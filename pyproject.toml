@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
+dependencies = []
+name = "pyurbanair"
+requires-python = ">= 3.12,<3.13"
+version = "0.1.0"
+
+[tool.pixi.workspace]
+preview = ["pixi-build"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.package.build]
+backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.dev/conda-forge" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyurbanair"]
+
+[tool.pixi.feature.py312.dependencies]
+python = {version="~=3.12.10", channel="conda-forge"}
+
+# Pixi dependencies
+[tool.pixi.dependencies]
+python = ">=3.11"
+
+[tool.pixi.pypi-dependencies]
+pyurbanair = { path = ".", editable = true }
+
+# Development tasks
+[tool.black]
+line-length = 88
+target-version = ['py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["scientific_stochastic_interpolants"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = "scisi.metrics.LSIM.*"
+ignore_errors = true
+
+
+[tool.pixi.feature.dev.dependencies]
+pytest= ">=8.3.5,<8.4"
+pre-commit = {version="~=4.1.0", channel="conda-forge"}
+black = {version="~=24.1.0", channel="conda-forge"}
+isort = {version="~=6.0.0", channel="conda-forge"}
+mypy = {version="~=1.15.0", channel="conda-forge"}
+
+
+[tool.pixi.feature.dev.tasks]
+"py.test" = { cmd = "py.test tests --exitfirst", description = "Run tests" }
+pre-commit = { cmd = "pre-commit run", description = "Run pre-commit hooks on specific files" }
+format = { cmd = "black src", description = "Format code" }
+type-check = { cmd = "mypy src", description = "Type check code" }
+sort-imports = { cmd = "isort src", description = "Sort imports" }
+
+
+[tool.pixi.environments]
+default = { features = ["py312"] }
+dev = { features = ["dev", "py312"] }
