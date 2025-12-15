@@ -9,3 +9,21 @@ pyproject.lock
 # python cache
 __pycache__/
 *.pyc
+
+
+##### pyudales #####
+libs/pyudales/u-dales/*
+libs/pyudales/outputs/*
+libs/pyudales/experiments/*
+libs/pyudales/.pixi/*
+libs/pyudales/pixi.lock
+libs/pyudales/pyproject.lock
+libs/pyudales/__pycache__/*
+libs/pyudales/*.pyc
+
+# temp files
+.temp/*
+
+# Figures
+*.pdf
+*.png

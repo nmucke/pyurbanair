@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# [tool.hatch.build.hooks.custom]
+# path = "hatch_build.py"
+
+[project]
+authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
+dependencies = []
+name = "pyudales"
+requires-python = ">= 3.12,<3.13"
+version = "0.1.0"
+
+[tool.pixi.workspace]
+preview = ["pixi-build"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.package.build]
+backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.dev/conda-forge" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyudales"]
+
+[tool.pixi.dependencies]
+python = {version="~=3.12.10", channel="conda-forge"}
+cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
+netcdf-fortran = {version=">=4.0.0", channel="conda-forge"}
+gcc = {version=">=15.2.0", channel="conda-forge"}
+gfortran = {version=">=15.2.0", channel="conda-forge"}
+fftw = {version=">=3.3.8.0", channel="conda-forge"}
+mpich = {version=">=4.3.2", channel="conda-forge"}
+nco = {version=">=5.3.6", channel="conda-forge"}
+
+[tool.pixi.pypi-dependencies]
+pyudales = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+build-udales-macos = { cmd = "bash build_udales_macos.sh common release", description = "Build uDALES in release mode" }
+build-preprocessing-macos = { cmd = "bash build_preprocessing_macos.sh common", description = "Build uDALES preprocessing tools (View3D)" }
+init-udales = { cmd = "python setup_post_install.py", description = "Download and initialize u-dales repository (for editable installs)" }

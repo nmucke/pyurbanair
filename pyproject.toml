@@ -25,10 +25,18 @@ python = {version="~=3.12.10", channel="conda-forge"}
 
 # Pixi dependencies
 [tool.pixi.dependencies]
-python = ">=3.11"
+python = ">=3.12"
+pdbpp = ">=0.11.7,<0.12"
+xarray = ">=2025.12.0,<2026"
+netcdf4 = ">=1.7.3,<2"
+numpy = ">=2.3.5,<3"
+matplotlib = ">=3.10.8,<4"
 
 [tool.pixi.pypi-dependencies]
 pyurbanair = { path = ".", editable = true }
+
+[tool.pixi.feature.udales.pypi-dependencies]
+pyudales = { path = "libs/pyudales", editable = true }
 
 # Development tasks
 [tool.black]
@@ -53,7 +61,7 @@ extend-exclude = '''
 profile = "black"
 multi_line_output = 3
 line_length = 88
-known_first_party = ["scientific_stochastic_interpolants"]
+known_first_party = ["pyurbanair"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -70,9 +78,6 @@ warn_no_return = true
 warn_unreachable = true
 strict_equality = true
 
-[[tool.mypy.overrides]]
-module = "scisi.metrics.LSIM.*"
-ignore_errors = true
 
 
 [tool.pixi.feature.dev.dependencies]
@@ -93,4 +98,4 @@ sort-imports = { cmd = "isort src", description = "Sort imports" }
 
 [tool.pixi.environments]
 default = { features = ["py312"] }
-dev = { features = ["dev", "py312"] }
+dev = { features = ["dev", "py312", "udales"] }

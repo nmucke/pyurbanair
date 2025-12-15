@@ -1,0 +1,190 @@
+"""pyudales - Python wrapper for uDALES."""
+
+import pathlib
+import subprocess
+import sys
+
+__version__ = "0.1.0"
+
+# Get paths
+_project_root = pathlib.Path(__file__).parent.parent.parent
+# Find repo root by looking for .git directory or .gitmodules file
+_repo_root = _project_root
+while _repo_root != _repo_root.parent:
+    if (_repo_root / ".git").exists() or (_repo_root / ".gitmodules").exists():
+        break
+    _repo_root = _repo_root.parent
+_gitmodules_path = _repo_root / ".gitmodules"
+
+# Parse .gitmodules to get u-dales path and URL
+UDALES_PATH = None
+_udales_path = None
+_udales_url = None
+
+if _gitmodules_path.exists():
+    try:
+        gitmodules_content = _gitmodules_path.read_text()
+        print(f"Reading .gitmodules from: {_gitmodules_path}", file=sys.stderr)
+        for line in gitmodules_content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("path = ") or stripped.startswith("path="):
+                # Handle both "path = " and "path=" formats
+                if "=" in stripped:
+                    submodule_path = stripped.split("=", 1)[1].strip()
+                    if "u-dales" in submodule_path:
+                        _udales_path = _repo_root / submodule_path
+                        print(
+                            f"Found u-dales path in .gitmodules: {submodule_path} -> {_udales_path}",
+                            file=sys.stderr,
+                        )
+            elif stripped.startswith("url = ") or stripped.startswith("url="):
+                if "=" in stripped and "u-dales" in gitmodules_content:
+                    _udales_url = stripped.split("=", 1)[1].strip()
+                    print(
+                        f"Found u-dales URL in .gitmodules: {_udales_url}",
+                        file=sys.stderr,
+                    )
+    except Exception as e:
+        print(f"Error reading .gitmodules: {e}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
+else:
+    print(f".gitmodules not found at: {_gitmodules_path}", file=sys.stderr)
+
+# Initialize git submodule from .gitmodules
+if _udales_path:
+    # Check if submodule needs to be initialized
+    # Repository is considered downloaded if it exists, has content, and is a valid git repo
+    is_repo_downloaded = (
+        _udales_path.exists()
+        and any(_udales_path.iterdir())
+        and (_udales_path / ".git").exists()
+    )
+    needs_init = not is_repo_downloaded
+
+    if needs_init:
+        print("Initializing u-dales git submodule...", file=sys.stderr)
+        submodule_success = False
+
+        # Try git submodule first
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "submodule",
+                    "update",
+                    "--init",
+                    "--recursive",
+                    "libs/pyudales/u-dales",
+                ],
+                cwd=str(_repo_root),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                print("u-dales submodule initialized successfully.", file=sys.stderr)
+                submodule_success = True
+            else:
+                print(
+                    f"Git submodule init failed (code {result.returncode}), trying direct clone...",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(
+                f"Exception during submodule init: {e}, trying direct clone...",
+                file=sys.stderr,
+            )
+
+        # Fallback to direct clone if submodule failed
+        if not submodule_success and _udales_url:
+            try:
+                print(f"Cloning u-dales from {_udales_url}...", file=sys.stderr)
+                # Remove empty directory if it exists
+                if _udales_path.exists():
+                    import shutil
+
+                    shutil.rmtree(_udales_path)
+
+                # Create parent directory
+                _udales_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Clone the repository
+                result = subprocess.run(
+                    ["git", "clone", "--recursive", _udales_url, str(_udales_path)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    print("u-dales cloned successfully.", file=sys.stderr)
+                else:
+                    print(
+                        f"Warning: git clone failed (code {result.returncode})",
+                        file=sys.stderr,
+                    )
+                    if result.stderr:
+                        print(f"Error: {result.stderr}", file=sys.stderr)
+            except Exception as e:
+                print(f"Exception during git clone: {e}", file=sys.stderr)
+    else:
+        print(
+            "u-dales repository already downloaded, skipping initialization.",
+            file=sys.stderr,
+        )
+
+    # Set UDALES_PATH from gitmodules path (always set it)
+    UDALES_PATH = _udales_path.resolve()
+    print(f"UDALES_PATH set to: {UDALES_PATH}", file=sys.stderr)
+else:
+    print("Warning: Could not find u-dales path in .gitmodules", file=sys.stderr)
+
+# Run build scripts
+if _udales_path and _udales_path.exists() and any(_udales_path.iterdir()):
+    build_udales_script = _project_root / "shell_scripts/build_udales_macos.sh"
+    build_preprocessing_script = (
+        _project_root / "shell_scripts/build_preprocessing_macos.sh"
+    )
+
+    # Check if uDALES build is already complete
+    # Build artifacts are in u-dales/build/release (build_type is "release")
+    udales_build_dir = _udales_path / "build" / "release"
+    udales_build_complete = (
+        udales_build_dir.exists() and (udales_build_dir / "CMakeCache.txt").exists()
+    )
+
+    if build_udales_script.exists():
+        if udales_build_complete:
+            print("uDALES build already complete, skipping build.", file=sys.stderr)
+        else:
+            print("Building uDALES...", file=sys.stderr)
+            subprocess.run(
+                ["bash", str(build_udales_script), "release"],
+                cwd=str(_project_root),
+                check=False,
+                env=None,  # Inherit environment (including pixi PATH)
+            )
+
+    # Check if preprocessing build is already complete
+    # Build artifacts are in u-dales/tools/View3D/build
+    preprocessing_build_dir = _udales_path / "tools" / "View3D" / "build"
+    preprocessing_build_complete = (
+        preprocessing_build_dir.exists()
+        and (preprocessing_build_dir / "CMakeCache.txt").exists()
+    )
+
+    if build_preprocessing_script.exists():
+        if preprocessing_build_complete:
+            print(
+                "Preprocessing tools build already complete, skipping build.",
+                file=sys.stderr,
+            )
+        else:
+            print("Building preprocessing tools...", file=sys.stderr)
+            subprocess.run(
+                ["bash", str(build_preprocessing_script)],
+                cwd=str(_project_root),
+                check=False,
+                env=None,  # Inherit environment (including pixi PATH)
+            )
