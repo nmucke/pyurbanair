@@ -32,6 +32,15 @@ netcdf4 = ">=1.7.3,<2"
 numpy = ">=2.3.5,<3"
 matplotlib = ">=3.10.8,<4"
 
+[tool.pixi.feature.udales.dependencies]
+cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
+netcdf-fortran = {version=">=4.0.0", channel="conda-forge"}
+gcc = {version=">=15.2.0", channel="conda-forge"}
+gfortran = {version=">=15.2.0", channel="conda-forge"}
+fftw = {version=">=3.3.8.0", channel="conda-forge"}
+openmpi = {version=">=4.1.0", channel="conda-forge"}
+nco = {version=">=5.3.6", channel="conda-forge"}
+
 [tool.pixi.pypi-dependencies]
 pyurbanair = { path = ".", editable = true }
 

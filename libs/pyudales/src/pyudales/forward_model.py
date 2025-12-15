@@ -93,7 +93,7 @@ class ForwardModel:
         # self.work_dir = work_dir
         self.ncpu = ncpu
         self.matlab_bin = matlab_bin
-        self.inflow_angle = inflow_angle
+        self.inflow_angle: Optional[float] = inflow_angle
         self.velocity_magnitude: Optional[float] = velocity_magnitude
         self.pressure_gradient_magnitude: Optional[float] = pressure_gradient_magnitude
 
