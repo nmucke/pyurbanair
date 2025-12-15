@@ -1,6 +1,7 @@
 import logging
 import os
 import pathlib
+import pdb
 import shutil
 import subprocess
 import time
@@ -55,9 +56,8 @@ class ForwardModel:
             "/Applications/MATLAB_R2025b.app/bin/matlab"
         ),
         save_only_last_timestep: bool = False,
-        inflow_angle: Optional[float] = None,
-        velocity_magnitude: Optional[float] = None,
-        pressure_gradient_magnitude: Optional[float] = None,
+        params: Optional[xarray.Dataset] = None,
+        results_dir: Optional[pathlib.Path] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -68,34 +68,55 @@ class ForwardModel:
             ncpu: The number of CPUs to use.
             matlab_bin: The path to the MATLAB binary.
             save_only_last_timestep: If True, only the last timestep will be saved.
-            inflow_angle: The angle of the inflow wind speed in degrees (measured from positive x-axis).
-                         If None, velocity and pressure gradient settings are not updated.
-            velocity_magnitude: The magnitude of the inflow wind speed (m/s).
-                              If None, u0 and v0 are not updated.
-            pressure_gradient_magnitude: The magnitude of the inflow pressure gradient (Pa/m).
-                                       If None, dpdx and dpdy are not updated.
+            params: The parameters of the forward model.
+                Currently, we only support the following parameters:
+                - inflow_angle: The angle of the inflow wind speed in degrees (measured from positive x-axis).
+                - velocity_magnitude: The magnitude of the inflow wind speed (m/s).
+                - pressure_gradient_magnitude: The magnitude of the inflow pressure gradient (Pa/m).
+            results_dir: The directory where the results will be saved.
         """
-        self.udales_root_path = UDALES_PATH
-        self.cwd = pathlib.Path(__file__).parent.parent.parent.parent.parent
 
+        # UDALES root path where the udales code is located
+        self.udales_root_path = UDALES_PATH
+
+        # Current working directory
+        self.cwd = pathlib.Path(__file__).parent.parent.parent.parent.parent
+        
+        # Save only the last timestep
         self.save_only_last_timestep = save_only_last_timestep
 
+        # Experiment name
         self.experiment_name = str(experiment_dir)[-3:]
+
+        # Experiment directory where the experiment is stored
+        self.experiment_dir = experiment_dir
+
+        # Temporary directory where the experiment is stored
         self.temp_dir: pathlib.Path = create_dir(
             pathlib.Path(f"{self.cwd}/.temp/experiments/{self.experiment_name}")
         )
+
+        # Output directory where the intermediate udales outputs will be saved
         self.work_dir: pathlib.Path = create_dir(
             pathlib.Path(f"{self.cwd}/.temp/outputs")
         )
 
-        self.experiment_dir = experiment_dir
+        # Whether to save the results in memory or on disk
+        if results_dir is None:
+            self.save_in_memory = True
+        else:
+            self.save_in_memory = False
+            self.results_dir = results_dir
+            os.makedirs(self.results_dir, exist_ok=True)
 
         # self.work_dir = work_dir
         self.ncpu = ncpu
+
+        # MATLAB binary
         self.matlab_bin = matlab_bin
-        self.inflow_angle: Optional[float] = inflow_angle
-        self.velocity_magnitude: Optional[float] = velocity_magnitude
-        self.pressure_gradient_magnitude: Optional[float] = pressure_gradient_magnitude
+
+        # Parameters
+        self.params = params
 
         logger.info(f"Experiment name: {self.experiment_name}")
         logger.info(f"Temp dir: {self.temp_dir}")
@@ -112,19 +133,26 @@ class ForwardModel:
 
         # Apply inflow settings if provided
         # Only apply if we have at least an angle and one magnitude
-        if (
-            self.inflow_angle is not None
-            and self.velocity_magnitude is not None
-            and self.pressure_gradient_magnitude is not None
-        ):
+        if self.params is not None:
             self._apply_inflow_settings(
-                inflow_angle=self.inflow_angle,
-                velocity_magnitude=self.velocity_magnitude,
-                pressure_gradient_magnitude=self.pressure_gradient_magnitude,
+                inflow_angle=self.params.inflow_angle.item(),
+                velocity_magnitude=self.params.velocity_magnitude.item(),
+                pressure_gradient_magnitude=self.params.pressure_gradient_magnitude.item(),
             )
 
         if self.save_only_last_timestep:
             self._apply_save_only_last_timestep()
+
+    def apply_save_in_memory(self, state: xarray.Dataset) -> None:
+        """Apply the save in memory flag."""
+        self.save_in_memory = True
+        self.results_dir = None
+
+    def apply_save_on_disk(self, results_dir: pathlib.Path) -> None:
+        """Apply the save on disk flag."""
+        self.save_in_memory = False
+        self.results_dir = results_dir
+        os.makedirs(self.results_dir, exist_ok=True)
 
     def _update_prof_file(self, u0: float | None, v0: float | None) -> None:
         """Update prof.inp.* file with new u0 and v0 values."""
@@ -251,6 +279,14 @@ class ForwardModel:
         self.inflow_angle = inflow_angle
         self.velocity_magnitude = velocity_magnitude
         self.pressure_gradient_magnitude = pressure_gradient_magnitude
+
+        self.params = xarray.Dataset(
+            data_vars={
+                "inflow_angle": inflow_angle,
+                "velocity_magnitude": velocity_magnitude,
+                "pressure_gradient_magnitude": pressure_gradient_magnitude,
+            },
+        )
 
         # Calculate velocity and pressure gradient components from angle and magnitudes
         u0, v0 = angle_to_velocity(self.inflow_angle, self.velocity_magnitude)
@@ -440,7 +476,7 @@ class ForwardModel:
 
         time.sleep(30)  # Wait for preprocessing to complete
 
-    def run(self) -> xarray.Dataset:
+    def run(self, sim_name: Optional[str] = "state") -> xarray.Dataset | None:
         """Run the forward model."""
         logger.info("Running forward model...")
         command = [
@@ -460,4 +496,49 @@ class ForwardModel:
 
         self._delete_work_dir()
 
-        return state
+        if self.save_in_memory:
+            return state
+        else:
+            state.to_netcdf(self.results_dir.joinpath(f"{sim_name}.nc"))
+            return None
+
+
+    def __call__(self, params: xarray.Dataset, sim_name: Optional[str] = "state") -> xarray.Dataset:
+        """Run the forward model."""
+        self.inflow_angle = (
+            params.inflow_angle.item() 
+            if "inflow_angle" in params else self.inflow_angle
+        )
+        self.velocity_magnitude = (
+            params.velocity_magnitude.item() 
+            if "velocity_magnitude" in params else self.velocity_magnitude
+        )
+        self.pressure_gradient_magnitude = (
+            params.pressure_gradient_magnitude.item() 
+            if "pressure_gradient_magnitude" in params else self.pressure_gradient_magnitude
+        )
+
+        self._apply_inflow_settings(
+            inflow_angle=self.inflow_angle,
+            velocity_magnitude=self.velocity_magnitude,
+            pressure_gradient_magnitude=self.pressure_gradient_magnitude,
+        )
+        return self.run(sim_name=sim_name)
+
+    def run_ensemble(
+        self, 
+        params: xarray.Dataset,
+        sim_name: Optional[str] = "state",
+    ) -> xarray.Dataset:
+        """Run the forward model ensemble."""
+
+        if self.save_in_memory:
+            states = []
+            for i in range(len(params.ensemble)):
+                states.append(self.__call__(params.isel(ensemble=i)))
+            return xarray.concat(states, dim="ensemble", join="override")
+        else:
+            for i in range(len(params.ensemble)):
+                state = self.__call__(params.isel(ensemble=i), sim_name=f"state_{i}")
+                state.to_netcdf(self.results_dir.joinpath(f"{sim_name}_{i}.nc"))
+
