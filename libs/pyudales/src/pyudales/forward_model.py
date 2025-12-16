@@ -1,6 +1,7 @@
 import logging
 import os
 import pathlib
+import pdb
 import shutil
 import subprocess
 import time
@@ -8,8 +9,10 @@ from typing import Optional
 
 import xarray
 
+from pyurbanair.base_forward_model import BaseForwardModel
+
 from . import UDALES_PATH
-from .angle_utils import angle_to_pressure_gradient, angle_to_velocity
+from .inflow_utils import angle_to_pressure_gradient, angle_to_velocity
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -40,7 +43,7 @@ def move_files_to_temp_dir(
             shutil.copytree(item, target)
 
 
-class ForwardModel:
+class ForwardModel(BaseForwardModel):
     """
     Forward model class.
 
@@ -55,9 +58,9 @@ class ForwardModel:
             "/Applications/MATLAB_R2025b.app/bin/matlab"
         ),
         save_only_last_timestep: bool = False,
-        inflow_angle: Optional[float] = None,
-        velocity_magnitude: Optional[float] = None,
-        pressure_gradient_magnitude: Optional[float] = None,
+        params: Optional[xarray.Dataset] = None,
+        results_dir: Optional[pathlib.Path] = None,
+        verbose: bool = True,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -68,34 +71,54 @@ class ForwardModel:
             ncpu: The number of CPUs to use.
             matlab_bin: The path to the MATLAB binary.
             save_only_last_timestep: If True, only the last timestep will be saved.
-            inflow_angle: The angle of the inflow wind speed in degrees (measured from positive x-axis).
-                         If None, velocity and pressure gradient settings are not updated.
-            velocity_magnitude: The magnitude of the inflow wind speed (m/s).
-                              If None, u0 and v0 are not updated.
-            pressure_gradient_magnitude: The magnitude of the inflow pressure gradient (Pa/m).
-                                       If None, dpdx and dpdy are not updated.
+            params: The parameters of the forward model.
+                Currently, we only support the following parameters:
+                - inflow_angle: The angle of the inflow wind speed in degrees (measured from positive x-axis).
+                - velocity_magnitude: The magnitude of the inflow wind speed (m/s).
+                - pressure_gradient_magnitude: The magnitude of the inflow pressure gradient (Pa/m).
+            results_dir: The directory where the results will be saved.
+            verbose: If True, print output from Fortran code execution. If False, suppress all output.
         """
+        super().__init__(results_dir=results_dir)
+
+        # UDALES root path where the udales code is located
         self.udales_root_path = UDALES_PATH
+
+        # Current working directory
         self.cwd = pathlib.Path(__file__).parent.parent.parent.parent.parent
 
+        # Save only the last timestep
         self.save_only_last_timestep = save_only_last_timestep
 
+        # Experiment name
         self.experiment_name = str(experiment_dir)[-3:]
+
+        # Experiment directory where the experiment is stored
+        self.experiment_dir = experiment_dir
+
+        # Temporary directory where the experiment is stored
         self.temp_dir: pathlib.Path = create_dir(
             pathlib.Path(f"{self.cwd}/.temp/experiments/{self.experiment_name}")
         )
+
+        # Output directory where the intermediate udales outputs will be saved
         self.work_dir: pathlib.Path = create_dir(
             pathlib.Path(f"{self.cwd}/.temp/outputs")
         )
 
-        self.experiment_dir = experiment_dir
-
         # self.work_dir = work_dir
         self.ncpu = ncpu
+
+        # MATLAB binary
         self.matlab_bin = matlab_bin
-        self.inflow_angle = inflow_angle
-        self.velocity_magnitude: Optional[float] = velocity_magnitude
-        self.pressure_gradient_magnitude: Optional[float] = pressure_gradient_magnitude
+
+        # Parameters
+        self.params = params
+
+        # Verbose flag for controlling output
+        self.verbose = verbose
+        self.stdout = None if self.verbose else subprocess.DEVNULL
+        self.stderr = None if self.verbose else subprocess.DEVNULL
 
         logger.info(f"Experiment name: {self.experiment_name}")
         logger.info(f"Temp dir: {self.temp_dir}")
@@ -112,15 +135,11 @@ class ForwardModel:
 
         # Apply inflow settings if provided
         # Only apply if we have at least an angle and one magnitude
-        if (
-            self.inflow_angle is not None
-            and self.velocity_magnitude is not None
-            and self.pressure_gradient_magnitude is not None
-        ):
+        if self.params is not None:
             self._apply_inflow_settings(
-                inflow_angle=self.inflow_angle,
-                velocity_magnitude=self.velocity_magnitude,
-                pressure_gradient_magnitude=self.pressure_gradient_magnitude,
+                inflow_angle=self.params.inflow_angle.item(),
+                velocity_magnitude=self.params.velocity_magnitude.item(),
+                pressure_gradient_magnitude=self.params.pressure_gradient_magnitude.item(),
             )
 
         if self.save_only_last_timestep:
@@ -251,6 +270,14 @@ class ForwardModel:
         self.inflow_angle = inflow_angle
         self.velocity_magnitude = velocity_magnitude
         self.pressure_gradient_magnitude = pressure_gradient_magnitude
+
+        self.params = xarray.Dataset(
+            data_vars={
+                "inflow_angle": inflow_angle,
+                "velocity_magnitude": velocity_magnitude,
+                "pressure_gradient_magnitude": pressure_gradient_magnitude,
+            },
+        )
 
         # Calculate velocity and pressure gradient components from angle and magnitudes
         u0, v0 = angle_to_velocity(self.inflow_angle, self.velocity_magnitude)
@@ -410,7 +437,7 @@ class ForwardModel:
             f.write(f"export MATLAB_BIN={str(self.matlab_bin)}\n")
             f.write(f"export PATH={matlab_bin_dir}:{os.environ.get('PATH', '')}\n")
 
-    def _delete_work_dir(self, except_for_files: list[str] = []) -> None:
+    def _clean_work_dir(self, except_for_files: list[str] = []) -> None:
         """Delete the work directory contents (files and subdirectories)."""
         work_experiment_dir = self.work_dir.joinpath(self.experiment_name)
         if not work_experiment_dir.exists():
@@ -424,8 +451,32 @@ class ForwardModel:
             elif item.is_dir():
                 shutil.rmtree(item)
 
+    def _clean_temp_dir(self) -> None:
+        """Clean the temp directory."""
+        # Empty the temp directory by removing all its contents
+        for item in pathlib.Path(self.temp_dir).iterdir():
+            name = item.name
+            lower_name = name.lower()
+            # Exclude config.sh, any namoptions*, and any *.stl (case-insensitive)
+            if lower_name == "config.sh":
+                continue
+            if lower_name.startswith("namoptions"):
+                continue
+            if lower_name.endswith(".stl"):
+                continue
+            if item.is_file():
+                item.unlink(missing_ok=True)
+            elif item.is_dir():
+                shutil.rmtree(item)
+
     def run_preprocessing(self) -> None:
         """Run preprocessing."""
+
+        logger.info("Running preprocessing. This will take 30 seconds...")
+
+        self._clean_temp_dir()
+        self._clean_work_dir()
+
         command = [
             "bash",
             str(self.udales_root_path.joinpath("tools", "write_inputs.sh")),  # type: ignore[union-attr]
@@ -435,13 +486,36 @@ class ForwardModel:
         env = os.environ.copy()
         matlab_bin_dir = str(pathlib.Path(self.matlab_bin).parent)
         env["PATH"] = f"{matlab_bin_dir}:{env.get('PATH', '')}"
-        logger.info("Running preprocessing...")
-        subprocess.run(command, check=True, env=env)
+        subprocess.run(
+            command, check=True, env=env, stdout=self.stdout, stderr=self.stderr
+        )
 
         time.sleep(30)  # Wait for preprocessing to complete
+        logger.info("Preprocessing completed.")
 
-    def run(self) -> xarray.Dataset:
+    def run_single(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+    ) -> xarray.Dataset | None:
         """Run the forward model."""
+
+        if params is not None:
+            if "inflow_angle" in params:
+                self.inflow_angle = params.inflow_angle.item()
+            if "velocity_magnitude" in params:
+                self.velocity_magnitude = params.velocity_magnitude.item()
+            if "pressure_gradient_magnitude" in params:
+                self.pressure_gradient_magnitude = (
+                    params.pressure_gradient_magnitude.item()
+                )
+
+        self._apply_inflow_settings(
+            inflow_angle=self.inflow_angle,
+            velocity_magnitude=self.velocity_magnitude,
+            pressure_gradient_magnitude=self.pressure_gradient_magnitude,
+        )
+
         logger.info("Running forward model...")
         command = [
             "bash",
@@ -449,7 +523,7 @@ class ForwardModel:
             str(self.temp_dir),
         ]
 
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, stdout=self.stdout, stderr=self.stderr)
 
         state = xarray.open_dataset(
             self.work_dir.joinpath(
@@ -458,6 +532,6 @@ class ForwardModel:
             engine="netcdf4",
         )
 
-        self._delete_work_dir()
+        self._clean_work_dir()
 
         return state

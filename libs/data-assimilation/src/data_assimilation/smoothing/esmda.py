@@ -1,0 +1,157 @@
+from typing import Optional
+
+import jax
+import jax.numpy as jnp
+import xarray
+from data_assimilation.observation_operator import ObservationOperator
+from data_assimilation.smoothing.base import BaseSmoothing
+
+from pyurbanair.base_forward_model import BaseForwardModel
+
+
+class ESMDA(BaseSmoothing):
+    """ESMDA smoothing."""
+
+    def __init__(
+        self,
+        observation_operator: ObservationOperator,
+        forward_model: BaseForwardModel,
+        C_D: jnp.ndarray,
+        num_steps: int = 3,
+        alpha: Optional[float] = None,
+        rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
+    ) -> None:
+        """Initialize the ESMDA smoothing."""
+        super().__init__(observation_operator, forward_model)
+
+        if alpha is None:
+            self.alpha = 1 / num_steps
+        else:
+            self.alpha = alpha
+        self.C_D = C_D
+        self.C_D_sqrt = jnp.sqrt(self.C_D)
+        self.rng_key = rng_key
+        self.num_steps = num_steps
+
+    def _one_step(
+        self,
+        params: xarray.Dataset,
+        obs: jnp.ndarray,
+        state: Optional[xarray.Dataset] = None,
+    ) -> xarray.Dataset:
+        """Perform one ESMDA assimilation step."""
+
+        obs = jnp.asarray(obs)
+
+        pred_obs = self._observation_step(
+            state=state, results_dir=self.forward_model.results_dir
+        )
+        pred_obs = jnp.asarray(pred_obs).T
+
+        # Extract parameter names and values
+        param_names = list(params.data_vars.keys())
+        N_e = params.sizes["ensemble"]  # Number of ensemble members
+        N_p = len(param_names)  # Number of parameters
+        N_d = len(obs)  # Number of observations
+
+        # Extract parameters as array of shape [N_p, N_e]
+        params_array = [params[param_name].values for param_name in param_names]
+        params_array = jnp.array(params_array)  # Shape: [N_p, N_e]
+
+        # Compute ensemble means
+        params_mean = jnp.mean(params_array, axis=1)  # Shape: [N_p]
+        pred_obs_mean = jnp.mean(pred_obs, axis=1)  # Shape: [N_d]
+
+        # Compute deviations from means
+        params_dev = params_array - params_mean[:, None]  # Shape: [N_p, N_e]
+        pred_obs_dev = pred_obs - pred_obs_mean[:, None]  # Shape: [N_d, N_e]
+
+        # Compute cross-covariance C^f_MD between model parameters and data
+        # C^f_MD = (1/(N_e-1)) * sum_j (m^f_j - m^f_mean) * (G(m^f_j) - G_mean)^T
+        C_MD = jnp.dot(params_dev, pred_obs_dev.T) / (N_e - 1)  # Shape: [N_p, N_d]
+
+        # Compute auto-covariance C^f_DD of the data
+        # C^f_DD = (1/(N_e-1)) * sum_j (G(m^f_j) - G_mean) * (G(m^f_j) - G_mean)^T
+        C_DD = jnp.dot(pred_obs_dev, pred_obs_dev.T) / (N_e - 1)  # Shape: [N_d, N_d]
+
+        # Initialize updated parameters
+        params_updated = jnp.zeros_like(params_array)  # Shape: [N_e, N_p]
+
+        # Generate random noise
+        self.rng_key, subkey = jax.random.split(self.rng_key)
+        Z = jax.random.normal(subkey, (N_d, N_e))
+
+        # Generate perturbed observations
+        perturbed_obs = obs[:, None] + jnp.sqrt(self.alpha) * (
+            self.C_D_sqrt @ Z
+        )  # Shape: [N_d, N_e]
+
+        # Compute innovation: d_j - G(m^f_j)
+        innovation = perturbed_obs - pred_obs  # Shape: [N_d, N_e]
+
+        # Compute (C^f_DD + α_i * C_D)
+        C_DD_alpha = C_DD + self.alpha * self.C_D
+
+        # Solve (C^f_DD + α_i * C_D) * x = innovation for x
+        try:
+            x = jnp.linalg.solve(C_DD_alpha, innovation)
+        except jnp.linalg.LinAlgError:
+            # If solve fails, use least squares
+            x = jnp.linalg.lstsq(C_DD_alpha, innovation, rcond=None)[0]
+
+        # Update parameters: m^a_j = m^f_j + C^f_MD * x
+        # C_MD is [N_p, N_d], x is [N_d], so C_MD @ x is [N_p]
+        params_updated = params_array + C_MD @ x
+
+        # Reconstruct xarray.Dataset with updated parameters
+        updated_data_vars = {}
+        for i, param_name in enumerate(param_names):
+            updated_data_vars[param_name] = ("ensemble", params_updated[i, :])
+
+        return xarray.Dataset(
+            data_vars=updated_data_vars,
+            coords=params.coords,
+        )
+
+    def _analysis(
+        self,
+        params: xarray.Dataset,
+        observations: jnp.ndarray,
+        state: Optional[xarray.Dataset] = None,
+        return_params_history: bool = False,
+        return_state_history: bool = False,
+    ) -> xarray.Dataset:
+        """Perform the ESMDA analysis."""
+        if return_params_history:
+            params_history = []
+        if return_state_history:
+            state_history = []
+        for _ in range(self.num_steps):
+            state = self._forecast_step(state=state, params=params)
+            if return_state_history:
+                state_history.append(state)
+
+            params = self._one_step(params=params, obs=observations, state=state)
+            if return_params_history:
+                params_history.append(params)
+
+        if return_params_history:
+            params_history = xarray.concat(
+                params_history, dim="esmda_step", join="override"
+            )
+
+        if return_state_history:
+            state = self._forecast_step(state=state, params=params)
+            state_history.append(state)
+            state_history = xarray.concat(
+                state_history, dim="esmda_step", join="override"
+            )
+
+        if return_params_history and return_state_history:
+            return params_history, state_history
+        elif return_params_history:
+            return params_history
+        elif return_state_history:
+            return state_history
+        else:
+            return params
