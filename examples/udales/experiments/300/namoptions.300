@@ -1,6 +1,6 @@
 &RUN
 iexpnr       = 300
-runtime      = 25.
+runtime      = 50.
 trestart     = 7200.
 dtmax        = 1.
 ladaptive    = .true.

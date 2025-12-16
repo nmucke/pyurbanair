@@ -29,13 +29,13 @@ TRUE_ANGLE = 10.0
 
 # Data assimilation settings
 ENSEMBLE_SIZE = 100
-NUM_ESMDA_STEPS = 3
+NUM_ESMDA_STEPS = 5
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
-OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
-OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
-OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
+OBS_IDS_X = [40, 50, 90, 120]  # , 80, 20, 50, 90]
+OBS_IDS_Y = [30, 60, 90, 120]  # , 20, 60, 90, 50]
+OBS_IDS_Z = [1, 1, 1, 1]  # , 1, 1, 1, 1]
 OBS_STATES = ["u", "v", "w"]
 NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
 
@@ -43,6 +43,7 @@ NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
 OBS_ERROR_STD = 0.01
 C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
+# Forward model settings
 FIXED_INPUT = {
     "save_only_last_timestep": True,
     "ncpu": NCPU,
@@ -86,15 +87,15 @@ def esmda_step(
 
     # Extract parameters as array of shape [N_p, N_e]
     params_array = [params[param_name].values for param_name in param_names]
-    params_array = jnp.array(params_array)
+    params_array = jnp.array(params_array)  # Shape: [N_p, N_e]
 
     # Compute ensemble means
-    params_mean = jnp.mean(params_array, axis=0)  # Shape: [N_p]
-    pred_obs_mean = jnp.mean(pred_obs, axis=0)  # Shape: [N_d]
+    params_mean = jnp.mean(params_array, axis=1)  # Shape: [N_p]
+    pred_obs_mean = jnp.mean(pred_obs, axis=1)  # Shape: [N_d]
 
     # Compute deviations from means
-    params_dev = params_array - params_mean  # Shape: [N_p, N_e]
-    pred_obs_dev = pred_obs - pred_obs_mean  # Shape: [N_d, N_e]
+    params_dev = params_array - params_mean[:, None]  # Shape: [N_p, N_e]
+    pred_obs_dev = pred_obs - pred_obs_mean[:, None]  # Shape: [N_d, N_e]
 
     # Compute cross-covariance C^f_MD between model parameters and data
     # C^f_MD = (1/(N_e-1)) * sum_j (m^f_j - m^f_mean) * (G(m^f_j) - G_mean)^T
@@ -177,7 +178,7 @@ def main() -> None:
             "pressure_gradient_magnitude": TRUE_PRESSURE_GRADIENT_MAGNITUDE,
         },
     )
-    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
+    forward_model = ForwardModel(**FIXED_INPUT)
     forward_model.run_preprocessing()
 
     ##### Run true simulation #####
@@ -204,10 +205,10 @@ def main() -> None:
             params_ensemble, true_obs, pred_obs, ALPHA, C_D, rng_key
         )
         params_history = xarray.concat(
-            [params_history, params_ensemble], dim="esmda_step"
+            [params_history, params_ensemble], dim="esmda_step", join="override"
         )
 
-        ensemble_mean_field = states.mean(dim="ensemble")  # type: ignore[union-attr]
+        ensemble_mean_field = states.mean(dim="ensemble")
         velocity_field = get_velocity_magnitude_field(ensemble_mean_field)
         velocity_field_history.append(velocity_field[0])
 
@@ -215,7 +216,7 @@ def main() -> None:
 
     states = forward_model.run_ensemble(params=params_ensemble)
 
-    ensemble_mean_field = states.mean(dim="ensemble")  # type: ignore[union-attr]
+    ensemble_mean_field = states.mean(dim="ensemble")
     velocity_field = get_velocity_magnitude_field(ensemble_mean_field)
     velocity_field_history.append(velocity_field[0])
 
@@ -253,10 +254,11 @@ def main() -> None:
         axes[i, 3].axvline(**angle_axvline_args)
         axes[i, 3].legend()
 
-        axes[i, 4].hist(params_history.velocity_magnitude.values[i], **hist_args(i))
-        axes[i, 4].set_xlim(0, 6)
-        axes[i, 4].axvline(**velocity_axvline_args)
-        axes[i, 4].legend()
+        if "velocity_magnitude" in params_history:
+            axes[i, 4].hist(params_history.velocity_magnitude.values[i], **hist_args(i))
+            axes[i, 4].set_xlim(0, 6)
+            axes[i, 4].axvline(**velocity_axvline_args)
+            axes[i, 4].legend()
 
         fig.colorbar(im, ax=axes[i, 0])
         fig.colorbar(im, ax=axes[i, 1])
@@ -269,7 +271,8 @@ def main() -> None:
             axes[i, 0].set_title("Ensemble mean")
             axes[i, 1].set_title("True")
             axes[i, 3].set_title("Angle distribution")
-            axes[i, 4].set_title("Velocity magnitude distribution")
+            if "velocity_magnitude" in params_history:
+                axes[i, 4].set_title("Velocity magnitude distribution")
 
         axes[i, 2].set_title(f"RMSE: {rmse[i]:.4f}")
     plt.savefig(os.path.join(FIGURES_DIR, "esmda_results.pdf"))

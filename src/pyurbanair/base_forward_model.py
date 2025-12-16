@@ -134,7 +134,9 @@ class BaseForwardModel:
                 )
             return xarray.concat(states, dim="ensemble", join="override")
         else:
-            for i in range(ensemble_size):
+            for i in tqdm(
+                range(ensemble_size), desc="Running ensemble", total=ensemble_size
+            ):
                 _ = self.__call__(
                     params=params.isel(ensemble=i) if params is not None else None,
                     state=state.isel(ensemble=i) if state is not None else None,
