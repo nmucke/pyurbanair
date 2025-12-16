@@ -4,7 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
-dependencies = []
+dependencies = [
+  "numpy>=2.3.5,<3",
+  "xarray>=2025.12.0,<2026",
+  "netcdf4>=1.7.3,<2",
+  "matplotlib>=3.10.8,<4",
+  "jax>=0.7.0,<0.8.0",
+  "tqdm>=4.67.1,<5",
+]
 name = "pyurbanair"
 requires-python = ">= 3.12,<3.13"
 version = "0.1.0"

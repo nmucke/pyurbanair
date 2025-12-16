@@ -60,6 +60,7 @@ class ForwardModel(BaseForwardModel):
         save_only_last_timestep: bool = False,
         params: Optional[xarray.Dataset] = None,
         results_dir: Optional[pathlib.Path] = None,
+        verbose: bool = True,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -76,6 +77,7 @@ class ForwardModel(BaseForwardModel):
                 - velocity_magnitude: The magnitude of the inflow wind speed (m/s).
                 - pressure_gradient_magnitude: The magnitude of the inflow pressure gradient (Pa/m).
             results_dir: The directory where the results will be saved.
+            verbose: If True, print output from Fortran code execution. If False, suppress all output.
         """
         super().__init__(results_dir=results_dir)
 
@@ -112,6 +114,11 @@ class ForwardModel(BaseForwardModel):
 
         # Parameters
         self.params = params
+
+        # Verbose flag for controlling output
+        self.verbose = verbose
+        self.stdout = None if self.verbose else subprocess.DEVNULL
+        self.stderr = None if self.verbose else subprocess.DEVNULL
 
         logger.info(f"Experiment name: {self.experiment_name}")
         logger.info(f"Temp dir: {self.temp_dir}")
@@ -430,7 +437,7 @@ class ForwardModel(BaseForwardModel):
             f.write(f"export MATLAB_BIN={str(self.matlab_bin)}\n")
             f.write(f"export PATH={matlab_bin_dir}:{os.environ.get('PATH', '')}\n")
 
-    def _delete_work_dir(self, except_for_files: list[str] = []) -> None:
+    def _clean_work_dir(self, except_for_files: list[str] = []) -> None:
         """Delete the work directory contents (files and subdirectories)."""
         work_experiment_dir = self.work_dir.joinpath(self.experiment_name)
         if not work_experiment_dir.exists():
@@ -444,8 +451,32 @@ class ForwardModel(BaseForwardModel):
             elif item.is_dir():
                 shutil.rmtree(item)
 
+    def _clean_temp_dir(self) -> None:
+        """Clean the temp directory."""
+        # Empty the temp directory by removing all its contents
+        for item in pathlib.Path(self.temp_dir).iterdir():
+            name = item.name
+            lower_name = name.lower()
+            # Exclude config.sh, any namoptions*, and any *.stl (case-insensitive)
+            if lower_name == "config.sh":
+                continue
+            if lower_name.startswith("namoptions"):
+                continue
+            if lower_name.endswith(".stl"):
+                continue
+            if item.is_file():
+                item.unlink(missing_ok=True)
+            elif item.is_dir():
+                shutil.rmtree(item)
+
     def run_preprocessing(self) -> None:
         """Run preprocessing."""
+
+        logger.info("Running preprocessing. This will take 30 seconds...")
+
+        self._clean_temp_dir()
+        self._clean_work_dir()
+
         command = [
             "bash",
             str(self.udales_root_path.joinpath("tools", "write_inputs.sh")),  # type: ignore[union-attr]
@@ -455,10 +486,12 @@ class ForwardModel(BaseForwardModel):
         env = os.environ.copy()
         matlab_bin_dir = str(pathlib.Path(self.matlab_bin).parent)
         env["PATH"] = f"{matlab_bin_dir}:{env.get('PATH', '')}"
-        logger.info("Running preprocessing...")
-        subprocess.run(command, check=True, env=env)
+        subprocess.run(
+            command, check=True, env=env, stdout=self.stdout, stderr=self.stderr
+        )
 
         time.sleep(30)  # Wait for preprocessing to complete
+        logger.info("Preprocessing completed.")
 
     def run_single(
         self,
@@ -490,7 +523,7 @@ class ForwardModel(BaseForwardModel):
             str(self.temp_dir),
         ]
 
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, stdout=self.stdout, stderr=self.stderr)
 
         state = xarray.open_dataset(
             self.work_dir.joinpath(
@@ -499,6 +532,6 @@ class ForwardModel(BaseForwardModel):
             engine="netcdf4",
         )
 
-        self._delete_work_dir()
+        self._clean_work_dir()
 
         return state

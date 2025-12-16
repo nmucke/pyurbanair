@@ -1,3 +1,4 @@
+import os
 import pdb
 
 import jax
@@ -15,6 +16,11 @@ SEED = 42
 # Directory settings
 MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
 EXPERIMENT_DIR = "examples/udales/experiments/300"
+FIGURES_DIR = "figures"
+os.makedirs(FIGURES_DIR, exist_ok=True)
+
+# Compute ressources
+NCPU = 4
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
@@ -31,26 +37,18 @@ OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
 OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
 OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
 OBS_STATES = ["u", "v", "w"]
+NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
 
 # Observation error settings
-U_ERROR_STD = 0.05
-V_ERROR_STD = 0.05
-W_ERROR_STD = 0.05
-C_D = jnp.diag(
-    jnp.concatenate(
-        [
-            U_ERROR_STD**2 * jnp.ones(len(OBS_IDS_X)),
-            V_ERROR_STD**2 * jnp.ones(len(OBS_IDS_X)),
-            W_ERROR_STD**2 * jnp.ones(len(OBS_IDS_X)),
-        ]
-    ),
-)
+OBS_ERROR_STD = 0.01
+C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
 FIXED_INPUT = {
     "save_only_last_timestep": True,
-    "ncpu": 4,
+    "ncpu": NCPU,
     "matlab_bin": MATLAB_BIN,
     "experiment_dir": EXPERIMENT_DIR,
+    "verbose": False,
 }
 
 
@@ -152,6 +150,8 @@ def esmda_step(
 
 def main() -> None:
     """Main function."""
+
+    ##### Setup parameter ensemble #####
     rng_key = jax.random.PRNGKey(SEED)
 
     rng_key, subkey = jax.random.split(rng_key)
@@ -161,6 +161,15 @@ def main() -> None:
     velocity_magnitude_range = jax.random.normal(subkey, (ENSEMBLE_SIZE,)) * 1 + 4.0
     velocity_magnitude_range = jnp.maximum(velocity_magnitude_range, 0.1)
 
+    params_ensemble = xarray.Dataset(
+        data_vars={
+            "inflow_angle": ("ensemble", inflow_angle_range),
+            "velocity_magnitude": ("ensemble", velocity_magnitude_range),
+        },
+        coords={"ensemble": jnp.arange(len(inflow_angle_range))},
+    )
+
+    ##### Setup forward model #####
     true_params = xarray.Dataset(
         data_vars={
             "inflow_angle": TRUE_ANGLE,
@@ -170,8 +179,13 @@ def main() -> None:
     )
     forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
     forward_model.run_preprocessing()
-    true_state = forward_model(params=true_params)
 
+    ##### Run true simulation #####
+    true_state = forward_model(params=true_params)
+    true_velocity_field = get_velocity_magnitude_field(true_state)
+    true_velocity_field = true_velocity_field[0]
+
+    ##### Setup observations #####
     observation_operator = ObservationOperator(
         OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES
     )
@@ -179,16 +193,7 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    true_velocity_field = get_velocity_magnitude_field(true_state)
-    true_velocity_field = true_velocity_field[0]
-
-    params_ensemble = xarray.Dataset(
-        data_vars={
-            "inflow_angle": ("ensemble", inflow_angle_range),
-            "velocity_magnitude": ("ensemble", velocity_magnitude_range),
-        },
-        coords={"ensemble": jnp.arange(len(inflow_angle_range))},
-    )
+    ##### Run ESMDA #####
     params_history = params_ensemble.copy()
     velocity_field_history = []
     rmse = []
@@ -216,6 +221,7 @@ def main() -> None:
 
     rmse.append(jnp.sqrt(jnp.mean((velocity_field - true_velocity_field) ** 2)))
 
+    ##### Plot results #####
     fig, axes = plt.subplots(
         NUM_ESMDA_STEPS + 1, 5, figsize=(16, 4 * (NUM_ESMDA_STEPS + 1))
     )
@@ -266,7 +272,7 @@ def main() -> None:
             axes[i, 4].set_title("Velocity magnitude distribution")
 
         axes[i, 2].set_title(f"RMSE: {rmse[i]:.4f}")
-    plt.savefig("esmda_results.pdf")
+    plt.savefig(os.path.join(FIGURES_DIR, "esmda_results.pdf"))
     plt.show()
 
 

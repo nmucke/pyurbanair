@@ -4,6 +4,7 @@ from abc import abstractmethod
 from typing import Any, Optional
 
 import xarray
+from tqdm import tqdm
 
 
 class BaseForwardModel:
@@ -122,7 +123,9 @@ class BaseForwardModel:
 
         if self.save_in_memory:
             states = []
-            for i in range(ensemble_size):
+            for i in tqdm(
+                range(ensemble_size), desc="Running ensemble", total=ensemble_size
+            ):
                 states.append(
                     self.__call__(
                         params=params.isel(ensemble=i) if params is not None else None,
