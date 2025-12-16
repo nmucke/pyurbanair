@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
+dependencies = [
+    "numpy>=2.3.5,<3",
+    "xarray>=2025.12.0,<2026",
+    "netcdf4>=1.7.3,<2",
+    "matplotlib>=3.10.8,<4",
+    "jax>=0.7.0,<0.8.0",
+]
+name = "data_assimilation"
+requires-python = ">= 3.12,<3.13"
+version = "0.1.0"
+
+[tool.pixi.workspace]
+preview = ["pixi-build"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.package.build]
+backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.dev/conda-forge" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/data_assimilation"]
+
+# Pixi dependencies
+[tool.pixi.dependencies]
+xarray = ">=2025.12.0,<2026"
+netcdf4 = ">=1.7.3,<2"
+numpy = ">=2.3.5,<3"
+matplotlib = ">=3.10.8,<4"
+
+[tool.pixi.pypi-dependencies]
+data-assimilation = { path = "libs/data-assimilation", editable = true }
+pyurbanair = { path = "../..", editable = true }

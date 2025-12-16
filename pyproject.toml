@@ -47,6 +47,9 @@ pyurbanair = { path = ".", editable = true }
 [tool.pixi.feature.udales.pypi-dependencies]
 pyudales = { path = "libs/pyudales", editable = true }
 
+[tool.pixi.feature.data-assimilation.pypi-dependencies]
+data-assimilation = { path = "libs/data-assimilation", editable = true }
+
 # Development tasks
 [tool.black]
 line-length = 88
@@ -107,4 +110,4 @@ sort-imports = { cmd = "isort src", description = "Sort imports" }
 
 [tool.pixi.environments]
 default = { features = ["py312"] }
-dev = { features = ["dev", "py312", "udales"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation"] }

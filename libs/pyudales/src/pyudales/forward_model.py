@@ -9,8 +9,10 @@ from typing import Optional
 
 import xarray
 
+from pyurbanair.base_forward_model import BaseForwardModel
+
 from . import UDALES_PATH
-from .angle_utils import angle_to_pressure_gradient, angle_to_velocity
+from .inflow_utils import angle_to_pressure_gradient, angle_to_velocity
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -41,7 +43,7 @@ def move_files_to_temp_dir(
             shutil.copytree(item, target)
 
 
-class ForwardModel:
+class ForwardModel(BaseForwardModel):
     """
     Forward model class.
 
@@ -75,13 +77,14 @@ class ForwardModel:
                 - pressure_gradient_magnitude: The magnitude of the inflow pressure gradient (Pa/m).
             results_dir: The directory where the results will be saved.
         """
+        super().__init__(results_dir=results_dir)
 
         # UDALES root path where the udales code is located
         self.udales_root_path = UDALES_PATH
 
         # Current working directory
         self.cwd = pathlib.Path(__file__).parent.parent.parent.parent.parent
-        
+
         # Save only the last timestep
         self.save_only_last_timestep = save_only_last_timestep
 
@@ -100,14 +103,6 @@ class ForwardModel:
         self.work_dir: pathlib.Path = create_dir(
             pathlib.Path(f"{self.cwd}/.temp/outputs")
         )
-
-        # Whether to save the results in memory or on disk
-        if results_dir is None:
-            self.save_in_memory = True
-        else:
-            self.save_in_memory = False
-            self.results_dir = results_dir
-            os.makedirs(self.results_dir, exist_ok=True)
 
         # self.work_dir = work_dir
         self.ncpu = ncpu
@@ -142,17 +137,6 @@ class ForwardModel:
 
         if self.save_only_last_timestep:
             self._apply_save_only_last_timestep()
-
-    def apply_save_in_memory(self, state: xarray.Dataset) -> None:
-        """Apply the save in memory flag."""
-        self.save_in_memory = True
-        self.results_dir = None
-
-    def apply_save_on_disk(self, results_dir: pathlib.Path) -> None:
-        """Apply the save on disk flag."""
-        self.save_in_memory = False
-        self.results_dir = results_dir
-        os.makedirs(self.results_dir, exist_ok=True)
 
     def _update_prof_file(self, u0: float | None, v0: float | None) -> None:
         """Update prof.inp.* file with new u0 and v0 values."""
@@ -476,8 +460,29 @@ class ForwardModel:
 
         time.sleep(30)  # Wait for preprocessing to complete
 
-    def run(self, sim_name: Optional[str] = "state") -> xarray.Dataset | None:
+    def run_single(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+    ) -> xarray.Dataset | None:
         """Run the forward model."""
+
+        if params is not None:
+            if "inflow_angle" in params:
+                self.inflow_angle = params.inflow_angle.item()
+            if "velocity_magnitude" in params:
+                self.velocity_magnitude = params.velocity_magnitude.item()
+            if "pressure_gradient_magnitude" in params:
+                self.pressure_gradient_magnitude = (
+                    params.pressure_gradient_magnitude.item()
+                )
+
+        self._apply_inflow_settings(
+            inflow_angle=self.inflow_angle,
+            velocity_magnitude=self.velocity_magnitude,
+            pressure_gradient_magnitude=self.pressure_gradient_magnitude,
+        )
+
         logger.info("Running forward model...")
         command = [
             "bash",
@@ -496,49 +501,4 @@ class ForwardModel:
 
         self._delete_work_dir()
 
-        if self.save_in_memory:
-            return state
-        else:
-            state.to_netcdf(self.results_dir.joinpath(f"{sim_name}.nc"))
-            return None
-
-
-    def __call__(self, params: xarray.Dataset, sim_name: Optional[str] = "state") -> xarray.Dataset:
-        """Run the forward model."""
-        self.inflow_angle = (
-            params.inflow_angle.item() 
-            if "inflow_angle" in params else self.inflow_angle
-        )
-        self.velocity_magnitude = (
-            params.velocity_magnitude.item() 
-            if "velocity_magnitude" in params else self.velocity_magnitude
-        )
-        self.pressure_gradient_magnitude = (
-            params.pressure_gradient_magnitude.item() 
-            if "pressure_gradient_magnitude" in params else self.pressure_gradient_magnitude
-        )
-
-        self._apply_inflow_settings(
-            inflow_angle=self.inflow_angle,
-            velocity_magnitude=self.velocity_magnitude,
-            pressure_gradient_magnitude=self.pressure_gradient_magnitude,
-        )
-        return self.run(sim_name=sim_name)
-
-    def run_ensemble(
-        self, 
-        params: xarray.Dataset,
-        sim_name: Optional[str] = "state",
-    ) -> xarray.Dataset:
-        """Run the forward model ensemble."""
-
-        if self.save_in_memory:
-            states = []
-            for i in range(len(params.ensemble)):
-                states.append(self.__call__(params.isel(ensemble=i)))
-            return xarray.concat(states, dim="ensemble", join="override")
-        else:
-            for i in range(len(params.ensemble)):
-                state = self.__call__(params.isel(ensemble=i), sim_name=f"state_{i}")
-                state.to_netcdf(self.results_dir.joinpath(f"{sim_name}_{i}.nc"))
-
+        return state
