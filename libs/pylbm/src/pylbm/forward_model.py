@@ -107,7 +107,8 @@ class ForwardModel:
                 env["PIXI_ENVIRONMENT"] = str(pixi_env_path)
 
             # Set stack size limit to unlimited
-            shell_cmd = f"ulimit -s unlimited 2>/dev/null || true; {executable_path}"
+            # shell_cmd = f"ulimit -s unlimited && {executable_path}"
+            shell_cmd = f"{executable_path}"
             result = subprocess.run(
                 shell_cmd,
                 shell=True,

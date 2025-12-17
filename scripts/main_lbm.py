@@ -25,8 +25,8 @@ def main() -> None:
 
     forward_model = ForwardModel(
         stl_path=stl_path,
-        nx=64,
-        ny=64,
+        nx=128,
+        ny=128,
         nz=8,
     )
     forward_model.run()
