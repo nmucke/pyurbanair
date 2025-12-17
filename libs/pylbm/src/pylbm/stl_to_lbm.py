@@ -505,7 +505,7 @@ def process_stl_to_fortran(
         nx=nx,
         ny=ny,
         nz=nz,
-        filename=output_path,
+        filename=output_path,  # type: ignore[arg-type]
     )
 
     print(f"Fortran code written to {output_path}")
@@ -582,14 +582,14 @@ def stl_to_lbm_geometry(
     )
 
     # Step 2: Generate Fortran code
-    generate_fortran_code(  # type: ignore[arg-type]
+    generate_fortran_code(
         building_data,
         nx,
         ny,
         nz,
         module_name=module_name,
         subroutine_name=subroutine_name,
-        filename=output_path,
+        filename=output_path,  # type: ignore[arg-type]
     )
 
     print(f"Generated Fortran geometry file: {output_path}", file=sys.stderr)

@@ -183,22 +183,6 @@ class ForwardModel(BaseForwardModel):
                 text=True,
             )
 
-            if result.returncode != 0:
-                error_msg = (
-                    f"LBM simulation failed with return code {result.returncode}"
-                )
-                if result.returncode == -11:
-                    error_msg += " (Segmentation fault - likely stack overflow)"
-                    error_msg += "\nTry setting ulimit -s unlimited before running"
-                if result.stderr:
-                    error_msg += (
-                        f"\nSTDERR:\n{result.stderr[-2000:]}"  # Last 2000 chars
-                    )
-                raise RuntimeError(error_msg)
-
-            if self.verbose:
-                print(f"Simulation completed successfully", file=sys.stderr)
-
         finally:
             # Always return to original directory
             os.chdir(original_cwd)

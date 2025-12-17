@@ -25,9 +25,18 @@ if _gitmodules_path.exists():
     try:
         gitmodules_content = _gitmodules_path.read_text()
         print(f"Reading .gitmodules from: {_gitmodules_path}", file=sys.stderr)
+        # Track which submodule section we're currently in
+        current_submodule = None
         for line in gitmodules_content.splitlines():
             stripped = line.strip()
-            if stripped.startswith("path = ") or stripped.startswith("path="):
+            # Check if this is a submodule section header
+            if stripped.startswith("[submodule"):
+                # Extract submodule name from [submodule "name"]
+                if '"' in stripped:
+                    current_submodule = stripped.split('"')[1]
+                else:
+                    current_submodule = None
+            elif stripped.startswith("path = ") or stripped.startswith("path="):
                 # Handle both "path = " and "path=" formats
                 if "=" in stripped:
                     submodule_path = stripped.split("=", 1)[1].strip()
@@ -38,7 +47,12 @@ if _gitmodules_path.exists():
                             file=sys.stderr,
                         )
             elif stripped.startswith("url = ") or stripped.startswith("url="):
-                if "=" in stripped and "u-dales" in gitmodules_content:
+                # Only set URL if we're in the u-dales submodule section
+                if (
+                    "=" in stripped
+                    and current_submodule
+                    and "u-dales" in current_submodule
+                ):
                     _udales_url = stripped.split("=", 1)[1].strip()
                     print(
                         f"Found u-dales URL in .gitmodules: {_udales_url}",
@@ -61,6 +75,41 @@ if _udales_path:
         and any(_udales_path.iterdir())
         and (_udales_path / ".git").exists()
     )
+
+    # Validate that the existing repo is the correct one if it exists
+    if is_repo_downloaded and _udales_url:
+        try:
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=str(_udales_path),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                actual_url = result.stdout.strip()
+                expected_url = _udales_url.rstrip("/")
+                actual_url_normalized = actual_url.rstrip("/")
+                # Check if URLs match (handle .git suffix differences)
+                if not (
+                    expected_url in actual_url_normalized
+                    or actual_url_normalized in expected_url
+                ):
+                    print(
+                        f"Warning: Existing repository has wrong remote URL: {actual_url}",
+                        file=sys.stderr,
+                    )
+                    print(
+                        f"Expected: {expected_url}. Removing incorrect repository...",
+                        file=sys.stderr,
+                    )
+                    import shutil
+
+                    shutil.rmtree(_udales_path)
+                    is_repo_downloaded = False
+        except Exception as e:
+            print(f"Warning: Could not validate repository URL: {e}", file=sys.stderr)
+
     needs_init = not is_repo_downloaded
 
     if needs_init:

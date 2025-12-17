@@ -234,7 +234,7 @@ def compile_lbm(
         make_args = ["make", "source", "depend", "GFORTRAN=1"]
         if enable_netcdf:
             make_args.append("NETCDF=1")
-        result_source: subprocess.CompletedProcess[str] = subprocess.run(
+        result_source: subprocess.CompletedProcess[str] = subprocess.run(  # type: ignore[call-overload]
             make_args,
             env=env,
             stderr=stderr,
@@ -294,7 +294,7 @@ def compile_lbm(
             make_args = ["make", "-B", f"m_{case_name}.o", "GFORTRAN=1"]
             if enable_netcdf:
                 make_args.append("NETCDF=1")
-            result_case: subprocess.CompletedProcess[str] = subprocess.run(
+            result_case: subprocess.CompletedProcess[str] = subprocess.run(  # type: ignore[call-overload]
                 make_args,
                 env=env,
                 stderr=stderr,
@@ -362,7 +362,7 @@ def compile_lbm(
         make_args = ["make", "GFORTRAN=1"]
         if enable_netcdf:
             make_args.append("NETCDF=1")
-        result: subprocess.CompletedProcess[str] = subprocess.run(
+        result: subprocess.CompletedProcess[str] = subprocess.run(  # type: ignore[call-overload]
             make_args,
             env=env,
             stderr=stderr,
@@ -469,7 +469,7 @@ def create_infile(rundir: pathlib.Path | None = None, verbose: bool = True) -> N
 # Physical variables
  0.0000178        ! visckin       : Dimensional kinematic viscosity
  1.225            ! C_rho - Density of air at surface 15C and  101.325 kPa  [kg/m^3] Eq. (7.12)
- 4.0              ! C_l   - Length of a lattice cell in meters [m]
+ 1.0              ! C_l   - Length of a lattice cell in meters [m]
  75.0             ! C_u   - Wind velocity conversion [m/s]   -> C_t=C_l/C_u
 # Averaging variables
  F F              ! lave lavesec  : Switch on/off full averaging and turbine section averaging
