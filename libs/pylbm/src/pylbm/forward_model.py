@@ -3,14 +3,23 @@ import pathlib
 import pdb
 import subprocess
 import sys
+from typing import Optional
+
+import xarray
+
+from pyurbanair.base_forward_model import BaseForwardModel
 
 from . import LBM_PATH
 from .compile_program import compile_lbm, create_infile, identify_environment
 from .stl_to_lbm import stl_to_lbm_geometry
-from .write_to_fortran import add_case_dimensions_to_mod_dimensions, add_module_to_main
+from .write_to_fortran import (
+    add_case_dimensions_to_mod_dimensions,
+    add_case_to_select_statement,
+    add_module_to_main,
+)
 
 
-class ForwardModel:
+class ForwardModel(BaseForwardModel):
     def __init__(
         self,
         rundir: pathlib.Path | None = None,
@@ -18,7 +27,20 @@ class ForwardModel:
         nx: int | None = None,
         ny: int | None = None,
         nz: int | None = None,
-    ):
+        num_timesteps: int = 1000,
+        bounds: (
+            tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None
+        ) = None,
+        results_dir: Optional[pathlib.Path] = None,
+        verbose: bool = True,
+    ) -> None:
+        super().__init__(results_dir=results_dir)
+
+        # Verbosity
+        self.verbose = verbose
+        self.stdout = None if self.verbose else subprocess.DEVNULL
+        self.stderr = None if self.verbose else subprocess.DEVNULL
+
         # Default rundir is .temp/lbm relative to current working directory
         if rundir is None:
             rundir = pathlib.Path(".temp/lbm")
@@ -46,19 +68,62 @@ class ForwardModel:
             nx=nx,  # type: ignore[arg-type]
             ny=ny,  # type: ignore[arg-type]
             nz=nz,  # type: ignore[arg-type]
+            bounds=bounds,
         )
 
         # Add module to main.F90
         add_module_to_main(self.case_name)
 
+        # Add case to select statement in main.F90
+        add_case_to_select_statement(self.case_name)
+
         # Set case dimensions
         add_case_dimensions_to_mod_dimensions(self.case_name, nx, ny, nz)  # type: ignore[arg-type]
 
         # Compile program
-        compile_lbm(rundir=self.rundir, case_name=self.case_name)
+        compile_lbm(rundir=self.rundir, case_name=self.case_name, verbose=self.verbose)
 
         # Create infile.in by running the executable
         create_infile(rundir=self.rundir)
+
+        # Set number of timesteps
+        self.num_timesteps = num_timesteps
+        self._set_num_timesteps(self.num_timesteps)
+
+    def _set_num_timesteps(self, num_timesteps: int) -> None:
+        """Set the number of timesteps."""
+        # Ensure infile.in exists
+        if not self.infile_path.exists():
+            raise FileNotFoundError(
+                f"infile.in not found at {self.infile_path}. "
+                f"Make sure create_infile() has been called."
+            )
+        # Read the infile
+        with open(self.infile_path, "r") as f:
+            lines = f.readlines()
+
+        # Find and modify the line with nt1
+        modified = False
+        for i, line in enumerate(lines):
+            if "! nt1" in line:
+                # Replace the number at the beginning while preserving the comment
+                # Format: "1000             ! nt1           : Final timestep"
+                parts = line.split("!")
+                if len(parts) >= 2:
+                    comment = "!" + "!".join(parts[1:])  # Preserve the comment part
+                    # Format the new line with proper spacing (match original format)
+                    lines[i] = f"{num_timesteps}             {comment}"
+                    modified = True
+                    break
+
+        if not modified:
+            raise ValueError(
+                f"Could not find 'nt1' line in infile.in at {self.infile_path}"
+            )
+
+        # Write the updated file
+        with open(self.infile_path, "w") as f:
+            f.writelines(lines)
 
     def run(self) -> None:
         """
@@ -76,7 +141,7 @@ class ForwardModel:
             _repo_root = _repo_root.parent
 
         # Identify the current pixi environment
-        pixi_env_path = identify_environment(_repo_root)
+        pixi_env_path = identify_environment(_repo_root, verbose=self.verbose)
         executable_path = pixi_env_path / "bin" / "boltzmann"
 
         if not executable_path.exists():
@@ -92,8 +157,8 @@ class ForwardModel:
                 f"Make sure create_infile() has been called."
             )
 
-        print(f"Running LBM simulation from {self.rundir}...", file=sys.stderr)
-        print(f"Executable: {executable_path}", file=sys.stderr)
+        if self.verbose:
+            print(f"Executable: {executable_path}", file=sys.stderr)
 
         original_cwd = pathlib.Path.cwd()
 
@@ -113,8 +178,8 @@ class ForwardModel:
                 shell_cmd,
                 shell=True,
                 env=env,
-                stderr=subprocess.PIPE,  # Capture stderr to see segfault details
-                stdout=subprocess.PIPE,  # Also capture stdout to see any error messages
+                stderr=self.stderr,  # Capture stderr to see segfault details
+                stdout=self.stdout,  # Also capture stdout to see any error messages
                 text=True,
             )
 
@@ -131,8 +196,78 @@ class ForwardModel:
                     )
                 raise RuntimeError(error_msg)
 
-            print(f"Simulation completed successfully", file=sys.stderr)
+            if self.verbose:
+                print(f"Simulation completed successfully", file=sys.stderr)
 
         finally:
             # Always return to original directory
             os.chdir(original_cwd)
+
+    def _set_inflow_settings(
+        self,
+        inflow_angle: float,
+        velocity_magnitude: float,
+    ) -> None:
+        """Set the inflow settings."""
+        # Ensure infile.in exists
+        if not self.infile_path.exists():
+            raise FileNotFoundError(
+                f"infile.in not found at {self.infile_path}. "
+                f"Make sure create_infile() has been called."
+            )
+
+        # Read the infile
+        with open(self.infile_path, "r") as f:
+            lines = f.readlines()
+
+        # Find and modify the line with uini, udir
+        modified = False
+        for i, line in enumerate(lines):
+            if "! uini, udir" in line:
+                # Replace the first two floats with velocity_magnitude and inflow_angle
+                # Format: "8.0 0.0          ! uini, udir    : Inflow wind velocity..."
+                parts = line.split("!")
+                if len(parts) >= 2:
+                    comment = "!" + "!".join(parts[1:])  # Preserve the comment part
+                    # Format the new line with proper spacing
+                    lines[i] = (
+                        f"{velocity_magnitude:.1f} {inflow_angle:.1f}          {comment}"
+                    )
+                    modified = True
+                    break
+
+        if not modified:
+            raise ValueError(
+                f"Could not find 'uini, udir' line in infile.in at {self.infile_path}"
+            )
+
+        # Write the updated file
+        with open(self.infile_path, "w") as f:
+            f.writelines(lines)
+
+    def run_single(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+    ) -> xarray.Dataset | None:
+        """Run the LBM executable from the rundir."""
+
+        if params is not None:
+            if "inflow_angle" in params:
+                self.inflow_angle = params.inflow_angle.item()
+            if "velocity_magnitude" in params:
+                self.velocity_magnitude = params.velocity_magnitude.item()
+
+        self._set_inflow_settings(
+            inflow_angle=self.inflow_angle,
+            velocity_magnitude=self.velocity_magnitude,
+        )
+
+        self.run()
+
+        sim_name = f"out{self.num_timesteps:06d}.nc"
+        state = xarray.load_dataset(self.rundir / sim_name)
+
+        # Add time dimension as the first dimension
+        state = state.expand_dims("time", axis=0)
+        return state

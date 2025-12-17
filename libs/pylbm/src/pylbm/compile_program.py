@@ -11,7 +11,7 @@ import sys
 from . import LBM_PATH
 
 
-def identify_environment(repo_root: pathlib.Path) -> pathlib.Path:
+def identify_environment(repo_root: pathlib.Path, verbose: bool = True) -> pathlib.Path:
     """
     Identify the current pixi environment path.
 
@@ -32,10 +32,11 @@ def identify_environment(repo_root: pathlib.Path) -> pathlib.Path:
     if pixi_env:
         pixi_env_path = pathlib.Path(pixi_env)
         if pixi_env_path.exists():
-            print(
-                f"Using pixi environment from PIXI_ENVIRONMENT: {pixi_env_path}",
-                file=sys.stderr,
-            )
+            if verbose:
+                print(
+                    f"Using pixi environment from PIXI_ENVIRONMENT: {pixi_env_path}",
+                    file=sys.stderr,
+                )
             return pixi_env_path
 
     # Check PIXI_PROJECT_ENVIRONMENT (set by pixi when activating an environment)
@@ -43,10 +44,11 @@ def identify_environment(repo_root: pathlib.Path) -> pathlib.Path:
     if pixi_proj_env:
         pixi_env_path = pathlib.Path(pixi_proj_env)
         if pixi_env_path.exists():
-            print(
-                f"Using pixi environment from PIXI_PROJECT_ENVIRONMENT: {pixi_env_path}",
-                file=sys.stderr,
-            )
+            if verbose:
+                print(
+                    f"Using pixi environment from PIXI_PROJECT_ENVIRONMENT: {pixi_env_path}",
+                    file=sys.stderr,
+                )
             return pixi_env_path
 
     # Check for .pixi/envs directory
@@ -56,16 +58,63 @@ def identify_environment(repo_root: pathlib.Path) -> pathlib.Path:
         for env_name in ["dev", "default"]:
             env_path = pixi_envs_dir / env_name
             if env_path.exists():
-                print(f"Using pixi environment: {env_name}", file=sys.stderr)
+                if verbose:
+                    print(f"Using pixi environment: {env_name}", file=sys.stderr)
                 return env_path
 
     # Default fallback
     default_env = repo_root / ".pixi" / "envs" / "default"
-    print(f"Using default pixi environment: {default_env}", file=sys.stderr)
+    if verbose:
+        print(f"Using default pixi environment: {default_env}", file=sys.stderr)
     return default_env
 
 
-def compile_lbm(rundir: pathlib.Path | None = None, case_name: str = "runcase") -> None:
+def _check_netcdf_needed(rundir: pathlib.Path) -> bool:
+    """
+    Check if NETCDF compilation is needed by examining infile.in.
+
+    NETCDF is needed when tecout is set to 3 (netcdf output format).
+
+    Args:
+        rundir: Directory containing infile.in
+
+    Returns:
+        True if NETCDF should be enabled, False otherwise
+    """
+    infile_path = rundir / "infile.in"
+    if not infile_path.exists():
+        # If infile.in doesn't exist yet, check the default template
+        # The default template has tecout=3, so we enable NETCDF by default
+        return True
+
+    try:
+        infile_content = infile_path.read_text()
+        # Look for the tecout line - it's formatted as: "3                ! tecout"
+        # We need to find the line with "tecout" and extract the number
+        for line in infile_content.splitlines():
+            if "tecout" in line.lower():
+                # Extract the first number from the line
+                parts = line.split()
+                if parts:
+                    try:
+                        tecout_value = int(parts[0])
+                        return tecout_value == 3
+                    except ValueError:
+                        continue
+        # If tecout line not found, default to False (safer)
+        return False
+    except Exception as e:
+        print(
+            f"Warning: Could not read infile.in to check tecout: {e}",
+            file=sys.stderr,
+        )
+        # Default to False if we can't read the file
+        return False
+
+
+def compile_lbm(
+    rundir: pathlib.Path | None = None, case_name: str = "runcase", verbose: bool = True
+) -> None:
     """
     Compile the LBM program.
 
@@ -75,9 +124,13 @@ def compile_lbm(rundir: pathlib.Path | None = None, case_name: str = "runcase") 
     Args:
         rundir: Directory where infile.in should be placed. If None, uses .temp/lbm
         case_name: Name of the case module (default: "runcase")
+        verbose: If True, print output from compilation
     """
     if rundir is None:
         rundir = pathlib.Path.cwd() / ".temp" / "lbm"
+
+    stderr = sys.stderr if verbose else subprocess.DEVNULL
+    stdout = sys.stdout if verbose else subprocess.DEVNULL
 
     # Convert to absolute path if relative
     if not rundir.is_absolute():
@@ -85,6 +138,11 @@ def compile_lbm(rundir: pathlib.Path | None = None, case_name: str = "runcase") 
 
     # Ensure rundir exists
     rundir.mkdir(parents=True, exist_ok=True)
+
+    # Check if NETCDF compilation is needed
+    enable_netcdf = _check_netcdf_needed(rundir)
+    if enable_netcdf:
+        print("NETCDF support enabled (tecout=3 detected)", file=sys.stderr)
 
     if not LBM_PATH or not LBM_PATH.exists():
         raise FileNotFoundError(f"LBM_PATH not found: {LBM_PATH}")
@@ -117,12 +175,24 @@ def compile_lbm(rundir: pathlib.Path | None = None, case_name: str = "runcase") 
     # Replace HOME line with absolute path to pixi environment
     # Also remove -march=native to avoid "illegal hardware instruction" errors
     # This flag optimizes for the build CPU but can cause compatibility issues
+    # Also update NCFDIR for NETCDF support when needed
     lines = makefile_content.splitlines()
     new_lines = []
     for line in lines:
         if line.strip().startswith("HOME = ") and not line.strip().startswith("#"):
             # Update HOME to absolute path
             new_lines.append(f"HOME = {pixi_env_path}")
+        elif line.strip().startswith("NCFDIR = ") and not line.strip().startswith("#"):
+            # Update NCFDIR to point to pixi environment root
+            # In conda/pixi, netcdf-fortran is installed directly in include/ and lib/
+            if enable_netcdf:
+                new_lines.append(f"NCFDIR = {pixi_env_path}")
+                print(
+                    f"Updated NCFDIR to {pixi_env_path} for NETCDF support",
+                    file=sys.stderr,
+                )
+            else:
+                new_lines.append(line)
         elif "-march=native" in line:
             # Remove -march=native to ensure portability
             # This flag causes "illegal hardware instruction" errors when the executable
@@ -161,10 +231,14 @@ def compile_lbm(rundir: pathlib.Path | None = None, case_name: str = "runcase") 
 
         # First, regenerate source.files and depends.file to include m_runcase.F90
         print("Regenerating source.files and depends.file...", file=sys.stderr)
-        result_source = subprocess.run(
-            ["make", "source", "depend", "GFORTRAN=1"],
+        make_args = ["make", "source", "depend", "GFORTRAN=1"]
+        if enable_netcdf:
+            make_args.append("NETCDF=1")
+        result_source: subprocess.CompletedProcess[str] = subprocess.run(
+            make_args,
             env=env,
-            capture_output=True,
+            stderr=stderr,
+            stdout=stdout,
             text=True,
         )
 
@@ -217,10 +291,14 @@ def compile_lbm(rundir: pathlib.Path | None = None, case_name: str = "runcase") 
 
         if case_module_file.exists():
             print(f"Compiling {case_module_file.name} first...", file=sys.stderr)
-            result_case = subprocess.run(
-                ["make", "-B", f"m_{case_name}.o", "GFORTRAN=1"],
+            make_args = ["make", "-B", f"m_{case_name}.o", "GFORTRAN=1"]
+            if enable_netcdf:
+                make_args.append("NETCDF=1")
+            result_case: subprocess.CompletedProcess[str] = subprocess.run(
+                make_args,
                 env=env,
-                capture_output=True,
+                stderr=stderr,
+                stdout=stdout,
                 text=True,
             )
 
@@ -281,10 +359,14 @@ def compile_lbm(rundir: pathlib.Path | None = None, case_name: str = "runcase") 
         # Don't use -B flag here since we've already compiled m_runcase.F90
         # Make will handle dependencies correctly now
         print("Compiling remaining files...", file=sys.stderr)
-        result = subprocess.run(
-            ["make", "GFORTRAN=1"],
+        make_args = ["make", "GFORTRAN=1"]
+        if enable_netcdf:
+            make_args.append("NETCDF=1")
+        result: subprocess.CompletedProcess[str] = subprocess.run(
+            make_args,
             env=env,
-            capture_output=True,
+            stderr=stderr,
+            stdout=stdout,
             text=True,
         )
 
@@ -328,7 +410,7 @@ def compile_lbm(rundir: pathlib.Path | None = None, case_name: str = "runcase") 
         os.chdir(original_cwd)
 
 
-def create_infile(rundir: pathlib.Path | None = None) -> None:
+def create_infile(rundir: pathlib.Path | None = None, verbose: bool = True) -> None:
     """
     Create infile.in template file in the rundir.
 
@@ -376,7 +458,7 @@ def create_infile(rundir: pathlib.Path | None = None) -> None:
  5000             ! iout          : Number of steps between diag outputs
  10000            ! irestarts     : Number of steps between restart outputs
  00 60000 1       ! iprt1 iprt2 x : Output every x timestep for it <= iprt1 and it >= iprt2
- 2                ! tecout        : full tecplot files (0), only solution (2), netcdf (3)
+ 3                ! tecout        : full tecplot files (0), only solution (2), netcdf (3)
 # Boundary conditions
  1                ! ibnd          : 0-periodic, 1 in/out flow,
  0                ! jbnd          : 0-periodic, 11,12,21,22 no-slip bb(1), free-slip bb(2) for j=1 and j=ny

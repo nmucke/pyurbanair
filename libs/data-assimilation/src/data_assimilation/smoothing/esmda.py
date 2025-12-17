@@ -123,7 +123,7 @@ class ESMDA(BaseSmoothing):
     ) -> xarray.Dataset:
         """Perform the ESMDA analysis."""
         if return_params_history:
-            params_history = []
+            params_history = [params]
         if return_state_history:
             state_history = []
         for _ in range(self.num_steps):

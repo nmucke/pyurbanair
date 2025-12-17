@@ -13,6 +13,7 @@ class ObservationOperator:
         obs_ids_y: list[int],
         obs_ids_z: list[int],
         obs_states: list[str],
+        solver_name: str = "pylbm",
     ):
         """Initialize the observation operator."""
         self.obs_ids_x = obs_ids_x
@@ -22,6 +23,21 @@ class ObservationOperator:
 
         self.num_sensors = len(obs_ids_x)
         self.num_obs = len(obs_ids_x) * len(obs_states)
+
+        if solver_name == "udales":
+            self.dim_mapping = {
+                "u": {"z": "zt", "y": "yt", "x": "xm"},
+                "v": {"z": "zt", "y": "ym", "x": "xt"},
+                "w": {"z": "zm", "y": "yt", "x": "xt"},
+            }
+        elif solver_name == "pylbm":
+            self.dim_mapping = {
+                "u": {"z": "z", "y": "y", "x": "x"},
+                "v": {"z": "z", "y": "y", "x": "x"},
+                "w": {"z": "z", "y": "y", "x": "x"},
+            }
+        else:
+            raise ValueError(f"Solver {solver_name} not supported.")
 
     def _observation_single(self, state: xarray.Dataset) -> np.ndarray:
         """Apply observation operator to one state.
@@ -34,26 +50,27 @@ class ObservationOperator:
         """
         # Map dimension names for each variable
         # u: (zt, yt, xm), v: (zt, ym, xt), w: (zm, yt, xt)
-        dim_mapping = {
-            "u": {"z": "zt", "y": "yt", "x": "xm"},
-            "v": {"z": "zt", "y": "ym", "x": "xt"},
-            "w": {"z": "zm", "y": "yt", "x": "xt"},
-        }
 
         # Extract observations for all sensors at once using vectorized indexing
         obs_list = []
         for state_var in self.obs_states:
             # Get dimension names for this variable
-            dims = dim_mapping[state_var]
+            dims = self.dim_mapping[state_var]
 
             # Use xarray's isel with DataArray objects sharing a common dimension
             # This enables vectorized indexing: selects (obs_ids_x[i], obs_ids_y[i], obs_ids_z[i]) for all i
             # Result shape: (time, sensor) where sensor dimension has size num_sensors
             sensor_obs = state[state_var].isel(
                 **{
-                    dims["z"]: xarray.DataArray(self.obs_ids_z, dims="sensor"),
-                    dims["y"]: xarray.DataArray(self.obs_ids_y, dims="sensor"),
-                    dims["x"]: xarray.DataArray(self.obs_ids_x, dims="sensor"),
+                    self.dim_mapping[state_var]["z"]: xarray.DataArray(
+                        self.obs_ids_z, dims="sensor"
+                    ),
+                    self.dim_mapping[state_var]["y"]: xarray.DataArray(
+                        self.obs_ids_y, dims="sensor"
+                    ),
+                    self.dim_mapping[state_var]["x"]: xarray.DataArray(
+                        self.obs_ids_x, dims="sensor"
+                    ),
                 }
             )
             # Flatten to handle time dimension: (time, sensor) -> (time * sensor,)

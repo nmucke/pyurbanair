@@ -181,7 +181,7 @@ def main() -> None:
                 axes[i, 4].set_title("Velocity magnitude distribution")
 
         axes[i, 2].set_title(f"RMSE: {rmse[i]:.4f}")
-    plt.savefig(os.path.join(FIGURES_DIR, "esmda_results.pdf"))
+    plt.savefig(os.path.join(FIGURES_DIR, "esmda_results_udales.pdf"))
     plt.show()
 
 

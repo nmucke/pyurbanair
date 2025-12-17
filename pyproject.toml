@@ -38,6 +38,10 @@ xarray = ">=2025.12.0,<2026"
 netcdf4 = ">=1.7.3,<2"
 numpy = ">=2.3.5,<3"
 matplotlib = ">=3.10.8,<4"
+trimesh = ">=4.10.1,<5"
+rtree = ">=1.4.1,<2"
+networkx = ">=3.6.1,<4"
+scipy = ">=1.16.3,<2"
 
 [tool.pixi.feature.udales.dependencies]
 cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
