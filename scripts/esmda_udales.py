@@ -30,7 +30,7 @@ TRUE_ANGLE = 10.0
 
 # Data assimilation settings
 ENSEMBLE_SIZE = 100
-NUM_ESMDA_STEPS = 2
+NUM_ESMDA_STEPS = 5
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
@@ -83,7 +83,7 @@ def main() -> None:
             "pressure_gradient_magnitude": TRUE_PRESSURE_GRADIENT_MAGNITUDE,
         },
     )
-    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
+    forward_model = ForwardModel(**FIXED_INPUT)
     forward_model.run_preprocessing()
 
     ##### Run true simulation #####
@@ -181,7 +181,9 @@ def main() -> None:
                 axes[i, 4].set_title("Velocity magnitude distribution")
 
         axes[i, 2].set_title(f"RMSE: {rmse[i]:.4f}")
-    plt.savefig(os.path.join(FIGURES_DIR, "esmda_results_udales.pdf"))
+    plt.savefig(
+        os.path.join(FIGURES_DIR, f"esmda_results_udales_{NUM_ESMDA_STEPS}.pdf")
+    )
     plt.show()
 
 
