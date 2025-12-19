@@ -1,3 +1,7 @@
 [submodule "libs/pyudales/u-dales"]
 	path = libs/pyudales/u-dales
 	url = https://github.com/uDALES/u-dales.git
+
+[submodule "libs/pylbm/lbm"]
+	path = libs/pylbm/LBM
+	url = https://github.com/geirev/LBM.git

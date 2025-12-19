@@ -1,4 +1,5 @@
 import pathlib
+import re
 from abc import abstractmethod
 from typing import Optional
 
@@ -47,12 +48,19 @@ class BaseSmoothing:
             return self.observation_operator(state)
         elif results_dir is not None:
             file_list = [f for f in results_dir.iterdir() if f.is_file()]
+            # Sort files numerically by extracting the number from filenames like "state_17.nc"
+            file_list.sort(
+                key=lambda f: (
+                    int(re.search(r"state_(\d+)\.nc", f.name).group(1))  # type: ignore[union-attr]
+                    if re.search(r"state_(\d+)\.nc", f.name)
+                    else float("inf")
+                )
+            )
             observations_list: list[jnp.ndarray] = []
             for state_file in file_list:
                 state = xarray.open_dataset(state_file)
-                observations = self.observation_operator(state)
-                observations_list.append(observations)
-            return jnp.concatenate(observations_list, axis=0)
+                observations_list.append(self.observation_operator(state))
+            return jnp.stack(observations_list, axis=0)
 
     @abstractmethod
     def _analysis(
@@ -63,7 +71,7 @@ class BaseSmoothing:
         return_params_history: bool = False,
         return_state_history: bool = False,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
-        """Analyze the state."""
+        """Perform the analysis."""
         raise NotImplementedError
 
     def __call__(
@@ -74,7 +82,7 @@ class BaseSmoothing:
         return_params_history: bool = False,
         return_state_history: bool = False,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
-        """Smooth the state."""
+        """Perform the analysis."""
         return self._analysis(
             state=state,
             params=params,

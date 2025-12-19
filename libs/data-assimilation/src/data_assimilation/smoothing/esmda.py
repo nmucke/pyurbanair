@@ -1,3 +1,6 @@
+import os
+import pathlib
+import shutil
 from typing import Optional
 
 import jax
@@ -20,9 +23,18 @@ class ESMDA(BaseSmoothing):
         num_steps: int = 3,
         alpha: Optional[float] = None,
         rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
+        results_dir: Optional[pathlib.Path] = None,
     ) -> None:
         """Initialize the ESMDA smoothing."""
         super().__init__(observation_operator, forward_model)
+
+        self.results_dir = results_dir
+        if results_dir is not None:
+            self.save_on_disk = True
+            for i in range(num_steps + 1):
+                os.makedirs(results_dir / f"step_{i}", exist_ok=True)
+        else:
+            self.save_on_disk = False
 
         if alpha is None:
             self.alpha = 1 / num_steps
@@ -113,6 +125,24 @@ class ESMDA(BaseSmoothing):
             coords=params.coords,
         )
 
+    def get_state(
+        self,
+        ensemble_member: int,
+        step: int,
+    ) -> xarray.Dataset:
+        """Get the state from the results directory."""
+        return xarray.open_dataset(
+            self.results_dir / f"step_{step}" / f"state_{ensemble_member}.nc"  # type: ignore[operator]
+        )
+
+    def _save_states_to_disk(self, step: int) -> None:
+        """Save the states to disk."""
+        src_dir = self.forward_model.results_dir
+        for f in pathlib.Path(src_dir).iterdir():
+            if f.suffix == ".nc":
+                target = self.results_dir / f"step_{step}" / f"{f.name}"  # type: ignore[operator]
+                shutil.move(str(f), str(target))
+
     def _analysis(
         self,
         params: xarray.Dataset,
@@ -123,17 +153,21 @@ class ESMDA(BaseSmoothing):
     ) -> xarray.Dataset:
         """Perform the ESMDA analysis."""
         if return_params_history:
-            params_history = []
+            params_history = [params]
         if return_state_history:
             state_history = []
-        for _ in range(self.num_steps):
+        for i in range(self.num_steps):
             state = self._forecast_step(state=state, params=params)
-            if return_state_history:
-                state_history.append(state)
 
             params = self._one_step(params=params, obs=observations, state=state)
             if return_params_history:
                 params_history.append(params)
+
+            if return_state_history:
+                if self.forward_model.save_on_disk:
+                    self._save_states_to_disk(step=i)
+                else:
+                    state_history.append(state)
 
         if return_params_history:
             params_history = xarray.concat(
@@ -142,11 +176,18 @@ class ESMDA(BaseSmoothing):
 
         if return_state_history:
             state = self._forecast_step(state=state, params=params)
-            state_history.append(state)
-            state_history = xarray.concat(
-                state_history, dim="esmda_step", join="override"
-            )
+            if self.forward_model.save_on_disk:
+                self._save_states_to_disk(step=self.num_steps)
+            else:
+                state_history.append(state)
+                state_history = xarray.concat(
+                    state_history, dim="esmda_step", join="override"
+                )
 
+        if self.save_on_disk:
+            if return_params_history:
+                return params_history
+            return params
         if return_params_history and return_state_history:
             return params_history, state_history
         elif return_params_history:
