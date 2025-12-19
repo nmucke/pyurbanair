@@ -93,7 +93,8 @@ def main() -> None:
     true_velocity_field = get_velocity_magnitude_field(true_state)
     true_velocity_field = true_velocity_field[0]
 
-    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
+
+    # forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
@@ -111,7 +112,7 @@ def main() -> None:
         num_steps=NUM_ESMDA_STEPS,
         alpha=ALPHA,
         rng_key=rng_key,
-        results_dir=pathlib.Path(RESULTS_DIR),
+        # results_dir=pathlib.Path(RESULTS_DIR),
     )
     output = esmda(
         params=params_ensemble,
@@ -119,6 +120,7 @@ def main() -> None:
         return_params_history=True,
         return_state_history=True,
     )
+    pdb.set_trace()
 
     if isinstance(output, tuple):
         params = output[0]
