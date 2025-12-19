@@ -1,4 +1,5 @@
 import os
+import pathlib
 import pdb
 
 import jax
@@ -17,6 +18,7 @@ SEED = 42
 # Directory settings
 MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
 EXPERIMENT_DIR = "examples/udales/experiments/300"
+RESULTS_DIR = ".temp/udales"
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
@@ -29,8 +31,8 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 100
-NUM_ESMDA_STEPS = 5
+ENSEMBLE_SIZE = 50
+NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
@@ -91,6 +93,8 @@ def main() -> None:
     true_velocity_field = get_velocity_magnitude_field(true_state)
     true_velocity_field = true_velocity_field[0]
 
+    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
+
     ##### Setup observations #####
     observation_operator = ObservationOperator(
         OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES, solver_name="udales"
@@ -107,15 +111,37 @@ def main() -> None:
         num_steps=NUM_ESMDA_STEPS,
         alpha=ALPHA,
         rng_key=rng_key,
+        results_dir=pathlib.Path(RESULTS_DIR),
     )
-    params, state = esmda(
+    output = esmda(
         params=params_ensemble,
         observations=true_obs,
         return_params_history=True,
         return_state_history=True,
     )
 
-    ensemble_mean_field = state.mean(dim="ensemble")
+    if isinstance(output, tuple):
+        params = output[0]
+        ensemble_mean_field = output[1]
+        ensemble_mean_field = ensemble_mean_field.mean(dim="ensemble")
+    else:
+        params = output
+        ensemble_mean_field = []
+        for i in range(NUM_ESMDA_STEPS + 1):
+            esmda_step = esmda.get_state(step=i, ensemble_member=0)
+            for j in range(1, ENSEMBLE_SIZE):
+                esmda_state = esmda.get_state(step=i, ensemble_member=j)
+                for var in esmda_step.data_vars:
+                    esmda_step[var].values = (
+                        esmda_step[var].values + esmda_state[var].values
+                    )
+            for var in esmda_step.data_vars:
+                esmda_step[var].values /= ENSEMBLE_SIZE
+            ensemble_mean_field.append(esmda_step)
+        ensemble_mean_field = xarray.concat(
+            ensemble_mean_field, dim="esmda_step", join="override"
+        )
+
     velocity_field = get_velocity_magnitude_field(ensemble_mean_field)
     velocity_field = velocity_field[:, 0]
 

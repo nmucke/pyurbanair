@@ -39,10 +39,12 @@ class BaseForwardModel:
     def apply_save_in_memory(self) -> None:
         """Apply the save in memory flag."""
         self.save_in_memory = True
+        self.save_on_disk = False
 
     def apply_save_on_disk(self, results_dir: pathlib.Path) -> None:
         """Apply the save on disk flag."""
         self.save_in_memory = False
+        self.save_on_disk = True
         self.results_dir = results_dir
         os.makedirs(self.results_dir, exist_ok=True)
 
@@ -80,7 +82,12 @@ class BaseForwardModel:
         if self.save_in_memory:
             return state
         else:
-            state.to_netcdf(self.results_dir.joinpath(f"{sim_name}.nc"))  # type: ignore[union-attr]
+            outfile = (
+                self.results_dir / f"{sim_name}.nc"  # type: ignore[operator]
+                if sim_name is not None
+                else self.results_dir / "state.nc"  # type: ignore[operator]
+            )
+            state.to_netcdf(str(outfile))  # type: ignore[union-attr]
             return None
 
     def run_ensemble(
