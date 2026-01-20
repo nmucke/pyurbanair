@@ -130,6 +130,9 @@ class ForwardModel(BaseForwardModel):
         # Move files from experiment_dir to temp_dir
         move_files_to_temp_dir(self.experiment_dir, self.temp_dir)
 
+        # Validate and sync NCPU with nprocx * nprocy from namoptions
+        self._validate_and_sync_ncpu()
+
         # Create a config.sh file where the environment variables are set
         self._create_config_sh()
 
@@ -413,6 +416,107 @@ class ForwardModel(BaseForwardModel):
             with open(namoptions_path, "w") as f:
                 f.writelines(output_lines)
 
+    def _validate_and_sync_ncpu(self) -> None:
+        """
+        Validate and synchronize NCPU with nprocx * nprocy from namoptions.
+        
+        uDALES requires: nprocx * nprocy = NCPU
+        Also validates divisibility constraints:
+        - itot must be divisible by nprocx
+        - jtot must be divisible by nprocy
+        - ktot must be divisible by nprocy
+        """
+        namoptions_path = (
+            pathlib.Path(self.temp_dir) / f"namoptions.{self.experiment_name}"
+        )
+
+        if not namoptions_path.exists():
+            logger.warning(
+                f"namoptions.{self.experiment_name} not found, skipping NCPU validation"
+            )
+            return
+
+        # Read namoptions to get nprocx, nprocy, itot, jtot, ktot
+        nprocx = None
+        nprocy = None
+        itot = None
+        jtot = None
+        ktot = None
+
+        with open(namoptions_path, "r") as f:
+            in_run = False
+            in_domain = False
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("&RUN"):
+                    in_run = True
+                elif stripped.startswith("&DOMAIN"):
+                    in_domain = True
+                elif stripped.startswith("/"):
+                    in_run = False
+                    in_domain = False
+                elif in_run and "nprocx" in stripped and "=" in stripped:
+                    try:
+                        nprocx = int(stripped.split("=")[1].strip().rstrip("."))
+                    except (ValueError, IndexError):
+                        pass
+                elif in_run and "nprocy" in stripped and "=" in stripped:
+                    try:
+                        nprocy = int(stripped.split("=")[1].strip().rstrip("."))
+                    except (ValueError, IndexError):
+                        pass
+                elif in_domain and "itot" in stripped and "=" in stripped:
+                    try:
+                        itot = int(stripped.split("=")[1].strip().rstrip("."))
+                    except (ValueError, IndexError):
+                        pass
+                elif in_domain and "jtot" in stripped and "=" in stripped:
+                    try:
+                        jtot = int(stripped.split("=")[1].strip().rstrip("."))
+                    except (ValueError, IndexError):
+                        pass
+                elif in_domain and "ktot" in stripped and "=" in stripped:
+                    try:
+                        ktot = int(stripped.split("=")[1].strip().rstrip("."))
+                    except (ValueError, IndexError):
+                        pass
+
+        # Validate and sync
+        if nprocx is not None and nprocy is not None:
+            expected_ncpu = nprocx * nprocy
+
+            # Check divisibility constraints
+            if itot is not None and itot % nprocx != 0:
+                raise ValueError(
+                    f"itot ({itot}) must be divisible by nprocx ({nprocx}). "
+                    f"Please adjust nprocx or itot in namoptions.{self.experiment_name}"
+                )
+
+            if jtot is not None and jtot % nprocy != 0:
+                raise ValueError(
+                    f"jtot ({jtot}) must be divisible by nprocy ({nprocy}). "
+                    f"Please adjust nprocy or jtot in namoptions.{self.experiment_name}"
+                )
+
+            if ktot is not None and ktot % nprocy != 0:
+                raise ValueError(
+                    f"ktot ({ktot}) must be divisible by nprocy ({nprocy}). "
+                    f"Please adjust nprocy or ktot in namoptions.{self.experiment_name}"
+                )
+
+            # Check if NCPU matches nprocx * nprocy
+            if self.ncpu != expected_ncpu:
+                logger.warning(
+                    f"NCPU ({self.ncpu}) does not match nprocx * nprocy ({nprocx} * {nprocy} = {expected_ncpu}). "
+                    f"Updating NCPU to {expected_ncpu} to match namoptions."
+                )
+                self.ncpu = expected_ncpu
+        else:
+            logger.warning(
+                f"Could not read nprocx and/or nprocy from namoptions.{self.experiment_name}. "
+                f"Using NCPU={self.ncpu} as specified."
+            )
+
     def _create_config_sh(self) -> None:
         """Create a config.sh file where the environment variables are set."""
         # DA_EXPDIR should point to the parent directory containing experiments,
@@ -472,25 +576,29 @@ class ForwardModel(BaseForwardModel):
     def run_preprocessing(self) -> None:
         """Run preprocessing."""
 
-        logger.info("Running preprocessing. This will take 30 seconds...")
+        logger.info("Running preprocessing...")
 
         self._clean_temp_dir()
         self._clean_work_dir()
 
+        # Use Python-based preprocessing script
+        script_path = pathlib.Path(__file__).parent.parent.parent / "shell_scripts" / "write_inputs.sh"
+        
         command = [
             "bash",
-            str(self.udales_root_path.joinpath("tools", "write_inputs.sh")),  # type: ignore[union-attr]
+            str(script_path),
             str(self.temp_dir),
         ]
-        # Add MATLAB bin directory to PATH so the script can find 'matlab'
+        
         env = os.environ.copy()
-        matlab_bin_dir = str(pathlib.Path(self.matlab_bin).parent)
-        env["PATH"] = f"{matlab_bin_dir}:{env.get('PATH', '')}"
+        # Set environment variables needed by the script
+        env["DA_EXPDIR"] = str(self.temp_dir.parent)
+        env["DA_TOOLSDIR"] = str(self.udales_root_path.joinpath("tools"))  # type: ignore[union-attr]
+        
         subprocess.run(
             command, check=True, env=env, stdout=self.stdout, stderr=self.stderr
         )
 
-        time.sleep(30)  # Wait for preprocessing to complete
         logger.info("Preprocessing completed.")
 
     def run_single(

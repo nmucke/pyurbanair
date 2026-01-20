@@ -15,7 +15,7 @@ FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
-NCPU = 4
+NCPU = 16
 # Forward model settings
 FIXED_INPUT = {
     "save_only_last_timestep": True,
