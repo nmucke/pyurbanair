@@ -8,7 +8,8 @@ import xarray
 from pyudales.forward_model import ForwardModel
 
 # Directory settings
-MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
+# MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
+MATLAB_BIN = "/opt/sw/matlab-2023b/bin/matlab"
 EXPERIMENT_DIR = "examples/udales/experiments/300"
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)

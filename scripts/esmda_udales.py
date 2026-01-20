@@ -16,14 +16,15 @@ from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 SEED = 42
 
 # Directory settings
-MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
+# MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
+MATLAB_BIN = "/opt/sw/matlab-2023b/bin/matlab"
 EXPERIMENT_DIR = "examples/udales/experiments/300"
 RESULTS_DIR = ".temp/udales"
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
-NCPU = 4
+NCPU = 16
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
