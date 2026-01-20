@@ -24,7 +24,7 @@ FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
-NCPU = 16
+NCPU = 4
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
@@ -32,7 +32,7 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 50
+ENSEMBLE_SIZE = 25
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -121,7 +121,6 @@ def main() -> None:
         return_params_history=True,
         return_state_history=True,
     )
-    pdb.set_trace()
 
     if isinstance(output, tuple):
         params = output[0]

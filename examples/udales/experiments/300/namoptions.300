@@ -1,6 +1,6 @@
 &RUN
 iexpnr       = 300
-runtime      = 50.
+runtime      = 25.
 trestart     = 7200.
 dtmax        = 1.
 ladaptive    = .true.
@@ -17,7 +17,7 @@ fieldvars    = 'u0,v0,w0,p0'
 &DOMAIN
 itot         = 128
 jtot         = 128
-ktot         = 6
+ktot         = 8
 xlen         = 160
 ylen         = 160
 /
