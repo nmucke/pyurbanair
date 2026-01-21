@@ -573,7 +573,7 @@ class ForwardModel(BaseForwardModel):
             elif item.is_dir():
                 shutil.rmtree(item)
 
-    def run_preprocessing(self) -> None:
+    def run_preprocessing(self, python_or_matlab: str = "python") -> None:
         """Run preprocessing."""
 
         logger.info("Running preprocessing...")
@@ -581,19 +581,35 @@ class ForwardModel(BaseForwardModel):
         self._clean_temp_dir()
         self._clean_work_dir()
 
-        # Use Python-based preprocessing script
-        script_path = pathlib.Path(__file__).parent.parent.parent / "shell_scripts" / "write_inputs.sh"
-        
-        command = [
-            "bash",
-            str(script_path),
-            str(self.temp_dir),
-        ]
-        
-        env = os.environ.copy()
-        # Set environment variables needed by the script
-        env["DA_EXPDIR"] = str(self.temp_dir.parent)
-        env["DA_TOOLSDIR"] = str(self.udales_root_path.joinpath("tools"))  # type: ignore[union-attr]
+        if python_or_matlab == "python":
+            # Use Python-based preprocessing script
+            script_path = pathlib.Path(__file__).parent.parent.parent / "shell_scripts" / "write_inputs.sh"
+            
+            command = [
+                "bash",
+                str(script_path),
+                str(self.temp_dir),
+            ]
+            env = os.environ.copy()
+            # Set environment variables needed by the script
+            env["DA_EXPDIR"] = str(self.temp_dir.parent)
+            env["DA_TOOLSDIR"] = str(self.udales_root_path.joinpath("tools"))  # type: ignore[union-attr]
+            
+        elif python_or_matlab == "matlab":
+            # Use MATLAB-based preprocessing script
+            command = [
+                "bash",
+                str(self.udales_root_path.joinpath("tools", "write_inputs.sh")),  # type: ignore[union-attr]
+                str(self.temp_dir),
+            ]
+            # Add MATLAB bin directory to PATH so the script can find 'matlab'
+            env = os.environ.copy()
+            matlab_bin_dir = str(pathlib.Path(self.matlab_bin).parent)
+            env["PATH"] = f"{matlab_bin_dir}:{env.get('PATH', '')}"
+            logger.info("Running preprocessing...")
+            subprocess.run(command, check=True, env=env)
+
+            time.sleep(90)  # Wait for preprocessing to complete
         
         subprocess.run(
             command, check=True, env=env, stdout=self.stdout, stderr=self.stderr

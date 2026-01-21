@@ -32,8 +32,8 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 25
-NUM_ESMDA_STEPS = 2
+ENSEMBLE_SIZE = 50
+NUM_ESMDA_STEPS = 5
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings

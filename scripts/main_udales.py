@@ -15,7 +15,8 @@ FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
-NCPU = 16
+NCPU = 4
+
 # Forward model settings
 FIXED_INPUT = {
     "save_only_last_timestep": True,
@@ -36,7 +37,7 @@ def main() -> None:
             "pressure_gradient_magnitude": 0.0041912,
         },
     )
-    forward_model.run_preprocessing()
+    forward_model.run_preprocessing(python_or_matlab="matlab")
     state = forward_model(params=params)
     # state = xarray.load_dataset(".temp/lbm/out005000.nc")
 
