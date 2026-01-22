@@ -7,7 +7,6 @@ import time
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-import ray
 import xarray
 from data_assimilation.observation_operator import ObservationOperator
 from data_assimilation.smoothing.esmda import ESMDA
