@@ -30,3 +30,6 @@ libs/pyudales/*.pyc
 
 # macOS files
 *.DS_Store
+
+# job output files
+job_scripts/delftblue/out_files/*
