@@ -104,7 +104,7 @@ class ForwardModel(BaseForwardModel):
         # Temporary directory where the experiment is stored
         if temp_dir is None:
             self.temp_dir: pathlib.Path = create_dir(
-                pathlib.Path(f"{self.cwd}/.temp/experiments")
+                pathlib.Path(f"{self.cwd}/.temp/experiments/{self.experiment_name}")
             )
         else:
             self.temp_dir = temp_dir
@@ -589,35 +589,6 @@ class ForwardModel(BaseForwardModel):
         self._clean_temp_dir()
         self._clean_work_dir()
 
-        # The write_inputs.sh script expects the path to end with the experiment number
-        # and the Python script expects DA_EXPDIR/experiment_number/namoptions.*
-        # So we need to create the experiment subdirectory structure
-        experiment_temp_dir = self.temp_dir / self.experiment_name
-        experiment_temp_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Copy all files from temp_dir to experiment_temp_dir
-        for item in self.temp_dir.iterdir():
-            if item.is_file():
-                target = experiment_temp_dir / item.name
-                if not target.exists():
-                    shutil.copy2(item, target)
-        
-        # Update config.sh in experiment directory to have correct DA_EXPDIR
-        # The Python script expects DA_EXPDIR to point to the experiments directory
-        config_sh_path = experiment_temp_dir / "config.sh"
-        if config_sh_path.exists():
-            # Read existing config.sh and update DA_EXPDIR
-            config_content = config_sh_path.read_text()
-            # Replace DA_EXPDIR line with correct value
-            lines = config_content.split('\n')
-            updated_lines = []
-            for line in lines:
-                if line.startswith('export DA_EXPDIR='):
-                    updated_lines.append(f'export DA_EXPDIR={str(self.temp_dir)}')
-                else:
-                    updated_lines.append(line)
-            config_sh_path.write_text('\n'.join(updated_lines))
-
         if python_or_matlab == "python":
             # Use Python-based preprocessing script
             script_path = pathlib.Path(__file__).parent.parent.parent / "shell_scripts" / "write_inputs.sh"
@@ -625,12 +596,11 @@ class ForwardModel(BaseForwardModel):
             command = [
                 "bash",
                 str(script_path),
-                str(experiment_temp_dir),
+                str(self.temp_dir),
             ]
             env = os.environ.copy()
             # Set environment variables needed by the script
-            # DA_EXPDIR should point to the parent of experiments (where experiment subdirectories are)
-            env["DA_EXPDIR"] = str(self.temp_dir)
+            env["DA_EXPDIR"] = str(self.temp_dir.parent)
             env["DA_TOOLSDIR"] = str(self.udales_root_path.joinpath("tools"))  # type: ignore[union-attr]
             
         elif python_or_matlab == "matlab":
@@ -638,7 +608,7 @@ class ForwardModel(BaseForwardModel):
             command = [
                 "bash",
                 str(self.udales_root_path.joinpath("tools", "write_inputs.sh")),  # type: ignore[union-attr]
-                str(experiment_temp_dir),
+                str(self.temp_dir),
             ]
             # Add MATLAB bin directory to PATH so the script can find 'matlab'
             env = os.environ.copy()
