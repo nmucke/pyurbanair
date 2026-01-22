@@ -26,10 +26,12 @@ class BaseForwardModel:
         self,
         *args: Any,
         results_dir: Optional[pathlib.Path] = None,
+        parallel_execution: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the forward model."""
         self.results_dir = results_dir
+        self.parallel_execution = parallel_execution
 
         if results_dir is not None:
             self.apply_save_on_disk(results_dir)
@@ -90,6 +92,45 @@ class BaseForwardModel:
             state.to_netcdf(str(outfile))  # type: ignore[union-attr]
             return None
 
+    def _run_ensemble_sequentially_in_memory(
+        self,
+        state: xarray.Dataset,
+        params: xarray.Dataset,
+        ensemble_size: int,
+    ) -> xarray.Dataset:
+        """Run the forward model ensemble sequentially in memory."""
+
+        states = []
+        for i in tqdm(
+            range(ensemble_size), desc="Running ensemble", total=ensemble_size
+        ):
+            states.append(
+                self.__call__(
+                    params=params.isel(ensemble=i) if params is not None else None,
+                    state=state.isel(ensemble=i) if state is not None else None,
+                )
+            )
+        return xarray.concat(states, dim="ensemble", join="override")
+
+    def _run_ensemble_sequentially_on_disk(
+        self,
+        state: xarray.Dataset,
+        params: xarray.Dataset,
+        ensemble_size: int,
+        sim_name: str,
+    ) -> xarray.Dataset:
+        """Run the forward model ensemble sequentially on disk."""
+
+        for i in tqdm(
+            range(ensemble_size), desc="Running ensemble", total=ensemble_size
+        ):
+            _ = self.__call__(
+                params=params.isel(ensemble=i) if params is not None else None,
+                state=state.isel(ensemble=i) if state is not None else None,
+                sim_name=f"{sim_name}_{i}",
+            )
+        return None
+
     def run_ensemble(
         self,
         state: Optional[xarray.Dataset] = None,
@@ -129,24 +170,16 @@ class BaseForwardModel:
             ensemble_size = ensemble_size
 
         if self.save_in_memory:
-            states = []
-            for i in tqdm(
-                range(ensemble_size), desc="Running ensemble", total=ensemble_size
-            ):
-                states.append(
-                    self.__call__(
-                        params=params.isel(ensemble=i) if params is not None else None,
-                        state=state.isel(ensemble=i) if state is not None else None,
-                    )
-                )
-            return xarray.concat(states, dim="ensemble", join="override")
+            return self._run_ensemble_sequentially_in_memory(
+                state=state,
+                params=params,
+                ensemble_size=ensemble_size,
+            )
+
         else:
-            for i in tqdm(
-                range(ensemble_size), desc="Running ensemble", total=ensemble_size
-            ):
-                _ = self.__call__(
-                    params=params.isel(ensemble=i) if params is not None else None,
-                    state=state.isel(ensemble=i) if state is not None else None,
-                    sim_name=f"{sim_name}_{i}",
-                )
-            return None
+            return self._run_ensemble_sequentially_on_disk(
+                state=state,
+                params=params,
+                ensemble_size=ensemble_size,
+                sim_name=sim_name,  # type: ignore[arg-type]
+            )

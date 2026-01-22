@@ -17,6 +17,10 @@ from .inflow_utils import angle_to_pressure_gradient, angle_to_velocity
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+DEFAULT_MATLAB_BIN = pathlib.Path("/Applications/MATLAB_R2025b.app/bin/matlab")
+
+DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp/experiments")
+
 
 def create_dir(
     dir_path: pathlib.Path,
@@ -54,13 +58,12 @@ class ForwardModel(BaseForwardModel):
         self,
         experiment_dir: pathlib.Path,
         ncpu: int = 4,
-        matlab_bin: pathlib.Path = pathlib.Path(
-            "/Applications/MATLAB_R2025b.app/bin/matlab"
-        ),
+        matlab_bin: pathlib.Path = DEFAULT_MATLAB_BIN,
         save_only_last_timestep: bool = False,
         params: Optional[xarray.Dataset] = None,
         results_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
+        temp_dir: Optional[pathlib.Path] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -78,6 +81,7 @@ class ForwardModel(BaseForwardModel):
                 - pressure_gradient_magnitude: The magnitude of the inflow pressure gradient (Pa/m).
             results_dir: The directory where the results will be saved.
             verbose: If True, print output from Fortran code execution. If False, suppress all output.
+            temp_dir: The directory where the temporary files will be saved.
         """
         super().__init__(results_dir=results_dir)
 
@@ -97,13 +101,18 @@ class ForwardModel(BaseForwardModel):
         self.experiment_dir = experiment_dir
 
         # Temporary directory where the experiment is stored
-        self.temp_dir: pathlib.Path = create_dir(
-            pathlib.Path(f"{self.cwd}/.temp/experiments/{self.experiment_name}")
-        )
+        if temp_dir is None:
+            self.temp_dir: pathlib.Path = create_dir(
+                pathlib.Path(f"{self.cwd}/.temp/experiments/{self.experiment_name}")
+            )
+        else:
+            self.temp_dir: pathlib.Path = create_dir(  # type: ignore[no-redef]
+                pathlib.Path(f"{temp_dir}/.temp/experiments/{self.experiment_name}")
+            )
 
         # Output directory where the intermediate udales outputs will be saved
         self.work_dir: pathlib.Path = create_dir(
-            pathlib.Path(f"{self.cwd}/.temp/outputs")
+            pathlib.Path(f"{self.cwd}/.temp/outputs/")
         )
 
         # self.work_dir = work_dir
@@ -419,7 +428,7 @@ class ForwardModel(BaseForwardModel):
     def _validate_and_sync_ncpu(self) -> None:
         """
         Validate and synchronize NCPU with nprocx * nprocy from namoptions.
-        
+
         uDALES requires: nprocx * nprocy = NCPU
         Also validates divisibility constraints:
         - itot must be divisible by nprocx
@@ -583,8 +592,12 @@ class ForwardModel(BaseForwardModel):
 
         if python_or_matlab == "python":
             # Use Python-based preprocessing script
-            script_path = pathlib.Path(__file__).parent.parent.parent / "shell_scripts" / "write_inputs.sh"
-            
+            script_path = (
+                pathlib.Path(__file__).parent.parent.parent
+                / "shell_scripts"
+                / "write_inputs.sh"
+            )
+
             command = [
                 "bash",
                 str(script_path),
@@ -594,7 +607,7 @@ class ForwardModel(BaseForwardModel):
             # Set environment variables needed by the script
             env["DA_EXPDIR"] = str(self.temp_dir.parent)
             env["DA_TOOLSDIR"] = str(self.udales_root_path.joinpath("tools"))  # type: ignore[union-attr]
-            
+
         elif python_or_matlab == "matlab":
             # Use MATLAB-based preprocessing script
             command = [
@@ -610,7 +623,7 @@ class ForwardModel(BaseForwardModel):
             subprocess.run(command, check=True, env=env)
 
             time.sleep(90)  # Wait for preprocessing to complete
-        
+
         subprocess.run(
             command, check=True, env=env, stdout=self.stdout, stderr=self.stderr
         )
