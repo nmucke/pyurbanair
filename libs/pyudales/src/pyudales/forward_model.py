@@ -12,6 +12,13 @@ import xarray
 from pyurbanair.base_forward_model import BaseForwardModel
 
 from . import UDALES_PATH
+from .file_utils import (
+    change_file_extensions,
+    copy_files,
+    create_dir,
+    move_files_to_temp_dir,
+    rename_namoptions_file,
+)
 from .inflow_utils import angle_to_pressure_gradient, angle_to_velocity
 
 logger = logging.getLogger(__name__)
@@ -20,31 +27,6 @@ logger.setLevel(logging.INFO)
 DEFAULT_MATLAB_BIN = pathlib.Path("/Applications/MATLAB_R2025b.app/bin/matlab")
 
 DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp/experiments")
-
-
-def create_dir(
-    dir_path: pathlib.Path,
-) -> pathlib.Path:
-    """Create a temporary directory in the given directory."""
-    os.makedirs(pathlib.Path(dir_path), exist_ok=True)
-    return pathlib.Path(dir_path)
-
-
-def move_files_to_temp_dir(
-    experiment_dir: pathlib.Path, temp_dir: pathlib.Path
-) -> None:
-    """Move files from experiment_dir to temp_dir."""
-    experiment_path = pathlib.Path(experiment_dir)
-    temp_dir_path = temp_dir
-    for item in experiment_path.iterdir():
-        target = temp_dir_path / item.name
-        if item.is_file():
-            target.write_bytes(item.read_bytes())
-        elif item.is_dir():
-            # Remove target if it exists, then copy
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(item, target)
 
 
 class ForwardModel(BaseForwardModel):
@@ -57,6 +39,7 @@ class ForwardModel(BaseForwardModel):
     def __init__(
         self,
         experiment_dir: pathlib.Path,
+        experiment_name: str = "300",
         ncpu: int = 4,
         matlab_bin: pathlib.Path = DEFAULT_MATLAB_BIN,
         save_only_last_timestep: bool = False,
@@ -95,7 +78,7 @@ class ForwardModel(BaseForwardModel):
         self.save_only_last_timestep = save_only_last_timestep
 
         # Experiment name
-        self.experiment_name = str(experiment_dir)[-3:]
+        self.experiment_name = experiment_name
 
         # Experiment directory where the experiment is stored
         self.experiment_dir = experiment_dir
@@ -139,6 +122,10 @@ class ForwardModel(BaseForwardModel):
         # Move files from experiment_dir to temp_dir
         move_files_to_temp_dir(self.experiment_dir, self.temp_dir)
 
+        # Rename the namoptions file to have the experiment_name as its extension
+        # Find any existing namoptions file with arbitrary extension in temp_dir
+        rename_namoptions_file(self.temp_dir, self.experiment_name)
+
         # Validate and sync NCPU with nprocx * nprocy from namoptions
         self._validate_and_sync_ncpu()
 
@@ -156,6 +143,44 @@ class ForwardModel(BaseForwardModel):
 
         if self.save_only_last_timestep:
             self._apply_save_only_last_timestep()
+
+    def change_dirs(
+        self,
+        temp_dir: pathlib.Path,
+        output_dir: pathlib.Path,
+        experiment_name: str,
+    ) -> None:
+        """Change the temporary and output directories."""
+        old_temp_dir = self.temp_dir
+        old_work_dir = self.work_dir
+        old_experiment_name = self.experiment_name
+
+        # Create new directories
+        new_temp_dir = create_dir(temp_dir)
+        new_output_dir = create_dir(output_dir)
+
+        # Copy all files from old temp_dir to new temp_dir
+        if old_temp_dir.exists():
+            copy_files(old_temp_dir, new_temp_dir)
+
+        # Update attributes
+        self.temp_dir = new_temp_dir
+        self.work_dir = new_output_dir
+        self.experiment_name = experiment_name
+
+        # Rename files that reference the old experiment name
+        if old_experiment_name != experiment_name:
+            change_file_extensions(self.temp_dir, old_experiment_name, experiment_name)
+
+        # Update namoptions file to reflect new experiment name
+        rename_namoptions_file(self.temp_dir, experiment_name)
+
+        # Update config.sh file to reflect new directories
+        self._create_config_sh()
+
+        logger.info(
+            f"Changed directories: temp_dir={self.temp_dir}, work_dir={self.work_dir}, experiment_name={self.experiment_name}"
+        )
 
     def _update_prof_file(self, u0: float | None, v0: float | None) -> None:
         """Update prof.inp.* file with new u0 and v0 values."""
