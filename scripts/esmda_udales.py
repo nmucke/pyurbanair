@@ -20,6 +20,7 @@ SEED = 42
 MATLAB_BIN = "/opt/sw/matlab-2023b/bin/matlab"
 EXPERIMENT_DIR = "examples/udales/experiments/300"
 RESULTS_DIR = ".temp/udales"
+TEMP_DIR = None  # "/scratch/ntmucke/pyudales"
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
@@ -32,7 +33,7 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 10
+ENSEMBLE_SIZE = 50
 NUM_ESMDA_STEPS = 3
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -54,6 +55,7 @@ FIXED_INPUT = {
     "matlab_bin": MATLAB_BIN,
     "experiment_dir": EXPERIMENT_DIR,
     "verbose": False,
+    "temp_dir": TEMP_DIR,
 }
 
 
@@ -86,14 +88,13 @@ def main() -> None:
             "pressure_gradient_magnitude": TRUE_PRESSURE_GRADIENT_MAGNITUDE,
         },
     )
-    forward_model = ForwardModel(**FIXED_INPUT)
+    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
     forward_model.run_preprocessing()
 
     ##### Run true simulation #####
     true_state = forward_model(params=true_params)
     true_velocity_field = get_velocity_magnitude_field(true_state)
     true_velocity_field = true_velocity_field[0]
-
 
     # forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
 

@@ -49,7 +49,7 @@ class BaseForwardModel:
         self.save_on_disk = True
         self.results_dir = results_dir
         os.makedirs(self.results_dir, exist_ok=True)
-    
+
     @abstractmethod
     def run_single(
         self,
@@ -93,11 +93,12 @@ class BaseForwardModel:
             return None
 
     def _run_ensemble_sequentially_in_memory(
-        self, 
+        self,
         state: xarray.Dataset,
-        params: xarray.Dataset, 
-        ensemble_size: int, 
+        params: xarray.Dataset,
+        ensemble_size: int,
     ) -> xarray.Dataset:
+        """Run the forward model ensemble sequentially in memory."""
 
         states = []
         for i in tqdm(
@@ -110,16 +111,16 @@ class BaseForwardModel:
                 )
             )
         return xarray.concat(states, dim="ensemble", join="override")
-    
+
     def _run_ensemble_sequentially_on_disk(
-        self, 
+        self,
         state: xarray.Dataset,
-        params: xarray.Dataset, 
-        ensemble_size: int, 
+        params: xarray.Dataset,
+        ensemble_size: int,
         sim_name: str,
     ) -> xarray.Dataset:
         """Run the forward model ensemble sequentially on disk."""
-        
+
         for i in tqdm(
             range(ensemble_size), desc="Running ensemble", total=ensemble_size
         ):
@@ -170,15 +171,15 @@ class BaseForwardModel:
 
         if self.save_in_memory:
             return self._run_ensemble_sequentially_in_memory(
-                state=state, 
-                params=params, 
-                ensemble_size=ensemble_size, 
+                state=state,
+                params=params,
+                ensemble_size=ensemble_size,
             )
-            
+
         else:
             return self._run_ensemble_sequentially_on_disk(
-                state=state, 
-                params=params, 
-                ensemble_size=ensemble_size, 
-                sim_name=sim_name,
+                state=state,
+                params=params,
+                ensemble_size=ensemble_size,
+                sim_name=sim_name,  # type: ignore[arg-type]
             )
