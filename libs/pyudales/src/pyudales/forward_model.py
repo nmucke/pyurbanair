@@ -17,6 +17,12 @@ from .inflow_utils import angle_to_pressure_gradient, angle_to_velocity
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+DEFAULT_MATLAB_BIN = pathlib.Path(
+    "/Applications/MATLAB_R2025b.app/bin/matlab"
+)
+
+DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp/experiments")
+
 
 def create_dir(
     dir_path: pathlib.Path,
@@ -54,13 +60,12 @@ class ForwardModel(BaseForwardModel):
         self,
         experiment_dir: pathlib.Path,
         ncpu: int = 4,
-        matlab_bin: pathlib.Path = pathlib.Path(
-            "/Applications/MATLAB_R2025b.app/bin/matlab"
-        ),
+        matlab_bin: pathlib.Path = DEFAULT_MATLAB_BIN,
         save_only_last_timestep: bool = False,
         params: Optional[xarray.Dataset] = None,
         results_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
+        temp_dir: Optional[pathlib.Path] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -97,9 +102,12 @@ class ForwardModel(BaseForwardModel):
         self.experiment_dir = experiment_dir
 
         # Temporary directory where the experiment is stored
-        self.temp_dir: pathlib.Path = create_dir(
-            pathlib.Path(f"{self.cwd}/.temp/experiments/{self.experiment_name}")
-        )
+        if temp_dir is None:
+            self.temp_dir: pathlib.Path = create_dir(
+                pathlib.Path(f"{self.cwd}/.temp/experiments")
+            )
+        else:
+            self.temp_dir = temp_dir
 
         # Output directory where the intermediate udales outputs will be saved
         self.work_dir: pathlib.Path = create_dir(
@@ -581,6 +589,18 @@ class ForwardModel(BaseForwardModel):
         self._clean_temp_dir()
         self._clean_work_dir()
 
+        # The write_inputs.sh script expects the path to end with the experiment number
+        # Create a subdirectory with the experiment number and ensure files are there
+        experiment_temp_dir = self.temp_dir / self.experiment_name
+        experiment_temp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy all files from temp_dir to experiment_temp_dir (config.sh, namoptions, .stl files, etc.)
+        for item in self.temp_dir.iterdir():
+            if item.is_file():
+                target = experiment_temp_dir / item.name
+                if not target.exists():
+                    shutil.copy2(item, target)
+
         if python_or_matlab == "python":
             # Use Python-based preprocessing script
             script_path = pathlib.Path(__file__).parent.parent.parent / "shell_scripts" / "write_inputs.sh"
@@ -588,7 +608,7 @@ class ForwardModel(BaseForwardModel):
             command = [
                 "bash",
                 str(script_path),
-                str(self.temp_dir),
+                str(experiment_temp_dir),
             ]
             env = os.environ.copy()
             # Set environment variables needed by the script
@@ -600,7 +620,7 @@ class ForwardModel(BaseForwardModel):
             command = [
                 "bash",
                 str(self.udales_root_path.joinpath("tools", "write_inputs.sh")),  # type: ignore[union-attr]
-                str(self.temp_dir),
+                str(experiment_temp_dir),
             ]
             # Add MATLAB bin directory to PATH so the script can find 'matlab'
             env = os.environ.copy()

@@ -37,7 +37,7 @@ def main() -> None:
             "pressure_gradient_magnitude": 0.0041912,
         },
     )
-    forward_model.run_preprocessing(python_or_matlab="matlab")
+    forward_model.run_preprocessing(python_or_matlab="python")
     state = forward_model(params=params)
     # state = xarray.load_dataset(".temp/lbm/out005000.nc")
 

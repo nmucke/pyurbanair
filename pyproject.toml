@@ -18,11 +18,17 @@ version = "0.1.0"
 
 [tool.pixi.workspace]
 preview = ["pixi-build"]
-channels = ["conda-forge"]
+channels = ["conda-forge","robostack"]
 platforms = ["osx-arm64","linux-64"]
+conda-pypi-map = { "conda-forge" = "./conda-pypi-mapping.json" }
+
+# conda-pypi-map = { "conda-forge" = "https://raw.githubusercontent.com/prefix-dev/parselmouth/main/files/mapping_as_grayskull.json" }
 
 [tool.pixi.package.build]
 backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.dev/conda-forge" }
+
+[tool.pixi.feature.delftblue.activation]
+scripts = ["activation_scripts/delftblue_pyurbanair_activation.sh"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pyurbanair"]
@@ -131,3 +137,4 @@ sort-imports = { cmd = "isort src", description = "Sort imports" }
 [tool.pixi.environments]
 default = { features = ["py312"] }
 dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm"] }
+delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm"] }
