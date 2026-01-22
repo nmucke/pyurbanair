@@ -1,5 +1,6 @@
 import os
 import pathlib
+import pdb
 import shutil
 from typing import Optional
 
@@ -29,10 +30,14 @@ class ESMDA(BaseSmoothing):
         super().__init__(observation_operator, forward_model)
 
         self.results_dir = results_dir
-        if results_dir is not None:
+        if self.results_dir is not None or self.forward_model.save_on_disk:
+            if self.results_dir is None:
+                self.results_dir = pathlib.Path(".temp/esmda")
+                os.makedirs(self.results_dir, exist_ok=True)
+
             self.save_on_disk = True
             for i in range(num_steps + 1):
-                os.makedirs(results_dir / f"step_{i}", exist_ok=True)
+                os.makedirs(self.results_dir / f"step_{i}", exist_ok=True)
         else:
             self.save_on_disk = False
 
@@ -137,6 +142,7 @@ class ESMDA(BaseSmoothing):
 
     def _save_states_to_disk(self, step: int) -> None:
         """Save the states to disk."""
+
         src_dir = self.forward_model.results_dir
         for f in pathlib.Path(src_dir).iterdir():
             if f.suffix == ".nc":
@@ -168,6 +174,8 @@ class ESMDA(BaseSmoothing):
                     self._save_states_to_disk(step=i)
                 else:
                     state_history.append(state)
+
+            print(f"ESMDA step {i} completed")
 
         if return_params_history:
             params_history = xarray.concat(

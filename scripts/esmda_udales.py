@@ -1,15 +1,20 @@
 import os
 import pathlib
 import pdb
+import shutil
+import time
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import ray
 import xarray
 from data_assimilation.observation_operator import ObservationOperator
 from data_assimilation.smoothing.esmda import ESMDA
+from pyudales.ensemble_forward_model import EnsembleForwardModel
 from pyudales.forward_model import ForwardModel
 
+from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 
 # Random seed
@@ -18,14 +23,16 @@ SEED = 42
 # Directory settings
 # MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
 MATLAB_BIN = "/opt/sw/matlab-2023b/bin/matlab"
-EXPERIMENT_DIR = "examples/udales/experiments/300"
+EXPERIMENT_DIR = "examples/udales/experiments/xie_and_castro"
+EXPERIMENT_NAME = "999"
 RESULTS_DIR = ".temp/udales"
 TEMP_DIR = None  # "/scratch/ntmucke/pyudales"
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
-NCPU = 4
+NCPU_PER_PROCESS = 4
+NUM_PARALLEL_PROCESSES = 2
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
@@ -33,7 +40,7 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 50
+ENSEMBLE_SIZE = 5
 NUM_ESMDA_STEPS = 3
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -51,16 +58,20 @@ C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 # Forward model settings
 FIXED_INPUT = {
     "save_only_last_timestep": True,
-    "ncpu": NCPU,
+    "ncpu": NCPU_PER_PROCESS,
     "matlab_bin": MATLAB_BIN,
     "experiment_dir": EXPERIMENT_DIR,
     "verbose": False,
     "temp_dir": TEMP_DIR,
+    "experiment_name": EXPERIMENT_NAME,
 }
 
 
 def main() -> None:
     """Main function."""
+
+    if os.path.exists(".temp"):
+        shutil.rmtree(".temp")
 
     ##### Setup parameter ensemble #####
     rng_key = jax.random.PRNGKey(SEED)
@@ -106,10 +117,21 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
+    ensemble_forward_model = EnsembleForwardModel(
+        forward_model=forward_model,
+        ensemble_size=ENSEMBLE_SIZE,
+        results_dir=pathlib.Path(RESULTS_DIR),
+        num_parallel_processes=NUM_PARALLEL_PROCESSES,
+        num_cpus_per_process=NCPU_PER_PROCESS,
+    )
+
+    # ray.init(num_cpus=NUM_PARALLEL_PROCESSES * NCPU_PER_PROCESS)
+
     ##### Run ESMDA #####
+    t1 = time.time()
     esmda = ESMDA(
         observation_operator=observation_operator,
-        forward_model=forward_model,
+        forward_model=ensemble_forward_model,
         C_D=C_D,
         num_steps=NUM_ESMDA_STEPS,
         alpha=ALPHA,
@@ -122,6 +144,10 @@ def main() -> None:
         return_params_history=True,
         return_state_history=True,
     )
+    t2 = time.time()
+    print(f"ESMDA time: {t2 - t1:.2f} seconds")
+
+    # ray.shutdown()
 
     if isinstance(output, tuple):
         params = output[0]
