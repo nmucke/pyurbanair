@@ -13,6 +13,8 @@ from pyudales.forward_model import ForwardModel
 MATLAB_BIN = "/opt/sw/matlab-2023b/bin/matlab"
 EXPERIMENT_DIR = "examples/udales/experiments/xie_and_castro"
 EXPERIMENT_NAME = "300"
+RESULTS_DIR = pathlib.Path(".temp/udales")
+
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
@@ -28,6 +30,7 @@ FIXED_INPUT = {
     "case_dir": EXPERIMENT_DIR,
     "experiment_name": EXPERIMENT_NAME,
     "verbose": False,
+    # "results_dir": RESULTS_DIR,
 }
 
 
