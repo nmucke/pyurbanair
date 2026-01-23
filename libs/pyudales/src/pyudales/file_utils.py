@@ -161,9 +161,7 @@ def change_file_extensions(
             item.rename(new_path)
 
 
-def move_files_to_temp_dir(
-    experiment_dir: pathlib.Path, temp_dir: pathlib.Path
-) -> None:
+def move_files_to_dir(experiment_dir: pathlib.Path, temp_dir: pathlib.Path) -> None:
     """Move files from experiment_dir to temp_dir."""
     experiment_path = pathlib.Path(experiment_dir)
     temp_dir_path = temp_dir

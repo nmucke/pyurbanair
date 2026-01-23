@@ -72,6 +72,11 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
 
         self.cwd = self.forward_model.cwd  # type: ignore[attr-defined]
 
+        if self.forward_model.save_warm_start:
+            self.base_warm_start_dir: pathlib.Path = create_dir(
+                pathlib.Path(f"{self.cwd}/.temp/ensemble_warm_starts")
+            )
+
         if self.parallel_execution:
             if temp_dir is None:
                 self.base_temp_dir: pathlib.Path = create_dir(
@@ -96,15 +101,24 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """Prepare the forward models."""
         temp_dirs = []
         forward_models = []
+        warm_start_dirs = []
         for ensemble_number in range(self.ensemble_size):
             temp_dirs.append(
                 self.base_temp_dir / self.ensemble_experiment_names[ensemble_number]
             )
+            if self.forward_model.save_warm_start:
+                warm_start_dirs.append(
+                    self.base_warm_start_dir
+                    / self.ensemble_experiment_names[ensemble_number]
+                )
+            else:
+                warm_start_dirs.append(None)
             _forward_model = copy.deepcopy(self.forward_model)
             _forward_model.change_dirs(  # type: ignore[attr-defined]
                 temp_dir=temp_dirs[ensemble_number],
                 output_dir=self.base_output_dir,
                 experiment_name=self.ensemble_experiment_names[ensemble_number],
+                warm_start_dir=warm_start_dirs[ensemble_number],
             )
             forward_models.append(_forward_model)
         return temp_dirs, forward_models  # type: ignore[return-value]
@@ -170,6 +184,9 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                 )
                 shutil.move(str(src_path), self.results_dir / f"{sim_name}_{i}.nc")  # type: ignore[operator]
 
+                if forward_model.save_warm_start:
+                    forward_model._move_warm_start_file()
+
                 forward_model._clean_work_dir()
             return None
         else:
@@ -183,6 +200,10 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                         engine="netcdf4",
                     )
                 )
+
+                if forward_model.save_warm_start:
+                    forward_model._move_warm_start_file()
+
                 forward_model._clean_work_dir()
 
             return xarray.concat(states, dim="ensemble", join="override")

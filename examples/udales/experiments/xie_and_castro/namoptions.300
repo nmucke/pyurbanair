@@ -1,7 +1,9 @@
 &RUN
 iexpnr       = 300
-runtime      = 10.
-trestart     = 7200.
+runtime      = 50.
+trestart     = 1000.
+lwarmstart   = .false.
+startfile    = 'initd00000042_xxx_xxx.300'
 dtmax        = 1.
 ladaptive    = .true.
 nprocx       = 2
