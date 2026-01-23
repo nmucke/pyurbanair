@@ -233,12 +233,18 @@ class ForwardModel(BaseForwardModel):
 
         subprocess.run(command, check=True, stdout=self.stdout, stderr=self.stderr)
 
+        output_file = self.dirs.output_dir.joinpath(
+            self.dirs.experiment_name, f"fielddump.{self.dirs.experiment_name}.nc"
+        )
+
         state = xarray.open_dataset(
-            self.dirs.output_dir.joinpath(
-                self.dirs.experiment_name, f"fielddump.{self.dirs.experiment_name}.nc"
-            ),
+            output_file,
             engine="netcdf4",
         )
+
+        # Load into memory if save_in_memory is True
+        if self.save_in_memory:
+            state = state.load()
 
         if self.clean_output:
             clean_output_dir(self.dirs)

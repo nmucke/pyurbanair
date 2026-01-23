@@ -1,13 +1,20 @@
 import os
 import pathlib
 import pdb
+import time
 
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray
 from animation import animate_state
+from pyudales.ensemble_forward_model import EnsembleForwardModel
 from pyudales.forward_model import ForwardModel
 from pyudales.utils.forward_model_utils import create_new_forward_model
+
+# Random seed
+SEED = 42
 
 # Directory settings
 # MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
@@ -19,34 +26,62 @@ RESULTS_DIR = pathlib.Path(".temp/udales")
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
+ENSEMBLE_SIZE = 12
+
 # Compute ressources
-NCPU = 4
+NCPU_PER_PROCESS = 4
+NUM_PARALLEL_PROCESSES = 2
 
 # Forward model settings
 FIXED_INPUT = {
     "save_only_last_timestep": False,
     "output_frequency": 2.0,
-    "ncpu": NCPU,
+    "ncpu": NCPU_PER_PROCESS,
     "matlab_bin": MATLAB_BIN,
     "case_dir": CASE_DIR,
     "experiment_name": EXPERIMENT_NAME,
     "verbose": False,
-    # "results_dir": RESULTS_DIR,
+    "results_dir": RESULTS_DIR,
 }
 
 
 def main() -> None:
 
-    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
-    params = xarray.Dataset(
+    ##### Setup parameter ensemble #####
+    rng_key = jax.random.PRNGKey(SEED)
+
+    rng_key, subkey = jax.random.split(rng_key)
+    inflow_angle_range = jax.random.normal(subkey, (ENSEMBLE_SIZE,)) * 8
+
+    rng_key, subkey = jax.random.split(rng_key)
+    velocity_magnitude_range = jax.random.normal(subkey, (ENSEMBLE_SIZE,)) * 1 + 4.0
+    velocity_magnitude_range = jnp.maximum(velocity_magnitude_range, 0.1)
+
+    params_ensemble = xarray.Dataset(
         data_vars={
-            "inflow_angle": -45,
-            "velocity_magnitude": 3,
-            "pressure_gradient_magnitude": 0.0041912,
+            "inflow_angle": ("ensemble", inflow_angle_range),
+            "velocity_magnitude": ("ensemble", velocity_magnitude_range),
         },
+        coords={"ensemble": jnp.arange(len(inflow_angle_range))},
     )
+
+    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
     forward_model.run_preprocessing(python_or_matlab="python")
-    state = forward_model(params=params)
+
+    ensemble_forward_model = EnsembleForwardModel(
+        forward_model=forward_model,
+        ensemble_size=ENSEMBLE_SIZE,
+        # results_dir=pathlib.Path(RESULTS_DIR),
+        num_parallel_processes=NUM_PARALLEL_PROCESSES,
+        num_cpus_per_process=NCPU_PER_PROCESS,
+    )
+    t1 = time.time()
+    state = ensemble_forward_model.run_ensemble(params=params_ensemble)
+    t2 = time.time()
+    print(f"Time taken: {t2 - t1} seconds")
+
+    import pdb
+
     pdb.set_trace()
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)

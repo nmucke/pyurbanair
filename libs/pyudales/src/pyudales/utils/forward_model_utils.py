@@ -61,10 +61,6 @@ def create_new_forward_model(
         experiment_name=experiment_name,
     )
 
-    import pdb
-
-    pdb.set_trace()
-
     # Rename files that reference the old experiment name
     if old_experiment_name != experiment_name:
         change_file_extensions(
