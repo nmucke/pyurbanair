@@ -62,15 +62,9 @@ class ObservationOperator:
             # Result shape: (time, sensor) where sensor dimension has size num_sensors
             sensor_obs = state[state_var].isel(
                 **{
-                    self.dim_mapping[state_var]["z"]: xarray.DataArray(
-                        self.obs_ids_z, dims="sensor"
-                    ),
-                    self.dim_mapping[state_var]["y"]: xarray.DataArray(
-                        self.obs_ids_y, dims="sensor"
-                    ),
-                    self.dim_mapping[state_var]["x"]: xarray.DataArray(
-                        self.obs_ids_x, dims="sensor"
-                    ),
+                    dims["z"]: xarray.DataArray(self.obs_ids_z, dims="sensor"),
+                    dims["y"]: xarray.DataArray(self.obs_ids_y, dims="sensor"),
+                    dims["x"]: xarray.DataArray(self.obs_ids_x, dims="sensor"),
                 }
             )
             # Flatten to handle time dimension: (time, sensor) -> (time * sensor,)
@@ -100,6 +94,80 @@ class ObservationOperator:
         return obs_matrix
 
     def __call__(self, state: xarray.Dataset) -> np.ndarray:
+        if "ensemble" in state.dims:
+            return self._observation_ensemble(state)
+        else:
+            return self._observation_single(state)
+
+
+class TemporalObservationOperator:
+    """Observation operator for the data assimilation with temporal averaging."""
+
+    def __init__(
+        self,
+        observation_operator: ObservationOperator,
+        mode: str = "mean",
+    ):
+        """
+        Initialize the temporal observation operator.
+
+        Args:
+            observation_operator: ObservationOperator.
+            mode: Mode to use for temporal averaging.
+            Valid modes are "mean", "median", "max", "min".
+        """
+        self.observation_operator = observation_operator
+        self.mode = mode
+
+        self.mode_mapping = {
+            "mean": lambda state: state.mean(dim="time"),
+            "median": lambda state: state.median(dim="time"),
+            "max": lambda state: state.max(dim="time"),
+            "min": lambda state: state.min(dim="time"),
+        }
+
+    def _observation_single(self, state: xarray.Dataset) -> np.ndarray:
+        """Apply observation operator to one state with temporal averaging.
+
+        Args:
+            state: xarray Dataset with time dimension.
+
+        Returns:
+            Vector of shape (num_obs) where num_obs = num_sensors * num_states.
+        """
+        # Average over time dimension for all state variables
+        state_avg = self.mode_mapping[self.mode](state)
+
+        obs_values = self.observation_operator(state_avg)
+
+        return obs_values
+
+    def _observation_ensemble(self, states: xarray.Dataset) -> np.ndarray:
+        """Apply observation operator to each ensemble member.
+
+        Args:
+            states: xarray Dataset with ensemble and time dimensions.
+
+        Returns:
+            Matrix of shape (ensemble, num_obs) where num_obs = num_sensors * num_states.
+        """
+        ensemble_size = states.sizes["ensemble"]
+        obs_matrix = np.zeros((ensemble_size, self.observation_operator.num_obs))
+
+        for i in range(ensemble_size):
+            obs_matrix[i, :] = self._observation_single(states.isel(ensemble=i))
+
+        return obs_matrix
+
+    def __call__(self, state: xarray.Dataset) -> np.ndarray:
+        """Apply the observation operator to a state or ensemble of states.
+
+        Args:
+            state: xarray Dataset with time dimension, optionally with ensemble dimension.
+
+        Returns:
+            Observation vector or matrix.
+        """
         if "ensemble" in state.dims:
             return self._observation_ensemble(state)
         else:

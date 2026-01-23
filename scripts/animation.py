@@ -14,8 +14,8 @@ def animate_state(
     fps: int = 10,
     dpi: int = 100,
     cmap: str = "viridis",
-    vmin: Optional[float | dict[str, tuple[float, float]]] = None,
-    vmax: Optional[float | dict[str, tuple[float, float]]] = None,
+    vmin: Optional[float | dict[str, float]] = None,
+    vmax: Optional[float | dict[str, float]] = None,
 ) -> None:
     """
     Animate all data variables from an xarray Dataset, with each frame being a time instance.
@@ -237,4 +237,3 @@ def animate_state(
     anim.save(str(output_path), writer=writer, dpi=dpi)
 
     plt.close(fig)
-
