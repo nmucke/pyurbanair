@@ -72,7 +72,7 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 25
+ENSEMBLE_SIZE = 4
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -132,7 +132,7 @@ def main() -> None:
             "pressure_gradient_magnitude": TRUE_PRESSURE_GRADIENT_MAGNITUDE,
         },
     )
-    forward_model = ForwardModel(**FIXED_INPUT)
+    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
     forward_model.run_preprocessing()
 
     ##### Run true simulation #####
