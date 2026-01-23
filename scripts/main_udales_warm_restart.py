@@ -6,13 +6,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray
 from animation import animate_state
-from pyudales.forward_model import ForwardModel
+from pyudales.rollout_forward_model import RolloutForwardModel
 
 # Directory settings
 # MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
 MATLAB_BIN = "/opt/sw/matlab-2023b/bin/matlab"
 EXPERIMENT_DIR = "examples/udales/experiments/xie_and_castro"
-EXPERIMENT_NAME = "999"
+EXPERIMENT_NAME = "300"
 RESULTS_DIR = pathlib.Path(".temp/udales")
 
 FIGURES_DIR = "figures"
@@ -36,7 +36,7 @@ FIXED_INPUT = {
 
 def main() -> None:
 
-    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
+    forward_model = RolloutForwardModel(**FIXED_INPUT)
     params = xarray.Dataset(
         data_vars={
             "inflow_angle": -45,
@@ -45,8 +45,10 @@ def main() -> None:
         },
     )
     forward_model.run_preprocessing(python_or_matlab="python")
-    state = forward_model(params=params)
-    # state = xarray.load_dataset(".temp/lbm/out005000.nc")
+    state1 = forward_model(params=params)
+    state2 = forward_model(params=params)
+    state3 = forward_model(params=params)
+    state = xarray.concat([state1, state2, state3], dim="time")
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     # Add vel_magnitude as a data variable in state
@@ -63,7 +65,7 @@ def main() -> None:
     print(vel_magnitude.shape)
     print(vel_magnitude.min(), vel_magnitude.max())
     plt.figure()
-    plt.imshow(vel_magnitude[0, 0, :, :])
+    plt.imshow(vel_magnitude[-1, 0, :, :])
     plt.colorbar()
     plt.savefig("figures/vel_magnitude_udales.png")
     plt.show()
