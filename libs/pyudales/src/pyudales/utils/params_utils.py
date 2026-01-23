@@ -156,7 +156,7 @@ def apply_inflow_settings(
         params: xarray.Dataset containing inflow parameters. Only applies settings
                if inflow_angle and at least one magnitude (velocity_magnitude or
                pressure_gradient_magnitude) are provided.
-        dirs: DirectoryPaths instance containing temp_dir and experiment_name.
+        dirs: DirectoryPaths instance containing experiment_dir and experiment_name.
 
     Returns:
         Updated params Dataset if settings were applied, None otherwise.
@@ -188,7 +188,7 @@ def apply_inflow_settings(
         pressure_gradient_magnitude if pressure_gradient_magnitude is not None else 0.0,
     )
 
-    namoptions_path = dirs.temp_dir / f"namoptions.{dirs.experiment_name}"
+    namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
 
     # Update namoptions file using NamoptionsFile
     namoptions = NamoptionsFile(namoptions_path)
@@ -199,10 +199,10 @@ def apply_inflow_settings(
     namoptions.write()
 
     # Update the affected input files
-    prof_path = dirs.temp_dir / f"prof.inp.{dirs.experiment_name}"
+    prof_path = dirs.experiment_dir / f"prof.inp.{dirs.experiment_name}"
     update_prof_file(prof_path, u0=u0, v0=v0)
 
-    lscale_path = dirs.temp_dir / f"lscale.inp.{dirs.experiment_name}"
+    lscale_path = dirs.experiment_dir / f"lscale.inp.{dirs.experiment_name}"
     update_lscale_file(lscale_path, u0=u0, v0=v0, dpdx=dpdx, dpdy=dpdy)
 
     logger.info(

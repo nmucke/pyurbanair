@@ -93,7 +93,7 @@ FIXED_INPUT = {
     "output_frequency": 2.0,
     "ncpu": NCPU_PER_PROCESS,
     "matlab_bin": MATLAB_BIN,
-    "experiment_dir": EXPERIMENT_DIR,
+    "case_dir": EXPERIMENT_DIR,
     "verbose": False,
     "temp_dir": TEMP_DIR,
     "experiment_name": EXPERIMENT_NAME,

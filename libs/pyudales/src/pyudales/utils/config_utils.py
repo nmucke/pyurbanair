@@ -14,20 +14,20 @@ def create_config_sh(
     """
     Create a config.sh file where the environment variables are set.
 
-    DA_EXPDIR should point to the parent directory containing experiments,
+    DA_EXPDIR should point to the experiment_base_dir containing experiments,
     not the specific experiment directory, because MATLAB appends expnr to it.
 
     Args:
-        dirs: DirectoryPaths instance containing temp_dir, udales_root_path, and output_dir.
+        dirs: DirectoryPaths instance containing experiment_base_dir, udales_root_path, and output_dir.
         matlab_bin: The path to the MATLAB binary.
         ncpu: The number of CPUs to use.
     """
-    config_sh_path = dirs.temp_dir / "config.sh"
+    config_sh_path = dirs.experiment_dir / "config.sh"
     matlab_bin_dir = pathlib.Path(matlab_bin).parent
-    # Set DA_EXPDIR to parent directory so MATLAB can append expnr
+    # Set DA_EXPDIR to experiment_base_dir so MATLAB can append expnr
 
     udales_root_path = pathlib.Path(dirs.udales_root_path)
-    da_expdir = dirs.temp_dir.parent
+    da_expdir = dirs.experiment_base_dir
     with open(config_sh_path, "w") as f:
         f.write(f"export DA_EXPDIR={str(da_expdir)}\n")
         f.write(f"export DA_TOOLSDIR={str(udales_root_path.joinpath('tools'))}\n")

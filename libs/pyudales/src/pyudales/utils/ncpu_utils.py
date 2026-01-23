@@ -22,8 +22,7 @@ def validate_and_sync_ncpu(
     - ktot must be divisible by nprocy
 
     Args:
-        temp_dir: The temporary directory containing the namoptions file.
-        experiment_name: The experiment name (used in namoptions filename).
+        dirs: DirectoryPaths instance containing experiment_dir and experiment_name.
         ncpu: The current NCPU value.
 
     Returns:
@@ -32,7 +31,7 @@ def validate_and_sync_ncpu(
     Raises:
         ValueError: If divisibility constraints are not met.
     """
-    namoptions_path = dirs.temp_dir / f"namoptions.{dirs.experiment_name}"
+    namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
 
     if not namoptions_path.exists():
         logger.warning(

@@ -28,7 +28,7 @@ logger.setLevel(logging.INFO)
 
 DEFAULT_MATLAB_BIN = pathlib.Path("/Applications/MATLAB_R2025b.app/bin/matlab")
 
-DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp/experiments")
+DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp")
 
 # Default parameter values as xarray.Dataset
 DEFAULT_PARAMS = xarray.Dataset(
@@ -49,7 +49,7 @@ class ForwardModel(BaseForwardModel):
 
     def __init__(
         self,
-        experiment_dir: pathlib.Path,
+        case_dir: pathlib.Path,
         experiment_name: str = "300",
         ncpu: int = 4,
         matlab_bin: pathlib.Path = DEFAULT_MATLAB_BIN,
@@ -59,13 +59,14 @@ class ForwardModel(BaseForwardModel):
         results_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
         temp_dir: Optional[pathlib.Path] = None,
+        experiment_base_dir: Optional[pathlib.Path] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
 
         Args:
-            experiment_dir: The directory containing the experiment.
-            output_dir: The directory where the output will be saved.
+            case_dir: The directory containing the original case files.
+            experiment_name: The name of the experiment.
             ncpu: The number of CPUs to use.
             matlab_bin: The path to the MATLAB binary.
             save_only_last_timestep: If True, only the last timestep will be saved. Overwrites save_frequency.
@@ -77,7 +78,8 @@ class ForwardModel(BaseForwardModel):
                 - pressure_gradient_magnitude: The magnitude of the inflow pressure gradient (Pa/m).
             results_dir: The directory where the results will be saved.
             verbose: If True, print output from Fortran code execution. If False, suppress all output.
-            temp_dir: The directory where the temporary files will be saved.
+            temp_dir: The base temp directory (defaults to {cwd}/.temp).
+            experiment_base_dir: The base directory for experiments (defaults to {temp_dir}/experiment).
         """
         super().__init__(results_dir=results_dir)
 
@@ -88,10 +90,11 @@ class ForwardModel(BaseForwardModel):
 
         # Create directory paths dataclass with defaults or provided paths
         self.dirs = get_udales_directory_paths(
-            experiment_dir=experiment_dir,
+            case_dir=case_dir,
             experiment_name=experiment_name,
             udales_root_path=UDALES_PATH,  # type: ignore[arg-type]
             temp_dir=temp_dir,
+            experiment_base_dir=experiment_base_dir,
         )
 
         # Save only the last timestep
@@ -112,11 +115,11 @@ class ForwardModel(BaseForwardModel):
             new_params=params,
         )
 
-        # Copy files from experiment_dir to temp_dir
-        copy_files(self.dirs.experiment_dir, self.dirs.temp_dir)
+        # Copy files from case_dir to experiment_dir
+        copy_files(self.dirs.case_dir, self.dirs.experiment_dir)
 
         # Rename the namoptions file to have the experiment_name as its extension
-        rename_namoptions_file(self.dirs.temp_dir, self.dirs.experiment_name)
+        rename_namoptions_file(self.dirs.experiment_dir, self.dirs.experiment_name)
 
         # Validate and sync NCPU with nprocx * nprocy from namoptions
         self.ncpu = validate_and_sync_ncpu(
@@ -140,7 +143,9 @@ class ForwardModel(BaseForwardModel):
             apply_output_frequency(self.dirs, self.output_frequency)
 
         logger.info(f"Experiment name: {self.dirs.experiment_name}")
+        logger.info(f"Case dir: {self.dirs.case_dir}")
         logger.info(f"Temp dir: {self.dirs.temp_dir}")
+        logger.info(f"Experiment base dir: {self.dirs.experiment_base_dir}")
         logger.info(f"Experiment dir: {self.dirs.experiment_dir}")
         logger.info(f"Output dir: {self.dirs.output_dir}")
         logger.info(f"NCPU: {self.ncpu}")
@@ -165,11 +170,11 @@ class ForwardModel(BaseForwardModel):
             command = [
                 "bash",
                 str(script_path),
-                str(self.dirs.temp_dir),
+                str(self.dirs.experiment_dir),
             ]
             env = os.environ.copy()
             # Set environment variables needed by the script
-            env["DA_EXPDIR"] = str(self.dirs.temp_dir.parent)
+            env["DA_EXPDIR"] = str(self.dirs.experiment_base_dir)
             env["DA_TOOLSDIR"] = str(
                 pathlib.Path(self.dirs.udales_root_path).joinpath("tools")
             )
@@ -183,7 +188,7 @@ class ForwardModel(BaseForwardModel):
                         "tools", "write_inputs.sh"
                     )
                 ),
-                str(self.dirs.temp_dir),
+                str(self.dirs.experiment_dir),
             ]
             # Add MATLAB bin directory to PATH so the script can find 'matlab'
             env = os.environ.copy()
@@ -221,7 +226,7 @@ class ForwardModel(BaseForwardModel):
                     "tools", "local_execute.sh"
                 )
             ),
-            str(self.dirs.temp_dir),
+            str(self.dirs.experiment_dir),
         ]
 
         subprocess.run(command, check=True, stdout=self.stdout, stderr=self.stderr)

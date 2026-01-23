@@ -324,27 +324,27 @@ def read_namoptions_value(
         return namoptions.get_value(section, key)
 
 
-def rename_namoptions_file(temp_dir: pathlib.Path, experiment_name: str) -> None:
+def rename_namoptions_file(experiment_dir: pathlib.Path, experiment_name: str) -> None:
     """
     Rename the namoptions file to have the experiment_name as its extension and update iexpnr.
 
-    This function finds any namoptions file in the temp_dir, renames it to match the
+    This function finds any namoptions file in the experiment_dir, renames it to match the
     experiment_name format (namoptions.{experiment_name}), and updates the iexpnr
     value in the &RUN section to match the experiment_name.
 
     Args:
-        temp_dir: Directory containing the namoptions file(s).
+        experiment_dir: Directory containing the namoptions file(s).
         experiment_name: The experiment name to use for the file extension and iexpnr value.
     """
-    namoptions_files = list(temp_dir.glob("namoptions*"))
+    namoptions_files = list(experiment_dir.glob("namoptions*"))
 
     # If no namoptions file found, return early
     if not namoptions_files:
-        logger.warning(f"No namoptions file found in {temp_dir}")
+        logger.warning(f"No namoptions file found in {experiment_dir}")
         return
 
     old_namoptions_path = namoptions_files[0]
-    new_namoptions_path = temp_dir / f"namoptions.{experiment_name}"
+    new_namoptions_path = experiment_dir / f"namoptions.{experiment_name}"
 
     # Only rename if the file doesn't already have the correct name
     if old_namoptions_path != new_namoptions_path:

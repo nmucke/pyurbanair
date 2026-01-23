@@ -63,17 +63,20 @@ class DirectoryPaths:
 
     udales_root_path: pathlib.Path
     cwd: pathlib.Path
-    temp_dir: pathlib.Path
+    temp_dir: pathlib.Path  # Base temp directory (e.g., {cwd}/.temp)
+    experiment_base_dir: pathlib.Path  # Base directory for experiments (e.g., {temp_dir}/experiment)
+    experiment_dir: pathlib.Path  # Specific experiment directory (e.g., {experiment_base_dir}/{experiment_name})
     output_dir: pathlib.Path
-    experiment_dir: pathlib.Path
+    case_dir: pathlib.Path  # Original case directory provided by user
     experiment_name: str
 
 
 def get_udales_directory_paths(
-    experiment_dir: pathlib.Path,
+    case_dir: pathlib.Path,
     experiment_name: str,
     udales_root_path: pathlib.Path,
     temp_dir: pathlib.Path | None = None,
+    experiment_base_dir: pathlib.Path | None = None,
     cwd: pathlib.Path | None = None,
     output_dir: pathlib.Path | None = None,
 ) -> DirectoryPaths:
@@ -84,25 +87,41 @@ def get_udales_directory_paths(
     forward model execution. If optional paths are not provided, it uses sensible
     defaults based on the project structure.
 
+    Directory structure:
+    - temp_dir: Base temp directory (defaults to {cwd}/.temp)
+    - experiment_base_dir: Base directory for experiments (defaults to {temp_dir}/experiment)
+    - experiment_dir: Specific experiment directory ({experiment_base_dir}/{experiment_name})
+
     Args:
-        experiment_dir: The directory containing the experiment (required).
+        case_dir: The directory containing the original case files (required).
         experiment_name: The name of the experiment (required).
         udales_root_path: The root path to the uDALES code (required).
-        temp_dir: Optional base directory for temporary files. If None, uses cwd/.temp/experiments.
+        temp_dir: Optional base temp directory. If None, uses {cwd}/.temp.
+        experiment_base_dir: Optional base directory for experiments. If None, uses {temp_dir}/experiment.
         cwd: Optional current working directory (project root). If None, uses get_project_root().
-        output_dir: Optional output directory. If None, uses cwd/.temp/outputs.
+        output_dir: Optional output directory. If None, uses {cwd}/.temp/outputs.
 
     Returns:
         DirectoryPaths instance with all paths configured.
     """
-    # Determine base directory for temp files
+    # Determine base directory
     if cwd is None:
         cwd = get_project_root()
 
-    base_dir = temp_dir if temp_dir is not None else cwd
+    # Base temp directory (e.g., {cwd}/.temp)
+    if temp_dir is None:
+        temp_dir_path = create_dir(cwd / ".temp")
+    else:
+        temp_dir_path = create_dir(temp_dir)
 
-    # Temporary directory where the experiment is stored
-    temp_dir_path = create_dir(base_dir / ".temp" / "experiments" / experiment_name)
+    # Base directory for experiments (e.g., {temp_dir}/experiment)
+    if experiment_base_dir is None:
+        experiment_base_dir_path = create_dir(temp_dir_path / "experiment")
+    else:
+        experiment_base_dir_path = create_dir(experiment_base_dir)
+
+    # Specific experiment directory (e.g., {experiment_base_dir}/{experiment_name})
+    experiment_dir_path = create_dir(experiment_base_dir_path / experiment_name)
 
     # Output directory where the intermediate udales outputs will be saved
     if output_dir is None:
@@ -114,7 +133,9 @@ def get_udales_directory_paths(
         udales_root_path=udales_root_path,
         cwd=cwd,
         temp_dir=temp_dir_path,
+        experiment_base_dir=experiment_base_dir_path,
+        experiment_dir=experiment_dir_path,
         output_dir=output_dir_path,
-        experiment_dir=experiment_dir,
+        case_dir=case_dir,
         experiment_name=experiment_name,
     )

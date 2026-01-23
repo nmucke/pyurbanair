@@ -22,9 +22,9 @@ def clean_output_dir(dirs: DirectoryPaths, except_for_files: list[str] = []) -> 
 
 
 def clean_temp_dir(dirs: DirectoryPaths) -> None:
-    """Clean the temp directory."""
-    # Empty the temp directory by removing all its contents
-    for item in pathlib.Path(dirs.temp_dir).iterdir():
+    """Clean the experiment directory."""
+    # Empty the experiment directory by removing all its contents
+    for item in pathlib.Path(dirs.experiment_dir).iterdir():
         name = item.name
         lower_name = name.lower()
         # Exclude config.sh, any namoptions*, and any *.stl (case-insensitive)

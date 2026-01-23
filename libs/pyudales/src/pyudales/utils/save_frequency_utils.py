@@ -15,9 +15,9 @@ def apply_save_only_last_timestep(dirs: DirectoryPaths) -> None:
     Sets tfielddump = runtime in the namoptions file.
 
     Args:
-        dirs: DirectoryPaths instance containing temp_dir and experiment_name.
+        dirs: DirectoryPaths instance containing experiment_dir and experiment_name.
     """
-    namoptions_path = dirs.temp_dir / f"namoptions.{dirs.experiment_name}"
+    namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
 
     namoptions = NamoptionsFile(namoptions_path)
 
@@ -45,10 +45,10 @@ def apply_output_frequency(
     Sets tfielddump to the specified output frequency in the namoptions file.
 
     Args:
-        dirs: DirectoryPaths instance containing temp_dir and experiment_name.
+        dirs: DirectoryPaths instance containing experiment_dir and experiment_name.
         output_frequency: The frequency at which the output will be saved.
     """
-    namoptions_path = dirs.temp_dir / f"namoptions.{dirs.experiment_name}"
+    namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
 
     if not namoptions_path.exists():
         logger.warning(

@@ -29,14 +29,14 @@ DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp/experiments")
 
 
 def _run_simulation(
-    temp_dir: pathlib.Path,
+    experiment_dir: pathlib.Path,
     udales_root_path: pathlib.Path,
 ) -> None:
     """Run a single simulation. Module-level function for multiprocessing."""
     command = [
         "bash",
         str(udales_root_path.joinpath("tools", "local_execute.sh")),
-        str(temp_dir),
+        str(experiment_dir),
     ]
     subprocess.run(
         command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -110,7 +110,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             )
             _forward_model = create_new_forward_model(
                 forward_model=self.forward_model,
-                temp_dir=temp_dirs[ensemble_number],
+                experiment_dir=temp_dirs[ensemble_number],
                 output_dir=self.base_output_dir,
                 experiment_name=self.ensemble_experiment_names[ensemble_number],
             )
@@ -160,7 +160,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             futures = [
                 executor.submit(
                     _run_simulation,
-                    temp_dir=temp_dirs[ensemble_number],
+                    experiment_dir=temp_dirs[ensemble_number],
                     udales_root_path=self.forward_model.dirs.udales_root_path,
                 )
                 for ensemble_number in range(self.ensemble_size)
