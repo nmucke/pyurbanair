@@ -88,6 +88,8 @@ class ForwardModel(BaseForwardModel):
         self.stdout = None if self.verbose else subprocess.DEVNULL
         self.stderr = None if self.verbose else subprocess.DEVNULL
 
+        self.clean_output = True
+
         # Create directory paths dataclass with defaults or provided paths
         self.dirs = get_udales_directory_paths(
             case_dir=case_dir,
@@ -238,6 +240,7 @@ class ForwardModel(BaseForwardModel):
             engine="netcdf4",
         )
 
-        clean_output_dir(self.dirs)
+        if self.clean_output:
+            clean_output_dir(self.dirs)
 
         return state
