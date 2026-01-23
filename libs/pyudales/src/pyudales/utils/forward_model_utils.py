@@ -15,8 +15,7 @@ logger = logging.getLogger(__name__)
 
 def create_new_forward_model(
     forward_model: ForwardModel,
-    experiment_dir: pathlib.Path,
-    output_dir: pathlib.Path,
+    experiment_base_dir: pathlib.Path,
     experiment_name: str,
 ) -> ForwardModel:
     """
@@ -28,8 +27,7 @@ def create_new_forward_model(
 
     Args:
         forward_model: The original ForwardModel instance to copy from.
-        experiment_dir: The new experiment directory path.
-        output_dir: The new output directory path.
+        experiment_base_dir: The new experiment base directory path.
         experiment_name: The new experiment name.
 
     Returns:
@@ -38,9 +36,11 @@ def create_new_forward_model(
     old_experiment_dir = forward_model.dirs.experiment_dir
     old_experiment_name = forward_model.dirs.experiment_name
 
+    cwd = forward_model.dirs.cwd
+
     # Create new directories
-    new_experiment_dir = create_dir(experiment_dir)
-    new_output_dir = create_dir(output_dir)
+    new_experiment_base_dir = create_dir(cwd / experiment_base_dir)
+    new_experiment_dir = create_dir(new_experiment_base_dir / experiment_name)
 
     # Copy all files from old experiment_dir to new experiment_dir
     if old_experiment_dir.exists():
@@ -49,23 +49,21 @@ def create_new_forward_model(
     # Create a deep copy of the forward model
     new_forward_model = copy.deepcopy(forward_model)
 
-    # Determine temp_dir and experiment_base_dir from the new experiment_dir
-    # experiment_dir should be {experiment_base_dir}/{experiment_name}
-    # experiment_base_dir should be {temp_dir}/experiment
-    new_experiment_base_dir = new_experiment_dir.parent
-    new_temp_dir = new_experiment_base_dir.parent
-
     # Update directory paths dataclass
     new_forward_model.dirs = DirectoryPaths(
         udales_root_path=forward_model.dirs.udales_root_path,
         cwd=forward_model.dirs.cwd,
-        temp_dir=new_temp_dir,
+        temp_dir=forward_model.dirs.temp_dir,
         experiment_base_dir=new_experiment_base_dir,
         experiment_dir=new_experiment_dir,
-        output_dir=new_output_dir,
+        output_dir=forward_model.dirs.output_dir,
         case_dir=forward_model.dirs.case_dir,
         experiment_name=experiment_name,
     )
+
+    import pdb
+
+    pdb.set_trace()
 
     # Rename files that reference the old experiment name
     if old_experiment_name != experiment_name:

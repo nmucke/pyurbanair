@@ -7,11 +7,12 @@ import numpy as np
 import xarray
 from animation import animate_state
 from pyudales.forward_model import ForwardModel
+from pyudales.utils.forward_model_utils import create_new_forward_model
 
 # Directory settings
 # MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
 MATLAB_BIN = "/opt/sw/matlab-2023b/bin/matlab"
-EXPERIMENT_DIR = "examples/udales/experiments/xie_and_castro"
+CASE_DIR = "examples/udales/experiments/xie_and_castro"
 EXPERIMENT_NAME = "999"
 RESULTS_DIR = pathlib.Path(".temp/udales")
 
@@ -27,7 +28,7 @@ FIXED_INPUT = {
     "output_frequency": 2.0,
     "ncpu": NCPU,
     "matlab_bin": MATLAB_BIN,
-    "case_dir": EXPERIMENT_DIR,
+    "case_dir": CASE_DIR,
     "experiment_name": EXPERIMENT_NAME,
     "verbose": False,
     # "results_dir": RESULTS_DIR,
@@ -46,7 +47,6 @@ def main() -> None:
     )
     forward_model.run_preprocessing(python_or_matlab="python")
     state = forward_model(params=params)
-    # state = xarray.load_dataset(".temp/lbm/out005000.nc")
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     # Add vel_magnitude as a data variable in state
