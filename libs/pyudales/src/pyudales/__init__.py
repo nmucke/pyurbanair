@@ -1,10 +1,14 @@
 """pyudales - Python wrapper for uDALES."""
 
 import pathlib
+import logging
 import subprocess
 import sys
 
 __version__ = "0.1.0"
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # Get paths
 _project_root = pathlib.Path(__file__).parent.parent.parent
@@ -20,6 +24,7 @@ _gitmodules_path = _repo_root / ".gitmodules"
 UDALES_PATH = None
 _udales_path = None
 _udales_url = None
+_udales_tag = None
 
 if _gitmodules_path.exists():
     try:
@@ -42,9 +47,8 @@ if _gitmodules_path.exists():
                     submodule_path = stripped.split("=", 1)[1].strip()
                     if "u-dales" in submodule_path:
                         _udales_path = _repo_root / submodule_path
-                        print(
+                        logger.info(
                             f"Found u-dales path in .gitmodules: {submodule_path} -> {_udales_path}",
-                            file=sys.stderr,
                         )
             elif stripped.startswith("url = ") or stripped.startswith("url="):
                 # Only set URL if we're in the u-dales submodule section
@@ -54,17 +58,27 @@ if _gitmodules_path.exists():
                     and "u-dales" in current_submodule
                 ):
                     _udales_url = stripped.split("=", 1)[1].strip()
-                    print(
+                    logger.info(
                         f"Found u-dales URL in .gitmodules: {_udales_url}",
-                        file=sys.stderr,
+                    )
+            elif stripped.startswith("branch = ") or stripped.startswith("branch="):
+                # Only set branch/tag if we're in the u-dales submodule section
+                if (
+                    "=" in stripped
+                    and current_submodule
+                    and "u-dales" in current_submodule
+                ):
+                    _udales_tag = stripped.split("=", 1)[1].strip()
+                    logger.info(
+                        f"Found u-dales branch/tag in .gitmodules: {_udales_tag}",
                     )
     except Exception as e:
-        print(f"Error reading .gitmodules: {e}", file=sys.stderr)
+        logger.error(f"Error reading .gitmodules: {e}")
         import traceback
 
-        traceback.print_exc(file=sys.stderr)
+        traceback.print_exc()
 else:
-    print(f".gitmodules not found at: {_gitmodules_path}", file=sys.stderr)
+    logger.info(f".gitmodules not found at: {_gitmodules_path}")
 
 # Initialize git submodule from .gitmodules
 if _udales_path:
@@ -95,25 +109,23 @@ if _udales_path:
                     expected_url in actual_url_normalized
                     or actual_url_normalized in expected_url
                 ):
-                    print(
+                    logger.warning(
                         f"Warning: Existing repository has wrong remote URL: {actual_url}",
-                        file=sys.stderr,
                     )
-                    print(
+                    logger.warning(
                         f"Expected: {expected_url}. Removing incorrect repository...",
-                        file=sys.stderr,
                     )
                     import shutil
 
                     shutil.rmtree(_udales_path)
                     is_repo_downloaded = False
         except Exception as e:
-            print(f"Warning: Could not validate repository URL: {e}", file=sys.stderr)
+            logger.warning(f"Warning: Could not validate repository URL: {e}")
 
     needs_init = not is_repo_downloaded
 
     if needs_init:
-        print("Initializing u-dales git submodule...", file=sys.stderr)
+        logger.info("Initializing u-dales git submodule...")
         submodule_success = False
 
         # Try git submodule first
@@ -133,17 +145,33 @@ if _udales_path:
                 text=True,
             )
             if result.returncode == 0:
-                print("u-dales submodule initialized successfully.", file=sys.stderr)
+                logger.info("u-dales submodule initialized successfully.")
                 submodule_success = True
+                # Checkout the specified tag if provided
+                if _udales_tag and _udales_path.exists():
+                    try:
+                        checkout_result = subprocess.run(
+                            ["git", "checkout", _udales_tag],
+                            cwd=str(_udales_path),
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if checkout_result.returncode == 0:
+                            logger.info(f"Checked out u-dales tag: {_udales_tag}")
+                        else:
+                            logger.warning(
+                                f"Warning: Failed to checkout tag {_udales_tag}: {checkout_result.stderr}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Warning: Exception checking out tag: {e}")
             else:
-                print(
+                logger.warning(
                     f"Git submodule init failed (code {result.returncode}), trying direct clone...",
-                    file=sys.stderr,
                 )
         except Exception as e:
-            print(
+            logger.warning(
                 f"Exception during submodule init: {e}, trying direct clone...",
-                file=sys.stderr,
             )
 
         # Fallback to direct clone if submodule failed
@@ -168,6 +196,25 @@ if _udales_path:
                 )
                 if result.returncode == 0:
                     print("u-dales cloned successfully.", file=sys.stderr)
+                    # Checkout the specified tag if provided
+                    if _udales_tag and _udales_path.exists():
+                        try:
+                            checkout_result = subprocess.run(
+                                ["git", "checkout", _udales_tag],
+                                cwd=str(_udales_path),
+                                check=False,
+                                capture_output=True,
+                                text=True,
+                            )
+                            if checkout_result.returncode == 0:
+                                print(f"Checked out u-dales tag: {_udales_tag}", file=sys.stderr)
+                            else:
+                                print(
+                                    f"Warning: Failed to checkout tag {_udales_tag}: {checkout_result.stderr}",
+                                    file=sys.stderr,
+                                )
+                        except Exception as e:
+                            print(f"Warning: Exception checking out tag: {e}", file=sys.stderr)
                 else:
                     print(
                         f"Warning: git clone failed (code {result.returncode})",
@@ -182,6 +229,36 @@ if _udales_path:
             "u-dales repository already downloaded, skipping initialization.",
             file=sys.stderr,
         )
+        # Verify that the correct tag is checked out
+        if _udales_tag and _udales_path.exists():
+            try:
+                result = subprocess.run(
+                    ["git", "describe", "--tags", "--exact-match", "HEAD"],
+                    cwd=str(_udales_path),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                current_tag = result.stdout.strip() if result.returncode == 0 else None
+                if current_tag != _udales_tag:
+                    logger.info(
+                        f"Current tag ({current_tag}) differs from expected ({_udales_tag}), checking out {_udales_tag}..."
+                    )
+                    checkout_result = subprocess.run(
+                        ["git", "checkout", _udales_tag],
+                        cwd=str(_udales_path),
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if checkout_result.returncode == 0:
+                        logger.info(f"Checked out u-dales tag: {_udales_tag}")
+                    else:
+                        logger.warning(
+                            f"Warning: Failed to checkout tag {_udales_tag}: {checkout_result.stderr}"
+                        )
+            except Exception as e:
+                logger.warning(f"Warning: Exception verifying/checking out tag: {e}")
 
     # Set UDALES_PATH from gitmodules path (always set it)
     UDALES_PATH = _udales_path.resolve()

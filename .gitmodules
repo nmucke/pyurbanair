@@ -1,6 +1,7 @@
 [submodule "libs/pyudales/u-dales"]
 	path = libs/pyudales/u-dales
 	url = https://github.com/uDALES/u-dales.git
+	branch = v2.2.0
 
 [submodule "libs/pylbm/lbm"]
 	path = libs/pylbm/LBM
