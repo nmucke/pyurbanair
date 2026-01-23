@@ -8,7 +8,15 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 import xarray
-from pyudales.forward_model import ForwardModel, create_dir
+from pyudales.forward_model import ForwardModel
+from pyudales.utils.clean_up_utils import clean_output_dir
+from pyudales.utils.dir_utils import create_dir
+from pyudales.utils.forward_model_utils import create_new_forward_model
+from pyudales.utils.params_utils import (
+    apply_inflow_settings,
+    extract_inflow_params,
+    merge_params,
+)
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
@@ -21,14 +29,14 @@ DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp/experiments")
 
 
 def _run_simulation(
-    temp_dir: pathlib.Path,
+    experiment_dir: pathlib.Path,
     udales_root_path: pathlib.Path,
 ) -> None:
     """Run a single simulation. Module-level function for multiprocessing."""
     command = [
         "bash",
         str(udales_root_path.joinpath("tools", "local_execute.sh")),
-        str(temp_dir),
+        str(experiment_dir),
     ]
     subprocess.run(
         command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -70,7 +78,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             num_cpus_per_process=num_cpus_per_process,
         )
 
-        self.cwd = self.forward_model.cwd  # type: ignore[attr-defined]
+        self.cwd = self.forward_model.dirs.cwd
 
         if self.parallel_execution:
             if temp_dir is None:
@@ -100,38 +108,38 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             temp_dirs.append(
                 self.base_temp_dir / self.ensemble_experiment_names[ensemble_number]
             )
-            _forward_model = copy.deepcopy(self.forward_model)
-            _forward_model.change_dirs(  # type: ignore[attr-defined]
-                temp_dir=temp_dirs[ensemble_number],
+            _forward_model = create_new_forward_model(
+                forward_model=self.forward_model,
+                experiment_dir=temp_dirs[ensemble_number],
                 output_dir=self.base_output_dir,
                 experiment_name=self.ensemble_experiment_names[ensemble_number],
             )
             forward_models.append(_forward_model)
-        return temp_dirs, forward_models  # type: ignore[return-value]
+        return temp_dirs, forward_models
 
     def _apply_ensemble_inflow_settings(
         self, forward_models: List[ForwardModel], params: xarray.Dataset
     ) -> None:
         for ensemble_number, forward_model in enumerate(forward_models):
+            # Extract params for this ensemble member
             _params = (
                 params.isel(ensemble=ensemble_number) if params is not None else None
             )
-            _inflow = forward_model.inflow_angle
-            _velocity_magnitude = forward_model.velocity_magnitude
-            _pressure_gradient_magnitude = forward_model.pressure_gradient_magnitude
-            if "inflow_angle" in params:
-                _inflow = _params.inflow_angle.item()
-            if "velocity_magnitude" in params:
-                _velocity_magnitude = _params.velocity_magnitude.item()
-            if "pressure_gradient_magnitude" in params:
-                _pressure_gradient_magnitude = (
-                    _params.pressure_gradient_magnitude.item()
+            # Extract only inflow parameters
+            _inflow_params = extract_inflow_params(_params)
+            # Merge with existing params and apply settings
+            if _inflow_params is not None:
+                # Merge with existing params
+                complete_params = merge_params(
+                    existing_params=forward_model.params,
+                    new_params=_inflow_params,
                 )
-            forward_model._apply_inflow_settings(
-                inflow_angle=_inflow,
-                velocity_magnitude=_velocity_magnitude,
-                pressure_gradient_magnitude=_pressure_gradient_magnitude,
-            )
+
+                # Apply inflow settings
+                apply_inflow_settings(
+                    params=complete_params,
+                    dirs=forward_model.dirs,
+                )
 
     def _run_parallel(
         self,
@@ -152,8 +160,8 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             futures = [
                 executor.submit(
                     _run_simulation,
-                    temp_dir=temp_dirs[ensemble_number],
-                    udales_root_path=self.forward_model.udales_root_path,  # type: ignore[attr-defined]
+                    experiment_dir=temp_dirs[ensemble_number],
+                    udales_root_path=self.forward_model.dirs.udales_root_path,
                 )
                 for ensemble_number in range(self.ensemble_size)
             ]
@@ -164,25 +172,25 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         states = []
         if self.save_on_disk:
             for i, forward_model in enumerate(_forward_models):
-                src_path = forward_model.work_dir.joinpath(
-                    forward_model.experiment_name,
-                    f"fielddump.{forward_model.experiment_name}.nc",
+                src_path = forward_model.dirs.output_dir.joinpath(
+                    forward_model.dirs.experiment_name,
+                    f"fielddump.{forward_model.dirs.experiment_name}.nc",
                 )
-                shutil.move(str(src_path), self.results_dir / f"{sim_name}_{i}.nc")  # type: ignore[operator]
+                shutil.move(str(src_path), self.results_dir / f"{sim_name}_{i}.nc")
 
-                forward_model._clean_work_dir()
+                clean_output_dir(forward_model.dirs)
             return None
         else:
             for forward_model in _forward_models:
                 states.append(
                     xarray.open_dataset(
                         self.base_output_dir.joinpath(
-                            forward_model.experiment_name,
-                            f"fielddump.{forward_model.experiment_name}.nc",
+                            forward_model.dirs.experiment_name,
+                            f"fielddump.{forward_model.dirs.experiment_name}.nc",
                         ),
                         engine="netcdf4",
                     )
                 )
-                forward_model._clean_work_dir()
+                clean_output_dir(forward_model.dirs)
 
             return xarray.concat(states, dim="ensemble", join="override")

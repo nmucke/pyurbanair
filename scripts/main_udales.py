@@ -25,7 +25,7 @@ FIXED_INPUT = {
     "output_frequency": 2.0,
     "ncpu": NCPU,
     "matlab_bin": MATLAB_BIN,
-    "experiment_dir": EXPERIMENT_DIR,
+    "case_dir": EXPERIMENT_DIR,
     "experiment_name": EXPERIMENT_NAME,
     "verbose": False,
 }
@@ -33,10 +33,10 @@ FIXED_INPUT = {
 
 def main() -> None:
 
-    forward_model = ForwardModel(**FIXED_INPUT)
+    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
     params = xarray.Dataset(
         data_vars={
-            "inflow_angle": 15,
+            "inflow_angle": -45,
             "velocity_magnitude": 3,
             "pressure_gradient_magnitude": 0.0041912,
         },
@@ -44,8 +44,6 @@ def main() -> None:
     forward_model.run_preprocessing(python_or_matlab="python")
     state = forward_model(params=params)
     # state = xarray.load_dataset(".temp/lbm/out005000.nc")
-
-    pdb.set_trace()
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     # Add vel_magnitude as a data variable in state
