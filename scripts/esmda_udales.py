@@ -138,7 +138,6 @@ def main() -> None:
     ##### Run true simulation #####
     true_state = forward_model(params=true_params)
     true_velocity_field = get_velocity_magnitude_field(true_state)
-    # forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
