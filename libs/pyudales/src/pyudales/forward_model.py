@@ -43,6 +43,7 @@ class ForwardModel(BaseForwardModel):
         ncpu: int = 4,
         matlab_bin: pathlib.Path = DEFAULT_MATLAB_BIN,
         save_only_last_timestep: bool = False,
+        output_frequency: Optional[float] = None,
         params: Optional[xarray.Dataset] = None,
         results_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
@@ -56,7 +57,8 @@ class ForwardModel(BaseForwardModel):
             work_dir: The directory where the output will be saved.
             ncpu: The number of CPUs to use.
             matlab_bin: The path to the MATLAB binary.
-            save_only_last_timestep: If True, only the last timestep will be saved.
+            save_only_last_timestep: If True, only the last timestep will be saved. Overwrites save_frequency.
+            output_frequency: The frequency at which the output will be saved.
             params: The parameters of the forward model.
                 Currently, we only support the following parameters:
                 - inflow_angle: The angle of the inflow wind speed in degrees (measured from positive x-axis).
@@ -76,6 +78,12 @@ class ForwardModel(BaseForwardModel):
 
         # Save only the last timestep
         self.save_only_last_timestep = save_only_last_timestep
+
+        # Save frequency
+        if save_only_last_timestep:
+            self.output_frequency = None
+        else:
+            self.output_frequency = output_frequency
 
         # Experiment name
         self.experiment_name = experiment_name
@@ -143,6 +151,8 @@ class ForwardModel(BaseForwardModel):
 
         if self.save_only_last_timestep:
             self._apply_save_only_last_timestep()
+        elif self.output_frequency is not None:
+            self._apply_output_frequency()
 
     def change_dirs(
         self,
@@ -449,6 +459,66 @@ class ForwardModel(BaseForwardModel):
                     output_lines.append(line)
             with open(namoptions_path, "w") as f:
                 f.writelines(output_lines)
+
+    def _apply_output_frequency(self) -> None:
+        """Apply the output frequency."""
+        namoptions_path = (
+            pathlib.Path(self.temp_dir) / f"namoptions.{self.experiment_name}"
+        )
+
+        if not namoptions_path.exists():
+            logger.warning(
+                f"namoptions.{self.experiment_name} not found, skipping output frequency update"
+            )
+            return
+
+        # Read the file
+        lines = []
+        with open(namoptions_path, "r") as f:
+            lines = f.readlines()
+
+        # Process the file to update tfielddump in the &OUTPUT section
+        output_lines = []
+        in_output = False
+        tfielddump_replaced = False
+        output_section_found = False
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Check if we're entering or leaving the &OUTPUT section
+            if stripped.startswith("&OUTPUT"):
+                in_output = True
+                output_section_found = True
+                output_lines.append(line)
+            elif stripped.startswith("/") and in_output:
+                # We're leaving the &OUTPUT section, add tfielddump if not already added
+                if not tfielddump_replaced:
+                    output_lines.append(f"tfielddump   = {self.output_frequency}\n")
+                    tfielddump_replaced = True
+                output_lines.append(line)
+                in_output = False
+            elif in_output and "tfielddump" in stripped and "=" in stripped:
+                # Replace existing tfielddump line
+                if not tfielddump_replaced:
+                    output_lines.append(f"tfielddump   = {self.output_frequency}\n")
+                    tfielddump_replaced = True
+            else:
+                # Keep the original line
+                output_lines.append(line)
+
+        # If &OUTPUT section was not found, add it at the end
+        if not output_section_found:
+            output_lines.append("\n&OUTPUT\n")
+            output_lines.append(f"tfielddump   = {self.output_frequency}\n")
+            output_lines.append("/\n")
+
+        # Write the updated file
+        with open(namoptions_path, "w") as f:
+            f.writelines(output_lines)
+
+        logger.info(f"Updated tfielddump to {self.output_frequency} in namoptions.{self.experiment_name}")
+
 
     def _validate_and_sync_ncpu(self) -> None:
         """
