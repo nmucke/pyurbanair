@@ -13,6 +13,10 @@ from pyudales.ensemble_forward_model import EnsembleForwardModel
 from pyudales.forward_model import ForwardModel
 from pyudales.utils.forward_model_utils import create_new_forward_model
 
+# import logging
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger(__name__)
+
 # Random seed
 SEED = 42
 
@@ -71,7 +75,7 @@ def main() -> None:
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        # results_dir=pathlib.Path(RESULTS_DIR),
+        results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
@@ -84,9 +88,9 @@ def main() -> None:
 
     pdb.set_trace()
 
-    vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
+    vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)  # type: ignore[union-attr]
     # Add vel_magnitude as a data variable in state
-    state = state.assign(vel_magnitude=(("time", "zm", "yt", "xt"), vel_magnitude))
+    state = state.assign(vel_magnitude=(("time", "zm", "yt", "xt"), vel_magnitude))  # type: ignore[union-attr]
 
     animate_state(
         state=state,

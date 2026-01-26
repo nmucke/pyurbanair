@@ -1,12 +1,19 @@
 import logging
+import os
 import pathlib
-import time
+import shutil
+import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
 import xarray
-from pyudales.forward_model import ForwardModel
-from pyudales.utils.dir_utils import create_dir
+from pyudales.forward_model import (
+    ForwardModel,
+    apply_inflow_settings,
+    clean_output_dir,
+    merge_params,
+)
+from pyudales.utils.dir_utils import DirectoryPaths, create_dir
 from pyudales.utils.forward_model_utils import create_new_forward_model
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
@@ -16,18 +23,19 @@ logger.setLevel(logging.INFO)
 
 
 def _run_simulation(
-    forward_model: ForwardModel,
-    params: xarray.Dataset,
-    state: xarray.Dataset,
-    sim_name: str,
+    experiment_dir: pathlib.Path,
+    udales_root_path: pathlib.Path,
 ) -> xarray.Dataset | None:
     """Run a single simulation. Module-level function for multiprocessing."""
 
-    return forward_model(
-        params=params,
-        state=state,
-        sim_name=sim_name,
+    logger.info(f"Running simulation in {experiment_dir}...")
+    command = str(pathlib.Path(udales_root_path).joinpath("tools", "local_execute.sh"))
+    command = ["bash", command, str(experiment_dir)]  # type: ignore[assignment]
+    subprocess.run(
+        command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
+
+    return None
 
 
 class EnsembleForwardModel(BaseEnsembleForwardModel):
@@ -66,19 +74,66 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         if self.parallel_execution:
 
             self.ensemble_experiment_base_dir = create_dir(
-                self.forward_model.dirs.temp_dir / "ensemble_experiments"
+                self.forward_model.dirs.temp_dir / "ensemble_experiments"  # type: ignore[attr-defined]
             )
 
             self.ensemble_forward_models = []
-
             for ensemble_number in range(self.ensemble_size):
                 self.ensemble_forward_models.append(
                     create_new_forward_model(
-                        forward_model=self.forward_model,
+                        forward_model=self.forward_model,  # type: ignore[arg-type]
                         experiment_base_dir=self.ensemble_experiment_base_dir,
                         experiment_name=f"{ensemble_number:03d}",
                     )
                 )
+
+    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
+        """Apply the inflow settings to the ensemble forward models."""
+        for i, model in enumerate(self.ensemble_forward_models):
+            _params = merge_params(
+                model.params, params.isel(ensemble=i) if params is not None else None
+            )
+            apply_inflow_settings(_params, model.dirs)
+            model.params = _params
+
+    def _move_results_to_disk(self, sim_name: str) -> None:
+        """Move the results to disk."""
+        for i, model in enumerate(self.ensemble_forward_models):
+            result_file = model.dirs.output_dir.joinpath(
+                model.dirs.experiment_name, f"fielddump.{model.dirs.experiment_name}.nc"
+            )
+            shutil.move(str(result_file), str(model.results_dir / f"{sim_name}_{i}.nc"))  # type: ignore[operator]
+
+    def _load_results(self) -> xarray.Dataset:
+        """Load the results from the output folders."""
+        states = []
+        for i, model in enumerate(self.ensemble_forward_models):
+            result_file = model.dirs.output_dir.joinpath(
+                model.dirs.experiment_name, f"fielddump.{model.dirs.experiment_name}.nc"
+            )
+            states.append(xarray.open_dataset(result_file, engine="netcdf4").load())
+        return xarray.concat(states, dim="ensemble", join="override")
+
+    def _clean_output(self) -> None:
+        """Clean the output folders."""
+        for model in self.ensemble_forward_models:
+            clean_output_dir(model.dirs)
+
+    def _launch_simulations(self) -> None:
+        """Launch the simulations in parallel."""
+
+        with ProcessPoolExecutor(max_workers=self.num_parallel_processes) as executor:
+            futures = [
+                executor.submit(
+                    _run_simulation,
+                    experiment_dir=model.dirs.experiment_dir,
+                    udales_root_path=model.dirs.udales_root_path,
+                )
+                for model in self.ensemble_forward_models
+            ]
+
+            for future in as_completed(futures):
+                future.result()
 
     def _run_parallel(
         self,
@@ -86,37 +141,18 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         state: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset:
+        """Run the forward model ensemble in parallel."""
 
-        # Run simulations in parallel
-        with ProcessPoolExecutor(max_workers=self.num_parallel_processes) as executor:
-            # Submit all tasks and store futures with their ensemble numbers
-            future_to_ensemble = {
-                executor.submit(
-                    _run_simulation,
-                    forward_model=self.ensemble_forward_models[ensemble_number],
-                    params=(
-                        params.isel(ensemble=ensemble_number)
-                        if params is not None
-                        else None
-                    ),
-                    state=(
-                        state.isel(ensemble=ensemble_number)
-                        if state is not None
-                        else None
-                    ),
-                    sim_name=f"{sim_name}_{ensemble_number}",
-                ): ensemble_number
-                for ensemble_number in range(self.ensemble_size)
-            }
+        self._apply_inflow_settings(params)
 
-            # Collect results, preserving order
-            states = [None] * self.ensemble_size
-            for future in as_completed(future_to_ensemble):
-                ensemble_number = future_to_ensemble[future]
-                result = future.result()
-                states[ensemble_number] = result
+        self._launch_simulations()
 
         if self.save_on_disk:
-            return None
+            self._move_results_to_disk(sim_name)  # type: ignore[arg-type]
+            states = None
         else:
-            return xarray.concat(states, dim="ensemble", join="override")
+            states = self._load_results()
+
+        self._clean_output()
+
+        return states
