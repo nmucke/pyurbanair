@@ -47,6 +47,7 @@ def main() -> None:
     )
     forward_model.run_preprocessing(python_or_matlab="python")
     state = forward_model(params=params)
+    pdb.set_trace()
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     # Add vel_magnitude as a data variable in state

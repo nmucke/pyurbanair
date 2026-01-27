@@ -55,8 +55,22 @@ class BaseForwardModel:
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
+        sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
-        """Run the forward model for a single state."""
+        """
+        Run the forward model for a single state.
+
+        Args:
+            state: The state of the forward model. If None, the state is initialized
+                according to the speicific forward model implementation.
+            params: The parameters of the forward model. If None, the parameters are
+                initialized according to the speicific forward model implementation.
+            sim_name: The name of the simulation. If None, the simulation name is "state".
+
+        Returns:
+            The state of the forward model if saved in memory, otherwise None.
+            If saved on disk, the state is saved to the results directory.
+        """
         raise NotImplementedError
 
     def __call__(
@@ -79,15 +93,15 @@ class BaseForwardModel:
             The state of the forward model if saved in memory, otherwise None.
             If saved on disk, the state is saved to the results directory.
         """
-        state = self.run_single(state=state, params=params)
+        state = self.run_single(state=state, params=params, sim_name=sim_name)
 
         if self.save_in_memory:
             return state
         else:
-            outfile = (
-                self.results_dir / f"{sim_name}.nc"  # type: ignore[operator]
-                if sim_name is not None
-                else self.results_dir / "state.nc"  # type: ignore[operator]
-            )
-            state.to_netcdf(str(outfile))  # type: ignore[union-attr]
+            # outfile = (
+            #     self.results_dir / f"{sim_name}.nc"  # type: ignore[operator]
+            #     if sim_name is not None
+            #     else self.results_dir / "state.nc"  # type: ignore[operator]
+            # )
+            # state.to_netcdf(str(outfile))  # type: ignore[union-attr]
             return None

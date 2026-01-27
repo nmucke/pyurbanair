@@ -2,6 +2,7 @@ import logging
 import os
 import pathlib
 import pdb
+import shutil
 import subprocess
 import time
 from typing import Optional
@@ -211,6 +212,7 @@ class ForwardModel(BaseForwardModel):
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
+        sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
         """Run the forward model."""
 
@@ -233,12 +235,22 @@ class ForwardModel(BaseForwardModel):
 
         subprocess.run(command, check=True, stdout=self.stdout, stderr=self.stderr)
 
-        state = xarray.open_dataset(
-            self.dirs.output_dir.joinpath(
-                self.dirs.experiment_name, f"fielddump.{self.dirs.experiment_name}.nc"
-            ),
-            engine="netcdf4",
+        output_file = self.dirs.output_dir.joinpath(
+            self.dirs.experiment_name, f"fielddump.{self.dirs.experiment_name}.nc"
         )
+
+        # Load into memory if save_in_memory is True
+        if self.save_in_memory:
+            state = xarray.open_dataset(
+                output_file,
+                engine="netcdf4",
+            )
+            state = state.load()
+        else:
+            outfile = self.results_dir / f"{sim_name}.nc"  # type: ignore[operator]
+            os.makedirs(self.results_dir, exist_ok=True)  # type: ignore[arg-type]
+            shutil.move(str(output_file), str(outfile))
+            state = None
 
         if self.clean_output:
             clean_output_dir(self.dirs)
