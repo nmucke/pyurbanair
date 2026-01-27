@@ -29,7 +29,6 @@ class BaseEnsembleForwardModel:
         forward_model: BaseForwardModel,
         *args: Any,
         ensemble_size: int = 10,
-        results_dir: Optional[pathlib.Path] = None,
         num_parallel_processes: int = 1,
         num_cpus_per_process: int = 1,
         **kwargs: Any,
@@ -37,31 +36,16 @@ class BaseEnsembleForwardModel:
         """Initialize the forward model."""
         self.forward_model = forward_model
         self.ensemble_size = ensemble_size
-        self.results_dir = results_dir
         self.num_parallel_processes = num_parallel_processes
         self.num_cpus_per_process = num_cpus_per_process
         self.parallel_execution = num_parallel_processes > 1
 
-        if results_dir is not None:
-            self.apply_save_on_disk(results_dir)
+        if forward_model.dirs.results_dir is not None:
+            self.save_on_disk = True
+            self.save_in_memory = False
         else:
-            self.apply_save_in_memory()
-
-    def apply_save_in_memory(self) -> None:
-        """Apply the save in memory flag."""
-        self.save_in_memory = True
-        self.save_on_disk = False
-        self.forward_model.save_in_memory = True
-        self.forward_model.save_on_disk = False
-
-    def apply_save_on_disk(self, results_dir: pathlib.Path) -> None:
-        """Apply the save on disk flag."""
-        self.save_in_memory = False
-        self.save_on_disk = True
-        self.forward_model.save_in_memory = False
-        self.forward_model.save_on_disk = True
-        self.forward_model.results_dir = results_dir
-        os.makedirs(self.results_dir, exist_ok=True)  # type: ignore[arg-type]
+            self.save_in_memory = True
+            self.save_on_disk = False
 
     @abstractmethod
     def _run_parallel(

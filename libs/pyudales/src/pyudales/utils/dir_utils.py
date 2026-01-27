@@ -4,6 +4,7 @@ import os
 import pathlib
 from dataclasses import dataclass
 
+from typing import Optional
 
 def get_project_root(start_path: pathlib.Path | None = None) -> pathlib.Path:
     """
@@ -69,6 +70,7 @@ class DirectoryPaths:
     output_dir: pathlib.Path
     case_dir: pathlib.Path  # Original case directory provided by user
     experiment_name: str
+    results_dir: Optional[pathlib.Path] = None
 
 
 def get_udales_directory_paths(
@@ -79,6 +81,7 @@ def get_udales_directory_paths(
     experiment_base_dir: pathlib.Path | None = None,
     cwd: pathlib.Path | None = None,
     output_dir: pathlib.Path | None = None,
+    results_dir: pathlib.Path | None = None,
 ) -> DirectoryPaths:
     """
     Create DirectoryPaths instance with provided paths or defaults.
@@ -100,7 +103,7 @@ def get_udales_directory_paths(
         experiment_base_dir: Optional base directory for experiments. If None, uses {temp_dir}/experiment.
         cwd: Optional current working directory (project root). If None, uses get_project_root().
         output_dir: Optional output directory. If None, uses {cwd}/.temp/outputs.
-
+        results_dir: Optional results directory. If None, uses {cwd}/.temp/results.
     Returns:
         DirectoryPaths instance with all paths configured.
     """
@@ -129,6 +132,12 @@ def get_udales_directory_paths(
     else:
         output_dir_path = create_dir(output_dir)
 
+    # Results directory where the final results will be saved
+    if results_dir is None:
+        results_dir_path = None
+    else:
+        results_dir_path = create_dir(results_dir)
+
     return DirectoryPaths(
         udales_root_path=udales_root_path,
         cwd=cwd,
@@ -138,4 +147,5 @@ def get_udales_directory_paths(
         output_dir=output_dir_path,
         case_dir=case_dir,
         experiment_name=experiment_name,
+        results_dir=results_dir_path,
     )

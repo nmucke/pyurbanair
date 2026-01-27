@@ -30,7 +30,7 @@ FIXED_INPUT = {
     "case_dir": EXPERIMENT_DIR,
     "experiment_name": EXPERIMENT_NAME,
     "verbose": False,
-    # "results_dir": RESULTS_DIR,
+    "results_dir": RESULTS_DIR,
 }
 
 
@@ -48,6 +48,7 @@ def main() -> None:
     state1 = forward_model(params=params)
     state2 = forward_model(params=params)
     state3 = forward_model(params=params)
+
     state = xarray.concat([state1, state2, state3], dim="time")
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
