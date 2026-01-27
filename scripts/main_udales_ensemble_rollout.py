@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray
-from animation import animate_state
+from animation import animate_ensemble_state, animate_state
 from pyudales.ensemble_forward_model import EnsembleForwardModel
 from pyudales.rollout_forward_model import RolloutForwardModel
 
@@ -43,21 +43,15 @@ FIXED_INPUT = {
     "case_dir": CASE_DIR,
     "experiment_name": EXPERIMENT_NAME,
     "verbose": False,
-    # "results_dir": RESULTS_DIR,
+    "results_dir": RESULTS_DIR,
 }
 
 
 def main() -> None:
 
     ##### Setup parameter ensemble #####
-    rng_key = jax.random.PRNGKey(SEED)
-
-    rng_key, subkey = jax.random.split(rng_key)
-    inflow_angle_range = jax.random.normal(subkey, (ENSEMBLE_SIZE,)) * 8
-
-    rng_key, subkey = jax.random.split(rng_key)
-    velocity_magnitude_range = jax.random.normal(subkey, (ENSEMBLE_SIZE,)) * 1 + 4.0
-    velocity_magnitude_range = jnp.maximum(velocity_magnitude_range, 0.1)
+    inflow_angle_range = jnp.linspace(-45, 45, ENSEMBLE_SIZE)
+    velocity_magnitude_range = jnp.ones(ENSEMBLE_SIZE) * 1.0
 
     params_ensemble = xarray.Dataset(
         data_vars={
@@ -73,20 +67,30 @@ def main() -> None:
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        # results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
-    state1 = ensemble_forward_model.run_ensemble(params=params_ensemble)
-    state2 = ensemble_forward_model.run_ensemble(params=params_ensemble)
-    state3 = ensemble_forward_model.run_ensemble(params=params_ensemble)
-    state = xarray.concat([state1, state2, state3], dim="time")
+    _ = ensemble_forward_model.run_ensemble(params=params_ensemble)
+    _ = ensemble_forward_model.run_ensemble(params=params_ensemble)
+    params_ensemble = xarray.Dataset(
+        data_vars={
+            "inflow_angle": ("ensemble", jnp.flip(inflow_angle_range)),
+            "velocity_magnitude": ("ensemble", jnp.ones(ENSEMBLE_SIZE) * 4.0),
+        },
+        coords={"ensemble": jnp.arange(len(inflow_angle_range))},
+    )
+    _ = ensemble_forward_model.run_ensemble(params=params_ensemble)
+    _ = ensemble_forward_model.run_ensemble(params=params_ensemble)
+
+    state = ensemble_forward_model.get_states()
+
+    # state = xarray.concat([state1, state2, state3], dim="time")
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)  # type: ignore[union-attr]
     # Add vel_magnitude as a data variable in state
-    state = state.assign(vel_magnitude=(("time", "zm", "yt", "xt"), vel_magnitude))  # type: ignore[union-attr]
+    state = state.assign(vel_magnitude=(("ensemble", "time", "zm", "yt", "xt"), vel_magnitude))  # type: ignore[union-attr]
 
-    animate_state(
+    animate_ensemble_state(
         state=state,
         output_path=pathlib.Path("figures/udales_animation.mp4"),
         z_level=0,

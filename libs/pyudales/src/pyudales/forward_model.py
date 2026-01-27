@@ -98,6 +98,7 @@ class ForwardModel(BaseForwardModel):
             udales_root_path=UDALES_PATH,  # type: ignore[arg-type]
             temp_dir=temp_dir,
             experiment_base_dir=experiment_base_dir,
+            results_dir=results_dir,
         )
 
         # Save only the last timestep
@@ -247,8 +248,8 @@ class ForwardModel(BaseForwardModel):
             )
             state = state.load()
         else:
-            outfile = self.results_dir / f"{sim_name}.nc"  # type: ignore[operator]
-            os.makedirs(self.results_dir, exist_ok=True)  # type: ignore[arg-type]
+            outfile = self.dirs.results_dir / f"{sim_name}.nc"
+            os.makedirs(str(self.dirs.results_dir), exist_ok=True)
             shutil.move(str(output_file), str(outfile))
             state = None
 
