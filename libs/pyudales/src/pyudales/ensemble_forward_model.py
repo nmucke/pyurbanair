@@ -6,6 +6,11 @@ import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
+from pyudales.utils.warm_start_utils import (
+    clean_output_except_warmstart_files,
+    remove_old_warmstart_files,
+    set_warm_start,
+)
 import xarray
 from pyudales.forward_model import (
     ForwardModel,
@@ -17,6 +22,7 @@ from pyudales.utils.dir_utils import DirectoryPaths, create_dir
 from pyudales.utils.forward_model_utils import create_new_forward_model
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
+from pyudales.rollout_forward_model import RolloutForwardModel
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -47,7 +53,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
 
     def __init__(
         self,
-        forward_model: ForwardModel,
+        forward_model: ForwardModel | RolloutForwardModel,
         ensemble_size: int = 10,
         temp_dir: Optional[pathlib.Path] = None,
         results_dir: Optional[pathlib.Path] = None,
@@ -70,6 +76,12 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             num_parallel_processes=num_parallel_processes,
             num_cpus_per_process=num_cpus_per_process,
         )
+
+        if isinstance(forward_model, RolloutForwardModel):
+            self.rollout = True
+            self.first_step = True
+        else:
+            self.rollout = False
 
         if self.parallel_execution:
 
@@ -119,6 +131,21 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         for model in self.ensemble_forward_models:
             clean_output_dir(model.dirs)
 
+    def _set_warm_rollout_start(self) -> None:
+        """Set the warm start for the rollout forward models."""
+        for model in self.ensemble_forward_models:
+            set_warm_start(model.dirs)
+    
+    def _first_step_rollout_clean_output(self) -> None:
+        """Clean the output folders for the first step of the rollout forward models."""
+        for model in self.ensemble_forward_models:
+            clean_output_except_warmstart_files(model.dirs)
+    
+    def _clean_rollout_output(self) -> None:
+        for model in self.ensemble_forward_models:
+            clean_output_except_warmstart_files(model.dirs)
+            remove_old_warmstart_files(model.dirs)
+
     def _launch_simulations(self) -> None:
         """Launch the simulations in parallel."""
 
@@ -145,6 +172,9 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
 
         self._apply_inflow_settings(params)
 
+        if self.rollout and self.first_step:
+            self._set_warm_rollout_start()
+
         self._launch_simulations()
 
         if self.save_on_disk:
@@ -153,6 +183,14 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         else:
             states = self._load_results()
 
-        self._clean_output()
+        if self.rollout:
+            if self.first_step:
+                self._first_step_rollout_clean_output()
+                self.first_step = False
+            else:
+                self._clean_rollout_output()
+                self._set_warm_rollout_start()
+        else:
+            self._clean_output()
 
         return states
