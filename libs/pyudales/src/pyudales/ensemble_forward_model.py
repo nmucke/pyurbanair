@@ -115,9 +115,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             result_file = model.dirs.output_dir.joinpath(
                 model.dirs.experiment_name, f"fielddump.{model.dirs.experiment_name}.nc"
             )
-            shutil.move(
-                str(result_file), str(model.results_dir / f"{sim_name}_{i}.nc")
-            )
+            shutil.move(str(result_file), str(model.results_dir / f"{sim_name}_{i}.nc"))
 
     def _move_and_collect_rollout_results_to_disk(
         self, sim_name: str, rollout_step: int
