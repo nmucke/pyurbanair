@@ -1,11 +1,16 @@
 &RUN
 iexpnr       = 300
-runtime      = 10.
+runtime      = 500.
 trestart     = 7200.
 dtmax        = 1.
 ladaptive    = .true.
-nprocx       = 2
-nprocy       = 2
+nprocx       = 4
+nprocy       = 4
+irandom      = 43
+randqt       = 2.5e-5
+randthl      = 0.001
+randu        = 0.01
+lrandomize   = .true.
 /
 
 &OUTPUT
@@ -20,6 +25,11 @@ jtot         = 128
 ktot         = 64
 xlen         = 80
 ylen         = 80
+/
+
+&BC
+BCxm       = 1
+BCym       = 1
 /
 
 &WALLS

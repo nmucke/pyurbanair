@@ -19,6 +19,7 @@ from .utils.file_utils import copy_files
 from .utils.namoptions_utils import rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
 from .utils.params_utils import apply_inflow_settings, merge_params
+from .utils.random_utils import apply_random_initial_condition
 from .utils.save_frequency_utils import (
     apply_output_frequency,
     apply_save_only_last_timestep,
@@ -61,6 +62,7 @@ class ForwardModel(BaseForwardModel):
         verbose: bool = True,
         temp_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
+        random_initial_condition_args: Optional[dict] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -145,6 +147,9 @@ class ForwardModel(BaseForwardModel):
             apply_save_only_last_timestep(self.dirs)
         elif self.output_frequency is not None:
             apply_output_frequency(self.dirs, self.output_frequency)
+        
+        if random_initial_condition_args is not None:
+            apply_random_initial_condition(self.dirs, random_initial_condition_args)
 
         logger.info(f"Experiment name: {self.dirs.experiment_name}")
         logger.info(f"Case dir: {self.dirs.case_dir}")
