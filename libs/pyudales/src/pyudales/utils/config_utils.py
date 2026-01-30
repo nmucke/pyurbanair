@@ -37,4 +37,9 @@ def create_config_sh(
         f.write(f"export DA_WORKDIR={str(dirs.output_dir)}\n")
         f.write(f"export NCPU={ncpu}\n")
         f.write(f"export MATLAB_BIN={str(matlab_bin)}\n")
-        f.write(f"export PATH={matlab_bin_dir}:{os.environ.get('PATH', '')}\n")
+        # f.write(f"export PATH={matlab_bin_dir}:{os.environ.get('PATH', '')}\n")
+        # Disable FFTW/OpenMP threading to prevent oversubscription when running
+        # multiple MPI jobs in parallel. Each MPI job already uses multiple cores,
+        # so additional FFTW threads cause severe cache thrashing and slowdowns.
+        # f.write("export OMP_NUM_THREADS=1\n")
+        # f.write("export FFTW_NUM_THREADS=1\n")

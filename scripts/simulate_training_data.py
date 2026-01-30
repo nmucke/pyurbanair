@@ -23,14 +23,14 @@ EXPERIMENT_NAME = "999"
 RESULTS_DIR = pathlib.Path(".temp/udales")
 
 NUM_TRAIN_DATA = 300
-BATCH_SIZE = 15
+BATCH_SIZE = 2
 
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
-NCPU_PER_PROCESS = 16
-NUM_PARALLEL_PROCESSES = 1
+NCPU_PER_PROCESS = 4
+NUM_PARALLEL_PROCESSES = 2
 
 # Forward model settings
 FIXED_INPUT = {
@@ -41,7 +41,7 @@ FIXED_INPUT = {
     "case_dir": CASE_DIR,
     "experiment_name": EXPERIMENT_NAME,
     "verbose": False,
-    "results_dir": RESULTS_DIR,
+    # "results_dir": RESULTS_DIR,
 }
 
 
@@ -86,45 +86,63 @@ def main() -> None:
 
     t1 = time.time()
 
-    for i in range(NUM_TRAIN_DATA // BATCH_SIZE):
+    # for i in range(NUM_TRAIN_DATA // BATCH_SIZE):
 
-        if os.path.exists(".temp"):
-            shutil.rmtree(".temp")
+    if os.path.exists(".temp"):
+        shutil.rmtree(".temp")
 
-        forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
-        forward_model.run_preprocessing(python_or_matlab="python")
+    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
+    forward_model.run_preprocessing(python_or_matlab="python")
 
-        inflow_angle_vec = np.random.uniform(low=-45, high=45, size=BATCH_SIZE)
-        print(inflow_angle_vec)
-        params_ensemble = xarray.Dataset(
-            data_vars={
-                "inflow_angle": ("ensemble", inflow_angle_vec),
-                "velocity_magnitude": ("ensemble", np.ones(BATCH_SIZE) * 3),
-            },
-            coords={"ensemble": np.arange(BATCH_SIZE)},
-        )
-        ensemble_forward_model = EnsembleForwardModel(
-            forward_model=forward_model,
-            ensemble_size=BATCH_SIZE,
-            num_parallel_processes=NUM_PARALLEL_PROCESSES,
-            num_cpus_per_process=NCPU_PER_PROCESS,
-        )
+    inflow_angle_vec = np.random.uniform(low=-45, high=45, size=BATCH_SIZE)
+    print(inflow_angle_vec)
+    params_ensemble = xarray.Dataset(
+        data_vars={
+            "inflow_angle": ("ensemble", inflow_angle_vec),
+            "velocity_magnitude": ("ensemble", np.ones(BATCH_SIZE) * 3),
+        },
+        coords={"ensemble": np.arange(BATCH_SIZE)},
+    )
+    ensemble_forward_model = EnsembleForwardModel(
+        forward_model=forward_model,
+        ensemble_size=BATCH_SIZE,
+        num_parallel_processes=NUM_PARALLEL_PROCESSES,
+        num_cpus_per_process=NCPU_PER_PROCESS,
+    )
 
-        state = ensemble_forward_model.run_ensemble(params=params_ensemble)
-
-        for sim_idx in range(BATCH_SIZE):
-            state = xarray.open_dataset(f"{RESULTS_DIR}/state_{sim_idx}.nc")
-
-            state = interpolate_grid(state)
-
-            state = state.isel(zt=1)
-
-            state = state.assign_coords({"inflow_angle": inflow_angle_vec[sim_idx]})
-
-            state.to_netcdf(f"training_data/sim_{i*BATCH_SIZE + sim_idx}.nc")
-
+    t1 = time.time()
+    state_parallel = ensemble_forward_model.run_ensemble(params=params_ensemble)
     t2 = time.time()
     print(f"Time taken: {t2 - t1} seconds")
+
+    ensemble_forward_model = EnsembleForwardModel(
+        forward_model=forward_model,
+        ensemble_size=BATCH_SIZE,
+        num_parallel_processes=1,
+        num_cpus_per_process=NCPU_PER_PROCESS,
+    )
+
+    t1 = time.time()
+    state_sequential = ensemble_forward_model.run_ensemble(params=params_ensemble)
+    t2 = time.time()
+    print(f"Time taken: {t2 - t1} seconds")
+
+    #     diff = state_parallel - state_sequential
+
+
+    #     for sim_idx in range(BATCH_SIZE):
+    #         state = xarray.open_dataset(f"{RESULTS_DIR}/state_{sim_idx}.nc")
+
+    #         state = interpolate_grid(state)
+
+    #         state = state.isel(zt=1)
+
+    #         state = state.assign_coords({"inflow_angle": inflow_angle_vec[sim_idx]})
+
+    #         # state.to_netcdf(f"training_data/sim_{i*BATCH_SIZE + sim_idx}.nc")
+
+    # t2 = time.time()
+    # print(f"Time taken: {t2 - t1} seconds")
 
 
 if __name__ == "__main__":
