@@ -248,7 +248,7 @@ class ForwardModel(BaseForwardModel):
             )
             state = state.load()
         else:
-            outfile = self.dirs.results_dir / f"{sim_name}.nc"
+            outfile = self.dirs.results_dir / f"{sim_name}.nc"  # type: ignore[operator]
             os.makedirs(str(self.dirs.results_dir), exist_ok=True)
             shutil.move(str(output_file), str(outfile))
             state = None

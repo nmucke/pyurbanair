@@ -6,12 +6,6 @@ import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
-from pyudales.utils.rollout_utils import collect_rollout_results
-from pyudales.utils.warm_start_utils import (
-    clean_output_except_warmstart_files,
-    remove_old_warmstart_files,
-    set_warm_start,
-)
 import xarray
 from pyudales.forward_model import (
     ForwardModel,
@@ -19,11 +13,17 @@ from pyudales.forward_model import (
     clean_output_dir,
     merge_params,
 )
+from pyudales.rollout_forward_model import RolloutForwardModel
 from pyudales.utils.dir_utils import DirectoryPaths, create_dir
 from pyudales.utils.forward_model_utils import create_new_forward_model
+from pyudales.utils.rollout_utils import collect_rollout_results
+from pyudales.utils.warm_start_utils import (
+    clean_output_except_warmstart_files,
+    remove_old_warmstart_files,
+    set_warm_start,
+)
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
-from pyudales.rollout_forward_model import RolloutForwardModel
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -87,14 +87,14 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         if self.parallel_execution:
 
             self.ensemble_experiment_base_dir = create_dir(
-                self.forward_model.dirs.temp_dir / "ensemble_experiments"  # type: ignore[attr-defined]
+                self.forward_model.dirs.temp_dir / "ensemble_experiments"
             )
 
             self.ensemble_forward_models = []
             for ensemble_number in range(self.ensemble_size):
                 self.ensemble_forward_models.append(
                     create_new_forward_model(
-                        forward_model=self.forward_model,  # type: ignore[arg-type]
+                        forward_model=self.forward_model,
                         experiment_base_dir=self.ensemble_experiment_base_dir,
                         experiment_name=f"{ensemble_number:03d}",
                     )
@@ -113,25 +113,22 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """Move the results to disk."""
         for i, model in enumerate(self.ensemble_forward_models):
             result_file = model.dirs.output_dir.joinpath(
-                model.dirs.experiment_name, 
-                f"fielddump.{model.dirs.experiment_name}.nc"
+                model.dirs.experiment_name, f"fielddump.{model.dirs.experiment_name}.nc"
             )
-            shutil.move(
-                str(result_file), 
-                str(model.results_dir / f"{sim_name}_{i}.nc")
-            )  # type: ignore[operator]
+            shutil.move(str(result_file), str(model.results_dir / f"{sim_name}_{i}.nc"))
 
-    def _move_and_collect_rollout_results_to_disk(self, sim_name: str, rollout_step: int) -> None:
+    def _move_and_collect_rollout_results_to_disk(
+        self, sim_name: str, rollout_step: int
+    ) -> None:
         """Move the rollout results to disk."""
         for i, model in enumerate(self.ensemble_forward_models):
             result_file = model.dirs.output_dir.joinpath(
-                model.dirs.experiment_name, 
-                f"fielddump.{model.dirs.experiment_name}.nc"
+                model.dirs.experiment_name, f"fielddump.{model.dirs.experiment_name}.nc"
             )
             shutil.move(
-                str(result_file), 
-                str(model.results_dir / f"{sim_name}_{i}_rollout_{rollout_step}.nc")
-            )  # type: ignore[operator]
+                str(result_file),
+                str(model.results_dir / f"{sim_name}_{i}_rollout_{rollout_step}.nc"),
+            )
 
             collect_rollout_results(
                 sim_name=f"{sim_name}_{i}",
@@ -158,17 +155,16 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """Set the warm start for the rollout forward models."""
         for model in self.ensemble_forward_models:
             set_warm_start(model.dirs)
-    
+
     def _clean_rollout_output(self) -> None:
         """Clean the output folders for the first step of the rollout forward models."""
         for model in self.ensemble_forward_models:
             clean_output_except_warmstart_files(model.dirs)
-    
+
     def _clean_old_rollout_warmstart_files(self) -> None:
         """Clean the warmstart files for the rollout forward models."""
         for model in self.ensemble_forward_models:
             remove_old_warmstart_files(model.dirs)
-
 
     def _launch_simulations(self) -> None:
         """Launch the simulations in parallel."""
@@ -213,7 +209,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         if self.save_on_disk:
             if self.rollout:
                 self._move_and_collect_rollout_results_to_disk(
-                    sim_name=sim_name,
+                    sim_name=sim_name,  # type: ignore[arg-type]
                     rollout_step=self.rollout_step,
                 )
             else:

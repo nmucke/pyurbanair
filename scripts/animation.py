@@ -473,9 +473,11 @@ def animate_ensemble_state(
                     var_2d = var_slice.values
 
                 if ims[e_idx][var_idx] is not None:
-                    ims[e_idx][var_idx].set_array(var_2d)
+                    ims[e_idx][var_idx].set_array(var_2d)  # type: ignore[attr-defined]
                     ax = axes[e_idx, var_idx]
-                    ax.set_title(f"{var_name} - Ensemble {e_idx} (t={time_values[frame]:.2f})")
+                    ax.set_title(
+                        f"{var_name} - Ensemble {e_idx} (t={time_values[frame]:.2f})"
+                    )
 
         # Flatten ims for return (filter out None values)
         return [im for row in ims for im in row if im is not None]

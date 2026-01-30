@@ -1,0 +1,149 @@
+import os
+import pathlib
+import pdb
+import shutil
+import time
+
+import matplotlib.pyplot as plt
+import numpy as np
+import xarray
+from animation import animate_state
+from pyudales.ensemble_forward_model import EnsembleForwardModel
+from pyudales.forward_model import ForwardModel
+from pyudales.utils.forward_model_utils import create_new_forward_model
+from pyudales.utils.grid_utils import interpolate_grid
+
+np.random.seed(1)
+
+# Directory settings
+# MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
+MATLAB_BIN = "/opt/sw/matlab-2023b/bin/matlab"
+CASE_DIR = "examples/udales/experiments/xie_and_castro_training_data"
+EXPERIMENT_NAME = "999"
+RESULTS_DIR = pathlib.Path(".temp/udales")
+
+NUM_TRAIN_DATA = 300
+BATCH_SIZE = 2
+
+FIGURES_DIR = "figures"
+os.makedirs(FIGURES_DIR, exist_ok=True)
+
+# Compute ressources
+NCPU_PER_PROCESS = 4
+NUM_PARALLEL_PROCESSES = 2
+
+# Forward model settings
+FIXED_INPUT = {
+    "save_only_last_timestep": False,
+    "output_frequency": 2.0,
+    "ncpu": NCPU_PER_PROCESS,
+    "matlab_bin": MATLAB_BIN,
+    "case_dir": CASE_DIR,
+    "experiment_name": EXPERIMENT_NAME,
+    "verbose": False,
+    # "results_dir": RESULTS_DIR,
+}
+
+
+def main() -> None:
+
+    # forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
+    # params = xarray.Dataset(
+    #     data_vars={
+    #         "inflow_angle": -45,
+    #         "velocity_magnitude": 3,
+    #         "pressure_gradient_magnitude": 0.0041912,
+    #     },
+    # )
+    # forward_model.run_preprocessing(python_or_matlab="python")
+
+    # t1 = time.time()
+    # state = forward_model(params=params)
+    # t2 = time.time()
+    # print(f"Time taken: {t2 - t1} seconds")
+
+    # state = interpolate_grid(state)
+
+    # vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
+    # # Add vel_magnitude as a data variable in state
+    # state = state.assign(vel_magnitude=(("time", "zm", "yt", "xt"), vel_magnitude))
+
+    # animate_state(
+    #     state=state,
+    #     output_path=pathlib.Path("figures/udales_animation.mp4"),
+    #     z_level=0,
+    #     vmin={"u": -3.0, "v": -2.0, "w": -2.0, "pres": 0.0, "vel_magnitude": 0.0},
+    #     vmax={"u": 3.0, "v": 2.0, "w": 2.0, "pres": 1.0, "vel_magnitude": 3.0},
+    # )
+
+    # print(vel_magnitude.shape)
+    # print(vel_magnitude.min(), vel_magnitude.max())
+    # plt.figure()
+    # plt.imshow(vel_magnitude[-1, 1, :, :])
+    # plt.colorbar()
+    # plt.savefig("figures/vel_magnitude_udales.png")
+    # plt.show()
+
+    t1 = time.time()
+
+    # for i in range(NUM_TRAIN_DATA // BATCH_SIZE):
+
+    if os.path.exists(".temp"):
+        shutil.rmtree(".temp")
+
+    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
+    forward_model.run_preprocessing(python_or_matlab="python")
+
+    inflow_angle_vec = np.random.uniform(low=-45, high=45, size=BATCH_SIZE)
+    print(inflow_angle_vec)
+    params_ensemble = xarray.Dataset(
+        data_vars={
+            "inflow_angle": ("ensemble", inflow_angle_vec),
+            "velocity_magnitude": ("ensemble", np.ones(BATCH_SIZE) * 3),
+        },
+        coords={"ensemble": np.arange(BATCH_SIZE)},
+    )
+    ensemble_forward_model = EnsembleForwardModel(
+        forward_model=forward_model,
+        ensemble_size=BATCH_SIZE,
+        num_parallel_processes=NUM_PARALLEL_PROCESSES,
+        num_cpus_per_process=NCPU_PER_PROCESS,
+    )
+
+    t1 = time.time()
+    state_parallel = ensemble_forward_model.run_ensemble(params=params_ensemble)
+    t2 = time.time()
+    print(f"Time taken: {t2 - t1} seconds")
+
+    ensemble_forward_model = EnsembleForwardModel(
+        forward_model=forward_model,
+        ensemble_size=BATCH_SIZE,
+        num_parallel_processes=1,
+        num_cpus_per_process=NCPU_PER_PROCESS,
+    )
+
+    t1 = time.time()
+    state_sequential = ensemble_forward_model.run_ensemble(params=params_ensemble)
+    t2 = time.time()
+    print(f"Time taken: {t2 - t1} seconds")
+
+    #     diff = state_parallel - state_sequential
+
+
+    #     for sim_idx in range(BATCH_SIZE):
+    #         state = xarray.open_dataset(f"{RESULTS_DIR}/state_{sim_idx}.nc")
+
+    #         state = interpolate_grid(state)
+
+    #         state = state.isel(zt=1)
+
+    #         state = state.assign_coords({"inflow_angle": inflow_angle_vec[sim_idx]})
+
+    #         # state.to_netcdf(f"training_data/sim_{i*BATCH_SIZE + sim_idx}.nc")
+
+    # t2 = time.time()
+    # print(f"Time taken: {t2 - t1} seconds")
+
+
+if __name__ == "__main__":
+    main()

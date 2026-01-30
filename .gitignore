@@ -34,3 +34,6 @@ libs/pyudales/*.pyc
 
 # job output files
 job_scripts/delftblue/out_files/*
+
+# training data
+training_data/*

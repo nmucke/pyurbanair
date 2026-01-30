@@ -1,6 +1,6 @@
 &RUN
 iexpnr       = 300
-runtime      = 300.
+runtime      = 10.
 trestart     = 7200.
 dtmax        = 1.
 ladaptive    = .true.
@@ -17,9 +17,9 @@ fieldvars    = 'u0,v0,w0,p0'
 &DOMAIN
 itot         = 128
 jtot         = 128
-ktot         = 8
-xlen         = 160
-ylen         = 160
+ktot         = 64
+xlen         = 80
+ylen         = 80
 /
 
 &WALLS
@@ -39,7 +39,7 @@ nfctsecs_c = 189696
 /
 
 &INPS
-zsize        = 40.
+zsize        = 80.
 u0           = 2.1213
 v0           = -2.1213
 dpdx         = 0.0029343

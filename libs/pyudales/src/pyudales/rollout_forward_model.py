@@ -62,11 +62,9 @@ class RolloutForwardModel(ForwardModel):
 
         if self.save_on_disk:
             collect_rollout_results(
-                sim_name=sim_name,
+                sim_name=sim_name,  # type: ignore[arg-type]
                 rollout_step=self.rollout_step,
                 dirs=self.dirs,
             )
 
         return state
-
-
