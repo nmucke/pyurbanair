@@ -7,6 +7,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
 import xarray
+from pyudales import LOCAL_EXECUTE_SCRIPT
 from pyudales.forward_model import (
     ForwardModel,
     apply_inflow_settings,
@@ -31,13 +32,11 @@ logger.setLevel(logging.INFO)
 
 def _run_simulation(
     experiment_dir: pathlib.Path,
-    udales_root_path: pathlib.Path,
 ) -> xarray.Dataset | None:
     """Run a single simulation. Module-level function for multiprocessing."""
 
     logger.info(f"Running simulation in {experiment_dir}...")
-    command = str(pathlib.Path(udales_root_path).joinpath("tools", "local_execute.sh"))
-    command = ["bash", command, str(experiment_dir)]  # type: ignore[assignment]
+    command = ["bash", str(LOCAL_EXECUTE_SCRIPT), str(experiment_dir)]
     subprocess.run(
         command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
@@ -174,7 +173,6 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                 executor.submit(
                     _run_simulation,
                     experiment_dir=model.dirs.experiment_dir,
-                    udales_root_path=model.dirs.udales_root_path,
                 )
                 for model in self.ensemble_forward_models
             ]

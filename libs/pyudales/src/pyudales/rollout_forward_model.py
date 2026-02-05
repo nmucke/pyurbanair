@@ -9,6 +9,7 @@ from pyudales.utils.warm_start_utils import (
     remove_old_warmstart_files,
     set_trestart,
     set_warm_start,
+    update_warmstart_file_from_xarray,
 )
 
 
@@ -40,24 +41,34 @@ class RolloutForwardModel(ForwardModel):
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
         """Run the rollout forward model"""
-        if self.rollout_step == 0:
-            self.rollout_step += 1
-            state = super().run_single(
-                state=state,
-                params=params,
-                sim_name=f"{sim_name}_rollout_{self.rollout_step}",
+        if state is not None:
+            # An explicit state is given. Update an existing warmstart file with new flow values.
+            # This uses an existing warmstart file as template (created by uDALES from a previous run)
+            # to avoid issues with 2DECOMP&FFT memory layout.
+            warmstart_file = identify_warmstart_file(self.dirs)
+            update_warmstart_file_from_xarray(
+                state, self.dirs, warmstart_file=warmstart_file
             )
-            clean_output_except_warmstart_files(self.dirs)
-
-        else:
-            self.rollout_step += 1
             set_warm_start(self.dirs)
-            state = super().run_single(
-                state=state,
-                params=params,
-                sim_name=f"{sim_name}_rollout_{self.rollout_step}",
-            )
-            clean_output_except_warmstart_files(self.dirs)
+        elif self.rollout_step > 0:
+            # No state given, but it's not the first step, so warm-start from previous.
+            set_warm_start(self.dirs)
+
+        # For rollout_step == 0 and state is None, it will be a cold start (no warm start settings).
+
+        self.rollout_step += 1
+
+        # Run the simulation
+        result_state = super().run_single(
+            state=None,  # state is always handled via files for this model now.
+            params=params,
+            sim_name=f"{sim_name}_rollout_{self.rollout_step}",
+        )
+
+        # Post-processing
+        clean_output_except_warmstart_files(self.dirs)
+
+        if self.rollout_step > 1:
             remove_old_warmstart_files(self.dirs)
 
         if self.save_on_disk:
@@ -67,4 +78,4 @@ class RolloutForwardModel(ForwardModel):
                 dirs=self.dirs,
             )
 
-        return state
+        return result_state

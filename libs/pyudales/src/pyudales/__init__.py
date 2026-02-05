@@ -1,7 +1,7 @@
 """pyudales - Python wrapper for uDALES."""
 
-import pathlib
 import logging
+import pathlib
 import subprocess
 import sys
 
@@ -12,6 +12,10 @@ logger.setLevel(logging.INFO)
 
 # Get paths
 _project_root = pathlib.Path(__file__).parent.parent.parent
+
+# Path to local_execute.sh script (stored in pyudales package, not u-dales submodule)
+# This ensures modifications to the script persist when the u-dales submodule is re-initialized
+LOCAL_EXECUTE_SCRIPT = _project_root / "shell_scripts" / "local_execute.sh"
 # Find repo root by looking for .git directory or .gitmodules file
 _repo_root = _project_root
 while _repo_root != _repo_root.parent:
@@ -207,14 +211,20 @@ if _udales_path:
                                 text=True,
                             )
                             if checkout_result.returncode == 0:
-                                print(f"Checked out u-dales tag: {_udales_tag}", file=sys.stderr)
+                                print(
+                                    f"Checked out u-dales tag: {_udales_tag}",
+                                    file=sys.stderr,
+                                )
                             else:
                                 print(
                                     f"Warning: Failed to checkout tag {_udales_tag}: {checkout_result.stderr}",
                                     file=sys.stderr,
                                 )
                         except Exception as e:
-                            print(f"Warning: Exception checking out tag: {e}", file=sys.stderr)
+                            print(
+                                f"Warning: Exception checking out tag: {e}",
+                                file=sys.stderr,
+                            )
                 else:
                     print(
                         f"Warning: git clone failed (code {result.returncode})",

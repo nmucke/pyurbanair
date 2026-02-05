@@ -11,7 +11,7 @@ import xarray
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
-from . import UDALES_PATH
+from . import LOCAL_EXECUTE_SCRIPT, UDALES_PATH
 from .utils.clean_up_utils import clean_output_dir, clean_temp_dir
 from .utils.config_utils import create_config_sh
 from .utils.dir_utils import get_udales_directory_paths
@@ -147,7 +147,7 @@ class ForwardModel(BaseForwardModel):
             apply_save_only_last_timestep(self.dirs)
         elif self.output_frequency is not None:
             apply_output_frequency(self.dirs, self.output_frequency)
-        
+
         if random_initial_condition_args is not None:
             apply_random_initial_condition(self.dirs, random_initial_condition_args)
 
@@ -231,19 +231,26 @@ class ForwardModel(BaseForwardModel):
         logger.info("Running forward model...")
         command = [
             "bash",
-            str(
-                pathlib.Path(self.dirs.udales_root_path).joinpath(
-                    "tools", "local_execute.sh"
-                )
-            ),
+            str(LOCAL_EXECUTE_SCRIPT),
             str(self.dirs.experiment_dir),
         ]
 
         subprocess.run(command, check=True, stdout=self.stdout, stderr=self.stderr)
 
+        # Check for merged file first (multi-processor case after gather_outputs.sh)
         output_file = self.dirs.output_dir.joinpath(
             self.dirs.experiment_name, f"fielddump.{self.dirs.experiment_name}.nc"
         )
+
+        # If merged file doesn't exist, check for single-processor file
+        # (gather_outputs.sh doesn't merge when there's only one processor)
+        if not output_file.exists():
+            single_proc_file = self.dirs.output_dir.joinpath(
+                self.dirs.experiment_name,
+                f"fielddump.000.000.{self.dirs.experiment_name}.nc",
+            )
+            if single_proc_file.exists():
+                output_file = single_proc_file
 
         # Load into memory if save_in_memory is True
         if self.save_in_memory:
