@@ -54,10 +54,19 @@ def main() -> None:
     forward_model.run_preprocessing(python_or_matlab="python")
     state1 = forward_model(params=params)
     state_new = state1.copy()
-    state_new.u.values = state_new.u.values * 0.9
-    state_new.v.values = state_new.v.values * 0.9
-    state_new.w.values = state_new.w.values * 0.9
-    state_new.pres.values = state_new.pres.values * 0.9
+    # state_new.u.values[-1, :, 50:70, 50:70] = 5.0
+    # state_new.u.values[-1] = state_new.u.values[-1] * 0.1
+    # state_new.v.values[-1] = state_new.v.values[-1] * 0.1
+    # state_new.w.values[-1] = state_new.w.values[-1] * 0.1
+    # import pdb; pdb.set_trace()
+    # state_new.pres.values[:, :, 50:70, 50:70] = 10.0#state_new.pres.values[-1, :, 64, 64] * 0.1
+    params = xarray.Dataset(
+        data_vars={
+            "inflow_angle": -45,
+            "velocity_magnitude": 0.0,
+            "pressure_gradient_magnitude": 0.0041912 * 10.0,
+        },
+    )
     state2 = forward_model(state=state_new, params=params)
     state3 = forward_model(state=state2, params=params)
 

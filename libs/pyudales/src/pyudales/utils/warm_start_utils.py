@@ -5,12 +5,106 @@ import pathlib
 import re
 import shutil
 
+import numpy as np
 from xarray import Dataset
 
 from .dir_utils import DirectoryPaths
 from .namoptions_utils import NamoptionsFile
 
 logger = logging.getLogger(__name__)
+
+
+def _fill_halo_cells(
+    ws_3d: np.ndarray,
+    offset_x: int,
+    offset_y: int,
+    offset_z: int,
+    itot: int,
+    jtot: int,
+    ktot: int,
+    bc_periodic_x: bool,
+    bc_periodic_y: bool,
+) -> None:
+    """
+    Fill halo cells in a 3D warmstart array based on boundary conditions.
+
+    This modifies ws_3d in-place to ensure halo cells are consistent with
+    the interior after any modifications (e.g., perturbations).
+
+    For periodic boundaries: halos are filled from the opposite side of the interior.
+    For non-periodic boundaries: halos are copied from the nearest interior value.
+
+    Args:
+        ws_3d: 3D array in Fortran order (x, y, z) to modify in-place.
+        offset_x: Starting x-index of interior region.
+        offset_y: Starting y-index of interior region.
+        offset_z: Starting z-index of interior region.
+        itot: Size of interior in x-direction.
+        jtot: Size of interior in y-direction.
+        ktot: Size of interior in z-direction.
+        bc_periodic_x: True if x-direction uses periodic boundary conditions.
+        bc_periodic_y: True if y-direction uses periodic boundary conditions.
+    """
+    # Interior index bounds
+    ix_start, ix_end = offset_x, offset_x + itot
+    iy_start, iy_end = offset_y, offset_y + jtot
+    iz_start, iz_end = offset_z, offset_z + ktot
+
+    # Get array shape
+    nx, ny, nz = ws_3d.shape
+
+    # Fill x-direction halos (left and right)
+    if bc_periodic_x:
+        # Periodic: copy from opposite side of interior
+        # Left halo gets data from right side of interior
+        for i in range(offset_x):
+            src_i = ix_end - offset_x + i  # Map to right side of interior
+            ws_3d[i, iy_start:iy_end, iz_start:iz_end] = ws_3d[
+                src_i, iy_start:iy_end, iz_start:iz_end
+            ]
+        # Right halo gets data from left side of interior
+        for i in range(ix_end, nx):
+            src_i = ix_start + (i - ix_end)  # Map to left side of interior
+            ws_3d[i, iy_start:iy_end, iz_start:iz_end] = ws_3d[
+                src_i, iy_start:iy_end, iz_start:iz_end
+            ]
+    else:
+        # Non-periodic: copy from nearest interior value (Neumann-like)
+        # Left halo: copy from leftmost interior
+        for i in range(offset_x):
+            ws_3d[i, iy_start:iy_end, iz_start:iz_end] = ws_3d[
+                ix_start, iy_start:iy_end, iz_start:iz_end
+            ]
+        # Right halo: copy from rightmost interior
+        for i in range(ix_end, nx):
+            ws_3d[i, iy_start:iy_end, iz_start:iz_end] = ws_3d[
+                ix_end - 1, iy_start:iy_end, iz_start:iz_end
+            ]
+
+    # Fill y-direction halos (front and back)
+    # Note: Now include x-halos since they're already filled
+    if bc_periodic_y:
+        # Periodic: copy from opposite side of interior
+        for j in range(offset_y):
+            src_j = iy_end - offset_y + j
+            ws_3d[:, j, iz_start:iz_end] = ws_3d[:, src_j, iz_start:iz_end]
+        for j in range(iy_end, ny):
+            src_j = iy_start + (j - iy_end)
+            ws_3d[:, j, iz_start:iz_end] = ws_3d[:, src_j, iz_start:iz_end]
+    else:
+        # Non-periodic: copy from nearest interior value
+        for j in range(offset_y):
+            ws_3d[:, j, iz_start:iz_end] = ws_3d[:, iy_start, iz_start:iz_end]
+        for j in range(iy_end, ny):
+            ws_3d[:, j, iz_start:iz_end] = ws_3d[:, iy_end - 1, iz_start:iz_end]
+
+    # Fill z-direction halos (bottom and top)
+    # Z typically has different handling - usually copy from nearest (Neumann at ground)
+    # Note: Include both x and y halos since they're now filled
+    for k in range(offset_z):
+        ws_3d[:, :, k] = ws_3d[:, :, iz_start]
+    for k in range(iz_end, nz):
+        ws_3d[:, :, k] = ws_3d[:, :, iz_end - 1]
 
 
 def set_trestart(dirs: DirectoryPaths) -> None:
@@ -433,6 +527,13 @@ def update_warmstart_file_from_xarray(
     jtot = int(namoptions.get_value("DOMAIN", "jtot") or 128)
     ktot = int(namoptions.get_value("DOMAIN", "ktot") or 8)
 
+    # Read boundary conditions (1 = periodic, 2 = profile/inflow, 3 = driver)
+    # Default to periodic (1) if not specified
+    bcxm = int(namoptions.get_value("INPS", "BCxm") or 1)
+    bcym = int(namoptions.get_value("INPS", "BCym") or 1)
+    bc_periodic_x = bcxm == 1
+    bc_periodic_y = bcym == 1
+
     # Calculate warmstart dimensions by factorizing the array size
     # The warmstart is flattened in column-major (Fortran) order: (nx, ny, nz)
     ws_size = flow_var_shape
@@ -529,6 +630,20 @@ def update_warmstart_file_from_xarray(
                     offset_y : offset_y + jtot,
                     offset_z : offset_z + ktot,
                 ] = fd_3d_fortran
+
+                # Fill halo cells based on boundary conditions
+                # This ensures consistency after perturbations to the interior
+                _fill_halo_cells(
+                    ws_3d,
+                    offset_x,
+                    offset_y,
+                    offset_z,
+                    itot,
+                    jtot,
+                    ktot,
+                    bc_periodic_x,
+                    bc_periodic_y,
+                )
 
                 # Flatten back to 1D (Fortran order)
                 records[idx] = ws_3d.flatten(order="F")
