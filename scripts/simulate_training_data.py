@@ -22,14 +22,14 @@ CASE_DIR = "examples/udales/experiments/xie_and_castro_training_data"
 EXPERIMENT_NAME = "999"
 RESULTS_DIR = pathlib.Path(".temp/udales")
 
-NUM_TRAIN_DATA = 500
+NUM_TRAIN_DATA = 1000
 BATCH_SIZE = 2
 
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
-NCPU_PER_PROCESS = 16
+NCPU_PER_PROCESS = 4
 NUM_PARALLEL_PROCESSES = 1
 
 # Forward model settings
@@ -47,7 +47,7 @@ FIXED_INPUT = {
 
 def main() -> None:
 
-    for i in range(2):
+    for i in range(500, NUM_TRAIN_DATA):
         if os.path.exists(".temp"):
             shutil.rmtree(".temp")
 
@@ -58,10 +58,9 @@ def main() -> None:
             "randu": 2.0,
         }
         forward_model = ForwardModel(
-            **FIXED_INPUT,
+            **FIXED_INPUT,  # type: ignore[arg-type]
             random_initial_condition_args=random_initial_condition_args,
-            results_dir=pathlib.Path(f"training_data/sim_{i}"),
-        )  # type: ignore[arg-type]
+        )
         params = xarray.Dataset(
             data_vars={
                 "inflow_angle": 0.0,
@@ -79,7 +78,6 @@ def main() -> None:
 
     #     state = xarray.open_dataset(f"training_data/sim_{i}.nc").load()
 
-
     #     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     #     # Add vel_magnitude as a data variable in state
     #     state = state.assign(vel_magnitude=(("time", "yt", "xt"), vel_magnitude))
@@ -92,9 +90,7 @@ def main() -> None:
     # # print(diff.mean())
     # # print(diff.std())
 
-
     # state = xarray.concat(states + [diff], dim="ensemble", join="override")
-
 
     # animate_ensemble_state(
     #     state=state,
@@ -154,7 +150,6 @@ def main() -> None:
     # print(f"Time taken: {t2 - t1} seconds")
 
     # #     diff = state_parallel - state_sequential
-
 
     #     for sim_idx in range(BATCH_SIZE):
     #         state = xarray.open_dataset(f"{RESULTS_DIR}/state_{sim_idx}.nc")

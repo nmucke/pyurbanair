@@ -1,16 +1,16 @@
 &RUN
 iexpnr       = 300
-runtime      = 300.
+runtime      = 100.
 trestart     = 7200.
 dtmax        = 1.
 ladaptive    = .true.
-nprocx       = 2
-nprocy       = 2
+nprocx       = 1
+nprocy       = 1
 /
 
 &OUTPUT
 lfielddump   = .true.
-tfielddump   = 100.
+tfielddump   = 2.
 fieldvars    = 'u0,v0,w0,p0'
 /
 

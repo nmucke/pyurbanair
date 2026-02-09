@@ -30,7 +30,7 @@ FIXED_INPUT = {
     "case_dir": EXPERIMENT_DIR,
     "experiment_name": EXPERIMENT_NAME,
     "verbose": False,
-    "results_dir": RESULTS_DIR,
+    # "results_dir": RESULTS_DIR,
 }
 
 

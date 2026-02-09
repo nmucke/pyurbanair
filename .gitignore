@@ -37,3 +37,4 @@ job_scripts/delftblue/out_files/*
 
 # training data
 training_data/*
+training_data_old/*

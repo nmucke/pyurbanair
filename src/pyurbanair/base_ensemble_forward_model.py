@@ -40,7 +40,7 @@ class BaseEnsembleForwardModel:
         self.num_cpus_per_process = num_cpus_per_process
         self.parallel_execution = num_parallel_processes > 1
 
-        if forward_model.dirs.results_dir is not None:
+        if forward_model.dirs.results_dir is not None:  # type: ignore[attr-defined]
             self.save_on_disk = True
             self.save_in_memory = False
         else:
@@ -57,25 +57,16 @@ class BaseEnsembleForwardModel:
         """Run the forward model ensemble in parallel."""
         raise NotImplementedError
 
+    @abstractmethod
     def _run_ensemble_sequentially_in_memory(
         self,
         state: xarray.Dataset,
         params: xarray.Dataset,
     ) -> xarray.Dataset:
         """Run the forward model ensemble sequentially in memory."""
+        raise NotImplementedError
 
-        states = []
-        for i in tqdm(
-            range(self.ensemble_size), desc="Running ensemble", total=self.ensemble_size
-        ):
-            states.append(
-                self.forward_model.__call__(
-                    params=params.isel(ensemble=i) if params is not None else None,
-                    state=state.isel(ensemble=i) if state is not None else None,
-                )
-            )
-        return xarray.concat(states, dim="ensemble", join="override")
-
+    @abstractmethod
     def _run_ensemble_sequentially_on_disk(
         self,
         state: xarray.Dataset,
@@ -83,20 +74,11 @@ class BaseEnsembleForwardModel:
         sim_name: str,
     ) -> xarray.Dataset:
         """Run the forward model ensemble sequentially on disk."""
-
-        for i in tqdm(
-            range(self.ensemble_size), desc="Running ensemble", total=self.ensemble_size
-        ):
-            _ = self.forward_model.__call__(
-                params=params.isel(ensemble=i) if params is not None else None,
-                state=state.isel(ensemble=i) if state is not None else None,
-                sim_name=f"{sim_name}_{i}",
-            )
-        return None
+        raise NotImplementedError
 
     def run_ensemble(
         self,
-        state: Optional[xarray.Dataset] = None,
+        state: Optional[xarray.Dataset | pathlib.Path] = None,
         params: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
@@ -105,7 +87,8 @@ class BaseEnsembleForwardModel:
 
         Args:
             state: The state of the forward model. If None, the state is initialized
-                according to the speicific forward model implementation.
+                according to the speicific forward model implementation. If a pathlib.Path
+                is provided, the state is loaded from the path.
             params: The parameters of the forward model. If None, the parameters are
                 initialized according to the speicific forward model implementation.
             sim_name: The name of the simulation. If None, the simulation name is "state".
