@@ -32,15 +32,14 @@ def collect_rollout_results(
     if sim_file.exists():
         # Load both datasets into memory and close file handles before writing
         # (cannot write to sim_file while it is still open for reading)
-        with xarray.open_dataset(sim_file, engine="netcdf4") as existing_state:
-            existing_data = existing_state.load()
-        with xarray.open_dataset(rollout_file, engine="netcdf4") as rollout_state:
-            rollout_data = rollout_state.load()
+        existing_data = xarray.open_dataset(sim_file, engine="netcdf4")
+        rollout_data = xarray.open_dataset(rollout_file, engine="netcdf4")
 
         combined_state = xarray.concat(
             [existing_data, rollout_data], dim="time", join="override"
         )
         rollout_file.unlink(missing_ok=True)
+        sim_file.unlink(missing_ok=True)
         combined_state.to_netcdf(sim_file)
     else:
         # Rename rollout file to sim_name.nc
