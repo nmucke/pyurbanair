@@ -15,6 +15,7 @@ from data_assimilation.observation_operator import (
 from data_assimilation.smoothing.esmda import StateAndParameterESMDA
 from pyudales.ensemble_forward_model import EnsembleForwardModel
 from pyudales.forward_model import ForwardModel
+from pyudales.rollout_forward_model import RolloutForwardModel
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 from pyurbanair.utils.state_utils import get_velocity_magnitude_field
@@ -64,9 +65,12 @@ TEMP_DIR = None  # "/scratch/ntmucke/pyudales"
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
+# Initialize states
+INIT_STATES_DIR = pathlib.Path("esmda_init_conditions")
+
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 1
+NUM_PARALLEL_PROCESSES = 8
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
@@ -74,7 +78,7 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 4
+ENSEMBLE_SIZE = 36
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -111,34 +115,18 @@ def main() -> None:
     ##### Setup parameter ensemble #####
     rng_key = jax.random.PRNGKey(SEED)
 
-    rng_key, subkey = jax.random.split(rng_key)
-    inflow_angle_range = jax.random.normal(subkey, (ENSEMBLE_SIZE,)) * 8
-
-    rng_key, subkey = jax.random.split(rng_key)
-    velocity_magnitude_range = jax.random.normal(subkey, (ENSEMBLE_SIZE,)) * 1 + 4.0
-    velocity_magnitude_range = jnp.maximum(velocity_magnitude_range, 0.1)
-
-    params_ensemble = xarray.Dataset(
-        data_vars={
-            "inflow_angle": ("ensemble", inflow_angle_range),
-            "velocity_magnitude": ("ensemble", velocity_magnitude_range),
-        },
-        coords={"ensemble": jnp.arange(len(inflow_angle_range))},
-    )
-
-    ##### Setup forward model #####
-    true_params = xarray.Dataset(
-        data_vars={
-            "inflow_angle": TRUE_ANGLE,
-            "velocity_magnitude": TRUE_VELOCITY_MAGNITUDE,
-            "pressure_gradient_magnitude": TRUE_PRESSURE_GRADIENT_MAGNITUDE,
-        },
-    )
-    forward_model = ForwardModel(**FIXED_INPUT)
+    true_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(ensemble=0)
+    forward_model = RolloutForwardModel(**FIXED_INPUT)
     forward_model.run_preprocessing(python_or_matlab="python")
 
+    TRUE_VELOCITY_MAGNITUDE = true_params.velocity_magnitude.values
+    TRUE_ANGLE = true_params.inflow_angle.values
+
     ##### Run true simulation #####
-    true_state = forward_model(params=true_params)
+    true_init_condition = xarray.open_dataset(INIT_STATES_DIR / f"state_{0}.nc").isel(
+        time=-1
+    )
+    true_state = forward_model(params=true_params, state=true_init_condition)
     true_velocity_field = get_velocity_magnitude_field(true_state)
 
     ##### Setup observations #####
@@ -162,7 +150,14 @@ def main() -> None:
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
 
-    # ray.init(num_cpus=NUM_PARALLEL_PROCESSES * NCPU_PER_PROCESS)
+    init_states = [
+        xarray.open_dataset(INIT_STATES_DIR / f"state_{i}.nc").isel(time=-1)
+        for i in range(ENSEMBLE_SIZE)
+    ]
+    init_states = xarray.concat(init_states, dim="ensemble", join="override")
+    init_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(
+        ensemble=slice(0, ENSEMBLE_SIZE)
+    )
 
     ##### Run ESMDA #####
     t1 = time.time()
@@ -176,7 +171,8 @@ def main() -> None:
         # results_dir=pathlib.Path(RESULTS_DIR),
     )
     output = esmda(
-        params=params_ensemble,
+        state=init_states,
+        params=init_params,
         observations=true_obs,
         return_params_history=True,
         return_state_history=True,
@@ -196,12 +192,21 @@ def main() -> None:
 
     # If 'time' is in the dimensions of ensemble_mean_field, select the last time step
     if "time" in ensemble_mean_field.dims:
+        rmse_init = [
+            jnp.sqrt(
+                jnp.mean((mean_velocity_field[i, 0] - true_velocity_field[0]) ** 2)
+            ).item()
+            for i in range(NUM_ESMDA_STEPS + 1)
+        ]
+        mean_velocity_field_init = mean_velocity_field[:, 0]
+        true_velocity_field_init = true_velocity_field[0]
+
         mean_velocity_field = mean_velocity_field[:, -1]
         true_velocity_field = true_velocity_field[-1]
 
     ##### Plot results #####
     fig, axes = plt.subplots(
-        NUM_ESMDA_STEPS + 1, 5, figsize=(16, 4 * (NUM_ESMDA_STEPS + 1))
+        NUM_ESMDA_STEPS + 1, 8, figsize=(8 * 4, 4 * (NUM_ESMDA_STEPS + 1))
     )
 
     hist_args = lambda i: {
@@ -234,48 +239,59 @@ def main() -> None:
             **im_args,
         )
 
-        axes[i, 3].hist(params.inflow_angle.isel(esmda_step=i).values, **hist_args(i))
-        axes[i, 3].set_xlim(-15, 15)
-        axes[i, 3].axvline(**angle_axvline_args)
-        axes[i, 3].axvline(
+        axes[i, 1].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
+        axes[i, 0].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
+
+        if i == 0:
+            axes[i, 0].set_title("Ens mean end time")
+            axes[i, 1].set_title("True end time")
+            axes[i, 3].set_title(f"Ens mean init cond")
+            axes[i, 4].set_title(f"True init cond")
+            axes[i, 6].set_title("Angle distribution")
+            if "velocity_magnitude" in params:
+                axes[i, 7].set_title("Velocity magnitude distribution")
+
+        axes[i, 2].set_title(f"RMSE: {rmse[i]:.4f}")
+
+        im = axes[i, 3].imshow(
+            mean_velocity_field_init[i, Z_PLOT_LEVEL, :, :], **im_args
+        )
+        im = axes[i, 4].imshow(true_velocity_field_init[Z_PLOT_LEVEL, :, :], **im_args)
+        im = axes[i, 5].imshow(
+            mean_velocity_field_init[i, Z_PLOT_LEVEL, :, :]
+            - true_velocity_field_init[Z_PLOT_LEVEL, :, :],
+            **im_args,
+        )
+        # fig.colorbar(im, ax=axes[i, 5])
+        axes[i, 5].set_title(f"RMSE: {rmse_init[i]:.4f}")
+
+        axes[i, 6].hist(params.inflow_angle.isel(esmda_step=i).values, **hist_args(i))
+        axes[i, 6].set_xlim(-20, 10)
+        axes[i, 6].axvline(**angle_axvline_args)
+        axes[i, 6].axvline(
             jnp.mean(params.inflow_angle.isel(esmda_step=i).values),
             color="black",
             linestyle="--",
             label="ESMDA Mean",
             linewidth=3,
         )
-        axes[i, 3].legend()
+        axes[i, 6].legend()
 
         if "velocity_magnitude" in params:
-            axes[i, 4].hist(
+            axes[i, 7].hist(
                 params.velocity_magnitude.isel(esmda_step=i).values, **hist_args(i)
             )
-            axes[i, 4].set_xlim(0, 8)
-            axes[i, 4].axvline(**velocity_axvline_args)
-            axes[i, 4].axvline(
+            axes[i, 7].set_xlim(0, 8)
+            axes[i, 7].axvline(**velocity_axvline_args)
+            axes[i, 7].axvline(
                 jnp.mean(params.velocity_magnitude.isel(esmda_step=i).values),
                 color="black",
                 linestyle="--",
                 label="ESMDA Mean",
                 linewidth=3,
             )
-            axes[i, 4].legend()
+            axes[i, 7].legend()
 
-        fig.colorbar(im, ax=axes[i, 0])
-        fig.colorbar(im, ax=axes[i, 1])
-        fig.colorbar(im, ax=axes[i, 2])
-
-        axes[i, 1].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
-        axes[i, 0].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
-
-        if i == 0:
-            axes[i, 0].set_title("Ensemble mean")
-            axes[i, 1].set_title("True")
-            axes[i, 3].set_title("Angle distribution")
-            if "velocity_magnitude" in params:
-                axes[i, 4].set_title("Velocity magnitude distribution")
-
-        axes[i, 2].set_title(f"RMSE: {rmse[i]:.4f}")
     plt.savefig(
         os.path.join(FIGURES_DIR, f"esmda_results_udales_{NUM_ESMDA_STEPS}.pdf")
     )

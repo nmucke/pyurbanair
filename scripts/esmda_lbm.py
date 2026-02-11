@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import xarray
 from data_assimilation.observation_operator import ObservationOperator
-from data_assimilation.smoothing.esmda import ESMDA
+from data_assimilation.smoothing.esmda import ParameterESMDA
 from pylbm.forward_model import ForwardModel
 
 from pyurbanair.utils.state_utils import get_velocity_magnitude_field
@@ -85,8 +85,6 @@ def main() -> None:
     true_velocity_field = get_velocity_magnitude_field(true_state)
     true_velocity_field = true_velocity_field[0]
 
-    pdb.set_trace()
-
     ##### Setup observations #####
     observation_operator = ObservationOperator(
         OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES, solver_name="pylbm"
@@ -96,7 +94,7 @@ def main() -> None:
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
     ##### Run ESMDA #####
-    esmda = ESMDA(
+    esmda = ParameterESMDA(
         observation_operator=observation_operator,
         forward_model=forward_model,
         C_D=C_D,

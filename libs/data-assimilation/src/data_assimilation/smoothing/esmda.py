@@ -397,7 +397,7 @@ class StateAndParameterESMDA(BaseSmoothing):
         params_array = jnp.array(params_array)  # Shape: [N_p, N_e]
 
         # Concatenate params_array and states_array
-        states_array = jnp.concatenate([params_array, states_array], axis=0)
+        states_array = jnp.concatenate([states_array, params_array], axis=0)
 
         # Compute ensemble means
         # params_mean = jnp.mean(params_array, axis=1)  # Shape: [N_p]
@@ -454,21 +454,24 @@ class StateAndParameterESMDA(BaseSmoothing):
 
         states_array = self._unflatten_state(states_array, state_template)
 
-        import matplotlib.pyplot as plt
+        # import matplotlib.pyplot as plt
 
-        from pyurbanair.utils.state_utils import get_velocity_magnitude_field
+        # from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 
-        velocity_field = get_velocity_magnitude_field(states_array)
+        # velocity_field = get_velocity_magnitude_field(states_array)
 
-        plt.figure()
-        plt.imshow(velocity_field[0, 1, :, :])
-        plt.colorbar()
-        plt.show()
+        # plt.figure()
+        # plt.imshow(velocity_field[0, 1, :, :])
+        # plt.colorbar()
+        # plt.show()
 
-        pdb.set_trace()
-        return xarray.Dataset(
-            data_vars=updated_data_vars,
-            coords=params.coords,
+        # pdb.set_trace()
+        return (
+            states_array,
+            xarray.Dataset(
+                data_vars=updated_data_vars,
+                coords=params.coords,
+            ),
         )
 
     def get_state(
@@ -506,32 +509,34 @@ class StateAndParameterESMDA(BaseSmoothing):
         for i in range(self.num_steps):
             state = self._forecast_step(state=state, params=params)
 
-            params = self._one_step(params=params, obs=observations, state=state)
-            if return_params_history:
-                params_history.append(params)
-
             if return_state_history:
                 if self.forward_model.save_on_disk:
                     self._save_states_to_disk(step=i)
                 else:
                     state_history.append(state)
 
+            state, params = self._one_step(params=params, obs=observations, state=state)
+
+            if return_params_history:
+                params_history.append(params)
+
             print(f"ESMDA step {i} completed")
 
-        if return_params_history:
-            params_history = xarray.concat(
-                params_history, dim="esmda_step", join="override"
-            )
+        state = self._forecast_step(state=state, params=params)
 
         if return_state_history:
-            state = self._forecast_step(state=state, params=params)
             if self.forward_model.save_on_disk:
-                self._save_states_to_disk(step=self.num_steps)
+                self._save_states_to_disk(step=i)
             else:
                 state_history.append(state)
                 state_history = xarray.concat(
                     state_history, dim="esmda_step", join="override"
                 )
+
+        if return_params_history:
+            params_history = xarray.concat(
+                params_history, dim="esmda_step", join="override"
+            )
 
         if self.save_on_disk:
             if return_params_history:
@@ -544,4 +549,4 @@ class StateAndParameterESMDA(BaseSmoothing):
         elif return_state_history:
             return state_history
         else:
-            return params
+            return params, state

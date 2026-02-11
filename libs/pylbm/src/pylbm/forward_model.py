@@ -233,6 +233,7 @@ class ForwardModel(BaseForwardModel):
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
+        sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
         """Run the LBM executable from the rundir."""
 

@@ -1,7 +1,9 @@
 """Utilities for handling warm start settings for uDALES."""
 
 import logging
+import os
 import pathlib
+import pdb
 import re
 import shutil
 
@@ -174,9 +176,7 @@ def identify_warmstart_file(
     output_experiment_dir = dirs.output_dir.joinpath(dirs.experiment_name)
 
     if not output_experiment_dir.exists():
-        raise ValueError(
-            f"Output experiment directory {output_experiment_dir} does not exist"
-        )
+        os.makedirs(output_experiment_dir, exist_ok=True)
 
     for item in output_experiment_dir.iterdir():
         if item.is_file():
@@ -186,6 +186,30 @@ def identify_warmstart_file(
                 # Return in x-format: initd{timestamp}_xxx_xxx.{experiment_name}
                 # return f"initd{timestamp}_xxx_xxx.{dirs.experiment_name}"
                 return f"initd{timestamp}_000_000.{dirs.experiment_name}"
+
+    # Try copying a warmstart file from the default directory if none found
+    warmstart_dir = dirs.cwd / "libs" / "pyudales" / "warmstart_files"
+    if os.path.exists(warmstart_dir):
+        for fname in os.listdir(warmstart_dir):
+            # Match files with .nc or .300 (suffix is not known; can be parametric)
+            if fname.startswith("initd") and ("." in fname):
+                src_file = os.path.join(warmstart_dir, fname)
+                # New file with same basename but replace suffix after last '.' with dirs.experiment_name
+                parts = fname.rsplit(".", 1)
+                if len(parts) == 2:
+                    new_fname = f"{parts[0]}.{dirs.experiment_name}"
+                else:
+                    new_fname = fname  # fallback
+                dst_file = output_experiment_dir / new_fname
+                shutil.copy2(src_file, dst_file)
+                # Return in x-format: e.g., initd{timestamp}_000_000.{dirs.experiment_name}
+                match = re.match(r"^initd(\d+)_\d+_\d+\.", new_fname)
+                if match:
+                    timestamp = match.group(1)
+                    return f"initd{timestamp}_000_000.{dirs.experiment_name}"
+                else:
+                    # fallback: return the filename just copied
+                    return new_fname
 
     raise ValueError(f"No warmstart file found in {output_experiment_dir}")
 
