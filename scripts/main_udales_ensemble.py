@@ -1,6 +1,7 @@
 import os
 import pathlib
 import pdb
+import shutil
 import time
 
 import jax
@@ -30,11 +31,11 @@ RESULTS_DIR = pathlib.Path(".temp/udales")
 FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
-ENSEMBLE_SIZE = 12
+ENSEMBLE_SIZE = 100
 
 # Compute ressources
-NCPU_PER_PROCESS = 4
-NUM_PARALLEL_PROCESSES = 2
+NCPU_PER_PROCESS = 1
+NUM_PARALLEL_PROCESSES = 1
 
 # Forward model settings
 FIXED_INPUT = {
@@ -50,6 +51,9 @@ FIXED_INPUT = {
 
 
 def main() -> None:
+
+    if os.path.exists(".temp"):
+        shutil.rmtree(".temp")
 
     ##### Setup parameter ensemble #####
     rng_key = jax.random.PRNGKey(SEED)
@@ -88,9 +92,9 @@ def main() -> None:
 
     pdb.set_trace()
 
-    vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)  # type: ignore[union-attr]
+    vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     # Add vel_magnitude as a data variable in state
-    state = state.assign(vel_magnitude=(("time", "zm", "yt", "xt"), vel_magnitude))  # type: ignore[union-attr]
+    state = state.assign(vel_magnitude=(("time", "zm", "yt", "xt"), vel_magnitude))
 
     animate_state(
         state=state,

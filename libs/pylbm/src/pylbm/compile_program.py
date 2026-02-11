@@ -455,7 +455,7 @@ def create_infile(rundir: pathlib.Path | None = None, verbose: bool = True) -> N
 # Time stepping and outputs
  00000            ! nt0           : First timestep
  1000             ! nt1           : Final timestep
- 5000             ! iout          : Number of steps between diag outputs
+ 2                ! iout          : Number of steps between diag outputs
  10000            ! irestarts     : Number of steps between restart outputs
  00 60000 1       ! iprt1 iprt2 x : Output every x timestep for it <= iprt1 and it >= iprt2
  3                ! tecout        : full tecplot files (0), only solution (2), netcdf (3)
@@ -465,7 +465,7 @@ def create_infile(rundir: pathlib.Path | None = None, verbose: bool = True) -> N
  22               ! kbnd          : 0-periodic, 11,12,21,22 no-slip bb(1), free-slip bb(2) for k=1 and k=nz
 # Inflow variables
  8.0 0.0          ! uini, udir    : Inflow wind velocity [m/s], direction in degrees (-45:45)
- F 0.00005  100   ! lturb amp nrtu: Add turbulence forcing on inflow, amplitude, number of prestored time ste
+ T 0.0005  100   ! lturb amp nrtu: Add turbulence forcing on inflow, amplitude, number of prestored time ste
 # Physical variables
  0.0000178        ! visckin       : Dimensional kinematic viscosity
  1.225            ! C_rho - Density of air at surface 15C and  101.325 kPa  [kg/m^3] Eq. (7.12)
