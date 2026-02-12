@@ -63,6 +63,7 @@ fftw = {version=">=3.3.10", channel="conda-forge"}
 netcdf-fortran = {version=">=4.6.2", channel="conda-forge"}
 gfortran = {version=">=15.2.0", channel="conda-forge"}
 gcc = {version=">=15.2.0", channel="conda-forge"}
+openmpi = {version=">=4.1.0", channel="conda-forge"}
 
 [tool.pixi.pypi-dependencies]
 pyurbanair = { path = ".", editable = true }
