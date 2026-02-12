@@ -133,8 +133,13 @@ format = { cmd = "black src", description = "Format code" }
 type-check = { cmd = "mypy src", description = "Type check code" }
 sort-imports = { cmd = "isort src", description = "Sort imports" }
 
+[tool.pixi.feature.benchmark_geometry.dependencies]
+numpy = "*"
+matplotlib = "*"
+typer = "*"
+
 
 [tool.pixi.environments]
 default = { features = ["py312"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "benchmark_geometry"] }
 delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm"] }
