@@ -1,5 +1,4 @@
 import numpy as np
-
 import typer
 from benchmark_geometry_utils import Building
 
@@ -175,7 +174,12 @@ def test_BenchmarkGeometry() -> None:
         f.write(geometry.to_lbm())
 
 
-def main(output_type: str, filename: str, resolution: int = 1) -> None:
+def main(
+    output_type: str,
+    filename: str,
+    resolution: int = 1,
+    num_tiles: tuple[int, int] = (2, 2),
+) -> None:
     """
     Command Line Tool to generate the geometry for the Xie Castro benchmark.
 
@@ -186,10 +190,12 @@ def main(output_type: str, filename: str, resolution: int = 1) -> None:
     :param resolution: multiple of the default resolution of the simulation
     :type resolution: int
     """
-    if output_type not in ["lbm", "stl", "palm"]:
+    if output_type not in ["lbm", "stl"]:  # , "palm"]:
         print("Invalid type!")
         raise typer.Exit()
-    geometry = XieCastroBenchmarkGeometry(resolution_factor=resolution)
+    geometry = XieCastroBenchmarkGeometry(
+        resolution_factor=resolution, num_tiles=num_tiles
+    )
     match output_type:
         case "lbm":
             with open(filename + ".ini", "w") as f:
@@ -197,14 +203,10 @@ def main(output_type: str, filename: str, resolution: int = 1) -> None:
         case "stl":
             with open(filename + ".stl", "w") as f:
                 f.write(geometry.to_stl())
-        case "palm":
-            raise NotImplementedError("Palm output not implemented yet")
-            # with open(filename + ".palm", "w") as f:
-            #    f.write(geometry.to_palm())
         case _:
             pass
 
 
 if __name__ == "__main__":
-    test_BenchmarkGeometry()
+    # test_BenchmarkGeometry()
     typer.run(main)
