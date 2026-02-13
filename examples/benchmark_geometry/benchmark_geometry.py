@@ -1,4 +1,5 @@
 import numpy as np
+
 import typer
 from benchmark_geometry_utils import Building
 
@@ -16,13 +17,14 @@ class XieCastroBenchmarkGeometry:
                 [10, 6.4, 13.6, 10],
             ]
         ),
+        num_tiles: tuple[int, int] = (2, 2),
         resolution_factor: int = 2,
     ):
         """
         Docstring für __init__
 
-        :param heights: The heights of the individual buildings  defaults to the Xie Castro setup
-        :param resolution_factor: Multiple of the default resolution (which is [8,8,10] * average building height)
+                    :param heights: The heights of the individual buildings  defaults to the Xie Castro setup
+            :param resolution_factor: Multiple of the default resolution (which is [8,8,10] * average building height)
         :type resolution_factor: int
         """
 
@@ -32,62 +34,72 @@ class XieCastroBenchmarkGeometry:
         ), "The Xie Castro Benchmark needs 4x4 building heights"
         self.heights = heights
         self.height_mean = np.mean(self.heights)
-        self.tile_size = self.height_mean
+        self.box_size = self.height_mean
         self.intrinsic_size = np.array([8, 8, 10], dtype=int)
         self.lower = np.array([0, 0, 0])
-        self.upper = self.tile_size * self.intrinsic_size
-        self.num_cells = resolution_factor * 2 * self.intrinsic_size
+        self.upper = self.box_size * self.intrinsic_size * np.append(num_tiles, 1)
+        self.tile_size = self.box_size * self.intrinsic_size
+        self.num_cells = (
+            resolution_factor * 2 * self.intrinsic_size * np.append(num_tiles, 1)
+        )
+        self.num_tiles = num_tiles
         self.buildings = self._create_building_list()
 
     def _create_building_list(self) -> list[Building]:
-        tile_size = self.tile_size
-        row_origins = np.array(
-            [
-                [tile_size / 2, tile_size / 2],
-                [5 * tile_size / 2, 3 * tile_size / 2],
-                [9 * tile_size / 2, tile_size / 2],
-                [13 * tile_size / 2, 3 * tile_size / 2],
-            ]
-        )
+        box_size = self.box_size
+        ro = []
+        for i in range(self.num_tiles[0]):
+            ro.append([i * self.tile_size[0] + box_size / 2, box_size / 2])
+            ro.append([i * self.tile_size[0] + 5 * box_size / 2, 3 * box_size / 2])
+            ro.append([i * self.tile_size[0] + 9 * box_size / 2, box_size / 2])
+            ro.append([i * self.tile_size[0] + 13 * box_size / 2, 3 * box_size / 2])
+
+        row_origins = np.array(ro)
 
         buildings = []
-
+        tiles = self.num_tiles
+        tile_size = self.tile_size
+        tiled_heights = np.tile(self.heights, tiles)
         # aligned rows
-        idx = [0, 2]
-        for origin, hs in zip(row_origins[idx, :], self.heights[idx, :]):
+        # idx = [0, 2]
+        idx = np.arange(0, len(row_origins), 2)
+        for origin, hs in zip(row_origins[idx, :], tiled_heights[idx, :]):
             for i, h in enumerate(hs):
                 buildings.append(
                     Building(
-                        np.array([0, 2 * i * tile_size]) + origin,
-                        size=[tile_size, tile_size],
+                        np.array([0, 2 * i * box_size]) + origin,
+                        size=[box_size, box_size],
                         height=h,
                     )
                 )
 
         # shifted rows
-        idx = [1, 3]
-        for origin, hs in zip(row_origins[idx, :], self.heights[idx, :]):
-            for i, h in enumerate(hs[:3]):
+        # idx = [1, 3]
+        idx = np.arange(1, len(row_origins), 2)
+        for origin, hs in zip(row_origins[idx, :], tiled_heights[idx, :]):
+            for i, h in enumerate(hs[:-1]):
                 buildings.append(
                     Building(
-                        np.array([0, 2 * i * tile_size]) + origin,
-                        size=[tile_size, tile_size],
+                        np.array([0, 2 * i * box_size]) + origin,
+                        size=[box_size, box_size],
                         height=h,
                     )
                 )
 
             buildings.append(
                 Building(
-                    np.array([0, -3 * tile_size / 2]) + origin,
-                    size=[tile_size, tile_size / 2],
-                    height=hs[3],
+                    np.array([0, -3 * box_size / 2]) + origin,
+                    size=[box_size, box_size / 2],
+                    height=hs[-1],
                 )
             )
+            print((tiles[1] - 1) * tile_size[1] + box_size * 6 * box_size + origin)
             buildings.append(
                 Building(
-                    np.array([0, 6 * tile_size]) + origin,
-                    size=[tile_size, tile_size / 2],
-                    height=hs[3],
+                    np.array([0, (tiles[1] - 1) * tile_size[1] + 6 * box_size])
+                    + origin,
+                    size=[box_size, box_size / 2],
+                    height=hs[-1],
                 )
             )
         return buildings
@@ -102,6 +114,7 @@ class XieCastroBenchmarkGeometry:
         )
         indices = []
         for b in self.buildings:
+            print(b.bounding_box)
             mask |= b.compute_mask(grid)
             indices.append(b.compute_index(xs, ys, zs))
         return mask, np.array(indices)
@@ -193,5 +206,5 @@ def main(output_type: str, filename: str, resolution: int = 1) -> None:
 
 
 if __name__ == "__main__":
-    # test_BenchmarkGeometry()
+    test_BenchmarkGeometry()
     typer.run(main)
