@@ -70,57 +70,6 @@ def add_module_to_main(case_name: str) -> None:
     main_f90_path.write_text("\n".join(lines) + "\n")
 
 
-def add_case_to_select_statement(case_name: str) -> None:
-    """
-    Add case statement for {case_name} to the select case block in main.F90.
-
-    Args:
-        case_name: Name of the case (e.g., "runcase")
-    """
-    main_f90_path = LBM_PATH / "src" / "main.F90"  # type: ignore[operator]
-
-    if not main_f90_path.exists():
-        raise FileNotFoundError(f"main.F90 not found at {main_f90_path}")
-
-    # Read main.F90
-    content = main_f90_path.read_text()
-    lines = content.splitlines()
-
-    # Find the select case statement and end select
-    select_idx = None
-    end_select_idx = None
-
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("select case") and select_idx is None:
-            select_idx = i
-        if stripped == "end select" and select_idx is not None:
-            end_select_idx = i
-            break
-
-    if select_idx is None or end_select_idx is None:
-        raise ValueError("Could not find select case statement in main.F90")
-
-    # Check if case already exists
-    case_pattern = f"case('{case_name}')"
-    for i in range(select_idx, end_select_idx):
-        if case_pattern in lines[i]:
-            return  # Already added
-
-    # Insert the new case before end select
-    case_lines = [
-        f"   case('{case_name}')",
-        f"      call {case_name}(lsolids,lblanking)",
-    ]
-
-    # Insert before end select
-    for i, case_line in enumerate(case_lines):
-        lines.insert(end_select_idx + i, case_line)
-
-    # Write back to file
-    main_f90_path.write_text("\n".join(lines) + "\n")
-
-
 def add_case_dimensions_to_mod_dimensions(
     case_name: str, nx: int, ny: int, nz: int
 ) -> None:
