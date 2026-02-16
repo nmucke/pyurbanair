@@ -28,6 +28,7 @@ class ForwardModel(BaseForwardModel):
         bounds: (
             tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None
         ) = None,
+        output_frequency: float = 1.0,
         results_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
         experiment_name: str = "runcase",
@@ -73,7 +74,9 @@ class ForwardModel(BaseForwardModel):
 
         # Set number of timesteps
         self.num_timesteps = num_timesteps
+        self.output_frequency = output_frequency
         self._set_infile_value("nt1", self.num_timesteps)
+        self._set_infile_value("iout", int(self.output_frequency))
         self._set_infile_value("experiment", self.dirs.experiment_name)
         self._set_infile_value("tecout", "3")
 
@@ -140,11 +143,25 @@ class ForwardModel(BaseForwardModel):
 
         self.run()
 
-        sim_name = f"out_0000_F{self.num_timesteps:06d}.nc"
         # sim_name = f"out_0000_F000000.nc"
 
-        state = xarray.load_dataset(self.dirs.output_dir / sim_name, engine="netcdf4")
+        if self.output_frequency < self.num_timesteps:
+            sim_name = "out_0000_F"
+            state = []
+            for i in range(0, self.num_timesteps, int(self.output_frequency)):
+                sim_name_i = f"{sim_name}{i:06d}.nc"
+                state.append(
+                    xarray.load_dataset(
+                        self.dirs.output_dir / sim_name_i, engine="netcdf4"
+                    )
+                )
+            state = xarray.concat(state, dim="time", join="override")
+        else:
+            sim_name = f"out_0000_F{self.num_timesteps:06d}.nc"
+            state = xarray.load_dataset(
+                self.dirs.output_dir / sim_name, engine="netcdf4"
+            )
+            # Add time dimension as the first dimension
+            state = state.expand_dims("time", axis=0)
 
-        # Add time dimension as the first dimension
-        state = state.expand_dims("time", axis=0)
         return state
