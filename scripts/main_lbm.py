@@ -16,14 +16,14 @@ def main() -> None:
     stl_path = pathlib.Path("examples/lbm/experiments/xie_castro_2008_STL.stl")
     # stl_path = pathlib.Path("examples/lbm/experiments/geom.STL")
 
-    # forward_model = ForwardModel(
-    #     stl_path=stl_path,
-    #     nx=120,
-    #     ny=120,
-    #     nz=8,
-    #     num_timesteps=50,
-    #     bounds=((0, 160), (0, 160), (0, 40)),
-    # )
+    forward_model = ForwardModel(
+        stl_path=stl_path,
+        nx=120,
+        ny=120,
+        nz=8,
+        num_timesteps=150,
+        bounds=((0, 160), (0, 160), (0, 40)),
+    )
     # inflow_angle = np.array([1, 10, 20])
     # velocity_magnitude = np.array([3, 5, 7])
     # params = xarray.Dataset(
@@ -33,13 +33,13 @@ def main() -> None:
     #     },
     #     coords={"ensemble": np.arange(len(inflow_angle))},
     # )
-    # params = xarray.Dataset(
-    #     data_vars={
-    #         "inflow_angle": 15,
-    #         "velocity_magnitude": 1,
-    #     },
-    # )
-    # state = forward_model(params=params)
+    params = xarray.Dataset(
+        data_vars={
+            "inflow_angle": -40,
+            "velocity_magnitude": 10,
+        },
+    )
+    state = forward_model(params=params)
 
     # state = xarray.load_dataset(".temp/lbm/out000500.nc")
 
@@ -49,8 +49,6 @@ def main() -> None:
     #     [xarray.load_dataset(f".temp/lbm/{file_name}") for file_name in all_file_names],
     #     dim="time",
     # )
-
-    state = xarray.load_dataset("out_0003_F001000.nc")
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     state = state.assign(vel_magnitude=(("time", "z", "y", "x"), vel_magnitude))
@@ -62,19 +60,20 @@ def main() -> None:
     if "rho" in state.data_vars:
         state = state.drop_vars("rho")
 
-    animate_state(
-        state=state,
-        output_path=pathlib.Path("figures/lbm_animation.mp4"),
-        z_level=0,
-        # vmin={"u": -3.0, "v": -2.0, "w": -2.0, "pres": 0.0, "vel_magnitude": 0.0},
-        # vmax={"u": 3.0, "v": 2.0, "w": 2.0, "pres": 1.0, "vel_magnitude": 3.0},
-    )
+    # animate_state(
+    #     state=state,
+    #     output_path=pathlib.Path("figures/lbm_animation.mp4"),
+    #     z_level=0,
+    #     # vmin={"u": -3.0, "v": -2.0, "w": -2.0, "pres": 0.0, "vel_magnitude": 0.0},
+    #     # vmax={"u": 3.0, "v": 2.0, "w": 2.0, "pres": 1.0, "vel_magnitude": 3.0},
+    # )
 
     vel_magnitude = state.v.values
     print(vel_magnitude.shape)
     print(vel_magnitude.min(), vel_magnitude.max())
     plt.figure()
-    plt.imshow(vel_magnitude[0, 0, :, :])
+    plt.imshow(vel_magnitude[0, 1, :, :])
+    # plt.imshow(state.blanking.values[0, 1, :, :])
     plt.colorbar()
     plt.savefig("figures/vel_magnitude_lbm.png")
     plt.show()

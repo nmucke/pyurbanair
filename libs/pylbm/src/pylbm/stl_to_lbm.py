@@ -477,6 +477,228 @@ end module
     return full_code
 
 
+def update_solid_objects_init(
+    solid_objects_init_path: pathlib.Path,
+    experiment_name: str,
+) -> None:
+    """
+    Update m_solid_objects_init.F90 to include the generated geometry module.
+
+    This function:
+    1. Adds `use m_{experiment_name}` to the use statements if not present
+    2. Adds a `case('{experiment_name}')` block in the select case statement
+       that calls the geometry subroutine
+
+    Args:
+        solid_objects_init_path: Path to m_solid_objects_init.F90
+        experiment_name: Name of the experiment (e.g. "runcase", "city2")
+    """
+    if not solid_objects_init_path.exists():
+        print(
+            f"Warning: m_solid_objects_init.F90 not found at {solid_objects_init_path}",
+            file=sys.stderr,
+        )
+        return
+
+    module_name = f"m_{experiment_name}"
+    use_statement = f"   use {module_name}"
+
+    # Read the file
+    with open(solid_objects_init_path, "r") as f:
+        lines = f.readlines()
+
+    # Check if use statement already exists (check for exact module name)
+    has_use = any(f"use {module_name}" in line for line in lines)
+
+    # Check if case statement exists and is correctly implemented
+    case_pattern = f"case('{experiment_name}')"
+    case_line_idx = None
+    case_end_idx = None
+    case_correct = False
+
+    for i, line in enumerate(lines):
+        if case_pattern in line:
+            case_line_idx = i
+            # Find where this case block ends (next case or end select)
+            case_end_idx = i + 1
+            for j in range(i + 1, len(lines)):
+                if lines[j].strip().startswith("case(") or lines[j].strip().startswith(
+                    "end select"
+                ):
+                    case_end_idx = j
+                    break
+
+            # Check if case is empty (immediately followed by another case)
+            is_empty = case_end_idx > i + 1 and lines[i + 1].strip().startswith("case(")
+
+            if is_empty:
+                # Empty case is always incorrect
+                case_correct = False
+                break
+
+            # Check if the case block has the correct call and no wrong calls
+            has_correct_call = False
+            has_wrong_calls = False
+
+            # Look through all lines in the case block
+            for j in range(i + 1, case_end_idx):
+                line_content = lines[j]
+                # Check for correct call: call {experiment_name}(lsolids, blanking_global)
+                if f"call {experiment_name}(lsolids, blanking_global)" in line_content:
+                    has_correct_call = True
+                # Check for any call statements
+                elif "call " in line_content:
+                    # If it's calling something other than our experiment, it's wrong
+                    if f"call {experiment_name}" not in line_content:
+                        has_wrong_calls = True
+                    # If it's calling our experiment but with wrong signature
+                    elif f"call {experiment_name}" in line_content:
+                        if "(lsolids, blanking_global)" not in line_content:
+                            has_wrong_calls = True
+
+            # Case is correct only if it has exactly the correct call and no wrong calls
+            case_correct = has_correct_call and not has_wrong_calls
+            break
+
+    modified = False
+
+    # Step 1: Add use statement if missing
+    if not has_use:
+        # Find the insertion point (after other use m_* statements, before MPI section)
+        insert_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("use m_") and not line.strip().startswith(
+                "use m_mpi"
+            ):
+                # Keep track of the last use m_* line
+                insert_idx = i + 1
+            elif line.strip().startswith("#ifdef MPI") or line.strip().startswith(
+                "implicit none"
+            ):
+                # Stop before MPI section or implicit none
+                if insert_idx is not None:
+                    break
+                insert_idx = i
+                break
+
+        if insert_idx is None:
+            # Fallback: insert after use m_dump_elevation
+            for i, line in enumerate(lines):
+                if "use m_dump_elevation" in line:
+                    insert_idx = i + 1
+                    break
+
+        if insert_idx is not None:
+            lines.insert(insert_idx, use_statement + "\n")
+            modified = True
+            print(
+                f"Added use statement: {use_statement}",
+                file=sys.stderr,
+            )
+
+    # Step 2: Add or fix case statement
+    if not case_correct:
+        # Also check for and fix empty cases that might be before our target case
+        # (e.g., empty cylinder case before runcase)
+        lines_deleted_before = 0
+        if case_line_idx is not None:
+            # Check if there's an empty case immediately before our target case
+            if (
+                case_line_idx > 0
+                and lines[case_line_idx - 1].strip().startswith("case(")
+                and lines[case_line_idx - 1].strip() != f"case('{experiment_name}')"
+            ):
+                # Check if the previous case is empty (falls through to our case)
+                prev_case_line = case_line_idx - 1
+                # If the line immediately after the previous case is our case, it's empty
+                if prev_case_line + 1 == case_line_idx:
+                    # Remove the empty case line
+                    del lines[prev_case_line]
+                    lines_deleted_before = 1
+                    modified = True
+                    print(
+                        f"Removed empty case statement before '{experiment_name}'",
+                        file=sys.stderr,
+                    )
+                    # Adjust case_line_idx and case_end_idx since we deleted a line
+                    case_line_idx -= 1
+                    if case_end_idx is not None:
+                        case_end_idx -= 1
+
+        if case_line_idx is not None and case_end_idx is not None:
+            # Case exists but is broken - need to fix it
+            # Remove the broken case block
+            del lines[case_line_idx:case_end_idx]
+            modified = True
+            print(
+                f"Removed broken case statement for '{experiment_name}'",
+                file=sys.stderr,
+            )
+
+        # Find the select case block and add/fix the case
+        # Need to recalculate indices after deletion
+        in_select_case = False
+        case_insert_idx = None
+
+        for i, line in enumerate(lines):
+            if "select case(trim(experiment))" in line:
+                in_select_case = True
+            elif in_select_case and line.strip().startswith("case("):
+                # Track the last case statement (but skip 'airfoil' which stops execution)
+                if "'airfoil'" not in line:
+                    # Find the end of this case block (next case or end select)
+                    case_block_end = i + 1
+                    for j in range(i + 1, len(lines)):
+                        if lines[j].strip().startswith("case(") or lines[
+                            j
+                        ].strip().startswith("end select"):
+                            case_block_end = j
+                            break
+                    # Insert after the entire case block, not just the case line
+                    case_insert_idx = case_block_end
+            elif in_select_case and line.strip().startswith("end select"):
+                # Insert before end select (or before airfoil if it exists)
+                if case_insert_idx is None:
+                    case_insert_idx = i
+                break
+
+        if case_insert_idx is not None:
+            # Generate the case block
+            # Note: runcase signature is (lsolids, blanking) while others are (blanking)
+            # Since we generate with (lsolids, blanking) signature, we call it with both args
+            # Also set lsolids=.true. after the call for consistency
+            case_block = f"""      case('{experiment_name}')
+         call {experiment_name}(lsolids, blanking_global)
+         lsolids=.true.
+"""
+            lines.insert(case_insert_idx, case_block)
+            modified = True
+            if case_line_idx is not None:
+                print(
+                    f"Fixed case statement for '{experiment_name}'",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Added case statement for '{experiment_name}'",
+                    file=sys.stderr,
+                )
+
+    # Write back if modified
+    if modified:
+        with open(solid_objects_init_path, "w") as f:
+            f.writelines(lines)
+        print(
+            f"Updated m_solid_objects_init.F90 to include {experiment_name} geometry",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"m_solid_objects_init.F90 already includes {experiment_name} geometry",
+            file=sys.stderr,
+        )
+
+
 # --- Helper Wrapper for Testing ---
 def process_stl_to_fortran(
     stl_path: str | pathlib.Path,
@@ -577,4 +799,10 @@ def stl_to_lbm_geometry(
         module_name=f"m_{dirs.experiment_name}",
         subroutine_name=dirs.experiment_name,
         filename=dirs.lbm_src_path / f"m_{dirs.experiment_name}.F90",  # type: ignore[arg-type]
+    )
+
+    # Step 3: Update m_solid_objects_init.F90 to use the generated geometry
+    update_solid_objects_init(
+        solid_objects_init_path=dirs.lbm_src_path / "m_solid_objects_init.F90",
+        experiment_name=dirs.experiment_name,
     )

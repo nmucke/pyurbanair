@@ -140,8 +140,8 @@ class ForwardModel(BaseForwardModel):
 
         self.run()
 
-        # sim_name = f"out_0000_{self.num_timesteps:06d}.nc"
-        sim_name = f"out_0000_F000000.nc"
+        sim_name = f"out_0000_F{self.num_timesteps:06d}.nc"
+        # sim_name = f"out_0000_F000000.nc"
 
         state = xarray.load_dataset(self.dirs.output_dir / sim_name, engine="netcdf4")
 
