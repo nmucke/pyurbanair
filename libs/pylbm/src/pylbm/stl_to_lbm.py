@@ -5,6 +5,7 @@ from collections import defaultdict
 
 import numpy as np
 import trimesh
+from pylbm.utils import DirectoryPaths
 
 
 def _split_buildings_edge_based(mesh: trimesh.Trimesh) -> list[trimesh.Trimesh]:
@@ -515,17 +516,13 @@ def process_stl_to_fortran(
 # --- Main API function matching the old interface ---
 def stl_to_lbm_geometry(
     stl_path: str | pathlib.Path,
-    output_path: str | pathlib.Path,
-    module_name: str = "m_runcase",
-    subroutine_name: str = "runcase",
-    nx: int = 200,
-    ny: int = 120,
-    nz: int = 96,
+    dirs: DirectoryPaths,
+    nx: int,
+    ny: int,
+    nz: int,
     bounds: (
         tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None
     ) = None,
-    scale: float | None = None,
-    translate: tuple[float, float, float] | None = None,
 ) -> None:
     """
     Convert an STL file to a Fortran geometry module for LBM simulation.
@@ -535,9 +532,8 @@ def stl_to_lbm_geometry(
 
     Args:
         stl_path: Path to the input STL file
-        output_path: Path where the output Fortran file will be written
-        module_name: Name of the Fortran module (default: "m_runcase")
-        subroutine_name: Name of the Fortran subroutine (default: "runcase")
+        dirs: DirectoryPaths object containing all relevant paths (including experiment_dir
+              and executable_path).
         nx: Grid resolution in x-direction
         ny: Grid resolution in y-direction
         nz: Grid resolution in z-direction
@@ -550,10 +546,6 @@ def stl_to_lbm_geometry(
         None. Writes the Fortran file to output_path.
     """
     stl_path = pathlib.Path(stl_path)
-    output_path = pathlib.Path(output_path)
-
-    if not stl_path.exists():
-        raise FileNotFoundError(f"STL file not found: {stl_path}")
 
     # Convert bounds from tuple format to dict format if provided
     domain_bounds = None
@@ -567,29 +559,22 @@ def stl_to_lbm_geometry(
             "zmax": float(bounds[2][1]),
         }
 
-    # Note: scale and translate are not yet implemented in the new version
-    # They would need to be applied to the mesh before calling get_building_grid_indices
-    if scale is not None or translate is not None:
-        print(
-            "Warning: scale and translate parameters are not yet implemented "
-            "in the alternative STL conversion. They will be ignored.",
-            file=sys.stderr,
-        )
-
     # Step 1: Get building grid indices
     building_data = get_building_grid_indices(
-        stl_path, nx, ny, nz, domain_bounds=domain_bounds
+        stl_path=stl_path,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        domain_bounds=domain_bounds,
     )
 
     # Step 2: Generate Fortran code
     generate_fortran_code(
-        building_data,
-        nx,
-        ny,
-        nz,
-        module_name=module_name,
-        subroutine_name=subroutine_name,
-        filename=output_path,  # type: ignore[arg-type]
+        buildings_indices=building_data,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        module_name=f"m_{dirs.experiment_name}",
+        subroutine_name=dirs.experiment_name,
+        filename=dirs.lbm_src_path / f"m_{dirs.experiment_name}.F90",  # type: ignore[arg-type]
     )
-
-    print(f"Generated Fortran geometry file: {output_path}", file=sys.stderr)
