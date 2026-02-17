@@ -1,49 +1,60 @@
 import pathlib
 import pdb
+import time
 
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-import pylbm
 import xarray
 from animation import animate_ensemble_state, animate_state
+from pylbm.ensemble_forward_model import EnsembleForwardModel
 
 # from pylbm.compile_program import compile_lbm
 from pylbm.forward_model import ForwardModel
-from pylbm.stl_to_lbm import stl_to_lbm_geometry
+
+ENSEMBLE_SIZE = 4
+NUM_PARALLEL_PROCESSES = 4
+NCPU_PER_PROCESS = 1
+SEED = 42
 
 
 def main() -> None:
     stl_path = pathlib.Path("examples/lbm/experiments/xie_castro_2008_STL.stl")
-    # stl_path = pathlib.Path("examples/lbm/experiments/geom.STL")
+    # stl_path = pathlib.Path("examples/udales/experiments/201/geom.201.STL")
 
     forward_model = ForwardModel(
         stl_path=stl_path,
-        nx=140,
-        ny=120,
+        nx=160,
+        ny=160,
         nz=8,
-        num_timesteps=1500,
-        bounds=((-40, 160), (0, 160), (0, 40)),
+        num_timesteps=1000,
+        bounds=((0, 160), (0, 160), (0, 100)),
         output_frequency=10,
     )
-    # inflow_angle = np.array([1, 10, 20])
-    # velocity_magnitude = np.array([3, 5, 7])
-    # params = xarray.Dataset(
-    #     data_vars={
-    #         "inflow_angle": ("ensemble", inflow_angle),
-    #         "velocity_magnitude": ("ensemble", velocity_magnitude),
-    #     },
-    #     coords={"ensemble": np.arange(len(inflow_angle))},
-    # )
+    ensemble_forward_model = EnsembleForwardModel(
+        forward_model=forward_model,
+        ensemble_size=ENSEMBLE_SIZE,
+        num_parallel_processes=NUM_PARALLEL_PROCESSES,
+        num_cpus_per_process=NCPU_PER_PROCESS,
+    )
+
     params = xarray.Dataset(
         data_vars={
-            "inflow_angle": -40,
-            "velocity_magnitude": 10,
+            "inflow_angle": ("ensemble", jnp.linspace(-40, 40, ENSEMBLE_SIZE)),
+            "velocity_magnitude": ("ensemble", jnp.ones(ENSEMBLE_SIZE) * 10),
         },
+        coords={"ensemble": jnp.arange(ENSEMBLE_SIZE)},
     )
-    state = forward_model(params=params)
+
+    t1 = time.time()
+    state = ensemble_forward_model.run_ensemble(params=params)
+    t2 = time.time()
+    print(f"Time taken: {t2 - t1} seconds")
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
-    state = state.assign(vel_magnitude=(("time", "z", "y", "x"), vel_magnitude))
+    state = state.assign(
+        vel_magnitude=(("ensemble", "time", "z", "y", "x"), vel_magnitude)
+    )
 
     # Remove the blanking data_var from the xarray.Dataset if present
     if "blanking" in state.data_vars:
@@ -52,12 +63,13 @@ def main() -> None:
     if "rho" in state.data_vars:
         state = state.drop_vars("rho")
 
-    animate_state(
+    state = state.drop_vars("v")
+    state = state.drop_vars("w")
+
+    animate_ensemble_state(
         state=state,
-        output_path=pathlib.Path("figures/lbm_animation.mp4"),
+        output_path=pathlib.Path("figures/lbm_ensemble_animation.mp4"),
         z_level=1,
-        # vmin={"u": -3.0, "v": -2.0, "w": -2.0, "pres": 0.0, "vel_magnitude": 0.0},
-        # vmax={"u": 3.0, "v": 2.0, "w": 2.0, "pres": 1.0, "vel_magnitude": 3.0},
     )
 
     vel_magnitude = state.v.values

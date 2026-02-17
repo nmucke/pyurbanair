@@ -119,6 +119,9 @@ def add_case_dimensions_to_mod_dimensions(
                 new_lines.append(
                     f"  integer, parameter :: nz = {nz:<10} ! resolution z-dir (up)"
                 )
+                new_lines.append(
+                    f"  integer, parameter :: nyg = {ny:<10} ! global grid dimension y-dir (north)"
+                )
                 new_lines.append("")
             new_lines.append(line)
             break
