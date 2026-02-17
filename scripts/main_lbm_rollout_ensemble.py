@@ -1,12 +1,18 @@
 import pathlib
 import pdb
 
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import pylbm
 import xarray
-from animation import animate_state
+from animation import animate_ensemble_state, animate_state
+from pylbm.ensemble_forward_model import EnsembleForwardModel
 from pylbm.rollout_forward_model import RolloutForwardModel
+
+ENSEMBLE_SIZE = 3
+NUM_PARALLEL_PROCESSES = 3
+NUM_CPUS_PER_PROCESS = 1
 
 
 def main() -> None:
@@ -15,35 +21,43 @@ def main() -> None:
 
     forward_model = RolloutForwardModel(
         stl_path=stl_path,
-        nx=140,
+        nx=120,
         ny=120,
         nz=8,
-        num_timesteps=100,
-        bounds=((-40, 160), (0, 160), (0, 40)),
+        num_timesteps=1000,
+        bounds=((0, 160), (0, 160), (0, 40)),
         output_frequency=10,
-        # results_dir=pathlib.Path(".temp/results"),
+        results_dir=pathlib.Path(".temp/results"),
     )
     params = xarray.Dataset(
         data_vars={
-            "inflow_angle": -40,
-            "velocity_magnitude": 10,
+            "inflow_angle": ("ensemble", jnp.linspace(-40, 40, ENSEMBLE_SIZE)),
+            "velocity_magnitude": ("ensemble", jnp.ones(ENSEMBLE_SIZE) * 10),
         },
     )
     # save_on_disk is applied automatically when results_dir is passed above
 
+    ensemble_forward_model = EnsembleForwardModel(
+        forward_model=forward_model,
+        ensemble_size=ENSEMBLE_SIZE,
+        num_parallel_processes=NUM_PARALLEL_PROCESSES,
+        num_cpus_per_process=NUM_CPUS_PER_PROCESS,
+    )
+
     # Run 3 rollout steps (cold → warm → warm)
     states = []
     for _ in range(3):
-        state = forward_model.run_single(sim_name="my_sim")
+        state = ensemble_forward_model.run_ensemble(params=params)
         states.append(state)
 
-    pdb.set_trace()
-    # state = xarray.load_dataset(forward_model.results_dir / "my_sim.nc")
-    state = forward_model.get_states()
-    pdb.set_trace()
+    # state = ensemble_forward_model.get_states()
     # state = xarray.concat(states, dim="time", join="override")
+    state = ensemble_forward_model.get_states()
+
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
-    state = state.assign(vel_magnitude=(("time", "z", "y", "x"), vel_magnitude))
+    state = state.assign(
+        vel_magnitude=(("ensemble", "time", "z", "y", "x"), vel_magnitude)
+    )
 
     # Remove the blanking data_var from the xarray.Dataset if present
     if "blanking" in state.data_vars:
@@ -52,7 +66,7 @@ def main() -> None:
     if "rho" in state.data_vars:
         state = state.drop_vars("rho")
 
-    animate_state(
+    animate_ensemble_state(
         state=state,
         output_path=pathlib.Path("figures/lbm_animation.mp4"),
         z_level=1,
