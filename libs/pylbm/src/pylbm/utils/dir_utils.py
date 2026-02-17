@@ -44,6 +44,7 @@ def get_lbm_directory_paths(
     temp_dir: pathlib.Path,
     case_dir: pathlib.Path,
     experiment_name: str,
+    experiment_base_dir: Optional[pathlib.Path] = None,
     results_dir: Optional[pathlib.Path] = None,
 ) -> DirectoryPaths:
     """
@@ -53,7 +54,7 @@ def get_lbm_directory_paths(
         lbm_src_path: Path to the LBM src directory (contains makefile, mod_dimensions.F90, main.F90).
         cwd: Current working directory.
         temp_dir: Base temp directory (e.g. {cwd}/.temp).
-        experiment_base_dir: Base directory for experiments.
+        experiment_base_dir: Base directory for experiments. If None, uses {temp_dir}/experiment.
         experiment_dir: Specific experiment directory (e.g. {experiment_base_dir}/{experiment_name}).
         output_dir: Output directory.
         case_dir: Original case directory provided by the user.
@@ -69,7 +70,11 @@ def get_lbm_directory_paths(
     mod_dimensions_path = lbm_src_path / "mod_dimensions.F90"
     makefile_path = lbm_src_path / "makefile"
 
-    experiment_base_dir = create_dir(temp_dir / "experiment")
+    if experiment_base_dir is None:
+        experiment_base_dir = create_dir(temp_dir / "experiment")
+    else:
+        experiment_base_dir = create_dir(experiment_base_dir)
+
     experiment_dir = create_dir(experiment_base_dir / experiment_name)
 
     output_dir = create_dir(experiment_dir / "output")
