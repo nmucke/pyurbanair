@@ -13,11 +13,9 @@ from data_assimilation.observation_operator import (
     TemporalObservationOperator,
 )
 from data_assimilation.smoothing.esmda import StateAndParameterESMDA
-from pyudales.ensemble_forward_model import EnsembleForwardModel
-from pyudales.forward_model import ForwardModel
-from pyudales.rollout_forward_model import RolloutForwardModel
+from pylbm.ensemble_forward_model import EnsembleForwardModel
+from pylbm.rollout_forward_model import RolloutForwardModel
 
-from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 
 
@@ -55,36 +53,30 @@ SEED = 42
 
 Z_PLOT_LEVEL = 1
 
-# Directory settings
-# MATLAB_BIN = "/Applications/MATLAB_R2025b.app/bin/matlab"
-MATLAB_BIN = "/opt/sw/matlab-2023b/bin/matlab"
-EXPERIMENT_DIR = "examples/udales/experiments/xie_and_castro"
-EXPERIMENT_NAME = "999"
-RESULTS_DIR = ".temp/udales"
-TEMP_DIR = None  # "/scratch/ntmucke/pyudales"
-FIGURES_DIR = "figures"
-os.makedirs(FIGURES_DIR, exist_ok=True)
+RESULTS_DIR = ".temp/lbm"
 
 # Initialize states
-INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/udales")
+INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/lbm")
+
+FIGURES_DIR = "figures"
+os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
 NUM_PARALLEL_PROCESSES = 8
 
 # True parameters
-TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
-TRUE_VELOCITY_MAGNITUDE = 3.0
+TRUE_VELOCITY_MAGNITUDE = 10.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 36
+ENSEMBLE_SIZE = 4
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
-OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
-OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
+OBS_IDS_X = [40, 50, 90, 110, 80, 20, 50, 90]
+OBS_IDS_Y = [30, 60, 90, 110, 20, 60, 90, 50]
 OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
 OBS_STATES = ["u", "v", "w"]
 NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
@@ -95,14 +87,15 @@ C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
 # Forward model settings
 FIXED_INPUT = {
-    "save_only_last_timestep": False,
     "output_frequency": 2.0,
-    "ncpu": NCPU_PER_PROCESS,
-    "matlab_bin": MATLAB_BIN,
-    "case_dir": EXPERIMENT_DIR,
+    "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
+    "nx": 120,
+    "ny": 120,
+    "nz": 8,
+    "num_timesteps": 100,
+    "bounds": ((0, 160), (0, 160), (0, 40)),
     "verbose": False,
-    "temp_dir": TEMP_DIR,
-    "experiment_name": EXPERIMENT_NAME,
+    # "results_dir": pathlib.Path(RESULTS_DIR),
 }
 
 
@@ -117,7 +110,6 @@ def main() -> None:
 
     true_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(ensemble=0)
     forward_model = RolloutForwardModel(**FIXED_INPUT)
-    forward_model.run_preprocessing(python_or_matlab="python")
 
     TRUE_VELOCITY_MAGNITUDE = true_params.velocity_magnitude.values
     TRUE_ANGLE = true_params.inflow_angle.values
@@ -131,7 +123,7 @@ def main() -> None:
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
-        OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES, solver_name="udales"
+        OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES, solver_name="pylbm"
     )
     if FIXED_INPUT["output_frequency"] is not None:
         observation_operator = TemporalObservationOperator(

@@ -1,3 +1,4 @@
+import pathlib
 from typing import Any, Optional
 
 import xarray
@@ -8,6 +9,7 @@ from .utils.warm_start_utils import (
     clean_output_files,
     identify_latest_restart_iteration,
     remove_old_restart_files,
+    write_restart_file_from_xarray,
 )
 
 
@@ -45,25 +47,75 @@ class RolloutForwardModel(ForwardModel):
         self._set_infile_value("nt0", restart_iteration)
         self._set_infile_value("nt1", restart_iteration + self.num_timesteps)
 
+    def _get_restart_iteration_from_state(
+        self,
+        state: xarray.Dataset | pathlib.Path,
+    ) -> Optional[int]:
+        """Infer restart iteration from xarray state time coordinate if available."""
+        if isinstance(state, pathlib.Path):
+            state_ds = xarray.open_dataset(state, engine="netcdf4").load()
+        else:
+            state_ds = state
+
+        if "time" not in state_ds.coords and "time" not in state_ds.dims:
+            return None
+
+        time_values = state_ds["time"].values
+        if getattr(time_values, "size", 0) == 0:
+            return None
+
+        try:
+            return int(round(float(time_values[-1])))
+        except Exception:
+            return None
+
     def run_single(
         self,
-        state: Optional[xarray.Dataset] = None,
+        state: Optional[xarray.Dataset | pathlib.Path] = None,
         params: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
         """
         Run one rollout step.
 
-        State injection is not yet supported for LBM rollout because restart
-        files are Fortran unformatted binaries with model-specific layout.
+        If `state` is provided, it is converted to an equilibrium restart file
+        and used as warmstart for this rollout step.
         """
         if state is not None:
-            raise NotImplementedError(
-                "State initialization is not supported for pylbm rollout yet. "
-                "Run a cold step first, then continue with warmstart."
+            # restart_iteration = self._get_restart_iteration_from_state(state)
+            # restart_file = (
+            #     self.dirs.experiment_dir / "restart" / f"restart_0000_{restart_iteration:06d}.uf"
+            #     if restart_iteration is not None
+            #     else None
+            # )
+
+            # if restart_file is not None and restart_file.exists():
+            #     # Prefer existing native restart files when they match the xarray time,
+            #     # which is the most stable continuation path.
+            #     pass
+            # else:
+            #     latest_restart = identify_latest_restart_iteration(self.dirs)
+            #     if latest_restart is not None:
+            #         # If state time cannot be mapped to an existing restart, fall back to
+            #         # latest native restart for stability.
+            #         restart_iteration = latest_restart
+            #     else:
+            #         restart_iteration = write_restart_file_from_xarray(
+            #             state=state,
+            #             dirs=self.dirs,
+            #         )
+
+            latest_restart = identify_latest_restart_iteration(self.dirs)
+            restart_iteration = write_restart_file_from_xarray(
+                state=state,
+                dirs=self.dirs,
+                restart_iteration=latest_restart,
             )
 
-        self._configure_for_rollout_step()
+            self._set_infile_value("nt0", restart_iteration)
+            self._set_infile_value("nt1", restart_iteration + self.num_timesteps)
+        else:
+            self._configure_for_rollout_step()
         self.rollout_step += 1
 
         step_sim_name = (
