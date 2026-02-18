@@ -63,14 +63,14 @@ os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 8
+NUM_PARALLEL_PROCESSES = 5
 
 # True parameters
 TRUE_VELOCITY_MAGNITUDE = 10.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 4
+ENSEMBLE_SIZE = 100
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -137,7 +137,7 @@ def main() -> None:
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        results_dir=pathlib.Path(RESULTS_DIR),
+        # results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
@@ -160,7 +160,7 @@ def main() -> None:
         num_steps=NUM_ESMDA_STEPS,
         alpha=ALPHA,
         rng_key=rng_key,
-        # results_dir=pathlib.Path(RESULTS_DIR),
+        results_dir=pathlib.Path(RESULTS_DIR),
     )
     output = esmda(
         state=init_states,

@@ -1,11 +1,14 @@
 """pylbm - Python wrapper for LBM."""
 
+import logging
 import os
 import pathlib
 import subprocess
 import sys
 
 __version__ = "0.1.0"
+
+logger = logging.getLogger(__name__)
 
 # Get paths
 _project_root = pathlib.Path(__file__).parent.parent.parent
@@ -25,7 +28,7 @@ _lbm_url = None
 if _gitmodules_path.exists():
     try:
         gitmodules_content = _gitmodules_path.read_text()
-        print(f"Reading .gitmodules from: {_gitmodules_path}", file=sys.stderr)
+        logger.info("Reading .gitmodules from: %s", _gitmodules_path)
         # Parse .gitmodules by sections
         in_lbm_section = False
         for line in gitmodules_content.splitlines():
@@ -42,24 +45,19 @@ if _gitmodules_path.exists():
                     if "=" in stripped:
                         submodule_path = stripped.split("=", 1)[1].strip()
                         _lbm_path = _repo_root / submodule_path
-                        print(
-                            f"Found LBM path in .gitmodules: {submodule_path} -> {_lbm_path}",
-                            file=sys.stderr,
+                        logger.info(
+                            "Found LBM path in .gitmodules: %s -> %s",
+                            submodule_path,
+                            _lbm_path,
                         )
                 elif stripped.startswith("url = ") or stripped.startswith("url="):
                     if "=" in stripped:
                         _lbm_url = stripped.split("=", 1)[1].strip()
-                        print(
-                            f"Found LBM URL in .gitmodules: {_lbm_url}",
-                            file=sys.stderr,
-                        )
+                        logger.info("Found LBM URL in .gitmodules: %s", _lbm_url)
     except Exception as e:
-        print(f"Error reading .gitmodules: {e}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
+        logger.exception("Error reading .gitmodules: %s", e)
 else:
-    print(f".gitmodules not found at: {_gitmodules_path}", file=sys.stderr)
+    logger.warning(".gitmodules not found at: %s", _gitmodules_path)
 
 # Initialize git submodule from .gitmodules
 _repo_just_downloaded = False
@@ -74,7 +72,7 @@ if _lbm_path:
     needs_init = not is_repo_downloaded
 
     if needs_init:
-        print("Initializing LBM git submodule...", file=sys.stderr)
+        logger.info("Initializing LBM git submodule...")
         submodule_success = False
 
         # Try git submodule first
@@ -94,24 +92,23 @@ if _lbm_path:
                 text=True,
             )
             if result.returncode == 0:
-                print("LBM submodule initialized successfully.", file=sys.stderr)
+                logger.info("LBM submodule initialized successfully.")
                 submodule_success = True
                 _repo_just_downloaded = True
             else:
-                print(
-                    f"Git submodule init failed (code {result.returncode}), trying direct clone...",
-                    file=sys.stderr,
+                logger.warning(
+                    "Git submodule init failed (code %s), trying direct clone...",
+                    result.returncode,
                 )
         except Exception as e:
-            print(
-                f"Exception during submodule init: {e}, trying direct clone...",
-                file=sys.stderr,
+            logger.warning(
+                "Exception during submodule init: %s, trying direct clone...", e
             )
 
         # Fallback to direct clone if submodule failed
         if not submodule_success and _lbm_url:
             try:
-                print(f"Cloning LBM from {_lbm_url}...", file=sys.stderr)
+                logger.info("Cloning LBM from %s...", _lbm_url)
                 # Remove empty directory if it exists
                 if _lbm_path.exists():
                     import shutil
@@ -129,25 +126,19 @@ if _lbm_path:
                     text=True,
                 )
                 if result.returncode == 0:
-                    print("LBM cloned successfully.", file=sys.stderr)
+                    logger.info("LBM cloned successfully.")
                     _repo_just_downloaded = True
                 else:
-                    print(
-                        f"Warning: git clone failed (code {result.returncode})",
-                        file=sys.stderr,
-                    )
+                    logger.warning("git clone failed (code %s)", result.returncode)
                     if result.stderr:
-                        print(f"Error: {result.stderr}", file=sys.stderr)
+                        logger.error("Error: %s", result.stderr)
             except Exception as e:
-                print(f"Exception during git clone: {e}", file=sys.stderr)
+                logger.exception("Exception during git clone: %s", e)
     else:
-        print(
-            "LBM repository already downloaded, skipping initialization.",
-            file=sys.stderr,
-        )
+        logger.info("LBM repository already downloaded, skipping initialization.")
 
     # Set LBM_PATH from gitmodules path (always set it)
     LBM_PATH = _lbm_path.resolve()
-    print(f"LBM_PATH set to: {LBM_PATH}", file=sys.stderr)
+    logger.info("LBM_PATH set to: %s", LBM_PATH)
 else:
-    print("Warning: Could not find LBM path in .gitmodules", file=sys.stderr)
+    logger.warning("Could not find LBM path in .gitmodules")

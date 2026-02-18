@@ -16,6 +16,7 @@ from data_assimilation.observation_operator import (
 from data_assimilation.smoothing.esmda import StateAndParameterESMDA
 from pylbm.ensemble_forward_model import EnsembleForwardModel
 from pylbm.rollout_forward_model import RolloutForwardModel
+from tqdm import tqdm
 
 from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 
@@ -93,7 +94,7 @@ INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/lbm")
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 8
+NUM_PARALLEL_PROCESSES = 10
 
 # True parameters
 TRUE_VELOCITY_MAGNITUDE = 10.0
@@ -102,7 +103,7 @@ TRUE_ANGLE = 10.0
 RESULTS_DIR = ".temp/lbm"
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 32
+ENSEMBLE_SIZE = 64
 NUM_ESMDA_STEPS = 3
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -190,7 +191,7 @@ def main() -> None:
     esmda_state_list = []
     esmda_params_list = []
     esmda_obs_list = []
-    for i in range(NUM_ASSIMILATION_WINDOWS):
+    for i in tqdm(range(NUM_ASSIMILATION_WINDOWS)):
 
         rng_key, subkey = jax.random.split(rng_key)
         vel_magnitude_perturbation = jax.random.normal(subkey, (1,)) * 0.5
@@ -216,7 +217,7 @@ def main() -> None:
         true_state = forward_model(
             params=true_params.isel(ensemble=0), state=true_state
         )
-        true_state = true_state.isel(time=slice(1, None))
+        # true_state = true_state.isel(time=slice(1, None))
         true_state_list.append(true_state.isel(z=Z_PLOT_LEVEL))
         true_params_list.append(true_params)
 

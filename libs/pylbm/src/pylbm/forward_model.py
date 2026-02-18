@@ -1,10 +1,12 @@
+import logging
 import os
 import pathlib
 import pdb
 import re
 import subprocess
-import sys
 from typing import Optional, Union
+
+logger = logging.getLogger(__name__)
 
 import xarray
 from pylbm.utils import get_lbm_directory_paths
@@ -68,9 +70,9 @@ class ForwardModel(BaseForwardModel):
         if not self.dirs.infile_path.exists():
             create_infile(dirs=self.dirs, verbose=self.verbose)
         elif self.verbose:
-            print(
-                f"infile.in already exists at {self.dirs.infile_path}, skipping creation.",
-                file=sys.stderr,
+            logger.info(
+                "infile.in already exists at %s, skipping creation.",
+                self.dirs.infile_path,
             )
 
         # Set number of timesteps
@@ -142,7 +144,7 @@ class ForwardModel(BaseForwardModel):
         """
 
         if self.verbose:
-            print(f"Executable: {self.dirs.executable_path}", file=sys.stderr)
+            logger.info("Executable: %s", self.dirs.executable_path)
 
         original_cwd = pathlib.Path.cwd()
 

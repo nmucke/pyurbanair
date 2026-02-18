@@ -2,11 +2,14 @@
 Compile the LBM program.
 """
 
+import logging
 import os
 import pathlib
 import subprocess
 import sys
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from .dir_utils import DirectoryPaths
 from .makefile_utils import Makefile
@@ -52,7 +55,7 @@ def compile_lbm(
     makefile.write()
 
     if verbose:
-        print(f"Updated makefile HOME to {dirs.pixi_env_path}", file=sys.stderr)
+        logger.info("Updated makefile HOME to %s", dirs.pixi_env_path)
 
     # Set up environment variables
     env = os.environ.copy()
@@ -69,8 +72,8 @@ def compile_lbm(
         os.chdir(dirs.lbm_src_path)
 
         if verbose:
-            print(f"Changed to directory: {dirs.lbm_src_path}", file=sys.stderr)
-            print("Compiling LBM program...", file=sys.stderr)
+            logger.info("Changed to directory: %s", dirs.lbm_src_path)
+            logger.info("Compiling LBM program...")
 
         # Build make command
         make_args = ["make", "-B", "GFORTRAN=1"]
@@ -92,7 +95,7 @@ def compile_lbm(
             )
 
         if verbose:
-            print("LBM compilation completed successfully", file=sys.stderr)
+            logger.info("LBM compilation completed successfully")
 
     finally:
         # Always return to original directory

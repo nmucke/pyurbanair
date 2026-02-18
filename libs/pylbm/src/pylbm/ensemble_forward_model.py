@@ -21,6 +21,7 @@ from .utils.warm_start_utils import (
     clean_output_files,
     identify_latest_restart_iteration,
     remove_old_restart_files,
+    write_restart_file_from_xarray,
 )
 
 logger = logging.getLogger(__name__)
@@ -291,6 +292,28 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         for model in self.ensemble_forward_models:
             remove_old_restart_files(model.dirs)
 
+    def _extract_member_state_for_parallel(
+        self,
+        state: xarray.Dataset | pathlib.Path,
+        member_index: int,
+        sim_name: Optional[str],
+    ) -> xarray.Dataset:
+        """Extract one ensemble-member state for parallel warmstart initialization."""
+        if isinstance(state, pathlib.Path):
+            if state.is_dir():
+                base_name = sim_name if sim_name is not None else "state"
+                state_file = state / f"{base_name}_{member_index}.nc"
+                return xarray.open_dataset(state_file, engine="netcdf4").load()
+
+            ds = xarray.open_dataset(state, engine="netcdf4").load()
+            if "ensemble" in ds.dims:
+                return ds.isel(ensemble=member_index)
+            return ds
+
+        if "ensemble" in state.dims:
+            return state.isel(ensemble=member_index)
+        return state
+
     def get_states(
         self,
         sim_name: str = "state",
@@ -348,13 +371,20 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """
         self._apply_inflow_settings(params)
 
-        # LBM doesn't support state initialization in parallel ensemble mode yet.
         if state is not None:
-            logger.warning(
-                "State initialization is not supported for pylbm ensemble parallel execution."
-            )
-
-        if self.rollout:
+            for i, model in enumerate(self.ensemble_forward_models):
+                state_i = self._extract_member_state_for_parallel(
+                    state=state,
+                    member_index=i,
+                    sim_name=sim_name,
+                )
+                restart_iteration = write_restart_file_from_xarray(
+                    state=state_i,
+                    dirs=model.dirs,
+                )
+                model._set_infile_value("nt0", restart_iteration)
+                model._set_infile_value("nt1", restart_iteration + model.num_timesteps)
+        elif self.rollout:
             self._configure_rollout_for_parallel()
 
     def _post_run_ensemble(self, sim_name: str) -> xarray.Dataset | None:

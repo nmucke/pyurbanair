@@ -206,9 +206,9 @@ def create_infile(dirs: "DirectoryPaths", verbose: bool = True) -> None:
     dirs.experiment_dir.mkdir(parents=True, exist_ok=True)
 
     if verbose:
-        print(f"Creating infile.in by running boltzmann executable...", file=sys.stderr)
-        print(f"Executable: {dirs.executable_path}", file=sys.stderr)
-        print(f"Working directory: {dirs.experiment_dir}", file=sys.stderr)
+        logger.info("Creating infile.in by running boltzmann executable...")
+        logger.info("Executable: %s", dirs.executable_path)
+        logger.info("Working directory: %s", dirs.experiment_dir)
 
     # Set up environment variables
     env = os.environ.copy()
@@ -245,9 +245,7 @@ def create_infile(dirs: "DirectoryPaths", verbose: bool = True) -> None:
             )
 
         if verbose:
-            print(
-                f"Successfully created infile.in at {dirs.infile_path}", file=sys.stderr
-            )
+            logger.info("Successfully created infile.in at %s", dirs.infile_path)
 
     finally:
         # Always return to original directory
