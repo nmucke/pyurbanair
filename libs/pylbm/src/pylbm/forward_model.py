@@ -1,9 +1,12 @@
+import logging
 import os
 import pathlib
 import pdb
+import re
 import subprocess
-import sys
 from typing import Optional, Union
+
+logger = logging.getLogger(__name__)
 
 import xarray
 from pylbm.utils import get_lbm_directory_paths
@@ -67,9 +70,9 @@ class ForwardModel(BaseForwardModel):
         if not self.dirs.infile_path.exists():
             create_infile(dirs=self.dirs, verbose=self.verbose)
         elif self.verbose:
-            print(
-                f"infile.in already exists at {self.dirs.infile_path}, skipping creation.",
-                file=sys.stderr,
+            logger.info(
+                "infile.in already exists at %s, skipping creation.",
+                self.dirs.infile_path,
             )
 
         # Set number of timesteps
@@ -94,6 +97,44 @@ class ForwardModel(BaseForwardModel):
         infile.set_value(key, value)
         infile.write()
 
+    def _get_infile_int_value(self, key: str, default: int) -> int:
+        """Read an integer value from infile.in, with fallback to default."""
+        infile = Infile(self.dirs.infile_path)
+        value = infile.get_value_as_int(key)
+        return value if value is not None else default
+
+    def _get_output_files_for_current_run(self) -> list[pathlib.Path]:
+        """
+        Return output netCDF files corresponding to the configured timestep range.
+
+        This supports both cold-start runs (nt0=0) and warm-start runs (nt0>0).
+        """
+        nt0 = self._get_infile_int_value("nt0", 0)
+        nt1 = self._get_infile_int_value("nt1", self.num_timesteps)
+
+        output_files: list[tuple[int, pathlib.Path]] = []
+        for path in self.dirs.output_dir.glob("out_0000_F*.nc"):
+            match = re.search(r"_F(\d+)$", path.stem)
+            if match is None:
+                continue
+            timestep = int(match.group(1))
+            if nt0 <= timestep <= nt1:
+                output_files.append((timestep, path))
+
+        output_files = sorted(output_files, key=lambda x: x[0])
+        if output_files:
+            return [path for _, path in output_files]
+
+        # Fallback to expected final file
+        expected_file = self.dirs.output_dir / f"out_0000_F{nt1:06d}.nc"
+        if expected_file.exists():
+            return [expected_file]
+
+        raise FileNotFoundError(
+            f"No LBM output files found in {self.dirs.output_dir} for timestep range "
+            f"[{nt0}, {nt1}]"
+        )
+
     def run(self) -> None:
         """
         Run the LBM executable from the rundir.
@@ -103,7 +144,7 @@ class ForwardModel(BaseForwardModel):
         """
 
         if self.verbose:
-            print(f"Executable: {self.dirs.executable_path}", file=sys.stderr)
+            logger.info("Executable: %s", self.dirs.executable_path)
 
         original_cwd = pathlib.Path.cwd()
 
@@ -143,25 +184,19 @@ class ForwardModel(BaseForwardModel):
 
         self.run()
 
-        # sim_name = f"out_0000_F000000.nc"
+        output_files = self._get_output_files_for_current_run()
+        datasets = [
+            xarray.load_dataset(path, engine="netcdf4") for path in output_files
+        ]
 
-        if self.output_frequency < self.num_timesteps:
-            sim_name = "out_0000_F"
-            state = []
-            for i in range(0, self.num_timesteps, int(self.output_frequency)):
-                sim_name_i = f"{sim_name}{i:06d}.nc"
-                state.append(
-                    xarray.load_dataset(
-                        self.dirs.output_dir / sim_name_i, engine="netcdf4"
-                    )
-                )
-            state = xarray.concat(state, dim="time", join="override")
+        if len(datasets) > 1:
+            state = xarray.concat(datasets, dim="time", join="override")
         else:
-            sim_name = f"out_0000_F{self.num_timesteps:06d}.nc"
-            state = xarray.load_dataset(
-                self.dirs.output_dir / sim_name, engine="netcdf4"
-            )
-            # Add time dimension as the first dimension
-            state = state.expand_dims("time", axis=0)
+            state = datasets[0].expand_dims("time", axis=0)
+
+        if self.save_on_disk and self.results_dir is not None:
+            outfile = self.results_dir / f"{sim_name}.nc"
+            state.to_netcdf(str(outfile))
+            return None
 
         return state

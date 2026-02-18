@@ -1,7 +1,9 @@
+import logging
 import os
 import pathlib
-import sys
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import trimesh
@@ -109,7 +111,7 @@ def _split_buildings_edge_based(mesh: trimesh.Trimesh) -> list[trimesh.Trimesh]:
             if len(building_mesh.faces) > 0:
                 building_meshes.append(building_mesh)
         except Exception as e:
-            print(f"Warning: Failed to create mesh for component: {e}", file=sys.stderr)
+            logger.warning("Failed to create mesh for component: %s", e)
             continue
 
     return building_meshes
@@ -150,16 +152,13 @@ def get_building_grid_indices(
         scene_meshes = [
             m for m in loaded.geometry.values() if isinstance(m, trimesh.Trimesh)
         ]
-        print(f"Loaded scene with {len(scene_meshes)} separate meshes", file=sys.stderr)
+        logger.info("Loaded scene with %s separate meshes", len(scene_meshes))
 
         # Split each mesh in the scene into connected components
         # (in case some meshes contain multiple buildings)
         for idx, mesh in enumerate(scene_meshes):
             if len(mesh.vertices) == 0:
-                print(
-                    f"Warning: Mesh {idx+1} in scene has no vertices, skipping",
-                    file=sys.stderr,
-                )
+                logger.warning("Mesh %s in scene has no vertices, skipping", idx + 1)
                 continue
 
             # Use edge-based splitting for better building detection
@@ -167,32 +166,27 @@ def get_building_grid_indices(
             if len(split_meshes) > 0:
                 buildings_meshes.extend(split_meshes)
                 if len(split_meshes) > 1:
-                    print(
-                        f"  Mesh {idx+1} split into {len(split_meshes)} components",
-                        file=sys.stderr,
+                    logger.info(
+                        "Mesh %s split into %s components",
+                        idx + 1,
+                        len(split_meshes),
                     )
             else:
                 buildings_meshes.append(mesh)
-                print(f"  Mesh {idx+1} kept as single component", file=sys.stderr)
+                logger.info("Mesh %s kept as single component", idx + 1)
 
     elif isinstance(loaded, trimesh.Trimesh):
         # Single mesh - use edge-based splitting for better building detection
-        print(
-            "Splitting mesh into connected components using edge-based analysis...",
-            file=sys.stderr,
+        logger.info(
+            "Splitting mesh into connected components using edge-based analysis..."
         )
         split_meshes = _split_buildings_edge_based(loaded)
         if len(split_meshes) > 0:
             buildings_meshes = split_meshes
-            print(
-                f"Found {len(buildings_meshes)} connected components", file=sys.stderr
-            )
+            logger.info("Found %s connected components", len(buildings_meshes))
         else:
             buildings_meshes = [loaded]
-            print(
-                "Split returned empty, using original mesh as single building",
-                file=sys.stderr,
-            )
+            logger.info("Split returned empty, using original mesh as single building")
     else:
         raise ValueError(f"Could not load a valid mesh from {stl_path}")
 
@@ -235,9 +229,10 @@ def get_building_grid_indices(
 
         # Filter out very flat structures (likely ground planes or walls)
         if z_size < 0.1:  # Less than 0.1 units tall
-            print(
-                f"Filtering out building {idx+1}: too flat (height={z_size:.3f})",
-                file=sys.stderr,
+            logger.info(
+                "Filtering out building %s: too flat (height=%.3f)",
+                idx + 1,
+                z_size,
             )
             continue
 
@@ -255,11 +250,14 @@ def get_building_grid_indices(
                 # Additional check: if height is also very high (>80% of domain), it might be a large building
                 # But if there are other buildings, this is likely still a base
                 # For now, filter anything covering >90% of both dimensions
-                print(
-                    f"Filtering out building {idx+1}: appears to be ground plane/base "
-                    f"(coverage={100*coverage_x:.1f}% x {100*coverage_y:.1f}%, "
-                    f"height={z_size:.2f}, height_ratio={100*height_ratio:.1f}%)",
-                    file=sys.stderr,
+                logger.info(
+                    "Filtering out building %s: appears to be ground plane/base "
+                    "(coverage=%.1f%% x %.1f%%, height=%.2f, height_ratio=%.1f%%)",
+                    idx + 1,
+                    100 * coverage_x,
+                    100 * coverage_y,
+                    z_size,
+                    100 * height_ratio,
                 )
                 continue
 
@@ -272,9 +270,9 @@ def get_building_grid_indices(
             f"No valid buildings found after filtering (all were too flat)"
         )
 
-    print(
-        f"Detected {len(buildings_meshes)} unique buildings in the STL (after filtering).",
-        file=sys.stderr,
+    logger.info(
+        "Detected %s unique buildings in the STL (after filtering).",
+        len(buildings_meshes),
     )
 
     # 3. Determine Physical Domain for Grid Mapping
@@ -332,12 +330,16 @@ def get_building_grid_indices(
         b_max = mesh.bounds[1]
 
         # Debug: print building physical bounds
-        print(
-            f"Building {idx+1}: physical bounds "
-            f"x=[{b_min[0]:.3f}, {b_max[0]:.3f}], "
-            f"y=[{b_min[1]:.3f}, {b_max[1]:.3f}], "
-            f"z=[{b_min[2]:.3f}, {b_max[2]:.3f}]",
-            file=sys.stderr,
+        logger.debug(
+            "Building %s: physical bounds x=[%.3f, %.3f], y=[%.3f, %.3f], "
+            "z=[%.3f, %.3f]",
+            idx + 1,
+            b_min[0],
+            b_max[0],
+            b_min[1],
+            b_max[1],
+            b_min[2],
+            b_max[2],
         )
 
         # Convert Physical coordinates to Grid Indices
@@ -388,25 +390,36 @@ def get_building_grid_indices(
 
         # Final validation: ensure buildings are not at boundaries
         if building_data["is"] == 1 or building_data["ie"] == nx:
-            print(
-                f"Warning: Building {idx+1} would be at x-boundary, "
-                f"adjusted from i=[{is_raw}, {ie_raw_int}] to i=[{building_data['is']}, {building_data['ie']}]",
-                file=sys.stderr,
+            logger.warning(
+                "Building %s would be at x-boundary, adjusted from i=[%s, %s] "
+                "to i=[%s, %s]",
+                idx + 1,
+                is_raw,
+                ie_raw_int,
+                building_data["is"],
+                building_data["ie"],
             )
         if building_data["js"] == 1 or building_data["je"] == ny:
-            print(
-                f"Warning: Building {idx+1} would be at y-boundary, "
-                f"adjusted from j=[{js_raw}, {je_raw_int}] to j=[{building_data['js']}, {building_data['je']}]",
-                file=sys.stderr,
+            logger.warning(
+                "Building %s would be at y-boundary, adjusted from j=[%s, %s] "
+                "to j=[%s, %s]",
+                idx + 1,
+                js_raw,
+                je_raw_int,
+                building_data["js"],
+                building_data["je"],
             )
 
         # Debug: print grid indices
-        print(
-            f"Building {idx+1}: grid indices "
-            f"i=[{building_data['is']}, {building_data['ie']}], "
-            f"j=[{building_data['js']}, {building_data['je']}], "
-            f"k=[{building_data['ks']}, {building_data['ke']}]",
-            file=sys.stderr,
+        logger.debug(
+            "Building %s: grid indices i=[%s, %s], j=[%s, %s], k=[%s, %s]",
+            idx + 1,
+            building_data["is"],
+            building_data["ie"],
+            building_data["js"],
+            building_data["je"],
+            building_data["ks"],
+            building_data["ke"],
         )
 
         buildings_indices.append(building_data)
@@ -494,9 +507,8 @@ def update_solid_objects_init(
         experiment_name: Name of the experiment (e.g. "runcase", "city2")
     """
     if not solid_objects_init_path.exists():
-        print(
-            f"Warning: m_solid_objects_init.F90 not found at {solid_objects_init_path}",
-            file=sys.stderr,
+        logger.warning(
+            "m_solid_objects_init.F90 not found at %s", solid_objects_init_path
         )
         return
 
@@ -591,10 +603,7 @@ def update_solid_objects_init(
         if insert_idx is not None:
             lines.insert(insert_idx, use_statement + "\n")
             modified = True
-            print(
-                f"Added use statement: {use_statement}",
-                file=sys.stderr,
-            )
+            logger.info("Added use statement: %s", use_statement)
 
     # Step 2: Add or fix case statement
     if not case_correct:
@@ -616,9 +625,9 @@ def update_solid_objects_init(
                     del lines[prev_case_line]
                     lines_deleted_before = 1
                     modified = True
-                    print(
-                        f"Removed empty case statement before '{experiment_name}'",
-                        file=sys.stderr,
+                    logger.info(
+                        "Removed empty case statement before '%s'",
+                        experiment_name,
                     )
                     # Adjust case_line_idx and case_end_idx since we deleted a line
                     case_line_idx -= 1
@@ -630,10 +639,7 @@ def update_solid_objects_init(
             # Remove the broken case block
             del lines[case_line_idx:case_end_idx]
             modified = True
-            print(
-                f"Removed broken case statement for '{experiment_name}'",
-                file=sys.stderr,
-            )
+            logger.info("Removed broken case statement for '%s'", experiment_name)
 
         # Find the select case block and add/fix the case
         # Need to recalculate indices after deletion
@@ -674,28 +680,22 @@ def update_solid_objects_init(
             lines.insert(case_insert_idx, case_block)
             modified = True
             if case_line_idx is not None:
-                print(
-                    f"Fixed case statement for '{experiment_name}'",
-                    file=sys.stderr,
-                )
+                logger.info("Fixed case statement for '%s'", experiment_name)
             else:
-                print(
-                    f"Added case statement for '{experiment_name}'",
-                    file=sys.stderr,
-                )
+                logger.info("Added case statement for '%s'", experiment_name)
 
     # Write back if modified
     if modified:
         with open(solid_objects_init_path, "w") as f:
             f.writelines(lines)
-        print(
-            f"Updated m_solid_objects_init.F90 to include {experiment_name} geometry",
-            file=sys.stderr,
+        logger.info(
+            "Updated m_solid_objects_init.F90 to include %s geometry",
+            experiment_name,
         )
     else:
-        print(
-            f"m_solid_objects_init.F90 already includes {experiment_name} geometry",
-            file=sys.stderr,
+        logger.info(
+            "m_solid_objects_init.F90 already includes %s geometry",
+            experiment_name,
         )
 
 
@@ -711,7 +711,7 @@ def process_stl_to_fortran(
     """
     Orchestrator function for better readability.
     """
-    print(f"Processing {stl_path}...")
+    logger.info("Processing %s...", stl_path)
 
     # Step 1: Get indices
     building_data = get_building_grid_indices(
@@ -731,7 +731,7 @@ def process_stl_to_fortran(
         filename=output_path,  # type: ignore[arg-type]
     )
 
-    print(f"Fortran code written to {output_path}")
+    logger.info("Fortran code written to %s", output_path)
     return code_str
 
 

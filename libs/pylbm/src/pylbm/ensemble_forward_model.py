@@ -12,9 +12,17 @@ from tqdm import tqdm
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
 from .forward_model import ForwardModel
+from .rollout_forward_model import RolloutForwardModel
 from .utils import apply_inflow_settings
 from .utils.dir_utils import create_dir
 from .utils.forward_model_utils import create_new_forward_model
+from .utils.rollout_utils import collect_rollout_results
+from .utils.warm_start_utils import (
+    clean_output_files,
+    identify_latest_restart_iteration,
+    remove_old_restart_files,
+    write_restart_file_from_xarray,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -69,7 +77,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
 
     def __init__(
         self,
-        forward_model: ForwardModel,
+        forward_model: ForwardModel | RolloutForwardModel,
         ensemble_size: int = 10,
         temp_dir: Optional[pathlib.Path] = None,
         results_dir: Optional[pathlib.Path] = None,
@@ -95,8 +103,10 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             num_cpus_per_process=num_cpus_per_process,
         )
 
-        # LBM doesn't have rollout functionality
-        self.rollout = False
+        self.save_on_disk = forward_model.save_on_disk
+
+        self.rollout = isinstance(forward_model, RolloutForwardModel)
+        self.rollout_step = 0
 
         # Create ensemble experiment base directory
         ensemble_temp_dir = (
@@ -138,21 +148,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         Returns:
             List of paths to output files.
         """
-        output_dir = model.dirs.output_dir
-
-        # Find all output files
-        output_files = sorted(
-            output_dir.glob("out_0000_F*.nc"),
-            key=lambda x: int(x.stem.split("_F")[-1]),
-        )
-
-        if not output_files:
-            # Fallback: try the expected final timestep file
-            expected_file = output_dir / f"out_0000_F{model.num_timesteps:06d}.nc"
-            if expected_file.exists():
-                output_files = [expected_file]
-
-        return output_files
+        return model._get_output_files_for_current_run()
 
     def _load_results(self) -> xarray.Dataset:
         """Load the results from the output folders."""
@@ -226,13 +222,138 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             for output_file in output_files:
                 output_file.unlink()
 
+    def _move_and_collect_rollout_results_to_disk(self, sim_name: str) -> None:
+        """Move and aggregate rollout results per ensemble member."""
+        for i, model in enumerate(self.ensemble_forward_models):
+            output_files = self._get_output_files(model)
+
+            if not output_files:
+                logger.warning(
+                    f"No output files found for ensemble member {i} in {model.dirs.output_dir}"
+                )
+                continue
+
+            if model.results_dir is None:
+                logger.warning(
+                    f"results_dir is None for ensemble member {i}, skipping move"
+                )
+                continue
+
+            if len(output_files) > 1:
+                state_parts = []
+                for output_file in output_files:
+                    state_parts.append(
+                        xarray.open_dataset(output_file, engine="netcdf4").load()
+                    )
+                state = xarray.concat(state_parts, dim="time", join="override")
+            else:
+                state = xarray.open_dataset(output_files[0], engine="netcdf4").load()
+                state = state.expand_dims("time", axis=0)
+
+            member_sim_name = f"{sim_name}_{i}"
+            rollout_file = (
+                model.results_dir
+                / f"{member_sim_name}_rollout_{self.rollout_step + 1}.nc"
+            )
+            state.to_netcdf(str(rollout_file))
+            collect_rollout_results(
+                sim_name=member_sim_name,
+                rollout_step=self.rollout_step + 1,
+                results_dir=model.results_dir,
+            )
+
+            for output_file in output_files:
+                output_file.unlink()
+
     def _clean_output(self) -> None:
         """Clean the output folders."""
         for model in self.ensemble_forward_models:
-            output_dir = model.dirs.output_dir
-            # Remove all output files
-            for output_file in output_dir.glob("out_*.nc"):
-                output_file.unlink()
+            clean_output_files(model.dirs)
+
+    def _configure_rollout_for_parallel(self) -> None:
+        """Set nt0/nt1 for parallel rollout runs per ensemble member."""
+        for model in self.ensemble_forward_models:
+            if self.rollout_step == 0:
+                model._set_infile_value("nt0", 0)
+                model._set_infile_value("nt1", model.num_timesteps)
+                continue
+
+            restart_iteration = identify_latest_restart_iteration(model.dirs)
+            if restart_iteration is None:
+                raise FileNotFoundError(
+                    f"No restart files found in {model.dirs.experiment_dir / 'restart'} "
+                    f"for ensemble member {model.dirs.experiment_name} warmstart rollout."
+                )
+            model._set_infile_value("nt0", restart_iteration)
+            model._set_infile_value("nt1", restart_iteration + model.num_timesteps)
+
+    def _clean_old_rollout_restarts(self) -> None:
+        """Keep only newest restart generation for each ensemble member."""
+        for model in self.ensemble_forward_models:
+            remove_old_restart_files(model.dirs)
+
+    def _extract_member_state_for_parallel(
+        self,
+        state: xarray.Dataset | pathlib.Path,
+        member_index: int,
+        sim_name: Optional[str],
+    ) -> xarray.Dataset:
+        """Extract one ensemble-member state for parallel warmstart initialization."""
+        if isinstance(state, pathlib.Path):
+            if state.is_dir():
+                base_name = sim_name if sim_name is not None else "state"
+                state_file = state / f"{base_name}_{member_index}.nc"
+                return xarray.open_dataset(state_file, engine="netcdf4").load()
+
+            ds = xarray.open_dataset(state, engine="netcdf4").load()
+            if "ensemble" in ds.dims:
+                return ds.isel(ensemble=member_index)
+            return ds
+
+        if "ensemble" in state.dims:
+            return state.isel(ensemble=member_index)
+        return state
+
+    def get_states(
+        self,
+        sim_name: str = "state",
+        rollout_step: Optional[int] = None,
+    ) -> xarray.Dataset:
+        """
+        Load ensemble member states from results files on disk.
+
+        Args:
+            sim_name: Base simulation name used when saving ensemble results.
+            rollout_step: Optional rollout step number. If provided, files are
+                read from `{sim_name}_{i}_rollout_{rollout_step}.nc`; otherwise
+                from `{sim_name}_{i}.nc`.
+
+        Returns:
+            Concatenated dataset with `ensemble` dimension.
+        """
+        states = []
+        for i, model in enumerate(self.ensemble_forward_models):
+            if model.results_dir is None:
+                raise ValueError(
+                    f"results_dir is None for ensemble member {i}; "
+                    "cannot load states from disk."
+                )
+
+            if rollout_step is None:
+                result_file = model.results_dir / f"{sim_name}_{i}.nc"
+            else:
+                result_file = (
+                    model.results_dir / f"{sim_name}_{i}_rollout_{rollout_step}.nc"
+                )
+
+            if not result_file.exists():
+                raise FileNotFoundError(
+                    f"Result file not found for ensemble member {i}: {result_file}"
+                )
+
+            states.append(xarray.open_dataset(result_file, engine="netcdf4").load())
+
+        return xarray.concat(states, dim="ensemble", join="override")
 
     def _pre_run_ensemble(
         self,
@@ -250,11 +371,21 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """
         self._apply_inflow_settings(params)
 
-        # LBM doesn't support warmstart/state initialization yet
         if state is not None:
-            logger.warning(
-                "State initialization is not yet supported for LBM ensemble forward model"
-            )
+            for i, model in enumerate(self.ensemble_forward_models):
+                state_i = self._extract_member_state_for_parallel(
+                    state=state,
+                    member_index=i,
+                    sim_name=sim_name,
+                )
+                restart_iteration = write_restart_file_from_xarray(
+                    state=state_i,
+                    dirs=model.dirs,
+                )
+                model._set_infile_value("nt0", restart_iteration)
+                model._set_infile_value("nt1", restart_iteration + model.num_timesteps)
+        elif self.rollout:
+            self._configure_rollout_for_parallel()
 
     def _post_run_ensemble(self, sim_name: str) -> xarray.Dataset | None:
         """
@@ -268,13 +399,19 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """
         # Load or move results
         if self.save_on_disk:
-            self._move_results_to_disk(sim_name)
+            if self.rollout:
+                self._move_and_collect_rollout_results_to_disk(sim_name)
+            else:
+                self._move_results_to_disk(sim_name)
             states = None
         else:
             states = self._load_results()
 
         # Clean output for next step
         self._clean_output()
+        if self.rollout:
+            self._clean_old_rollout_restarts()
+            self.rollout_step += 1
 
         return states
 
@@ -297,6 +434,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             result = forward_model.run_single(
                 state=state_i,
                 params=params_i,
+                sim_name=f"state_{i}",
             )
             if result is not None:
                 states.append(result)

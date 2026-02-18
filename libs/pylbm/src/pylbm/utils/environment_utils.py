@@ -1,6 +1,8 @@
+import logging
 import os
 import pathlib
-import sys
+
+logger = logging.getLogger(__name__)
 
 
 def identify_environment(repo_root: pathlib.Path, verbose: bool = True) -> pathlib.Path:
@@ -25,9 +27,9 @@ def identify_environment(repo_root: pathlib.Path, verbose: bool = True) -> pathl
         pixi_env_path = pathlib.Path(pixi_env)
         if pixi_env_path.exists():
             if verbose:
-                print(
-                    f"Using pixi environment from PIXI_ENVIRONMENT: {pixi_env_path}",
-                    file=sys.stderr,
+                logger.info(
+                    "Using pixi environment from PIXI_ENVIRONMENT: %s",
+                    pixi_env_path,
                 )
             return pixi_env_path
 
@@ -37,9 +39,9 @@ def identify_environment(repo_root: pathlib.Path, verbose: bool = True) -> pathl
         pixi_env_path = pathlib.Path(pixi_proj_env)
         if pixi_env_path.exists():
             if verbose:
-                print(
-                    f"Using pixi environment from PIXI_PROJECT_ENVIRONMENT: {pixi_env_path}",
-                    file=sys.stderr,
+                logger.info(
+                    "Using pixi environment from PIXI_PROJECT_ENVIRONMENT: %s",
+                    pixi_env_path,
                 )
             return pixi_env_path
 
@@ -51,11 +53,11 @@ def identify_environment(repo_root: pathlib.Path, verbose: bool = True) -> pathl
             env_path = pixi_envs_dir / env_name
             if env_path.exists():
                 if verbose:
-                    print(f"Using pixi environment: {env_name}", file=sys.stderr)
+                    logger.info("Using pixi environment: %s", env_name)
                 return env_path
 
     # Default fallback
     default_env = repo_root / ".pixi" / "envs" / "default"
     if verbose:
-        print(f"Using default pixi environment: {default_env}", file=sys.stderr)
+        logger.info("Using default pixi environment: %s", default_env)
     return default_env
