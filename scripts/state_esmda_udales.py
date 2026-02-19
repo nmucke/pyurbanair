@@ -70,7 +70,7 @@ INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/udales")
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 8
+NUM_PARALLEL_PROCESSES = 4
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
@@ -78,7 +78,7 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 36
+ENSEMBLE_SIZE = 4
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 

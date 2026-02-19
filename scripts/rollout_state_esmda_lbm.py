@@ -94,7 +94,7 @@ INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/lbm")
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 10
+NUM_PARALLEL_PROCESSES = 32
 
 # True parameters
 TRUE_VELOCITY_MAGNITUDE = 10.0
@@ -103,8 +103,8 @@ TRUE_ANGLE = 10.0
 RESULTS_DIR = ".temp/lbm"
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 64
-NUM_ESMDA_STEPS = 3
+ENSEMBLE_SIZE = 32
+NUM_ESMDA_STEPS = 1
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
@@ -115,10 +115,9 @@ OBS_STATES = ["u", "v", "w"]
 NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
 
 # Observation error settings
-OBS_ERROR_STD = 0.1
+OBS_ERROR_STD = 0.01
 C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
-# Forward model settings
 # Forward model settings
 FIXED_INPUT = {
     "output_frequency": 10.0,
@@ -126,7 +125,7 @@ FIXED_INPUT = {
     "nx": 120,
     "ny": 120,
     "nz": 8,
-    "num_timesteps": 100,
+    "num_timesteps": 200,
     "bounds": ((0, 160), (0, 160), (0, 40)),
     "verbose": False,
     # "results_dir": pathlib.Path(RESULTS_DIR),
@@ -186,46 +185,44 @@ def main() -> None:
     )
 
     true_state_list = []
+    true_params_list = [true_params]
     true_obs_list = []
-    true_params_list = []
     esmda_state_list = []
-    esmda_params_list = []
+    esmda_params_list = [init_params]
     esmda_obs_list = []
     for i in tqdm(range(NUM_ASSIMILATION_WINDOWS)):
 
+        ##### Perturb true parameters #####
         rng_key, subkey = jax.random.split(rng_key)
-        vel_magnitude_perturbation = jax.random.normal(subkey, (1,)) * 0.5
+        vel_magnitude_perturbation = jax.random.normal(subkey) * 0.0
 
         rng_key, subkey = jax.random.split(rng_key)
-        angle_perturbation = jax.random.normal(subkey, (1,)) * 0.5
+        angle_perturbation = jax.random.normal(subkey) * 0.0
+
+        perturbed_velocity_magnitude = (
+            true_params.velocity_magnitude.values + vel_magnitude_perturbation
+        )
+        perturbed_inflow_angle = true_params.inflow_angle.values + angle_perturbation
 
         true_params = xarray.Dataset(
             data_vars={
-                "velocity_magnitude": (
-                    "ensemble",
-                    true_params.velocity_magnitude.values + vel_magnitude_perturbation,
-                ),
-                "inflow_angle": (
-                    "ensemble",
-                    true_params.inflow_angle.values + angle_perturbation,
-                ),
+                "velocity_magnitude": ([], perturbed_velocity_magnitude),
+                "inflow_angle": ([], perturbed_inflow_angle),
             },
-            coords={"ensemble": jnp.arange(1)},
         )
 
         ##### Run true simulation #####
-        true_state = forward_model(
-            params=true_params.isel(ensemble=0), state=true_state
-        )
-        # true_state = true_state.isel(time=slice(1, None))
+        true_state = forward_model(params=true_params, state=true_state)
         true_state_list.append(true_state.isel(z=Z_PLOT_LEVEL))
         true_params_list.append(true_params)
 
+        ##### Run observation operator #####
         true_obs = observation_operator(true_state)
         rng_key, subkey = jax.random.split(rng_key)
         true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
         true_obs_list.append(true_obs)
 
+        ##### Run ESMDA #####
         init_params, init_states = esmda(
             state=init_states.isel(time=-1),  # type: ignore[attr-defined]
             params=init_params,
@@ -234,7 +231,6 @@ def main() -> None:
             return_state_history=False,
         )
         esmda_obs_list.append(observation_operator(init_states))
-
         esmda_state_list.append(init_states.isel(z=Z_PLOT_LEVEL))  # type: ignore[attr-defined]
         esmda_params_list.append(init_params)
 
@@ -244,7 +240,6 @@ def main() -> None:
     esmda_params_list = xarray.concat(esmda_params_list, dim="time", join="override")
 
     os.makedirs("esmda_results", exist_ok=True)
-
     true_state_list.to_netcdf("esmda_results/true_state.nc")  # type: ignore[attr-defined]
     true_params_list.to_netcdf("esmda_results/true_params.nc")  # type: ignore[attr-defined]
     esmda_state_list.to_netcdf("esmda_results/esmda_state.nc")  # type: ignore[attr-defined]
@@ -299,20 +294,22 @@ def main() -> None:
         state=xarray_to_animate,
         output_path=pathlib.Path("figures/lbm_esmda_animation.mp4"),
         z_level=0,
-        vmin={"u": -1.0, "v": -1.0, "w": -1.0, "rho": 0.0, "vel_magnitude": 0.0},
-        vmax={"u": 1.0, "v": 1.0, "w": 1.0, "rho": 1.0, "vel_magnitude": 1.0},
+        # vmin={"u": -1.0, "v": -1.0, "w": -1.0, "rho": 0.0, "vel_magnitude": 0.0},
+        # vmax={"u": 1.0, "v": 1.0, "w": 1.0, "rho": 1.0, "vel_magnitude": 1.0},
     )
 
     esmda_mean_params = esmda_params_list.mean(dim="ensemble")  # type: ignore[attr-defined]
     esmda_std_params = esmda_params_list.std(dim="ensemble")  # type: ignore[attr-defined]
-    true_mean_params = true_params_list.mean(dim="ensemble")  # type: ignore[attr-defined]
+    true_mean_params = (
+        true_params_list  # .mean(dim="ensemble")  # type: ignore[attr-defined]
+    )
 
     inflow_angle_mean = esmda_mean_params.inflow_angle.values
     inflow_angle_std = esmda_std_params.inflow_angle.values
     velocity_magnitude_mean = esmda_mean_params.velocity_magnitude.values
     velocity_magnitude_std = esmda_std_params.velocity_magnitude.values
-    true_inflow_angle_mean = true_mean_params.inflow_angle.values
-    true_velocity_magnitude_mean = true_mean_params.velocity_magnitude.values
+    true_inflow_angle_mean = true_mean_params.inflow_angle.values  # type: ignore[attr-defined]
+    true_velocity_magnitude_mean = true_mean_params.velocity_magnitude.values  # type: ignore[attr-defined]
     timesteps = (
         esmda_mean_params.time.values
         if "time" in esmda_mean_params.dims

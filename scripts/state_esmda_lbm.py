@@ -63,14 +63,14 @@ os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 5
+NUM_PARALLEL_PROCESSES = 16
 
 # True parameters
 TRUE_VELOCITY_MAGNITUDE = 10.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 100
+ENSEMBLE_SIZE = 16
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -137,7 +137,7 @@ def main() -> None:
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        # results_dir=pathlib.Path(RESULTS_DIR),
+        results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
@@ -160,7 +160,7 @@ def main() -> None:
         num_steps=NUM_ESMDA_STEPS,
         alpha=ALPHA,
         rng_key=rng_key,
-        results_dir=pathlib.Path(RESULTS_DIR),
+        # results_dir=pathlib.Path(RESULTS_DIR),
     )
     output = esmda(
         state=init_states,
@@ -169,6 +169,7 @@ def main() -> None:
         return_params_history=True,
         return_state_history=True,
     )
+
     t2 = time.time()
     print(f"ESMDA time: {t2 - t1:.2f} seconds")
 
@@ -223,9 +224,9 @@ def main() -> None:
         "label": "True",
     }
     for i in range(NUM_ESMDA_STEPS + 1):
-        im = axes[i, 0].imshow(mean_velocity_field[i, Z_PLOT_LEVEL, :, :], **im_args)
-        im = axes[i, 1].imshow(true_velocity_field[Z_PLOT_LEVEL, :, :], **im_args)
-        im = axes[i, 2].imshow(
+        im = axes[i, 3].imshow(mean_velocity_field[i, Z_PLOT_LEVEL, :, :], **im_args)
+        im = axes[i, 4].imshow(true_velocity_field[Z_PLOT_LEVEL, :, :], **im_args)
+        im = axes[i, 5].imshow(
             mean_velocity_field[i, Z_PLOT_LEVEL, :, :]
             - true_velocity_field[Z_PLOT_LEVEL, :, :],
             **im_args,
@@ -235,30 +236,30 @@ def main() -> None:
         axes[i, 0].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
 
         if i == 0:
-            axes[i, 0].set_title("Ens mean end time")
-            axes[i, 1].set_title("True end time")
-            axes[i, 3].set_title(f"Ens mean init cond")
-            axes[i, 4].set_title(f"True init cond")
+            axes[i, 3].set_title("Ens mean end time")
+            axes[i, 4].set_title("True end time")
+            axes[i, 0].set_title(f"Ens mean init cond")
+            axes[i, 1].set_title(f"True init cond")
             axes[i, 6].set_title("Angle distribution")
             if "velocity_magnitude" in params:
                 axes[i, 7].set_title("Velocity magnitude distribution")
 
-        axes[i, 2].set_title(f"RMSE: {rmse[i]:.4f}")
+        axes[i, 5].set_title(f"End time RMSE: {rmse[i]:.4f}")
 
-        im = axes[i, 3].imshow(
+        im = axes[i, 0].imshow(
             mean_velocity_field_init[i, Z_PLOT_LEVEL, :, :], **im_args
         )
-        im = axes[i, 4].imshow(true_velocity_field_init[Z_PLOT_LEVEL, :, :], **im_args)
-        im = axes[i, 5].imshow(
+        im = axes[i, 1].imshow(true_velocity_field_init[Z_PLOT_LEVEL, :, :], **im_args)
+        im = axes[i, 2].imshow(
             mean_velocity_field_init[i, Z_PLOT_LEVEL, :, :]
             - true_velocity_field_init[Z_PLOT_LEVEL, :, :],
             **im_args,
         )
         # fig.colorbar(im, ax=axes[i, 5])
-        axes[i, 5].set_title(f"RMSE: {rmse_init[i]:.4f}")
+        axes[i, 2].set_title(f"Init RMSE: {rmse_init[i]:.4f}")
 
         axes[i, 6].hist(params.inflow_angle.isel(esmda_step=i).values, **hist_args(i))
-        axes[i, 6].set_xlim(-20, 10)
+        axes[i, 6].set_xlim(-15, 15)
         axes[i, 6].axvline(**angle_axvline_args)
         axes[i, 6].axvline(
             jnp.mean(params.inflow_angle.isel(esmda_step=i).values),
@@ -273,7 +274,7 @@ def main() -> None:
             axes[i, 7].hist(
                 params.velocity_magnitude.isel(esmda_step=i).values, **hist_args(i)
             )
-            axes[i, 7].set_xlim(0, 8)
+            axes[i, 7].set_xlim(-5, 15)
             axes[i, 7].axvline(**velocity_axvline_args)
             axes[i, 7].axvline(
                 jnp.mean(params.velocity_magnitude.isel(esmda_step=i).values),
@@ -284,10 +285,9 @@ def main() -> None:
             )
             axes[i, 7].legend()
 
-    plt.savefig(
-        os.path.join(FIGURES_DIR, f"esmda_results_udales_{NUM_ESMDA_STEPS}.pdf")
-    )
-    plt.show()
+    plt.savefig(os.path.join(FIGURES_DIR, f"esmda_results_lbm_{NUM_ESMDA_STEPS}.pdf"))
+    plt.close()
+    # plt.show()
 
 
 if __name__ == "__main__":

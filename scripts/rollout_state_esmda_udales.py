@@ -193,36 +193,33 @@ def main() -> None:
 
     true_state_list = []
     true_obs_list = []
-    true_params_list = []
+    true_params_list = [true_params]
     esmda_state_list = []
-    esmda_params_list = []
+    esmda_params_list = [init_params]
     esmda_obs_list = []
     for i in range(NUM_ASSIMILATION_WINDOWS):
 
+        ##### Perturb true parameters #####
         rng_key, subkey = jax.random.split(rng_key)
-        vel_magnitude_perturbation = jax.random.normal(subkey, (1,)) * 0.5
+        vel_magnitude_perturbation = jax.random.normal(subkey) * 3.0
 
         rng_key, subkey = jax.random.split(rng_key)
-        angle_perturbation = jax.random.normal(subkey, (1,)) * 0.5
+        angle_perturbation = jax.random.normal(subkey) * 3.0
+
+        perturbed_velocity_magnitude = (
+            true_params.velocity_magnitude.values + vel_magnitude_perturbation
+        )
+        perturbed_inflow_angle = true_params.inflow_angle.values + angle_perturbation
 
         true_params = xarray.Dataset(
             data_vars={
-                "velocity_magnitude": (
-                    "ensemble",
-                    true_params.velocity_magnitude.values + vel_magnitude_perturbation,
-                ),
-                "inflow_angle": (
-                    "ensemble",
-                    true_params.inflow_angle.values + angle_perturbation,
-                ),
+                "velocity_magnitude": ([], perturbed_velocity_magnitude),
+                "inflow_angle": ([], perturbed_inflow_angle),
             },
-            coords={"ensemble": jnp.arange(1)},
         )
 
         ##### Run true simulation #####
-        true_state = forward_model(
-            params=true_params.isel(ensemble=0), state=true_state
-        )
+        true_state = forward_model(params=true_params, state=true_state)
         true_state_list.append(true_state.isel(zt=1, zm=1))
         true_params_list.append(true_params)
 
