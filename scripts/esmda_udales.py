@@ -104,6 +104,7 @@ FIXED_INPUT = {
     "verbose": False,
     "temp_dir": TEMP_DIR,
     "experiment_name": EXPERIMENT_NAME,
+    # "results_dir": pathlib.Path(RESULTS_DIR),
 }
 
 
@@ -163,6 +164,7 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
+    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
@@ -182,7 +184,7 @@ def main() -> None:
         num_steps=NUM_ESMDA_STEPS,
         alpha=ALPHA,
         rng_key=rng_key,
-        # results_dir=pathlib.Path(RESULTS_DIR),
+        results_dir=pathlib.Path(RESULTS_DIR),
     )
     output = esmda(
         params=params_ensemble,
@@ -221,6 +223,7 @@ def main() -> None:
     im_args = {
         "vmin": true_velocity_field[1, :, :].min(),
         "vmax": true_velocity_field[1, :, :].max(),
+        "extent": [0, 160, 0, 160],
     }
     angle_axvline_args = {
         "x": TRUE_ANGLE,

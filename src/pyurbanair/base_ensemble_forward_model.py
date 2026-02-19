@@ -40,9 +40,10 @@ class BaseEnsembleForwardModel:
         self.num_cpus_per_process = num_cpus_per_process
         self.parallel_execution = num_parallel_processes > 1
 
-        if forward_model.dirs.results_dir is not None:  # type: ignore[attr-defined]
+        if forward_model.results_dir is not None:
             self.save_on_disk = True
             self.save_in_memory = False
+            self.results_dir = forward_model.results_dir
         else:
             self.save_in_memory = True
             self.save_on_disk = False
