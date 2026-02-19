@@ -37,12 +37,12 @@ FIXED_INPUT = {
 
 def main() -> None:
 
-    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
+    forward_model = ForwardModel(**FIXED_INPUT)
     params = xarray.Dataset(
         data_vars={
             "inflow_angle": -45,
             "velocity_magnitude": 3,
-            "pressure_gradient_magnitude": 0.0041912,
+            "pressure_gradient_magnitude": 0.0041912 * 10,
         },
     )
     forward_model.run_preprocessing(python_or_matlab="python")

@@ -12,15 +12,16 @@ from data_assimilation.observation_operator import (
     ObservationOperator,
     TemporalObservationOperator,
 )
-from data_assimilation.smoothing.esmda import ESMDA
+from data_assimilation.smoothing.esmda import ParameterESMDA
 from pyudales.ensemble_forward_model import EnsembleForwardModel
 from pyudales.forward_model import ForwardModel
 
-from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 
 
-def get_ensemble_mean_field(output: tuple | None, esmda: ESMDA) -> xarray.Dataset:
+def get_ensemble_mean_field(
+    output: tuple | None, esmda: ParameterESMDA
+) -> xarray.Dataset:
     """Get the ensemble mean field from the output of the ESMDA."""
     if isinstance(output, tuple):
         params = output[0]
@@ -77,11 +78,17 @@ NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
-OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
-OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
-OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
+# OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
+# OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
+# OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
+# OBS_STATES = ["u", "v", "w"]
+# NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
+
+OBS_X = [43, 51.6, 94.3, 110.9, 87.3, 20.0, 52.6, 90.0]
+OBS_Y = [30.6, 62.7, 92.9, 108.0, 20.0, 60.0, 90.0, 50.0]
+OBS_Z = [2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8]
 OBS_STATES = ["u", "v", "w"]
-NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
+NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
 # Observation error settings
 OBS_ERROR_STD = 0.01
@@ -132,7 +139,7 @@ def main() -> None:
             "pressure_gradient_magnitude": TRUE_PRESSURE_GRADIENT_MAGNITUDE,
         },
     )
-    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
+    forward_model = ForwardModel(**FIXED_INPUT)
     forward_model.run_preprocessing()
 
     ##### Run true simulation #####
@@ -141,7 +148,11 @@ def main() -> None:
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
-        OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES, solver_name="udales"
+        obs_x=OBS_X,
+        obs_y=OBS_Y,
+        obs_z=OBS_Z,
+        obs_states=OBS_STATES,
+        solver_name="udales",
     )
     if FIXED_INPUT["output_frequency"] is not None:
         observation_operator = TemporalObservationOperator(
@@ -164,7 +175,7 @@ def main() -> None:
 
     ##### Run ESMDA #####
     t1 = time.time()
-    esmda = ESMDA(
+    esmda = ParameterESMDA(
         observation_operator=observation_operator,
         forward_model=ensemble_forward_model,
         C_D=C_D,
@@ -263,8 +274,8 @@ def main() -> None:
         fig.colorbar(im, ax=axes[i, 1])
         fig.colorbar(im, ax=axes[i, 2])
 
-        axes[i, 1].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
-        axes[i, 0].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
+        axes[i, 1].scatter(OBS_X, OBS_Y, color="red")
+        axes[i, 0].scatter(OBS_X, OBS_Y, color="red")
 
         if i == 0:
             axes[i, 0].set_title("Ensemble mean")
@@ -277,7 +288,8 @@ def main() -> None:
     plt.savefig(
         os.path.join(FIGURES_DIR, f"esmda_results_udales_{NUM_ESMDA_STEPS}.pdf")
     )
-    plt.show()
+    plt.close()
+    # plt.show()
 
 
 if __name__ == "__main__":

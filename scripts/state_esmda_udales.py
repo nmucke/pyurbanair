@@ -83,11 +83,14 @@ NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
-OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
-OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
-OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
+# OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
+# OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
+# OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
+OBS_X = [43, 51.6, 94.3, 110.9, 87.3, 20.0, 52.6, 90.0]
+OBS_Y = [30.6, 62.7, 92.9, 108.0, 20.0, 60.0, 90.0, 50.0]
+OBS_Z = [2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8]
 OBS_STATES = ["u", "v", "w"]
-NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
+NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
 # Observation error settings
 OBS_ERROR_STD = 0.01
@@ -131,7 +134,11 @@ def main() -> None:
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
-        OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES, solver_name="udales"
+        obs_x=OBS_X,
+        obs_y=OBS_Y,
+        obs_z=OBS_Z,
+        obs_states=OBS_STATES,
+        solver_name="udales",
     )
     if FIXED_INPUT["output_frequency"] is not None:
         observation_operator = TemporalObservationOperator(
@@ -239,8 +246,8 @@ def main() -> None:
             **im_args,
         )
 
-        axes[i, 1].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
-        axes[i, 0].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
+        axes[i, 1].scatter(OBS_X, OBS_Y, color="red")
+        axes[i, 0].scatter(OBS_X, OBS_Y, color="red")
 
         if i == 0:
             axes[i, 0].set_title("Ens mean end time")
@@ -295,7 +302,8 @@ def main() -> None:
     plt.savefig(
         os.path.join(FIGURES_DIR, f"esmda_results_udales_{NUM_ESMDA_STEPS}.pdf")
     )
-    plt.show()
+    plt.close()
+    # plt.show()
 
 
 if __name__ == "__main__":
