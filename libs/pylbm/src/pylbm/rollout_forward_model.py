@@ -82,28 +82,6 @@ class RolloutForwardModel(ForwardModel):
         and used as warmstart for this rollout step.
         """
         if state is not None:
-            # restart_iteration = self._get_restart_iteration_from_state(state)
-            # restart_file = (
-            #     self.dirs.experiment_dir / "restart" / f"restart_0000_{restart_iteration:06d}.uf"
-            #     if restart_iteration is not None
-            #     else None
-            # )
-
-            # if restart_file is not None and restart_file.exists():
-            #     # Prefer existing native restart files when they match the xarray time,
-            #     # which is the most stable continuation path.
-            #     pass
-            # else:
-            #     latest_restart = identify_latest_restart_iteration(self.dirs)
-            #     if latest_restart is not None:
-            #         # If state time cannot be mapped to an existing restart, fall back to
-            #         # latest native restart for stability.
-            #         restart_iteration = latest_restart
-            #     else:
-            #         restart_iteration = write_restart_file_from_xarray(
-            #             state=state,
-            #             dirs=self.dirs,
-            #         )
 
             latest_restart = identify_latest_restart_iteration(self.dirs)
             restart_iteration = write_restart_file_from_xarray(

@@ -213,7 +213,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                 # Single timestep: load and add time dimension
                 state = xarray.open_dataset(output_files[0], engine="netcdf4").load()
                 state = state.expand_dims("time", axis=0)
-
+            state = state.assign(x=model.x_grid, y=model.y_grid, z=model.z_grid)
             # Save concatenated state to results directory
             dest_file = model.results_dir / f"{sim_name}_{i}.nc"
             state.to_netcdf(str(dest_file))
@@ -246,9 +246,11 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                         xarray.open_dataset(output_file, engine="netcdf4").load()
                     )
                 state = xarray.concat(state_parts, dim="time", join="override")
+                state = state.assign(x=model.x_grid, y=model.y_grid, z=model.z_grid)
             else:
                 state = xarray.open_dataset(output_files[0], engine="netcdf4").load()
                 state = state.expand_dims("time", axis=0)
+                state = state.assign(x=model.x_grid, y=model.y_grid, z=model.z_grid)
 
             member_sim_name = f"{sim_name}_{i}"
             rollout_file = (

@@ -88,6 +88,9 @@ class ObservationOperator:
         # Map dimension names for each variable
         # u: (zt, yt, xm), v: (zt, ym, xt), w: (zm, yt, xt)
 
+        if "time" in state.dims:
+            state = state.isel(time=-1)
+
         # Extract observations for all sensors at once using vectorized indexing
         obs_list = []
         for state_var in self.obs_states:
