@@ -113,7 +113,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """Move the results to disk."""
         for i, model in enumerate(self.ensemble_forward_models):
             result_file = self._get_output_file(model)
-            shutil.move(str(result_file), str(model.results_dir / f"{sim_name}_{i}.nc"))
+            shutil.move(str(result_file), str(self.results_dir / f"{sim_name}_{i}.nc"))
 
     def _move_and_collect_rollout_results_to_disk(
         self, sim_name: str, rollout_step: int
@@ -123,7 +123,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             result_file = self._get_output_file(model)
             shutil.move(
                 str(result_file),
-                str(model.results_dir / f"{sim_name}_{i}_rollout_{rollout_step}.nc"),
+                str(self.results_dir / f"{sim_name}_{i}_rollout_{rollout_step}.nc"),
             )
 
             collect_rollout_results(
@@ -183,7 +183,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """Get the state from disk."""
         states = []
         for i, model in enumerate(self.ensemble_forward_models):
-            result_file = model.results_dir / f"state_{i}.nc"
+            result_file = self.results_dir / f"state_{i}.nc"
             states.append(xarray.open_dataset(result_file, engine="netcdf4").load())
         return xarray.concat(states, dim="ensemble", join="override")
 

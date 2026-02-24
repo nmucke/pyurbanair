@@ -8,6 +8,7 @@ from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
+import numpy as np
 import xarray
 from pylbm.utils import get_lbm_directory_paths
 
@@ -22,15 +23,17 @@ from .utils.mod_dimensions_utils import set_experiment
 class ForwardModel(BaseForwardModel):
     def __init__(
         self,
+        stl_path: str | pathlib.Path,
         rundir: pathlib.Path | None = None,
-        stl_path: str | pathlib.Path | None = None,
-        nx: int | None = None,
-        ny: int | None = None,
-        nz: int | None = None,
+        nx: int = 120,
+        ny: int = 120,
+        nz: int = 8,
         num_timesteps: int = 1000,
-        bounds: (
-            tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None
-        ) = None,
+        bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] = (
+            (0, 160),
+            (0, 160),
+            (0, 40),
+        ),
         output_frequency: float = 1.0,
         results_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
@@ -51,17 +54,24 @@ class ForwardModel(BaseForwardModel):
 
         # Generate geometry file
         stl_to_lbm_geometry(
-            stl_path=stl_path,  # type: ignore[arg-type]
+            stl_path=stl_path,
             dirs=self.dirs,
-            nx=nx,  # type: ignore[arg-type]
-            ny=ny,  # type: ignore[arg-type]
-            nz=nz,  # type: ignore[arg-type]
+            nx=nx,
+            ny=ny,
+            nz=nz,
             bounds=bounds,
         )
 
+        # Compute cell size from bounds
+        dx = (bounds[0][1] - bounds[0][0]) / nx
+        dy = (bounds[1][1] - bounds[1][0]) / ny
+        dz = (bounds[2][1] - bounds[2][0]) / nz
+        self.x_grid = (np.arange(nx) + 0.5) * dx + bounds[0][0]
+        self.y_grid = (np.arange(ny) + 0.5) * dy + bounds[1][0]
+        self.z_grid = (np.arange(nz) + 0.5) * dz + bounds[2][0]
+
         # Set experiment dimensions in mod_dimensions.F90 (add or update experiment, set active)
-        if nx is not None and ny is not None and nz is not None:
-            set_experiment(dirs=self.dirs, nx=nx, ny=ny, nz=nz)
+        set_experiment(dirs=self.dirs, nx=nx, ny=ny, nz=nz)
 
         # Compile program
         compile_lbm(dirs=self.dirs, verbose=self.verbose)
@@ -193,6 +203,8 @@ class ForwardModel(BaseForwardModel):
             state = xarray.concat(datasets, dim="time", join="override")
         else:
             state = datasets[0].expand_dims("time", axis=0)
+
+        state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
 
         if self.save_on_disk and self.results_dir is not None:
             outfile = self.results_dir / f"{sim_name}.nc"

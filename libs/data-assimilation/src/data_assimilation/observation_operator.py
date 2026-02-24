@@ -2,6 +2,7 @@
 
 import numpy as np
 import xarray
+from data_assimilation.interpolation import interpolate_dataarray_at_points
 
 
 class ObservationOperator:
@@ -9,20 +10,56 @@ class ObservationOperator:
 
     def __init__(
         self,
-        obs_ids_x: list[int],
-        obs_ids_y: list[int],
-        obs_ids_z: list[int],
-        obs_states: list[str],
+        obs_ids_x: list[int] | None = None,
+        obs_ids_y: list[int] | None = None,
+        obs_ids_z: list[int] | None = None,
+        obs_states: list[str] | None = None,
         solver_name: str = "pylbm",
+        obs_x: list[float] | None = None,
+        obs_y: list[float] | None = None,
+        obs_z: list[float] | None = None,
     ):
         """Initialize the observation operator."""
-        self.obs_ids_x = obs_ids_x
-        self.obs_ids_y = obs_ids_y
-        self.obs_ids_z = obs_ids_z
+        if obs_states is None or len(obs_states) == 0:
+            raise ValueError("obs_states must be provided and non-empty.")
+
+        has_indices = (
+            obs_ids_x is not None and obs_ids_y is not None and obs_ids_z is not None
+        )
+        has_coordinates = obs_x is not None and obs_y is not None and obs_z is not None
+
+        if has_indices and has_coordinates:
+            raise ValueError(
+                "Provide either index-based observations (obs_ids_*) or coordinate-"
+                "based observations (obs_*), not both."
+            )
+        if not has_indices and not has_coordinates:
+            raise ValueError(
+                "Provide either obs_ids_x/obs_ids_y/obs_ids_z or obs_x/obs_y/obs_z."
+            )
+
+        self.use_interpolation = has_coordinates
+        if self.use_interpolation:
+            self.obs_x = np.asarray(obs_x, dtype=float)
+            self.obs_y = np.asarray(obs_y, dtype=float)
+            self.obs_z = np.asarray(obs_z, dtype=float)
+            num_sensors = self.obs_x.size
+            if self.obs_y.size != num_sensors or self.obs_z.size != num_sensors:
+                raise ValueError("obs_x, obs_y, and obs_z must have the same length.")
+        else:
+            self.obs_ids_x = np.asarray(obs_ids_x, dtype=int)
+            self.obs_ids_y = np.asarray(obs_ids_y, dtype=int)
+            self.obs_ids_z = np.asarray(obs_ids_z, dtype=int)
+            num_sensors = self.obs_ids_x.size
+            if self.obs_ids_y.size != num_sensors or self.obs_ids_z.size != num_sensors:
+                raise ValueError(
+                    "obs_ids_x, obs_ids_y, and obs_ids_z must have the same length."
+                )
+
         self.obs_states = obs_states
 
-        self.num_sensors = len(obs_ids_x)
-        self.num_obs = len(obs_ids_x) * len(obs_states)
+        self.num_sensors = num_sensors
+        self.num_obs = num_sensors * len(obs_states)
 
         if solver_name == "udales":
             self.dim_mapping = {
@@ -51,22 +88,37 @@ class ObservationOperator:
         # Map dimension names for each variable
         # u: (zt, yt, xm), v: (zt, ym, xt), w: (zm, yt, xt)
 
+        if "time" in state.dims:
+            state = state.isel(time=-1)
+
         # Extract observations for all sensors at once using vectorized indexing
         obs_list = []
         for state_var in self.obs_states:
             # Get dimension names for this variable
             dims = self.dim_mapping[state_var]
 
-            # Use xarray's isel with DataArray objects sharing a common dimension
-            # This enables vectorized indexing: selects (obs_ids_x[i], obs_ids_y[i], obs_ids_z[i]) for all i
-            # Result shape: (time, sensor) where sensor dimension has size num_sensors
-            sensor_obs = state[state_var].isel(
-                **{
-                    dims["z"]: xarray.DataArray(self.obs_ids_z, dims="sensor"),
-                    dims["y"]: xarray.DataArray(self.obs_ids_y, dims="sensor"),
-                    dims["x"]: xarray.DataArray(self.obs_ids_x, dims="sensor"),
-                }
-            )
+            if self.use_interpolation:
+                sensor_obs = interpolate_dataarray_at_points(
+                    state[state_var],
+                    x_dim=dims["x"],
+                    y_dim=dims["y"],
+                    z_dim=dims["z"],
+                    obs_x=self.obs_x,
+                    obs_y=self.obs_y,
+                    obs_z=self.obs_z,
+                )
+            else:
+                # Use xarray's isel with DataArray objects sharing a common dimension.
+                # This enables vectorized indexing: selects
+                # (obs_ids_x[i], obs_ids_y[i], obs_ids_z[i]) for all i.
+                # Result shape: (time, sensor) where sensor dimension has size num_sensors.
+                sensor_obs = state[state_var].isel(
+                    **{
+                        dims["z"]: xarray.DataArray(self.obs_ids_z, dims="sensor"),
+                        dims["y"]: xarray.DataArray(self.obs_ids_y, dims="sensor"),
+                        dims["x"]: xarray.DataArray(self.obs_ids_x, dims="sensor"),
+                    }
+                )
             # Flatten to handle time dimension: (time, sensor) -> (time * sensor,)
             # If time dimension is size 1, this gives shape (num_sensors,)
             obs_list.append(sensor_obs.values.ravel())

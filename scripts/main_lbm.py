@@ -18,11 +18,11 @@ def main() -> None:
 
     forward_model = ForwardModel(
         stl_path=stl_path,
-        nx=140,
+        nx=120,
         ny=120,
         nz=8,
         num_timesteps=1500,
-        bounds=((-40, 160), (0, 160), (0, 40)),
+        bounds=((0, 160), (0, 160), (0, 40)),
         output_frequency=10,
     )
     # inflow_angle = np.array([1, 10, 20])
@@ -68,7 +68,8 @@ def main() -> None:
     # plt.imshow(state.blanking.values[0, 1, :, :])
     plt.colorbar()
     plt.savefig("figures/vel_magnitude_lbm.png")
-    plt.show()
+    plt.close()
+    # plt.show()
 
 
 if __name__ == "__main__":

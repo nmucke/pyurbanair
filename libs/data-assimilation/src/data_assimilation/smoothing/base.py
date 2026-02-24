@@ -60,6 +60,7 @@ class BaseSmoothing:
             for state_file in file_list:
                 state = xarray.open_dataset(state_file)
                 observations_list.append(self.observation_operator(state))
+
             return jnp.stack(observations_list, axis=0)
 
     @abstractmethod

@@ -104,7 +104,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         )
 
         self.save_on_disk = forward_model.save_on_disk
-
+        self.results_dir = forward_model.results_dir
         self.rollout = isinstance(forward_model, RolloutForwardModel)
         self.rollout_step = 0
 
@@ -194,7 +194,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                 )
                 continue
 
-            if model.results_dir is None:
+            if self.results_dir is None:
                 logger.warning(
                     f"results_dir is None for ensemble member {i}, skipping move"
                 )
@@ -213,9 +213,9 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                 # Single timestep: load and add time dimension
                 state = xarray.open_dataset(output_files[0], engine="netcdf4").load()
                 state = state.expand_dims("time", axis=0)
-
+            state = state.assign(x=model.x_grid, y=model.y_grid, z=model.z_grid)
             # Save concatenated state to results directory
-            dest_file = model.results_dir / f"{sim_name}_{i}.nc"
+            dest_file = self.results_dir / f"{sim_name}_{i}.nc"
             state.to_netcdf(str(dest_file))
 
             # Remove original output files after moving
@@ -233,7 +233,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                 )
                 continue
 
-            if model.results_dir is None:
+            if self.results_dir is None:
                 logger.warning(
                     f"results_dir is None for ensemble member {i}, skipping move"
                 )
@@ -246,20 +246,22 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                         xarray.open_dataset(output_file, engine="netcdf4").load()
                     )
                 state = xarray.concat(state_parts, dim="time", join="override")
+                state = state.assign(x=model.x_grid, y=model.y_grid, z=model.z_grid)
             else:
                 state = xarray.open_dataset(output_files[0], engine="netcdf4").load()
                 state = state.expand_dims("time", axis=0)
+                state = state.assign(x=model.x_grid, y=model.y_grid, z=model.z_grid)
 
             member_sim_name = f"{sim_name}_{i}"
             rollout_file = (
-                model.results_dir
+                self.results_dir
                 / f"{member_sim_name}_rollout_{self.rollout_step + 1}.nc"
             )
             state.to_netcdf(str(rollout_file))
             collect_rollout_results(
                 sim_name=member_sim_name,
                 rollout_step=self.rollout_step + 1,
-                results_dir=model.results_dir,
+                results_dir=self.results_dir,
             )
 
             for output_file in output_files:
@@ -333,17 +335,17 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """
         states = []
         for i, model in enumerate(self.ensemble_forward_models):
-            if model.results_dir is None:
+            if self.results_dir is None:
                 raise ValueError(
                     f"results_dir is None for ensemble member {i}; "
                     "cannot load states from disk."
                 )
 
             if rollout_step is None:
-                result_file = model.results_dir / f"{sim_name}_{i}.nc"
+                result_file = self.results_dir / f"{sim_name}_{i}.nc"
             else:
                 result_file = (
-                    model.results_dir / f"{sim_name}_{i}_rollout_{rollout_step}.nc"
+                    self.results_dir / f"{sim_name}_{i}_rollout_{rollout_step}.nc"
                 )
 
             if not result_file.exists():
