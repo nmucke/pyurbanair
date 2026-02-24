@@ -1,11 +1,13 @@
+import os
 import pathlib
 import pdb
+import shutil
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pylbm
 import xarray
-from animation import animate_ensemble_state, animate_state
+from animation import animate_3d, animate_ensemble_state, animate_state
 
 # from pylbm.compile_program import compile_lbm
 from pylbm.forward_model import ForwardModel
@@ -13,6 +15,10 @@ from pylbm.stl_to_lbm import stl_to_lbm_geometry
 
 
 def main() -> None:
+
+    if os.path.exists(".temp"):
+        shutil.rmtree(".temp")
+
     stl_path = pathlib.Path("examples/lbm/experiments/xie_castro_2008_STL.stl")
     # stl_path = pathlib.Path("examples/lbm/experiments/geom.STL")
 
@@ -20,9 +26,9 @@ def main() -> None:
         stl_path=stl_path,
         nx=120,
         ny=120,
-        nz=8,
+        nz=16,
         num_timesteps=1500,
-        bounds=((0, 160), (0, 160), (0, 40)),
+        bounds=((0, 160), (0, 160), (0, 16)),
         output_frequency=10,
     )
     # inflow_angle = np.array([1, 10, 20])
@@ -36,7 +42,7 @@ def main() -> None:
     # )
     params = xarray.Dataset(
         data_vars={
-            "inflow_angle": -40,
+            "inflow_angle": 10,
             "velocity_magnitude": 10,
         },
     )
@@ -51,6 +57,12 @@ def main() -> None:
 
     if "rho" in state.data_vars:
         state = state.drop_vars("rho")
+
+    animate_3d(
+        state=state,
+        output_path=pathlib.Path("figures/lbm_animation_3d.mp4"),
+        variable="vel_magnitude",
+    )
 
     animate_state(
         state=state,

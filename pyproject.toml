@@ -11,6 +11,7 @@ dependencies = [
   "matplotlib>=3.10.8,<4",
   "jax>=0.7.0,<0.8.0",
   "tqdm>=4.67.1,<5",
+  "vape4d>=0.2.0,<0.3.0",
 ]
 name = "pyurbanair"
 requires-python = ">= 3.12,<3.13"
