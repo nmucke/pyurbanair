@@ -28,6 +28,7 @@ libs/pyudales/*.pyc
 *.pdf
 *.png
 *.mp4
+figures/*
 
 # macOS files
 *.DS_Store

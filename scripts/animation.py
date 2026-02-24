@@ -1,4 +1,5 @@
 import pathlib
+import warnings
 from typing import Optional
 
 import matplotlib.animation as animation
@@ -7,6 +8,86 @@ import numpy as np
 import xarray
 from vape4d import render
 from vape4d.utils import diverging_alpha
+
+
+def _get_writer_and_output_path(
+    output_path: pathlib.Path,
+    fps: int,
+) -> tuple[pathlib.Path, animation.AbstractMovieWriter]:
+    """
+    Return a usable animation writer and output path.
+
+    Falls back to PillowWriter/GIF when ffmpeg is not available.
+    """
+    if animation.writers.is_available("ffmpeg"):
+        return output_path, animation.FFMpegWriter(fps=fps)
+
+    gif_path = output_path.with_suffix(".gif")
+    warnings.warn(
+        "ffmpeg is not available. Saving animation as GIF instead.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return gif_path, animation.PillowWriter(fps=fps)
+
+
+def _save_projection_animation(
+    volume_4d: np.ndarray,
+    output_path: pathlib.Path,
+    fps: int,
+    dpi: int,
+    width: int,
+    height: int,
+    cmap: str,
+) -> None:
+    """
+    Save a CPU-only fallback animation using max-intensity projection over depth.
+    """
+    # Infer a likely depth axis from the smallest spatial dimension.
+    # This keeps fallback robust even if spatial dimensions are reordered upstream.
+    depth_axis = int(np.argmin(volume_4d.shape[1:])) + 1
+    projection = np.nanmax(volume_4d, axis=depth_axis)
+
+    finite = np.isfinite(projection)
+    if not np.any(finite):
+        warnings.warn(
+            "Projection contains no finite values; writing an empty fallback animation.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        projection = np.zeros_like(projection, dtype=np.float32)
+        vmin, vmax = 0.0, 1.0
+    else:
+        valid_values = projection[finite]
+        # Use robust percentiles to avoid a near-flat image due to outliers.
+        vmin = float(np.percentile(valid_values, 2))
+        vmax = float(np.percentile(valid_values, 98))
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+            vmin = float(np.nanmin(valid_values))
+            vmax = float(np.nanmax(valid_values))
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+                vmin, vmax = 0.0, 1.0
+
+    projection = np.nan_to_num(projection, nan=vmin)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path, writer = _get_writer_and_output_path(output_path=output_path, fps=fps)
+
+    fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
+    ax.set_axis_off()
+    im = ax.imshow(
+        projection[0],
+        cmap=cmap,
+        origin="lower",
+        aspect="auto",
+        vmin=vmin,
+        vmax=vmax,
+    )
+    with writer.saving(fig, str(output_path), dpi=dpi):
+        writer.grab_frame()
+        for frame in projection[1:]:
+            im.set_array(frame)
+            writer.grab_frame()
+    plt.close(fig)
 
 
 def animate_state(
@@ -234,8 +315,8 @@ def animate_state(
     # Save animation
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path, writer = _get_writer_and_output_path(output_path=output_path, fps=fps)
 
-    writer = animation.FFMpegWriter(fps=fps)
     anim.save(str(output_path), writer=writer, dpi=dpi)
 
     plt.close(fig)
@@ -325,24 +406,45 @@ def animate_3d(
     times = [t / max(1, n_times - 1) for t in range(n_times)]
     # colormap = plt.get_cmap(cmap)
     colormap = diverging_alpha(plt.get_cmap("magma"))
-    frames = render(
-        volume_4d,
-        cmap=colormap,
-        time=times,
-        width=width,
-        height=height,
-    )
+    try:
+        frames = render(
+            volume_4d,
+            cmap=colormap,
+            time=times,
+            width=width,
+            height=height,
+        )
+    except TypeError as exc:
+        # Common on headless HPC nodes without GPU/EGL adapters.
+        if "suitable adapter" in str(exc).lower():
+            warnings.warn(
+                "vape4d could not find a graphics adapter. Falling back to "
+                "a 2D max-projection animation.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            _save_projection_animation(
+                volume_4d=volume_4d,
+                output_path=pathlib.Path(output_path),
+                fps=fps,
+                dpi=dpi,
+                width=width,
+                height=height,
+                cmap=cmap,
+            )
+            return
+        raise
     # When a single time is given, render returns (H, W, 4); ensure we always have (T, H, W, 4)
     if frames.ndim == 3:
         frames = frames[np.newaxis, ...]
 
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path, writer = _get_writer_and_output_path(output_path=output_path, fps=fps)
 
     fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
     ax.set_axis_off()
     im = ax.imshow(frames[0])
-    writer = animation.FFMpegWriter(fps=fps)
     with writer.saving(fig, str(output_path), dpi=dpi):
         writer.grab_frame()
         for f in frames[1:]:
@@ -603,8 +705,8 @@ def animate_ensemble_state(
     # Save animation
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path, writer = _get_writer_and_output_path(output_path=output_path, fps=fps)
 
-    writer = animation.FFMpegWriter(fps=fps)
     anim.save(str(output_path), writer=writer, dpi=dpi)
 
     plt.close(fig)

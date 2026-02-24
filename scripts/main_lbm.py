@@ -27,7 +27,7 @@ def main() -> None:
         nx=120,
         ny=120,
         nz=16,
-        num_timesteps=1500,
+        num_timesteps=100,
         bounds=((0, 160), (0, 160), (0, 16)),
         output_frequency=10,
     )
