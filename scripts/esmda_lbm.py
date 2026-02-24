@@ -2,12 +2,16 @@ import os
 import pathlib
 import pdb
 import shutil
+import time
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import xarray
-from data_assimilation.observation_operator import ObservationOperator
+from data_assimilation.observation_operator import (
+    ObservationOperator,
+    TemporalObservationOperator,
+)
 from data_assimilation.smoothing.esmda import ParameterESMDA
 from pylbm.ensemble_forward_model import EnsembleForwardModel
 from pylbm.forward_model import ForwardModel
@@ -57,10 +61,10 @@ os.makedirs(FIGURES_DIR, exist_ok=True)
 TRUE_VELOCITY_MAGNITUDE = 10.0
 TRUE_ANGLE = 10.0
 
-NUM_PARALLEL_PROCESSES = 32
+NUM_PARALLEL_PROCESSES = 1
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 200
+ENSEMBLE_SIZE = 32
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -99,8 +103,9 @@ FIXED_INPUT = {
     "nz": 8,
     "num_timesteps": 50,
     "bounds": ((0, 160), (0, 160), (0, 40)),
-    "verbose": True,
+    "verbose": False,
     "output_frequency": 50,
+    "cuda": True,
 }
 
 
@@ -139,9 +144,6 @@ def main() -> None:
 
     ##### Run true simulation #####
     true_state = forward_model(params=true_params)
-    import pdb
-
-    pdb.set_trace()
     true_velocity_field = get_velocity_magnitude_field(true_state)
 
     ##### Setup observations #####
@@ -152,6 +154,12 @@ def main() -> None:
         obs_states=OBS_STATES,
         solver_name="pylbm",
     )
+
+    # if FIXED_INPUT["output_frequency"] is not None:
+    #     observation_operator = TemporalObservationOperator(
+    #         observation_operator=observation_operator,
+    #         mode="mean",
+    #     )
     true_obs = observation_operator(true_state.isel(time=-1))
     rng_key, subkey = jax.random.split(rng_key)
 
@@ -176,13 +184,15 @@ def main() -> None:
         rng_key=rng_key,
         results_dir=pathlib.Path(".temp/lbm"),
     )
+    t1 = time.time()
     output = esmda(
         params=params_ensemble,
         observations=true_obs,
         return_params_history=True,
         return_state_history=True,
     )
-
+    t2 = time.time()
+    print(f"ESMDA time: {t2 - t1:.2f} seconds")
     # Get ESMDA ensemble mean field and parameters
     ensemble_mean_field, params = get_ensemble_mean_field(output, esmda)
 

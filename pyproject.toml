@@ -141,8 +141,17 @@ numpy = "*"
 matplotlib = "*"
 typer = "*"
 
+[tool.pixi.feature.cuda.dependencies]
+# NVIDIA CUDA toolkit and drivers are system-level and should be installed from NVIDIA:
+# https://developer.nvidia.com/cuda-downloads
+curl = ">=8.0.0,<9"
+
+[tool.pixi.feature.cuda.activation]
+scripts = ["activation_scripts/cuda_activation.sh"]
+
 
 [tool.pixi.environments]
 default = { features = ["py312"] }
 dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "benchmark_geometry"] }
 delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm"] }
+cuda = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "cuda"] }

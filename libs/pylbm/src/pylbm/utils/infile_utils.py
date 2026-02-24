@@ -14,6 +14,44 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _augment_runtime_library_paths(
+    env: dict[str, str], pixi_env_path: pathlib.Path
+) -> None:
+    """
+    Ensure runtime loader can find shared libraries for LBM executables.
+    """
+    lib_paths: list[pathlib.Path] = []
+
+    # Pixi/conda libraries (e.g., libnetcdf.so, libfftw3f.so).
+    pixi_lib = pixi_env_path / "lib"
+    if pixi_lib.exists():
+        lib_paths.append(pixi_lib)
+
+    # Optional local NVHPC-compatible netcdf-fortran install.
+    local_netcdf_lib = pixi_env_path / ".nvhpc" / "netcdf-fortran" / "lib"
+    if local_netcdf_lib.exists():
+        lib_paths.append(local_netcdf_lib)
+
+    # NVHPC runtime libraries.
+    nvhpc_versions = sorted((pixi_env_path / ".nvhpc" / "Linux_x86_64").glob("*"))
+    if nvhpc_versions:
+        nvhpc_root = nvhpc_versions[-1]
+        for candidate in [
+            nvhpc_root / "compilers" / "lib",
+            nvhpc_root / "math_libs" / "lib64",
+            nvhpc_root / "comm_libs" / "mpi" / "lib",
+        ]:
+            if candidate.exists():
+                lib_paths.append(candidate)
+
+    if not lib_paths:
+        return
+
+    existing = env.get("LD_LIBRARY_PATH", "")
+    prefix = ":".join(str(p) for p in lib_paths)
+    env["LD_LIBRARY_PATH"] = f"{prefix}:{existing}" if existing else prefix
+
+
 class Infile:
     """
     A parser and editor for LBM infile.in files.
@@ -215,6 +253,7 @@ def create_infile(dirs: "DirectoryPaths", verbose: bool = True) -> None:
     env["HOME"] = str(dirs.pixi_env_path)
     if "PIXI_ENVIRONMENT" not in env:
         env["PIXI_ENVIRONMENT"] = str(dirs.pixi_env_path)
+    _augment_runtime_library_paths(env=env, pixi_env_path=dirs.pixi_env_path)
 
     # Change to experiment directory and run executable
     original_cwd = pathlib.Path.cwd()

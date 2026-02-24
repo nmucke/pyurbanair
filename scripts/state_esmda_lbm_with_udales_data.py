@@ -92,11 +92,11 @@ OBS_STATES = ["u", "v", "w"]
 NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
 # Observation error settings
-OBS_ERROR_STD = 0.005
+OBS_ERROR_STD = 0.01
 C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
 # Forward model settings
-udales_time = 50
+udales_time = 10
 lbm_time_steps = int(udales_time / 0.0538)
 lbm_output_frequency = int(lbm_time_steps / 50)
 
@@ -108,7 +108,7 @@ LBM_FIXED_INPUT = {
     "nz": 8,
     "num_timesteps": lbm_time_steps,
     "bounds": ((0, 160), (0, 160), (0, 40)),
-    "verbose": True,
+    "verbose": False,
     "output_frequency": lbm_output_frequency,
 }
 
@@ -139,9 +139,9 @@ def main() -> None:
             "velocity_magnitude": TRUE_VELOCITY_MAGNITUDE,
         },
     )
-    # udales_forward_model = UDALESRolloutForwardModel(**UDALES_FIXED_INPUT)
-    # udales_forward_model.run_preprocessing()
-    udales_forward_model = LBMRolloutForwardModel(**LBM_FIXED_INPUT)
+    udales_forward_model = UDALESRolloutForwardModel(**UDALES_FIXED_INPUT)
+    udales_forward_model.run_preprocessing()
+    # udales_forward_model = LBMRolloutForwardModel(**LBM_FIXED_INPUT)
 
     ##### Run true simulation #####
     true_state = udales_forward_model(params=true_params)
@@ -152,6 +152,7 @@ def main() -> None:
 
     lbm_forward_model = LBMRolloutForwardModel(
         **LBM_FIXED_INPUT,
+        cuda=True,
         results_dir=pathlib.Path(RESULTS_DIR),
     )
 
@@ -213,7 +214,7 @@ def main() -> None:
 
     mean_velocity_field = get_velocity_magnitude_field(ensemble_mean_field)
 
-    # mean_velocity_field = mean_velocity_field[:, 2:]
+    mean_velocity_field = mean_velocity_field[:, 2:]
 
     rmse = [
         jnp.sqrt(jnp.mean((mean_velocity_field[i] - true_velocity_field) ** 2)).item()
@@ -322,7 +323,11 @@ def main() -> None:
             )
             axes[i, 7].legend()
 
-    plt.savefig(os.path.join(FIGURES_DIR, f"esmda_results_lbm_{NUM_ESMDA_STEPS}.pdf"))
+    plt.savefig(
+        os.path.join(
+            FIGURES_DIR, f"esmda_results_lbm_with_udales_data_{NUM_ESMDA_STEPS}.pdf"
+        )
+    )
     plt.close()
     # plt.show()
 

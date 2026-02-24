@@ -182,6 +182,7 @@ class ParameterESMDA(BaseSmoothing):
             state_history = []
         for i in range(self.num_steps):
             self.esmda_step = i
+
             if self.forward_model.save_on_disk:
                 self.forward_model.results_dir = (
                     self.base_results_dir / f"step_{self.esmda_step}"

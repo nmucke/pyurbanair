@@ -456,9 +456,6 @@ subroutine {subroutine_name}(lsolids,blanking)
    logical, intent(out)   :: lsolids
    logical, intent(inout) :: blanking(0:{nx}+1,0:{ny}+1,0:{nz}+1)
    integer :: i, j, k
-#ifdef _CUDA
-   attributes(device) :: blanking
-#endif
 
    lsolids=.true.
 

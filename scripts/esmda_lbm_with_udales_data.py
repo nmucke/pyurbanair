@@ -60,10 +60,10 @@ os.makedirs(FIGURES_DIR, exist_ok=True)
 TRUE_VELOCITY_MAGNITUDE = 8.0
 TRUE_ANGLE = 10.0
 
-NUM_PARALLEL_PROCESSES = 32
+NUM_PARALLEL_PROCESSES = 1
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 200
+ENSEMBLE_SIZE = 5
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -102,8 +102,9 @@ LBM_FIXED_INPUT = {
     "nz": 8,
     "num_timesteps": lbm_time_steps,
     "bounds": ((0, 160), (0, 160), (0, 40)),
-    "verbose": True,
+    "verbose": False,
     "output_frequency": lbm_output_frequency,
+    "cuda": True,
     # "results_dir": pathlib.Path(RESULTS_DIR),
 }
 
@@ -155,7 +156,7 @@ def main() -> None:
         **LBM_FIXED_INPUT,  # type: ignore[arg-type]
         results_dir=pathlib.Path(RESULTS_DIR),
     )
-    udales_forward_model = UDALESForwardModel(**UDALES_FIXED_INPUT)  # type: ignore[arg-type]
+    udales_forward_model = UDALESForwardModel(**UDALES_FIXED_INPUT)
     udales_forward_model.run_preprocessing()
 
     # udales_forward_model = LBMForwardModel(
@@ -209,7 +210,7 @@ def main() -> None:
     ensemble_mean_field = ensemble_mean_field.isel(time=slice(2, lbm_time_steps))
 
     mean_velocity_field = get_velocity_magnitude_field(ensemble_mean_field)
-
+    mean_velocity_field = mean_velocity_field[:, 2:]
     rmse = [
         jnp.sqrt(jnp.mean((mean_velocity_field[i] - true_velocity_field) ** 2)).item()
         for i in range(NUM_ESMDA_STEPS + 1)
@@ -299,7 +300,9 @@ def main() -> None:
 
         axes[i, 2].set_title(f"RMSE: {rmse[i]:.4f}")
     plt.savefig(
-        os.path.join(FIGURES_DIR, f"esmda_par_results_lbm_{NUM_ESMDA_STEPS}.pdf")
+        os.path.join(
+            FIGURES_DIR, f"esmda_par_results_lbm_with_udales_data_{NUM_ESMDA_STEPS}.pdf"
+        )
     )
     plt.close()
 

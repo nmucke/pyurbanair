@@ -43,3 +43,7 @@ training_data_old/*
 # esmda files
 esmda_init_conditions/*
 esmda_results/*
+
+
+# cache
+.cache/*

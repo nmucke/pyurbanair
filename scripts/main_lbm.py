@@ -26,11 +26,13 @@ def main() -> None:
         stl_path=stl_path,
         nx=120,
         ny=120,
-        nz=16,
-        num_timesteps=100,
-        bounds=((0, 160), (0, 160), (0, 16)),
+        nz=120,
+        num_timesteps=1500,
+        bounds=((0, 160), (0, 160), (0, 160)),
         output_frequency=10,
+        cuda=True,
     )
+    forward_model.compile()
     # inflow_angle = np.array([1, 10, 20])
     # velocity_magnitude = np.array([3, 5, 7])
     # params = xarray.Dataset(
