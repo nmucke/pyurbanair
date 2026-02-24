@@ -5,6 +5,8 @@ import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray
+from vape4d import render
+from vape4d.utils import diverging_alpha
 
 
 def animate_state(
@@ -235,6 +237,117 @@ def animate_state(
 
     writer = animation.FFMpegWriter(fps=fps)
     anim.save(str(output_path), writer=writer, dpi=dpi)
+
+    plt.close(fig)
+
+
+def animate_3d(
+    state: xarray.Dataset | xarray.DataArray,
+    output_path: str | pathlib.Path,
+    variable: Optional[str] = None,
+    time_dim: str = "time",
+    spatial_dims: Optional[tuple[str, str, str]] = None,
+    fps: int = 10,
+    dpi: int = 100,
+    width: int = 512,
+    height: int = 512,
+    cmap: str = "viridis",
+) -> None:
+    """
+    Animate 4D data (3 spatial dimensions + time) as volume-rendered frames using vape4d.
+
+    Each frame is a volume-rendered image at one time step; frames are written to a
+    video file. Requires the vape4d library (pip install vape4d).
+
+    Parameters
+    ----------
+    state : xarray.Dataset | xarray.DataArray
+        Dataset or DataArray with one time dimension and three spatial dimensions.
+    output_path : str | pathlib.Path
+        Path where the .mp4 file will be saved.
+    variable : Optional[str], default=None
+        Name of the data variable to animate (only used if `state` is a Dataset).
+        If None, the first data variable is used.
+    time_dim : str, default="time"
+        Name of the time dimension.
+    spatial_dims : Optional[tuple[str, str, str]], default=None
+        Names of the three spatial dimensions in (depth, height, width) order, i.e.
+        (z, y, x) for vape4d's [T, D, H, W]. If None, the three non-time dimensions
+        are used in their current order.
+    fps : int, default=10
+        Frames per second for the output video.
+    dpi : int, default=100
+        Dots per inch when writing the video (affects resolution).
+    width : int, default=512
+        Width of each rendered frame in pixels.
+    height : int, default=512
+        Height of each rendered frame in pixels.
+    cmap : str, default="viridis"
+        Matplotlib colormap name for the volume transfer function.
+    """
+    if isinstance(state, xarray.Dataset):
+        if variable is None:
+            data_vars = list(state.data_vars.keys())
+            if not data_vars:
+                raise ValueError("Dataset has no data variables")
+            variable = data_vars[0]
+        data = state[variable]
+    else:
+        data = state
+
+    if time_dim not in data.dims:
+        raise ValueError(
+            f"Data must have a '{time_dim}' dimension; found dims: {list(data.dims)}"
+        )
+
+    non_time_dims = [d for d in data.dims if d != time_dim]
+    if len(non_time_dims) != 3:
+        raise ValueError(
+            f"Data must have exactly 3 spatial dimensions (besides '{time_dim}'); "
+            f"found: {non_time_dims}"
+        )
+
+    if spatial_dims is None:
+        spatial_dims = tuple(non_time_dims)
+    else:
+        for d in spatial_dims:
+            if d not in data.dims:
+                raise ValueError(
+                    f"Spatial dimension '{d}' not in data dims: {list(data.dims)}"
+                )
+
+    # Order as (time, depth, height, width) for vape4d [T, D, H, W]
+    ordered_dims = (time_dim, spatial_dims[1], spatial_dims[0], spatial_dims[2])
+    volume_4d = data.transpose(*ordered_dims).values.astype(np.float32)
+    n_times = volume_4d.shape[0]
+
+    # Normalized times in [0, 1] for each frame; render() accepts a list and returns all frames
+    times = [t / max(1, n_times - 1) for t in range(n_times)]
+    # colormap = plt.get_cmap(cmap)
+    colormap = diverging_alpha(plt.get_cmap("magma"))
+    frames = render(
+        volume_4d,
+        cmap=colormap,
+        time=times,
+        width=width,
+        height=height,
+    )
+    # When a single time is given, render returns (H, W, 4); ensure we always have (T, H, W, 4)
+    if frames.ndim == 3:
+        frames = frames[np.newaxis, ...]
+
+    output_path = pathlib.Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
+    ax.set_axis_off()
+    im = ax.imshow(frames[0])
+    writer = animation.FFMpegWriter(fps=fps)
+    with writer.saving(fig, str(output_path), dpi=dpi):
+        writer.grab_frame()
+        for f in frames[1:]:
+            im.set_array(f)
+            writer.grab_frame()
 
     plt.close(fig)
 

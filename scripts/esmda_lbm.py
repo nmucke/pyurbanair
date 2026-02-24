@@ -139,6 +139,9 @@ def main() -> None:
 
     ##### Run true simulation #####
     true_state = forward_model(params=true_params)
+    import pdb
+
+    pdb.set_trace()
     true_velocity_field = get_velocity_magnitude_field(true_state)
 
     ##### Setup observations #####

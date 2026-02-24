@@ -79,7 +79,7 @@ def get_ensemble_std_field(
     return ensemble_std_field, params
 
 
-NUM_ASSIMILATION_WINDOWS = 10
+NUM_ASSIMILATION_WINDOWS = 30
 
 # Random seed
 SEED = 42
@@ -94,7 +94,7 @@ INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/lbm")
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 32
+NUM_PARALLEL_PROCESSES = 8
 
 # True parameters
 TRUE_VELOCITY_MAGNITUDE = 10.0
@@ -103,16 +103,18 @@ TRUE_ANGLE = 10.0
 RESULTS_DIR = ".temp/lbm"
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 32
+ENSEMBLE_SIZE = 64
 NUM_ESMDA_STEPS = 1
 ALPHA = 1 / NUM_ESMDA_STEPS
 
-# Observation settings
-OBS_IDS_X = [40, 50, 90, 110, 80, 20, 50, 90]
-OBS_IDS_Y = [30, 60, 90, 110, 20, 60, 90, 50]
-OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
+OBS_X = jnp.linspace(10, 150, 4)
+OBS_Y = jnp.linspace(10, 150, 4)
+OBS_X, OBS_Y = jnp.meshgrid(OBS_X, OBS_Y)
+OBS_X = OBS_X.flatten()
+OBS_Y = OBS_Y.flatten()
+OBS_Z = jnp.full(len(OBS_X), 2.0)
 OBS_STATES = ["u", "v", "w"]
-NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
+NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
 # Observation error settings
 OBS_ERROR_STD = 0.01
@@ -125,7 +127,7 @@ FIXED_INPUT = {
     "nx": 120,
     "ny": 120,
     "nz": 8,
-    "num_timesteps": 200,
+    "num_timesteps": 100,
     "bounds": ((0, 160), (0, 160), (0, 40)),
     "verbose": False,
     # "results_dir": pathlib.Path(RESULTS_DIR),
@@ -149,7 +151,7 @@ def main() -> None:
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        results_dir=pathlib.Path(RESULTS_DIR),
+        # results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
@@ -167,7 +169,11 @@ def main() -> None:
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
-        OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES, solver_name="pylbm"
+        obs_x=OBS_X,
+        obs_y=OBS_Y,
+        obs_z=OBS_Z,
+        obs_states=OBS_STATES,
+        solver_name="pylbm",
     )
     if FIXED_INPUT["output_frequency"] is not None:
         observation_operator = TemporalObservationOperator(
