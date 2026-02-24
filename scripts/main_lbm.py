@@ -68,7 +68,8 @@ def main() -> None:
     # plt.imshow(state.blanking.values[0, 1, :, :])
     plt.colorbar()
     plt.savefig("figures/vel_magnitude_lbm.png")
-    plt.show()
+    plt.close()
+    # plt.show()
 
 
 if __name__ == "__main__":

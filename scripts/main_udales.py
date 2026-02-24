@@ -37,7 +37,7 @@ FIXED_INPUT = {
 
 def main() -> None:
 
-    forward_model = ForwardModel(**FIXED_INPUT)
+    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
     params = xarray.Dataset(
         data_vars={
             "inflow_angle": -45,
@@ -47,7 +47,6 @@ def main() -> None:
     )
     forward_model.run_preprocessing(python_or_matlab="python")
     state = forward_model(params=params)
-    pdb.set_trace()
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     # Add vel_magnitude as a data variable in state
@@ -67,7 +66,8 @@ def main() -> None:
     plt.imshow(vel_magnitude[0, 0, :, :])
     plt.colorbar()
     plt.savefig("figures/vel_magnitude_udales.png")
-    plt.show()
+    plt.close()
+    # plt.show()
 
 
 if __name__ == "__main__":

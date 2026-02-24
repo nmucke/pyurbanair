@@ -5,6 +5,31 @@ from __future__ import annotations
 import numpy as np
 import xarray
 
+_AXIS_DIM_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "x": ("x", "xt", "xm"),
+    "y": ("y", "yt", "ym"),
+    "z": ("z", "zt", "zm"),
+}
+
+
+def _resolve_axis_dim_name(
+    data_array: xarray.DataArray, requested_dim: str, axis_name: str
+) -> str:
+    """Resolve requested axis dimension name against available staggered variants."""
+    if requested_dim in data_array.dims:
+        return requested_dim
+
+    candidates = _AXIS_DIM_CANDIDATES.get(axis_name, (requested_dim,))
+    for candidate in candidates:
+        if candidate in data_array.dims:
+            return candidate
+
+    raise ValueError(
+        f"Dimension '{requested_dim}' required for interpolation is not present in "
+        f"state variable '{data_array.name}'. Available dimensions are "
+        f"{tuple(data_array.dims)}."
+    )
+
 
 def _compute_linear_indices_and_weights(
     coords: np.ndarray, points: np.ndarray, axis_name: str
@@ -24,10 +49,19 @@ def _compute_linear_indices_and_weights(
 
     min_coord = float(coords[0])
     max_coord = float(coords[-1])
-    if np.any(points < min_coord) or np.any(points > max_coord):
+
+    # Staggered grids can place observations up to half a cell beyond a variable's
+    # native coordinates (e.g., center observations against face velocities).
+    spacing = np.diff(coords)
+    extrapolation_margin = 0.5 * float(np.median(spacing))
+
+    if np.any(points < (min_coord - extrapolation_margin)) or np.any(
+        points > (max_coord + extrapolation_margin)
+    ):
         raise ValueError(
             f"Observation points for axis '{axis_name}' are outside the grid bounds "
-            f"[{min_coord}, {max_coord}]."
+            f"[{min_coord}, {max_coord}] (including allowed staggered extrapolation "
+            f"margin {extrapolation_margin})."
         )
 
     upper_idx = np.searchsorted(coords, points, side="right")
@@ -66,12 +100,9 @@ def interpolate_dataarray_at_points(
         DataArray with shape (..., sensor), where "..." are non-spatial dimensions
         from the original data_array (e.g., time).
     """
-    for dim_name in (z_dim, y_dim, x_dim):
-        if dim_name not in data_array.dims:
-            raise ValueError(
-                f"Dimension '{dim_name}' required for interpolation is not present in "
-                f"state variable '{data_array.name}'."
-            )
+    z_dim = _resolve_axis_dim_name(data_array, z_dim, "z")
+    y_dim = _resolve_axis_dim_name(data_array, y_dim, "y")
+    x_dim = _resolve_axis_dim_name(data_array, x_dim, "x")
 
     num_sensors = obs_x.size
     if obs_y.size != num_sensors or obs_z.size != num_sensors:

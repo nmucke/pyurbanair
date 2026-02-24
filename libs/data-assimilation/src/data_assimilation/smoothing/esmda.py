@@ -29,15 +29,28 @@ class ParameterESMDA(BaseSmoothing):
         """Initialize the Parameter ESMDA smoothing."""
         super().__init__(observation_operator, forward_model)
 
-        self.results_dir = results_dir
-        if self.results_dir is not None or self.forward_model.save_on_disk:
-            if self.results_dir is None:
-                self.results_dir = pathlib.Path(".temp/esmda")
-                os.makedirs(self.results_dir, exist_ok=True)
+        # self.results_dir = results_dir
+        # if self.results_dir is not None or self.forward_model.save_on_disk:
+        #     if self.results_dir is None:
+        #         self.base_results_dir = pathlib.Path(".temp/esmda")
+        #         os.makedirs(self.results_dir, exist_ok=True)
+
+        #     self.save_on_disk = True
+        #     for i in range(num_steps + 1):
+        #         os.makedirs(self.results_dir / f"step_{i}", exist_ok=True)
+        # else:
+        #     self.save_on_disk = False
+
+        if self.forward_model.save_on_disk:
+            # if self.results_dir is None:
+            #     self.results_dir = pathlib.Path(".temp/esmda")
+            #     os.makedirs(self.results_dir, exist_ok=True)
+            # else:
+            self.base_results_dir = self.forward_model.results_dir
 
             self.save_on_disk = True
             for i in range(num_steps + 1):
-                os.makedirs(self.results_dir / f"step_{i}", exist_ok=True)
+                os.makedirs(self.base_results_dir / f"step_{i}", exist_ok=True)
         else:
             self.save_on_disk = False
 
@@ -61,7 +74,12 @@ class ParameterESMDA(BaseSmoothing):
         obs = jnp.asarray(obs)
 
         pred_obs = self._observation_step(
-            state=state, results_dir=self.forward_model.results_dir
+            state=state,
+            results_dir=(
+                self.forward_model.results_dir
+                if self.forward_model.save_on_disk
+                else None
+            ),
         )
         pred_obs = jnp.asarray(pred_obs).T
 
@@ -137,7 +155,7 @@ class ParameterESMDA(BaseSmoothing):
     ) -> xarray.Dataset:
         """Get the state from the results directory."""
         return xarray.open_dataset(
-            self.results_dir / f"step_{step}" / f"state_{ensemble_member}.nc"  # type: ignore[operator]
+            self.base_results_dir / f"step_{step}" / f"state_{ensemble_member}.nc"
         )
 
     def _save_states_to_disk(self, step: int) -> None:
@@ -146,7 +164,7 @@ class ParameterESMDA(BaseSmoothing):
         src_dir = self.forward_model.results_dir
         for f in pathlib.Path(src_dir).iterdir():
             if f.suffix == ".nc":
-                target = self.results_dir / f"step_{step}" / f"{f.name}"  # type: ignore[operator]
+                target = self.results_dir / f"step_{step}" / f"{f.name}"
                 shutil.move(str(f), str(target))
 
     def _analysis(
@@ -163,17 +181,20 @@ class ParameterESMDA(BaseSmoothing):
         if return_state_history:
             state_history = []
         for i in range(self.num_steps):
+            self.esmda_step = i
+            if self.forward_model.save_on_disk:
+                self.forward_model.results_dir = (
+                    self.base_results_dir / f"step_{self.esmda_step}"
+                )
+
             state = self._forecast_step(state=state, params=params)
 
             params = self._one_step(params=params, obs=observations, state=state)
             if return_params_history:
                 params_history.append(params)
 
-            if return_state_history:
-                if self.forward_model.save_on_disk:
-                    self._save_states_to_disk(step=i)
-                else:
-                    state_history.append(state)
+            if return_state_history and not self.forward_model.save_on_disk:
+                state_history.append(state)
 
             print(f"ESMDA step {i} completed")
 
@@ -182,15 +203,21 @@ class ParameterESMDA(BaseSmoothing):
                 params_history, dim="esmda_step", join="override"
             )
 
-        if return_state_history:
-            state = self._forecast_step(state=state, params=params)
-            if self.forward_model.save_on_disk:
-                self._save_states_to_disk(step=self.num_steps)
-            else:
-                state_history.append(state)
-                state_history = xarray.concat(
-                    state_history, dim="esmda_step", join="override"
-                )
+        self.esmda_step = self.num_steps
+        if self.forward_model.save_on_disk:
+            self.forward_model.results_dir = (
+                self.base_results_dir / f"step_{self.esmda_step}"
+            )
+
+        state = self._forecast_step(state=state, params=params)
+
+        self.forward_model.results_dir = self.base_results_dir
+
+        if return_state_history and not self.forward_model.save_on_disk:
+            state_history.append(state)
+            state_history = xarray.concat(
+                state_history, dim="esmda_step", join="override"
+            )
 
         if self.save_on_disk:
             if return_params_history:
@@ -222,15 +249,12 @@ class StateAndParameterESMDA(BaseSmoothing):
         """Initialize the State and Parameter ESMDA smoothing."""
         super().__init__(observation_operator, forward_model)
 
-        self.results_dir = results_dir
-        if self.results_dir is not None or self.forward_model.save_on_disk:
-            if self.results_dir is None:
-                self.results_dir = pathlib.Path(".temp/esmda")
-                os.makedirs(self.results_dir, exist_ok=True)
+        if self.forward_model.save_on_disk:
+            self.base_results_dir = self.forward_model.results_dir
 
             self.save_on_disk = True
             for i in range(num_steps + 1):
-                os.makedirs(self.results_dir / f"step_{i}", exist_ok=True)
+                os.makedirs(self.base_results_dir / f"step_{i}", exist_ok=True)
         else:
             self.save_on_disk = False
 
@@ -386,7 +410,7 @@ class StateAndParameterESMDA(BaseSmoothing):
 
         # Extract parameter names and values
         param_names = list(params.data_vars.keys())
-        state_names = list(state.data_vars.keys())
+
         N_e = params.sizes["ensemble"]  # Number of ensemble members
         N_p = len(param_names)  # Number of parameters
         N_s = states_array.shape[0]  # Number of state variables
@@ -454,17 +478,6 @@ class StateAndParameterESMDA(BaseSmoothing):
 
         states_array = self._unflatten_state(states_array, state_template)
 
-        # import matplotlib.pyplot as plt
-
-        # from pyurbanair.utils.state_utils import get_velocity_magnitude_field
-
-        # velocity_field = get_velocity_magnitude_field(states_array)
-
-        # plt.figure()
-        # plt.imshow(velocity_field[0, 1, :, :])
-        # plt.colorbar()
-        # plt.show()
-
         # pdb.set_trace()
         return (
             states_array,
@@ -481,7 +494,7 @@ class StateAndParameterESMDA(BaseSmoothing):
     ) -> xarray.Dataset:
         """Get the state from the results directory."""
         return xarray.open_dataset(
-            self.results_dir / f"step_{step}" / f"state_{ensemble_member}.nc"  # type: ignore[operator]
+            self.base_results_dir / f"step_{step}" / f"state_{ensemble_member}.nc"
         )
 
     def _save_states_to_disk(self, step: int) -> None:
@@ -490,7 +503,7 @@ class StateAndParameterESMDA(BaseSmoothing):
         src_dir = self.forward_model.results_dir
         for f in pathlib.Path(src_dir).iterdir():
             if f.suffix == ".nc":
-                target = self.results_dir / f"step_{step}" / f"{f.name}"  # type: ignore[operator]
+                target = self.base_results_dir / f"step_{step}" / f"{f.name}"
                 shutil.move(str(f), str(target))
 
     def _analysis(
@@ -507,13 +520,16 @@ class StateAndParameterESMDA(BaseSmoothing):
         if return_state_history:
             state_history = []
         for i in range(self.num_steps):
+            self.esmda_step = i
+            if self.forward_model.save_on_disk:
+                self.forward_model.results_dir = (
+                    self.base_results_dir / f"step_{self.esmda_step}"
+                )
+
             state = self._forecast_step(state=state, params=params)
 
-            if return_state_history:
-                if self.forward_model.save_on_disk:
-                    self._save_states_to_disk(step=i)
-                else:
-                    state_history.append(state)
+            if return_state_history and not self.forward_model.save_on_disk:
+                state_history.append(state)
 
             state, params = self._one_step(params=params, obs=observations, state=state)
 
@@ -522,16 +538,20 @@ class StateAndParameterESMDA(BaseSmoothing):
 
             print(f"ESMDA step {i} completed")
 
+        self.esmda_step = self.num_steps
+        if self.forward_model.save_on_disk:
+            self.forward_model.results_dir = (
+                self.base_results_dir / f"step_{self.esmda_step}"
+            )
         state = self._forecast_step(state=state, params=params)
 
-        if return_state_history:
-            if self.forward_model.save_on_disk:
-                self._save_states_to_disk(step=i)
-            else:
-                state_history.append(state)
-                state_history = xarray.concat(
-                    state_history, dim="esmda_step", join="override"
-                )
+        self.forward_model.results_dir = self.base_results_dir
+
+        if return_state_history and not self.forward_model.save_on_disk:
+            state_history.append(state)
+            state_history = xarray.concat(
+                state_history, dim="esmda_step", join="override"
+            )
 
         if return_params_history:
             params_history = xarray.concat(
