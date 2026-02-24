@@ -64,8 +64,8 @@ FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
-NCPU_PER_PROCESS = 4
-NUM_PARALLEL_PROCESSES = 2
+NCPU_PER_PROCESS = 1
+NUM_PARALLEL_PROCESSES = 32
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
@@ -73,7 +73,7 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 4
+ENSEMBLE_SIZE = 32
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -164,11 +164,11 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
+    # forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        results_dir=pathlib.Path(RESULTS_DIR),
+        # results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
@@ -184,7 +184,7 @@ def main() -> None:
         num_steps=NUM_ESMDA_STEPS,
         alpha=ALPHA,
         rng_key=rng_key,
-        results_dir=pathlib.Path(RESULTS_DIR),
+        # results_dir=pathlib.Path(RESULTS_DIR),
     )
     output = esmda(
         params=params_ensemble,

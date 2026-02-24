@@ -211,8 +211,6 @@ class ParameterESMDA(BaseSmoothing):
 
         state = self._forecast_step(state=state, params=params)
 
-        self.forward_model.results_dir = self.base_results_dir
-
         if return_state_history and not self.forward_model.save_on_disk:
             state_history.append(state)
             state_history = xarray.concat(
