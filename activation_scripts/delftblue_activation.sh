@@ -8,6 +8,7 @@
 
 # Load NVHPC module if available
 if command -v module >/dev/null 2>&1; then
+    echo "Loading NVHPC module"
     module load nvhpc/25.7 2>/dev/null || module load nvhpc 2>/dev/null || true
 fi
 

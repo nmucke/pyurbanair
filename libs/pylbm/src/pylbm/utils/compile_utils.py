@@ -15,6 +15,40 @@ from .dir_utils import DirectoryPaths
 from .makefile_utils import Makefile
 
 
+def _resolve_build_environment(
+    dirs: DirectoryPaths,
+    enable_netcdf: bool,
+) -> pathlib.Path:
+    """
+    Resolve the environment path used for compilation.
+
+    If NETCDF is enabled, prefer an environment that actually contains
+    include/netcdf.mod so the Fortran compiler can resolve `use netcdf`.
+    """
+    preferred_env = pathlib.Path(dirs.pixi_env_path)
+    if not enable_netcdf:
+        return preferred_env
+
+    if (preferred_env / "include" / "netcdf.mod").exists():
+        return preferred_env
+
+    # Fallback to known pixi envs in this repository.
+    repo_envs = dirs.cwd / ".pixi" / "envs"
+    if repo_envs.exists():
+        for env_name in ["delftblue", "dev", "default"]:
+            candidate = repo_envs / env_name
+            if (candidate / "include" / "netcdf.mod").exists():
+                logger.warning(
+                    "Selected NETCDF-capable environment '%s' because '%s' "
+                    "does not contain include/netcdf.mod",
+                    candidate,
+                    preferred_env,
+                )
+                return candidate
+
+    return preferred_env
+
+
 def compile_lbm(
     dirs: DirectoryPaths,
     verbose: bool = True,
@@ -44,24 +78,26 @@ def compile_lbm(
     if not dirs.lbm_src_path.exists():
         raise FileNotFoundError(f"LBM src directory not found at {dirs.lbm_src_path}")
 
+    build_env_path = _resolve_build_environment(dirs=dirs, enable_netcdf=enable_netcdf)
+
     # Update makefile HOME path to pixi environment
     makefile = Makefile(dirs.makefile_path)
-    makefile.set_path("HOME", dirs.pixi_env_path)
+    makefile.set_path("HOME", build_env_path)
 
     # Also update NCFDIR if NETCDF is enabled
     if enable_netcdf:
-        makefile.set_path("NCFDIR", dirs.pixi_env_path)
+        makefile.set_path("NCFDIR", build_env_path)
 
     makefile.write()
 
     if verbose:
-        logger.info("Updated makefile HOME to %s", dirs.pixi_env_path)
+        logger.info("Updated makefile HOME to %s", build_env_path)
 
     # Set up environment variables
     env = os.environ.copy()
-    env["HOME"] = str(dirs.pixi_env_path)
+    env["HOME"] = str(build_env_path)
     if "PIXI_ENVIRONMENT" not in env:
-        env["PIXI_ENVIRONMENT"] = str(dirs.pixi_env_path)
+        env["PIXI_ENVIRONMENT"] = str(build_env_path)
 
     # Change to LBM src directory and run make
     original_cwd = pathlib.Path.cwd()
@@ -76,9 +112,9 @@ def compile_lbm(
             logger.info("Compiling LBM program...")
 
         # Build make command
-        make_args = ["make", "-B", "GFORTRAN=1"]
+        make_args = ["make", "-B", "GFORTRAN=1", f"HOME={build_env_path}"]
         if enable_netcdf:
-            make_args.append("NETCDF=1")
+            make_args.extend(["NETCDF=1", f"NCFDIR={build_env_path}"])
 
         result = subprocess.run(  # type: ignore[call-overload]
             make_args,
