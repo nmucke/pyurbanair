@@ -30,9 +30,9 @@ def main() -> None:
         nx=120,
         ny=120,
         nz=8,
-        num_timesteps=500,
+        simulation_time=500 * 0.0538,
         bounds=((0, 160), (0, 160), (0, 40)),
-        output_frequency=1000,
+        output_frequency=1000 * 0.0538,
     )
     random_key = jax.random.PRNGKey(42)
 

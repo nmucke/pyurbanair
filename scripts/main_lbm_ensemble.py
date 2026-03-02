@@ -32,9 +32,9 @@ def main() -> None:
         nx=160,
         ny=160,
         nz=8,
-        num_timesteps=100,
+        simulation_time=100 * 0.0538,
         bounds=((0, 160), (0, 160), (0, 100)),
-        output_frequency=10,
+        output_frequency=10 * 0.0538,
     )
     forward_model.compile()
 

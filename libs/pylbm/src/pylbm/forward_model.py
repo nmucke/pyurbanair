@@ -28,13 +28,13 @@ class ForwardModel(BaseForwardModel):
         nx: int = 120,
         ny: int = 120,
         nz: int = 8,
-        num_timesteps: int = 1000,
+        simulation_time: float = 53.8,
         bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] = (
             (0, 160),
             (0, 160),
             (0, 40),
         ),
-        output_frequency: float = 1.0,
+        output_frequency: float = 0.0538,
         results_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
         experiment_name: str = "runcase",
@@ -78,8 +78,25 @@ class ForwardModel(BaseForwardModel):
         # Set experiment dimensions in mod_dimensions.F90 (add or update experiment, set active)
         set_experiment(dirs=self.dirs, nx=nx, ny=ny, nz=nz)
 
-        self.num_timesteps = num_timesteps
+        self.simulation_time = simulation_time
         self.output_frequency = output_frequency
+        self.seconds_per_timestep: float | None = None
+        # Derived during compile() once infile.in exists (C_t = C_l / C_u).
+        self.num_timesteps = 0
+        self.output_frequency_timesteps = 0
+
+    def _compute_seconds_per_timestep(self) -> float:
+        """Compute seconds per timestep from infile constants C_l/C_u."""
+        infile = Infile(self.dirs.infile_path)
+        c_l = infile.get_value_as_float("C_l")
+        c_u = infile.get_value_as_float("C_u")
+        if c_l is None or c_u is None:
+            raise ValueError(
+                "Could not read C_l/C_u from infile.in to compute timestep duration."
+            )
+        if c_u <= 0:
+            raise ValueError("C_u in infile.in must be > 0.")
+        return c_l / c_u
 
     def compile(self) -> None:
         """Compile the LBM program."""
@@ -100,9 +117,19 @@ class ForwardModel(BaseForwardModel):
                 self.dirs.infile_path,
             )
 
-        # Set number of timesteps
+        self.seconds_per_timestep = self._compute_seconds_per_timestep()
+        self.num_timesteps = int(self.simulation_time / self.seconds_per_timestep)
+        self.output_frequency_timesteps = int(
+            self.output_frequency / self.seconds_per_timestep
+        )
+        if self.num_timesteps <= 0:
+            raise ValueError("Resolved num_timesteps must be > 0.")
+        if self.output_frequency_timesteps <= 0:
+            raise ValueError("Resolved output frequency must be >= 1 timestep.")
+
+        # Set runtime controls in timestep units
         self._set_infile_value("nt1", self.num_timesteps)
-        self._set_infile_value("iout", int(self.output_frequency))
+        self._set_infile_value("iout", self.output_frequency_timesteps)
         self._set_infile_value("experiment", self.dirs.experiment_name)
         self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
 

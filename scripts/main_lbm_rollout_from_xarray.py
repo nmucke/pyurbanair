@@ -24,9 +24,9 @@ def main() -> None:
         nx=120,
         ny=120,
         nz=8,
-        num_timesteps=100,
+        simulation_time=100 * 0.0538,
         bounds=((0, 160), (0, 160), (0, 40)),
-        output_frequency=2,
+        output_frequency=2 * 0.0538,
         # results_dir=pathlib.Path(".temp/results"),
     )
     params = xarray.Dataset(

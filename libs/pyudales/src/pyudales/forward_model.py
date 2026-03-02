@@ -98,6 +98,7 @@ class ForwardModel(BaseForwardModel):
         case_dir: pathlib.Path,
         experiment_name: str = "300",
         ncpu: int = 4,
+        simulation_time: float | None = None,
         nx: int | None = None,
         ny: int | None = None,
         nz: int | None = None,
@@ -119,6 +120,8 @@ class ForwardModel(BaseForwardModel):
             case_dir: The directory containing the original case files.
             experiment_name: The name of the experiment.
             ncpu: The number of CPUs to use.
+            simulation_time: Total simulation runtime in seconds. If provided,
+                writes &RUN runtime in namoptions.
             nx: Number of grid cells in x direction (maps to itot in namoptions).
             ny: Number of grid cells in y direction (maps to jtot in namoptions).
             nz: Number of grid cells in z direction (maps to ktot in namoptions).
@@ -183,6 +186,7 @@ class ForwardModel(BaseForwardModel):
         # Rename the namoptions file to have the experiment_name as its extension
         rename_namoptions_file(self.dirs.experiment_dir, self.dirs.experiment_name)
 
+        self._apply_runtime_override(simulation_time=simulation_time)
         self._apply_domain_overrides(nx=nx, ny=ny, nz=nz, bounds=bounds)
 
         # Validate and sync NCPU with nprocx * nprocy from namoptions
@@ -219,6 +223,20 @@ class ForwardModel(BaseForwardModel):
         logger.info(f"Output dir: {self.dirs.output_dir}")
         logger.info(f"NCPU: {self.ncpu}")
         logger.info(f"MATLAB bin: {self.matlab_bin}")
+
+    def _apply_runtime_override(self, simulation_time: float | None) -> None:
+        """Apply optional simulation runtime override to namoptions."""
+        if simulation_time is None:
+            return
+        if simulation_time <= 0:
+            raise ValueError("simulation_time must be > 0.")
+
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+        namoptions.set_value("RUN", "runtime", simulation_time)
+        namoptions.write()
 
     def _apply_domain_overrides(
         self,

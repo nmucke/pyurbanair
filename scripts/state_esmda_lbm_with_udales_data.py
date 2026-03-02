@@ -96,9 +96,8 @@ OBS_ERROR_STD = 0.01
 C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
 # Forward model settings
-udales_time = 10
-lbm_time_steps = int(udales_time / 0.0538)
-lbm_output_frequency = int(lbm_time_steps / 50)
+time_in_seconds = 10
+output_frequency_seconds = time_in_seconds / 50
 
 # Forward model settings
 LBM_FIXED_INPUT = {
@@ -106,10 +105,10 @@ LBM_FIXED_INPUT = {
     "nx": 120,
     "ny": 120,
     "nz": 8,
-    "num_timesteps": lbm_time_steps,
+    "simulation_time": time_in_seconds,
     "bounds": ((0, 160), (0, 160), (0, 40)),
     "verbose": False,
-    "output_frequency": lbm_output_frequency,
+    "output_frequency": output_frequency_seconds,
 }
 
 # Forward model settings
