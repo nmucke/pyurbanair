@@ -144,6 +144,8 @@ def main() -> None:
 
     ##### Run true simulation #####
     true_state = forward_model(params=true_params)
+    if true_state is None:
+        raise RuntimeError("Expected in-memory true state from forward model.")
     true_velocity_field = get_velocity_magnitude_field(true_state)
 
     ##### Setup observations #####
@@ -165,7 +167,7 @@ def main() -> None:
 
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    forward_model.apply_save_on_disk(results_dir=pathlib.Path(".temp/lbm"))
+    forward_model.set_results_dir(pathlib.Path(".temp/lbm"))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,

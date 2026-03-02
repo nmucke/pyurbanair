@@ -31,6 +31,7 @@ def main() -> None:
         bounds=((0, 160), (0, 160), (0, 16)),
         output_frequency=10,
         cuda=False,
+        results_dir=pathlib.Path(".temp/lbm"),
     )
     forward_model.compile()
     # inflow_angle = np.array([1, 10, 20])
@@ -49,6 +50,8 @@ def main() -> None:
         },
     )
     state = forward_model(params=params)
+    if state is None:
+        raise RuntimeError("Expected in-memory state from forward_model run.")
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     state = state.assign(vel_magnitude=(("time", "z", "y", "x"), vel_magnitude))

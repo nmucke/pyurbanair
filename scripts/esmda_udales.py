@@ -150,7 +150,7 @@ def main() -> None:
             "pressure_gradient_magnitude": TRUE_PRESSURE_GRADIENT_MAGNITUDE,
         },
     )
-    forward_model = ForwardModel(**FIXED_INPUT)
+    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
     forward_model.run_preprocessing()
 
     ##### Run true simulation #####
@@ -174,14 +174,13 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
+    forward_model.set_results_dir(pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
-
 
     ##### Run ESMDA #####
     t1 = time.time()

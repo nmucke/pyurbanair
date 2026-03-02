@@ -314,7 +314,13 @@ def set_experiment(
     mod_dims = ModDimensions(dirs.mod_dimensions_path)
 
     if mod_dims.has_experiment(dirs.experiment_name):
-        mod_dims.set_experiment_params(dirs.experiment_name, nx=nx, ny=ny, nz=nz)
+        update_kwargs: dict[str, int] = {"nx": nx, "ny": ny, "nz": nz}
+
+        # ForwardModel updates "runcase" dimensions; keep nyg consistent with ny.
+        if dirs.experiment_name == "runcase":
+            update_kwargs["nyg"] = ny
+
+        mod_dims.set_experiment_params(dirs.experiment_name, **update_kwargs)
         mod_dims.set_active_experiment(dirs.experiment_name)
     else:
         mod_dims.add_experiment(

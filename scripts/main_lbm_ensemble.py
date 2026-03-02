@@ -1,5 +1,7 @@
+import os
 import pathlib
 import pdb
+import shutil
 import time
 
 import jax.numpy as jnp
@@ -13,24 +15,29 @@ from pylbm.ensemble_forward_model import EnsembleForwardModel
 from pylbm.forward_model import ForwardModel
 
 ENSEMBLE_SIZE = 4
-NUM_PARALLEL_PROCESSES = 4
+NUM_PARALLEL_PROCESSES = 1
 NCPU_PER_PROCESS = 1
 SEED = 42
 
 
 def main() -> None:
+
+    if os.path.exists(".temp"):
+        shutil.rmtree(".temp")
+
     stl_path = pathlib.Path("examples/lbm/experiments/xie_castro_2008_STL.stl")
-    # stl_path = pathlib.Path("examples/udales/experiments/201/geom.201.STL")
 
     forward_model = ForwardModel(
         stl_path=stl_path,
         nx=160,
         ny=160,
         nz=8,
-        num_timesteps=1000,
+        num_timesteps=100,
         bounds=((0, 160), (0, 160), (0, 100)),
         output_frequency=10,
     )
+    forward_model.compile()
+
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
@@ -50,6 +57,8 @@ def main() -> None:
     state = ensemble_forward_model.run_ensemble(params=params)
     t2 = time.time()
     print(f"Time taken: {t2 - t1} seconds")
+    if state is None:
+        raise RuntimeError("Expected in-memory ensemble state.")
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     state = state.assign(

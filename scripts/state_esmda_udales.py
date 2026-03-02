@@ -70,7 +70,7 @@ INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/udales")
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 32
+NUM_PARALLEL_PROCESSES = 10
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
@@ -78,7 +78,7 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 100
+ENSEMBLE_SIZE = 10
 NUM_ESMDA_STEPS = 3
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -156,13 +156,14 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
+    forward_model.set_results_dir(pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
+    forward_model.set_results_dir(None)
 
     init_states = [
         xarray.open_dataset(INIT_STATES_DIR / f"state_{i}.nc").isel(time=-1)

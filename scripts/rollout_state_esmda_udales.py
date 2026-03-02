@@ -163,16 +163,14 @@ def main() -> None:
     forward_model = RolloutForwardModel(**FIXED_INPUT)
     forward_model.run_preprocessing(python_or_matlab="python")
 
-
-    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
+    forward_model.set_results_dir(pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
-    forward_model.apply_save_in_memory()
-
+    forward_model.set_results_dir(None)
 
     init_states = [
         xarray.open_dataset(INIT_STATES_DIR / f"state_{i}.nc").isel(
@@ -187,7 +185,11 @@ def main() -> None:
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
-        obs_x=OBS_X, obs_y=OBS_Y, obs_z=OBS_Z, obs_states=OBS_STATES, solver_name="udales"
+        obs_x=OBS_X,
+        obs_y=OBS_Y,
+        obs_z=OBS_Z,
+        obs_states=OBS_STATES,
+        solver_name="udales",
     )
     if FIXED_INPUT["output_frequency"] is not None:
         observation_operator = TemporalObservationOperator(

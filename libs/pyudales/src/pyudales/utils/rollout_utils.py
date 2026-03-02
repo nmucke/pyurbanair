@@ -4,14 +4,13 @@ import pathlib
 import shutil
 
 import xarray
-from pyudales.utils.dir_utils import DirectoryPaths
 
 
 def collect_rollout_results(
     sim_name: str,
     rollout_step: int,
-    dirs: DirectoryPaths,
-) -> xarray.Dataset:
+    results_dir: pathlib.Path,
+) -> None:
     """Collect the results from the rollout forward model.
 
     If sim_name.nc already exists, load it and concatenate with the rollout file
@@ -21,13 +20,10 @@ def collect_rollout_results(
     Args:
         sim_name: Base name for the simulation results file.
         rollout_step: The rollout step number.
-        dirs: Directory paths.
-
-    Returns:
-        The collected dataset, either concatenated or renamed.
+        results_dir: Directory where results are stored.
     """
-    sim_file = dirs.results_dir / f"{sim_name}.nc"  # type: ignore[operator]
-    rollout_file = dirs.results_dir / f"{sim_name}_rollout_{rollout_step}.nc"  # type: ignore[operator]
+    sim_file = results_dir / f"{sim_name}.nc"
+    rollout_file = results_dir / f"{sim_name}_rollout_{rollout_step}.nc"
 
     if sim_file.exists():
         # Load both datasets into memory and close file handles before writing

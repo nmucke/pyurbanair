@@ -111,7 +111,9 @@ def main() -> None:
     ##### Setup parameter ensemble #####
     rng_key = jax.random.PRNGKey(SEED)
 
-    true_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(ensemble=TRUE_SIM_ID)
+    true_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(
+        ensemble=TRUE_SIM_ID
+    )
     forward_model = RolloutForwardModel(**FIXED_INPUT)
     forward_model.compile()
 
@@ -119,15 +121,19 @@ def main() -> None:
     TRUE_ANGLE = true_params.inflow_angle.values
 
     ##### Run true simulation #####
-    true_init_condition = xarray.open_dataset(INIT_STATES_DIR / f"state_{TRUE_SIM_ID}.nc").isel(
-        time=-1
-    )
+    true_init_condition = xarray.open_dataset(
+        INIT_STATES_DIR / f"state_{TRUE_SIM_ID}.nc"
+    ).isel(time=-1)
     true_state = forward_model(params=true_params, state=true_init_condition)
     true_velocity_field = get_velocity_magnitude_field(true_state)
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
-        obs_x=OBS_X, obs_y=OBS_Y, obs_z=OBS_Z, obs_states=OBS_STATES, solver_name="pylbm"
+        obs_x=OBS_X,
+        obs_y=OBS_Y,
+        obs_z=OBS_Z,
+        obs_states=OBS_STATES,
+        solver_name="pylbm",
     )
     if FIXED_INPUT["output_frequency"] is not None:
         observation_operator = TemporalObservationOperator(
@@ -138,14 +144,14 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
+    forward_model.set_results_dir(pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
-    forward_model.apply_save_in_memory()
+    forward_model.set_results_dir(None)
 
     init_states = [
         xarray.open_dataset(INIT_STATES_DIR / f"state_{i}.nc").isel(time=-1)

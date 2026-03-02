@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import xarray
 from data_assimilation.observation_operator import ObservationOperator
 
-from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
 
 class BaseSmoothing:
@@ -16,7 +16,7 @@ class BaseSmoothing:
     def __init__(
         self,
         observation_operator: ObservationOperator,
-        forward_model: BaseForwardModel,
+        forward_model: BaseEnsembleForwardModel,
     ) -> None:
         self.observation_operator = observation_operator
         self.forward_model = forward_model

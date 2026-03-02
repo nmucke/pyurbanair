@@ -91,7 +91,6 @@ class ForwardModel(BaseForwardModel):
             enable_netcdf=self.enable_netcdf,
         )
 
-        
         # Create infile.in by running the executable (only if it doesn't exist)
         if not self.dirs.infile_path.exists():
             create_infile(dirs=self.dirs, verbose=self.verbose)
@@ -100,13 +99,17 @@ class ForwardModel(BaseForwardModel):
                 "infile.in already exists at %s, skipping creation.",
                 self.dirs.infile_path,
             )
-        
+
         # Set number of timesteps
         self._set_infile_value("nt1", self.num_timesteps)
         self._set_infile_value("iout", int(self.output_frequency))
         self._set_infile_value("experiment", self.dirs.experiment_name)
         self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
 
+    def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
+        """Change results directory, updating both base and dirs dataclass."""
+        super().set_results_dir(results_dir)
+        self.dirs.results_dir = results_dir
 
     def _set_infile_value(self, key: str, value: Union[str, int, float, bool]) -> None:
         """
@@ -159,6 +162,13 @@ class ForwardModel(BaseForwardModel):
             f"No LBM output files found in {self.dirs.output_dir} for timestep range "
             f"[{nt0}, {nt1}]"
         )
+
+    def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
+        """Save simulation results to a NetCDF file."""
+        if self.results_dir is None:
+            raise ValueError("Cannot save results because results_dir is not set.")
+        outfile = self.results_dir / f"{sim_name}.nc"
+        state.to_netcdf(str(outfile))
 
     def run(self) -> None:
         """
@@ -229,9 +239,9 @@ class ForwardModel(BaseForwardModel):
 
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
 
-        if self.save_on_disk and self.results_dir is not None:
-            outfile = self.results_dir / f"{sim_name}.nc"
-            state.to_netcdf(str(outfile))
+        if self.save_on_disk:
+            resolved_sim_name = sim_name if sim_name is not None else "state"
+            self.save_results(state, resolved_sim_name)
             return None
 
         return state

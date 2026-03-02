@@ -158,7 +158,7 @@ def main() -> None:
     )
     lbm_forward_model.compile()
 
-    udales_forward_model = UDALESForwardModel(**UDALES_FIXED_INPUT)
+    udales_forward_model = UDALESForwardModel(**UDALES_FIXED_INPUT)  # type: ignore[arg-type]
     udales_forward_model.run_preprocessing()
 
     # udales_forward_model = LBMForwardModel(
@@ -167,6 +167,8 @@ def main() -> None:
 
     ##### Run true simulation #####
     true_state = udales_forward_model(params=true_params)
+    if true_state is None:
+        raise RuntimeError("Expected in-memory true state from uDALES model.")
     true_state = true_state / 75.0
     true_velocity_field = get_velocity_magnitude_field(true_state)
 
@@ -183,7 +185,7 @@ def main() -> None:
 
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    lbm_forward_model.apply_save_on_disk(results_dir=pathlib.Path(".temp/lbm"))
+    lbm_forward_model.set_results_dir(pathlib.Path(".temp/lbm"))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=lbm_forward_model,
         ensemble_size=ENSEMBLE_SIZE,

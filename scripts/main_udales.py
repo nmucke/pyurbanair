@@ -31,6 +31,10 @@ FIXED_INPUT = {
     "case_dir": CASE_DIR,
     "experiment_name": EXPERIMENT_NAME,
     "verbose": False,
+    "nx": 120,
+    "ny": 120,
+    "nz": 8,
+    "bounds": ((0, 160), (0, 160), (0, 40)),
     # "results_dir": RESULTS_DIR,
 }
 
@@ -47,6 +51,8 @@ def main() -> None:
     )
     forward_model.run_preprocessing(python_or_matlab="python")
     state = forward_model(params=params)
+    if state is None:
+        raise RuntimeError("Expected in-memory state from forward_model run.")
 
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     # Add vel_magnitude as a data variable in state
