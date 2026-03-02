@@ -3,7 +3,6 @@
 import logging
 import pathlib
 import subprocess
-import sys
 
 __version__ = "0.1.0"
 
@@ -33,7 +32,7 @@ _udales_tag = None
 if _gitmodules_path.exists():
     try:
         gitmodules_content = _gitmodules_path.read_text()
-        print(f"Reading .gitmodules from: {_gitmodules_path}", file=sys.stderr)
+        logger.info(f"Reading .gitmodules from: {_gitmodules_path}")
         # Track which submodule section we're currently in
         current_submodule = None
         for line in gitmodules_content.splitlines():
@@ -181,7 +180,7 @@ if _udales_path:
         # Fallback to direct clone if submodule failed
         if not submodule_success and _udales_url:
             try:
-                print(f"Cloning u-dales from {_udales_url}...", file=sys.stderr)
+                logger.info(f"Cloning u-dales from {_udales_url}...")
                 # Remove empty directory if it exists
                 if _udales_path.exists():
                     import shutil
@@ -199,7 +198,7 @@ if _udales_path:
                     text=True,
                 )
                 if result.returncode == 0:
-                    print("u-dales cloned successfully.", file=sys.stderr)
+                    logger.info("u-dales cloned successfully.")
                     # Checkout the specified tag if provided
                     if _udales_tag and _udales_path.exists():
                         try:
@@ -211,34 +210,21 @@ if _udales_path:
                                 text=True,
                             )
                             if checkout_result.returncode == 0:
-                                print(
-                                    f"Checked out u-dales tag: {_udales_tag}",
-                                    file=sys.stderr,
-                                )
+                                logger.info(f"Checked out u-dales tag: {_udales_tag}")
                             else:
-                                print(
-                                    f"Warning: Failed to checkout tag {_udales_tag}: {checkout_result.stderr}",
-                                    file=sys.stderr,
+                                logger.warning(
+                                    f"Failed to checkout tag {_udales_tag}: {checkout_result.stderr}",
                                 )
                         except Exception as e:
-                            print(
-                                f"Warning: Exception checking out tag: {e}",
-                                file=sys.stderr,
-                            )
+                            logger.warning(f"Exception checking out tag: {e}")
                 else:
-                    print(
-                        f"Warning: git clone failed (code {result.returncode})",
-                        file=sys.stderr,
-                    )
+                    logger.warning(f"git clone failed (code {result.returncode})")
                     if result.stderr:
-                        print(f"Error: {result.stderr}", file=sys.stderr)
+                        logger.error(f"git clone error: {result.stderr}")
             except Exception as e:
-                print(f"Exception during git clone: {e}", file=sys.stderr)
+                logger.error(f"Exception during git clone: {e}")
     else:
-        print(
-            "u-dales repository already downloaded, skipping initialization.",
-            file=sys.stderr,
-        )
+        logger.info("u-dales repository already downloaded, skipping initialization.")
         # Verify that the correct tag is checked out
         if _udales_tag and _udales_path.exists():
             try:
@@ -272,9 +258,9 @@ if _udales_path:
 
     # Set UDALES_PATH from gitmodules path (always set it)
     UDALES_PATH = _udales_path.resolve()
-    print(f"UDALES_PATH set to: {UDALES_PATH}", file=sys.stderr)
+    logger.info(f"UDALES_PATH set to: {UDALES_PATH}")
 else:
-    print("Warning: Could not find u-dales path in .gitmodules", file=sys.stderr)
+    logger.warning("Could not find u-dales path in .gitmodules")
 
 # Run build scripts
 if _udales_path and _udales_path.exists() and any(_udales_path.iterdir()):
@@ -292,9 +278,9 @@ if _udales_path and _udales_path.exists() and any(_udales_path.iterdir()):
 
     if build_udales_script.exists():
         if udales_build_complete:
-            print("uDALES build already complete, skipping build.", file=sys.stderr)
+            logger.info("uDALES build already complete, skipping build.")
         else:
-            print("Building uDALES...", file=sys.stderr)
+            logger.info("Building uDALES...")
             subprocess.run(
                 ["bash", str(build_udales_script), "release"],
                 cwd=str(_project_root),
@@ -312,12 +298,9 @@ if _udales_path and _udales_path.exists() and any(_udales_path.iterdir()):
 
     if build_preprocessing_script.exists():
         if preprocessing_build_complete:
-            print(
-                "Preprocessing tools build already complete, skipping build.",
-                file=sys.stderr,
-            )
+            logger.info("Preprocessing tools build already complete, skipping build.")
         else:
-            print("Building preprocessing tools...", file=sys.stderr)
+            logger.info("Building preprocessing tools...")
             subprocess.run(
                 ["bash", str(build_preprocessing_script)],
                 cwd=str(_project_root),
