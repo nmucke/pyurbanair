@@ -1,7 +1,6 @@
 import logging
 import os
 import pathlib
-import pdb
 import shutil
 import subprocess
 import time
@@ -14,7 +13,7 @@ from pyurbanair.base_forward_model import BaseForwardModel
 from . import LOCAL_EXECUTE_SCRIPT, UDALES_PATH
 from .utils.clean_up_utils import clean_output_dir, clean_temp_dir
 from .utils.config_utils import create_config_sh
-from .utils.dir_utils import get_udales_directory_paths
+from .utils.dir_utils import get_project_root, get_udales_directory_paths
 from .utils.file_utils import copy_files
 from .utils.namoptions_utils import rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
@@ -40,6 +39,45 @@ DEFAULT_PARAMS = xarray.Dataset(
         "pressure_gradient_magnitude": 0.0041912,
     },
 )
+
+
+def _augment_runtime_library_paths(env: dict[str, str]) -> None:
+    """Ensure runtime loader can find shared libraries in active pixi/conda env."""
+    lib_paths: list[pathlib.Path] = []
+
+    conda_prefix = env.get("CONDA_PREFIX")
+    pixi_environment = env.get("PIXI_ENVIRONMENT")
+
+    prefix_candidates: list[pathlib.Path] = []
+    if conda_prefix:
+        prefix_candidates.append(pathlib.Path(conda_prefix))
+    if pixi_environment:
+        pixi_path = pathlib.Path(pixi_environment)
+        if pixi_path.exists():
+            prefix_candidates.append(pixi_path)
+        else:
+            prefix_candidates.append(
+                get_project_root() / ".pixi" / "envs" / pixi_environment
+            )
+
+    for prefix_path in prefix_candidates:
+        if not prefix_path.exists():
+            continue
+        lib_dir = prefix_path / "lib"
+        if lib_dir.exists():
+            lib_paths.append(lib_dir)
+
+        # Also include optional NVHPC-local netcdf-fortran install used by CUDA/LBM.
+        local_netcdf_lib = prefix_path / ".nvhpc" / "netcdf-fortran" / "lib"
+        if local_netcdf_lib.exists():
+            lib_paths.append(local_netcdf_lib)
+
+    if not lib_paths:
+        return
+
+    existing = env.get("LD_LIBRARY_PATH", "")
+    prefix = ":".join(str(p) for p in lib_paths)
+    env["LD_LIBRARY_PATH"] = f"{prefix}:{existing}" if existing else prefix
 
 
 class ForwardModel(BaseForwardModel):
@@ -187,6 +225,7 @@ class ForwardModel(BaseForwardModel):
             env["DA_TOOLSDIR"] = str(
                 pathlib.Path(self.dirs.udales_root_path).joinpath("tools")
             )
+            _augment_runtime_library_paths(env)
 
         elif python_or_matlab == "matlab":
             # Use MATLAB-based preprocessing script
@@ -203,6 +242,7 @@ class ForwardModel(BaseForwardModel):
             env = os.environ.copy()
             matlab_bin_dir = str(pathlib.Path(self.matlab_bin).parent)
             env["PATH"] = f"{matlab_bin_dir}:{env.get('PATH', '')}"
+            _augment_runtime_library_paths(env)
 
         subprocess.run(
             command, check=True, env=env, stdout=self.stdout, stderr=self.stderr
@@ -234,8 +274,15 @@ class ForwardModel(BaseForwardModel):
             str(LOCAL_EXECUTE_SCRIPT),
             str(self.dirs.experiment_dir),
         ]
-
-        subprocess.run(command, check=True, stdout=self.stdout, stderr=self.stderr)
+        env = os.environ.copy()
+        _augment_runtime_library_paths(env)
+        subprocess.run(
+            command,
+            check=True,
+            env=env,
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
 
         # Check for merged file first (multi-processor case after gather_outputs.sh)
         output_file = self.dirs.output_dir.joinpath(

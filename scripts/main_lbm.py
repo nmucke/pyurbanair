@@ -27,10 +27,12 @@ def main() -> None:
         nx=120,
         ny=120,
         nz=16,
-        num_timesteps=100,
+        num_timesteps=1500,
         bounds=((0, 160), (0, 160), (0, 16)),
         output_frequency=10,
+        cuda=False,
     )
+    forward_model.compile()
     # inflow_angle = np.array([1, 10, 20])
     # velocity_magnitude = np.array([3, 5, 7])
     # params = xarray.Dataset(
@@ -55,8 +57,8 @@ def main() -> None:
     if "blanking" in state.data_vars:
         state = state.drop_vars("blanking")
 
-    if "rho" in state.data_vars:
-        state = state.drop_vars("rho")
+    # if "rho" in state.data_vars:
+    #     state = state.drop_vars("rho")
 
     animate_3d(
         state=state,

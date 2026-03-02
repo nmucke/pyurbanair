@@ -461,6 +461,8 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             desc="Running ensemble",
         )
         for i, forward_model in pbar:
+            forward_model.results_dir = self.results_dir
+
             state_i = None
             if state is not None:
                 if isinstance(state, pathlib.Path):

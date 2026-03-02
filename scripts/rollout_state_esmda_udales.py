@@ -98,11 +98,11 @@ FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Initialize states
-INIT_STATES_DIR = pathlib.Path("esmda_init_conditions")
+INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/udales")
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 8
+NUM_PARALLEL_PROCESSES = 4
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
@@ -110,16 +110,26 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 40
-NUM_ESMDA_STEPS = 1
+ENSEMBLE_SIZE = 4
+NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
-OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
-OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
-OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
+# OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
+# OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
+# OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
+# OBS_STATES = ["u", "v", "w"]
+# NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
+
+
+OBS_X = jnp.linspace(10, 150, 4)
+OBS_Y = jnp.linspace(10, 150, 4)
+OBS_X, OBS_Y = jnp.meshgrid(OBS_X, OBS_Y)
+OBS_X = OBS_X.flatten()
+OBS_Y = OBS_Y.flatten()
+OBS_Z = jnp.full(len(OBS_X), 2.0)
 OBS_STATES = ["u", "v", "w"]
-NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
+NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
 # Observation error settings
 OBS_ERROR_STD = 0.1
@@ -128,7 +138,7 @@ C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 # Forward model settings
 FIXED_INPUT = {
     "save_only_last_timestep": False,
-    "output_frequency": 1.0,
+    "output_frequency": 2.0,
     "ncpu": NCPU_PER_PROCESS,
     "matlab_bin": MATLAB_BIN,
     "case_dir": EXPERIMENT_DIR,
@@ -153,13 +163,16 @@ def main() -> None:
     forward_model = RolloutForwardModel(**FIXED_INPUT)
     forward_model.run_preprocessing(python_or_matlab="python")
 
+
+    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
+    forward_model.apply_save_in_memory()
+
 
     init_states = [
         xarray.open_dataset(INIT_STATES_DIR / f"state_{i}.nc").isel(
@@ -174,7 +187,7 @@ def main() -> None:
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
-        OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES, solver_name="udales"
+        obs_x=OBS_X, obs_y=OBS_Y, obs_z=OBS_Z, obs_states=OBS_STATES, solver_name="udales"
     )
     if FIXED_INPUT["output_frequency"] is not None:
         observation_operator = TemporalObservationOperator(
@@ -201,10 +214,10 @@ def main() -> None:
 
         ##### Perturb true parameters #####
         rng_key, subkey = jax.random.split(rng_key)
-        vel_magnitude_perturbation = jax.random.normal(subkey) * 3.0
+        vel_magnitude_perturbation = jax.random.normal(subkey) * 0.0
 
         rng_key, subkey = jax.random.split(rng_key)
-        angle_perturbation = jax.random.normal(subkey) * 3.0
+        angle_perturbation = jax.random.normal(subkey) * 0.0
 
         perturbed_velocity_magnitude = (
             true_params.velocity_magnitude.values + vel_magnitude_perturbation
@@ -372,7 +385,7 @@ def main() -> None:
     plt.xlabel("Time")
     plt.ylabel("RMSE")
     plt.legend()
-    plt.savefig(pathlib.Path("figures/udales_esmda_params.pdf"))
+    plt.savefig(pathlib.Path("figures/rollout_udales_esmda_params.pdf"))
     plt.close()
 
     # true_velocity_field = get_velocity_magnitude_field(true_state)

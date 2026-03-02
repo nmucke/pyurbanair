@@ -10,6 +10,7 @@ import xarray
 from pyudales import LOCAL_EXECUTE_SCRIPT
 from pyudales.forward_model import (
     ForwardModel,
+    _augment_runtime_library_paths,
     apply_inflow_settings,
     clean_output_dir,
     merge_params,
@@ -40,8 +41,14 @@ def _run_simulation(
 
     logger.info(f"Running simulation in {experiment_dir}...")
     command = ["bash", str(LOCAL_EXECUTE_SCRIPT), str(experiment_dir)]
+    env = os.environ.copy()
+    _augment_runtime_library_paths(env)
     subprocess.run(
-        command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        command,
+        check=True,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
     return None
@@ -121,11 +128,11 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         """Move the rollout results to disk."""
         for i, model in enumerate(self.ensemble_forward_models):
             result_file = self._get_output_file(model)
+
             shutil.move(
                 str(result_file),
                 str(self.results_dir / f"{sim_name}_{i}_rollout_{rollout_step}.nc"),
             )
-
             collect_rollout_results(
                 sim_name=f"{sim_name}_{i}",
                 rollout_step=rollout_step,
