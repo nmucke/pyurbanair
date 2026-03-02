@@ -63,7 +63,7 @@ TRUE_ANGLE = 10.0
 NUM_PARALLEL_PROCESSES = 1
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 5
+ENSEMBLE_SIZE = 25
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -80,17 +80,17 @@ OBS_X, OBS_Y = jnp.meshgrid(OBS_X, OBS_Y)
 OBS_X = OBS_X.flatten()
 OBS_Y = OBS_Y.flatten()
 
-# OBS_X = [13, 45.6, 94.3, 108.9, 87.3, 20.0, 52.6, 90.0, 60.0, 75.0, 75.0]
-# OBS_Y = [30.6, 52.7, 92.9, 108.0, 10.0, 90.0, 10.0, 50.0, 80.0, 90.0, 60.0]
+OBS_X = [13, 45.6, 94.3, 108.9, 87.3, 20.0, 52.6, 90.0, 60.0, 75.0, 75.0]
+OBS_Y = [30.6, 52.7, 92.9, 108.0, 10.0, 90.0, 10.0, 50.0, 80.0, 90.0, 60.0]
 OBS_Z = jnp.full(len(OBS_X), 2.0)
 OBS_STATES = ["u", "v", "w"]
 NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
 # Observation error settings
-OBS_ERROR_STD = 0.01
+OBS_ERROR_STD = 0.001
 C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
-udales_time = 20
+udales_time = 10
 lbm_time_steps = int(udales_time / 0.0538)
 lbm_output_frequency = int(lbm_time_steps / udales_time)
 
@@ -156,6 +156,8 @@ def main() -> None:
         **LBM_FIXED_INPUT,  # type: ignore[arg-type]
         results_dir=pathlib.Path(RESULTS_DIR),
     )
+    lbm_forward_model.compile()
+
     udales_forward_model = UDALESForwardModel(**UDALES_FIXED_INPUT)
     udales_forward_model.run_preprocessing()
 
@@ -210,7 +212,7 @@ def main() -> None:
     ensemble_mean_field = ensemble_mean_field.isel(time=slice(2, lbm_time_steps))
 
     mean_velocity_field = get_velocity_magnitude_field(ensemble_mean_field)
-    mean_velocity_field = mean_velocity_field[:, 2:]
+    # mean_velocity_field = mean_velocity_field[:, 2:]
     rmse = [
         jnp.sqrt(jnp.mean((mean_velocity_field[i] - true_velocity_field) ** 2)).item()
         for i in range(NUM_ESMDA_STEPS + 1)

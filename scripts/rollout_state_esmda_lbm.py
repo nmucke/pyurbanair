@@ -79,7 +79,7 @@ def get_ensemble_std_field(
     return ensemble_std_field, params
 
 
-NUM_ASSIMILATION_WINDOWS = 10
+NUM_ASSIMILATION_WINDOWS = 30
 
 # Random seed
 SEED = 42
@@ -94,7 +94,7 @@ INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/lbm")
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 1
+NUM_PARALLEL_PROCESSES = 32
 
 # True parameters
 TRUE_VELOCITY_MAGNITUDE = 10.0
@@ -103,8 +103,8 @@ TRUE_ANGLE = 10.0
 RESULTS_DIR = ".temp/lbm"
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 10
-NUM_ESMDA_STEPS = 1
+ENSEMBLE_SIZE = 250
+NUM_ESMDA_STEPS = 3
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 OBS_X = jnp.linspace(10, 150, 4)
@@ -131,9 +131,11 @@ FIXED_INPUT = {
     "bounds": ((0, 160), (0, 160), (0, 40)),
     "verbose": False,
     # "results_dir": pathlib.Path(RESULTS_DIR),
-    "cuda": True,
+    "cuda": False,
 }
 
+
+TRUE_SIM_ID = 282
 
 def main() -> None:
     """Main function."""
@@ -144,8 +146,10 @@ def main() -> None:
     ##### Setup parameter ensemble #####
     rng_key = jax.random.PRNGKey(SEED)
 
-    true_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(ensemble=0)
-    true_state = xarray.open_dataset(INIT_STATES_DIR / f"state_{0}.nc").isel(time=-1)
+    true_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(ensemble=TRUE_SIM_ID)
+    true_state = xarray.open_dataset(INIT_STATES_DIR / f"state_{TRUE_SIM_ID}.nc").isel(time=-1)
+
+
 
     forward_model = RolloutForwardModel(**FIXED_INPUT)
     forward_model.compile()
@@ -303,7 +307,7 @@ def main() -> None:
         output_path=pathlib.Path(
             f"figures/lbm_esmda_animation_{NUM_ASSIMILATION_WINDOWS}.mp4"
         ),
-        z_level=0,
+        z_level=1,
         # vmin={"u": -1.0, "v": -1.0, "w": -1.0, "rho": 0.0, "vel_magnitude": 0.0},
         # vmax={"u": 1.0, "v": 1.0, "w": 1.0, "rho": 1.0, "vel_magnitude": 1.0},
     )

@@ -15,8 +15,8 @@ fieldvars    = 'u0,v0,w0,p0'
 /
 
 &DOMAIN
-itot         = 120
-jtot         = 120
+itot         = 128
+jtot         = 128
 ktot         = 8
 xlen         = 160
 ylen         = 160

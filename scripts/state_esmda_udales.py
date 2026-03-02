@@ -70,7 +70,7 @@ INIT_STATES_DIR = pathlib.Path("esmda_init_conditions/udales")
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 4
+NUM_PARALLEL_PROCESSES = 32
 
 # True parameters
 TRUE_PRESSURE_GRADIENT_MAGNITUDE = 0.0041912
@@ -78,19 +78,25 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 4
-NUM_ESMDA_STEPS = 2
+ENSEMBLE_SIZE = 100
+NUM_ESMDA_STEPS = 3
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
 # OBS_IDS_X = [40, 50, 90, 120, 80, 20, 50, 90]
 # OBS_IDS_Y = [30, 60, 90, 120, 20, 60, 90, 50]
 # OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
-OBS_X = [43, 51.6, 94.3, 110.9, 87.3, 20.0, 52.6, 90.0]
-OBS_Y = [30.6, 62.7, 92.9, 108.0, 20.0, 60.0, 90.0, 50.0]
-OBS_Z = [2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8]
+
+OBS_X = jnp.linspace(10, 150, 4)
+OBS_Y = jnp.linspace(10, 150, 4)
+OBS_X, OBS_Y = jnp.meshgrid(OBS_X, OBS_Y)
+OBS_X = OBS_X.flatten()
+OBS_Y = OBS_Y.flatten()
+
+OBS_Z = jnp.full(len(OBS_X), 2.0)
 OBS_STATES = ["u", "v", "w"]
 NUM_OBS = len(OBS_X) * len(OBS_STATES)
+
 
 # Observation error settings
 OBS_ERROR_STD = 0.01
@@ -129,6 +135,7 @@ def main() -> None:
     true_init_condition = xarray.open_dataset(INIT_STATES_DIR / f"state_{0}.nc").isel(
         time=-1
     )
+
     true_state = forward_model(params=true_params, state=true_init_condition)
     true_velocity_field = get_velocity_magnitude_field(true_state)
 
@@ -224,6 +231,7 @@ def main() -> None:
     im_args = {
         "vmin": true_velocity_field[1, :, :].min(),
         "vmax": true_velocity_field[1, :, :].max(),
+        "extent": [0, 160, 0, 160],
     }
     angle_axvline_args = {
         "x": TRUE_ANGLE,
@@ -300,7 +308,7 @@ def main() -> None:
             axes[i, 7].legend()
 
     plt.savefig(
-        os.path.join(FIGURES_DIR, f"esmda_results_udales_{NUM_ESMDA_STEPS}.pdf")
+        os.path.join(FIGURES_DIR, f"esmda_state_results_udales_{NUM_ESMDA_STEPS}.pdf")
     )
     plt.close()
     # plt.show()

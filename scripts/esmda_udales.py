@@ -73,8 +73,8 @@ TRUE_VELOCITY_MAGNITUDE = 3.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 32
-NUM_ESMDA_STEPS = 2
+ENSEMBLE_SIZE = 128
+NUM_ESMDA_STEPS = 4
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
@@ -84,9 +84,19 @@ ALPHA = 1 / NUM_ESMDA_STEPS
 # OBS_STATES = ["u", "v", "w"]
 # NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
 
-OBS_X = [43, 51.6, 94.3, 110.9, 87.3, 20.0, 52.6, 90.0]
-OBS_Y = [30.6, 62.7, 92.9, 108.0, 20.0, 60.0, 90.0, 50.0]
-OBS_Z = [2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8]
+# OBS_X = [43, 51.6, 94.3, 110.9, 87.3, 20.0, 52.6, 90.0]
+# OBS_Y = [30.6, 62.7, 92.9, 108.0, 20.0, 60.0, 90.0, 50.0]
+# OBS_Z = [2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8]
+# OBS_STATES = ["u", "v", "w"]
+# NUM_OBS = len(OBS_X) * len(OBS_STATES)
+
+
+OBS_X = jnp.linspace(10, 150, 4)
+OBS_Y = jnp.linspace(10, 150, 4)
+OBS_X, OBS_Y = jnp.meshgrid(OBS_X, OBS_Y)
+OBS_X = OBS_X.flatten()
+OBS_Y = OBS_Y.flatten()
+OBS_Z = jnp.full(len(OBS_X), 2.0)
 OBS_STATES = ["u", "v", "w"]
 NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
@@ -164,16 +174,14 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    # forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
+    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        # results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
 
-    # ray.init(num_cpus=NUM_PARALLEL_PROCESSES * NCPU_PER_PROCESS)
 
     ##### Run ESMDA #####
     t1 = time.time()

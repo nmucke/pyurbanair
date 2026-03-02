@@ -1,0 +1,52 @@
+# Development variables
+ T                ! ltiming         : CPU timing
+ F                ! ltesting        : testing final solution while developing code.
+ T                ! ldump           : Saves diagnostics and restarts files
+ 256 1 1          ! ntx, nty, ntz   : number of threads per block in x, y, and z direction
+ F                ! lmeasurements   : Saves predicted measurements for data assimilation experiments
+# Experiment configuration
+ city2            ! experiment      : Cylinder, airfoil etc
+ 3                ! ibgk            : BGK order, ibgk=2 standard second order, ibgk=3 gives third order BGK
+ 1                ! ihrr            : Collision operator ihrr=1 includes regularization by 3rd ord Hermite
+ 1 0.15           ! ivreman smagor  : Vreman subgridscale mixing (1) with Smagorinsky constant (0.15)
+# Atmospheric boundary layer
+ 0                ! iablvisc        : mode for ABL (0-none, 1-mechanical layer, 2-buoyancy scheme)
+ 400.0            ! ablheight       : height of ABL in meters
+ 1                ! istable         : Stability of ABL when iablvisc=2 (1=stable, 0=netural, -1=unstable)
+# Time stepping and outputs
+ 00000            ! nt0             : First timestep
+ 1000             ! nt1             : Final timestep
+ 5000             ! iout            : Number of steps between diag outputs
+ 10000            ! irestarts       : Number of steps between restart outputs
+ 00 60000 1       ! iprt1 iprt2 x   : Output every x timestep for it <= iprt1 and it >= iprt2
+ 2                ! tecout          : full tecplot files (0), only solution (2), netcdf (3)
+# Boundary conditions
+ 1                ! ibnd            : 0-periodic, 1 in/out flow,
+ 0                ! jbnd            : 0-periodic, 11,12,21,22 no-slip bb(1), free-slip bb(2) for j=1 and j=ny
+ 22               ! kbnd            : 0-periodic, 11,12,21,22 no-slip bb(1), free-slip bb(2) for k=1 and k=nz
+# Inflow variables
+ 8.0 0.0          ! uini, udir      : Inflow wind velocity [m/s], direction in degrees (-45:45)
+ F 0.00005  100   ! lturb amp nrtu  : Add turbulence forcing on inflow, amplitude, number of prestored time ste
+# Physical variables
+ 0.0000178        ! visckin         : Dimensional kinematic viscosity
+ 1.225            ! C_rho - Density of air at surface 15C and  101.325 kPa  [kg/m^3] Eq. (7.12)
+ 4.0              ! C_l   - Length of a lattice cell in meters [m]
+ 75.0             ! C_u   - Wind velocity conversion [m/s]   -> C_t=C_l/C_u
+# Averaging variables
+ F F              ! lave lavesec    : Switch on/off full averaging and turbine section averaging
+ 20000            ! avestart        : Iteration to start computing section averages
+ 40000            ! avestop         : Iteration to save section averages
+# Turbine-definitions
+ 0                ! nturbines       : Number of turbines
+ 0.0              ! pitchangle      : Imposed pitchangle (0 until u=11.4, see table 7.1 in NREL doc).
+ 8.95             ! turbrpm         : Turbine RPM for actuator line model (max 12.1 9.22 8.95 12.06
+ 0.00             ! tipspeed ratio  : Tipspeed ratio (7.55) (if given will override the given turbine RPM
+ 0                ! itiploss        : Tiploss(0-none, 1-Prandl, 2-Shen)
+# T1
+ 96 61 61 0.0 0.0    ! ipos, jpos, kpos, yaw, tilt
+# T2
+ 96 91 61 0.0 0.0    ! ipos, jpos, kpos, yaw, tilt
+
+
+ kinematic viscosity of air is 1.78E-5
+ Reynolds number becomes Re= u D /nu = 10^1 * 10^2 / 10^(-5)  = 10^7 - 10^8

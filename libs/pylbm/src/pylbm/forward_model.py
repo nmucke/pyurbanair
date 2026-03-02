@@ -78,22 +78,8 @@ class ForwardModel(BaseForwardModel):
         # Set experiment dimensions in mod_dimensions.F90 (add or update experiment, set active)
         set_experiment(dirs=self.dirs, nx=nx, ny=ny, nz=nz)
 
-        # Create infile.in by running the executable (only if it doesn't exist)
-        if not self.dirs.infile_path.exists():
-            create_infile(dirs=self.dirs, verbose=self.verbose)
-        elif self.verbose:
-            logger.info(
-                "infile.in already exists at %s, skipping creation.",
-                self.dirs.infile_path,
-            )
-
-        # Set number of timesteps
         self.num_timesteps = num_timesteps
         self.output_frequency = output_frequency
-        self._set_infile_value("nt1", self.num_timesteps)
-        self._set_infile_value("iout", int(self.output_frequency))
-        self._set_infile_value("experiment", self.dirs.experiment_name)
-        self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
 
     def compile(self) -> None:
         """Compile the LBM program."""
@@ -104,6 +90,23 @@ class ForwardModel(BaseForwardModel):
             enable_cuda=self.cuda,
             enable_netcdf=self.enable_netcdf,
         )
+
+        
+        # Create infile.in by running the executable (only if it doesn't exist)
+        if not self.dirs.infile_path.exists():
+            create_infile(dirs=self.dirs, verbose=self.verbose)
+        elif self.verbose:
+            logger.info(
+                "infile.in already exists at %s, skipping creation.",
+                self.dirs.infile_path,
+            )
+        
+        # Set number of timesteps
+        self._set_infile_value("nt1", self.num_timesteps)
+        self._set_infile_value("iout", int(self.output_frequency))
+        self._set_infile_value("experiment", self.dirs.experiment_name)
+        self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
+
 
     def _set_infile_value(self, key: str, value: Union[str, int, float, bool]) -> None:
         """

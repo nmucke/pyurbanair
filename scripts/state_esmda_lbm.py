@@ -63,23 +63,23 @@ os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 16
+NUM_PARALLEL_PROCESSES = 4
 
 # True parameters
 TRUE_VELOCITY_MAGNITUDE = 10.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 16
-NUM_ESMDA_STEPS = 2
+ENSEMBLE_SIZE = 4
+NUM_ESMDA_STEPS = 1
 ALPHA = 1 / NUM_ESMDA_STEPS
 
 # Observation settings
-OBS_IDS_X = [40, 50, 90, 110, 80, 20, 50, 90]
-OBS_IDS_Y = [30, 60, 90, 110, 20, 60, 90, 50]
-OBS_IDS_Z = [1, 1, 1, 1, 1, 1, 1, 1]
+OBS_X = [13, 45.6, 94.3, 108.9, 87.3, 20.0, 52.6, 90.0, 60.0, 75.0, 75.0]
+OBS_Y = [30.6, 52.7, 92.9, 108.0, 10.0, 90.0, 10.0, 50.0, 80.0, 90.0, 60.0]
+OBS_Z = jnp.full(len(OBS_X), 2.0)
 OBS_STATES = ["u", "v", "w"]
-NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
+NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
 # Observation error settings
 OBS_ERROR_STD = 0.01
@@ -87,7 +87,7 @@ C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
 # Forward model settings
 FIXED_INPUT = {
-    "output_frequency": 2.0,
+    "output_frequency": 10.0,
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "nx": 120,
     "ny": 120,
@@ -95,8 +95,11 @@ FIXED_INPUT = {
     "num_timesteps": 100,
     "bounds": ((0, 160), (0, 160), (0, 40)),
     "verbose": False,
+    "cuda": False,
     # "results_dir": pathlib.Path(RESULTS_DIR),
 }
+
+TRUE_SIM_ID = 282
 
 
 def main() -> None:
@@ -108,14 +111,15 @@ def main() -> None:
     ##### Setup parameter ensemble #####
     rng_key = jax.random.PRNGKey(SEED)
 
-    true_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(ensemble=0)
+    true_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(ensemble=TRUE_SIM_ID)
     forward_model = RolloutForwardModel(**FIXED_INPUT)
+    forward_model.compile()
 
     TRUE_VELOCITY_MAGNITUDE = true_params.velocity_magnitude.values
     TRUE_ANGLE = true_params.inflow_angle.values
 
     ##### Run true simulation #####
-    true_init_condition = xarray.open_dataset(INIT_STATES_DIR / f"state_{0}.nc").isel(
+    true_init_condition = xarray.open_dataset(INIT_STATES_DIR / f"state_{TRUE_SIM_ID}.nc").isel(
         time=-1
     )
     true_state = forward_model(params=true_params, state=true_init_condition)
@@ -123,7 +127,7 @@ def main() -> None:
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
-        OBS_IDS_X, OBS_IDS_Y, OBS_IDS_Z, OBS_STATES, solver_name="pylbm"
+        obs_x=OBS_X, obs_y=OBS_Y, obs_z=OBS_Z, obs_states=OBS_STATES, solver_name="pylbm"
     )
     if FIXED_INPUT["output_frequency"] is not None:
         observation_operator = TemporalObservationOperator(
@@ -134,13 +138,14 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
+    forward_model.apply_save_on_disk(results_dir=pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
-        results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
+    forward_model.apply_save_in_memory()
 
     init_states = [
         xarray.open_dataset(INIT_STATES_DIR / f"state_{i}.nc").isel(time=-1)
@@ -232,8 +237,8 @@ def main() -> None:
             **im_args,
         )
 
-        axes[i, 1].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
-        axes[i, 0].scatter(OBS_IDS_X, OBS_IDS_Y, color="red")
+        axes[i, 1].scatter(OBS_X, OBS_Y, color="red")
+        axes[i, 0].scatter(OBS_X, OBS_Y, color="red")
 
         if i == 0:
             axes[i, 3].set_title("Ens mean end time")

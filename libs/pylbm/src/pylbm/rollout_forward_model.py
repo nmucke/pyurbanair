@@ -26,9 +26,6 @@ class RolloutForwardModel(ForwardModel):
         super().__init__(*args, **kwargs)
         self.rollout_step = 0
 
-        # Ensure first rollout step starts from cold-start settings.
-        self._set_infile_value("nt0", 0)
-        self._set_infile_value("nt1", self.num_timesteps)
 
     def _configure_for_rollout_step(self) -> None:
         """Configure infile restart/timestep settings for current rollout step."""
@@ -81,6 +78,12 @@ class RolloutForwardModel(ForwardModel):
         If `state` is provided, it is converted to an equilibrium restart file
         and used as warmstart for this rollout step.
         """
+
+        if self.rollout_step == 0:
+            # Ensure first rollout step starts from cold-start settings.
+            self._set_infile_value("nt0", 0)
+            self._set_infile_value("nt1", self.num_timesteps)
+
         if state is not None:
 
             latest_restart = identify_latest_restart_iteration(self.dirs)
