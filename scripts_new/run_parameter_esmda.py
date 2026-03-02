@@ -6,6 +6,10 @@ import jax
 import jax.numpy as jnp
 from data_assimilation.smoothing.esmda import ParameterESMDA
 
+from pyurbanair.plotting import (
+    plot_parameter_distributions,
+    plot_true_vs_estimated_state,
+)
 from pyurbanair.utils.animation_utils import _visualize_state_history
 from pyurbanair.utils.run_utils import get_ensemble_mean_field
 
@@ -19,11 +23,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--truth-model", choices=["pylbm", "pyudales"], default="pylbm")
     parser.add_argument("--assim-model", choices=["pylbm", "pyudales"], default="pylbm")
-    parser.add_argument(
-        "--skip-viz",
-        action="store_true",
-        help="Skip plotting and animation outputs.",
-    )
+    parser.add_argument("--skip-viz", action="store_true")
     args = parser.parse_args()
 
     truth_model = config.create_forward_model(args.truth_model, rollout=False)
@@ -78,21 +78,38 @@ def main() -> None:
     out_dir = config.BASE_RESULTS_DIR / "parameter_esmda"
     out_dir.mkdir(parents=True, exist_ok=True)
     state_for_viz = ensemble_mean_field
+    params_for_plot = None
     if isinstance(output, tuple):
         params_history, state_history = output
         params_history.to_netcdf(out_dir / "params_history.nc")
         state_history.to_netcdf(out_dir / "state_history.nc")
         state_for_viz = state_history
+        params_for_plot = params_history
     else:
         output.to_netcdf(out_dir / "params_history.nc")
+        params_for_plot = output
     ensemble_mean_field.to_netcdf(out_dir / "state_mean_history.nc")
 
     if not args.skip_viz:
+        obs_x, obs_y, _ = config.create_observation_points()
+        plot_true_vs_estimated_state(
+            true_state=true_state,
+            estimated_state=ensemble_mean_field,
+            output_path=out_dir / "state_comparison.png",
+            obs_x=obs_x,
+            obs_y=obs_y,
+        )
         _visualize_state_history(
             state_history=state_for_viz,
             out_dir=out_dir,
             title_prefix="parameter_esmda",
         )
+        if params_for_plot is not None:
+            plot_parameter_distributions(
+                params_history=params_for_plot,
+                true_params=true_params,
+                output_path=out_dir / "parameter_distributions.png",
+            )
 
     print(f"Saved outputs in {pathlib.Path(out_dir)}")
 
