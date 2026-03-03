@@ -27,7 +27,7 @@ ModelName = Literal["pylbm", "pyudales"]
 
 def _cfg() -> Any:
     # Lazily import config to avoid import cycles.
-    from scripts_new import config
+    from scripts import config
 
     return config
 

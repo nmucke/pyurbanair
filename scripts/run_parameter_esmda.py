@@ -16,7 +16,7 @@ from pyurbanair.utils.run_utils import get_ensemble_mean_field
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from scripts_new import config
+from scripts import config
 
 
 def main() -> None:

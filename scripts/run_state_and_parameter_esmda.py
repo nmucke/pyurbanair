@@ -12,18 +12,14 @@ from pyurbanair.utils.run_utils import get_ensemble_mean_field
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from scripts_new import config
+from scripts import config
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--truth-model", choices=["pylbm", "pyudales"], default="pylbm")
     parser.add_argument("--assim-model", choices=["pylbm", "pyudales"], default="pylbm")
-    parser.add_argument(
-        "--skip-viz",
-        action="store_true",
-        help="Skip plotting and animation outputs.",
-    )
+    parser.add_argument("--skip-viz", action="store_true")
     args = parser.parse_args()
 
     truth_model = config.create_forward_model(args.truth_model, rollout=False)

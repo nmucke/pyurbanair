@@ -15,7 +15,7 @@ from pyurbanair.utils.config_utils import (
     solver_name,
 )
 
-BASE_RESULTS_DIR = pathlib.Path(".temp/scripts_new")
+BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
     "nx": 120,
@@ -31,7 +31,7 @@ TIME = {
 
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
-    "experiment_name": "scripts_new",
+    "experiment_name": "runcase",
     "cuda": False,
     "verbose": False,
 }
