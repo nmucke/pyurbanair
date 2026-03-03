@@ -57,7 +57,7 @@ OBS = {
 }
 
 ESMDA = {
-    "ensemble_size": 10,
+    "ensemble_size": 50,
     "num_steps": 2,
     "seed": 42,
     "obs_error_std": 0.01,
