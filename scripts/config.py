@@ -57,11 +57,11 @@ OBS = {
 }
 
 ESMDA = {
-    "ensemble_size": 48,
+    "ensemble_size": 32,
     "num_steps": 2,
     "seed": 42,
     "obs_error_std": 0.01,
-    "num_parallel_processes": 8,
+    "num_parallel_processes": 32,
     "num_cpus_per_process": 1,
 }
 

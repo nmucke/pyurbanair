@@ -65,6 +65,27 @@ def plot_parameter_distributions(
     if not param_names:
         raise ValueError("No parameters found in params_history.")
 
+    # Compute fixed x-axis limits per parameter (across all steps)
+    param_xlims: dict[str, tuple[float, float]] = {}
+    for param_name in param_names:
+        all_vals: list[float] = []
+        for i in range(num_steps):
+            step_slice = params_history.isel({step_dim: i})
+            vals = np.asarray(step_slice[param_name].values).reshape(-1)
+            vals = vals[np.isfinite(vals)]
+            if vals.size > 0:
+                all_vals.extend(vals.tolist())
+        if true_params is not None and param_name in true_params.data_vars:
+            true_val = np.asarray(true_params[param_name].values).reshape(-1)
+            if true_val.size > 0 and np.isfinite(true_val[0]):
+                all_vals.append(float(true_val[0]))
+        if all_vals:
+            vmin, vmax = float(np.min(all_vals)), float(np.max(all_vals))
+            margin = max((vmax - vmin) * 0.05, 1e-10)
+            param_xlims[param_name] = (vmin - margin, vmax + margin)
+        else:
+            param_xlims[param_name] = (0.0, 1.0)
+
     fig, axes = plt.subplots(
         num_steps,
         len(param_names),
@@ -102,6 +123,8 @@ def plot_parameter_distributions(
                         linewidth=2,
                         label="True",
                     )
+
+            ax.set_xlim(param_xlims[param_name])
 
             if i == 0:
                 ax.set_title(f"{param_name} distribution")
