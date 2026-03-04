@@ -10,10 +10,12 @@ from pyurbanair.utils.run_utils import add_velocity_magnitude
 def _extract_2d_slice_with_extent(
     data_array: xarray.DataArray,
     z_level: int | None = None,
+    time_index: int | None = None,
 ) -> tuple[np.ndarray, tuple[float, float, float, float]]:
     da = data_array
     if "time" in da.dims:
-        da = da.isel(time=-1)
+        idx = time_index if time_index is not None else -1
+        da = da.isel(time=idx)
     for z_dim in ("z", "zm", "zt"):
         if z_dim in da.dims:
             da = da.isel(
@@ -260,6 +262,188 @@ def plot_true_vs_estimated_state(
         fig.colorbar(im0, ax=axes[i, 0])
         fig.colorbar(im1, ax=axes[i, 1])
         fig.colorbar(im2, ax=axes[i, 2])
+
+    output_path = pathlib.Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def plot_state_init_and_terminal(
+    true_state: xarray.Dataset,
+    estimated_state: xarray.Dataset,
+    output_path: str | pathlib.Path,
+    obs_x: np.ndarray | None = None,
+    obs_y: np.ndarray | None = None,
+    z_level: int | None = None,
+) -> None:
+    """Plot estimated vs true state with both initial and terminal time for each step."""
+    true_for_plot = add_velocity_magnitude(true_state)
+    est_for_plot = add_velocity_magnitude(estimated_state)
+
+    plot_var = "vel_magnitude" if "vel_magnitude" in est_for_plot.data_vars else "u"
+    if plot_var not in est_for_plot.data_vars:
+        plot_var = list(est_for_plot.data_vars)[0]
+    if plot_var not in true_for_plot.data_vars:
+        true_plot_var = (
+            "vel_magnitude" if "vel_magnitude" in true_for_plot.data_vars else None
+        )
+        if true_plot_var is None:
+            true_plot_var = list(true_for_plot.data_vars)[0]
+    else:
+        true_plot_var = plot_var
+
+    step_dim = None
+    for candidate in ("esmda_step", "assimilation_step", "step", "window", "iteration"):
+        if candidate in est_for_plot.dims:
+            step_dim = candidate
+            break
+
+    if step_dim is None:
+        est_for_plot = est_for_plot.expand_dims(esmda_step=[0])
+        step_dim = "esmda_step"
+
+    has_time_est = "time" in est_for_plot.dims
+    has_time_true = "time" in true_for_plot.dims
+
+    true_init, _ = _extract_2d_slice_with_extent(
+        true_for_plot[true_plot_var],
+        z_level=z_level,
+        time_index=0 if has_time_true else None,
+    )
+    true_terminal, _ = _extract_2d_slice_with_extent(
+        true_for_plot[true_plot_var],
+        z_level=z_level,
+        time_index=-1 if has_time_true else None,
+    )
+
+    num_steps = int(est_for_plot.sizes[step_dim])
+    init_slices: list[np.ndarray] = []
+    terminal_slices: list[np.ndarray] = []
+    init_extents: list[tuple[float, float, float, float]] = []
+    terminal_extents: list[tuple[float, float, float, float]] = []
+    init_rmse: list[float] = []
+    terminal_rmse: list[float] = []
+
+    for i in range(num_steps):
+        step_slice = est_for_plot.isel({step_dim: i})
+        est_init, est_init_ext = _extract_2d_slice_with_extent(
+            step_slice[plot_var],
+            z_level=z_level,
+            time_index=0 if has_time_est else None,
+        )
+        est_terminal, est_terminal_ext = _extract_2d_slice_with_extent(
+            step_slice[plot_var],
+            z_level=z_level,
+            time_index=-1 if has_time_est else None,
+        )
+
+        min_y = min(est_init.shape[0], true_init.shape[0])
+        min_x = min(est_init.shape[1], true_init.shape[1])
+        true_init_aligned = true_init[:min_y, :min_x]
+        est_init_crop = est_init[:min_y, :min_x]
+        init_err = est_init_crop - true_init_aligned
+        init_rmse.append(float(np.sqrt(np.mean(init_err**2))))
+
+        min_y = min(est_terminal.shape[0], true_terminal.shape[0])
+        min_x = min(est_terminal.shape[1], true_terminal.shape[1])
+        true_terminal_aligned = true_terminal[:min_y, :min_x]
+        est_terminal_crop = est_terminal[:min_y, :min_x]
+        terminal_err = est_terminal_crop - true_terminal_aligned
+        terminal_rmse.append(float(np.sqrt(np.mean(terminal_err**2))))
+
+        init_slices.append(est_init_crop)
+        terminal_slices.append(est_terminal_crop)
+        init_extents.append(est_init_ext)
+        terminal_extents.append(est_terminal_ext)
+
+    true_vmin = float(
+        np.nanmin(np.concatenate([true_init.ravel(), true_terminal.ravel()]))
+    )
+    true_vmax = float(
+        np.nanmax(np.concatenate([true_init.ravel(), true_terminal.ravel()]))
+    )
+    err_abs = 0.0
+    for i in range(num_steps):
+        sy, sx = init_slices[i].shape
+        err_abs = max(
+            err_abs, float(np.nanmax(np.abs(init_slices[i] - true_init[:sy, :sx])))
+        )
+        sy, sx = terminal_slices[i].shape
+        err_abs = max(
+            err_abs,
+            float(np.nanmax(np.abs(terminal_slices[i] - true_terminal[:sy, :sx]))),
+        )
+    err_vmin, err_vmax = -err_abs, err_abs
+
+    fig, axes = plt.subplots(
+        num_steps,
+        6,
+        figsize=(18, 4 * num_steps),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    for i in range(num_steps):
+        sy, sx = init_slices[i].shape
+        im0 = axes[i, 0].imshow(
+            init_slices[i],
+            origin="lower",
+            vmin=true_vmin,
+            vmax=true_vmax,
+            extent=init_extents[i],
+        )
+        im1 = axes[i, 1].imshow(
+            true_init[:sy, :sx],
+            origin="lower",
+            vmin=true_vmin,
+            vmax=true_vmax,
+            extent=init_extents[i],
+        )
+        im2 = axes[i, 2].imshow(
+            init_slices[i] - true_init[:sy, :sx],
+            origin="lower",
+            cmap="RdBu_r",
+            vmin=err_vmin,
+            vmax=err_vmax,
+            extent=init_extents[i],
+        )
+        sy, sx = terminal_slices[i].shape
+        im3 = axes[i, 3].imshow(
+            terminal_slices[i],
+            origin="lower",
+            vmin=true_vmin,
+            vmax=true_vmax,
+            extent=terminal_extents[i],
+        )
+        im4 = axes[i, 4].imshow(
+            true_terminal[:sy, :sx],
+            origin="lower",
+            vmin=true_vmin,
+            vmax=true_vmax,
+            extent=terminal_extents[i],
+        )
+        im5 = axes[i, 5].imshow(
+            terminal_slices[i] - true_terminal[:sy, :sx],
+            origin="lower",
+            cmap="RdBu_r",
+            vmin=err_vmin,
+            vmax=err_vmax,
+            extent=terminal_extents[i],
+        )
+
+        if obs_x is not None and obs_y is not None:
+            for col in (0, 1, 3, 4):
+                axes[i, col].scatter(obs_x, obs_y, color="red", s=12)
+
+        if i == 0:
+            axes[i, 0].set_title(f"Estimated init ({plot_var})")
+            axes[i, 1].set_title(f"True init ({true_plot_var})")
+            axes[i, 2].set_title("Init error")
+            axes[i, 3].set_title(f"Estimated terminal ({plot_var})")
+            axes[i, 4].set_title(f"True terminal ({true_plot_var})")
+            axes[i, 5].set_title("Terminal error")
+        axes[i, 2].set_ylabel(f"Step {i}\nInit RMSE={init_rmse[i]:.4f}")
+        axes[i, 5].set_ylabel(f"Terminal RMSE={terminal_rmse[i]:.4f}")
 
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

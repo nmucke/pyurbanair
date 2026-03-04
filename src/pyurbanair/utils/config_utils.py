@@ -12,6 +12,9 @@ from data_assimilation.observation_operator import (
 from pylbm.ensemble_forward_model import EnsembleForwardModel as LBMEnsembleForwardModel
 from pylbm.forward_model import ForwardModel as LBMForwardModel
 from pylbm.rollout_forward_model import RolloutForwardModel as LBMRolloutForwardModel
+from pylbm.utils.warm_start_utils import (
+    clean_all_restart_files as clean_lbm_restart_files,
+)
 from pylbm.utils.warm_start_utils import clean_output_files as clean_lbm_output_files
 from pyudales.ensemble_forward_model import (
     EnsembleForwardModel as UDALESEnsembleForwardModel,
@@ -82,6 +85,12 @@ def clean_forward_model_outputs(model_name: ModelName, forward_model: Any) -> No
         clean_lbm_output_files(forward_model.dirs)
     else:
         clean_udales_output_dir(forward_model.dirs)
+
+
+def clean_forward_model_restarts(model_name: ModelName, forward_model: Any) -> None:
+    """Remove all restart files so warm start uses iteration 1."""
+    if model_name == "pylbm":
+        clean_lbm_restart_files(forward_model.dirs)
 
 
 def create_ensemble_forward_model(model_name: ModelName, forward_model: Any) -> Any:
@@ -175,3 +184,58 @@ def create_observation_operator(model_name: ModelName) -> TemporalObservationOpe
 def create_C_D(num_obs: int) -> jnp.ndarray:
     cfg = _cfg()
     return jnp.diag((cfg.ESMDA["obs_error_std"] ** 2) * jnp.ones(num_obs))
+
+
+def load_init_conditions_for_esmda(
+    model_name: ModelName,
+    ensemble_size: int,
+    true_sim_id: int = 0,
+) -> tuple[xarray.Dataset, xarray.Dataset, xarray.Dataset, xarray.Dataset] | None:
+    """
+    Load init conditions from esmda_init_conditions/{lbm|udales}/.
+
+    Returns (init_states, init_params, true_params, true_init_state) or None
+    if the directory does not exist or required files are missing.
+    """
+    cfg = _cfg()
+    base_dir = pathlib.Path(
+        cfg.ESMDA.get("init_conditions_dir", "esmda_init_conditions")
+    )
+    subdir = "lbm" if model_name == "pylbm" else "udales"
+    init_dir = base_dir / subdir
+
+    if not init_dir.exists():
+        return None
+    params_path = init_dir / "params.nc"
+    if not params_path.exists():
+        return None
+
+    params_all = xarray.open_dataset(params_path).load()
+    n_available = int(params_all.sizes.get("ensemble", 0))
+    if n_available < ensemble_size:
+        return None
+    if true_sim_id >= n_available:
+        return None
+
+    true_params = params_all.isel(ensemble=true_sim_id)
+    init_params = params_all.isel(ensemble=slice(0, ensemble_size))
+
+    state_path = init_dir / f"state_{true_sim_id}.nc"
+    if not state_path.exists():
+        return None
+    true_init_state = xarray.open_dataset(state_path).load()
+    if "time" in true_init_state.dims:
+        true_init_state = true_init_state.isel(time=-1)
+
+    init_states = []
+    for i in range(ensemble_size):
+        sp = init_dir / f"state_{i}.nc"
+        if not sp.exists():
+            return None
+        ds = xarray.open_dataset(sp).load()
+        if "time" in ds.dims:
+            ds = ds.isel(time=-1)
+        init_states.append(ds)
+    init_states = xarray.concat(init_states, dim="ensemble", join="override")
+
+    return init_states, init_params, true_params, true_init_state

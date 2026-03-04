@@ -82,6 +82,16 @@ def clean_output_files(dirs: DirectoryPaths) -> None:
         output_file.unlink(missing_ok=True)
 
 
+def clean_all_restart_files(dirs: DirectoryPaths) -> None:
+    """Remove all LBM restart files from the restart directory."""
+    restart_dir = _restart_dir(dirs)
+    if not restart_dir.exists():
+        return
+    for path in restart_dir.iterdir():
+        if path.is_file() and RESTART_FILE_PATTERN.match(path.name):
+            path.unlink(missing_ok=True)
+
+
 def _get_mod_dimensions_int(dirs: DirectoryPaths, key: str, default: int) -> int:
     """Read integer parameter from mod_dimensions.F90."""
     pattern = re.compile(rf"integer,\s*parameter\s*::\s*{re.escape(key)}\s*=\s*(\d+)")
