@@ -16,6 +16,7 @@ from .utils import apply_inflow_settings
 from .utils.dir_utils import create_dir
 from .utils.forward_model_utils import create_new_forward_model
 from .utils.rollout_utils import collect_rollout_results
+from .utils.state_utils import scale_velocity_to_physical
 from .utils.warm_start_utils import (
     clean_output_files,
     identify_latest_restart_iteration,
@@ -184,6 +185,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                 state = state.expand_dims("time", axis=0)
 
             state = state.assign(x=model.x_grid, y=model.y_grid, z=model.z_grid)
+            state = scale_velocity_to_physical(state)
             states.append(state)
 
         if not states:
@@ -222,6 +224,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                 state = xarray.open_dataset(output_files[0], engine="netcdf4").load()
                 state = state.expand_dims("time", axis=0)
             state = state.assign(x=model.x_grid, y=model.y_grid, z=model.z_grid)
+            state = scale_velocity_to_physical(state)
             # Save concatenated state to results directory
             dest_file = self.results_dir / f"{sim_name}_{i}.nc"
             state.to_netcdf(str(dest_file))
@@ -259,6 +262,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                 state = xarray.open_dataset(output_files[0], engine="netcdf4").load()
                 state = state.expand_dims("time", axis=0)
                 state = state.assign(x=model.x_grid, y=model.y_grid, z=model.z_grid)
+            state = scale_velocity_to_physical(state)
 
             member_sim_name = f"{sim_name}_{i}"
             rollout_file = (

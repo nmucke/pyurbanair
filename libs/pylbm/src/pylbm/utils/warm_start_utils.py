@@ -10,6 +10,7 @@ from scipy.io import FortranFile
 
 from .dir_utils import DirectoryPaths
 from .infile_utils import Infile
+from .state_utils import VELOCITY_SCALE_TO_PHYSICAL
 
 RESTART_FILE_PATTERN = re.compile(
     r"^(?P<prefix>restart|turbulence|theta|pottemp|tracer)_(?P<tile>\d{4})_(?P<iteration>\d{6})\.uf$"
@@ -566,6 +567,11 @@ def write_restart_file_from_xarray(
     u_zyx = _get_state_variable(state_ds, "u")
     v_zyx = _get_state_variable(state_ds, "v")
     w_zyx = _get_state_variable(state_ds, "w")
+    # pylbm forward model outputs velocity in m/s; LBM restart expects lattice units
+    scale_to_lattice = 1.0 / VELOCITY_SCALE_TO_PHYSICAL
+    u_zyx = (u_zyx * scale_to_lattice).astype(np.float32)
+    v_zyx = (v_zyx * scale_to_lattice).astype(np.float32)
+    w_zyx = (w_zyx * scale_to_lattice).astype(np.float32)
     fluid_mask_zyx = _get_state_blanking_mask(state_ds)
 
     nz, ny, nx = rho_zyx.shape

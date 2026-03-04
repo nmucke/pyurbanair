@@ -25,7 +25,7 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 50.0,
+    "simulation_time": 75.0,
     "output_frequency": 5.0,
 }
 
@@ -66,7 +66,7 @@ ESMDA = {
 }
 
 TRUE_PARAMS = {
-    "inflow_angle": 10.0,
+    "inflow_angle": 40.0,
     "velocity_magnitude": 5.0,
     "pressure_gradient_magnitude": 0.0041912,
 }

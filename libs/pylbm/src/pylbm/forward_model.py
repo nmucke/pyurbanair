@@ -18,6 +18,7 @@ from .utils import Infile, apply_inflow_settings, compile_lbm, create_infile
 from .utils.environment_utils import identify_environment
 from .utils.infile_utils import _augment_runtime_library_paths
 from .utils.mod_dimensions_utils import set_experiment
+from .utils.state_utils import scale_velocity_to_physical
 
 
 class ForwardModel(BaseForwardModel):
@@ -265,6 +266,7 @@ class ForwardModel(BaseForwardModel):
             state = datasets[0].expand_dims("time", axis=0)
 
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
+        state = scale_velocity_to_physical(state)
 
         if self.save_on_disk:
             resolved_sim_name = sim_name if sim_name is not None else "state"
