@@ -137,14 +137,6 @@ def create_parameter_ensemble(model_name: ModelName) -> xarray.Dataset:
         "velocity_magnitude": ("ensemble", vel),
     }
 
-    if model_name == "pyudales":
-        rng_key, subkey = jax.random.split(rng_key)
-        pressure = (
-            jax.random.normal(subkey, (n,)) * cfg.PARAM_PRIORS["pressure_std"]
-            + cfg.PARAM_PRIORS["pressure_mean"]
-        )
-        data_vars["pressure_gradient_magnitude"] = ("ensemble", pressure)
-
     return xarray.Dataset(data_vars=data_vars, coords={"ensemble": jnp.arange(n)})
 
 

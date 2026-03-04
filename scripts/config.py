@@ -25,8 +25,8 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 10.0,
-    "output_frequency": 0.2,
+    "simulation_time": 50.0,
+    "output_frequency": 5.0,
 }
 
 LBM_ARGS = {
@@ -57,24 +57,24 @@ OBS = {
 }
 
 ESMDA = {
-    "ensemble_size": 50,
+    "ensemble_size": 48,
     "num_steps": 2,
     "seed": 42,
     "obs_error_std": 0.01,
-    "num_parallel_processes": 10,
+    "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
 }
 
 TRUE_PARAMS = {
     "inflow_angle": 10.0,
-    "velocity_magnitude": 8.0,
+    "velocity_magnitude": 5.0,
     "pressure_gradient_magnitude": 0.0041912,
 }
 
 PARAM_PRIORS = {
     "inflow_angle_mean": 0.0,
     "inflow_angle_std": 8.0,
-    "velocity_mean": 7.0,
+    "velocity_mean": 3.0,
     "velocity_std": 1.0,
     "pressure_mean": 0.0041912,
     "pressure_std": 0.001,

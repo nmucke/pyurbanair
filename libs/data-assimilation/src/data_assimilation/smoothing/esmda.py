@@ -32,7 +32,12 @@ class ParameterESMDA(BaseSmoothing):
             self.base_results_dir = self.forward_model.results_dir
             self.save_on_disk = True
             for i in range(num_steps + 1):
-                os.makedirs(self.base_results_dir / f"step_{i}", exist_ok=True)
+                step_dir = self.base_results_dir / f"step_{i}"
+                os.makedirs(step_dir, exist_ok=True)
+                # Avoid stale ensemble state files from previous runs with
+                # different ensemble sizes.
+                for state_file in step_dir.glob("state_*.nc"):
+                    state_file.unlink(missing_ok=True)
         else:
             self.save_on_disk = False
 
@@ -55,6 +60,12 @@ class ParameterESMDA(BaseSmoothing):
 
         obs = jnp.asarray(obs)
 
+        # Extract parameter names and values
+        param_names = list(params.data_vars.keys())
+        N_e = params.sizes["ensemble"]  # Number of ensemble members
+        N_p = len(param_names)  # Number of parameters
+        N_d = len(obs)  # Number of observations
+
         pred_obs = self._observation_step(
             state=state,
             results_dir=(
@@ -65,11 +76,13 @@ class ParameterESMDA(BaseSmoothing):
         )
         pred_obs = jnp.asarray(pred_obs).T
 
-        # Extract parameter names and values
-        param_names = list(params.data_vars.keys())
-        N_e = params.sizes["ensemble"]  # Number of ensemble members
-        N_p = len(param_names)  # Number of parameters
-        N_d = len(obs)  # Number of observations
+        if pred_obs.ndim != 2 or pred_obs.shape[1] != N_e:
+            raise ValueError(
+                "Predicted observations shape does not match ensemble size. "
+                f"Expected second dimension {N_e}, got {pred_obs.shape}. "
+                "This usually indicates stale or unexpected files in the ESMDA "
+                "results step directory."
+            )
 
         # Extract parameters as array of shape [N_p, N_e]
         params_array = [params[param_name].values for param_name in param_names]
@@ -235,7 +248,12 @@ class StateAndParameterESMDA(BaseSmoothing):
 
             self.save_on_disk = True
             for i in range(num_steps + 1):
-                os.makedirs(self.base_results_dir / f"step_{i}", exist_ok=True)
+                step_dir = self.base_results_dir / f"step_{i}"
+                os.makedirs(step_dir, exist_ok=True)
+                # Avoid stale ensemble state files from previous runs with
+                # different ensemble sizes.
+                for state_file in step_dir.glob("state_*.nc"):
+                    state_file.unlink(missing_ok=True)
         else:
             self.save_on_disk = False
 
@@ -257,10 +275,12 @@ class StateAndParameterESMDA(BaseSmoothing):
         if state is not None:
             states = state.isel(time=0)
         elif results_dir is not None:
-            states = [
-                xarray.open_dataset(f).isel(time=-1)
-                for f in pathlib.Path(results_dir).iterdir()
-            ]
+            state_files = self._get_sorted_state_files(pathlib.Path(results_dir))
+            if not state_files:
+                raise FileNotFoundError(
+                    f"No state_*.nc files found in results directory: {results_dir}"
+                )
+            states = [xarray.open_dataset(f).isel(time=-1) for f in state_files]
             states = xarray.concat(states, dim="ensemble", join="override")
         return states
 

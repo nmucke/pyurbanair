@@ -336,22 +336,41 @@ def rename_namoptions_file(experiment_dir: pathlib.Path, experiment_name: str) -
         experiment_dir: Directory containing the namoptions file(s).
         experiment_name: The experiment name to use for the file extension and iexpnr value.
     """
-    namoptions_files = list(experiment_dir.glob("namoptions*"))
+    namoptions_files = sorted(
+        [f for f in experiment_dir.glob("namoptions*") if f.is_file()]
+    )
 
-    # If no namoptions file found, return early
+    # If no namoptions file found, return early.
     if not namoptions_files:
         logger.warning(f"No namoptions file found in {experiment_dir}")
         return
 
-    old_namoptions_path = namoptions_files[0]
     new_namoptions_path = experiment_dir / f"namoptions.{experiment_name}"
+    source_candidates = [f for f in namoptions_files if f != new_namoptions_path]
 
-    # Only rename if the file doesn't already have the correct name
-    if old_namoptions_path != new_namoptions_path:
-        old_namoptions_path.rename(new_namoptions_path)
+    if len(source_candidates) > 1:
+        candidates = ", ".join(f.name for f in source_candidates)
+        raise RuntimeError(
+            "Ambiguous namoptions sources in "
+            f"{experiment_dir}: found multiple candidates ({candidates}). "
+            "Please clean the directory before retrying."
+        )
+
+    if len(source_candidates) == 1:
+        source_path = source_candidates[0]
+        if new_namoptions_path.exists():
+            new_namoptions_path.unlink()
+        source_path.rename(new_namoptions_path)
+        namoptions_file_path = new_namoptions_path
+    elif new_namoptions_path.exists():
         namoptions_file_path = new_namoptions_path
     else:
-        namoptions_file_path = old_namoptions_path
+        # This means namoptions_files is non-empty but no expected target exists.
+        # Keep behavior explicit and deterministic for easier debugging.
+        raise RuntimeError(
+            f"Could not resolve namoptions target in {experiment_dir}. "
+            f"Expected {new_namoptions_path.name}."
+        )
 
     # Update iexpnr in the namoptions file to match experiment_name
     namoptions = NamoptionsFile(namoptions_file_path)

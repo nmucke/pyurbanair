@@ -11,13 +11,17 @@ def add_velocity_magnitude(state: xarray.Dataset) -> xarray.Dataset:
     return state.assign(vel_magnitude=(state["u"].dims, vel_magnitude))
 
 
-def extract_2d_slice(data_array: xarray.DataArray) -> np.ndarray:
+def extract_2d_slice(
+    data_array: xarray.DataArray, z_level: int | None = None
+) -> np.ndarray:
     da = data_array
     if "time" in da.dims:
         da = da.isel(time=-1)
     for z_dim in ("z", "zm", "zt"):
         if z_dim in da.dims:
-            da = da.isel({z_dim: len(da[z_dim]) // 2})
+            da = da.isel(
+                {z_dim: z_level if z_level is not None else len(da[z_dim]) // 2}
+            )
             break
     if da.ndim > 2:
         indexers = {dim: 0 for dim in da.dims[:-2]}
@@ -44,16 +48,49 @@ def get_ensemble_mean_field(
         params = output
         ensemble_mean_steps = []
         for i in range(num_esmda_steps + 1):
-            esmda_step = esmda.get_state(step=i, ensemble_member=0)
-            for j in range(1, ensemble_size):
-                esmda_state = esmda.get_state(step=i, ensemble_member=j)
-                for var in esmda_step.data_vars:
-                    esmda_step[var].values = (
-                        esmda_step[var].values + esmda_state[var].values
+            member_states = [
+                esmda.get_state(step=i, ensemble_member=j) for j in range(ensemble_size)
+            ]
+
+            # Some ensemble members can have slightly different time lengths.
+            # Truncate to the shortest available length before averaging.
+            if any("time" in state.dims for state in member_states):
+                common_time_len = min(
+                    state.sizes["time"]
+                    for state in member_states
+                    if "time" in state.dims
+                )
+                member_states = [
+                    (
+                        state.isel(time=slice(0, common_time_len))
+                        if "time" in state.dims
+                        else state
                     )
-            for var in esmda_step.data_vars:
-                esmda_step[var].values /= ensemble_size
+                    for state in member_states
+                ]
+
+            esmda_step = xarray.concat(
+                member_states,
+                dim="ensemble_member",
+                join="override",
+            ).mean(dim="ensemble_member")
             ensemble_mean_steps.append(esmda_step)
+
+        if any("time" in step.dims for step in ensemble_mean_steps):
+            common_time_len = min(
+                step.sizes["time"]
+                for step in ensemble_mean_steps
+                if "time" in step.dims
+            )
+            ensemble_mean_steps = [
+                (
+                    step.isel(time=slice(0, common_time_len))
+                    if "time" in step.dims
+                    else step
+                )
+                for step in ensemble_mean_steps
+            ]
+
         ensemble_mean_field = xarray.concat(
             ensemble_mean_steps,
             dim="esmda_step",

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
-from scripts_new import config
+from scripts import config
 
 
 def main() -> None:
@@ -60,7 +60,7 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         plot_var = "vel_magnitude" if "vel_magnitude" in state.data_vars else "u"
-        plot_2d = extract_2d_slice(state[plot_var])
+        plot_2d = extract_2d_slice(state[plot_var], z_level=0)
         plt.figure(figsize=(6, 5))
         plt.imshow(plot_2d, origin="lower")
         plt.colorbar(label=plot_var)
@@ -72,7 +72,7 @@ def main() -> None:
         animate_state(
             state=state,
             output_path=out_dir / "state_animation.mp4",
-            z_level=None,
+            z_level=0,
         )
         print(f"Saved visualization outputs in {out_dir}")
 

@@ -13,6 +13,7 @@ def _visualize_state_history(
     state_history: xarray.Dataset,
     out_dir: pathlib.Path,
     title_prefix: str,
+    z_level: int | None = None,
 ) -> None:
     state_viz = state_history
     for step_dim in ("esmda_step", "assimilation_step", "step", "window", "iteration"):
@@ -31,7 +32,7 @@ def _visualize_state_history(
         state_viz.mean(dim="ensemble") if "ensemble" in state_viz.dims else state_viz
     )
     if "time" in snapshot_state.dims:
-        plot_2d = extract_2d_slice(snapshot_state[plot_var])
+        plot_2d = extract_2d_slice(snapshot_state[plot_var], z_level=z_level)
         if plot_2d.ndim == 2:
             plt.figure(figsize=(6, 5))
             plt.imshow(plot_2d, origin="lower")
@@ -47,13 +48,13 @@ def _visualize_state_history(
         animate_ensemble_state(
             state=state_viz,
             output_path=out_dir / "state_history_animation.mp4",
-            z_level=None,
+            z_level=z_level,
         )
     else:
         animate_state(
             state=state_viz,
             output_path=out_dir / "state_history_animation.mp4",
-            z_level=None,
+            z_level=z_level,
         )
 
 

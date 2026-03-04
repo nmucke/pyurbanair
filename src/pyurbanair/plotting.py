@@ -9,13 +9,16 @@ from pyurbanair.utils.run_utils import add_velocity_magnitude
 
 def _extract_2d_slice_with_extent(
     data_array: xarray.DataArray,
+    z_level: int | None = None,
 ) -> tuple[np.ndarray, tuple[float, float, float, float]]:
     da = data_array
     if "time" in da.dims:
         da = da.isel(time=-1)
     for z_dim in ("z", "zm", "zt"):
         if z_dim in da.dims:
-            da = da.isel({z_dim: len(da[z_dim]) // 2})
+            da = da.isel(
+                {z_dim: z_level if z_level is not None else len(da[z_dim]) // 2}
+            )
             break
     if da.ndim > 2:
         indexers = {dim: 0 for dim in da.dims[:-2]}
@@ -117,6 +120,7 @@ def plot_true_vs_estimated_state(
     output_path: str | pathlib.Path,
     obs_x: np.ndarray | None = None,
     obs_y: np.ndarray | None = None,
+    z_level: int | None = None,
 ) -> None:
     """Plot estimated vs true state snapshots, error, and RMSE by step."""
     true_for_plot = add_velocity_magnitude(true_state)
@@ -144,7 +148,9 @@ def plot_true_vs_estimated_state(
         est_for_plot = est_for_plot.expand_dims(esmda_step=[0])
         step_dim = "esmda_step"
 
-    true_2d, true_extent = _extract_2d_slice_with_extent(true_for_plot[true_plot_var])
+    true_2d, true_extent = _extract_2d_slice_with_extent(
+        true_for_plot[true_plot_var], z_level=z_level
+    )
     num_steps = int(est_for_plot.sizes[step_dim])
     rmse_vals: list[float] = []
     est_slices: list[np.ndarray] = []
@@ -156,7 +162,8 @@ def plot_true_vs_estimated_state(
 
     for i in range(num_steps):
         est_2d, est_extent = _extract_2d_slice_with_extent(
-            est_for_plot.isel({step_dim: i})[plot_var]
+            est_for_plot.isel({step_dim: i})[plot_var],
+            z_level=z_level,
         )
         true_2d_aligned = true_2d
         true_extent_aligned = true_extent

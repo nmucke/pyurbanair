@@ -98,11 +98,13 @@ def main() -> None:
             output_path=out_dir / "state_comparison.png",
             obs_x=obs_x,
             obs_y=obs_y,
+            z_level=0,
         )
         _visualize_state_history(
             state_history=state_for_viz,
             out_dir=out_dir,
             title_prefix="parameter_esmda",
+            z_level=0,
         )
         if params_for_plot is not None:
             plot_parameter_distributions(
