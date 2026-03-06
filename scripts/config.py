@@ -26,14 +26,14 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 3000 * 0.0538,  # 25.0,
-    "output_frequency": 3000 * 0.0538,  # 2.0,
+    "simulation_time": 10.0, # 3000 * 0.0538,
+    "output_frequency": 2.0, # 3000 * 0.0538,
 }
 
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": True,
+    "cuda": False,
     "verbose": False,
 }
 
@@ -58,8 +58,9 @@ OBS = {
 }
 
 ESMDA = {
-    "ensemble_size": 256,
-    "num_steps": 2,
+    "ensemble_size": 4,
+    "num_steps": 1,
+    "num_assimilation_windows": 3,
     "seed": 42,
     "obs_error_std": 0.1,
     "num_parallel_processes": 1,

@@ -449,3 +449,63 @@ def plot_state_init_and_terminal(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path)
     plt.close(fig)
+
+
+def plot_rollout_time_evolution(
+    esmda_params: xarray.Dataset,
+    true_params: xarray.Dataset,
+    esmda_state: xarray.Dataset,
+    true_state: xarray.Dataset,
+    output_path: str | pathlib.Path,
+) -> None:
+    """Plot parameter and RMSE time evolution over rollout assimilation windows."""
+    from pyurbanair.utils.state_utils import get_velocity_magnitude_field
+
+    esmda_mean = esmda_params.mean(dim="ensemble")
+    esmda_std = esmda_params.std(dim="ensemble")
+
+    true_state_mean = true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
+    esmda_state_mean = esmda_state.mean(dim="ensemble")
+
+    true_vel = np.asarray(get_velocity_magnitude_field(true_state_mean))
+    esmda_vel = np.asarray(get_velocity_magnitude_field(esmda_state_mean))
+    min_t = min(true_vel.shape[0], esmda_vel.shape[0])
+    rmse = np.sqrt(np.mean((true_vel[:min_t] - esmda_vel[:min_t]) ** 2, axis=tuple(range(1, true_vel.ndim))))
+
+    param_names = [p for p in ("inflow_angle", "velocity_magnitude") if p in esmda_mean.data_vars]
+    n_params = len(param_names)
+
+    fig, axes = plt.subplots(n_params + 1, 1, figsize=(10, 4 * (n_params + 1)), constrained_layout=True)
+    axes = np.atleast_1d(axes)
+
+    for i, param_name in enumerate(param_names):
+        ax = axes[i]
+        mean_vals = np.asarray(esmda_mean[param_name].values).reshape(-1)
+        std_vals = np.asarray(esmda_std[param_name].values).reshape(-1)
+        t = np.arange(len(mean_vals))
+        ax.plot(t, mean_vals, label="ESMDA Mean", linewidth=2, color="tab:blue")
+        ax.fill_between(
+            t,
+            mean_vals - 2 * std_vals,
+            mean_vals + 2 * std_vals,
+            color="tab:blue",
+            alpha=0.3,
+            label="ESMDA ±2 Std",
+        )
+        if param_name in true_params.data_vars:
+            true_vals = np.asarray(true_params[param_name].values).reshape(-1)
+            ax.plot(np.arange(len(true_vals)), true_vals, label="True", linewidth=2, color="tab:red")
+        ax.set_xlabel("Time Window")
+        ax.set_ylabel(param_name)
+        ax.legend()
+
+    ax_rmse = axes[n_params]
+    ax_rmse.plot(np.arange(len(rmse)), rmse, label="RMSE", linewidth=2, color="tab:blue")
+    ax_rmse.set_xlabel("Time Window")
+    ax_rmse.set_ylabel("RMSE (velocity magnitude)")
+    ax_rmse.legend()
+
+    output_path = pathlib.Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
