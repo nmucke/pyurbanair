@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
 from scripts import config
+from pyudales.utils.grid_utils import interpolate_grid
 
 
 def main() -> None:
@@ -68,6 +69,10 @@ def main() -> None:
         plt.tight_layout()
         plt.savefig(out_dir / "field_snapshot.png")
         plt.close()
+
+
+        if model_name == "pyudales":
+            state = interpolate_grid(state)
 
         animate_state(
             state=state,
