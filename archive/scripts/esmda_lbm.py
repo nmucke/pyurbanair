@@ -2,22 +2,23 @@ import os
 import pathlib
 import pdb
 import shutil
+import time
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import xarray
-from data_assimilation.observation_operator import ObservationOperator
+from data_assimilation.observation_operator import (
+    ObservationOperator,
+    TemporalObservationOperator,
+)
 from data_assimilation.smoothing.esmda import ParameterESMDA
 from pylbm.ensemble_forward_model import EnsembleForwardModel
-from pylbm.forward_model import ForwardModel as LBMForwardModel
-from pyudales.forward_model import ForwardModel as UDALESForwardModel
+from pylbm.forward_model import ForwardModel
 
 from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 
 Z_PLOT_LEVEL = 1
-
-RESULTS_DIR = ".temp/lbm"
 
 
 def get_ensemble_mean_field(
@@ -57,13 +58,13 @@ FIGURES_DIR = "figures"
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # True parameters
-TRUE_VELOCITY_MAGNITUDE = 8.0
+TRUE_VELOCITY_MAGNITUDE = 10.0
 TRUE_ANGLE = 10.0
 
 NUM_PARALLEL_PROCESSES = 1
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 25
+ENSEMBLE_SIZE = 32
 NUM_ESMDA_STEPS = 2
 ALPHA = 1 / NUM_ESMDA_STEPS
 
@@ -74,50 +75,37 @@ ALPHA = 1 / NUM_ESMDA_STEPS
 # OBS_STATES = ["u", "v", "w"]
 # NUM_OBS = len(OBS_IDS_X) * len(OBS_STATES)
 
+
+# OBS_X = [43, 51.6, 94.3, 110.9, 87.3, 20.0, 52.6, 90.0]
+# OBS_Y = [30.6, 62.7, 92.9, 108.0, 20.0, 60.0, 90.0, 50.0]
+
+# OBS_Z = [2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8]
+
 OBS_X = jnp.linspace(10, 150, 4)
 OBS_Y = jnp.linspace(10, 150, 4)
 OBS_X, OBS_Y = jnp.meshgrid(OBS_X, OBS_Y)
 OBS_X = OBS_X.flatten()
 OBS_Y = OBS_Y.flatten()
 
-OBS_X = [13, 45.6, 94.3, 108.9, 87.3, 20.0, 52.6, 90.0, 60.0, 75.0, 75.0]
-OBS_Y = [30.6, 52.7, 92.9, 108.0, 10.0, 90.0, 10.0, 50.0, 80.0, 90.0, 60.0]
 OBS_Z = jnp.full(len(OBS_X), 2.0)
 OBS_STATES = ["u", "v", "w"]
 NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
 # Observation error settings
-OBS_ERROR_STD = 0.001
+OBS_ERROR_STD = 0.01
 C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
-udales_time = 10
-lbm_time_steps = int(udales_time / 0.0538)
-lbm_output_frequency = int(lbm_time_steps / udales_time)
-
 # Forward model settings
-LBM_FIXED_INPUT = {
+FIXED_INPUT = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "nx": 120,
     "ny": 120,
     "nz": 8,
-    "num_timesteps": lbm_time_steps,
+    "num_timesteps": 50,
     "bounds": ((0, 160), (0, 160), (0, 40)),
     "verbose": False,
-    "output_frequency": lbm_output_frequency,
+    "output_frequency": 50,
     "cuda": True,
-    # "results_dir": pathlib.Path(RESULTS_DIR),
-}
-
-
-# Forward model settings
-UDALES_FIXED_INPUT = {
-    "save_only_last_timestep": False,
-    "output_frequency": 1.0,
-    "ncpu": 1,
-    "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "case_dir": "examples/udales/experiments/xie_and_castro",
-    "verbose": False,
-    "experiment_name": "999",
 }
 
 
@@ -152,22 +140,12 @@ def main() -> None:
             "velocity_magnitude": TRUE_VELOCITY_MAGNITUDE,
         },
     )
-    lbm_forward_model = LBMForwardModel(
-        **LBM_FIXED_INPUT,  # type: ignore[arg-type]
-        results_dir=pathlib.Path(RESULTS_DIR),
-    )
-    lbm_forward_model.compile()
-
-    udales_forward_model = UDALESForwardModel(**UDALES_FIXED_INPUT)
-    udales_forward_model.run_preprocessing()
-
-    # udales_forward_model = LBMForwardModel(
-    #     **LBM_FIXED_INPUT
-    # )
+    forward_model = ForwardModel(**FIXED_INPUT)  # type: ignore[arg-type]
 
     ##### Run true simulation #####
-    true_state = udales_forward_model(params=true_params)
-    true_state = true_state / 75.0
+    true_state = forward_model(params=true_params)
+    if true_state is None:
+        raise RuntimeError("Expected in-memory true state from forward model.")
     true_velocity_field = get_velocity_magnitude_field(true_state)
 
     ##### Setup observations #####
@@ -178,15 +156,22 @@ def main() -> None:
         obs_states=OBS_STATES,
         solver_name="pylbm",
     )
+
+    # if FIXED_INPUT["output_frequency"] is not None:
+    #     observation_operator = TemporalObservationOperator(
+    #         observation_operator=observation_operator,
+    #         mode="mean",
+    #     )
     true_obs = observation_operator(true_state.isel(time=-1))
     rng_key, subkey = jax.random.split(rng_key)
 
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    lbm_forward_model.apply_save_on_disk(results_dir=pathlib.Path(".temp/lbm"))
+    forward_model.set_results_dir(pathlib.Path(".temp/lbm"))
     ensemble_forward_model = EnsembleForwardModel(
-        forward_model=lbm_forward_model,
+        forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
+        # results_dir=pathlib.Path(RESULTS_DIR),
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=1,
     )
@@ -199,20 +184,22 @@ def main() -> None:
         num_steps=NUM_ESMDA_STEPS,
         alpha=ALPHA,
         rng_key=rng_key,
+        results_dir=pathlib.Path(".temp/lbm"),
     )
+    t1 = time.time()
     output = esmda(
         params=params_ensemble,
         observations=true_obs,
         return_params_history=True,
         return_state_history=True,
     )
-
+    t2 = time.time()
+    print(f"ESMDA time: {t2 - t1:.2f} seconds")
     # Get ESMDA ensemble mean field and parameters
     ensemble_mean_field, params = get_ensemble_mean_field(output, esmda)
-    ensemble_mean_field = ensemble_mean_field.isel(time=slice(2, lbm_time_steps))
 
     mean_velocity_field = get_velocity_magnitude_field(ensemble_mean_field)
-    # mean_velocity_field = mean_velocity_field[:, 2:]
+
     rmse = [
         jnp.sqrt(jnp.mean((mean_velocity_field[i] - true_velocity_field) ** 2)).item()
         for i in range(NUM_ESMDA_STEPS + 1)
@@ -259,11 +246,11 @@ def main() -> None:
             **im_args,
         )
 
-        axes[i, 3].hist(-params.inflow_angle.isel(esmda_step=i).values, **hist_args(i))
-        axes[i, 3].set_xlim(-10, 35)
+        axes[i, 3].hist(params.inflow_angle.isel(esmda_step=i).values, **hist_args(i))
+        axes[i, 3].set_xlim(-15, 15)
         axes[i, 3].axvline(**angle_axvline_args)
         axes[i, 3].axvline(
-            -jnp.mean(params.inflow_angle.isel(esmda_step=i).values),
+            jnp.mean(params.inflow_angle.isel(esmda_step=i).values),
             color="black",
             linestyle="--",
             label="ESMDA Mean",
@@ -301,11 +288,7 @@ def main() -> None:
                 axes[i, 4].set_title("Velocity magnitude distribution")
 
         axes[i, 2].set_title(f"RMSE: {rmse[i]:.4f}")
-    plt.savefig(
-        os.path.join(
-            FIGURES_DIR, f"esmda_par_results_lbm_with_udales_data_{NUM_ESMDA_STEPS}.pdf"
-        )
-    )
+    plt.savefig(os.path.join(FIGURES_DIR, f"esmda_results_lbm_{NUM_ESMDA_STEPS}.pdf"))
     plt.close()
 
     # # Get ESMDA ensemble mean field and parameters

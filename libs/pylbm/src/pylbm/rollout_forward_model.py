@@ -26,7 +26,6 @@ class RolloutForwardModel(ForwardModel):
         super().__init__(*args, **kwargs)
         self.rollout_step = 0
 
-
     def _configure_for_rollout_step(self) -> None:
         """Configure infile restart/timestep settings for current rollout step."""
         if self.rollout_step == 0:
@@ -110,7 +109,10 @@ class RolloutForwardModel(ForwardModel):
             sim_name=step_sim_name,
         )
 
-        clean_output_files(self.dirs)
+        # When save_on_disk, the ensemble's _post_run_ensemble needs the output
+        # files for _move_and_collect_rollout_results_to_disk; it will clean them.
+        if not self.save_on_disk:
+            clean_output_files(self.dirs)
         remove_old_restart_files(self.dirs)
 
         if self.save_on_disk and self.results_dir is not None and sim_name is not None:

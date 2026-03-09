@@ -3,6 +3,7 @@
 import copy
 import logging
 import pathlib
+import shutil
 
 from ..forward_model import ForwardModel
 from .config_utils import create_config_sh
@@ -40,6 +41,11 @@ def create_new_forward_model(
 
     # Create new directories
     new_experiment_base_dir = create_dir(cwd / experiment_base_dir)
+    new_experiment_dir = create_dir(new_experiment_base_dir / experiment_name)
+
+    # Ensure no stale files remain from previous runs for this ensemble member.
+    if new_experiment_dir.exists():
+        shutil.rmtree(new_experiment_dir)
     new_experiment_dir = create_dir(new_experiment_base_dir / experiment_name)
 
     # Copy all files from old experiment_dir to new experiment_dir

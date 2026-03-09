@@ -15,7 +15,7 @@ from .utils.clean_up_utils import clean_output_dir, clean_temp_dir
 from .utils.config_utils import create_config_sh
 from .utils.dir_utils import get_project_root, get_udales_directory_paths
 from .utils.file_utils import copy_files
-from .utils.namoptions_utils import rename_namoptions_file
+from .utils.namoptions_utils import NamoptionsFile, rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
 from .utils.params_utils import apply_inflow_settings, merge_params
 from .utils.random_utils import apply_random_initial_condition
@@ -39,6 +39,12 @@ DEFAULT_PARAMS = xarray.Dataset(
         "pressure_gradient_magnitude": 0.0041912,
     },
 )
+
+DomainBounds = tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]
 
 
 def _augment_runtime_library_paths(env: dict[str, str]) -> None:
@@ -92,6 +98,11 @@ class ForwardModel(BaseForwardModel):
         case_dir: pathlib.Path,
         experiment_name: str = "300",
         ncpu: int = 4,
+        simulation_time: float | None = None,
+        nx: int | None = None,
+        ny: int | None = None,
+        nz: int | None = None,
+        bounds: DomainBounds | None = None,
         matlab_bin: pathlib.Path = DEFAULT_MATLAB_BIN,
         save_only_last_timestep: bool = False,
         output_frequency: Optional[float] = None,
@@ -109,6 +120,14 @@ class ForwardModel(BaseForwardModel):
             case_dir: The directory containing the original case files.
             experiment_name: The name of the experiment.
             ncpu: The number of CPUs to use.
+            simulation_time: Total simulation runtime in seconds. If provided,
+                writes &RUN runtime in namoptions.
+            nx: Number of grid cells in x direction (maps to itot in namoptions).
+            ny: Number of grid cells in y direction (maps to jtot in namoptions).
+            nz: Number of grid cells in z direction (maps to ktot in namoptions).
+            bounds: Domain bounds in the form
+                ((xmin, xmax), (ymin, ymax), (zmin, zmax)).
+                Domain lengths are written to xlen/ylen/zsize in namoptions.
             matlab_bin: The path to the MATLAB binary.
             save_only_last_timestep: If True, only the last timestep will be saved. Overwrites save_frequency.
             output_frequency: The frequency at which the output will be saved.
@@ -158,12 +177,17 @@ class ForwardModel(BaseForwardModel):
             existing_params=DEFAULT_PARAMS,
             new_params=params,
         )
+        if self.params is None:
+            raise ValueError("ForwardModel requires at least one inflow parameter.")
 
         # Copy files from case_dir to experiment_dir
         copy_files(self.dirs.case_dir, self.dirs.experiment_dir)
 
         # Rename the namoptions file to have the experiment_name as its extension
         rename_namoptions_file(self.dirs.experiment_dir, self.dirs.experiment_name)
+
+        self._apply_runtime_override(simulation_time=simulation_time)
+        self._apply_domain_overrides(nx=nx, ny=ny, nz=nz, bounds=bounds)
 
         # Validate and sync NCPU with nprocx * nprocy from namoptions
         self.ncpu = validate_and_sync_ncpu(
@@ -179,6 +203,8 @@ class ForwardModel(BaseForwardModel):
         )
 
         # Apply inflow settings
+        if self.params is None:
+            raise ValueError("ForwardModel parameters are unexpectedly unset.")
         apply_inflow_settings(self.params, self.dirs)
 
         if self.save_only_last_timestep:
@@ -197,6 +223,71 @@ class ForwardModel(BaseForwardModel):
         logger.info(f"Output dir: {self.dirs.output_dir}")
         logger.info(f"NCPU: {self.ncpu}")
         logger.info(f"MATLAB bin: {self.matlab_bin}")
+
+    def _apply_runtime_override(self, simulation_time: float | None) -> None:
+        """Apply optional simulation runtime override to namoptions."""
+        if simulation_time is None:
+            return
+        if simulation_time <= 0:
+            raise ValueError("simulation_time must be > 0.")
+
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+        namoptions.set_value("RUN", "runtime", simulation_time)
+        namoptions.write()
+
+    def _apply_domain_overrides(
+        self,
+        nx: int | None,
+        ny: int | None,
+        nz: int | None,
+        bounds: DomainBounds | None,
+    ) -> None:
+        """Apply optional domain overrides to namoptions."""
+        provided_any = any(v is not None for v in (nx, ny, nz, bounds))
+        if not provided_any:
+            return
+
+        if nx is None or ny is None or nz is None or bounds is None:
+            raise ValueError(
+                "If one of nx/ny/nz/bounds is provided, all four must be provided."
+            )
+
+        if nx <= 0 or ny <= 0 or nz <= 0:
+            raise ValueError("nx, ny, and nz must all be positive integers.")
+
+        for axis_name, axis_bounds in zip(("x", "y", "z"), bounds):
+            if axis_bounds[1] <= axis_bounds[0]:
+                raise ValueError(
+                    f"Invalid {axis_name} bounds: upper bound must be greater than lower bound."
+                )
+
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+        namoptions.set_value("DOMAIN", "itot", nx)
+        namoptions.set_value("DOMAIN", "jtot", ny)
+        namoptions.set_value("DOMAIN", "ktot", nz)
+        namoptions.set_value("DOMAIN", "xlen", bounds[0][1] - bounds[0][0])
+        namoptions.set_value("DOMAIN", "ylen", bounds[1][1] - bounds[1][0])
+        namoptions.set_value("INPS", "zsize", bounds[2][1] - bounds[2][0])
+        namoptions.write()
+
+    def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
+        """Change results directory, updating both base and dirs dataclass."""
+        super().set_results_dir(results_dir)
+        self.dirs.results_dir = results_dir
+
+    def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
+        """Save simulation results to a NetCDF file."""
+        if self.results_dir is None:
+            raise ValueError("Cannot save results because results_dir is not set.")
+        outfile = self.results_dir / f"{sim_name}.nc"
+        os.makedirs(self.results_dir, exist_ok=True)
+        state.to_netcdf(str(outfile))
 
     def run_preprocessing(self, python_or_matlab: str = "python") -> None:
         """Run preprocessing."""
@@ -266,6 +357,8 @@ class ForwardModel(BaseForwardModel):
         if params is not None:
             self.params = merge_params(self.params, params)
 
+        if self.params is None:
+            raise ValueError("ForwardModel parameters are unexpectedly unset.")
         apply_inflow_settings(self.params, self.dirs)
 
         logger.info("Running forward model...")
@@ -300,19 +393,19 @@ class ForwardModel(BaseForwardModel):
                 output_file = single_proc_file
 
         # Load into memory if save_in_memory is True
+        state = xarray.open_dataset(
+            output_file,
+            engine="netcdf4",
+        )
+        state = state.load()
+
         if self.save_in_memory:
-            state = xarray.open_dataset(
-                output_file,
-                engine="netcdf4",
-            )
-            state = state.load()
+            if self.clean_output:
+                clean_output_dir(self.dirs)
+            return state
         else:
-            outfile = self.dirs.results_dir / f"{sim_name}.nc"  # type: ignore[operator]
-            os.makedirs(str(self.dirs.results_dir), exist_ok=True)
-            shutil.move(str(output_file), str(outfile))
-            state = None
-
-        if self.clean_output:
-            clean_output_dir(self.dirs)
-
-        return state
+            resolved_sim_name = sim_name if sim_name is not None else "state"
+            self.save_results(state, resolved_sim_name)
+            if self.clean_output:
+                clean_output_dir(self.dirs)
+            return None

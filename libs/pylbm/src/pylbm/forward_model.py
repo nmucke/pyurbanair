@@ -18,6 +18,7 @@ from .utils import Infile, apply_inflow_settings, compile_lbm, create_infile
 from .utils.environment_utils import identify_environment
 from .utils.infile_utils import _augment_runtime_library_paths
 from .utils.mod_dimensions_utils import set_experiment
+from .utils.state_utils import scale_velocity_to_physical
 
 
 class ForwardModel(BaseForwardModel):
@@ -28,13 +29,13 @@ class ForwardModel(BaseForwardModel):
         nx: int = 120,
         ny: int = 120,
         nz: int = 8,
-        num_timesteps: int = 1000,
+        simulation_time: float = 53.8,
         bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] = (
             (0, 160),
             (0, 160),
             (0, 40),
         ),
-        output_frequency: float = 1.0,
+        output_frequency: float = 0.0538,
         results_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
         experiment_name: str = "runcase",
@@ -78,8 +79,25 @@ class ForwardModel(BaseForwardModel):
         # Set experiment dimensions in mod_dimensions.F90 (add or update experiment, set active)
         set_experiment(dirs=self.dirs, nx=nx, ny=ny, nz=nz)
 
-        self.num_timesteps = num_timesteps
+        self.simulation_time = simulation_time
         self.output_frequency = output_frequency
+        self.seconds_per_timestep: float | None = None
+        # Derived during compile() once infile.in exists (C_t = C_l / C_u).
+        self.num_timesteps = 0
+        self.output_frequency_timesteps = 0
+
+    def _compute_seconds_per_timestep(self) -> float:
+        """Compute seconds per timestep from infile constants C_l/C_u."""
+        infile = Infile(self.dirs.infile_path)
+        c_l = infile.get_value_as_float("C_l")
+        c_u = infile.get_value_as_float("C_u")
+        if c_l is None or c_u is None:
+            raise ValueError(
+                "Could not read C_l/C_u from infile.in to compute timestep duration."
+            )
+        if c_u <= 0:
+            raise ValueError("C_u in infile.in must be > 0.")
+        return c_l / c_u
 
     def compile(self) -> None:
         """Compile the LBM program."""
@@ -91,7 +109,6 @@ class ForwardModel(BaseForwardModel):
             enable_netcdf=self.enable_netcdf,
         )
 
-        
         # Create infile.in by running the executable (only if it doesn't exist)
         if not self.dirs.infile_path.exists():
             create_infile(dirs=self.dirs, verbose=self.verbose)
@@ -100,13 +117,27 @@ class ForwardModel(BaseForwardModel):
                 "infile.in already exists at %s, skipping creation.",
                 self.dirs.infile_path,
             )
-        
-        # Set number of timesteps
+
+        self.seconds_per_timestep = self._compute_seconds_per_timestep()
+        self.num_timesteps = int(self.simulation_time / self.seconds_per_timestep)
+        self.output_frequency_timesteps = int(
+            self.output_frequency / self.seconds_per_timestep
+        )
+        if self.num_timesteps <= 0:
+            raise ValueError("Resolved num_timesteps must be > 0.")
+        if self.output_frequency_timesteps <= 0:
+            raise ValueError("Resolved output frequency must be >= 1 timestep.")
+
+        # Set runtime controls in timestep units
         self._set_infile_value("nt1", self.num_timesteps)
-        self._set_infile_value("iout", int(self.output_frequency))
+        self._set_infile_value("iout", self.output_frequency_timesteps)
         self._set_infile_value("experiment", self.dirs.experiment_name)
         self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
 
+    def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
+        """Change results directory, updating both base and dirs dataclass."""
+        super().set_results_dir(results_dir)
+        self.dirs.results_dir = results_dir
 
     def _set_infile_value(self, key: str, value: Union[str, int, float, bool]) -> None:
         """
@@ -159,6 +190,13 @@ class ForwardModel(BaseForwardModel):
             f"No LBM output files found in {self.dirs.output_dir} for timestep range "
             f"[{nt0}, {nt1}]"
         )
+
+    def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
+        """Save simulation results to a NetCDF file."""
+        if self.results_dir is None:
+            raise ValueError("Cannot save results because results_dir is not set.")
+        outfile = self.results_dir / f"{sim_name}.nc"
+        state.to_netcdf(str(outfile))
 
     def run(self) -> None:
         """
@@ -228,10 +266,11 @@ class ForwardModel(BaseForwardModel):
             state = datasets[0].expand_dims("time", axis=0)
 
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
+        state = scale_velocity_to_physical(state)
 
-        if self.save_on_disk and self.results_dir is not None:
-            outfile = self.results_dir / f"{sim_name}.nc"
-            state.to_netcdf(str(outfile))
+        if self.save_on_disk:
+            resolved_sim_name = sim_name if sim_name is not None else "state"
+            self.save_results(state, resolved_sim_name)
             return None
 
         return state

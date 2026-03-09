@@ -56,6 +56,11 @@ def apply_inflow_settings(
     if velocity_magnitude is None:
         raise ValueError("velocity_magnitude is required but not found in params")
 
+    # pylbm uses opposite sign convention for inflow angle compared to pyudales.
+    # Negate the angle so that the same params produce matching flow direction
+    # (pyudales is the ground truth).
+    inflow_angle_for_lbm = -inflow_angle
+
     # Update infile.in using Infile class
     infile = Infile(dirs.infile_path)
 
@@ -66,10 +71,10 @@ def apply_inflow_settings(
             f"Could not find 'uini, udir' in infile.in at {dirs.infile_path}"
         )
 
-    infile.set_value(uini_key, f"{velocity_magnitude:.1f} {inflow_angle:.1f}")
+    infile.set_value(uini_key, f"{velocity_magnitude:.1f} {inflow_angle_for_lbm:.1f}")
     infile.write()
 
     logger.info(
-        f"Updated inflow settings: angle={inflow_angle:.1f}°, "
+        f"Updated inflow settings: angle={inflow_angle_for_lbm:.1f}°, "
         f"velocity={velocity_magnitude:.1f} m/s"
     )

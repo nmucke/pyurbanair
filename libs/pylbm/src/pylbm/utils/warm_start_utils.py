@@ -10,6 +10,7 @@ from scipy.io import FortranFile
 
 from .dir_utils import DirectoryPaths
 from .infile_utils import Infile
+from .state_utils import VELOCITY_SCALE_TO_PHYSICAL
 
 RESTART_FILE_PATTERN = re.compile(
     r"^(?P<prefix>restart|turbulence|theta|pottemp|tracer)_(?P<tile>\d{4})_(?P<iteration>\d{6})\.uf$"
@@ -79,6 +80,16 @@ def clean_output_files(dirs: DirectoryPaths) -> None:
     """Remove LBM netCDF output files from the output directory."""
     for output_file in dirs.output_dir.glob("out_*.nc"):
         output_file.unlink(missing_ok=True)
+
+
+def clean_all_restart_files(dirs: DirectoryPaths) -> None:
+    """Remove all LBM restart files from the restart directory."""
+    restart_dir = _restart_dir(dirs)
+    if not restart_dir.exists():
+        return
+    for path in restart_dir.iterdir():
+        if path.is_file() and RESTART_FILE_PATTERN.match(path.name):
+            path.unlink(missing_ok=True)
 
 
 def _get_mod_dimensions_int(dirs: DirectoryPaths, key: str, default: int) -> int:
@@ -566,6 +577,11 @@ def write_restart_file_from_xarray(
     u_zyx = _get_state_variable(state_ds, "u")
     v_zyx = _get_state_variable(state_ds, "v")
     w_zyx = _get_state_variable(state_ds, "w")
+    # pylbm forward model outputs velocity in m/s; LBM restart expects lattice units
+    scale_to_lattice = 1.0 / VELOCITY_SCALE_TO_PHYSICAL
+    u_zyx = (u_zyx * scale_to_lattice).astype(np.float32)
+    v_zyx = (v_zyx * scale_to_lattice).astype(np.float32)
+    w_zyx = (w_zyx * scale_to_lattice).astype(np.float32)
     fluid_mask_zyx = _get_state_blanking_mask(state_ds)
 
     nz, ny, nx = rho_zyx.shape

@@ -4,7 +4,7 @@ import pathlib
 import shutil
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Optional
+from typing import Optional, cast
 
 import xarray
 from pyudales import LOCAL_EXECUTE_SCRIPT
@@ -26,7 +26,6 @@ from pyudales.utils.warm_start_utils import (
     set_warm_start,
     update_warmstart_file_from_xarray,
 )
-from tqdm import tqdm
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
@@ -94,31 +93,41 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             self.rollout = False
 
         self.ensemble_experiment_base_dir = create_dir(
-            self.forward_model.dirs.temp_dir / "ensemble_experiments"
+            forward_model.dirs.temp_dir / "ensemble_experiments"
         )
 
         self.ensemble_forward_models = []
         for ensemble_number in range(self.ensemble_size):
             self.ensemble_forward_models.append(
                 create_new_forward_model(
-                    forward_model=self.forward_model,
+                    forward_model=forward_model,
                     experiment_base_dir=self.ensemble_experiment_base_dir,
                     experiment_name=f"{ensemble_number:03d}",
                 )
             )
 
-    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
+    def _typed_models(self) -> list[ForwardModel | RolloutForwardModel]:
+        """Typed view over ensemble members for static type checking."""
+        return cast(
+            list[ForwardModel | RolloutForwardModel], self.ensemble_forward_models
+        )
+
+    def _apply_inflow_settings(self, params: Optional[xarray.Dataset]) -> None:
         """Apply the inflow settings to the ensemble forward models."""
-        for i, model in enumerate(self.ensemble_forward_models):
-            _params = merge_params(
-                model.params, params.isel(ensemble=i) if params is not None else None
-            )
+        if params is None:
+            return
+        for i, model in enumerate(self._typed_models()):
+            _params = merge_params(model.params, params.isel(ensemble=i))
+            if _params is None:
+                continue
             apply_inflow_settings(_params, model.dirs)
             model.params = _params
 
     def _move_results_to_disk(self, sim_name: str) -> None:
         """Move the results to disk."""
-        for i, model in enumerate(self.ensemble_forward_models):
+        if self.results_dir is None:
+            raise ValueError("Cannot move results because results_dir is not set.")
+        for i, model in enumerate(self._typed_models()):
             result_file = self._get_output_file(model)
             shutil.move(str(result_file), str(self.results_dir / f"{sim_name}_{i}.nc"))
 
@@ -126,7 +135,11 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         self, sim_name: str, rollout_step: int
     ) -> None:
         """Move the rollout results to disk."""
-        for i, model in enumerate(self.ensemble_forward_models):
+        if self.results_dir is None:
+            raise ValueError(
+                "Cannot move rollout results because results_dir is not set."
+            )
+        for i, model in enumerate(self._typed_models()):
             result_file = self._get_output_file(model)
 
             shutil.move(
@@ -136,10 +149,12 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             collect_rollout_results(
                 sim_name=f"{sim_name}_{i}",
                 rollout_step=rollout_step,
-                dirs=model.dirs,
+                results_dir=self.results_dir,
             )
 
-    def _get_output_file(self, model: ForwardModel) -> pathlib.Path:
+    def _get_output_file(
+        self, model: ForwardModel | RolloutForwardModel
+    ) -> pathlib.Path:
         """Get the output file from the model."""
         # Check for merged file first (multi-processor case after gather_outputs.sh)
         output_file = model.dirs.output_dir.joinpath(
@@ -160,39 +175,26 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
     def _load_results(self) -> xarray.Dataset:
         """Load the results from the output folders."""
         states = []
-        for i, model in enumerate(self.ensemble_forward_models):
+        for i, model in enumerate(self._typed_models()):
             output_file = self._get_output_file(model)
 
             states.append(xarray.open_dataset(output_file, engine="netcdf4").load())
         return xarray.concat(states, dim="ensemble", join="override")
 
-    def _clean_output(self) -> None:
-        """Clean the output folders."""
-        for model in self.ensemble_forward_models:
-            clean_output_dir(model.dirs)
-
     def _set_warm_rollout_start(self) -> None:
         """Set the warm start for the rollout forward models."""
-        for model in self.ensemble_forward_models:
+        for model in self._typed_models():
             set_warm_start(model.dirs)
 
     def _clean_rollout_output(self) -> None:
         """Clean the output folders for the first step of the rollout forward models."""
-        for model in self.ensemble_forward_models:
+        for model in self._typed_models():
             clean_output_except_warmstart_files(model.dirs)
 
     def _clean_old_rollout_warmstart_files(self) -> None:
         """Clean the warmstart files for the rollout forward models."""
-        for model in self.ensemble_forward_models:
+        for model in self._typed_models():
             remove_old_warmstart_files(model.dirs)
-
-    def get_states(self) -> xarray.Dataset:
-        """Get the state from disk."""
-        states = []
-        for i, model in enumerate(self.ensemble_forward_models):
-            result_file = self.results_dir / f"state_{i}.nc"
-            states.append(xarray.open_dataset(result_file, engine="netcdf4").load())
-        return xarray.concat(states, dim="ensemble", join="override")
 
     def _pre_run_ensemble(
         self,
@@ -202,16 +204,14 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
     ) -> None:
         """Pre-run the ensemble."""
         self._apply_inflow_settings(params)
+        resolved_sim_name = sim_name if sim_name is not None else "state"
 
         if state is not None:
-            for i, model in enumerate(self.ensemble_forward_models):
+            for i, model in enumerate(self._typed_models()):
+                state_i = self._extract_member_state(state, i, resolved_sim_name)
+                if state_i is None:
+                    continue
 
-                if isinstance(state, pathlib.Path):
-                    state_i = xarray.open_dataset(
-                        state.joinpath(f"{sim_name}_{i}.nc"), engine="netcdf4"
-                    ).load()
-                else:
-                    state_i = state.isel(ensemble=i)
                 warmstart_file = identify_warmstart_file(model.dirs)
                 update_warmstart_file_from_xarray(
                     state_i, model.dirs, warmstart_file=warmstart_file
@@ -238,74 +238,27 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             states = self._load_results()
 
         # Clean the output for the next step
+        self._clean_output()
+
+        return states
+
+    def _clean_output(self) -> None:
+        """Clean the output folders."""
         if self.rollout:
             self._clean_rollout_output()
             if self.rollout_step > 0:
                 self._clean_old_rollout_warmstart_files()
             self.rollout_step += 1
         else:
-            self._clean_output()
-
-        return states
-
-    def _run_ensemble_sequentially_in_memory(
-        self,
-        state: Optional[xarray.Dataset] = None,
-        params: Optional[xarray.Dataset] = None,
-    ) -> xarray.Dataset:
-        """Run the forward model ensemble sequentially in memory."""
-
-        states = []
-        pbar = tqdm(
-            enumerate(self.ensemble_forward_models),
-            total=self.ensemble_size,
-            desc="Running ensemble",
-        )
-        for i, forward_model in pbar:
-            states.append(
-                forward_model.__call__(
-                    params=params.isel(ensemble=i) if params is not None else None,
-                    state=state.isel(ensemble=i) if state is not None else None,
-                )
-            )
-        return xarray.concat(states, dim="ensemble", join="override")
-
-    def _run_ensemble_sequentially_on_disk(
-        self,
-        state: Optional[xarray.Dataset | pathlib.Path] = None,
-        params: Optional[xarray.Dataset] = None,
-        sim_name: Optional[str] = "state",
-    ) -> xarray.Dataset:
-        """Run the forward model ensemble sequentially on disk."""
-
-        pbar = tqdm(
-            enumerate(self.ensemble_forward_models),
-            total=self.ensemble_size,
-            desc="Running ensemble",
-        )
-        for i, forward_model in pbar:
-            state_i = None
-            if state is not None:
-                if isinstance(state, pathlib.Path):
-                    state_i = xarray.open_dataset(
-                        state.joinpath(f"{sim_name}_{i}.nc"), engine="netcdf4"
-                    ).load()
-                else:
-                    state_i = state.isel(ensemble=i)
-
-            _ = forward_model.__call__(
-                params=params.isel(ensemble=i) if params is not None else None,
-                state=state_i,
-                sim_name=f"{sim_name}_{i}",
-            )
-        return None
+            for model in self._typed_models():
+                clean_output_dir(model.dirs)
 
     def _run_parallel(
         self,
         params: Optional[xarray.Dataset] = None,
         state: Optional[xarray.Dataset | pathlib.Path] = None,
         sim_name: Optional[str] = "state",
-    ) -> xarray.Dataset:
+    ) -> xarray.Dataset | None:
         """Run the forward model ensemble in parallel."""
 
         self._pre_run_ensemble(params, state, sim_name)
@@ -316,12 +269,12 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                     _run_simulation,
                     experiment_dir=model.dirs.experiment_dir,
                 )
-                for model in self.ensemble_forward_models
+                for model in self._typed_models()
             ]
 
             for future in as_completed(futures):
                 future.result()
 
-        states = self._post_run_ensemble(sim_name)  # type: ignore[arg-type]
+        states = self._post_run_ensemble(sim_name if sim_name is not None else "state")
 
         return states

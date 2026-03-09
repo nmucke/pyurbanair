@@ -14,10 +14,7 @@ from data_assimilation.observation_operator import (
 )
 from data_assimilation.smoothing.esmda import StateAndParameterESMDA
 from pylbm.ensemble_forward_model import EnsembleForwardModel
-from pylbm.rollout_forward_model import RolloutForwardModel as LBMRolloutForwardModel
-from pyudales.rollout_forward_model import (
-    RolloutForwardModel as UDALESRolloutForwardModel,
-)
+from pylbm.rollout_forward_model import RolloutForwardModel
 
 from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 
@@ -33,7 +30,6 @@ def get_ensemble_mean_field(
     else:
         params = output
         ensemble_mean_field = []
-        num_timesteps = []
         for i in range(NUM_ESMDA_STEPS + 1):
             esmda_step = esmda.get_state(step=i, ensemble_member=0)
             for j in range(1, ENSEMBLE_SIZE):
@@ -45,15 +41,9 @@ def get_ensemble_mean_field(
             for var in esmda_step.data_vars:
                 esmda_step[var].values /= ENSEMBLE_SIZE
             ensemble_mean_field.append(esmda_step)
-            num_timesteps.append(esmda_step.time.shape[0])
-
-        num_timesteps = min(num_timesteps)
-        out = []
-        for state in ensemble_mean_field:
-            state_time = state.time.shape[0]
-            diff_time = abs(num_timesteps - state_time)
-            out.append(state.isel(time=slice(diff_time, state_time + 1)))
-        ensemble_mean_field = xarray.concat(out, dim="esmda_step", join="override")
+        ensemble_mean_field = xarray.concat(
+            ensemble_mean_field, dim="esmda_step", join="override"
+        )
 
     return ensemble_mean_field, params
 
@@ -73,21 +63,21 @@ os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # Compute ressources
 NCPU_PER_PROCESS = 1
-NUM_PARALLEL_PROCESSES = 25
+NUM_PARALLEL_PROCESSES = 4
 
 # True parameters
 TRUE_VELOCITY_MAGNITUDE = 10.0
 TRUE_ANGLE = 10.0
 
 # Data assimilation settings
-ENSEMBLE_SIZE = 300
-NUM_ESMDA_STEPS = 2
+ENSEMBLE_SIZE = 4
+NUM_ESMDA_STEPS = 1
 ALPHA = 1 / NUM_ESMDA_STEPS
 
-
+# Observation settings
 OBS_X = [13, 45.6, 94.3, 108.9, 87.3, 20.0, 52.6, 90.0, 60.0, 75.0, 75.0]
 OBS_Y = [30.6, 52.7, 92.9, 108.0, 10.0, 90.0, 10.0, 50.0, 80.0, 90.0, 60.0]
-OBS_Z = [2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8, 2.8]
+OBS_Z = jnp.full(len(OBS_X), 2.0)
 OBS_STATES = ["u", "v", "w"]
 NUM_OBS = len(OBS_X) * len(OBS_STATES)
 
@@ -96,32 +86,20 @@ OBS_ERROR_STD = 0.01
 C_D = jnp.diag(OBS_ERROR_STD**2 * jnp.ones(NUM_OBS))
 
 # Forward model settings
-udales_time = 10
-lbm_time_steps = int(udales_time / 0.0538)
-lbm_output_frequency = int(lbm_time_steps / 50)
-
-# Forward model settings
-LBM_FIXED_INPUT = {
+FIXED_INPUT = {
+    "output_frequency": 10.0,
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "nx": 120,
     "ny": 120,
     "nz": 8,
-    "num_timesteps": lbm_time_steps,
+    "num_timesteps": 100,
     "bounds": ((0, 160), (0, 160), (0, 40)),
     "verbose": False,
-    "output_frequency": lbm_output_frequency,
+    "cuda": False,
+    # "results_dir": pathlib.Path(RESULTS_DIR),
 }
 
-# Forward model settings
-UDALES_FIXED_INPUT = {
-    "save_only_last_timestep": False,
-    "output_frequency": 1.0,
-    "ncpu": 1,
-    "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "case_dir": "examples/udales/experiments/xie_and_castro",
-    "verbose": False,
-    "experiment_name": "999",
-}
+TRUE_SIM_ID = 282
 
 
 def main() -> None:
@@ -133,28 +111,21 @@ def main() -> None:
     ##### Setup parameter ensemble #####
     rng_key = jax.random.PRNGKey(SEED)
 
-    true_params = xarray.Dataset(
-        data_vars={
-            "inflow_angle": TRUE_ANGLE,
-            "velocity_magnitude": TRUE_VELOCITY_MAGNITUDE,
-        },
+    true_params = xarray.open_dataset(INIT_STATES_DIR / f"params.nc").isel(
+        ensemble=TRUE_SIM_ID
     )
-    udales_forward_model = UDALESRolloutForwardModel(**UDALES_FIXED_INPUT)
-    udales_forward_model.run_preprocessing()
-    # udales_forward_model = LBMRolloutForwardModel(**LBM_FIXED_INPUT)
+    forward_model = RolloutForwardModel(**FIXED_INPUT)
+    forward_model.compile()
+
+    TRUE_VELOCITY_MAGNITUDE = true_params.velocity_magnitude.values
+    TRUE_ANGLE = true_params.inflow_angle.values
 
     ##### Run true simulation #####
-    true_state = udales_forward_model(params=true_params)
-    true_state = udales_forward_model(params=true_params, state=true_state)
-    true_state = true_state / 75.0
-
+    true_init_condition = xarray.open_dataset(
+        INIT_STATES_DIR / f"state_{TRUE_SIM_ID}.nc"
+    ).isel(time=-1)
+    true_state = forward_model(params=true_params, state=true_init_condition)
     true_velocity_field = get_velocity_magnitude_field(true_state)
-
-    lbm_forward_model = LBMRolloutForwardModel(
-        **LBM_FIXED_INPUT,
-        cuda=True,
-        results_dir=pathlib.Path(RESULTS_DIR),
-    )
 
     ##### Setup observations #####
     observation_operator = ObservationOperator(
@@ -164,7 +135,7 @@ def main() -> None:
         obs_states=OBS_STATES,
         solver_name="pylbm",
     )
-    if LBM_FIXED_INPUT["output_frequency"] is not None:
+    if FIXED_INPUT["output_frequency"] is not None:
         observation_operator = TemporalObservationOperator(
             observation_operator=observation_operator,
             mode="mean",
@@ -173,12 +144,15 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
+    forward_model.set_results_dir(pathlib.Path(RESULTS_DIR))
     ensemble_forward_model = EnsembleForwardModel(
-        forward_model=lbm_forward_model,
+        forward_model=forward_model,
         ensemble_size=ENSEMBLE_SIZE,
         num_parallel_processes=NUM_PARALLEL_PROCESSES,
         num_cpus_per_process=NCPU_PER_PROCESS,
     )
+    forward_model.set_results_dir(None)
+
     init_states = [
         xarray.open_dataset(INIT_STATES_DIR / f"state_{i}.nc").isel(time=-1)
         for i in range(ENSEMBLE_SIZE)
@@ -190,7 +164,6 @@ def main() -> None:
 
     ##### Run ESMDA #####
     t1 = time.time()
-
     esmda = StateAndParameterESMDA(
         observation_operator=observation_operator,
         forward_model=ensemble_forward_model,
@@ -198,6 +171,7 @@ def main() -> None:
         num_steps=NUM_ESMDA_STEPS,
         alpha=ALPHA,
         rng_key=rng_key,
+        # results_dir=pathlib.Path(RESULTS_DIR),
     )
     output = esmda(
         state=init_states,
@@ -206,6 +180,7 @@ def main() -> None:
         return_params_history=True,
         return_state_history=True,
     )
+
     t2 = time.time()
     print(f"ESMDA time: {t2 - t1:.2f} seconds")
 
@@ -213,8 +188,6 @@ def main() -> None:
     ensemble_mean_field, params = get_ensemble_mean_field(output, esmda)
 
     mean_velocity_field = get_velocity_magnitude_field(ensemble_mean_field)
-
-    mean_velocity_field = mean_velocity_field[:, 2:]
 
     rmse = [
         jnp.sqrt(jnp.mean((mean_velocity_field[i] - true_velocity_field) ** 2)).item()
@@ -297,7 +270,7 @@ def main() -> None:
         axes[i, 2].set_title(f"Init RMSE: {rmse_init[i]:.4f}")
 
         axes[i, 6].hist(params.inflow_angle.isel(esmda_step=i).values, **hist_args(i))
-        axes[i, 6].set_xlim(-25, 25)
+        axes[i, 6].set_xlim(-15, 15)
         axes[i, 6].axvline(**angle_axvline_args)
         axes[i, 6].axvline(
             jnp.mean(params.inflow_angle.isel(esmda_step=i).values),
@@ -312,7 +285,7 @@ def main() -> None:
             axes[i, 7].hist(
                 params.velocity_magnitude.isel(esmda_step=i).values, **hist_args(i)
             )
-            axes[i, 7].set_xlim(0, 25)
+            axes[i, 7].set_xlim(-5, 15)
             axes[i, 7].axvline(**velocity_axvline_args)
             axes[i, 7].axvline(
                 jnp.mean(params.velocity_magnitude.isel(esmda_step=i).values),
@@ -323,11 +296,7 @@ def main() -> None:
             )
             axes[i, 7].legend()
 
-    plt.savefig(
-        os.path.join(
-            FIGURES_DIR, f"esmda_results_lbm_with_udales_data_{NUM_ESMDA_STEPS}.pdf"
-        )
-    )
+    plt.savefig(os.path.join(FIGURES_DIR, f"esmda_results_lbm_{NUM_ESMDA_STEPS}.pdf"))
     plt.close()
     # plt.show()
 

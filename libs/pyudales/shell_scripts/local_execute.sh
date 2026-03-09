@@ -20,6 +20,7 @@
 # Usage: ./tools/local_execute.sh <PATH_TO_CASE>
 
 set -e
+set -o pipefail
 
 if (( $# < 1 ))
 then

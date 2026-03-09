@@ -73,10 +73,14 @@ class RolloutForwardModel(ForwardModel):
             remove_old_warmstart_files(self.dirs)
 
         if self.save_on_disk:
+            if self.dirs.results_dir is None:
+                raise ValueError(
+                    "Cannot collect rollout results because results_dir is not set."
+                )
             collect_rollout_results(
                 sim_name=sim_name,  # type: ignore[arg-type]
                 rollout_step=self.rollout_step,
-                dirs=self.dirs,
+                results_dir=self.dirs.results_dir,
             )
 
         return result_state

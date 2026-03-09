@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import xarray
 from data_assimilation.observation_operator import ObservationOperator
 
-from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
 
 class BaseSmoothing:
@@ -16,7 +16,7 @@ class BaseSmoothing:
     def __init__(
         self,
         observation_operator: ObservationOperator,
-        forward_model: BaseForwardModel,
+        forward_model: BaseEnsembleForwardModel,
     ) -> None:
         self.observation_operator = observation_operator
         self.forward_model = forward_model
@@ -47,21 +47,38 @@ class BaseSmoothing:
         if state is not None:
             return self.observation_operator(state)
         elif results_dir is not None:
-            file_list = [f for f in results_dir.iterdir() if f.is_file()]
-            # Sort files numerically by extracting the number from filenames like "state_17.nc"
-            file_list.sort(
-                key=lambda f: (
-                    int(re.search(r"state_(\d+)\.nc", f.name).group(1))  # type: ignore[union-attr]
-                    if re.search(r"state_(\d+)\.nc", f.name)
-                    else float("inf")
+            file_list = self._get_sorted_state_files(results_dir)
+            if not file_list:
+                raise FileNotFoundError(
+                    f"No state_*.nc files found in results directory: {results_dir}"
                 )
-            )
             observations_list: list[jnp.ndarray] = []
             for state_file in file_list:
                 state = xarray.open_dataset(state_file)
                 observations_list.append(self.observation_operator(state))
 
             return jnp.stack(observations_list, axis=0)
+
+    @staticmethod
+    def _get_sorted_state_files(results_dir: pathlib.Path) -> list[pathlib.Path]:
+        """Return state files sorted by ensemble index.
+
+        Only files matching state_<int>.nc are considered to avoid stale or
+        unrelated NetCDF files from previous runs polluting ensemble size.
+        """
+        state_file_regex = re.compile(r"state_(\d+)\.nc")
+        state_files_with_idx: list[tuple[int, pathlib.Path]] = []
+
+        for file_path in results_dir.iterdir():
+            if not file_path.is_file():
+                continue
+            match = state_file_regex.fullmatch(file_path.name)
+            if match is None:
+                continue
+            state_files_with_idx.append((int(match.group(1)), file_path))
+
+        state_files_with_idx.sort(key=lambda item: item[0])
+        return [file_path for _, file_path in state_files_with_idx]
 
     @abstractmethod
     def _analysis(
