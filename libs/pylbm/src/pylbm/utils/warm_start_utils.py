@@ -10,7 +10,7 @@ from scipy.io import FortranFile
 
 from .dir_utils import DirectoryPaths
 from .infile_utils import Infile
-from .state_utils import VELOCITY_SCALE_TO_PHYSICAL
+from .state_utils import DEFAULT_C_U
 
 RESTART_FILE_PATTERN = re.compile(
     r"^(?P<prefix>restart|turbulence|theta|pottemp|tracer)_(?P<tile>\d{4})_(?P<iteration>\d{6})\.uf$"
@@ -578,7 +578,10 @@ def write_restart_file_from_xarray(
     v_zyx = _get_state_variable(state_ds, "v")
     w_zyx = _get_state_variable(state_ds, "w")
     # pylbm forward model outputs velocity in m/s; LBM restart expects lattice units
-    scale_to_lattice = 1.0 / VELOCITY_SCALE_TO_PHYSICAL
+    infile = Infile(dirs.infile_path)
+    c_u = infile.get_value_as_float("C_u")
+    c_u = c_u if c_u is not None and c_u > 0 else DEFAULT_C_U
+    scale_to_lattice = 1.0 / c_u
     u_zyx = (u_zyx * scale_to_lattice).astype(np.float32)
     v_zyx = (v_zyx * scale_to_lattice).astype(np.float32)
     w_zyx = (w_zyx * scale_to_lattice).astype(np.float32)
@@ -613,7 +616,6 @@ def write_restart_file_from_xarray(
     if restart_iteration is None:
         restart_iteration = 1 if latest_iteration is None else latest_iteration
 
-    infile = Infile(dirs.infile_path)
     ibnd = _read_infile_int(infile, ["ibnd"], default=1)
     jbnd = _read_infile_int(infile, ["jbnd"], default=0)
     kbnd = _read_infile_int(infile, ["kbnd"], default=22)

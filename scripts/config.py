@@ -18,16 +18,22 @@ from pyurbanair.utils.config_utils import (
 
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
+# Fetch length in x (m) before buildings. Use positive value for domain extending
+# before STL (e.g. 20 = 20 m fetch, bounds x_min = -20).
+X_FETCH = 0.0
+
 DOMAIN = {
-    "nx": 80,
-    "ny": 80,
+    "nx": 40,
+    "ny": 40,
     "nz": 8,
-    "bounds": ((0.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    # bounds: ((x_min, x_max), (y_min, y_max), (z_min, z_max)) in meters.
+    # Negative x_min = fetch before buildings. Set via -X_FETCH or any value.
+    "bounds": ((-X_FETCH, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 25.0, # 3000 * 0.0538,
-    "output_frequency": 0.5, # 3000 * 0.0538,
+    "simulation_time": 5.0,
+    "output_frequency": 1.0,
 }
 
 LBM_ARGS = {
@@ -35,15 +41,17 @@ LBM_ARGS = {
     "experiment_name": "runcase",
     "cuda": False,
     "verbose": False,
+    "boundary_condition": "periodic",
 }
 
 UDALES_ARGS = {
     "case_dir": "examples/udales/experiments/xie_and_castro",
     "experiment_name": "999",
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "ncpu": 16,
+    "ncpu": 1,
     "save_only_last_timestep": False,
     "verbose": False,
+    "boundary_condition": "periodic",
 }
 
 OBS = {
@@ -58,9 +66,9 @@ OBS = {
 }
 
 ESMDA = {
-    "ensemble_size": 4,
+    "ensemble_size": 32,
     "num_steps": 1,
-    "num_assimilation_windows": 3,
+    "num_assimilation_windows": 5,
     "seed": 42,
     "obs_error_std": 0.1,
     "num_parallel_processes": 1,
@@ -70,7 +78,7 @@ ESMDA = {
 }
 
 TRUE_PARAMS = {
-    "inflow_angle": 30.0,
+    "inflow_angle": 10.0,
     "velocity_magnitude": 5.0,
     "pressure_gradient_magnitude": 0.0041912,
 }

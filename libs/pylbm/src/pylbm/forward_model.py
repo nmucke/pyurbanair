@@ -41,6 +41,7 @@ class ForwardModel(BaseForwardModel):
         experiment_name: str = "runcase",
         cuda: bool = False,
         enable_netcdf: Optional[bool] = None,
+        boundary_condition: str = "periodic",
     ) -> None:
         super().__init__(results_dir=results_dir)
 
@@ -68,10 +69,11 @@ class ForwardModel(BaseForwardModel):
             bounds=bounds,
         )
 
-        # Compute cell size from bounds
+        # Compute cell size from bounds (physical meters per grid cell)
         dx = (bounds[0][1] - bounds[0][0]) / nx
         dy = (bounds[1][1] - bounds[1][0]) / ny
         dz = (bounds[2][1] - bounds[2][0]) / nz
+        self._c_l = (dx + dy + dz) / 3.0  # characteristic lattice cell size for infile C_l
         self.x_grid = (np.arange(nx) + 0.5) * dx + bounds[0][0]
         self.y_grid = (np.arange(ny) + 0.5) * dy + bounds[1][0]
         self.z_grid = (np.arange(nz) + 0.5) * dz + bounds[2][0]
@@ -81,6 +83,11 @@ class ForwardModel(BaseForwardModel):
 
         self.simulation_time = simulation_time
         self.output_frequency = output_frequency
+        if boundary_condition not in ("periodic", "inflow_outflow"):
+            raise ValueError(
+                f"boundary_condition must be 'periodic' or 'inflow_outflow', got {boundary_condition!r}"
+            )
+        self.boundary_condition = boundary_condition
         self.seconds_per_timestep: float | None = None
         # Derived during compile() once infile.in exists (C_t = C_l / C_u).
         self.num_timesteps = 0
@@ -118,6 +125,9 @@ class ForwardModel(BaseForwardModel):
                 self.dirs.infile_path,
             )
 
+        # Set C_l (lattice cell size in m) from bounds and grid resolution, before timestep computation
+        self._set_infile_value("C_l", self._c_l)
+
         self.seconds_per_timestep = self._compute_seconds_per_timestep()
         self.num_timesteps = int(self.simulation_time / self.seconds_per_timestep)
         self.output_frequency_timesteps = int(
@@ -133,6 +143,10 @@ class ForwardModel(BaseForwardModel):
         self._set_infile_value("iout", self.output_frequency_timesteps)
         self._set_infile_value("experiment", self.dirs.experiment_name)
         self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
+
+        # Apply x-direction boundary condition (y is always periodic)
+        ibnd = 0 if self.boundary_condition == "periodic" else 1
+        self._set_infile_value("ibnd", ibnd)
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         """Change results directory, updating both base and dirs dataclass."""
@@ -252,6 +266,16 @@ class ForwardModel(BaseForwardModel):
 
         if params is not None:
             apply_inflow_settings(params=params, dirs=self.dirs)
+            # C_u was updated; recompute timestep and update nt1/iout in infile
+            self.seconds_per_timestep = self._compute_seconds_per_timestep()
+            self.num_timesteps = int(self.simulation_time / self.seconds_per_timestep)
+            self.output_frequency_timesteps = int(
+                self.output_frequency / self.seconds_per_timestep
+            )
+            nt0 = self._get_infile_int_value("nt0", 0)
+            nt1 = nt0 + self.num_timesteps if nt0 > 0 else self.num_timesteps
+            self._set_infile_value("nt1", nt1)
+            self._set_infile_value("iout", self.output_frequency_timesteps)
 
         self.run()
 
@@ -266,7 +290,7 @@ class ForwardModel(BaseForwardModel):
             state = datasets[0].expand_dims("time", axis=0)
 
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
-        state = scale_velocity_to_physical(state)
+        state = scale_velocity_to_physical(state, dirs=self.dirs)
 
         if self.save_on_disk:
             resolved_sim_name = sim_name if sim_name is not None else "state"

@@ -108,6 +108,17 @@ def write_inputs(expnr: int, exppath: Optional[str] = None, toolsdir: Optional[s
                 raise FileNotFoundError(f"STL file not found: {stl_path}")
 
             TR = trimesh.load(stl_path)
+
+            # Translate STL when domain has nonzero origin (e.g. fetch before buildings).
+            # domain_origin.txt: (origin_x, origin_y, origin_z). uDALES_x = physical_x - origin.
+            # We translate STL by -origin so buildings at physical 0..x are at uDALES origin..x.
+            origin_file = os.path.join(fpath, "domain_origin.txt")
+            if os.path.exists(origin_file):
+                with open(origin_file) as f:
+                    origin = [float(x) for x in f.read().split()]
+                if len(origin) >= 3:
+                    offset = np.array([-origin[0], -origin[1], -origin[2]])
+                    TR.vertices = TR.vertices + offset
             nfcts = TR.faces.shape[0]
             preprocessing.Preprocessing.set_nfcts(r, nfcts)
 

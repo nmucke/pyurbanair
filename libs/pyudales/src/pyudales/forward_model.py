@@ -112,6 +112,7 @@ class ForwardModel(BaseForwardModel):
         temp_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
         random_initial_condition_args: Optional[dict] = None,
+        boundary_condition: str = "periodic",
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -140,6 +141,8 @@ class ForwardModel(BaseForwardModel):
             verbose: If True, print output from Fortran code execution. If False, suppress all output.
             temp_dir: The base temp directory (defaults to {cwd}/.temp).
             experiment_base_dir: The base directory for experiments (defaults to {temp_dir}/experiment).
+            boundary_condition: X-direction boundary condition. "periodic" (BCxm=1) or "inflow_outflow"
+                (BCxm=2). Y-direction is always periodic.
         """
         super().__init__(results_dir=results_dir)
 
@@ -188,6 +191,7 @@ class ForwardModel(BaseForwardModel):
 
         self._apply_runtime_override(simulation_time=simulation_time)
         self._apply_domain_overrides(nx=nx, ny=ny, nz=nz, bounds=bounds)
+        self._apply_boundary_condition(boundary_condition)
 
         # Validate and sync NCPU with nprocx * nprocy from namoptions
         self.ncpu = validate_and_sync_ncpu(
@@ -274,6 +278,36 @@ class ForwardModel(BaseForwardModel):
         namoptions.set_value("DOMAIN", "xlen", bounds[0][1] - bounds[0][0])
         namoptions.set_value("DOMAIN", "ylen", bounds[1][1] - bounds[1][0])
         namoptions.set_value("INPS", "zsize", bounds[2][1] - bounds[2][0])
+        namoptions.write()
+
+        # Domain origin for STL translation when bounds have nonzero origin.
+        # Physical coords map to uDALES coords [0, xlen]: uDALES_x = physical_x - origin
+        # Stored in domain_origin.txt (excluded from clean_temp_dir).
+        origin_x = bounds[0][0]
+        origin_y = bounds[1][0]
+        origin_z = bounds[2][0]
+        if origin_x != 0 or origin_y != 0 or origin_z != 0:
+            origin_path = self.dirs.experiment_dir / "domain_origin.txt"
+            with open(origin_path, "w") as f:
+                f.write(f"{origin_x} {origin_y} {origin_z}\n")
+        else:
+            origin_path = self.dirs.experiment_dir / "domain_origin.txt"
+            if origin_path.exists():
+                origin_path.unlink()
+
+    def _apply_boundary_condition(self, boundary_condition: str) -> None:
+        """Apply x-direction boundary condition to namoptions. Y is always periodic."""
+        if boundary_condition not in ("periodic", "inflow_outflow"):
+            raise ValueError(
+                f"boundary_condition must be 'periodic' or 'inflow_outflow', got {boundary_condition!r}"
+            )
+        bcxm = 1 if boundary_condition == "periodic" else 2
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+        namoptions.set_value("BC", "BCxm", bcxm)
+        namoptions.set_value("BC", "BCym", 1)  # y always periodic
         namoptions.write()
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:

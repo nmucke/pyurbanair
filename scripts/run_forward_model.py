@@ -61,11 +61,25 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         plot_var = "vel_magnitude" if "vel_magnitude" in state.data_vars else "u"
-        plot_2d = extract_2d_slice(state[plot_var], z_level=0)
-        plt.figure(figsize=(6, 5))
-        plt.imshow(plot_2d, origin="lower")
-        plt.colorbar(label=plot_var)
-        plt.title(f"{model_name} {run_type} - {plot_var} (last time, mid z)")
+        n_times = state.sizes.get("time", 1)
+        time_indices = (
+            [0, (n_times - 1) // 2, n_times - 1]
+            if n_times >= 3
+            else list(range(n_times))
+        )
+        fig, axes = plt.subplots(1, len(time_indices), figsize=(5 * len(time_indices), 5))
+        if len(time_indices) == 1:
+            axes = [axes]
+        for ax, ti in zip(axes, time_indices):
+            plot_2d = extract_2d_slice(
+                state[plot_var].isel(time=ti) if n_times > 1 else state[plot_var],
+                z_level=0,
+            )
+            im = ax.imshow(plot_2d, origin="lower")
+            plt.colorbar(im, ax=ax, label=plot_var)
+            t_label = f"t={ti}" if n_times > 1 else "t=0"
+            ax.set_title(f"{plot_var} ({t_label}, mid z)")
+        fig.suptitle(f"{model_name} {run_type} - {plot_var} at equidistant times")
         plt.tight_layout()
         plt.savefig(out_dir / "field_snapshot.png")
         plt.close()
@@ -77,7 +91,7 @@ def main() -> None:
         animate_state(
             state=state,
             output_path=out_dir / "state_animation.mp4",
-            z_level=0,
+            z_level=1,
         )
         print(f"Saved visualization outputs in {out_dir}")
 

@@ -4,8 +4,8 @@ runtime      = 20.
 trestart     = 7200.
 dtmax        = 1.
 ladaptive    = .true.
-nprocx       = 4
-nprocy       = 4
+nprocx       = 1
+nprocy       = 1
 /
 
 &OUTPUT
@@ -45,4 +45,9 @@ v0           = -2.1213
 dpdx         = 0.0029343
 dpdy         = -0.0029343
 stl_file     = xie_castro_2008_STL.stl
+/
+
+&BC
+BCxm         = 1
+BCym         = 1
 /

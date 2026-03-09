@@ -59,7 +59,8 @@ def apply_inflow_settings(
     # pylbm uses opposite sign convention for inflow angle compared to pyudales.
     # Negate the angle so that the same params produce matching flow direction
     # (pyudales is the ground truth).
-    inflow_angle_for_lbm = -inflow_angle
+    # inflow_angle_for_lbm = -inflow_angle
+    inflow_angle_for_lbm = inflow_angle
 
     # Update infile.in using Infile class
     infile = Infile(dirs.infile_path)
@@ -72,9 +73,13 @@ def apply_inflow_settings(
         )
 
     infile.set_value(uini_key, f"{velocity_magnitude:.1f} {inflow_angle_for_lbm:.1f}")
+
+    # C_u (wind velocity conversion) scales with inflow velocity: C_u = 15 * uini
+    c_u = 15.0 * velocity_magnitude
+    infile.set_value("C_u", c_u)
     infile.write()
 
     logger.info(
         f"Updated inflow settings: angle={inflow_angle_for_lbm:.1f}°, "
-        f"velocity={velocity_magnitude:.1f} m/s"
+        f"velocity={velocity_magnitude:.1f} m/s, C_u={c_u:.1f}"
     )

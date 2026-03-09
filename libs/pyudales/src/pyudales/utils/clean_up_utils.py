@@ -27,12 +27,14 @@ def clean_temp_dir(dirs: DirectoryPaths) -> None:
     for item in pathlib.Path(dirs.experiment_dir).iterdir():
         name = item.name
         lower_name = name.lower()
-        # Exclude config.sh, any namoptions*, and any *.stl (case-insensitive)
+        # Exclude config.sh, namoptions*, *.stl, and domain_origin.txt (case-insensitive)
         if lower_name == "config.sh":
             continue
         if lower_name.startswith("namoptions"):
             continue
         if lower_name.endswith(".stl"):
+            continue
+        if lower_name == "domain_origin.txt":
             continue
         if item.is_file():
             item.unlink(missing_ok=True)
