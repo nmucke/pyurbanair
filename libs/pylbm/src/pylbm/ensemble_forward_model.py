@@ -111,8 +111,9 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         experiment_name: str,
     ) -> ForwardModel | RolloutForwardModel:
         """Create a new forward model for the ensemble."""
-        return create_new_forward_model(forward_model, experiment_base_dir, experiment_name)
-
+        return create_new_forward_model(
+            forward_model, experiment_base_dir, experiment_name
+        )
 
     def _typed_models(self) -> list[ForwardModel | RolloutForwardModel]:
         """Typed view over ensemble members for static type checking."""
@@ -120,13 +121,13 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             list[ForwardModel | RolloutForwardModel], self.ensemble_forward_models
         )
 
-    def _apply_inflow_settings(self, params: Optional[xarray.Dataset]) -> None:
+    def _apply_inflow_settings(
+        self,
+        params: Optional[xarray.Dataset],
+        model: ForwardModel | RolloutForwardModel,
+    ) -> None:
         """Apply the inflow settings to the ensemble forward models."""
-        if params is None:
-            return
-        for i, model in enumerate(self._typed_models()):
-            params_i = params.isel(ensemble=i)
-            apply_inflow_settings(params=params_i, dirs=model.dirs)
+        apply_inflow_settings(params=params, dirs=model.dirs)
 
     def _get_output_files(
         self, model: ForwardModel | RolloutForwardModel

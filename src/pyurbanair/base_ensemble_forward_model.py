@@ -8,12 +8,14 @@ from tqdm import tqdm
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
+
 def create_dir(
     dir_path: pathlib.Path,
 ) -> pathlib.Path:
     """Create a temporary directory in the given directory."""
     os.makedirs(pathlib.Path(dir_path), exist_ok=True)
     return pathlib.Path(dir_path)
+
 
 class BaseEnsembleForwardModel:
     """
@@ -63,17 +65,19 @@ class BaseEnsembleForwardModel:
         )
         self._set_save_mode(effective_results_dir)
 
-
         if hasattr(forward_model, "rollout_step"):
             self.rollout = True
             self.rollout_step = 0
         else:
             self.rollout = False
-            
+
         # Create ensemble experiment base directory
-        ensemble_temp_dir = (
-            temp_dir if temp_dir is not None else forward_model.dirs.temp_dir
-        )
+        if hasattr(forward_model, "dirs"):
+            ensemble_temp_dir = forward_model.dirs.temp_dir
+        else:
+            ensemble_temp_dir = (
+                temp_dir if temp_dir is not None else pathlib.Path(".temp")
+            )
         self.ensemble_experiment_base_dir = create_dir(
             ensemble_temp_dir / "ensemble_experiments"
         )
@@ -88,7 +92,7 @@ class BaseEnsembleForwardModel:
                     experiment_name=f"{ensemble_number:03d}",
                 )
             )
-            
+
     @abstractmethod
     def _create_new_forward_model(
         self,
@@ -239,9 +243,17 @@ class BaseEnsembleForwardModel:
             states.append(xarray.open_dataset(result_file, engine="netcdf4").load())
         return xarray.concat(states, dim="ensemble", join="override")
 
+    def _apply_ensemble_inflow_settings(self, params: xarray.Dataset) -> None:
+        """Apply the inflow settings to the ensemble forward models."""
+        if params is None:
+            return
+        for i, model in enumerate(self.ensemble_forward_models):
+            params_i = params.isel(ensemble=i)
+            self._apply_inflow_settings(params=params_i, model=model)
+
     @abstractmethod
     def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
-        """Apply the inflow settings to the ensemble forward models."""
+        """Apply the inflow settings to a single forward models."""
         raise NotImplementedError
 
     @abstractmethod

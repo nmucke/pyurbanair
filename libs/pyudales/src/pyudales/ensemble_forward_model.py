@@ -94,8 +94,9 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         experiment_name: str,
     ) -> ForwardModel | RolloutForwardModel:
         """Create a new forward model for the ensemble."""
-        return create_new_forward_model(forward_model, experiment_base_dir, experiment_name)
-
+        return create_new_forward_model(
+            forward_model, experiment_base_dir, experiment_name
+        )
 
     def _typed_models(self) -> list[ForwardModel | RolloutForwardModel]:
         """Typed view over ensemble members for static type checking."""
@@ -103,16 +104,17 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             list[ForwardModel | RolloutForwardModel], self.ensemble_forward_models
         )
 
-    def _apply_inflow_settings(self, params: Optional[xarray.Dataset]) -> None:
+    def _apply_inflow_settings(
+        self,
+        params: Optional[xarray.Dataset],
+        model: ForwardModel | RolloutForwardModel,
+    ) -> None:
         """Apply the inflow settings to the ensemble forward models."""
-        if params is None:
+        _params = merge_params(model.params, params)
+        if _params is None:
             return
-        for i, model in enumerate(self._typed_models()):
-            _params = merge_params(model.params, params.isel(ensemble=i))
-            if _params is None:
-                continue
-            apply_inflow_settings(_params, model.dirs)
-            model.params = _params
+        apply_inflow_settings(_params, model.dirs)
+        model.params = _params
 
     def _move_results_to_disk(self, sim_name: str) -> None:
         """Move the results to disk."""
@@ -218,6 +220,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         # Load the results
         if self.save_on_disk:
             import pdb
+
             pdb.set_trace()
             if self.rollout:
                 self._move_and_collect_rollout_results_to_disk(

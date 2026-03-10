@@ -45,7 +45,15 @@ class BaseForwardModel:
 
     def get_states(self) -> xarray.Dataset:
         """Get the states from the results directory."""
-        return xarray.open_dataset(self.results_dir / "state.nc", engine="netcdf4").load()
+        return xarray.open_dataset(
+            self.results_dir / "state.nc",  # type: ignore[operator]
+            engine="netcdf4",
+        ).load()
+
+    @abstractmethod
+    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
+        """Apply the inflow settings to the forward model."""
+        raise NotImplementedError
 
     @abstractmethod
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
@@ -57,13 +65,20 @@ class BaseForwardModel:
         """
         raise NotImplementedError
 
+    def _save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
+        """Save simulation results to a NetCDF file."""
+        if self.results_dir is None:
+            raise ValueError("Cannot save results because results_dir is not set.")
+        outfile = self.results_dir / f"{sim_name}.nc"
+        state.to_netcdf(str(outfile))
+
     @abstractmethod
     def run_single(
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
-    ) -> xarray.Dataset | None:
+    ) -> xarray.Dataset:
         """
         Run the forward model for a single state.
 
@@ -89,4 +104,11 @@ class BaseForwardModel:
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
         """Run the forward model."""
-        return self.run_single(state=state, params=params, sim_name=sim_name)
+        state = self.run_single(state=state, params=params, sim_name=sim_name)
+
+        if self.save_on_disk:
+            resolved_sim_name = sim_name if sim_name is not None else "state"
+            self._save_results(state, resolved_sim_name)
+            return None
+
+        return state

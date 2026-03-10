@@ -281,13 +281,15 @@ class ForwardModel(BaseForwardModel):
         super().set_results_dir(results_dir)
         self.dirs.results_dir = results_dir
 
-    def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
-        """Save simulation results to a NetCDF file."""
-        if self.results_dir is None:
-            raise ValueError("Cannot save results because results_dir is not set.")
-        outfile = self.results_dir / f"{sim_name}.nc"
-        os.makedirs(self.results_dir, exist_ok=True)
-        state.to_netcdf(str(outfile))
+    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
+        """Apply the inflow settings to the forward model."""
+        if params is not None:
+            self.params = merge_params(self.params, params)
+
+        if self.params is None:
+            raise ValueError("ForwardModel parameters are unexpectedly unset.")
+
+        apply_inflow_settings(params=self.params, dirs=self.dirs)
 
     def run_preprocessing(self, python_or_matlab: str = "python") -> None:
         """Run preprocessing."""
@@ -353,13 +355,7 @@ class ForwardModel(BaseForwardModel):
     ) -> xarray.Dataset | None:
         """Run the forward model."""
 
-        # Merge new params with existing params
-        if params is not None:
-            self.params = merge_params(self.params, params)
-
-        if self.params is None:
-            raise ValueError("ForwardModel parameters are unexpectedly unset.")
-        apply_inflow_settings(self.params, self.dirs)
+        self._apply_inflow_settings(self.params)
 
         logger.info("Running forward model...")
         command = [
@@ -399,13 +395,15 @@ class ForwardModel(BaseForwardModel):
         )
         state = state.load()
 
-        if self.save_in_memory:
-            if self.clean_output:
-                clean_output_dir(self.dirs)
-            return state
-        else:
-            resolved_sim_name = sim_name if sim_name is not None else "state"
-            self.save_results(state, resolved_sim_name)
-            if self.clean_output:
-                clean_output_dir(self.dirs)
-            return None
+        return state
+
+        # if self.save_in_memory:
+        #     if self.clean_output:
+        #         clean_output_dir(self.dirs)
+        #     return state
+        # else:
+        #     resolved_sim_name = sim_name if sim_name is not None else "state"
+        #     self._save_results(state, resolved_sim_name)
+        #     if self.clean_output:
+        #         clean_output_dir(self.dirs)
+        #     return None

@@ -191,12 +191,9 @@ class ForwardModel(BaseForwardModel):
             f"[{nt0}, {nt1}]"
         )
 
-    def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
-        """Save simulation results to a NetCDF file."""
-        if self.results_dir is None:
-            raise ValueError("Cannot save results because results_dir is not set.")
-        outfile = self.results_dir / f"{sim_name}.nc"
-        state.to_netcdf(str(outfile))
+    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
+        """Apply the inflow settings to the forward model."""
+        apply_inflow_settings(params=params, dirs=self.dirs)
 
     def run(self) -> None:
         """
@@ -251,7 +248,7 @@ class ForwardModel(BaseForwardModel):
             )
 
         if params is not None:
-            apply_inflow_settings(params=params, dirs=self.dirs)
+            self._apply_inflow_settings(params)
 
         self.run()
 
@@ -267,10 +264,5 @@ class ForwardModel(BaseForwardModel):
 
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
         state = scale_velocity_to_physical(state)
-
-        if self.save_on_disk:
-            resolved_sim_name = sim_name if sim_name is not None else "state"
-            self.save_results(state, resolved_sim_name)
-            return None
 
         return state
