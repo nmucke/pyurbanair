@@ -41,8 +41,16 @@ class ForwardModel(BaseForwardModel):
         experiment_name: str = "runcase",
         cuda: bool = False,
         enable_netcdf: Optional[bool] = None,
+        boundary_condition: str = "periodic",
     ) -> None:
         super().__init__(results_dir=results_dir)
+
+        if boundary_condition not in ("periodic", "inflow_outflow"):
+            raise ValueError(
+                f"boundary_condition must be 'periodic' or 'inflow_outflow', "
+                f"got '{boundary_condition}'"
+            )
+        self.boundary_condition = boundary_condition
 
         # Verbosity
         self.verbose = verbose
@@ -124,6 +132,11 @@ class ForwardModel(BaseForwardModel):
         # Set runtime controls in timestep units
         self._set_infile_value("experiment", self.dirs.experiment_name)
         self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
+
+        # Apply x-direction boundary condition (y is always periodic: jbnd=0)
+        ibnd = 0 if self.boundary_condition == "periodic" else 1
+        self._set_infile_value("ibnd", ibnd)
+        self._set_infile_value("jbnd", 0)
 
     def _set_scaling_factors(self, params: Optional[xarray.Dataset] = None) -> None:
         """Set the scaling factors for the LBM."""

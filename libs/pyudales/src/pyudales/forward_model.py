@@ -112,6 +112,7 @@ class ForwardModel(BaseForwardModel):
         temp_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
         random_initial_condition_args: Optional[dict] = None,
+        boundary_condition: str = "periodic",
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -188,6 +189,15 @@ class ForwardModel(BaseForwardModel):
 
         self._apply_runtime_override(simulation_time=simulation_time)
         self._apply_domain_overrides(nx=nx, ny=ny, nz=nz, bounds=bounds)
+
+        # Apply boundary conditions (x-direction configurable, y always periodic)
+        if boundary_condition not in ("periodic", "inflow_outflow"):
+            raise ValueError(
+                f"boundary_condition must be 'periodic' or 'inflow_outflow', "
+                f"got '{boundary_condition}'"
+            )
+        self.boundary_condition = boundary_condition
+        self._apply_boundary_condition()
 
         # Validate and sync NCPU with nprocx * nprocy from namoptions
         self.ncpu = validate_and_sync_ncpu(
@@ -274,6 +284,17 @@ class ForwardModel(BaseForwardModel):
         namoptions.set_value("DOMAIN", "xlen", bounds[0][1] - bounds[0][0])
         namoptions.set_value("DOMAIN", "ylen", bounds[1][1] - bounds[1][0])
         namoptions.set_value("INPS", "zsize", bounds[2][1] - bounds[2][0])
+        namoptions.write()
+
+    def _apply_boundary_condition(self) -> None:
+        """Apply x-direction boundary condition to namoptions (y is always periodic)."""
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+        bcxm = 1 if self.boundary_condition == "periodic" else 2
+        namoptions.set_value("BC", "BCxm", bcxm)
+        namoptions.set_value("BC", "BCym", 1)
         namoptions.write()
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
