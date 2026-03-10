@@ -31,13 +31,19 @@ def main() -> None:
         action="store_true",
         help="Skip plotting and animation outputs.",
     )
+    parser.add_argument(
+        "--results-dir",
+        type=pathlib.Path,
+        default=None,
+        help="Override results directory for model outputs.",
+    )
     args = parser.parse_args()
 
     model_name = args.model
     forward_model = config.create_forward_model(
         model_name=model_name,
         rollout=args.rollout,
-        results_dir=None,
+        results_dir=pathlib.Path(args.results_dir) if args.results_dir is not None else None,
     )
     config.prepare_forward_model(model_name=model_name, forward_model=forward_model)
     config.clean_forward_model_outputs(
@@ -47,7 +53,7 @@ def main() -> None:
     true_params = config.create_true_params(model_name)
     state = forward_model(params=true_params)
     if state is None:
-        raise RuntimeError("Expected in-memory state from forward model run.")
+        state = forward_model.get_states()
     state = add_velocity_magnitude(state)
 
     print(f"Model: {model_name}")

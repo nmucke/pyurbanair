@@ -43,6 +43,10 @@ class BaseForwardModel:
         """
         self._set_save_mode(results_dir)
 
+    def get_states(self) -> xarray.Dataset:
+        """Get the states from the results directory."""
+        return xarray.open_dataset(self.results_dir / "state.nc", engine="netcdf4").load()
+
     @abstractmethod
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
         """Save simulation results to disk.
