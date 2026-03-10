@@ -282,11 +282,10 @@ class BaseEnsembleForwardModel:
             for model in self.ensemble_forward_models:
                 model.rollout_step = self.rollout_step  # type: ignore[attr-defined]
 
-        states = list(states.values())  # type: ignore[assignment]
         if self.save_on_disk:
             return None
         else:
-            return xarray.concat(states, dim="ensemble", join="override")
+            return xarray.concat(list(states.values()), dim="ensemble", join="override")
 
     def run_ensemble(
         self,
