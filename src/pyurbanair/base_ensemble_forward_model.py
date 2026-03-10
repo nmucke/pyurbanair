@@ -245,9 +245,9 @@ class BaseEnsembleForwardModel:
     def get_states(self) -> xarray.Dataset:
         """Get the state from disk."""
         states = []
-        for i, _ in enumerate(self.ensemble_forward_models):
-            result_file = self.results_dir / f"state_{i}.nc"  # type: ignore[operator]
-            states.append(xarray.open_dataset(result_file, engine="netcdf4").load())
+        for i, model in enumerate(self.ensemble_forward_models):
+            state = model.get_states(sim_name=f"state_{i}")
+            states.append(state)
         return xarray.concat(states, dim="ensemble", join="override")
 
     def _clean_output(self) -> None:
@@ -276,6 +276,11 @@ class BaseEnsembleForwardModel:
             states = {i: None for i in range(self.ensemble_size)}
             for i, future in enumerate(as_completed(futures)):
                 states[i] = future.result()
+
+        if self.rollout:
+            self.rollout_step += 1
+            for model in self.ensemble_forward_models:
+                model.rollout_step = self.rollout_step  # type: ignore[attr-defined]
 
         states = list(states.values())  # type: ignore[assignment]
         if self.save_on_disk:

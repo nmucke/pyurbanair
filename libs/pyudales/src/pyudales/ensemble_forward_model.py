@@ -74,8 +74,18 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         experiment_name: str,
     ) -> ForwardModel | RolloutForwardModel:
         """Create a new forward model for the ensemble."""
-        return create_new_forward_model(
-            forward_model,  # type: ignore[arg-type]
-            experiment_base_dir,
-            experiment_name,
-        )
+
+        if isinstance(forward_model, ForwardModel):
+            return create_new_forward_model(
+                forward_model,
+                experiment_base_dir,
+                experiment_name,
+            )
+        if isinstance(forward_model, RolloutForwardModel):
+            return RolloutForwardModel(
+                forward_model=create_new_forward_model(
+                    forward_model.forward_model,  # type: ignore[arg-type]
+                    experiment_base_dir,
+                    experiment_name,
+                ),
+            )

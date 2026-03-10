@@ -30,6 +30,11 @@ class BaseRolloutForwardModel:
         self.forward_model = forward_model
         self.rollout_step = 0
 
+    @property
+    def results_dir(self) -> Optional[pathlib.Path]:
+        """Delegate to the underlying forward model's results directory."""
+        return self.forward_model.results_dir
+
     @abstractmethod
     def _pre_run_rollout_step(
         self,
@@ -52,13 +57,16 @@ class BaseRolloutForwardModel:
 
     def get_states(
         self,
+        sim_name: Optional[str] = "state",
         rollout_step: Optional[int] = None,
     ) -> xarray.Dataset:
         """Get the states from the results directory."""
         if rollout_step is None:
             rollout_step = self.rollout_step - 1
+
+        sim_name = "state" if sim_name is None else sim_name
         return self.forward_model.get_states(
-            sim_name=f"state_rollout_{rollout_step}",
+            sim_name=f"{sim_name}_rollout_{rollout_step}",
         )
 
     def __call__(
