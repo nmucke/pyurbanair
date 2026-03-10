@@ -1,6 +1,7 @@
 import argparse
 import pathlib
 import sys
+import time
 
 import jax
 import jax.numpy as jnp
@@ -26,7 +27,7 @@ def main() -> None:
     parser.add_argument("--skip-viz", action="store_true")
     args = parser.parse_args()
 
-    truth_model = config.create_forward_model(args.truth_model, rollout=False)
+    truth_model = config.create_forward_model(args.truth_model)
     config.prepare_forward_model(args.truth_model, truth_model)
     true_params = config.create_true_params(args.truth_model)
     true_state = truth_model(params=true_params)
@@ -44,8 +45,7 @@ def main() -> None:
     assim_results_dir = config.BASE_RESULTS_DIR / "parameter_esmda" / "assim_states"
     assim_model = config.create_forward_model(
         args.assim_model,
-        rollout=False,
-        results_dir=assim_results_dir,
+        # results_dir=assim_results_dir,
     )
     config.prepare_forward_model(args.assim_model, assim_model)
 
@@ -58,20 +58,23 @@ def main() -> None:
         forward_model=ensemble_model,
         C_D=C_D,
         num_steps=config.ESMDA["num_steps"],
-        alpha=1 / config.ESMDA["num_steps"],
+        alpha=config.ESMDA["num_steps"],
         rng_key=rng_key,
     )
 
+    t1 = time.time()
     output = esmda(
         params=params_ensemble,
         observations=true_obs,
         return_params_history=True,
         return_state_history=True,
     )
+    t2 = time.time()
+    print(f"ESMDA time: {t2 - t1:.2f} seconds")
     ensemble_mean_field, _ = get_ensemble_mean_field(
         output=output,
         esmda=esmda,
-        num_esmda_steps=int(config.ESMDA["num_steps"]),
+        num_esmda_steps=int(config.ESMDA["num_steps"]),  # type: ignore[call-overload]
         ensemble_size=int(config.ENSEMBLE["ensemble_size"]),
     )
 

@@ -273,9 +273,10 @@ class BaseEnsembleForwardModel:
                 for i, model in enumerate(self.ensemble_forward_models)
             ]
 
+            future_to_idx = {future: i for i, future in enumerate(futures)}
             states = {i: None for i in range(self.ensemble_size)}
-            for i, future in enumerate(as_completed(futures)):
-                states[i] = future.result()
+            for future in as_completed(future_to_idx):
+                states[future_to_idx[future]] = future.result()
 
         if self.rollout:
             self.rollout_step += 1

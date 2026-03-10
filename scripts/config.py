@@ -20,22 +20,22 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 60,
-    "ny": 60,
+    "nx": 80,
+    "ny": 80,
     "nz": 8,
     "bounds": ((0.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 10.0,  # 3000 * 0.0538,
-    "output_frequency": 1.0,  # 3000 * 0.0538,
+    "simulation_time": 25.0,  # 3000 * 0.0538,
+    "output_frequency": 5.0,  # 3000 * 0.0538,
 }
 
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
     "cuda": False,
-    "verbose": True,
+    "verbose": False,
 }
 
 UDALES_ARGS = {
@@ -44,12 +44,12 @@ UDALES_ARGS = {
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
     "ncpu": 1,
     "save_only_last_timestep": False,
-    "verbose": True,
+    "verbose": False,
 }
 
 ENSEMBLE = {
-    "ensemble_size": 4,
-    "num_parallel_processes": 1,
+    "ensemble_size": 16,
+    "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
 }
 
@@ -65,7 +65,7 @@ OBS = {
 }
 
 ESMDA = {
-    "num_steps": 1,
+    "num_steps": 2,
     "num_assimilation_windows": 3,
     "seed": 42,
     "obs_error_std": 0.1,
@@ -74,7 +74,7 @@ ESMDA = {
 }
 
 TRUE_PARAMS = {
-    "inflow_angle": 10.0,
+    "inflow_angle": 5.0,
     "velocity_magnitude": 5.0,
     "pressure_gradient_magnitude": 0.0041912,
 }

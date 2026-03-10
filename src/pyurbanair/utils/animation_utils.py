@@ -48,20 +48,21 @@ def _visualize_state_history(
             plt.savefig(out_dir / "state_history_snapshot.png")
             plt.close()
 
-    if "time" not in state_viz.dims:
-        return
-    if "ensemble" in state_viz.dims:
-        animate_ensemble_state(
-            state=state_viz,
-            output_path=out_dir / "state_history_animation.mp4",
-            z_level=z_level,
-        )
-    else:
-        animate_state(
-            state=state_viz,
-            output_path=out_dir / "state_history_animation.mp4",
-            z_level=z_level,
-        )
+    return
+    # if "time" not in state_viz.dims:
+    #     return
+    # if "ensemble" in state_viz.dims:
+    #     animate_ensemble_state(
+    #         state=state_viz,
+    #         output_path=out_dir / "state_history_animation.mp4",
+    #         z_level=z_level,
+    #     )
+    # else:
+    #     animate_state(
+    #         state=state_viz,
+    #         output_path=out_dir / "state_history_animation.mp4",
+    #         z_level=z_level,
+    #     )
 
 
 def animate_rollout_state(
@@ -84,8 +85,13 @@ def animate_rollout_state(
     true_with_vel = add_velocity_magnitude(true_state)
     esmda_with_vel = add_velocity_magnitude(esmda_state)
 
-    if "vel_magnitude" not in true_with_vel.data_vars or "vel_magnitude" not in esmda_with_vel.data_vars:
-        raise ValueError("Could not compute vel_magnitude (need u, v, w in both datasets)")
+    if (
+        "vel_magnitude" not in true_with_vel.data_vars
+        or "vel_magnitude" not in esmda_with_vel.data_vars
+    ):
+        raise ValueError(
+            "Could not compute vel_magnitude (need u, v, w in both datasets)"
+        )
 
     true_vel = true_with_vel["vel_magnitude"]
     esmda_vel = esmda_with_vel["vel_magnitude"]
@@ -131,10 +137,18 @@ def animate_rollout_state(
     fig, axes = plt.subplots(1, 4, figsize=(22, 5), constrained_layout=True)
     titles = ["Truth |U|", "Ensemble mean |U|", "Ensemble std |U|", "Abs error |U|"]
 
-    im_truth = axes[0].imshow(frames_truth[0], origin="lower", cmap=cmap, vmin=vmin_vel, vmax=vmax_vel)
-    im_mean = axes[1].imshow(frames_mean[0], origin="lower", cmap=cmap, vmin=vmin_vel, vmax=vmax_vel)
-    im_std = axes[2].imshow(frames_std[0], origin="lower", cmap="plasma", vmin=0.0, vmax=vmax_std)
-    im_diff = axes[3].imshow(frames_diff[0], origin="lower", cmap="Reds", vmin=0.0, vmax=vmax_diff)
+    im_truth = axes[0].imshow(
+        frames_truth[0], origin="lower", cmap=cmap, vmin=vmin_vel, vmax=vmax_vel
+    )
+    im_mean = axes[1].imshow(
+        frames_mean[0], origin="lower", cmap=cmap, vmin=vmin_vel, vmax=vmax_vel
+    )
+    im_std = axes[2].imshow(
+        frames_std[0], origin="lower", cmap="plasma", vmin=0.0, vmax=vmax_std
+    )
+    im_diff = axes[3].imshow(
+        frames_diff[0], origin="lower", cmap="Reds", vmin=0.0, vmax=vmax_diff
+    )
 
     for ax, title, im in zip(axes, titles, [im_truth, im_mean, im_std, im_diff]):
         ax.set_title(title)

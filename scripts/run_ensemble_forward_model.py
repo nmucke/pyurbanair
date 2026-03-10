@@ -1,6 +1,7 @@
 import argparse
 import pathlib
 import sys
+import time
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -60,7 +61,11 @@ def main() -> None:
         config.clean_forward_model_outputs(model_name=model_name, forward_model=member)
 
     params_ensemble = config.create_parameter_ensemble(model_name)
+
+    t1 = time.time()
     state = ensemble_model.run_ensemble(params=params_ensemble, sim_name="state")
+    t2 = time.time()
+    print(f"Ensemble forward model time: {t2 - t1:.2f} seconds")
     if state is None:
         state = ensemble_model.get_states()
     state = add_velocity_magnitude(state)

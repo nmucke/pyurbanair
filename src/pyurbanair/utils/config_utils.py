@@ -115,7 +115,7 @@ def create_ensemble_forward_model(model_name: ModelName, forward_model: Any) -> 
             num_parallel_processes=ensemble_cfg["num_parallel_processes"],
             num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
         )
-    return UDALESEnsembleForwardModel(  # type: ignore[abstract]
+    return UDALESEnsembleForwardModel(
         forward_model=forward_model,
         ensemble_size=ensemble_cfg["ensemble_size"],
         num_parallel_processes=ensemble_cfg["num_parallel_processes"],

@@ -41,7 +41,7 @@ def main() -> None:
 
     use_init_conditions = args.init_conditions
 
-    ensemble_size = int(config.ENSEMBLE["ensemble_size"])  # type: ignore[call-overload]
+    ensemble_size = int(config.ENSEMBLE["ensemble_size"])
     true_sim_id = (
         args.true_sim_id
         if args.true_sim_id is not None
@@ -87,7 +87,7 @@ def main() -> None:
         rollout = False
 
     truth_model_name = args.truth_model
-    truth_model = config.create_forward_model(truth_model_name, rollout=rollout)
+    truth_model = config.create_forward_model(truth_model_name)
     config.prepare_forward_model(truth_model_name, truth_model)
     if use_init_conditions:
         true_state = truth_model(params=true_params, state=true_init_state)
@@ -109,7 +109,6 @@ def main() -> None:
     )
     assim_model = config.create_forward_model(
         args.assim_model,
-        rollout=rollout,
         results_dir=assim_results_dir,
     )
     config.prepare_forward_model(args.assim_model, assim_model)
@@ -137,7 +136,7 @@ def main() -> None:
         forward_model=ensemble_model,
         C_D=C_D,
         num_steps=config.ESMDA["num_steps"],
-        alpha=1 / config.ESMDA["num_steps"],  # type: ignore[operator]
+        alpha=config.ESMDA["num_steps"],
         rng_key=rng_key,
     )
 
@@ -152,7 +151,7 @@ def main() -> None:
         output=output,
         esmda=esmda,
         num_esmda_steps=int(config.ESMDA["num_steps"]),  # type: ignore[call-overload]
-        ensemble_size=int(config.ENSEMBLE["ensemble_size"]),  # type: ignore[call-overload]
+        ensemble_size=int(config.ENSEMBLE["ensemble_size"]),
     )
 
     out_dir = config.BASE_RESULTS_DIR / "state_and_parameter_esmda"

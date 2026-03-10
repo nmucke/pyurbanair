@@ -137,14 +137,17 @@ class ForwardModel(BaseForwardModel):
         self._set_infile_value("C_u", self.C_u)
 
         self.seconds_per_timestep = self._compute_seconds_per_timestep()
-        self.num_timesteps = int(self.simulation_time / self.seconds_per_timestep)
-        self.output_frequency_timesteps = int(
-            self.output_frequency / self.seconds_per_timestep
+
+        # Compute a fixed number of output steps independent of C_u, then derive
+        # iout and num_timesteps so every ensemble member produces the same count.
+        num_outputs = round(self.simulation_time / self.output_frequency)
+        self.output_frequency_timesteps = max(
+            1, round(self.output_frequency / self.seconds_per_timestep)
         )
+        self.num_timesteps = self.output_frequency_timesteps * num_outputs
+
         if self.num_timesteps <= 0:
             raise ValueError("Resolved num_timesteps must be > 0.")
-        if self.output_frequency_timesteps <= 0:
-            raise ValueError("Resolved output frequency must be >= 1 timestep.")
 
         nt0 = self._get_infile_int_value("nt0", 0)
         self._set_infile_value("nt1", nt0 + self.num_timesteps)
