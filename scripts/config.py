@@ -27,7 +27,7 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 100.0,  # 3000 * 0.0538,
+    "simulation_time": 10.0,  # 3000 * 0.0538,
     "output_frequency": 1.0,  # 3000 * 0.0538,
 }
 
@@ -49,7 +49,7 @@ UDALES_ARGS = {
 
 ENSEMBLE = {
     "ensemble_size": 4,
-    "num_parallel_processes": 1,
+    "num_parallel_processes": 4,
     "num_cpus_per_process": 1,
 }
 

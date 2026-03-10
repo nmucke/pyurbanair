@@ -363,7 +363,7 @@ class ForwardModel(BaseForwardModel):
     ) -> xarray.Dataset:
         """Run the forward model."""
 
-        self._apply_inflow_settings(params=params)  # type: ignore[arg-type]
+        self._apply_inflow_settings(params=params)
 
         logger.info("Running forward model...")
         command = [

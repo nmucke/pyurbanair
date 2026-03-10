@@ -109,13 +109,13 @@ def create_ensemble_forward_model(model_name: ModelName, forward_model: Any) -> 
     cfg = _cfg()
     ensemble_cfg = cfg.ENSEMBLE
     if model_name == "pylbm":
-        return LBMEnsembleForwardModel(
+        return LBMEnsembleForwardModel(  # type: ignore[abstract]
             forward_model=forward_model,
             ensemble_size=ensemble_cfg["ensemble_size"],
             num_parallel_processes=ensemble_cfg["num_parallel_processes"],
             num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
         )
-    return UDALESEnsembleForwardModel(
+    return UDALESEnsembleForwardModel(  # type: ignore[abstract]
         forward_model=forward_model,
         ensemble_size=ensemble_cfg["ensemble_size"],
         num_parallel_processes=ensemble_cfg["num_parallel_processes"],

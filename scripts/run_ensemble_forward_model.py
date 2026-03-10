@@ -6,11 +6,11 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import matplotlib.pyplot as plt
+from pyudales.utils.grid_utils import interpolate_grid
 
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
 from scripts import config
-from pyudales.utils.grid_utils import interpolate_grid
 
 
 def main() -> None:
@@ -46,7 +46,6 @@ def main() -> None:
 
     forward_model = config.create_forward_model(
         model_name=model_name,
-        rollout=args.rollout,
         results_dir=results_dir,
     )
     config.prepare_forward_model(model_name=model_name, forward_model=forward_model)
@@ -58,9 +57,7 @@ def main() -> None:
         model_name=model_name, forward_model=forward_model
     )
     for member in ensemble_model.ensemble_forward_models:
-        config.clean_forward_model_outputs(
-            model_name=model_name, forward_model=member
-        )
+        config.clean_forward_model_outputs(model_name=model_name, forward_model=member)
 
     params_ensemble = config.create_parameter_ensemble(model_name)
     state = ensemble_model.run_ensemble(params=params_ensemble, sim_name="state")
@@ -86,7 +83,9 @@ def main() -> None:
         plt.figure(figsize=(6, 5))
         plt.imshow(plot_2d, origin="lower")
         plt.colorbar(label=plot_var)
-        plt.title(f"{model_name} {run_type} - {plot_var} (ensemble mean, last time, mid z)")
+        plt.title(
+            f"{model_name} {run_type} - {plot_var} (ensemble mean, last time, mid z)"
+        )
         plt.tight_layout()
         plt.savefig(out_dir / "field_snapshot.png")
         plt.close()

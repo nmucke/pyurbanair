@@ -1,6 +1,7 @@
 import os
 import pathlib
 from abc import abstractmethod
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Optional
 
 import xarray
@@ -60,10 +61,10 @@ class BaseEnsembleForwardModel:
         self.parallel_execution = num_parallel_processes > 1
 
         # Determine results directory: explicit > forward model's
-        effective_results_dir = (
+        results_dir = (
             results_dir if results_dir is not None else forward_model.results_dir
         )
-        self._set_save_mode(effective_results_dir)
+        self._set_save_mode(results_dir)
 
         if hasattr(forward_model, "rollout_step"):
             self.rollout = True
@@ -120,38 +121,47 @@ class BaseEnsembleForwardModel:
         """
         self._set_save_mode(results_dir)
 
-    @staticmethod
-    def _extract_member_state(
+    def get_member_state(
+        self,
         state: Optional[xarray.Dataset | pathlib.Path],
         member_index: int,
         sim_name: str = "state",
     ) -> Optional[xarray.Dataset]:
-        """Extract state for a single ensemble member.
-
-        Handles xarray.Dataset (with/without ensemble dim) and
-        pathlib.Path (directory of per-member files or single file).
         """
-        if state is None:
-            return None
-        if isinstance(state, pathlib.Path):
-            if state.is_dir():
-                return xarray.open_dataset(
-                    state / f"{sim_name}_{member_index}.nc", engine="netcdf4"
-                ).load()
-            ds = xarray.open_dataset(state, engine="netcdf4").load()
-            if "ensemble" in ds.dims:
-                return ds.isel(ensemble=member_index)
-            return ds
-        if "ensemble" in state.dims:
-            return state.isel(ensemble=member_index)
-        return state
+        Get state for a single ensemble member.
 
-    @staticmethod
-    def _extract_member_params(
+        Args:
+            state: The state for the ensemble. Can be an xarray.Dataset with
+                an ensemble dimension, a pathlib.Path to a directory of
+                per-member files, or None.
+            member_index: The index of the ensemble member.
+            sim_name: The base simulation name. Each member will be saved
+                as "{sim_name}_{i}.nc".
+
+        Returns:
+            The state for the ensemble member.
+        """
+        if isinstance(state, xarray.Dataset):
+            return state.isel(ensemble=member_index)
+
+        if isinstance(state, pathlib.Path):
+            return xarray.open_dataset(
+                state / f"{sim_name}_{member_index}.nc", engine="netcdf4"
+            ).load()
+
+        if self.save_on_disk:
+            file_name = self.results_dir / f"{sim_name}_{member_index}.nc"  # type: ignore[operator]
+            if file_name.exists():
+                return xarray.open_dataset(file_name, engine="netcdf4").load()
+
+        return None
+
+    def get_member_params(
+        self,
         params: Optional[xarray.Dataset],
         member_index: int,
     ) -> Optional[xarray.Dataset]:
-        """Extract params for a single ensemble member."""
+        """Get params for a single ensemble member."""
         if params is None:
             return None
         if "ensemble" in params.dims:
@@ -165,7 +175,8 @@ class BaseEnsembleForwardModel:
         state: Optional[xarray.Dataset | pathlib.Path] = None,
         sim_name: Optional[str] = "state",
     ) -> None:
-        """Prepare the ensemble for a run.
+        """
+        Prepare the ensemble for a run.
 
         This can include applying inflow settings, handling warm starts, etc.
         """
@@ -196,16 +207,12 @@ class BaseEnsembleForwardModel:
             desc="Running ensemble",
         )
         for i, model in pbar:
-            state_i = self._extract_member_state(state, i, sim_name)  # type: ignore[arg-type]
-            params_i = self._extract_member_params(params, i)
-            result = model.run_single(
-                state=state_i, params=params_i, sim_name=f"{sim_name}_{i}"
+            result = model(
+                state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
+                params=self.get_member_params(params, i),
+                sim_name=f"{sim_name}_{i}",
             )
-            if result is not None:
-                states.append(result)
-
-        if not states:
-            raise RuntimeError("No results returned from ensemble members")
+            states.append(result)
 
         return xarray.concat(states, dim="ensemble", join="override")
 
@@ -220,61 +227,61 @@ class BaseEnsembleForwardModel:
         Each member's results_dir is set to the ensemble's results_dir
         before running. Override in subclasses for custom behavior.
         """
-        self._pre_run_ensemble(state=state, params=params, sim_name=sim_name)
+        # self._pre_run_ensemble(state=state, params=params, sim_name=sim_name)
         pbar = tqdm(
             enumerate(self.ensemble_forward_models),
             total=self.ensemble_size,
             desc="Running ensemble",
         )
         for i, model in pbar:
-            model.set_results_dir(self.results_dir)
-            state_i = self._extract_member_state(state, i, sim_name)  # type: ignore[arg-type]
-            params_i = self._extract_member_params(params, i)
-            model.run_single(state=state_i, params=params_i, sim_name=f"{sim_name}_{i}")
-        self._post_run_ensemble(sim_name=sim_name)  # type: ignore[arg-type]
+            model(
+                state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
+                params=self.get_member_params(params, i),
+                sim_name=f"{sim_name}_{i}",
+            )
 
         return None
 
     def get_states(self) -> xarray.Dataset:
         """Get the state from disk."""
         states = []
-        for i, model in enumerate(self.ensemble_forward_models):
+        for i, _ in enumerate(self.ensemble_forward_models):
             result_file = self.results_dir / f"state_{i}.nc"  # type: ignore[operator]
             states.append(xarray.open_dataset(result_file, engine="netcdf4").load())
         return xarray.concat(states, dim="ensemble", join="override")
 
-    def _apply_ensemble_inflow_settings(self, params: xarray.Dataset) -> None:
-        """Apply the inflow settings to the ensemble forward models."""
-        if params is None:
-            return
-        for i, model in enumerate(self.ensemble_forward_models):
-            params_i = params.isel(ensemble=i)
-            self._apply_inflow_settings(params=params_i, model=model)
-
-    @abstractmethod
-    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
-        """Apply the inflow settings to a single forward models."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def _load_results(self) -> xarray.Dataset:
-        """Load the results from the output folders."""
-        raise NotImplementedError
-
-    @abstractmethod
     def _clean_output(self) -> None:
         """Clean the output folders."""
-        raise NotImplementedError
+        for model in self.ensemble_forward_models:
+            model._clean_output()
 
-    @abstractmethod
     def _run_parallel(
         self,
         params: Optional[xarray.Dataset] = None,
         state: Optional[xarray.Dataset | pathlib.Path] = None,
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
-        """Run the ensemble in parallel. Must be implemented by subclasses."""
-        raise NotImplementedError
+        """Run the ensemble in parallel."""
+        with ProcessPoolExecutor(max_workers=self.num_parallel_processes) as executor:
+            futures = [
+                executor.submit(
+                    model.__call__,
+                    state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
+                    params=self.get_member_params(params, i),
+                    sim_name=f"{sim_name}_{i}",
+                )
+                for i, model in enumerate(self.ensemble_forward_models)
+            ]
+
+            states = {i: None for i in range(self.ensemble_size)}
+            for i, future in enumerate(as_completed(futures)):
+                states[i] = future.result()
+
+        states = list(states.values())  # type: ignore[assignment]
+        if self.save_on_disk:
+            return None
+        else:
+            return xarray.concat(states, dim="ensemble", join="override")
 
     def run_ensemble(
         self,

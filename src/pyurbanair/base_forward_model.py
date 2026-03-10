@@ -115,6 +115,8 @@ class BaseForwardModel:
             resolved_sim_name = sim_name if sim_name is not None else "state"
             self._save_results(out, resolved_sim_name)
             out = None
+        else:
+            out = out.load()
 
         self._clean_output()
 
