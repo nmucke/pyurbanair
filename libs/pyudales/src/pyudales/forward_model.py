@@ -291,13 +291,21 @@ class ForwardModel(BaseForwardModel):
 
         apply_inflow_settings(params=self.params, dirs=self.dirs)
 
+    def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
+        """Save simulation results to disk."""
+        self._save_results(state, sim_name)
+
+    def _clean_output(self) -> None:
+        """Clean the output directory."""
+        clean_output_dir(self.dirs)
+
     def run_preprocessing(self, python_or_matlab: str = "python") -> None:
         """Run preprocessing."""
 
         logger.info("Running preprocessing...")
 
         clean_temp_dir(self.dirs)
-        clean_output_dir(self.dirs)
+        self._clean_output()
 
         if python_or_matlab == "python":
             # Use Python-based preprocessing script
@@ -352,10 +360,10 @@ class ForwardModel(BaseForwardModel):
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
-    ) -> xarray.Dataset | None:
+    ) -> xarray.Dataset:
         """Run the forward model."""
 
-        self._apply_inflow_settings(self.params)
+        self._apply_inflow_settings(params=params)  # type: ignore[arg-type]
 
         logger.info("Running forward model...")
         command = [
@@ -363,6 +371,7 @@ class ForwardModel(BaseForwardModel):
             str(LOCAL_EXECUTE_SCRIPT),
             str(self.dirs.experiment_dir),
         ]
+
         env = os.environ.copy()
         _augment_runtime_library_paths(env)
         subprocess.run(
@@ -393,7 +402,6 @@ class ForwardModel(BaseForwardModel):
             output_file,
             engine="netcdf4",
         )
-        state = state.load()
 
         return state
 

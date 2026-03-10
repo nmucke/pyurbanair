@@ -10,6 +10,7 @@ from pyurbanair.utils.config_utils import (
     create_observation_operator,
     create_observation_points,
     create_parameter_ensemble,
+    create_rollout_forward_model,
     create_true_params,
     model_args,
     prepare_forward_model,
@@ -26,8 +27,8 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 5.0, # 3000 * 0.0538,
-    "output_frequency": 1.0, # 3000 * 0.0538,
+    "simulation_time": 5.0,  # 3000 * 0.0538,
+    "output_frequency": 1.0,  # 3000 * 0.0538,
 }
 
 LBM_ARGS = {
@@ -41,7 +42,7 @@ UDALES_ARGS = {
     "case_dir": "examples/udales/experiments/xie_and_castro",
     "experiment_name": "999",
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "ncpu": 16,
+    "ncpu": 1,
     "save_only_last_timestep": False,
     "verbose": False,
 }

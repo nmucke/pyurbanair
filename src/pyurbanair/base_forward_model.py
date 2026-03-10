@@ -43,10 +43,10 @@ class BaseForwardModel:
         """
         self._set_save_mode(results_dir)
 
-    def get_states(self) -> xarray.Dataset:
+    def get_states(self, sim_name: str = "state") -> xarray.Dataset:
         """Get the states from the results directory."""
         return xarray.open_dataset(
-            self.results_dir / "state.nc",  # type: ignore[operator]
+            self.results_dir / f"{sim_name}.nc",  # type: ignore[operator]
             engine="netcdf4",
         ).load()
 
@@ -71,6 +71,11 @@ class BaseForwardModel:
             raise ValueError("Cannot save results because results_dir is not set.")
         outfile = self.results_dir / f"{sim_name}.nc"
         state.to_netcdf(str(outfile))
+
+    @abstractmethod
+    def _clean_output(self) -> None:
+        """Clean the output directory."""
+        raise NotImplementedError
 
     @abstractmethod
     def run_single(
@@ -104,11 +109,13 @@ class BaseForwardModel:
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
         """Run the forward model."""
-        state = self.run_single(state=state, params=params, sim_name=sim_name)
+        out = self.run_single(state=state, params=params, sim_name=sim_name)
 
         if self.save_on_disk:
             resolved_sim_name = sim_name if sim_name is not None else "state"
-            self._save_results(state, resolved_sim_name)
-            return None
+            self._save_results(out, resolved_sim_name)
+            out = None
 
-        return state
+        self._clean_output()
+
+        return out

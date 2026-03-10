@@ -6,11 +6,11 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import matplotlib.pyplot as plt
+from pyudales.utils.grid_utils import interpolate_grid
 
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
 from scripts import config
-from pyudales.utils.grid_utils import interpolate_grid
 
 
 def main() -> None:
@@ -42,8 +42,9 @@ def main() -> None:
     model_name = args.model
     forward_model = config.create_forward_model(
         model_name=model_name,
-        rollout=args.rollout,
-        results_dir=pathlib.Path(args.results_dir) if args.results_dir is not None else None,
+        results_dir=(
+            pathlib.Path(args.results_dir) if args.results_dir is not None else None
+        ),
     )
     config.prepare_forward_model(model_name=model_name, forward_model=forward_model)
     config.clean_forward_model_outputs(
@@ -75,7 +76,6 @@ def main() -> None:
         plt.tight_layout()
         plt.savefig(out_dir / "field_snapshot.png")
         plt.close()
-
 
         if model_name == "pyudales":
             state = interpolate_grid(state)

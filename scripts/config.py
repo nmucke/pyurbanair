@@ -10,6 +10,7 @@ from pyurbanair.utils.config_utils import (
     create_observation_operator,
     create_observation_points,
     create_parameter_ensemble,
+    create_rollout_forward_model,
     create_true_params,
     model_args,
     prepare_forward_model,
@@ -19,15 +20,15 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 40,
-    "ny": 40,
-    "nz": 4,
-    "bounds": ((0.0, 40.0), (0.0, 40.0), (0.0, 10.0)),
+    "nx": 60,
+    "ny": 60,
+    "nz": 8,
+    "bounds": ((0.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 10.0, # 3000 * 0.0538,
-    "output_frequency": 0.5, # 3000 * 0.0538,
+    "simulation_time": 100.0,  # 3000 * 0.0538,
+    "output_frequency": 1.0,  # 3000 * 0.0538,
 }
 
 LBM_ARGS = {
@@ -41,7 +42,7 @@ UDALES_ARGS = {
     "case_dir": "examples/udales/experiments/xie_and_castro",
     "experiment_name": "999",
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "ncpu": 16,
+    "ncpu": 1,
     "save_only_last_timestep": False,
     "verbose": False,
 }
@@ -73,7 +74,7 @@ ESMDA = {
 }
 
 TRUE_PARAMS = {
-    "inflow_angle": 30.0,
+    "inflow_angle": 10.0,
     "velocity_magnitude": 5.0,
     "pressure_gradient_magnitude": 0.0041912,
 }

@@ -195,6 +195,14 @@ class ForwardModel(BaseForwardModel):
         """Apply the inflow settings to the forward model."""
         apply_inflow_settings(params=params, dirs=self.dirs)
 
+    def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
+        """Save simulation results to disk."""
+        self._save_results(state, sim_name)
+
+    def _clean_output(self) -> None:
+        """Clean the output directory."""
+        pass
+
     def run(self) -> None:
         """
         Run the LBM executable from the rundir.
@@ -237,7 +245,7 @@ class ForwardModel(BaseForwardModel):
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
-    ) -> xarray.Dataset | None:
+    ) -> xarray.Dataset:
         """Run the LBM executable from the rundir."""
         if not self.enable_netcdf:
             raise RuntimeError(

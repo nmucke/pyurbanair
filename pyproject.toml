@@ -123,9 +123,6 @@ strict_equality = true
 
 [tool.pytest.ini_options]
 addopts = "-v"
-markers = [
-    "udales: marks tests requiring UDALES Fortran executable (deselect with '-m \"not udales\"')",
-]
 
 [tool.pixi.feature.dev.dependencies]
 pytest= ">=8.3.5,<8.4"
