@@ -101,29 +101,18 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             results_dir=results_dir,
             num_parallel_processes=num_parallel_processes,
             num_cpus_per_process=num_cpus_per_process,
+            temp_dir=temp_dir,
         )
 
-        self.rollout = isinstance(forward_model, RolloutForwardModel)
-        self.rollout_step = 0
+    def _create_new_forward_model(
+        self,
+        forward_model: ForwardModel | RolloutForwardModel,
+        experiment_base_dir: pathlib.Path,
+        experiment_name: str,
+    ) -> ForwardModel | RolloutForwardModel:
+        """Create a new forward model for the ensemble."""
+        return create_new_forward_model(forward_model, experiment_base_dir, experiment_name)
 
-        # Create ensemble experiment base directory
-        ensemble_temp_dir = (
-            temp_dir if temp_dir is not None else forward_model.dirs.temp_dir
-        )
-        self.ensemble_experiment_base_dir = create_dir(
-            ensemble_temp_dir / "ensemble_experiments"
-        )
-
-        # Create ensemble forward models
-        self.ensemble_forward_models = []
-        for ensemble_number in range(self.ensemble_size):
-            self.ensemble_forward_models.append(
-                create_new_forward_model(
-                    forward_model=forward_model,
-                    experiment_base_dir=self.ensemble_experiment_base_dir,
-                    experiment_name=f"{ensemble_number:03d}",
-                )
-            )
 
     def _typed_models(self) -> list[ForwardModel | RolloutForwardModel]:
         """Typed view over ensemble members for static type checking."""

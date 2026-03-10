@@ -43,7 +43,7 @@ def main() -> None:
     args = parser.parse_args()
 
     use_init_conditions = args.init_conditions
-    ensemble_size = int(config.ESMDA["ensemble_size"])
+    ensemble_size = int(config.ENSEMBLE["ensemble_size"])
     num_assimilation_windows = int(config.ESMDA["num_assimilation_windows"])
     true_sim_id = (
         args.true_sim_id

@@ -46,6 +46,12 @@ UDALES_ARGS = {
     "verbose": False,
 }
 
+ENSEMBLE = {
+    "ensemble_size": 4,
+    "num_parallel_processes": 1,
+    "num_cpus_per_process": 1,
+}
+
 OBS = {
     "x_min": 10.0,
     "x_max": 70.0,
@@ -58,13 +64,10 @@ OBS = {
 }
 
 ESMDA = {
-    "ensemble_size": 4,
     "num_steps": 1,
     "num_assimilation_windows": 3,
     "seed": 42,
     "obs_error_std": 0.1,
-    "num_parallel_processes": 1,
-    "num_cpus_per_process": 1,
     "init_conditions_dir": "esmda_init_conditions",
     "true_sim_id": 0,
 }

@@ -72,7 +72,7 @@ def main() -> None:
         output=output,
         esmda=esmda,
         num_esmda_steps=int(config.ESMDA["num_steps"]),
-        ensemble_size=int(config.ESMDA["ensemble_size"]),
+        ensemble_size=int(config.ENSEMBLE["ensemble_size"]),
     )
 
     out_dir = config.BASE_RESULTS_DIR / "parameter_esmda"

@@ -8,6 +8,12 @@ from tqdm import tqdm
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
+def create_dir(
+    dir_path: pathlib.Path,
+) -> pathlib.Path:
+    """Create a temporary directory in the given directory."""
+    os.makedirs(pathlib.Path(dir_path), exist_ok=True)
+    return pathlib.Path(dir_path)
 
 class BaseEnsembleForwardModel:
     """
@@ -31,6 +37,7 @@ class BaseEnsembleForwardModel:
         results_dir: Optional[pathlib.Path] = None,
         num_parallel_processes: int = 1,
         num_cpus_per_process: int = 1,
+        temp_dir: Optional[pathlib.Path] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the ensemble forward model.
@@ -42,6 +49,7 @@ class BaseEnsembleForwardModel:
                 forward_model.results_dir.
             num_parallel_processes: Number of parallel processes.
             num_cpus_per_process: Number of CPUs per process.
+            temp_dir: Temporary directory for ensemble experiments.
         """
         self.forward_model = forward_model
         self.ensemble_size = ensemble_size
@@ -55,8 +63,41 @@ class BaseEnsembleForwardModel:
         )
         self._set_save_mode(effective_results_dir)
 
+
+        if hasattr(forward_model, "rollout_step"):
+            self.rollout = True
+            self.rollout_step = 0
+        else:
+            self.rollout = False
+            
+        # Create ensemble experiment base directory
+        ensemble_temp_dir = (
+            temp_dir if temp_dir is not None else forward_model.dirs.temp_dir
+        )
+        self.ensemble_experiment_base_dir = create_dir(
+            ensemble_temp_dir / "ensemble_experiments"
+        )
+
         # Subclasses must populate this list with individual forward models
         self.ensemble_forward_models: list[BaseForwardModel] = []
+        for ensemble_number in range(self.ensemble_size):
+            self.ensemble_forward_models.append(
+                self._create_new_forward_model(
+                    forward_model=forward_model,
+                    experiment_base_dir=self.ensemble_experiment_base_dir,
+                    experiment_name=f"{ensemble_number:03d}",
+                )
+            )
+            
+    @abstractmethod
+    def _create_new_forward_model(
+        self,
+        forward_model: BaseForwardModel,
+        experiment_base_dir: pathlib.Path,
+        experiment_name: str,
+    ) -> BaseForwardModel:
+        """Create a new forward model for the ensemble."""
+        raise NotImplementedError
 
     def _set_save_mode(self, results_dir: Optional[pathlib.Path]) -> None:
         """Set save mode based on results_dir."""

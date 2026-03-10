@@ -41,7 +41,7 @@ def main() -> None:
 
     use_init_conditions = args.init_conditions
 
-    ensemble_size = int(config.ESMDA["ensemble_size"])  # type: ignore[call-overload]
+    ensemble_size = int(config.ENSEMBLE["ensemble_size"])  # type: ignore[call-overload]
     true_sim_id = (
         args.true_sim_id
         if args.true_sim_id is not None
@@ -152,7 +152,7 @@ def main() -> None:
         output=output,
         esmda=esmda,
         num_esmda_steps=int(config.ESMDA["num_steps"]),  # type: ignore[call-overload]
-        ensemble_size=int(config.ESMDA["ensemble_size"]),  # type: ignore[call-overload]
+        ensemble_size=int(config.ENSEMBLE["ensemble_size"]),  # type: ignore[call-overload]
     )
 
     out_dir = config.BASE_RESULTS_DIR / "state_and_parameter_esmda"

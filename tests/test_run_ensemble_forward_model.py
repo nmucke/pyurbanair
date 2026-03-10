@@ -15,23 +15,25 @@ sys.modules["scripts.config"] = tests_config
 @pytest.mark.parametrize(
     "model,use_results_dir",
     [
-        pytest.param("pylbm", False, id="pylbm_default_results_dir"),
-        pytest.param("pylbm", True, id="pylbm_custom_results_dir"),
+        pytest.param("pylbm", False, id="pylbm_no_results_dir"),
+        pytest.param("pylbm", True, id="pylbm_results_dir"),
         pytest.param(
-            "pyudales", False, id="pyudales_default_results_dir", marks=pytest.mark.udales
+            "pyudales", False, id="pyudales_no_results_dir", marks=pytest.mark.udales
         ),
         pytest.param(
-            "pyudales", True, id="pyudales_custom_results_dir", marks=pytest.mark.udales
+            "pyudales", True, id="pyudales_results_dir", marks=pytest.mark.udales
         ),
     ],
 )
-def test_run_forward_model(model: str, use_results_dir: bool, tmp_path: pathlib.Path) -> None:
-    """Test run_forward_model.py with pylbm and pyudales backends."""
-    from scripts.run_forward_model import main
+def test_run_ensemble_forward_model(
+    model: str, use_results_dir: bool, tmp_path: pathlib.Path
+) -> None:
+    """Test run_ensemble_forward_model.py with pylbm and pyudales backends."""
+    from scripts.run_ensemble_forward_model import main
 
     # Set argv for argparse
     original_argv = sys.argv
-    argv = ["run_forward_model", "--model", model, "--skip-viz"]
+    argv = ["run_ensemble_forward_model", "--model", model, "--skip-viz"]
     if use_results_dir:
         results_dir = tmp_path / "results"
         results_dir.mkdir()

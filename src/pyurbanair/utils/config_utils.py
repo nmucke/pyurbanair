@@ -95,18 +95,19 @@ def clean_forward_model_restarts(model_name: ModelName, forward_model: Any) -> N
 
 def create_ensemble_forward_model(model_name: ModelName, forward_model: Any) -> Any:
     cfg = _cfg()
+    ensemble_cfg = cfg.ENSEMBLE
     if model_name == "pylbm":
         return LBMEnsembleForwardModel(
             forward_model=forward_model,
-            ensemble_size=cfg.ESMDA["ensemble_size"],
-            num_parallel_processes=cfg.ESMDA["num_parallel_processes"],
-            num_cpus_per_process=cfg.ESMDA["num_cpus_per_process"],
+            ensemble_size=ensemble_cfg["ensemble_size"],
+            num_parallel_processes=ensemble_cfg["num_parallel_processes"],
+            num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
         )
     return UDALESEnsembleForwardModel(
         forward_model=forward_model,
-        ensemble_size=cfg.ESMDA["ensemble_size"],
-        num_parallel_processes=cfg.ESMDA["num_parallel_processes"],
-        num_cpus_per_process=cfg.ESMDA["num_cpus_per_process"],
+        ensemble_size=ensemble_cfg["ensemble_size"],
+        num_parallel_processes=ensemble_cfg["num_parallel_processes"],
+        num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
     )
 
 
@@ -125,7 +126,7 @@ def create_true_params(model_name: ModelName) -> xarray.Dataset:
 
 def create_parameter_ensemble(model_name: ModelName) -> xarray.Dataset:
     cfg = _cfg()
-    n = int(cfg.ESMDA["ensemble_size"])
+    n = int(cfg.ENSEMBLE["ensemble_size"])
     rng_key = jax.random.PRNGKey(cfg.ESMDA["seed"])
 
     rng_key, subkey = jax.random.split(rng_key)
@@ -151,7 +152,7 @@ def create_parameter_ensemble(model_name: ModelName) -> xarray.Dataset:
 
 def create_initial_state_ensemble(state: xarray.Dataset) -> xarray.Dataset:
     cfg = _cfg()
-    n = int(cfg.ESMDA["ensemble_size"])
+    n = int(cfg.ENSEMBLE["ensemble_size"])
     member_state = state.isel(time=-1) if "time" in state.dims else state
     members = [member_state.copy(deep=True) for _ in range(n)]
     return xarray.concat(members, dim="ensemble", join="override")
