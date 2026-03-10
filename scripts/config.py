@@ -35,7 +35,7 @@ LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
     "cuda": False,
-    "verbose": False,
+    "verbose": True,
 }
 
 UDALES_ARGS = {
@@ -44,12 +44,12 @@ UDALES_ARGS = {
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
     "ncpu": 1,
     "save_only_last_timestep": False,
-    "verbose": False,
+    "verbose": True,
 }
 
 ENSEMBLE = {
     "ensemble_size": 4,
-    "num_parallel_processes": 4,
+    "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
 

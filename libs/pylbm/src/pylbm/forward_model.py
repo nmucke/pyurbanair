@@ -76,6 +76,9 @@ class ForwardModel(BaseForwardModel):
         self.y_grid = (np.arange(ny) + 0.5) * dy + bounds[1][0]
         self.z_grid = (np.arange(nz) + 0.5) * dz + bounds[2][0]
 
+        self.min_cell_size = min(dx, dy, dz)
+        self.min_cell_size = np.round(self.min_cell_size, 1)
+
         # Set experiment dimensions in mod_dimensions.F90 (add or update experiment, set active)
         set_experiment(dirs=self.dirs, nx=nx, ny=ny, nz=nz)
 
@@ -118,6 +121,21 @@ class ForwardModel(BaseForwardModel):
                 self.dirs.infile_path,
             )
 
+        # Set runtime controls in timestep units
+        self._set_infile_value("experiment", self.dirs.experiment_name)
+        self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
+
+    def _set_scaling_factors(self, params: Optional[xarray.Dataset] = None) -> None:
+        """Set the scaling factors for the LBM."""
+        self._set_infile_value("C_l", self.min_cell_size)
+
+        if params is not None:
+            velocity_magnitude = params["velocity_magnitude"].item()
+            self.C_u = int(velocity_magnitude * 15)
+        else:
+            self.C_u = 75
+        self._set_infile_value("C_u", self.C_u)
+
         self.seconds_per_timestep = self._compute_seconds_per_timestep()
         self.num_timesteps = int(self.simulation_time / self.seconds_per_timestep)
         self.output_frequency_timesteps = int(
@@ -128,11 +146,9 @@ class ForwardModel(BaseForwardModel):
         if self.output_frequency_timesteps <= 0:
             raise ValueError("Resolved output frequency must be >= 1 timestep.")
 
-        # Set runtime controls in timestep units
-        self._set_infile_value("nt1", self.num_timesteps)
+        nt0 = self._get_infile_int_value("nt0", 0)
+        self._set_infile_value("nt1", nt0 + self.num_timesteps)
         self._set_infile_value("iout", self.output_frequency_timesteps)
-        self._set_infile_value("experiment", self.dirs.experiment_name)
-        self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         """Change results directory, updating both base and dirs dataclass."""
@@ -258,19 +274,19 @@ class ForwardModel(BaseForwardModel):
         if params is not None:
             self._apply_inflow_settings(params)
 
+        self._set_scaling_factors(params)
+
         self.run()
 
         output_files = self._get_output_files_for_current_run()
-        datasets = [
-            xarray.load_dataset(path, engine="netcdf4") for path in output_files
-        ]
+        state = [xarray.load_dataset(path, engine="netcdf4") for path in output_files]
 
-        if len(datasets) > 1:
-            state = xarray.concat(datasets, dim="time", join="override")
+        if len(state) > 1:
+            state = xarray.concat(state, dim="time", join="override")
         else:
-            state = datasets[0].expand_dims("time", axis=0)
+            state = state[0].expand_dims("time", axis=0)
 
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
-        state = scale_velocity_to_physical(state)
+        state = scale_velocity_to_physical(state, scale=self.C_u)
 
         return state

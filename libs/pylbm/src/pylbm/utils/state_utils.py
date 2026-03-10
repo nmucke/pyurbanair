@@ -6,7 +6,9 @@ import xarray
 VELOCITY_SCALE_TO_PHYSICAL = 75.0
 
 
-def scale_velocity_to_physical(state: xarray.Dataset) -> xarray.Dataset:
+def scale_velocity_to_physical(
+    state: xarray.Dataset, scale: float = VELOCITY_SCALE_TO_PHYSICAL
+) -> xarray.Dataset:
     """
     Scale velocity fields (u, v, w) from lattice units to m/s.
 
@@ -16,18 +18,20 @@ def scale_velocity_to_physical(state: xarray.Dataset) -> xarray.Dataset:
     result = state.copy(deep=False)
     for var in ("u", "v", "w"):
         if var in result.data_vars:
-            result[var] = result[var] * VELOCITY_SCALE_TO_PHYSICAL
+            result[var] = result[var] * scale
     return result
 
 
-def scale_velocity_to_lattice(state: xarray.Dataset) -> xarray.Dataset:
+def scale_velocity_to_lattice(
+    state: xarray.Dataset, scale: float = VELOCITY_SCALE_TO_PHYSICAL
+) -> xarray.Dataset:
     """
     Scale velocity fields (u, v, w) from m/s to lattice units.
 
     Used when preparing state for LBM restart files, which expect lattice units.
     """
     result = state.copy(deep=False)
-    scale = 1.0 / VELOCITY_SCALE_TO_PHYSICAL
+    scale = 1.0 / scale
     for var in ("u", "v", "w"):
         if var in result.data_vars:
             result[var] = result[var] * scale
