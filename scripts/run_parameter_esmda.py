@@ -25,6 +25,12 @@ def main() -> None:
     parser.add_argument("--truth-model", choices=["pylbm", "pyudales"], default="pylbm")
     parser.add_argument("--assim-model", choices=["pylbm", "pyudales"], default="pylbm")
     parser.add_argument("--skip-viz", action="store_true")
+    parser.add_argument(
+        "--results-dir",
+        type=pathlib.Path,
+        default=None,
+        help="Override results directory for assimilation model outputs.",
+    )
     args = parser.parse_args()
 
     truth_model = config.create_forward_model(args.truth_model)
@@ -42,10 +48,12 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    assim_results_dir = config.BASE_RESULTS_DIR / "parameter_esmda" / "assim_states"
+    assim_results_dir = (
+        pathlib.Path(args.results_dir) if args.results_dir is not None else None
+    )
     assim_model = config.create_forward_model(
         args.assim_model,
-        # results_dir=assim_results_dir,
+        results_dir=assim_results_dir,
     )
     config.prepare_forward_model(args.assim_model, assim_model)
 
