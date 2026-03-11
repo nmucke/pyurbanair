@@ -227,13 +227,13 @@ class BaseEnsembleForwardModel:
         Each member's results_dir is set to the ensemble's results_dir
         before running. Override in subclasses for custom behavior.
         """
-        # self._pre_run_ensemble(state=state, params=params, sim_name=sim_name)
         pbar = tqdm(
             enumerate(self.ensemble_forward_models),
             total=self.ensemble_size,
             desc="Running ensemble",
         )
         for i, model in pbar:
+            model.set_results_dir(self.results_dir)
             model(
                 state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
                 params=self.get_member_params(params, i),
@@ -262,6 +262,10 @@ class BaseEnsembleForwardModel:
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset | None:
         """Run the ensemble in parallel."""
+        if self.save_on_disk:
+            for model in self.ensemble_forward_models:
+                model.set_results_dir(self.results_dir)
+
         with ProcessPoolExecutor(max_workers=self.num_parallel_processes) as executor:
             futures = [
                 executor.submit(
