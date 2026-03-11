@@ -329,6 +329,47 @@ def get_building_grid_indices(
         b_min = mesh.bounds[0]
         b_max = mesh.bounds[1]
 
+        # Skip buildings that do not overlap the simulation domain at all.
+        # Without this guard, fully out-of-domain buildings get clamped to
+        # boundary indices and can create artificial walls.
+        if (
+            b_max[0] <= xmin
+            or b_min[0] >= xmax
+            or b_max[1] <= ymin
+            or b_min[1] >= ymax
+            or b_max[2] <= zmin
+            or b_min[2] >= zmax
+        ):
+            logger.debug(
+                "Building %s outside domain and skipped: x=[%.3f, %.3f], "
+                "y=[%.3f, %.3f], z=[%.3f, %.3f]",
+                idx + 1,
+                b_min[0],
+                b_max[0],
+                b_min[1],
+                b_max[1],
+                b_min[2],
+                b_max[2],
+            )
+            continue
+
+        # Clip building bounds to the domain before discretization.
+        # This preserves buildings that partially intersect the domain.
+        b_min = np.array(
+            [
+                max(float(b_min[0]), xmin),
+                max(float(b_min[1]), ymin),
+                max(float(b_min[2]), zmin),
+            ]
+        )
+        b_max = np.array(
+            [
+                min(float(b_max[0]), xmax),
+                min(float(b_max[1]), ymax),
+                min(float(b_max[2]), zmax),
+            ]
+        )
+
         # Debug: print building physical bounds
         logger.debug(
             "Building %s: physical bounds x=[%.3f, %.3f], y=[%.3f, %.3f], "
@@ -342,39 +383,28 @@ def get_building_grid_indices(
             b_max[2],
         )
 
-        # Convert Physical coordinates to Grid Indices
-        # Fortran arrays are 1-based: valid domain is 1:nx, 1:ny, 1:nz
-        # Ghost cells are at 0, nx+1, ny+1, nz+1
-        # CRITICAL: Buildings cannot be at boundaries (index 1 or nx/ny)
-        # Valid building indices: 2 to (nx-1) for x and y, 1 to nz for z
+        # Convert physical coordinates to 1-based Fortran grid indices
+        # blanking(0:nx+1, 0:nyg+1, 0:nz+1) — interior cells are 1..nx, 1..nyg, 1..nz
 
-        # Start Indices: use floor to get the cell containing the minimum coordinate
-        is_raw = int(np.floor((b_min[0] - xmin) / dx)) + 1
-        js_raw = int(np.floor((b_min[1] - ymin) / dy)) + 1
-        ks = int(np.floor((b_min[2] - zmin) / dz)) + 1
+        # Start Indices (1-based Fortran): first cell whose left edge >= building lower bound
+        # Matches reference compute_index: argmax(lower <= xs) + 1
+        is_raw = int(np.ceil((b_min[0] - xmin) / dx)) + 1
+        js_raw = int(np.ceil((b_min[1] - ymin) / dy)) + 1
+        ks = max(1, int(np.ceil((b_min[2] - zmin) / dz)) + 1)
 
-        # End Indices: calculate raw indices first
-        ie_raw = (b_max[0] - xmin) / dx
-        je_raw = (b_max[1] - ymin) / dy
-        ke_raw = (b_max[2] - zmin) / dz
+        # End Indices (1-based Fortran): last cell whose left edge <= building upper bound
+        # Matches reference compute_index: last j where xs[j] <= upper (no +1)
+        ie_raw_int = int(np.floor((b_max[0] - xmin) / dx))
+        je_raw_int = int(np.floor((b_max[1] - ymin) / dy))
+        ke = int(np.floor((b_max[2] - zmin) / dz))
 
-        # For x and y: use floor for end indices
-        ie_raw_int = int(np.floor(ie_raw)) + 1
-        je_raw_int = int(np.floor(je_raw)) + 1
+        # Clamp to valid interior indices [1, nx] for x/y, [1, nz] for z
+        is_ = max(1, min(nx, is_raw))
+        ie = max(1, min(nx, ie_raw_int))
+        js = max(1, min(ny, js_raw))
+        je = max(1, min(ny, je_raw_int))
 
-        # For z: use ceil to include the top cell
-        ke = int(np.ceil(ke_raw))
-
-        # CRITICAL: Ensure buildings don't touch boundaries
-        # Buildings must be in range 2 to (nx-1) for x and y
-        # If building would start at index 1, move it to index 2
-        # If building would end at index nx, move it to index nx-1
-        is_ = max(2, min(nx - 1, is_raw))  # Clamp to [2, nx-1]
-        ie = max(2, min(nx - 1, ie_raw_int))  # Clamp to [2, nx-1]
-        js = max(2, min(ny - 1, js_raw))  # Clamp to [2, ny-1]
-        je = max(2, min(ny - 1, je_raw_int))  # Clamp to [2, ny-1]
-
-        # For z: boundaries are allowed (1 to nz)
+        # Clamp z to valid range [1, nz]
         ks = max(1, min(nz, ks))
         ke = max(1, min(nz, ke))
 
@@ -448,33 +478,25 @@ def generate_fortran_code(
     """
 
     # Template strings for the Fortran boilerplate
-    header = f"""module {module_name}
-contains
-subroutine {subroutine_name}(lsolids,blanking)
-   use mod_dimensions
-   implicit none
-   logical, intent(out)   :: lsolids
-   logical, intent(inout) :: blanking(0:{nx}+1,0:{ny}+1,0:{nz}+1)
-   integer :: i, j, k
+    header = (
+        f"module {module_name}\n"
+        f"contains\n"
+        f"subroutine {subroutine_name}(blanking)\n"
+        f"   use mod_dimensions, only : nx, nyg, nz\n"
+        f"   implicit none\n"
+        f"   logical, intent(inout) :: blanking(0:nx+1,0:nyg+1,0:nz+1)\n"
+        f"   integer ioff\n"
+        f"   integer joff\n\n"
+        f"   ioff=0\n"
+        f"   joff=0\n"
+    )
 
-   lsolids=.true.
-
-! Set obstacle cells based on STL geometry (rectangular buildings)
-   ! {len(buildings_indices)} buildings
-"""
-
-    footer = """
-end subroutine
-end module
-"""
+    footer = "end subroutine\nend module\n"
 
     body = ""
 
-    for idx, b in enumerate(buildings_indices):
-        # Format: blanking(5:47,113:128,1:4)=.true.
-        line = f"   ! Building {idx + 1}\n"
-        line += f"   blanking({b['is']}:{b['ie']},{b['js']}:{b['je']},{b['ks']}:{b['ke']})=.true.\n"
-        body += line
+    for b in buildings_indices:
+        body += f"   blanking(ioff+{b['is']}:ioff+{b['ie']}, joff+{b['js']}:joff+{b['je']}, {b['ks']}:{b['ke']})=.true.\n"
 
     full_code = header + body + footer
 
@@ -552,8 +574,8 @@ def update_solid_objects_init(
             # Look through all lines in the case block
             for j in range(i + 1, case_end_idx):
                 line_content = lines[j]
-                # Check for correct call: call {experiment_name}(lsolids, blanking_global)
-                if f"call {experiment_name}(lsolids, blanking_global)" in line_content:
+                # Check for correct call: call {experiment_name}(blanking_global)
+                if f"call {experiment_name}(blanking_global)" in line_content:
                     has_correct_call = True
                 # Check for any call statements
                 elif "call " in line_content:
@@ -562,7 +584,7 @@ def update_solid_objects_init(
                         has_wrong_calls = True
                     # If it's calling our experiment but with wrong signature
                     elif f"call {experiment_name}" in line_content:
-                        if "(lsolids, blanking_global)" not in line_content:
+                        if "(blanking_global)" not in line_content:
                             has_wrong_calls = True
 
             # Case is correct only if it has exactly the correct call and no wrong calls
@@ -667,11 +689,8 @@ def update_solid_objects_init(
 
         if case_insert_idx is not None:
             # Generate the case block
-            # Note: runcase signature is (lsolids, blanking) while others are (blanking)
-            # Since we generate with (lsolids, blanking) signature, we call it with both args
-            # Also set lsolids=.true. after the call for consistency
             case_block = f"""      case('{experiment_name}')
-         call {experiment_name}(lsolids, blanking_global)
+         call {experiment_name}(blanking_global)
          lsolids=.true.
 """
             lines.insert(case_insert_idx, case_block)
