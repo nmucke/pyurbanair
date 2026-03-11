@@ -35,6 +35,10 @@ class BaseRolloutForwardModel:
         """Delegate to the underlying forward model's results directory."""
         return self.forward_model.results_dir
 
+    def set_results_dir(self, results_dir: Optional[pathlib.Path]) -> None:
+        """Delegate to the underlying forward model."""
+        self.forward_model.set_results_dir(results_dir)
+
     @abstractmethod
     def _pre_run_rollout_step(
         self,
