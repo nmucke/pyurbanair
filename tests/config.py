@@ -54,11 +54,11 @@ ENSEMBLE = {
 }
 
 OBS = {
-    "x_min": 10.0,
-    "x_max": 70.0,
-    "y_min": 10.0,
-    "y_max": 70.0,
-    "n_per_axis": 4,
+    "x_min": 5.0,
+    "x_max": 35.0,
+    "y_min": 5.0,
+    "y_max": 35.0,
+    "n_per_axis": 2,
     "z": 2.0,
     "states": ["u", "v", "w"],
     "temporal_mode": "mean",

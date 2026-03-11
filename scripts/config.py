@@ -27,8 +27,8 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 50.0,  # 3000 * 0.0538,
-    "output_frequency": 1.0,  # 3000 * 0.0538,
+    "simulation_time": 25.0,  # 3000 * 0.0538,
+    "output_frequency": 5.0,  # 3000 * 0.0538,
 }
 
 LBM_ARGS = {
