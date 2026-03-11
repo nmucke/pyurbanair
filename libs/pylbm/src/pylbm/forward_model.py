@@ -96,6 +96,9 @@ class ForwardModel(BaseForwardModel):
         # Derived during compile() once infile.in exists (C_t = C_l / C_u).
         self.num_timesteps = 0
         self.output_frequency_timesteps = 0
+        # Warm-start override: when set, _set_scaling_factors uses this as nt0
+        # instead of defaulting to 0. Consumed (reset to None) after each use.
+        self._nt0_override: int | None = None
 
     def _compute_seconds_per_timestep(self) -> float:
         """Compute seconds per timestep from infile constants C_l/C_u."""
@@ -162,7 +165,12 @@ class ForwardModel(BaseForwardModel):
         if self.num_timesteps <= 0:
             raise ValueError("Resolved num_timesteps must be > 0.")
 
-        nt0 = self._get_infile_int_value("nt0", 0)
+        if self._nt0_override is not None:
+            nt0 = self._nt0_override
+            self._nt0_override = None
+        else:
+            nt0 = 0
+        self._set_infile_value("nt0", nt0)
         self._set_infile_value("nt1", nt0 + self.num_timesteps)
         self._set_infile_value("iout", self.output_frequency_timesteps)
 
@@ -206,7 +214,7 @@ class ForwardModel(BaseForwardModel):
             if match is None:
                 continue
             timestep = int(match.group(1))
-            if nt0 <= timestep <= nt1:
+            if nt0 < timestep <= nt1:
                 output_files.append((timestep, path))
 
         output_files = sorted(output_files, key=lambda x: x[0])
@@ -232,8 +240,13 @@ class ForwardModel(BaseForwardModel):
         self._save_results(state, sim_name)
 
     def _clean_output(self) -> None:
-        """Clean the output directory."""
-        pass
+        """Remove netCDF output files from the output directory.
+
+        This prevents stale files from being picked up by subsequent runs
+        that may use a different output frequency (iout).
+        """
+        for output_file in self.dirs.output_dir.glob("out_*.nc"):
+            output_file.unlink(missing_ok=True)
 
     def run(self) -> None:
         """
@@ -291,6 +304,10 @@ class ForwardModel(BaseForwardModel):
             self._apply_inflow_settings(params)
 
         self._set_scaling_factors(params)
+
+        # Remove stale output files before running to prevent files from a
+        # previous run (which may have used a different iout) being collected.
+        self._clean_output()
 
         self.run()
 

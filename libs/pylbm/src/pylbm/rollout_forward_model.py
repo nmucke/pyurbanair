@@ -32,7 +32,7 @@ class RolloutForwardModel(BaseRolloutForwardModel):
     ) -> None:
         """Initialize the rollout forward model."""
         super().__init__(*args, forward_model=forward_model, **kwargs)
-        self.dirs = self.forward_model.dirs  # type: ignore[attr-defined]
+        self.dirs = self.forward_model.dirs
 
     def _pre_run_rollout_step(
         self,
@@ -41,36 +41,21 @@ class RolloutForwardModel(BaseRolloutForwardModel):
         sim_name: Optional[str] = "state",
     ) -> None:
         """Prepare the state for the rollout step."""
-        if self.rollout_step == 0:
-            # Ensure first rollout step starts from cold-start settings.
-            self.forward_model._set_infile_value("nt0", 0)  # type: ignore[attr-defined]
-            self.forward_model._set_infile_value(  # type: ignore[attr-defined]
-                "nt1", self.forward_model.num_timesteps  # type: ignore[attr-defined]
-            )
-
         if state is not None:
-
             latest_restart = identify_latest_restart_iteration(self.dirs)
             restart_iteration = write_restart_file_from_xarray(
                 state=state,
                 dirs=self.dirs,
                 restart_iteration=latest_restart,
             )
-
-            self.forward_model._set_infile_value("nt0", restart_iteration)  # type: ignore[attr-defined]
-            self.forward_model._set_infile_value(  # type: ignore[attr-defined]
-                "nt1", restart_iteration + self.forward_model.num_timesteps  # type: ignore[attr-defined]
-            )
+            self.forward_model._nt0_override = restart_iteration
         else:
             self._configure_for_rollout_step()
 
     def _configure_for_rollout_step(self) -> None:
         """Configure infile restart/timestep settings for current rollout step."""
         if self.rollout_step == 0:
-            self.forward_model._set_infile_value("nt0", 0)  # type: ignore[attr-defined]
-            self.forward_model._set_infile_value(  # type: ignore[attr-defined]
-                "nt1", self.forward_model.num_timesteps  # type: ignore[attr-defined]
-            )
+            # Cold start: _set_scaling_factors defaults to nt0=0.
             return
 
         restart_iteration = identify_latest_restart_iteration(self.dirs)
@@ -79,11 +64,7 @@ class RolloutForwardModel(BaseRolloutForwardModel):
                 f"No restart files found in {self.dirs.experiment_dir / 'restart'} "
                 "for warmstart rollout."
             )
-
-        self.forward_model._set_infile_value("nt0", restart_iteration)  # type: ignore[attr-defined]
-        self.forward_model._set_infile_value(  # type: ignore[attr-defined]
-            "nt1", restart_iteration + self.forward_model.num_timesteps  # type: ignore[attr-defined]
-        )
+        self.forward_model._nt0_override = restart_iteration
 
     def _get_restart_iteration_from_state(
         self,

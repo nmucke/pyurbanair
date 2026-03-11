@@ -27,7 +27,7 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 25.0,  # 3000 * 0.0538,
+    "simulation_time": 60.0,  # 3000 * 0.0538,
     "output_frequency": 5.0,  # 3000 * 0.0538,
 }
 
