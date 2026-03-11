@@ -2,8 +2,10 @@ import pathlib
 from typing import Any, Optional
 
 import xarray
+from pylbm.forward_model import ForwardModel
 
-from .forward_model import ForwardModel
+from pyurbanair.base_rollout_forward_model import BaseRolloutForwardModel
+
 from .utils.rollout_utils import collect_rollout_results
 from .utils.warm_start_utils import (
     clean_output_files,
@@ -13,7 +15,7 @@ from .utils.warm_start_utils import (
 )
 
 
-class RolloutForwardModel(ForwardModel):
+class RolloutForwardModel(BaseRolloutForwardModel):
     """
     Rollout forward model for LBM using restart files for warmstart.
 
@@ -22,15 +24,38 @@ class RolloutForwardModel(ForwardModel):
     - `nt0 > 0`: reads restart files at iteration `nt0` from `restart/`
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.rollout_step = 0
+    def __init__(
+        self,
+        *args: Any,
+        forward_model: ForwardModel,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the rollout forward model."""
+        super().__init__(*args, forward_model=forward_model, **kwargs)
+        self.dirs = self.forward_model.dirs
+
+    def _pre_run_rollout_step(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+        sim_name: Optional[str] = "state",
+    ) -> None:
+        """Prepare the state for the rollout step."""
+        if state is not None:
+            latest_restart = identify_latest_restart_iteration(self.dirs)
+            restart_iteration = write_restart_file_from_xarray(
+                state=state,
+                dirs=self.dirs,
+                restart_iteration=latest_restart,
+            )
+            self.forward_model._nt0_override = restart_iteration
+        else:
+            self._configure_for_rollout_step()
 
     def _configure_for_rollout_step(self) -> None:
         """Configure infile restart/timestep settings for current rollout step."""
         if self.rollout_step == 0:
-            self._set_infile_value("nt0", 0)
-            self._set_infile_value("nt1", self.num_timesteps)
+            # Cold start: _set_scaling_factors defaults to nt0=0.
             return
 
         restart_iteration = identify_latest_restart_iteration(self.dirs)
@@ -39,9 +64,7 @@ class RolloutForwardModel(ForwardModel):
                 f"No restart files found in {self.dirs.experiment_dir / 'restart'} "
                 "for warmstart rollout."
             )
-
-        self._set_infile_value("nt0", restart_iteration)
-        self._set_infile_value("nt1", restart_iteration + self.num_timesteps)
+        self.forward_model._nt0_override = restart_iteration
 
     def _get_restart_iteration_from_state(
         self,
@@ -65,61 +88,26 @@ class RolloutForwardModel(ForwardModel):
         except Exception:
             return None
 
-    def run_single(
+    def _post_run_rollout_step(
         self,
-        state: Optional[xarray.Dataset | pathlib.Path] = None,
-        params: Optional[xarray.Dataset] = None,
+        state: xarray.Dataset,
         sim_name: Optional[str] = "state",
-    ) -> xarray.Dataset | None:
-        """
-        Run one rollout step.
-
-        If `state` is provided, it is converted to an equilibrium restart file
-        and used as warmstart for this rollout step.
-        """
-
-        if self.rollout_step == 0:
-            # Ensure first rollout step starts from cold-start settings.
-            self._set_infile_value("nt0", 0)
-            self._set_infile_value("nt1", self.num_timesteps)
-
-        if state is not None:
-
-            latest_restart = identify_latest_restart_iteration(self.dirs)
-            restart_iteration = write_restart_file_from_xarray(
-                state=state,
-                dirs=self.dirs,
-                restart_iteration=latest_restart,
-            )
-
-            self._set_infile_value("nt0", restart_iteration)
-            self._set_infile_value("nt1", restart_iteration + self.num_timesteps)
-        else:
-            self._configure_for_rollout_step()
-        self.rollout_step += 1
-
-        step_sim_name = (
-            f"{sim_name}_rollout_{self.rollout_step}"
-            if sim_name is not None
-            else f"state_rollout_{self.rollout_step}"
-        )
-        result_state = super().run_single(
-            state=None,
-            params=params,
-            sim_name=step_sim_name,
-        )
-
+        rollout_step: Optional[int] = 0,
+    ) -> None:
+        """Post-run the rollout step."""
         # When save_on_disk, the ensemble's _post_run_ensemble needs the output
         # files for _move_and_collect_rollout_results_to_disk; it will clean them.
-        if not self.save_on_disk:
+        if not self.forward_model.save_on_disk:
             clean_output_files(self.dirs)
         remove_old_restart_files(self.dirs)
 
-        if self.save_on_disk and self.results_dir is not None and sim_name is not None:
-            collect_rollout_results(
-                sim_name=sim_name,
-                rollout_step=self.rollout_step,
-                results_dir=self.results_dir,
-            )
-
-        return result_state
+        # if (
+        #     self.forward_model.save_on_disk
+        #     and self.forward_model.results_dir is not None
+        #     and sim_name is not None
+        # ):
+        #     collect_rollout_results(
+        #         sim_name=sim_name,
+        #         rollout_step=rollout_step,
+        #         results_dir=self.forward_model.results_dir,
+        #     )

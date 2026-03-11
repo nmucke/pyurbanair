@@ -43,12 +43,12 @@ def main() -> None:
     args = parser.parse_args()
 
     use_init_conditions = args.init_conditions
-    ensemble_size = int(config.ESMDA["ensemble_size"])
-    num_assimilation_windows = int(config.ESMDA["num_assimilation_windows"])
+    ensemble_size = int(config.ENSEMBLE["ensemble_size"])
+    num_assimilation_windows = int(config.ESMDA["num_assimilation_windows"])  # type: ignore[call-overload]
     true_sim_id = (
         args.true_sim_id
         if args.true_sim_id is not None
-        else int(config.ESMDA.get("true_sim_id", 0))
+        else int(config.ESMDA.get("true_sim_id", 0))  # type: ignore[call-overload]
     )
 
     if use_init_conditions:
@@ -59,7 +59,7 @@ def main() -> None:
         )
         if truth_data is None:
             truth_subdir = "lbm" if args.truth_model == "pylbm" else "udales"
-            init_dir = pathlib.Path(config.ESMDA["init_conditions_dir"]) / truth_subdir
+            init_dir = pathlib.Path(config.ESMDA["init_conditions_dir"]) / truth_subdir  # type: ignore[arg-type]
             raise FileNotFoundError(
                 f"Truth init conditions not found or incomplete in {init_dir}. "
                 f"Need params.nc and state_{true_sim_id}.nc"
@@ -73,7 +73,7 @@ def main() -> None:
         )
         if assim_data is None:
             assim_subdir = "lbm" if args.assim_model == "pylbm" else "udales"
-            init_dir = pathlib.Path(config.ESMDA["init_conditions_dir"]) / assim_subdir
+            init_dir = pathlib.Path(config.ESMDA["init_conditions_dir"]) / assim_subdir  # type: ignore[arg-type]
             raise FileNotFoundError(
                 f"Assim init conditions not found or incomplete in {init_dir}. "
                 f"Need params.nc and state_0.nc .. state_{ensemble_size - 1}.nc"
@@ -85,21 +85,23 @@ def main() -> None:
         init_state_ensemble = None
         init_params_ensemble = None
 
-    truth_model = config.create_forward_model(args.truth_model, rollout=True)
+    truth_model = config.create_forward_model(args.truth_model)
     config.prepare_forward_model(args.truth_model, truth_model)
 
     # No results_dir: states must stay in memory so we can feed them back each window
-    assim_model = config.create_forward_model(args.assim_model, rollout=True)
+    assim_model = config.create_forward_model(args.assim_model)
     config.prepare_forward_model(args.assim_model, assim_model)
 
     if not use_init_conditions:
-        assim_init_model = config.create_forward_model(args.assim_model, rollout=True)
+        assim_init_model = config.create_forward_model(args.assim_model)
         config.prepare_forward_model(args.assim_model, assim_init_model)
         assim_ref_state = assim_init_model(
             params=config.create_true_params(args.assim_model)
         )
         if assim_ref_state is None:
-            raise RuntimeError("Expected in-memory assimilation rollout reference state.")
+            raise RuntimeError(
+                "Expected in-memory assimilation rollout reference state."
+            )
         init_state_ensemble = config.create_initial_state_ensemble(assim_ref_state)
         init_params_ensemble = config.create_parameter_ensemble(args.assim_model)
 
@@ -114,7 +116,9 @@ def main() -> None:
 
     truth_obs_op = config.create_observation_operator(args.truth_model)
     _state_for_sample = (
-        true_state.expand_dims(time=[0]) if "time" not in true_state.dims else true_state
+        true_state.expand_dims(time=[0])
+        if "time" not in true_state.dims
+        else true_state
     )
     true_obs_sample = jnp.asarray(truth_obs_op(_state_for_sample))
     C_D = config.create_C_D(true_obs_sample.shape[0])
@@ -129,7 +133,7 @@ def main() -> None:
         forward_model=ensemble_model,
         C_D=C_D,
         num_steps=config.ESMDA["num_steps"],
-        alpha=1 / config.ESMDA["num_steps"],
+        alpha=config.ESMDA["num_steps"],
         rng_key=rng_key,
     )
 
@@ -149,7 +153,10 @@ def main() -> None:
             data_vars={
                 "velocity_magnitude": (
                     [],
-                    float(true_params.velocity_magnitude.values + vel_magnitude_perturbation),
+                    float(
+                        true_params.velocity_magnitude.values
+                        + vel_magnitude_perturbation
+                    ),
                 ),
                 "inflow_angle": (
                     [],

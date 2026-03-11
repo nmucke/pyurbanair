@@ -4,8 +4,8 @@ runtime      = 20.
 trestart     = 7200.
 dtmax        = 1.
 ladaptive    = .true.
-nprocx       = 4
-nprocy       = 4
+nprocx       = 1
+nprocy       = 1
 /
 
 &OUTPUT

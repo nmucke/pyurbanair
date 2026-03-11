@@ -58,7 +58,6 @@ def model_args(model_name: ModelName) -> dict:
 
 def create_forward_model(
     model_name: ModelName,
-    rollout: bool = False,
     results_dir: pathlib.Path | None = None,
 ) -> Any:
     args = model_args(model_name)
@@ -66,18 +65,31 @@ def create_forward_model(
         args["results_dir"] = results_dir
 
     if model_name == "pylbm":
-        cls = LBMRolloutForwardModel if rollout else LBMForwardModel
-        return cls(**args)
+        return LBMForwardModel(**args)
 
-    cls = UDALESRolloutForwardModel if rollout else UDALESForwardModel
-    return cls(**args)
+    return UDALESForwardModel(**args)
+
+
+def create_rollout_forward_model(
+    model_name: ModelName,
+    forward_model: Any,
+) -> Any:
+    if model_name == "pylbm":
+        return LBMRolloutForwardModel(forward_model=forward_model)
+
+    return UDALESRolloutForwardModel(forward_model=forward_model)
 
 
 def prepare_forward_model(model_name: ModelName, forward_model: Any) -> None:
+    model_to_prepare = (
+        forward_model.forward_model
+        if hasattr(forward_model, "forward_model")
+        else forward_model
+    )
     if model_name == "pylbm":
-        forward_model.compile()
+        model_to_prepare.compile()
     else:
-        forward_model.run_preprocessing(python_or_matlab="python")
+        model_to_prepare.run_preprocessing(python_or_matlab="python")
 
 
 def clean_forward_model_outputs(model_name: ModelName, forward_model: Any) -> None:
@@ -95,18 +107,19 @@ def clean_forward_model_restarts(model_name: ModelName, forward_model: Any) -> N
 
 def create_ensemble_forward_model(model_name: ModelName, forward_model: Any) -> Any:
     cfg = _cfg()
+    ensemble_cfg = cfg.ENSEMBLE
     if model_name == "pylbm":
-        return LBMEnsembleForwardModel(
+        return LBMEnsembleForwardModel(  # type: ignore[abstract]
             forward_model=forward_model,
-            ensemble_size=cfg.ESMDA["ensemble_size"],
-            num_parallel_processes=cfg.ESMDA["num_parallel_processes"],
-            num_cpus_per_process=cfg.ESMDA["num_cpus_per_process"],
+            ensemble_size=ensemble_cfg["ensemble_size"],
+            num_parallel_processes=ensemble_cfg["num_parallel_processes"],
+            num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
         )
     return UDALESEnsembleForwardModel(
         forward_model=forward_model,
-        ensemble_size=cfg.ESMDA["ensemble_size"],
-        num_parallel_processes=cfg.ESMDA["num_parallel_processes"],
-        num_cpus_per_process=cfg.ESMDA["num_cpus_per_process"],
+        ensemble_size=ensemble_cfg["ensemble_size"],
+        num_parallel_processes=ensemble_cfg["num_parallel_processes"],
+        num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
     )
 
 
@@ -125,7 +138,7 @@ def create_true_params(model_name: ModelName) -> xarray.Dataset:
 
 def create_parameter_ensemble(model_name: ModelName) -> xarray.Dataset:
     cfg = _cfg()
-    n = int(cfg.ESMDA["ensemble_size"])
+    n = int(cfg.ENSEMBLE["ensemble_size"])
     rng_key = jax.random.PRNGKey(cfg.ESMDA["seed"])
 
     rng_key, subkey = jax.random.split(rng_key)
@@ -151,7 +164,7 @@ def create_parameter_ensemble(model_name: ModelName) -> xarray.Dataset:
 
 def create_initial_state_ensemble(state: xarray.Dataset) -> xarray.Dataset:
     cfg = _cfg()
-    n = int(cfg.ESMDA["ensemble_size"])
+    n = int(cfg.ENSEMBLE["ensemble_size"])
     member_state = state.isel(time=-1) if "time" in state.dims else state
     members = [member_state.copy(deep=True) for _ in range(n)]
     return xarray.concat(members, dim="ensemble", join="override")
@@ -227,7 +240,7 @@ def load_init_conditions_for_esmda(
     if "time" in true_init_state.dims:
         true_init_state = true_init_state.isel(time=-1)
 
-    init_states = []
+    init_states_list: list[xarray.Dataset] = []
     for i in range(ensemble_size):
         sp = init_dir / f"state_{i}.nc"
         if not sp.exists():
@@ -235,7 +248,7 @@ def load_init_conditions_for_esmda(
         ds = xarray.open_dataset(sp).load()
         if "time" in ds.dims:
             ds = ds.isel(time=-1)
-        init_states.append(ds)
-    init_states = xarray.concat(init_states, dim="ensemble", join="override")
+        init_states_list.append(ds)
+    init_states = xarray.concat(init_states_list, dim="ensemble", join="override")
 
     return init_states, init_params, true_params, true_init_state

@@ -10,7 +10,6 @@ from scipy.io import FortranFile
 
 from .dir_utils import DirectoryPaths
 from .infile_utils import Infile
-from .state_utils import VELOCITY_SCALE_TO_PHYSICAL
 
 RESTART_FILE_PATTERN = re.compile(
     r"^(?P<prefix>restart|turbulence|theta|pottemp|tracer)_(?P<tile>\d{4})_(?P<iteration>\d{6})\.uf$"
@@ -577,8 +576,15 @@ def write_restart_file_from_xarray(
     u_zyx = _get_state_variable(state_ds, "u")
     v_zyx = _get_state_variable(state_ds, "v")
     w_zyx = _get_state_variable(state_ds, "w")
-    # pylbm forward model outputs velocity in m/s; LBM restart expects lattice units
-    scale_to_lattice = 1.0 / VELOCITY_SCALE_TO_PHYSICAL
+    # pylbm forward model outputs velocity in m/s; LBM restart expects lattice units.
+    # Read the dynamic C_u scaling factor from the infile rather than using a hardcoded value.
+    infile_for_cu = Infile(dirs.infile_path)
+    c_u = infile_for_cu.get_value_as_float("C_u")
+    if c_u is None or c_u <= 0:
+        raise ValueError(
+            "Could not read a valid C_u from infile.in for velocity scaling."
+        )
+    scale_to_lattice = 1.0 / c_u
     u_zyx = (u_zyx * scale_to_lattice).astype(np.float32)
     v_zyx = (v_zyx * scale_to_lattice).astype(np.float32)
     w_zyx = (w_zyx * scale_to_lattice).astype(np.float32)

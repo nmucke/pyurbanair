@@ -121,6 +121,9 @@ strict_equality = true
 
 
 
+[tool.pytest.ini_options]
+addopts = "-v"
+
 [tool.pixi.feature.dev.dependencies]
 pytest= ">=8.3.5,<8.4"
 pre-commit = {version="~=4.1.0", channel="conda-forge"}

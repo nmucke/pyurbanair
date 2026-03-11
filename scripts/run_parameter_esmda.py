@@ -1,6 +1,7 @@
 import argparse
 import pathlib
 import sys
+import time
 
 import jax
 import jax.numpy as jnp
@@ -24,9 +25,15 @@ def main() -> None:
     parser.add_argument("--truth-model", choices=["pylbm", "pyudales"], default="pylbm")
     parser.add_argument("--assim-model", choices=["pylbm", "pyudales"], default="pylbm")
     parser.add_argument("--skip-viz", action="store_true")
+    parser.add_argument(
+        "--results-dir",
+        type=pathlib.Path,
+        default=None,
+        help="Override results directory for assimilation model outputs.",
+    )
     args = parser.parse_args()
 
-    truth_model = config.create_forward_model(args.truth_model, rollout=False)
+    truth_model = config.create_forward_model(args.truth_model)
     config.prepare_forward_model(args.truth_model, truth_model)
     true_params = config.create_true_params(args.truth_model)
     true_state = truth_model(params=true_params)
@@ -41,10 +48,11 @@ def main() -> None:
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    assim_results_dir = config.BASE_RESULTS_DIR / "parameter_esmda" / "assim_states"
+    assim_results_dir = (
+        pathlib.Path(args.results_dir) if args.results_dir is not None else None
+    )
     assim_model = config.create_forward_model(
         args.assim_model,
-        rollout=False,
         results_dir=assim_results_dir,
     )
     config.prepare_forward_model(args.assim_model, assim_model)
@@ -58,21 +66,24 @@ def main() -> None:
         forward_model=ensemble_model,
         C_D=C_D,
         num_steps=config.ESMDA["num_steps"],
-        alpha=1 / config.ESMDA["num_steps"],
+        alpha=config.ESMDA["num_steps"],
         rng_key=rng_key,
     )
 
+    t1 = time.time()
     output = esmda(
         params=params_ensemble,
         observations=true_obs,
         return_params_history=True,
         return_state_history=True,
     )
+    t2 = time.time()
+    print(f"ESMDA time: {t2 - t1:.2f} seconds")
     ensemble_mean_field, _ = get_ensemble_mean_field(
         output=output,
         esmda=esmda,
-        num_esmda_steps=int(config.ESMDA["num_steps"]),
-        ensemble_size=int(config.ESMDA["ensemble_size"]),
+        num_esmda_steps=int(config.ESMDA["num_steps"]),  # type: ignore[call-overload]
+        ensemble_size=int(config.ENSEMBLE["ensemble_size"]),
     )
 
     out_dir = config.BASE_RESULTS_DIR / "parameter_esmda"

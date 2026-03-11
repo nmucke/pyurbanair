@@ -112,6 +112,7 @@ class ForwardModel(BaseForwardModel):
         temp_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
         random_initial_condition_args: Optional[dict] = None,
+        boundary_condition: str = "periodic",
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -188,6 +189,15 @@ class ForwardModel(BaseForwardModel):
 
         self._apply_runtime_override(simulation_time=simulation_time)
         self._apply_domain_overrides(nx=nx, ny=ny, nz=nz, bounds=bounds)
+
+        # Apply boundary conditions (x-direction configurable, y always periodic)
+        if boundary_condition not in ("periodic", "inflow_outflow"):
+            raise ValueError(
+                f"boundary_condition must be 'periodic' or 'inflow_outflow', "
+                f"got '{boundary_condition}'"
+            )
+        self.boundary_condition = boundary_condition
+        self._apply_boundary_condition()
 
         # Validate and sync NCPU with nprocx * nprocy from namoptions
         self.ncpu = validate_and_sync_ncpu(
@@ -276,18 +286,39 @@ class ForwardModel(BaseForwardModel):
         namoptions.set_value("INPS", "zsize", bounds[2][1] - bounds[2][0])
         namoptions.write()
 
+    def _apply_boundary_condition(self) -> None:
+        """Apply x-direction boundary condition to namoptions (y is always periodic)."""
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+        bcxm = 1 if self.boundary_condition == "periodic" else 2
+        namoptions.set_value("BC", "BCxm", bcxm)
+        namoptions.set_value("BC", "BCym", 1)
+        namoptions.write()
+
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         """Change results directory, updating both base and dirs dataclass."""
         super().set_results_dir(results_dir)
         self.dirs.results_dir = results_dir
 
+    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
+        """Apply the inflow settings to the forward model."""
+        if params is not None:
+            self.params = merge_params(self.params, params)
+
+        if self.params is None:
+            raise ValueError("ForwardModel parameters are unexpectedly unset.")
+
+        apply_inflow_settings(params=self.params, dirs=self.dirs)
+
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
-        """Save simulation results to a NetCDF file."""
-        if self.results_dir is None:
-            raise ValueError("Cannot save results because results_dir is not set.")
-        outfile = self.results_dir / f"{sim_name}.nc"
-        os.makedirs(self.results_dir, exist_ok=True)
-        state.to_netcdf(str(outfile))
+        """Save simulation results to disk."""
+        self._save_results(state, sim_name)
+
+    def _clean_output(self) -> None:
+        """Clean the output directory."""
+        clean_output_dir(self.dirs)
 
     def run_preprocessing(self, python_or_matlab: str = "python") -> None:
         """Run preprocessing."""
@@ -295,7 +326,7 @@ class ForwardModel(BaseForwardModel):
         logger.info("Running preprocessing...")
 
         clean_temp_dir(self.dirs)
-        clean_output_dir(self.dirs)
+        self._clean_output()
 
         if python_or_matlab == "python":
             # Use Python-based preprocessing script
@@ -350,16 +381,10 @@ class ForwardModel(BaseForwardModel):
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
-    ) -> xarray.Dataset | None:
+    ) -> xarray.Dataset:
         """Run the forward model."""
 
-        # Merge new params with existing params
-        if params is not None:
-            self.params = merge_params(self.params, params)
-
-        if self.params is None:
-            raise ValueError("ForwardModel parameters are unexpectedly unset.")
-        apply_inflow_settings(self.params, self.dirs)
+        self._apply_inflow_settings(params=params)
 
         logger.info("Running forward model...")
         command = [
@@ -367,6 +392,7 @@ class ForwardModel(BaseForwardModel):
             str(LOCAL_EXECUTE_SCRIPT),
             str(self.dirs.experiment_dir),
         ]
+
         env = os.environ.copy()
         _augment_runtime_library_paths(env)
         subprocess.run(
@@ -397,15 +423,16 @@ class ForwardModel(BaseForwardModel):
             output_file,
             engine="netcdf4",
         )
-        state = state.load()
 
-        if self.save_in_memory:
-            if self.clean_output:
-                clean_output_dir(self.dirs)
-            return state
-        else:
-            resolved_sim_name = sim_name if sim_name is not None else "state"
-            self.save_results(state, resolved_sim_name)
-            if self.clean_output:
-                clean_output_dir(self.dirs)
-            return None
+        return state
+
+        # if self.save_in_memory:
+        #     if self.clean_output:
+        #         clean_output_dir(self.dirs)
+        #     return state
+        # else:
+        #     resolved_sim_name = sim_name if sim_name is not None else "state"
+        #     self._save_results(state, resolved_sim_name)
+        #     if self.clean_output:
+        #         clean_output_dir(self.dirs)
+        #     return None

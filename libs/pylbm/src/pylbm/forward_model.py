@@ -41,8 +41,16 @@ class ForwardModel(BaseForwardModel):
         experiment_name: str = "runcase",
         cuda: bool = False,
         enable_netcdf: Optional[bool] = None,
+        boundary_condition: str = "periodic",
     ) -> None:
         super().__init__(results_dir=results_dir)
+
+        if boundary_condition not in ("periodic", "inflow_outflow"):
+            raise ValueError(
+                f"boundary_condition must be 'periodic' or 'inflow_outflow', "
+                f"got '{boundary_condition}'"
+            )
+        self.boundary_condition = boundary_condition
 
         # Verbosity
         self.verbose = verbose
@@ -76,6 +84,9 @@ class ForwardModel(BaseForwardModel):
         self.y_grid = (np.arange(ny) + 0.5) * dy + bounds[1][0]
         self.z_grid = (np.arange(nz) + 0.5) * dz + bounds[2][0]
 
+        self.min_cell_size = min(dx, dy, dz)
+        self.min_cell_size = np.round(self.min_cell_size, 1)
+
         # Set experiment dimensions in mod_dimensions.F90 (add or update experiment, set active)
         set_experiment(dirs=self.dirs, nx=nx, ny=ny, nz=nz)
 
@@ -85,6 +96,9 @@ class ForwardModel(BaseForwardModel):
         # Derived during compile() once infile.in exists (C_t = C_l / C_u).
         self.num_timesteps = 0
         self.output_frequency_timesteps = 0
+        # Warm-start override: when set, _set_scaling_factors uses this as nt0
+        # instead of defaulting to 0. Consumed (reset to None) after each use.
+        self._nt0_override: int | None = None
 
     def _compute_seconds_per_timestep(self) -> float:
         """Compute seconds per timestep from infile constants C_l/C_u."""
@@ -118,21 +132,47 @@ class ForwardModel(BaseForwardModel):
                 self.dirs.infile_path,
             )
 
-        self.seconds_per_timestep = self._compute_seconds_per_timestep()
-        self.num_timesteps = int(self.simulation_time / self.seconds_per_timestep)
-        self.output_frequency_timesteps = int(
-            self.output_frequency / self.seconds_per_timestep
-        )
-        if self.num_timesteps <= 0:
-            raise ValueError("Resolved num_timesteps must be > 0.")
-        if self.output_frequency_timesteps <= 0:
-            raise ValueError("Resolved output frequency must be >= 1 timestep.")
-
         # Set runtime controls in timestep units
-        self._set_infile_value("nt1", self.num_timesteps)
-        self._set_infile_value("iout", self.output_frequency_timesteps)
         self._set_infile_value("experiment", self.dirs.experiment_name)
         self._set_infile_value("tecout", "3" if self.enable_netcdf else "0")
+
+        # Apply x-direction boundary condition (y is always periodic: jbnd=0)
+        ibnd = 0 if self.boundary_condition == "periodic" else 1
+        self._set_infile_value("ibnd", ibnd)
+        self._set_infile_value("jbnd", 0)
+
+    def _set_scaling_factors(self, params: Optional[xarray.Dataset] = None) -> None:
+        """Set the scaling factors for the LBM."""
+        self._set_infile_value("C_l", self.min_cell_size)
+
+        if params is not None:
+            velocity_magnitude = params["velocity_magnitude"].item()
+            self.C_u = int(velocity_magnitude * 15)
+        else:
+            self.C_u = 75
+        self._set_infile_value("C_u", self.C_u)
+
+        self.seconds_per_timestep = self._compute_seconds_per_timestep()
+
+        # Compute a fixed number of output steps independent of C_u, then derive
+        # iout and num_timesteps so every ensemble member produces the same count.
+        num_outputs = round(self.simulation_time / self.output_frequency)
+        self.output_frequency_timesteps = max(
+            1, round(self.output_frequency / self.seconds_per_timestep)
+        )
+        self.num_timesteps = self.output_frequency_timesteps * num_outputs
+
+        if self.num_timesteps <= 0:
+            raise ValueError("Resolved num_timesteps must be > 0.")
+
+        if self._nt0_override is not None:
+            nt0 = self._nt0_override
+            self._nt0_override = None
+        else:
+            nt0 = 0
+        self._set_infile_value("nt0", nt0)
+        self._set_infile_value("nt1", nt0 + self.num_timesteps)
+        self._set_infile_value("iout", self.output_frequency_timesteps)
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         """Change results directory, updating both base and dirs dataclass."""
@@ -174,7 +214,7 @@ class ForwardModel(BaseForwardModel):
             if match is None:
                 continue
             timestep = int(match.group(1))
-            if nt0 <= timestep <= nt1:
+            if nt0 < timestep <= nt1:
                 output_files.append((timestep, path))
 
         output_files = sorted(output_files, key=lambda x: x[0])
@@ -191,12 +231,22 @@ class ForwardModel(BaseForwardModel):
             f"[{nt0}, {nt1}]"
         )
 
+    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
+        """Apply the inflow settings to the forward model."""
+        apply_inflow_settings(params=params, dirs=self.dirs)
+
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
-        """Save simulation results to a NetCDF file."""
-        if self.results_dir is None:
-            raise ValueError("Cannot save results because results_dir is not set.")
-        outfile = self.results_dir / f"{sim_name}.nc"
-        state.to_netcdf(str(outfile))
+        """Save simulation results to disk."""
+        self._save_results(state, sim_name)
+
+    def _clean_output(self) -> None:
+        """Remove netCDF output files from the output directory.
+
+        This prevents stale files from being picked up by subsequent runs
+        that may use a different output frequency (iout).
+        """
+        for output_file in self.dirs.output_dir.glob("out_*.nc"):
+            output_file.unlink(missing_ok=True)
 
     def run(self) -> None:
         """
@@ -240,7 +290,7 @@ class ForwardModel(BaseForwardModel):
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
-    ) -> xarray.Dataset | None:
+    ) -> xarray.Dataset:
         """Run the LBM executable from the rundir."""
         if not self.enable_netcdf:
             raise RuntimeError(
@@ -251,26 +301,25 @@ class ForwardModel(BaseForwardModel):
             )
 
         if params is not None:
-            apply_inflow_settings(params=params, dirs=self.dirs)
+            self._apply_inflow_settings(params)
+
+        self._set_scaling_factors(params)
+
+        # Remove stale output files before running to prevent files from a
+        # previous run (which may have used a different iout) being collected.
+        self._clean_output()
 
         self.run()
 
         output_files = self._get_output_files_for_current_run()
-        datasets = [
-            xarray.load_dataset(path, engine="netcdf4") for path in output_files
-        ]
+        state = [xarray.load_dataset(path, engine="netcdf4") for path in output_files]
 
-        if len(datasets) > 1:
-            state = xarray.concat(datasets, dim="time", join="override")
+        if len(state) > 1:
+            state = xarray.concat(state, dim="time", join="override")
         else:
-            state = datasets[0].expand_dims("time", axis=0)
+            state = state[0].expand_dims("time", axis=0)
 
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
-        state = scale_velocity_to_physical(state)
-
-        if self.save_on_disk:
-            resolved_sim_name = sim_name if sim_name is not None else "state"
-            self.save_results(state, resolved_sim_name)
-            return None
+        state = scale_velocity_to_physical(state, scale=self.C_u)
 
         return state

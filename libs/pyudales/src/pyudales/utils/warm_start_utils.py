@@ -464,7 +464,7 @@ def remove_old_warmstart_files(
 def update_warmstart_file_from_xarray(
     state: Dataset,
     dirs: DirectoryPaths,
-    warmstart_file: str,
+    warmstart_file: pathlib.Path,
 ) -> None:
     """Update an existing warmstart file with flow variables from xarray.
 
@@ -506,25 +506,25 @@ def update_warmstart_file_from_xarray(
     output_experiment_dir = dirs.output_dir / dirs.experiment_name
 
     # Find an existing warmstart file to use as template
-    template_pattern = str(
-        output_experiment_dir / f"initd*_000_000.{dirs.experiment_name}"
-    )
-    template_files = sorted(glob.glob(template_pattern))
+    # template_pattern = str(
+    #     output_experiment_dir / f"initd*_000_000.{dirs.experiment_name}"
+    # )
+    # template_files = sorted(glob.glob(template_pattern))
 
-    if not template_files:
-        raise FileNotFoundError(
-            f"No existing warmstart file found matching {template_pattern}. "
-            "Run a cold start first to generate the warmstart file structure."
-        )
+    # if not template_files:
+    #     raise FileNotFoundError(
+    #         f"No existing warmstart file found matching {template_pattern}. "
+    #         "Run a cold start first to generate the warmstart file structure."
+    #     )
 
-    # Use the most recent warmstart file as template
-    template_file = template_files[-1]
-    logger.info(f"Using {template_file} as template for warmstart file")
+    # # Use the most recent warmstart file as template
+    # template_file = template_files[-1]
+    # logger.info(f"Using {template_file} as template for warmstart file")
 
     # Read all records from template
     # Note: uDALES uses double precision (REAL*8 / float64), not single precision
     records = []
-    with FortranFile(template_file, "r") as f:
+    with FortranFile(str(warmstart_file), "r") as f:
         try:
             while True:
                 rec = f.read_record(dtype=np.float64)
@@ -708,7 +708,8 @@ def update_warmstart_file_from_xarray(
         )
 
     # Write new warmstart file
-    new_file = output_experiment_dir / warmstart_file
+    # new_file = output_experiment_dir / warmstart_file.name
+    new_file = warmstart_file
     with FortranFile(str(new_file), "w") as f:
         for rec in records:
             f.write_record(rec)

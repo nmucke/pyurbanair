@@ -10,6 +10,7 @@ from pyurbanair.utils.config_utils import (
     create_observation_operator,
     create_observation_points,
     create_parameter_ensemble,
+    create_rollout_forward_model,
     create_true_params,
     model_args,
     prepare_forward_model,
@@ -26,8 +27,8 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 25.0, # 3000 * 0.0538,
-    "output_frequency": 0.5, # 3000 * 0.0538,
+    "simulation_time": 60.0,  # 3000 * 0.0538,
+    "output_frequency": 5.0,  # 3000 * 0.0538,
 }
 
 LBM_ARGS = {
@@ -41,9 +42,15 @@ UDALES_ARGS = {
     "case_dir": "examples/udales/experiments/xie_and_castro",
     "experiment_name": "999",
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "ncpu": 16,
+    "ncpu": 1,
     "save_only_last_timestep": False,
     "verbose": False,
+}
+
+ENSEMBLE = {
+    "ensemble_size": 16,
+    "num_parallel_processes": 8,
+    "num_cpus_per_process": 1,
 }
 
 OBS = {
@@ -58,19 +65,16 @@ OBS = {
 }
 
 ESMDA = {
-    "ensemble_size": 4,
-    "num_steps": 1,
+    "num_steps": 2,
     "num_assimilation_windows": 3,
     "seed": 42,
     "obs_error_std": 0.1,
-    "num_parallel_processes": 1,
-    "num_cpus_per_process": 1,
     "init_conditions_dir": "esmda_init_conditions",
     "true_sim_id": 0,
 }
 
 TRUE_PARAMS = {
-    "inflow_angle": 30.0,
+    "inflow_angle": 5.0,
     "velocity_magnitude": 5.0,
     "pressure_gradient_magnitude": 0.0041912,
 }
