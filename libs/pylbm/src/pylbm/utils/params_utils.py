@@ -56,10 +56,8 @@ def apply_inflow_settings(
     if velocity_magnitude is None:
         raise ValueError("velocity_magnitude is required but not found in params")
 
-    # pylbm uses opposite sign convention for inflow angle compared to pyudales.
-    # Negate the angle so that the same params produce matching flow direction
-    # (pyudales is the ground truth).
-    inflow_angle_for_lbm = -inflow_angle
+    # Use inflow_angle directly so the Python interface matches LBM Fortran input.
+    inflow_angle_for_lbm = inflow_angle
 
     # Update infile.in using Infile class
     infile = Infile(dirs.infile_path)
