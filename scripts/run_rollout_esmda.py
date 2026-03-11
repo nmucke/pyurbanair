@@ -87,10 +87,12 @@ def main() -> None:
 
     truth_model = config.create_forward_model(args.truth_model)
     config.prepare_forward_model(args.truth_model, truth_model)
+    truth_model = config.create_rollout_forward_model(args.truth_model, truth_model)
 
     # No results_dir: states must stay in memory so we can feed them back each window
     assim_model = config.create_forward_model(args.assim_model)
     config.prepare_forward_model(args.assim_model, assim_model)
+    assim_model = config.create_rollout_forward_model(args.assim_model, assim_model)
 
     if not use_init_conditions:
         assim_init_model = config.create_forward_model(args.assim_model)

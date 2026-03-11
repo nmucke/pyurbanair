@@ -27,7 +27,7 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 20.0,  # 3000 * 0.0538,
+    "simulation_time": 30.0,  # 3000 * 0.0538,
     "output_frequency": 2.0,  # 3000 * 0.0538,
 }
 
@@ -48,8 +48,8 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 16,
-    "num_parallel_processes": 8,
+    "ensemble_size": 4,
+    "num_parallel_processes": 4,
     "num_cpus_per_process": 1,
 }
 
@@ -66,7 +66,7 @@ OBS = {
 
 ESMDA = {
     "num_steps": 2,
-    "num_assimilation_windows": 3,
+    "num_assimilation_windows": 2,
     "seed": 42,
     "obs_error_std": 0.1,
     "init_conditions_dir": "esmda_init_conditions",
