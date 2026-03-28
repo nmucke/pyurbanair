@@ -23,11 +23,11 @@ DOMAIN = {
     "nx": 80,
     "ny": 80,
     "nz": 8,
-    "bounds": ((0.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 30.0,  # 3000 * 0.0538,
+    "simulation_time": 100.0,  # 3000 * 0.0538,
     "output_frequency": 2.0,  # 3000 * 0.0538,
 }
 
@@ -45,6 +45,7 @@ UDALES_ARGS = {
     "ncpu": 1,
     "save_only_last_timestep": False,
     "verbose": False,
+    "boundary_condition": "inflow_outflow",
 }
 
 ENSEMBLE = {

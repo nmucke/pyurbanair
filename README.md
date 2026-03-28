@@ -1,22 +1,36 @@
 # pyurbanair
 
-This repository provides general simulation and data assimilation tools for the UrbanAIR project.
+A Python framework for urban air flow simulation and ensemble-based data assimilation. Part of the UrbanAIR project.
 
-IMPORTANT: The repository is very much under development! Therefore, may things will change and there are probably, some functionalities that don't work as intended.
+> **Note:** This repository is under active development (v0.1.0). Things will change and some functionalities may not work as intended.
 
-IMPORTANT: It only works on MacOS! Linux will be added next!
+## Features
+
+- **Two simulation backends:** pylbm (Lattice Boltzmann Method, wrapping Geir Evensen's LBM) and pyudales (wrapping uDALES v2.2.0)
+- **Ensemble-based data assimilation** using ESMDA (Ensemble Smoother with Multiple Data Assimilation), implemented in JAX
+- **Parameter estimation** and **joint state-parameter estimation**
+- **Multi-step rollout simulations** with state carry-over between time windows
+- **Cross-model assimilation** (e.g., use LBM as truth model with uDALES for assimilation)
+- **Observation operators** for mapping simulation states to observation space
+- **Benchmark geometry generation** for the Xie and Castro 2008 case
 
 ## Installation
 
-All dependencies and environments are handled via Pixi. Pixi can be installed on Linux and MacOS by running:
+All dependencies and environments are handled via [Pixi](https://pixi.sh). Install Pixi on Linux or MacOS by running:
 
 ```
 curl -fsSL https://pixi.sh/install.sh | sh
 ```
 
-Currently, there is only one functioning environment, the dev environment. When installing the dev environment it automatically creates the environment and installs all necessary dependendencies to compile uDALES and LBM as well as python dependencies. At a later stage, I will implement different environments for different purposes (e.g. pyudales-env) such that it only install the necessary dependencies for that.
+Three environments are available:
 
-The environment is installd and initiated via:
+| Environment | Purpose |
+|-------------|---------|
+| `dev` | Full development environment with all backends, data assimilation, benchmarks, and dev tools |
+| `delftblue` | HPC environment for the DelftBlue supercomputer |
+| `cuda` | GPU-accelerated environment with CUDA support |
+
+Install and activate the dev environment:
 
 ```
 pixi shell --environment=dev
@@ -24,131 +38,187 @@ pixi shell --environment=dev
 
 ### LBM specifics
 
-Note that for running the LBM code on MacOSn you have to run the following after initializing the environment:
+For running the LBM code on MacOS, you have to run the following after initializing the environment:
 
 ```
 ulimit -s unlimited
 ```
 
-### uDALES specifics
+## Usage
 
-You need to have Matlab installed to run uDALES code. You also have to provide that path to Matlab program.
+### Configuration
 
-## Running the code
+All simulation and assimilation settings are centralized in `scripts/config.py`. This includes:
 
-There are 4 scripts set up in the `pyurbanair/scripts` folder. You should be able to run then when the dev environment is initialized. The scripts load the examples from the `pyurbanair/examples` folder. Currently, only the Xia and Castro case is set up.
+- **Domain:** grid resolution (`nx`, `ny`, `nz`) and spatial bounds
+- **Time:** simulation duration and output frequency
+- **Model-specific arguments:** STL file path (LBM), case directory and Matlab path (uDALES)
+- **Ensemble:** ensemble size, number of parallel processes, CPUs per process
+- **Observations:** spatial extent, number of sensors, observed states, temporal aggregation mode
+- **ESMDA:** number of assimilation steps and windows, observation error standard deviation, random seed
+- **Parameters:** true parameter values and prior distributions for `inflow_angle`, `velocity_magnitude`, and `pressure_gradient_magnitude`
 
-When inside the dev environment, simply run:
+### Forward simulations
 
+```bash
+# Single forward simulation
+python scripts/run_forward_model.py --model pylbm
+python scripts/run_forward_model.py --model pyudales
+
+# Ensemble forward simulation
+python scripts/run_ensemble_forward_model.py --model pylbm
+
+# Multi-step rollout simulation
+python scripts/run_rollout_forward_model.py --model pylbm
+
+# Ensemble rollout simulation
+python scripts/run_ensemble_rollout_forward_model.py --model pylbm
 ```
-python scripts/<file_to_run>.py
+
+### Data assimilation
+
+```bash
+# Parameter estimation with ESMDA
+python scripts/run_parameter_esmda.py --truth-model pylbm --assim-model pylbm
+
+# Cross-model assimilation (LBM truth, uDALES assimilation)
+python scripts/run_parameter_esmda.py --truth-model pylbm --assim-model pyudales
+
+# Joint state and parameter estimation
+python scripts/run_state_and_parameter_esmda.py --truth-model pylbm --assim-model pylbm
+
+# Rollout-based ESMDA with multiple assimilation windows
+python scripts/run_rollout_esmda.py --truth-model pylbm --assim-model pylbm
 ```
 
-All forward models (pylbm and pyudales) automatically generates a `pyurbanair/.temp` folder where intermediate files are stored.
+### Initial conditions
 
-Currently, each of the forward models require different types of configuration files due to the vastly different structure of LBM and uDALES. I might create a unifying yaml-like config file format later.
+Pre-generate initial conditions for ESMDA experiments:
+
+```bash
+python scripts/simulate_init_conditions.py --model pylbm --num-simulations 500
+```
+
+All forward models generate a `.temp` folder where intermediate files are stored.
 
 ## Repository Structure
 
-I chose to go with a mono-repo approach. The repository contains a base project `pyurbanair`, and a series of sub-libraries in the `libs/` folder. The general idea is that everything should be run from the `pyurbanair` project which will load functionalities from the other libraries.
+The repository uses a monorepo approach. It contains a base project `pyurbanair` and a series of sub-libraries in the `libs/` folder. The general idea is that everything should be run from the `pyurbanair` project, which loads functionalities from the other libraries.
+
+```
+pyurbanair/
+├── src/
+│   └── pyurbanair/                        # Main package
+│       ├── base_forward_model.py          # Abstract base class for forward models
+│       ├── base_ensemble_forward_model.py # Ensemble execution orchestration
+│       ├── base_rollout_forward_model.py  # Multi-step rollout simulations
+│       ├── animation.py                   # Animation utilities
+│       ├── plotting.py                    # Plotting utilities
+│       └── utils/
+│           ├── config_utils.py            # Factory functions for models and operators
+│           ├── state_utils.py             # State manipulation utilities
+│           ├── run_utils.py               # Runtime utilities
+│           └── animation_utils.py         # Animation generation helpers
+│
+├── libs/                                  # Sub-libraries
+│   ├── data-assimilation/                 # Data assimilation library (JAX)
+│   │   ├── pyproject.toml
+│   │   └── src/data_assimilation/
+│   │       ├── observation_operator.py    # Maps states to observation space
+│   │       ├── interpolation.py           # Grid interpolation utilities
+│   │       └── smoothing/
+│   │           ├── base.py                # Base smoothing class
+│   │           └── esmda.py               # ESMDA implementation
+│   │
+│   ├── pylbm/                             # Lattice Boltzmann Method wrapper
+│   │   ├── pyproject.toml
+│   │   └── src/pylbm/
+│   │       ├── forward_model.py
+│   │       ├── ensemble_forward_model.py
+│   │       ├── rollout_forward_model.py
+│   │       ├── stl_to_lbm.py             # STL geometry conversion
+│   │       └── utils/
+│   │
+│   └── pyudales/                          # uDALES wrapper
+│       ├── pyproject.toml
+│       └── src/pyudales/
+│           ├── forward_model.py
+│           ├── ensemble_forward_model.py
+│           ├── rollout_forward_model.py
+│           └── utils/
+│
+├── scripts/                               # Main execution scripts
+│   ├── config.py                          # Centralized configuration
+│   ├── run_forward_model.py               # Single forward simulation
+│   ├── run_ensemble_forward_model.py      # Ensemble forward simulation
+│   ├── run_rollout_forward_model.py       # Multi-step rollout
+│   ├── run_ensemble_rollout_forward_model.py  # Ensemble rollout
+│   ├── run_parameter_esmda.py             # Parameter estimation via ESMDA
+│   ├── run_state_and_parameter_esmda.py   # Joint state-parameter estimation
+│   ├── run_rollout_esmda.py               # Rollout-based ESMDA
+│   └── simulate_init_conditions.py        # Generate initial conditions
+│
+├── examples/                              # Example experiments
+│   ├── benchmark_geometry/                # Xie and Castro 2008 geometry tools
+│   ├── lbm/experiments/                   # LBM experiment configs (STL files)
+│   └── udales/experiments/                # uDALES experiment configs
+│
+├── tests/                                 # Test suite
+├── pyproject.toml                         # Project configuration
+├── LICENSE                                # MIT License
+└── .gitmodules                            # Git submodules (u-dales, LBM)
+```
 
 ### Libraries
 
 #### pyurbanair
 
-This is the base library. It only contains utils to compute quantities of interest and a base forward model. All the other libraries that introduce forward models should inheret from this base class. This ensures compatibility throughout the entire repo. Furthermore, a series of functionalities are already implemented to ease the implementation of other forward models. For examples, it is set up such that one only has to implement `run_single` when implementing a new forward model. Then, the base class can simulate an ensemble based on an ensemble of parameter inputs bu calling the `run_single` method.
+The base library. It contains a base forward model, base ensemble forward model, and base rollout forward model. All other libraries that introduce forward models inherit from these base classes. This ensures compatibility throughout the entire repo. The base classes handle common functionality — for example, one only has to implement `run_single` when adding a new forward model, and ensemble simulation is automatically handled by the base class.
 
 #### data-assimilation
 
-This library contains data assimilation functionalities. Currently, it only contains an observation operator, a base smoothing model (from which future smoothing models will inherit) and an ESMDA model. It is setup such that it is compatible with the other libraries. The library is implemented using Jax.
+Data assimilation functionalities implemented using JAX. Contains an observation operator (for mapping simulation states to observation locations), grid interpolation utilities, a base smoothing class, and ESMDA (Ensemble Smoother with Multiple Data Assimilation). Supports both parameter-only and joint state-parameter estimation. Compatible with both simulation backends.
 
 #### pylbm
 
-This library is a wrapper for Geir Evensens Lattice Boltzmann simulator. First time it is being imported it downloads the repo from github and compiles the code based on the experiment specifications.
+A wrapper for Geir Evensen's Lattice Boltzmann simulator. On first import, it automatically downloads the repository from GitHub and compiles the code based on the experiment specifications. Supports STL geometry input and optional CUDA acceleration (via the `cuda` environment).
 
-IMPORTANT: I have implemented an stl-to-LBM convertion. However, I don't think it is completely correct. So don't trust the outputs from pylbm.
+> **Caveat:** The STL-to-LBM geometry conversion has been implemented but may not be completely correct. Do not fully trust outputs from pylbm when using STL geometry.
 
 #### pyudales
 
-This library is a wrapper for the uDALES simulator. First time it is being imported it downloads the repo from github and compiles the code based on the experiment specifications.
+A wrapper for the uDALES v2.2.0 simulator. On first import, it automatically downloads the repository from GitHub and compiles the code based on the experiment specifications. Requires Matlab for preprocessing.
 
-#### Structure
+## Benchmark Geometry
 
-```
-pyurbanair/
-├── src/
-│   └── pyurbanair/          # Main package
-│       ├── base_forward_model.py
-│       └── utils/
-│           └── state_utils.py
-│
-├── libs/                     # Library submodules
-│   ├── data-assimilation/   # Data assimilation library
-│   │   ├── pyproject.toml   # Dependencies for data-assimilation
-│   │   └── src/data_assimilation/
-│   │       ├── observation_operator.py
-│   │       └── smoothing/   # Smoothing algorithms (only ESMDA for now)
-│   │
-│   ├── pylbm/               # Lattice Boltzmann Method wrapper
-│   │   ├── pyproject.toml   # Dependencies for pylbm
-│   │   └── src/pylbm/
-│   │       ├── forward_model.py
-│   │       └── ...
-│   │
-│   └── pyudales/            # u-dales wrapper
-│       ├── pyproject.toml   # Dependencies for pyudales
-│       └── src/pyudales/
-│           ├── forward_model.py
-│           └── ...
-│
-├── scripts/                 # Main execution scripts
-│   ├── main_lbm.py          # Forward run with LBM
-│   ├── main_udales.py       # Forward run with uDALES
-│   ├── esmda_lbm.py         # ESMDA with LBM
-│   └── esmda_udales.py      # ESMDA with uDALES
-│
-├── examples/                # Example experiments
-│   ├── lbm/
-│   │   └── experiments/
-│   └── udales/
-│       └── experiments/
-│
-├── pyproject.toml           # Project configuration
-├── LICENSE
-└── .gitmodules              # Git submodules (u-dales, LBM)
-```
+A script to generate the geometry in `stl` (as well as other formats) for the Xie and Castro 2008 benchmark can be found in the `examples/benchmark_geometry/` folder.
 
-### Benchmark geometry
-
-A script to generate the geometry in `stl` (as well as other format) for the Xie Castro 2002 Benchmark can be found in `examples/benchmark_geometry/` folder.
-
-By importing `XieCastroBenchmarkGeometry` from `boundary_geometry.py` one can configure and serialize the specific setup. There is also a commandline tool available. The dependencies are available in the `dev` environment. Usage:
+By importing `XieCastroBenchmarkGeometry` from `boundary_geometry.py` one can configure and serialize the specific setup. There is also a command-line tool available. The dependencies are available in the `dev` environment. Usage:
 
 ```
 pixi shell -e dev
-python examples/boundary_geometry/boundary_geometry.py --help
-
+python examples/benchmark_geometry/benchmark_geometry.py --help
 ```
 
-One example for stl is
+One example for STL is:
 
 ```
-python examples/boundary_geometry/boundary_geometry.py stl output --num-tiles 3 3
+python examples/benchmark_geometry/benchmark_geometry.py stl output --num-tiles 3 3
 ```
 
-For Geir Evensen's Lattice Boltzmann code one can as well configure a fortran file, which needs to be compiled subsequently. To change the base resolution one can provide a refinement factor as well.
+For Geir Evensen's Lattice Boltzmann code one can also configure a Fortran file, which needs to be compiled subsequently. To change the base resolution one can provide a refinement factor as well:
 
 ```
-python examples/boundary_geometry/boundary_geometry.py stl output --resolution 4 --num-tiles 3 3
+python examples/benchmark_geometry/benchmark_geometry.py stl output --resolution 4 --num-tiles 3 3
 ```
 
-## Data and file types
+## Data and File Types
 
-The main data and files types are netcdf and xarray. All forward models take in parameters as xarrays and out states as xarray. When the model is configures to save the simulation outputs is always stores in netcdf format. This is to ensure compatibility accross libraries.
+The main data and file types are NetCDF and xarray. All forward models take in parameters as xarray Datasets and output states as xarray Datasets. When the model is configured to save, simulation outputs are always stored in NetCDF format to ensure compatibility across libraries.
 
 ### State data
 
-States are always provide and output as xarrays. They should have the following format:
+States are always provided and output as xarray Datasets. They should have the following format:
 
 ```
 Dimensions:  (time: 1, zm: 6, yt: 128, xt: 128, zt: 6, ym: 128, xm: 128)
@@ -167,9 +237,9 @@ Data variables:
     u        (time, zt, yt, xm) float32 393kB -0.05016 0.08196 ... 3.14 3.139
 ```
 
-Note that xt vs xm is udales specific. For pylbm there is only x, y, z. However, time should always be there, even when only one time step is present. For example, if the simulations is set to only output tha last state in a simulation.
+Note that `xt` vs `xm` is uDALES-specific (staggered grid). For pylbm there is only `x`, `y`, `z`. However, `time` should always be present, even when only one time step is stored.
 
-Ensembles of states are also in xarray format:
+Ensembles of states are also in xarray format with an added `ensemble` dimension:
 
 ```
 Dimensions:  (ensemble: 50, time: 1, zm: 6, yt: 128, xt: 128,
@@ -190,26 +260,25 @@ Data variables:
     u        (ensemble, time, zt, yt, xm) float32 59MB 0.3301 ......
 ```
 
-Here, the format is the same but with an added ensemble dimension.
-
 ### Parameter data
 
-Parameters can be provided as argument as an xarray when calling the forward model. The format should be like this:
+Parameters are provided as an xarray Dataset when calling the forward model:
 
-```
+```python
 true_params = xarray.Dataset(
     data_vars={
         "inflow_angle": TRUE_ANGLE,
         "velocity_magnitude": TRUE_VELOCITY_MAGNITUDE,
+        "pressure_gradient_magnitude": TRUE_PRESSURE_GRADIENT,
     },
 )
 ```
 
-Currently, only inflows_angle and velocity_magnitude are supported. This will be expanded later.
+Currently, `inflow_angle`, `velocity_magnitude`, and `pressure_gradient_magnitude` are supported. Note that `pressure_gradient_magnitude` is only used by pyudales.
 
-An ensemble of parameter can be provided in the same manner, but the an added ensemble dimension:
+An ensemble of parameters can be provided in the same manner, with an added `ensemble` dimension:
 
-```
+```python
 params_ensemble = xarray.Dataset(
     data_vars={
         "inflow_angle": ("ensemble", inflow_angle_range),
@@ -219,11 +288,11 @@ params_ensemble = xarray.Dataset(
 )
 ```
 
-Running with this automatically simulates an ensemble. This is set up in the base forward model.
+Running with an ensemble of parameters automatically simulates an ensemble. This is handled by the base forward model.
 
 ## Development
 
-When adding to the repository, first create a new branch. Then make the changes you want, commit, and then create a pull request.
+When adding to the repository, first create a new branch. Then make the changes you want, commit, and create a pull request.
 
 If you want to add to the repository you should make use of the linting and formatting. These are automatically installed in the dev environment. Simply run:
 
@@ -231,10 +300,14 @@ If you want to add to the repository you should make use of the linting and form
 pixi run pre-commit
 ```
 
-and it will apply formatting and give you "errors" to be fixed. Note that it only applies to files that are staged. Note that somtimes the linting is a bit annoying and gives errors that you don't necessarily want to fix. These errors you can ignore by adding the following after the line in question:
+and it will apply formatting and give you errors to be fixed. Note that it only applies to files that are staged. Sometimes the linting gives errors that you don't necessarily want to fix. These errors you can ignore by adding the following after the line in question:
 
-```
+```python
 # type: ignore[<something>]
 ```
 
-There is currently no pretection on the main branch! So comitting is possible without passing the pre-commit! Please be mindful before comitting!
+There is currently no protection on the main branch. Committing directly is possible without passing pre-commit. Please be mindful before committing.
+
+## License
+
+MIT License. Copyright (c) 2025 Nikolaj T. Mucke. See [LICENSE](LICENSE) for details.
