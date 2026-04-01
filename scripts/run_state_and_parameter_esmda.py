@@ -89,6 +89,14 @@ def main() -> None:
     truth_model_name = args.truth_model
     truth_model = config.create_forward_model(truth_model_name)
     config.prepare_forward_model(truth_model_name, truth_model)
+
+    config.clean_forward_model_outputs(
+        model_name=truth_model_name, forward_model=truth_model
+    )
+    truth_model = config.create_rollout_forward_model(
+        model_name=truth_model_name,
+        forward_model=truth_model,
+    )
     if use_init_conditions:
         true_state = truth_model(params=true_params, state=true_init_state)
     else:
@@ -115,6 +123,10 @@ def main() -> None:
     config.clean_forward_model_outputs(args.assim_model, assim_model)
     if use_init_conditions and args.assim_model == "pylbm":
         config.clean_forward_model_restarts(args.assim_model, assim_model)
+    assim_model = config.create_rollout_forward_model(
+        model_name=args.assim_model,
+        forward_model=assim_model,
+    )
 
     if not use_init_conditions:
         assim_model.set_results_dir(None)
