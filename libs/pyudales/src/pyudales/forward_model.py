@@ -187,6 +187,8 @@ class ForwardModel(BaseForwardModel):
         # Rename the namoptions file to have the experiment_name as its extension
         rename_namoptions_file(self.dirs.experiment_dir, self.dirs.experiment_name)
 
+        self.bounds: DomainBounds | None = None
+
         self._apply_runtime_override(simulation_time=simulation_time)
         self._apply_domain_overrides(nx=nx, ny=ny, nz=nz, bounds=bounds)
 
@@ -285,6 +287,56 @@ class ForwardModel(BaseForwardModel):
         namoptions.set_value("DOMAIN", "ylen", bounds[1][1] - bounds[1][0])
         namoptions.set_value("INPS", "zsize", bounds[2][1] - bounds[2][0])
         namoptions.write()
+
+        self.bounds = bounds
+
+        # When the domain has non-zero lower bounds, the STL geometry must be
+        # shifted so that it is correctly positioned within the [0, length]
+        # computational domain.  uDALES always starts its grid at 0, so an
+        # STL vertex originally at x=0 needs to move to x=-xmin (e.g. +100
+        # when xmin=-100) inside the enlarged domain.
+        x_offset = -bounds[0][0]
+        y_offset = -bounds[1][0]
+        z_offset = -bounds[2][0]
+        if x_offset != 0.0 or y_offset != 0.0 or z_offset != 0.0:
+            self._shift_stl_geometry(
+                namoptions_path, (x_offset, y_offset, z_offset)
+            )
+
+    def _shift_stl_geometry(
+        self,
+        namoptions_path: pathlib.Path,
+        offsets: tuple[float, float, float],
+    ) -> None:
+        """Shift STL geometry vertices so buildings sit correctly in the enlarged domain.
+
+        Args:
+            namoptions_path: Path to the namoptions file (used to read the STL filename).
+            offsets: (x_offset, y_offset, z_offset) to add to every vertex.
+        """
+        import trimesh
+
+        namoptions = NamoptionsFile(namoptions_path)
+        stl_filename = namoptions.get_value("INPS", "stl_file")
+        if stl_filename is None:
+            logger.warning("No stl_file found in namoptions; skipping STL shift.")
+            return
+
+        stl_path = self.dirs.experiment_dir / stl_filename.strip().strip("'\"")
+        if not stl_path.exists():
+            logger.warning("STL file %s not found; skipping STL shift.", stl_path)
+            return
+
+        mesh = trimesh.load(stl_path)
+        mesh.vertices[:, 0] += offsets[0]
+        mesh.vertices[:, 1] += offsets[1]
+        mesh.vertices[:, 2] += offsets[2]
+        mesh.export(stl_path)
+
+        logger.info(
+            "Shifted STL vertices by (%.2f, %.2f, %.2f) for negative-bound domain.",
+            *offsets,
+        )
 
     def _apply_boundary_condition(self) -> None:
         """Apply x-direction boundary condition to namoptions (y is always periodic)."""
@@ -423,6 +475,23 @@ class ForwardModel(BaseForwardModel):
             output_file,
             engine="netcdf4",
         )
+
+        # Shift coordinates by lower-bound offset so that the state reflects
+        # physical domain coordinates (matching pylbm behaviour for negative bounds).
+        if self.bounds is not None:
+            x_offset = self.bounds[0][0]
+            y_offset = self.bounds[1][0]
+            z_offset = self.bounds[2][0]
+            coord_updates = {}
+            for coord_name, offset in [
+                ("xt", x_offset), ("xm", x_offset),
+                ("yt", y_offset), ("ym", y_offset),
+                ("zt", z_offset), ("zm", z_offset),
+            ]:
+                if coord_name in state.coords:
+                    coord_updates[coord_name] = state.coords[coord_name].values + offset
+            if coord_updates:
+                state = state.assign_coords(coord_updates)
 
         return state
 
