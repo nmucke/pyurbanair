@@ -101,7 +101,6 @@ def main() -> None:
 
     forward_model = config.create_forward_model(
         model_name=model_name,
-        rollout=False,
         results_dir=None,
     )
     config.prepare_forward_model(model_name=model_name, forward_model=forward_model)

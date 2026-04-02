@@ -27,15 +27,16 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 25.0,  # 3000 * 0.0538,
+    "simulation_time": 50.0,  # 3000 * 0.0538,
     "output_frequency": 2.0,  # 3000 * 0.0538,
 }
 
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": False,
+    "cuda": True,
     "verbose": False,
+    "boundary_condition": "inflow_outflow",
 }
 
 UDALES_ARGS = {
@@ -49,8 +50,8 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 4,
-    "num_parallel_processes": 4,
+    "ensemble_size": 50,
+    "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
 

@@ -62,16 +62,10 @@ class BaseRolloutForwardModel:
     def get_states(
         self,
         sim_name: Optional[str] = "state",
-        rollout_step: Optional[int] = None,
     ) -> xarray.Dataset:
         """Get the states from the results directory."""
-        if rollout_step is None:
-            rollout_step = self.rollout_step - 1
-
         sim_name = "state" if sim_name is None else sim_name
-        return self.forward_model.get_states(
-            sim_name=f"{sim_name}_rollout_{rollout_step}",
-        )
+        return self.forward_model.get_states(sim_name=sim_name)
 
     def __call__(
         self,
@@ -81,7 +75,6 @@ class BaseRolloutForwardModel:
     ) -> xarray.Dataset | None:
         """Run the forward model."""
 
-        sim_name = f"{sim_name}_rollout_{self.rollout_step}"
         self._pre_run_rollout_step(
             state=state,
             params=params,

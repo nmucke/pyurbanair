@@ -1,6 +1,5 @@
 import logging
 import pathlib
-import re
 import shutil
 from typing import Any, Optional
 
@@ -9,7 +8,7 @@ from pyudales.forward_model import ForwardModel
 from pyudales.utils.namoptions_utils import NamoptionsFile
 from pyudales.utils.warm_start_utils import (
     clean_output_except_warmstart_files,
-    identify_warmstart_file,
+    identify_generated_warmstart_file,
     remove_old_warmstart_files,
     set_trestart,
     set_warm_start,
@@ -53,53 +52,53 @@ class RolloutForwardModel(BaseRolloutForwardModel):
 
         self.dirs = self.forward_model.dirs  # type: ignore[attr-defined]
         self._warmstart_template_dir = self.dirs.experiment_dir / "warmstart_template"
-        self._generate_warmstart_template()
+        self._initialize_warmstart_template()
 
-    def _generate_warmstart_template(self) -> None:
-        """Run a very short cold-start simulation to generate warmstart template files.
+    def _initialize_warmstart_template(self) -> None:
+        """Create a per-instance warmstart template from a short cold-start run.
 
-        Temporarily overrides the namoptions runtime to a single timestep,
-        runs the forward model, copies the resulting warmstart files to a
-        template directory, then restores the original namoptions settings.
+        The template is generated from the current experiment configuration, so
+        custom grid settings already applied to the underlying ForwardModel are
+        reflected in the binary layout used for later warm starts.
         """
         namoptions_path = (
             self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
         )
+        original_namoptions_text = namoptions_path.read_text()
         namoptions = NamoptionsFile(namoptions_path)
-
-        # Save original values to restore later
-        original_runtime = namoptions.get_value("RUN", "runtime")
-        original_trestart = namoptions.get_value("RUN", "trestart")
-        original_lwarmstart = namoptions.get_value("RUN", "lwarmstart")
 
         # Set a very short runtime (single timestep) and enable restart writing
         dtmax_str = namoptions.get_value("RUN", "dtmax")
         short_runtime = float(dtmax_str) if dtmax_str else 1.0
-        namoptions.set_value("RUN", "runtime", short_runtime)
-        namoptions.set_value("RUN", "trestart", short_runtime)
-        namoptions.set_value("RUN", "lwarmstart", ".false.")
-        namoptions.write()
+        output_template_dir = self.dirs.output_dir / self.dirs.experiment_name
 
-        self.forward_model.run_single(
-            state=None,
-            params=None,
-            sim_name="warmstart_template",
-        )
+        self._warmstart_template_dir.mkdir(parents=True, exist_ok=True)
 
-        warmstart_filename = identify_warmstart_file(self.dirs)
+        try:
+            namoptions.set_value("RUN", "runtime", short_runtime)
+            namoptions.set_value("RUN", "trestart", short_runtime)
+            namoptions.set_value("RUN", "lwarmstart", ".false.")
+            namoptions.write()
 
-        shutil.move(
-            self.dirs.output_dir / self.dirs.experiment_name / warmstart_filename,
-            self.dirs.experiment_dir / warmstart_filename,
-        )
-        self.warmstart_template_file: pathlib.Path = (
-            self.dirs.experiment_dir / warmstart_filename
-        )
+            self.forward_model.run_single(
+                state=None,
+                params=None,
+                sim_name="warmstart_template",
+            )
 
-        namoptions.set_value("RUN", "runtime", original_runtime or short_runtime)
-        namoptions.write()
+            warmstart_filename = identify_generated_warmstart_file(self.dirs)
+            self.warmstart_template_file = (
+                self._warmstart_template_dir / warmstart_filename
+            )
+            self.warmstart_template_file.unlink(missing_ok=True)
 
-        self.forward_model._clean_output()
+            shutil.move(
+                output_template_dir / warmstart_filename,
+                self.warmstart_template_file,
+            )
+        finally:
+            namoptions_path.write_text(original_namoptions_text)
+            self.forward_model._clean_output()
 
     def _pre_run_rollout_step(
         self,
