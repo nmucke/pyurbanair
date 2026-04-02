@@ -16,6 +16,54 @@ from .namoptions_utils import NamoptionsFile
 logger = logging.getLogger(__name__)
 
 
+def _infer_warmstart_grid_shape(
+    ws_size: int,
+    itot: int,
+    jtot: int,
+    ktot: int,
+) -> tuple[int, int, int]:
+    """Infer the 3D warmstart record shape from its flattened size.
+
+    uDALES restart files store flow fields with halo padding, so the warmstart
+    shape is typically slightly larger than the interior fielddump shape.
+    Prefer shapes that are just larger than the interior domain rather than
+    "near-square" factorizations, which can reject valid stretched domains.
+    """
+    candidates: list[tuple[tuple[int, int, int, int], tuple[int, int, int]]] = []
+
+    for ws_nz in range(ktot, ktot + 4):
+        if ws_nz <= 0 or ws_size % ws_nz != 0:
+            continue
+
+        ws_xy = ws_size // ws_nz
+        for factor in range(1, int(np.sqrt(ws_xy)) + 1):
+            if ws_xy % factor != 0:
+                continue
+
+            factor_pair = (factor, ws_xy // factor)
+            for ws_nx, ws_ny in (factor_pair, factor_pair[::-1]):
+                dx = ws_nx - itot
+                dy = ws_ny - jtot
+                dz = ws_nz - ktot
+
+                if dx < 0 or dy < 0 or dz < 0:
+                    continue
+
+                score = (
+                    dx + dy + dz,
+                    abs(dx - dy),
+                    dz,
+                    max(dx, dy),
+                )
+                candidates.append((score, (ws_nx, ws_ny, ws_nz)))
+
+    if not candidates:
+        return 0, 0, 0
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
 def _fill_halo_cells(
     ws_3d: np.ndarray,
     offset_x: int,
@@ -159,6 +207,22 @@ def identify_warmstart_file(
     """
     Identify the warmstart file and return it in x-format.
 
+    This first looks for a warmstart generated in the current output directory.
+    If none exists, it falls back to copying a packaged warmstart file into the
+    output directory for backward compatibility.
+    """
+    try:
+        return identify_generated_warmstart_file(dirs)
+    except ValueError:
+        return copy_packaged_warmstart_file(dirs)
+
+
+def identify_generated_warmstart_file(
+    dirs: DirectoryPaths,
+) -> str:
+    """
+    Identify a warmstart file produced in output_dir/{experiment_name}.
+
     Returns the warmstart filename in the format 'initd{timestamp}_xxx_xxx.{experiment_name}'
     where xxx_xxx is a wildcard pattern that matches processor numbers.
 
@@ -187,6 +251,16 @@ def identify_warmstart_file(
                 # return f"initd{timestamp}_xxx_xxx.{dirs.experiment_name}"
                 return f"initd{timestamp}_000_000.{dirs.experiment_name}"
 
+    raise ValueError(f"No generated warmstart file found in {output_experiment_dir}")
+
+
+def copy_packaged_warmstart_file(
+    dirs: DirectoryPaths,
+) -> str:
+    """Copy a packaged warmstart file into the output directory and return its name."""
+    output_experiment_dir = dirs.output_dir.joinpath(dirs.experiment_name)
+    os.makedirs(output_experiment_dir, exist_ok=True)
+
     # Try copying a warmstart file from the default directory if none found
     warmstart_dir = dirs.cwd / "libs" / "pyudales" / "warmstart_files"
     if os.path.exists(warmstart_dir):
@@ -211,7 +285,7 @@ def identify_warmstart_file(
                     # fallback: return the filename just copied
                     return new_fname
 
-    raise ValueError(f"No warmstart file found in {output_experiment_dir}")
+    raise ValueError(f"No packaged warmstart file found in {warmstart_dir}")
 
 
 def set_warm_start(
@@ -552,38 +626,20 @@ def update_warmstart_file_from_xarray(
     ktot = int(namoptions.get_value("DOMAIN", "ktot") or 8)
 
     # Read boundary conditions (1 = periodic, 2 = profile/inflow, 3 = driver)
-    # Default to periodic (1) if not specified
-    bcxm = int(namoptions.get_value("INPS", "BCxm") or 1)
-    bcym = int(namoptions.get_value("INPS", "BCym") or 1)
+    # ForwardModel writes these in the BC section; keep INPS as fallback.
+    bcxm = int(
+        namoptions.get_value("BC", "BCxm") or namoptions.get_value("INPS", "BCxm") or 1
+    )
+    bcym = int(
+        namoptions.get_value("BC", "BCym") or namoptions.get_value("INPS", "BCym") or 1
+    )
     bc_periodic_x = bcxm == 1
     bc_periodic_y = bcym == 1
 
-    # Calculate warmstart dimensions by factorizing the array size
-    # The warmstart is flattened in column-major (Fortran) order: (nx, ny, nz)
     ws_size = flow_var_shape
     fd_size = itot * jtot * ktot
 
-    # Try to find warmstart dimensions that make sense
-    # Warmstart z-dimension should match ktot (or ktot+1 for kh=1)
-    ws_nz = ktot  # Most likely
-    if ws_size % ws_nz != 0:
-        ws_nz = ktot + 1  # Try with kh=1
-
-    if ws_size % ws_nz == 0:
-        ws_xy = ws_size // ws_nz
-        ws_nx = int(np.sqrt(ws_xy))
-        # Try to find exact square root or nearby factors
-        while ws_nx > 0 and ws_nx * ws_nx != ws_xy:
-            if ws_xy % ws_nx == 0:
-                ws_ny = ws_xy // ws_nx
-                if abs(ws_nx - ws_ny) < 10:  # Accept near-square shapes
-                    break
-            ws_nx -= 1
-        else:
-            ws_nx = int(np.sqrt(ws_xy))
-            ws_ny = ws_nx
-    else:
-        ws_nx, ws_ny, ws_nz = 0, 0, 0
+    ws_nx, ws_ny, ws_nz = _infer_warmstart_grid_shape(ws_size, itot, jtot, ktot)
 
     logger.info(
         f"Grid dimensions - fielddump: {itot}x{jtot}x{ktot}={fd_size}, "
