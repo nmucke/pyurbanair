@@ -113,6 +113,7 @@ class ForwardModel(BaseForwardModel):
         experiment_base_dir: Optional[pathlib.Path] = None,
         random_initial_condition_args: Optional[dict] = None,
         boundary_condition: str = "periodic",
+        spinup_time: float = 0.0,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -189,6 +190,9 @@ class ForwardModel(BaseForwardModel):
 
         self.bounds: DomainBounds | None = None
 
+        self.spinup_time = spinup_time
+        self._simulation_time = simulation_time
+
         self._apply_runtime_override(simulation_time=simulation_time)
         self._apply_domain_overrides(nx=nx, ny=ny, nz=nz, bounds=bounds)
 
@@ -237,17 +241,24 @@ class ForwardModel(BaseForwardModel):
         logger.info(f"MATLAB bin: {self.matlab_bin}")
 
     def _apply_runtime_override(self, simulation_time: float | None) -> None:
-        """Apply optional simulation runtime override to namoptions."""
+        """Apply optional simulation runtime override to namoptions.
+
+        When spinup_time > 0 the effective runtime written to namoptions is
+        ``simulation_time + spinup_time``; the extra output produced during
+        the spinup window is trimmed in ``run_single``.
+        """
         if simulation_time is None:
             return
         if simulation_time <= 0:
             raise ValueError("simulation_time must be > 0.")
 
+        effective_time = simulation_time + self.spinup_time
+
         namoptions_path = (
             self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
         )
         namoptions = NamoptionsFile(namoptions_path)
-        namoptions.set_value("RUN", "runtime", simulation_time)
+        namoptions.set_value("RUN", "runtime", effective_time)
         namoptions.write()
 
     def _apply_domain_overrides(
@@ -493,15 +504,22 @@ class ForwardModel(BaseForwardModel):
             if coord_updates:
                 state = state.assign_coords(coord_updates)
 
+        if self.spinup_time > 0 and self.output_frequency is not None:
+            spinup_outputs = round(self.spinup_time / self.output_frequency)
+            state = state.isel(time=slice(spinup_outputs, None))
+            if "time" in state.coords:
+                state = state.assign_coords(time=state.time - state.time.values[0])
+
         return state
 
-        # if self.save_in_memory:
-        #     if self.clean_output:
-        #         clean_output_dir(self.dirs)
-        #     return state
-        # else:
-        #     resolved_sim_name = sim_name if sim_name is not None else "state"
-        #     self._save_results(state, resolved_sim_name)
-        #     if self.clean_output:
-        #         clean_output_dir(self.dirs)
-        #     return None
+    def disable_spinup(self) -> None:
+        """Disable spinup so subsequent runs use only simulation_time."""
+        self.spinup_time = 0.0
+        if self._simulation_time is not None:
+            namoptions_path = (
+                self.dirs.experiment_dir
+                / f"namoptions.{self.dirs.experiment_name}"
+            )
+            namoptions = NamoptionsFile(namoptions_path)
+            namoptions.set_value("RUN", "runtime", self._simulation_time)
+            namoptions.write()
