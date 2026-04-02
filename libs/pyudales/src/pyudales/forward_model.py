@@ -506,9 +506,12 @@ class ForwardModel(BaseForwardModel):
 
         if self.spinup_time > 0 and self.output_frequency is not None:
             spinup_outputs = round(self.spinup_time / self.output_frequency)
-            state = state.isel(time=slice(spinup_outputs, None))
-            if "time" in state.coords:
-                state = state.assign_coords(time=state.time - state.time.values[0])
+            if state.sizes.get("time", 0) > spinup_outputs:
+                state = state.isel(time=slice(spinup_outputs, None))
+                if "time" in state.coords and state.sizes["time"] > 0:
+                    state = state.assign_coords(
+                        time=state.time - state.time.values[0]
+                    )
 
         return state
 

@@ -20,22 +20,22 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 120,
-    "ny": 80,
+    "nx": 80,
+    "ny": 40,
     "nz": 8,
-    "bounds": ((-40.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-40.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 50.0,  # 3000 * 0.0538,
+    "simulation_time": 25.0,  # 3000 * 0.0538,
     "output_frequency": 2.0,  # 3000 * 0.0538,
-    "spinup_time": 0.0,
+    "spinup_time": 10.0,
 }
 
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": True,
+    "cuda": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
 }
@@ -51,7 +51,7 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 50,
+    "ensemble_size": 4,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }

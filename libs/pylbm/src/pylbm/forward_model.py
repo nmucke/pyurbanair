@@ -335,7 +335,7 @@ class ForwardModel(BaseForwardModel):
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
         state = scale_velocity_to_physical(state, scale=self.C_u)
 
-        if self._spinup_outputs > 0:
+        if self._spinup_outputs > 0 and state.sizes["time"] > self._spinup_outputs:
             state = state.isel(time=slice(self._spinup_outputs, None))
             state = state.assign_coords(time=range(state.sizes["time"]))
 
