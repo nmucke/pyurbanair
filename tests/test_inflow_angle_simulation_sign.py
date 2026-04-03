@@ -1,7 +1,8 @@
-"""Simulation-based sign checks for inflow angle conventions.
+"""Simulation-based sign checks for LBM inflow angle conventions.
 
-These tests use actual forward-model runs to determine how each solver responds
-to positive/negative input angles by measuring the sign of domain-mean v.
+These tests use actual forward-model runs to compare the direct LBM Fortran
+input path against the Python wrapper, using inlet-plane mean v as the most
+direct observable of the imposed inflow direction.
 """
 
 import pathlib
@@ -27,20 +28,23 @@ from pyurbanair.utils.config_utils import (
 )
 
 
-def _get_uv_means(state: xarray.Dataset) -> tuple[float, float]:
-    """Return domain-mean (u, v) from the latest timestep."""
+def _get_v_mean(state: xarray.Dataset, x_index: int | None = None) -> float:
+    """Return the latest-timestep mean v, optionally at a single x-plane."""
     if "time" in state.dims:
         state = state.isel(time=-1)
 
-    u_name = "u" if "u" in state.data_vars else "u0"
     v_name = "v" if "v" in state.data_vars else "v0"
 
-    if u_name not in state.data_vars or v_name not in state.data_vars:
+    if v_name not in state.data_vars:
         raise AssertionError(
             f"Could not find velocity components in state. data_vars={list(state.data_vars)}"
         )
 
-    return float(state[u_name].mean()), float(state[v_name].mean())
+    v = state[v_name]
+    if x_index is not None:
+        v = v.isel(x=x_index)
+
+    return float(v.mean())
 
 
 def _set_lbm_inflow_direct(
@@ -72,11 +76,11 @@ def pylbm_model() -> ForwardModel:
     return model  # type: ignore[no-any-return]
 
 
-@pytest.mark.parametrize("angle_deg,expected_v_sign", [(20.0, 1.0), (-20.0, -1.0)])  # type: ignore[misc]
-def test_lbm_fortran_respects_input_udir_sign(
+@pytest.mark.parametrize("angle_deg,expected_v_sign", [(20.0, -1.0), (-20.0, 1.0)])  # type: ignore[misc]
+def test_lbm_fortran_inverts_input_udir_sign(
     pylbm_model: ForwardModel, angle_deg: float, expected_v_sign: float
 ) -> None:
-    """LBM Fortran should produce v with same sign as directly supplied udir."""
+    """Direct LBM Fortran input produces the opposite inlet-v sign."""
     clean_forward_model_outputs(model_name="pylbm", forward_model=pylbm_model)
     _set_lbm_inflow_direct(
         model=pylbm_model,
@@ -85,21 +89,21 @@ def test_lbm_fortran_respects_input_udir_sign(
     )
 
     state = pylbm_model.run_single(params=None)
-    _, v_mean = _get_uv_means(state)
+    v_mean = _get_v_mean(state, x_index=0)
 
     assert expected_v_sign * v_mean > 0.0, (
-        f"LBM direct udir={angle_deg} produced mean v={v_mean:.6f}; "
-        "this suggests sign inversion in simulation response."
+        f"Direct LBM udir={angle_deg} produced inlet mean v={v_mean:.6f}; "
+        "expected the opposite sign based on the observed solver convention."
     )
 
 
 @pytest.mark.parametrize("angle_deg", [20.0, -20.0])  # type: ignore[misc]
-def test_lbm_ab_wrapper_vs_direct_inflow_angle_regression(
+def test_lbm_wrapper_corrects_direct_fortran_sign_convention(
     pylbm_model: ForwardModel, angle_deg: float
 ) -> None:
-    """A/B regression: wrapper path should match direct-Fortran input.
+    """Wrapper path should correct the sign inversion seen in direct LBM input.
 
-    A (wrapper): run_single(params=...) uses pylbm Python mapping (angle).
+    A (wrapper): run_single(params=...) writes a corrected udir for LBM.
     B (direct):  write udir=angle directly in infile and run run_single(params=None).
     """
     velocity = tests_config.TRUE_PARAMS["velocity_magnitude"]
@@ -113,7 +117,7 @@ def test_lbm_ab_wrapper_vs_direct_inflow_angle_regression(
         }
     )
     state_wrapper = pylbm_model.run_single(params=params)
-    _, v_mean_wrapper = _get_uv_means(state_wrapper)
+    v_mean_wrapper = _get_v_mean(state_wrapper, x_index=0)
 
     # B) Direct Fortran input path
     clean_forward_model_outputs(model_name="pylbm", forward_model=pylbm_model)
@@ -123,21 +127,21 @@ def test_lbm_ab_wrapper_vs_direct_inflow_angle_regression(
         angle_deg=angle_deg,
     )
     state_direct = pylbm_model.run_single(params=None)
-    _, v_mean_direct = _get_uv_means(state_direct)
+    v_mean_direct = _get_v_mean(state_direct, x_index=0)
 
     sign_wrapper = _sign(v_mean_wrapper)
     sign_direct = _sign(v_mean_direct)
     sign_target = _sign(angle_deg)
 
-    assert sign_direct == sign_target, (
-        f"Direct LBM run should follow input sign. angle={angle_deg}, "
+    assert sign_direct == -sign_target, (
+        f"Direct LBM run should invert input sign. angle={angle_deg}, "
         f"v_mean_direct={v_mean_direct:.6f}"
     )
     assert sign_wrapper == sign_target, (
-        f"Wrapper run should follow input sign. "
+        f"Wrapper run should restore the user-facing sign convention. "
         f"angle={angle_deg}, v_mean_wrapper={v_mean_wrapper:.6f}"
     )
-    assert sign_wrapper == sign_direct, (
-        f"A/B regression failed: wrapper and direct should have the same sign. "
+    assert sign_wrapper == -sign_direct, (
+        f"A/B regression failed: wrapper should flip the direct LBM sign. "
         f"v_mean_wrapper={v_mean_wrapper:.6f}, v_mean_direct={v_mean_direct:.6f}"
     )

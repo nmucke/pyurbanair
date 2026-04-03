@@ -337,7 +337,8 @@ class ForwardModel(BaseForwardModel):
 
         if self._spinup_outputs > 0 and state.sizes["time"] > self._spinup_outputs:
             state = state.isel(time=slice(self._spinup_outputs, None))
-            state = state.assign_coords(time=range(state.sizes["time"]))
+
+        state = state.assign_coords(time=range(state.sizes["time"]))
 
         return state
 

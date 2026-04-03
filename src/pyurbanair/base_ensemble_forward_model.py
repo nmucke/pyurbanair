@@ -145,14 +145,16 @@ class BaseEnsembleForwardModel:
             return state.isel(ensemble=member_index)
 
         if isinstance(state, pathlib.Path):
-            return xarray.open_dataset(
+            with xarray.open_dataset(
                 state / f"{sim_name}_{member_index}.nc", engine="netcdf4"
-            ).load()
+            ) as dataset:
+                return dataset.load()
 
         if self.save_on_disk:
             file_name = self.results_dir / f"{sim_name}_{member_index}.nc"  # type: ignore[operator]
             if file_name.exists():
-                return xarray.open_dataset(file_name, engine="netcdf4").load()
+                with xarray.open_dataset(file_name, engine="netcdf4") as dataset:
+                    return dataset.load()
 
         return None
 

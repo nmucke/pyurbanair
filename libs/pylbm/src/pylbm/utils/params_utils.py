@@ -56,8 +56,9 @@ def apply_inflow_settings(
     if velocity_magnitude is None:
         raise ValueError("velocity_magnitude is required but not found in params")
 
-    # Use inflow_angle directly so the Python interface matches LBM Fortran input.
-    inflow_angle_for_lbm = inflow_angle
+    # LBM's effective y-direction response is opposite to the user-facing
+    # convention used by pyudales, so negate the angle before writing udir.
+    inflow_angle_for_lbm = -inflow_angle
 
     # Update infile.in using Infile class
     infile = Infile(dirs.infile_path)
@@ -73,6 +74,7 @@ def apply_inflow_settings(
     infile.write()
 
     logger.info(
-        f"Updated inflow settings: angle={inflow_angle_for_lbm:.1f}°, "
+        f"Updated inflow settings: angle={inflow_angle:.1f}° "
+        f"(written to LBM as {inflow_angle_for_lbm:.1f}°), "
         f"velocity={velocity_magnitude:.1f} m/s"
     )

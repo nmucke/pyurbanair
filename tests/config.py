@@ -37,6 +37,7 @@ LBM_ARGS = {
     "experiment_name": "runcase",
     "cuda": False,
     "verbose": False,
+    "boundary_condition": "inflow_outflow",
 }
 
 UDALES_ARGS = {

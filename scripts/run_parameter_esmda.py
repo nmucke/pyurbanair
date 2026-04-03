@@ -10,6 +10,7 @@ from data_assimilation.smoothing.esmda import ParameterESMDA
 from pyurbanair.plotting import (
     plot_parameter_distributions,
     plot_true_vs_estimated_state,
+    plot_state_init_and_terminal,
 )
 from pyurbanair.utils.animation_utils import _visualize_state_history
 from pyurbanair.utils.run_utils import get_ensemble_mean_field
@@ -107,6 +108,14 @@ def main() -> None:
             true_state=true_state,
             estimated_state=ensemble_mean_field,
             output_path=out_dir / "state_comparison.png",
+            obs_x=obs_x,
+            obs_y=obs_y,
+            z_level=0,
+        )
+        plot_state_init_and_terminal(
+            true_state=true_state,
+            estimated_state=ensemble_mean_field,
+            output_path=out_dir / "state_init_and_terminal.png",
             obs_x=obs_x,
             obs_y=obs_y,
             z_level=0,
