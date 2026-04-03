@@ -20,16 +20,16 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 80,
-    "ny": 40,
+    "nx": 120,
+    "ny": 80,
     "nz": 8,
-    "bounds": ((-40.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
+    "bounds": ((-80.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
     "simulation_time": 25.0,  # 3000 * 0.0538,
     "output_frequency": 2.0,  # 3000 * 0.0538,
-    "spinup_time": 10.0,
+    "spinup_time": 0.0,
 }
 
 LBM_ARGS = {
@@ -51,7 +51,7 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 4,
+    "ensemble_size": 50,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
