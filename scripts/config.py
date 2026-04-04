@@ -23,18 +23,19 @@ DOMAIN = {
     "nx": 120,
     "ny": 80,
     "nz": 8,
-    "bounds": ((-40.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-80.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 50.0,  # 3000 * 0.0538,
+    "simulation_time": 25.0,  # 3000 * 0.0538,
     "output_frequency": 2.0,  # 3000 * 0.0538,
+    "spinup_time": 0.0,
 }
 
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": True,
+    "cuda": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
 }
@@ -57,9 +58,9 @@ ENSEMBLE = {
 
 OBS = {
     "x_min": 10.0,
-    "x_max": 70.0,
+    "x_max": 30.0,
     "y_min": 10.0,
-    "y_max": 70.0,
+    "y_max": 30.0,
     "n_per_axis": 4,
     "z": 2.0,
     "states": ["u", "v", "w"],

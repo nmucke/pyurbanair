@@ -29,6 +29,7 @@ DOMAIN = {
 TIME = {
     "simulation_time": 5.0,  # 3000 * 0.0538,
     "output_frequency": 1.0,  # 3000 * 0.0538,
+    "spinup_time": 5.0,
 }
 
 LBM_ARGS = {
@@ -36,6 +37,7 @@ LBM_ARGS = {
     "experiment_name": "runcase",
     "cuda": False,
     "verbose": False,
+    "boundary_condition": "inflow_outflow",
 }
 
 UDALES_ARGS = {

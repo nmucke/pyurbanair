@@ -45,10 +45,11 @@ class BaseForwardModel:
 
     def get_states(self, sim_name: str = "state") -> xarray.Dataset:
         """Get the states from the results directory."""
-        return xarray.open_dataset(
+        with xarray.open_dataset(
             self.results_dir / f"{sim_name}.nc",  # type: ignore[operator]
             engine="netcdf4",
-        ).load()
+        ) as dataset:
+            return dataset.load()
 
     @abstractmethod
     def _apply_inflow_settings(self, params: xarray.Dataset) -> None:

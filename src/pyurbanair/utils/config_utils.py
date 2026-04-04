@@ -41,18 +41,21 @@ def solver_name(model_name: ModelName) -> str:
 
 def model_args(model_name: ModelName) -> dict:
     cfg = _cfg()
+    spinup_time = cfg.TIME.get("spinup_time", 0.0)
     if model_name == "pylbm":
         return {
             **cfg.LBM_ARGS,
             **cfg.DOMAIN,
             "simulation_time": cfg.TIME["simulation_time"],
             "output_frequency": cfg.TIME["output_frequency"],
+            "spinup_time": spinup_time,
         }
     return {
         **cfg.UDALES_ARGS,
         **cfg.DOMAIN,
         "simulation_time": cfg.TIME["simulation_time"],
         "output_frequency": cfg.TIME["output_frequency"],
+        "spinup_time": spinup_time,
     }
 
 

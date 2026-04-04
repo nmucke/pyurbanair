@@ -42,8 +42,12 @@ class ForwardModel(BaseForwardModel):
         cuda: bool = False,
         enable_netcdf: Optional[bool] = None,
         boundary_condition: str = "periodic",
+        spinup_time: float = 0.0,
     ) -> None:
         super().__init__(results_dir=results_dir)
+
+        self.spinup_time = spinup_time
+        self._spinup_outputs = 0
 
         if boundary_condition not in ("periodic", "inflow_outflow"):
             raise ValueError(
@@ -165,13 +169,22 @@ class ForwardModel(BaseForwardModel):
         if self.num_timesteps <= 0:
             raise ValueError("Resolved num_timesteps must be > 0.")
 
+        # Extend run by spinup period (outputs produced during spinup are
+        # discarded after collection in run_single).
+        if self.spinup_time > 0:
+            self._spinup_outputs = round(self.spinup_time / self.output_frequency)
+        else:
+            self._spinup_outputs = 0
+        spinup_timesteps = self._spinup_outputs * self.output_frequency_timesteps
+        total_timesteps = self.num_timesteps + spinup_timesteps
+
         if self._nt0_override is not None:
             nt0 = self._nt0_override
             self._nt0_override = None
         else:
             nt0 = 0
         self._set_infile_value("nt0", nt0)
-        self._set_infile_value("nt1", nt0 + self.num_timesteps)
+        self._set_infile_value("nt1", nt0 + total_timesteps)
         self._set_infile_value("iout", self.output_frequency_timesteps)
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
@@ -322,4 +335,13 @@ class ForwardModel(BaseForwardModel):
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
         state = scale_velocity_to_physical(state, scale=self.C_u)
 
+        if self._spinup_outputs > 0 and state.sizes["time"] > self._spinup_outputs:
+            state = state.isel(time=slice(self._spinup_outputs, None))
+
+        state = state.assign_coords(time=range(state.sizes["time"]))
+
         return state
+
+    def disable_spinup(self) -> None:
+        """Disable spinup so subsequent runs use only simulation_time."""
+        self.spinup_time = 0.0

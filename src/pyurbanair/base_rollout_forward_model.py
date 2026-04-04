@@ -24,11 +24,20 @@ class BaseRolloutForwardModel:
         self,
         *args: Any,
         forward_model: BaseForwardModel,
+        spinup_first_step_only: bool = True,
         **kwargs: Any,
     ) -> None:
-        """Initialize the rollout forward model."""
+        """Initialize the rollout forward model.
+
+        Args:
+            forward_model: The underlying forward model to run at each step.
+            spinup_first_step_only: When True (default), automatically call
+                ``forward_model.disable_spinup()`` after the first rollout
+                step so that only the cold-start run pays the spinup cost.
+        """
         self.forward_model = forward_model
         self.rollout_step = 0
+        self.spinup_first_step_only = spinup_first_step_only
 
     @property
     def results_dir(self) -> Optional[pathlib.Path]:
@@ -92,5 +101,13 @@ class BaseRolloutForwardModel:
             rollout_step=self.rollout_step,
         )
         self.rollout_step += 1
+
+        if (
+            self.spinup_first_step_only
+            and self.rollout_step == 1
+            and hasattr(self.forward_model, "spinup_time")
+            and self.forward_model.spinup_time > 0
+        ):
+            self.forward_model.disable_spinup()
 
         return state
