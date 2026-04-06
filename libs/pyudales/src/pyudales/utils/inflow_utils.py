@@ -26,9 +26,9 @@ import numpy as np
 
 
 def angle_to_pressure_gradient(
-    angle_deg: float,
-    dp_magnitude: float,
-) -> tuple[float, float]:
+    angle_deg: float | np.ndarray,
+    dp_magnitude: float | np.ndarray,
+) -> tuple[float | np.ndarray, float | np.ndarray]:
     """
     Convert flow angle to pressure gradient components (dpdx, dpdy).
 
@@ -75,9 +75,9 @@ def angle_to_pressure_gradient(
 
 
 def angle_to_velocity(
-    angle_deg: float,
-    wind_speed: float,
-) -> tuple[float, float]:
+    angle_deg: float | np.ndarray,
+    wind_speed: float | np.ndarray,
+) -> tuple[float | np.ndarray, float | np.ndarray]:
     """
     Convert flow angle to velocity components (u, v).
 

@@ -52,6 +52,7 @@ def main() -> None:
     )
 
     true_params = config.create_true_params(model_name)
+
     state = forward_model(params=true_params)
     if state is None:
         state = forward_model.get_states()
@@ -86,6 +87,22 @@ def main() -> None:
             z_level=0,
         )
         print(f"Saved visualization outputs in {out_dir}")
+
+        import numpy as np
+
+        plt.figure()
+        for idx in [10, 40, 70]:
+            u_at_left_end = state.u.values[:, 1, idx, 1]
+            v_at_left_end = state.v.values[:, 1, idx, 1]
+            inflow_angle_from_state = (
+                np.arctan2(v_at_left_end, u_at_left_end) * 180.0 / np.pi
+            )
+            plt.plot(inflow_angle_from_state, label=f"idx={idx}")
+        plt.legend()
+        plt.title("inflow angle from state")
+        plt.xlabel("time")
+        plt.ylabel("inflow angle")
+        plt.show()
 
 
 if __name__ == "__main__":

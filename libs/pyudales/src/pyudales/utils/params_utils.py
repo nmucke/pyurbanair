@@ -14,6 +14,23 @@ from .namoptions_utils import NamoptionsFile
 logger = logging.getLogger(__name__)
 
 
+def is_time_varying_params(params: Optional[xarray.Dataset]) -> bool:
+    """Check if parameters contain time-varying inflow_angle or velocity_magnitude.
+
+    Args:
+        params: Optional xarray.Dataset that may contain inflow parameters.
+
+    Returns:
+        True if any inflow parameter has a ``time`` dimension.
+    """
+    if params is None:
+        return False
+    for var_name in ("inflow_angle", "velocity_magnitude"):
+        if var_name in params and "time" in params[var_name].dims:
+            return True
+    return False
+
+
 def extract_inflow_params(params: Optional[xarray.Dataset]) -> Optional[xarray.Dataset]:
     """
     Extract only the inflow parameters from an xarray.Dataset.
