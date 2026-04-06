@@ -64,7 +64,7 @@ OBS = {
     "n_per_axis": 4,
     "z": 2.0,
     "states": ["u", "v", "w"],
-    "temporal_mode": "mean",
+    "temporal_mode": "full",
 }
 
 ESMDA = {

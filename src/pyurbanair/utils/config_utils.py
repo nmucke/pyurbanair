@@ -194,6 +194,7 @@ def create_observation_operator(model_name: ModelName) -> TemporalObservationOpe
         obs_states=cfg.OBS["states"],
         solver_name=solver_name(model_name),
     )
+
     return TemporalObservationOperator(operator, mode=cfg.OBS["temporal_mode"])
 
 
