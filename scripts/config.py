@@ -61,7 +61,7 @@ OBS = {
     "y_points": [10.0, 15.0, 20.0, 25.0, 30.0],
     "z_points": [2.0, 2.0, 2.0, 2.0, 2.0],
     "states": ["u", "v", "w"],
-    "temporal_mode": "mean",
+    "temporal_mode": "full",
 }
 
 ESMDA = {

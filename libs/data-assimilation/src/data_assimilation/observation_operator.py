@@ -159,14 +159,18 @@ class TemporalObservationOperator:
         self,
         observation_operator: ObservationOperator,
         mode: str = "mean",
+        num_time_steps: int | None = None,
     ):
         """
         Initialize the temporal observation operator.
 
         Args:
             observation_operator: ObservationOperator.
-            mode: Mode to use for temporal averaging.
-            Valid modes are "mean", "median", "max", "min".
+            mode: Mode to use for temporal aggregation.
+                Valid modes are "mean", "median", "max", "min", "full".
+            num_time_steps: Number of time steps in the state. Optional; if
+                not provided for "full" mode, it is detected from the first
+                observed state.
         """
         self.observation_operator = observation_operator
         self.mode = mode
@@ -178,18 +182,45 @@ class TemporalObservationOperator:
             "min": lambda state: state.min(dim="time"),
         }
 
+        valid_modes = set(self.mode_mapping.keys()) | {"full"}
+        if mode not in valid_modes:
+            raise ValueError(f"Invalid mode '{mode}'. Must be one of {valid_modes}.")
+
+        if mode == "full":
+            self._num_time_steps = num_time_steps  # None is OK; set lazily
+
+    @property
+    def num_obs(self) -> int:
+        """Number of observations produced by the operator."""
+        if self.mode == "full":
+            return self.observation_operator.num_obs * self._num_time_steps
+        return self.observation_operator.num_obs
+
     def _observation_single(self, state: xarray.Dataset) -> np.ndarray:
-        """Apply observation operator to one state with temporal averaging.
+        """Apply observation operator to one state with temporal aggregation.
 
         Args:
             state: xarray Dataset with time dimension.
 
         Returns:
-            Vector of shape (num_obs) where num_obs = num_sensors * num_states.
+            Observation vector. Length is ``num_sensors * num_states`` for
+            aggregation modes, or ``num_sensors * num_states * num_time_steps``
+            for "full" mode.
         """
-        # Average over time dimension for all state variables
-        state_avg = self.mode_mapping[self.mode](state)
+        if self.mode == "full":
+            num_time_steps = state.sizes["time"]
+            if self._num_time_steps is None:
+                self._num_time_steps = num_time_steps
+            obs_per_time = []
+            for t in range(num_time_steps):
+                state_t = state.isel(time=t)
+                obs_per_time.append(
+                    self.observation_operator._observation_single(state_t)
+                )
+            return np.concatenate(obs_per_time)
 
+        # Aggregation path (mean, median, max, min)
+        state_avg = self.mode_mapping[self.mode](state)
         obs_values = self.observation_operator(state_avg)
 
         return obs_values
@@ -201,15 +232,13 @@ class TemporalObservationOperator:
             states: xarray Dataset with ensemble and time dimensions.
 
         Returns:
-            Matrix of shape (ensemble, num_obs) where num_obs = num_sensors * num_states.
+            Matrix of shape (ensemble, num_obs).
         """
         ensemble_size = states.sizes["ensemble"]
-        obs_matrix = np.zeros((ensemble_size, self.observation_operator.num_obs))
-
+        observations_list = []
         for i in range(ensemble_size):
-            obs_matrix[i, :] = self._observation_single(states.isel(ensemble=i))
-
-        return obs_matrix
+            observations_list.append(self._observation_single(states.isel(ensemble=i)))
+        return np.stack(observations_list, axis=0)
 
     def __call__(self, state: xarray.Dataset) -> np.ndarray:
         """Apply the observation operator to a state or ensemble of states.
