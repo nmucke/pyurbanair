@@ -27,7 +27,7 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 50.0,  # 3000 * 0.0538,
+    "simulation_time": 25.0,  # 3000 * 0.0538,
     "output_frequency": 0.5,  # 3000 * 0.0538,
     "spinup_time": 20.0,
 }
@@ -57,12 +57,9 @@ ENSEMBLE = {
 }
 
 OBS = {
-    "x_min": 10.0,
-    "x_max": 30.0,
-    "y_min": 10.0,
-    "y_max": 30.0,
-    "n_per_axis": 4,
-    "z": 2.0,
+    "x_points": [10.0, 15.0, 20.0, 25.0, 30.0],
+    "y_points": [10.0, 15.0, 20.0, 25.0, 30.0],
+    "z_points": [2.0, 2.0, 2.0, 2.0, 2.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "mean",
 }

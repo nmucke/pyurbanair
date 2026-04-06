@@ -175,13 +175,22 @@ def create_initial_state_ensemble(state: xarray.Dataset) -> xarray.Dataset:
 
 def create_observation_points() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     cfg = _cfg()
-    obs_x = np.linspace(cfg.OBS["x_min"], cfg.OBS["x_max"], cfg.OBS["n_per_axis"])
-    obs_y = np.linspace(cfg.OBS["y_min"], cfg.OBS["y_max"], cfg.OBS["n_per_axis"])
-    obs_xx, obs_yy = np.meshgrid(obs_x, obs_y)
-    obs_x_flat = obs_xx.flatten()
-    obs_y_flat = obs_yy.flatten()
-    obs_z_flat = np.full(obs_x_flat.shape[0], cfg.OBS["z"])
-    return obs_x_flat, obs_y_flat, obs_z_flat
+    if "x_points" in cfg.OBS:
+        obs_x = np.asarray(cfg.OBS["x_points"])
+        obs_y = np.asarray(cfg.OBS["y_points"])
+        obs_z = np.asarray(cfg.OBS["z_points"])
+    else:
+        obs_x_ax = np.linspace(
+            cfg.OBS["x_min"], cfg.OBS["x_max"], cfg.OBS["n_per_axis"]
+        )
+        obs_y_ax = np.linspace(
+            cfg.OBS["y_min"], cfg.OBS["y_max"], cfg.OBS["n_per_axis"]
+        )
+        obs_xx, obs_yy = np.meshgrid(obs_x_ax, obs_y_ax)
+        obs_x = obs_xx.flatten()
+        obs_y = obs_yy.flatten()
+        obs_z = np.full(obs_x.shape[0], cfg.OBS["z"])
+    return obs_x, obs_y, obs_z
 
 
 def create_observation_operator(model_name: ModelName) -> TemporalObservationOperator:
