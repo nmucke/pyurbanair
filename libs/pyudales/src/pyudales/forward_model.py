@@ -1,6 +1,7 @@
 import logging
 import os
 import pathlib
+import pdb
 import shutil
 import subprocess
 import time
@@ -17,7 +18,12 @@ from .utils.dir_utils import get_project_root, get_udales_directory_paths
 from .utils.file_utils import copy_files
 from .utils.namoptions_utils import NamoptionsFile, rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
-from .utils.params_utils import apply_inflow_settings, merge_params
+from .utils.nudging_utils import apply_time_varying_inflow
+from .utils.params_utils import (
+    apply_inflow_settings,
+    is_time_varying_params,
+    merge_params,
+)
 from .utils.random_utils import apply_random_initial_condition
 from .utils.save_frequency_utils import (
     apply_output_frequency,
@@ -34,11 +40,16 @@ DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp")
 # Default parameter values as xarray.Dataset
 DEFAULT_PARAMS = xarray.Dataset(
     data_vars={
-        "inflow_angle": 45,
+        "inflow_angle": 0,
         "velocity_magnitude": 3,
         "pressure_gradient_magnitude": 0.0041912,
     },
 )
+
+DEFAULT_NUDGING_CONFIG = {
+    "tnudge": 10.0,
+    "nnudge": 0,
+}
 
 DomainBounds = tuple[
     tuple[float, float],
@@ -114,6 +125,7 @@ class ForwardModel(BaseForwardModel):
         random_initial_condition_args: Optional[dict] = None,
         boundary_condition: str = "periodic",
         spinup_time: float = 0.0,
+        nudging_config: Optional[dict] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -142,6 +154,9 @@ class ForwardModel(BaseForwardModel):
             verbose: If True, print output from Fortran code execution. If False, suppress all output.
             temp_dir: The base temp directory (defaults to {cwd}/.temp).
             experiment_base_dir: The base directory for experiments (defaults to {temp_dir}/experiment).
+            nudging_config: Optional dict with nudging tunables for time-varying params.
+                Supported keys: ``tnudge`` (relaxation timescale in seconds, default 10.0),
+                ``nnudge`` (number of levels from bottom NOT nudged, default 0).
         """
         super().__init__(results_dir=results_dir)
 
@@ -218,10 +233,18 @@ class ForwardModel(BaseForwardModel):
             ncpu=self.ncpu,
         )
 
-        # Apply inflow settings
-        if self.params is None:
-            raise ValueError("ForwardModel parameters are unexpectedly unset.")
-        apply_inflow_settings(self.params, self.dirs)
+        # Store nudging config for time-varying params.
+        # When using inflow_outflow BCs, nudging is required for stability,
+        # so provide sensible defaults if no nudging config was given.
+        self._nudging_config = nudging_config or {}
+        if not self._nudging_config and self.boundary_condition == "inflow_outflow":
+            self._nudging_config = DEFAULT_NUDGING_CONFIG
+
+        # NOTE: inflow settings (nudging files, prof.inp, lscale.inp updates)
+        # are NOT applied here.  They are deferred to run_single() via
+        # _apply_inflow_settings() so that they run AFTER preprocessing
+        # (which deletes generated files via clean_temp_dir) and with the
+        # final parameter values (which may be provided at call time).
 
         if self.save_only_last_timestep:
             apply_save_only_last_timestep(self.dirs)
@@ -310,9 +333,7 @@ class ForwardModel(BaseForwardModel):
         y_offset = -bounds[1][0]
         z_offset = -bounds[2][0]
         if x_offset != 0.0 or y_offset != 0.0 or z_offset != 0.0:
-            self._shift_stl_geometry(
-                namoptions_path, (x_offset, y_offset, z_offset)
-            )
+            self._shift_stl_geometry(namoptions_path, (x_offset, y_offset, z_offset))
 
     def _shift_stl_geometry(
         self,
@@ -373,7 +394,31 @@ class ForwardModel(BaseForwardModel):
         if self.params is None:
             raise ValueError("ForwardModel parameters are unexpectedly unset.")
 
-        apply_inflow_settings(params=self.params, dirs=self.dirs)
+        use_nudging = (
+            is_time_varying_params(self.params)
+            or self.boundary_condition == "inflow_outflow"
+        )
+
+        if use_nudging:
+            logger.info(
+                "Applying inflow via nudging (time_varying=%s, BC=%s, nudging_config=%s)",
+                is_time_varying_params(self.params),
+                self.boundary_condition,
+                self._nudging_config,
+            )
+
+            apply_time_varying_inflow(
+                params=self.params,
+                dirs=self.dirs,
+                spinup_time=self.spinup_time,
+                simulation_time=(
+                    self._simulation_time if self._simulation_time is not None else 0.0
+                ),
+                **self._nudging_config,
+            )
+        else:
+            logger.info("Applying inflow via static settings (periodic BC)")
+            apply_inflow_settings(params=self.params, dirs=self.dirs)
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
         """Save simulation results to disk."""
@@ -495,9 +540,12 @@ class ForwardModel(BaseForwardModel):
             z_offset = self.bounds[2][0]
             coord_updates = {}
             for coord_name, offset in [
-                ("xt", x_offset), ("xm", x_offset),
-                ("yt", y_offset), ("ym", y_offset),
-                ("zt", z_offset), ("zm", z_offset),
+                ("xt", x_offset),
+                ("xm", x_offset),
+                ("yt", y_offset),
+                ("ym", y_offset),
+                ("zt", z_offset),
+                ("zm", z_offset),
             ]:
                 if coord_name in state.coords:
                     coord_updates[coord_name] = state.coords[coord_name].values + offset
@@ -509,9 +557,7 @@ class ForwardModel(BaseForwardModel):
             if state.sizes.get("time", 0) > spinup_outputs:
                 state = state.isel(time=slice(spinup_outputs, None))
                 if "time" in state.coords and state.sizes["time"] > 0:
-                    state = state.assign_coords(
-                        time=state.time - state.time.values[0]
-                    )
+                    state = state.assign_coords(time=state.time - state.time.values[0])
 
         return state
 
@@ -520,8 +566,7 @@ class ForwardModel(BaseForwardModel):
         self.spinup_time = 0.0
         if self._simulation_time is not None:
             namoptions_path = (
-                self.dirs.experiment_dir
-                / f"namoptions.{self.dirs.experiment_name}"
+                self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
             )
             namoptions = NamoptionsFile(namoptions_path)
             namoptions.set_value("RUN", "runtime", self._simulation_time)

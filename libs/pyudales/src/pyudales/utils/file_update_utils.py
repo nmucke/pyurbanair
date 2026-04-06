@@ -170,13 +170,13 @@ def update_lscale_file(
         return
 
     # Format: z uq vq pqx pqy wfls dqtdxls dqtdyls dqtdtls dthlrad
-    # Format strings: %-20.15f %-12.6f %-12.6f %-12.9f %-12.6f %-15.9f %-12.6f %-12.6f %-12.6f %-17.12f
+    # Format strings match preprocessing (write_lscale in preprocessing.py)
     column_formats = [
         "20.15f",  # z
         "12.6f",  # uq
         "12.6f",  # vq
         "12.9f",  # pqx
-        "12.6f",  # pqy
+        "12.9f",  # pqy (was 12.6f, fixed to match preprocessing 12.9f)
         "15.9f",  # wfls
         "12.6f",  # dqtdxls
         "12.6f",  # dqtdyls

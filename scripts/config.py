@@ -23,13 +23,13 @@ DOMAIN = {
     "nx": 120,
     "ny": 80,
     "nz": 8,
-    "bounds": ((-80.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-40.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 25.0,  # 3000 * 0.0538,
-    "output_frequency": 2.0,  # 3000 * 0.0538,
-    "spinup_time": 0.0,
+    "simulation_time": 50.0,  # 3000 * 0.0538,
+    "output_frequency": 0.5,  # 3000 * 0.0538,
+    "spinup_time": 20.0,
 }
 
 LBM_ARGS = {
@@ -51,7 +51,7 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 50,
+    "ensemble_size": 4,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
@@ -77,8 +77,8 @@ ESMDA = {
 }
 
 TRUE_PARAMS = {
-    "inflow_angle": 5.0,
-    "velocity_magnitude": 5.0,
+    "inflow_angle": -15.0,
+    "velocity_magnitude": 3.0,
     "pressure_gradient_magnitude": 0.0041912,
 }
 
