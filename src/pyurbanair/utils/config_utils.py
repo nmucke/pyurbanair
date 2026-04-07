@@ -112,7 +112,7 @@ def create_ensemble_forward_model(model_name: ModelName, forward_model: Any) -> 
     cfg = _cfg()
     ensemble_cfg = cfg.ENSEMBLE
     if model_name == "pylbm":
-        return LBMEnsembleForwardModel(  # type: ignore[abstract]
+        return LBMEnsembleForwardModel(
             forward_model=forward_model,
             ensemble_size=ensemble_cfg["ensemble_size"],
             num_parallel_processes=ensemble_cfg["num_parallel_processes"],
@@ -204,7 +204,12 @@ def create_observation_operator(model_name: ModelName) -> TemporalObservationOpe
         solver_name=solver_name(model_name),
     )
 
-    return TemporalObservationOperator(operator, mode=cfg.OBS["temporal_mode"])
+    return TemporalObservationOperator(
+        operator,
+        mode=cfg.OBS["temporal_mode"],
+        interval_size=cfg.OBS.get("interval_size"),
+        aggregation_mode=cfg.OBS.get("aggregation_mode", "mean"),
+    )
 
 
 def create_C_D(num_obs: int) -> jnp.ndarray:
