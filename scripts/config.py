@@ -77,7 +77,7 @@ ESMDA = {
 }
 
 TRUE_PARAMS = {
-    "inflow_angle": -15.0,
+    "inflow_angle": 10.0,
     "velocity_magnitude": 3.0,
     "pressure_gradient_magnitude": 0.0041912,
 }

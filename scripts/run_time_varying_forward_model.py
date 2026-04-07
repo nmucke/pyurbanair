@@ -1,8 +1,7 @@
-"""Run the uDALES forward model with time-varying inflow parameters.
+"""Run a forward model with time-varying inflow parameters.
 
-This script demonstrates running a simulation where inflow_angle and
-velocity_magnitude vary smoothly over the simulation interval using
-uDALES time-dependent nudging.
+Supports both pyudales (via time-dependent nudging) and pylbm (via
+``uvel_time.dat``).  Use ``--model`` to select which solver to run.
 """
 
 import argparse
@@ -15,8 +14,6 @@ if __package__ is None or __package__ == "":
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-from pyudales.forward_model import ForwardModel as UDALESForwardModel
-from pyudales.utils.grid_utils import interpolate_grid
 
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
@@ -25,7 +22,13 @@ from scripts import config
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run uDALES with time-varying inflow parameters."
+        description="Run a forward model with time-varying inflow parameters."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["pyudales", "pylbm"],
+        default="pyudales",
+        help="Which solver to use (default: pyudales).",
     )
     parser.add_argument(
         "--skip-viz",
@@ -47,9 +50,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    model_name: str = args.model
+
     # Build time-varying parameters
     # Time is relative to the simulation interval (not including spinup).
-    # apply_time_varying_inflow internally prepends a constant plateau for spinup.
+    # The forward model internally prepends a constant plateau for spinup.
     sim_time = config.TIME["simulation_time"]
     n_snapshots = 2
     time_seconds = np.linspace(0, sim_time, n_snapshots)
@@ -59,48 +64,67 @@ def main() -> None:
         vel = config.TRUE_PARAMS["velocity_magnitude"]
         print(f"Using TRUE_PARAMS: angle={angle}, vel={vel}")
     else:
-        angle = -15.0
+        angle = -25.0
         vel = 3.0
 
-    params = xr.Dataset(
-        data_vars={
-            "inflow_angle": ("time", np.linspace(angle, angle, n_snapshots)),
-            "velocity_magnitude": ("time", np.full(n_snapshots, vel)),
-            "pressure_gradient_magnitude": config.TRUE_PARAMS[
-                "pressure_gradient_magnitude"
-            ],
-        },
-        coords={"time": time_seconds},
-    )
+    data_vars: dict = {
+        "inflow_angle": ("time", np.linspace(angle, -angle, n_snapshots)),
+        "velocity_magnitude": ("time", np.full(n_snapshots, vel)),
+    }
+    # pressure_gradient_magnitude is only relevant for pyudales
+    if model_name == "pyudales":
+        data_vars["pressure_gradient_magnitude"] = config.TRUE_PARAMS[
+            "pressure_gradient_magnitude"
+        ]
 
-    # Create the forward model with time-varying params
-    model_kwargs = config.model_args("pyudales")
-    model_kwargs["params"] = params
-    model_kwargs["nudging_config"] = {"tnudge": 10.0, "nnudge": 0}
+    params = xr.Dataset(data_vars=data_vars, coords={"time": time_seconds})
+
+    # Create the forward model
+    model_kwargs = config.model_args(model_name)
     if args.results_dir is not None:
         model_kwargs["results_dir"] = pathlib.Path(args.results_dir)
 
-    fm = UDALESForwardModel(**model_kwargs)
-    config.prepare_forward_model("pyudales", fm)
-    config.clean_forward_model_outputs("pyudales", fm)
+    if model_name == "pyudales":
+        from pyudales.forward_model import ForwardModel as UDALESForwardModel
 
-    state = fm.run_single()
-    if state is None:
-        state = fm.get_states()
+        model_kwargs["params"] = params
+        model_kwargs["nudging_config"] = {"tnudge": 10.0, "nnudge": 0}
+        fm = UDALESForwardModel(**model_kwargs)
+    else:
+        from pylbm.forward_model import ForwardModel as LBMForwardModel
+
+        fm = LBMForwardModel(**model_kwargs)
+
+    config.prepare_forward_model(model_name, fm)
+    config.clean_forward_model_outputs(model_name, fm)
+
+    # For pylbm, params are passed to run_single; for pyudales they were
+    # passed at init and run_single uses the stored params.
+    if model_name == "pylbm":
+        state = fm.run_single(params=params)
+    else:
+        state = fm.run_single()
+        if state is None:
+            state = fm.get_states()
+
     state = add_velocity_magnitude(state)
 
-    print("Model: pyudales (time-varying inflow)")
+    print(f"Model: {model_name} (time-varying inflow)")
     print(f"Dims: {dict(state.sizes)}")
     print(f"Vars: {list(state.data_vars)}")
     print(
-        f"Inflow angle: {params['inflow_angle'].values[0]:.1f} -> {params['inflow_angle'].values[-1]:.1f} deg"
+        f"Inflow angle: {params['inflow_angle'].values[0]:.1f} -> "
+        f"{params['inflow_angle'].values[-1]:.1f} deg"
     )
     print(
-        f"Velocity magnitude: {params['velocity_magnitude'].values[0]:.1f} -> {params['velocity_magnitude'].values[-1]:.1f} m/s"
+        f"Velocity magnitude: {params['velocity_magnitude'].values[0]:.1f} -> "
+        f"{params['velocity_magnitude'].values[-1]:.1f} m/s"
     )
 
     if not args.skip_viz:
-        out_dir = config.BASE_RESULTS_DIR / "forward_model" / "pyudales_time_varying"
+        out_dir = (
+            config.BASE_RESULTS_DIR / "forward_model" / f"{model_name}_time_varying"
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
 
         plot_var = "vel_magnitude" if "vel_magnitude" in state.data_vars else "u"
@@ -108,12 +132,15 @@ def main() -> None:
         plt.figure(figsize=(6, 5))
         plt.imshow(plot_2d, origin="lower")
         plt.colorbar(label=plot_var)
-        plt.title(f"pyudales time-varying - {plot_var} (last time, mid z)")
+        plt.title(f"{model_name} time-varying - {plot_var} (last time, mid z)")
         plt.tight_layout()
         plt.savefig(out_dir / "field_snapshot.png")
         plt.close()
 
-        state = interpolate_grid(state)
+        if model_name == "pyudales":
+            from pyudales.utils.grid_utils import interpolate_grid
+
+            state = interpolate_grid(state)
 
         animate_state(
             state=state,
@@ -124,8 +151,8 @@ def main() -> None:
 
         plt.figure()
         for idx in [10, 40, 70]:
-            u_at_left_end = state.u.values[:, 1, idx, 1]
-            v_at_left_end = state.v.values[:, 1, idx, 1]
+            u_at_left_end = state.u.isel(z=1, y=idx, x=0).values
+            v_at_left_end = state.v.isel(z=1, y=idx, x=0).values
             inflow_angle_from_state = (
                 np.arctan2(v_at_left_end, u_at_left_end) * 180.0 / np.pi
             )
