@@ -220,9 +220,10 @@ def create_time_varying_parameter_ensemble(
 ) -> xarray.Dataset:
     """Create a time-varying parameter ensemble.
 
-    The prior is constant across time for each member — each member draws
-    a single scalar from the Gaussian prior and broadcasts it to all time
-    points.  The ESMDA will discover time variation from observations.
+    Each ensemble member draws an independent value at every time point
+    from the Gaussian prior.  This gives the Kalman update enough
+    ensemble spread per time point to reconstruct time variation from
+    observations.
     """
     cfg = _cfg()
     n = int(cfg.ENSEMBLE["ensemble_size"])
@@ -231,19 +232,19 @@ def create_time_varying_parameter_ensemble(
     rng_key = jax.random.PRNGKey(cfg.ESMDA["seed"])
 
     rng_key, subkey = jax.random.split(rng_key)
-    inflow_scalar = (
-        jax.random.normal(subkey, (n,)) * cfg.PARAM_PRIORS["inflow_angle_std"]
+    inflow = (
+        jax.random.normal(subkey, (num_time_points, n))
+        * cfg.PARAM_PRIORS["inflow_angle_std"]
         + cfg.PARAM_PRIORS["inflow_angle_mean"]
     )
-    inflow = jnp.broadcast_to(inflow_scalar[None, :], (num_time_points, n)).copy()
 
     rng_key, subkey = jax.random.split(rng_key)
-    vel_scalar = (
-        jax.random.normal(subkey, (n,)) * cfg.PARAM_PRIORS["velocity_std"]
+    vel = (
+        jax.random.normal(subkey, (num_time_points, n))
+        * cfg.PARAM_PRIORS["velocity_std"]
         + cfg.PARAM_PRIORS["velocity_mean"]
     )
-    vel_scalar = jnp.maximum(vel_scalar, 0.1)
-    vel = jnp.broadcast_to(vel_scalar[None, :], (num_time_points, n)).copy()
+    vel = jnp.maximum(vel, 0.1)
 
     data_vars: dict = {
         "inflow_angle": (("time", "ensemble"), inflow),

@@ -22,10 +22,10 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 100,
-    "ny": 80,
+    "nx": 50,
+    "ny": 40,
     "nz": 8,
-    "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-10.0, 20.0), (0.0, 20.0), (0.0, 40.0)),
 }
 
 TIME = {
@@ -40,7 +40,7 @@ LBM_ARGS = {
     "cuda": True,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
-    "compile": False,
+    "compile": True,
 }
 
 UDALES_ARGS = {
@@ -60,8 +60,8 @@ ENSEMBLE = {
 }
 
 OBS = {
-    "x_points": [-19.0, -19.0, -19.0, -19.0, -19.0],
-    "y_points": [10.0, 25.0, 40.0, 55.0, 70.0],
+    "x_points": [-8.0, -8.0, -8.0, -8.0, -8.0],
+    "y_points": [3.0, 6.0, 9.0, 12.0, 15.0],
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
