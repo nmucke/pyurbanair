@@ -68,6 +68,7 @@ def create_forward_model(
         args["results_dir"] = results_dir
 
     if model_name == "pylbm":
+        args.pop("compile")
         return LBMForwardModel(**args)
 
     return UDALESForwardModel(**args)
@@ -90,7 +91,8 @@ def prepare_forward_model(model_name: ModelName, forward_model: Any) -> None:
         else forward_model
     )
     if model_name == "pylbm":
-        model_to_prepare.compile()
+        args = model_args(model_name)
+        model_to_prepare.compile(compile=args["compile"])
     else:
         model_to_prepare.run_preprocessing(python_or_matlab="python")
 

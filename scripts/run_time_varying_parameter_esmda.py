@@ -196,8 +196,6 @@ def main() -> None:
             z_level=0,
         )
 
-        import pdb; pdb.set_trace()
-
         if isinstance(output, tuple):
             _plot_time_varying_params(
                 params_history=params_history,

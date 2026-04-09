@@ -22,10 +22,10 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 120,
+    "nx": 100,
     "ny": 80,
     "nz": 8,
-    "bounds": ((-40.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
@@ -37,9 +37,10 @@ TIME = {
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": False,
+    "cuda": True,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
+    "compile": False,
 }
 
 UDALES_ARGS = {
@@ -54,12 +55,12 @@ UDALES_ARGS = {
 
 ENSEMBLE = {
     "ensemble_size": 32,
-    "num_parallel_processes": 8,
+    "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
 
 OBS = {
-    "x_points": [-10.0, -10.0, -10.0, -10.0, -10.0],
+    "x_points": [-19.0, -19.0, -19.0, -19.0, -19.0],
     "y_points": [10.0, 25.0, 40.0, 55.0, 70.0],
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
@@ -94,8 +95,8 @@ PARAM_PRIORS = {
 
 TIME_VARYING_PARAMS = {
     "num_time_points": 10,
-    "inflow_angle_start": -45.0,
-    "inflow_angle_end": 45.0,
+    "inflow_angle_start": -20.0,
+    "inflow_angle_end": 20.0,
     "inflow_angle_sigmoid_center": 0.5,
     "inflow_angle_sigmoid_width": 0.1,
     "velocity_magnitude_start": 3.0,
