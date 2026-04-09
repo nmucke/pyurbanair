@@ -18,6 +18,12 @@ from .utils import Infile, apply_inflow_settings, compile_lbm, create_infile
 from .utils.environment_utils import identify_environment
 from .utils.infile_utils import _augment_runtime_library_paths
 from .utils.mod_dimensions_utils import set_experiment
+from .utils.params_utils import (
+    extract_initial_params,
+    is_time_varying_params,
+    remove_uvel_time_file,
+    write_uvel_time_file,
+)
 from .utils.state_utils import scale_velocity_to_physical
 
 
@@ -150,7 +156,10 @@ class ForwardModel(BaseForwardModel):
         self._set_infile_value("C_l", self.min_cell_size)
 
         if params is not None:
-            velocity_magnitude = params["velocity_magnitude"].item()
+            if is_time_varying_params(params):
+                velocity_magnitude = float(params["velocity_magnitude"].max().item())
+            else:
+                velocity_magnitude = params["velocity_magnitude"].item()
             self.C_u = int(velocity_magnitude * 15)
         else:
             self.C_u = 75
@@ -245,8 +254,22 @@ class ForwardModel(BaseForwardModel):
         )
 
     def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
-        """Apply the inflow settings to the forward model."""
-        apply_inflow_settings(params=params, dirs=self.dirs)
+        """Apply the inflow settings to the forward model.
+
+        For time-varying parameters (Dataset with a ``time`` dimension),
+        writes ``uvel_time.dat`` for the Fortran code and sets initial
+        static values in ``infile.in``.  For static parameters, removes
+        any stale ``uvel_time.dat`` and applies the values directly.
+        """
+        if is_time_varying_params(params):
+            write_uvel_time_file(
+                params=params, dirs=self.dirs, spinup_time=self.spinup_time
+            )
+            initial_params = extract_initial_params(params)
+            apply_inflow_settings(params=initial_params, dirs=self.dirs)
+        else:
+            remove_uvel_time_file(self.dirs)
+            apply_inflow_settings(params=params, dirs=self.dirs)
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
         """Save simulation results to disk."""
