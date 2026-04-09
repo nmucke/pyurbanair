@@ -165,6 +165,94 @@ def create_parameter_ensemble(model_name: ModelName) -> xarray.Dataset:
     return xarray.Dataset(data_vars=data_vars, coords={"ensemble": jnp.arange(n)})
 
 
+def create_time_varying_true_params(
+    model_name: ModelName,
+    num_time_points: int,
+) -> xarray.Dataset:
+    """Create time-varying true parameters using a sigmoid profile."""
+    cfg = _cfg()
+    tv = cfg.TIME_VARYING_PARAMS
+    sim_time = cfg.TIME["simulation_time"]
+    time_coords = np.linspace(0, sim_time, num_time_points)
+
+    def _sigmoid(
+        t: np.ndarray,
+        start: float,
+        end: float,
+        center_frac: float,
+        width_frac: float,
+    ) -> np.ndarray:
+        center = center_frac * sim_time
+        width = max(width_frac * sim_time, 1e-6)
+        return start + (end - start) / (1 + np.exp(-(t - center) / width))
+
+    inflow_angle = _sigmoid(
+        time_coords,
+        tv["inflow_angle_start"],
+        tv["inflow_angle_end"],
+        tv["inflow_angle_sigmoid_center"],
+        tv["inflow_angle_sigmoid_width"],
+    )
+    velocity_magnitude = _sigmoid(
+        time_coords,
+        tv["velocity_magnitude_start"],
+        tv["velocity_magnitude_end"],
+        tv["velocity_magnitude_sigmoid_center"],
+        tv["velocity_magnitude_sigmoid_width"],
+    )
+
+    data_vars: dict = {
+        "inflow_angle": ("time", inflow_angle),
+        "velocity_magnitude": ("time", velocity_magnitude),
+    }
+    if model_name == "pyudales":
+        data_vars["pressure_gradient_magnitude"] = cfg.TRUE_PARAMS[
+            "pressure_gradient_magnitude"
+        ]
+    return xarray.Dataset(data_vars=data_vars, coords={"time": time_coords})
+
+
+def create_time_varying_parameter_ensemble(
+    model_name: ModelName,
+    num_time_points: int,
+) -> xarray.Dataset:
+    """Create a time-varying parameter ensemble.
+
+    The prior is constant across time for each member — each member draws
+    a single scalar from the Gaussian prior and broadcasts it to all time
+    points.  The ESMDA will discover time variation from observations.
+    """
+    cfg = _cfg()
+    n = int(cfg.ENSEMBLE["ensemble_size"])
+    sim_time = cfg.TIME["simulation_time"]
+    time_coords = jnp.linspace(0, sim_time, num_time_points)
+    rng_key = jax.random.PRNGKey(cfg.ESMDA["seed"])
+
+    rng_key, subkey = jax.random.split(rng_key)
+    inflow_scalar = (
+        jax.random.normal(subkey, (n,)) * cfg.PARAM_PRIORS["inflow_angle_std"]
+        + cfg.PARAM_PRIORS["inflow_angle_mean"]
+    )
+    inflow = jnp.broadcast_to(inflow_scalar[None, :], (num_time_points, n)).copy()
+
+    rng_key, subkey = jax.random.split(rng_key)
+    vel_scalar = (
+        jax.random.normal(subkey, (n,)) * cfg.PARAM_PRIORS["velocity_std"]
+        + cfg.PARAM_PRIORS["velocity_mean"]
+    )
+    vel_scalar = jnp.maximum(vel_scalar, 0.1)
+    vel = jnp.broadcast_to(vel_scalar[None, :], (num_time_points, n)).copy()
+
+    data_vars: dict = {
+        "inflow_angle": (("time", "ensemble"), inflow),
+        "velocity_magnitude": (("time", "ensemble"), vel),
+    }
+    return xarray.Dataset(
+        data_vars=data_vars,
+        coords={"time": time_coords, "ensemble": jnp.arange(n)},
+    )
+
+
 def create_initial_state_ensemble(state: xarray.Dataset) -> xarray.Dataset:
     cfg = _cfg()
     n = int(cfg.ENSEMBLE["ensemble_size"])

@@ -206,6 +206,99 @@ class ParameterESMDA(_BaseESMDA):
         return None, xarray.Dataset(data_vars=updated_data_vars, coords=params.coords)
 
 
+class TimeVaryingParameterESMDA(ParameterESMDA):
+    """Parameter-only ESMDA for time-varying inflow parameters.
+
+    Each time point of each parameter is treated as an independent scalar
+    parameter during the Kalman update.  The flattening groups all time
+    points of one parameter together (e.g. ``inflow_angle_0``, …,
+    ``inflow_angle_{N_t-1}``, ``velocity_magnitude_0``, …) so that
+    different physical quantities are never mixed.
+    """
+
+    def __init__(
+        self,
+        observation_operator: ObservationOperator,
+        forward_model: BaseEnsembleForwardModel,
+        C_D: jnp.ndarray,
+        num_time_points: int,
+        time_coords: jnp.ndarray,
+        num_steps: int = 3,
+        alpha: Optional[float] = None,
+        rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
+    ) -> None:
+        super().__init__(
+            observation_operator=observation_operator,
+            forward_model=forward_model,
+            C_D=C_D,
+            num_steps=num_steps,
+            alpha=alpha,
+            rng_key=rng_key,
+        )
+        self.num_time_points = num_time_points
+        self.time_coords = time_coords
+
+    def _flatten_time_varying_params(
+        self, params: xarray.Dataset
+    ) -> xarray.Dataset:
+        """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars.
+
+        Each variable with a ``time`` dimension is expanded into
+        ``{name}_0``, ``{name}_1``, … so that all time points of one
+        parameter are contiguous.  Variables without a ``time`` dimension
+        are passed through unchanged.
+        """
+        flat_data_vars: dict = {}
+        for name in params.data_vars:
+            if "time" in params[name].dims:
+                for t_idx in range(self.num_time_points):
+                    flat_data_vars[f"{name}_{t_idx}"] = (
+                        "ensemble",
+                        jnp.asarray(params[name].isel(time=t_idx).values),
+                    )
+            else:
+                flat_data_vars[name] = (
+                    "ensemble",
+                    jnp.asarray(params[name].values),
+                )
+        return xarray.Dataset(
+            data_vars=flat_data_vars,
+            coords={"ensemble": params.coords["ensemble"]},
+        )
+
+    def _unflatten_params(
+        self,
+        flat_params: xarray.Dataset,
+        original_params: xarray.Dataset,
+    ) -> xarray.Dataset:
+        """Reverse :meth:`_flatten_time_varying_params`."""
+        data_vars: dict = {}
+        for name in original_params.data_vars:
+            if "time" in original_params[name].dims:
+                time_slices = [
+                    jnp.asarray(flat_params[f"{name}_{t_idx}"].values)
+                    for t_idx in range(self.num_time_points)
+                ]
+                data_vars[name] = (
+                    ("time", "ensemble"),
+                    jnp.stack(time_slices, axis=0),
+                )
+            else:
+                data_vars[name] = flat_params[name]
+        return xarray.Dataset(data_vars=data_vars, coords=original_params.coords)
+
+    def _one_step(
+        self,
+        params: xarray.Dataset,
+        obs: jnp.ndarray,
+        state: Optional[xarray.Dataset] = None,
+    ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
+        flat_params = self._flatten_time_varying_params(params)
+        _, updated_flat = super()._one_step(flat_params, obs, state)
+        updated_params = self._unflatten_params(updated_flat, params)
+        return None, updated_params
+
+
 class StateAndParameterESMDA(_BaseESMDA):
     """Joint state and parameter ESMDA smoothing."""
 
