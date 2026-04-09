@@ -56,7 +56,7 @@ def main() -> None:
     # Time is relative to the simulation interval (not including spinup).
     # The forward model internally prepends a constant plateau for spinup.
     sim_time = config.TIME["simulation_time"]
-    n_snapshots = 2
+    n_snapshots = 100
     time_seconds = np.linspace(0, sim_time, n_snapshots)
 
     if args.use_true_params:
@@ -64,13 +64,22 @@ def main() -> None:
         vel = config.TRUE_PARAMS["velocity_magnitude"]
         print(f"Using TRUE_PARAMS: angle={angle}, vel={vel}")
     else:
-        angle = -25.0
+        angle = -45.0
         vel = 3.0
 
+        x = np.linspace(angle, -angle, n_snapshots)
+
+        def sigmoid(x, center, width, min_val, max_val):
+            return min_val + (max_val - min_val) / (1 + np.exp(-(x - center) / width))
+
+        inflow_vec = sigmoid(x, center=-30.0, width=5.0, min_val=angle, max_val=-angle)
+
+
     data_vars: dict = {
-        "inflow_angle": ("time", np.linspace(angle, -angle, n_snapshots)),
+        "inflow_angle": ("time", inflow_vec),
         "velocity_magnitude": ("time", np.full(n_snapshots, vel)),
     }
+
     # pressure_gradient_magnitude is only relevant for pyudales
     if model_name == "pyudales":
         data_vars["pressure_gradient_magnitude"] = config.TRUE_PARAMS[
