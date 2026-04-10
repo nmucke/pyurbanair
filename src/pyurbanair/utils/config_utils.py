@@ -214,35 +214,88 @@ def create_time_varying_true_params(
     return xarray.Dataset(data_vars=data_vars, coords={"time": time_coords})
 
 
+def _sample_smooth_ensemble(
+    rng_key: jax.random.PRNGKey,
+    time_coords: jnp.ndarray,
+    mean: float,
+    std: float,
+    ensemble_size: int,
+    correlation_length: float,
+) -> jnp.ndarray:
+    """Draw smooth ensemble trajectories from a Gaussian process prior.
+
+    Uses a squared-exponential (RBF) kernel so that nearby time points
+    are correlated.  The marginal distribution at each time point is
+    approximately N(mean, std).
+
+    Args:
+        rng_key: JAX random key.
+        time_coords: 1-D array of time values in seconds, shape ``(N_t,)``.
+        mean: Prior mean.
+        std: Prior standard deviation.
+        ensemble_size: Number of ensemble members.
+        correlation_length: Temporal correlation length in seconds.
+            Controls smoothness — larger values produce smoother
+            trajectories.
+
+    Returns:
+        Array of shape ``(N_t, ensemble_size)``.
+    """
+    num_time_points = time_coords.shape[0]
+
+    # Build squared-exponential covariance: K[i,j] = exp(-0.5 * dt^2 / l^2)
+    dt = time_coords[:, None] - time_coords[None, :]
+    K = jnp.exp(-0.5 * (dt / jnp.maximum(correlation_length, 1e-6)) ** 2)
+    K = K + 1e-6 * jnp.eye(num_time_points)  # numerical stability
+
+    L = jnp.linalg.cholesky(K)
+
+    # Draw iid normals and correlate: L @ z ~ N(0, K)
+    z = jax.random.normal(rng_key, (num_time_points, ensemble_size))
+    correlated = L @ z  # (N_t, ensemble_size)
+
+    return correlated * std + mean
+
+
 def create_time_varying_parameter_ensemble(
     model_name: ModelName,
     num_time_points: int,
 ) -> xarray.Dataset:
-    """Create a time-varying parameter ensemble.
+    """Create a time-varying parameter ensemble with smooth trajectories.
 
-    Each ensemble member draws an independent value at every time point
-    from the Gaussian prior.  This gives the Kalman update enough
-    ensemble spread per time point to reconstruct time variation from
-    observations.
+    Each ensemble member is a smooth function of time drawn from a
+    Gaussian process prior with a squared-exponential kernel.  The
+    ``prior_correlation_length`` config key (in seconds) controls how
+    smooth the trajectories are — larger values produce gentler
+    variations that are less likely to cause solver instability.
     """
     cfg = _cfg()
     n = int(cfg.ENSEMBLE["ensemble_size"])
     sim_time = cfg.TIME["simulation_time"]
     time_coords = jnp.linspace(0, sim_time, num_time_points)
     rng_key = jax.random.PRNGKey(cfg.ESMDA["seed"])
-
-    rng_key, subkey = jax.random.split(rng_key)
-    inflow = (
-        jax.random.normal(subkey, (num_time_points, n))
-        * cfg.PARAM_PRIORS["inflow_angle_std"]
-        + cfg.PARAM_PRIORS["inflow_angle_mean"]
+    correlation_length = cfg.TIME_VARYING_PARAMS.get(
+        "prior_correlation_length", sim_time / 4
     )
 
     rng_key, subkey = jax.random.split(rng_key)
-    vel = (
-        jax.random.normal(subkey, (num_time_points, n))
-        * cfg.PARAM_PRIORS["velocity_std"]
-        + cfg.PARAM_PRIORS["velocity_mean"]
+    inflow = _sample_smooth_ensemble(
+        subkey,
+        time_coords,
+        mean=cfg.PARAM_PRIORS["inflow_angle_mean"],
+        std=cfg.PARAM_PRIORS["inflow_angle_std"],
+        ensemble_size=n,
+        correlation_length=correlation_length,
+    )
+
+    rng_key, subkey = jax.random.split(rng_key)
+    vel = _sample_smooth_ensemble(
+        subkey,
+        time_coords,
+        mean=cfg.PARAM_PRIORS["velocity_mean"],
+        std=cfg.PARAM_PRIORS["velocity_std"],
+        ensemble_size=n,
+        correlation_length=correlation_length,
     )
     vel = jnp.maximum(vel, 0.1)
 

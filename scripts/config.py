@@ -22,16 +22,16 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 50,
-    "ny": 40,
+    "nx": 100,
+    "ny": 80,
     "nz": 8,
-    "bounds": ((-10.0, 20.0), (0.0, 20.0), (0.0, 40.0)),
+    "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 50.0,  # 3000 * 0.0538,
+    "simulation_time": 20.0,  # 3000 * 0.0538,
     "output_frequency": 1.0,  # 3000 * 0.0538,
-    "spinup_time": 20.0,
+    "spinup_time": 10.0,
 }
 
 LBM_ARGS = {
@@ -55,13 +55,13 @@ UDALES_ARGS = {
 
 ENSEMBLE = {
     "ensemble_size": 32,
-    "num_parallel_processes": 1,
+    "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
 }
 
 OBS = {
-    "x_points": [-8.0, -8.0, -8.0, -8.0, -8.0],
-    "y_points": [3.0, 6.0, 9.0, 12.0, 15.0],
+    "x_points": [20.0, 20.0, 40.0, 40.0, 60.0],
+    "y_points": [20.0, 60.0, 10.0, 30.0, 60.0],
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
@@ -95,6 +95,7 @@ PARAM_PRIORS = {
 
 TIME_VARYING_PARAMS = {
     "num_time_points": 10,
+    "prior_correlation_length": 5.0,  # seconds — controls smoothness of GP prior
     "inflow_angle_start": -20.0,
     "inflow_angle_end": 20.0,
     "inflow_angle_sigmoid_center": 0.5,
