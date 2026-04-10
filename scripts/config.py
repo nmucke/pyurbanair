@@ -55,7 +55,7 @@ UDALES_ARGS = {
 
 ENSEMBLE = {
     "ensemble_size": 32,
-    "num_parallel_processes": 8,
+    "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
 
