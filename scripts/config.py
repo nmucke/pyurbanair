@@ -16,6 +16,7 @@ from pyurbanair.utils.config_utils import (
     create_true_params,
     model_args,
     prepare_forward_model,
+    sample_smooth_ensemble,
     solver_name,
 )
 
@@ -29,15 +30,15 @@ DOMAIN = {
 }
 
 TIME = {
-    "simulation_time": 20.0,  # 3000 * 0.0538,
+    "simulation_time": 10.0,  # 3000 * 0.0538,
     "output_frequency": 1.0,  # 3000 * 0.0538,
-    "spinup_time": 10.0,
+    "spinup_time": 5.0,
 }
 
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": True,
+    "cuda": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "compile": True,
@@ -54,7 +55,7 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 32,
+    "ensemble_size": 4,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
@@ -70,8 +71,8 @@ OBS = {
 }
 
 ESMDA = {
-    "num_steps": 2,
-    "num_assimilation_windows": 2,
+    "num_steps": 1,
+    "num_assimilation_windows": 3,
     "seed": 42,
     "obs_error_std": 0.1,
     "init_conditions_dir": "esmda_init_conditions",
@@ -96,6 +97,7 @@ PARAM_PRIORS = {
 TIME_VARYING_PARAMS = {
     "num_time_points": 10,
     "prior_correlation_length": 5.0,  # seconds — controls smoothness of GP prior
+    "truth_correlation_length": 10.0,  # seconds — different from prior to avoid inverse crime
     "inflow_angle_start": -20.0,
     "inflow_angle_end": 20.0,
     "inflow_angle_sigmoid_center": 0.5,

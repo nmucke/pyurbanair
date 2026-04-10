@@ -214,7 +214,7 @@ def create_time_varying_true_params(
     return xarray.Dataset(data_vars=data_vars, coords={"time": time_coords})
 
 
-def _sample_smooth_ensemble(
+def sample_smooth_ensemble(
     rng_key: jax.random.PRNGKey,
     time_coords: jnp.ndarray,
     mean: float,
@@ -279,7 +279,7 @@ def create_time_varying_parameter_ensemble(
     )
 
     rng_key, subkey = jax.random.split(rng_key)
-    inflow = _sample_smooth_ensemble(
+    inflow = sample_smooth_ensemble(
         subkey,
         time_coords,
         mean=cfg.PARAM_PRIORS["inflow_angle_mean"],
@@ -289,7 +289,7 @@ def create_time_varying_parameter_ensemble(
     )
 
     rng_key, subkey = jax.random.split(rng_key)
-    vel = _sample_smooth_ensemble(
+    vel = sample_smooth_ensemble(
         subkey,
         time_coords,
         mean=cfg.PARAM_PRIORS["velocity_mean"],
