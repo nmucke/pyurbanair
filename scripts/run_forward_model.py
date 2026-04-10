@@ -88,54 +88,5 @@ def main() -> None:
         )
         print(f"Saved visualization outputs in {out_dir}")
 
-        import numpy as np
-
-        plt.figure()
-        for idx in [10, 40, 70]:
-            u_at_left_end = state.u.isel(z=1, y=idx, x=0).values
-            v_at_left_end = state.v.isel(z=1, y=idx, x=0).values
-            inflow_angle_from_state = (
-                np.arctan2(v_at_left_end, u_at_left_end) * 180.0 / np.pi
-            )
-            plt.plot(inflow_angle_from_state, label=f"idx={idx}")
-        plt.legend()
-        plt.title("inflow angle from state")
-        plt.xlabel("time")
-        plt.ylabel("inflow angle")
-        plt.show()
-
-        print(f"\n--- Inflow angle diagnostics ---")
-        print(f"state.u.dims = {state.u.dims}")
-        print(f"state.u.shape = {state.u.shape}")
-
-        t_mid = state.sizes["time"] // 2
-        sample = state.isel(time=t_mid, x=0)
-        for zi in range(min(state.sizes["z"], 4)):
-            s = sample.isel(z=zi)
-            u_mean = float(s.u.mean())
-            v_mean = float(s.v.mean())
-            w_mean = float(s.w.mean())
-            angle = np.degrees(np.arctan2(v_mean, u_mean))
-            mag = np.sqrt(u_mean**2 + v_mean**2)
-            print(
-                f"  z={zi}: u={u_mean:.4f}, v={v_mean:.4f}, w={w_mean:.4f}, "
-                f"|uv|={mag:.4f}, angle(v,u)={angle:.2f}°"
-            )
-
-        print(f"\nAngle vs x-position (z=0, y=40, mid-time):")
-        for xi in [0, 1, 2, 5, 10, 60, 119]:
-            s = state.isel(time=t_mid, z=0, y=40, x=xi)
-            u_val = float(s.u)
-            v_val = float(s.v)
-            w_val = float(s.w)
-            angle = np.degrees(np.arctan2(v_val, u_val))
-            print(
-                f"  x={xi}: u={u_val:.4f}, v={v_val:.4f}, w={w_val:.4f}, "
-                f"angle={angle:.2f}°"
-            )
-
-        print(f"--- End diagnostics ---\n")
-
-
 if __name__ == "__main__":
     main()

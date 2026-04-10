@@ -270,6 +270,7 @@ class TemporalObservationOperator:
                 obs_per_interval.append(
                     self.observation_operator._observation_single(aggregated)
                 )
+                
             return np.concatenate(obs_per_interval)
 
         # Aggregation path (mean, median, max, min)

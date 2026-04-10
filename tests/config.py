@@ -11,6 +11,8 @@ from pyurbanair.utils.config_utils import (
     create_observation_points,
     create_parameter_ensemble,
     create_rollout_forward_model,
+    create_time_varying_parameter_ensemble,
+    create_time_varying_true_params,
     create_true_params,
     model_args,
     prepare_forward_model,
@@ -88,4 +90,17 @@ PARAM_PRIORS = {
     "velocity_std": 1.0,
     "pressure_mean": 0.0041912,
     "pressure_std": 0.001,
+}
+
+TIME_VARYING_PARAMS = {
+    "num_time_points": 3,
+    "prior_correlation_length": 2.0,  # seconds — controls smoothness of GP prior
+    "inflow_angle_start": -10.0,
+    "inflow_angle_end": 10.0,
+    "inflow_angle_sigmoid_center": 0.5,
+    "inflow_angle_sigmoid_width": 0.1,
+    "velocity_magnitude_start": 3.0,
+    "velocity_magnitude_end": 5.0,
+    "velocity_magnitude_sigmoid_center": 0.5,
+    "velocity_magnitude_sigmoid_width": 0.1,
 }

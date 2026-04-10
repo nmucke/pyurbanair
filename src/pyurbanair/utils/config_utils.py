@@ -68,6 +68,7 @@ def create_forward_model(
         args["results_dir"] = results_dir
 
     if model_name == "pylbm":
+        args.pop("compile")
         return LBMForwardModel(**args)
 
     return UDALESForwardModel(**args)
@@ -90,7 +91,8 @@ def prepare_forward_model(model_name: ModelName, forward_model: Any) -> None:
         else forward_model
     )
     if model_name == "pylbm":
-        model_to_prepare.compile()
+        args = model_args(model_name)
+        model_to_prepare.compile(compile=args["compile"])
     else:
         model_to_prepare.run_preprocessing(python_or_matlab="python")
 
@@ -163,6 +165,148 @@ def create_parameter_ensemble(model_name: ModelName) -> xarray.Dataset:
     }
 
     return xarray.Dataset(data_vars=data_vars, coords={"ensemble": jnp.arange(n)})
+
+
+def create_time_varying_true_params(
+    model_name: ModelName,
+    num_time_points: int,
+) -> xarray.Dataset:
+    """Create time-varying true parameters using a sigmoid profile."""
+    cfg = _cfg()
+    tv = cfg.TIME_VARYING_PARAMS
+    sim_time = cfg.TIME["simulation_time"]
+    time_coords = np.linspace(0, sim_time, num_time_points)
+
+    def _sigmoid(
+        t: np.ndarray,
+        start: float,
+        end: float,
+        center_frac: float,
+        width_frac: float,
+    ) -> np.ndarray:
+        center = center_frac * sim_time
+        width = max(width_frac * sim_time, 1e-6)
+        return start + (end - start) / (1 + np.exp(-(t - center) / width))
+
+    inflow_angle = _sigmoid(
+        time_coords,
+        tv["inflow_angle_start"],
+        tv["inflow_angle_end"],
+        tv["inflow_angle_sigmoid_center"],
+        tv["inflow_angle_sigmoid_width"],
+    )
+    velocity_magnitude = _sigmoid(
+        time_coords,
+        tv["velocity_magnitude_start"],
+        tv["velocity_magnitude_end"],
+        tv["velocity_magnitude_sigmoid_center"],
+        tv["velocity_magnitude_sigmoid_width"],
+    )
+
+    data_vars: dict = {
+        "inflow_angle": ("time", inflow_angle),
+        "velocity_magnitude": ("time", velocity_magnitude),
+    }
+    if model_name == "pyudales":
+        data_vars["pressure_gradient_magnitude"] = cfg.TRUE_PARAMS[
+            "pressure_gradient_magnitude"
+        ]
+    return xarray.Dataset(data_vars=data_vars, coords={"time": time_coords})
+
+
+def _sample_smooth_ensemble(
+    rng_key: jax.random.PRNGKey,
+    time_coords: jnp.ndarray,
+    mean: float,
+    std: float,
+    ensemble_size: int,
+    correlation_length: float,
+) -> jnp.ndarray:
+    """Draw smooth ensemble trajectories from a Gaussian process prior.
+
+    Uses a squared-exponential (RBF) kernel so that nearby time points
+    are correlated.  The marginal distribution at each time point is
+    approximately N(mean, std).
+
+    Args:
+        rng_key: JAX random key.
+        time_coords: 1-D array of time values in seconds, shape ``(N_t,)``.
+        mean: Prior mean.
+        std: Prior standard deviation.
+        ensemble_size: Number of ensemble members.
+        correlation_length: Temporal correlation length in seconds.
+            Controls smoothness — larger values produce smoother
+            trajectories.
+
+    Returns:
+        Array of shape ``(N_t, ensemble_size)``.
+    """
+    num_time_points = time_coords.shape[0]
+
+    # Build squared-exponential covariance: K[i,j] = exp(-0.5 * dt^2 / l^2)
+    dt = time_coords[:, None] - time_coords[None, :]
+    K = jnp.exp(-0.5 * (dt / jnp.maximum(correlation_length, 1e-6)) ** 2)
+    K = K + 1e-6 * jnp.eye(num_time_points)  # numerical stability
+
+    L = jnp.linalg.cholesky(K)
+
+    # Draw iid normals and correlate: L @ z ~ N(0, K)
+    z = jax.random.normal(rng_key, (num_time_points, ensemble_size))
+    correlated = L @ z  # (N_t, ensemble_size)
+
+    return correlated * std + mean
+
+
+def create_time_varying_parameter_ensemble(
+    model_name: ModelName,
+    num_time_points: int,
+) -> xarray.Dataset:
+    """Create a time-varying parameter ensemble with smooth trajectories.
+
+    Each ensemble member is a smooth function of time drawn from a
+    Gaussian process prior with a squared-exponential kernel.  The
+    ``prior_correlation_length`` config key (in seconds) controls how
+    smooth the trajectories are — larger values produce gentler
+    variations that are less likely to cause solver instability.
+    """
+    cfg = _cfg()
+    n = int(cfg.ENSEMBLE["ensemble_size"])
+    sim_time = cfg.TIME["simulation_time"]
+    time_coords = jnp.linspace(0, sim_time, num_time_points)
+    rng_key = jax.random.PRNGKey(cfg.ESMDA["seed"])
+    correlation_length = cfg.TIME_VARYING_PARAMS.get(
+        "prior_correlation_length", sim_time / 4
+    )
+
+    rng_key, subkey = jax.random.split(rng_key)
+    inflow = _sample_smooth_ensemble(
+        subkey,
+        time_coords,
+        mean=cfg.PARAM_PRIORS["inflow_angle_mean"],
+        std=cfg.PARAM_PRIORS["inflow_angle_std"],
+        ensemble_size=n,
+        correlation_length=correlation_length,
+    )
+
+    rng_key, subkey = jax.random.split(rng_key)
+    vel = _sample_smooth_ensemble(
+        subkey,
+        time_coords,
+        mean=cfg.PARAM_PRIORS["velocity_mean"],
+        std=cfg.PARAM_PRIORS["velocity_std"],
+        ensemble_size=n,
+        correlation_length=correlation_length,
+    )
+    vel = jnp.maximum(vel, 0.1)
+
+    data_vars: dict = {
+        "inflow_angle": (("time", "ensemble"), inflow),
+        "velocity_magnitude": (("time", "ensemble"), vel),
+    }
+    return xarray.Dataset(
+        data_vars=data_vars,
+        coords={"time": time_coords, "ensemble": jnp.arange(n)},
+    )
 
 
 def create_initial_state_ensemble(state: xarray.Dataset) -> xarray.Dataset:

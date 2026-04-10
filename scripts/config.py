@@ -11,6 +11,8 @@ from pyurbanair.utils.config_utils import (
     create_observation_points,
     create_parameter_ensemble,
     create_rollout_forward_model,
+    create_time_varying_parameter_ensemble,
+    create_time_varying_true_params,
     create_true_params,
     model_args,
     prepare_forward_model,
@@ -20,24 +22,25 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 120,
+    "nx": 100,
     "ny": 80,
     "nz": 8,
-    "bounds": ((-40.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 200.0,  # 3000 * 0.0538,
-    "output_frequency": 0.5,  # 3000 * 0.0538,
-    "spinup_time": 20.0,
+    "simulation_time": 20.0,  # 3000 * 0.0538,
+    "output_frequency": 1.0,  # 3000 * 0.0538,
+    "spinup_time": 10.0,
 }
 
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": False,
+    "cuda": True,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
+    "compile": True,
 }
 
 UDALES_ARGS = {
@@ -51,15 +54,15 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 4,
+    "ensemble_size": 32,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
 
 OBS = {
-    "x_points": [10.0, 15.0, 20.0, 25.0, 30.0],
-    "y_points": [10.0, 15.0, 20.0, 25.0, 30.0],
-    "z_points": [2.0, 2.0, 2.0, 2.0, 2.0],
+    "x_points": [20.0, 20.0, 40.0, 40.0, 60.0],
+    "y_points": [20.0, 60.0, 10.0, 30.0, 60.0],
+    "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
     "interval_size": 5,
@@ -88,4 +91,17 @@ PARAM_PRIORS = {
     "velocity_std": 1.0,
     "pressure_mean": 0.0041912,
     "pressure_std": 0.001,
+}
+
+TIME_VARYING_PARAMS = {
+    "num_time_points": 10,
+    "prior_correlation_length": 5.0,  # seconds — controls smoothness of GP prior
+    "inflow_angle_start": -20.0,
+    "inflow_angle_end": 20.0,
+    "inflow_angle_sigmoid_center": 0.5,
+    "inflow_angle_sigmoid_width": 0.1,
+    "velocity_magnitude_start": 3.0,
+    "velocity_magnitude_end": 5.0,
+    "velocity_magnitude_sigmoid_center": 0.5,
+    "velocity_magnitude_sigmoid_width": 0.1,
 }

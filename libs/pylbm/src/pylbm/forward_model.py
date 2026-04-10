@@ -123,15 +123,16 @@ class ForwardModel(BaseForwardModel):
             raise ValueError("C_u in infile.in must be > 0.")
         return c_l / c_u
 
-    def compile(self) -> None:
+    def compile(self, compile: bool = True) -> None:
         """Compile the LBM program."""
         # Compile program
-        compile_lbm(
-            dirs=self.dirs,
-            verbose=self.verbose,
-            enable_cuda=self.cuda,
-            enable_netcdf=self.enable_netcdf,
-        )
+        if compile:
+            compile_lbm(
+                dirs=self.dirs,
+                verbose=self.verbose,
+                enable_cuda=self.cuda,
+                enable_netcdf=self.enable_netcdf,
+            )
 
         # Create infile.in by running the executable (only if it doesn't exist)
         if not self.dirs.infile_path.exists():
