@@ -354,6 +354,12 @@ def main() -> None:
                 correlation_length=prior_corr_length,
                 include_std=False,
             )
+            # Clamp velocity to avoid C_u=0 in LBM (same guard as
+            # create_time_varying_parameter_ensemble).
+            if "velocity_magnitude" in params_ensemble.data_vars:
+                params_ensemble["velocity_magnitude"] = params_ensemble[
+                    "velocity_magnitude"
+                ].clip(min=0.1)
             extrapolated_params_list.append(params_ensemble)
 
     # ---- Save outputs -----------------------------------------------------
