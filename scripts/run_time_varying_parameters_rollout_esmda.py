@@ -141,37 +141,38 @@ def _plot_time_varying_params_rollout(
         )
         ax.plot(true_times, true_vals, color="C0", linewidth=2, label="True")
 
-        # Posterior per window
+        # Posterior per window — individual ensemble trajectories + mean
+        for w, post_ds in enumerate(posterior_params_list):
+            t = np.asarray(post_ds.coords["time"].values)
+            n_ens = post_ds.sizes["ensemble"]
+            for e in range(n_ens):
+                vals = np.asarray(post_ds[name].isel(ensemble=e).values)
+                label = "Posterior members" if w == 0 and e == 0 else None
+                ax.plot(t, vals, color="C1", linewidth=0.5, alpha=0.4, label=label)
         for w, post_ds in enumerate(posterior_params_list):
             t = np.asarray(post_ds.coords["time"].values)
             ens_mean = np.asarray(post_ds[name].mean(dim="ensemble").values)
-            ens_std = np.asarray(post_ds[name].std(dim="ensemble").values)
             label = "Posterior mean" if w == 0 else None
-            ax.plot(t, ens_mean, color="C1", linewidth=2, label=label)
-            ax.fill_between(
-                t,
-                ens_mean - ens_std,
-                ens_mean + ens_std,
-                color="C1",
-                alpha=0.25,
-                label="Posterior ±1σ" if w == 0 else None,
-            )
+            ax.plot(t, ens_mean, color="C3", linewidth=2.5, zorder=10, label=label)
 
-        # Extrapolated prior per window
+        # Extrapolated prior per window — individual ensemble trajectories + mean
+        for w, extrap_ds in enumerate(extrapolated_params_list):
+            t = np.asarray(extrap_ds.coords["time"].values)
+            n_ens = extrap_ds.sizes["ensemble"]
+            for e in range(n_ens):
+                vals = np.asarray(extrap_ds[name].isel(ensemble=e).values)
+                label = "Extrapolated members" if w == 0 and e == 0 else None
+                ax.plot(
+                    t, vals, color="C2", linewidth=0.5, alpha=0.3,
+                    linestyle="--", label=label,
+                )
         for w, extrap_ds in enumerate(extrapolated_params_list):
             t = np.asarray(extrap_ds.coords["time"].values)
             ens_mean = np.asarray(extrap_ds[name].mean(dim="ensemble").values)
-            ens_std = np.asarray(extrap_ds[name].std(dim="ensemble").values)
-            label = "Extrapolated prior" if w == 0 else None
+            label = "Extrapolated mean" if w == 0 else None
             ax.plot(
-                t, ens_mean, color="C2", linewidth=1.5, linestyle="--", label=label
-            )
-            ax.fill_between(
-                t,
-                ens_mean - ens_std,
-                ens_mean + ens_std,
-                color="C2",
-                alpha=0.15,
+                t, ens_mean, color="C4", linewidth=2.5, linestyle="--",
+                zorder=10, label=label,
             )
 
         # Window boundaries
