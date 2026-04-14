@@ -317,6 +317,7 @@ def main() -> None:
         num_steps=config.ESMDA["num_steps"],
         alpha=config.ESMDA["num_steps"],
         rng_key=rng_key,
+        param_bounds={"velocity_magnitude": (0.1, 10.0)},
     )
 
     # ---- Storage ----------------------------------------------------------

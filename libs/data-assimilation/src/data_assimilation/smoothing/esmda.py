@@ -226,6 +226,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         num_steps: int = 3,
         alpha: Optional[float] = None,
         rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
+        param_bounds: Optional[dict[str, tuple[float, float]]] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -237,6 +238,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         )
         self.num_time_points = num_time_points
         self.time_coords = time_coords
+        self.param_bounds = param_bounds or {}
 
     def _flatten_time_varying_params(
         self, params: xarray.Dataset
@@ -296,6 +298,11 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         flat_params = self._flatten_time_varying_params(params)
         _, updated_flat = super()._one_step(flat_params, obs, state)
         updated_params = self._unflatten_params(updated_flat, params)
+
+        for name, (lo, hi) in self.param_bounds.items():
+            if name in updated_params.data_vars:
+                updated_params[name] = updated_params[name].clip(min=lo, max=hi)
+
         return state, updated_params
 
 
