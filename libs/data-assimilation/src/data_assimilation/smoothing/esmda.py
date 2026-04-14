@@ -296,7 +296,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         flat_params = self._flatten_time_varying_params(params)
         _, updated_flat = super()._one_step(flat_params, obs, state)
         updated_params = self._unflatten_params(updated_flat, params)
-        return None, updated_params
+        return state, updated_params
 
 
 class StateAndParameterESMDA(_BaseESMDA):
