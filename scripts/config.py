@@ -102,6 +102,8 @@ TIME_VARYING_PARAMS = {
     "inflow_angle_end": 20.0,
     "inflow_angle_sigmoid_center": 0.5,
     "inflow_angle_sigmoid_width": 0.1,
+    "velocity_magnitude_min": 0.1,
+    "velocity_magnitude_max": 10.0,
     "velocity_magnitude_start": 3.0,
     "velocity_magnitude_end": 5.0,
     "velocity_magnitude_sigmoid_center": 0.5,

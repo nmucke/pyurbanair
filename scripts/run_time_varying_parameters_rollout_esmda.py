@@ -317,7 +317,12 @@ def main() -> None:
         num_steps=config.ESMDA["num_steps"],
         alpha=config.ESMDA["num_steps"],
         rng_key=rng_key,
-        param_bounds={"velocity_magnitude": (0.1, 10.0)},
+        param_bounds={
+            "velocity_magnitude": (
+                config.TIME_VARYING_PARAMS["velocity_magnitude_min"],
+                config.TIME_VARYING_PARAMS["velocity_magnitude_max"],
+            ),
+        },
     )
 
     # ---- Storage ----------------------------------------------------------
