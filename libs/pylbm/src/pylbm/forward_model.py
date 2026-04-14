@@ -362,6 +362,13 @@ class ForwardModel(BaseForwardModel):
         if self._spinup_outputs > 0 and state.sizes["time"] > self._spinup_outputs:
             state = state.isel(time=slice(self._spinup_outputs, None))
 
+        # Trim to exactly num_outputs time steps. Warm-start runs may pick up
+        # an extra output file when nt0 is not aligned to iout (which happens
+        # when C_u differs across ensemble members).
+        num_outputs = round(self.simulation_time / self.output_frequency)
+        if state.sizes["time"] > num_outputs:
+            state = state.isel(time=slice(-num_outputs, None))
+
         state = state.assign_coords(time=range(state.sizes["time"]))
 
         return state
