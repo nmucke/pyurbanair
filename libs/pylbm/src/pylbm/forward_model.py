@@ -49,11 +49,15 @@ class ForwardModel(BaseForwardModel):
         enable_netcdf: Optional[bool] = None,
         boundary_condition: str = "periodic",
         spinup_time: float = 0.0,
+        velocity_reference: float = 8.0,
     ) -> None:
         super().__init__(results_dir=results_dir)
 
         self.spinup_time = spinup_time
         self._spinup_outputs = 0
+        # Reference velocity used to pick a stable-but-fast C_u (see
+        # _set_scaling_factors). Should be >= the expected max inflow speed.
+        self.velocity_reference = float(velocity_reference)
 
         if boundary_condition not in ("periodic", "inflow_outflow"):
             raise ValueError(
@@ -156,15 +160,18 @@ class ForwardModel(BaseForwardModel):
         """Set the scaling factors for the LBM."""
         self._set_infile_value("C_l", self.min_cell_size)
 
-        if params is not None:
-            if is_time_varying_params(params):
-                velocity_magnitude = float(params["velocity_magnitude"].max().item())
-            else:
-                velocity_magnitude = params["velocity_magnitude"].item()
-            self.C_u = int(velocity_magnitude * 15)
-        else:
-            self.C_u = 75
-        self._set_infile_value("C_u", self.C_u)
+        # Pick C_u from the reference velocity (prior's expected max), not the
+        # per-call value. Balanced clamp: C_u = 10 * v_ref gives lattice
+        # Mach ~0.1 (stable for BGK) and a predictable runtime across ESMDA
+        # iterations. Clip to [7*v_ref, 10*v_ref] so the value is bounded
+        # even if v_ref is overridden externally.
+        v_ref = max(1e-3, self.velocity_reference)
+        max_velocity_magnitude = max(params["velocity_magnitude"].max().item(), self.velocity_reference)
+        self.C_u = float(np.clip(10* max_velocity_magnitude, 7.0 * v_ref, 10.0 * v_ref))
+        # Format with bounded precision so the value always fits within the
+        # infile field and leaves whitespace before '!'. Fortran list-directed
+        # read otherwise chokes on "<num>!" when str(float) is too long.
+        self._set_infile_value("C_u", f"{self.C_u:.6f}")
 
         self.seconds_per_timestep = self._compute_seconds_per_timestep()
 

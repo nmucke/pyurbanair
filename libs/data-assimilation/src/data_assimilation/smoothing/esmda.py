@@ -227,6 +227,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         alpha: Optional[float] = None,
         rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
         param_bounds: Optional[dict[str, tuple[float, float]]] = None,
+        estimate_initial_time: bool = True,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -239,6 +240,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         self.num_time_points = num_time_points
         self.time_coords = time_coords
         self.param_bounds = param_bounds or {}
+        self.estimate_initial_time = estimate_initial_time
 
     def _flatten_time_varying_params(
         self, params: xarray.Dataset
@@ -251,9 +253,10 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         are passed through unchanged.
         """
         flat_data_vars: dict = {}
+        start = 0 if self.estimate_initial_time else 1
         for name in params.data_vars:
             if "time" in params[name].dims:
-                for t_idx in range(self.num_time_points):
+                for t_idx in range(start, self.num_time_points):
                     flat_data_vars[f"{name}_{t_idx}"] = (
                         "ensemble",
                         jnp.asarray(params[name].isel(time=t_idx).values),
@@ -277,10 +280,18 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         data_vars: dict = {}
         for name in original_params.data_vars:
             if "time" in original_params[name].dims:
-                time_slices = [
-                    jnp.asarray(flat_params[f"{name}_{t_idx}"].values)
-                    for t_idx in range(self.num_time_points)
-                ]
+                time_slices = []
+                for t_idx in range(self.num_time_points):
+                    if t_idx == 0 and not self.estimate_initial_time:
+                        time_slices.append(
+                            jnp.asarray(
+                                original_params[name].isel(time=0).values
+                            )
+                        )
+                    else:
+                        time_slices.append(
+                            jnp.asarray(flat_params[f"{name}_{t_idx}"].values)
+                        )
                 data_vars[name] = (
                     ("time", "ensemble"),
                     jnp.stack(time_slices, axis=0),

@@ -106,41 +106,6 @@ def _generate_truth_params_all_windows(
 
 
 # ---------------------------------------------------------------------------
-# Boundary pinning
-# ---------------------------------------------------------------------------
-
-
-def _pin_boundary_values(
-    params: xarray.Dataset,
-    boundary_values: dict[str, jnp.ndarray],
-) -> xarray.Dataset:
-    """Overwrite the first time index of time-varying params with boundary values.
-
-    This ensures continuity between consecutive assimilation windows by
-    setting each parameter's leftmost time point to the rightmost value
-    from the previous window's posterior.
-
-    Args:
-        params: Parameter ensemble with dims ``(time, ensemble)``.
-        boundary_values: Maps parameter name to array of shape
-            ``(ensemble,)`` — the rightmost values from the previous
-            window's posterior.
-
-    Returns:
-        New Dataset with boundary values pinned at time index 0.
-    """
-    data_vars: dict = {}
-    for name in params.data_vars:
-        if name in boundary_values and "time" in params[name].dims:
-            values = jnp.asarray(params[name].values)  # (time, ensemble)
-            values = values.at[0].set(boundary_values[name])
-            data_vars[name] = (params[name].dims, values)
-        else:
-            data_vars[name] = params[name]
-    return xarray.Dataset(data_vars=data_vars, coords=params.coords)
-
-
-# ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
 
@@ -323,6 +288,7 @@ def main() -> None:
                 config.TIME_VARYING_PARAMS["velocity_magnitude_max"],
             ),
         },
+        estimate_initial_time=True,
     )
 
     # ---- Storage ----------------------------------------------------------
@@ -334,7 +300,6 @@ def main() -> None:
 
     # ---- State tracking for handoff between windows -----------------------
     esmda_final_state: xarray.Dataset | None = None
-    boundary_values: dict[str, jnp.ndarray] = {}
 
     # ---- Window loop ------------------------------------------------------
     for w in tqdm(range(num_windows), desc="Assimilation windows"):
@@ -382,20 +347,8 @@ def main() -> None:
         # Extract final posterior (last ESMDA step)
         posterior_params = params_history.isel(esmda_step=-1)
 
-        # Pin leftmost posterior point to previous window's rightmost value
-        # to ensure exact continuity across window boundaries.
-        if boundary_values:
-            posterior_params = _pin_boundary_values(posterior_params, boundary_values)
-
         posterior_params_list.append(posterior_params)
         esmda_state_list.append(esmda_final_state)
-
-        # Store rightmost posterior values for next window's boundary pinning
-        boundary_values = {
-            name: jnp.asarray(posterior_params[name].isel(time=-1).values)
-            for name in posterior_params.data_vars
-            if "time" in posterior_params[name].dims
-        }
 
         print(f"Window {w} completed")
 
@@ -410,8 +363,7 @@ def main() -> None:
                 correlation_length=prior_corr_length,
                 include_std=False,
             )
-            # Pin extrapolated prior's leftmost point to previous posterior
-            params_ensemble = _pin_boundary_values(params_ensemble, boundary_values)
+
             # Clamp velocity to avoid C_u=0 in LBM (same guard as
             # create_time_varying_parameter_ensemble).
             if "velocity_magnitude" in params_ensemble.data_vars:
@@ -419,6 +371,8 @@ def main() -> None:
                     "velocity_magnitude"
                 ].clip(min=0.1)
             extrapolated_params_list.append(params_ensemble)
+        
+        esmda.estimate_initial_time = False
 
     # ---- Save outputs -----------------------------------------------------
     out_dir = config.BASE_RESULTS_DIR / "time_varying_rollout_esmda"

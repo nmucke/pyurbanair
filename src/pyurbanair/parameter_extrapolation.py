@@ -98,7 +98,27 @@ def extrapolate_parameters(
     def _predict_ensemble(y_train_ensemble: jnp.ndarray):
         """y_train_ensemble: shape (N_t, N_e)."""
         def _predict_single(y: jnp.ndarray):
-            return _gp_predict(time_coords, y, prediction_times, correlation_length)
+            # Fit linear trend y ≈ a * t + b, run GP on residuals, then
+            # add the trend back at prediction_times. Without this the
+            # zero-mean GP prior drags extrapolated values to zero.
+            slope, intercept = jnp.polyfit(time_coords, y, 1)
+            trend_train = slope * time_coords + intercept
+            trend_pred = slope * prediction_times + intercept
+            residual = y - trend_train
+            mean, std = _gp_predict(
+                time_coords, residual, prediction_times, correlation_length,
+            )
+            mean = mean + trend_pred
+            # Continuity correction: if the first prediction time coincides
+            # with the last training time (shared window boundary), the GP's
+            # ridge jitter leaves a small gap at that point. Add a smoothly
+            # decaying RBF bump so the boundary value matches y[-1] exactly.
+            decay = _rbf_kernel(
+                prediction_times, time_coords[-1:], correlation_length,
+            ).squeeze(-1)
+            delta = y[-1] - mean[0]
+            mean = mean + delta * decay
+            return mean, std
         means, stds = jax.vmap(_predict_single, in_axes=1, out_axes=1)(
             y_train_ensemble,
         )

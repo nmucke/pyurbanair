@@ -38,10 +38,10 @@ TIME = {
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": False,
+    "cuda": True,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
-    "compile": True,
+    "compile": False,
 }
 
 UDALES_ARGS = {
@@ -55,15 +55,15 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 4,
+    "ensemble_size": 32,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
 
 OBS = {
-    "x_points": [20.0, 20.0, 40.0, 40.0, 60.0],
-    "y_points": [20.0, 60.0, 10.0, 30.0, 60.0],
-    "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
+    "x_points": [20.0, 20.0, 40.0, 40.0, 60.0, 60.0],
+    "y_points": [20.0, 60.0, 10.0, 30.0, 60.0, 20.0],
+    "z_points": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
     "interval_size": 5,
@@ -71,8 +71,8 @@ OBS = {
 }
 
 ESMDA = {
-    "num_steps": 1,
-    "num_assimilation_windows": 3,
+    "num_steps": 4,
+    "num_assimilation_windows": 2,
     "seed": 42,
     "obs_error_std": 0.1,
     "init_conditions_dir": "esmda_init_conditions",
@@ -88,7 +88,7 @@ TRUE_PARAMS = {
 PARAM_PRIORS = {
     "inflow_angle_mean": 0.0,
     "inflow_angle_std": 8.0,
-    "velocity_mean": 3.0,
+    "velocity_mean": 5.0,
     "velocity_std": 1.0,
     "pressure_mean": 0.0041912,
     "pressure_std": 0.001,
@@ -96,7 +96,7 @@ PARAM_PRIORS = {
 
 TIME_VARYING_PARAMS = {
     "num_time_points": 10,
-    "prior_correlation_length": 5.0,  # seconds — controls smoothness of GP prior
+    "prior_correlation_length": 20.0,  # seconds — controls smoothness of GP prior
     "truth_correlation_length": 10.0,  # seconds — different from prior to avoid inverse crime
     "inflow_angle_start": -20.0,
     "inflow_angle_end": 20.0,

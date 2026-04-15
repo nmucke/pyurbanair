@@ -49,6 +49,7 @@ def model_args(model_name: ModelName) -> dict:
             "simulation_time": cfg.TIME["simulation_time"],
             "output_frequency": cfg.TIME["output_frequency"],
             "spinup_time": spinup_time,
+            "velocity_reference": cfg.TIME_VARYING_PARAMS["velocity_magnitude_max"],
         }
     return {
         **cfg.UDALES_ARGS,
