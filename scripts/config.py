@@ -23,16 +23,22 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 100,
-    "ny": 80,
+    "nx": 50,
+    "ny": 40,
     "nz": 8,
-    "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
+# DOMAIN = {
+#     "nx": 100,
+#     "ny": 80,
+#     "nz": 8,
+#     "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+# }
 
 TIME = {
-    "simulation_time": 10.0,  # 3000 * 0.0538,
+    "simulation_time": 50.0,  # 3000 * 0.0538,
     "output_frequency": 1.0,  # 3000 * 0.0538,
-    "spinup_time": 5.0,
+    "spinup_time": 50.0,
 }
 
 LBM_ARGS = {

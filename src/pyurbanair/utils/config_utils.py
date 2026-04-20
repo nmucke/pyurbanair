@@ -11,7 +11,6 @@ from data_assimilation.observation_operator import (
 )
 from pylbm.ensemble_forward_model import EnsembleForwardModel as LBMEnsembleForwardModel
 from pylbm.forward_model import ForwardModel as LBMForwardModel
-from pylbm.rollout_forward_model import RolloutForwardModel as LBMRolloutForwardModel
 from pylbm.utils.warm_start_utils import (
     clean_all_restart_files as clean_lbm_restart_files,
 )
@@ -79,7 +78,7 @@ def create_rollout_forward_model(
     forward_model: Any,
 ) -> Any:
     if model_name == "pylbm":
-        return LBMRolloutForwardModel(forward_model=forward_model)
+        return forward_model
 
     return UDALESRolloutForwardModel(forward_model=forward_model)
 

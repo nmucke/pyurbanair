@@ -9,9 +9,9 @@ logger = logging.getLogger(__name__)
 
 import numpy as np
 import xarray
-from pylbm.utils import get_lbm_directory_paths
-
 from pyurbanair.base_forward_model import BaseForwardModel
+
+from pylbm.utils import get_lbm_directory_paths
 
 from .stl_to_lbm import stl_to_lbm_geometry
 from .utils import Infile, apply_inflow_settings, compile_lbm, create_infile
@@ -25,6 +25,11 @@ from .utils.params_utils import (
     write_uvel_time_file,
 )
 from .utils.state_utils import scale_velocity_to_physical
+from .utils.warm_start_utils import (
+    identify_latest_restart_iteration,
+    remove_old_restart_files,
+    write_restart_file_from_xarray,
+)
 
 
 class ForwardModel(BaseForwardModel):
@@ -49,11 +54,13 @@ class ForwardModel(BaseForwardModel):
         enable_netcdf: Optional[bool] = None,
         boundary_condition: str = "periodic",
         spinup_time: float = 0.0,
+        spinup_first_step_only: bool = True,
     ) -> None:
         super().__init__(results_dir=results_dir)
 
         self.spinup_time = spinup_time
         self._spinup_outputs = 0
+        self.spinup_first_step_only = spinup_first_step_only
 
         if boundary_condition not in ("periodic", "inflow_outflow"):
             raise ValueError(
@@ -322,6 +329,21 @@ class ForwardModel(BaseForwardModel):
         # Always return to original directory
         os.chdir(original_cwd)
 
+    def _prepare_warmstart(self, state: xarray.Dataset) -> None:
+        """Write a restart file from ``state`` and arm nt0 for the next run.
+
+        Uses the latest existing ``restart/restart_0000_<iter>.uf`` as a
+        template (for ghost cells and non-equilibrium content) when
+        available; otherwise falls back to a pure-equilibrium restart.
+        """
+        latest_restart = identify_latest_restart_iteration(self.dirs)
+        restart_iteration = write_restart_file_from_xarray(
+            state=state,
+            dirs=self.dirs,
+            restart_iteration=latest_restart,
+        )
+        self._nt0_override = restart_iteration
+
     def run_single(
         self,
         state: Optional[xarray.Dataset] = None,
@@ -336,6 +358,9 @@ class ForwardModel(BaseForwardModel):
                 "Either set enable_netcdf=True with an NVFORTRAN-compatible netcdf.mod, "
                 "or call run() and process non-NETCDF diagnostics."
             )
+
+        if state is not None:
+            self._prepare_warmstart(state)
 
         if params is not None:
             self._apply_inflow_settings(params)
@@ -363,6 +388,11 @@ class ForwardModel(BaseForwardModel):
             state = state.isel(time=slice(self._spinup_outputs, None))
 
         state = state.assign_coords(time=range(state.sizes["time"]))
+
+        remove_old_restart_files(self.dirs)
+
+        if self.spinup_first_step_only and self.spinup_time > 0:
+            self.disable_spinup()
 
         return state
 

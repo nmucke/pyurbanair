@@ -9,9 +9,9 @@ if __package__ is None or __package__ == "":
 
 import matplotlib.pyplot as plt
 from pyudales.utils.grid_utils import interpolate_grid
-
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
+
 from scripts import config
 
 
