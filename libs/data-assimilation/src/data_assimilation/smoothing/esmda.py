@@ -202,6 +202,7 @@ class ParameterESMDA(_BaseESMDA):
             name: ("ensemble", params_updated[i, :])
             for i, name in enumerate(param_names)
         }
+
         return None, xarray.Dataset(data_vars=updated_data_vars, coords=params.coords)
 
 

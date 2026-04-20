@@ -396,6 +396,10 @@ class ForwardModel(BaseForwardModel):
         if self._spinup_outputs > 0 and state.sizes["time"] > self._spinup_outputs:
             state = state.isel(time=slice(self._spinup_outputs, None))
 
+        expected_outputs = round(self.simulation_time / self.output_frequency)
+        if state.sizes["time"] > expected_outputs:
+            state = state.isel(time=slice(-expected_outputs, None))
+
         state = state.assign_coords(time=range(state.sizes["time"]))
 
         remove_old_restart_files(self.dirs)
