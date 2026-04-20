@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import xarray
 from data_assimilation.observation_operator import ObservationOperator
 from data_assimilation.smoothing.base import BaseSmoothing
-
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
 
@@ -238,9 +237,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         self.num_time_points = num_time_points
         self.time_coords = time_coords
 
-    def _flatten_time_varying_params(
-        self, params: xarray.Dataset
-    ) -> xarray.Dataset:
+    def _flatten_time_varying_params(self, params: xarray.Dataset) -> xarray.Dataset:
         """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars.
 
         Each variable with a ``time`` dimension is expanded into

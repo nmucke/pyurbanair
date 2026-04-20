@@ -54,13 +54,11 @@ class ForwardModel(BaseForwardModel):
         enable_netcdf: Optional[bool] = None,
         boundary_condition: str = "periodic",
         spinup_time: float = 0.0,
-        spinup_first_step_only: bool = True,
     ) -> None:
         super().__init__(results_dir=results_dir)
 
         self.spinup_time = spinup_time
         self._spinup_outputs = 0
-        self.spinup_first_step_only = spinup_first_step_only
 
         if boundary_condition not in ("periodic", "inflow_outflow"):
             raise ValueError(
@@ -359,19 +357,24 @@ class ForwardModel(BaseForwardModel):
                 "or call run() and process non-NETCDF diagnostics."
             )
 
-        if state is not None:
-            self._prepare_warmstart(state)
+        saved_spinup_time = self.spinup_time
+        try:
+            if state is not None:
+                self.spinup_time = 0.0
+                self._prepare_warmstart(state)
 
-        if params is not None:
-            self._apply_inflow_settings(params)
+            if params is not None:
+                self._apply_inflow_settings(params)
 
-        self._set_scaling_factors(params)
+            self._set_scaling_factors(params)
 
-        # Remove stale output files before running to prevent files from a
-        # previous run (which may have used a different iout) being collected.
-        self._clean_output()
+            # Remove stale output files before running to prevent files from a
+            # previous run (which may have used a different iout) being collected.
+            self._clean_output()
 
-        self.run()
+            self.run()
+        finally:
+            self.spinup_time = saved_spinup_time
 
         output_files = self._get_output_files_for_current_run()
         state = [xarray.load_dataset(path, engine="netcdf4") for path in output_files]
@@ -390,9 +393,6 @@ class ForwardModel(BaseForwardModel):
         state = state.assign_coords(time=range(state.sizes["time"]))
 
         remove_old_restart_files(self.dirs)
-
-        # if self.spinup_first_step_only and self.spinup_time > 0:
-        #     self.disable_spinup()
 
         return state
 
