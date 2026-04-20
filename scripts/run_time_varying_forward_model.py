@@ -14,9 +14,9 @@ if __package__ is None or __package__ == "":
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
+
 from scripts import config
 
 
@@ -27,7 +27,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         choices=["pyudales", "pylbm"],
-        default="pyudales",
+        default="pylbm",
         help="Which solver to use (default: pyudales).",
     )
     parser.add_argument(
@@ -74,7 +74,6 @@ def main() -> None:
 
         inflow_vec = sigmoid(x, center=-30.0, width=5.0, min_val=angle, max_val=-angle)
 
-
     data_vars: dict = {
         "inflow_angle": ("time", inflow_vec),
         "velocity_magnitude": ("time", np.full(n_snapshots, vel)),
@@ -88,33 +87,26 @@ def main() -> None:
 
     params = xr.Dataset(data_vars=data_vars, coords={"time": time_seconds})
 
-    # Create the forward model
-    model_kwargs = config.model_args(model_name)
-    if args.results_dir is not None:
-        model_kwargs["results_dir"] = pathlib.Path(args.results_dir)
-
-    if model_name == "pyudales":
-        from pyudales.forward_model import ForwardModel as UDALESForwardModel
-
-        model_kwargs["params"] = params
-        model_kwargs["nudging_config"] = {"tnudge": 10.0, "nnudge": 0}
-        fm = UDALESForwardModel(**model_kwargs)
-    else:
-        from pylbm.forward_model import ForwardModel as LBMForwardModel
-
-        fm = LBMForwardModel(**model_kwargs)
-
-    config.prepare_forward_model(model_name, fm)
-    config.clean_forward_model_outputs(model_name, fm)
+    model_name = args.model
+    forward_model = config.create_forward_model(
+        model_name=model_name,
+        results_dir=(
+            pathlib.Path(args.results_dir) if args.results_dir is not None else None
+        ),
+    )
+    config.prepare_forward_model(model_name=model_name, forward_model=forward_model)
+    config.clean_forward_model_outputs(
+        model_name=model_name, forward_model=forward_model
+    )
 
     # For pylbm, params are passed to run_single; for pyudales they were
     # passed at init and run_single uses the stored params.
     if model_name == "pylbm":
-        state = fm.run_single(params=params)
+        state = forward_model.run_single(params=params)
     else:
-        state = fm.run_single()
+        state = forward_model.run_single()
         if state is None:
-            state = fm.get_states()
+            state = forward_model.get_states()
 
     state = add_velocity_magnitude(state)
 
@@ -157,20 +149,6 @@ def main() -> None:
             z_level=0,
         )
         print(f"Saved visualization outputs in {out_dir}")
-
-        plt.figure()
-        for idx in [10, 40, 70]:
-            u_at_left_end = state.u.isel(z=1, y=idx, x=0).values
-            v_at_left_end = state.v.isel(z=1, y=idx, x=0).values
-            inflow_angle_from_state = (
-                np.arctan2(v_at_left_end, u_at_left_end) * 180.0 / np.pi
-            )
-            plt.plot(inflow_angle_from_state, label=f"idx={idx}")
-        plt.legend()
-        plt.title("inflow angle from state")
-        plt.xlabel("time")
-        plt.ylabel("inflow angle")
-        plt.show()
 
 
 if __name__ == "__main__":

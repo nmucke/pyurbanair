@@ -38,7 +38,7 @@ DOMAIN = {
 TIME = {
     "simulation_time": 50.0,  # 3000 * 0.0538,
     "output_frequency": 1.0,  # 3000 * 0.0538,
-    "spinup_time": 50.0,
+    "spinup_time": 10.0,
 }
 
 LBM_ARGS = {
@@ -61,14 +61,16 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 4,
+    "ensemble_size": 16,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
 
 OBS = {
-    "x_points": [20.0, 20.0, 40.0, 40.0, 60.0],
-    "y_points": [20.0, 60.0, 10.0, 30.0, 60.0],
+    # "x_points": [20.0, 20.0, 40.0, 40.0, 60.0],
+    # "y_points": [20.0, 60.0, 10.0, 30.0, 60.0],
+    "x_points": [10.0, 20.0, 30.0, 40.0, 10.0],
+    "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",

@@ -8,10 +8,9 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from data_assimilation.smoothing.esmda import TimeVaryingParameterESMDA
-
 from pyurbanair.plotting import (
-    plot_true_vs_estimated_state,
     plot_state_init_and_terminal,
+    plot_true_vs_estimated_state,
 )
 from pyurbanair.utils.animation_utils import _visualize_state_history
 from pyurbanair.utils.run_utils import get_ensemble_mean_field
@@ -36,9 +35,7 @@ def _plot_time_varying_params(
     import xarray  # noqa: F811 – local import to keep type hint lazy
 
     param_names = [
-        name
-        for name in true_params.data_vars
-        if "time" in true_params[name].dims
+        name for name in true_params.data_vars if "time" in true_params[name].dims
     ]
     n_params = len(param_names)
     fig, axes = plt.subplots(n_params, 1, figsize=(8, 4 * n_params), squeeze=False)
@@ -188,7 +185,9 @@ def main() -> None:
             obs_y=obs_y,
             z_level=0,
         )
-        state_for_viz = state_history if isinstance(output, tuple) else ensemble_mean_field
+        state_for_viz = (
+            state_history if isinstance(output, tuple) else ensemble_mean_field
+        )
         _visualize_state_history(
             state_history=state_for_viz,
             out_dir=out_dir,

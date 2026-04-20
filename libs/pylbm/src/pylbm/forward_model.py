@@ -391,8 +391,8 @@ class ForwardModel(BaseForwardModel):
 
         remove_old_restart_files(self.dirs)
 
-        if self.spinup_first_step_only and self.spinup_time > 0:
-            self.disable_spinup()
+        # if self.spinup_first_step_only and self.spinup_time > 0:
+        #     self.disable_spinup()
 
         return state
 
