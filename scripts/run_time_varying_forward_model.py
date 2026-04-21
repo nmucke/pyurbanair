@@ -14,9 +14,9 @@ if __package__ is None or __package__ == "":
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
-
 from scripts import config
 
 
@@ -64,7 +64,7 @@ def main() -> None:
         vel = config.TRUE_PARAMS["velocity_magnitude"]
         print(f"Using TRUE_PARAMS: angle={angle}, vel={vel}")
     else:
-        angle = -45.0
+        angle = -40.0
         vel = 3.0
 
         x = np.linspace(angle, -angle, n_snapshots)
@@ -72,7 +72,7 @@ def main() -> None:
         def sigmoid(x, center, width, min_val, max_val):
             return min_val + (max_val - min_val) / (1 + np.exp(-(x - center) / width))
 
-        inflow_vec = sigmoid(x, center=-30.0, width=5.0, min_val=angle, max_val=-angle)
+        inflow_vec = sigmoid(x, center=0.0, width=5.0, min_val=angle, max_val=-angle)
 
     data_vars: dict = {
         "inflow_angle": ("time", inflow_vec),
@@ -99,14 +99,9 @@ def main() -> None:
         model_name=model_name, forward_model=forward_model
     )
 
-    # For pylbm, params are passed to run_single; for pyudales they were
-    # passed at init and run_single uses the stored params.
-    if model_name == "pylbm":
-        state = forward_model.run_single(params=params)
-    else:
-        state = forward_model.run_single()
-        if state is None:
-            state = forward_model.get_states()
+    state = forward_model.run_single(params=params)
+    if state is None:
+        state = forward_model.get_states()
 
     state = add_velocity_magnitude(state)
 
@@ -148,6 +143,44 @@ def main() -> None:
             output_path=out_dir / "state_animation.mp4",
             z_level=0,
         )
+
+        # Derived inflow angle at three probes near the left x-boundary.
+        u_dims = state["u"].dims
+        x_dim = next(d for d in ("x", "xt", "xm") if d in u_dims)
+        y_dim = next(d for d in ("y", "yt", "ym") if d in u_dims)
+        z_dim = next(d for d in ("z", "zt", "zm") if d in u_dims)
+        x_left = float(state[x_dim].min())
+        y_min, y_max = float(state[y_dim].min()), float(state[y_dim].max())
+        y_probes = [
+            y_min + 0.2 * (y_max - y_min),
+            y_min + 0.5 * (y_max - y_min),
+            y_min + 0.8 * (y_max - y_min),
+        ]
+        z_probe = 0.5 * (float(state[z_dim].min()) + float(state[z_dim].max()))
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        for y_p in y_probes:
+            sel = {x_dim: x_left, y_dim: y_p, z_dim: z_probe}
+            u_t = state["u"].sel(**sel, method="nearest")
+            v_t = state["v"].sel(**sel, method="nearest")
+            angle_sim = np.degrees(np.arctan2(v_t.values, u_t.values))
+            ax.plot(state.time.values, angle_sim, label=f"y={y_p:.1f} m")
+        ax.plot(
+            params["time"].values,
+            params["inflow_angle"].values,
+            "k--",
+            alpha=0.5,
+            label="prescribed",
+        )
+        ax.set_xlabel("time [s]")
+        ax.set_ylabel("inflow angle [deg]")
+        ax.set_title(f"Derived inflow angle near x={x_left:.1f} m (z={z_probe:.1f} m)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(out_dir / "derived_inflow_angle.png")
+        plt.close()
+
         print(f"Saved visualization outputs in {out_dir}")
 
 

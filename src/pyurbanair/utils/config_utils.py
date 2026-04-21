@@ -19,9 +19,6 @@ from pyudales.ensemble_forward_model import (
     EnsembleForwardModel as UDALESEnsembleForwardModel,
 )
 from pyudales.forward_model import ForwardModel as UDALESForwardModel
-from pyudales.rollout_forward_model import (
-    RolloutForwardModel as UDALESRolloutForwardModel,
-)
 from pyudales.utils.clean_up_utils import clean_output_dir as clean_udales_output_dir
 
 ModelName = Literal["pylbm", "pyudales"]
@@ -77,10 +74,7 @@ def create_rollout_forward_model(
     model_name: ModelName,
     forward_model: Any,
 ) -> Any:
-    if model_name == "pylbm":
-        return forward_model
-
-    return UDALESRolloutForwardModel(forward_model=forward_model)
+    return forward_model
 
 
 def prepare_forward_model(model_name: ModelName, forward_model: Any) -> None:

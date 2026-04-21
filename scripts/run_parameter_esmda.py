@@ -6,6 +6,7 @@ import time
 import jax
 import jax.numpy as jnp
 from data_assimilation.smoothing.esmda import ParameterESMDA
+
 from pyurbanair.plotting import (
     plot_parameter_distributions,
     plot_state_init_and_terminal,

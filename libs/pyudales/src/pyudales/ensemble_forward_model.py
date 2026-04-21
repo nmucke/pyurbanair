@@ -1,31 +1,9 @@
 import logging
-import os
 import pathlib
-import shutil
-import subprocess
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Optional, cast
+from typing import Optional
 
-import xarray
-from pyudales import LOCAL_EXECUTE_SCRIPT
-from pyudales.forward_model import (
-    ForwardModel,
-    _augment_runtime_library_paths,
-    apply_inflow_settings,
-    clean_output_dir,
-    merge_params,
-)
-from pyudales.rollout_forward_model import RolloutForwardModel
-from pyudales.utils.dir_utils import DirectoryPaths, create_dir
+from pyudales.forward_model import ForwardModel
 from pyudales.utils.forward_model_utils import create_new_forward_model
-from pyudales.utils.rollout_utils import collect_rollout_results
-from pyudales.utils.warm_start_utils import (
-    clean_output_except_warmstart_files,
-    identify_warmstart_file,
-    remove_old_warmstart_files,
-    set_warm_start,
-    update_warmstart_file_from_xarray,
-)
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
@@ -42,7 +20,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
 
     def __init__(
         self,
-        forward_model: ForwardModel | RolloutForwardModel,
+        forward_model: ForwardModel,
         ensemble_size: int = 10,
         temp_dir: Optional[pathlib.Path] = None,
         results_dir: Optional[pathlib.Path] = None,
@@ -69,23 +47,13 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
 
     def _create_new_forward_model(  # type: ignore[override]
         self,
-        forward_model: ForwardModel | RolloutForwardModel,  # type: ignore[override]
+        forward_model: ForwardModel,
         experiment_base_dir: pathlib.Path,
         experiment_name: str,
-    ) -> ForwardModel | RolloutForwardModel:
+    ) -> ForwardModel:
         """Create a new forward model for the ensemble."""
-
-        if isinstance(forward_model, ForwardModel):
-            return create_new_forward_model(
-                forward_model,
-                experiment_base_dir,
-                experiment_name,
-            )
-        if isinstance(forward_model, RolloutForwardModel):
-            return RolloutForwardModel(
-                forward_model=create_new_forward_model(
-                    forward_model.forward_model,  # type: ignore[arg-type]
-                    experiment_base_dir,
-                    experiment_name,
-                ),
-            )
+        return create_new_forward_model(
+            forward_model,
+            experiment_base_dir,
+            experiment_name,
+        )

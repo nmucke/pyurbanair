@@ -8,7 +8,6 @@ import time
 from typing import Optional
 
 import xarray
-
 from pyurbanair.base_forward_model import BaseForwardModel
 
 from . import LOCAL_EXECUTE_SCRIPT, UDALES_PATH
@@ -28,6 +27,14 @@ from .utils.random_utils import apply_random_initial_condition
 from .utils.save_frequency_utils import (
     apply_output_frequency,
     apply_save_only_last_timestep,
+)
+from .utils.warm_start_utils import (
+    clean_output_except_warmstart_files,
+    identify_generated_warmstart_file,
+    remove_old_warmstart_files,
+    set_trestart,
+    set_warm_start,
+    update_warmstart_file_from_xarray,
 )
 
 logger = logging.getLogger(__name__)
@@ -176,6 +183,9 @@ class ForwardModel(BaseForwardModel):
             experiment_base_dir=experiment_base_dir,
             results_dir=results_dir,
         )
+
+        self._warmstart_template_dir = self.dirs.experiment_dir / "warmstart_template"
+        self.warmstart_template_file: pathlib.Path | None = None
 
         # Save only the last timestep
         self.save_only_last_timestep = save_only_last_timestep
@@ -379,6 +389,8 @@ class ForwardModel(BaseForwardModel):
         bcxm = 1 if self.boundary_condition == "periodic" else 2
         namoptions.set_value("BC", "BCxm", bcxm)
         namoptions.set_value("BC", "BCym", 1)
+        if self.boundary_condition == "inflow_outflow":
+            namoptions.set_value("BC", "BCtopm", 3)
         namoptions.write()
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
@@ -398,6 +410,7 @@ class ForwardModel(BaseForwardModel):
             is_time_varying_params(self.params)
             or self.boundary_condition == "inflow_outflow"
         )
+        use_nudging = True
 
         if use_nudging:
             logger.info(
@@ -414,11 +427,16 @@ class ForwardModel(BaseForwardModel):
                 simulation_time=(
                     self._simulation_time if self._simulation_time is not None else 0.0
                 ),
+                boundary_condition=self.boundary_condition,
                 **self._nudging_config,
             )
         else:
             logger.info("Applying inflow via static settings (periodic BC)")
-            apply_inflow_settings(params=self.params, dirs=self.dirs)
+            apply_inflow_settings(
+                params=self.params,
+                dirs=self.dirs,
+                boundary_condition=self.boundary_condition,
+            )
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
         """Save simulation results to disk."""
@@ -490,17 +508,48 @@ class ForwardModel(BaseForwardModel):
         params: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset:
-        """Run the forward model."""
+        """Run the forward model.
 
+        If ``state`` is None, run a cold start (with optional spinup). If a
+        warmstart template has not been captured yet, trestart is enabled so
+        the run produces a restart file that is harvested as the template.
+
+        If ``state`` is provided, run a warm start from that state: the
+        warmstart template is bootstrapped lazily if missing, filled with the
+        provided state, and the simulation runs without spinup.
+        """
         self._apply_inflow_settings(params=params)
 
+        saved_spinup_time = self.spinup_time
+        saved_namoptions = self._snapshot_namoptions()
+        try:
+            if state is None:
+                self._run_executable()
+                result = self._load_and_postprocess_state()
+            else:
+                self._ensure_warmstart_template()
+                self.spinup_time = 0.0
+                self._rewrite_runtime(self._simulation_time)
+                set_trestart(self.dirs)
+                self._prepare_warmstart(state)
+                self._run_executable()
+                result = self._load_and_postprocess_state()
+                clean_output_except_warmstart_files(self.dirs)
+                remove_old_warmstart_files(self.dirs)
+
+            return result
+        finally:
+            self.spinup_time = saved_spinup_time
+            self._restore_namoptions(saved_namoptions)
+
+    def _run_executable(self) -> None:
+        """Invoke the uDALES executable via LOCAL_EXECUTE_SCRIPT."""
         logger.info("Running forward model...")
         command = [
             "bash",
             str(LOCAL_EXECUTE_SCRIPT),
             str(self.dirs.experiment_dir),
         ]
-
         env = os.environ.copy()
         _augment_runtime_library_paths(env)
         subprocess.run(
@@ -511,13 +560,11 @@ class ForwardModel(BaseForwardModel):
             stderr=self.stderr,
         )
 
-        # Check for merged file first (multi-processor case after gather_outputs.sh)
+    def _load_and_postprocess_state(self) -> xarray.Dataset:
+        """Load fielddump output, shift coordinates, trim spinup outputs."""
         output_file = self.dirs.output_dir.joinpath(
             self.dirs.experiment_name, f"fielddump.{self.dirs.experiment_name}.nc"
         )
-
-        # If merged file doesn't exist, check for single-processor file
-        # (gather_outputs.sh doesn't merge when there's only one processor)
         if not output_file.exists():
             single_proc_file = self.dirs.output_dir.joinpath(
                 self.dirs.experiment_name,
@@ -526,14 +573,8 @@ class ForwardModel(BaseForwardModel):
             if single_proc_file.exists():
                 output_file = single_proc_file
 
-        # Load into memory if save_in_memory is True
-        state = xarray.open_dataset(
-            output_file,
-            engine="netcdf4",
-        )
+        state = xarray.open_dataset(output_file, engine="netcdf4")
 
-        # Shift coordinates by lower-bound offset so that the state reflects
-        # physical domain coordinates (matching pylbm behaviour for negative bounds).
         if self.bounds is not None:
             x_offset = self.bounds[0][0]
             y_offset = self.bounds[1][0]
@@ -559,7 +600,108 @@ class ForwardModel(BaseForwardModel):
                 if "time" in state.coords and state.sizes["time"] > 0:
                     state = state.assign_coords(time=state.time - state.time.values[0])
 
+        if (
+            self._simulation_time is not None
+            and self.output_frequency is not None
+            and state.sizes.get("time", 0) > 0
+        ):
+            expected_outputs = round(self._simulation_time / self.output_frequency)
+            if state.sizes["time"] > expected_outputs:
+                state = state.isel(time=slice(-expected_outputs, None))
+
         return state
+
+    def _snapshot_namoptions(self) -> str:
+        """Return the full text of the namoptions file for later restore."""
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        return namoptions_path.read_text()
+
+    def _restore_namoptions(self, text: str) -> None:
+        """Restore the namoptions file from a previously captured snapshot."""
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions_path.write_text(text)
+
+    def _rewrite_runtime(self, runtime: float | None) -> None:
+        """Write ``RUN/runtime`` to namoptions; no-op when runtime is None."""
+        if runtime is None:
+            return
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+        namoptions.set_value("RUN", "runtime", runtime)
+        namoptions.write()
+
+    def _prepare_warmstart(self, state: xarray.Dataset) -> None:
+        """Fill the warmstart template with ``state`` and arm warm start flags."""
+        if self.warmstart_template_file is None:
+            raise RuntimeError(
+                "warmstart_template_file is unset; call _ensure_warmstart_template first."
+            )
+        # Strip ``time`` so the warmstart's timee is written as 0. uDALES
+        # treats RUN/runtime as an absolute end-time: leaving the previous
+        # run's end-time in the state causes timee >= runtime and the
+        # simulation dies with SIGILL before producing any output.
+        state_for_warmstart = state
+        if "time" in state_for_warmstart.dims:
+            state_for_warmstart = state_for_warmstart.isel(time=-1)
+        if "time" in state_for_warmstart.coords:
+            state_for_warmstart = state_for_warmstart.drop_vars("time")
+        update_warmstart_file_from_xarray(
+            state_for_warmstart,
+            self.dirs,
+            warmstart_file=self.warmstart_template_file,
+        )
+        shutil.copy(
+            self.warmstart_template_file,
+            self.dirs.output_dir
+            / self.dirs.experiment_name
+            / self.warmstart_template_file.name,
+        )
+        set_warm_start(self.dirs)
+
+    def _ensure_warmstart_template(self) -> None:
+        """Create a warmstart template via a short cold-start if missing."""
+        if (
+            self.warmstart_template_file is not None
+            and self.warmstart_template_file.exists()
+        ):
+            return
+
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        original_namoptions_text = namoptions_path.read_text()
+        namoptions = NamoptionsFile(namoptions_path)
+
+        dtmax_str = namoptions.get_value("RUN", "dtmax")
+        short_runtime = float(dtmax_str) if dtmax_str else 1.0
+
+        try:
+            namoptions.set_value("RUN", "runtime", short_runtime)
+            namoptions.set_value("RUN", "trestart", short_runtime)
+            namoptions.set_value("RUN", "lwarmstart", ".false.")
+            namoptions.write()
+
+            self._run_executable()
+            self._capture_template_from_output()
+        finally:
+            namoptions_path.write_text(original_namoptions_text)
+            self._clean_output()
+
+    def _capture_template_from_output(self) -> None:
+        """Harvest the restart file produced by the last run as the template."""
+        self._warmstart_template_dir.mkdir(parents=True, exist_ok=True)
+        filename = identify_generated_warmstart_file(self.dirs)
+        template_path = self._warmstart_template_dir / filename
+        template_path.unlink(missing_ok=True)
+        src = self.dirs.output_dir / self.dirs.experiment_name / filename
+        shutil.copy(src, template_path)
+        self.warmstart_template_file = template_path
 
     def disable_spinup(self) -> None:
         """Disable spinup so subsequent runs use only simulation_time."""

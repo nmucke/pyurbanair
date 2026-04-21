@@ -10,14 +10,19 @@ horizontal-average velocities toward the target profiles.
 
 import logging
 import pathlib
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import xarray
 
 from .dir_utils import DirectoryPaths
+from .file_update_utils import (
+    update_lscale_file_profile,
+    update_prof_file_profile,
+)
 from .inflow_utils import angle_to_velocity
 from .namoptions_utils import NamoptionsFile
+from .vertical_profile import build_profile_shape
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +34,13 @@ def compute_nudging_profiles(
     heights: np.ndarray,
     thl0: float = 288.0,
     qt0: float = 0.0,
+    profile_shape: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Compute uniform nudging profiles for each time snapshot.
+    """Compute nudging profiles for each time snapshot.
 
     At each time step, the velocity components u(t) and v(t) are computed from
-    the angle and magnitude, then broadcast uniformly across all vertical levels.
+    the angle and magnitude, then multiplied by ``profile_shape`` along the
+    vertical axis.  When ``profile_shape`` is None, the profiles are uniform.
 
     Args:
         time_seconds: Time values in seconds, shape (n_times,).
@@ -42,6 +49,7 @@ def compute_nudging_profiles(
         heights: Vertical grid cell centers in meters, shape (ktot,).
         thl0: Constant potential temperature (K) for all profiles.
         qt0: Constant specific humidity (kg/kg) for all profiles.
+        profile_shape: Dimensionless shape s(z), length ktot.  If None, uniform.
 
     Returns:
         Tuple of (thl_profiles, qt_profiles, u_profiles, v_profiles),
@@ -52,9 +60,9 @@ def compute_nudging_profiles(
 
     u_arr, v_arr = angle_to_velocity(inflow_angle, velocity_magnitude)
 
-    # Broadcast to (n_times, ktot) -- uniform at all heights
-    u_profiles = np.tile(u_arr[:, np.newaxis], (1, ktot))  # type: ignore[index]
-    v_profiles = np.tile(v_arr[:, np.newaxis], (1, ktot))  # type: ignore[index]
+    shape = profile_shape if profile_shape is not None else np.ones(ktot)
+    u_profiles = u_arr[:, np.newaxis] * shape[np.newaxis, :]
+    v_profiles = v_arr[:, np.newaxis] * shape[np.newaxis, :]
     thl_profiles = np.full((n_times, ktot), thl0)
     qt_profiles = np.full((n_times, ktot), qt0)
 
@@ -91,7 +99,7 @@ def write_timedepnudge_file(
     with open(file_path, "w") as f:
         for t_idx, t_sec in enumerate(time_seconds):
             f.write("height    thl        qt       u        v\n")
-            f.write(f"#    {t_sec:.0f}\n")
+            f.write(f"#    {t_sec:.3f}\n")
             for k in range(len(heights)):
                 f.write(
                     f"  {heights[k]:11.6f}"
@@ -151,6 +159,8 @@ def apply_time_varying_inflow(
     nnudge: Optional[int] = None,
     spinup_time: float = 0.0,
     simulation_time: float = 0.0,
+    boundary_condition: str = "periodic",
+    profile_config: Optional[dict[str, Any]] = None,
 ) -> None:
     """Apply inflow settings via nudging files.
 
@@ -199,6 +209,8 @@ def apply_time_varying_inflow(
     dz = zsize / ktot
     heights = np.arange(0.5 * dz, zsize, dz)  # cell centers
 
+    profile_shape = build_profile_shape(profile_config, heights, zsize)
+
     if nnudge is None:
         nnudge = 0
 
@@ -206,7 +218,6 @@ def apply_time_varying_inflow(
     # (scalar / constant params), create a synthetic constant schedule
     # spanning the full runtime so that nudging holds constant values.
     if "time" not in params.dims:
-
         time_seconds = np.linspace(0.0, simulation_time, 2)
 
         inflow_angle = np.linspace(
@@ -234,7 +245,6 @@ def apply_time_varying_inflow(
         if velocity_mag.ndim == 0:
             velocity_mag = np.full_like(time_seconds, float(velocity_mag))
 
-
     # Handle spinup: prepend a constant plateau at initial values and shift
     # user times so that the time-varying schedule starts after spinup.
     if spinup_time > 0:
@@ -242,13 +252,14 @@ def apply_time_varying_inflow(
         time_seconds = np.concatenate([[0.0], time_seconds + spinup_time])
         inflow_angle = np.concatenate([[inflow_angle[0]], inflow_angle])
         velocity_mag = np.concatenate([[velocity_mag[0]], velocity_mag])
-    
+
     # Compute profiles
     thl_profs, qt_profs, u_profs, v_profs = compute_nudging_profiles(
         time_seconds,
         inflow_angle,
         velocity_mag,
         heights,
+        profile_shape=profile_shape,
     )
 
     # Write the timedepnudge file
@@ -271,19 +282,69 @@ def apply_time_varying_inflow(
         tnudge,
     )
 
-    # Apply the initial (t=0) values as static inflow settings
-    # so that prof.inp, lscale.inp, and namoptions INPS are consistent
-    initial_params_vars: dict = {
-        "inflow_angle": float(inflow_angle[0]),
-        "velocity_magnitude": float(velocity_mag[0]),
-    }
-    if "pressure_gradient_magnitude" in params:
-        pg = params["pressure_gradient_magnitude"].values
-        initial_params_vars["pressure_gradient_magnitude"] = (
-            float(pg) if pg.ndim == 0 else float(pg[0])
-        )
-    initial_params = xarray.Dataset(data_vars=initial_params_vars)
-    apply_inflow_settings(initial_params, dirs)
+    zeros = np.zeros(ktot)
+    update_prof_file_profile(
+        dirs.experiment_dir / f"prof.inp.{dirs.experiment_name}",
+        u_profile=zeros,
+        v_profile=zeros,
+    )
+    update_lscale_file_profile(
+        dirs.experiment_dir / f"lscale.inp.{dirs.experiment_name}",
+        u_profile=zeros,
+        v_profile=zeros,
+        dpdx_profile=zeros,
+        dpdy_profile=zeros,
+    )
+    # if boundary_condition == "inflow_outflow":
+    #     # Match the reference expnr=400 convention: start the flow from
+    #     # rest and let nudging plus the west-face inflow BC ramp toward
+    #     # the t=0 target during spinup.  Writing t=0 velocities into
+    #     # prof.inp stagnates the flow against building walls before the
+    #     # pressure solver has settled.
+    #     zeros = np.zeros(ktot)
+    #     update_prof_file_profile(
+    #         dirs.experiment_dir / f"prof.inp.{dirs.experiment_name}",
+    #         u_profile=zeros,
+    #         v_profile=zeros,
+    #     )
+    #     update_lscale_file_profile(
+    #         dirs.experiment_dir / f"lscale.inp.{dirs.experiment_name}",
+    #         u_profile=zeros,
+    #         v_profile=zeros,
+    #         dpdx_profile=zeros,
+    #         dpdy_profile=zeros,
+    #     )
+
+    #     # Still write scalar u0, v0 to namoptions INPS (uDALES uses
+    #     # these as reference scalars independent of IC).  dpdx/dpdy are
+    #     # zeroed because under inflow_outflow the west-face BC drives
+    #     # the flow.
+    #     u0, v0 = angle_to_velocity(float(inflow_angle[0]), float(velocity_mag[0]))
+    #     namoptions.set_value("INPS", "u0", f"{u0:.7f}")
+    #     namoptions.set_value("INPS", "v0", f"{v0:.7f}")
+    #     namoptions.set_value("INPS", "dpdx", "0.0")
+    #     namoptions.set_value("INPS", "dpdy", "0.0")
+    #     namoptions.write()
+    # else:
+    #     # Periodic BC: keep the t=0 profile in prof.inp and lscale.inp,
+    #     # because there is no inflow face to drive the flow.
+    #     initial_params_vars: dict = {
+    #         "inflow_angle": float(inflow_angle[0]),
+    #         "velocity_magnitude": float(velocity_mag[0]),
+    #     }
+    #     if "pressure_gradient_magnitude" in params:
+    #         pg = params["pressure_gradient_magnitude"].values
+    #         initial_params_vars["pressure_gradient_magnitude"] = (
+    #             float(pg) if pg.ndim == 0 else float(pg[0])
+    #         )
+
+    #     initial_params = xarray.Dataset(data_vars=initial_params_vars)
+    #     apply_inflow_settings(
+    #         initial_params,
+    #         dirs,
+    #         boundary_condition=boundary_condition,
+    #         profile_shape=profile_shape,
+    #     )
 
     # Verify critical files exist
     nudge_exists = nudge_file_path.exists()
