@@ -16,10 +16,7 @@ import numpy as np
 import xarray
 
 from .dir_utils import DirectoryPaths
-from .file_update_utils import (
-    update_lscale_file_profile,
-    update_prof_file_profile,
-)
+from .file_update_utils import update_lscale_file_profile, update_prof_file_profile
 from .inflow_utils import angle_to_velocity
 from .namoptions_utils import NamoptionsFile
 from .vertical_profile import build_profile_shape
