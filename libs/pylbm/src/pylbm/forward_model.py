@@ -138,6 +138,12 @@ class ForwardModel(BaseForwardModel):
                 enable_cuda=self.cuda,
                 enable_netcdf=self.enable_netcdf,
             )
+            # A rebuilt binary may use a different RANDOM_SEED size than the
+            # stale seed_*.dat/.orig files written by the previous binary,
+            # which causes a FIO read past end-of-file at startup.
+            for pattern in ("seed_*.dat", "seed_*.orig"):
+                for seed_file in self.dirs.experiment_dir.glob(pattern):
+                    seed_file.unlink(missing_ok=True)
 
         # Create infile.in by running the executable (only if it doesn't exist)
         if not self.dirs.infile_path.exists():
