@@ -95,12 +95,5 @@ PARAM_PRIORS = {
 TIME_VARYING_PARAMS = {
     "num_time_points": 3,
     "prior_correlation_length": 2.0,  # seconds — controls smoothness of GP prior
-    "inflow_angle_start": -10.0,
-    "inflow_angle_end": 10.0,
-    "inflow_angle_sigmoid_center": 0.5,
-    "inflow_angle_sigmoid_width": 0.1,
-    "velocity_magnitude_start": 3.0,
-    "velocity_magnitude_end": 5.0,
-    "velocity_magnitude_sigmoid_center": 0.5,
-    "velocity_magnitude_sigmoid_width": 0.1,
+    "truth_correlation_length": 1.0,  # seconds — different from prior to avoid inverse crime
 }
