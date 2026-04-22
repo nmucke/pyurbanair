@@ -9,9 +9,9 @@ logger = logging.getLogger(__name__)
 
 import numpy as np
 import xarray
-from pylbm.utils import get_lbm_directory_paths
-
 from pyurbanair.base_forward_model import BaseForwardModel
+
+from pylbm.utils import get_lbm_directory_paths
 
 from .stl_to_lbm import stl_to_lbm_geometry
 from .utils import Infile, apply_inflow_settings, compile_lbm, create_infile
@@ -25,6 +25,11 @@ from .utils.params_utils import (
     write_uvel_time_file,
 )
 from .utils.state_utils import scale_velocity_to_physical
+from .utils.warm_start_utils import (
+    identify_latest_restart_iteration,
+    remove_old_restart_files,
+    write_restart_file_from_xarray,
+)
 
 
 class ForwardModel(BaseForwardModel):
@@ -133,6 +138,12 @@ class ForwardModel(BaseForwardModel):
                 enable_cuda=self.cuda,
                 enable_netcdf=self.enable_netcdf,
             )
+            # A rebuilt binary may use a different RANDOM_SEED size than the
+            # stale seed_*.dat/.orig files written by the previous binary,
+            # which causes a FIO read past end-of-file at startup.
+            for pattern in ("seed_*.dat", "seed_*.orig"):
+                for seed_file in self.dirs.experiment_dir.glob(pattern):
+                    seed_file.unlink(missing_ok=True)
 
         # Create infile.in by running the executable (only if it doesn't exist)
         if not self.dirs.infile_path.exists():
@@ -322,6 +333,21 @@ class ForwardModel(BaseForwardModel):
         # Always return to original directory
         os.chdir(original_cwd)
 
+    def _prepare_warmstart(self, state: xarray.Dataset) -> None:
+        """Write a restart file from ``state`` and arm nt0 for the next run.
+
+        Uses the latest existing ``restart/restart_0000_<iter>.uf`` as a
+        template (for ghost cells and non-equilibrium content) when
+        available; otherwise falls back to a pure-equilibrium restart.
+        """
+        latest_restart = identify_latest_restart_iteration(self.dirs)
+        restart_iteration = write_restart_file_from_xarray(
+            state=state,
+            dirs=self.dirs,
+            restart_iteration=latest_restart,
+        )
+        self._nt0_override = restart_iteration
+
     def run_single(
         self,
         state: Optional[xarray.Dataset] = None,
@@ -337,16 +363,24 @@ class ForwardModel(BaseForwardModel):
                 "or call run() and process non-NETCDF diagnostics."
             )
 
-        if params is not None:
-            self._apply_inflow_settings(params)
+        saved_spinup_time = self.spinup_time
+        try:
+            if state is not None:
+                self.spinup_time = 0.0
+                self._prepare_warmstart(state)
 
-        self._set_scaling_factors(params)
+            if params is not None:
+                self._apply_inflow_settings(params)
 
-        # Remove stale output files before running to prevent files from a
-        # previous run (which may have used a different iout) being collected.
-        self._clean_output()
+            self._set_scaling_factors(params)
 
-        self.run()
+            # Remove stale output files before running to prevent files from a
+            # previous run (which may have used a different iout) being collected.
+            self._clean_output()
+
+            self.run()
+        finally:
+            self.spinup_time = saved_spinup_time
 
         output_files = self._get_output_files_for_current_run()
         state = [xarray.load_dataset(path, engine="netcdf4") for path in output_files]
@@ -362,7 +396,13 @@ class ForwardModel(BaseForwardModel):
         if self._spinup_outputs > 0 and state.sizes["time"] > self._spinup_outputs:
             state = state.isel(time=slice(self._spinup_outputs, None))
 
+        expected_outputs = round(self.simulation_time / self.output_frequency)
+        if state.sizes["time"] > expected_outputs:
+            state = state.isel(time=slice(-expected_outputs, None))
+
         state = state.assign_coords(time=range(state.sizes["time"]))
+
+        remove_old_restart_files(self.dirs)
 
         return state
 

@@ -9,8 +9,8 @@ from data_assimilation.smoothing.esmda import ParameterESMDA
 
 from pyurbanair.plotting import (
     plot_parameter_distributions,
-    plot_true_vs_estimated_state,
     plot_state_init_and_terminal,
+    plot_true_vs_estimated_state,
 )
 from pyurbanair.utils.animation_utils import _visualize_state_history
 from pyurbanair.utils.run_utils import get_ensemble_mean_field

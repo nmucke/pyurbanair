@@ -23,16 +23,22 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 100,
-    "ny": 80,
-    "nz": 8,
-    "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "nx": 50,
+    "ny": 40,
+    "nz": 16,
+    "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
+# DOMAIN = {
+#     "nx": 100,
+#     "ny": 80,
+#     "nz": 8,
+#     "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+# }
 
 TIME = {
-    "simulation_time": 10.0,  # 3000 * 0.0538,
-    "output_frequency": 1.0,  # 3000 * 0.0538,
-    "spinup_time": 5.0,
+    "simulation_time": 30.0,  # 3000 * 0.0538,
+    "output_frequency": 2.0,  # 3000 * 0.0538,
+    "spinup_time": 10.0,
 }
 
 LBM_ARGS = {
@@ -41,7 +47,7 @@ LBM_ARGS = {
     "cuda": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
-    "compile": True,
+    "compile": False,
 }
 
 UDALES_ARGS = {
@@ -52,26 +58,38 @@ UDALES_ARGS = {
     "save_only_last_timestep": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
+    "nudging_config": {
+        "tnudge": 150.0,
+        "nnudge": 2,
+        # Vertical inflow profile.  Omit for uniform (back-compat).  Supported:
+        #   {"type": "uniform"},
+        #   {"type": "power_law", "alpha": 0.25, "z_ref": 40.0}
+        # velocity_magnitude is interpreted as the speed at z_ref.
+        "profile_config": {"type": "power_law", "alpha": 0.25},
+        # "profile_config": {"type": "uniform"},
+    },
 }
 
 ENSEMBLE = {
-    "ensemble_size": 4,
+    "ensemble_size": 128,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
 
 OBS = {
-    "x_points": [20.0, 20.0, 40.0, 40.0, 60.0],
-    "y_points": [20.0, 60.0, 10.0, 30.0, 60.0],
+    # "x_points": [20.0, 20.0, 40.0, 40.0, 60.0],
+    # "y_points": [20.0, 60.0, 10.0, 30.0, 60.0],
+    "x_points": [10.0, 20.0, 30.0, 38.0, 10.0],
+    "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
-    "interval_size": 5,
+    "interval_size": 3,
     "aggregation_mode": "mean",
 }
 
 ESMDA = {
-    "num_steps": 1,
+    "num_steps": 3,
     "num_assimilation_windows": 3,
     "seed": 42,
     "obs_error_std": 0.1,
@@ -96,7 +114,7 @@ PARAM_PRIORS = {
 
 TIME_VARYING_PARAMS = {
     "num_time_points": 10,
-    "prior_correlation_length": 5.0,  # seconds — controls smoothness of GP prior
+    "prior_correlation_length": 15.0,  # seconds — controls smoothness of GP prior
     "truth_correlation_length": 10.0,  # seconds — different from prior to avoid inverse crime
     "inflow_angle_start": -20.0,
     "inflow_angle_end": 20.0,

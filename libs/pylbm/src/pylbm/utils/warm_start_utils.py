@@ -719,28 +719,17 @@ def write_restart_file_from_xarray(
             fluid_mask_xyz = np.transpose(fluid_mask_zyx, (2, 1, 0))
             valid_mask = valid_mask & fluid_mask_xyz
 
-        # Apply bounded increments toward xarray target to avoid restart shocks.
-        rho_delta = rho_xyz_interior - rho_target
-        u_delta = u_xyz_interior - u_target
-        v_delta = v_xyz_interior - v_target
-        w_delta = w_xyz_interior - w_target
+        # Use xarray macros directly where valid; keep template values elsewhere.
+        rho_target[valid_mask] = rho_xyz_interior[valid_mask]
+        u_target[valid_mask] = u_xyz_interior[valid_mask]
+        v_target[valid_mask] = v_xyz_interior[valid_mask]
+        w_target[valid_mask] = w_xyz_interior[valid_mask]
 
-        rho_delta = np.clip(rho_delta, -0.02, 0.02)
-        u_delta = np.clip(u_delta, -0.01, 0.01)
-        v_delta = np.clip(v_delta, -0.01, 0.01)
-        w_delta = np.clip(w_delta, -0.01, 0.01)
-
-        blend = 0.5
-        rho_target[valid_mask] = rho_target[valid_mask] + blend * rho_delta[valid_mask]
-        u_target[valid_mask] = u_target[valid_mask] + blend * u_delta[valid_mask]
-        v_target[valid_mask] = v_target[valid_mask] + blend * v_delta[valid_mask]
-        w_target[valid_mask] = w_target[valid_mask] + blend * w_delta[valid_mask]
-
-        # Keep values in a numerically sane range for restart consistency.
+        # Floor rho to protect feq from division by zero; velocities pass through.
         rho_target = np.clip(rho_target, 1e-6, np.inf).astype(np.float32)
-        u_target = np.clip(u_target, -0.25, 0.25).astype(np.float32)
-        v_target = np.clip(v_target, -0.25, 0.25).astype(np.float32)
-        w_target = np.clip(w_target, -0.25, 0.25).astype(np.float32)
+        u_target = u_target.astype(np.float32)
+        v_target = v_target.astype(np.float32)
+        w_target = w_target.astype(np.float32)
 
         rho_xyz[1:-1, 1:-1, 1:-1] = rho_target
         u_xyz[1:-1, 1:-1, 1:-1] = u_target
