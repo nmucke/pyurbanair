@@ -117,13 +117,20 @@ class _BaseESMDA(BaseSmoothing):
         return_state_history: bool = False,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the ESMDA analysis loop."""
+        # Pin the caller-provided state so every forecast in this analysis
+        # loop integrates from the same initial condition. Without this,
+        # iteration i+1 would forecast from iteration i's output — which
+        # bypasses spin-up after the first iteration (when the caller
+        # passes state=None) and tangles the iterates' physical states.
+        initial_state = state
+
         params_history: list[xarray.Dataset] = [params] if return_params_history else []
         state_history: list[xarray.Dataset] = []
 
         for i in range(self.num_steps):
             self._set_step_results_dir(i)
 
-            state = self._forecast_step(state=state, params=params)
+            state = self._forecast_step(state=initial_state, params=params)
 
             if return_state_history and not self.forward_model.save_on_disk:
                 state_history.append(state)
@@ -140,7 +147,7 @@ class _BaseESMDA(BaseSmoothing):
 
         # Final forecast with updated params
         self._set_step_results_dir(self.num_steps)
-        state = self._forecast_step(state=state, params=params)
+        state = self._forecast_step(state=initial_state, params=params)
 
         if return_state_history and not self.forward_model.save_on_disk:
             state_history.append(state)
@@ -226,6 +233,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         num_steps: int = 3,
         alpha: Optional[float] = None,
         rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
+        pin_initial_time_point: bool = False,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -237,6 +245,11 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         )
         self.num_time_points = num_time_points
         self.time_coords = time_coords
+        # When True, ``t=0`` of every time-varying parameter is excluded
+        # from the Kalman-updated augmented state and reinserted unchanged
+        # during unflatten — per ensemble member. Useful for preserving
+        # cross-window continuity in rollout ESMDA.
+        self.pin_initial_time_point = pin_initial_time_point
 
     def _flatten_time_varying_params(self, params: xarray.Dataset) -> xarray.Dataset:
         """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars.
@@ -245,11 +258,15 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         ``{name}_0``, ``{name}_1``, … so that all time points of one
         parameter are contiguous.  Variables without a ``time`` dimension
         are passed through unchanged.
+
+        When ``self.pin_initial_time_point`` is True, ``{name}_0`` is
+        omitted so ``t=0`` never enters the augmented state.
         """
+        start_idx = 1 if self.pin_initial_time_point else 0
         flat_data_vars: dict = {}
         for name in params.data_vars:
             if "time" in params[name].dims:
-                for t_idx in range(self.num_time_points):
+                for t_idx in range(start_idx, self.num_time_points):
                     flat_data_vars[f"{name}_{t_idx}"] = (
                         "ensemble",
                         jnp.asarray(params[name].isel(time=t_idx).values),
@@ -269,14 +286,24 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         flat_params: xarray.Dataset,
         original_params: xarray.Dataset,
     ) -> xarray.Dataset:
-        """Reverse :meth:`_flatten_time_varying_params`."""
+        """Reverse :meth:`_flatten_time_varying_params`.
+
+        When ``self.pin_initial_time_point`` is True, ``t=0`` was not
+        flattened — reinsert it per-member from ``original_params``.
+        """
+        start_idx = 1 if self.pin_initial_time_point else 0
         data_vars: dict = {}
         for name in original_params.data_vars:
             if "time" in original_params[name].dims:
-                time_slices = [
+                time_slices: list = []
+                if self.pin_initial_time_point:
+                    time_slices.append(
+                        jnp.asarray(original_params[name].isel(time=0).values)
+                    )
+                time_slices.extend(
                     jnp.asarray(flat_params[f"{name}_{t_idx}"].values)
-                    for t_idx in range(self.num_time_points)
-                ]
+                    for t_idx in range(start_idx, self.num_time_points)
+                )
                 data_vars[name] = (
                     ("time", "ensemble"),
                     jnp.stack(time_slices, axis=0),

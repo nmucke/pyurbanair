@@ -164,47 +164,52 @@ def create_time_varying_true_params(
     model_name: ModelName,
     num_time_points: int,
 ) -> xarray.Dataset:
-    """Create time-varying true parameters using a sigmoid profile."""
+    """Create time-varying true parameters from a Gaussian process sample.
+
+    A single realization is drawn from a squared-exponential GP prior with
+    the same marginal distribution as the ensemble prior but using
+    ``truth_correlation_length`` and a distinct seed, so the truth is not
+    identical to any ensemble member (avoids the inverse crime).
+    """
     cfg = _cfg()
     tv = cfg.TIME_VARYING_PARAMS
     sim_time = cfg.TIME["simulation_time"]
-    time_coords = np.linspace(0, sim_time, num_time_points)
+    time_coords = jnp.linspace(0, sim_time, num_time_points)
+    correlation_length = tv.get("truth_correlation_length", sim_time / 4)
+    rng_key = jax.random.PRNGKey(cfg.ESMDA["seed"] + 1)
 
-    def _sigmoid(
-        t: np.ndarray,
-        start: float,
-        end: float,
-        center_frac: float,
-        width_frac: float,
-    ) -> np.ndarray:
-        center = center_frac * sim_time
-        width = max(width_frac * sim_time, 1e-6)
-        return start + (end - start) / (1 + np.exp(-(t - center) / width))
+    rng_key, subkey = jax.random.split(rng_key)
+    inflow = sample_smooth_ensemble(
+        subkey,
+        time_coords,
+        mean=cfg.PARAM_PRIORS["inflow_angle_mean"],
+        std=cfg.PARAM_PRIORS["inflow_angle_std"],
+        ensemble_size=1,
+        correlation_length=correlation_length,
+    )[:, 0]
 
-    inflow_angle = _sigmoid(
+    rng_key, subkey = jax.random.split(rng_key)
+    vel = sample_smooth_ensemble(
+        subkey,
         time_coords,
-        tv["inflow_angle_start"],
-        tv["inflow_angle_end"],
-        tv["inflow_angle_sigmoid_center"],
-        tv["inflow_angle_sigmoid_width"],
-    )
-    velocity_magnitude = _sigmoid(
-        time_coords,
-        tv["velocity_magnitude_start"],
-        tv["velocity_magnitude_end"],
-        tv["velocity_magnitude_sigmoid_center"],
-        tv["velocity_magnitude_sigmoid_width"],
-    )
+        mean=cfg.PARAM_PRIORS["velocity_mean"],
+        std=cfg.PARAM_PRIORS["velocity_std"],
+        ensemble_size=1,
+        correlation_length=correlation_length,
+    )[:, 0]
+    vel = jnp.maximum(vel, 0.1)
 
     data_vars: dict = {
-        "inflow_angle": ("time", inflow_angle),
-        "velocity_magnitude": ("time", velocity_magnitude),
+        "inflow_angle": ("time", np.asarray(inflow)),
+        "velocity_magnitude": ("time", np.asarray(vel)),
     }
     if model_name == "pyudales":
         data_vars["pressure_gradient_magnitude"] = cfg.TRUE_PARAMS[
             "pressure_gradient_magnitude"
         ]
-    return xarray.Dataset(data_vars=data_vars, coords={"time": time_coords})
+    return xarray.Dataset(
+        data_vars=data_vars, coords={"time": np.asarray(time_coords)}
+    )
 
 
 def sample_smooth_ensemble(
