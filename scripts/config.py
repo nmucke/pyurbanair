@@ -36,7 +36,7 @@ DOMAIN = {
 # }
 
 TIME = {
-    "simulation_time": 60.0,  # 3000 * 0.0538,
+    "simulation_time": 30.0,  # 3000 * 0.0538,
     "output_frequency": 1.0,  # 3000 * 0.0538,
     "spinup_time": 15.0,
 }
@@ -59,8 +59,8 @@ UDALES_ARGS = {
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "nudging_config": {
-        "tnudge": 150.0,
-        "nnudge": 2,
+        "tnudge": 50.0,
+        "nnudge": 0,
         # Vertical inflow profile.  Omit for uniform (back-compat).  Supported:
         #   {"type": "uniform"},
         #   {"type": "power_law", "alpha": 0.25, "z_ref": 40.0}
