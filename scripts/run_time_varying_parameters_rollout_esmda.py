@@ -233,6 +233,12 @@ def main() -> None:
     sim_time = config.TIME["simulation_time"]
     prior_corr_length = config.TIME_VARYING_PARAMS["prior_correlation_length"]
     truth_corr_length = config.TIME_VARYING_PARAMS["truth_correlation_length"]
+    extrap_method = config.TIME_VARYING_PARAMS.get(
+        "extrapolation_method", "linear_trend_gp"
+    )
+    slope_damping_time = config.TIME_VARYING_PARAMS.get("slope_damping_time", None)
+    ar1_phi_max = config.TIME_VARYING_PARAMS.get("ar1_phi_max", 0.999)
+    ou_phi_max = config.TIME_VARYING_PARAMS.get("ou_phi_max", 0.999)
 
     rng_key = jax.random.PRNGKey(config.ESMDA["seed"])
 
@@ -349,11 +355,17 @@ def main() -> None:
         # window's forward model.
         if w < num_windows - 1:
             prediction_times = jnp.linspace(sim_time, 2.0 * sim_time, num_time_points)
+            rng_key, extrap_key = jax.random.split(rng_key)
             extrapolated = extrapolate_parameters(
                 posterior_params,
                 prediction_times=prediction_times,
+                method=extrap_method,
                 correlation_length=prior_corr_length,
                 include_std=False,
+                slope_damping_time=slope_damping_time,
+                ar1_phi_max=ar1_phi_max,
+                rng_key=extrap_key,
+                ou_phi_max=ou_phi_max,
             )
             extrapolated = extrapolated.assign_coords(
                 time=np.asarray(local_time_coords)

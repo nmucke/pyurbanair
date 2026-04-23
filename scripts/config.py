@@ -37,8 +37,8 @@ DOMAIN = {
 
 TIME = {
     "simulation_time": 60.0,  # 3000 * 0.0538,
-    "output_frequency": 2.0,  # 3000 * 0.0538,
-    "spinup_time": 25.0,
+    "output_frequency": 1.0,  # 3000 * 0.0538,
+    "spinup_time": 15.0,
 }
 
 LBM_ARGS = {
@@ -71,8 +71,8 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 64,
-    "num_parallel_processes": 1,
+    "ensemble_size": 32,
+    "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
 }
 
@@ -84,12 +84,12 @@ OBS = {
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
-    "interval_size": 3,
+    "interval_size": 5,
     "aggregation_mode": "mean",
 }
 
 ESMDA = {
-    "num_steps": 3,
+    "num_steps": 2,
     "num_assimilation_windows": 3,
     "seed": 42,
     "obs_error_std": 0.1,
@@ -105,7 +105,7 @@ TRUE_PARAMS = {
 
 PARAM_PRIORS = {
     "inflow_angle_mean": 0.0,
-    "inflow_angle_std": 8.0,
+    "inflow_angle_std": 10.0,
     "velocity_mean": 3.0,
     "velocity_std": 1.0,
     "pressure_mean": 0.0041912,
@@ -114,6 +114,21 @@ PARAM_PRIORS = {
 
 TIME_VARYING_PARAMS = {
     "num_time_points": 10,
-    "prior_correlation_length": 10.0,  # seconds — controls smoothness of GP prior
-    "truth_correlation_length": 10.0,  # seconds — different from prior to avoid inverse crime
+    "prior_correlation_length": 30.0,  # seconds — controls smoothness of GP prior
+    "truth_correlation_length": 30.0,  # seconds — different from prior to avoid inverse crime
+    # Between-window extrapolation of the posterior parameter ensemble.
+    # Options:
+    #   "linear_trend_gp": per-member linear trend + GP residual.  Trend
+    #       continues into the next window; optionally damped via
+    #       ``slope_damping_time`` (seconds, or None for no damping).
+    #   "ar1": per-member AR(1) rolled forward deterministically from
+    #       the last posterior value; ``ar1_phi_max`` clips the fit.
+    #   "ornstein_uhlenbeck": per-member OU-with-drift SDE, ensemble-
+    #       pooled diffusion, stochastic Euler-Maruyama rollout with
+    #       independent Brownian increments per member.  ``ou_phi_max``
+    #       clips the fitted AR coefficient for stability.
+    "extrapolation_method": "ornstein_uhlenbeck",
+    "slope_damping_time": None,
+    "ar1_phi_max": 0.999,
+    "ou_phi_max": 0.999,
 }
