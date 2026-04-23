@@ -23,12 +23,12 @@ from data_assimilation.smoothing.esmda import TimeVaryingParameterESMDA
 from tqdm import tqdm
 
 from pyurbanair.parameter_extrapolation import extrapolate_parameters
+from pyurbanair.utils.animation_utils import animate_rollout_state
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from scripts import config
-
 
 # ---------------------------------------------------------------------------
 # Truth generation
@@ -45,9 +45,11 @@ def _generate_truth_params_all_windows(
     """Generate time-varying true parameters across all windows from a GP draw.
 
     A single Gaussian process draw (per parameter) spans the full time
-    horizon ``[0, num_windows * sim_time]``.  The result is sliced into
-    per-window datasets so that the truth profile is smooth across window
-    boundaries.
+    horizon ``[0, num_windows * sim_time]``.  The draw is evaluated on
+    the union of all windows' time grids (sharing boundary points
+    between adjacent windows) so that each per-window slice matches the
+    ESMDA window grid ``linspace(w*sim_time, (w+1)*sim_time, N_t)``
+    exactly and the profile is continuous across boundaries.
 
     Args:
         num_windows: Number of assimilation windows.
@@ -58,10 +60,15 @@ def _generate_truth_params_all_windows(
 
     Returns:
         List of ``num_windows`` :class:`xarray.Dataset` objects, each with
-        dims ``(time,)`` and time coordinates local to that window.
+        dims ``(time,)`` and time coordinates matching the ESMDA window
+        grid for that window.
     """
-    total_points = num_windows * num_time_points
-    full_time = jnp.linspace(0, num_windows * sim_time, total_points)
+    # Shared-boundary grid: window w spans indices
+    # [w*(N_t-1) : w*(N_t-1) + N_t], so window w's last point == window
+    # w+1's first point (both at t = (w+1)*sim_time).
+    step = max(num_time_points - 1, 1)
+    n_unique = num_windows * step + 1
+    full_time = jnp.linspace(0, num_windows * sim_time, n_unique)
 
     rng_key, subkey = jax.random.split(rng_key)
     inflow_angle = config.sample_smooth_ensemble(
@@ -84,12 +91,15 @@ def _generate_truth_params_all_windows(
     )[:, 0]
     velocity_magnitude = jnp.maximum(velocity_magnitude, 0.1)
 
-    # Slice into per-window datasets
+    # Each window's simulation runs with its own clock starting at t=0,
+    # so assign LOCAL time coords [0, sim_time] to each window's dataset.
+    # Absolute times are reconstructed at save/plot time from the window index.
+    local_time = np.asarray(jnp.linspace(0.0, sim_time, num_time_points))
+
     datasets: list[xarray.Dataset] = []
     for w in range(num_windows):
-        start = w * num_time_points
-        end = (w + 1) * num_time_points
-        window_time = full_time[start:end]
+        start = w * step
+        end = start + num_time_points
         datasets.append(
             xarray.Dataset(
                 data_vars={
@@ -99,7 +109,7 @@ def _generate_truth_params_all_windows(
                         np.asarray(velocity_magnitude[start:end]),
                     ),
                 },
-                coords={"time": np.asarray(window_time)},
+                coords={"time": local_time},
             )
         )
     return datasets
@@ -141,37 +151,29 @@ def _plot_time_varying_params_rollout(
         )
         ax.plot(true_times, true_vals, color="C0", linewidth=2, label="True")
 
-        # Posterior per window
+        # Posterior per window: individual members + ensemble mean
         for w, post_ds in enumerate(posterior_params_list):
             t = np.asarray(post_ds.coords["time"].values)
-            ens_mean = np.asarray(post_ds[name].mean(dim="ensemble").values)
-            ens_std = np.asarray(post_ds[name].std(dim="ensemble").values)
-            label = "Posterior mean" if w == 0 else None
-            ax.plot(t, ens_mean, color="C1", linewidth=2, label=label)
-            ax.fill_between(
-                t,
-                ens_mean - ens_std,
-                ens_mean + ens_std,
-                color="C1",
-                alpha=0.25,
-                label="Posterior ±1σ" if w == 0 else None,
-            )
+            members = np.asarray(post_ds[name].transpose("time", "ensemble").values)
+            ax.plot(t, members, color="C1", linewidth=0.8, alpha=0.25)
+            ens_mean = members.mean(axis=1)
+            mean_label = "Posterior mean" if w == 0 else None
+            ax.plot(t, ens_mean, color="C1", linewidth=2, label=mean_label)
 
-        # Extrapolated prior per window
+        # Extrapolated prior per window: individual members + ensemble mean
         for w, extrap_ds in enumerate(extrapolated_params_list):
             t = np.asarray(extrap_ds.coords["time"].values)
-            ens_mean = np.asarray(extrap_ds[name].mean(dim="ensemble").values)
-            ens_std = np.asarray(extrap_ds[name].std(dim="ensemble").values)
-            label = "Extrapolated prior" if w == 0 else None
+            members = np.asarray(extrap_ds[name].transpose("time", "ensemble").values)
+            ax.plot(t, members, color="C2", linewidth=0.8, linestyle="--", alpha=0.25)
+            ens_mean = members.mean(axis=1)
+            mean_label = "Extrapolated posterior" if w == 0 else None
             ax.plot(
-                t, ens_mean, color="C2", linewidth=1.5, linestyle="--", label=label
-            )
-            ax.fill_between(
                 t,
-                ens_mean - ens_std,
-                ens_mean + ens_std,
+                ens_mean,
                 color="C2",
-                alpha=0.15,
+                linewidth=1.5,
+                linestyle="--",
+                label=mean_label,
             )
 
         # Window boundaries
@@ -199,12 +201,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Rollout ESMDA with time-varying parameters and GP extrapolation."
     )
-    parser.add_argument(
-        "--truth-model", choices=["pylbm", "pyudales"], default="pylbm"
-    )
-    parser.add_argument(
-        "--assim-model", choices=["pylbm", "pyudales"], default="pylbm"
-    )
+    parser.add_argument("--truth-model", choices=["pylbm", "pyudales"], default="pylbm")
+    parser.add_argument("--assim-model", choices=["pylbm", "pyudales"], default="pylbm")
     parser.add_argument(
         "--skip-viz",
         action="store_true",
@@ -216,6 +214,12 @@ def main() -> None:
         default=None,
         help="Number of discrete time points per window for time-varying parameters. "
         "Defaults to config.TIME_VARYING_PARAMS['num_time_points'].",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=pathlib.Path,
+        default=None,
+        help="Override results directory for assimilation model outputs.",
     )
     args = parser.parse_args()
 
@@ -247,8 +251,12 @@ def main() -> None:
     config.prepare_forward_model(args.truth_model, truth_model)
     truth_model = config.create_rollout_forward_model(args.truth_model, truth_model)
 
-    # No results_dir: states stay in memory for state handoff
-    assim_model = config.create_forward_model(args.assim_model)
+    assim_results_dir = (
+        pathlib.Path(args.results_dir) if args.results_dir is not None else None
+    )
+    assim_model = config.create_forward_model(
+        args.assim_model, results_dir=assim_results_dir
+    )
     config.prepare_forward_model(args.assim_model, assim_model)
     assim_model = config.create_rollout_forward_model(args.assim_model, assim_model)
 
@@ -257,68 +265,61 @@ def main() -> None:
         args.assim_model, num_time_points
     )
 
-    # ---- Run truth for window 0 (cold start with spinup) ------------------
-    true_state = truth_model(params=true_params_per_window[0], state=None)
-    if true_state is None:
-        raise RuntimeError("Expected in-memory truth rollout state.")
-
     # ---- Observation setup ------------------------------------------------
     truth_obs_op = config.create_observation_operator(args.truth_model)
-    true_obs_sample = jnp.asarray(truth_obs_op(true_state))
-    C_D = config.create_C_D(true_obs_sample.shape[0])
-
     ensemble_model = config.create_ensemble_forward_model(args.assim_model, assim_model)
     assim_obs_op = config.create_observation_operator(args.assim_model)
 
-    # ---- ESMDA instance ---------------------------------------------------
-    window_0_time_coords = jnp.linspace(0, sim_time, num_time_points)
-    esmda = TimeVaryingParameterESMDA(
-        observation_operator=assim_obs_op,
-        forward_model=ensemble_model,
-        C_D=C_D,
-        num_time_points=num_time_points,
-        time_coords=window_0_time_coords,
-        num_steps=config.ESMDA["num_steps"],
-        alpha=config.ESMDA["num_steps"],
-        rng_key=rng_key,
-    )
-
     # ---- Storage ----------------------------------------------------------
     true_state_list: list[xarray.Dataset] = []
-    true_params_list: list[xarray.Dataset] = list(true_params_per_window)
     posterior_params_list: list[xarray.Dataset] = []
     extrapolated_params_list: list[xarray.Dataset] = []
     esmda_state_list: list[xarray.Dataset] = []
 
     # ---- State tracking for handoff between windows -----------------------
+    true_state: xarray.Dataset | None = None
     esmda_final_state: xarray.Dataset | None = None
+    C_D: jnp.ndarray | None = None
+    esmda: TimeVaryingParameterESMDA | None = None
 
     # ---- Window loop ------------------------------------------------------
     for w in tqdm(range(num_windows), desc="Assimilation windows"):
         true_params_w = true_params_per_window[w]
 
         # --- Truth forward -------------------------------------------------
-        if w == 0:
-            # Already computed above for observation setup
-            pass
-        else:
-            true_state = truth_model(params=true_params_w, state=true_state)
-            if true_state is None:
-                raise RuntimeError("Expected in-memory truth rollout state.")
+        true_state = truth_model(params=true_params_w, state=true_state)
+        if true_state is None:
+            raise RuntimeError("Expected in-memory truth rollout state.")
         true_state_list.append(true_state)
 
         # --- Noisy observations --------------------------------------------
         true_obs = jnp.asarray(truth_obs_op(true_state))
+        if C_D is None:
+            C_D = config.create_C_D(true_obs.shape[0])
         rng_key, subkey = jax.random.split(rng_key)
-        noisy_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(
-            subkey, true_obs.shape
-        )
+        noisy_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-        # --- Update ESMDA time coords for this window ----------------------
-        window_time_coords = jnp.linspace(
-            w * sim_time, (w + 1) * sim_time, num_time_points
-        )
-        esmda.time_coords = window_time_coords
+        # --- Window time coords (local; each window's sim runs 0..sim_time) -
+        local_time_coords = jnp.linspace(0.0, sim_time, num_time_points)
+
+        # --- Construct ESMDA (local time coords are the same every window) -
+        if esmda is None:
+            esmda = TimeVaryingParameterESMDA(
+                observation_operator=assim_obs_op,
+                forward_model=ensemble_model,
+                C_D=C_D,
+                num_time_points=num_time_points,
+                time_coords=local_time_coords,
+                num_steps=config.ESMDA["num_steps"],
+                alpha=config.ESMDA["num_steps"],
+                rng_key=rng_key,
+                pin_initial_time_point=False,
+            )
+        # Pin t=0 from window 1 onward so the Kalman update preserves the
+        # continuity that the GP extrapolation established at each window
+        # boundary. Window 0's prior t=0 is a free parameter (just a GP
+        # draw), so we let ESMDA fit it.
+        esmda.pin_initial_time_point = w > 0
 
         # --- Determine initial state for ESMDA -----------------------------
         if esmda_final_state is not None and "time" in esmda_final_state.dims:
@@ -341,31 +342,55 @@ def main() -> None:
         posterior_params_list.append(posterior_params)
         esmda_state_list.append(esmda_final_state)
 
-        print(f"Window {w} completed")
-
-        # --- GP extrapolation to next window's time coords -----------------
+        # --- GP extrapolation to next window ------------------------------
+        # Extrapolate forward to [sim_time, 2*sim_time] relative to the
+        # posterior's local time axis (RBF kernel is translation-invariant),
+        # then relabel the result to local [0, sim_time] for the next
+        # window's forward model.
         if w < num_windows - 1:
-            next_time_coords = jnp.linspace(
-                (w + 1) * sim_time, (w + 2) * sim_time, num_time_points
-            )
-            params_ensemble = extrapolate_parameters(
+            prediction_times = jnp.linspace(sim_time, 2.0 * sim_time, num_time_points)
+            extrapolated = extrapolate_parameters(
                 posterior_params,
-                prediction_times=next_time_coords,
+                prediction_times=prediction_times,
                 correlation_length=prior_corr_length,
                 include_std=False,
             )
+            extrapolated = extrapolated.assign_coords(
+                time=np.asarray(local_time_coords)
+            )
+            extrapolated["velocity_magnitude"] = extrapolated[
+                "velocity_magnitude"
+            ].clip(min=0.1)
+            params_ensemble = extrapolated
             extrapolated_params_list.append(params_ensemble)
 
     # ---- Save outputs -----------------------------------------------------
     out_dir = config.BASE_RESULTS_DIR / "time_varying_rollout_esmda"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    true_state_all = xarray.concat(true_state_list, dim="time", join="override")
-    esmda_state_all = xarray.concat(esmda_state_list, dim="time", join="override")
+    # Each window's datasets carry LOCAL time coords [0, sim_time]; shift to
+    # absolute times before concatenating so the global time axis is monotonic.
+    def _shift_to_abs(ds: xarray.Dataset, w: int) -> xarray.Dataset:
+        return ds.assign_coords(time=ds["time"].values + w * sim_time)
 
-    true_params_all = xarray.concat(true_params_list, dim="time", join="override")
+    true_state_abs = [_shift_to_abs(ds, w) for w, ds in enumerate(true_state_list)]
+    esmda_state_abs = [_shift_to_abs(ds, w) for w, ds in enumerate(esmda_state_list)]
+    true_params_abs = [
+        _shift_to_abs(ds, w) for w, ds in enumerate(true_params_per_window)
+    ]
+    posterior_params_abs = [
+        _shift_to_abs(ds, w) for w, ds in enumerate(posterior_params_list)
+    ]
+    # extrapolated_params_list[w] is the prior for window w+1
+    extrapolated_params_abs = [
+        _shift_to_abs(ds, w + 1) for w, ds in enumerate(extrapolated_params_list)
+    ]
+
+    true_state_all = xarray.concat(true_state_abs, dim="time", join="override")
+    esmda_state_all = xarray.concat(esmda_state_abs, dim="time", join="override")
+    true_params_all = xarray.concat(true_params_abs, dim="time", join="override")
     posterior_params_all = xarray.concat(
-        posterior_params_list, dim="time", join="override"
+        posterior_params_abs, dim="time", join="override"
     )
 
     true_state_all.to_netcdf(out_dir / "true_state.nc")
@@ -374,19 +399,23 @@ def main() -> None:
     posterior_params_all.to_netcdf(out_dir / "posterior_params.nc")
 
     # Save extrapolated priors for inspection
-    if extrapolated_params_list:
-        extrap_all = xarray.concat(
-            extrapolated_params_list, dim="time", join="override"
-        )
+    if extrapolated_params_abs:
+        extrap_all = xarray.concat(extrapolated_params_abs, dim="time", join="override")
         extrap_all.to_netcdf(out_dir / "extrapolated_params.nc")
 
     # ---- Plotting ---------------------------------------------------------
     if not args.skip_viz:
         _plot_time_varying_params_rollout(
-            true_params_list=true_params_list,
-            posterior_params_list=posterior_params_list,
-            extrapolated_params_list=extrapolated_params_list,
+            true_params_list=true_params_abs,
+            posterior_params_list=posterior_params_abs,
+            extrapolated_params_list=extrapolated_params_abs,
             output_path=out_dir / "time_varying_parameters_rollout.png",
+        )
+        animate_rollout_state(
+            true_state=true_state_all,
+            esmda_state=esmda_state_all,
+            output_path=out_dir / "rollout_animation.mp4",
+            z_level=0,
         )
 
     print(f"Saved outputs in {pathlib.Path(out_dir)}")

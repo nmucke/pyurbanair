@@ -594,8 +594,13 @@ class ForwardModel(BaseForwardModel):
             if coord_updates:
                 state = state.assign_coords(coord_updates)
 
+        # uDALES emits fielddump at t ∈ {tf, 2·tf, …, k·tf} with
+        # k = floor(runtime/tf); it does not emit a frame at t=0. So the
+        # number of post-spinup frames to discard is floor(spinup/tf),
+        # never round(): for spinup=15, tf=2, round(7.5)=8 would drop one
+        # too many (frames at t=2..14 are only seven frames).
         if self.spinup_time > 0 and self.output_frequency is not None:
-            spinup_outputs = round(self.spinup_time / self.output_frequency)
+            spinup_outputs = int(self.spinup_time / self.output_frequency)
             if state.sizes.get("time", 0) > spinup_outputs:
                 state = state.isel(time=slice(spinup_outputs, None))
                 if "time" in state.coords and state.sizes["time"] > 0:
@@ -606,9 +611,19 @@ class ForwardModel(BaseForwardModel):
             and self.output_frequency is not None
             and state.sizes.get("time", 0) > 0
         ):
-            expected_outputs = round(self._simulation_time / self.output_frequency)
-            if state.sizes["time"] > expected_outputs:
+            expected_outputs = int(self._simulation_time / self.output_frequency)
+            actual = state.sizes["time"]
+            if actual > expected_outputs:
                 state = state.isel(time=slice(-expected_outputs, None))
+            elif actual < expected_outputs:
+                raise RuntimeError(
+                    f"uDALES produced {actual} fielddump frames, expected "
+                    f"{expected_outputs} "
+                    f"(simulation_time={self._simulation_time}, "
+                    f"output_frequency={self.output_frequency}, "
+                    f"spinup_time={self.spinup_time}, "
+                    f"runtime={self._simulation_time + self.spinup_time})."
+                )
 
         return state
 

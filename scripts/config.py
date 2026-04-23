@@ -38,7 +38,7 @@ DOMAIN = {
 TIME = {
     "simulation_time": 60.0,  # 3000 * 0.0538,
     "output_frequency": 2.0,  # 3000 * 0.0538,
-    "spinup_time": 10.0,
+    "spinup_time": 25.0,
 }
 
 LBM_ARGS = {
@@ -71,7 +71,7 @@ UDALES_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 4,
+    "ensemble_size": 64,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
 }
@@ -89,7 +89,7 @@ OBS = {
 }
 
 ESMDA = {
-    "num_steps": 1,
+    "num_steps": 3,
     "num_assimilation_windows": 3,
     "seed": 42,
     "obs_error_std": 0.1,
@@ -114,6 +114,6 @@ PARAM_PRIORS = {
 
 TIME_VARYING_PARAMS = {
     "num_time_points": 10,
-    "prior_correlation_length": 15.0,  # seconds — controls smoothness of GP prior
+    "prior_correlation_length": 10.0,  # seconds — controls smoothness of GP prior
     "truth_correlation_length": 10.0,  # seconds — different from prior to avoid inverse crime
 }

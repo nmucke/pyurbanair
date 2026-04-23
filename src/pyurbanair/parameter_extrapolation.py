@@ -112,8 +112,14 @@ def extrapolate_parameters(
             data_vars[name] = params[name]
             continue
 
-        y_train = jnp.asarray(params[name].values)  # (N_t, N_e)
-        means, stds = _predict_ensemble(y_train)
+        da = params[name].transpose("time", "ensemble")
+        y_train = jnp.asarray(da.values)  # (N_t, N_e)
+
+        # Subtract per-trajectory mean so the zero-mean GP extrapolates
+        # back toward each member's own level instead of toward 0.
+        y_mean = y_train.mean(axis=0, keepdims=True)
+        means, stds = _predict_ensemble(y_train - y_mean)
+        means = means + y_mean
 
         data_vars[name] = (("time", "ensemble"), means)
         if include_std:
