@@ -455,23 +455,28 @@ class ForwardModel(BaseForwardModel):
             output_file, engine="netcdf4", decode_timedelta=False
         )
 
-        rename_candidates = {
-            "zu_3d": "z",
-            "zw_3d": "z",
-            "zs_3d": "z",
-        }
-        rename = {k: v for k, v in rename_candidates.items() if k in state.dims}
-        first_z = next(iter(rename), None)
-        if first_z:
-            state = state.rename({first_z: "z"})
-            drop = [k for k in rename if k != first_z and k in state.dims]
-            if drop:
-                state = state.drop_dims(drop, errors="ignore")
+        # PALM uses staggered vertical coords: u/v/scalars on zu_3d,
+        # w on zw_3d. Preserve both; rename zu_3d -> z (the "canonical" z
+        # used by u/v) and zw_3d -> zw so w keeps its own staggered axis.
+        rename_map = {}
+        if "zu_3d" in state.dims:
+            rename_map["zu_3d"] = "z"
+        if "zw_3d" in state.dims:
+            rename_map["zw_3d"] = "zw"
+        if "zs_3d" in state.dims and "zs_3d" != "z":
+            rename_map["zs_3d"] = "zs"
+        if rename_map:
+            state = state.rename(rename_map)
 
-        # PALM's first vertical level (zu_3d[0] = 0) is the wall; all values
-        # there are masked NaN. Downstream code (animation, 2D slicing) uses
-        # z_level=0 as "first fluid layer", so drop the wall layer to match
-        # the convention used by pylbm/pyudales.
+        # PALM writes NaN for any cell occluded by topography (wall layer
+        # zu_3d[0]/zw_3d[0] = 0, building interiors, etc.). The physical
+        # BC is no-slip, so replace NaN with 0 across u/v/w. Without this,
+        # observation operators that sample near-ground or inside-building
+        # points produce NaN pred_obs and poison the Kalman update.
+        for var in ("u", "v", "w"):
+            if var in state.data_vars:
+                state[var] = state[var].fillna(0.0)
+
         if "z" in state.dims and state.sizes["z"] > 1:
             state = state.isel(z=slice(1, None))
 
