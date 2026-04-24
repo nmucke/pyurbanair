@@ -70,6 +70,20 @@ UDALES_ARGS = {
     },
 }
 
+PALM_ARGS = {
+    "case_dir": "examples/palm/experiments/xie_and_castro_palm",
+    "stl_path": "examples/palm/experiments/xie_and_castro_palm/xie_castro_2008_STL.stl",
+    "experiment_name": "urban_run",
+    "ncpu": 1,
+    "save_only_last_timestep": False,
+    "verbose": False,
+    "boundary_condition": "inflow_outflow",
+    "nudging_config": {
+        "profile_config": {"type": "power_law", "alpha": 0.25},
+    },
+    "compile": False,
+}
+
 ENSEMBLE = {
     "ensemble_size": 32,
     "num_parallel_processes": 8,

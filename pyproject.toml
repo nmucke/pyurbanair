@@ -64,6 +64,16 @@ gfortran = {version=">=15.2.0", channel="conda-forge"}
 gcc = {version=">=15.2.0", channel="conda-forge"}
 openmpi = {version=">=4.1.0", channel="conda-forge"}
 
+[tool.pixi.feature.palm.dependencies]
+cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
+netcdf-fortran = {version=">=4.6.2", channel="conda-forge"}
+gcc = {version=">=15.2.0", channel="conda-forge"}
+gfortran = {version=">=15.2.0", channel="conda-forge"}
+fftw = {version=">=3.3.10", channel="conda-forge"}
+openmpi = {version=">=4.1.0", channel="conda-forge"}
+libnetcdf = {version=">=4.9.3", channel="conda-forge"}
+coreutils = {version=">=9.0", channel="conda-forge"}
+
 [tool.pixi.feature.delftblue.activation]
 scripts = ["activation_scripts/delftblue_activation.sh"]
 
@@ -75,6 +85,9 @@ pyudales = { path = "libs/pyudales", editable = true }
 
 [tool.pixi.feature.lbm.pypi-dependencies]
 pylbm = { path = "libs/pylbm", editable = true }
+
+[tool.pixi.feature.palm.pypi-dependencies]
+pypalm = { path = "libs/pypalm", editable = true }
 
 [tool.pixi.feature.data-assimilation.pypi-dependencies]
 data-assimilation = { path = "libs/data-assimilation", editable = true }
@@ -155,6 +168,6 @@ scripts = ["activation_scripts/cuda_activation.sh"]
 
 [tool.pixi.environments]
 default = { features = ["py312"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "benchmark_geometry"] }
-delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm"] }
-cuda = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "cuda"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "benchmark_geometry"] }
+delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm", "palm"] }
+cuda = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "cuda"] }

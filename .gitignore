@@ -21,6 +21,12 @@ libs/pyudales/pyproject.lock
 libs/pyudales/__pycache__/*
 libs/pyudales/*.pyc
 
+##### pypalm #####
+libs/pypalm/palm_model_system/
+libs/pypalm/palm_model_system.tar.gz
+libs/pypalm/__pycache__/*
+libs/pypalm/*.pyc
+
 # temp files
 .temp/*
 

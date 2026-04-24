@@ -201,8 +201,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Rollout ESMDA with time-varying parameters and GP extrapolation."
     )
-    parser.add_argument("--truth-model", choices=["pylbm", "pyudales"], default="pylbm")
-    parser.add_argument("--assim-model", choices=["pylbm", "pyudales"], default="pylbm")
+    parser.add_argument("--truth-model", choices=["pylbm", "pyudales", "pypalm"], default="pylbm")
+    parser.add_argument("--assim-model", choices=["pylbm", "pyudales", "pypalm"], default="pylbm")
     parser.add_argument(
         "--skip-viz",
         action="store_true",
