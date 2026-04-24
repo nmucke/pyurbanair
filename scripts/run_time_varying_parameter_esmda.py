@@ -72,8 +72,8 @@ def _plot_time_varying_params(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--truth-model", choices=["pylbm", "pyudales"], default="pylbm")
-    parser.add_argument("--assim-model", choices=["pylbm", "pyudales"], default="pylbm")
+    parser.add_argument("--truth-model", choices=["pylbm", "pyudales", "pypalm"], default="pylbm")
+    parser.add_argument("--assim-model", choices=["pylbm", "pyudales", "pypalm"], default="pylbm")
     parser.add_argument("--skip-viz", action="store_true")
     parser.add_argument(
         "--results-dir",

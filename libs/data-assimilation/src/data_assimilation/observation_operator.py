@@ -74,6 +74,16 @@ class ObservationOperator:
                 "v": {"z": "z", "y": "y", "x": "x"},
                 "w": {"z": "z", "y": "y", "x": "x"},
             }
+        elif solver_name == "palm":
+            # PALM staggers u on xu and v on yv. pypalm's postprocess
+            # unifies the vertical axis: zu_3d -> z (wall layer dropped)
+            # and w is interpolated from zw_3d onto z, so all three share
+            # the single z dim.
+            self.dim_mapping = {
+                "u": {"z": "z", "y": "y", "x": "xu"},
+                "v": {"z": "z", "y": "yv", "x": "x"},
+                "w": {"z": "z", "y": "y", "x": "x"},
+            }
         else:
             raise ValueError(f"Solver {solver_name} not supported.")
 

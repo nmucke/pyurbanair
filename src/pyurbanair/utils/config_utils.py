@@ -20,8 +20,13 @@ from pyudales.ensemble_forward_model import (
 )
 from pyudales.forward_model import ForwardModel as UDALESForwardModel
 from pyudales.utils.clean_up_utils import clean_output_dir as clean_udales_output_dir
+from pypalm.ensemble_forward_model import (
+    EnsembleForwardModel as PALMEnsembleForwardModel,
+)
+from pypalm.forward_model import ForwardModel as PALMForwardModel
+from pypalm.utils.clean_up_utils import clean_palm_output_dir
 
-ModelName = Literal["pylbm", "pyudales"]
+ModelName = Literal["pylbm", "pyudales", "pypalm"]
 
 
 def _cfg() -> Any:
@@ -32,7 +37,11 @@ def _cfg() -> Any:
 
 
 def solver_name(model_name: ModelName) -> str:
-    return "pylbm" if model_name == "pylbm" else "udales"
+    if model_name == "pylbm":
+        return "pylbm"
+    if model_name == "pypalm":
+        return "palm"
+    return "udales"
 
 
 def model_args(model_name: ModelName) -> dict:
@@ -41,6 +50,14 @@ def model_args(model_name: ModelName) -> dict:
     if model_name == "pylbm":
         return {
             **cfg.LBM_ARGS,
+            **cfg.DOMAIN,
+            "simulation_time": cfg.TIME["simulation_time"],
+            "output_frequency": cfg.TIME["output_frequency"],
+            "spinup_time": spinup_time,
+        }
+    if model_name == "pypalm":
+        return {
+            **cfg.PALM_ARGS,
             **cfg.DOMAIN,
             "simulation_time": cfg.TIME["simulation_time"],
             "output_frequency": cfg.TIME["output_frequency"],
@@ -67,6 +84,10 @@ def create_forward_model(
         args.pop("compile")
         return LBMForwardModel(**args)
 
+    if model_name == "pypalm":
+        args.pop("compile", None)
+        return PALMForwardModel(**args)
+
     return UDALESForwardModel(**args)
 
 
@@ -86,6 +107,9 @@ def prepare_forward_model(model_name: ModelName, forward_model: Any) -> None:
     if model_name == "pylbm":
         args = model_args(model_name)
         model_to_prepare.compile(compile=args["compile"])
+    elif model_name == "pypalm":
+        args = model_args(model_name)
+        model_to_prepare.compile(compile=args["compile"])
     else:
         model_to_prepare.run_preprocessing(python_or_matlab="python")
 
@@ -93,6 +117,8 @@ def prepare_forward_model(model_name: ModelName, forward_model: Any) -> None:
 def clean_forward_model_outputs(model_name: ModelName, forward_model: Any) -> None:
     if model_name == "pylbm":
         clean_lbm_output_files(forward_model.dirs)
+    elif model_name == "pypalm":
+        clean_palm_output_dir(forward_model.dirs)
     else:
         clean_udales_output_dir(forward_model.dirs)
 
@@ -108,6 +134,13 @@ def create_ensemble_forward_model(model_name: ModelName, forward_model: Any) -> 
     ensemble_cfg = cfg.ENSEMBLE
     if model_name == "pylbm":
         return LBMEnsembleForwardModel(
+            forward_model=forward_model,
+            ensemble_size=ensemble_cfg["ensemble_size"],
+            num_parallel_processes=ensemble_cfg["num_parallel_processes"],
+            num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
+        )
+    if model_name == "pypalm":
+        return PALMEnsembleForwardModel(
             forward_model=forward_model,
             ensemble_size=ensemble_cfg["ensemble_size"],
             num_parallel_processes=ensemble_cfg["num_parallel_processes"],
@@ -374,7 +407,12 @@ def load_init_conditions_for_esmda(
     base_dir = pathlib.Path(
         cfg.ESMDA.get("init_conditions_dir", "esmda_init_conditions")
     )
-    subdir = "lbm" if model_name == "pylbm" else "udales"
+    if model_name == "pylbm":
+        subdir = "lbm"
+    elif model_name == "pypalm":
+        subdir = "palm"
+    else:
+        subdir = "udales"
     init_dir = base_dir / subdir
 
     if not init_dir.exists():

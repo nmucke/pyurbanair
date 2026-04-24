@@ -55,7 +55,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        choices=["pylbm", "pyudales"],
+        choices=["pylbm", "pyudales", "pypalm"],
         default="pylbm",
         help="Forward model backend.",
     )

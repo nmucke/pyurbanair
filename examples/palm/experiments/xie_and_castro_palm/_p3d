@@ -1,0 +1,51 @@
+!------------------------------------------------------------------------------
+! PALM parameter file for the xie_and_castro urban-array case.
+!
+! Domain size, time limits, and boundary conditions are overwritten at
+! staging time by pypalm.forward_model.ForwardModel (see
+! _apply_runtime_and_domain and _apply_boundary_condition). The values below
+! are reasonable defaults; the fields are kept so the namelist is valid as-is.
+!------------------------------------------------------------------------------
+
+&initialization_parameters
+
+    nx = 31,
+    ny = 31,
+    nz = 32,
+
+    dx = 1.0,
+    dy = 1.0,
+    dz = 1.0,
+
+    initializing_actions = 'set_constant_profiles',
+
+    topography = 'read_from_file',
+
+    bc_lr = 'cyclic',
+    bc_ns = 'cyclic',
+
+    ug_surface = 3.0,
+    vg_surface = 0.0,
+
+    roughness_length = 0.1,
+
+    humidity = .F.,
+    passive_scalar = .F.,
+
+/
+
+&runtime_parameters
+
+    end_time = 60.0,
+
+    dt_data_output = 10.0,
+    dt_data_output_av = 10.0,
+    averaging_interval = 10.0,
+
+    skip_time_data_output = 0.0,
+
+    data_output = 'u', 'v', 'w',
+
+    netcdf_data_format = 2,
+
+/

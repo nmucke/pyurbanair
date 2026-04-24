@@ -23,22 +23,22 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 50,
+    "nx": 60,
     "ny": 40,
     "nz": 16,
-    "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
+    "bounds": ((-20.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
 # DOMAIN = {
 #     "nx": 100,
 #     "ny": 80,
-#     "nz": 8,
+#     "nz": 16,
 #     "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 # }
 
 TIME = {
     "simulation_time": 30.0,  # 3000 * 0.0538,
     "output_frequency": 1.0,  # 3000 * 0.0538,
-    "spinup_time": 15.0,
+    "spinup_time": 10.0,
 }
 
 LBM_ARGS = {
@@ -70,8 +70,22 @@ UDALES_ARGS = {
     },
 }
 
+PALM_ARGS = {
+    "case_dir": "examples/palm/experiments/xie_and_castro_palm",
+    "stl_path": "examples/palm/experiments/xie_and_castro_palm/xie_castro_2008_STL.stl",
+    "experiment_name": "urban_run",
+    "ncpu": 1,
+    "save_only_last_timestep": False,
+    "verbose": False,
+    "boundary_condition": "inflow_outflow",
+    "nudging_config": {
+        "profile_config": {"type": "power_law", "alpha": 0.25},
+    },
+    "compile": False,
+}
+
 ENSEMBLE = {
-    "ensemble_size": 32,
+    "ensemble_size": 16,
     "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
 }

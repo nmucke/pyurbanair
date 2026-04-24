@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
+dependencies = [
+    "numpy>=2.3.5,<3",
+    "xarray>=2025.12.0,<2026",
+    "netcdf4>=1.7.3,<2",
+    "tqdm>=4.67.1,<5",
+    "trimesh>=4.0.0,<5",
+]
+name = "pypalm"
+requires-python = ">= 3.12,<3.13"
+version = "0.1.0"
+
+[tool.pixi.workspace]
+preview = ["pixi-build"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.package.build]
+backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.dev/conda-forge" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pypalm"]
+
+[tool.pixi.dependencies]
+python = {version=">=3.12, <3.13", channel="conda-forge"}
+cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
+netcdf-fortran = {version=">=4.6.2", channel="conda-forge"}
+gcc = {version=">=15.2.0", channel="conda-forge"}
+gfortran = {version=">=15.2.0", channel="conda-forge"}
+fftw = {version=">=3.3.10", channel="conda-forge"}
+openmpi = {version=">=4.1.0", channel="conda-forge"}
+
+[tool.pixi.pypi-dependencies]
+pypalm = {path = ".", editable = true}
