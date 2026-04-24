@@ -345,17 +345,21 @@ class ForwardModel(BaseForwardModel):
     def _ensure_palm_config_in_cwd(self) -> None:
         """palmrun reads ``.palm.config.<id>`` from its working directory.
 
-        The install script writes the canonical copy to
-        ``<palm_root>/.palm.config.default`` with all data-path keys pointing
-        at ``<palm_root>/JOBS``. We write a patched copy into
-        ``experiment_base_dir`` so palmrun reads our staged inputs and writes
-        outputs next to them, leaving the install tree untouched.
+        We write a patched copy into ``experiment_dir`` (per-member) and point
+        palmrun's data paths at the staged inputs/outputs. Each ensemble
+        member gets its own tmp/ so parallel palmrun invocations do not
+        collide on ``fast_io_catalog`` or CWD-local state.
+
+        Layout: palmrun runs from ``experiment_dir`` with ``$base_data`` set
+        to ``experiment_dir.parent`` (= ``experiment_base_dir``). palmrun
+        then resolves ``$base_data/$run_identifier/INPUT`` to
+        ``experiment_dir/INPUT``.
         """
         canonical = PALM_MODEL_SYSTEM_PATH / ".palm.config.default"
         if not canonical.exists():
             return
-        base = str(self.dirs.experiment_base_dir)
-        tmp = str(self.dirs.experiment_base_dir / "tmp")
+        base = str(self.dirs.experiment_dir.parent)
+        tmp = str(self.dirs.experiment_dir / "tmp")
         os.makedirs(tmp, exist_ok=True)
         overrides = {
             "%base_data": base,
@@ -375,7 +379,7 @@ class ForwardModel(BaseForwardModel):
                     break
             if not replaced:
                 out_lines.append(line)
-        (self.dirs.experiment_base_dir / ".palm.config.default").write_text(
+        (self.dirs.experiment_dir / ".palm.config.default").write_text(
             "\n".join(out_lines) + "\n"
         )
 
@@ -391,10 +395,12 @@ class ForwardModel(BaseForwardModel):
             )
         self._ensure_palm_config_in_cwd()
         logger.info("Running PALM …")
+        # Run palmrun from experiment_dir (per-member) so parallel ensemble
+        # members don't share a CWD / .palm.config / tmp catalog.
         command = [
             "bash",
             str(LOCAL_EXECUTE_SCRIPT),
-            str(self.dirs.experiment_base_dir),
+            str(self.dirs.experiment_dir),
             self.experiment_name,
             str(self.ncpu),
         ]
