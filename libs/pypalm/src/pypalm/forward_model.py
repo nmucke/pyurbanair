@@ -480,6 +480,16 @@ class ForwardModel(BaseForwardModel):
         if "z" in state.dims and state.sizes["z"] > 1:
             state = state.isel(z=slice(1, None))
 
+        # Unify onto a single z axis so u/v/w have matching shapes for
+        # downstream viz and aggregation. Interpolate w from zw onto z
+        # (linear, with extrapolation) and drop the zw dim.
+        if "zw" in state.dims and "w" in state.data_vars and "z" in state.dims:
+            w_on_z = state["w"].interp(
+                zw=state["z"].values, kwargs={"fill_value": "extrapolate"}
+            )
+            w_on_z = w_on_z.rename({"zw": "z"}).assign_coords(z=state["z"].values)
+            state = state.drop_vars("w").assign(w=w_on_z).drop_dims("zw")
+
         if self.spinup_time > 0 and self.output_frequency:
             spinup_outputs = int(self.spinup_time / self.output_frequency)
             if state.sizes.get("time", 0) > spinup_outputs:
