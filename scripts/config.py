@@ -36,9 +36,9 @@ DOMAIN = {
 # }
 
 TIME = {
-    "simulation_time": 30.0,  # 3000 * 0.0538,
+    "simulation_time": 5*60.0,  # 3000 * 0.0538,
     "output_frequency": 2.0,  # 3000 * 0.0538,
-    "spinup_time": 10.0,
+    "spinup_time": 15.0,
 }
 
 LBM_ARGS = {
@@ -59,7 +59,7 @@ UDALES_ARGS = {
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "nudging_config": {
-        "tnudge": 50.0,
+        "tnudge": 15.0,
         "nnudge": 0,
         # Vertical inflow profile.  Omit for uniform (back-compat).  Supported:
         #   {"type": "uniform"},
@@ -86,7 +86,7 @@ PALM_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 32,
+    "ensemble_size": 64,
     "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
 }
@@ -104,7 +104,7 @@ OBS = {
 }
 
 ESMDA = {
-    "num_steps": 1,
+    "num_steps": 2,
     "num_assimilation_windows": 3,
     "seed": 42,
     "obs_error_std": 0.025,
@@ -128,7 +128,7 @@ PARAM_PRIORS = {
 }
 
 TIME_VARYING_PARAMS = {
-    "num_time_points": 3,
+    "num_time_points": 5,
     "prior_correlation_length": 10.0,  # seconds — controls smoothness of GP prior
     "truth_correlation_length": 10.0,  # seconds — different from prior to avoid inverse crime
     # Between-window extrapolation of the posterior parameter ensemble.
@@ -142,7 +142,7 @@ TIME_VARYING_PARAMS = {
     #       pooled diffusion, stochastic Euler-Maruyama rollout with
     #       independent Brownian increments per member.  ``ou_phi_max``
     #       clips the fitted AR coefficient for stability.
-    "extrapolation_method": "ornstein_uhlenbeck",
+    "extrapolation_method": "linear_trend_gp",
     "slope_damping_time": None,
     "ar1_phi_max": 0.999,
     "ou_phi_max": 0.999,
