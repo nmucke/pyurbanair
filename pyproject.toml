@@ -145,6 +145,16 @@ isort = {version="~=6.0.0", channel="conda-forge"}
 mypy = {version="~=1.15.0", channel="conda-forge"}
 
 
+# Workaround for a file/directory clash between two transitive deps in the
+# dev env: `coreutils` (palm feature) ships `bin/test` as a file, while
+# `tempest-remap` (pulled in by `nco` in the udales feature) ships scripts
+# under `bin/test/` as a directory. `pixi install -e dev` aborts the first
+# time because the file blocks the directory; deleting the file and
+# re-running lets tempest-remap claim the path. Run `pixi run setup-dev`
+# once after cloning instead of `pixi install -e dev` directly.
+[tool.pixi.tasks]
+setup-dev = { cmd = "pixi install -e dev || (rm -f .pixi/envs/dev/bin/test && pixi install -e dev)", description = "Bootstrap dev env (works around coreutils/tempest-remap bin/test conflict)" }
+
 [tool.pixi.feature.dev.tasks]
 "py.test" = { cmd = "py.test tests --exitfirst", description = "Run tests" }
 pre-commit = { cmd = "pre-commit run", description = "Run pre-commit hooks on specific files" }

@@ -33,8 +33,19 @@ Three environments are available:
 Install and activate the dev environment:
 
 ```
+pixi run setup-dev
 pixi shell --environment=dev
 ```
+
+> **Why `setup-dev` and not `pixi install -e dev`?** The dev env combines the
+> `palm` feature (which depends on `coreutils`) with the `udales` feature
+> (which transitively pulls in `tempest-remap` via `nco`). `coreutils` ships
+> `bin/test` as a file while `tempest-remap` ships scripts under `bin/test/`
+> as a directory, so the two clobber each other and the first `pixi install`
+> aborts. The `setup-dev` task runs the install, deletes the conflicting
+> `bin/test` file if needed, and re-runs the install so `tempest-remap` can
+> claim the path. Run it once after cloning; subsequent `pixi install` /
+> `pixi shell` calls work normally.
 
 ### LBM specifics
 
