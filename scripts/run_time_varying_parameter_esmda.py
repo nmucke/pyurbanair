@@ -1,4 +1,5 @@
 import argparse
+import csv
 import pathlib
 import sys
 import time
@@ -13,6 +14,13 @@ from pyurbanair.plotting import (
     plot_true_vs_estimated_state,
 )
 from pyurbanair.utils.animation_utils import _visualize_state_history
+from pyurbanair.utils.da_metrics import (
+    per_knot_crps,
+    per_knot_error,
+    per_knot_in_band,
+    per_knot_spread,
+    summary_scalars,
+)
 from pyurbanair.utils.run_utils import get_ensemble_mean_field
 
 if __package__ is None or __package__ == "":
@@ -70,6 +78,147 @@ def _plot_time_varying_params(
     print(f"Saved time-varying parameter plot to {output_path}")
 
 
+def _compute_time_varying_metrics(
+    params_history: "xarray.Dataset",
+    true_params: "xarray.Dataset",
+    time_coords: np.ndarray,
+) -> tuple[list[dict], list[dict]]:
+    """Compute per-knot and per-step summary metrics.
+
+    Returns ``(rows, summary_rows)``: long-format per-knot records and
+    per-step summary records, ready for CSV writing.
+    """
+    param_names = [
+        name for name in true_params.data_vars if "time" in true_params[name].dims
+    ]
+    rows: list[dict] = []
+    summary_rows: list[dict] = []
+    n_steps = int(params_history.sizes["esmda_step"])
+    for k in range(n_steps):
+        for name in param_names:
+            ens = np.asarray(
+                params_history[name].isel(esmda_step=k).transpose("ensemble", "time").values
+            )
+            truth = np.asarray(true_params[name].values)
+            err = per_knot_error(ens, truth)
+            spr = per_knot_spread(ens)
+            crps = per_knot_crps(ens, truth)
+            band = per_knot_in_band(ens, truth)
+            for t_idx, t in enumerate(time_coords):
+                rows.append(
+                    {
+                        "esmda_step": k,
+                        "parameter": name,
+                        "time": float(t),
+                        "error": float(err[t_idx]),
+                        "spread": float(spr[t_idx]),
+                        "crps": float(crps[t_idx]),
+                        "in_band": int(bool(band[t_idx])),
+                    }
+                )
+            summary = summary_scalars(ens, truth)
+            summary_rows.append({"esmda_step": k, "parameter": name, **summary})
+    return rows, summary_rows
+
+
+def _write_metrics_csv(rows: list[dict], path: pathlib.Path) -> None:
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _print_summary(summary_rows: list[dict]) -> None:
+    by_step: dict[int, list[dict]] = {}
+    for row in summary_rows:
+        by_step.setdefault(int(row["esmda_step"]), []).append(row)
+    for step in sorted(by_step):
+        print(f"--- ESMDA step {step} ---")
+        for row in by_step[step]:
+            print(
+                f"  {row['parameter']:20s} "
+                f"rmse={row['time_avg_error']:.4f}  "
+                f"spread={row['time_avg_spread']:.4f}  "
+                f"crps={row['mean_crps']:.4f}  "
+                f"coverage={row['coverage']:.2f}"
+            )
+
+
+def _plot_time_varying_metrics(
+    params_history: "xarray.Dataset",
+    true_params: "xarray.Dataset",
+    time_coords: np.ndarray,
+    output_path: pathlib.Path,
+) -> None:
+    """Per-parameter diagnostic: error/spread/CRPS/in-band over time, one
+    line per ESMDA step (color-graded so step 0 is light, final is dark)."""
+    param_names = [
+        name for name in true_params.data_vars if "time" in true_params[name].dims
+    ]
+    n_params = len(param_names)
+    n_steps = int(params_history.sizes["esmda_step"])
+    metric_titles = ["|mean - truth|", "ensemble spread", "CRPS", "in 90% band"]
+    fig, axes = plt.subplots(
+        n_params, 4, figsize=(16, 3.5 * n_params), squeeze=False
+    )
+    cmap = plt.get_cmap("viridis")
+    for row_idx, name in enumerate(param_names):
+        truth = np.asarray(true_params[name].values)
+        for k in range(n_steps):
+            ens = np.asarray(
+                params_history[name].isel(esmda_step=k).transpose("ensemble", "time").values
+            )
+            err = per_knot_error(ens, truth)
+            spr = per_knot_spread(ens)
+            crps = per_knot_crps(ens, truth)
+            band = per_knot_in_band(ens, truth).astype(float)
+            shade = 0.2 + 0.8 * (k / max(n_steps - 1, 1))
+            color = cmap(shade)
+            label = f"step {k}"
+            axes[row_idx, 0].plot(time_coords, err, color=color, label=label)
+            axes[row_idx, 1].plot(time_coords, spr, color=color, label=label)
+            axes[row_idx, 2].plot(time_coords, crps, color=color, label=label)
+            axes[row_idx, 3].plot(
+                time_coords, band, "o-", color=color, label=label, alpha=0.7
+            )
+        for col, title in enumerate(metric_titles):
+            ax = axes[row_idx, col]
+            ax.set_xlabel("Time [s]")
+            ax.set_title(f"{name}: {title}")
+            if col == 3:
+                ax.set_ylim(-0.1, 1.1)
+        axes[row_idx, 0].legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved time-varying metrics plot to {output_path}")
+
+
+def _apply_config_overrides(args: argparse.Namespace) -> None:
+    """Apply CLI overrides to the imported ``config`` module in place.
+
+    Must run before any forward-model construction so downstream callers
+    see the override.
+    """
+    if args.esmda_num_steps is not None:
+        config.ESMDA["num_steps"] = int(args.esmda_num_steps)
+    if args.obs_error_std is not None:
+        config.ESMDA["obs_error_std"] = float(args.obs_error_std)
+    if args.truth_corr_length is not None:
+        config.TIME_VARYING_PARAMS["truth_correlation_length"] = float(
+            args.truth_corr_length
+        )
+    if args.prior_corr_length is not None:
+        config.TIME_VARYING_PARAMS["prior_correlation_length"] = float(
+            args.prior_corr_length
+        )
+    if args.obs_interval is not None:
+        config.OBS["interval_size"] = int(args.obs_interval)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--truth-model", choices=["pylbm", "pyudales", "pypalm"], default="pylbm")
@@ -88,7 +237,38 @@ def main() -> None:
         help="Number of discrete time points for time-varying parameters. "
         "Defaults to config.TIME_VARYING_PARAMS['num_time_points'].",
     )
+    parser.add_argument(
+        "--esmda-num-steps",
+        type=int,
+        default=None,
+        help="Override config.ESMDA['num_steps'] for sweeps.",
+    )
+    parser.add_argument(
+        "--obs-error-std",
+        type=float,
+        default=None,
+        help="Override config.ESMDA['obs_error_std'] for sweeps.",
+    )
+    parser.add_argument(
+        "--truth-corr-length",
+        type=float,
+        default=None,
+        help="Override config.TIME_VARYING_PARAMS['truth_correlation_length'].",
+    )
+    parser.add_argument(
+        "--prior-corr-length",
+        type=float,
+        default=None,
+        help="Override config.TIME_VARYING_PARAMS['prior_correlation_length'].",
+    )
+    parser.add_argument(
+        "--obs-interval",
+        type=int,
+        default=None,
+        help="Override config.OBS['interval_size'] for sweeps.",
+    )
     args = parser.parse_args()
+    _apply_config_overrides(args)
 
     num_time_points = (
         args.num_par_time_points
@@ -164,8 +344,18 @@ def main() -> None:
         params_history.to_netcdf(out_dir / "params_history.nc")
         state_history.to_netcdf(out_dir / "state_history.nc")
     else:
-        output.to_netcdf(out_dir / "params_history.nc")
+        params_history = output
+        params_history.to_netcdf(out_dir / "params_history.nc")
     ensemble_mean_field.to_netcdf(out_dir / "state_mean_history.nc")
+
+    metric_rows, summary_rows = _compute_time_varying_metrics(
+        params_history=params_history,
+        true_params=true_params,
+        time_coords=np.asarray(time_coords),
+    )
+    _write_metrics_csv(metric_rows, out_dir / "time_varying_metrics.csv")
+    _write_metrics_csv(summary_rows, out_dir / "summary_metrics.csv")
+    _print_summary(summary_rows)
 
     if not args.skip_viz:
         obs_x, obs_y, _ = config.create_observation_points()
@@ -195,13 +385,18 @@ def main() -> None:
             z_level=0,
         )
 
-        if isinstance(output, tuple):
-            _plot_time_varying_params(
-                params_history=params_history,
-                true_params=true_params,
-                time_coords=np.asarray(time_coords),
-                output_path=out_dir / "time_varying_parameters.png",
-            )
+        _plot_time_varying_params(
+            params_history=params_history,
+            true_params=true_params,
+            time_coords=np.asarray(time_coords),
+            output_path=out_dir / "time_varying_parameters.png",
+        )
+        _plot_time_varying_metrics(
+            params_history=params_history,
+            true_params=true_params,
+            time_coords=np.asarray(time_coords),
+            output_path=out_dir / "time_varying_metrics.png",
+        )
 
     print(f"Saved outputs in {pathlib.Path(out_dir)}")
 
