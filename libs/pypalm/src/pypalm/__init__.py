@@ -92,13 +92,18 @@ def _ensure_palm_source() -> bool:
 
 
 def _install_palm() -> bool:
-    """Run the PALM install script if ``bin/palmrun`` is missing.
+    """Run the PALM install script if the compiled solver is missing.
 
-    Returns True when ``bin/palmrun`` is present after this call. Install
+    The presence of ``bin/palmrun`` alone is not sufficient: that is a perl
+    wrapper that ships in the source tarball and exists as soon as the source
+    is extracted. The Fortran binary at ``MAKE_DEPOSITORY_default/palm`` is
+    what install_palm.sh actually produces, so gate on that instead.
+
+    Returns True when the compiled binary is present after this call. Install
     failure is logged but non-fatal.
     """
-    palmrun = PALM_MODEL_SYSTEM_PATH / "bin" / "palmrun"
-    if palmrun.exists():
+    palm_bin = PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "palm"
+    if palm_bin.exists():
         return True
 
     if not LOCAL_INSTALL_SCRIPT.exists():
@@ -119,7 +124,7 @@ def _install_palm() -> bool:
         logger.warning("PALM install raised: %s", e)
         return False
 
-    return palmrun.exists()
+    return palm_bin.exists()
 
 
 def _resolve_palmrun() -> pathlib.Path | None:
