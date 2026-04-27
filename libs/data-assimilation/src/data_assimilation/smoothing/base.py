@@ -5,9 +5,9 @@ from typing import Optional
 
 import jax.numpy as jnp
 import xarray
-from data_assimilation.observation_operator import ObservationOperator
-
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
+
+from data_assimilation.observation_operator import ObservationOperator
 
 
 class BaseSmoothing:

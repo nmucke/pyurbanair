@@ -23,10 +23,10 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 60,
+    "nx": 50,
     "ny": 40,
     "nz": 16,
-    "bounds": ((-20.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
+    "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
 # DOMAIN = {
 #     "nx": 100,
@@ -37,7 +37,7 @@ DOMAIN = {
 
 TIME = {
     "simulation_time": 30.0,  # 3000 * 0.0538,
-    "output_frequency": 1.0,  # 3000 * 0.0538,
+    "output_frequency": 2.0,  # 3000 * 0.0538,
     "spinup_time": 10.0,
 }
 
@@ -47,7 +47,7 @@ LBM_ARGS = {
     "cuda": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
-    "compile": False,
+    "compile": True,
 }
 
 UDALES_ARGS = {
@@ -65,8 +65,8 @@ UDALES_ARGS = {
         #   {"type": "uniform"},
         #   {"type": "power_law", "alpha": 0.25, "z_ref": 40.0}
         # velocity_magnitude is interpreted as the speed at z_ref.
-        "profile_config": {"type": "power_law", "alpha": 0.25},
-        # "profile_config": {"type": "uniform"},
+        # "profile_config": {"type": "power_law", "alpha": 0.25},
+        "profile_config": {"type": "uniform"},
     },
 }
 
@@ -79,13 +79,14 @@ PALM_ARGS = {
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "nudging_config": {
-        "profile_config": {"type": "power_law", "alpha": 0.25},
+        # "profile_config": {"type": "power_law", "alpha": 0.25},
+        "profile_config": {"type": "uniform"},
     },
     "compile": False,
 }
 
 ENSEMBLE = {
-    "ensemble_size": 16,
+    "ensemble_size": 32,
     "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
 }
@@ -103,10 +104,10 @@ OBS = {
 }
 
 ESMDA = {
-    "num_steps": 2,
+    "num_steps": 1,
     "num_assimilation_windows": 3,
     "seed": 42,
-    "obs_error_std": 0.1,
+    "obs_error_std": 0.025,
     "init_conditions_dir": "esmda_init_conditions",
     "true_sim_id": 0,
 }
@@ -127,9 +128,9 @@ PARAM_PRIORS = {
 }
 
 TIME_VARYING_PARAMS = {
-    "num_time_points": 10,
-    "prior_correlation_length": 30.0,  # seconds — controls smoothness of GP prior
-    "truth_correlation_length": 30.0,  # seconds — different from prior to avoid inverse crime
+    "num_time_points": 3,
+    "prior_correlation_length": 10.0,  # seconds — controls smoothness of GP prior
+    "truth_correlation_length": 10.0,  # seconds — different from prior to avoid inverse crime
     # Between-window extrapolation of the posterior parameter ensemble.
     # Options:
     #   "linear_trend_gp": per-member linear trend + GP residual.  Trend

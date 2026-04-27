@@ -26,7 +26,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        choices=["pyudales", "pylbm"],
+        choices=["pyudales", "pylbm", "pypalm"],
         default="pylbm",
         help="Which solver to use (default: pyudales).",
     )
@@ -145,24 +145,37 @@ def main() -> None:
         )
 
         # Derived inflow angle at three probes near the left x-boundary.
-        u_dims = state["u"].dims
-        x_dim = next(d for d in ("x", "xt", "xm") if d in u_dims)
-        y_dim = next(d for d in ("y", "yt", "ym") if d in u_dims)
-        z_dim = next(d for d in ("z", "zt", "zm") if d in u_dims)
-        x_left = float(state[x_dim].min())
-        y_min, y_max = float(state[y_dim].min()), float(state[y_dim].max())
+        # PALM stores u/v on staggered grids (u on xu, v on yv), so resolve
+        # the spatial dim names per-variable.
+        def _pick_dim(da, candidates):
+            return next(d for d in candidates if d in da.dims)
+
+        x_cands = ("x", "xt", "xm", "xu")
+        y_cands = ("y", "yt", "ym", "yv")
+        z_cands = ("z", "zt", "zm", "zu")
+        u_x_dim = _pick_dim(state["u"], x_cands)
+        u_y_dim = _pick_dim(state["u"], y_cands)
+        u_z_dim = _pick_dim(state["u"], z_cands)
+        v_x_dim = _pick_dim(state["v"], x_cands)
+        v_y_dim = _pick_dim(state["v"], y_cands)
+        v_z_dim = _pick_dim(state["v"], z_cands)
+
+        x_left = float(state[u_x_dim].min())
+        y_min = float(state[u_y_dim].min())
+        y_max = float(state[u_y_dim].max())
         y_probes = [
             y_min + 0.2 * (y_max - y_min),
             y_min + 0.5 * (y_max - y_min),
             y_min + 0.8 * (y_max - y_min),
         ]
-        z_probe = 0.5 * (float(state[z_dim].min()) + float(state[z_dim].max()))
+        z_probe = 0.5 * (float(state[u_z_dim].min()) + float(state[u_z_dim].max()))
 
         fig, ax = plt.subplots(figsize=(8, 4))
         for y_p in y_probes:
-            sel = {x_dim: x_left, y_dim: y_p, z_dim: z_probe}
-            u_t = state["u"].sel(**sel, method="nearest")
-            v_t = state["v"].sel(**sel, method="nearest")
+            u_sel = {u_x_dim: x_left, u_y_dim: y_p, u_z_dim: z_probe}
+            v_sel = {v_x_dim: x_left, v_y_dim: y_p, v_z_dim: z_probe}
+            u_t = state["u"].sel(**u_sel, method="nearest")
+            v_t = state["v"].sel(**v_sel, method="nearest")
             angle_sim = np.degrees(np.arctan2(v_t.values, u_t.values))
             ax.plot(state.time.values, angle_sim, label=f"y={y_p:.1f} m")
         ax.plot(

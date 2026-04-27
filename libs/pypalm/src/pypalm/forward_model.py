@@ -17,6 +17,12 @@ from .stl_to_palm import stl_to_palm_topography
 from .utils.clean_up_utils import clean_palm_output_dir
 from .utils.compile_utils import compile_palm
 from .utils.dir_utils import PALMDirectoryPaths, get_palm_directory_paths
+from .utils.dynamic_driver_utils import (
+    apply_time_varying_inflow,
+    disable_turbulent_inflow,
+    is_time_varying_params,
+    remove_dynamic_driver_file,
+)
 from .utils.inflow_utils import angle_to_velocity
 from .utils.p3d_utils import P3DFile
 from .utils.vertical_profile import build_profile_shape
@@ -69,7 +75,10 @@ def _augment_runtime_library_paths(env: dict[str, str]) -> None:
 
 
 def _is_time_varying_params(params: Optional[xarray.Dataset]) -> bool:
-    return params is not None and "time" in params.dims
+    # Delegate to the utils helper which matches pyudales/pylbm's
+    # per-variable check (strictly more permissive than a Dataset-level
+    # ``"time" in params.dims``).
+    return is_time_varying_params(params)
 
 
 def _merge_params(
@@ -298,18 +307,42 @@ class ForwardModel(BaseForwardModel):
             return
         compile_palm(verbose=self.verbose)
 
-    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
-        if _is_time_varying_params(params):
-            raise NotImplementedError(
-                "Time-varying params (time-dependent inflow) are not implemented in "
-                "pypalm v1. PALM supports this via a time-dependent driver file; "
-                "adding it is tracked as a follow-up."
-            )
+    @property
+    def dynamic_driver_path(self) -> pathlib.Path:
+        return self.dirs.input_dir / f"{self.experiment_name}_dynamic"
 
+    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
         self.params = _merge_params(self.params, params)
 
-        angle = float(self.params["inflow_angle"].item())
-        speed = float(self.params["velocity_magnitude"].item())
+        if _is_time_varying_params(self.params):
+            if self.bounds is None or not self.nz or not self.ny:
+                raise ValueError(
+                    "Time-varying inflow requires bounds, nz, and ny to be set "
+                    "on ForwardModel (needed to construct the dynamic driver)."
+                )
+            # Writes <case>_dynamic NetCDF and flips on turbulent_inflow in the
+            # namelist. Returns a scalar params Dataset holding the t=0 values
+            # so we still populate ug_surface/u_profile for initialisation.
+            init_params = apply_time_varying_inflow(
+                params=self.params,
+                p3d_path=self.p3d_path,
+                driver_path=self.dynamic_driver_path,
+                bounds=self.bounds,
+                nz=self.nz,
+                ny=self.ny,
+                profile_config=self._nudging_config.get("profile_config"),
+                spinup_time=self.spinup_time,
+            )
+            angle = float(init_params["inflow_angle"].item())
+            speed = float(init_params["velocity_magnitude"].item())
+        else:
+            # Static path — make sure a stale dynamic driver from a prior
+            # time-varying run in the same experiment_dir doesn't leak in.
+            disable_turbulent_inflow(self.p3d_path)
+            remove_dynamic_driver_file(self.dynamic_driver_path)
+            angle = float(self.params["inflow_angle"].item())
+            speed = float(self.params["velocity_magnitude"].item())
+
         u0, v0 = angle_to_velocity(angle, speed)
 
         p3d = P3DFile(self.p3d_path)
@@ -504,6 +537,13 @@ class ForwardModel(BaseForwardModel):
             actual = state.sizes["time"]
             if actual > expected_outputs:
                 state = state.isel(time=slice(-expected_outputs, None))
+            elif actual < expected_outputs:
+                # PALM's timestep is adaptive, so the 3D file occasionally
+                # has one fewer output than requested. Pad by repeating the
+                # last frame so all ensemble members concat along `time`.
+                last = state.isel(time=-1)
+                pads = [last.expand_dims(time=1) for _ in range(expected_outputs - actual)]
+                state = xarray.concat([state, *pads], dim="time")
 
         if state.sizes.get("time", 0) > 0:
             state = state.assign_coords(time=range(state.sizes["time"]))
