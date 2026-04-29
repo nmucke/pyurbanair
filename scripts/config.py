@@ -29,15 +29,15 @@ DOMAIN = {
     "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
 # DOMAIN = {
-#     "nx": 100,
+#     "nx": 90,
 #     "ny": 80,
 #     "nz": 16,
-#     "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+#     "bounds": ((-10.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 # }
 
 TIME = {
     "simulation_time": 5*60.0,  # 3000 * 0.0538,
-    "output_frequency": 2.0,  # 3000 * 0.0538,
+    "output_frequency": 15.0,  # 3000 * 0.0538,
     "spinup_time": 15.0,
 }
 
@@ -54,7 +54,7 @@ UDALES_ARGS = {
     "case_dir": "examples/udales/experiments/xie_and_castro",
     "experiment_name": "999",
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "ncpu": 1,
+    "ncpu": 4,
     "save_only_last_timestep": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
@@ -87,19 +87,19 @@ PALM_ARGS = {
 
 ENSEMBLE = {
     "ensemble_size": 64,
-    "num_parallel_processes": 8,
-    "num_cpus_per_process": 1,
+    "num_parallel_processes": 1,
+    "num_cpus_per_process": 4,
 }
 
 OBS = {
-    # "x_points": [20.0, 20.0, 40.0, 40.0, 60.0],
-    # "y_points": [20.0, 60.0, 10.0, 30.0, 60.0],
+    # "x_points": [20.0, 20.0, 40.0, 50.0, 60.0],
+    # "y_points": [20.0, 60.0, 10.0, 40.0, 60.0],
     "x_points": [10.0, 20.0, 30.0, 38.0, 10.0],
     "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
-    "interval_size": 5,
+    "interval_size": 2,
     "aggregation_mode": "mean",
 }
 
@@ -107,7 +107,7 @@ ESMDA = {
     "num_steps": 2,
     "num_assimilation_windows": 3,
     "seed": 42,
-    "obs_error_std": 0.025,
+    "obs_error_std": 0.1,
     "init_conditions_dir": "esmda_init_conditions",
     "true_sim_id": 0,
 }
@@ -128,7 +128,7 @@ PARAM_PRIORS = {
 }
 
 TIME_VARYING_PARAMS = {
-    "num_time_points": 5,
+    "num_time_points": 10,
     "prior_correlation_length": 10.0,  # seconds — controls smoothness of GP prior
     "truth_correlation_length": 10.0,  # seconds — different from prior to avoid inverse crime
     # Between-window extrapolation of the posterior parameter ensemble.
