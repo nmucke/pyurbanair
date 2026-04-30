@@ -11,7 +11,6 @@ from pyurbanair.utils.config_utils import (
     create_observation_points,
     create_parameter_ensemble,
     create_rollout_forward_model,
-    create_time_varying_parameter_ensemble,
     create_time_varying_true_params,
     create_true_params,
     model_args,
@@ -36,8 +35,8 @@ DOMAIN = {
 # }
 
 TIME = {
-    "simulation_time": 30.0,  # 3000 * 0.0538,
-    "output_frequency": 2.0,  # 3000 * 0.0538,
+    "simulation_time": 3*60.0,  # 3000 * 0.0538,
+    "output_frequency": 5.0,  # 3000 * 0.0538,
     "spinup_time": 10.0,
 }
 
@@ -86,9 +85,17 @@ PALM_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 32,
+    "ensemble_size": 64,
     "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
+    # Failure handling for individual ensemble members. With
+    # "resample_from_successes", a per-member CalledProcessError is logged
+    # and that slot is replaced by a clone of a randomly chosen successful
+    # member (state cloned, params cloned + jittered). "raise" preserves
+    # the historical fail-the-whole-ensemble behavior.
+    "failure_policy": "resample_from_successes",
+    "failure_jitter_scale": 0.05,
+    "failure_seed": 0,
 }
 
 OBS = {
@@ -99,15 +106,15 @@ OBS = {
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
-    "interval_size": 5,
+    "interval_size": 3,
     "aggregation_mode": "mean",
 }
 
 ESMDA = {
-    "num_steps": 1,
-    "num_assimilation_windows": 3,
+    "num_steps": 3,
+    "num_assimilation_windows": 2,
     "seed": 42,
-    "obs_error_std": 0.025,
+    "obs_error_std": 0.25,
     "init_conditions_dir": "esmda_init_conditions",
     "true_sim_id": 0,
 }
@@ -127,23 +134,75 @@ PARAM_PRIORS = {
     "pressure_std": 0.001,
 }
 
+# External-prior estimates (the paper's x_ext and Σ_ext).  Consumed by the
+# pyurbanair.parameter_time_series classes for both prior sampling and
+# (where applicable) between-window relaxation toward x_ext.  Optional
+# "min"/"max" entries clip generated values.
+EXTERNAL_PRIORS = {
+    "inflow_angle":       {"mean": 0.0, "std": 10.0},
+    "velocity_magnitude": {"mean": 3.0, "std": 0.5, "min": 0.1},
+}
+
+# Time-varying parameter prior + extrapolation.
+#
+# ``method`` selects one of the pyurbanair.parameter_time_series classes;
+# ``method_kwargs[<method>]`` carries that class's hyperparameters.  Each
+# class exposes ``sample_prior`` (cold-start initial-window draw) and
+# ``extrapolate`` (next window's prior given the previous posterior), so
+# the rollout loop is agnostic to the choice.
+#
+# Available methods:
+#   "gp_linear_trend"     RBF GP prior; per-member linear-trend + GP
+#                         residual extrapolation, optional slope damping.
+#   "ar1"                 Stationary AR(1) prior; per-member AR(1) fit
+#                         rolled forward deterministically from the last
+#                         posterior value.
+#   "ornstein_uhlenbeck"  Stationary OU prior; per-member OU-with-drift
+#                         fit rolled forward stochastically (E-M) with
+#                         ensemble-pooled diffusion.
+#   "ar2_relaxation"      Critically-damped AR(2) prior (Evensen 2024)
+#                         carrying state across windows; next-window
+#                         prior blended with posterior mean via
+#                         exponential relaxation toward x_ext.
 TIME_VARYING_PARAMS = {
-    "num_time_points": 3,
-    "prior_correlation_length": 10.0,  # seconds — controls smoothness of GP prior
-    "truth_correlation_length": 10.0,  # seconds — different from prior to avoid inverse crime
-    # Between-window extrapolation of the posterior parameter ensemble.
-    # Options:
-    #   "linear_trend_gp": per-member linear trend + GP residual.  Trend
-    #       continues into the next window; optionally damped via
-    #       ``slope_damping_time`` (seconds, or None for no damping).
-    #   "ar1": per-member AR(1) rolled forward deterministically from
-    #       the last posterior value; ``ar1_phi_max`` clips the fit.
-    #   "ornstein_uhlenbeck": per-member OU-with-drift SDE, ensemble-
-    #       pooled diffusion, stochastic Euler-Maruyama rollout with
-    #       independent Brownian increments per member.  ``ou_phi_max``
-    #       clips the fitted AR coefficient for stability.
-    "extrapolation_method": "ornstein_uhlenbeck",
-    "slope_damping_time": None,
-    "ar1_phi_max": 0.999,
-    "ou_phi_max": 0.999,
+    "num_time_points": 12,
+    "method": "ar2_relaxation",
+    "method_kwargs": {
+        "gp_linear_trend": {
+            "correlation_length": 10.0,
+            "slope_damping_time": None,
+        },
+        "ar1": {
+            "correlation_length": 10.0,
+            "phi_max": 0.999,
+        },
+        "ornstein_uhlenbeck": {
+            "correlation_length": 10.0,
+            "phi_max": 0.999,
+        },
+        "ar2_relaxation": {
+            "correlation_length": 100.0,
+        },
+    },
+    # Truth-trajectory generator.  Selects one of the same methods to
+    # draw the underlying true parameter trajectory (ensemble_size=1).
+    # Use a different correlation length than the assimilation prior to
+    # avoid the inverse crime of identical generative processes.
+    "truth_method": "ar2_relaxation",
+    "truth_method_kwargs": {
+        "gp_linear_trend": {
+            "correlation_length": 100.0,
+        },
+        "ar1": {
+            "correlation_length": 100.0,
+            "phi_max": 0.999,
+        },
+        "ornstein_uhlenbeck": {
+            "correlation_length": 100.0,
+            "phi_max": 0.999,
+        },
+        "ar2_relaxation": {
+            "correlation_length": 100.0,
+        },
+    },
 }

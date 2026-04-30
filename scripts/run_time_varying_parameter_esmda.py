@@ -21,6 +21,7 @@ from pyurbanair.utils.da_metrics import (
     per_knot_spread,
     summary_scalars,
 )
+from pyurbanair.parameter_time_series import build_parameter_time_series
 from pyurbanair.utils.run_utils import get_ensemble_mean_field
 
 if __package__ is None or __package__ == "":
@@ -306,9 +307,16 @@ def main() -> None:
 
     ensemble_model = config.create_ensemble_forward_model(args.assim_model, assim_model)
     assim_obs_op = config.create_observation_operator(args.assim_model)
-    params_ensemble = config.create_time_varying_parameter_ensemble(
-        args.assim_model, num_time_points
+
+    method = config.TIME_VARYING_PARAMS["method"]
+    ts_model = build_parameter_time_series(
+        method=method,
+        external_priors=config.EXTERNAL_PRIORS,
+        ensemble_size=int(config.ENSEMBLE["ensemble_size"]),
+        method_kwargs=config.TIME_VARYING_PARAMS["method_kwargs"][method],
     )
+    rng_key, prior_key = jax.random.split(rng_key)
+    params_ensemble = ts_model.sample_prior(time_coords, prior_key)
 
     esmda = TimeVaryingParameterESMDA(
         observation_operator=assim_obs_op,

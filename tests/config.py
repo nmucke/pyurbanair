@@ -11,7 +11,6 @@ from pyurbanair.utils.config_utils import (
     create_observation_points,
     create_parameter_ensemble,
     create_rollout_forward_model,
-    create_time_varying_parameter_ensemble,
     create_time_varying_true_params,
     create_true_params,
     model_args,
@@ -92,8 +91,25 @@ PARAM_PRIORS = {
     "pressure_std": 0.001,
 }
 
+EXTERNAL_PRIORS = {
+    "inflow_angle":       {"mean": 0.0, "std": 8.0},
+    "velocity_magnitude": {"mean": 3.0, "std": 1.0, "min": 0.1},
+}
+
 TIME_VARYING_PARAMS = {
     "num_time_points": 3,
-    "prior_correlation_length": 2.0,  # seconds — controls smoothness of GP prior
-    "truth_correlation_length": 1.0,  # seconds — different from prior to avoid inverse crime
+    "method": "gp_linear_trend",
+    "method_kwargs": {
+        "gp_linear_trend": {"correlation_length": 2.0, "slope_damping_time": None},
+        "ar1": {"correlation_length": 2.0, "phi_max": 0.999},
+        "ornstein_uhlenbeck": {"correlation_length": 2.0, "phi_max": 0.999},
+        "ar2_relaxation": {"correlation_length": 5.0},
+    },
+    "truth_method": "gp_linear_trend",
+    "truth_method_kwargs": {
+        "gp_linear_trend": {"correlation_length": 1.0},
+        "ar1": {"correlation_length": 1.0, "phi_max": 0.999},
+        "ornstein_uhlenbeck": {"correlation_length": 1.0, "phi_max": 0.999},
+        "ar2_relaxation": {"correlation_length": 3.0},
+    },
 }

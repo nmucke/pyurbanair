@@ -131,6 +131,9 @@ class _BaseESMDA(BaseSmoothing):
             self._set_step_results_dir(i)
 
             state = self._forecast_step(state=initial_state, params=params)
+            params = self.forward_model.apply_failure_substitutions_to_params(
+                params
+            )
 
             if return_state_history and not self.forward_model.save_on_disk:
                 state_history.append(state)

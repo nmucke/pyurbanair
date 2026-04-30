@@ -133,25 +133,32 @@ def create_ensemble_forward_model(model_name: ModelName, forward_model: Any) -> 
     cfg = _cfg()
     ensemble_cfg = cfg.ENSEMBLE
     if model_name == "pylbm":
-        return LBMEnsembleForwardModel(
+        ensemble = LBMEnsembleForwardModel(
             forward_model=forward_model,
             ensemble_size=ensemble_cfg["ensemble_size"],
             num_parallel_processes=ensemble_cfg["num_parallel_processes"],
             num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
         )
-    if model_name == "pypalm":
-        return PALMEnsembleForwardModel(
+    elif model_name == "pypalm":
+        ensemble = PALMEnsembleForwardModel(
             forward_model=forward_model,
             ensemble_size=ensemble_cfg["ensemble_size"],
             num_parallel_processes=ensemble_cfg["num_parallel_processes"],
             num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
         )
-    return UDALESEnsembleForwardModel(
-        forward_model=forward_model,
-        ensemble_size=ensemble_cfg["ensemble_size"],
-        num_parallel_processes=ensemble_cfg["num_parallel_processes"],
-        num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
+    else:
+        ensemble = UDALESEnsembleForwardModel(
+            forward_model=forward_model,
+            ensemble_size=ensemble_cfg["ensemble_size"],
+            num_parallel_processes=ensemble_cfg["num_parallel_processes"],
+            num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
+        )
+    ensemble.configure_failure_policy(
+        policy=ensemble_cfg.get("failure_policy", "raise"),
+        jitter_scale=ensemble_cfg.get("failure_jitter_scale", 0.05),
+        seed=ensemble_cfg.get("failure_seed", 0),
     )
+    return ensemble
 
 
 def create_true_params(model_name: ModelName) -> xarray.Dataset:
@@ -286,58 +293,6 @@ def sample_smooth_ensemble(
     correlated = L @ z  # (N_t, ensemble_size)
 
     return correlated * std + mean
-
-
-def create_time_varying_parameter_ensemble(
-    model_name: ModelName,
-    num_time_points: int,
-) -> xarray.Dataset:
-    """Create a time-varying parameter ensemble with smooth trajectories.
-
-    Each ensemble member is a smooth function of time drawn from a
-    Gaussian process prior with a squared-exponential kernel.  The
-    ``prior_correlation_length`` config key (in seconds) controls how
-    smooth the trajectories are — larger values produce gentler
-    variations that are less likely to cause solver instability.
-    """
-    cfg = _cfg()
-    n = int(cfg.ENSEMBLE["ensemble_size"])
-    sim_time = cfg.TIME["simulation_time"]
-    time_coords = jnp.linspace(0, sim_time, num_time_points)
-    rng_key = jax.random.PRNGKey(cfg.ESMDA["seed"])
-    correlation_length = cfg.TIME_VARYING_PARAMS.get(
-        "prior_correlation_length", sim_time / 4
-    )
-
-    rng_key, subkey = jax.random.split(rng_key)
-    inflow = sample_smooth_ensemble(
-        subkey,
-        time_coords,
-        mean=cfg.PARAM_PRIORS["inflow_angle_mean"],
-        std=cfg.PARAM_PRIORS["inflow_angle_std"],
-        ensemble_size=n,
-        correlation_length=correlation_length,
-    )
-
-    rng_key, subkey = jax.random.split(rng_key)
-    vel = sample_smooth_ensemble(
-        subkey,
-        time_coords,
-        mean=cfg.PARAM_PRIORS["velocity_mean"],
-        std=cfg.PARAM_PRIORS["velocity_std"],
-        ensemble_size=n,
-        correlation_length=correlation_length,
-    )
-    vel = jnp.maximum(vel, 0.1)
-
-    data_vars: dict = {
-        "inflow_angle": (("time", "ensemble"), inflow),
-        "velocity_magnitude": (("time", "ensemble"), vel),
-    }
-    return xarray.Dataset(
-        data_vars=data_vars,
-        coords={"time": time_coords, "ensemble": jnp.arange(n)},
-    )
 
 
 def create_initial_state_ensemble(state: xarray.Dataset) -> xarray.Dataset:

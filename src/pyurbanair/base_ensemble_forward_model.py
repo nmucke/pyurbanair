@@ -1,13 +1,20 @@
+import logging
 import os
 import pathlib
+import subprocess
 from abc import abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
+import numpy as np
 import xarray
 from tqdm import tqdm
 
 from pyurbanair.base_forward_model import BaseForwardModel
+
+logger = logging.getLogger(__name__)
+
+FailurePolicy = Literal["raise", "resample_from_successes"]
 
 
 def create_dir(
@@ -83,6 +90,14 @@ class BaseEnsembleForwardModel:
             ensemble_temp_dir / "ensemble_experiments"
         )
 
+        # Failure-handling state. Defaults preserve historical behavior
+        # (any per-member exception aborts the ensemble run). Configure via
+        # ``configure_failure_policy`` to opt into resample-from-successes.
+        self._failure_policy: FailurePolicy = "raise"
+        self._failure_jitter_scale: float = 0.05
+        self._failure_rng: np.random.Generator = np.random.default_rng(0)
+        self._last_failure_substitutions: dict[int, int] = {}
+
         # Subclasses must populate this list with individual forward models
         self.ensemble_forward_models: list[BaseForwardModel] = []
         for ensemble_number in range(self.ensemble_size):
@@ -93,6 +108,25 @@ class BaseEnsembleForwardModel:
                     experiment_name=f"{ensemble_number:03d}",
                 )
             )
+
+    def configure_failure_policy(
+        self,
+        policy: FailurePolicy = "raise",
+        jitter_scale: float = 0.05,
+        seed: int = 0,
+    ) -> None:
+        """Configure how per-member forward-run failures are handled.
+
+        - ``"raise"``: any ``CalledProcessError`` aborts the ensemble.
+        - ``"resample_from_successes"``: failed members' states are cloned
+          from a randomly chosen successful member; the failed slots in the
+          parameter ensemble are also replaced (with jitter) when the caller
+          invokes :meth:`apply_failure_substitutions_to_params`.
+        """
+        self._failure_policy = policy
+        self._failure_jitter_scale = float(jitter_scale)
+        self._failure_rng = np.random.default_rng(seed)
+        self._last_failure_substitutions = {}
 
     @abstractmethod
     def _create_new_forward_model(
@@ -202,21 +236,116 @@ class BaseEnsembleForwardModel:
 
         Override in subclasses for custom behavior.
         """
-        states = []
+        states: list[Optional[xarray.Dataset]] = []
+        failed: list[int] = []
+        self._last_failure_substitutions = {}
         pbar = tqdm(
             enumerate(self.ensemble_forward_models),
             total=self.ensemble_size,
             desc="Running ensemble",
         )
         for i, model in pbar:
-            result = model(
-                state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
-                params=self.get_member_params(params, i),
-                sim_name=f"{sim_name}_{i}",
-            )
+            try:
+                result = model(
+                    state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
+                    params=self.get_member_params(params, i),
+                    sim_name=f"{sim_name}_{i}",
+                )
+            except subprocess.CalledProcessError as exc:
+                if self._failure_policy == "raise":
+                    raise
+                logger.warning(
+                    "Ensemble member %d failed (%s); will be resampled "
+                    "from a successful member.",
+                    i,
+                    exc,
+                )
+                failed.append(i)
+                states.append(None)
+                continue
             states.append(result)
 
-        return xarray.concat(states, dim="ensemble", join="override")
+        resolved = self._resolve_failures(states, failed)
+        return xarray.concat(resolved, dim="ensemble", join="override")
+
+    def _resolve_failures(
+        self,
+        states: list[Optional[xarray.Dataset]],
+        failed: list[int],
+    ) -> list[xarray.Dataset]:
+        """Replace ``None`` entries in ``states`` with clones of successful members.
+
+        Records substitutions in ``self._last_failure_substitutions`` so that
+        downstream callers (e.g. ESMDA) can apply matching substitutions to
+        the parameter ensemble.
+        """
+        if not failed:
+            # Cast away Optional once we know there are no Nones.
+            return [s for s in states if s is not None]
+
+        survivors = [i for i, s in enumerate(states) if s is not None]
+        if not survivors:
+            raise RuntimeError(
+                "All ensemble members failed; cannot resample. "
+                "Inspect per-member logs and forward-model inputs."
+            )
+
+        donors = self._failure_rng.choice(survivors, size=len(failed))
+        substitutions = {int(j): int(d) for j, d in zip(failed, donors)}
+        self._last_failure_substitutions = substitutions
+
+        resolved: list[xarray.Dataset] = []
+        for i, s in enumerate(states):
+            if s is None:
+                donor_idx = substitutions[i]
+                resolved.append(states[donor_idx])  # type: ignore[arg-type]
+            else:
+                resolved.append(s)
+
+        logger.warning(
+            "Resampled %d failed ensemble members from successful donors: %s",
+            len(failed),
+            substitutions,
+        )
+        return resolved
+
+    def apply_failure_substitutions_to_params(
+        self,
+        params: xarray.Dataset,
+    ) -> xarray.Dataset:
+        """Apply the most recent failure substitutions to a parameter ensemble.
+
+        For each failed member ``j`` recorded in the previous ``run_ensemble``
+        call, replace ``params.isel(ensemble=j)`` with ``params.isel(ensemble=donor)``
+        plus Gaussian jitter scaled to ``failure_jitter_scale * std(ensemble)``
+        per data variable. Returns a new dataset; ``params`` is not mutated.
+
+        If there were no failures, returns ``params`` unchanged.
+        """
+        substitutions = self._last_failure_substitutions
+        if not substitutions or "ensemble" not in params.dims:
+            return params
+
+        scale = self._failure_jitter_scale
+        new_data_vars: dict = {}
+        for name, da in params.data_vars.items():
+            # Force a writable numpy copy: xarray's deep copy can preserve
+            # read-only buffers when the original is JAX-backed.
+            arr = np.array(da.values, copy=True)
+            ensemble_axis = da.dims.index("ensemble")
+            std = np.asarray(params[name].std(dim="ensemble").values)
+            for j, donor in substitutions.items():
+                donor_slice = np.take(arr, donor, axis=ensemble_axis)
+                if scale > 0.0:
+                    noise = self._failure_rng.standard_normal(donor_slice.shape)
+                    donor_slice = donor_slice + scale * std * noise
+                idx: list[slice | int] = [slice(None)] * arr.ndim
+                idx[ensemble_axis] = j
+                arr[tuple(idx)] = donor_slice
+            new_data_vars[name] = (da.dims, arr, da.attrs)
+        return xarray.Dataset(
+            data_vars=new_data_vars, coords=params.coords, attrs=params.attrs
+        )
 
     def _run_ensemble_sequentially_on_disk(
         self,
@@ -268,6 +397,9 @@ class BaseEnsembleForwardModel:
             for model in self.ensemble_forward_models:
                 model.set_results_dir(self.results_dir)
 
+        self._last_failure_substitutions = {}
+        failed: list[int] = []
+
         with ProcessPoolExecutor(max_workers=self.num_parallel_processes) as executor:
             futures = [
                 executor.submit(
@@ -280,9 +412,24 @@ class BaseEnsembleForwardModel:
             ]
 
             future_to_idx = {future: i for i, future in enumerate(futures)}
-            states = {i: None for i in range(self.ensemble_size)}
+            states: dict[int, Optional[xarray.Dataset]] = {
+                i: None for i in range(self.ensemble_size)
+            }
             for future in as_completed(future_to_idx):
-                states[future_to_idx[future]] = future.result()
+                idx = future_to_idx[future]
+                try:
+                    states[idx] = future.result()
+                except subprocess.CalledProcessError as exc:
+                    if self._failure_policy == "raise":
+                        raise
+                    logger.warning(
+                        "Ensemble member %d failed (%s); will be resampled "
+                        "from a successful member.",
+                        idx,
+                        exc,
+                    )
+                    failed.append(idx)
+                    states[idx] = None
 
         if self.rollout:
             self.rollout_step += 1
@@ -290,9 +437,20 @@ class BaseEnsembleForwardModel:
                 model.rollout_step = self.rollout_step  # type: ignore[attr-defined]
 
         if self.save_on_disk:
+            if failed:
+                # On-disk parallel failure handling is not implemented: failed
+                # members produced no state file, so a downstream consumer
+                # would read stale data. Fail loudly rather than silently.
+                raise RuntimeError(
+                    f"Parallel on-disk run had {len(failed)} member failure(s) "
+                    f"({failed}); on-disk resample-from-successes is not yet "
+                    "supported. Switch to save_in_memory or use sequential."
+                )
             return None
-        else:
-            return xarray.concat(list(states.values()), dim="ensemble", join="override")
+
+        ordered = [states[i] for i in range(self.ensemble_size)]
+        resolved = self._resolve_failures(ordered, sorted(failed))
+        return xarray.concat(resolved, dim="ensemble", join="override")
 
     def run_ensemble(
         self,
