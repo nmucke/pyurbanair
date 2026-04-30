@@ -46,15 +46,10 @@ class AR2RelaxationModel(ParameterTimeSeries):
         external_priors: dict[str, dict[str, float]],
         ensemble_size: int,
         correlation_length: float,
-        substeps_per_interval: int = 8,
     ) -> None:
         super().__init__(external_priors, ensemble_size)
         self.correlation_length = correlation_length
         self.lam = math.sqrt(3.0) / max(correlation_length, 1e-6)
-        # σ_η chosen so the stationary marginal variance of z is 1
-        # (Lyapunov equation for the 2D linear SDE).
-        self.sigma_eta = 2.0 * self.lam**1.5
-        self.substeps_per_interval = max(int(substeps_per_interval), 1)
 
         # Carried state: per-parameter terminal (z, w) of the most
         # recent draw.  ``None`` triggers a stationary cold start.
@@ -83,44 +78,51 @@ class AR2RelaxationModel(ParameterTimeSeries):
         w0: jnp.ndarray,
         rng_key: jax.Array,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Euler-Maruyama integration of the AR(2) SDE on ``time_coords``.
+        """Exact discrete-time integration of the critically-damped AR(2).
 
-        Returns the trajectory ``z(t)`` of shape ``(N_t, N_e)`` and the
-        terminal state ``(z_end, w_end)``.  Stores grid-point values
-        only; ``substeps_per_interval`` sub-steps are taken between
-        consecutive grid points for accuracy.
+        Uses the closed-form transition matrix ``F = exp(A·dt)`` (which
+        is exact for the double eigenvalue at ``-λ``) and the exact
+        one-step process noise ``Q = P_stat - F P_stat F^T`` with
+        ``P_stat = diag(1, λ²)``, factored via Cholesky.  Each grid step
+        preserves the stationary covariance exactly without substepping,
+        matching the reference implementation in Evensen's Dasys code
+        (``m_smooth_random_series.F90``).
         """
         time_coords = jnp.asarray(time_coords)
         n_t = time_coords.shape[0]
-        n_sub = self.substeps_per_interval
 
         intervals = jnp.diff(time_coords)
-        # Pre-sample all noise increments: shape (n_t-1, n_sub, N_e).
-        eps = jax.random.normal(
-            rng_key, (n_t - 1, n_sub, self.ensemble_size)
-        )
+        # Two independent normals per step for the 2-D Cholesky factor.
+        eps = jax.random.normal(rng_key, (n_t - 1, 2, self.ensemble_size))
 
         lam = self.lam
-        sigma_eta = self.sigma_eta
+        lam2 = lam * lam
 
         def advance_interval(state, scan_input):
             z, w = state
-            dt_total, eps_block = scan_input
-            dt = dt_total / n_sub
-            sqrt_dt = jnp.sqrt(jnp.maximum(dt, 0.0))
+            dt, eps_pair = scan_input
+            e = jnp.exp(-lam * dt)
+            a11 = e * (1.0 + lam * dt)
+            a12 = e * dt
+            a21 = -e * lam2 * dt
+            a22 = e * (1.0 - lam * dt)
 
-            def substep(carry, eps_k):
-                zc, wc = carry
-                z_new = zc + dt * wc
-                w_new = (
-                    wc
-                    + dt * (-2.0 * lam * wc - lam**2 * zc)
-                    + sigma_eta * sqrt_dt * eps_k
-                )
-                return (z_new, w_new), None
+            q11 = 1.0 - (a11 * a11 + a12 * a12 * lam2)
+            q12 = -(a11 * a21 + a12 * a22 * lam2)
+            q22 = lam2 - (a21 * a21 + a22 * a22 * lam2)
 
-            (z_end, w_end), _ = jax.lax.scan(substep, (z, w), eps_block)
-            return (z_end, w_end), z_end
+            q11 = jnp.maximum(q11, 0.0)
+            q22 = jnp.maximum(q22, 0.0)
+
+            l11 = jnp.sqrt(q11)
+            l11_safe = jnp.where(l11 > 0.0, l11, 1.0)
+            l21 = jnp.where(l11 > 0.0, q12 / l11_safe, 0.0)
+            l22 = jnp.sqrt(jnp.maximum(q22 - l21 * l21, 0.0))
+
+            eps_z, eps_w = eps_pair[0], eps_pair[1]
+            z_new = a11 * z + a12 * w + l11 * eps_z
+            w_new = a21 * z + a22 * w + l21 * eps_z + l22 * eps_w
+            return (z_new, w_new), z_new
 
         (z_final, w_final), z_grid = jax.lax.scan(
             advance_interval, (z0, w0), (intervals, eps)
@@ -203,9 +205,13 @@ class AR2RelaxationModel(ParameterTimeSeries):
                 # Per-member normalized end-of-window state.
                 z0 = (y_post[-1] - mu_end) / std_safe
                 if y_post.shape[0] >= 2:
+                    # Each timepoint is normalized by ITS OWN ensemble
+                    # mean before differencing, matching the reference
+                    # Fortran (m_ensemble_forcing.F90).
+                    mu_prev = y_post[-2].mean()
+                    z_prev = (y_post[-2] - mu_prev) / std_safe
                     post_times = jnp.asarray(posterior.coords["time"].values)
                     dt_post = post_times[-1] - post_times[-2]
-                    z_prev = (y_post[-2] - mu_end) / std_safe
                     w0 = (z0 - z_prev) / jnp.maximum(dt_post, 1e-6)
                 else:
                     w0 = jnp.zeros_like(z0)
