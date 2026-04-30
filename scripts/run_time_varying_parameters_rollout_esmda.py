@@ -147,14 +147,14 @@ def _plot_time_varying_params_rollout(
         for w, prior_ds in enumerate(prior_params_list):
             t = np.asarray(prior_ds.coords["time"].values)
             members = np.asarray(prior_ds[name].transpose("time", "ensemble").values)
-            ax.plot(t, members, color="C2", linewidth=0.8, linestyle="--", alpha=0.25)
+            ax.plot(t, members, color="C2", linewidth=0.8, linestyle="--", alpha=0.50)
             ens_mean = members.mean(axis=1)
             mean_label = "Prior mean" if w == 0 else None
             ax.plot(
                 t,
                 ens_mean,
                 color="C2",
-                linewidth=1.5,
+                linewidth=2,
                 linestyle="--",
                 label=mean_label,
             )
@@ -163,10 +163,10 @@ def _plot_time_varying_params_rollout(
         for w, post_ds in enumerate(posterior_params_list):
             t = np.asarray(post_ds.coords["time"].values)
             members = np.asarray(post_ds[name].transpose("time", "ensemble").values)
-            ax.plot(t, members, color="C1", linewidth=0.8, alpha=0.25)
+            ax.plot(t, members, color="C1", linewidth=0.8, alpha=0.50)
             ens_mean = members.mean(axis=1)
             mean_label = "Posterior mean" if w == 0 else None
-            ax.plot(t, ens_mean, color="C1", linewidth=2, label=mean_label)
+            ax.plot(t, ens_mean, color="C1", linewidth=4, label=mean_label)
 
         # Window boundaries
         for w in range(1, len(true_params_list)):

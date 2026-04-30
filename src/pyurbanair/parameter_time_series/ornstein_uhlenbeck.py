@@ -7,11 +7,16 @@ Prior:
     increments.
 
 Extrapolation:
-    Per-member OU-with-drift fit ``x_{k+1} = c_e + φ_e x_k + σ ε`` by
-    OLS on the posterior trajectory, with ensemble-pooled diffusion
-    ``σ``.  Rolled forward stochastically (Euler-Maruyama) with
-    independent Brownian increments per member, so the ensemble spread
-    grows across the extrapolation window instead of collapsing.
+    OU SDE anchored to the external prior:
+
+        dX_t = θ (x_ext - X_t) dt + σ dW_t,
+
+    with ``θ = 1 / l_corr`` (matching how ``α`` depends on ``l_corr``
+    in ``ar2_relaxation``) and ``σ = σ_ext √(2θ)`` so the marginal
+    standard deviation of ``X_t`` approaches ``σ_ext`` as ``t → ∞``.
+    Each member starts from its end-of-window posterior value for
+    continuity; the ensemble relaxes toward the external prior with
+    independent Brownian increments per member.
 """
 
 from __future__ import annotations
@@ -81,6 +86,14 @@ class OrnsteinUhlenbeckModel(ParameterTimeSeries):
     ) -> xarray.Dataset:
         prediction_times = jnp.asarray(prediction_times)
         n_pred = prediction_times.shape[0]
+        dt = jnp.median(jnp.diff(prediction_times))
+
+        # Exact discretization of dX = θ(x_ext - X) dt + σ dW with
+        # θ = 1/l_corr and σ = σ_ext √(2θ): φ = exp(-θ dt), conditional
+        # variance σ_ext² (1 - φ²) per step.
+        phi = jnp.exp(-dt / jnp.maximum(self.correlation_length, 1e-6))
+        phi = jnp.clip(phi, -self.phi_max, self.phi_max)
+        innovation_std = jnp.sqrt(jnp.maximum(1.0 - phi**2, 0.0))
 
         var_names = [
             n
@@ -97,31 +110,23 @@ class OrnsteinUhlenbeckModel(ParameterTimeSeries):
         }
 
         for name, key in zip(var_names, var_keys):
+            spec = self._ext(name)
+            x_ext = spec["mean"]
+            std = spec["std"]
+
             da = posterior[name].transpose("time", "ensemble")
             y_train = jnp.asarray(da.values)
             n_e = y_train.shape[1]
 
-            x_prev = y_train[:-1, :]
-            x_next = y_train[1:, :]
-
-            mean_prev = x_prev.mean(axis=0, keepdims=True)
-            mean_next = x_next.mean(axis=0, keepdims=True)
-            cov = jnp.sum((x_prev - mean_prev) * (x_next - mean_next), axis=0)
-            var_prev = jnp.sum((x_prev - mean_prev) ** 2, axis=0)
-            phi = jnp.where(
-                var_prev > 1e-12, cov / jnp.maximum(var_prev, 1e-12), 0.0
-            )
-            phi = jnp.clip(phi, -self.phi_max, self.phi_max)
-            c = mean_next[0] - phi * mean_prev[0]
-
-            residuals = x_next - (c[None, :] + phi[None, :] * x_prev)
-            sigma = jnp.sqrt(jnp.mean(residuals**2))
-
-            eps = jax.random.normal(key, (n_pred - 1, n_e))
             x0 = y_train[-1, :]
+            eps = jax.random.normal(key, (n_pred - 1, n_e))
 
             def step(x_prev_state, eps_k):
-                x_new = c + phi * x_prev_state + sigma * eps_k
+                x_new = (
+                    x_ext
+                    + phi * (x_prev_state - x_ext)
+                    + std * innovation_std * eps_k
+                )
                 return x_new, x_new
 
             _, x_rest = jax.lax.scan(step, x0, eps)

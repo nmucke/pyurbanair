@@ -35,7 +35,7 @@ DOMAIN = {
 # }
 
 TIME = {
-    "simulation_time": 3*60.0,  # 3000 * 0.0538,
+    "simulation_time": 5*60.0,  # 3000 * 0.0538,
     "output_frequency": 5.0,  # 3000 * 0.0538,
     "spinup_time": 10.0,
 }
@@ -46,7 +46,7 @@ LBM_ARGS = {
     "cuda": True,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
-    "compile": True,
+    "compile": False,
 }
 
 UDALES_ARGS = {
@@ -85,7 +85,7 @@ PALM_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 30,
+    "ensemble_size": 64,
     "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
     # Failure handling for individual ensemble members. With
@@ -112,7 +112,7 @@ OBS = {
 
 ESMDA = {
     "num_steps": 3,
-    "num_assimilation_windows": 5,
+    "num_assimilation_windows": 12,
     "seed": 42,
     "obs_error_std": 0.25,
     "init_conditions_dir": "esmda_init_conditions",
@@ -165,7 +165,7 @@ EXTERNAL_PRIORS = {
 #                         prior blended with posterior mean via
 #                         exponential relaxation toward x_ext.
 TIME_VARYING_PARAMS = {
-    "num_time_points": 12,
+    "num_time_points": int(TIME['simulation_time'] / 60),
     "method": "ar2_relaxation",
     "method_kwargs": {
         "gp_linear_trend": {
@@ -177,11 +177,11 @@ TIME_VARYING_PARAMS = {
             "phi_max": 0.999,
         },
         "ornstein_uhlenbeck": {
-            "correlation_length": 10.0,
+            "correlation_length": 200.0,
             "phi_max": 0.999,
         },
         "ar2_relaxation": {
-            "correlation_length": 100.0,
+            "correlation_length": 200.0,
         },
     },
     # Truth-trajectory generator.  Selects one of the same methods to
@@ -198,11 +198,11 @@ TIME_VARYING_PARAMS = {
             "phi_max": 0.999,
         },
         "ornstein_uhlenbeck": {
-            "correlation_length": 100.0,
+            "correlation_length": 200.0,
             "phi_max": 0.999,
         },
         "ar2_relaxation": {
-            "correlation_length": 100.0,
+            "correlation_length": 200.0,
         },
     },
 }
