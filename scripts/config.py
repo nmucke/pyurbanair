@@ -28,10 +28,10 @@ DOMAIN = {
     "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
 # DOMAIN = {
-#     "nx": 100,
+#     "nx": 90,
 #     "ny": 80,
 #     "nz": 16,
-#     "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+#     "bounds": ((-10.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 # }
 
 TIME = {
@@ -53,12 +53,12 @@ UDALES_ARGS = {
     "case_dir": "examples/udales/experiments/xie_and_castro",
     "experiment_name": "999",
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "ncpu": 1,
+    "ncpu": 4,
     "save_only_last_timestep": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "nudging_config": {
-        "tnudge": 50.0,
+        "tnudge": 15.0,
         "nnudge": 0,
         # Vertical inflow profile.  Omit for uniform (back-compat).  Supported:
         #   {"type": "uniform"},
@@ -99,8 +99,8 @@ ENSEMBLE = {
 }
 
 OBS = {
-    # "x_points": [20.0, 20.0, 40.0, 40.0, 60.0],
-    # "y_points": [20.0, 60.0, 10.0, 30.0, 60.0],
+    # "x_points": [20.0, 20.0, 40.0, 50.0, 60.0],
+    # "y_points": [20.0, 60.0, 10.0, 40.0, 60.0],
     "x_points": [10.0, 20.0, 30.0, 38.0, 10.0],
     "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
