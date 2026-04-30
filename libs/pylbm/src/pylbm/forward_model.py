@@ -207,6 +207,11 @@ class ForwardModel(BaseForwardModel):
         self._set_infile_value("nt0", nt0)
         self._set_infile_value("nt1", nt0 + total_timesteps)
         self._set_infile_value("iout", self.output_frequency_timesteps)
+        # Disable the iprt2-based "every iteration output" trigger in m_diag.F90.
+        # The default iprt2=60000 causes every iteration with it>=60000 to dump a
+        # NetCDF file, which makes warm-start runs (where nt0 typically already
+        # exceeds 60000) ~20x slower than cold starts.
+        self._set_infile_value("iprt1", f"0 {nt0 + total_timesteps + 1} 1")
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         """Change results directory, updating both base and dirs dataclass."""
