@@ -43,7 +43,7 @@ TIME = {
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": False,
+    "cuda": True,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "compile": True,
@@ -85,8 +85,8 @@ PALM_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 64,
-    "num_parallel_processes": 8,
+    "ensemble_size": 30,
+    "num_parallel_processes": 1,
     "num_cpus_per_process": 1,
     # Failure handling for individual ensemble members. With
     # "resample_from_successes", a per-member CalledProcessError is logged
@@ -112,7 +112,7 @@ OBS = {
 
 ESMDA = {
     "num_steps": 3,
-    "num_assimilation_windows": 2,
+    "num_assimilation_windows": 5,
     "seed": 42,
     "obs_error_std": 0.25,
     "init_conditions_dir": "esmda_init_conditions",
@@ -140,7 +140,7 @@ PARAM_PRIORS = {
 # "min"/"max" entries clip generated values.
 EXTERNAL_PRIORS = {
     "inflow_angle":       {"mean": 0.0, "std": 10.0},
-    "velocity_magnitude": {"mean": 3.0, "std": 0.5, "min": 0.1},
+    "velocity_magnitude": {"mean": 5.0, "std": 0.5, "min": 0.1},
 }
 
 # Time-varying parameter prior + extrapolation.

@@ -24,25 +24,35 @@ def _restart_dir(dirs: DirectoryPaths) -> pathlib.Path:
 
 def identify_latest_restart_iteration(dirs: DirectoryPaths) -> Optional[int]:
     """
-    Find the latest available main restart iteration.
+    Find the iteration of the most recently written main restart file.
+
+    Selection is by file mtime, not by max(iteration). For ESMDA loops
+    that re-cold-start with smaller nt1, the just-written file may have a
+    smaller iteration than a leftover restart from a prior step; mtime
+    correctly identifies the file produced by the most recent run.
 
     Returns:
-        Latest iteration number if any main restart file exists, otherwise None.
+        Iteration number of the most recently written main restart file,
+        or None if no main restart file exists.
     """
     restart_dir = _restart_dir(dirs)
     if not restart_dir.exists():
         return None
 
-    iterations: list[int] = []
+    latest_iter: Optional[int] = None
+    latest_mtime: float = -1.0
     for path in restart_dir.iterdir():
         if not path.is_file():
             continue
         match = MAIN_RESTART_PATTERN.match(path.name)
         if match is None:
             continue
-        iterations.append(int(match.group("iteration")))
+        mtime = path.stat().st_mtime
+        if mtime > latest_mtime:
+            latest_mtime = mtime
+            latest_iter = int(match.group("iteration"))
 
-    return max(iterations) if iterations else None
+    return latest_iter
 
 
 def remove_old_restart_files(
@@ -50,9 +60,10 @@ def remove_old_restart_files(
     keep_iteration: Optional[int] = None,
 ) -> None:
     """
-    Remove restart files from older iterations.
+    Remove all restart files except those for ``keep_iteration``.
 
-    If keep_iteration is None, the newest available main restart iteration is kept.
+    If ``keep_iteration`` is None, the iteration of the most recently
+    written main restart file is kept.
     """
     restart_dir = _restart_dir(dirs)
     if not restart_dir.exists():
@@ -71,7 +82,7 @@ def remove_old_restart_files(
         if match is None:
             continue
         iteration = int(match.group("iteration"))
-        if iteration < keep_iteration:
+        if iteration != keep_iteration:
             path.unlink(missing_ok=True)
 
 
