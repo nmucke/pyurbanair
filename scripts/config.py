@@ -21,18 +21,18 @@ from pyurbanair.utils.config_utils import (
 
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
-# DOMAIN = {
-#     "nx": 50,
-#     "ny": 40,
-#     "nz": 16,
-#     "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
-# }
 DOMAIN = {
-    "nx": 90,
-    "ny": 80,
+    "nx": 50,
+    "ny": 40,
     "nz": 16,
-    "bounds": ((-10.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
+# DOMAIN = {
+#     "nx": 90,
+#     "ny": 80,
+#     "nz": 16,
+#     "bounds": ((-10.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+# }
 
 TIME = {
     "simulation_time": 5*60.0,  # 3000 * 0.0538,
@@ -43,10 +43,10 @@ TIME = {
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": True,
+    "cuda": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
-    "compile": False,
+    "compile": True,
 }
 
 UDALES_ARGS = {
@@ -59,7 +59,7 @@ UDALES_ARGS = {
     "boundary_condition": "inflow_outflow",
     "nudging_config": {
         "tnudge": 15.0,
-        "nnudge": 0,
+        "nnudge": 4,
         # Vertical inflow profile.  Omit for uniform (back-compat).  Supported:
         #   {"type": "uniform"},
         #   {"type": "power_law", "alpha": 0.25, "z_ref": 40.0}
@@ -85,8 +85,8 @@ PALM_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 64,
-    "num_parallel_processes": 4,
+    "ensemble_size": 32,
+    "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
     # Failure handling for individual ensemble members. With
     # "resample_from_successes", a per-member CalledProcessError is logged
@@ -99,10 +99,10 @@ ENSEMBLE = {
 }
 
 OBS = {
-    "x_points": [20.0, 20.0, 40.0, 50.0, 60.0],
-    "y_points": [20.0, 60.0, 10.0, 40.0, 60.0],
-    # "x_points": [10.0, 20.0, 30.0, 38.0, 10.0],
-    # "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
+    # "x_points": [20.0, 20.0, 40.0, 50.0, 60.0],
+    # "y_points": [20.0, 60.0, 10.0, 40.0, 60.0],
+    "x_points": [10.0, 20.0, 30.0, 38.0, 10.0],
+    "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
