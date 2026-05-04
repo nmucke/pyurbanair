@@ -1,0 +1,318 @@
+\section{Data assimilation -- Smoothing with ES-MDA}
+\label{sec:da}
+
+This section describes the data-assimilation strategy implemented in
+the rollout script \rolloutscript{}.
+We first introduce \ESMDA{} for a single window with a time-varying
+parameter vector (Section~\ref{subsec:da-single-window}), then
+describe how the prior parameter ensemble is generated for cold and
+warm starts (Section~\ref{subsec:da-prior}), and finally explain
+how the rollout chains windows together
+(Section~\ref{subsec:da-multiwindow}).
+
+\subsection{Single-window ES-MDA for time-varying parameters}
+\label{subsec:da-single-window}
+
+Within a single window, the parameter trajectory is represented as a
+discrete vector
+\begin{equation}
+  \paramTraj_j = \bigl(\param_j(t_0), \param_j(t_1), \ldots, \param_j(t_{\Nt-1})\bigr)
+  \in \R^{n_p \cdot \Nt}, \qquad j = 1, \ldots, \Ne,
+  \label{eq:flat-param}
+\end{equation}
+where each time point of each physical parameter is treated as an
+independent scalar variable.  Stacking time points contiguously
+within a parameter -- $(\theta^{(1)}_0, \theta^{(1)}_1, \ldots,
+\theta^{(1)}_{\Nt-1}, \theta^{(2)}_0, \ldots)$ -- ensures that
+different physical quantities are never mixed during the Kalman
+update.  This flatten/unflatten pair is implemented in the
+\tvESMDAclass{} class.
+
+\paragraph{Tempering.}
+\ESMDA{}~\cite{emerick2013esmda} approximates a single Bayesian
+update by a sequence of $\Nsteps$ smaller analyses with inflated
+observation error covariance.  The inflation factors
+$\{\alphaInfl_i\}_{i=1}^{\Nsteps}$ satisfy
+\begin{equation}
+  \sum_{i=1}^{\Nsteps} \frac{1}{\alphaInfl_i} = 1,
+  \label{eq:esmda-tempering}
+\end{equation}
+which guarantees that the product of the $\Nsteps$ tempered
+Gaussian likelihoods, each with covariance $\alphaInfl_i \CD$,
+recovers the original observation likelihood with covariance $\CD$.
+The implementation uses the uniform schedule $\alphaInfl_i =
+\Nsteps$, so each step contributes equal Bayesian weight.  At each
+step the analysis is performed with the standard ensemble Kalman
+update below.
+
+\paragraph{Kalman update.}
+Let $\paramTraj^{(i)}$ denote the $(n_p \Nt) \times \Ne$ matrix
+whose columns are the flattened parameter trajectories of the
+ensemble members at the start of step $i$, and $\mat{D}^{(i)}$ the
+corresponding $\Nd \times \Ne$ matrix of predicted observations,
+$\mat{D}^{(i)}_j = \obsop\bigl(\fwd(\paramTraj^{(i)}_j)\bigr)$.
+Define ensemble means and anomalies
+\begin{equation}
+  \bar{\paramTraj}^{(i)}
+    = \frac{1}{\Ne}\sum_{j=1}^{\Ne} \paramTraj^{(i)}_j,
+  \quad
+  \anomdelta\paramTraj^{(i)} = \paramTraj^{(i)} - \bar{\paramTraj}^{(i)} \mathbf{1}\transp,
+  \quad
+  \anomdelta\mat{D}^{(i)} = \mat{D}^{(i)} - \bar{\mat{D}}^{(i)} \mathbf{1}\transp,
+  \label{eq:anomalies}
+\end{equation}
+with $\mathbf{1}$ the $\Ne$-vector of ones.  The empirical
+cross-covariance between flattened parameters and predicted
+observations and the empirical predicted-observation covariance are
+\begin{equation}
+  \CMD^{(i)} = \frac{1}{\Ne - 1}\,
+               \anomdelta\paramTraj^{(i)}\, \bigl(\anomdelta\mat{D}^{(i)}\bigr)\transp,
+  \qquad
+  \CDD^{(i)} = \frac{1}{\Ne - 1}\,
+               \anomdelta\mat{D}^{(i)}\, \bigl(\anomdelta\mat{D}^{(i)}\bigr)\transp.
+  \label{eq:cov}
+\end{equation}
+Each ensemble member is then updated through
+\begin{equation}
+  \paramTraj^{(i+1)}_j
+  = \paramTraj^{(i)}_j
+  + \CMD^{(i)} \bigl(\CDD^{(i)} + \alphaInfl_i \CD\bigr)\inv
+    \bigl(\obs + \sqrt{\alphaInfl_i}\, \CD^{1/2} \vect{z}_j - \mat{D}^{(i)}_j\bigr),
+  \quad \vect{z}_j \sim \mathcal{N}(\zerovec, \identity).
+  \label{eq:esmda-update}
+\end{equation}
+Crucially, the ensemble forecast for step $i{+}1$ re-runs the
+forward model from the same window-initial state $\state\win{w}(0)$
+with the updated parameters.  Without this reset, iteration $i{+}1$
+would forecast from iteration $i$'s output, which would bypass the
+spin-up after the first iteration and entangle the iterates'
+physical states.
+
+\paragraph{Pinning the initial time point.}
+The Kalman update may optionally be restricted to time indices
+$t_1, \ldots, t_{\Nt-1}$ within the window, leaving $\param_j(t_0)$
+untouched.  This is controlled by the \code{pin\_initial\_time\_point}
+flag in \tvESMDAclass{}: when set, the entries
+corresponding to $t_0$ are dropped from the flattened augmented
+state in~\eqref{eq:flat-param} and reinserted unchanged on
+unflattening.  Pinning is essential for the rollout
+(Section~\ref{subsec:da-multiwindow}) because the boundary value
+$\param_j(t_0)$ at window $w > 0$ is set by the previous window's
+posterior; any further adjustment by \ESMDA{} would break
+continuity at the window seam.
+
+\subsection{Prior parameter generation}
+\label{subsec:da-prior}
+
+The prior parameter ensemble is the entry point of every \ESMDA{}
+window.  In \pyurbanair{} the prior is provided by a
+\paramTSclass{} object, which exposes two methods:
+\begin{itemize}
+  \item \code{sample\_prior(time\_coords, rng\_key)} -- a cold-start
+        draw used for window $0$ and, in identical-twin experiments,
+        also for the truth (with $\Ne = 1$);
+  \item \code{extrapolate(posterior, prediction\_times, rng\_key)} --
+        a warm-start propagation of a window's posterior into the
+        prior of the next window.
+\end{itemize}
+Four implementations of \paramTSclass{} are registered under
+\code{src/\allowbreak pyurbanair/\allowbreak parameter\_time\_series/}.
+All four share an
+external prior specification $(\xext, \Sext)$ per parameter -- in
+the notation of Evensen~\cite{evensen2024}, the climatological mean
+and standard deviation of each parameter -- together with a
+correlation length $\ell$ that controls the smoothness of the
+trajectory in time.
+
+\paragraph{Gaussian process with linear-trend extrapolation
+(\code{gp\_linear\_trend}).}
+The cold-start prior is a smooth ensemble drawn from an RBF Gaussian
+process~\cite{rasmussen2006gp} with marginal $\mathcal{N}(\xext,
+\Sext^2)$ and correlation length $\ell$.  Extrapolation fits a
+per-member linear trend to the posterior trajectory by ordinary
+least squares and adds a zero-mean GP residual with heteroscedastic
+noise estimated from the cross-ensemble spread.  An optional
+exponential damping prevents the trend from diverging far into the
+next window.
+
+\paragraph{Stationary AR(1) (\code{ar1}).}
+The cold-start prior is a stationary first-order auto-regressive
+process with $\phi = e^{-\Delta t / \ell}$ around $\xext$.
+Extrapolation fits a per-member AR(1) coefficient by ordinary least
+squares and rolls the trajectory forward deterministically from each
+member's last training value.
+
+\paragraph{Ornstein--Uhlenbeck (\code{ornstein\_uhlenbeck}).}
+The cold-start prior is a stationary Ornstein--Uhlenbeck
+process~\cite{uhlenbeck1930ou}.  Extrapolation fits an
+\OU{}-with-drift to the posterior, advances it stochastically with
+an Euler--Maruyama step, and pools the diffusion coefficient across
+the ensemble to keep the spread calibrated.
+
+\paragraph{Critically-damped AR(2) relaxation (\code{ar2\_relaxation}).}
+The default in our experiments and the model used in
+Evensen~\cite{evensen2024}.  The latent process satisfies the
+critically-damped second-order SDE
+\begin{equation}
+  \frac{\mathrm{d} z}{\mathrm{d} t} = w,
+  \qquad
+  \frac{\mathrm{d} w}{\mathrm{d} t} = -2\lambda\, w - \lambda^2 z + \eta(t),
+  \qquad
+  \lambda = \frac{\sqrt{3}}{\ell},
+  \label{eq:ar2}
+\end{equation}
+where $\eta$ is a white-noise term scaled so that $z$ has zero mean
+and unit variance in stationarity.  The implementation
+integrates~\eqref{eq:ar2} with the closed-form transition matrix
+$\mat{F} = \exp(\mat{A}\,\Delta t)$ and the exact one-step process
+noise $\mat{Q} = \mat{P}_{\mathrm{stat}} - \mat{F}\,
+\mat{P}_{\mathrm{stat}}\, \mat{F}\transp$ with $\mat{P}_{\mathrm{stat}}
+= \diag(1, \lambda^2)$, factored via Cholesky.  Each grid step
+preserves the stationary covariance exactly, without substepping.
+
+\medskip
+\noindent\emph{Cold start.}\;
+For window $0$ the prior follows
+Evensen~\cite{evensen2024}:
+\begin{equation}
+  \param_j(t) = \xext + \Sext\, z_j(t),
+  \label{eq:ar2-cold}
+\end{equation}
+with $z_j$ drawn from the stationary distribution of~\eqref{eq:ar2}.
+
+\medskip
+\noindent\emph{Warm start.}\;
+For window $w > 0$ let $\mu_{\mathrm{end}} = \Ne^{-1}
+\sum_j \param_j^{\post,(w-1)}(t_{\Nt-1})$ be the ensemble-mean
+end-of-window posterior of the previous window, and $z_j(t)$ a fresh
+trajectory of~\eqref{eq:ar2} on the new window's grid.  The next
+window's prior is then constructed by exponential relaxation toward
+the external prior:
+\begin{equation}
+  \param_j(t) = \alpha(t)\, \mu_{\mathrm{end}}
+              + \bigl(1 - \alpha(t)\bigr)\,\bigl(\xext + \Sext\, z_j(t)\bigr),
+  \quad
+  \alpha(t) = e^{-(t - t_0)/\ell}.
+  \label{eq:ar2-relax}
+\end{equation}
+At $t = t_0$ the relaxation coefficient $\alpha = 1$ and every
+member starts at the previous-window ensemble mean
+$\mu_{\mathrm{end}}$, so the per-member spread at the seam is zero
+and the seam is determined by the previous posterior's mean.  Far
+into the window $\alpha(t) \to 0$ and the prior relaxes back to
+$\xext$ with full external spread $\Sext$.  The AR(2) state $(z, w)$
+is initialized per member from the normalized end-of-window
+posterior so that the latent process is itself $C^1$-continuous
+across the window seam, even though only the ensemble mean appears
+explicitly in~\eqref{eq:ar2-relax}.
+
+\paragraph{Avoiding the inverse crime.}
+In identical-twin experiments, using the same generative process for
+the truth and for the prior would underestimate the difficulty of the
+inverse problem.  The truth trajectory is therefore drawn from a
+separate \paramTSclass{} instance, typically with a
+different correlation length, that samples once over the full
+horizon $[0, \Nw\windowLen]$ and slices the result into per-window
+datasets, sharing boundary points so that the truth is continuous
+across windows.
+
+\subsection{Multi-window rollout}
+\label{subsec:da-multiwindow}
+
+The rollout chains the single-window \ESMDA{} of
+Section~\ref{subsec:da-single-window} with the prior generators of
+Section~\ref{subsec:da-prior} into a sequence covering the full
+horizon.  Algorithm~\ref{alg:rollout} summarizes the loop, which
+mirrors the implementation in
+\rolloutscript{}.
+
+\begin{algorithm}[t]
+\caption{Rolling-window \ESMDA{} with time-varying parameters.}
+\label{alg:rollout}
+\begin{algorithmic}[1]
+\REQUIRE Number of windows $\Nw$, window length $\windowLen$, time
+points per window $\Nt$, ensemble size $\Ne$, external prior
+$(\xext, \Sext)$, time-series model \code{ts\_model}, truth model
+\code{truth\_ts\_model}, forward models $\fwd_{\mathrm{truth}}$ and
+$\fwd_{\mathrm{assim}}$, \ESMDA{} configuration $(\Nsteps, \CD)$.
+\STATE \emph{(Truth pre-generation.)}\;
+       Draw a single trajectory from \code{truth\_ts\_model} on a
+       shared-boundary grid covering $[0, \Nw\windowLen]$ and slice
+       into $\{\paramTraj^{\star\winSub{w}}\}_{w=0}^{\Nw-1}$, each
+       on local time $[0, \windowLen]$.
+\STATE \emph{(Initial prior.)}\;
+       $\paramTraj_{\mathrm{ens}} \leftarrow$
+       \code{ts\_model.sample\_prior}$\bigl([0, \windowLen],\,
+       \cdot\bigr)$.
+\STATE $\state_\star \leftarrow \mathtt{None}$;\quad
+       $\state_{\mathrm{end}} \leftarrow \mathtt{None}$.
+\FOR{$w = 0, 1, \ldots, \Nw - 1$}
+  \STATE Record the prior used for window $w$:
+         $\paramTraj^{\prior,(w)} \leftarrow \paramTraj_{\mathrm{ens}}$.
+  \STATE Run the truth solver:
+         $\state_\star \leftarrow \fwd_{\mathrm{truth}}\bigl(
+         \paramTraj^{\star\winSub{w}};\, \state_\star\bigr)$.
+  \STATE Generate noisy observations
+         $\obs\win{w} = \obsop_{\mathrm{truth}}(\state_\star)
+         + \CD^{1/2}\,\vect{z}$,
+         $\vect{z} \sim \mathcal{N}(\zerovec, \identity)$.
+  \STATE \textbf{if} $w > 0$ \textbf{then} enable
+         \code{pin\_initial\_time\_point} so the seam value
+         established by \code{extrapolate} is preserved.
+  \STATE Choose the warm-start state for the assimilation forecast:
+         $\state\win{w}(0) =
+         \state_{\mathrm{end}}\big|_{t=\windowLen}$ when $w > 0$,
+         else $\mathtt{None}$ (cold start with spin-up).
+  \STATE Run \ESMDA{} with $\Nsteps$ tempering steps on the
+         flattened parameter vector, using
+         $\fwd_{\mathrm{assim}}$ for the forecasts; obtain the
+         parameter history $\paramTraj^{(0)}, \ldots,
+         \paramTraj^{(\Nsteps)}$ and the final ensemble forecast
+         state $\state_{\mathrm{end}}\win{w}$.
+  \STATE Record posterior $\paramTraj^{\post,(w)} \leftarrow
+         \paramTraj^{(\Nsteps)}$.
+  \IF{$w < \Nw - 1$}
+    \STATE Build next window's prior on $[\windowLen, 2\windowLen]$
+           and relabel to local $[0, \windowLen]$:\;
+           $\paramTraj_{\mathrm{ens}} \leftarrow$
+           \code{ts\_model.extrapolate}$\bigl(
+           \paramTraj^{\post,(w)};\,
+           [\windowLen, 2\windowLen],\, \cdot\bigr)$.
+  \ENDIF
+\ENDFOR
+\ENSURE Per-window priors $\{\paramTraj^{\prior,(w)}\}$, posteriors
+$\{\paramTraj^{\post,(w)}\}$, truth states, and assimilation states;
+concatenated on absolute time at save time.
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Local-time invariance.}
+Each window's simulation runs with its own clock $[0, \windowLen]$,
+independently of $w$.  The extrapolation in step~12 is performed on
+$[\windowLen, 2\windowLen]$ -- the natural prediction interval given
+the previous posterior's local time grid -- and then relabeled to
+$[0, \windowLen]$ for the next window's forward model.  This keeps
+the smoother's \code{time\_coords} constant across windows and
+spares the forward model from recomputing time stamps; it works for
+all four prior models because the AR(2) relaxation is
+translation-invariant in local time, and the GP- and AR(1)-based
+methods only depend on relative offsets within their training and
+prediction grids.
+
+\paragraph{Continuity at boundaries.}
+Continuity across windows is enforced by two complementary
+mechanisms.  First, the prior generator -- in the case of the AR(2)
+relaxation, equation~\eqref{eq:ar2-relax} -- guarantees a well-defined
+seam value $\param_j\win{w+1}(t_0)$ inherited from window $w$.
+Second, pinning the initial time point in \ESMDA{} from window $1$
+onward ensures that the Kalman update preserves that seam value.
+Without pinning, the smoother would treat $\param_j(t_0)$ as a free
+parameter and the trajectory would jump at every window boundary.
+
+\paragraph{Storage.}
+The rollout records, for every window, the prior parameter ensemble,
+the posterior parameter ensemble, the truth state, and the final
+ensemble forecast state.  These are concatenated into global NetCDF
+archives after shifting from local to absolute time, and they form
+the basis for the diagnostics shown in
+Section~\ref{sec:results}.

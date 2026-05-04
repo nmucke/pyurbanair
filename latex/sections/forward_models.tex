@@ -1,0 +1,74 @@
+\section{Forward models}
+\label{sec:forward}
+
+The data-assimilation pipeline is solver-agnostic: the smoother
+interacts with the forward model only through an ensemble interface
+that takes a parameter dataset and an optional warm-start state, and
+returns a forecast trajectory.  Three solvers are wired up in
+\pyurbanair{} and can be selected independently for the truth and
+the assimilation model from the command line of the rollout script.
+
+\subsection{Lattice-Boltzmann solver (\pylbm{})}
+\pylbm{} is a custom lattice-Boltzmann
+implementation~\cite{succi2001lbm} on a regular Cartesian grid, with
+an STL-defined urban geometry and velocity-/pressure-driven
+inflow--outflow boundary conditions.  In the experiments reported
+here we use a moderate grid of $50 \times 40 \times 16$ cells over a
+$50\,\mathrm{m}\times 40\,\mathrm{m}\times 40\,\mathrm{m}$ domain
+covering the staggered cube array of Xie and
+Castro~\cite{xie2008castro}.  Among the three solvers it is the
+cheapest to run and is therefore the default choice for ensemble
+experiments and development.
+
+\subsection{uDALES (\pyudales{})}
+uDALES~\cite{suter2018udales} is a finite-difference \LES{} code
+targeted at urban-microclimate applications.  In \pyurbanair{} it is
+driven through a Python wrapper that prepares the case directory,
+configures a uniform or power-law vertical inflow profile, and
+triggers the simulation through a MATLAB-based preprocessing chain.
+Inflow nudging is applied with a fixed time constant and width to
+relax the interior of the domain toward the prescribed inflow
+profile.
+
+\subsection{PALM (\pypalm{})}
+PALM~\cite{maronga2020palm} is a comprehensive \LES{} model system
+that supports thermodynamics, building-resolved geometry through STL
+meshes, and a flexible I/O system.  Its integration in \pyurbanair{}
+mirrors that of \pyudales{}: a wrapper sets up the case directory,
+writes inflow and nudging configuration, and dispatches the run.
+
+\subsection{Common interface}
+Each solver exposes three Python objects with consistent signatures:
+\begin{enumerate}
+  \item a \emph{single-member} forward model that accepts a parameter
+        dataset on a discrete time grid and integrates the flow over
+        a window, optionally warm-starting from a previous terminal
+        state;
+  \item an \emph{ensemble} forward model that runs $\Ne$ members in
+        parallel processes and gathers their outputs into a single
+        ensemble dataset; and
+  \item an \emph{observation operator} that samples ensemble
+        velocity fields at a fixed set of probe locations and
+        aggregates them in time according to the observation
+        configuration.
+\end{enumerate}
+This common interface is what allows the rollout script to swap the
+truth and the assimilation solvers independently and to remain
+agnostic to the parameter time-series model in use.
+
+\paragraph{Spin-up and warm-starting.}
+Window $0$ runs with spin-up enabled to wash out the artificial
+initial condition.  From window $1$ onward each ensemble member
+warm-starts from the terminal state of the previous window's
+forecast, so the physical state across windows is continuous up to
+the discretization of the parameter trajectory.
+
+\paragraph{Failure handling.}
+Individual ensemble runs occasionally fail (e.g.\ a numerical
+blow-up triggered by an outlier parameter draw).  The ensemble layer
+in \pyurbanair{} handles this through a configurable failure
+policy: by default, a failed member is replaced by a clone of a
+randomly chosen successful member with its parameters jittered by a
+small fraction of the prior spread.  This keeps the ensemble size
+constant across windows and prevents a single failure from aborting
+the rollout.
