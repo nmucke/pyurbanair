@@ -29,6 +29,7 @@ from pyurbanair.parameter_time_series import (
     ParameterTimeSeries,
     build_parameter_time_series,
 )
+from pyurbanair.plotting import plot_state_init_and_terminal
 from pyurbanair.utils.animation_utils import animate_rollout_state
 
 if __package__ is None or __package__ == "":
@@ -215,6 +216,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+
     # ---- Config -----------------------------------------------------------
     num_windows = int(config.ESMDA["num_assimilation_windows"])
     num_time_points = (
@@ -378,7 +380,7 @@ def main() -> None:
             params_ensemble = extrapolated
 
     # ---- Save outputs -----------------------------------------------------
-    out_dir = config.BASE_RESULTS_DIR / "time_varying_rollout_esmda"
+    out_dir = config.BASE_RESULTS_DIR / f"time_varying_rollout_esmda_{args.truth_model}_{args.truth_model}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Each window's datasets carry LOCAL time coords [0, sim_time]; shift to
@@ -420,6 +422,20 @@ def main() -> None:
             posterior_params_list=posterior_params_abs,
             prior_params_list=prior_params_abs,
             output_path=out_dir / "time_varying_parameters_rollout.png",
+        )
+        obs_x, obs_y, _ = config.create_observation_points()
+        esmda_mean_all = (
+            esmda_state_all.mean(dim="ensemble")
+            if "ensemble" in esmda_state_all.dims
+            else esmda_state_all
+        )
+        plot_state_init_and_terminal(
+            true_state=true_state_all,
+            estimated_state=esmda_mean_all,
+            output_path=out_dir / "state_init_and_terminal.png",
+            obs_x=obs_x,
+            obs_y=obs_y,
+            z_level=0,
         )
         animate_rollout_state(
             true_state=true_state_all,

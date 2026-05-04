@@ -21,18 +21,18 @@ from pyurbanair.utils.config_utils import (
 
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
-DOMAIN = {
-    "nx": 50,
-    "ny": 40,
-    "nz": 16,
-    "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
-}
 # DOMAIN = {
-#     "nx": 90,
-#     "ny": 80,
+#     "nx": 50,
+#     "ny": 40,
 #     "nz": 16,
-#     "bounds": ((-10.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+#     "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 # }
+DOMAIN = {
+    "nx": 90,
+    "ny": 80,
+    "nz": 16,
+    "bounds": ((-10.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+}
 
 TIME = {
     "simulation_time": 5*60.0,  # 3000 * 0.0538,
@@ -86,7 +86,7 @@ PALM_ARGS = {
 
 ENSEMBLE = {
     "ensemble_size": 64,
-    "num_parallel_processes": 1,
+    "num_parallel_processes": 4,
     "num_cpus_per_process": 1,
     # Failure handling for individual ensemble members. With
     # "resample_from_successes", a per-member CalledProcessError is logged
@@ -99,10 +99,10 @@ ENSEMBLE = {
 }
 
 OBS = {
-    # "x_points": [20.0, 20.0, 40.0, 50.0, 60.0],
-    # "y_points": [20.0, 60.0, 10.0, 40.0, 60.0],
-    "x_points": [10.0, 20.0, 30.0, 38.0, 10.0],
-    "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
+    "x_points": [20.0, 20.0, 40.0, 50.0, 60.0],
+    "y_points": [20.0, 60.0, 10.0, 40.0, 60.0],
+    # "x_points": [10.0, 20.0, 30.0, 38.0, 10.0],
+    # "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
     "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
@@ -112,7 +112,7 @@ OBS = {
 
 ESMDA = {
     "num_steps": 3,
-    "num_assimilation_windows": 12,
+    "num_assimilation_windows": 6,
     "seed": 42,
     "obs_error_std": 0.25,
     "init_conditions_dir": "esmda_init_conditions",
