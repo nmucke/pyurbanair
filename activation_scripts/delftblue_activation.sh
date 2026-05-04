@@ -29,3 +29,13 @@ if [ -n "${CONDA_PREFIX}" ] && [ -d "${CONDA_PREFIX}/lib" ]; then
         export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib"
     fi
 fi
+
+# Conda-forge OpenMPI's UCX PML segfaults inside MPI_Finalize on DelftBlue
+# (after the run completes cleanly): UCX detects InfiniBand devices but
+# can't fully initialize them — particularly on login nodes — then crashes
+# on shutdown. Force the OB1 PML with TCP/shared-memory BTLs. Single-rank
+# uDALES runs don't need RDMA, and this works on both login and compute nodes.
+export OMPI_MCA_pml=ob1
+export OMPI_MCA_btl=self,vader,tcp
+export OMPI_MCA_osc=pt2pt
+export OMPI_MCA_btl_base_warn_component_unused=0
