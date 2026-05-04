@@ -1,0 +1,89 @@
+% =====================================================================
+% Macros for the time-varying-parameter ESMDA report.
+% =====================================================================
+
+% -- Math operators ----------------------------------------------------
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\E}{\mathbb{E}}
+\DeclareMathOperator{\Cov}{Cov}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\trace}{tr}
+
+% -- Basic shortcuts ---------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\identity}{\mathbf{I}}
+\newcommand{\zerovec}{\mathbf{0}}
+
+% -- Generic vector / matrix typography --------------------------------
+\newcommand{\vect}[1]{\boldsymbol{#1}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\transp}{^{\mathsf{T}}}
+\newcommand{\inv}{^{-1}}
+
+% -- State, parameters, observations -----------------------------------
+\newcommand{\state}{\vect{x}}                 % physical state
+\newcommand{\param}{\vect{\theta}}            % parameter vector
+\newcommand{\paramTraj}{\vect{\Theta}}        % parameter trajectory
+\newcommand{\obs}{\vect{d}}                   % observation vector
+\newcommand{\obsop}{\mathcal{H}}              % observation operator
+\newcommand{\fwd}{\mathcal{M}}                % forward model
+\newcommand{\noise}{\vect{\varepsilon}}       % observation noise
+
+% -- Covariances and inflation ----------------------------------------
+\newcommand{\CD}{\mat{C}_{\!D}}               % observation error covariance
+\newcommand{\CMD}{\mat{C}_{\!M\!D}}           % cross-covariance
+\newcommand{\CDD}{\mat{C}_{\!D\!D}}           % predicted-observation covariance
+\newcommand{\alphaInfl}{\alpha}               % ESMDA inflation factor
+\newcommand{\Nsteps}{N_{\alpha}}              % number of ESMDA tempering steps
+\newcommand{\Ne}{N_{\!e}}                     % ensemble size
+\newcommand{\Nd}{N_{\!d}}                     % observation dimension
+\newcommand{\Nt}{N_{\!t}}                     % time points per window
+\newcommand{\Nw}{N_{\!w}}                     % number of assimilation windows
+
+% -- Window indexing ---------------------------------------------------
+% \win{w} renders as a parenthesized superscript "(w)".  Use \winSub{w}
+% for combined situations (e.g. truth-trajectory star + window index).
+\newcommand{\win}[1]{^{(#1)}}                 % window superscript
+\newcommand{\winSub}[1]{{\scriptscriptstyle (#1)}}
+\newcommand{\windowLen}{T}                    % single-window length
+
+% -- Ensemble subscripts ----------------------------------------------
+\newcommand{\member}[1]{_{#1}}                % j-th ensemble member
+\newcommand{\prior}{\mathrm{p}}               % prior label
+\newcommand{\post}{\mathrm{a}}                % analysis (posterior) label
+% Ensemble-anomaly prefix: write \anomdelta\paramTraj instead of
+% trying to put a prime past an existing superscript.
+\newcommand{\anomdelta}{\delta}
+
+% -- External prior (Evensen 2024 notation) ---------------------------
+\newcommand{\xext}{\vect{x}_{\mathrm{ext}}}
+\newcommand{\Sext}{\vect{\Sigma}_{\mathrm{ext}}}
+
+% -- ESMDA acronyms ----------------------------------------------------
+\newcommand{\ESMDA}{ES-MDA}
+\newcommand{\LBM}{LBM}
+\newcommand{\LES}{LES}
+\newcommand{\GP}{GP}
+\newcommand{\OU}{OU}
+
+% -- Software / code references ---------------------------------------
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\pyurbanair}{\code{pyurbanair}}
+\newcommand{\pylbm}{\code{pylbm}}
+\newcommand{\pyudales}{\code{pyudales}}
+\newcommand{\pypalm}{\code{pypalm}}
+
+% Long script and class names: insert allow-break points so they fit
+% in narrow columns without overfull hboxes.
+\newcommand{\rolloutscript}{%
+  \texttt{run\_time\_\allowbreak varying\_\allowbreak parameters\_\allowbreak rollout\_\allowbreak esmda.py}}
+\newcommand{\plothelper}{%
+  \texttt{\_plot\_\allowbreak time\_\allowbreak varying\_\allowbreak params\_\allowbreak rollout}}
+\newcommand{\paramTSclass}{\texttt{ParameterTimeSeries}}
+\newcommand{\tvESMDAclass}{%
+  \texttt{TimeVarying\allowbreak ParameterESMDA}}
+\newcommand{\stateparamESMDAclass}{%
+  \texttt{StateAnd\allowbreak ParameterESMDA}}
