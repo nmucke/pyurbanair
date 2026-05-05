@@ -1,4 +1,5 @@
 import logging
+import multiprocessing as mp
 import os
 import pathlib
 import subprocess
@@ -11,6 +12,11 @@ import xarray
 from tqdm import tqdm
 
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.cpu_pinning import (
+    build_cpu_queue,
+    cpu_pinning_disabled,
+    pin_worker_initializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +406,20 @@ class BaseEnsembleForwardModel:
         self._last_failure_substitutions = {}
         failed: list[int] = []
 
-        with ProcessPoolExecutor(max_workers=self.num_parallel_processes) as executor:
+        executor_kwargs: dict[str, Any] = {"max_workers": self.num_parallel_processes}
+        if not cpu_pinning_disabled():
+            ctx = mp.get_context("fork")
+            cpu_queue = build_cpu_queue(
+                num_workers=self.num_parallel_processes,
+                cpus_per_worker=self.num_cpus_per_process,
+            )
+            executor_kwargs.update(
+                mp_context=ctx,
+                initializer=pin_worker_initializer,
+                initargs=(cpu_queue,),
+            )
+
+        with ProcessPoolExecutor(**executor_kwargs) as executor:
             futures = [
                 executor.submit(
                     model.__call__,

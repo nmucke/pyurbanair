@@ -53,7 +53,7 @@ UDALES_ARGS = {
     "case_dir": "examples/udales/experiments/xie_and_castro",
     "experiment_name": "999",
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "ncpu": 4,
+    "ncpu": 1,
     "save_only_last_timestep": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
@@ -86,7 +86,12 @@ PALM_ARGS = {
 
 ENSEMBLE = {
     "ensemble_size": 32,
-    "num_parallel_processes": 8,
+    # Past 4 workers, per-member runtime grows in proportion (DRAM-bandwidth
+    # saturation on this hardware), so wall time stops improving. See
+    # scripts/benchmark_ensemble_scaling.py and the pinning vs. no-pin sweep
+    # in .temp/bench/ensemble_scaling_pinned.csv. Bump only after a fresh
+    # benchmark on the actual machine confirms the cliff has moved.
+    "num_parallel_processes": 4,
     "num_cpus_per_process": 1,
     # Failure handling for individual ensemble members. With
     # "resample_from_successes", a per-member CalledProcessError is logged
