@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 from abc import abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Literal, Optional
 
 import numpy as np
@@ -97,6 +98,18 @@ class BaseEnsembleForwardModel:
         self._failure_jitter_scale: float = 0.05
         self._failure_rng: np.random.Generator = np.random.default_rng(0)
         self._last_failure_substitutions: dict[int, int] = {}
+
+        # Persistent worker pool, lazily created on the first parallel run
+        # and reused across calls.  Tearing the pool down each call (the
+        # historical ``with ProcessPoolExecutor(...)`` pattern) re-pays the
+        # fork + JAX-init cost on every forward call; with N ESMDA windows
+        # × M update steps that adds up.  Set
+        # ``PYURBANAIR_PERSIST_POOL=0`` to fall back to the per-call pool
+        # (used by the parallelism benchmark to measure the baseline).
+        self._persistent_pool_enabled = (
+            os.environ.get("PYURBANAIR_PERSIST_POOL", "1") != "0"
+        )
+        self._executor: Optional[ProcessPoolExecutor] = None
 
         # Subclasses must populate this list with individual forward models
         self.ensemble_forward_models: list[BaseForwardModel] = []
@@ -386,6 +399,33 @@ class BaseEnsembleForwardModel:
         for model in self.ensemble_forward_models:
             model._clean_output()
 
+    def _get_or_create_executor(self) -> ProcessPoolExecutor:
+        """Return the persistent worker pool, creating it on first use.
+
+        Falls back to a fresh per-call pool when persistence is disabled
+        via ``PYURBANAIR_PERSIST_POOL=0``; the caller is responsible for
+        shutting that pool down.
+        """
+        if not self._persistent_pool_enabled:
+            return ProcessPoolExecutor(max_workers=self.num_parallel_processes)
+        if self._executor is None:
+            self._executor = ProcessPoolExecutor(
+                max_workers=self.num_parallel_processes
+            )
+        return self._executor
+
+    def close(self) -> None:
+        """Shut down the persistent worker pool, if any."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def _run_parallel(
         self,
         params: Optional[xarray.Dataset] = None,
@@ -400,16 +440,37 @@ class BaseEnsembleForwardModel:
         self._last_failure_substitutions = {}
         failed: list[int] = []
 
-        with ProcessPoolExecutor(max_workers=self.num_parallel_processes) as executor:
-            futures = [
-                executor.submit(
-                    model.__call__,
-                    state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
-                    params=self.get_member_params(params, i),
-                    sim_name=f"{sim_name}_{i}",
-                )
-                for i, model in enumerate(self.ensemble_forward_models)
-            ]
+        executor = self._get_or_create_executor()
+        # Tear the per-call pool down at the end; persistent pools live
+        # on the instance and are reused across calls.
+        owned_executor = not self._persistent_pool_enabled
+
+        try:
+            try:
+                futures = [
+                    executor.submit(
+                        model.__call__,
+                        state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
+                        params=self.get_member_params(params, i),
+                        sim_name=f"{sim_name}_{i}",
+                    )
+                    for i, model in enumerate(self.ensemble_forward_models)
+                ]
+            except BrokenProcessPool:
+                # A worker died between calls (segfault, OOM kill, slurm
+                # step abort).  Rebuild the persistent pool once and retry.
+                logger.warning("Persistent worker pool was broken; rebuilding.")
+                self.close()
+                executor = self._get_or_create_executor()
+                futures = [
+                    executor.submit(
+                        model.__call__,
+                        state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
+                        params=self.get_member_params(params, i),
+                        sim_name=f"{sim_name}_{i}",
+                    )
+                    for i, model in enumerate(self.ensemble_forward_models)
+                ]
 
             future_to_idx = {future: i for i, future in enumerate(futures)}
             states: dict[int, Optional[xarray.Dataset]] = {
@@ -430,6 +491,9 @@ class BaseEnsembleForwardModel:
                     )
                     failed.append(idx)
                     states[idx] = None
+        finally:
+            if owned_executor:
+                executor.shutdown(wait=True)
 
         if self.rollout:
             self.rollout_step += 1

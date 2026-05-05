@@ -85,8 +85,8 @@ PALM_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 32,
-    "num_parallel_processes": 8,
+    "ensemble_size": 64,
+    "num_parallel_processes": 64,
     "num_cpus_per_process": 1,
     # Failure handling for individual ensemble members. With
     # "resample_from_successes", a per-member CalledProcessError is logged
