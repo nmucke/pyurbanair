@@ -20,11 +20,10 @@ from pyudales.ensemble_forward_model import (
 )
 from pyudales.forward_model import ForwardModel as UDALESForwardModel
 from pyudales.utils.clean_up_utils import clean_output_dir as clean_udales_output_dir
-from pypalm.ensemble_forward_model import (
-    EnsembleForwardModel as PALMEnsembleForwardModel,
-)
-from pypalm.forward_model import ForwardModel as PALMForwardModel
-from pypalm.utils.clean_up_utils import clean_palm_output_dir
+
+# pypalm is imported lazily inside the model_name == "pypalm" branches below:
+# its package __init__ downloads and compiles the PALM solver on first import,
+# which we want to avoid for runs that never instantiate a PALM model.
 
 ModelName = Literal["pylbm", "pyudales", "pypalm"]
 
@@ -85,6 +84,8 @@ def create_forward_model(
         return LBMForwardModel(**args)
 
     if model_name == "pypalm":
+        from pypalm.forward_model import ForwardModel as PALMForwardModel
+
         args.pop("compile", None)
         return PALMForwardModel(**args)
 
@@ -118,6 +119,8 @@ def clean_forward_model_outputs(model_name: ModelName, forward_model: Any) -> No
     if model_name == "pylbm":
         clean_lbm_output_files(forward_model.dirs)
     elif model_name == "pypalm":
+        from pypalm.utils.clean_up_utils import clean_palm_output_dir
+
         clean_palm_output_dir(forward_model.dirs)
     else:
         clean_udales_output_dir(forward_model.dirs)
@@ -140,6 +143,10 @@ def create_ensemble_forward_model(model_name: ModelName, forward_model: Any) -> 
             num_cpus_per_process=ensemble_cfg["num_cpus_per_process"],
         )
     elif model_name == "pypalm":
+        from pypalm.ensemble_forward_model import (
+            EnsembleForwardModel as PALMEnsembleForwardModel,
+        )
+
         ensemble = PALMEnsembleForwardModel(
             forward_model=forward_model,
             ensemble_size=ensemble_cfg["ensemble_size"],

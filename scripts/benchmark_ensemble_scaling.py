@@ -178,7 +178,14 @@ def run_one_sweep(
     ens = build_ensemble(project_root, ncpu=ncpu, workers=workers)
 
     t0 = time.time()
-    ens.run_ensemble(sim_name="state")
+    try:
+        ens.run_ensemble(sim_name="state")
+    except Exception as exc:
+        # The bench only needs per-member timings (captured via .timings
+        # files) and total wall time. Post-run failures (e.g. xarray
+        # concat hitting netcdf files corrupted by an MPI_Finalize
+        # segfault on DelftBlue) are non-fatal for benchmarking.
+        print(f"  WARNING: run_ensemble post-processing failed: {exc!r}", flush=True)
     wall = time.time() - t0
 
     timings = parse_member_timings(bench_dir)

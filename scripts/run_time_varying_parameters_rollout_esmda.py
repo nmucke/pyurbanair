@@ -214,6 +214,13 @@ def main() -> None:
         default=None,
         help="Override results directory for assimilation model outputs.",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=pathlib.Path,
+        default=None,
+        help="Directory for final results (netcdf datasets) and plots. "
+        "Defaults to config.BASE_RESULTS_DIR / 'time_varying_rollout_esmda_<truth>_<assim>'.",
+    )
     args = parser.parse_args()
 
 
@@ -380,7 +387,12 @@ def main() -> None:
             params_ensemble = extrapolated
 
     # ---- Save outputs -----------------------------------------------------
-    out_dir = config.BASE_RESULTS_DIR / f"time_varying_rollout_esmda_{args.truth_model}_{args.truth_model}"
+    out_dir = (
+        args.output_dir
+        if args.output_dir is not None
+        else config.BASE_RESULTS_DIR
+        / f"time_varying_rollout_esmda_{args.truth_model}_{args.truth_model}"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Each window's datasets carry LOCAL time coords [0, sim_time]; shift to

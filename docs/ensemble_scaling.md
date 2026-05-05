@@ -123,6 +123,63 @@ implied 13.5× speedup over serial. CSVs:
 `.temp/bench/lbm_ensemble_scaling.csv`,
 `.temp/bench/lbm_ensemble_scaling_n16.csv`.
 
+### DelftBlue (Xeon Gold 6248R, 48 cores/node) — uDALES
+
+Same `ncpu=1` sweep, same 64×64×16 / 60s case, `ensemble_size=32` so the
+top of the sweep fills in exactly one batch. Ran with `--exclusive
+--mem=0 --cpus-per-task=32`. CSV:
+`.temp/bench/ensemble_scaling_delftblue_*.csv`, SLURM script:
+`job_scripts/delftblue/bench_udales_scaling.slurm`.
+
+| workers | wall (s)  | mpi/member (s) |    speedup | per-member inflation |
+|--------:|----------:|---------------:|-----------:|---------------------:|
+|       1 |    746.71 |          21.20 |      1.00× |                1.00× |
+|       4 |    207.52 |          23.63 |      3.60× |                1.11× |
+|       8 |    123.25 |          28.18 |      6.06× |                1.33× |
+|      16 |     68.98 |          29.57 |     10.82× |                1.39× |
+|  **32** | **55.64** |      **45.47** | **13.42×** |                2.14× |
+
+Key findings:
+
+- **Optimal at workers=32** for `ensemble_size=32` (one-batch fit is the
+  dominant factor). Production `ENSEMBLE["num_parallel_processes"]` on
+  DelftBlue should target `≥ ensemble_size` when feasible, capped by node
+  cores.
+- **Way more memory headroom than Ryzen.** At workers=16 inflation is
+  1.39× (Ryzen at the same point: 7.10×). Xeon Gold 6248R has 6 memory
+  channels per CPU × 2 CPUs = 12 channels per node vs Ryzen's 2.
+- **No sharp cliff up to 32**, just gradual diminishing returns. 16→32
+  inflates per-member by 1.54× but cuts wall time 19% (one batch beats
+  two even with the inflation).
+
+Direct answer to "1 node × 16 cpus vs 2 nodes × 8 cpus" for
+`ensemble_size=32`:
+
+|             layout | projected wall | reasoning |
+|-------------------:|---------------:|-----------|
+|   1 node × 32 cpus |       55.6 s   | measured; 1 batch |
+|   2 nodes × 8 cpus |        ~61 s   | each node: 16 members in 2 batches × ~28 s |
+|   1 node × 16 cpus |       69.0 s   | 2 batches × ~30 s |
+
+A single big node beats both layouts. Multi-node only becomes interesting
+once `ensemble_size` grows past ~48.
+
+**Caveat — MPI_Finalize segfaults corrupt netcdf output.** OpenMPI on
+DelftBlue compute nodes still SIGSEGVs inside `MPI_Finalize` after a
+clean uDALES run, despite the `OMPI_MCA_pml=ob1 / btl=self,vader,tcp`
+overrides in `activation_scripts/delftblue_activation.sh`. The bench
+wrapper (`scripts/_bench_local_execute.sh`) tolerates exit 139 when the
+run log contains `TOTAL CPU time`, and the bench driver
+(`scripts/benchmark_ensemble_scaling.py`) tolerates the resulting xarray
+concat failure. But the underlying issue corrupts per-member `fielddump`
+netcdf mid-close — different members end up with different `xt` sizes.
+ESMDA currently masks this via
+`ENSEMBLE["failure_policy"] = "resample_from_successes"`, which only
+catches `CalledProcessError` and not corrupted-but-readable netcdf —
+some posterior members may silently be running on a truncated grid.
+Worth investigating: try `OMPI_MCA_coll_hcoll_enable=0`, disable
+`hwloc`/`prted` early shutdown, or switch to a non-conda OpenMPI build.
+
 ## Cross-solver comparison
 
 | Solver | Domain (cells) | Best speedup | Best workers | per-member inflation at best |

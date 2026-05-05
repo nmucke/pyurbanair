@@ -1,10 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=esmda_udales
 #SBATCH --partition=compute
-#SBATCH --time=16:00:00
+#SBATCH --time=08:00:00
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem-per-cpu=2G
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=0
+#SBATCH --exclusive
 #SBATCH --account=innovation
 #SBATCH --output=job_scripts/delftblue/out_files/slurm-esmda_udales-%j.out
 #SBATCH --error=job_scripts/delftblue/out_files/slurm-esmda_udales-%j.err
@@ -29,11 +31,13 @@ export OMPI_MCA_btl=self,vader,tcp
 export OMPI_MCA_osc=pt2pt
 export OMPI_MCA_btl_base_warn_component_unused=0
 
-# Cap thread fan-out so JAX/BLAS/OpenMP don't oversubscribe the 4 cores
-# allocated by --cpus-per-task.
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
-export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
-export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+# Each ensemble worker is a separate forked Python process pinned to one
+# core. In-rank thread libraries must stay at 1 so 48 workers × 48 BLAS
+# threads = 2304 threads don't fight for cores.
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
 
 pixi run -e delftblue -- python scripts/run_time_varying_parameters_rollout_esmda.py \
-    --truth-model pyudales --assim-model pyudales
+    --truth-model pyudales --assim-model pyudales \
+    --output-dir /projects/urbanair/time_varying_rollout_esmda_pyudales_pyudales

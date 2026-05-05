@@ -59,13 +59,13 @@ UDALES_ARGS = {
     "boundary_condition": "inflow_outflow",
     "nudging_config": {
         "tnudge": 15.0,
-        "nnudge": 4,
+        "nnudge": 2,
         # Vertical inflow profile.  Omit for uniform (back-compat).  Supported:
         #   {"type": "uniform"},
         #   {"type": "power_law", "alpha": 0.25, "z_ref": 40.0}
         # velocity_magnitude is interpreted as the speed at z_ref.
-        # "profile_config": {"type": "power_law", "alpha": 0.25},
-        "profile_config": {"type": "uniform"},
+        "profile_config": {"type": "power_law", "alpha": 0.25},
+        # "profile_config": {"type": "uniform"},
     },
 }
 
@@ -85,13 +85,13 @@ PALM_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 32,
+    "ensemble_size": 96,
     # Past 4 workers, per-member runtime grows in proportion (DRAM-bandwidth
     # saturation on this hardware), so wall time stops improving. See
     # scripts/benchmark_ensemble_scaling.py and the pinning vs. no-pin sweep
     # in .temp/bench/ensemble_scaling_pinned.csv. Bump only after a fresh
     # benchmark on the actual machine confirms the cliff has moved.
-    "num_parallel_processes": 4,
+    "num_parallel_processes": 48,
     "num_cpus_per_process": 1,
     # Failure handling for individual ensemble members. With
     # "resample_from_successes", a per-member CalledProcessError is logged

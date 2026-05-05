@@ -43,10 +43,26 @@ echo "copy $(elapsed "$t0" "$t1")" >> "$TLOG"
 pushd "$outdir" > /dev/null
 
 t2=$(now)
+set +e
 mpiexec -n "$NCPU" --bind-to none --oversubscribe "$DA_BUILD" "namoptions.$exp" \
     >> "run.$exp.log" 2>&1
+mpi_exit=$?
+set -e
 t3=$(now)
 echo "mpiexec $(elapsed "$t2" "$t3")" >> "$TLOG"
+
+# DelftBlue: conda-forge OpenMPI can SIGSEGV inside MPI_Finalize even after
+# a clean uDALES run (UCX/InfiniBand tear-down). Tolerate exit 139 if
+# uDALES printed its "TOTAL CPU time" end-of-run line. Real crashes still
+# propagate.
+if [ "$mpi_exit" -ne 0 ]; then
+    if [ "$mpi_exit" -eq 139 ] && grep -q "TOTAL CPU time" "run.$exp.log"; then
+        echo "mpiexec exit=139 after clean uDALES run; tolerating finalize segfault." >&2
+    else
+        echo "mpiexec failed with exit $mpi_exit" >&2
+        exit "$mpi_exit"
+    fi
+fi
 
 t4=$(now)
 "$DA_TOOLSDIR/gather_outputs.sh" "$outdir" > gather.log 2>&1
