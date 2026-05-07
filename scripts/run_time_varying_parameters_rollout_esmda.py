@@ -352,6 +352,12 @@ def main() -> None:
             state_input = esmda_final_state  # None for window 0
 
         # --- Run ESMDA -----------------------------------------------------
+        # ``_analysis`` returns either ``(params_history, final_state)`` (in
+        # memory) or just ``params_history`` (when the ensemble forward model
+        # has save_on_disk=True). The rollout flow needs the in-memory final
+        # state to seed the next window, so reject the on-disk contract loudly
+        # instead of letting it crash later as an opaque AttributeError on a
+        # string return value.
         output = esmda(
             state=state_input,
             params=params_ensemble,
@@ -359,6 +365,13 @@ def main() -> None:
             return_params_history=True,
             return_state_history=False,
         )
+        if not isinstance(output, tuple):
+            raise RuntimeError(
+                "Rollout ESMDA requires an in-memory ensemble forward model "
+                "so the final window state can seed the next window. Got a "
+                "single return value, which means the forward model is "
+                "configured with save_on_disk=True."
+            )
         params_history, esmda_final_state = output
 
         # Extract final posterior (last ESMDA step)
@@ -460,4 +473,16 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Print tracebacks to ``sys.__stderr__`` (the original fd) before
+    # re-raising. tqdm wraps ``sys.stderr``; on shutdown its buffered ``\r``
+    # progress line can be the only thing that ever reaches the SLURM .err
+    # file, hiding the actual traceback. Bypassing the wrapper guarantees
+    # the traceback lands on disk even if tqdm swallows it.
+    import sys as _sys
+    import traceback as _traceback
+    try:
+        main()
+    except BaseException:
+        _traceback.print_exc(file=_sys.__stderr__)
+        _sys.__stderr__.flush()
+        raise

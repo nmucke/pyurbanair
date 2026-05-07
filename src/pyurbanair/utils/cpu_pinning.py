@@ -109,9 +109,20 @@ def round_robin_cpu_ids(num_slots: int) -> list[int]:
     return out
 
 
-def build_cpu_queue(num_workers: int, cpus_per_worker: int) -> "mp.Queue":
-    """Build a Queue holding one frozenset of CPU ids per worker."""
-    ctx = mp.get_context("fork")
+def build_cpu_queue(
+    num_workers: int,
+    cpus_per_worker: int,
+    ctx: "mp.context.BaseContext | None" = None,
+) -> "mp.Queue":
+    """Build a Queue holding one frozenset of CPU ids per worker.
+
+    The queue must use the same multiprocessing context as the
+    ProcessPoolExecutor it feeds; ``ctx`` defaults to ``forkserver`` to
+    match the executor and to avoid fork()/multithreaded-parent
+    deadlocks when the parent has imported JAX.
+    """
+    if ctx is None:
+        ctx = mp.get_context("forkserver")
     queue: "mp.Queue" = ctx.Queue()
     pool = round_robin_cpu_ids(num_workers * cpus_per_worker)
     if not pool:
