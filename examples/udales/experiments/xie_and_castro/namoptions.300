@@ -47,3 +47,9 @@ dpdx         = 0.0029343
 dpdy         = -0.0029343
 stl_file     = xie_castro_2008_STL.stl
 /
+
+&NAMSUBGRID
+lsmagorinsky = .true.
+lvreman      = .false.
+cs           = 0.20
+/

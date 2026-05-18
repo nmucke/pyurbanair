@@ -21,18 +21,18 @@ from pyurbanair.utils.config_utils import (
 
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
-# DOMAIN = {
-#     "nx": 50,
-#     "ny": 40,
-#     "nz": 16,
-#     "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
-# }
 DOMAIN = {
-    "nx": 100,
-    "ny": 80,
+    "nx": 60,
+    "ny": 40,
     "nz": 16,
-    "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-20.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
+# DOMAIN = {
+#     "nx": 100,
+#     "ny": 80,
+#     "nz": 16,
+#     "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+# }
 
 TIME = {
     "simulation_time": 3*60.0,  # 3000 * 0.0538,
@@ -43,7 +43,7 @@ TIME = {
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": False,
+    "cuda": True,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "compile": True,
@@ -58,8 +58,8 @@ UDALES_ARGS = {
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "nudging_config": {
-        "tnudge": 15.0,
-        "nnudge": 2,
+        "tnudge": 30.0,
+        "nnudge": 4,
         # Vertical inflow profile.  Omit for uniform (back-compat).  Supported:
         #   {"type": "uniform"},
         #   {"type": "power_law", "alpha": 0.25, "z_ref": 40.0}
@@ -85,7 +85,7 @@ PALM_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 64,
+    "ensemble_size": 16,
     # Past 4 workers, per-member runtime grows in proportion (DRAM-bandwidth
     # saturation on this hardware), so wall time stops improving. See
     # scripts/benchmark_ensemble_scaling.py and the pinning vs. no-pin sweep
