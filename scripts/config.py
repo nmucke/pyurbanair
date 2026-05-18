@@ -22,20 +22,20 @@ from pyurbanair.utils.config_utils import (
 BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 
 DOMAIN = {
-    "nx": 50,
+    "nx": 60,
     "ny": 40,
     "nz": 16,
-    "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
+    "bounds": ((-20.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 }
 # DOMAIN = {
-#     "nx": 90,
+#     "nx": 100,
 #     "ny": 80,
 #     "nz": 16,
-#     "bounds": ((-10.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+#     "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 # }
 
 TIME = {
-    "simulation_time": 5*60.0,  # 3000 * 0.0538,
+    "simulation_time": 3*60.0,  # 3000 * 0.0538,
     "output_frequency": 5.0,  # 3000 * 0.0538,
     "spinup_time": 10.0,
 }
@@ -43,7 +43,7 @@ TIME = {
 LBM_ARGS = {
     "stl_path": "examples/lbm/experiments/xie_castro_2008_STL.stl",
     "experiment_name": "runcase",
-    "cuda": False,
+    "cuda": True,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "compile": True,
@@ -53,19 +53,19 @@ UDALES_ARGS = {
     "case_dir": "examples/udales/experiments/xie_and_castro",
     "experiment_name": "999",
     "matlab_bin": "/opt/sw/matlab-2023b/bin/matlab",
-    "ncpu": 4,
+    "ncpu": 1,
     "save_only_last_timestep": False,
     "verbose": False,
     "boundary_condition": "inflow_outflow",
     "nudging_config": {
-        "tnudge": 15.0,
+        "tnudge": 30.0,
         "nnudge": 4,
         # Vertical inflow profile.  Omit for uniform (back-compat).  Supported:
         #   {"type": "uniform"},
         #   {"type": "power_law", "alpha": 0.25, "z_ref": 40.0}
         # velocity_magnitude is interpreted as the speed at z_ref.
-        # "profile_config": {"type": "power_law", "alpha": 0.25},
-        "profile_config": {"type": "uniform"},
+        "profile_config": {"type": "power_law", "alpha": 0.25},
+        # "profile_config": {"type": "uniform"},
     },
 }
 
@@ -85,7 +85,12 @@ PALM_ARGS = {
 }
 
 ENSEMBLE = {
-    "ensemble_size": 32,
+    "ensemble_size": 16,
+    # Past 4 workers, per-member runtime grows in proportion (DRAM-bandwidth
+    # saturation on this hardware), so wall time stops improving. See
+    # scripts/benchmark_ensemble_scaling.py and the pinning vs. no-pin sweep
+    # in .temp/bench/ensemble_scaling_pinned.csv. Bump only after a fresh
+    # benchmark on the actual machine confirms the cliff has moved.
     "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
     # Failure handling for individual ensemble members. With
@@ -99,20 +104,20 @@ ENSEMBLE = {
 }
 
 OBS = {
-    # "x_points": [20.0, 20.0, 40.0, 50.0, 60.0],
-    # "y_points": [20.0, 60.0, 10.0, 40.0, 60.0],
-    "x_points": [10.0, 20.0, 30.0, 38.0, 10.0],
-    "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
-    "z_points": [1.0, 1.0, 1.0, 1.0, 1.0],
+    "x_points": [20.0, 20.0, 40.0, 50.0, 60.0],
+    "y_points": [20.0, 60.0, 10.0, 40.0, 60.0],
+    # "x_points": [10.0, 20.0, 30.0, 38.0, 10.0],
+    # "y_points": [20.0, 25.0, 10.0, 30.0, 2.0],
+    "z_points": [3.0, 3.0, 3.0, 3.0, 3.0],
     "states": ["u", "v", "w"],
     "temporal_mode": "intervals",
-    "interval_size": 3,
+    "interval_size": 4,
     "aggregation_mode": "mean",
 }
 
 ESMDA = {
-    "num_steps": 3,
-    "num_assimilation_windows": 6,
+    "num_steps": 2,
+    "num_assimilation_windows": 5,
     "seed": 42,
     "obs_error_std": 0.25,
     "init_conditions_dir": "esmda_init_conditions",
@@ -121,14 +126,14 @@ ESMDA = {
 
 TRUE_PARAMS = {
     "inflow_angle": 10.0,
-    "velocity_magnitude": 3.0,
+    "velocity_magnitude": 5.0,
     "pressure_gradient_magnitude": 0.0041912,
 }
 
 PARAM_PRIORS = {
     "inflow_angle_mean": 0.0,
     "inflow_angle_std": 10.0,
-    "velocity_mean": 3.0,
+    "velocity_mean": 5.0,
     "velocity_std": 1.0,
     "pressure_mean": 0.0041912,
     "pressure_std": 0.001,
@@ -139,7 +144,7 @@ PARAM_PRIORS = {
 # (where applicable) between-window relaxation toward x_ext.  Optional
 # "min"/"max" entries clip generated values.
 EXTERNAL_PRIORS = {
-    "inflow_angle":       {"mean": 0.0, "std": 10.0},
+    "inflow_angle":       {"mean": 0.0, "std": 5.0},
     "velocity_magnitude": {"mean": 5.0, "std": 0.5, "min": 0.1},
 }
 
@@ -181,7 +186,7 @@ TIME_VARYING_PARAMS = {
             "phi_max": 0.999,
         },
         "ar2_relaxation": {
-            "correlation_length": 200.0,
+            "correlation_length": 300.0,
         },
     },
     # Truth-trajectory generator.  Selects one of the same methods to
@@ -202,7 +207,7 @@ TIME_VARYING_PARAMS = {
             "phi_max": 0.999,
         },
         "ar2_relaxation": {
-            "correlation_length": 200.0,
+            "correlation_length": 500.0,
         },
     },
 }

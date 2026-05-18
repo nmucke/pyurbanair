@@ -1,4 +1,5 @@
 import logging
+import multiprocessing as mp
 import os
 import pathlib
 import subprocess
@@ -11,6 +12,11 @@ import xarray
 from tqdm import tqdm
 
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.cpu_pinning import (
+    build_cpu_queue,
+    cpu_pinning_disabled,
+    pin_worker_initializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +406,28 @@ class BaseEnsembleForwardModel:
         self._last_failure_substitutions = {}
         failed: list[int] = []
 
-        with ProcessPoolExecutor(max_workers=self.num_parallel_processes) as executor:
+        executor_kwargs: dict[str, Any] = {"max_workers": self.num_parallel_processes}
+        # ``forkserver`` instead of ``fork``: the parent imports JAX at module
+        # load time, which starts background threads. Bare ``fork()`` clones
+        # only the calling thread and leaves the others' mutexes locked,
+        # producing the deadlock the JAX/popen_fork RuntimeWarning calls out.
+        # ``forkserver`` runs a small helper process that does the forking;
+        # workers inherit no parent threads, so JAX/MPI cleanup at shutdown
+        # stays clean (no Py_FinalizeEx exit code 120 from orphaned threads).
+        ctx = mp.get_context("forkserver")
+        executor_kwargs["mp_context"] = ctx
+        if not cpu_pinning_disabled():
+            cpu_queue = build_cpu_queue(
+                ctx=ctx,
+                num_workers=self.num_parallel_processes,
+                cpus_per_worker=self.num_cpus_per_process,
+            )
+            executor_kwargs.update(
+                initializer=pin_worker_initializer,
+                initargs=(cpu_queue,),
+            )
+
+        with ProcessPoolExecutor(**executor_kwargs) as executor:
             futures = [
                 executor.submit(
                     model.__call__,

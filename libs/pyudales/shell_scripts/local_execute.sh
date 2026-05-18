@@ -73,7 +73,13 @@ cp -r ./* $outdir
 pushd $outdir
 
 ## execute program with mpi
-mpiexec -n $NCPU --oversubscribe $DA_BUILD namoptions.$exp 2>&1 | tee -a run.$exp.log
+##
+## --bind-to none: respect the parent process affinity (set by
+##   pyurbanair.utils.cpu_pinning when running ensembles), so MPI does
+##   not move ranks off the CPUs the worker was pinned to.
+## --oversubscribe: still allow more ranks than OpenMPI's slot count
+##   (cgroups/affinity can confuse the slot computation under pinning).
+mpiexec -n $NCPU --bind-to none --oversubscribe $DA_BUILD namoptions.$exp 2>&1 | tee -a run.$exp.log
 
 ## Merge output files across outputs.
 ## Always run gather_outputs.sh to merge per-processor files
