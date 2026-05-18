@@ -1,0 +1,39 @@
+name: pyudales
+solver_name: udales
+init_subdir: udales
+
+forward_model:
+  _target_: pyudales.forward_model.ForwardModel
+  _convert_: all
+  case_dir: examples/udales/experiments/xie_and_castro
+  experiment_name: "999"
+  matlab_bin: /opt/sw/matlab-2023b/bin/matlab
+  ncpu: 1
+  save_only_last_timestep: false
+  verbose: false
+  boundary_condition: inflow_outflow
+  nudging_config:
+    tnudge: 30.0
+    nnudge: 4
+    profile_config:
+      type: power_law
+      alpha: 0.25
+  nx: ${domain.nx}
+  ny: ${domain.ny}
+  nz: ${domain.nz}
+  bounds: ${domain.bounds}
+  simulation_time: ${time.simulation_time}
+  output_frequency: ${time.output_frequency}
+  spinup_time: ${time.spinup_time}
+
+prepare:
+  _target_: pyurbanair.config.hydra_helpers.prepare_udales
+  python_or_matlab: python
+
+ensemble_model:
+  _target_: pyudales.ensemble_forward_model.EnsembleForwardModel
+  _convert_: all
+  ensemble_size: ${ensemble.ensemble_size}
+  num_parallel_processes: ${ensemble.num_parallel_processes}
+  num_cpus_per_process: ${ensemble.num_cpus_per_process}
+

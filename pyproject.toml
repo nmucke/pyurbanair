@@ -12,6 +12,7 @@ dependencies = [
   "jax>=0.7.0,<0.8.0",
   "tqdm>=4.67.1,<5",
   "vape4d>=0.2.0,<0.3.0",
+  "hydra-core>=1.3,<2",
 ]
 name = "pyurbanair"
 requires-python = ">= 3.12,<3.13"
@@ -46,6 +47,7 @@ trimesh = ">=4.10.1,<5"
 rtree = ">=1.4.1,<2"
 networkx = ">=3.6.1,<4"
 scipy = ">=1.16.3,<2"
+hydra-core = ">=1.3,<2"
 
 [tool.pixi.feature.udales.dependencies]
 cmake = {version=">3.5.0,<4.0", channel="conda-forge"}

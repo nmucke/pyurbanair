@@ -1,0 +1,8 @@
+ensemble_size: 16
+num_parallel_processes: 8
+num_cpus_per_process: 1
+failure:
+  policy: resample_from_successes
+  jitter_scale: 0.05
+  seed: 0
+

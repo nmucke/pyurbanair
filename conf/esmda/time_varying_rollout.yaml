@@ -1,0 +1,16 @@
+kind: time_varying_rollout
+num_steps: 2
+alpha: ${.num_steps}
+num_assimilation_windows: 5
+seed: 42
+obs_error_std: 0.25
+init_conditions_dir: esmda_init_conditions
+true_sim_id: 0
+
+smoother:
+  _target_: data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA
+  num_steps: ${..num_steps}
+  alpha: ${..alpha}
+  num_time_points: ${time_varying.num_time_points}
+  pin_initial_time_point: true
+

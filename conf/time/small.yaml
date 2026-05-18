@@ -1,0 +1,4 @@
+simulation_time: 30.0
+output_frequency: 1.0
+spinup_time: 5.0
+

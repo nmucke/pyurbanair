@@ -1,0 +1,27 @@
+defaults:
+  - paths: default
+  - domain: xie_castro_60x40x16
+  - time: default
+  - ensemble: default
+  - obs: xie_castro_points
+  - esmda: parameter
+  - params/true: default
+  - params/prior: default
+  - params/external: default
+  - time_varying: ar2_relaxation
+  - model@model: pylbm
+  - model@truth_model: pylbm
+  - model@assim_model: pylbm
+  - preset: null
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.base_results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+run:
+  skip_viz: false
+  rollout: false
+  results_dir: null

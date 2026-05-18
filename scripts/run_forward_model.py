@@ -1,57 +1,35 @@
-import argparse
 import pathlib
 import sys
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import hydra
 import matplotlib.pyplot as plt
+from hydra.utils import instantiate
+from omegaconf import DictConfig
 from pyudales.utils.grid_utils import interpolate_grid
+from pyurbanair.config.hydra_helpers import (
+    clean_outputs,
+    create_true_params,
+    resolve_output_dir,
+)
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
 
-from scripts import config
 
+def run(cfg: DictConfig) -> None:
+    model_name = cfg.model.name
+    results_dir = (
+        pathlib.Path(cfg.run.results_dir)
+        if cfg.run.results_dir is not None
+        else None
+    )
+    forward_model = instantiate(cfg.model.forward_model, results_dir=results_dir)
+    instantiate(cfg.model.prepare, forward_model=forward_model)
+    clean_outputs(model_name=model_name, forward_model=forward_model)
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model",
-        choices=["pylbm", "pyudales", "pypalm"],
-        default="pylbm",
-        help="Forward model backend.",
-    )
-    parser.add_argument(
-        "--rollout",
-        action="store_true",
-        help="Use rollout forward model variant.",
-    )
-    parser.add_argument(
-        "--skip-viz",
-        action="store_true",
-        help="Skip plotting and animation outputs.",
-    )
-    parser.add_argument(
-        "--results-dir",
-        type=pathlib.Path,
-        default=None,
-        help="Override results directory for model outputs.",
-    )
-    args = parser.parse_args()
-
-    model_name = args.model
-    forward_model = config.create_forward_model(
-        model_name=model_name,
-        results_dir=(
-            pathlib.Path(args.results_dir) if args.results_dir is not None else None
-        ),
-    )
-    config.prepare_forward_model(model_name=model_name, forward_model=forward_model)
-    config.clean_forward_model_outputs(
-        model_name=model_name, forward_model=forward_model
-    )
-
-    true_params = config.create_true_params(model_name)
+    true_params = create_true_params(model_name, cfg.params.true)
 
     state = forward_model(params=true_params)
     if state is None:
@@ -59,13 +37,13 @@ def main() -> None:
     state = add_velocity_magnitude(state)
 
     print(f"Model: {model_name}")
-    print(f"Rollout: {args.rollout}")
+    print(f"Rollout: {cfg.run.rollout}")
     print(f"Dims: {dict(state.sizes)}")
     print(f"Vars: {list(state.data_vars)}")
 
-    if not args.skip_viz:
-        run_type = "rollout" if args.rollout else "single"
-        out_dir = config.BASE_RESULTS_DIR / "forward_model" / f"{model_name}_{run_type}"
+    if not cfg.run.skip_viz:
+        run_type = "rollout" if cfg.run.rollout else "single"
+        out_dir = resolve_output_dir(cfg, "forward_model") / f"{model_name}_{run_type}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         plot_var = "vel_magnitude" if "vel_magnitude" in state.data_vars else "u"
@@ -87,6 +65,11 @@ def main() -> None:
             z_level=0,
         )
         print(f"Saved visualization outputs in {out_dir}")
+
+
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

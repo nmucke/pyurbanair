@@ -1,0 +1,18 @@
+num_time_points: 3
+method: ornstein_uhlenbeck
+method_kwargs:
+  correlation_length: 200.0
+  phi_max: 0.999
+truth_method: ornstein_uhlenbeck
+truth_method_kwargs:
+  correlation_length: 200.0
+  phi_max: 0.999
+
+prior_model:
+  _target_: pyurbanair.parameter_time_series.build_parameter_time_series
+  _convert_: all
+  method: ${time_varying.method}
+  external_priors: ${params.external}
+  ensemble_size: ${ensemble.ensemble_size}
+  method_kwargs: ${time_varying.method_kwargs}
+
