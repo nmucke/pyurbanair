@@ -2143,3 +2143,297 @@ All acceptance criteria from the original plan are satisfied:
   model-conditional filter in the helpers.
 - Truth and prior correlation lengths remain distinct in the
   default config (anti-inverse-crime invariant).
+
+## Phase 5 Implementation Review (2026-05-18)
+
+Review of the Phase 5 commit (`cdee8f2`) on top of the prior reviews.
+`pytest tests/test_hydra_config.py -q`: 15 passed. All ten migrated
+scripts import cleanly under `.pixi/envs/default`. A repo-wide grep
+for `scripts.config`, `from scripts import config`, `tests.config`,
+`config_utils`, `simulate_init_conditions`, `test_truth_only`, and
+`scripts._diag` returns zero matches in `scripts/`, `tests/`,
+`src/`, `conf/`, and `README.md`.
+
+### Prior review items confirmed resolved
+
+- **Issue #1 from Phase 4 Finish-Up review (no-op `run.results_dir`
+  test parametrizations).** Not in scope of this commit; still open.
+- **Issue #2 (`shutil.rmtree(tmp_path)` after `results_dir.mkdir`).**
+  Not in scope; still open.
+- **Issue #3 (plan-file whitespace + bold-with-backtick damage).**
+  Resolved. `grep -n "^- \`\*\*" docs/plans/...` returns zero hits;
+  spot-checks at lines 28-31 and 38-54 confirm bullet continuations
+  are properly indented at 2 spaces again.
+- **"things to look at" item: `run_rollout_forward_model.py`
+  doesn't honor `cfg.run.num_steps`.** Resolved.
+  [scripts/run_rollout_forward_model.py:24](../../scripts/run_rollout_forward_model.py#L24)
+  now reads `num_steps = int(cfg.run.num_steps)` and the print line
+  ("Rollout: {num_steps} steps") reflects it.
+- **"things to look at" item: module-scoped compose helper.**
+  Resolved.
+  [tests/conftest.py:24-35](../../tests/conftest.py#L24-L35)
+  exposes `compose_module_cfg` (used by
+  `test_inflow_angle_simulation_sign.py` and
+  `test_varying_inflow_velocity.py`).
+
+### What's good
+
+- **All seven legacy modules are gone** — `scripts/config.py`,
+  `scripts/config_small.py`, `tests/config.py`,
+  `src/pyurbanair/utils/config_utils.py`,
+  `scripts/test_truth_only.py`, `scripts/_diag.py`, and
+  `scripts/simulate_init_conditions.py` no longer exist on disk.
+  `from pyurbanair.utils import config_utils` raises `ImportError`,
+  confirming the removal is real (not just a file rename).
+- **No dangling configuration imports.** The codebase guide's "Add a
+  new backend" recipe walks through the surviving surface
+  (`conf/model/*.yaml` + `hydra_helpers.py::clean_outputs` +
+  `ObservationOperator.dim_mapping`); no step references a deleted
+  function.
+- **`run_rollout_forward_model.py`** now honors `cfg.run.num_steps`
+  and prints the actual count, fixing the "two scripts both meant to
+  honor `run.num_steps` but only one did" asymmetry from the prior
+  review.
+- **Acceptance-criteria status is genuinely "done"** for the
+  Hydra-migration scope. The 10 acceptance bullets at the end of
+  the original plan all line up with grepped reality.
+
+### Confirmed bugs
+
+#### 1. Three stale references in `docs/ensemble_scaling.md`
+
+The benchmark/scaling document still prescribes fixes against the
+now-deleted legacy surface:
+
+- [docs/ensemble_scaling.md:41](../ensemble_scaling.md#L41) — table
+  entry says `scripts/config.py | UDALES_ARGS["ncpu"] = 1 (was 4);
+  ENSEMBLE["num_parallel_processes"] = 4 (was 8); comment explains
+  the cap.` These are mutations against modules and dicts that no
+  longer exist; the equivalent today is
+  `conf/model/pyudales.yaml` / `conf/ensemble/default.yaml`.
+- [docs/ensemble_scaling.md:284](../ensemble_scaling.md#L284) —
+  "Per-model `ENSEMBLE` blocks in `scripts/config.py`. The current
+  global `num_parallel_processes=4`..."
+- [docs/ensemble_scaling.md:296](../ensemble_scaling.md#L296) —
+  "plus a tweak in `pyurbanair.utils.config_utils.create_ensemble_forward_model`
+  to pick the right block by `model_name`."
+
+The recommended ENSEMBLE-per-model fix is still a sensible direction,
+but the file now describes it against a tree that doesn't exist.
+Replace with the Hydra-config equivalent (`ensemble@<model>=...`
+package overrides, or per-model defaults inside
+`conf/model/*.yaml`).
+
+Doc-only fix, not a code change — but Phase 5 explicitly claims
+"docs updated", so this is in scope.
+
+#### 2. Stale docstring in `libs/pypalm/src/pypalm/forward_model.py`
+
+[libs/pypalm/src/pypalm/forward_model.py:299-305](../../libs/pypalm/src/pypalm/forward_model.py#L299-L305):
+
+```python
+def compile(self, compile: bool = True) -> None:
+    """Build PALM via ``palmbuild`` when ``compile`` is True.
+
+    The rest of the repo's dispatch pattern calls ``compile()`` through
+    ``config_utils.prepare_forward_model``; this method exists to honour
+    that contract.
+    """
+```
+
+`config_utils.prepare_forward_model` no longer exists; the contract
+is now honored by `pyurbanair.config.hydra_helpers.prepare_compile`
+via the `model.prepare._target_` block. The behavior is unchanged
+(the method is still called the same way), so this is documentation
+rot rather than a real bug — but it points readers at a deleted
+module. Mirror updates for the equivalent docstring in
+`libs/pylbm/src/pylbm/forward_model.py` if one exists.
+
+### Things to look at
+
+- **`docs/codebase_guide.md` §8 (Add a new backend) step 5** says
+  "Use the existing `prepare_compile` / `prepare_udales` helpers
+  ... if they fit; add a new prepare helper there otherwise. Add a
+  `clean_outputs` branch in the same module for the new
+  `model_name`." That's accurate but the second sentence elides
+  that today's `clean_outputs`
+  ([src/pyurbanair/config/hydra_helpers.py:55-64](../../src/pyurbanair/config/hydra_helpers.py#L55-L64))
+  is a closed-over if-chain (`pylbm → ...`, `pypalm → ...`, else
+  `udales`). Adding a new backend means inserting a new branch
+  *and* breaking the "else uDALES" default. A one-line note to
+  that effect would save the next person a debugging session.
+
+- **README parameter-ESMDA example** does not include
+  `esmda=parameter` because `parameter` is the default `esmda`
+  group in `conf/config.yaml`. The next three CLI examples
+  (`state_and_parameter`, `rollout`, `time_varying_parameter`)
+  do include `esmda=...`. This is consistent but inconsistent —
+  a reader skimming the examples may not realize why some need the
+  group selector and some don't. One-sentence note at the top of
+  the DA examples ("the `esmda` group defaults to `parameter`;
+  every other smoother variant needs an explicit
+  `esmda=<name>`") would close that gap.
+
+- **Codebase guide §11 "fastest-path" table** drops the "Factory
+  wiring (model_name → class)" row entirely and points at
+  `hydra_helpers.py` for "Hydra `_target_` helpers". A reader
+  arriving at the guide for the first time may still ask "where is
+  the model-name-to-class mapping?". The answer is now split:
+  YAML `_target_` blocks for the *forward/ensemble model classes*
+  themselves, and `clean_outputs` / `prepare_*` in `hydra_helpers.py`
+  for the dispatch helpers. Adding one row pointing at
+  `conf/model/*.yaml` for the per-backend class wiring would make
+  this discoverable.
+
+- **`compose_module_cfg`'s docstring** explains *why* it exists
+  (each compose call opens and closes a `GlobalHydra`, so
+  module-scoped fixtures need a callable that is invocable outside
+  the function-scoped fixture lifecycle). The README and codebase
+  guide present `compose_module_cfg` as a peer of `compose_test_cfg`
+  without noting that — minor, but readers wondering when to pick
+  which now have to dig into the conftest source.
+
+### Acceptance-criteria status
+
+Re-verified against the original plan's 10 acceptance criteria. All
+satisfied:
+
+| Criterion | Status |
+|---|---|
+| Legacy defaults represented in Hydra | ✓ — `conf/` tree matches legacy dicts |
+| Solver backend switchable from CLI | ✓ — `model=pylbm`, `model@truth_model=pylbm`, etc. |
+| `hydra.utils.instantiate` for forward / ensemble / smoother / prior-model | ✓ — all 10 scripts |
+| PALM stays lazy | ✓ — `test_palm_target_does_not_import_for_non_palm_composition` |
+| ESMDA scripts don't mutate config dicts for sweeps | ✓ — all use overrides |
+| `def run(cfg)` entry points | ✓ — all 10 scripts |
+| No `sys.modules["scripts.config"]` patching | ✓ — grep returns 0 |
+| Small/fast test settings as Hydra preset | ✓ — `conf/preset/test.yaml` |
+| `pressure_gradient_magnitude` uDALES-only filter preserved | ✓ — helper + unit test |
+| Truth vs assimilation correlation lengths distinct | ✓ — defaults differ, unit test |
+
+### Summary
+
+Phase 5 is real cleanup, not a rewrite: the deleted files were
+already unused after Phase 4. The migration plan can now legitimately
+be marked done. Two concrete follow-ups before closing the branch:
+
+1. Update `docs/ensemble_scaling.md` to describe the per-model
+   ensemble-config recommendation against `conf/`, not the deleted
+   `scripts/config.py` / `config_utils.py` (issue #1).
+2. Fix the stale `config_utils.prepare_forward_model` reference in
+   the pypalm `compile()` docstring (issue #2).
+
+Two carry-overs from earlier reviews that are still open:
+
+3. The no-op `use_results_dir` parametrizations in
+   `tests/test_run_time_varying_parameter_esmda.py` (the script
+   ignores `cfg.run.results_dir`).
+4. The `shutil.rmtree(tmp_path)`-after-`results_dir.mkdir` ordering
+   in `tests/test_run_ensemble_rollout_forward_model.py`.
+
+None of these block merging the branch; all are routine cleanup.
+
+## Phase 5 Review Resolution (2026-05-18)
+
+All comments from the **Phase 5 Implementation Review** above have
+been addressed.
+
+### Confirmed bugs — fixed
+
+**#1 — Stale references in `docs/ensemble_scaling.md`.**
+Updated three locations to describe the per-model ensemble-config
+recommendation against `conf/` rather than the deleted
+`scripts/config.py` / `config_utils.py`:
+
+- Header paragraph: `UDALES_ARGS["ncpu"]` /
+  `ENSEMBLE["num_parallel_processes"]` → `conf/model/pyudales.yaml` /
+  `conf/ensemble/default.yaml` with explicit field paths.
+- "Files changed" table row: legacy `scripts/config.py` row replaced
+  with the two YAML files.
+- Body references to `ENSEMBLE["..."]` and the resample-failure-policy
+  config switched to `cfg.ensemble.num_parallel_processes` and
+  `cfg.ensemble.failure.policy`.
+- "Open questions / next steps" #1 ("Per-model `ENSEMBLE` blocks"):
+  the suggested-shape block now proposes either per-model
+  `conf/ensemble/<backend>.yaml` overlays selected on the CLI
+  (`ensemble=lbm`) or auto-selection from `conf/model/*.yaml`
+  defaults — both fits to the actual Hydra surface. The "tweak in
+  `config_utils.create_ensemble_forward_model`" sentence is gone.
+
+**#2 — Stale docstring in `libs/pypalm/src/pypalm/forward_model.py`.**
+[libs/pypalm/src/pypalm/forward_model.py:299-306](../../libs/pypalm/src/pypalm/forward_model.py#L299-L306)
+now references `pyurbanair.config.hydra_helpers.prepare_compile` and
+the `model.prepare._target_` block in `conf/model/pypalm.yaml`
+instead of the deleted `config_utils.prepare_forward_model`. Checked
+`libs/pylbm/src/pylbm/forward_model.py` per the reviewer's
+"mirror updates" note — that file's `compile` docstring is just
+`"Compile the LBM program."`, so no mirror fix needed.
+
+### Things to look at — addressed
+
+**`docs/codebase_guide.md` §8 step 5 — closed-over `else uDALES`
+default in `clean_outputs`.** Added a "**Watch out**" sentence:
+"today `clean_outputs` is an if/elif chain with an `else` arm that
+falls back to the uDALES cleanup … Adding a new backend means both
+inserting an `elif` branch AND making sure unrecognized models no
+longer silently get uDALES cleanup — raise on the else arm instead
+of leaving the fall-through."
+
+**README ESMDA-default note.** Added a short paragraph at the top of
+the "Data assimilation" section: "The `esmda` group defaults to
+`parameter` in `conf/config.yaml`. Every other smoother variant
+needs an explicit `esmda=<name>` selector …"
+
+**Codebase guide §11 model-name→class wiring row.** Added a new row
+to the fastest-path table: "Per-backend `model_name → class` wiring
+| [conf/model/](../../conf/model/) (`forward_model._target_` /
+`ensemble_model._target_` blocks)". Sits between the existing
+"Run-time parameters" row and the "Hydra `_target_` helpers" row.
+
+**`compose_module_cfg` vs. `compose_test_cfg` choice criterion.**
+Codebase guide §5 (Tests subsection) now explains the difference by
+scope, not by behavior: function-scoped composer for ordinary
+`run(cfg)` tests; module-scoped composer for tests where a
+module-scoped fixture depends on a composed config (a pytest scope
+constraint, not a feature difference). The reviewer mentioned the
+README too, but the README never named either fixture in the first
+place, so no fix needed there.
+
+### Carry-overs from earlier reviews — already resolved at HEAD
+
+The reviewer's "Summary" lists two carry-overs (#3 no-op
+`use_results_dir` parametrizations in
+`test_run_time_varying_parameter_esmda.py`; #4
+`shutil.rmtree(tmp_path)` ordering in
+`test_run_ensemble_rollout_forward_model.py`) as "still open". Both
+were actually fixed in commit `bff4b5e` ("Migrate forward-model
+scripts to Hydra; finish Phase 4"), before the Phase 5 commit
+`cdee8f2` the reviewer was looking at. Verified:
+
+```bash
+grep -n "use_results_dir\|run.results_dir\|shutil.rmtree" \
+  tests/test_run_time_varying_parameter_esmda.py \
+  tests/test_run_ensemble_rollout_forward_model.py
+```
+
+The time-varying test no longer parametrizes `use_results_dir` (only
+the docstring still mentions it as historical context). The
+ensemble-rollout test's `shutil.rmtree(tmp_path)` is gone — the
+`use_results_dir` parametrization remains, but that script *does*
+honor `cfg.run.results_dir`, so the parametrization is meaningful
+there.
+
+### Verified after this pass
+
+```bash
+.pixi/envs/default/bin/python -m pytest tests/test_hydra_config.py -q
+# 15 passed
+```
+
+A repository-wide grep for `config_utils`, `scripts.config`,
+`UDALES_ARGS`, and `ENSEMBLE["...` against the touched documentation
+files (`docs/ensemble_scaling.md`, `docs/codebase_guide.md`,
+`README.md`) and `libs/pypalm/src/pypalm/forward_model.py` returns
+zero matches.
+
+With this resolution, the Hydra migration plan is **closed**.

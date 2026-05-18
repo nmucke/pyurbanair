@@ -299,9 +299,10 @@ class ForwardModel(BaseForwardModel):
     def compile(self, compile: bool = True) -> None:
         """Build PALM via ``palmbuild`` when ``compile`` is True.
 
-        The rest of the repo's dispatch pattern calls ``compile()`` through
-        ``config_utils.prepare_forward_model``; this method exists to honour
-        that contract.
+        Hydra dispatches to this method via the ``model.prepare._target_``
+        block in ``conf/model/pypalm.yaml``, which instantiates
+        ``pyurbanair.config.hydra_helpers.prepare_compile``; this method
+        exists to honour that contract.
         """
         if not compile:
             return

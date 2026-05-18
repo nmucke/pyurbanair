@@ -102,6 +102,11 @@ python scripts/run_ensemble_rollout_forward_model.py model=pylbm
 
 ### Data assimilation
 
+The `esmda` group defaults to `parameter` in `conf/config.yaml`. Every
+other smoother variant needs an explicit `esmda=<name>` selector (the
+examples below do this for `state_and_parameter`, `rollout`, and
+`time_varying_parameter`).
+
 ```bash
 # Parameter estimation with ESMDA
 python scripts/run_parameter_esmda.py \

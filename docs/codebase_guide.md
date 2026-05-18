@@ -251,13 +251,19 @@ CLI. `main` is just the CLI wrapper.
 
 ### Tests
 
-[tests/conftest.py](../tests/conftest.py) exposes two fixtures:
+[tests/conftest.py](../tests/conftest.py) exposes two fixtures, both
+returning the same composer callable. Pick by fixture scope, not by
+behavior:
 
-- `compose_test_cfg` (function-scoped): returns a composer callable
-  that runs `compose(config_name="config", overrides=["preset=test", ...])`.
-- `compose_module_cfg` (module-scoped): same composer, for tests that
-  need a config-built fixture once per module (e.g. `pylbm_cfg` /
-  `pylbm_model` for sign / velocity-grid tests).
+- **`compose_test_cfg`** (function-scoped): use this in every ordinary
+  test that calls `run(cfg)` once. Each `compose(...)` call opens and
+  closes a `GlobalHydra`, so the function-scoped lifecycle is fine.
+- **`compose_module_cfg`** (module-scoped): use only when a
+  module-scoped fixture depends on a composed config (e.g. `pylbm_cfg`
+  → `pylbm_model` in the sign / velocity-grid tests, where compiling
+  pylbm once per module is the whole point). A function-scoped
+  composer can't be invoked from a module-scoped fixture without
+  pytest erroring on the scope mismatch.
 
 The `preset=test` overlay sets a small domain / short simulation time /
 CPU-only LBM / 4-member ensemble. Override anything per-test:
@@ -400,8 +406,13 @@ ensemble_size, method_kwargs)`.
    `prepare_udales` helpers in
    [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py)
    if they fit; add a new prepare helper there otherwise. Add a
-   `clean_outputs` branch in the same module for the new
-   `model_name`.
+   `clean_outputs` branch in the same module for the new `model_name`.
+   **Watch out**: today `clean_outputs` is an if/elif chain with an
+   `else` arm that falls back to the uDALES cleanup
+   ([src/pyurbanair/config/hydra_helpers.py:55-64](../src/pyurbanair/config/hydra_helpers.py#L55-L64)).
+   Adding a new backend means both inserting an `elif` branch AND
+   making sure unrecognized models no longer silently get uDALES
+   cleanup — raise on the else arm instead of leaving the fall-through.
 6. Add a `dim_mapping` entry in
    [`ObservationOperator.__init__`](../libs/data-assimilation/src/data_assimilation/observation_operator.py)
    for the new `solver_name`.
@@ -498,6 +509,7 @@ ensemble_size, method_kwargs)`.
 | You want to change… | Look here |
 |---|---|
 | Run-time parameters (domain, sim time, ensemble size) | [conf/](../conf/) — see §5 |
+| Per-backend `model_name → class` wiring | [conf/model/](../conf/model/) (`forward_model._target_` / `ensemble_model._target_` blocks) |
 | Hydra `_target_` helpers (prepare, clean, factories) | [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py) |
 | What an ensemble member does in parallel | [src/pyurbanair/base_ensemble_forward_model.py](../src/pyurbanair/base_ensemble_forward_model.py) |
 | How a solver consumes params | `libs/<solver>/src/<solver>/utils/params_utils.py` |
