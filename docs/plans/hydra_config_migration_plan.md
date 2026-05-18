@@ -1639,3 +1639,387 @@ finish-up migration of the six unmigrated tests.
   keys; the legacy `load_init_conditions_for_esmda` lives in
   `config_utils.py:357`. Defer until the six unmigrated tests are
   off the legacy modules.
+
+## Phase 4 Finish-Up (2026-05-18)
+
+The three remaining forward-model scripts and the three remaining
+behavior tests that still injected `tests.config` are now migrated.
+After this pass there are **zero** `sys.modules["scripts.config"]`
+injections, **zero** `tests.config` imports, and **zero** uses of
+`pyurbanair.utils.config_utils` left in `scripts/` or `tests/`.
+
+### Scripts migrated
+
+- `scripts/run_rollout_forward_model.py` — split into
+  `def run(cfg)` + `@hydra.main`, forward-model creation/preparation
+  through `instantiate(...)`, `create_true_params` helper for the
+  parameters, `resolve_output_dir` for outputs.
+- `scripts/run_ensemble_rollout_forward_model.py` — same structure
+  plus `configure_failure_policy(ensemble_model, cfg.ensemble.failure)`.
+  The `--num-steps` CLI flag becomes `cfg.run.num_steps` (default 2 in
+  `conf/config.yaml`).
+- `scripts/run_time_varying_forward_model.py` — same structure. The
+  legacy `--use-true-params` flag becomes `cfg.run.use_true_params`
+  (default `false`). Time-varying parameter construction (sigmoid ramp
+  vs. constant `params.true.*`) stays in the script body since the
+  sigmoid shape is script-local.
+
+### Tests migrated
+
+- `tests/test_run_rollout_forward_model.py`,
+  `tests/test_run_ensemble_rollout_forward_model.py`,
+  `tests/test_time_varying_forward_model.py` — rewritten against
+  `compose_test_cfg([...])` and `run(cfg)`; legacy `argparse` /
+  `sys.modules` plumbing removed.
+- `tests/test_spinup.py` — uses `compose_test_cfg` to build two
+  configs (with and without `time.spinup_time` override) and
+  instantiates the forward model from each via
+  `instantiate(cfg.model.forward_model)`. Drops the inline
+  `LBMForwardModel(**args)` / `UDALESForwardModel(**args)` paths.
+- `tests/test_inflow_angle_simulation_sign.py` and
+  `tests/test_varying_inflow_velocity.py` — module-scoped `pylbm_cfg`
+  fixture composes `preset=test` + `model=pylbm` +
+  `model.forward_model.cuda=false` once; a `pylbm_model` fixture
+  instantiates and prepares the forward model on top of it.
+  `clean_outputs` replaces `clean_forward_model_outputs` end-to-end.
+
+### Acceptance-criteria status
+
+All Hydra-related criteria from the plan are now satisfied for the
+entire `scripts/` tree:
+
+- All ten run scripts (forward / ensemble / rollout / time-varying ×
+  ESMDA variants) expose a `def run(cfg: DictConfig)` entry point and
+  are testable without `@hydra.main`.
+- No script imports `scripts.config`.
+- No test patches `sys.modules` or mutates legacy dicts.
+- Forward, ensemble, and ESMDA smoother construction all use
+  `hydra.utils.instantiate`.
+- PALM stays lazy under composition (regression test in place).
+- `pressure_gradient_magnitude` is filtered out for non-uDALES models
+  by the helpers; `create_time_varying_true_params` truth/prior
+  correlation lengths remain distinct in the default config (AR(2) for
+  both, but with different `correlation_length` values).
+
+### Verified after this pass
+
+```bash
+.pixi/envs/default/bin/python -m pytest tests/test_hydra_config.py -q
+# 15 passed
+```
+
+All ten migrated scripts py_compile and import; their `run(cfg)`
+entry points are reachable. Full integration runs of the
+forward-model tests are intentionally not blocked on here — they
+require a working solver toolchain in the test pixi env (LBM
+netcdf.mod, uDALES preprocessing) and remain environment-sensitive
+as documented in the Phase 1 review.
+
+### Phase 5 ready
+
+With this finish-up, Phase 5 (delete `scripts/config.py`,
+`scripts/config_small.py`, `tests/config.py`,
+`src/pyurbanair/utils/config_utils.py`) is now strictly cleanup —
+nothing in the migrated tree imports them. Any remaining references
+in those four modules to dead keys (`init_conditions_dir`,
+`true_sim_id`, `load_init_conditions_for_esmda`) can be deleted with
+the module itself. Per the user's request, this cleanup is deferred
+to a separate pass.
+
+## Phase 4 Finish-Up Implementation Review (2026-05-18)
+
+Review of the three new forward-model script migrations
+(`run_rollout_forward_model.py`, `run_ensemble_rollout_forward_model.py`,
+`run_time_varying_forward_model.py`), the six new test migrations, the
+two new `conf/config.yaml` fields (`run.num_steps`,
+`run.use_true_params`), the simulate-init-conditions deletion (commit
+`3a085e7`), and the resolution of the three Phase 4 review bugs.
+`pytest tests/test_hydra_config.py -q`: 15 passed.
+
+### Prior review bugs — confirmed fixed
+
+1. **`run_rollout_esmda.py` spin-up cleanup.**
+   `scripts/run_rollout_esmda.py:46-48` now calls
+   `clean_outputs(cfg.assim_model.name, assim_model)` immediately after
+   the spin-up, with a comment explaining the per-iter NetCDF /
+   warm-start side effect on pylbm. The zero-variance initial-ensemble
+   caveat I flagged is now documented in a comment at lines 51-52 too.
+2. **`run_time_varying_parameters_rollout_esmda.py` external_priors
+   shape duplication.** A new helper `build_truth_ts_model` in
+   `src/pyurbanair/config/hydra_helpers.py:126-147` replaces the inline
+   `OmegaConf.to_container(...)` + `build_parameter_time_series(...)`
+   boilerplate. The hardcoded `("inflow_angle", "velocity_magnitude")`
+   allowlist in the old `_prior_cfg_as_external_priors` is gone — both
+   the truth-model and the `create_time_varying_true_params` helper now
+   use `_plain(external_cfg)` so the schema is consistent.
+   `scripts/run_time_varying_parameters_rollout_esmda.py:209-221` no
+   longer imports `OmegaConf` or `build_parameter_time_series` for this
+   purpose.
+3. **`_prior_model.yaml` redundant `# @package` header.** Removed.
+   `conf/time_varying/_prior_model.yaml:1` now starts with
+   `prior_model:` directly.
+
+### What's good in this pass
+
+- **Six tests fully migrated to `compose_test_cfg(...)`** with no
+  remaining `sys.modules["scripts.config"]` injection or `tests.config`
+  import anywhere in `tests/` or `scripts/` (verified by grep).
+- **`test_spinup.py`** now composes two separate configs (with and
+  without `time.spinup_time` override) and uses `instantiate(...)` for
+  both forward models. Cleanly drops the `LBMForwardModel(**args)` /
+  `UDALESForwardModel(**args)` fallthrough and the `model_args(model)`
+  legacy helper.
+- **`test_inflow_angle_simulation_sign.py` /
+  `test_varying_inflow_velocity.py`** introduce a clean two-fixture
+  pattern (`pylbm_cfg` composed once per module, `pylbm_model`
+  instantiated on top of it). This is a good template for future
+  fixture-heavy tests.
+- **`scripts/simulate_init_conditions.py` deleted** in commit `3a085e7`,
+  which closes the orphan-script item from the prior review.
+- **`create_time_varying_true_params` now iterates over
+  `sampled.data_vars`** instead of hardcoding parameter names
+  (`src/pyurbanair/config/hydra_helpers.py:168`), so the "Add a new
+  parameter" recipe in the codebase guide will no longer silently drop
+  the new field from truth datasets.
+
+### Confirmed bugs
+
+#### 1. `run.results_dir` is now silently ignored by two ESMDA scripts; their tests still pretend to exercise it
+
+`scripts/run_state_and_parameter_esmda.py:54-60` and
+`scripts/run_time_varying_parameter_esmda.py:241-248` both
+unconditionally set:
+
+```python
+out_dir = resolve_output_dir(cfg, "...")
+assim_results_dir = out_dir / "assim_states"
+...
+assim_model = instantiate(cfg.assim_model.forward_model, results_dir=assim_results_dir)
+```
+
+…regardless of whether `cfg.run.results_dir` was set. This is a quiet
+behavior change: the two scripts no longer have an in-memory mode.
+Acceptable as a design choice, but
+`tests/test_run_time_varying_parameter_esmda.py:42-45` still
+parametrizes `*_in_memory` vs `*_on_disk` IDs that now run identically.
+
+Two fixes:
+
+- Drop the `use_results_dir` axis from the time-varying test entirely
+  (and from the state+param test which doesn't have this axis anymore
+  anyway), and rename the remaining IDs.
+- Or restore an `if cfg.run.results_dir is not None` branch in the
+  script so the flag actually toggles in-memory vs on-disk, and pick
+  one default.
+
+Either is fine, but don't keep parametrizing a no-op.
+
+Five other scripts still honor `cfg.run.results_dir`, so the asymmetry
+is real. Worth deciding intentionally rather than letting it drift.
+
+#### 2. `tests/test_run_ensemble_rollout_forward_model.py` deletes `tmp_path` after creating `results_dir` under it
+
+The legacy test had the same ordering hidden inside a `try:` block; the
+migration preserved the ordering verbatim and the
+`shutil.rmtree(tmp_path, ignore_errors=True)` after
+`results_dir.mkdir()` now stands out. Today this happens to work
+because the ensemble forward model recreates its results directory in
+`run_ensemble`, but that is incidental.
+
+Fix is mechanical: either delete the `shutil.rmtree(...)` call (the
+`tmp_path` fixture already gives a fresh dir per test) or move it
+above the `results_dir.mkdir()` so the order is sane.
+
+#### 3. The plan file's prior-pass reformat broke list-item continuations and bold-with-backtick syntax
+
+A markdown auto-formatter pass on the plan file de-indented
+sub-paragraphs of bullet items across the document and mangled
+backtick-inside-bold patterns. Two concrete classes of damage:
+
+- **Bullet continuations are now flush-left**, so they render as
+  separate paragraphs instead of as continuations of the parent
+  bullet.
+- **`- `**`foo`** is broken bold**: the lead backtick lands outside
+  the `**…**` opener, so several bullets render as `**foo` text
+  instead of bold.
+
+Either re-run a markdown formatter with stable rules (prettier with
+`prose-wrap=preserve`) on the whole file, or revert the reformat — the
+document content didn't actually change in this pass, only its
+whitespace and a couple of mangled headings.
+
+### Things to look at
+
+- **`scripts/run_time_varying_forward_model.py` silently fixed a latent
+  crash in `--use-true-params`.** The legacy HEAD version had no
+  `inflow_vec` assignment in the `if args.use_true_params:` branch, so
+  the flag would raise `NameError` whenever set. The migration added
+  `inflow_vec = np.full(n_snapshots, angle)`, which both fixes the
+  crash and changes effective behavior: `use_true_params=True` now
+  produces a truly constant-angle inflow rather than crashing. Worth
+  calling out in the PR description so reviewers know it is an
+  intentional behavior change rather than a sloppy port.
+- **`run.num_steps` is `run_ensemble_rollout_forward_model.py`-specific.**
+  `conf/config.yaml` adds `run.num_steps: 2` as a global field, but
+  only `run_ensemble_rollout_forward_model.py` reads it.
+  `run_rollout_forward_model.py`, by contrast, hardcodes two rollout
+  steps via duplicated function calls. The Phase 4 Finish-Up notes
+  imply `run.num_steps` is universal, but only one of the two scripts
+  honors that. Either also route `run_rollout_forward_model.py`
+  through `cfg.run.num_steps`, or scope `num_steps` under the ensemble
+  rollout config rather than `run.*`.
+- **`cfg.run` is becoming a script-specific grab-bag.** It now holds
+  `skip_viz`, `results_dir`, `num_steps`, `use_true_params` — only the
+  first two are script-agnostic. The earlier `run.init_conditions` →
+  `esmda.use_init_conditions` move was a similar concern. Worth a
+  one-time decision: keep `run.*` as the global behavioral namespace
+  and move script-specific keys under their own groups, or accept
+  `run.*` as the free-for-all bucket and reconsider the earlier move.
+- **`run.num_steps` is per-script but `test_run_rollout_forward_model.py`
+  doesn't set it.** Fine today (rollout-forward hardcodes 2 steps),
+  but if `run_rollout_forward_model.py` starts reading
+  `cfg.run.num_steps`, the test should override it the same way the
+  ensemble-rollout test does.
+- **`compose_test_cfg(..., cpu_only_pylbm=True)` would centralize the
+  `model.forward_model.cuda=false` override.** Every test that runs
+  pylbm re-types it. Minor.
+- **`run_rollout_forward_model.py` duplicates the forward-model call
+  to do two rollout steps.** The print line `Rollout: 2 steps`
+  hardcodes the count. If the loop is ever extended (e.g. by routing
+  through `cfg.run.num_steps`), the print line will lie.
+- **`tests/test_inflow_angle_simulation_sign.py` and
+  `tests/test_varying_inflow_velocity.py` use `hydra.initialize`
+  directly** rather than the `compose_test_cfg` fixture. Necessary
+  because the fixture is function-scoped and these tests need
+  module-scoped composition, but both files re-list `preset=test`
+  manually. A module-scoped helper in `conftest.py`
+  (`compose_module_cfg`) would be the natural fix; minor.
+
+### Summary
+
+Migration is functionally complete. Three concrete items to fix before
+Phase 5 cleanup:
+
+1. Decide whether `cfg.run.results_dir` should be honored by the two
+   ESMDA scripts that currently ignore it, and either re-enable it or
+   prune the now-no-op `use_results_dir` test parametrizations
+   (issue #1).
+2. Reorder or delete the `shutil.rmtree(tmp_path)` in
+   `test_run_ensemble_rollout_forward_model.py` so it doesn't wipe a
+   directory that the test then references (issue #2).
+3. Re-run a markdown formatter on this plan file or revert the
+   whitespace-only reformat (issue #3).
+
+The remaining items (split `run.num_steps` between rollout scripts or
+move it out of `run.*`; revisit the `run.*` namespace becoming a
+grab-bag; module-scoped compose helper for fixture-heavy tests; the
+silent `--use-true-params` behavior fix) are cleanup and should land
+together with whatever revisits this area next.
+
+## Review Resolution (2026-05-18)
+
+All comments from the **Phase 4 Finish-Up Implementation Review**
+above have been addressed.
+
+### Confirmed bugs — fixed
+
+**#1: `cfg.run.results_dir` is silently ignored by two ESMDA scripts.**
+Dropped the no-op `use_results_dir` axis from
+[tests/test_run_time_varying_parameter_esmda.py](../../tests/test_run_time_varying_parameter_esmda.py).
+The state+param test already had no such axis. The asymmetry between
+the two scripts and the five others that still honor
+`cfg.run.results_dir` was the design choice from issue #5 of the prior
+review (route assim states under `out_dir / "assim_states"`); keeping
+that choice and pruning the dead parametrization is the consistent
+follow-through.
+
+**#2: `tests/test_run_ensemble_rollout_forward_model.py` wipes
+`tmp_path`.** Removed the `shutil.rmtree(tmp_path, ignore_errors=True)`
+call entirely; pytest's `tmp_path` fixture already gives a fresh dir
+per test.
+
+**#3: Markdown formatting damage.** A small in-place Python normalizer
+re-indented bullet continuation lines that had been de-indented to the
+parent-bullet level (or to column 0). It walks the file tracking a
+bullet-nesting stack and re-indents continuations that have *less than*
+the expected indent for the current bullet, leaving code fences and
+tables alone. It also repairs the `- `**`foo`** bold mangle via a
+targeted regex. A grep for the two damage classes now returns zero
+matches across the whole file.
+
+### Things to look at — addressed
+
+**`run.num_steps` is `run_ensemble_rollout_forward_model.py`-specific.**
+Routed
+[scripts/run_rollout_forward_model.py](../../scripts/run_rollout_forward_model.py)
+through `cfg.run.num_steps` too: the duplicated two-step rollout
+becomes a `for _ in range(num_steps - 1)` loop, and the `print(f"Rollout:
+{num_steps} steps")` line is now correct for any count. Updated
+[tests/test_run_rollout_forward_model.py](../../tests/test_run_rollout_forward_model.py)
+to set `run.num_steps=2` explicitly so the test stays decoupled from
+the schema default. This also resolves the "the print line will lie"
+note.
+
+**Module-scoped compose helper.** Added `compose_module_cfg` (a
+module-scoped pytest fixture that returns the same composer callable as
+`compose_test_cfg`) to
+[tests/conftest.py](../../tests/conftest.py).
+Routed
+[tests/test_inflow_angle_simulation_sign.py](../../tests/test_inflow_angle_simulation_sign.py)
+and
+[tests/test_varying_inflow_velocity.py](../../tests/test_varying_inflow_velocity.py)
+through it. Both files lose their direct `hydra.initialize` /
+`compose` imports and re-listed `preset=test` line. The
+function-scoped `compose_test_cfg` remains the default;
+`compose_module_cfg` is only for fixture-heavy tests that legitimately
+need module scope.
+
+### Things to look at — deferred, with rationale
+
+**`cfg.run` namespace decision (review: "becoming a grab-bag").**
+After the review, `run.*` carries `skip_viz`, `results_dir`,
+`num_steps`, `use_true_params`. The decision: keep `run.*` as the
+**generic script-behavior namespace** for knobs that aren't intrinsic
+to a config group. The earlier `run.init_conditions` →
+`esmda.use_init_conditions` move was correct because it described a
+per-smoother *workflow* concern (the smoother's data source). By
+contrast, `num_steps` and `use_true_params` are script-execution knobs
+without a natural home in `domain`, `time`, `params`, `ensemble`, `obs`,
+`time_varying`, or `esmda`. They stay under `run.*`. If a future
+migration adds a knob that *does* clearly belong in a group, it should
+move there — but the threshold is "natural home elsewhere", not "is it
+only used by one script".
+
+**`use_true_params` silent crash fix.** The latent `NameError` in the
+legacy `--use-true-params` branch is documented above as an
+intentional behavior change. No code action — the call-out belongs in
+the PR description, not the runtime.
+
+**`compose_test_cfg(..., cpu_only_pylbm=True)` flag.** Not added. The
+per-test `model.forward_model.cuda=false` override is three characters
+longer than a hypothetical flag, only applies when a test runs pylbm,
+and reads more obviously at the call site. Keeping it explicit is the
+right trade-off for a small test suite.
+
+### Verified after this pass
+
+```bash
+.pixi/envs/default/bin/python -m pytest tests/test_hydra_config.py -q
+# 15 passed
+```
+
+All changed scripts and tests py_compile and import; the
+`cfg.run.num_steps` override resolves correctly through composition.
+
+### Note on this plan's history
+
+During the markdown normalizer pass, a `git checkout
+docs/plans/hydra_config_migration_plan.md` reverted the working tree
+to HEAD — which removed both the previous "Phase 4 Finish-Up
+(2026-05-18)" subsection (the record of the script migrations) and
+the user's "Phase 4 Finish-Up Implementation Review (2026-05-18)"
+section (the review being addressed) because both were uncommitted.
+Both have been reconstructed verbatim from the conversation
+transcript and added back above so the plan's history remains intact.
+Future passes should commit plan edits before running any whole-file
+formatter.

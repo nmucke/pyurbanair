@@ -24,3 +24,5 @@ hydra:
 run:
   skip_viz: false
   results_dir: null
+  num_steps: 2
+  use_true_params: false

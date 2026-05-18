@@ -1,72 +1,50 @@
-import argparse
 import pathlib
 import sys
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import hydra
 import matplotlib.pyplot as plt
 import xarray
+from hydra.utils import instantiate
+from omegaconf import DictConfig
 from pyudales.utils.grid_utils import interpolate_grid
-
+from pyurbanair.config.hydra_helpers import (
+    clean_outputs,
+    configure_failure_policy,
+    create_parameter_ensemble,
+    resolve_output_dir,
+)
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
-from scripts import config
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model",
-        choices=["pylbm", "pyudales", "pypalm"],
-        default="pylbm",
-        help="Forward model backend.",
-    )
-    parser.add_argument(
-        "--num-steps",
-        type=int,
-        default=2,
-        help="Number of rollout steps.",
-    )
-    parser.add_argument(
-        "--skip-viz",
-        action="store_true",
-        help="Skip plotting and animation outputs.",
-    )
-    parser.add_argument(
-        "--results-dir",
-        type=pathlib.Path,
-        default=None,
-        help="Override results directory for model outputs.",
-    )
-    args = parser.parse_args()
-
-    model_name = args.model
-    num_steps = args.num_steps
+def run(cfg: DictConfig) -> None:
+    model_name = cfg.model.name
+    num_steps = int(cfg.run.num_steps)
     results_dir = (
-        pathlib.Path(args.results_dir) if args.results_dir is not None else None
+        pathlib.Path(cfg.run.results_dir) if cfg.run.results_dir is not None else None
     )
 
-    forward_model = config.create_forward_model(
-        model_name=model_name,
-        results_dir=results_dir,
-    )
-    config.prepare_forward_model(model_name=model_name, forward_model=forward_model)
-    config.clean_forward_model_outputs(
-        model_name=model_name, forward_model=forward_model
-    )
+    forward_model = instantiate(cfg.model.forward_model, results_dir=results_dir)
+    instantiate(cfg.model.prepare, forward_model=forward_model)
+    clean_outputs(model_name=model_name, forward_model=forward_model)
 
-    forward_model = config.create_rollout_forward_model(
-        model_name=model_name,
+    ensemble_model = instantiate(
+        cfg.model.ensemble_model,
         forward_model=forward_model,
     )
-    ensemble_model = config.create_ensemble_forward_model(
-        model_name=model_name, forward_model=forward_model
-    )
+    configure_failure_policy(ensemble_model, cfg.ensemble.failure)
     for member in ensemble_model.ensemble_forward_models:
-        config.clean_forward_model_outputs(model_name=model_name, forward_model=member)
+        clean_outputs(model_name=model_name, forward_model=member)
 
-    params_ensemble = config.create_parameter_ensemble(model_name)
+    params_ensemble = create_parameter_ensemble(
+        model_name=model_name,
+        prior_cfg=cfg.params.prior,
+        ensemble_size=cfg.ensemble.ensemble_size,
+        seed=cfg.esmda.seed,
+    )
 
     state_list = []
     state = ensemble_model.run_ensemble(params=params_ensemble, sim_name="state")
@@ -87,13 +65,13 @@ def main() -> None:
 
     print(f"Model: {model_name}")
     print(f"Rollout: {num_steps} steps")
-    print(f"Ensemble size: {config.ENSEMBLE['ensemble_size']}")
+    print(f"Ensemble size: {cfg.ensemble.ensemble_size}")
     print(f"Dims: {dict(state.sizes)}")
     print(f"Vars: {list(state.data_vars)}")
 
-    if not args.skip_viz:
+    if not cfg.run.skip_viz:
         out_dir = (
-            config.BASE_RESULTS_DIR / "forward_model" / f"{model_name}_ensemble_rollout"
+            resolve_output_dir(cfg, "forward_model") / f"{model_name}_ensemble_rollout"
         )
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -120,6 +98,11 @@ def main() -> None:
             z_level=0,
         )
         print(f"Saved visualization outputs in {out_dir}")
+
+
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

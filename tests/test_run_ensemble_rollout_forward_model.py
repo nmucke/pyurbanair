@@ -1,16 +1,6 @@
 import pathlib
-import shutil
-import sys
 
 import pytest
-
-# Patch scripts.config to use tests.config before any script imports
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-import tests.config as tests_config
-
-sys.modules["scripts.config"] = tests_config
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -27,38 +17,28 @@ sys.modules["scripts.config"] = tests_config
     ],
 )
 def test_run_ensemble_rollout_forward_model(
-    model: str, use_results_dir: bool, parallel_execution: bool, tmp_path: pathlib.Path
+    model: str,
+    use_results_dir: bool,
+    parallel_execution: bool,
+    tmp_path: pathlib.Path,
+    compose_test_cfg,
 ) -> None:
-    """Test run_ensemble_rollout_forward_model.py with pylbm and pyudales backends.
+    """Spin-up path: ensemble rollout forward model with sequential and parallel
+    execution."""
+    from scripts.run_ensemble_rollout_forward_model import run
 
-    Covers both sequential (num_parallel_processes=1) and parallel
-    (num_parallel_processes>1) execution paths.
-    """
-    from scripts.run_ensemble_rollout_forward_model import main
-
-    # Set argv for argparse
-    original_argv = sys.argv
-    argv = [
-        "run_ensemble_rollout_forward_model",
-        "--model",
-        model,
-        "--skip-viz",
-        "--num-steps",
-        "2",
+    overrides = [
+        f"model={model}",
+        "run.skip_viz=true",
+        "run.num_steps=2",
+        f"ensemble.num_parallel_processes={2 if parallel_execution else 1}",
+        f"paths.base_results_dir={tmp_path}",
     ]
+    if model == "pylbm":
+        overrides.append("model.forward_model.cuda=false")
     if use_results_dir:
         results_dir = tmp_path / "results"
         results_dir.mkdir()
-        argv.extend(["--results-dir", str(results_dir)])
-    sys.argv = argv
+        overrides.append(f"run.results_dir={results_dir}")
 
-    original_num_parallel = tests_config.ENSEMBLE["num_parallel_processes"]
-    try:
-        shutil.rmtree(tmp_path, ignore_errors=True)
-
-        tests_config.ENSEMBLE["num_parallel_processes"] = 2 if parallel_execution else 1
-        main()
-
-    finally:
-        sys.argv = original_argv
-        tests_config.ENSEMBLE["num_parallel_processes"] = original_num_parallel
+    run(compose_test_cfg(overrides))

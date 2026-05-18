@@ -5,27 +5,12 @@ input path against the Python wrapper, using inlet-plane mean v as the most
 direct observable of the imposed inflow direction.
 """
 
-import pathlib
-import sys
-
 import pytest
 import xarray
+from hydra.utils import instantiate
 from pylbm.forward_model import ForwardModel
 from pylbm.utils.infile_utils import Infile
-
-# Patch scripts.config to use tests.config before any script imports
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-import tests.config as tests_config
-
-sys.modules["scripts.config"] = tests_config
-
-from pyurbanair.utils.config_utils import (
-    clean_forward_model_outputs,
-    create_forward_model,
-    prepare_forward_model,
-)
+from pyurbanair.config.hydra_helpers import clean_outputs
 
 
 def _get_v_mean(state: xarray.Dataset, x_index: int | None = None) -> float:
@@ -69,22 +54,41 @@ def _sign(value: float) -> int:
 
 
 @pytest.fixture(scope="module")  # type: ignore[misc]
-def pylbm_model() -> ForwardModel:
+def pylbm_cfg(compose_module_cfg):
+    """Compose a single-model pylbm test config once for this module."""
+    return compose_module_cfg(
+        [
+            "model=pylbm",
+            "model.forward_model.cuda=false",
+        ]
+    )
+
+
+@pytest.fixture(scope="module")  # type: ignore[misc]
+def pylbm_model(pylbm_cfg) -> ForwardModel:
     """Create and compile pylbm once for this module."""
-    model = create_forward_model(model_name="pylbm")
-    prepare_forward_model(model_name="pylbm", forward_model=model)
+    model = instantiate(pylbm_cfg.model.forward_model)
+    instantiate(pylbm_cfg.model.prepare, forward_model=model)
     return model  # type: ignore[no-any-return]
+
+
+@pytest.fixture(scope="module")  # type: ignore[misc]
+def true_velocity_magnitude(pylbm_cfg) -> float:
+    return float(pylbm_cfg.params.true.velocity_magnitude)
 
 
 @pytest.mark.parametrize("angle_deg,expected_v_sign", [(20.0, -1.0), (-20.0, 1.0)])  # type: ignore[misc]
 def test_lbm_fortran_inverts_input_udir_sign(
-    pylbm_model: ForwardModel, angle_deg: float, expected_v_sign: float
+    pylbm_model: ForwardModel,
+    true_velocity_magnitude: float,
+    angle_deg: float,
+    expected_v_sign: float,
 ) -> None:
     """Direct LBM Fortran input produces the opposite inlet-v sign."""
-    clean_forward_model_outputs(model_name="pylbm", forward_model=pylbm_model)
+    clean_outputs(model_name="pylbm", forward_model=pylbm_model)
     _set_lbm_inflow_direct(
         model=pylbm_model,
-        velocity_magnitude=tests_config.TRUE_PARAMS["velocity_magnitude"],
+        velocity_magnitude=true_velocity_magnitude,
         angle_deg=angle_deg,
     )
 
@@ -99,17 +103,19 @@ def test_lbm_fortran_inverts_input_udir_sign(
 
 @pytest.mark.parametrize("angle_deg", [20.0, -20.0])  # type: ignore[misc]
 def test_lbm_wrapper_corrects_direct_fortran_sign_convention(
-    pylbm_model: ForwardModel, angle_deg: float
+    pylbm_model: ForwardModel,
+    true_velocity_magnitude: float,
+    angle_deg: float,
 ) -> None:
     """Wrapper path should correct the sign inversion seen in direct LBM input.
 
     A (wrapper): run_single(params=...) writes a corrected udir for LBM.
     B (direct):  write udir=angle directly in infile and run run_single(params=None).
     """
-    velocity = tests_config.TRUE_PARAMS["velocity_magnitude"]
+    velocity = true_velocity_magnitude
 
     # A) Wrapper path (current production behavior)
-    clean_forward_model_outputs(model_name="pylbm", forward_model=pylbm_model)
+    clean_outputs(model_name="pylbm", forward_model=pylbm_model)
     params = xarray.Dataset(
         data_vars={
             "inflow_angle": angle_deg,
@@ -120,7 +126,7 @@ def test_lbm_wrapper_corrects_direct_fortran_sign_convention(
     v_mean_wrapper = _get_v_mean(state_wrapper, x_index=0)
 
     # B) Direct Fortran input path
-    clean_forward_model_outputs(model_name="pylbm", forward_model=pylbm_model)
+    clean_outputs(model_name="pylbm", forward_model=pylbm_model)
     _set_lbm_inflow_direct(
         model=pylbm_model,
         velocity_magnitude=velocity,

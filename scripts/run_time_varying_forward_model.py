@@ -1,68 +1,44 @@
 """Run a forward model with time-varying inflow parameters.
 
 Supports both pyudales (via time-dependent nudging) and pylbm (via
-``uvel_time.dat``).  Use ``--model`` to select which solver to run.
+``uvel_time.dat``).  Use ``model=`` to select which solver to run.
 """
 
-import argparse
 import pathlib
 import sys
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import hydra
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+from hydra.utils import instantiate
+from omegaconf import DictConfig
 
+from pyurbanair.config.hydra_helpers import (
+    clean_outputs,
+    resolve_output_dir,
+)
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
-from scripts import config
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Run a forward model with time-varying inflow parameters."
-    )
-    parser.add_argument(
-        "--model",
-        choices=["pyudales", "pylbm", "pypalm"],
-        default="pylbm",
-        help="Which solver to use (default: pyudales).",
-    )
-    parser.add_argument(
-        "--skip-viz",
-        action="store_true",
-        help="Skip plotting and animation outputs.",
-    )
-    parser.add_argument(
-        "--results-dir",
-        type=pathlib.Path,
-        default=None,
-        help="Override results directory for model outputs.",
-    )
-    parser.add_argument(
-        "--use-true-params",
-        action="store_true",
-        help="Use TRUE_PARAMS values (same as run_forward_model.py) instead "
-        "of default constants.  Useful for diagnosing whether divergence "
-        "is caused by parameter values vs the scalar/time-varying mechanism.",
-    )
-    args = parser.parse_args()
+def run(cfg: DictConfig) -> None:
+    model_name = cfg.model.name
 
-    model_name: str = args.model
-
-    # Build time-varying parameters
     # Time is relative to the simulation interval (not including spinup).
     # The forward model internally prepends a constant plateau for spinup.
-    sim_time = config.TIME["simulation_time"]
+    sim_time = cfg.time.simulation_time
     n_snapshots = 100
     time_seconds = np.linspace(0, sim_time, n_snapshots)
 
-    if args.use_true_params:
-        angle = config.TRUE_PARAMS["inflow_angle"]
-        vel = config.TRUE_PARAMS["velocity_magnitude"]
+    if bool(cfg.run.use_true_params):
+        angle = float(cfg.params.true.inflow_angle)
+        vel = float(cfg.params.true.velocity_magnitude)
         print(f"Using TRUE_PARAMS: angle={angle}, vel={vel}")
+        inflow_vec = np.full(n_snapshots, angle)
     else:
         angle = -40.0
         vel = 3.0
@@ -81,23 +57,18 @@ def main() -> None:
 
     # pressure_gradient_magnitude is only relevant for pyudales
     if model_name == "pyudales":
-        data_vars["pressure_gradient_magnitude"] = config.TRUE_PARAMS[
-            "pressure_gradient_magnitude"
-        ]
+        data_vars["pressure_gradient_magnitude"] = float(
+            cfg.params.true.pressure_gradient_magnitude
+        )
 
     params = xr.Dataset(data_vars=data_vars, coords={"time": time_seconds})
 
-    model_name = args.model
-    forward_model = config.create_forward_model(
-        model_name=model_name,
-        results_dir=(
-            pathlib.Path(args.results_dir) if args.results_dir is not None else None
-        ),
+    results_dir = (
+        pathlib.Path(cfg.run.results_dir) if cfg.run.results_dir is not None else None
     )
-    config.prepare_forward_model(model_name=model_name, forward_model=forward_model)
-    config.clean_forward_model_outputs(
-        model_name=model_name, forward_model=forward_model
-    )
+    forward_model = instantiate(cfg.model.forward_model, results_dir=results_dir)
+    instantiate(cfg.model.prepare, forward_model=forward_model)
+    clean_outputs(model_name=model_name, forward_model=forward_model)
 
     state = forward_model.run_single(params=params)
     if state is None:
@@ -117,10 +88,8 @@ def main() -> None:
         f"{params['velocity_magnitude'].values[-1]:.1f} m/s"
     )
 
-    if not args.skip_viz:
-        out_dir = (
-            config.BASE_RESULTS_DIR / "forward_model" / f"{model_name}_time_varying"
-        )
+    if not cfg.run.skip_viz:
+        out_dir = resolve_output_dir(cfg, "forward_model") / f"{model_name}_time_varying"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         plot_var = "vel_magnitude" if "vel_magnitude" in state.data_vars else "u"
@@ -195,6 +164,11 @@ def main() -> None:
         plt.close()
 
         print(f"Saved visualization outputs in {out_dir}")
+
+
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

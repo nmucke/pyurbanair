@@ -5,32 +5,28 @@ and output_frequency, regardless of the inflow velocity (which affects C_u and
 therefore the internal timestep size).
 """
 
-import pathlib
-import sys
-
-import numpy as np
 import pytest
 import xarray
-
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-import tests.config as tests_config
-
-sys.modules["scripts.config"] = tests_config
-
-from pyurbanair.utils.config_utils import (
-    clean_forward_model_outputs,
-    create_forward_model,
-    prepare_forward_model,
-)
+from hydra.utils import instantiate
+from pyurbanair.config.hydra_helpers import clean_outputs
 
 
 @pytest.fixture(scope="module")
-def pylbm_model():
+def pylbm_cfg(compose_module_cfg):
+    """Compose a single-model pylbm test config once for this module."""
+    return compose_module_cfg(
+        [
+            "model=pylbm",
+            "model.forward_model.cuda=false",
+        ]
+    )
+
+
+@pytest.fixture(scope="module")
+def pylbm_model(pylbm_cfg):
     """Create and compile a pylbm forward model once for all tests."""
-    model = create_forward_model(model_name="pylbm")
-    prepare_forward_model(model_name="pylbm", forward_model=model)
+    model = instantiate(pylbm_cfg.model.forward_model)
+    instantiate(pylbm_cfg.model.prepare, forward_model=model)
     return model
 
 
@@ -38,9 +34,9 @@ VELOCITIES = [2.0, 3.0, 5.0, 7.0, 10.0]
 
 
 @pytest.mark.parametrize("velocity", VELOCITIES)
-def test_output_timesteps_consistent(pylbm_model, velocity: float) -> None:
+def test_output_timesteps_consistent(pylbm_cfg, pylbm_model, velocity: float) -> None:
     """Each velocity should produce the same number of output timesteps."""
-    clean_forward_model_outputs(model_name="pylbm", forward_model=pylbm_model)
+    clean_outputs(model_name="pylbm", forward_model=pylbm_model)
 
     params = xarray.Dataset(
         data_vars={
@@ -52,7 +48,7 @@ def test_output_timesteps_consistent(pylbm_model, velocity: float) -> None:
     state = pylbm_model.run_single(params=params)
 
     expected_num_outputs = round(
-        tests_config.TIME["simulation_time"] / tests_config.TIME["output_frequency"]
+        pylbm_cfg.time.simulation_time / pylbm_cfg.time.output_frequency
     )
 
     actual_time_steps = state.sizes["time"]
@@ -77,7 +73,7 @@ def test_all_velocities_same_time_dim(pylbm_model) -> None:
     time_dims: dict[float, int] = {}
 
     for velocity in VELOCITIES:
-        clean_forward_model_outputs(model_name="pylbm", forward_model=pylbm_model)
+        clean_outputs(model_name="pylbm", forward_model=pylbm_model)
 
         params = xarray.Dataset(
             data_vars={
@@ -109,7 +105,7 @@ def test_all_velocities_without_cleaning(pylbm_model) -> None:
     and leftover files from a previous run with different iout may be
     collected by the next run.
     """
-    clean_forward_model_outputs(model_name="pylbm", forward_model=pylbm_model)
+    clean_outputs(model_name="pylbm", forward_model=pylbm_model)
 
     time_dims: dict[float, int] = {}
     output_files_info: dict[float, list[str]] = {}
