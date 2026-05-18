@@ -4,7 +4,12 @@ import pytest
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
-from pyurbanair.config.hydra_helpers import create_true_params
+from pyurbanair.config.hydra_helpers import (
+    configure_failure_policy,
+    create_observation_operator,
+    create_observation_points,
+    create_true_params,
+)
 
 
 def _compose(overrides: list[str] | None = None):
@@ -58,6 +63,7 @@ def test_test_preset_matches_fast_test_shape() -> None:
     assert cfg.ensemble.ensemble_size == 4
     assert cfg.ensemble.num_parallel_processes == 1
     assert cfg.obs.mode == "grid"
+    assert cfg.obs.aggregation_mode is None
     assert cfg.esmda.num_assimilation_windows == 3
     assert cfg.params.true.inflow_angle == 30.0
     assert True not in cfg.params
@@ -105,3 +111,41 @@ def test_time_varying_truth_and_prior_correlation_lengths_are_distinct() -> None
         cfg.time_varying.truth_method_kwargs.correlation_length
         != cfg.time_varying.method_kwargs.correlation_length
     )
+
+
+def test_observation_helpers_use_explicit_mode() -> None:
+    cfg = _compose(["preset=test", "model=pyudales"])
+
+    obs_x, obs_y, obs_z = create_observation_points(cfg.obs)
+    obs_op = create_observation_operator(cfg.obs, cfg.model.solver_name)
+
+    assert obs_x.shape == (4,)
+    assert obs_y.shape == (4,)
+    assert obs_z.shape == (4,)
+    assert sorted(zip(obs_x.tolist(), obs_y.tolist(), obs_z.tolist())) == [
+        (5.0, 5.0, 2.0),
+        (5.0, 35.0, 2.0),
+        (35.0, 5.0, 2.0),
+        (35.0, 35.0, 2.0),
+    ]
+    assert obs_op.mode == "mean"
+    assert obs_op.observation_operator.num_sensors == 4
+    assert obs_op.observation_operator.dim_mapping["u"]["x"] == "xm"
+
+
+def test_configure_failure_policy_uses_nested_ensemble_config() -> None:
+    cfg = _compose(["ensemble.failure.policy=raise", "ensemble.failure.seed=7"])
+
+    class DummyEnsemble:
+        def configure_failure_policy(self, policy, jitter_scale, seed):
+            self.failure_policy = policy
+            self.failure_jitter_scale = jitter_scale
+            self.failure_seed = seed
+
+    ensemble = DummyEnsemble()
+    returned = configure_failure_policy(ensemble, cfg.ensemble.failure)
+
+    assert returned is ensemble
+    assert ensemble.failure_policy == "raise"
+    assert ensemble.failure_jitter_scale == cfg.ensemble.failure.jitter_scale
+    assert ensemble.failure_seed == 7

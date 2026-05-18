@@ -1,8 +1,11 @@
 from collections.abc import Sequence
+import os
 
 import pytest
 from hydra import compose, initialize
 from omegaconf import DictConfig
+
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 
 def _compose_test_cfg(overrides: Sequence[str] | None = None) -> DictConfig:

@@ -6,10 +6,10 @@ seed: 42
 obs_error_std: 0.25
 init_conditions_dir: esmda_init_conditions
 true_sim_id: 0
+use_init_conditions: false
 
 smoother:
   _target_: data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA
   num_steps: ${..num_steps}
   alpha: ${..alpha}
   num_time_points: ${time_varying.num_time_points}
-

@@ -37,7 +37,7 @@ obs:
   z: 2.0
   states: [u, v, w]
   temporal_mode: mean
-  aggregation_mode: mean
+  aggregation_mode: null
 
 esmda:
   num_steps: 1
