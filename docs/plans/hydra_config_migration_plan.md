@@ -2023,3 +2023,123 @@ Both have been reconstructed verbatim from the conversation
 transcript and added back above so the plan's history remains intact.
 Future passes should commit plan edits before running any whole-file
 formatter.
+
+## Phase 5 — Legacy Module Deletion (2026-05-18)
+
+The four legacy modules and two orphan diagnostic scripts that were
+the only remaining `scripts.config` consumers have been deleted.
+Docs (`README.md`, `docs/codebase_guide.md`) have been rewritten so
+the canonical configuration surface is `conf/` + `hydra_helpers.py`
++ `compose_test_cfg`.
+
+### Modules deleted
+
+- `scripts/config.py` — the legacy single source of truth (dict-typed
+  constants).
+- `scripts/config_small.py` — the legacy "small preset" Python module
+  (replaced by `conf/preset/small.yaml`).
+- `tests/config.py` — the parallel Python config module used by the
+  legacy `sys.modules["scripts.config"] = tests_config` test injection
+  pattern (replaced by `conf/preset/test.yaml` + `compose_test_cfg`).
+- `src/pyurbanair/utils/config_utils.py` — the legacy factory module
+  (`create_forward_model`, `create_ensemble_forward_model`,
+  `model_args`, `prepare_forward_model`, `clean_forward_model_outputs`,
+  `clean_forward_model_restarts`, `create_parameter_ensemble`,
+  `create_true_params`, `create_time_varying_true_params`,
+  `create_observation_operator`, `create_observation_points`,
+  `create_C_D`, `load_init_conditions_for_esmda`,
+  `create_initial_state_ensemble`, `create_rollout_forward_model`,
+  `sample_smooth_ensemble`). Every callable that survived has been
+  rebuilt against `cfg` arguments in
+  [src/pyurbanair/config/hydra_helpers.py](../../src/pyurbanair/config/hydra_helpers.py);
+  the dead ones (`load_init_conditions_for_esmda`,
+  `create_rollout_forward_model`, `model_args`,
+  `sample_smooth_ensemble`) are gone.
+
+### Orphan scripts deleted
+
+- `scripts/test_truth_only.py` — one-shot bisection script for a
+  cleanup-time SIGSEGV. Imported `scripts.config` directly. Confirmed
+  expendable by the user; the bug it was bisecting is resolved.
+- `scripts/_diag.py` — one-shot tnudge sweep diagnostic. Same status.
+
+### Docs updated
+
+- [README.md](../../README.md) — `### Configuration` section
+  rewritten around Hydra config groups; CLI examples updated from
+  `--model pylbm` / `--truth-model pylbm` to `model=pylbm` /
+  `model@truth_model=pylbm`; repo tree updated to drop
+  `scripts/config.py` / `config_utils.py` and add a `conf/` entry
+  plus the three new run scripts that didn't exist when the README
+  was last touched.
+- [docs/codebase_guide.md](../../docs/codebase_guide.md):
+  - **§2 (repo layout)** — drops `scripts/config.py`,
+    `config_small.py`, `config_utils.py`, `tests/config.py`; adds
+    `conf/` and `src/pyurbanair/config/hydra_helpers.py`.
+  - **§3 (forward models)** — reworded the rollout note since
+    `create_rollout_forward_model` no longer exists.
+  - **§5 (Configuration system)** — full rewrite around Hydra. New
+    config-group table, `instantiate` vs. helpers section,
+    `model@truth_model` aliasing, sibling-relative interpolation,
+    `run(cfg)` script structure, `compose_test_cfg` /
+    `compose_module_cfg` for tests.
+  - **§7 (backend gotchas)** — pylbm `LBM_ARGS["compile"]` →
+    `cfg.model.compile`; pylbm `verbose=True in LBM_ARGS` →
+    `model.forward_model.verbose=true`; pyudales
+    `UDALESARGS["matlab_bin"]` →
+    `cfg.model.forward_model.matlab_bin`; pypalm lazy-import note
+    points at `conf/model/pypalm.yaml` and the regression test.
+  - **§8 (recipes)** — "Add a new backend", "Add a new parameter",
+    "Add a new ESMDA variant", "Add a new run script" all
+    rewritten to point at `conf/` + `hydra_helpers.py` +
+    `compose_test_cfg`. The `argparse --model choices=[...]` step
+    is replaced by adding a `conf/model/<name>.yaml`.
+  - **§9 (operational defaults)** — `tests/config.py` →
+    `conf/preset/test.yaml`; `ENSEMBLE` comments → `conf/ensemble/default.yaml`.
+  - **§11 (fastest-path table)** — "Run-time parameters" row points
+    at `conf/`; "Factory wiring" row replaced with "Hydra `_target_`
+    helpers" pointing at `hydra_helpers.py`; "Time-varying
+    parameter prior" row also lists `conf/time_varying/`; new "Test
+    fixture composition" row.
+
+### Verified after this pass
+
+```bash
+.pixi/envs/default/bin/python -m pytest tests/test_hydra_config.py -q
+# 15 passed
+```
+
+All ten migrated scripts plus
+`src/pyurbanair/config/hydra_helpers.py` and `tests/conftest.py`
+py_compile after the deletions. A repository-wide grep for the
+removed symbols returns zero matches:
+
+```bash
+grep -rln "from scripts.config\|from scripts import config\|...\|scripts._diag" \
+  . --include="*.py" --include="*.ipynb"
+# (no output)
+```
+
+### Migration complete
+
+All acceptance criteria from the original plan are satisfied:
+
+- Existing defaults from the legacy config are represented in Hydra
+  config files.
+- Solver backends are switched from the command line without editing
+  code.
+- Forward / ensemble / smoother / time-varying-prior construction all
+  use `hydra.utils.instantiate`.
+- PALM stays lazy under composition (regression test in place).
+- ESMDA scripts no longer mutate imported config dictionaries for
+  sweeps.
+- Every run script exposes `def run(cfg: DictConfig)` and is testable
+  without `@hydra.main`.
+- The test suite no longer patches `sys.modules` or mutates legacy
+  dicts.
+- Small/fast test settings are expressed as a Hydra preset
+  (`conf/preset/test.yaml`).
+- `pressure_gradient_magnitude` stays uDALES-only via the
+  model-conditional filter in the helpers.
+- Truth and prior correlation lengths remain distinct in the
+  default config (anti-inverse-crime invariant).

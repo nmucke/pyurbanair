@@ -30,11 +30,18 @@ src/pyurbanair/                    # Top-level package: base classes + glue
   base_ensemble_forward_model.py   # BaseEnsembleForwardModel (parallel/seq, failure policy)
   base_rollout_forward_model.py    # BaseRolloutForwardModel (multi-window state carry-over)
   parameter_time_series/           # Time-varying parameter priors (AR1/AR2/OU/GP)
+  config/
+    hydra_helpers.py               # Targets that Hydra `_target_` blocks instantiate
+                                   #   (prepare_*, create_*, configure_failure_policy,
+                                   #    build_truth_ts_model, resolve_output_dir, ...)
   utils/
-    config_utils.py                # Factories: create_forward_model, create_ensemble_*, etc.
     cpu_pinning.py                 # Worker → CPU pinning for parallel ensembles
     run_utils.py, state_utils.py, animation_utils.py, da_metrics.py
   plotting.py, animation.py
+
+conf/                              # Hydra config groups (see §5 Configuration system)
+  config.yaml                      # Top-level composition + `run:` namespace
+  domain/, time/, model/, ensemble/, obs/, esmda/, params/, time_varying/, preset/
 
 libs/data-assimilation/src/data_assimilation/
   observation_operator.py          # ObservationOperator + TemporalObservationOperator
@@ -57,23 +64,26 @@ libs/pyudales/src/pyudales/        # uDALES wrapper. Similar shape to pylbm.
 libs/pypalm/src/pypalm/            # PALM wrapper. Similar shape.
 
 scripts/                           # All top-level executables run from here.
-  config.py                        # SINGLE source of truth for run-time configuration
-  config_small.py                  # Cheaper config preset (for tests / quick runs)
+                                   # Each exposes `def run(cfg)` + a thin `@hydra.main` wrapper.
   run_forward_model.py             # Single forward sim
   run_ensemble_forward_model.py    # Ensemble forward sim
   run_rollout_forward_model.py     # Multi-window rollout (state carries between windows)
   run_ensemble_rollout_forward_model.py
+  run_time_varying_forward_model.py
   run_parameter_esmda.py           # Parameter-only ESMDA
   run_state_and_parameter_esmda.py # Joint state+parameter ESMDA
   run_rollout_esmda.py             # Multi-window joint ESMDA
-  run_time_varying_*.py            # Time-varying inflow params variants
+  run_time_varying_parameter_esmda.py
+  run_time_varying_parameters_rollout_esmda.py
   benchmark_*_ensemble_scaling.py  # Throughput benchmarks (see docs/ensemble_scaling.md)
 
 examples/
   benchmark_geometry/              # Xie & Castro 2008 geometry generator (CLI)
   lbm/, udales/, palm/             # Per-backend experiment dirs (STL, namoptions, p3d, etc.)
 
-tests/                             # pytest suite. tests/config.py = small/fast config used by tests.
+tests/                             # pytest suite. tests/conftest.py provides
+                                   # `compose_test_cfg` / `compose_module_cfg` fixtures
+                                   # that compose `preset=test` + per-test overrides.
 .temp/                             # Default scratch dir. Everything mutable lands here.
 ```
 
@@ -127,11 +137,11 @@ All three solvers conform to the same three-class shape, declared in
   after step 0 so only the cold start pays the spinup cost.
 - Subclasses implement `_pre_run_rollout_step` / `_post_run_rollout_step`.
 
-> When the README and `config_utils.create_rollout_forward_model` say
-> "rollout forward model", note that the current default returns the
-> underlying `forward_model` unchanged — multi-window driving is now
-> handled in the scripts (e.g. `run_rollout_esmda.py`) by repeatedly
-> invoking the model with state carry-over.
+> The legacy `BaseRolloutForwardModel` is now effectively unused at
+> runtime — the explicit `create_rollout_forward_model` factory was
+> removed during the Hydra migration. Multi-window driving is handled
+> directly in the scripts (e.g. `run_rollout_esmda.py`) by repeatedly
+> invoking the forward model with state carry-over.
 
 ## 4. Data contracts
 
@@ -156,32 +166,111 @@ For time-varying parameters, vars have a `time` dim. For ensembles, an
 
 ## 5. Configuration system
 
-[scripts/config.py](../scripts/config.py) is the **single source of truth**
-for all runs. It is a plain Python module with dict-typed constants:
-`DOMAIN, TIME, LBM_ARGS, UDALES_ARGS, PALM_ARGS, ENSEMBLE, OBS, ESMDA,
-TRUE_PARAMS, PARAM_PRIORS, EXTERNAL_PRIORS, TIME_VARYING_PARAMS`.
+Run-time configuration is a [Hydra](https://hydra.cc/) tree rooted at
+[`conf/`](../conf/). The top-level [`conf/config.yaml`](../conf/config.yaml)
+selects one option per group and bundles a `run:` namespace for generic
+script-behavior knobs (`skip_viz`, `results_dir`, `num_steps`,
+`use_true_params`).
 
-All run scripts import this module and call the factory functions
-re-exported from
-[src/pyurbanair/utils/config_utils.py](../src/pyurbanair/utils/config_utils.py):
+Config groups:
 
-```python
-forward_model        = config.create_forward_model(model_name, results_dir=None)
-config.prepare_forward_model(model_name, forward_model)   # compile / preprocess
-ensemble_model       = config.create_ensemble_forward_model(model_name, fm)
-true_params          = config.create_true_params(model_name)
-params_ensemble      = config.create_parameter_ensemble(model_name)
-obs_op               = config.create_observation_operator(model_name)
-C_D                  = config.create_C_D(num_obs)
+| Group | Selects | Notable fields |
+|---|---|---|
+| `paths/` | output roots | `base_results_dir` |
+| `domain/` | grid + bounds | `nx`, `ny`, `nz`, `bounds` |
+| `time/` | wall-clock | `simulation_time`, `output_frequency`, `spinup_time` |
+| `model/` | forward + ensemble model backends | `name`, `solver_name`, `forward_model._target_`, `ensemble_model._target_`, `prepare._target_` |
+| `ensemble/` | ensemble execution | `ensemble_size`, `num_parallel_processes`, `failure.{policy, jitter_scale, seed}` |
+| `obs/` | observation operator | `mode: points|grid`, sensor coords, `states`, `temporal_mode`, `interval_size` |
+| `esmda/` | smoother variant | `kind`, `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `smoother._target_` |
+| `params/{true,prior,external}/` | parameter values & priors | per-parameter `{mean, std, min?, max?}` |
+| `time_varying/` | time-varying-parameter method | `method`, `method_kwargs.*`, `truth_method`, `truth_method_kwargs.*`, `prior_model._target_` (via shared `_prior_model.yaml`) |
+| `preset/` | bundled overlays | `small`, `test` (smaller domain / fewer steps / CPU-only LBM) |
+
+Single-model scripts mount the model under `cfg.model.*`. Assimilation
+scripts use Hydra's package-override syntax to mount the same `model/`
+group **twice**, once as the truth model and once as the assim model:
+
+```bash
+python scripts/run_parameter_esmda.py \
+  model@truth_model=pylbm model@assim_model=pyudales
 ```
 
-`pypalm` is **lazily imported** inside the `model_name == "pypalm"`
-branches — its `__init__` compiles the solver, which is too expensive for
-runs that never instantiate a PALM model.
+Inside the YAMLs, sibling-relative interpolation (`${.foo}`, `${..foo}`)
+is used wherever the surrounding group might be re-mounted under
+another package; absolute interpolation (`${time.simulation_time}`) is
+reserved for cross-group lookups.
 
-Tests use [tests/config.py](../tests/config.py) (smaller domain / shorter
-simulation_time). [scripts/config_small.py](../scripts/config_small.py) is
-a manual quick-run preset.
+### Instantiation vs. helpers
+
+Backend object construction is **declarative** — every forward model,
+ensemble model, ESMDA smoother, and time-varying prior model is built
+by `hydra.utils.instantiate(cfg.<group>.<target>, ...)` against the
+`_target_` block in YAML. The scripts also call a small set of helpers
+from [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py)
+for the procedural pieces:
+
+```python
+forward_model   = instantiate(cfg.model.forward_model, results_dir=...)
+instantiate(cfg.model.prepare, forward_model=forward_model)   # compile / preprocess
+ensemble_model  = instantiate(cfg.model.ensemble_model, forward_model=forward_model)
+configure_failure_policy(ensemble_model, cfg.ensemble.failure)
+
+true_params     = create_true_params(cfg.model.name, cfg.params.true)
+params_ensemble = create_parameter_ensemble(
+    model_name=cfg.model.name, prior_cfg=cfg.params.prior,
+    ensemble_size=cfg.ensemble.ensemble_size, seed=cfg.esmda.seed,
+)
+obs_op          = create_observation_operator(cfg.obs, cfg.model.solver_name)
+C_D             = create_C_D(num_obs, cfg.esmda.obs_error_std)
+
+esmda           = instantiate(cfg.esmda.smoother, ..., rng_key=rng_key)
+```
+
+`pypalm` stays **lazy** because its `_target_` blocks only appear inside
+[conf/model/pypalm.yaml](../conf/model/pypalm.yaml); composing a config
+with `model=pylbm` never imports `pypalm`. This is asserted by a
+regression test in [tests/test_hydra_config.py](../tests/test_hydra_config.py).
+
+### Script structure
+
+Every script in [`scripts/`](../scripts/) follows the same shape:
+
+```python
+def run(cfg: DictConfig) -> None:
+    ...
+
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    run(cfg)
+```
+
+`run(cfg)` is the **testable entry point** — tests compose a
+`DictConfig` and call `run(cfg)` directly without going through Hydra's
+CLI. `main` is just the CLI wrapper.
+
+### Tests
+
+[tests/conftest.py](../tests/conftest.py) exposes two fixtures:
+
+- `compose_test_cfg` (function-scoped): returns a composer callable
+  that runs `compose(config_name="config", overrides=["preset=test", ...])`.
+- `compose_module_cfg` (module-scoped): same composer, for tests that
+  need a config-built fixture once per module (e.g. `pylbm_cfg` /
+  `pylbm_model` for sign / velocity-grid tests).
+
+The `preset=test` overlay sets a small domain / short simulation time /
+CPU-only LBM / 4-member ensemble. Override anything per-test:
+
+```python
+def test_something(compose_test_cfg) -> None:
+    cfg = compose_test_cfg([
+        "model=pyudales",
+        "esmda=parameter",
+        "esmda.num_steps=1",
+    ])
+    run(cfg)
+```
 
 ## 6. Data assimilation flow
 
@@ -245,9 +334,10 @@ ensemble_size, method_kwargs)`.
 - On **first import** the Fortran code is fetched as a git submodule into
   `libs/pylbm/LBM/` (see [libs/pylbm/src/pylbm/__init__.py](../libs/pylbm/src/pylbm/__init__.py)).
   No network access ⇒ it will silently fall back.
-- Compile is gated by `LBM_ARGS["compile"]` and called from
-  `prepare_forward_model`. After a rebuild, stale `seed_*.dat[.orig]`
-  files are wiped (they break warm starts).
+- Compile is gated by `cfg.model.compile` (consumed by
+  `pyurbanair.config.hydra_helpers.prepare_compile` via the
+  `model.prepare._target_` instantiation). After a rebuild, stale
+  `seed_*.dat[.orig]` files are wiped (they break warm starts).
 - Runtime configuration lives in `infile.in`. The wrapper edits keys via
   `Infile(...).set_value(...)`. `iprt1` is set to disable the
   every-iteration NetCDF dump that otherwise makes warm starts ~20× slower.
@@ -255,30 +345,34 @@ ensemble_size, method_kwargs)`.
   and trimmed to `simulation_time / output_frequency` outputs (the
   spinup_outputs prefix is dropped).
 - Failures surface as `subprocess.CalledProcessError`. **To see swallowed
-  errors, flip `verbose=True` in `LBM_ARGS`.**
+  errors, override `model.forward_model.verbose=true` on the CLI.**
 - STL → LBM geometry conversion is implemented but not fully trusted (per
   README caveat).
 
 ### pyudales
-- Uses Matlab for default preprocessing
-  (`UDALES_ARGS["matlab_bin"]`). A pure-Python preprocessor exists in
-  `python_udgeom/` and is selected by passing
-  `python_or_matlab="python"` to `run_preprocessing`. `prepare_forward_model`
-  currently always uses Python.
+- The Matlab binary is set on `cfg.model.forward_model.matlab_bin`. A
+  pure-Python preprocessor exists in `python_udgeom/` and is selected by
+  the `prepare._target_` block in [conf/model/pyudales.yaml](../conf/model/pyudales.yaml)
+  via `python_or_matlab: python`, which is what
+  `pyurbanair.config.hydra_helpers.prepare_udales` passes through.
 - Runtime config in `namoptions.<exp>` (edited via `NamoptionsFile`).
 - Staggered grid: state has `xt/xm`, `yt/ym`, `zt/zm`. Some plotting
   utilities call `interpolate_grid` to project everything onto a common
   grid before display.
-- Inflow profile is configured via the nested `nudging_config` dict
-  (`profile_config = {"type": "uniform" | "power_law", "alpha": ...,
-  "z_ref": ...}`).
+- Inflow profile is configured via the nested `nudging_config` field on
+  `cfg.model.forward_model` (`profile_config = {"type": "uniform" |
+  "power_law", "alpha": ..., "z_ref": ...}`).
 - `pressure_gradient_magnitude` is the third parameter only this backend
-  supports.
+  supports. The helpers `create_true_params` /
+  `create_time_varying_true_params` filter it out for non-uDALES
+  models.
 
 ### pypalm
-- Lazy-imported. Same factory pattern as the others but lives behind
-  `if model_name == "pypalm": from pypalm... import ...` in
-  `config_utils.py` so non-PALM runs never pay its compile cost.
+- Lazy-imported. All `pypalm.*` `_target_` blocks live exclusively in
+  [conf/model/pypalm.yaml](../conf/model/pypalm.yaml), so Hydra only
+  triggers the PALM import when that config is instantiated. Non-PALM
+  runs never pay the compile cost. This invariant is asserted by
+  `tests/test_hydra_config.py::test_palm_target_does_not_import_for_non_palm_composition`.
 - Postprocess unifies the vertical staggers (`zu_3d → z`, `w`
   interpolated from `zw_3d`) so all three velocity components share a
   single `z` dim.
@@ -299,23 +393,34 @@ ensemble_size, method_kwargs)`.
    directory).
 4. Add a Pixi feature in [pyproject.toml](../pyproject.toml) (system
    deps + pypi dependency on the new lib).
-5. Add branches to every helper in
-   [src/pyurbanair/utils/config_utils.py](../src/pyurbanair/utils/config_utils.py)
-   (`model_args`, `create_forward_model`, `prepare_forward_model`,
-   `clean_forward_model_outputs`, `create_ensemble_forward_model`,
-   `solver_name`).
-6. Add the solver name to `ModelName` and to each script's
-   `argparse --model choices=[...]` list.
-7. Add a `dim_mapping` entry in
+5. Add a new `conf/model/<name>.yaml` mirroring
+   [conf/model/pylbm.yaml](../conf/model/pylbm.yaml): `name`,
+   `solver_name`, `forward_model._target_`, `ensemble_model._target_`,
+   `prepare._target_`. Use the existing `prepare_compile` /
+   `prepare_udales` helpers in
+   [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py)
+   if they fit; add a new prepare helper there otherwise. Add a
+   `clean_outputs` branch in the same module for the new
+   `model_name`.
+6. Add a `dim_mapping` entry in
    [`ObservationOperator.__init__`](../libs/data-assimilation/src/data_assimilation/observation_operator.py)
    for the new `solver_name`.
+7. Add a regression test that the model composes without importing the
+   backend lazily (mirror
+   `test_palm_target_does_not_import_for_non_palm_composition`).
 
 ### Add a new parameter
-- New `data_vars` entry to `TRUE_PARAMS` and matching prior in
-  `PARAM_PRIORS` and (if relevant) `EXTERNAL_PRIORS` in
-  [scripts/config.py](../scripts/config.py).
+- Add a default value under [conf/params/true/default.yaml](../conf/params/true/default.yaml)
+  and matching prior under
+  [conf/params/prior/default.yaml](../conf/params/prior/default.yaml).
+  If the parameter is time-varying and feeds the truth/prior
+  ts-models, also add it to
+  [conf/params/external/default.yaml](../conf/params/external/default.yaml).
 - Extend `create_true_params` and `create_parameter_ensemble` in
-  [config_utils.py](../src/pyurbanair/utils/config_utils.py).
+  [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py)
+  to include the new field. Watch out for the model-conditional filter
+  (`if model_name == "pyudales": ...`) — `pressure_gradient_magnitude`
+  uses it today.
 - Extend each backend's `_apply_inflow_settings` /
   `apply_inflow_settings` in `utils/params_utils.py` so the value gets
   written to that solver's input format.
@@ -328,30 +433,48 @@ ensemble_size, method_kwargs)`.
 - Override `_one_step(params, obs, state)` — choose what's in the
   augmented vector, call `self._compute_kalman_update(...)`, return
   `(updated_state_or_None, updated_params)`.
+- Add a new `conf/esmda/<name>.yaml` with the `smoother._target_` block
+  pointing to your class. Use sibling-relative interpolation for
+  fields that the smoother shares with the surrounding ESMDA config
+  (`num_steps`, `alpha`, …).
 - Add a new top-level `scripts/run_<name>.py`. Pattern: build truth
-  model, draw truth obs, build assim ensemble + obs op + C_D, instantiate
-  the smoother, call it, dump results.
+  model, draw truth obs, build assim ensemble + obs op + C_D,
+  `instantiate(cfg.esmda.smoother, ...)` with the dynamic kwargs, call
+  it, dump results.
 
 ### Add a new run script
-- Place under [scripts/](../scripts/), mirror an existing one — `argparse`
-  with `--model` (or `--truth-model`/`--assim-model`), pull all config
-  from `from scripts import config`, use the `config.create_*` factories.
-- Output to `config.BASE_RESULTS_DIR / "<script_name>"`.
-- If interactive plots: gate with `--skip-viz`.
+- Place under [scripts/](../scripts/), mirror an existing one. The
+  shape is `def run(cfg)` + a thin `@hydra.main`-decorated `main`.
+- Use `hydra.utils.instantiate(cfg.model.forward_model, ...)` for
+  backend construction; pull procedural helpers from
+  [pyurbanair.config.hydra_helpers](../src/pyurbanair/config/hydra_helpers.py).
+- Compute outputs via `resolve_output_dir(cfg, "<script_name>")` so the
+  script writes under `${paths.base_results_dir}/<script_name>/` when
+  invoked directly and under Hydra's auto-managed run dir when invoked
+  via `@hydra.main`.
+- Gate visualization with `cfg.run.skip_viz`. Per-script behavior
+  knobs that don't fit any config group land under `run.*` (e.g.
+  `run.num_steps`, `run.use_true_params`).
+- Add a test in `tests/test_<name>.py` that uses `compose_test_cfg` to
+  invoke `run(cfg)` directly.
 
 ## 9. Operational defaults / scaling
 
 - `.temp/` is the default scratch directory. Every backend writes its
-  per-experiment dir and per-member dirs underneath.
-- Tests use a small domain (see `tests/config.py`) — `pixi run py.test`
-  in the dev env.
+  per-experiment dir and per-member dirs underneath. The default
+  `paths.base_results_dir` is `.temp/scripts` (see
+  [conf/paths/default.yaml](../conf/paths/default.yaml)).
+- Tests use [conf/preset/test.yaml](../conf/preset/test.yaml) (small
+  domain / short simulation_time / CPU-only LBM / 4-member ensemble) —
+  `pixi run py.test` in the dev env.
 - Pre-commit hooks (`black`, `isort`, `mypy`) installed via
   `pixi run pre-commit`. They are **not enforced** server-side; commits
   can bypass.
 - **Ensemble scaling on this hardware** is DRAM-bandwidth-bound past
   ~4 workers (see [docs/ensemble_scaling.md](ensemble_scaling.md) and
-  the comment in `ENSEMBLE` of `config.py`). Don't blindly raise
-  `num_parallel_processes` past 8 — re-benchmark first.
+  the comments in [conf/ensemble/default.yaml](../conf/ensemble/default.yaml)).
+  Don't blindly raise `num_parallel_processes` past 8 — re-benchmark
+  first.
 - `pyurbanair` deliberately uses `forkserver` not `fork` for parallel
   workers (JAX threads + bare-fork = deadlock).
 
@@ -374,12 +497,13 @@ ensemble_size, method_kwargs)`.
 
 | You want to change… | Look here |
 |---|---|
-| Run-time parameters (domain, sim time, ensemble size) | [scripts/config.py](../scripts/config.py) |
+| Run-time parameters (domain, sim time, ensemble size) | [conf/](../conf/) — see §5 |
+| Hydra `_target_` helpers (prepare, clean, factories) | [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py) |
 | What an ensemble member does in parallel | [src/pyurbanair/base_ensemble_forward_model.py](../src/pyurbanair/base_ensemble_forward_model.py) |
 | How a solver consumes params | `libs/<solver>/src/<solver>/utils/params_utils.py` |
 | ESMDA Kalman update | [libs/data-assimilation/src/data_assimilation/smoothing/esmda.py](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py) |
 | How sensors map to grid points | [libs/data-assimilation/src/data_assimilation/observation_operator.py](../libs/data-assimilation/src/data_assimilation/observation_operator.py) |
-| Factory wiring (model_name → class) | [src/pyurbanair/utils/config_utils.py](../src/pyurbanair/utils/config_utils.py) |
 | Per-window rollout logic | [src/pyurbanair/base_rollout_forward_model.py](../src/pyurbanair/base_rollout_forward_model.py) and `scripts/run_rollout_*.py` |
-| Time-varying parameter prior | [src/pyurbanair/parameter_time_series/](../src/pyurbanair/parameter_time_series/) |
+| Time-varying parameter prior | [src/pyurbanair/parameter_time_series/](../src/pyurbanair/parameter_time_series/) and [conf/time_varying/](../conf/time_varying/) |
+| Test fixture composition | [tests/conftest.py](../tests/conftest.py) (`compose_test_cfg`, `compose_module_cfg`) |
 | Benchmark / scaling experiments | `scripts/benchmark_*_ensemble_scaling.py`, [docs/ensemble_scaling.md](ensemble_scaling.md) |
