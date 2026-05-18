@@ -28,14 +28,14 @@ BASE_RESULTS_DIR = pathlib.Path(".temp/scripts")
 #     "bounds": ((-10.0, 40.0), (0.0, 40.0), (0.0, 40.0)),
 # }
 DOMAIN = {
-    "nx": 90,
+    "nx": 100,
     "ny": 80,
     "nz": 16,
-    "bounds": ((-10.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
+    "bounds": ((-20.0, 80.0), (0.0, 80.0), (0.0, 40.0)),
 }
 
 TIME = {
-    "simulation_time": 5*60.0,  # 3000 * 0.0538,
+    "simulation_time": 3*60.0,  # 3000 * 0.0538,
     "output_frequency": 5.0,  # 3000 * 0.0538,
     "spinup_time": 10.0,
 }
@@ -91,7 +91,7 @@ ENSEMBLE = {
     # scripts/benchmark_ensemble_scaling.py and the pinning vs. no-pin sweep
     # in .temp/bench/ensemble_scaling_pinned.csv. Bump only after a fresh
     # benchmark on the actual machine confirms the cliff has moved.
-    "num_parallel_processes": 32,
+    "num_parallel_processes": 8,
     "num_cpus_per_process": 1,
     # Failure handling for individual ensemble members. With
     # "resample_from_successes", a per-member CalledProcessError is logged
@@ -116,8 +116,8 @@ OBS = {
 }
 
 ESMDA = {
-    "num_steps": 3,
-    "num_assimilation_windows": 6,
+    "num_steps": 2,
+    "num_assimilation_windows": 5,
     "seed": 42,
     "obs_error_std": 0.25,
     "init_conditions_dir": "esmda_init_conditions",
