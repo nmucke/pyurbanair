@@ -102,14 +102,6 @@ python scripts/run_state_and_parameter_esmda.py --truth-model pylbm --assim-mode
 python scripts/run_rollout_esmda.py --truth-model pylbm --assim-model pylbm
 ```
 
-### Initial conditions
-
-Pre-generate initial conditions for ESMDA experiments:
-
-```bash
-python scripts/simulate_init_conditions.py --model pylbm --num-simulations 500
-```
-
 All forward models generate a `.temp` folder where intermediate files are stored.
 
 ## Repository Structure
@@ -166,8 +158,7 @@ pyurbanair/
 │   ├── run_ensemble_rollout_forward_model.py  # Ensemble rollout
 │   ├── run_parameter_esmda.py             # Parameter estimation via ESMDA
 │   ├── run_state_and_parameter_esmda.py   # Joint state-parameter estimation
-│   ├── run_rollout_esmda.py               # Rollout-based ESMDA
-│   └── simulate_init_conditions.py        # Generate initial conditions
+│   └── run_rollout_esmda.py               # Rollout-based ESMDA
 │
 ├── examples/                              # Example experiments
 │   ├── benchmark_geometry/                # Xie and Castro 2008 geometry tools

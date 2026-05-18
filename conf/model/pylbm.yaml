@@ -1,6 +1,5 @@
 name: pylbm
 solver_name: pylbm
-init_subdir: lbm
 compile: true
 
 forward_model:

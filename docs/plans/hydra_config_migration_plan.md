@@ -1216,3 +1216,426 @@ Next implementation work remains:
 2. Migrate the time-varying ESMDA scripts.
 3. Continue removing `scripts.config` injection from each script's tests as
    that script is migrated.
+
+## Spinup-Only Cleanup (2026-05-18)
+
+Decisions accepted from the review of the last pass:
+
+- **AR(2) is the truth default.** The new
+  `create_time_varying_true_params` deliberately uses `truth_method` /
+  `truth_method_kwargs` to build a full time-series model (AR(2) by
+  default) for the truth trajectory — the legacy `sample_smooth_ensemble`
+  GP behavior is gone. The anti-inverse-crime invariant is preserved by
+  keeping `truth_method_kwargs` distinct from `method_kwargs`.
+- **Pre-specified init conditions are no longer supported.** The
+  spin-up flow (one warm-up call on the assim model before the ESMDA
+  loop) is now the only entry point. This deletes a substantial chunk
+  of branching from the rollout and state+param scripts.
+- **Rollout ESMDA no longer builds two assim forward models.** The
+  `assim_init_model` was a legacy artifact of the now-deleted
+  `create_rollout_forward_model` identity wrapper; the script now reuses
+  the single `assim_model` for both the spin-up call and the per-window
+  loop.
+- **Shared `prior_model` block is hoisted into
+  `conf/time_varying/_prior_model.yaml`.** Each of the four method files
+  selects it via `defaults: [_prior_model]`.
+
+What the spin-up cleanup deletes:
+
+- `conf/esmda/*.yaml`: `use_init_conditions`, `init_conditions_dir`,
+  `true_sim_id` (all five files).
+- `conf/model/*.yaml`: `init_subdir` (all three files).
+- `src/pyurbanair/config/hydra_helpers.py`:
+  `load_init_conditions_for_esmda`, `clean_restarts`, and the
+  `clean_lbm_restart_files` import. Update the **Helper Module** section
+  to drop these — they were carried over from the legacy code only to
+  serve the pre-specified-init-conditions path.
+- `scripts/run_rollout_esmda.py`: the entire `if use_init_conditions:`
+  branch, the `assim_init_model` block, and the imports of
+  `load_init_conditions_for_esmda`.
+- `scripts/run_state_and_parameter_esmda.py`: the entire
+  `if use_init_conditions:` branch, the `clean_restarts` import and
+  call, the imports of `load_init_conditions_for_esmda`.
+- `tests/test_run_rollout_esmda.py` and
+  `tests/test_run_state_and_parameter_esmda.py`: the `_write_init_conditions`
+  and `_build_params_ensemble` fixture helpers, the `init_conditions_root`
+  scaffolding, and the per-test
+  `esmda.use_init_conditions=true` / `esmda.init_conditions_dir=...`
+  overrides. The tests now only cover the spin-up path.
+- `tests/test_hydra_config.py::test_single_model_configs_compose`: the
+  `init_subdir` assertion (model field no longer exists).
+
+Pre-existing legacy modules (`scripts/config.py`, `scripts/config_small.py`,
+`scripts/simulate_init_conditions.py`, `tests/config.py`,
+`src/pyurbanair/utils/config_utils.py`) still reference the dead
+`init_conditions_dir` / `true_sim_id` keys and the old
+`load_init_conditions_for_esmda` helper. They are scheduled for Phase 5
+removal — leaving them alone for now keeps a half-migrated tree compiling.
+
+New tests added:
+
+- `test_create_time_varying_true_params_uses_ar2_relaxation_truth`: pins
+  the schema (only `time` dim, no `ensemble`; `inflow_angle` and
+  `velocity_magnitude` time series of length `num_time_points`) and
+  proves the truth trajectory is driven by `truth_method` — flipping
+  `time_varying.method` while holding `truth_method=ar2_relaxation`
+  yields byte-identical truth samples.
+- `test_create_time_varying_true_params_includes_pressure_gradient_for_pyudales`:
+  model-conditional filter for `pressure_gradient_magnitude`.
+
+Verified after this pass:
+
+```bash
+.pixi/envs/default/bin/python -m pytest tests/test_hydra_config.py -q
+# 15 passed
+```
+
+Acceptance-criteria updates:
+
+- The "pre-specified init-conditions" behavior is **no longer** a
+  preserved invariant. The Phase 5 follow-up to delete
+  `scripts/simulate_init_conditions.py` and the legacy
+  `load_init_conditions_for_esmda` in `pyurbanair.utils.config_utils`
+  is now strictly cleanup, not behavior preservation.
+- The "rollout ESMDA constructs exactly one assim forward model" is
+  a new behavioral invariant from this pass.
+
+Remaining work (unchanged):
+
+1. Migrate `scripts/run_time_varying_parameters_rollout_esmda.py`.
+2. Continue removing `scripts.config` injection from each script's
+   tests as that script is migrated.
+3. Phase 5: remove `scripts/config.py`, `scripts/config_small.py`,
+   `tests/config.py`, and the legacy `config_utils.py` once all scripts
+   are off them.
+
+## Phase 4 (Rollout + Time-Varying) Implementation Review (2026-05-18)
+
+Review of the currently uncommitted changes on `hydra-config`: the four
+remaining ESMDA scripts and their tests, the spin-up-only cleanup in
+`hydra_helpers.py`, the `_prior_model.yaml` hoist, and the removal of
+`init_*` keys / `init_subdir` from `conf/esmda/*.yaml` and
+`conf/model/*.yaml`. Verified `pytest tests/test_hydra_config.py -q`:
+15 passed.
+
+### What's good
+
+- **`run_time_varying_parameters_rollout_esmda.py` and
+  `run_rollout_esmda.py`** both cleanly dropped `argparse` +
+  `scripts.config`, use `instantiate(cfg.*.forward_model)`,
+  `instantiate(cfg.*.ensemble_model, forward_model=…)`, and
+  `configure_failure_policy(...)`. RNG ordering matches the prior
+  scripts.
+- **Tests** for the four migrated scripts now compose Hydra configs via
+  `compose_test_cfg(...)` and call `run(cfg)` directly. The legacy
+  `tests_config` injection plus `try/finally` mutation dance is gone.
+  The state+param test in particular is now significantly shorter than
+  the pre-spin-up-only version.
+- **`_prior_model.yaml` hoist** removes ~12 lines × 4 files of
+  duplication. The four `time_varying/*.yaml` files now diff only on
+  the values that actually matter (method, kwargs, truth_method,
+  truth_method_kwargs).
+- **`prepare_compile`** was the right collapse for the identical
+  `prepare_lbm` / `prepare_palm` helpers from the Phase 1 review.
+  `prepare_lbm` and `prepare_palm` remain as thin pass-throughs so the
+  per-model YAML keeps a semantic name — fine.
+- **New `create_time_varying_true_params` tests** pin the schema (only
+  `time` dim, no `ensemble`), the `truth_method`-drives-truth
+  invariant, and the `pressure_gradient_magnitude` model-conditional
+  filter.
+
+### Confirmed bugs
+
+#### 1. `run_rollout_esmda.py` runs spin-up before the truth forecast, with no `clean_outputs` between them
+
+[scripts/run_rollout_esmda.py:38-61](../../scripts/run_rollout_esmda.py#L38-L61):
+the assim model is instantiated, prepared, and immediately invoked to
+produce `assim_ref_state`. Then `truth_model(params=true_params, state=None)`
+runs. Compared with [scripts/run_state_and_parameter_esmda.py:62-71](../../scripts/run_state_and_parameter_esmda.py#L62-L71)
+the rollout script is missing both the `clean_outputs(...)` calls
+*and* the `set_results_dir(None)` / restore dance around the spin-up.
+
+Today this happens to work because the rollout script never passes a
+`results_dir` (line 38: `assim_model = instantiate(cfg.assim_model.forward_model)`,
+no kwarg), so the assim model is in-memory and nothing lands on disk
+to leak. But:
+
+- If anyone follows the state+param pattern and adds `results_dir=...`
+  to make rollout writes resumable, the warmup state will silently
+  pollute window 0's outputs.
+- pylbm spin-up *does* leave per-iteration NetCDF dumps and
+  `seed_*.dat` warm-start files under `dirs/output/...` even in
+  "in-memory" mode — that is exactly what `clean_outputs` is there
+  for. Without it, warm-start determinism between truth and assim
+  rollouts on the same backend (the `pylbm_pylbm` test case) is not
+  guaranteed.
+
+Either add a `clean_outputs(cfg.assim_model.name, assim_model)` after
+the spin-up call (cheap and matches the state+param script), or
+document explicitly in the script why the rollout flavor doesn't need
+it.
+
+#### 2. `run_time_varying_parameters_rollout_esmda.py` builds two parallel "external priors" representations that differ in shape
+
+[scripts/run_time_varying_parameters_rollout_esmda.py:210-221](../../scripts/run_time_varying_parameters_rollout_esmda.py#L210-L221)
+calls `OmegaConf.to_container(cfg.params.external, resolve=True)` and
+hands the result to `build_parameter_time_series(external_priors=…)`
+for the truth model. Meanwhile, the *prior* `ts_model` is built by
+`instantiate(cfg.time_varying.prior_model)`, which routes through the
+hydra-helper-built `external_priors`. The helper version
+([src/pyurbanair/config/hydra_helpers.py:126-129](../../src/pyurbanair/config/hydra_helpers.py#L126-L129))
+returns only `inflow_angle` and `velocity_magnitude`:
+
+```python
+def _prior_cfg_as_external_priors(prior_cfg: Any) -> dict[str, dict[str, float]]:
+    prior = _plain(prior_cfg)
+    names = ("inflow_angle", "velocity_magnitude")
+    return {name: dict(prior[name]) for name in names}
+```
+
+…but the script's inline `OmegaConf.to_container(cfg.params.external,
+resolve=True)` returns **every** key in `params/external/default.yaml`
+(today that's the same set, so it doesn't crash — yet). Two paths,
+two shapes, only one of them respects a curated allowlist.
+
+Two fixes, in order of preference:
+
+- Replace the inline `OmegaConf.to_container(...)` with the existing
+  helper. Better still, add `build_truth_ts_model(tv_cfg, prior_cfg,
+  ensemble_size=1)` to `hydra_helpers.py` so the script also stops
+  duplicating the `build_parameter_time_series(method=tv["truth_method"],
+  ...)` boilerplate from `create_time_varying_true_params`. That makes
+  the rollout script's two model constructions symmetrical.
+- Or accept that `external_priors` should be "all of `params.external`"
+  and rip the allowlist out of `_prior_cfg_as_external_priors`.
+
+Pick one, but don't leave both code paths.
+
+#### 3. `_prior_model.yaml` carries a redundant package directive
+
+[conf/time_varying/_prior_model.yaml:1](../../conf/time_varying/_prior_model.yaml#L1):
+
+```yaml
+# @package time_varying
+prior_model:
+  _target_: ...
+```
+
+Hydra already infers the package as `time_varying` from the file's
+location under `conf/time_varying/`. The `# @package time_varying`
+header is therefore a no-op. The sibling files (`ar2_relaxation.yaml`,
+`ar1.yaml`, etc.) don't have it. Either delete the comment for
+consistency, or convert it to `# @package _group_` if you want to be
+explicit about not depending on directory inference.
+
+### Things to look at
+
+- **Spin-up state ensemble has zero variance across members.**
+  [scripts/run_rollout_esmda.py:47-50](../../scripts/run_rollout_esmda.py#L47-L50)
+  builds the initial state ensemble by replicating one warm-up
+  trajectory `ensemble_size` times via
+  `create_initial_state_ensemble(...)`. The parameter ensemble has
+  prior spread, but every state copy is byte-identical at t=0. This is
+  the same behavior the pre-migration spin-up path had, so it isn't a
+  regression — but it is now the only entry point (the
+  pre-specified-init-conditions path that used to provide a true state
+  ensemble is gone). Worth a one-line explanation in the script that
+  this is intentional (the param spread is what generates trajectory
+  divergence on the first window).
+
+- **`run_time_varying_parameter_esmda.py` mixes two output-dir sources.**
+  Line 241–243 honors `cfg.run.results_dir` for the on-disk assim
+  states, while line 286 routes the final results via
+  `resolve_output_dir(cfg, "time_varying_parameter_esmda")` (Hydra's
+  per-run dir, falling back to `cfg.paths.base_results_dir /
+  "time_varying_parameter_esmda"`). The plan's "pick one output-dir
+  source of truth" recommendation under "Proposed Config Layout"
+  applies here too — the assim states could just go to `out_dir /
+  "assim_states"`, mirroring the state+param script. Today the
+  `*_on_disk` test cases work, but a CLI user running with
+  `paths.base_results_dir=…` ends up with assim states under the
+  pytest `tmp_path` while the rest of the run lands somewhere else.
+
+- **`conf/config.yaml::run.rollout` is dead.** Grepping shows it is
+  only printed in
+  [scripts/run_forward_model.py:40,45](../../scripts/run_forward_model.py#L40)
+  and [scripts/run_ensemble_forward_model.py:57,63](../../scripts/run_ensemble_forward_model.py#L57)
+  to choose a label string. The earlier "rollout" mode of these
+  scripts ran the explicit `create_rollout_forward_model` wrapper
+  that the codebase guide notes is now an identity function. The flag
+  no longer does anything. Either wire it back up or remove the
+  field. Carrying a config key that does nothing trains users to
+  ignore the schema.
+
+- **`_prior_cfg_as_external_priors` hardcodes the two parameter
+  names.** If someone follows the "Add a new parameter" recipe in the
+  codebase guide, the new param will be silently dropped from
+  `external_priors` (and from the prior ensemble). Either iterate over
+  the dict keys, or add an assertion that surfaces the omission
+  loudly. This is a slow-leak bug — by the time it bites, the cause
+  will be far away.
+
+- **Six unmigrated tests still inject `tests.config`** via
+  `sys.modules["scripts.config"] = tests_config`:
+  `test_run_ensemble_rollout_forward_model.py`, `test_spinup.py`,
+  `test_time_varying_forward_model.py`,
+  `test_run_rollout_forward_model.py`,
+  `test_varying_inflow_velocity.py`,
+  `test_inflow_angle_simulation_sign.py`. They target scripts
+  (`run_rollout_forward_model.py`,
+  `run_ensemble_rollout_forward_model.py`) that have **not** been
+  migrated yet, so the injection is still load-bearing. The migration
+  invariant "migrate the script and its test in the same PR" should
+  apply to those scripts too — flag this as a Phase 4 finish-up task
+  so the asymmetry doesn't accidentally persist into Phase 5.
+
+- **No regression test for the rollout script's
+  truth/prior correlation-length distinctness.** The plan's anti-inverse-crime
+  invariant has unit coverage in `test_hydra_config.py` for
+  `create_time_varying_true_params`, but
+  `run_time_varying_parameters_rollout_esmda.py` constructs
+  `truth_ts_model` inline (issue #2 above). If issue #2 is fixed by
+  routing through a helper, the existing test covers it. If not, add
+  an explicit assertion that `cfg.time_varying.truth_method_kwargs !=
+  cfg.time_varying.method_kwargs` after composition for the rollout
+  config path.
+
+- **`run_time_varying_parameters_rollout_esmda.py` still imports
+  `build_parameter_time_series` directly.** Once issue #2 is resolved
+  via a helper, this import (and the `OmegaConf` import on line 27)
+  should go away — the script would only need `instantiate(...)` plus
+  the helpers. Cleanup, not a bug.
+
+- **Legacy module references for dead keys.** `scripts/config.py:123`,
+  `scripts/config_small.py:116`, and
+  `scripts/simulate_init_conditions.py:97` still set/read
+  `init_conditions_dir`; `src/pyurbanair/utils/config_utils.py:357`
+  still defines `load_init_conditions_for_esmda`. The plan lists
+  these for Phase 5, which is correct — but
+  `simulate_init_conditions.py` in particular is now an orphan: its
+  only purpose was to feed the deleted pre-specified-init-conditions
+  ESMDA path. Confirm whether it should be deleted outright rather
+  than rewritten, and update the codebase guide section 2 (it lists
+  the script).
+
+### Summary
+
+The four script migrations look correct and the tests pass; the
+spin-up-only consolidation is a real simplification. Three items to
+fix before Phase 5:
+
+1. Add `clean_outputs(...)` after the spin-up in `run_rollout_esmda.py`,
+   or document why it doesn't need one (issue #1).
+2. Collapse the two `external_priors` paths in
+   `run_time_varying_parameters_rollout_esmda.py` onto a single helper
+   so the prior and truth ts-models are constructed symmetrically
+   (issue #2).
+3. Delete the redundant `# @package time_varying` header from
+   `_prior_model.yaml` (issue #3).
+
+The remaining items (dead `run.rollout` flag, hardcoded param names in
+`_prior_cfg_as_external_priors`, six still-injecting tests, mixed
+output-dir source in the time-varying script, missing rollout-script
+correlation-length test) are pre-Phase-5 cleanup that should be done
+in the same window as those tests' scripts get migrated.
+
+## Review-Driven Cleanup (2026-05-18)
+
+Changes made in response to the review above. The three "before
+Phase 5" items and most of the "things to look at" items are now
+addressed; what remains is genuinely Phase 5 (full removal of legacy
+`scripts/config.py` / `tests/config.py` / `config_utils.py`) and the
+finish-up migration of the six unmigrated tests.
+
+### Bugs fixed
+
+- **Issue #1 — spin-up `clean_outputs` in rollout ESMDA.**
+  [scripts/run_rollout_esmda.py](../../scripts/run_rollout_esmda.py)
+  now calls `clean_outputs(cfg.assim_model.name, assim_model)` after
+  the warm-up call so per-iteration NetCDF dumps and `seed_*.dat`
+  files do not leak into the per-window loop.
+- **Issue #2 — single `build_truth_ts_model` helper.**
+  `src/pyurbanair/config/hydra_helpers.py` now exposes
+  `build_truth_ts_model(tv_cfg, external_cfg, ensemble_size=1)` and
+  both time-varying scripts use it. The legacy
+  `_prior_cfg_as_external_priors` (which projected `params.prior` onto
+  a hardcoded `inflow_angle` / `velocity_magnitude` allowlist) is gone,
+  and the rollout script no longer constructs a parallel
+  `OmegaConf.to_container(cfg.params.external, …)` →
+  `build_parameter_time_series(...)` block. Truth and prior ts-models
+  now share one construction path and one source of external priors
+  (`cfg.params.external`). Subsumes issues #2, #7, #9 and #10 from the
+  review.
+- **Issue #3 — redundant package directive.** Removed
+  `# @package time_varying` from
+  [conf/time_varying/_prior_model.yaml](../../conf/time_varying/_prior_model.yaml).
+  Hydra infers the package from the file's directory; verified by
+  re-composing `cfg.time_varying.prior_model` and instantiating.
+
+### Behavior-preserving cleanups
+
+- **Issue #4 — spin-up state ensemble variance.** Added a one-line
+  comment in
+  [scripts/run_rollout_esmda.py](../../scripts/run_rollout_esmda.py)
+  documenting that every member starts from the same warm-up
+  trajectory and parameter spread drives divergence on the first
+  window.
+- **Issue #5 — output-dir source of truth.**
+  [scripts/run_time_varying_parameter_esmda.py](../../scripts/run_time_varying_parameter_esmda.py)
+  now derives `assim_results_dir = out_dir / "assim_states"`
+  (computed once before the assim model is instantiated, with the
+  parent `mkdir`s up front), matching `run_state_and_parameter_esmda.py`.
+  `cfg.run.results_dir` is no longer read here.
+- **Issue #6 — dead `run.rollout` flag.** Removed `run.rollout` from
+  `conf/config.yaml`, `scripts/run_forward_model.py`, and
+  `scripts/run_ensemble_forward_model.py`. The label-only flag was a
+  rotted artifact of the deleted `create_rollout_forward_model`
+  identity wrapper. Single-model output subdirs now use
+  `{model_name}` (and `{model_name}_ensemble` for the ensemble
+  variant) directly.
+- **Issue #11 — orphan `simulate_init_conditions.py` deleted.** The
+  only consumer of the pre-specified-init-conditions producer was the
+  init-conditions path of `run_rollout_esmda.py` /
+  `run_state_and_parameter_esmda.py`, both of which were removed in
+  the Spinup-Only cleanup. Updated
+  [docs/codebase_guide.md](../../docs/codebase_guide.md) section 2
+  and the README repository tree / quickstart to drop the script.
+
+### Carried into the test suite
+
+- **`test_hydra_config.py::_build_time_varying_truth`** now passes
+  `external_cfg=cfg.params.external` (was `prior_cfg=cfg.params.prior`).
+  The AR(2)-truth seed-stability assertion still holds because the
+  default config has `truth_method_kwargs.correlation_length=500.0`
+  in `ar2_relaxation.yaml`; flipping `time_varying.method` to `ar1`
+  while keeping `truth_method=ar2_relaxation` continues to produce
+  byte-identical truth samples.
+- All 15 focused Hydra tests pass; all seven migrated scripts
+  py_compile and expose `run(cfg)`.
+
+### Remaining work
+
+- **Issue #8 — six unmigrated tests still inject `tests.config`.**
+  `test_run_ensemble_rollout_forward_model.py`,
+  `test_spinup.py`,
+  `test_time_varying_forward_model.py`,
+  `test_run_rollout_forward_model.py`,
+  `test_varying_inflow_velocity.py`,
+  `test_inflow_angle_simulation_sign.py`. These target scripts that
+  are **not yet migrated**
+  (`run_rollout_forward_model.py`,
+  `run_ensemble_rollout_forward_model.py`,
+  `run_time_varying_forward_model.py`, and the
+  `test_inflow_angle_*` / `test_varying_inflow_velocity` / `test_spinup`
+  cases that exercise forward-model behavior directly). The injection
+  is load-bearing until those scripts move to Hydra. Per the
+  migration invariant in Phase 4: each script's test should be
+  migrated in the same PR as the script. Track this as the last
+  finish-up task before Phase 5.
+- **Phase 5 deletions** — `scripts/config.py`,
+  `scripts/config_small.py`, `tests/config.py`,
+  `src/pyurbanair/utils/config_utils.py`. All four still reference the
+  now-dead `init_conditions_dir` / `true_sim_id` / `init_subdir`
+  keys; the legacy `load_init_conditions_for_esmda` lives in
+  `config_utils.py:357`. Defer until the six unmigrated tests are
+  off the legacy modules.

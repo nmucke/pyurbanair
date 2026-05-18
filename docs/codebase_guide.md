@@ -67,7 +67,6 @@ scripts/                           # All top-level executables run from here.
   run_state_and_parameter_esmda.py # Joint state+parameter ESMDA
   run_rollout_esmda.py             # Multi-window joint ESMDA
   run_time_varying_*.py            # Time-varying inflow params variants
-  simulate_init_conditions.py      # Pre-bake a developed-flow ensemble for ESMDA cold-start
   benchmark_*_ensemble_scaling.py  # Throughput benchmarks (see docs/ensemble_scaling.md)
 
 examples/

@@ -1,6 +1,5 @@
 name: pyudales
 solver_name: udales
-init_subdir: udales
 
 forward_model:
   _target_: pyudales.forward_model.ForwardModel

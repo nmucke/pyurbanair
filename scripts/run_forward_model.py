@@ -37,13 +37,11 @@ def run(cfg: DictConfig) -> None:
     state = add_velocity_magnitude(state)
 
     print(f"Model: {model_name}")
-    print(f"Rollout: {cfg.run.rollout}")
     print(f"Dims: {dict(state.sizes)}")
     print(f"Vars: {list(state.data_vars)}")
 
     if not cfg.run.skip_viz:
-        run_type = "rollout" if cfg.run.rollout else "single"
-        out_dir = resolve_output_dir(cfg, "forward_model") / f"{model_name}_{run_type}"
+        out_dir = resolve_output_dir(cfg, "forward_model") / model_name
         out_dir.mkdir(parents=True, exist_ok=True)
 
         plot_var = "vel_magnitude" if "vel_magnitude" in state.data_vars else "u"
@@ -51,7 +49,7 @@ def run(cfg: DictConfig) -> None:
         plt.figure(figsize=(6, 5))
         plt.imshow(plot_2d, origin="lower")
         plt.colorbar(label=plot_var)
-        plt.title(f"{model_name} {run_type} - {plot_var} (last time, mid z)")
+        plt.title(f"{model_name} - {plot_var} (last time, mid z)")
         plt.tight_layout()
         plt.savefig(out_dir / "field_snapshot.png")
         plt.close()

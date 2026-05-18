@@ -13,9 +13,6 @@ from data_assimilation.observation_operator import (
 )
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-from pylbm.utils.warm_start_utils import (
-    clean_all_restart_files as clean_lbm_restart_files,
-)
 from pylbm.utils.warm_start_utils import clean_output_files as clean_lbm_output_files
 from pyudales.utils.clean_up_utils import clean_output_dir as clean_udales_output_dir
 
@@ -65,11 +62,6 @@ def clean_outputs(model_name: str, forward_model: Any) -> None:
         clean_palm_output_dir(model.dirs)
     else:
         clean_udales_output_dir(model.dirs)
-
-
-def clean_restarts(model_name: str, forward_model: Any) -> None:
-    if model_name == "pylbm":
-        clean_lbm_restart_files(_unwrap_forward_model(forward_model).dirs)
 
 
 def configure_failure_policy(ensemble_model: Any, failure_cfg: Any) -> Any:
@@ -131,39 +123,49 @@ def create_parameter_ensemble(
     )
 
 
-def _prior_cfg_as_external_priors(prior_cfg: Any) -> dict[str, dict[str, float]]:
-    prior = _plain(prior_cfg)
-    names = ("inflow_angle", "velocity_magnitude")
-    return {name: dict(prior[name]) for name in names}
+def build_truth_ts_model(
+    tv_cfg: Any,
+    external_cfg: Any,
+    ensemble_size: int = 1,
+) -> Any:
+    """Construct the parameter time-series model used to draw the truth.
+
+    Uses ``tv_cfg.truth_method`` and ``tv_cfg.truth_method_kwargs`` — kept
+    distinct from ``tv_cfg.method`` / ``tv_cfg.method_kwargs`` so the truth
+    and assimilation priors never collapse to identical generative
+    processes (anti-inverse-crime invariant).
+    """
+    from pyurbanair.parameter_time_series import build_parameter_time_series
+
+    tv = _plain(tv_cfg)
+    external_priors = _plain(external_cfg)
+    return build_parameter_time_series(
+        method=tv["truth_method"],
+        external_priors=external_priors,
+        ensemble_size=ensemble_size,
+        method_kwargs=tv.get("truth_method_kwargs") or {},
+    )
 
 
 def create_time_varying_true_params(
     model_name: str,
     tv_cfg: Any,
     true_cfg: Any,
-    prior_cfg: Any,
+    external_cfg: Any,
     simulation_time: float,
     num_time_points: int,
     seed: int,
 ) -> xarray.Dataset:
-    from pyurbanair.parameter_time_series import build_parameter_time_series
-
-    tv = _plain(tv_cfg)
     true = _plain(true_cfg)
     time_coords = make_time_coords(simulation_time, num_time_points)
-    truth_model = build_parameter_time_series(
-        method=tv["truth_method"],
-        external_priors=_prior_cfg_as_external_priors(prior_cfg),
-        ensemble_size=1,
-        method_kwargs=tv.get("truth_method_kwargs") or {},
-    )
+    truth_model = build_truth_ts_model(tv_cfg, external_cfg, ensemble_size=1)
     sampled = truth_model.sample_prior(
         time_coords=time_coords,
         rng_key=jax.random.PRNGKey(seed + 1),
     )
 
     data_vars: dict[str, Any] = {}
-    for name in ("inflow_angle", "velocity_magnitude"):
+    for name in sampled.data_vars:
         data_vars[name] = ("time", np.asarray(sampled[name].isel(ensemble=0)))
     if model_name == "pyudales":
         data_vars["pressure_gradient_magnitude"] = true[
@@ -227,50 +229,6 @@ def create_observation_operator(
 
 def create_C_D(num_obs: int, obs_error_std: float) -> jnp.ndarray:
     return jnp.diag((obs_error_std**2) * jnp.ones(num_obs))
-
-
-def load_init_conditions_for_esmda(
-    model_name: str,
-    init_conditions_dir: str | pathlib.Path,
-    ensemble_size: int,
-    true_sim_id: int,
-    init_subdir: str,
-) -> tuple[xarray.Dataset, xarray.Dataset, xarray.Dataset, xarray.Dataset] | None:
-    init_dir = pathlib.Path(init_conditions_dir) / init_subdir
-
-    if not init_dir.exists():
-        return None
-    params_path = init_dir / "params.nc"
-    if not params_path.exists():
-        return None
-
-    params_all = xarray.open_dataset(params_path).load()
-    n_available = int(params_all.sizes.get("ensemble", 0))
-    if n_available < ensemble_size or true_sim_id >= n_available:
-        return None
-
-    true_params = params_all.isel(ensemble=true_sim_id)
-    init_params = params_all.isel(ensemble=slice(0, ensemble_size))
-
-    state_path = init_dir / f"state_{true_sim_id}.nc"
-    if not state_path.exists():
-        return None
-    true_init_state = xarray.open_dataset(state_path).load()
-    if "time" in true_init_state.dims:
-        true_init_state = true_init_state.isel(time=-1)
-
-    init_states_list: list[xarray.Dataset] = []
-    for i in range(ensemble_size):
-        member_state_path = init_dir / f"state_{i}.nc"
-        if not member_state_path.exists():
-            return None
-        state = xarray.open_dataset(member_state_path).load()
-        if "time" in state.dims:
-            state = state.isel(time=-1)
-        init_states_list.append(state)
-    init_states = xarray.concat(init_states_list, dim="ensemble", join="override")
-
-    return init_states, init_params, true_params, true_init_state
 
 
 def make_rng_key(seed: int) -> jax.Array:

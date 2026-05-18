@@ -14,7 +14,6 @@ from pyurbanair.plotting import (
 )
 from pyurbanair.config.hydra_helpers import (
     clean_outputs,
-    clean_restarts,
     configure_failure_policy,
     create_C_D,
     create_initial_state_ensemble,
@@ -22,7 +21,6 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_parameter_ensemble,
     create_true_params,
-    load_init_conditions_for_esmda,
     make_rng_key,
     resolve_output_dir,
 )
@@ -34,64 +32,14 @@ if __package__ is None or __package__ == "":
 
 
 def run(cfg: DictConfig) -> None:
-    use_init_conditions = bool(cfg.esmda.use_init_conditions)
-
-    ensemble_size = int(cfg.ensemble.ensemble_size)
-    true_sim_id = int(cfg.esmda.true_sim_id)
-
-    if use_init_conditions:
-        # Load truth init (true_params, true_init_state) from truth-model dir
-        truth_data = load_init_conditions_for_esmda(
-            model_name=cfg.truth_model.name,
-            init_conditions_dir=cfg.esmda.init_conditions_dir,
-            ensemble_size=max(1, true_sim_id + 1),
-            true_sim_id=true_sim_id,
-            init_subdir=cfg.truth_model.init_subdir,
-        )
-        if truth_data is None:
-            init_dir = (
-                pathlib.Path(cfg.esmda.init_conditions_dir)
-                / cfg.truth_model.init_subdir
-            )
-            raise FileNotFoundError(
-                f"Truth init conditions not found or incomplete in {init_dir}. "
-                f"Need params.nc and state_{true_sim_id}.nc"
-            )
-        _, _, true_params, true_init_state = truth_data
-
-        # Load assim init (init_state_ensemble, init_params_ensemble) from assim-model dir
-        assim_data = load_init_conditions_for_esmda(
-            model_name=cfg.assim_model.name,
-            init_conditions_dir=cfg.esmda.init_conditions_dir,
-            ensemble_size=ensemble_size,
-            true_sim_id=true_sim_id,
-            init_subdir=cfg.assim_model.init_subdir,
-        )
-        if assim_data is None:
-            init_dir = (
-                pathlib.Path(cfg.esmda.init_conditions_dir)
-                / cfg.assim_model.init_subdir
-            )
-            raise FileNotFoundError(
-                f"Assim init conditions not found or incomplete in {init_dir}. "
-                f"Need params.nc and state_0.nc .. state_{ensemble_size - 1}.nc"
-            )
-        init_state_ensemble, init_params_ensemble, _, _ = assim_data
-    else:
-        true_params = create_true_params(cfg.truth_model.name, cfg.params.true)
-        init_params_ensemble = None
-        init_state_ensemble = None
-        true_init_state = None
+    true_params = create_true_params(cfg.truth_model.name, cfg.params.true)
 
     truth_model_name = cfg.truth_model.name
     truth_model = instantiate(cfg.truth_model.forward_model)
     instantiate(cfg.truth_model.prepare, forward_model=truth_model)
 
     clean_outputs(model_name=truth_model_name, forward_model=truth_model)
-    if use_init_conditions:
-        true_state = truth_model(params=true_params, state=true_init_state)
-    else:
-        true_state = truth_model(params=true_params)
+    true_state = truth_model(params=true_params)
     if true_state is None:
         raise RuntimeError("Expected in-memory truth state.")
 
@@ -113,28 +61,26 @@ def run(cfg: DictConfig) -> None:
     )
     instantiate(cfg.assim_model.prepare, forward_model=assim_model)
     clean_outputs(cfg.assim_model.name, assim_model)
-    if use_init_conditions and cfg.assim_model.name == "pylbm":
-        clean_restarts(cfg.assim_model.name, assim_model)
 
-    if not use_init_conditions:
-        assim_model.set_results_dir(None)
-        assim_ref_state = assim_model(
-            params=create_true_params(cfg.assim_model.name, cfg.params.true)
-        )
-        assim_model.set_results_dir(assim_results_dir)
-        clean_outputs(cfg.assim_model.name, assim_model)
-        if assim_ref_state is None:
-            raise RuntimeError("Expected in-memory assimilation reference state.")
-        init_state_ensemble = create_initial_state_ensemble(
-            assim_ref_state,
-            cfg.ensemble.ensemble_size,
-        )
-        init_params_ensemble = create_parameter_ensemble(
-            model_name=cfg.assim_model.name,
-            prior_cfg=cfg.params.prior,
-            ensemble_size=cfg.ensemble.ensemble_size,
-            seed=cfg.esmda.seed,
-        )
+    # Spin up the assim model once to seed the initial state ensemble.
+    assim_model.set_results_dir(None)
+    assim_ref_state = assim_model(
+        params=create_true_params(cfg.assim_model.name, cfg.params.true)
+    )
+    assim_model.set_results_dir(assim_results_dir)
+    clean_outputs(cfg.assim_model.name, assim_model)
+    if assim_ref_state is None:
+        raise RuntimeError("Expected in-memory assimilation reference state.")
+    init_state_ensemble = create_initial_state_ensemble(
+        assim_ref_state,
+        cfg.ensemble.ensemble_size,
+    )
+    init_params_ensemble = create_parameter_ensemble(
+        model_name=cfg.assim_model.name,
+        prior_cfg=cfg.params.prior,
+        ensemble_size=cfg.ensemble.ensemble_size,
+        seed=cfg.esmda.seed,
+    )
 
     ensemble_model = instantiate(
         cfg.assim_model.ensemble_model,

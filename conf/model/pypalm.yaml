@@ -1,6 +1,5 @@
 name: pypalm
 solver_name: palm
-init_subdir: palm
 compile: false
 
 forward_model:
