@@ -12,6 +12,7 @@ dependencies = [
   "jax>=0.7.0,<0.8.0",
   "tqdm>=4.67.1,<5",
   "vape4d>=0.2.0,<0.3.0",
+  "hydra-core>=1.3,<2",
 ]
 name = "pyurbanair"
 requires-python = ">= 3.12,<3.13"
@@ -46,6 +47,7 @@ trimesh = ">=4.10.1,<5"
 rtree = ">=1.4.1,<2"
 networkx = ">=3.6.1,<4"
 scipy = ">=1.16.3,<2"
+hydra-core = ">=1.3,<2"
 
 [tool.pixi.feature.udales.dependencies]
 cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
@@ -175,9 +177,25 @@ curl = ">=8.0.0,<9"
 [tool.pixi.feature.cuda.activation]
 scripts = ["activation_scripts/cuda_activation.sh"]
 
+[tool.pixi.feature.cuda.tasks]
+install-nvhpc = { cmd = "bash activation_scripts/install_nvhpc.sh", description = "One-time download + install of the NVIDIA HPC SDK (nvfortran, ~16 GB) into the cuda env. Required before GPU pylbm/uDALES builds." }
+
+# CPU-only environments: silence JAX's CUDA-discovery clutter.
+#   PYTHONNOUSERSITE stops an incompatible jax_cuda12_plugin in the user's
+#     ~/.local site-packages from leaking into the env (the source of the
+#     "plugin ... not compatible" RuntimeWarning and the cuDNN traceback).
+#   JAX_PLATFORMS=cpu suppresses the residual "NVIDIA GPU may be present,
+#     falling back to cpu" warning.
+# Both export to subprocesses, so parallel forward-model workers stay quiet
+# too. Kept out of the shared `dev` feature so the GPU-capable `cuda` and
+# `delftblue` environments are not forced onto CPU.
+[tool.pixi.feature.cpu.activation.env]
+PYTHONNOUSERSITE = "1"
+JAX_PLATFORMS = "cpu"
+
 
 [tool.pixi.environments]
-default = { features = ["py312"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "benchmark_geometry"] }
+default = { features = ["py312", "cpu"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "benchmark_geometry", "cpu"] }
 delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm", "palm"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "cuda"] }

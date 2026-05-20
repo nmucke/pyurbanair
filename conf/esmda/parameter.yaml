@@ -1,0 +1,11 @@
+kind: parameter
+num_steps: 2
+alpha: ${.num_steps}
+num_assimilation_windows: 5
+seed: 42
+obs_error_std: 0.25
+
+smoother:
+  _target_: data_assimilation.smoothing.esmda.ParameterESMDA
+  num_steps: ${..num_steps}
+  alpha: ${..alpha}

@@ -1,17 +1,28 @@
-import argparse
 import csv
 import pathlib
 import sys
 import time
 
+import hydra
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-from data_assimilation.smoothing.esmda import TimeVaryingParameterESMDA
+from hydra.utils import instantiate
+from omegaconf import DictConfig
 from pyurbanair.plotting import (
     plot_state_init_and_terminal,
     plot_true_vs_estimated_state,
+)
+from pyurbanair.config.hydra_helpers import (
+    configure_failure_policy,
+    create_C_D,
+    create_observation_operator,
+    create_observation_points,
+    create_time_varying_true_params,
+    make_rng_key,
+    make_time_coords,
+    resolve_output_dir,
 )
 from pyurbanair.utils.animation_utils import _visualize_state_history
 from pyurbanair.utils.da_metrics import (
@@ -21,13 +32,10 @@ from pyurbanair.utils.da_metrics import (
     per_knot_spread,
     summary_scalars,
 )
-from pyurbanair.parameter_time_series import build_parameter_time_series
 from pyurbanair.utils.run_utils import get_ensemble_mean_field
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-
-from scripts import config
 
 
 def _plot_time_varying_params(
@@ -98,7 +106,10 @@ def _compute_time_varying_metrics(
     for k in range(n_steps):
         for name in param_names:
             ens = np.asarray(
-                params_history[name].isel(esmda_step=k).transpose("ensemble", "time").values
+                params_history[name]
+                .isel(esmda_step=k)
+                .transpose("ensemble", "time")
+                .values
             )
             truth = np.asarray(true_params[name].values)
             err = per_knot_error(ens, truth)
@@ -162,15 +173,16 @@ def _plot_time_varying_metrics(
     n_params = len(param_names)
     n_steps = int(params_history.sizes["esmda_step"])
     metric_titles = ["|mean - truth|", "ensemble spread", "CRPS", "in 90% band"]
-    fig, axes = plt.subplots(
-        n_params, 4, figsize=(16, 3.5 * n_params), squeeze=False
-    )
+    fig, axes = plt.subplots(n_params, 4, figsize=(16, 3.5 * n_params), squeeze=False)
     cmap = plt.get_cmap("viridis")
     for row_idx, name in enumerate(param_names):
         truth = np.asarray(true_params[name].values)
         for k in range(n_steps):
             ens = np.asarray(
-                params_history[name].isel(esmda_step=k).transpose("ensemble", "time").values
+                params_history[name]
+                .isel(esmda_step=k)
+                .transpose("ensemble", "time")
+                .values
             )
             err = per_knot_error(ens, truth)
             spr = per_knot_spread(ens)
@@ -198,134 +210,61 @@ def _plot_time_varying_metrics(
     print(f"Saved time-varying metrics plot to {output_path}")
 
 
-def _apply_config_overrides(args: argparse.Namespace) -> None:
-    """Apply CLI overrides to the imported ``config`` module in place.
+def run(cfg: DictConfig) -> None:
+    num_time_points = int(cfg.time_varying.num_time_points)
+    sim_time = cfg.time.simulation_time
+    time_coords = make_time_coords(sim_time, num_time_points)
 
-    Must run before any forward-model construction so downstream callers
-    see the override.
-    """
-    if args.esmda_num_steps is not None:
-        config.ESMDA["num_steps"] = int(args.esmda_num_steps)
-    if args.obs_error_std is not None:
-        config.ESMDA["obs_error_std"] = float(args.obs_error_std)
-    if args.truth_corr_length is not None:
-        config.TIME_VARYING_PARAMS["truth_correlation_length"] = float(
-            args.truth_corr_length
-        )
-    if args.prior_corr_length is not None:
-        config.TIME_VARYING_PARAMS["prior_correlation_length"] = float(
-            args.prior_corr_length
-        )
-    if args.obs_interval is not None:
-        config.OBS["interval_size"] = int(args.obs_interval)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--truth-model", choices=["pylbm", "pyudales", "pypalm"], default="pylbm")
-    parser.add_argument("--assim-model", choices=["pylbm", "pyudales", "pypalm"], default="pylbm")
-    parser.add_argument("--skip-viz", action="store_true")
-    parser.add_argument(
-        "--results-dir",
-        type=pathlib.Path,
-        default=None,
-        help="Override results directory for assimilation model outputs.",
-    )
-    parser.add_argument(
-        "--num-par-time-points",
-        type=int,
-        default=None,
-        help="Number of discrete time points for time-varying parameters. "
-        "Defaults to config.TIME_VARYING_PARAMS['num_time_points'].",
-    )
-    parser.add_argument(
-        "--esmda-num-steps",
-        type=int,
-        default=None,
-        help="Override config.ESMDA['num_steps'] for sweeps.",
-    )
-    parser.add_argument(
-        "--obs-error-std",
-        type=float,
-        default=None,
-        help="Override config.ESMDA['obs_error_std'] for sweeps.",
-    )
-    parser.add_argument(
-        "--truth-corr-length",
-        type=float,
-        default=None,
-        help="Override config.TIME_VARYING_PARAMS['truth_correlation_length'].",
-    )
-    parser.add_argument(
-        "--prior-corr-length",
-        type=float,
-        default=None,
-        help="Override config.TIME_VARYING_PARAMS['prior_correlation_length'].",
-    )
-    parser.add_argument(
-        "--obs-interval",
-        type=int,
-        default=None,
-        help="Override config.OBS['interval_size'] for sweeps.",
-    )
-    args = parser.parse_args()
-    _apply_config_overrides(args)
-
-    num_time_points = (
-        args.num_par_time_points
-        if args.num_par_time_points is not None
-        else config.TIME_VARYING_PARAMS["num_time_points"]
-    )
-    sim_time = config.TIME["simulation_time"]
-    time_coords = jnp.linspace(0, sim_time, num_time_points)
-
-    truth_model = config.create_forward_model(args.truth_model)
-    config.prepare_forward_model(args.truth_model, truth_model)
-    true_params = config.create_time_varying_true_params(
-        args.truth_model, num_time_points
+    truth_model = instantiate(cfg.truth_model.forward_model)
+    instantiate(cfg.truth_model.prepare, forward_model=truth_model)
+    true_params = create_time_varying_true_params(
+        model_name=cfg.truth_model.name,
+        tv_cfg=cfg.time_varying,
+        true_cfg=cfg.params.true,
+        external_cfg=cfg.params.external,
+        simulation_time=sim_time,
+        num_time_points=num_time_points,
+        seed=cfg.esmda.seed,
     )
     true_state = truth_model(params=true_params)
     if true_state is None:
         raise RuntimeError("Expected in-memory truth state.")
 
-    truth_obs_op = config.create_observation_operator(args.truth_model)
+    truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     true_obs = jnp.asarray(truth_obs_op(true_state))
 
-    C_D = config.create_C_D(true_obs.shape[0])
-    rng_key = jax.random.PRNGKey(config.ESMDA["seed"])
+    C_D = create_C_D(true_obs.shape[0], cfg.esmda.obs_error_std)
+    rng_key = make_rng_key(cfg.esmda.seed)
     rng_key, subkey = jax.random.split(rng_key)
     true_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
-    assim_results_dir = (
-        pathlib.Path(args.results_dir) if args.results_dir is not None else None
-    )
-    assim_model = config.create_forward_model(
-        args.assim_model,
+    out_dir = resolve_output_dir(cfg, "time_varying_parameter_esmda")
+    assim_results_dir = out_dir / "assim_states"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    assim_results_dir.mkdir(parents=True, exist_ok=True)
+    assim_model = instantiate(
+        cfg.assim_model.forward_model,
         results_dir=assim_results_dir,
     )
-    config.prepare_forward_model(args.assim_model, assim_model)
+    instantiate(cfg.assim_model.prepare, forward_model=assim_model)
 
-    ensemble_model = config.create_ensemble_forward_model(args.assim_model, assim_model)
-    assim_obs_op = config.create_observation_operator(args.assim_model)
-
-    method = config.TIME_VARYING_PARAMS["method"]
-    ts_model = build_parameter_time_series(
-        method=method,
-        external_priors=config.EXTERNAL_PRIORS,
-        ensemble_size=int(config.ENSEMBLE["ensemble_size"]),
-        method_kwargs=config.TIME_VARYING_PARAMS["method_kwargs"][method],
+    ensemble_model = instantiate(
+        cfg.assim_model.ensemble_model,
+        forward_model=assim_model,
     )
+    configure_failure_policy(ensemble_model, cfg.ensemble.failure)
+    assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
+
+    ts_model = instantiate(cfg.time_varying.prior_model)
     rng_key, prior_key = jax.random.split(rng_key)
     params_ensemble = ts_model.sample_prior(time_coords, prior_key)
 
-    esmda = TimeVaryingParameterESMDA(
+    esmda = instantiate(
+        cfg.esmda.smoother,
         observation_operator=assim_obs_op,
         forward_model=ensemble_model,
         C_D=C_D,
-        num_time_points=num_time_points,
         time_coords=time_coords,
-        num_steps=config.ESMDA["num_steps"],
-        alpha=config.ESMDA["num_steps"],
         rng_key=rng_key,
     )
 
@@ -341,12 +280,10 @@ def main() -> None:
     ensemble_mean_field, _ = get_ensemble_mean_field(
         output=output,
         esmda=esmda,
-        num_esmda_steps=int(config.ESMDA["num_steps"]),
-        ensemble_size=int(config.ENSEMBLE["ensemble_size"]),
+        num_esmda_steps=int(cfg.esmda.num_steps),
+        ensemble_size=int(cfg.ensemble.ensemble_size),
     )
 
-    out_dir = config.BASE_RESULTS_DIR / "time_varying_parameter_esmda"
-    out_dir.mkdir(parents=True, exist_ok=True)
     if isinstance(output, tuple):
         params_history, state_history = output
         params_history.to_netcdf(out_dir / "params_history.nc")
@@ -365,8 +302,8 @@ def main() -> None:
     _write_metrics_csv(summary_rows, out_dir / "summary_metrics.csv")
     _print_summary(summary_rows)
 
-    if not args.skip_viz:
-        obs_x, obs_y, _ = config.create_observation_points()
+    if not cfg.run.skip_viz:
+        obs_x, obs_y, _ = create_observation_points(cfg.obs)
         plot_true_vs_estimated_state(
             true_state=true_state,
             estimated_state=ensemble_mean_field,
@@ -407,6 +344,11 @@ def main() -> None:
         )
 
     print(f"Saved outputs in {pathlib.Path(out_dir)}")
+
+
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

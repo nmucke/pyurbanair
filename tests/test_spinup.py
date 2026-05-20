@@ -1,55 +1,40 @@
-import pathlib
-import sys
-
 import pytest
-
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-import tests.config as tests_config
-
-sys.modules["scripts.config"] = tests_config
-
-from pylbm.forward_model import ForwardModel as LBMForwardModel
-from pyudales.forward_model import ForwardModel as UDALESForwardModel
+from hydra.utils import instantiate
 from pyudales.utils.namoptions_utils import NamoptionsFile
-
-from pyurbanair.utils.config_utils import (
-    clean_forward_model_outputs,
-    create_forward_model,
+from pyurbanair.config.hydra_helpers import (
+    clean_outputs,
     create_true_params,
-    model_args,
-    prepare_forward_model,
 )
-
-import tests.config as config
 
 
 @pytest.mark.parametrize("model", ["pylbm", "pyudales"])
-def test_spinup_trims_output(model: str) -> None:
+def test_spinup_trims_output(model: str, compose_test_cfg) -> None:
     """Verify spinup extends the run but trims output to simulation_time."""
     spinup_time = 2.0
-    expected_steps = round(
-        config.TIME["simulation_time"] / config.TIME["output_frequency"]
-    )
+
+    overrides = [f"model={model}"]
+    if model == "pylbm":
+        overrides.append("model.forward_model.cuda=false")
+
+    cfg = compose_test_cfg(overrides)
+    expected_steps = round(cfg.time.simulation_time / cfg.time.output_frequency)
+    true_params = create_true_params(cfg.model.name, cfg.params.true)
 
     # --- Run without spinup ---
-    fm = create_forward_model(model)
-    prepare_forward_model(model, fm)
-    clean_forward_model_outputs(model, fm)
-    state_no_spinup = fm(params=create_true_params(model))
+    fm = instantiate(cfg.model.forward_model)
+    instantiate(cfg.model.prepare, forward_model=fm)
+    clean_outputs(cfg.model.name, fm)
+    state_no_spinup = fm(params=true_params)
     assert state_no_spinup is not None
     assert state_no_spinup.sizes["time"] == expected_steps
 
     # --- Run with spinup ---
-    args = model_args(model)
-    args["spinup_time"] = spinup_time
-    if model == "pylbm":
-        fm_spinup = LBMForwardModel(**args)
-    else:
-        fm_spinup = UDALESForwardModel(**args)
-    prepare_forward_model(model, fm_spinup)
-    clean_forward_model_outputs(model, fm_spinup)
+    cfg_spinup = compose_test_cfg(
+        overrides + [f"time.spinup_time={spinup_time}"],
+    )
+    fm_spinup = instantiate(cfg_spinup.model.forward_model)
+    instantiate(cfg_spinup.model.prepare, forward_model=fm_spinup)
+    clean_outputs(cfg_spinup.model.name, fm_spinup)
 
     # Assert spinup was actually configured (not silently ignored)
     if model == "pylbm":
@@ -60,9 +45,9 @@ def test_spinup_trims_output(model: str) -> None:
             / f"namoptions.{fm_spinup.dirs.experiment_name}"
         )
         runtime = float(namoptions.get_value("RUN", "runtime"))
-        assert runtime == config.TIME["simulation_time"] + spinup_time
+        assert runtime == cfg_spinup.time.simulation_time + spinup_time
 
-    state_spinup = fm_spinup(params=create_true_params(model))
+    state_spinup = fm_spinup(params=true_params)
     assert state_spinup is not None
     # Output is trimmed to simulation_time
     assert state_spinup.sizes["time"] == expected_steps

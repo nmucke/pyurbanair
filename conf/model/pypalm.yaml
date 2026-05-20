@@ -1,0 +1,35 @@
+name: pypalm
+solver_name: palm
+compile: false
+
+forward_model:
+  _target_: pypalm.forward_model.ForwardModel
+  _convert_: all
+  case_dir: examples/palm/experiments/xie_and_castro_palm
+  stl_path: examples/palm/experiments/xie_and_castro_palm/xie_castro_2008_STL.stl
+  experiment_name: urban_run
+  ncpu: 1
+  save_only_last_timestep: false
+  verbose: false
+  boundary_condition: inflow_outflow
+  nudging_config:
+    profile_config:
+      type: uniform
+  nx: ${domain.nx}
+  ny: ${domain.ny}
+  nz: ${domain.nz}
+  bounds: ${domain.bounds}
+  simulation_time: ${time.simulation_time}
+  output_frequency: ${time.output_frequency}
+  spinup_time: ${time.spinup_time}
+
+prepare:
+  _target_: pyurbanair.config.hydra_helpers.prepare_compile
+  compile: ${..compile}
+
+ensemble_model:
+  _target_: pypalm.ensemble_forward_model.EnsembleForwardModel
+  _convert_: all
+  ensemble_size: ${ensemble.ensemble_size}
+  num_parallel_processes: ${ensemble.num_parallel_processes}
+  num_cpus_per_process: ${ensemble.num_cpus_per_process}

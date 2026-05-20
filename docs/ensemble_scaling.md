@@ -15,11 +15,11 @@ On the local 16-core / Ryzen 9 3950X / single-socket box:
 | PALM | 8 | 2.45× | DRAM bandwidth (cliff at 8) |
 | LBM | ≥ 16 (one per physical core) | ≥ 13.5× (≈ 7.5× at N=8) | none observed; compute-bound |
 
-`UDALES_ARGS["ncpu"] = 1` (was 4) and the global
-`ENSEMBLE["num_parallel_processes"] = 4` are committed defaults
-optimized for uDALES. PALM and LBM run sub-optimally with that global
-default — they want more workers. See **Open questions / next steps**
-for the per-model-ENSEMBLE proposal.
+`conf/model/pyudales.yaml` pins `ncpu: 1` (was 4) and
+`conf/ensemble/default.yaml` pins `num_parallel_processes: 4` (was 8).
+These defaults are uDALES-optimized; PALM and LBM run sub-optimally
+with the global default — they want more workers. See **Open questions
+/ next steps** for the per-model-ensemble proposal.
 
 CPU pinning is implemented and verified to put workers on distinct
 physical cores spread across CCXs, but doesn't move the needle for
@@ -38,7 +38,7 @@ with `PYURBANAIR_DISABLE_CPU_PINNING=1`.
 | `scripts/benchmark_ensemble_scaling.py` | **new** — uDALES benchmark. Sweeps `(ncpu, num_parallel_processes)`, captures per-stage timings (cp / mpiexec / gather), writes CSV. |
 | `scripts/benchmark_palm_ensemble_scaling.py` | **new** — PALM benchmark. Monkey-patches `pypalm.ForwardModel.run_single` to record per-member timings into `BENCH_TIMING_DIR`; the patch propagates through fork to all workers. |
 | `scripts/benchmark_lbm_ensemble_scaling.py` | **new** — LBM benchmark. Same monkey-patch trick; compiles LBM once at startup so the boltzmann binary matches the benchmark domain. |
-| `scripts/config.py` | `UDALES_ARGS["ncpu"] = 1` (was 4); `ENSEMBLE["num_parallel_processes"] = 4` (was 8); comment explains the cap. |
+| `conf/model/pyudales.yaml` / `conf/ensemble/default.yaml` | `ncpu: 1` (was 4); `num_parallel_processes: 4` (was 8); comment explains the cap. |
 | `examples/udales/experiments/xie_and_castro/namoptions.300` | `nprocx=1, nprocy=1` so `validate_and_sync_ncpu` doesn't override `ncpu=1` back to 4. |
 
 ## Benchmark numbers
@@ -142,7 +142,7 @@ top of the sweep fills in exactly one batch. Ran with `--exclusive
 Key findings:
 
 - **Optimal at workers=32** for `ensemble_size=32` (one-batch fit is the
-  dominant factor). Production `ENSEMBLE["num_parallel_processes"]` on
+  dominant factor). Production `cfg.ensemble.num_parallel_processes` on
   DelftBlue should target `≥ ensemble_size` when feasible, capped by node
   cores.
 - **Way more memory headroom than Ryzen.** At workers=16 inflation is
@@ -174,7 +174,7 @@ run log contains `TOTAL CPU time`, and the bench driver
 concat failure. But the underlying issue corrupts per-member `fielddump`
 netcdf mid-close — different members end up with different `xt` sizes.
 ESMDA currently masks this via
-`ENSEMBLE["failure_policy"] = "resample_from_successes"`, which only
+`cfg.ensemble.failure.policy = "resample_from_successes"`, which only
 catches `CalledProcessError` and not corrupted-but-readable netcdf —
 some posterior members may silently be running on a truncated grid.
 Worth investigating: try `OMPI_MCA_coll_hcoll_enable=0`, disable
@@ -281,21 +281,25 @@ PYURBANAIR_DISABLE_CPU_PINNING=1 pixi run -e dev python scripts/benchmark_ensemb
 
 In rough priority order:
 
-1. **Per-model `ENSEMBLE` blocks in `scripts/config.py`**. The current
-   global `num_parallel_processes=4` is uDALES-optimal but leaves
-   ~17% on the table for PALM (8 → 4: 38s vs 32s) and ~2× on the
-   table for LBM (8 → 4: 60s vs 31s). Suggested shape:
+1. **Per-model `ensemble` defaults via Hydra**. The current
+   `conf/ensemble/default.yaml` pins `num_parallel_processes=4`, which
+   is uDALES-optimal but leaves ~17% on the table for PALM (8 → 4:
+   38s vs 32s) and ~2× on the table for LBM (8 → 4: 60s vs 31s). Two
+   reasonable shapes:
 
-   ```python
-   ENSEMBLE_UDALES = {**ENSEMBLE, "num_parallel_processes": 4}
-   ENSEMBLE_PALM   = {**ENSEMBLE, "num_parallel_processes": 8}
-   ENSEMBLE_LBM    = {**ENSEMBLE, "num_parallel_processes": 16}
+   ```yaml
+   # conf/ensemble/udales.yaml, conf/ensemble/palm.yaml, conf/ensemble/lbm.yaml
+   # each inherits conf/ensemble/default.yaml and overrides
+   # num_parallel_processes for its target backend.
    ```
 
-   plus a tweak in
-   `pyurbanair.utils.config_utils.create_ensemble_forward_model` to
-   pick the right block by `model_name`. Not implemented yet because
-   it's a config-shape decision worth aligning on first.
+   then either (a) select per-run on the CLI
+   (`ensemble=lbm model=pylbm`), or (b) have each `conf/model/*.yaml`
+   carry a default `ensemble@_global_` selection. Option (b) auto-picks
+   the right block from the model choice without an extra CLI flag but
+   couples the two groups; option (a) keeps the groups orthogonal but
+   relies on the caller to remember to pair them. Not implemented yet
+   because it's a config-shape decision worth aligning on first.
 
 2. **Re-run benchmarks on the production domains.** All three
    benchmarks use small domains tuned for fast iteration. Production

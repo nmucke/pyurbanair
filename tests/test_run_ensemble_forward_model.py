@@ -1,16 +1,7 @@
 import pathlib
 import shutil
-import sys
 
 import pytest
-
-# Patch scripts.config to use tests.config before any script imports
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-import tests.config as tests_config
-
-sys.modules["scripts.config"] = tests_config
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -27,31 +18,31 @@ sys.modules["scripts.config"] = tests_config
     ],
 )
 def test_run_ensemble_forward_model(
-    model: str, use_results_dir: bool, parallel_execution: bool, tmp_path: pathlib.Path
+    model: str,
+    use_results_dir: bool,
+    parallel_execution: bool,
+    tmp_path: pathlib.Path,
+    compose_test_cfg,
 ) -> None:
     """Test run_ensemble_forward_model.py with pylbm and pyudales backends.
 
     Covers both sequential (num_parallel_processes=1) and parallel
     (num_parallel_processes>1) execution paths.
     """
-    from scripts.run_ensemble_forward_model import main
+    from scripts.run_ensemble_forward_model import run
 
-    # Set argv for argparse
-    original_argv = sys.argv
-    argv = ["run_ensemble_forward_model", "--model", model, "--skip-viz"]
+    overrides = [
+        f"model={model}",
+        "run.skip_viz=true",
+        f"ensemble.num_parallel_processes={2 if parallel_execution else 1}",
+    ]
+    if model == "pylbm":
+        overrides.append("model.forward_model.cuda=false")
     if use_results_dir:
         results_dir = tmp_path / "results"
         results_dir.mkdir()
-        argv.extend(["--results-dir", str(results_dir)])
-    sys.argv = argv
+        overrides.append(f"run.results_dir={results_dir}")
 
-    original_num_parallel = tests_config.ENSEMBLE["num_parallel_processes"]
-    try:
-        shutil.rmtree(tmp_path)
+    shutil.rmtree(tmp_path)
 
-        tests_config.ENSEMBLE["num_parallel_processes"] = 2 if parallel_execution else 1
-        main()
-
-    finally:
-        sys.argv = original_argv
-        tests_config.ENSEMBLE["num_parallel_processes"] = original_num_parallel
+    run(compose_test_cfg(overrides))

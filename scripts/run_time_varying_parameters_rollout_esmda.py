@@ -4,38 +4,44 @@ Each assimilation window uses :class:`TimeVaryingParameterESMDA` to
 estimate time-varying inflow parameters.  Between windows the next
 window's prior parameter ensemble is produced by a
 :class:`pyurbanair.parameter_time_series.ParameterTimeSeries` instance
-selected via ``config.TIME_VARYING_PARAMS["method"]``: that object both
-draws the initial-window prior and propagates the posterior into the
-next window's prior.
+selected via the Hydra ``time_varying.method`` config: that object both
+draws the initial-window prior and propagates the posterior into the next
+window's prior.
 
 Window 0 starts cold (``state=None``) with spin-up enabled.  Subsequent
 windows warm-start from the previous window's final forecast state, with
 spin-up disabled.
 """
 
-import argparse
 import pathlib
 import sys
+from typing import Any
 
+import hydra
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray
-from data_assimilation.smoothing.esmda import TimeVaryingParameterESMDA
+from hydra.utils import instantiate
+from omegaconf import DictConfig
 from tqdm import tqdm
 
-from pyurbanair.parameter_time_series import (
-    ParameterTimeSeries,
-    build_parameter_time_series,
-)
+from pyurbanair.parameter_time_series import ParameterTimeSeries
 from pyurbanair.plotting import plot_state_init_and_terminal
+from pyurbanair.config.hydra_helpers import (
+    build_truth_ts_model,
+    configure_failure_policy,
+    create_C_D,
+    create_observation_operator,
+    create_observation_points,
+    make_rng_key,
+    resolve_output_dir,
+)
 from pyurbanair.utils.animation_utils import animate_rollout_state
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-
-from scripts import config
 
 # ---------------------------------------------------------------------------
 # Truth generation
@@ -190,69 +196,20 @@ def _plot_time_varying_params_rollout(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Rollout ESMDA with time-varying parameters and GP extrapolation."
-    )
-    parser.add_argument("--truth-model", choices=["pylbm", "pyudales", "pypalm"], default="pylbm")
-    parser.add_argument("--assim-model", choices=["pylbm", "pyudales", "pypalm"], default="pylbm")
-    parser.add_argument(
-        "--skip-viz",
-        action="store_true",
-        help="Skip plotting outputs.",
-    )
-    parser.add_argument(
-        "--num-par-time-points",
-        type=int,
-        default=None,
-        help="Number of discrete time points per window for time-varying parameters. "
-        "Defaults to config.TIME_VARYING_PARAMS['num_time_points'].",
-    )
-    parser.add_argument(
-        "--results-dir",
-        type=pathlib.Path,
-        default=None,
-        help="Override results directory for assimilation model outputs.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=pathlib.Path,
-        default=None,
-        help="Directory for final results (netcdf datasets) and plots. "
-        "Defaults to config.BASE_RESULTS_DIR / 'time_varying_rollout_esmda_<truth>_<assim>'.",
-    )
-    args = parser.parse_args()
-
-
+def run(cfg: DictConfig) -> None:
     # ---- Config -----------------------------------------------------------
-    num_windows = int(config.ESMDA["num_assimilation_windows"])
-    num_time_points = (
-        args.num_par_time_points
-        if args.num_par_time_points is not None
-        else config.TIME_VARYING_PARAMS["num_time_points"]
-    )
-    sim_time = config.TIME["simulation_time"]
-    method = config.TIME_VARYING_PARAMS["method"]
-    method_kwargs = config.TIME_VARYING_PARAMS["method_kwargs"][method]
-    truth_method = config.TIME_VARYING_PARAMS["truth_method"]
-    truth_method_kwargs = config.TIME_VARYING_PARAMS["truth_method_kwargs"][
-        truth_method
-    ]
+    num_windows = int(cfg.esmda.num_assimilation_windows)
+    num_time_points = int(cfg.time_varying.num_time_points)
+    sim_time = cfg.time.simulation_time
 
-    rng_key = jax.random.PRNGKey(config.ESMDA["seed"])
+    rng_key = make_rng_key(cfg.esmda.seed)
 
     # ---- Parameter time-series models ------------------------------------
-    ts_model = build_parameter_time_series(
-        method=method,
-        external_priors=config.EXTERNAL_PRIORS,
-        ensemble_size=int(config.ENSEMBLE["ensemble_size"]),
-        method_kwargs=method_kwargs,
-    )
-    truth_ts_model = build_parameter_time_series(
-        method=truth_method,
-        external_priors=config.EXTERNAL_PRIORS,
+    ts_model = instantiate(cfg.time_varying.prior_model)
+    truth_ts_model = build_truth_ts_model(
+        tv_cfg=cfg.time_varying,
+        external_cfg=cfg.params.external,
         ensemble_size=1,
-        method_kwargs=truth_method_kwargs,
     )
 
     # ---- Truth parameters across all windows ------------------------------
@@ -266,18 +223,19 @@ def main() -> None:
     )
 
     # ---- Forward models ---------------------------------------------------
-    truth_model = config.create_forward_model(args.truth_model)
-    config.prepare_forward_model(args.truth_model, truth_model)
-    truth_model = config.create_rollout_forward_model(args.truth_model, truth_model)
+    truth_model = instantiate(cfg.truth_model.forward_model)
+    instantiate(cfg.truth_model.prepare, forward_model=truth_model)
 
     assim_results_dir = (
-        pathlib.Path(args.results_dir) if args.results_dir is not None else None
+        pathlib.Path(cfg.run.results_dir)
+        if cfg.run.results_dir is not None
+        else None
     )
-    assim_model = config.create_forward_model(
-        args.assim_model, results_dir=assim_results_dir
+    assim_model = instantiate(
+        cfg.assim_model.forward_model,
+        results_dir=assim_results_dir,
     )
-    config.prepare_forward_model(args.assim_model, assim_model)
-    assim_model = config.create_rollout_forward_model(args.assim_model, assim_model)
+    instantiate(cfg.assim_model.prepare, forward_model=assim_model)
 
     # ---- Initial parameter ensemble for window 0 -------------------------
     initial_time_coords = jnp.linspace(0.0, sim_time, num_time_points)
@@ -285,9 +243,13 @@ def main() -> None:
     params_ensemble = ts_model.sample_prior(initial_time_coords, prior_key)
 
     # ---- Observation setup ------------------------------------------------
-    truth_obs_op = config.create_observation_operator(args.truth_model)
-    ensemble_model = config.create_ensemble_forward_model(args.assim_model, assim_model)
-    assim_obs_op = config.create_observation_operator(args.assim_model)
+    truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
+    ensemble_model = instantiate(
+        cfg.assim_model.ensemble_model,
+        forward_model=assim_model,
+    )
+    configure_failure_policy(ensemble_model, cfg.ensemble.failure)
+    assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
 
     # ---- Storage ----------------------------------------------------------
     # ``prior_params_list[w]`` is the prior ensemble for window ``w``:
@@ -302,7 +264,7 @@ def main() -> None:
     true_state: xarray.Dataset | None = None
     esmda_final_state: xarray.Dataset | None = None
     C_D: jnp.ndarray | None = None
-    esmda: TimeVaryingParameterESMDA | None = None
+    esmda: Any | None = None
 
     # ---- Window loop ------------------------------------------------------
     for w in tqdm(range(num_windows), desc="Assimilation windows"):
@@ -319,7 +281,7 @@ def main() -> None:
         # --- Noisy observations --------------------------------------------
         true_obs = jnp.asarray(truth_obs_op(true_state))
         if C_D is None:
-            C_D = config.create_C_D(true_obs.shape[0])
+            C_D = create_C_D(true_obs.shape[0], cfg.esmda.obs_error_std)
         rng_key, subkey = jax.random.split(rng_key)
         noisy_obs = true_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, true_obs.shape)
 
@@ -328,16 +290,13 @@ def main() -> None:
 
         # --- Construct ESMDA (local time coords are the same every window) -
         if esmda is None:
-            esmda = TimeVaryingParameterESMDA(
+            esmda = instantiate(
+                cfg.esmda.smoother,
                 observation_operator=assim_obs_op,
                 forward_model=ensemble_model,
                 C_D=C_D,
-                num_time_points=num_time_points,
                 time_coords=local_time_coords,
-                num_steps=config.ESMDA["num_steps"],
-                alpha=config.ESMDA["num_steps"],
                 rng_key=rng_key,
-                pin_initial_time_point=False,
             )
         # Pin t=0 from window 1 onward so the Kalman update preserves the
         # continuity that the GP extrapolation established at each window
@@ -400,11 +359,9 @@ def main() -> None:
             params_ensemble = extrapolated
 
     # ---- Save outputs -----------------------------------------------------
-    out_dir = (
-        args.output_dir
-        if args.output_dir is not None
-        else config.BASE_RESULTS_DIR
-        / f"time_varying_rollout_esmda_{args.truth_model}_{args.truth_model}"
+    out_dir = resolve_output_dir(
+        cfg,
+        f"time_varying_rollout_esmda_{cfg.truth_model.name}_{cfg.assim_model.name}",
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -441,14 +398,14 @@ def main() -> None:
     prior_params_all.to_netcdf(out_dir / "prior_params.nc")
 
     # ---- Plotting ---------------------------------------------------------
-    if not args.skip_viz:
+    if not cfg.run.skip_viz:
         _plot_time_varying_params_rollout(
             true_params_list=true_params_abs,
             posterior_params_list=posterior_params_abs,
             prior_params_list=prior_params_abs,
             output_path=out_dir / "time_varying_parameters_rollout.png",
         )
-        obs_x, obs_y, _ = config.create_observation_points()
+        obs_x, obs_y, _ = create_observation_points(cfg.obs)
         esmda_mean_all = (
             esmda_state_all.mean(dim="ensemble")
             if "ensemble" in esmda_state_all.dims
@@ -470,6 +427,15 @@ def main() -> None:
         )
 
     print(f"Saved outputs in {pathlib.Path(out_dir)}")
+
+
+@hydra.main(
+    version_base=None,
+    config_path="../conf",
+    config_name="time_varying_rollout_esmda",
+)
+def main(cfg: DictConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

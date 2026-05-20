@@ -1,0 +1,52 @@
+# @package _global_
+defaults:
+  - _self_
+
+# Keep presets as explicit root-level overlays. Hydra 1.3 merges group
+# overrides from CLI-selected presets in surprising ways for nested mappings.
+domain:
+  nx: 40
+  ny: 40
+  nz: 4
+  bounds:
+    - [0.0, 40.0]
+    - [0.0, 40.0]
+    - [0.0, 10.0]
+
+time:
+  simulation_time: 30.0
+  output_frequency: 1.0
+  spinup_time: 5.0
+
+ensemble:
+  ensemble_size: 8
+  num_parallel_processes: 4
+  num_cpus_per_process: 1
+  failure:
+    policy: resample_from_successes
+    jitter_scale: 0.05
+    seed: 0
+
+obs:
+  mode: points
+  x_points: [10.0, 20.0, 30.0, 38.0, 10.0]
+  y_points: [20.0, 25.0, 10.0, 30.0, 2.0]
+  z_points: [1.0, 1.0, 1.0, 1.0, 1.0]
+  states: [u, v, w]
+  temporal_mode: intervals
+  interval_size: 3
+  aggregation_mode: mean
+
+params:
+  "true":
+    velocity_magnitude: 3.0
+  prior:
+    velocity_magnitude:
+      mean: 3.0
+
+time_varying:
+  num_time_points: 4
+  method_kwargs:
+    correlation_length: 200.0
+  truth_method_kwargs:
+    correlation_length: 200.0

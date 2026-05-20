@@ -59,55 +59,81 @@ ulimit -s unlimited
 
 ### Configuration
 
-All simulation and assimilation settings are centralized in `scripts/config.py`. This includes:
+All simulation and assimilation settings live in `conf/` as composable
+[Hydra](https://hydra.cc/) config groups. The top-level `conf/config.yaml`
+selects one option per group; any field can be overridden from the
+command line. The groups are:
 
-- **Domain:** grid resolution (`nx`, `ny`, `nz`) and spatial bounds
-- **Time:** simulation duration and output frequency
-- **Model-specific arguments:** STL file path (LBM), case directory and Matlab path (uDALES)
-- **Ensemble:** ensemble size, number of parallel processes, CPUs per process
-- **Observations:** spatial extent, number of sensors, observed states, temporal aggregation mode
-- **ESMDA:** number of assimilation steps and windows, observation error standard deviation, random seed
-- **Parameters:** true parameter values and prior distributions for `inflow_angle`, `velocity_magnitude`, and `pressure_gradient_magnitude`
+- **`domain/`** — grid resolution (`nx`, `ny`, `nz`) and spatial bounds
+- **`time/`** — simulation duration, output frequency, spinup time
+- **`model/`** — per-backend forward-model and ensemble-model
+  `_target_` blocks (`pylbm`, `pyudales`, `pypalm`)
+- **`ensemble/`** — ensemble size, parallel processes, CPUs/process,
+  failure policy
+- **`obs/`** — observation operator schema (points/grid mode, sensor
+  locations, observed states, temporal aggregation)
+- **`esmda/`** — smoother variant (`parameter`, `state_and_parameter`,
+  `rollout`, `time_varying_parameter`, `time_varying_rollout`), number
+  of assimilation steps/windows, observation error std, random seed
+- **`params/{true,prior,external}/`** — true parameter values,
+  assimilation prior, external/expert prior
+- **`time_varying/`** — time-varying-parameter method
+  (`ar2_relaxation`, `ar1`, `gp_linear_trend`, `ornstein_uhlenbeck`)
+  and per-method kwargs for both the assimilation prior and the truth
+  trajectory
+- **`preset/`** — bundled overlays (`small`, `test`) for fast runs
 
 ### Forward simulations
 
 ```bash
 # Single forward simulation
-python scripts/run_forward_model.py --model pylbm
-python scripts/run_forward_model.py --model pyudales
+python scripts/run_forward_model.py model=pylbm
+python scripts/run_forward_model.py model=pyudales
 
 # Ensemble forward simulation
-python scripts/run_ensemble_forward_model.py --model pylbm
+python scripts/run_ensemble_forward_model.py model=pylbm
 
 # Multi-step rollout simulation
-python scripts/run_rollout_forward_model.py --model pylbm
+python scripts/run_rollout_forward_model.py model=pylbm run.num_steps=4
 
 # Ensemble rollout simulation
-python scripts/run_ensemble_rollout_forward_model.py --model pylbm
+python scripts/run_ensemble_rollout_forward_model.py model=pylbm
 ```
 
 ### Data assimilation
 
+The `esmda` group defaults to `parameter` in `conf/config.yaml`. Every
+other smoother variant needs an explicit `esmda=<name>` selector (the
+examples below do this for `state_and_parameter`, `rollout`, and
+`time_varying_parameter`).
+
 ```bash
 # Parameter estimation with ESMDA
-python scripts/run_parameter_esmda.py --truth-model pylbm --assim-model pylbm
+python scripts/run_parameter_esmda.py \
+  model@truth_model=pylbm model@assim_model=pylbm
 
 # Cross-model assimilation (LBM truth, uDALES assimilation)
-python scripts/run_parameter_esmda.py --truth-model pylbm --assim-model pyudales
+python scripts/run_parameter_esmda.py \
+  model@truth_model=pylbm model@assim_model=pyudales
 
 # Joint state and parameter estimation
-python scripts/run_state_and_parameter_esmda.py --truth-model pylbm --assim-model pylbm
+python scripts/run_state_and_parameter_esmda.py \
+  esmda=state_and_parameter \
+  model@truth_model=pylbm model@assim_model=pylbm
 
 # Rollout-based ESMDA with multiple assimilation windows
-python scripts/run_rollout_esmda.py --truth-model pylbm --assim-model pylbm
-```
+python scripts/run_rollout_esmda.py \
+  esmda=rollout \
+  model@truth_model=pylbm model@assim_model=pylbm
 
-### Initial conditions
+# Time-varying-parameter ESMDA
+python scripts/run_time_varying_parameter_esmda.py \
+  esmda=time_varying_parameter \
+  model@truth_model=pylbm model@assim_model=pylbm \
+  esmda.num_steps=4 obs.interval_size=2
 
-Pre-generate initial conditions for ESMDA experiments:
-
-```bash
-python scripts/simulate_init_conditions.py --model pylbm --num-simulations 500
+# Fast test preset (small domain, few steps, CPU-only LBM)
+python scripts/run_parameter_esmda.py preset=test
 ```
 
 All forward models generate a `.temp` folder where intermediate files are stored.
@@ -125,8 +151,9 @@ pyurbanair/
 │       ├── base_rollout_forward_model.py  # Multi-step rollout simulations
 │       ├── animation.py                   # Animation utilities
 │       ├── plotting.py                    # Plotting utilities
+│       ├── config/
+│       │   └── hydra_helpers.py           # Helpers consumed by Hydra configs (instantiate targets)
 │       └── utils/
-│           ├── config_utils.py            # Factory functions for models and operators
 │           ├── state_utils.py             # State manipulation utilities
 │           ├── run_utils.py               # Runtime utilities
 │           └── animation_utils.py         # Animation generation helpers
@@ -158,16 +185,23 @@ pyurbanair/
 │           ├── rollout_forward_model.py
 │           └── utils/
 │
+├── conf/                                  # Hydra config groups (see Configuration)
+│   ├── config.yaml                        # Top-level composition
+│   ├── domain/, time/, model/, ensemble/
+│   ├── obs/, esmda/, params/, time_varying/
+│   └── preset/                            # Bundled overlays (small, test)
+│
 ├── scripts/                               # Main execution scripts
-│   ├── config.py                          # Centralized configuration
 │   ├── run_forward_model.py               # Single forward simulation
 │   ├── run_ensemble_forward_model.py      # Ensemble forward simulation
 │   ├── run_rollout_forward_model.py       # Multi-step rollout
 │   ├── run_ensemble_rollout_forward_model.py  # Ensemble rollout
+│   ├── run_time_varying_forward_model.py  # Time-varying inflow
 │   ├── run_parameter_esmda.py             # Parameter estimation via ESMDA
 │   ├── run_state_and_parameter_esmda.py   # Joint state-parameter estimation
 │   ├── run_rollout_esmda.py               # Rollout-based ESMDA
-│   └── simulate_init_conditions.py        # Generate initial conditions
+│   ├── run_time_varying_parameter_esmda.py
+│   └── run_time_varying_parameters_rollout_esmda.py
 │
 ├── examples/                              # Example experiments
 │   ├── benchmark_geometry/                # Xie and Castro 2008 geometry tools
