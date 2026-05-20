@@ -10,3 +10,4 @@ smoother:
   num_steps: ${..num_steps}
   alpha: ${..alpha}
   num_time_points: ${time_varying.num_time_points}
+  localization: ${localization}

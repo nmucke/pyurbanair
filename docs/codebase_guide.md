@@ -46,6 +46,9 @@ conf/                              # Hydra config groups (see §5 Configuration 
 libs/data-assimilation/src/data_assimilation/
   observation_operator.py          # ObservationOperator + TemporalObservationOperator
   interpolation.py                 # Grid → sensor-point interpolation
+  localization/
+    base.py                        # BaseLocalization — inflation_factors + localized_update
+    correlation.py                 # CorrelationLocalization (adaptive correlation-based)
   smoothing/
     base.py                        # BaseSmoothing — _forecast_step, _observation_step
     esmda.py                       # ParameterESMDA, StateAndParameterESMDA, TimeVaryingParameterESMDA
@@ -183,6 +186,7 @@ Config groups:
 | `ensemble/` | ensemble execution | `ensemble_size`, `num_parallel_processes`, `failure.{policy, jitter_scale, seed}` |
 | `obs/` | observation operator | `mode: points|grid`, sensor coords, `states`, `temporal_mode`, `interval_size` |
 | `esmda/` | smoother variant | `kind`, `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `smoother._target_` |
+| `localization/` | ESMDA localization | `none` (global update) or `correlation` (`truncation_correlation`, `tapering_beta`, `max_inflation`) |
 | `params/{true,prior,external}/` | parameter values & priors | per-parameter `{mean, std, min?, max?}` |
 | `time_varying/` | time-varying-parameter method | `method`, `method_kwargs.*`, `truth_method`, `truth_method_kwargs.*`, `prior_model._target_` (via shared `_prior_model.yaml`) |
 | `preset/` | bundled overlays | `small`, `test` (smaller domain / fewer steps / CPU-only LBM) |
@@ -311,6 +315,32 @@ def test_something(compose_test_cfg) -> None:
 - Ensemble failures recorded by the underlying ensemble model are
   applied to the params ensemble between forecast and analysis via
   `apply_failure_substitutions_to_params`.
+
+### Localization (optional)
+- [localization/base.py](../libs/data-assimilation/src/data_assimilation/localization/base.py)
+  defines `BaseLocalization`. Subclasses implement one method,
+  `inflation_factors(aug_dev, pred_obs_dev) -> (N_aug, N_d)`, returning a
+  per-(state-row, observation) observation-error inflation factor (`1.0` =
+  keep, `>1` = taper, `inf` = exclude). The shared local-analysis math lives
+  in `localized_update`, which updates each augmented row with only its
+  relevant observations (Vossepoel et al. 2025, MWR-D-24-0269.1).
+- `CorrelationLocalization`
+  ([localization/correlation.py](../libs/data-assimilation/src/data_assimilation/localization/correlation.py))
+  selects observations by ensemble correlation: exclude `|ρ| < ρ_t`, taper the
+  rest by correlation distance. Needs no spatial coordinates, so it works for
+  both abstract parameter rows and gridded state rows.
+- `_BaseESMDA` takes an optional `localization=` arg. When `None` (the
+  default), `_compute_kalman_update` does the original global update unchanged;
+  when set, it delegates to `localization.localized_update(...)`. The hook is
+  in the shared base, so **all** variants (Parameter / TimeVaryingParameter /
+  StateAndParameter) get it. Selected via the `localization/` config group
+  (`localization=correlation`); the smoother YAML wires it through with
+  `localization: ${localization}`, so no script changes are needed.
+- **Cost note**: `localized_update` is `jax.vmap` over augmented rows
+  (`N_aug` small `N_d×N_d` solves). Cheap for parameter variants; for
+  `StateAndParameterESMDA` (large `N_aug`) it is `O(N_aug·N_d²)` memory — the
+  paper's grid-block transition-matrix reuse (§3b) is a documented future
+  optimization, not yet implemented.
 
 ### Multi-window rollout ESMDA
 See [scripts/run_rollout_esmda.py](../scripts/run_rollout_esmda.py): outer
@@ -452,6 +482,21 @@ ensemble_size, method_kwargs)`.
   model, draw truth obs, build assim ensemble + obs op + C_D,
   `instantiate(cfg.esmda.smoother, ...)` with the dynamic kwargs, call
   it, dump results.
+
+### Add a new localization strategy
+- Subclass `BaseLocalization` in
+  [localization/](../libs/data-assimilation/src/data_assimilation/localization/)
+  and implement `inflation_factors(aug_dev, pred_obs_dev)`. Return `(N_aug,
+  N_d)`: `1.0` keeps an observation for a row, `>1` tapers it, `jnp.inf`
+  excludes it. The shared `localized_update` handles the Kalman math — a
+  distance-based strategy (Gaspari–Cohn taper + radius cutoff) drops in by
+  implementing only this method.
+- Add a `conf/localization/<name>.yaml` mirroring
+  [conf/localization/correlation.yaml](../conf/localization/correlation.yaml):
+  `# @package _global_` then a `localization:` block with your `_target_`.
+  Every `conf/esmda/*.yaml` smoother already references `${localization}`, so
+  the new strategy is selectable via `localization=<name>` with no further
+  wiring.
 
 ### Add a new run script
 - Place under [scripts/](../scripts/), mirror an existing one. The

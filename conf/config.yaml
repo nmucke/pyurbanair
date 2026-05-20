@@ -5,6 +5,7 @@ defaults:
   - ensemble: default
   - obs: xie_castro_points
   - esmda: parameter
+  - localization: none
   - params/true: default
   - params/prior: default
   - params/external: default

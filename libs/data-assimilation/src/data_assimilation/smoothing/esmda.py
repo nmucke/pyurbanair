@@ -6,6 +6,7 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 import xarray
+from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import ObservationOperator
 from data_assimilation.smoothing.base import BaseSmoothing
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
@@ -22,6 +23,7 @@ class _BaseESMDA(BaseSmoothing):
         num_steps: int = 3,
         alpha: Optional[float] = None,
         rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
+        localization: Optional[BaseLocalization] = None,
     ) -> None:
         super().__init__(observation_operator, forward_model)
 
@@ -30,6 +32,10 @@ class _BaseESMDA(BaseSmoothing):
         self.C_D_sqrt = jnp.sqrt(self.C_D)
         self.rng_key = rng_key
         self.num_steps = num_steps
+        # Optional localization strategy. When None, the global (unlocalized)
+        # Kalman update is used. When set, each augmented-state row is updated
+        # via a local analysis driven by the strategy's inflation factors.
+        self.localization = localization
 
         if self.forward_model.save_on_disk:
             self.base_results_dir = self.forward_model.results_dir
@@ -76,6 +82,22 @@ class _BaseESMDA(BaseSmoothing):
 
         aug_dev = augmented - aug_mean
         pred_obs_dev = pred_obs - pred_obs_mean
+
+        # Localized (local-analysis) update: each augmented row is updated
+        # with only the observations the localization strategy deems relevant.
+        if self.localization is not None:
+            self.rng_key, subkey = jax.random.split(self.rng_key)
+            return self.localization.localized_update(
+                augmented=augmented,
+                aug_dev=aug_dev,
+                pred_obs=pred_obs,
+                pred_obs_dev=pred_obs_dev,
+                obs=obs,
+                C_D=self.C_D,
+                C_D_sqrt=self.C_D_sqrt,
+                alpha=self.alpha,
+                rng_key=subkey,
+            )
 
         C_MD = jnp.dot(aug_dev, pred_obs_dev.T) / (N_e - 1)
         C_DD = jnp.dot(pred_obs_dev, pred_obs_dev.T) / (N_e - 1)
@@ -131,9 +153,7 @@ class _BaseESMDA(BaseSmoothing):
             self._set_step_results_dir(i)
 
             state = self._forecast_step(state=initial_state, params=params)
-            params = self.forward_model.apply_failure_substitutions_to_params(
-                params
-            )
+            params = self.forward_model.apply_failure_substitutions_to_params(params)
 
             if return_state_history and not self.forward_model.save_on_disk:
                 state_history.append(state)
@@ -237,6 +257,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         alpha: Optional[float] = None,
         rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
         pin_initial_time_point: bool = False,
+        localization: Optional[BaseLocalization] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -245,6 +266,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
             num_steps=num_steps,
             alpha=alpha,
             rng_key=rng_key,
+            localization=localization,
         )
         self.num_time_points = num_time_points
         self.time_coords = time_coords

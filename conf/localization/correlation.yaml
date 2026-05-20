@@ -1,0 +1,14 @@
+# @package _global_
+# Adaptive correlation-based localization (Vossepoel et al. 2025).
+# Each augmented-state row is updated via a local analysis using only the
+# observations whose ensemble correlation to that row exceeds the threshold,
+# with error-variance tapering for observations near the truncation distance.
+localization:
+  _target_: data_assimilation.localization.correlation.CorrelationLocalization
+  # Correlation truncation threshold rho_t. null -> theoretical 3/sqrt(N_e).
+  # The paper found tuned values in [0.3, 0.4] work best.
+  truncation_correlation: null
+  # Fraction of the truncation distance left un-tapered (beta in Eq. 9).
+  tapering_beta: 0.5
+  # Maximum error-variance inflation E_max at the truncation distance.
+  max_inflation: 8.0

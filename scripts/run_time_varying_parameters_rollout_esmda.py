@@ -17,6 +17,8 @@ import pathlib
 import sys
 from typing import Any
 
+import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
+
 import hydra
 import jax
 import jax.numpy as jnp

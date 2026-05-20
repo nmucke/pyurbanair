@@ -9,3 +9,4 @@ smoother:
   _target_: data_assimilation.smoothing.esmda.StateAndParameterESMDA
   num_steps: ${..num_steps}
   alpha: ${..alpha}
+  localization: ${localization}

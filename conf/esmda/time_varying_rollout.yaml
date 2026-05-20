@@ -11,3 +11,4 @@ smoother:
   alpha: ${..alpha}
   num_time_points: ${time_varying.num_time_points}
   pin_initial_time_point: true
+  localization: ${localization}
