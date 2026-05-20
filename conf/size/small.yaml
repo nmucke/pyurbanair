@@ -1,0 +1,50 @@
+# @package _global_
+defaults:
+  - _self_
+
+# Sizing-only overlay (model-agnostic). See conf/size/tiny.yaml for rationale.
+#
+# small: quick end-to-end run on a modest domain.
+
+domain:
+  nx: 60
+  ny: 40
+  nz: 4
+  bounds:
+    - [-20.0, 40.0]
+    - [0.0, 40.0]
+    - [0.0, 10.0]
+
+time:
+  simulation_time: 180.0
+  output_frequency: 5.0
+  spinup_time: 5.0
+
+ensemble:
+  ensemble_size: 8
+  num_parallel_processes: 1
+  num_cpus_per_process: 1
+  failure:
+    policy: resample_from_successes
+    jitter_scale: 0.05
+    seed: 0
+
+obs:
+  # Explicit observation locations. Edit these lists to place sensors;
+  # all three must have the same length. Coordinates are in domain units
+  # and must fall inside `domain.bounds` ([0,40] x [0,40] x [0,10] here).
+  mode: points
+  x_points: [10.0, 20.0, 30.0, 38.0, 10.0]
+  y_points: [20.0, 25.0, 10.0, 30.0, 2.0]
+  z_points: [2.0, 2.0, 2.0, 2.0, 2.0]
+  states: [u, v, w]
+  temporal_mode: intervals
+  interval_size: 3
+  aggregation_mode: mean
+
+esmda:
+  num_steps: 1
+  num_assimilation_windows: 2
+
+time_varying:
+  num_time_points: 3

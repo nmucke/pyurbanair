@@ -13,6 +13,7 @@ defaults:
   - model@truth_model: pylbm
   - model@assim_model: pylbm
   - preset: null
+  - size: null
   - _self_
 
 hydra:

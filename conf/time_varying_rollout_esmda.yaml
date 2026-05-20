@@ -1,0 +1,15 @@
+# Primary config for scripts/run_time_varying_parameters_rollout_esmda.py.
+#
+# Extends the shared base config but selects the time-varying-rollout ESMDA
+# smoother, which is the only variant this script can use: it passes
+# ``time_coords`` and toggles ``pin_initial_time_point`` when instantiating
+# ``cfg.esmda.smoother`` (see the script's window loop). The base config's
+# default ``esmda: parameter`` targets ``ParameterESMDA``, which rejects those
+# kwargs, so without this override the script fails at instantiation.
+#
+# All other groups (domain, time, ensemble, obs, model, params, time_varying,
+# size, preset) remain selectable on the CLI exactly as with the base config.
+defaults:
+  - config
+  - override /esmda: time_varying_rollout
+  - _self_

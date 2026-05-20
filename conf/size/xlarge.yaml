@@ -1,0 +1,51 @@
+# @package _global_
+defaults:
+  - _self_
+
+# Sizing-only overlay (model-agnostic). See conf/size/tiny.yaml for rationale.
+#
+# xlarge: largest domain (Xie & Castro 100x80x16), longest horizon, most
+# windows. Expect long wall-clock times with the pyudales forward model.
+
+domain:
+  nx: 100
+  ny: 80
+  nz: 16
+  bounds:
+    - [-20.0, 80.0]
+    - [0.0, 80.0]
+    - [0.0, 40.0]
+
+time:
+  simulation_time: 180.0
+  output_frequency: 5.0
+  spinup_time: 10.0
+
+ensemble:
+  ensemble_size: 32
+  num_parallel_processes: 8
+  num_cpus_per_process: 1
+  failure:
+    policy: resample_from_successes
+    jitter_scale: 0.05
+    seed: 0
+
+obs:
+  # Explicit observation locations. Edit these lists to place sensors;
+  # all three must have the same length. Coordinates are in domain units
+  # and must fall inside `domain.bounds` ([-20,80] x [0,80] x [0,40] here).
+  mode: points
+  x_points: [0.0, 20.0, 40.0, 60.0, 30.0, 50.0]
+  y_points: [20.0, 40.0, 60.0, 30.0, 70.0, 10.0]
+  z_points: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+  states: [u, v, w]
+  temporal_mode: intervals
+  interval_size: 4
+  aggregation_mode: mean
+
+esmda:
+  num_steps: 4
+  num_assimilation_windows: 8
+
+time_varying:
+  num_time_points: 6

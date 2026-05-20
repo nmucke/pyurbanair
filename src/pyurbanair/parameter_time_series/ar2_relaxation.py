@@ -227,7 +227,7 @@ class AR2RelaxationModel(ParameterTimeSeries):
             )
             new_state[name] = (z_end, w_end)
 
-            ar2_part = mu_end# + std * z_traj  # (N_t, N_e)
+            ar2_part = mu_end + std * z_traj  # (N_t, N_e)
             ext_part = jnp.full_like(ar2_part, x_ext)
             arrays[name] = (
                 alpha[:, None] * ar2_part + (1.0 - alpha[:, None]) * (ext_part + std * z_traj)
