@@ -21,8 +21,56 @@ interface.
 
 ---
 
+## Quick start — the two central commands
+
+Run from the repo root. Use `-e dev` on CPU/macOS, `-e cuda` on a GPU box.
+
+**1. Generate a training corpus** (the CFD solver *is* the data generator):
+
+```bash
+pixi run -e dev python scripts/generate_neural_surrogate_data.py \
+  model=pylbm model.forward_model.cuda=false \
+  domain=xie_castro_60x40x16 \
+  time.simulation_time=300 time.output_frequency=5 time.spinup_time=30 \
+  ensemble.ensemble_size=8 ensemble.num_parallel_processes=4 \
+  +generate.n_trajectories=200 \
+  +generate.corpus_path=.temp/neural_surrogate/xie_castro
+```
+
+Add `params/external=time_varying time_varying=ar2_relaxation +generate.time_varying=true`
+for transient inflow (time-varying boundary conditions).
+
+**2. Run the training** (architecture is a config choice; UNet by default):
+
+```bash
+pixi run -e cuda python scripts/train_surrogate.py \
+  corpus_path=.temp/neural_surrogate/xie_castro \
+  run_id=lbm_xie_castro_unet3d_v1 \
+  history_len=3
+```
+
+Equivalent Pixi tasks:
+
+```bash
+pixi run -e dev  generate-surrogate-data model=pylbm model.forward_model.cuda=false \
+  domain=xie_castro_60x40x16 +generate.corpus_path=.temp/neural_surrogate/xie_castro \
+  +generate.n_trajectories=200
+pixi run -e cuda train-surrogate corpus_path=.temp/neural_surrogate/xie_castro \
+  run_id=lbm_xie_castro_unet3d_v1
+pixi run -e cuda train-surrogate-multi corpus_path=... run_id=...   # data-parallel multi-GPU
+```
+
+The trainer reads the grid, channels, param schema, and normalization from the
+corpus and builds the network to match — you never set runtime dims. The
+checkpoint is written to `models/neural_surrogates/<run_id>/`. See
+[§4 End-to-end workflow](#4-end-to-end-workflow) for the full pipeline
+(sizing → generate → train → GATE → inference → ESMDA) and all knobs.
+
+---
+
 ## Table of contents
 
+0. [Quick start — the two central commands](#quick-start--the-two-central-commands)
 1. [Core idea: the architecture interface](#1-core-idea-the-architecture-interface)
 2. [Library layout](#2-library-layout)
 3. [Installation & environments](#3-installation--environments)
