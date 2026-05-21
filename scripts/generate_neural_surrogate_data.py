@@ -35,6 +35,7 @@ def _generate_cfg(cfg: DictConfig) -> dict:
     defaults = {
         "corpus_path": ".temp/neural_surrogate/corpus",
         "n_trajectories": 64,
+        "time_varying": False,
         "include_pressure": False,
         "val_fraction": 0.1,
         "test_fraction": 0.1,
@@ -45,6 +46,25 @@ def _generate_cfg(cfg: DictConfig) -> dict:
     if gen is not None:
         defaults.update(OmegaConf.to_container(gen, resolve=True))  # type: ignore[arg-type]
     return defaults
+
+
+def _augment_constant_params(tv, schema_names, cfg, ensemble_size):
+    """Add schema params the time-series model doesn't sample as constants.
+
+    The external priors typically cover ``inflow_angle`` + ``velocity_magnitude``;
+    a uDALES corpus also needs ``pressure_gradient_magnitude``, so fill it from
+    ``params.true`` as a per-member constant the conditioning builder can read.
+    """
+    import numpy as _np
+
+    for name in schema_names:
+        if name in tv:
+            continue
+        value = float(cfg.params.true[name])
+        tv = tv.assign(
+            {name: ("ensemble", _np.full(ensemble_size, value, dtype=float))}
+        )
+    return tv
 
 
 def _assign_split(idx: int, n: int, val_frac: float, test_frac: float) -> str:
@@ -113,16 +133,50 @@ def run(cfg: DictConfig) -> pathlib.Path:
 
     n_traj = int(gen["n_trajectories"])
     ensemble_size = int(cfg.ensemble.ensemble_size)
+
+    # Optional time-varying parameters (§5): sample transient inflow series from
+    # the parameter_time_series machinery so the corpus teaches transient BCs.
+    # The external priors (params.external) may carry per-window mean/std
+    # *profiles* (lists), letting x_ext(t) / Σ_ext(t) vary over the window.
+    time_varying = bool(gen.get("time_varying", False))
+    ts_model = None
+    tv_time_coords = None
+    if time_varying:
+        import jax
+
+        from pyurbanair.config.hydra_helpers import make_time_coords
+        from pyurbanair.parameter_time_series import build_parameter_time_series
+
+        ts_model = build_parameter_time_series(
+            method=cfg.time_varying.method,
+            external_priors=OmegaConf.to_container(cfg.params.external, resolve=True),
+            ensemble_size=ensemble_size,
+            method_kwargs=OmegaConf.to_container(
+                cfg.time_varying.method_kwargs, resolve=True
+            ),
+        )
+        tv_time_coords = make_time_coords(
+            float(cfg.time.simulation_time), int(cfg.time_varying.num_time_points)
+        )
+
     traj_idx = 0
     round_seed = int(gen["seed"])
     while traj_idx < n_traj:
-        params_ensemble = create_parameter_ensemble(
-            model_name=model_name,
-            prior_cfg=cfg.params.prior,
-            ensemble_size=ensemble_size,
-            seed=round_seed,
-            param_names=param_schema.names,
-        )
+        if time_varying:
+            import jax
+
+            tv = ts_model.sample_prior(tv_time_coords, jax.random.PRNGKey(round_seed))
+            params_ensemble = _augment_constant_params(
+                tv, param_schema.names, cfg, ensemble_size
+            )
+        else:
+            params_ensemble = create_parameter_ensemble(
+                model_name=model_name,
+                prior_cfg=cfg.params.prior,
+                ensemble_size=ensemble_size,
+                seed=round_seed,
+                param_names=param_schema.names,
+            )
         round_seed += 1
 
         ensemble_model = instantiate(cfg.model.ensemble_model, forward_model=forward_model)

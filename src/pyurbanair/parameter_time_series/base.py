@@ -66,6 +66,49 @@ class ParameterTimeSeries(abc.ABC):
     def _ext(self, name: str) -> dict[str, float]:
         return self.external_priors[name]
 
+    def _resolve_profile(
+        self,
+        value: object,
+        time_coords: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Resolve an external-prior value to a per-time profile ``(n_t,)``.
+
+        A scalar broadcasts to a constant profile (the historical behavior);
+        a sequence is treated as control points spaced evenly over the window
+        and linearly interpolated onto ``time_coords`` — letting the external
+        mean/std *vary over the window* (``x_ext(t)`` / ``Σ_ext(t)``). The
+        models build a unit-variance anomaly and apply this envelope, so
+        ``mean(t) + std(t)·z(t)`` stays mathematically sound even though the
+        underlying AR/OU/GP process is stationary.
+        """
+        arr = jnp.asarray(value, dtype=float)
+        time_coords = jnp.asarray(time_coords)
+        if arr.ndim == 0:
+            return jnp.broadcast_to(arr, (time_coords.shape[0],))
+        ctrl_t = jnp.linspace(time_coords[0], time_coords[-1], arr.shape[0])
+        return jnp.interp(time_coords, ctrl_t, arr)
+
+    def _ext_profile(
+        self,
+        name: str,
+        time_coords: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Return ``(mean(t), std(t))`` profiles for an external parameter."""
+        spec = self._ext(name)
+        return (
+            self._resolve_profile(spec["mean"], time_coords),
+            self._resolve_profile(spec["std"], time_coords),
+        )
+
+    def _ext_scalar(self, name: str, key: str) -> float:
+        """Representative scalar for a (possibly time-varying) external value.
+
+        Between-window extrapolation models a single relaxation target /
+        stationary spread, so a time profile is reduced to its mean.
+        """
+        arr = jnp.asarray(self._ext(name)[key], dtype=float)
+        return float(arr.mean()) if arr.ndim else float(arr)
+
     def _apply_clips(self, name: str, values: jnp.ndarray) -> jnp.ndarray:
         spec = self.external_priors[name]
         lo = spec.get("min")

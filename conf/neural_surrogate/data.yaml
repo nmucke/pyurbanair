@@ -7,6 +7,13 @@ corpus_path: .temp/neural_surrogate/corpus
 # without one (e.g. uDALES, which uses case_dir).
 stl_path: null
 n_trajectories: 64
+
+# Time-varying parameters (§5): when true, sample transient inflow series from
+# the parameter_time_series model selected by `time_varying.method` (driven by
+# `params.external`) instead of scalar params, so the corpus teaches transient
+# boundary conditions. The external mean/std may be PROFILES (lists) to vary
+# x_ext(t) / Σ_ext(t) over the window — see conf/params/external/time_varying.yaml.
+time_varying: false
 dtype: float32                  # fp16 halves storage; pick deliberately (§5 sizing)
 include_pressure: false
 val_fraction: 0.1
