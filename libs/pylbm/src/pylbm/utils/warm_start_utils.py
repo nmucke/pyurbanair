@@ -11,10 +11,12 @@ from scipy.io import FortranFile
 from .dir_utils import DirectoryPaths
 from .infile_utils import Infile
 
+# Iteration field width is variable (6 digits historically, 9 digits since the
+# overflow fix). Match \d+ so both legacy and current restart names parse.
 RESTART_FILE_PATTERN = re.compile(
-    r"^(?P<prefix>restart|turbulence|theta|pottemp|tracer)_(?P<tile>\d{4})_(?P<iteration>\d{6})\.uf$"
+    r"^(?P<prefix>restart|turbulence|theta|pottemp|tracer)_(?P<tile>\d{4})_(?P<iteration>\d+)\.uf$"
 )
-MAIN_RESTART_PATTERN = re.compile(r"^restart_\d{4}_(?P<iteration>\d{6})\.uf$")
+MAIN_RESTART_PATTERN = re.compile(r"^restart_\d{4}_(?P<iteration>\d+)\.uf$")
 
 
 def _restart_dir(dirs: DirectoryPaths) -> pathlib.Path:
@@ -532,7 +534,7 @@ def _copy_auxiliary_restart_files(
         tile = match.group("tile")
         if prefix == "restart" or iteration != source_iteration:
             continue
-        target_name = f"{prefix}_{tile}_{target_iteration:06d}.uf"
+        target_name = f"{prefix}_{tile}_{target_iteration:09d}.uf"
         target_path = restart_dir / target_name
         target_path.write_bytes(path.read_bytes())
 
@@ -667,7 +669,7 @@ def write_restart_file_from_xarray(
     # Prefer template-based update to preserve consistent ghost/boundary data.
     template_f = None
     if latest_iteration is not None:
-        template_restart = restart_dir / f"restart_0000_{latest_iteration:06d}.uf"
+        template_restart = restart_dir / f"restart_0000_{latest_iteration:09d}.uf"
         template_f = _try_load_restart_distribution(
             restart_file=template_restart,
             nx=nx,
@@ -774,7 +776,7 @@ def write_restart_file_from_xarray(
         )
         feq = np.asfortranarray(f_new.astype(np.float32))
 
-    restart_file = restart_dir / f"restart_0000_{restart_iteration:06d}.uf"
+    restart_file = restart_dir / f"restart_0000_{restart_iteration:09d}.uf"
     with FortranFile(str(restart_file), "w") as f:
         f.write_record(
             np.int32(nx),

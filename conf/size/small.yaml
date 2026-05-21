@@ -16,7 +16,7 @@ domain:
     - [0.0, 10.0]
 
 time:
-  simulation_time: 180.0
+  simulation_time: 300.0
   output_frequency: 5.0
   spinup_time: 10.0
 
@@ -44,7 +44,7 @@ obs:
 
 esmda:
   num_steps: 4
-  num_assimilation_windows: 10
+  num_assimilation_windows: 5
 
 time_varying:
   num_time_points: 5

@@ -7,6 +7,10 @@ from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
+# Largest iteration representable in the LBM filename field (i9.9 in the Fortran
+# sources). Iterations above this overflow to '*' and break output collection.
+MAX_ITERATION = 999_999_999
+
 import numpy as np
 import xarray
 from pyurbanair.base_forward_model import BaseForwardModel
@@ -204,14 +208,27 @@ class ForwardModel(BaseForwardModel):
             self._nt0_override = None
         else:
             nt0 = 0
+        # LBM output/restart filenames encode the iteration in a fixed-width
+        # field (currently i9.9). Guard against silently overflowing it: an
+        # overflowed name (out_0000_F*********.nc) is dropped by the collector,
+        # yielding mismatched time dims across members and a concat AlignmentError.
+        nt1 = nt0 + total_timesteps
+        if nt1 > MAX_ITERATION:
+            raise ValueError(
+                f"LBM final timestep nt1={nt1} exceeds the maximum representable "
+                f"iteration {MAX_ITERATION} (filenames use a 9-digit field). "
+                "Reduce the run length or widen the i9.9 format in the LBM Fortran "
+                "sources (m_diag/m_saverestart/m_save_uvw/m_readrestart) and the "
+                "matching Python filename formats."
+            )
         self._set_infile_value("nt0", nt0)
-        self._set_infile_value("nt1", nt0 + total_timesteps)
+        self._set_infile_value("nt1", nt1)
         self._set_infile_value("iout", self.output_frequency_timesteps)
         # Disable the iprt2-based "every iteration output" trigger in m_diag.F90.
         # The default iprt2=60000 causes every iteration with it>=60000 to dump a
         # NetCDF file, which makes warm-start runs (where nt0 typically already
         # exceeds 60000) ~20x slower than cold starts.
-        self._set_infile_value("iprt1", f"0 {nt0 + total_timesteps + 1} 1")
+        self._set_infile_value("iprt1", f"0 {nt1 + 1} 1")
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         """Change results directory, updating both base and dirs dataclass."""
@@ -261,7 +278,7 @@ class ForwardModel(BaseForwardModel):
             return [path for _, path in output_files]
 
         # Fallback to expected final file
-        expected_file = self.dirs.output_dir / f"out_0000_F{nt1:06d}.nc"
+        expected_file = self.dirs.output_dir / f"out_0000_F{nt1:09d}.nc"
         if expected_file.exists():
             return [expected_file]
 
@@ -326,17 +343,23 @@ class ForwardModel(BaseForwardModel):
         # Set stack size limit to unlimited
         # shell_cmd = f"ulimit -s unlimited && {executable_path}"
         shell_cmd = f"{self.dirs.executable_path}"
-        _ = subprocess.run(
-            shell_cmd,
-            shell=True,
-            env=env,
-            stderr=self.stderr,
-            stdout=self.stdout,
-            text=True,
-        )
-
-        # Always return to original directory
-        os.chdir(original_cwd)
+        try:
+            # check=True so a non-zero LBM exit raises CalledProcessError, which
+            # the ensemble runner catches to resample the member from a survivor.
+            # Without it, a crashed member silently produces partial/no output and
+            # later breaks the cross-member concat with an AlignmentError.
+            _ = subprocess.run(
+                shell_cmd,
+                shell=True,
+                env=env,
+                stderr=self.stderr,
+                stdout=self.stdout,
+                text=True,
+                check=True,
+            )
+        finally:
+            # Always return to original directory, even if the run failed.
+            os.chdir(original_cwd)
 
     def _prepare_warmstart(self, state: xarray.Dataset) -> None:
         """Write a restart file from ``state`` and arm nt0 for the next run.
