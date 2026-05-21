@@ -25,11 +25,19 @@ inflow** + **transient time-series output** feeding multi-window ESMDA
 tuple; geometry generalization is out of scope (§14).
 
 Scope of the surrogate (identical contract to the Fortran backends):
-- **Inputs**: an initial state (`u,v,w[,pres]` on the solver grid, `time` length ≥1)
-  + scalar parameters (`inflow_angle`, `velocity_magnitude`, and for uDALES
-  `pressure_gradient_magnitude`).
+- **Inputs**: an initial state (`u,v,w[,pres]` on the solver grid) + scalar
+  parameters (`inflow_angle`, `velocity_magnitude`, and for uDALES-trained
+  checkpoints `pressure_gradient_magnitude`). The incoming `state` may be either a
+  time-indexed history (`time` length ≥1) or a single time-less warm-start frame,
+  because current rollout ESMDA passes `isel(time=-1)` frames between windows.
 - **Output**: a time-indexed `xarray.Dataset` with the same grid axes and variables
   as the source solver.
+
+Every checkpoint records the **source solver contract** (`source_solver_name` +
+`param_schema` + `state_var_names`) separately from the pyurbanair backend name
+`neural_surrogate`. Inference uses that schema to decide which params are required
+and which state variables are emitted. Do not key uDALES-only behavior off
+`model.name == "pyudales"` once the solver is represented by a surrogate.
 
 **New design goal: separate the framework from the architecture.** Everything that
 is pyurbanair-specific (the I/O contract, ensemble batching, geometry handling, data
@@ -135,11 +143,16 @@ Unchanged and architecture-independent. The existing parallel path
 CPU-bound Fortran subprocesses (forkserver + CPU pinning, DRAM-capped at ~4 workers,
 `docs/ensemble_scaling.md`). For a GPU NN that is wrong — N processes contend for one
 GPU. `neural_surrogates.EnsembleForwardModel` **overrides** `run_ensemble` to:
-- Stack per-member initial states and params into batched arrays.
+- Stream per-member initial states and params into batched arrays chunk by chunk.
 - Run the batched autoregressive `rollout` (§1.1) **in sub-batches sized to GPU
   memory** via a `vmap_chunk_size` (members per device pass); default = full
   ensemble, lower it when memory-bound. `ensemble × grid × (K fields or latents)` can
   exceed device memory.
+- For each chunk, load only those members' `state`/params via `get_member_state` /
+  `get_member_params`, move the chunk to device, run the rollout, and immediately
+  append to the in-memory result list or write per-member NetCDF files. Do **not** stack
+  the full ensemble in host RAM before chunking, because ESMDA may pass `state` as a
+  `Path` to on-disk per-member files.
 - Re-split into a `concat`-along-`ensemble` `xarray.Dataset`.
 - Keep `num_parallel_processes` only as an optional CPU-smoke fallback; default to
   in-process batching.
@@ -254,8 +267,11 @@ decoder UNet over the 3D grid. **Config-driven** from day one (per the chosen sc
 read from `conf/neural_surrogate/arch/unet3d.yaml` (§8.3) and snapshotted into the
 checkpoint manifest:
 - `base_channels`, `channel_multipliers` (depth/width per level), `num_levels`,
-  `num_res_blocks_per_level`, `norm` (`group`/`batch`/`none`) + `groups`, `activation`,
-  optional `attention_at_levels` (cheap toggle, off by default).
+  `num_res_blocks_per_level`, `norm` (`group`/`none`) + `groups`, `activation`,
+  optional `attention_at_levels` (cheap toggle, off by default). **P2 keeps
+  architectures deterministic and stateless**: no batch norm, dropout, or mutable layer
+  state unless the `SurrogateArchitecture` contract is explicitly extended with
+  mode/RNG/state plumbing.
 - **History**: `K`-frame input by channel-stacking (`init_carry` holds K fields; `step`
   concatenates `[K·C, S static, P broadcast-param]` → in-channels). `K=1` skips the
   stacking (Markov fast path, §1.1).
@@ -308,13 +324,17 @@ the checkpoint names):
 | `__init__` | Load checkpoint (weights + architecture name/config + normalization + grid/mask) via `utils/registry`. Store `simulation_time`, `output_frequency` → `num_outputs = round(simulation_time/output_frequency)`. `super().__init__(results_dir=...)`. **Lazy-init** the accelerator + architecture on first `run_single` so forkserver workers stay importable. |
 | `run_single(state, params, sim_name)` | (1) `params` → **per-step** conditioning sequence (`utils/params_io`, §1.5). (2) resolve initial field(s) (see **cold-start** below) → normalized history → `arch.init_carry(...)` (D4). (3) `rollout.rollout(arch, carry, future_params, static, num_outputs)` autoregressively (§1.1). (4) decode is inside `step`; denormalize, reapply the building mask, assemble an `xarray.Dataset` with `time` + source grid coords per the **time-axis contract** below. Return it. |
 | `_apply_inflow_settings(params)` | Build/store the per-step conditioning **sequence** on `self` (no files to edit). Sparse `time`-dim params interpolated to dense per-step grid (§1.5: linear; angle via sin/cos; spin-up plateau); scalars broadcast. |
-| `save_results` / `_clean_output` | `save_results = self._save_results` (NetCDF base helper). `_clean_output` = no-op. |
+| `save_results` / `_clean_output` | Implement a concrete `save_results(...)` method that delegates to `_save_results(...)` (even though `BaseForwardModel.__call__` currently calls `_save_results` directly, the abstract method should still be satisfied clearly). `_clean_output` = no-op. |
 
 Notes:
 - **Warm start / rollout**: the multi-window pattern feeds each window's final `state`
   into the next `run_single`; the surrogate consumes it as the new IC. No restart files.
   With the K-frame history, `state_io` seeds the buffer with up to the last `K` frames
   of an incoming `time>1` state so cross-window context is preserved.
+- **Time-less warm-start frames**: `state_io` accepts both a Dataset with `time` and a
+  single-frame Dataset without it, internally normalizing to `[T,C,Z,Y,X]` before
+  extracting the K-frame history. This is required for current rollout ESMDA, which
+  passes posterior states with `time` stripped.
 - **`get_states` / on-disk mode** work unchanged via the base class.
 
 **Cold-start initial condition (decision — §12).** A NN cannot spin up a physical field
@@ -346,10 +366,9 @@ base method's branching ([`run_ensemble`](../src/pyurbanair/base_ensemble_forwar
 - **All three save modes** — `save_on_disk` writes per-member `{sim_name}_{i}.nc` into
   `self.results_dir` (so ESMDA's `step_{i}/state_*.nc` re-open via `get_state`/
   `get_states` keeps working); `save_in_memory` returns the `concat`-along-`ensemble`
-  dataset.
-- **`state` may be a `pathlib.Path`** — load-and-stack via the existing
-  `get_member_state` (handles `Dataset` | `Path` | `None`) before forming the batched
-  array.
+  dataset. Chunking streams through members instead of preloading the full ensemble.
+- **`state` may be a `pathlib.Path`** — chunk-load via the existing `get_member_state`
+  (handles `Dataset` | `Path` | `None`) before forming each batched array.
 - **`rollout_step` increment** ([L461-464](../src/pyurbanair/base_ensemble_forward_model.py#L461))
   still advances per call.
 - **Failure policy** is largely moot (a NN forward pass doesn't raise
@@ -373,9 +392,10 @@ New script `scripts/generate_neural_surrogate_data.py` (`def run(cfg)` + thin
 4. Per trajectory store: `(u,v,w[,pres])` over `time`, the parameter vector **resampled
    to one value per output frame** (the solver already interpolated the sparse input, so
    record per-frame *effective* params so tensors align with §1.5's dense convention),
-   grid metadata. Convert staggered uDALES via `interpolate_grid` (D3). Geometry mask/SDF
-   is **identical across trajectories** (fixed geometry, D5) — voxelize once, store at the
-   **corpus root**, not per-trajectory.
+   grid metadata, and the source solver's `param_schema` / `state_var_names`. Convert
+   staggered uDALES via `interpolate_grid` (D3). Geometry mask/SDF is **identical across
+   trajectories** (fixed geometry, D5) — voxelize once, store at the **corpus root**, not
+   per-trajectory.
 5. Persist to a **corpus directory** as **Zarr** (chunked along `time`/sample). **Store
    each trajectory whole — never pre-windowed** (overlapping windows duplicate frames
    ~`K×` and the rollout horizon `H` grows during training, so a materialized window
@@ -465,6 +485,10 @@ The **dense, interpolated** per-step params (§1.5, framework) reach training te
 the architecture** so each model fuses it natively (FiLM levels in the UNet, tokens in
 UPT). uDALES adds `pressure_gradient_magnitude`; non-uDALES drops it.
 
+The param list is not inferred from `model.name`; it comes from the corpus/checkpoint
+`param_schema`. For a uDALES-trained neural surrogate, `pressure_gradient_magnitude`
+must be present even though `model.name == "neural_surrogate"`.
+
 ### 6.3 Normalization
 Fit per-variable mean/std (mask-aware) over the **training split only**; store in the
 checkpoint manifest; apply at inference. Never recompute on assimilation data.
@@ -495,8 +519,9 @@ models/neural_surrogates/<run_id>/
   config.yaml              # full resolved Hydra training config snapshot
   architecture.json        # {"name": "unet3d", "config": {...}}  + K (history)  <-- NEW
   normalization.json       # per-variable mean/std, mask stats
-  grid.json                # solver_name, nx/ny/nz, bounds, coord arrays, mask ref
+  grid.json                # source_solver_name, nx/ny/nz, bounds, coord arrays, mask ref
   geometry.npy             # baked static occupancy mask (+ SDF); STL path/SHA in manifest (D5)
+  schema.json              # param_schema, state_var_names, output dim mapping, dtype policy
   manifest.json            # run_id, git SHA, data corpus id, metrics, created_at
   metrics.json             # final/best val + rollout-horizon errors
 ```
@@ -510,6 +535,9 @@ models/neural_surrogates/<run_id>/
   scratch).
 - Inference resolves a checkpoint by **explicit path** or `run_id` via `utils/registry.py`.
   The forward-model Hydra config (§8) takes a `checkpoint_path`.
+- `schema.json` is load-bearing: `ForwardModel` and `params_io` use it to validate and
+  order params, so a uDALES-trained checkpoint still receives
+  `pressure_gradient_magnitude` while a pylbm-trained checkpoint does not.
 
 ## 8. Configuration & Hydra wiring
 
@@ -559,7 +587,13 @@ ensemble_model:
   ([currently L55-64](../src/pyurbanair/config/hydra_helpers.py#L55-L64)) so unknown
   models can't silently get uDALES cleanup (per `docs/codebase_guide.md` §8).
 - `create_true_params` / `create_parameter_ensemble` already produce the param Datasets
-  the surrogate consumes — no change unless a new parameter is added.
+  the surrogate consumes for native Fortran backends, but the surrogate needs a schema
+  bridge: when `model_name == "neural_surrogate"`, helper code or the calling script must
+  use the checkpoint's `param_schema` / `source_solver_name` so uDALES-trained
+  checkpoints include `pressure_gradient_magnitude`. Prefer adding a small helper such
+  as `resolve_parameter_schema(model_or_cfg)` and extending the param factory call sites
+  to pass an explicit schema, rather than making `create_parameter_ensemble` open
+  checkpoints by itself.
 
 ### 8.3 Training config group
 New `conf/neural_surrogate/` group, consumed only by
@@ -606,7 +640,9 @@ cross-grid and must interpolate first. Flag in §11 tooling, don't silently diff
 
 ## 10. Inference / use in the existing pipeline
 
-No changes to ESMDA, rollout, or the scripts beyond config selection:
+The common ESMDA/rollout math does not change, but a few helpers/scripts need surrogate
+schema awareness (param factories, anti-inverse-crime checks, and possibly
+truth/assim comparison tooling). The user-facing invocation stays config-driven:
 ```bash
 # single forward sim with the surrogate
 python scripts/run_forward_model.py model=neural_surrogate \
@@ -629,6 +665,10 @@ as needed.
 
 ## 11. Testing & CI
 
+- For setup, integration wiring, and smoke-test runs that compose the real pyurbanair
+  config, use the `size=small` overlay by default. This is the intended modest
+  end-to-end setup for neural-surrogate plumbing; reserve `size=tiny` / synthetic data
+  for narrow unit tests and the full/default sizes for post-GATE scaling.
 - `libs/neural_surrogates/tests/`: `state_io`/`params_io` round-trips; a **tiny
   architecture** training-step test (default UNet, 2 levels, few channels); a
   rollout-shape test; and the **CPU smoke-training stage (§11.1)**.
@@ -639,9 +679,10 @@ as needed.
   grid-divisibility / pad-crop test. **UPT (later)** adds the **encoder/decoder + K=1
   parity test** against `ml-jku/UPT` (faithful-port gate, §1.6 / old plan §11),
   skippable without PyTorch; it guards the *port*, not the surrogate's accuracy.
-- `tests/` (top-level): a `compose_test_cfg(["model=neural_surrogate", ...])` end-to-end
-  test against a **train-on-the-fly tiny checkpoint** in `tmp_path` (no committed binary,
-  no GPU); and a regression test that composing a non-surrogate model does **not** import
+- `tests/` (top-level): a
+  `compose_test_cfg(["model=neural_surrogate", "size=small", ...])` end-to-end test
+  against a **train-on-the-fly tiny checkpoint** in `tmp_path` (no committed binary, no
+  GPU); and a regression test that composing a non-surrogate model does **not** import
   `neural_surrogates` (mirror `test_palm_target_does_not_import_for_non_palm_composition`).
 
 ### 11.1 CPU smoke-training stage (plumbing, not accuracy)
@@ -665,6 +706,11 @@ output back without shape drift. Keep one combination wired to save+reload a thr
 checkpoint so the registry/manifest round-trip is smoke-tested. This is the always-on
 guard so the §13 GATE is never the *first* thing to exercise the training loop.
 
+Separately, any smoke test that instantiates real solver/surrogate Hydra configs should
+compose with `size=small`, e.g.
+`compose_test_cfg(["model=neural_surrogate", "size=small", ...])`, so setup exercises
+the same modest domain/ensemble/time settings used by quick end-to-end runs.
+
 ## 12. Decisions to confirm before coding
 
 1. **Framework (D1)**: JAX+Equinox (recommended; repo-consistent; JAX *is* the D2
@@ -684,6 +730,9 @@ guard so the §13 GATE is never the *first* thing to exercise the training loop.
    `examples/lbm/` (collocated, CUDA, fastest) — recommended.
 8. **Corpus storage & budget (§5)**: `N_traj`, grid, dtype, GB, GPU-hours, checkpoint
    sync target. Record before generating.
+9. **Schema bridge for surrogate params**: confirm the concrete `schema.json` shape and
+   helper API (`resolve_parameter_schema` or equivalent) before P3, so uDALES-trained
+   checkpoints do not silently drop `pressure_gradient_magnitude`.
 
 ## 13. Phased roadmap
 
@@ -694,13 +743,14 @@ re-touching P0/P1/P3.
 - **P0 — scaffolding**: `libs/neural_surrogates` skeleton, pyproject + pixi feature,
   lazy-import regression test, `state_io`/`params_io` + round-trip tests, the
   `SurrogateArchitecture` interface + `rollout` + conformance test. No real model yet.
+  Any repo-integrated config smoke uses `size=small`.
 - **P1 — data**: `scripts/generate_neural_surrogate_data.py`, Zarr corpus + manifest,
   normalization fit, a small pylbm corpus end-to-end. **Do the §5 sizing first.**
 - **P2 — UNet + single-GPU training**: implement `architectures/unet3d.py` (config-driven,
   §1.2) and the architecture-agnostic `training/loop.py` (one-step + **pushforward** loss
   with off-manifold IC injection) + `train_surrogate.py` + checkpoint/manifest +
   rollout-error eval. **Stand up the §11.1 CPU smoke stage as soon as the loop is wired**,
-  before real data or the GATE.
+  before real data or the GATE. Real-config smoke runs use `size=small`.
 - **GATE (after P2) — go/no-go before scaling**, on a *small* pylbm corpus. Three bars,
   all pre-stated, over a full assimilation window's worth of steps:
   1. **Clean rollout-error-vs-horizon** on held-out trajectories — below bar B1.
@@ -767,6 +817,7 @@ P-UPT**.
 ### P0 — Scaffolding (no real model, no GPU)
 **Exit:** `libs/neural_surrogates` installs, lazy-import invariant holds, `state_io`/
 `params_io` round-trip, the architecture interface + `rollout` + conformance test pass.
+Use `size=small` for any smoke test that composes the real pyurbanair Hydra config.
 
 | File | Responsibility |
 |---|---|
@@ -775,11 +826,11 @@ P-UPT**.
 | `.../architectures/base.py` | `SurrogateArchitecture` interface (`init_carry`, `step`) + `Carry` typing (§1.1). |
 | `.../architectures/registry.py` | `resolve_architecture(name, config) -> SurrogateArchitecture`; `{"unet3d": ...}` (UPT added later). |
 | `.../rollout.py` | `rollout(arch, carry, future_params, static, n_steps)` via `jax.lax.scan`; pushforward stop-gradient hook (§1.1/§6.1). |
-| `.../utils/state_io.py` | `state_to_tensor(ds, grid) -> [T,C,Z,Y,X]`; `tensor_to_state(arr, grid, var_names, time_coords) -> Dataset`; `trim_to_window(ds, num_outputs)` (§4 time-axis contract, matching [pylbm forward_model.py:401-408](../libs/pylbm/src/pylbm/forward_model.py#L401-L408)); K-frame history extraction. |
-| `.../utils/params_io.py` | `params_to_conditioning(params, num_steps, output_frequency, spinup_outputs) -> [T,P]`: sparse→dense **linear** interp, `inflow_angle` sin/cos, spin-up plateau — matching [`write_uvel_time_file`](../libs/pylbm/src/pylbm/utils/params_utils.py#L119); drop `pressure_gradient_magnitude` unless uDALES (§1.5). |
+| `.../utils/state_io.py` | `state_to_tensor(ds, grid) -> [T,C,Z,Y,X]`; accept both time-indexed histories and time-less single-frame warm starts; `tensor_to_state(arr, grid, var_names, time_coords) -> Dataset`; `trim_to_window(ds, num_outputs)` (§4 time-axis contract, matching [pylbm forward_model.py:401-408](../libs/pylbm/src/pylbm/forward_model.py#L401-L408)); K-frame history extraction. |
+| `.../utils/params_io.py` | `params_to_conditioning(params, schema, num_steps, output_frequency, spinup_outputs) -> [T,P]`: sparse→dense **linear** interp, `inflow_angle` sin/cos, spin-up plateau — matching [`write_uvel_time_file`](../libs/pylbm/src/pylbm/utils/params_utils.py#L119); include/drop `pressure_gradient_magnitude` according to the checkpoint `param_schema`, not `model.name`. |
 | `.../data/grid.py` | `GridMeta`; `build_occupancy_mask(stl_path, grid)` reusing [`get_building_grid_indices`](../libs/pylbm/src/pylbm/stl_to_lbm.py#L120); `mask_to_sdf(mask)` (signed EDT). |
 | `.../utils/registry.py` | `resolve_checkpoint(path_or_run_id) -> Path`; `load_manifest(dir)`. |
-| `libs/neural_surrogates/tests/test_io_roundtrip.py` | state↔tensor and params→conditioning round-trips; trimmed `time` equals pylbm's on a tiny config. |
+| `libs/neural_surrogates/tests/test_io_roundtrip.py` | state↔tensor and params→conditioning round-trips; time-less warm-start frames normalize to one-frame tensors; schema-driven params include uDALES pressure gradient only when requested; trimmed `time` equals pylbm's on a tiny config. |
 | `libs/neural_surrogates/tests/test_interface.py` | Dummy architecture exercises `init_carry`/`step`/`rollout` shapes + K=1 fast path. |
 | [pyproject.toml](../pyproject.toml) | `[tool.pixi.feature.neural_surrogates.*]` (NN deps + editable lib); add to `cuda`, `delftblue`, `dev` — **not** `default`. |
 | [tests/test_hydra_config.py](../tests/test_hydra_config.py) | `test_neural_surrogate_target_does_not_import_for_non_surrogate_composition` (mirror pypalm). |
@@ -790,7 +841,7 @@ P-UPT**.
 
 | File | Responsibility |
 |---|---|
-| `scripts/generate_neural_surrogate_data.py` | `def run(cfg)` + `@hydra.main`. Build solver+ensemble like [run_ensemble_forward_model.py](../scripts/run_ensemble_forward_model.py); sample params via [`create_parameter_ensemble`](../src/pyurbanair/config/hydra_helpers.py#L90) (+ `parameter_time_series/`); run **on-disk** over full `simulation_time`+spin-up; record per-frame **effective** params (§5/§1.5). |
+| `scripts/generate_neural_surrogate_data.py` | `def run(cfg)` + `@hydra.main`. Build solver+ensemble like [run_ensemble_forward_model.py](../scripts/run_ensemble_forward_model.py); sample params via [`create_parameter_ensemble`](../src/pyurbanair/config/hydra_helpers.py#L90) (+ `parameter_time_series/`); run **on-disk** over full `simulation_time`+spin-up; record per-frame **effective** params and the source solver schema (§5/§1.5). |
 | `.../data/generate.py` | `write_trajectory(...)` to Zarr (whole trajectories, chunked along `time`/sample, §5); voxelize geometry **once** to corpus root (`geometry.npy`); corpus manifest JSON. Staggered uDALES via `interpolate_grid` (D3). |
 | `.../data/normalization.py` | `fit_normalization(corpus, split="train")` (mask-aware per-var mean/std → `normalization.json`); `apply`/`invert`. Train split only (§6.3). |
 
@@ -805,7 +856,7 @@ smoke stage green**, **all three §13 GATE bars cleared**.
 | `.../data/dataset.py` | **Lazy index-map windowing** (§6.1.1): `sample_id → (trajectory_id, t_start, history_len)`; `__getitem__` slices Zarr, normalizes, returns the field-space window record; explicit short-history start entries; split-by-trajectory before indexing. |
 | `.../training/loop.py` | `train_step` (jit); one-step + **pushforward** loss (curriculum on `H`, stop-gradient warm-up) via `rollout`; **inject perturbed/off-manifold ICs** at step time (§6.1/§14, feeds GATE B2); mask solid cells; rollout-error-vs-horizon eval. **Architecture-agnostic** (only calls the interface). |
 | `.../training/train.py` | `def run(cfg)` + `@hydra.main`; Optax, bf16 compute / fp32 master, Zarr prefetch. |
-| `.../training/checkpoint.py` | Orbax save + the §7 artifact set incl. **`architecture.json`** and **K** in the manifest. |
+| `.../training/checkpoint.py` | Orbax save + the §7 artifact set incl. **`architecture.json`**, **K**, and **`schema.json`** (`source_solver_name`, `param_schema`, `state_var_names`). |
 | `conf/neural_surrogate/train.yaml`, `arch/unet3d.yaml`, `data.yaml` | Training group (§8.3); consumed only by the two training scripts. `arch/unet3d.yaml` snapshotted into the checkpoint. |
 | `libs/neural_surrogates/tests/test_smoke_training.py` | **§11.1 CPU smoke stage** — parametrized over `(T, grid, K, H, C)`; plumbing invariants only. Stand up as soon as the loop is wired. |
 | `scripts/eval_surrogate_gate.py` | Compute + check the **three §13 GATE bars** on the small corpus. Hard go/no-go. Architecture-agnostic (re-runs for UPT). |
@@ -816,12 +867,12 @@ model.checkpoint_path=…` runs and honors the `BaseForwardModel` contract.
 
 | File | Responsibility |
 |---|---|
-| `.../forward_model.py` | `ForwardModel(BaseForwardModel)`. `__init__`: load checkpoint via `registry`, resolve architecture from `architecture.json`, store grid/normalization/mask, `num_outputs`, **lazy-init on first `run_single`**. `run_single` per §4 (conditioning seq → resolve IC via canned bank, raise on `None` stopgap → `init_carry` → `rollout` → decode/denorm/reapply mask → trimmed Dataset). `save_results=self._save_results`; `_clean_output`=no-op. |
-| `.../ensemble_forward_model.py` | `EnsembleForwardModel(BaseEnsembleForwardModel)`. `_create_new_forward_model` shares weights, clones result dirs. **Override `run_ensemble`** honoring all 3 save modes + `state` as `Path` (via `get_member_state`) + `rollout_step` increment ([base L482-522](../src/pyurbanair/base_ensemble_forward_model.py#L482-L522)); `vmap` with `vmap_chunk_size` sub-batching (D2). |
+| `.../forward_model.py` | `ForwardModel(BaseForwardModel)`. `__init__`: load checkpoint via `registry`, resolve architecture from `architecture.json`, store schema/grid/normalization/mask, `num_outputs`, **lazy-init on first `run_single`**. `run_single` per §4 (conditioning seq using `param_schema` → resolve IC via canned bank, raise on `None` stopgap → normalize time-less or time-indexed state history → `init_carry` → `rollout` → decode/denorm/reapply mask → trimmed Dataset). Implement concrete `save_results(...)` delegating to `_save_results`; `_clean_output`=no-op. |
+| `.../ensemble_forward_model.py` | `EnsembleForwardModel(BaseEnsembleForwardModel)`. `_create_new_forward_model` shares weights, clones result dirs. **Override `run_ensemble`** honoring all 3 save modes + `state` as `Path` (via `get_member_state`) + `rollout_step` increment ([base L482-522](../src/pyurbanair/base_ensemble_forward_model.py#L482-L522)); stream chunk-load members, `vmap` each `vmap_chunk_size` sub-batch, then concat/write outputs (D2). |
 | `conf/model/neural_surrogate.yaml` | Per §8.1: `checkpoint_path: ???`, `prepare._target_: …prepare_neural_surrogate`, `num_parallel_processes: 1`; nx/ny/nz/bounds for **validation only**. |
-| [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py) | Add `prepare_neural_surrogate` (**function-local** NN imports, §8.2) validating grid vs `cfg.domain` + output count vs `cfg.time`, then JIT warm-up. Add `elif model_name=="neural_surrogate"` no-op to `clean_outputs` **and turn the `else` fall-through into a raise** ([currently L63-64](../src/pyurbanair/config/hydra_helpers.py#L63-L64)). |
+| [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py) | Add `prepare_neural_surrogate` (**function-local** NN imports, §8.2) validating grid vs `cfg.domain` + output count vs `cfg.time`, then JIT warm-up. Add `elif model_name=="neural_surrogate"` no-op to `clean_outputs` **and turn the `else` fall-through into a raise** ([currently L63-64](../src/pyurbanair/config/hydra_helpers.py#L63-L64)). Add/route schema-aware param factory behavior (`resolve_parameter_schema(model_or_cfg)` or equivalent) so `neural_surrogate` can request the checkpoint's `param_schema` (notably uDALES pressure gradient) without the factory guessing from `model.name`. |
 | [observation_operator.py](../libs/data-assimilation/src/data_assimilation/observation_operator.py#L71) | Add `elif solver_name=="neural_surrogate"` collocated mapping (§8.4). |
-| `tests/test_neural_surrogate_forward.py` | `compose_test_cfg(["model=neural_surrogate", …])` end-to-end against a **train-on-the-fly tiny checkpoint** in `tmp_path` (no committed binary, no GPU; §11). |
+| `tests/test_neural_surrogate_forward.py` | `compose_test_cfg(["model=neural_surrogate", "size=small", …])` end-to-end against a **train-on-the-fly tiny checkpoint** in `tmp_path` (no committed binary, no GPU; §11). |
 
 ### P4 — Multi-GPU + scale corpus
 | File | Responsibility |
@@ -854,6 +905,11 @@ model.checkpoint_path=…` runs and honors the `BaseForwardModel` contract.
 ### Resolve before P2 coding
 1. **First UNet hyperparameters** (§1.2/§12.6) for the small corpus.
 2. **Canned-IC-bank format** (§4) the GATE cold-start bar and P3 `run_single` consume.
+
+### Resolve before P3 coding
+1. **Checkpoint schema bridge** (§7/§8.2): exact `schema.json` fields and helper/call-site
+   API for creating true/prior params from a `neural_surrogate` checkpoint's
+   `source_solver_name` / `param_schema`.
 
 ### Resolve before P-UPT coding
 1. **§1.0 prerequisite** — does released `ml-jku/UPT` ship a comparable transient config
