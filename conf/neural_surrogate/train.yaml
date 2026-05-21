@@ -1,0 +1,35 @@
+# Training config (docs/neural_surrogate_plan.md §8.3). Consumed only by
+# scripts/train_surrogate.py — kept OUT of the inference `model/` group.
+defaults:
+  - arch: unet3d
+  - _self_
+
+corpus_path: ???                       # produced by generate_neural_surrogate_data.py
+run_id: dev
+checkpoint_dir: models/neural_surrogates/${run_id}
+
+history_len: 1                         # K (D4): UNet default Markov; raise by ablation
+seed: 0
+
+optimizer:
+  name: adamw
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+
+batch_size: 8
+stride: 1
+num_epochs: 50
+
+# Pushforward curriculum (§6.1): grow the rollout horizon H over training, with
+# a stop-gradient warm-up on the leading steps. Mandatory for ESMDA usefulness.
+horizon_schedule:
+  - {epoch: 0, horizon: 1, warmup: 0}
+  - {epoch: 10, horizon: 2, warmup: 1}
+  - {epoch: 25, horizon: 4, warmup: 2}
+
+# Off-manifold IC injection (§6.1/§14): perturb history frames before init_carry
+# to feed the GATE B2 (analysis-OOD) bar. 0 disables.
+off_manifold_noise_std: 0.0
+
+sharding:
+  data_parallel: false                 # §6.4 P4; single-GPU default

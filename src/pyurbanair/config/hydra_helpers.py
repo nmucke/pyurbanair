@@ -52,6 +52,17 @@ def prepare_udales(
     )
 
 
+def prepare_neural_surrogate(forward_model: Any) -> None:
+    """Validate + warm a neural-surrogate checkpoint (replaces ``compile``).
+
+    Loads the checkpoint and validates the composed grid against it (raising on
+    mismatch); NN imports stay inside ``ForwardModel.ensure_loaded`` so this
+    helper — imported by every script — never drags in the JAX stack at module
+    top (the lazy-import invariant, ``docs/neural_surrogate_plan.md`` §8.2).
+    """
+    _unwrap_forward_model(forward_model).ensure_loaded()
+
+
 def clean_outputs(model_name: str, forward_model: Any) -> None:
     model = _unwrap_forward_model(forward_model)
     if model_name == "pylbm":
@@ -60,8 +71,16 @@ def clean_outputs(model_name: str, forward_model: Any) -> None:
         from pypalm.utils.clean_up_utils import clean_palm_output_dir
 
         clean_palm_output_dir(model.dirs)
-    else:
+    elif model_name == "neural_surrogate":
+        # No external solver outputs to clean.
+        return None
+    elif model_name == "pyudales":
         clean_udales_output_dir(model.dirs)
+    else:
+        # Previously the else arm fell through to uDALES cleanup; raise instead
+        # so an unrecognized backend can't silently get the wrong cleanup
+        # (docs/codebase_guide.md §8).
+        raise ValueError(f"clean_outputs: unknown model_name {model_name!r}.")
 
 
 def configure_failure_policy(ensemble_model: Any, failure_cfg: Any) -> Any:
@@ -74,17 +93,67 @@ def configure_failure_policy(ensemble_model: Any, failure_cfg: Any) -> Any:
     return ensemble_model
 
 
-def create_true_params(model_name: str, true_cfg: Any) -> xarray.Dataset:
+def resolve_parameter_schema(
+    model_name: str,
+    checkpoint_path: Any = None,
+) -> tuple[str, ...]:
+    """Resolve the ordered parameter names a model consumes.
+
+    For native Fortran backends this is keyed off ``model_name``
+    (``pressure_gradient_magnitude`` is uDALES-only). For ``neural_surrogate``
+    the param set comes from the **checkpoint's** ``schema.json`` (its source
+    solver), so a uDALES-trained surrogate keeps ``pressure_gradient_magnitude``
+    even though ``model.name == "neural_surrogate"`` (§6.2/§8.2). Reads the JSON
+    directly to avoid importing the NN stack (lazy-import invariant).
+    """
+    base = ("inflow_angle", "velocity_magnitude")
+    if model_name == "neural_surrogate":
+        if checkpoint_path is None:
+            return base
+        import json
+
+        schema_file = pathlib.Path(str(checkpoint_path)) / "schema.json"
+        if not schema_file.exists():
+            return base
+        with open(schema_file) as f:
+            schema = json.load(f)
+        return tuple(schema["param_schema"]["names"])
+    if model_name == "pyudales":
+        return base + ("pressure_gradient_magnitude",)
+    return base
+
+
+def create_true_params(
+    model_name: str,
+    true_cfg: Any,
+    param_names: Any = None,
+) -> xarray.Dataset:
     true = _plain(true_cfg)
+    names = param_names if param_names is not None else resolve_parameter_schema(model_name)
     data_vars = {
         "inflow_angle": true["inflow_angle"],
         "velocity_magnitude": true["velocity_magnitude"],
     }
-    if model_name == "pyudales":
+    if "pressure_gradient_magnitude" in names:
         data_vars["pressure_gradient_magnitude"] = true[
             "pressure_gradient_magnitude"
         ]
     return xarray.Dataset(data_vars=data_vars)
+
+
+def _sample_gaussian_param(
+    rng_key: jax.Array,
+    spec: Any,
+    ensemble_size: int,
+) -> tuple[jax.Array, jnp.ndarray]:
+    """Sample one Gaussian parameter, applying optional min/max clamps."""
+    rng_key, subkey = jax.random.split(rng_key)
+    values = jax.random.normal(subkey, (ensemble_size,)) * spec["std"] + spec["mean"]
+    if spec.get("min") is not None:
+        values = jnp.maximum(values, spec["min"])
+    if spec.get("max") is not None:
+        values = jnp.minimum(values, spec["max"])
+    return rng_key, values
 
 
 def create_parameter_ensemble(
@@ -92,33 +161,36 @@ def create_parameter_ensemble(
     prior_cfg: Any,
     ensemble_size: int,
     seed: int,
+    param_names: Any = None,
 ) -> xarray.Dataset:
     prior = _plain(prior_cfg)
     rng_key = jax.random.PRNGKey(seed)
+    names = param_names if param_names is not None else resolve_parameter_schema(model_name)
 
-    rng_key, subkey = jax.random.split(rng_key)
-    inflow_spec = prior["inflow_angle"]
-    inflow = (
-        jax.random.normal(subkey, (ensemble_size,)) * inflow_spec["std"]
-        + inflow_spec["mean"]
+    rng_key, inflow = _sample_gaussian_param(rng_key, prior["inflow_angle"], ensemble_size)
+    rng_key, velocity = _sample_gaussian_param(
+        rng_key, prior["velocity_magnitude"], ensemble_size
     )
-
-    rng_key, subkey = jax.random.split(rng_key)
-    velocity_spec = prior["velocity_magnitude"]
-    velocity = (
-        jax.random.normal(subkey, (ensemble_size,)) * velocity_spec["std"]
-        + velocity_spec["mean"]
-    )
-    if velocity_spec.get("min") is not None:
-        velocity = jnp.maximum(velocity, velocity_spec["min"])
-    if velocity_spec.get("max") is not None:
-        velocity = jnp.minimum(velocity, velocity_spec["max"])
+    data_vars = {
+        "inflow_angle": ("ensemble", inflow),
+        "velocity_magnitude": ("ensemble", velocity),
+    }
+    # Include pressure_gradient_magnitude only when the resolved schema requires
+    # it (uDALES, or a uDALES-trained neural_surrogate checkpoint) — otherwise a
+    # surrogate's conditioning builder would KeyError on the missing param.
+    if "pressure_gradient_magnitude" in names:
+        if "pressure_gradient_magnitude" not in prior:
+            raise KeyError(
+                "Schema requires 'pressure_gradient_magnitude' but the prior "
+                "config has no such entry."
+            )
+        rng_key, pgm = _sample_gaussian_param(
+            rng_key, prior["pressure_gradient_magnitude"], ensemble_size
+        )
+        data_vars["pressure_gradient_magnitude"] = ("ensemble", pgm)
 
     return xarray.Dataset(
-        data_vars={
-            "inflow_angle": ("ensemble", inflow),
-            "velocity_magnitude": ("ensemble", velocity),
-        },
+        data_vars=data_vars,
         coords={"ensemble": jnp.arange(ensemble_size)},
     )
 

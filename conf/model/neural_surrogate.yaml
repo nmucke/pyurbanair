@@ -1,0 +1,30 @@
+# Neural-surrogate inference backend (docs/neural_surrogate_plan.md §8.1).
+# The grid AND architecture come from the checkpoint, not from this config:
+# nx/ny/nz/bounds are passed only so prepare_neural_surrogate can VALIDATE the
+# composed domain against the checkpoint and raise on mismatch — never to size
+# the network. The architecture name/config come from architecture.json (§7).
+name: neural_surrogate
+solver_name: neural_surrogate     # registered in the obs-operator dim_mapping (§8.4)
+checkpoint_path: ???              # required: models/neural_surrogates/<run_id> or a path
+
+forward_model:
+  _target_: neural_surrogates.forward_model.ForwardModel
+  _convert_: all
+  checkpoint_path: ${..checkpoint_path}
+  nx: ${domain.nx}
+  ny: ${domain.ny}
+  nz: ${domain.nz}
+  bounds: ${domain.bounds}
+  simulation_time: ${time.simulation_time}
+  output_frequency: ${time.output_frequency}
+  device: cuda                    # or cpu
+  cold_start: canned              # canned IC bank (§4 recommended) | raise | zeros
+
+prepare:
+  _target_: pyurbanair.config.hydra_helpers.prepare_neural_surrogate
+
+ensemble_model:
+  _target_: neural_surrogates.ensemble_forward_model.EnsembleForwardModel
+  _convert_: all
+  ensemble_size: ${ensemble.ensemble_size}
+  num_parallel_processes: 1       # default in-process on-device batching (D2)

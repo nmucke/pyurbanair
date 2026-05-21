@@ -68,7 +68,9 @@ class ObservationOperator:
                 "v": {"z": "zt", "y": "ym", "x": "xt"},
                 "w": {"z": "zm", "y": "yt", "x": "xt"},
             }
-        elif solver_name == "pylbm":
+        elif solver_name in ("pylbm", "neural_surrogate"):
+            # neural_surrogate emits the collocated x,y,z grid (D3), same as
+            # pylbm. Cross-grid caveat for joint state estimation: §8.4.
             self.dim_mapping = {
                 "u": {"z": "z", "y": "y", "x": "x"},
                 "v": {"z": "z", "y": "y", "x": "x"},

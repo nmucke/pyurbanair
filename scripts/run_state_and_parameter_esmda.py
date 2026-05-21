@@ -23,6 +23,7 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_parameter_ensemble,
     create_true_params,
+    resolve_parameter_schema,
     make_rng_key,
     resolve_output_dir,
 )
@@ -34,7 +35,13 @@ if __package__ is None or __package__ == "":
 
 
 def run(cfg: DictConfig) -> None:
-    true_params = create_true_params(cfg.truth_model.name, cfg.params.true)
+    true_params = create_true_params(
+        cfg.truth_model.name,
+        cfg.params.true,
+        resolve_parameter_schema(
+            cfg.truth_model.name, cfg.truth_model.get("checkpoint_path")
+        ),
+    )
 
     truth_model_name = cfg.truth_model.name
     truth_model = instantiate(cfg.truth_model.forward_model)
@@ -67,7 +74,13 @@ def run(cfg: DictConfig) -> None:
     # Spin up the assim model once to seed the initial state ensemble.
     assim_model.set_results_dir(None)
     assim_ref_state = assim_model(
-        params=create_true_params(cfg.assim_model.name, cfg.params.true)
+        params=create_true_params(
+            cfg.assim_model.name,
+            cfg.params.true,
+            resolve_parameter_schema(
+                cfg.assim_model.name, cfg.assim_model.get("checkpoint_path")
+            ),
+        )
     )
     assim_model.set_results_dir(assim_results_dir)
     clean_outputs(cfg.assim_model.name, assim_model)
@@ -82,6 +95,9 @@ def run(cfg: DictConfig) -> None:
         prior_cfg=cfg.params.prior,
         ensemble_size=cfg.ensemble.ensemble_size,
         seed=cfg.esmda.seed,
+        param_names=resolve_parameter_schema(
+            cfg.assim_model.name, cfg.assim_model.get("checkpoint_path")
+        ),
     )
 
     ensemble_model = instantiate(

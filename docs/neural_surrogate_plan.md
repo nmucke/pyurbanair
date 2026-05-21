@@ -1,6 +1,10 @@
 # Plan: architecture-agnostic neural surrogate library (`libs/neural_surrogates`)
 
-Status: **proposal / design doc**. Implementation not started.
+Status: **P0–P3 + P5-gate landed** (framework, UNet3D, training, inference,
+Hydra wiring, GATE eval). The data-generation (P1) and training/eval scripts run
+on the existing solver/cluster; multi-GPU sharding (P4) and UPT (P-UPT) are
+stubbed/registered for later. Library lives in `libs/neural_surrogates`; CPU
+tests in `libs/neural_surrogates/tests` + `tests/test_neural_surrogate_forward.py`.
 
 This document supersedes [`docs/upt_surrogate_plan.md`](upt_surrogate_plan.md). That
 plan packaged a single architecture (Universal Physics Transformers) as a backend
