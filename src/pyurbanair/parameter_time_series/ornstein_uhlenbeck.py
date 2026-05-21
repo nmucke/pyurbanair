@@ -60,21 +60,20 @@ class OrnsteinUhlenbeckModel(ParameterTimeSeries):
         keys = jax.random.split(rng_key, len(self.param_names))
         arrays: dict[str, jnp.ndarray] = {}
         for key, name in zip(keys, self.param_names):
-            spec = self._ext(name)
-            mean = spec["mean"]
-            std = spec["std"]
-
+            # Unit-variance stationary OU anomaly z, then external envelope
+            # mean(t) + std(t)·z (constant std reproduces the prior behavior).
             key_init, key_eps = jax.random.split(key)
-            x0 = jax.random.normal(key_init, (self.ensemble_size,)) * std
+            z0 = jax.random.normal(key_init, (self.ensemble_size,))
             eps = jax.random.normal(key_eps, (n_t - 1, self.ensemble_size))
 
             def step(x_prev, eps_k):
-                x_new = phi * x_prev + std * innovation_std * eps_k
+                x_new = phi * x_prev + innovation_std * eps_k
                 return x_new, x_new
 
-            _, x_rest = jax.lax.scan(step, x0, eps)
-            anomaly = jnp.concatenate([x0[None, :], x_rest], axis=0)
-            arrays[name] = mean + anomaly
+            _, z_rest = jax.lax.scan(step, z0, eps)
+            z = jnp.concatenate([z0[None, :], z_rest], axis=0)
+            mean_t, std_t = self._ext_profile(name, time_coords)
+            arrays[name] = mean_t[:, None] + std_t[:, None] * z
 
         return self._build_dataset(arrays, time_coords)
 
@@ -110,9 +109,8 @@ class OrnsteinUhlenbeckModel(ParameterTimeSeries):
         }
 
         for name, key in zip(var_names, var_keys):
-            spec = self._ext(name)
-            x_ext = spec["mean"]
-            std = spec["std"]
+            x_ext = self._ext_scalar(name, "mean")
+            std = self._ext_scalar(name, "std")
 
             da = posterior[name].transpose("time", "ensemble")
             y_train = jnp.asarray(da.values)

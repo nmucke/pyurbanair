@@ -151,8 +151,10 @@ class AR2RelaxationModel(ParameterTimeSeries):
             z_traj, z_end, w_end = self._integrate(
                 time_coords, z0, w0, integ_key
             )
-            spec = self._ext(name)
-            arrays[name] = spec["mean"] + spec["std"] * z_traj
+            # z_traj is the unit-variance AR(2) anomaly; apply the (possibly
+            # time-varying) external envelope x_ext(t) + Σ_ext(t)·z.
+            mean_t, std_t = self._ext_profile(name, time_coords)
+            arrays[name] = mean_t[:, None] + std_t[:, None] * z_traj
             self._state[name] = (z_end, w_end)
 
         return self._build_dataset(arrays, time_coords)
@@ -192,9 +194,8 @@ class AR2RelaxationModel(ParameterTimeSeries):
         new_state: dict[str, tuple[jnp.ndarray, jnp.ndarray]] = {}
 
         for key, name in zip(keys, self.param_names):
-            spec = self._ext(name)
-            x_ext = spec["mean"]
-            std = spec["std"]
+            x_ext = self._ext_scalar(name, "mean")
+            std = self._ext_scalar(name, "std")
             std_safe = max(std, 1e-12)
 
             if name in posterior.data_vars and "time" in posterior[name].dims:

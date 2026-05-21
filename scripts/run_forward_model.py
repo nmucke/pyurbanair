@@ -13,6 +13,7 @@ from pyurbanair.config.hydra_helpers import (
     clean_outputs,
     create_true_params,
     resolve_output_dir,
+    resolve_parameter_schema,
 )
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
@@ -29,7 +30,8 @@ def run(cfg: DictConfig) -> None:
     instantiate(cfg.model.prepare, forward_model=forward_model)
     clean_outputs(model_name=model_name, forward_model=forward_model)
 
-    true_params = create_true_params(model_name, cfg.params.true)
+    param_names = resolve_parameter_schema(model_name, cfg.model.get("checkpoint_path"))
+    true_params = create_true_params(model_name, cfg.params.true, param_names)
 
     state = forward_model(params=true_params)
     if state is None:

@@ -63,15 +63,19 @@ class GPLinearTrendModel(ParameterTimeSeries):
         keys = jax.random.split(rng_key, len(self.param_names))
         arrays: dict[str, jnp.ndarray] = {}
         for key, name in zip(keys, self.param_names):
-            spec = self._ext(name)
-            arrays[name] = sample_gp_ensemble(
+            # Draw a unit-variance GP, then apply the (possibly time-varying)
+            # external envelope mean(t) + std(t)·z — identical to passing
+            # scalar mean/std directly when both are constant.
+            z = sample_gp_ensemble(
                 key,
                 time_coords,
-                mean=spec["mean"],
-                std=spec["std"],
+                mean=0.0,
+                std=1.0,
                 ensemble_size=self.ensemble_size,
                 correlation_length=self.correlation_length,
             )
+            mean_t, std_t = self._ext_profile(name, time_coords)
+            arrays[name] = mean_t[:, None] + std_t[:, None] * z
         return self._build_dataset(arrays, time_coords)
 
     def extrapolate(

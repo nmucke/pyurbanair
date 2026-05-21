@@ -20,6 +20,7 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_operator,
     create_parameter_ensemble,
     create_true_params,
+    resolve_parameter_schema,
     make_rng_key,
     resolve_output_dir,
 )
@@ -32,7 +33,13 @@ if __package__ is None or __package__ == "":
 def run(cfg: DictConfig) -> None:
     num_assimilation_windows = int(cfg.esmda.num_assimilation_windows)
 
-    true_params = create_true_params(cfg.truth_model.name, cfg.params.true)
+    true_params = create_true_params(
+        cfg.truth_model.name,
+        cfg.params.true,
+        resolve_parameter_schema(
+            cfg.truth_model.name, cfg.truth_model.get("checkpoint_path")
+        ),
+    )
 
     truth_model = instantiate(cfg.truth_model.forward_model)
     instantiate(cfg.truth_model.prepare, forward_model=truth_model)
@@ -43,7 +50,13 @@ def run(cfg: DictConfig) -> None:
 
     # Spin up the assim model once to build the initial state ensemble.
     assim_ref_state = assim_model(
-        params=create_true_params(cfg.assim_model.name, cfg.params.true)
+        params=create_true_params(
+            cfg.assim_model.name,
+            cfg.params.true,
+            resolve_parameter_schema(
+                cfg.assim_model.name, cfg.assim_model.get("checkpoint_path")
+            ),
+        )
     )
     # Drop spin-up side-effects (per-iter NetCDF dumps, warm-start seed files
     # on pylbm) before the per-window loop reuses the same model.
@@ -59,6 +72,9 @@ def run(cfg: DictConfig) -> None:
     init_params_ensemble = create_parameter_ensemble(
         model_name=cfg.assim_model.name,
         prior_cfg=cfg.params.prior,
+        param_names=resolve_parameter_schema(
+            cfg.assim_model.name, cfg.assim_model.get("checkpoint_path")
+        ),
         ensemble_size=cfg.ensemble.ensemble_size,
         seed=cfg.esmda.seed,
     )

@@ -1,0 +1,15 @@
+# Time-varying external priors for the parameter_time_series models.
+#
+# Each parameter's `mean` and `std` may be a scalar (constant over the window,
+# the historical behavior) OR a list of control points spaced evenly over the
+# window and linearly interpolated — letting x_ext(t) / Σ_ext(t) vary in time.
+# The models draw a unit-variance anomaly z and apply mean(t) + std(t)·z.
+#
+# Use with:  params/external=time_varying  +generate.time_varying=true
+inflow_angle:
+  mean: [-30.0, 0.0, 30.0]   # sweep the prior-mean inflow direction across the window
+  std:  [3.0, 8.0, 3.0]      # widest spread mid-window
+velocity_magnitude:
+  mean: [6.0, 9.0, 7.0]
+  std:  [0.5, 1.0, 0.5]
+  min: 0.1

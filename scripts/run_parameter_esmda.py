@@ -22,6 +22,7 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_parameter_ensemble,
     create_true_params,
+    resolve_parameter_schema,
     make_rng_key,
     resolve_output_dir,
 )
@@ -35,7 +36,13 @@ if __package__ is None or __package__ == "":
 def run(cfg: DictConfig) -> None:
     truth_model = instantiate(cfg.truth_model.forward_model)
     instantiate(cfg.truth_model.prepare, forward_model=truth_model)
-    true_params = create_true_params(cfg.truth_model.name, cfg.params.true)
+    true_params = create_true_params(
+        cfg.truth_model.name,
+        cfg.params.true,
+        resolve_parameter_schema(
+            cfg.truth_model.name, cfg.truth_model.get("checkpoint_path")
+        ),
+    )
     true_state = truth_model(params=true_params)
     if true_state is None:
         raise RuntimeError("Expected in-memory truth state.")
@@ -74,6 +81,9 @@ def run(cfg: DictConfig) -> None:
         prior_cfg=cfg.params.prior,
         ensemble_size=cfg.ensemble.ensemble_size,
         seed=cfg.esmda.seed,
+        param_names=resolve_parameter_schema(
+            cfg.assim_model.name, cfg.assim_model.get("checkpoint_path")
+        ),
     )
 
     esmda = instantiate(

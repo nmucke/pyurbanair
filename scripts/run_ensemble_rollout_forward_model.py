@@ -15,6 +15,7 @@ from pyurbanair.config.hydra_helpers import (
     configure_failure_policy,
     create_parameter_ensemble,
     resolve_output_dir,
+    resolve_parameter_schema,
 )
 from pyurbanair.utils.animation_utils import animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
@@ -44,6 +45,9 @@ def run(cfg: DictConfig) -> None:
         prior_cfg=cfg.params.prior,
         ensemble_size=cfg.ensemble.ensemble_size,
         seed=cfg.esmda.seed,
+        param_names=resolve_parameter_schema(
+            model_name, cfg.model.get("checkpoint_path")
+        ),
     )
 
     state_list = []
