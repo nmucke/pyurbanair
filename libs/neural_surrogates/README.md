@@ -268,6 +268,19 @@ the collocated grid first), records per-frame **effective** conditioning,
 voxelizes the geometry once, writes a Zarr corpus + manifest, and fits
 normalization on the train split.
 
+**uDALES example** (`size=small` domain; uDALES has no `forward_model.stl_path`,
+so `generate.stl_path` must be set explicitly):
+
+```bash
+pixi run -e dev python scripts/generate_neural_surrogate_data.py \
+  model=pyudales size=small \
+  time.simulation_time=300 time.output_frequency=1 \
+  ensemble.ensemble_size=4 ensemble.num_parallel_processes=4 \
+  +generate.n_trajectories=400 \
+  +generate.stl_path=examples/udales/experiments/xie_and_castro/xie_castro_2008_STL.stl \
+  +generate.corpus_path=.temp/neural_surrogate/corpus_udales
+```
+
 **Time-varying inflow** (transient BCs — recommended for ESMDA-relevant data):
 
 ```bash
