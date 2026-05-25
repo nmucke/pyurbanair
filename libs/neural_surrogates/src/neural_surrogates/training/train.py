@@ -162,6 +162,7 @@ def run(cfg: Any) -> dict:
             arch_config=arch_cfg, history_len=history_len,
             normalization=norm, grid=corpus.grid, geometry_mask=mask,
             static_channels=np.asarray(corpus.static_channels), schema=contract,
+            native_output_frequency=corpus.manifest.get("output_frequency"),
             metrics={k: v for k, v in metrics.items() if k != "rollout_error_vs_horizon"},
             manifest_extra={"corpus_path": str(cfg["corpus_path"])},
             ic_bank=ic_bank,

@@ -50,6 +50,7 @@ def save_checkpoint(
     geometry_mask: np.ndarray,
     static_channels: np.ndarray,
     schema: ContractSchema,
+    native_output_frequency: Optional[float] = None,
     metrics: Optional[dict] = None,
     manifest_extra: Optional[dict] = None,
     ic_bank: Optional[dict] = None,
@@ -97,6 +98,13 @@ def save_checkpoint(
         "architecture": arch_name,
         "history_len": int(history_len),
         "source_solver_name": schema.source_solver_name,
+        # Native autoregressive step size: the corpus output_frequency the model
+        # was trained on. One ``arch.step`` advances the flow by this much
+        # physical time. Inference resamples the rollout from this to the
+        # requested output_frequency, so the model is self-describing (§4).
+        "native_output_frequency": (
+            None if native_output_frequency is None else float(native_output_frequency)
+        ),
     }
     manifest.update(manifest_extra or {})
     _write_json(directory / registry.MANIFEST_FILE, manifest)
@@ -116,6 +124,7 @@ class LoadedCheckpoint:
     geometry_mask: np.ndarray
     static_channels: np.ndarray
     manifest: dict
+    native_output_frequency: Optional[float] = None
     ic_bank: Optional[dict] = None
 
 
@@ -168,6 +177,9 @@ def load_checkpoint(
     geometry_mask = np.load(directory / registry.GEOMETRY_FILE)
     static_channels = np.load(directory / _STATIC_FILE)
     manifest = registry.load_manifest(directory)
+    native_output_frequency = manifest.get("native_output_frequency")
+    if native_output_frequency is not None:
+        native_output_frequency = float(native_output_frequency)
 
     ic_bank = None
     ic_path = directory / _IC_BANK_FILE
@@ -185,5 +197,6 @@ def load_checkpoint(
         geometry_mask=geometry_mask,
         static_channels=static_channels,
         manifest=manifest,
+        native_output_frequency=native_output_frequency,
         ic_bank=ic_bank,
     )

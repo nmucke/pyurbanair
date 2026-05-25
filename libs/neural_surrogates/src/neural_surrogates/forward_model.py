@@ -28,9 +28,14 @@ class ForwardModel(BaseForwardModel):
         checkpoint_path: Path or ``run_id`` of the trained checkpoint (§7).
         nx, ny, nz, bounds: Composed domain — **validated** against the
             checkpoint grid, never used to size the network (§8.1).
-        simulation_time, output_frequency: Set ``num_outputs =
+        simulation_time, output_frequency: ``output_frequency`` is the
+            **requested inference** output spacing; ``num_outputs =
             round(simulation_time / output_frequency)`` (the time-axis
-            contract, §4).
+            contract, §4). The network always steps at the checkpoint's
+            **native** Δt (the corpus frequency it trained on); the rollout is
+            resampled from native frames onto ``output_frequency``. When the
+            requested frequency is not a multiple of the native Δt the
+            nearest native frame is taken (accepted approximation).
         device: ``"cuda"`` or ``"cpu"`` (informational; JAX placement follows
             ``JAX_PLATFORMS``).
         cold_start: ``"canned"`` (default, IC bank), ``"raise"``, or ``"zeros"``.
@@ -98,17 +103,51 @@ class ForwardModel(BaseForwardModel):
                 "was trained on (D5)."
             )
 
+    @property
+    def native_dt(self) -> float:
+        """Native autoregressive step size (physical time per ``arch.step``).
+
+        Read from the checkpoint (the corpus frequency it trained on). Old
+        checkpoints that predate this field fall back to the requested
+        ``output_frequency`` — i.e. the legacy 1:1 step==output behavior.
+        """
+        self.ensure_loaded()
+        native = self._ckpt.native_output_frequency
+        return float(native) if native else self.output_frequency
+
+    def _rollout_plan(self) -> tuple[int, np.ndarray]:
+        """Native-resolution step count + native indices for each output frame.
+
+        The model rolls out ``n_internal`` steps at ``native_dt``; output frame
+        ``j`` (at physical time ``(j+1)*output_frequency``) is the nearest
+        native frame (at ``(i+1)*native_dt``). When ``output_frequency`` is a
+        multiple of ``native_dt`` this is exact decimation; otherwise the
+        nearest frame is selected.
+        """
+        native_dt = self.native_dt
+        n_internal = max(1, round(self.simulation_time / native_dt))
+        t_native = (np.arange(n_internal) + 1) * native_dt
+        t_out = (np.arange(self.num_outputs) + 1) * self.output_frequency
+        sel = np.abs(t_native[None, :] - t_out[:, None]).argmin(axis=1)
+        return n_internal, sel
+
     # ----- BaseForwardModel interface ------------------------------------
     def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
-        """Store the per-step conditioning sequence on ``self`` (no files, §4)."""
+        """Store the per-step conditioning sequence on ``self`` (no files, §4).
+
+        Built at the **native** Δt over the full internal-step count, since the
+        network steps at native resolution and the rollout is decimated to the
+        requested ``output_frequency`` afterward.
+        """
         from .utils.params_io import params_to_conditioning
 
         self.ensure_loaded()
+        n_internal, _ = self._rollout_plan()
         self._pending_conditioning = params_to_conditioning(
             params,
             self._ckpt.schema.param_schema,
-            self.num_outputs,
-            self.output_frequency,
+            n_internal,
+            self.native_dt,
         )
 
     def run_single(
@@ -142,7 +181,8 @@ class ForwardModel(BaseForwardModel):
 
         static = jnp.asarray(ckpt.static_channels)
 
-        # (3) autoregressive rollout (§1.1).
+        # (3) autoregressive rollout at native Δt (§1.1).
+        n_internal, sel = self._rollout_plan()
         preds_n = rollout_from_history(
             ckpt.arch,
             jnp.asarray(hist_fields_n),
@@ -150,11 +190,14 @@ class ForwardModel(BaseForwardModel):
             jnp.asarray(hist_mask),
             jnp.asarray(conditioning),
             static,
-            self.num_outputs,
+            n_internal,
         )
-        preds = ckpt.normalization.invert(np.asarray(preds_n))  # [T, C, Z, Y, X]
+        preds = ckpt.normalization.invert(np.asarray(preds_n))  # [n_internal, C,Z,Y,X]
 
-        # (4) re-apply the building mask (no flow in solid cells, D5).
+        # (4) resample native frames onto the requested output_frequency (§4).
+        preds = preds[sel]  # [num_outputs, C, Z, Y, X]
+
+        # (5) re-apply the building mask (no flow in solid cells, D5).
         preds = self._reapply_mask(preds)
 
         ds = state_io.tensor_to_state(preds, grid, var_names)

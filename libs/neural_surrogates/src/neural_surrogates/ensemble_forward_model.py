@@ -89,9 +89,11 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         static = jnp.asarray(ckpt.static_channels)
         resolved_name = sim_name if sim_name is not None else "state"
 
+        n_internal, sel = fm._rollout_plan()
+
         def run_chunk(hist_n, hist_p, hist_m, cond):
             return rollout_from_history(
-                ckpt.arch, hist_n, hist_p, hist_m, cond, static, fm.num_outputs
+                ckpt.arch, hist_n, hist_p, hist_m, cond, static, n_internal
             )
 
         batched_run = jax.jit(jax.vmap(run_chunk))
@@ -111,6 +113,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             )  # [chunk, T, C, Z, Y, X]
             for local, member_idx in enumerate(idxs):
                 preds = ckpt.normalization.invert(preds_n[local])
+                preds = preds[sel]  # native frames -> requested output_frequency
                 preds = fm._reapply_mask(preds)
                 ds = state_io.trim_to_window(
                     state_io.tensor_to_state(preds, grid, var_names), fm.num_outputs
@@ -148,6 +151,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         ckpt = fm._ckpt
         schema = ckpt.schema.param_schema
         k = ckpt.history_len
+        n_internal, _ = fm._rollout_plan()
 
         hist_list, histp_list, mask_list, cond_list = [], [], [], []
         for i in idxs:
@@ -155,8 +159,10 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             member_params = self.get_member_params(params, i)
             if member_params is None:
                 raise ValueError("Surrogate ensemble requires per-member params.")
+            # Conditioning at the native Δt over the full internal-step count;
+            # the rollout is decimated to output_frequency after stepping (§4).
             cond = params_to_conditioning(
-                member_params, schema, fm.num_outputs, fm.output_frequency
+                member_params, schema, n_internal, fm.native_dt
             )
             hist_fields, hist_mask = fm._resolve_initial_history(member_state, cond[0])
             hist_n = ckpt.normalization.apply(hist_fields)
