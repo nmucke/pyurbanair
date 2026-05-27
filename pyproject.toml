@@ -189,13 +189,30 @@ numpy = "*"
 matplotlib = "*"
 typer = "*"
 
+# CUDA / GPU JAX wheels exist only for linux-64, so scope the whole feature to
+# it; otherwise pixi tries (and fails) to solve the cuda env for osx-arm64.
+[tool.pixi.feature.cuda]
+platforms = ["linux-64"]
+
 [tool.pixi.feature.cuda.dependencies]
 # NVIDIA CUDA toolkit and drivers are system-level and should be installed from NVIDIA:
 # https://developer.nvidia.com/cuda-downloads
 curl = ">=8.0.0,<9"
 
+# GPU JAX for the surrogate stack. The base `jax` (pulled by neural_surrogates)
+# resolves to a CPU jaxlib; the `cuda12` extra adds the matching
+# jax-cuda12-plugin + bundled cuDNN/cuBLAS pip wheels so JAX sees the GPU. Pin
+# to the env's jaxlib (0.7.2) — a mismatched plugin is exactly the
+# "plugin ... not compatible" / "cuDNN not found" failure we hit from ~/.local.
+[tool.pixi.feature.cuda.pypi-dependencies]
+jax = { version = "==0.7.2", extras = ["cuda12"] }
+
 [tool.pixi.feature.cuda.activation]
 scripts = ["activation_scripts/cuda_activation.sh"]
+# PYTHONNOUSERSITE keeps the incompatible jax_cuda12_plugin in the user's
+# ~/.local site-packages from leaking into and shadowing this env's GPU JAX.
+# (No JAX_PLATFORMS=cpu here — unlike the cpu feature, we want the GPU.)
+env = { PYTHONNOUSERSITE = "1" }
 
 [tool.pixi.feature.cuda.tasks]
 install-nvhpc = { cmd = "bash activation_scripts/install_nvhpc.sh", description = "One-time download + install of the NVIDIA HPC SDK (nvfortran, ~16 GB) into the cuda env. Required before GPU pylbm/uDALES builds." }
