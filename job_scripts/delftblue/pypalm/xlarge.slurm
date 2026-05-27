@@ -50,6 +50,28 @@ export OPENBLAS_NUM_THREADS=1
 # mid-run loses the traceback (cf. job 9842407).
 export PYTHONUNBUFFERED=1
 
+# PALM launches a nested `mpirun palm` per ensemble member. The ensemble runs
+# each member in a forkserver worker pinned to a single core (default, tuned
+# for uDALES); confined to one CPU, OpenMPI's orted + palm rank with the forced
+# TCP BTL livelock and the member run stalls (the serial truth run survives
+# only because the main process keeps the full cpuset). Disable pinning so
+# members get the whole allocation like the truth run, and let OMPI yield when
+# idle / not bind / oversubscribe so concurrent PALMs coexist.
+export PYURBANAIR_DISABLE_CPU_PINNING=1
+export OMPI_MCA_mpi_yield_when_idle=1
+export OMPI_MCA_rmaps_base_oversubscribe=true
+export OMPI_MCA_hwloc_base_binding_policy=none
+
+# Route palmrun's per-run working dir (fast_io_catalog) to node-local /tmp
+# instead of beegfs scratch. palmrun copies the full build tree (~750 files:
+# sources + prebuilt objects + the executable) there per member per window;
+# on beegfs that many-small-file copy is slow, on local SSD it's cheap. The
+# binary is identical across members, so this is pure I/O placement. Cleaned
+# on exit (node-local, so it would vanish with the node anyway).
+export PYPALM_FAST_IO_CATALOG="/tmp/urbanair_palm_${SLURM_JOB_ID}"
+mkdir -p "${PYPALM_FAST_IO_CATALOG}"
+trap 'rm -rf "${PYPALM_FAST_IO_CATALOG}"' EXIT
+
 # The delftblue activation `module load`s nvhpc/25.7, which prepends NVHPC's
 # mpif90 (nvfortran) ahead of the conda env's gfortran wrapper. PALM's installer
 # then picks nvfortran, which can't read the gfortran-built netcdf.mod and the
