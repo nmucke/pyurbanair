@@ -1,4 +1,4 @@
-simulation_time: 30.0
-output_frequency: 1.0
-spinup_time: 5.0
-
+# Sizing time: small. Override with `time=...` on the CLI.
+simulation_time: 60.0
+output_frequency: 5.0
+spinup_time: 10.0

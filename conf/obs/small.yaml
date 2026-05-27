@@ -1,0 +1,16 @@
+# Sizing obs: small. Override with `obs=...` on the CLI.
+#
+# Sensor placement. All (x,y,z) must fall inside `domain.bounds`
+# ([-20,40] x [0,40] x [0,10] for size=small) and outside the buildings. The
+# Xie & Castro array is a staggered grid of 10x10 cubes (period 20 in x and y,
+# height 17.2). x=-10 sits in the open upstream inflow region; the N-S lanes at
+# x in {2.5, 20, 38} fall in the gaps between cube columns and stay open for
+# every y. Lengths of x/y/z_points must match. (Verified against the case STL.)
+mode: points
+x_points: [-10.0, 2.5, 20.0, 20.0, 38.0]
+y_points: [20.0, 10.0, 20.0, 35.0, 10.0]
+z_points: [3.0, 3.0, 3.0, 3.0, 3.0]
+states: [u, v, w]
+temporal_mode: intervals
+interval_size: 3
+aggregation_mode: mean

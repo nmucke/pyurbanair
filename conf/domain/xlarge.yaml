@@ -1,0 +1,10 @@
+# Sizing domain: xlarge. Selected via `size=xlarge`; override individually with
+# `domain=...` on the CLI. Largest footprint (Xie & Castro 100x80) at full
+# height; x starts at -20 for the open upstream inflow region.
+nx: 180
+ny: 160
+nz: 32
+bounds:
+  - [-20.0, 160.0]
+  - [0.0, 160.0]
+  - [0.0, 64.0]

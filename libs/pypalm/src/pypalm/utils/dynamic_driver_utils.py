@@ -216,7 +216,21 @@ def write_dynamic_driver_file(
 
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    ds.to_netcdf(path, engine="netcdf4")
+    # PALM 25.10's turbulent_inflow_init does `ANY( time == fill_time )`
+    # (turbulent_inflow_mod.f90:1396) where fill_time is read from the
+    # `_FillValue` attribute, or left uninitialized when absent. Two
+    # pitfalls (cf. jobs 9950168, 9950191):
+    #   - xarray's default _FillValue=NaN, combined with PALM's -Ofast
+    #     build (implies -ffinite-math-only), lets gfortran fold
+    #     `time == NaN` to .TRUE. → false TUI0018.
+    #   - omitting the attribute leaves fill_time as 0.0 (zeroed Fortran
+    #     memory). PALM also REQUIRES time_inflow[0] == 0.0 (TUI0017),
+    #     so the check trivially matches.
+    # Pick a finite, non-NaN sentinel that can't appear in any inflow data:
+    # the canonical netCDF default fill 9.96921e+36.
+    fill = np.float32(9.9692099683868690e36)
+    encoding = {name: {"_FillValue": fill} for name in list(ds.variables)}
+    ds.to_netcdf(path, engine="netcdf4", encoding=encoding)
     logger.info(
         "Wrote dynamic driver with %d time points to %s", n_time, path
     )

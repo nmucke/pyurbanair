@@ -102,7 +102,7 @@ def get_udales_directory_paths(
         temp_dir: Optional base temp directory. If None, uses {cwd}/.temp.
         experiment_base_dir: Optional base directory for experiments. If None, uses {temp_dir}/experiment.
         cwd: Optional current working directory (project root). If None, uses get_project_root().
-        output_dir: Optional output directory. If None, uses {cwd}/.temp/outputs.
+        output_dir: Optional output directory. If None, uses {temp_dir}/outputs.
         results_dir: Optional results directory. If None, uses {cwd}/.temp/results.
     Returns:
         DirectoryPaths instance with all paths configured.
@@ -126,9 +126,13 @@ def get_udales_directory_paths(
     # Specific experiment directory (e.g., {experiment_base_dir}/{experiment_name})
     experiment_dir_path = create_dir(experiment_base_dir_path / experiment_name)
 
-    # Output directory where the intermediate udales outputs will be saved
+    # Output directory where the intermediate udales outputs will be saved.
+    # Derive from temp_dir (not cwd) so a single temp_dir override routes the
+    # heavy intermediate I/O off the home/login node along with the experiment
+    # dirs; otherwise outputs leak to {cwd}/.temp/outputs and can blow the home
+    # quota mid-run (cf. job 9970859).
     if output_dir is None:
-        output_dir_path = create_dir(cwd / ".temp" / "outputs")
+        output_dir_path = create_dir(temp_dir_path / "outputs")
     else:
         output_dir_path = create_dir(output_dir)
 

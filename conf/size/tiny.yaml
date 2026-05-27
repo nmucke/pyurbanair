@@ -1,48 +1,21 @@
 # @package _global_
-defaults:
-  - _self_
-
-# Sizing-only overlay (model-agnostic). Explicit root-level overrides because
-# Hydra 1.3 merges group overrides from CLI-selected overlays in surprising
-# ways for nested mappings; see conf/preset/*.yaml for the same rationale.
 #
-# tiny: fastest smoke run — minimal domain, ensemble, and windows.
-
-domain:
-  nx: 20
-  ny: 20
-  nz: 4
-  bounds:
-    - [0.0, 20.0]
-    - [0.0, 20.0]
-    - [0.0, 10.0]
-
-time:
-  simulation_time: 5.0
-  output_frequency: 1.0
-  spinup_time: 5.0
-
-ensemble:
-  ensemble_size: 4
-  num_parallel_processes: 2
-  num_cpus_per_process: 1
-  failure:
-    policy: resample_from_successes
-    jitter_scale: 0.05
-    seed: 0
-
-obs:
-  # Explicit observation locations. Edit these lists to place sensors;
-  # all three must have the same length. Coordinates are in domain units
-  # and must fall inside `domain.bounds` ([0,20] x [0,20] x [0,10] here).
-  mode: points
-  x_points: [5.0, 10.0, 15.0, 10.0]
-  y_points: [5.0, 10.0, 15.0, 15.0]
-  z_points: [2.0, 2.0, 2.0, 2.0]
-  states: [u, v, w]
-  temporal_mode: intervals
-  interval_size: 3
-  aggregation_mode: mean
+# Sizing overlay: tiny — fastest smoke run. Selects the matching per-group
+# `tiny` configs so each group (domain/time/ensemble/obs) lives in its own file.
+# Individual groups stay overridable on the CLI — a command-line `domain=...`,
+# `obs=...`, etc. wins over the selection here, e.g.
+#   ... size=tiny obs=grid_small domain=small
+#
+# The two scalars below are *not* swappable groups: the `esmda` group encodes an
+# assimilation method and `time_varying` a stochastic model, so their size-
+# dependent counts are set inline on top of whatever method/model is selected.
+# Override per-run with `esmda.num_steps=... time_varying.num_time_points=...`.
+defaults:
+  - override /domain: tiny
+  - override /time: tiny
+  - override /ensemble: tiny
+  - override /obs: tiny
+  - _self_
 
 esmda:
   num_steps: 1

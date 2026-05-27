@@ -1,0 +1,9 @@
+# Sizing domain: large. Selected via `size=large`; override individually with
+# `domain=...` on the CLI. Full-height domain (z to 40) on a 60x40 footprint.
+nx: 180
+ny: 80
+nz: 16
+bounds:
+  - [-20.0, 160.0]
+  - [0.0, 80.0]
+  - [0.0, 32.0]

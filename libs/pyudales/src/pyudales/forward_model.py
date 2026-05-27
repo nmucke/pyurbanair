@@ -130,6 +130,7 @@ class ForwardModel(BaseForwardModel):
         verbose: bool = True,
         temp_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
+        output_dir: Optional[pathlib.Path] = None,
         random_initial_condition_args: Optional[dict] = None,
         boundary_condition: str = "periodic",
         spinup_time: float = 0.0,
@@ -162,6 +163,7 @@ class ForwardModel(BaseForwardModel):
             verbose: If True, print output from Fortran code execution. If False, suppress all output.
             temp_dir: The base temp directory (defaults to {cwd}/.temp).
             experiment_base_dir: The base directory for experiments (defaults to {temp_dir}/experiment).
+            output_dir: The directory for intermediate uDALES outputs (defaults to {temp_dir}/outputs).
             nudging_config: Optional dict with nudging tunables for time-varying params.
                 Supported keys: ``tnudge`` (relaxation timescale in seconds, default 10.0),
                 ``nnudge`` (number of levels from bottom NOT nudged, default 0).
@@ -182,6 +184,7 @@ class ForwardModel(BaseForwardModel):
             udales_root_path=UDALES_PATH,  # type: ignore[arg-type]
             temp_dir=temp_dir,
             experiment_base_dir=experiment_base_dir,
+            output_dir=output_dir,
             results_dir=results_dir,
         )
 

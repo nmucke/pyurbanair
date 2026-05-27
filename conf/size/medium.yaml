@@ -1,50 +1,25 @@
 # @package _global_
+#
+# Sizing overlay: medium. Selects the matching per-group `medium` configs so
+# each group (domain/time/ensemble/obs) lives in its own file. Individual groups
+# stay overridable on the CLI — a command-line `domain=...`, `obs=...`, etc.
+# wins over the selection here, e.g.
+#   ... size=medium obs=grid_small domain=small
+#
+# The two scalars below are *not* swappable groups: the `esmda` group encodes an
+# assimilation method and `time_varying` a stochastic model, so their size-
+# dependent counts are set inline on top of whatever method/model is selected.
+# Override per-run with `esmda.num_steps=... time_varying.num_time_points=...`.
 defaults:
+  - override /domain: medium
+  - override /time: medium
+  - override /ensemble: medium
+  - override /obs: medium
   - _self_
 
-# Sizing-only overlay (model-agnostic). See conf/size/tiny.yaml for rationale.
-#
-# medium: taller domain, larger ensemble, more windows.
-
-domain:
-  nx: 60
-  ny: 40
-  nz: 8
-  bounds:
-    - [0.0, 60.0]
-    - [0.0, 40.0]
-    - [0.0, 16.0]
-
-time:
-  simulation_time: 60.0
-  output_frequency: 5.0
-  spinup_time: 10.0
-
-ensemble:
-  ensemble_size: 16
-  num_parallel_processes: 8
-  num_cpus_per_process: 1
-  failure:
-    policy: resample_from_successes
-    jitter_scale: 0.05
-    seed: 0
-
-obs:
-  # Explicit observation locations. Edit these lists to place sensors;
-  # all three must have the same length. Coordinates are in domain units
-  # and must fall inside `domain.bounds` ([0,60] x [0,40] x [0,16] here).
-  mode: points
-  x_points: [10.0, 25.0, 40.0, 55.0, 30.0]
-  y_points: [10.0, 30.0, 20.0, 35.0, 5.0]
-  z_points: [3.0, 3.0, 3.0, 3.0, 3.0]
-  states: [u, v, w]
-  temporal_mode: intervals
-  interval_size: 3
-  aggregation_mode: mean
-
 esmda:
-  num_steps: 2
+  num_steps: 3
   num_assimilation_windows: 5
 
 time_varying:
-  num_time_points: 4
+  num_time_points: 5
