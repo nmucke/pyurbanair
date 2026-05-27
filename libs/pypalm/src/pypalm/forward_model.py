@@ -502,6 +502,29 @@ class ForwardModel(BaseForwardModel):
         if rename_map:
             state = state.rename(rename_map)
 
+        # PALM emits grid coords based at 0 (the topography is sampled at the
+        # physical x_centers = xmin + ..., but PALM's NetCDF axes start at the
+        # origin). Shift them onto the configured physical domain so x/y/z match
+        # `bounds` — i.e. the same convention pyudales (coords + offset) and
+        # pylbm (xmin + (i+0.5)*dx) already use, and therefore the shared obs
+        # configs. Without this, sensors in the upstream inflow region (x < 0)
+        # fall outside PALM's [0, xlen] grid and the observation operator raises
+        # "Observation points for axis 'xu' are outside the grid bounds".
+        if self.bounds is not None:
+            (xmin, _), (ymin, _), (zmin, _) = self.bounds
+            offsets = {
+                "x": xmin, "xu": xmin,
+                "y": ymin, "yv": ymin,
+                "z": zmin, "zw": zmin, "zs": zmin,
+            }
+            coord_updates = {
+                name: state.coords[name].values + off
+                for name, off in offsets.items()
+                if name in state.coords
+            }
+            if coord_updates:
+                state = state.assign_coords(coord_updates)
+
         # PALM writes NaN for any cell occluded by topography (wall layer
         # zu_3d[0]/zw_3d[0] = 0, building interiors, etc.). The physical
         # BC is no-slip, so replace NaN with 0 across u/v/w. Without this,

@@ -9,6 +9,11 @@
 #SBATCH --output=job_scripts/delftblue/out_files/slurm-esmda_pypalm_tiny-%j.out
 #SBATCH --error=job_scripts/delftblue/out_files/slurm-esmda_pypalm_tiny-%j.err
 
+# Extra args passed to sbatch are forwarded as Hydra overrides, e.g.
+#   sbatch $0 time=large esmda.seed=7
+# They override this size's group selections. The #SBATCH walltime/cpus above
+# are fixed — bump them (or pass `sbatch --time=...`) for a heavier config.
+
 set -euo pipefail
 
 # Run from the repo root regardless of where sbatch was invoked.
@@ -24,6 +29,7 @@ mkdir -p job_scripts/delftblue/out_files "${PROJECT_STORAGE}" "${RUN_TEMP_DIR}"
 echo "Job ${SLURM_JOB_ID} on $(hostname) — $(date)"
 echo "Repo: $(pwd)"
 echo "Results: ${PROJECT_STORAGE}  (temp: ${RUN_TEMP_DIR})"
+echo "Extra Hydra overrides: $*"
 
 module purge
 
@@ -68,5 +74,6 @@ pixi run -e delftblue -- bash -c '
       localization=correlation \
       paths.base_results_dir='"${PROJECT_STORAGE}"' \
       +truth_model.forward_model.temp_dir='"${RUN_TEMP_DIR}"' \
-      +assim_model.forward_model.temp_dir='"${RUN_TEMP_DIR}"'
-'
+      +assim_model.forward_model.temp_dir='"${RUN_TEMP_DIR}"' \
+      "$@"
+' bash "$@"
