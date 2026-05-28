@@ -17,20 +17,37 @@
 
 set -euo pipefail
 
-# Run from the repo root regardless of where sbatch was invoked.
-cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}"
+# sbatch's --chdir (set by submit.sh) has already put us in the per-job
+# workdir on /scratch-shared, populated with symlinks back to the repo. We
+# deliberately do NOT `cd "${SLURM_SUBMIT_DIR}"` here: on Snellius that env
+# var points at the directory sbatch was invoked from (the shared repo root),
+# which would undo the per-job isolation and let concurrent jobs clobber each
+# other's `.temp`. If you ever invoke this template outside the wrapper, set
+# cwd manually before sbatch.
 
 : "${PUA_SIZE:?PUA_SIZE not set — submit via job_scripts/snellius/submit.sh}"
 : "${PUA_NUM_PARALLEL:?PUA_NUM_PARALLEL not set — submit via job_scripts/snellius/submit.sh}"
 : "${PUA_TRUTH_MODEL:?PUA_TRUTH_MODEL not set — submit via job_scripts/snellius/submit.sh}"
 : "${PUA_ASSIM_MODEL:?PUA_ASSIM_MODEL not set — submit via job_scripts/snellius/submit.sh}"
 
-# Logs -> job_scripts/snellius/out_files; temp/intermediate I/O -> node-local
-# scratch ($TMPDIR = /scratch-local/<jobid>, auto-purged); final results ->
-# ${PROJECT_STORAGE} on the project space.
+# Logs -> job_scripts/snellius/out_files; temp/intermediate I/O ->
+# /scratch-shared (shared GPFS); final results -> ${PROJECT_STORAGE} on the
+# project space.
+#
+# NB: do NOT point RUN_TEMP_DIR at $TMPDIR (/scratch-local/<jobid>) — pyudales
+# same-model runs (truth_model == assim_model == pyudales) fail there: the
+# second of the two prepare() calls exits the (silent-stderr) write_inputs.sh
+# preprocessor with status 1, consistently in <40s. The exact same workflow
+# succeeds when temp_dir lives on /scratch-shared (verified on debug job
+# 23170164). Cause not yet pinpointed (pyudales swallows the bash error via
+# subprocess.DEVNULL by default); /scratch-shared is the working location and
+# the cost is GPFS I/O latency vs node-local. We clean up RUN_TEMP_DIR at
+# successful job exit so /scratch-shared doesn't accumulate per-run trees;
+# failures leave the dir behind for post-mortem inspection.
 PROJECT_STORAGE="/projects/prjs2075/urbanair"
-RUN_TEMP_DIR="${TMPDIR:-/scratch-shared/${USER}/urbanair_temp/${SLURM_JOB_ID}}"
+RUN_TEMP_DIR="/scratch-shared/${USER}/urbanair_temp/${SLURM_JOB_ID}"
 mkdir -p job_scripts/snellius/out_files "${PROJECT_STORAGE}" "${RUN_TEMP_DIR}"
+trap '[ "$?" = "0" ] && rm -rf "${RUN_TEMP_DIR}"' EXIT
 
 echo "Job ${SLURM_JOB_ID} on $(hostname) — $(date)"
 echo "Truth=${PUA_TRUTH_MODEL} assim=${PUA_ASSIM_MODEL} size=${PUA_SIZE} cores=${SLURM_CPUS_PER_TASK} num_parallel=${PUA_NUM_PARALLEL}"
