@@ -12,7 +12,7 @@ def _compose_test_cfg(overrides: Sequence[str] | None = None) -> DictConfig:
     with initialize(version_base=None, config_path="../conf"):
         return compose(
             config_name="config",
-            overrides=["preset=test", *(overrides or [])],
+            overrides=["size=tiny", *(overrides or [])],
         )
 
 

@@ -1,7 +1,17 @@
 import pathlib
 
+import pytest
 
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param("pylbm", id="pylbm"),
+        pytest.param("pyudales", id="pyudales"),
+    ],
+)
 def test_run_time_varying_forward_model(
+    model: str,
     tmp_path: pathlib.Path,
     compose_test_cfg,
 ) -> None:
@@ -12,10 +22,12 @@ def test_run_time_varying_forward_model(
     results_dir.mkdir()
 
     overrides = [
+        f"model={model}",
         "run.skip_viz=true",
         f"run.results_dir={results_dir}",
         f"paths.base_results_dir={tmp_path}",
-        "model.forward_model.cuda=false",
     ]
+    if model == "pylbm":
+        overrides.append("model.forward_model.cuda=false")
 
     run(compose_test_cfg(overrides))
