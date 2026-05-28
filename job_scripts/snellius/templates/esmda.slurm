@@ -91,10 +91,41 @@ role_flags() {
 
 EXTRA_FLAGS=()
 
-# Global: if pypalm is involved in either role, pin the shared vertical
-# resolution PALM expects (matches the DelftBlue pypalm scripts).
+# Global: if pypalm is involved in either role, apply the PALM-specific
+# environment + Hydra defaults. Mirrors the DelftBlue template, minus the
+# DelftBlue-only nvhpc/CMakeCache scrub (Snellius's pixi env doesn't load
+# nvhpc) and the OMPI_MCA=osc=pt2pt override (OpenMPI 5 on Snellius removed
+# that component — setting it crashes MPI_Init; see memory).
 case " ${PUA_TRUTH_MODEL} ${PUA_ASSIM_MODEL} " in
-  *" pypalm "*) EXTRA_FLAGS+=( "domain.nz=16" ) ;;
+  *" pypalm "*)
+    # PALM expects this vertical resolution (matches the DelftBlue pypalm scripts).
+    EXTRA_FLAGS+=( "domain.nz=16" )
+
+    # PALM launches a nested `mpirun palm` per ensemble member. Workers pinned
+    # to a single core deadlock with the nested MPI ranks; disable pinning and
+    # let OMPI yield/no-bind/oversubscribe so concurrent PALMs coexist.
+    export PYURBANAIR_DISABLE_CPU_PINNING=1
+    export OMPI_MCA_mpi_yield_when_idle=1
+    export OMPI_MCA_rmaps_base_oversubscribe=true
+    export OMPI_MCA_hwloc_base_binding_policy=none
+
+    # Per-run PALM working dir on node-local scratch ($TMPDIR =
+    # /scratch-local/<jobid> on Snellius). Auto-purged at job end, so no
+    # cleanup trap needed. direct_palm copies outputs to OUTPUT/ before
+    # tearing the tempdir down.
+    export PYPALM_FAST_IO_CATALOG="${TMPDIR}/urbanair_palm_${SLURM_JOB_ID}"
+    mkdir -p "${PYPALM_FAST_IO_CATALOG}"
+
+    # Default to direct-run (no palmrun, no palmbuild): ~16x faster on tiny,
+    # ~2.4x on small, bit-identical u/v/w + posterior_params relative to the
+    # palmrun baseline. See docs/palm_overhead_plan.md §M0–M3. Escape hatch:
+    # prefix the submit with `PYPALM_USE_DIRECT_RUN=` to fall back to palmrun.
+    # NB: direct-run reuses the prebuilt binary at
+    # libs/pypalm/palm_model_system/MAKE_DEPOSITORY_default/{palm,combine_plot_fields.x};
+    # if it's absent the run aborts. Compute nodes have no internet, so build
+    # it once on a login node before submitting.
+    export PYPALM_USE_DIRECT_RUN="${PYPALM_USE_DIRECT_RUN:-1}"
+    ;;
 esac
 
 # Global: pylbm's forward model hardcodes ./.temp relative to cwd. If either
