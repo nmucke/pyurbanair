@@ -39,6 +39,9 @@ figures/*
 # torch weights
 *.pt
 
+# trained model weights
+model_weights/
+
 # macOS files
 *.DS_Store
 
