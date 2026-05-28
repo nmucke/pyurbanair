@@ -1,8 +1,10 @@
 # @package _global_
 
 defaults:
-  - /neural_surrogate_architectures/unet_convnext@architecture: small
+  - /neural_surrogate_architectures/unet_convnext@architecture: tiny
   - _self_
+
+model_name: unet_convnext_tiny
 
 trainer:
   _target_: neural_surrogates.Trainer

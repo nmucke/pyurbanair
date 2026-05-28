@@ -13,10 +13,13 @@ Usage:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import hydra
 import torch
 from hydra.utils import instantiate
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
+
 
 def run(cfg: DictConfig) -> None:
     dtype = getattr(torch, cfg.dataset.dtype)
@@ -46,6 +49,12 @@ def run(cfg: DictConfig) -> None:
         loss_fn=instantiate(cfg.loss),
     )
     trainer.fit()
+
+    out_dir = Path("model_weights") / cfg.model_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), out_dir / "weights.pt")
+    OmegaConf.save(cfg, out_dir / "config.yaml")
+    print(f"saved weights and config to {out_dir}")
 
 
 @hydra.main(

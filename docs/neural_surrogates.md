@@ -7,7 +7,7 @@ broader [codebase_guide.md](codebase_guide.md); read that first for
 orientation on the forward-model / ensemble abstractions referenced
 below.
 
-The stack splits into three pieces that are useful (and runnable) on
+The stack splits into four pieces that are useful (and runnable) on
 their own:
 
 1. **Training-data generation** — drive the CFD ensemble to produce a
@@ -15,7 +15,13 @@ their own:
 2. **Data loading** — `TransitionDataset` turns the on-disk layout into
    one-step transition pairs ready for PyTorch training. See §6.
 3. **Architectures + training loop** — `SimpleConv` baseline,
-   `UNetConvNeXt` architecture, and the generic `Trainer`. See §7–§10.
+   `UNetConvNeXt` architecture, and the generic `Trainer`. Trained
+   weights are saved alongside the resolved config under
+   `model_weights/<model_name>/`. See §7–§10.
+4. **Autoregressive rollout / test** — reload a saved model from its
+   config + weights and step it through a full test trajectory,
+   producing diagnostic plots and a `truth | pred | |err|`
+   animation. See §11.
 
 ---
 
@@ -420,6 +426,12 @@ augmentation, and config structure.
    optimizer=instantiate(cfg.optimizer, params=model.parameters()),
    loss_fn=instantiate(cfg.loss))`.
 6. `trainer.fit()`.
+7. Save `model.state_dict()` to `model_weights/<model_name>/weights.pt` and
+   the resolved Hydra config to `model_weights/<model_name>/config.yaml`.
+   `model_name` is a top-level config field (default
+   `unet_convnext_small`); override on the CLI with `model_name=...`.
+   Re-instantiating the architecture from the saved `config.yaml` and
+   loading `weights.pt` rebuilds the exact trained model.
 
 Every runtime object — architecture, dataset, dataloader, optimizer,
 loss, trainer — is constructed via `hydra.utils.instantiate` against a
@@ -461,6 +473,37 @@ pixi run -e dev python scripts/train_neural_surrogate.py \
     trainer.num_epochs=20 \
     optimizer.lr=5e-4 \
     architecture.kernel_size=5
+```
+
+### 11. Autoregressive rollout on the test split
+
+[scripts/test_neural_surrogate.py](../scripts/test_neural_surrogate.py)
+loads `model_weights/<model_name>/config.yaml`, re-instantiates the
+architecture and `TransitionDataset` from it, restores `weights.pt`, and
+steps the model from `truth[0]` for `T - 1` steps so the predicted
+trajectory matches the test trajectory length. At each step the
+ground-truth `params_n` for that time index is fed in. The script is
+Hydra-driven via
+[conf/neural_surrogate_testing/test.yaml](../conf/neural_surrogate_testing/test.yaml)
+and takes `model_dir`, `sample_idx`, `device`, and `output_dir` (default
+`${model_dir}/rollout_${sample_idx}`).
+
+Outputs in `${output_dir}/`:
+
+| File | Contents |
+|---|---|
+| `trajectory.pt` | `{"truth": (T, C, *grid), "pred": (T, C, *grid)}` torch tensors |
+| `rollout.png` | mid-z `|u|` slices at evenly-spaced times: truth / pred / `|err|` rows |
+| `rmse.png` | per-step RMSE vs ground truth across the rollout |
+| `rollout.mp4` | three-panel animation (truth, pred, `|err|`) of mid-z `|u|`, all `T` steps. Falls back to `rollout.gif` when ffmpeg is missing. |
+
+All slice plots index the z-axis (first spatial dim of the `(C, nz, ny, nx)`
+state tensor), matching the convention used in
+[scripts/dataloading.py](../scripts/dataloading.py).
+
+```bash
+pixi run -e dev python scripts/test_neural_surrogate.py \
+    model_dir=model_weights/unet_convnext_small sample_idx=0
 ```
 
 ### Extending
