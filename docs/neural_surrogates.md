@@ -15,8 +15,9 @@ their own:
 2. **Data loading** — `TransitionDataset` turns the on-disk layout into
    one-step transition pairs ready for PyTorch training. See §6.
 3. **Architectures + training loop** — `SimpleConv` baseline,
-   `UNetConvNeXt` architecture, and the generic `Trainer`. Trained
-   weights are saved alongside the resolved config under
+   `UNetConvNeXt` architecture, and the generic `Trainer`. The trainer
+   checkpoints the best-val weights and supports patience-based early
+   stopping; resolved config + best weights land under
    `model_weights/<model_name>/`. See §7–§10.
 4. **Autoregressive rollout / test** — reload a saved model from its
    config + weights and step it through a full test trajectory,
@@ -404,10 +405,22 @@ holds five presets that scale `base_channels`, `channel_mults`,
 
 `Trainer` is a generic loop. Its constructor takes `model`,
 `train_loader`, `val_loader`, `optimizer`, `loss_fn`, `num_epochs`,
-`device`. `fit()` runs the loop; each epoch calls `_train_epoch` then
-`_validate` and prints the mean losses. Batch unpacking assumes the
-`TransitionDataset` dict layout (`state_n`, `state_next`, `params_n`,
-`geometry`).
+`device`, optional `patience`, and optional `weights_path`. `fit()` runs
+the loop; each epoch calls `_train_epoch` then `_validate` and prints
+the mean losses. Batch unpacking assumes the `TransitionDataset` dict
+layout (`state_n`, `state_next`, `params_n`, `geometry`).
+
+**Best-checkpoint saving.** When `weights_path` is set, the trainer
+writes `model.state_dict()` to that path every time the val loss
+improves, and reloads it into the model at the end of `fit()` so the
+returned model is the best-val checkpoint (not the last epoch). The run
+script passes `weights_path=model_weights/<model_name>/weights.pt`, so
+nothing needs to be saved by the caller after `fit()`.
+
+**Early stopping.** When `trainer.patience` is set in the config
+(default `null`, disabled), training halts after `patience` consecutive
+epochs without val-loss improvement. Combine with a generous
+`num_epochs` to let the patience criterion choose when to stop.
 
 The model and dataloaders are deliberately **constructed outside** the
 trainer and passed in — this keeps `Trainer` agnostic to backend choice,
@@ -422,16 +435,19 @@ augmentation, and config structure.
    `shuffle=False` on val.
 4. `instantiate(cfg.architecture, n_state_channels=len(cfg.dataset.state_vars),
    n_params=len(train_ds.param_names))` → model.
-5. `instantiate(cfg.trainer, model=..., train_loader=..., val_loader=...,
+5. Save the resolved Hydra config to
+   `model_weights/<model_name>/config.yaml`. `model_name` is a top-level
+   config field (default `unet_convnext_small`); override on the CLI
+   with `model_name=...`.
+6. `instantiate(cfg.trainer, model=..., train_loader=..., val_loader=...,
    optimizer=instantiate(cfg.optimizer, params=model.parameters()),
-   loss_fn=instantiate(cfg.loss))`.
-6. `trainer.fit()`.
-7. Save `model.state_dict()` to `model_weights/<model_name>/weights.pt` and
-   the resolved Hydra config to `model_weights/<model_name>/config.yaml`.
-   `model_name` is a top-level config field (default
-   `unet_convnext_small`); override on the CLI with `model_name=...`.
-   Re-instantiating the architecture from the saved `config.yaml` and
-   loading `weights.pt` rebuilds the exact trained model.
+   loss_fn=instantiate(cfg.loss),
+   weights_path=model_weights/<model_name>/weights.pt)`.
+7. `trainer.fit()` — the trainer writes `weights.pt` on every val-loss
+   improvement and loads the best checkpoint back into the model before
+   returning. Re-instantiating the architecture from the saved
+   `config.yaml` and loading `weights.pt` rebuilds the exact trained
+   model.
 
 Every runtime object — architecture, dataset, dataloader, optimizer,
 loss, trainer — is constructed via `hydra.utils.instantiate` against a

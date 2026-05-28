@@ -36,6 +36,9 @@ libs/pypalm/*.pyc
 *.mp4
 figures/*
 
+# torch weights
+*.pt
+
 # macOS files
 *.DS_Store
 

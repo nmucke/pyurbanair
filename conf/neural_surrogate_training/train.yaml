@@ -8,8 +8,9 @@ model_name: unet_convnext_tiny
 
 trainer:
   _target_: neural_surrogates.Trainer
-  num_epochs: 50
+  num_epochs: 500
   device: cpu
+  patience: 10
 
 optimizer:
   _target_: torch.optim.Adam
