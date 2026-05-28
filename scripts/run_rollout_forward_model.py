@@ -34,7 +34,7 @@ def run(cfg: DictConfig) -> None:
     true_params = create_true_params(
         model_name,
         cfg.params.true,
-        resolve_parameter_schema(model_name, cfg.model.get("checkpoint_path")),
+        resolve_parameter_schema(model_name),
     )
 
     state_list = []

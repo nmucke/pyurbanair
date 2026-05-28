@@ -80,25 +80,6 @@ def test_palm_target_does_not_import_for_non_palm_composition() -> None:
     assert "pypalm" not in sys.modules
 
 
-def test_neural_surrogate_target_does_not_import_for_non_surrogate_composition() -> None:
-    for module_name in list(sys.modules):
-        if module_name == "neural_surrogates" or module_name.startswith(
-            "neural_surrogates."
-        ):
-            del sys.modules[module_name]
-
-    _compose(["model=pylbm"])
-
-    assert "neural_surrogates" not in sys.modules
-
-
-def test_neural_surrogate_config_composes() -> None:
-    cfg = _compose(["model=neural_surrogate"])
-
-    assert cfg.model.name == "neural_surrogate"
-    assert cfg.model.solver_name == "neural_surrogate"
-
-
 def test_interpolations_resolve_under_aliased_packages() -> None:
     cfg = _compose(
         [
@@ -124,48 +105,14 @@ def test_true_params_filter_pressure_gradient_for_non_udales() -> None:
     assert "pressure_gradient_magnitude" not in true_params
 
 
-def test_resolve_parameter_schema_reads_neural_surrogate_checkpoint(tmp_path) -> None:
-    import json
+def test_resolve_parameter_schema_includes_pressure_gradient_for_udales() -> None:
+    from pyurbanair.config.hydra_helpers import resolve_parameter_schema
 
-    from pyurbanair.config.hydra_helpers import (
-        create_parameter_ensemble,
-        resolve_parameter_schema,
-    )
-
-    # pylbm-source surrogate: no pressure gradient.
-    assert resolve_parameter_schema("neural_surrogate", None) == (
+    assert resolve_parameter_schema("pylbm") == (
         "inflow_angle",
         "velocity_magnitude",
     )
-
-    # uDALES-source surrogate: schema.json drives the param set, NOT model.name.
-    ckpt = tmp_path / "ckpt"
-    ckpt.mkdir()
-    with open(ckpt / "schema.json", "w") as f:
-        json.dump(
-            {
-                "source_solver_name": "udales",
-                "param_schema": {
-                    "names": [
-                        "inflow_angle",
-                        "velocity_magnitude",
-                        "pressure_gradient_magnitude",
-                    ],
-                    "angular": ["inflow_angle"],
-                },
-                "state_var_names": ["u", "v", "w"],
-            },
-            f,
-        )
-    names = resolve_parameter_schema("neural_surrogate", str(ckpt))
-    assert "pressure_gradient_magnitude" in names
-
-    cfg = _compose(["model=pylbm"])
-    ensemble = create_parameter_ensemble(
-        "neural_surrogate", cfg.params.prior, ensemble_size=3, seed=0, param_names=names
-    )
-    assert "pressure_gradient_magnitude" in ensemble
-    assert ensemble.sizes["ensemble"] == 3
+    assert "pressure_gradient_magnitude" in resolve_parameter_schema("pyudales")
 
 
 def test_time_varying_truth_and_prior_correlation_lengths_are_distinct() -> None:

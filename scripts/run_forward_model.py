@@ -30,7 +30,7 @@ def run(cfg: DictConfig) -> None:
     instantiate(cfg.model.prepare, forward_model=forward_model)
     clean_outputs(model_name=model_name, forward_model=forward_model)
 
-    param_names = resolve_parameter_schema(model_name, cfg.model.get("checkpoint_path"))
+    param_names = resolve_parameter_schema(model_name)
     true_params = create_true_params(model_name, cfg.params.true, param_names)
 
     state = forward_model(params=true_params)

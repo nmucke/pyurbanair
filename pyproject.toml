@@ -94,26 +94,6 @@ pypalm = { path = "libs/pypalm", editable = true }
 [tool.pixi.feature.data-assimilation.pypi-dependencies]
 data-assimilation = { path = "libs/data-assimilation", editable = true }
 
-# Neural-surrogate framework (libs/neural_surrogates). NN-only deps; no
-# Fortran/MPI. Added to `dev`, `cuda`, and `delftblue` — NOT `default` — so the
-# import-light `default` env stays free of the JAX NN stack. GPU JAX comes from
-# the `cuda` feature; CPU envs keep JAX_PLATFORMS=cpu.
-[tool.pixi.feature.neural_surrogates.dependencies]
-zarr = ">=2.17,<3"
-
-[tool.pixi.feature.neural_surrogates.tasks]
-generate-surrogate-data = { cmd = "python scripts/generate_neural_surrogate_data.py", description = "Generate a neural-surrogate training corpus from a Fortran solver (§5)" }
-train-surrogate = { cmd = "python scripts/train_surrogate.py", description = "Train a neural surrogate, single GPU (§6)" }
-train-surrogate-multi = { cmd = "python scripts/train_surrogate.py sharding.data_parallel=true", description = "Train a neural surrogate, data-parallel multi-GPU (§6.4)" }
-eval-surrogate-gate = { cmd = "python scripts/eval_surrogate_gate.py", description = "Run the §13 GATE bars on a trained checkpoint (go/no-go)" }
-
-[tool.pixi.feature.neural_surrogates.pypi-dependencies]
-equinox = ">=0.11,<0.13"
-optax = ">=0.2,<0.3"
-orbax-checkpoint = ">=0.6"
-jaxtyping = ">=0.2"
-neural_surrogates = { path = "libs/neural_surrogates", editable = true }
-
 # Development tasks
 [tool.black]
 line-length = 88
@@ -199,8 +179,8 @@ platforms = ["linux-64"]
 # https://developer.nvidia.com/cuda-downloads
 curl = ">=8.0.0,<9"
 
-# GPU JAX for the surrogate stack. The base `jax` (pulled by neural_surrogates)
-# resolves to a CPU jaxlib; the `cuda12` extra adds the matching
+# GPU JAX for the assimilation stack. The base `jax` resolves to a CPU jaxlib;
+# the `cuda12` extra adds the matching
 # jax-cuda12-plugin + bundled cuDNN/cuBLAS pip wheels so JAX sees the GPU. Pin
 # to the env's jaxlib (0.7.2) — a mismatched plugin is exactly the
 # "plugin ... not compatible" / "cuDNN not found" failure we hit from ~/.local.
@@ -233,6 +213,6 @@ JAX_PLATFORMS = "cpu"
 
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "neural_surrogates", "benchmark_geometry", "cpu"] }
-delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm", "palm", "neural_surrogates"] }
-cuda = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "neural_surrogates", "cuda"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "benchmark_geometry", "cpu"] }
+delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm", "palm"] }
+cuda = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "cuda"] }

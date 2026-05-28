@@ -39,9 +39,7 @@ def run(cfg: DictConfig) -> None:
     true_params = create_true_params(
         cfg.truth_model.name,
         cfg.params.true,
-        resolve_parameter_schema(
-            cfg.truth_model.name, cfg.truth_model.get("checkpoint_path")
-        ),
+        resolve_parameter_schema(cfg.truth_model.name),
     )
     true_state = truth_model(params=true_params)
     if true_state is None:
@@ -81,9 +79,7 @@ def run(cfg: DictConfig) -> None:
         prior_cfg=cfg.params.prior,
         ensemble_size=cfg.ensemble.ensemble_size,
         seed=cfg.esmda.seed,
-        param_names=resolve_parameter_schema(
-            cfg.assim_model.name, cfg.assim_model.get("checkpoint_path")
-        ),
+        param_names=resolve_parameter_schema(cfg.assim_model.name),
     )
 
     esmda = instantiate(

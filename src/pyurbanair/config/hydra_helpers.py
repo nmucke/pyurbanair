@@ -52,17 +52,6 @@ def prepare_udales(
     )
 
 
-def prepare_neural_surrogate(forward_model: Any) -> None:
-    """Validate + warm a neural-surrogate checkpoint (replaces ``compile``).
-
-    Loads the checkpoint and validates the composed grid against it (raising on
-    mismatch); NN imports stay inside ``ForwardModel.ensure_loaded`` so this
-    helper — imported by every script — never drags in the JAX stack at module
-    top (the lazy-import invariant, ``docs/neural_surrogate_plan.md`` §8.2).
-    """
-    _unwrap_forward_model(forward_model).ensure_loaded()
-
-
 def clean_outputs(model_name: str, forward_model: Any) -> None:
     model = _unwrap_forward_model(forward_model)
     if model_name == "pylbm":
@@ -71,9 +60,6 @@ def clean_outputs(model_name: str, forward_model: Any) -> None:
         from pypalm.utils.clean_up_utils import clean_palm_output_dir
 
         clean_palm_output_dir(model.dirs)
-    elif model_name == "neural_surrogate":
-        # No external solver outputs to clean.
-        return None
     elif model_name == "pyudales":
         clean_udales_output_dir(model.dirs)
     else:
@@ -93,31 +79,12 @@ def configure_failure_policy(ensemble_model: Any, failure_cfg: Any) -> Any:
     return ensemble_model
 
 
-def resolve_parameter_schema(
-    model_name: str,
-    checkpoint_path: Any = None,
-) -> tuple[str, ...]:
+def resolve_parameter_schema(model_name: str) -> tuple[str, ...]:
     """Resolve the ordered parameter names a model consumes.
 
-    For native Fortran backends this is keyed off ``model_name``
-    (``pressure_gradient_magnitude`` is uDALES-only). For ``neural_surrogate``
-    the param set comes from the **checkpoint's** ``schema.json`` (its source
-    solver), so a uDALES-trained surrogate keeps ``pressure_gradient_magnitude``
-    even though ``model.name == "neural_surrogate"`` (§6.2/§8.2). Reads the JSON
-    directly to avoid importing the NN stack (lazy-import invariant).
+    Keyed off ``model_name``: ``pressure_gradient_magnitude`` is uDALES-only.
     """
     base = ("inflow_angle", "velocity_magnitude")
-    if model_name == "neural_surrogate":
-        if checkpoint_path is None:
-            return base
-        import json
-
-        schema_file = pathlib.Path(str(checkpoint_path)) / "schema.json"
-        if not schema_file.exists():
-            return base
-        with open(schema_file) as f:
-            schema = json.load(f)
-        return tuple(schema["param_schema"]["names"])
     if model_name == "pyudales":
         return base + ("pressure_gradient_magnitude",)
     return base
@@ -176,8 +143,7 @@ def create_parameter_ensemble(
         "velocity_magnitude": ("ensemble", velocity),
     }
     # Include pressure_gradient_magnitude only when the resolved schema requires
-    # it (uDALES, or a uDALES-trained neural_surrogate checkpoint) — otherwise a
-    # surrogate's conditioning builder would KeyError on the missing param.
+    # it (uDALES).
     if "pressure_gradient_magnitude" in names:
         if "pressure_gradient_magnitude" not in prior:
             raise KeyError(

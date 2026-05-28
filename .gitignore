@@ -54,9 +54,5 @@ esmda_results/*
 # cache
 .cache/*
 
-# Trained neural-surrogate model registry (docs/neural_surrogate_plan.md §7).
-# Weights are large and reproducible; sync to an external store, not git.
-models/neural_surrogates/
-
 # Stray Hydra default run dir (when a script runs without the configured run.dir).
 outputs/
