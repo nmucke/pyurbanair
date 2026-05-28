@@ -7,11 +7,10 @@ A Python framework for urban air flow simulation and ensemble-based data assimil
 ## Features
 
 - **Two CFD backends:** pylbm (Lattice Boltzmann Method, wrapping Geir Evensen's LBM) and pyudales (wrapping uDALES v2.2.0)
-- **Neural surrogate backend** (`neural_surrogates`): an architecture-agnostic, GPU-batched learned surrogate that drops into the same forward-model/ensemble/ESMDA machinery as the CFD backends (first architecture: a 3D convolutional UNet)
 - **Ensemble-based data assimilation** using ESMDA (Ensemble Smoother with Multiple Data Assimilation), implemented in JAX
 - **Parameter estimation** and **joint state-parameter estimation**
 - **Multi-step rollout simulations** with state carry-over between time windows
-- **Cross-model assimilation** (e.g., use LBM as truth model with uDALES — or a neural surrogate — for assimilation)
+- **Cross-model assimilation** (e.g., use LBM as truth model with uDALES for assimilation)
 - **Time-varying parameters** with per-window mean/std profiles for the inflow priors
 - **Observation operators** for mapping simulation states to observation space
 - **Benchmark geometry generation** for the Xie and Castro 2008 case
@@ -87,9 +86,6 @@ command line. The groups are:
   a scalar **or a list of control points** interpolated over the window,
   letting `x_ext(t)` / `Σ_ext(t)` vary in time (see
   `conf/params/external/time_varying.yaml`)
-- **`neural_surrogate/`** — training-side config for the learned surrogate
-  (`train.yaml`, `arch/unet3d.yaml`, `data.yaml`, `gate.yaml`); consumed
-  only by the surrogate data-generation / training / gate scripts
 - **`preset/`** — bundled overlays (`small`, `test`) for fast runs
 
 ### Forward simulations
@@ -188,46 +184,6 @@ Results land in `/projects/prjs2075/urbanair/`; SLURM logs in
 `job_scripts/snellius/out_files/slurm-<model>_<size>-<jobid>.{out,err}`
 (gitignored). Mixed-model runs get a `..._truth-<model>` suffix.
 
-### Neural surrogate models
-
-A trained neural surrogate behaves like any other backend (`model=neural_surrogate`),
-so the same forward / ensemble / ESMDA scripts work unchanged. The full
-workflow — generate a trajectory corpus from a CFD solver, train, gate, and use
-the checkpoint — is documented in
-[`libs/neural_surrogates/README.md`](libs/neural_surrogates/README.md). Quick tour:
-
-```bash
-# 1. Generate a corpus from a CFD solver (the solver IS the data generator).
-#    Optionally with time-varying inflow (transient BCs).
-python scripts/generate_neural_surrogate_data.py \
-  model=pylbm model.forward_model.cuda=false \
-  domain=xie_castro_60x40x16 \
-  +generate.corpus_path=.temp/neural_surrogate/xie_castro \
-  +generate.n_trajectories=200
-
-# 2. Train (architecture is a config choice; UNet by default).
-python scripts/train_surrogate.py \
-  corpus_path=.temp/neural_surrogate/xie_castro \
-  run_id=lbm_xie_castro_unet3d_v1
-
-# 3. Go/no-go GATE on a held-out split before scaling.
-python scripts/eval_surrogate_gate.py \
-  checkpoint_path=models/neural_surrogates/lbm_xie_castro_unet3d_v1 \
-  corpus_path=.temp/neural_surrogate/xie_castro
-
-# 4. Use it like any backend — domain must match the checkpoint grid.
-python scripts/run_forward_model.py model=neural_surrogate \
-  model.checkpoint_path=models/neural_surrogates/lbm_xie_castro_unet3d_v1 \
-  domain=xie_castro_60x40x16
-
-# 5. ESMDA with a CFD truth and the surrogate as assim (anti-inverse-crime).
-python scripts/run_parameter_esmda.py \
-  model@truth_model=pylbm model@assim_model=neural_surrogate \
-  assim_model.checkpoint_path=models/neural_surrogates/lbm_xie_castro_unet3d_v1
-```
-
-Trained checkpoints live under `models/neural_surrogates/<run_id>/` (git-ignored).
-
 ## Repository Structure
 
 The repository uses a monorepo approach. It contains a base project `pyurbanair` and a series of sub-libraries in the `libs/` folder. The general idea is that everything should be run from the `pyurbanair` project, which loads functionalities from the other libraries.
@@ -274,25 +230,11 @@ pyurbanair/
 │   │       ├── ensemble_forward_model.py
 │   │       ├── rollout_forward_model.py
 │   │       └── utils/
-│   │
-│   └── neural_surrogates/                  # Architecture-agnostic learned surrogate
-│       ├── README.md                       # Detailed library docs
-│       ├── pyproject.toml
-│       ├── src/neural_surrogates/
-│       │   ├── forward_model.py            # ForwardModel(BaseForwardModel)
-│       │   ├── ensemble_forward_model.py   # GPU-batched (vmap) ensemble
-│       │   ├── rollout.py                  # architecture-agnostic autoregression
-│       │   ├── architectures/              # SurrogateArchitecture interface + unet3d
-│       │   ├── data/                       # corpus generate/dataset/normalization/grid
-│       │   ├── training/                   # loop, train, checkpoint, conditioning, sharding
-│       │   └── utils/                      # state_io, params_io, schema, registry
-│       └── tests/
 │
 ├── conf/                                  # Hydra config groups (see Configuration)
 │   ├── config.yaml                        # Top-level composition
 │   ├── domain/, time/, model/, ensemble/
 │   ├── obs/, esmda/, params/, time_varying/
-│   ├── neural_surrogate/                  # Surrogate training/data/gate config
 │   └── preset/                            # Bundled overlays (small, test)
 │
 ├── scripts/                               # Main execution scripts
@@ -305,10 +247,7 @@ pyurbanair/
 │   ├── run_state_and_parameter_esmda.py   # Joint state-parameter estimation
 │   ├── run_rollout_esmda.py               # Rollout-based ESMDA
 │   ├── run_time_varying_parameter_esmda.py
-│   ├── run_time_varying_parameters_rollout_esmda.py
-│   ├── generate_neural_surrogate_data.py  # Build a surrogate training corpus
-│   ├── train_surrogate.py                 # Train a neural surrogate
-│   └── eval_surrogate_gate.py             # Surrogate go/no-go GATE
+│   └── run_time_varying_parameters_rollout_esmda.py
 │
 ├── examples/                              # Example experiments
 │   ├── benchmark_geometry/                # Xie and Castro 2008 geometry tools
@@ -340,10 +279,6 @@ A wrapper for Geir Evensen's Lattice Boltzmann simulator. On first import, it au
 #### pyudales
 
 A wrapper for the uDALES v2.2.0 simulator. On first import, it automatically downloads the repository from GitHub and compiles the code based on the experiment specifications. Requires Matlab for preprocessing.
-
-#### neural_surrogates
-
-An architecture-agnostic neural-surrogate framework. It owns the pyurbanair-specific machinery (the forward-model I/O contract, ensemble batching, geometry handling, data generation, training curriculum, checkpoint format, and Hydra wiring) and treats the neural network as a **pluggable architecture** behind a small `SurrogateArchitecture` interface. The first architecture is a 3D convolutional UNet; others (e.g. UPT) slot in without touching the framework. A trained checkpoint behaves like any CFD backend (`model=neural_surrogate`), so ESMDA, the observation operator, and plotting are unchanged. The data generator reuses the existing CFD backends — the solver *is* the corpus generator. Requires the `dev`, `cuda`, or `delftblue` environment (not `default`). See [`libs/neural_surrogates/README.md`](libs/neural_surrogates/README.md) for the full design, data formats, and end-to-end workflow.
 
 ## Benchmark Geometry
 

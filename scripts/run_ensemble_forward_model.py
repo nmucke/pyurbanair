@@ -44,9 +44,7 @@ def run(cfg: DictConfig) -> None:
         prior_cfg=cfg.params.prior,
         ensemble_size=cfg.ensemble.ensemble_size,
         seed=cfg.esmda.seed,
-        param_names=resolve_parameter_schema(
-            model_name, cfg.model.get("checkpoint_path")
-        ),
+        param_names=resolve_parameter_schema(model_name),
     )
 
     t1 = time.time()

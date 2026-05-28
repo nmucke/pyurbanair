@@ -38,9 +38,7 @@ def run(cfg: DictConfig) -> None:
     true_params = create_true_params(
         cfg.truth_model.name,
         cfg.params.true,
-        resolve_parameter_schema(
-            cfg.truth_model.name, cfg.truth_model.get("checkpoint_path")
-        ),
+        resolve_parameter_schema(cfg.truth_model.name),
     )
 
     truth_model_name = cfg.truth_model.name
@@ -77,9 +75,7 @@ def run(cfg: DictConfig) -> None:
         params=create_true_params(
             cfg.assim_model.name,
             cfg.params.true,
-            resolve_parameter_schema(
-                cfg.assim_model.name, cfg.assim_model.get("checkpoint_path")
-            ),
+            resolve_parameter_schema(cfg.assim_model.name),
         )
     )
     assim_model.set_results_dir(assim_results_dir)
@@ -95,9 +91,7 @@ def run(cfg: DictConfig) -> None:
         prior_cfg=cfg.params.prior,
         ensemble_size=cfg.ensemble.ensemble_size,
         seed=cfg.esmda.seed,
-        param_names=resolve_parameter_schema(
-            cfg.assim_model.name, cfg.assim_model.get("checkpoint_path")
-        ),
+        param_names=resolve_parameter_schema(cfg.assim_model.name),
     )
 
     ensemble_model = instantiate(
