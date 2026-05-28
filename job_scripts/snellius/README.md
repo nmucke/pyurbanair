@@ -83,6 +83,24 @@ WALLTIME=02:00:00 job_scripts/snellius/submit.sh pylbm medium
 - `templates/esmda.slurm` — one generic job body for all model combinations,
   driven by `PUA_SIZE` / `PUA_NUM_PARALLEL` / `PUA_TRUTH_MODEL` / `PUA_ASSIM_MODEL`
   (set by the wrapper). Not meant to be `sbatch`ed directly.
+
+### Per-job working directories (concurrent-submission safety)
+
+Each submission gets its own working directory under
+`/scratch-shared/$USER/urbanair_runs/<timestamp>-<jobname>-<pid>/`, populated
+with symlinks back to the read-only parts of the repo (`src`, `scripts`,
+`conf`, `libs`, `.pixi`, etc.) and passed to sbatch as `--chdir`. Anything the
+template writes at the working-dir root — most importantly the `.temp` symlink
+pylbm uses, which points at a node-local `/scratch-local/<jobid>` path — lives
+in that per-job dir, not in the shared repo root. Two jobs submitted back-to-back
+no longer clobber each other's `.temp`. The workdirs are tiny (just symlinks)
+and `/scratch-shared` auto-purges, so no manual cleanup is needed.
+
+Note: the per-job dir contains symlinks to the repo's `libs/`, so concurrent
+**rebuilds** of pylbm / uDALES / PALM still touch the shared `libs/<solver>/build/`
+trees. After the first successful build, subsequent runs reuse the cache and
+don't write there, so this is usually fine — but avoid submitting jobs in
+parallel while a code change is forcing a rebuild.
 - `out_files/` — SLURM `.out`/`.err` logs, named `slurm-<model>_<size>-<jobid>`
   (gitignored).
 

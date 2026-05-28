@@ -19,7 +19,7 @@ defaults:
 # size the SLURM core request. Each is still overridable per-run on the CLI,
 # e.g. `ensemble.ensemble_size=20 time.simulation_time=60 esmda.num_assimilation_windows=3`.
 ensemble:
-  ensemble_size: 32
+  ensemble_size: 64
 
 time:
   simulation_time: 300.0

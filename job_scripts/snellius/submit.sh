@@ -105,7 +105,41 @@ fi
 OUT="job_scripts/snellius/out_files/slurm-${JOBNAME}-%j.out"
 ERR="job_scripts/snellius/out_files/slurm-${JOBNAME}-%j.err"
 
+# Per-submission working directory. Concurrent jobs that share the repo root
+# as SLURM_SUBMIT_DIR clobber each other's mutable state — most notably the
+# `.temp` symlink pylbm uses (the template does `rm -rf .temp && ln -sfn
+# $RUN_TEMP_DIR .temp`, and $RUN_TEMP_DIR is a node-local /scratch-local path
+# only valid on the submitting node). The fix: each submission gets its own
+# `--chdir`, populated with symlinks back to the read-only parts of the repo
+# (source, configs, pixi env, examples, libs source + cached builds). The
+# template's `.temp` then lives inside that per-job dir and can't conflict with
+# any other in-flight job. Workdirs are tiny (just symlinks); /scratch-shared
+# auto-purges them — no explicit cleanup needed.
+JOB_WORKDIR_BASE="/scratch-shared/${USER}/urbanair_runs"
+JOB_WORKDIR="${JOB_WORKDIR_BASE}/$(date +%Y%m%d-%H%M%S)-${JOBNAME}-$$"
+# Dry-run doesn't submit anything, so don't litter scratch with a workdir we
+# won't use — just print the path that would be created.
+if [ "${DRY_RUN:-0}" != "1" ]; then
+  mkdir -p "${JOB_WORKDIR}"
+  for item in \
+      pyproject.toml \
+      pixi.lock \
+      conda-pypi-mapping.json \
+      .pixi \
+      src \
+      scripts \
+      conf \
+      libs \
+      activation_scripts \
+      examples \
+      job_scripts \
+  ; do
+    [ -e "${REPO_ROOT}/${item}" ] && ln -s "${REPO_ROOT}/${item}" "${JOB_WORKDIR}/${item}"
+  done
+fi
+
 echo "==> truth=${TRUTH_MODEL} assim=${ASSIM_MODEL} / ${SIZE}: ensemble_size=${ENSEMBLE_SIZE} -> partition=${PARTITION}, cores=${CORES}, num_parallel=${NUM_PARALLEL}, time=${WALLTIME}"
+echo "    workdir: ${JOB_WORKDIR}"
 (( ${#} > 0 )) && echo "    extra hydra overrides: $*"
 
 sbatch_cmd=(
@@ -116,7 +150,7 @@ sbatch_cmd=(
   --time="${WALLTIME}"
   --output="${OUT}"
   --error="${ERR}"
-  --chdir="${REPO_ROOT}"
+  --chdir="${JOB_WORKDIR}"
   --export="ALL,PUA_SIZE=${SIZE},PUA_NUM_PARALLEL=${NUM_PARALLEL},PUA_TRUTH_MODEL=${TRUTH_MODEL},PUA_ASSIM_MODEL=${ASSIM_MODEL}"
   "${TEMPLATE}"
   "$@"
