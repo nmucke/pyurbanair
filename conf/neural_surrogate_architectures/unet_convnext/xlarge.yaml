@@ -1,0 +1,8 @@
+# ConvNeXt-UNet — xlarge preset.
+
+_target_: neural_surrogates.UNetConvNeXt
+base_channels: 48
+channel_mults: [1, 2, 4, 8]
+depths: [3, 3, 3, 3]
+kernel_size: 7
+expansion: 4

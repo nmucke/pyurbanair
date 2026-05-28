@@ -1,8 +1,12 @@
-kernel_size: 3
+# @package _global_
+
+defaults:
+  - /neural_surrogate_architectures/unet_convnext@architecture: small
+  - _self_
 
 trainer:
   _target_: neural_surrogates.Trainer
-  num_epochs: 5
+  num_epochs: 50
   device: cpu
 
 optimizer:
@@ -14,7 +18,7 @@ loss:
 
 dataset:
   _target_: neural_surrogates.TransitionDataset
-  root_dir: training_data/pylbm_tiny
+  root_dir: training_data/pyudales_tiny
   state_vars:
     - u
     - v

@@ -18,9 +18,6 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
-from neural_surrogates.architectures import SimpleConv
-
-
 def run(cfg: DictConfig) -> None:
     dtype = getattr(torch, cfg.dataset.dtype)
 
@@ -29,10 +26,10 @@ def run(cfg: DictConfig) -> None:
     train_loader = instantiate(cfg.dataloader, dataset=train_ds)
     val_loader = instantiate(cfg.dataloader, dataset=val_ds, shuffle=False)
 
-    model = SimpleConv(
+    model = instantiate(
+        cfg.architecture,
         n_state_channels=len(cfg.dataset.state_vars),
         n_params=len(train_ds.param_names),
-        kernel_size=cfg.kernel_size,
     ).to(dtype=dtype)
 
     print(
@@ -53,8 +50,8 @@ def run(cfg: DictConfig) -> None:
 
 @hydra.main(
     version_base=None,
-    config_path="../conf/neural_surrogate_training",
-    config_name="train",
+    config_path="../conf",
+    config_name="neural_surrogate_training/train",
 )
 def main(cfg: DictConfig) -> None:
     run(cfg)

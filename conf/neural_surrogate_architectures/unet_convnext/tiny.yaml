@@ -1,0 +1,9 @@
+# ConvNeXt-UNet — tiny preset. Single downsampling level, single block
+# per stage. Smoke-test sizing for the end-to-end training loop.
+
+_target_: neural_surrogates.UNetConvNeXt
+base_channels: 8
+channel_mults: [1, 2]
+depths: [1, 1]
+kernel_size: 3
+expansion: 2
