@@ -23,12 +23,13 @@ All dependencies and environments are handled via [Pixi](https://pixi.sh). Insta
 curl -fsSL https://pixi.sh/install.sh | sh
 ```
 
-Three environments are available:
+Four environments are available:
 
 | Environment | Purpose |
 |-------------|---------|
 | `dev` | Full development environment with all backends, data assimilation, benchmarks, and dev tools |
 | `delftblue` | HPC environment for the DelftBlue supercomputer |
+| `snellius` | CPU-only HPC environment for the Snellius supercomputer |
 | `cuda` | GPU-accelerated environment with CUDA support |
 
 Install and activate the dev environment:
@@ -141,6 +142,47 @@ python scripts/run_parameter_esmda.py preset=test
 ```
 
 All forward models generate a `.temp` folder where intermediate files are stored.
+
+### Running on Snellius (SLURM)
+
+The Snellius `snellius` env ships with a one-command submit wrapper that picks
+the partition, requests the right number of cores, and sets a sensible wall
+time — all from `conf/size/<size>.yaml`. Use it instead of writing your own
+sbatch files. Full details: [`job_scripts/snellius/README.md`](job_scripts/snellius/README.md).
+
+```bash
+# Pattern
+job_scripts/snellius/submit.sh <model> <size> [extra hydra overrides...]
+#   <model>   pylbm | pyudales | pypalm     (assimilation forward model)
+#   <size>    tiny | small | medium | large | xlarge
+```
+
+Common launches:
+
+| Goal                                          | Command                                                                       |
+|-----------------------------------------------|-------------------------------------------------------------------------------|
+| pylbm, small run                              | `job_scripts/snellius/submit.sh pylbm small`                                  |
+| pyudales, medium run                          | `job_scripts/snellius/submit.sh pyudales medium`                              |
+| pypalm, small run                             | `job_scripts/snellius/submit.sh pypalm small`                                 |
+| Twin experiment (truth ≠ assim model)         | `TRUTH_MODEL=pyudales job_scripts/snellius/submit.sh pylbm small`             |
+| Ad-hoc Hydra override (per submission)        | `job_scripts/snellius/submit.sh pylbm small esmda.num_assimilation_windows=3` |
+| Custom wall time (overrides the size default) | `WALLTIME=30:00:00 job_scripts/snellius/submit.sh pyudales medium`            |
+| Preview only (don't submit)                   | `DRY_RUN=1 job_scripts/snellius/submit.sh pyudales medium`                    |
+
+**Tuning a run.** Edit the three per-size knobs in `conf/size/<size>.yaml`; the
+wrapper reads `ensemble.ensemble_size` and sizes the SLURM allocation
+automatically (one core per ensemble member, rounded up to the partition's
+billing minimum — 16 on `rome`, 24 on `genoa`):
+
+| Knob                              | Meaning                            |
+|-----------------------------------|------------------------------------|
+| `ensemble.ensemble_size`          | number of ensemble members         |
+| `time.simulation_time`            | per-window forward-model duration  |
+| `esmda.num_assimilation_windows`  | number of assimilation windows     |
+
+Results land in `/projects/prjs2075/urbanair/`; SLURM logs in
+`job_scripts/snellius/out_files/slurm-<model>_<size>-<jobid>.{out,err}`
+(gitignored). Mixed-model runs get a `..._truth-<model>` suffix.
 
 ## Repository Structure
 

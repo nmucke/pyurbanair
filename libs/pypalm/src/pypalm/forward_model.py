@@ -5,6 +5,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import time
 from typing import Optional
 
 import numpy as np
@@ -388,12 +389,25 @@ class ForwardModel(BaseForwardModel):
         to ``experiment_dir.parent`` (= ``experiment_base_dir``). palmrun
         then resolves ``$base_data/$run_identifier/INPUT`` to
         ``experiment_dir/INPUT``.
+
+        ``fast_io_catalog`` is palmrun's per-run working directory: it copies
+        the full build tree (~750 files: sources + prebuilt objects + the
+        executable) there and runs PALM in it. PALM intends this to be a *fast
+        local* filesystem; on networked scratch (beegfs) that per-member,
+        per-window copy is slow for many small files. If
+        ``PYPALM_FAST_IO_CATALOG`` is set (point it at node-local /tmp on a
+        cluster), each member's working dir is isolated under it; otherwise we
+        fall back to the per-member scratch ``tmp/`` (unchanged behaviour).
         """
         canonical = PALM_MODEL_SYSTEM_PATH / ".palm.config.default"
         if not canonical.exists():
             return
         base = str(self.dirs.experiment_dir.parent)
-        tmp = str(self.dirs.experiment_dir / "tmp")
+        fast_io_base = os.environ.get("PYPALM_FAST_IO_CATALOG", "").strip()
+        if fast_io_base:
+            tmp = str(pathlib.Path(fast_io_base) / self.experiment_name)
+        else:
+            tmp = str(self.dirs.experiment_dir / "tmp")
         os.makedirs(tmp, exist_ok=True)
         overrides = {
             "%base_data": base,
@@ -444,18 +458,32 @@ class ForwardModel(BaseForwardModel):
             bin_dir = str(PALMRUN_BIN.parent)
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
 
+        # palmrun prompts interactively (">>> everything o.k. (y/n) ?") unless
+        # it thinks it's in batch mode. With a blocking stdin this hangs forever
+        # — which is exactly what happens for ensemble members run inside
+        # forkserver pool workers (the serial truth run survives only because
+        # the main process inherits sbatch's /dev/null stdin). Force stdin to
+        # /dev/null so palmrun's `read` always hits EOF and proceeds.
         if self.verbose:
-            subprocess.run(command, check=True, env=env)
+            subprocess.run(command, check=True, env=env, stdin=subprocess.DEVNULL)
             return
 
         # When not verbose, capture output so we can surface PALM's error
         # message on failure instead of leaving the user with just an exit code.
+        _t0 = time.monotonic()
         result = subprocess.run(
             command,
             env=env,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+        )
+        logger.info(
+            "palmrun(%s) wall=%.1fs rc=%s",
+            self.experiment_name,
+            time.monotonic() - _t0,
+            result.returncode,
         )
         if result.returncode != 0:
             tail = "\n".join((result.stdout or "").splitlines()[-80:])
