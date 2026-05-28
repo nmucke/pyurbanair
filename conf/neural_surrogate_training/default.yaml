@@ -1,0 +1,13 @@
+data_dir: training_data/pylbm_tiny
+split: train
+batch_size: 8
+shuffle: true
+num_workers: 0
+state_vars:
+  - u
+  - v
+  - w
+param_vars: null
+cache: false
+dtype: float32
+plot_dir: .temp/dataloading

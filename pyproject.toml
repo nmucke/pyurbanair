@@ -97,6 +97,12 @@ pypalm = { path = "libs/pypalm", editable = true }
 [tool.pixi.feature.data-assimilation.pypi-dependencies]
 data-assimilation = { path = "libs/data-assimilation", editable = true }
 
+[tool.pixi.feature.neural-surrogates.dependencies]
+pytorch = ">=2.4,<3"
+
+[tool.pixi.feature.neural-surrogates.pypi-dependencies]
+neural-surrogates = { path = "libs/neural-surrogates", editable = true }
+
 # Development tasks
 [tool.black]
 line-length = 88
@@ -216,9 +222,9 @@ JAX_PLATFORMS = "cpu"
 
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "benchmark_geometry", "cpu"] }
-delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm", "palm"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "neural-surrogates", "lbm", "palm", "benchmark_geometry", "cpu"] }
+delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "neural-surrogates", "lbm", "palm"] }
 # Snellius is CPU-only for now, so it pulls in the shared `cpu` feature
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
-snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "lbm", "palm"] }
-cuda = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "cuda"] }
+snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "neural-surrogates", "lbm", "palm"] }
+cuda = { features = ["dev", "py312", "udales", "data-assimilation", "neural-surrogates", "lbm", "palm", "cuda"] }
