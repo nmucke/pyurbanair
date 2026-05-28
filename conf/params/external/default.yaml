@@ -1,6 +1,6 @@
 inflow_angle:
-  mean: 0.0
-  std: 4.0
+  mean: 50.0
+  std: 6.0
 velocity_magnitude:
   mean: 8.0
   std: 0.5

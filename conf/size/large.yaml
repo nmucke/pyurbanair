@@ -5,17 +5,24 @@
 # lives in its own file. Individual groups stay overridable on the CLI — a
 # command-line `domain=...`, `obs=...`, etc. wins over the selection here, e.g.
 #   ... size=large obs=grid_small domain=small
-#
-# The two scalars below are *not* swappable groups: the `esmda` group encodes an
-# assimilation method and `time_varying` a stochastic model, so their size-
-# dependent counts are set inline on top of whatever method/model is selected.
-# Override per-run with `esmda.num_steps=... time_varying.num_time_points=...`.
 defaults:
   - override /domain: large
   - override /time: large
   - override /ensemble: large
   - override /obs: large
   - _self_
+
+# --- Per-size knobs (edit these to tune the run) ---------------------------
+# These scalars override the values coming from the selected groups above and
+# are the recommended single place to size a run. The Snellius submit wrapper
+# (job_scripts/snellius/submit.sh) reads `ensemble.ensemble_size` from here to
+# size the SLURM core request. Each is still overridable per-run on the CLI,
+# e.g. `ensemble.ensemble_size=20 time.simulation_time=60 esmda.num_assimilation_windows=3`.
+ensemble:
+  ensemble_size: 64
+
+time:
+  simulation_time: 240.0
 
 esmda:
   num_steps: 3

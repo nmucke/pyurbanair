@@ -79,6 +79,9 @@ coreutils = {version=">=9.0", channel="conda-forge"}
 [tool.pixi.feature.delftblue.activation]
 scripts = ["activation_scripts/delftblue_activation.sh"]
 
+[tool.pixi.feature.snellius.activation]
+scripts = ["activation_scripts/snellius_activation.sh"]
+
 [tool.pixi.pypi-dependencies]
 pyurbanair = { path = ".", editable = true }
 
@@ -235,4 +238,7 @@ JAX_PLATFORMS = "cpu"
 default = { features = ["py312", "cpu"] }
 dev = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "neural_surrogates", "benchmark_geometry", "cpu"] }
 delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "lbm", "palm", "neural_surrogates"] }
+# Snellius is CPU-only for now, so it pulls in the shared `cpu` feature
+# (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
+snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "lbm", "palm", "neural_surrogates"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "lbm", "palm", "neural_surrogates", "cuda"] }
