@@ -432,7 +432,18 @@ class ForwardModel(BaseForwardModel):
         )
 
     def run(self) -> None:
-        """Invoke palmrun via the execute.sh wrapper."""
+        """Invoke PALM.
+
+        Two paths:
+          - ``PYPALM_USE_DIRECT_RUN=1`` -> ``direct_palm.run_direct`` (bypasses
+            palmrun + palmbuild; ~16x faster on tiny — see docs/palm_overhead_plan.md).
+          - otherwise -> palmrun via the execute.sh wrapper (the historical path,
+            kept as a fallback until M4 flips the default).
+        """
+        if os.environ.get("PYPALM_USE_DIRECT_RUN") == "1":
+            self._run_direct()
+            return
+
         if PALMRUN_BIN is None and not shutil.which("palmrun"):
             raise RuntimeError(
                 "palmrun not found. Install palm_model_system and either:\n"
@@ -495,6 +506,43 @@ class ForwardModel(BaseForwardModel):
             raise subprocess.CalledProcessError(
                 result.returncode, command, output=result.stdout
             )
+
+    def _run_direct(self) -> None:
+        """PYPALM_USE_DIRECT_RUN=1 branch — bypass palmrun + palmbuild.
+
+        Stages an isolated tempdir from ``self.dirs.input_dir``, runs the
+        prebuilt ``palm`` + ``combine_plot_fields.x`` (no mpirun on combine),
+        and transfers ``DATA_3D_NETCDF`` to ``self.dirs.output_dir``. See
+        ``pypalm.direct_palm`` for the staging contract and
+        ``docs/palm_overhead_plan.md`` §M0/§M1 for the per-phase numbers.
+        """
+        # Import inside the method so non-direct runs don't pay the import
+        # cost and so the existing palmrun path doesn't depend on the new module.
+        from .direct_palm import run_direct
+
+        env = os.environ.copy()
+        _augment_runtime_library_paths(env)
+
+        logger.info("Running PALM (direct, no palmrun) …")
+        _t0 = time.monotonic()
+        result = run_direct(
+            dirs=self.dirs,
+            experiment_name=self.experiment_name,
+            ncpu=self.ncpu,
+            host="default",
+            env=env,
+            keep_tempdir=False,
+        )
+        logger.info(
+            "palm_direct(%s) wall=%.1fs (stage=%.2fs palm=%.2fs combine=%.2fs transfer=%.2fs) rc=%s",
+            self.experiment_name,
+            time.monotonic() - _t0,
+            result.stage_s,
+            result.palm_s,
+            result.combine_s,
+            result.transfer_s,
+            result.palm_rc,
+        )
 
     def _locate_3d_output(self) -> pathlib.Path:
         """Find the ``<name>_3d.nc`` output file palmrun wrote."""

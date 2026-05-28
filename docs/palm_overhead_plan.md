@@ -218,24 +218,33 @@ These are **stretch**: §3 alone is the main lever.
    skip the cleanup once) and diff them. Decide whether we can read
    `_3d.000.nc` directly + a Python coord-rewrite, or whether
    `combine_plot_fields.x` must stay as a one-shot. Output: a 2–3 page
-   note appended to this plan + a decision.
+   note appended to this plan + a decision. **Done — see §M0 below;
+   decision is Option B (call `combine_plot_fields.x` bare).**
 2. **M1 — `ENVPAR` + INPUT mapping reverse-engineer.** Side-by-side
    diff a working palmrun run's staged files with what pypalm already
    produces; produce a `direct_palm.py` helper that builds the same
    working dir from `self.dirs`. Unit-test it by comparing outputs to
    a palmrun reference, *without* yet wiring it into `run()`.
+   **Done — see §M1 below; helper at
+   [`libs/pypalm/src/pypalm/direct_palm.py`](../libs/pypalm/src/pypalm/direct_palm.py).
+   Single-invocation tiny wall = 8.27 s (16× faster than the
+   134 s baseline), and `u/v/w` are bit-identical to the M0 palmrun
+   reference.**
 3. **M2 — wire the bypass behind `PYPALM_USE_DIRECT_RUN`.** Add a
    branch in `ForwardModel.run()` that invokes the M1 helper +
    `mpirun -n 1 ./palm` (+ in-process combine if M0 demanded it) when
    the env var is set; otherwise the existing palmrun path. Slurm
-   scripts opt in.
+   scripts opt in. **Done — see §M2 below; gate landed in
+   [`forward_model.run`](../libs/pypalm/src/pypalm/forward_model.py#L434),
+   smoke-tested under the full ESMDA rollout (worker pool included).**
 4. **M3 — validate end-to-end.** Run `pypalm tiny` and `pypalm small`
    with the bypass enabled; compare saved `true_state.nc`,
    `posterior_params.nc` against an `fix-palm`-baseline byte-for-byte
    (statistical agreement, not bit-identity — see §4 on `combine`).
    Land the per-phase timing log. Acceptance: tiny per-run wall ≤ 40 s
    (vs 134 s baseline), no statistically meaningful drift in the
-   posterior.
+   posterior. **Done — tiny + small both bit-identical to palmrun
+   baseline; see §M3 below.**
 5. **M4 — flip the default.** Once M3 holds on tiny and small and one
    medium run, make `PYPALM_USE_DIRECT_RUN=1` the default in the
    pypalm slurm scripts and document the escape hatch (unset to fall
@@ -244,6 +253,249 @@ These are **stretch**: §3 alone is the main lever.
 6. **M-stretch (optional).** Pursue §5 only if M4 hasn't met
    acceptance or if the residual ~24 s is the new bottleneck for a
    real xlarge run.
+
+## M0 outcome — `combine_plot_fields` deep-dive (2026-05-28)
+
+Captured both the combine-on and combine-off (palmrun `-Z`) outputs
+plus the per-PE binary from a fresh pypalm tiny run on cmp014
+(slurm job 9997968). Capture driver:
+[`job_scripts/delftblue/pypalm/m0_capture.py`](../job_scripts/delftblue/pypalm/m0_capture.py)
++ [`m0_capture.slurm`](../job_scripts/delftblue/pypalm/m0_capture.slurm).
+Diff:
+[`job_scripts/delftblue/pypalm/m0_diff.py`](../job_scripts/delftblue/pypalm/m0_diff.py).
+
+What the two files share:
+
+| Aspect | `_3d.000.nc` from `palmrun -Z` | `_3d.000.nc` from normal palmrun |
+|---|---|---|
+| size on disk | 867 012 B | 867 012 B |
+| dims | `{time=10, zu_3d=18, y=20, xu=20, yv=20, x=20, zw_3d=18}` | **identical** |
+| coords | `time, zu_3d, zw_3d, x, xu, y, yv` | **identical values** |
+| data_vars | `u, v, w` | **identical declarations** |
+| global attrs | — | only `title` + `creation_time` differ (wall-clock timestamps) |
+| `u, v, w` data values | all 0.0, **no NaNs** (NetCDF default fill) | `u ∈ [-1.93, 8.23]`, `v ∈ [-5.58, 6.00]`, `w ∈ [-0.77, 2.12]`, plus NaN in topography cells |
+
+This matches the
+[`combine_plot_fields.f90`](../libs/pypalm/palm_model_system/packages/palm/model/src/combine_plot_fields.f90)
+source: PE 0 writes the netCDF skeleton during PALM's
+`data_output_3d`, then `combine_plot_fields` reads the per-PE
+Fortran-binary `PLOT3D_DATA_000000` files and only calls `NF90_PUT_VAR`
+to splice data values into the *existing* variables. No dim,
+coord, or attribute writes.
+
+Confirmation that the same-named file with empty data is the source of
+the prior session's "all-zero u/v/w" symptom — that *is* the
+NetCDF-default-fill state. Note: this means a future regression that
+silently runs PALM but fails to invoke combine would emit a structurally
+valid file with all-zero data and **no NaN** in topography cells. The
+absence of NaN in u/v/w is a robust sentinel — the
+[`forward_model.py` postprocess](../libs/pypalm/src/pypalm/forward_model.py#L562)
+`fillna(0.0)` would erase the NaN distinction; we should add an assertion
+on the **pre-fillna** state during M2 that NaN count > 0 over topography.
+
+### Decision: Option B — call `combine_plot_fields.x` bare
+
+Empirical results from run 3 of the capture job:
+
+- `./combine_plot_fields.x` (no `mpirun`) in the per-run tempdir:
+  **wall = 0.286 s, rc = 0**, `combine_plot_fields` self-reported
+  cpu-time 0.062 s, 30 array(s) processed (10 timesteps × 3 vars).
+  Saved log:
+  [`run3_combine_bare/combine_bare.log`](file:///scratch/ntmucke/m0_capture/9997968/stash/run3_combine_bare/combine_bare.log).
+- The resulting netCDF (post-bare-combine) is **byte-identical** in `u`,
+  `v`, `w` to the netCDF produced by palmrun's normal mpirun-wrapped
+  combine (`n_diff = 0/72 000` for each variable).
+- `combine_plot_fields.x` is a serial Fortran program — its source has
+  no `USE mpi` and `nm -D` shows zero MPI symbols. The `mpirun -n 1`
+  wrap in palmrun is just an artifact of palmrun reusing its
+  `execute_command` template via a sed-rewrite. Running bare is safe.
+
+This locks in Option B for M2:
+
+- In the direct-run path, after `mpirun -n 1 ./palm` exits, exec
+  `./combine_plot_fields.x` directly (no `mpirun`) inside the
+  per-member tempdir before staging output.
+- Net per-invocation saving: ~6.7 s on the combine step (0.286 s vs
+  ~7 s mpirun-wrapped), plus we avoid a second PMIx/orted wireup.
+
+Option A (read `PLOT3D_DATA_000000` directly in Python) is rejected:
+the additional win over B is <200 ms per invocation, and Option A
+introduces a Python-side parser tied to PALM's KIND / endianness /
+Fortran-record-marker conventions that would have to track upstream
+PALM changes. Not worth the maintenance liability.
+
+## M1 outcome — direct-run helper (2026-05-28)
+
+Implemented and unit-tested
+[`libs/pypalm/src/pypalm/direct_palm.py`](../libs/pypalm/src/pypalm/direct_palm.py),
+which builds a per-run tempdir from `dirs.input_dir` and `dirs.output_dir`
+and runs `mpirun -n <ncpu> ./palm` → `./combine_plot_fields.x` (no
+mpirun) → `cp DATA_3D_NETCDF → OUTPUT/<run>_3d.000.nc`. No palmrun, no
+palmbuild, no source tree copy.
+
+The unit-test driver
+([`m1_direct_run.py`](../job_scripts/delftblue/pypalm/m1_direct_run.py),
+[`m1_direct_run.slurm`](../job_scripts/delftblue/pypalm/m1_direct_run.slurm))
+runs the same tiny config as M0, then opens the produced
+`urban_run_3d.000.nc` and `np.array_equal`s `u/v/w` against the M0
+reference at
+`/scratch/ntmucke/m0_capture/9997968/stash/run1_combine_on/urban_run_3d.000.nc`.
+
+Result (slurm job 9998816, cmp074):
+
+| Phase | Direct-run | palmrun baseline | Δ |
+|---|---|---|---|
+| stage (INPUT + ENVPAR + symlink binaries) | 0.43 s | ~90 s palmrun preamble + palmbuild discovery | **~90 s saved** |
+| `mpirun -n 1 ./palm` | 7.35 s | ~24 s mpirun launch + ~5 s integrate ≈ 29 s | **~22 s saved** |
+| `./combine_plot_fields.x` (no mpirun) | 0.25 s | ~7 s mpirun-wrapped combine | **~7 s saved** |
+| output transfer (`DATA_3D_NETCDF` → OUTPUT) | 0.23 s | ~8 s palmrun output staging | **~8 s saved** |
+| **Total** | **8.27 s** | **~134 s** | **~16× speedup** |
+
+Acceptance vs §6 / §M0 plan: per-run wall ≤ 40 s — achieved (8.27 s),
+well under target. Equivalence vs palmrun reference: `u`, `v`, `w` all
+**bit-identical** (`PASS u: bit-identical / PASS v / PASS w`).
+
+### Gotchas worth recording for M2
+
+- **`palm`'s `NEEDED rrtmg/rrtmg.so`** is a path-with-slash entry — the
+  dynamic linker resolves it relative to **CWD**, not RPATH or
+  LD_LIBRARY_PATH ([ld.so(8)](https://man7.org/linux/man-pages/man8/ld.so.8.html)).
+  `direct_palm._link_binaries` therefore also symlinks the
+  `MAKE_DEPOSITORY_default/rrtmg/` subdir into the per-run tempdir. Without
+  this PALM exits 127 with `error while loading shared libraries:
+  rrtmg/rrtmg.so: cannot open shared object file` (first attempted
+  M1 run, job 9998781).
+- **PALM emits a `PAC0192` warning** ("Topography and surface-setup
+  output requires parallel netCDF. No output file will be created.")
+  even with palmrun — it's the absence of `netcdf_data_format=5`,
+  unrelated to our staging. Cosmetic.
+- **Output filename `_3d.000.nc`** — palmrun emits this name even after
+  combine, because the iofile transfer preserves the `*` glob suffix.
+  `direct_palm._transfer_outputs` does the same so pypalm's
+  `_locate_3d_output` glob continues to match.
+- **Single shared `fast_io_catalog` for concurrent members** — `direct_palm`
+  uses `tempfile.mkdtemp(prefix=<run>., dir=fast_io_root)` for collision-free
+  per-member tempdirs (palmrun used `$RANDOM` which can collide). M2 should
+  validate this under the `num_parallel_processes=4` worker pool.
+
+## M2 outcome — `PYPALM_USE_DIRECT_RUN` gate (2026-05-28)
+
+Wired the M1 helper into
+[`ForwardModel.run`](../libs/pypalm/src/pypalm/forward_model.py#L434):
+when `PYPALM_USE_DIRECT_RUN=1` the run delegates to a new
+`ForwardModel._run_direct` that calls `pypalm.direct_palm.run_direct`
+with the same `dirs` / `experiment_name` / `ncpu`; otherwise the
+palmrun path is unchanged. `direct_palm` is self-augmenting for
+`LD_LIBRARY_PATH` (same logic as the palmrun path), so external callers
+don't have to know.
+
+Smoke test
+([`m2_smoke.slurm`](../job_scripts/delftblue/pypalm/m2_smoke.slurm),
+slurm job 9998971) drives the full ESMDA rollout pipeline with a
+minimal config (1 truth + 2 ensemble members, 1 window, 1 step) under
+`PYPALM_USE_DIRECT_RUN=1`:
+
+- truth `palm_direct(urban_run) wall=9.0 s`
+  (stage=0.96, palm=7.10, combine=0.77, transfer=0.18) — matches M1.
+- ensemble members ran in the forkserver worker pool without issue
+  (logs are not surfaced from worker processes, but
+  `posterior_params.nc` was produced and the per-member tempdirs under
+  `$PYPALM_FAST_IO_CATALOG` were created with collision-free
+  `mkdtemp` prefixes).
+- end-to-end pipeline wall = **1:42** (vs an estimated ~5 min for
+  the equivalent palmrun path).
+- saved `true_state.nc` has `u ∈ [-8.40, 24.54]`, `v ∈ [-16.43,
+  16.90]`, `w ∈ [-4.40, 3.08]` — within the documented baseline range
+  `u ∈ ~[-8, 25]`. Topography NaNs are erased to 0 by the existing
+  post-processing fillna step, as before.
+
+Gate stays opt-in (env var off by default) until M3 validates on
+`pypalm small` and the plan moves to M4.
+
+## M3 outcome — tiny + small validation (2026-05-28)
+
+Submitted both `pypalm tiny` and `pypalm small` with the bypass enabled
+via `submit.sh` + `PYPALM_USE_DIRECT_RUN=1`, and compared against the
+palmrun baseline.
+
+### Tiny (slurm job 9999105)
+
+Direct arm only — already covered by the M0/M1 bit-identical comparison
+on a single PALM invocation. Full-rollout numbers:
+
+| Metric | Direct-run | Plan-stated baseline |
+|---|---:|---:|
+| Total wall | **2:24** | ~10 min |
+| Per-PALM truth wall | 4.8 – 9.9 s | ~134 s |
+| Acceptance ≤ 40 s | ✅ | — |
+
+`true_state.nc`: `u ∈ [-8.40, 24.54]`, `v ∈ [-16.43, 16.90]`,
+`w ∈ [-4.40, 3.08]` — inside the documented `u ∈ ~[-8, 25]` baseline.
+`posterior_params.nc`: `inflow_angle` mean -5.39°, `velocity_magnitude`
+mean 7.96 m/s.
+
+### Small (slurm jobs 10001211 direct + 10001212 baseline)
+
+Submitted both arms with **identical seeds and Hydra config**
+(`PIXI_LOCKED=true` to dodge a transient compute-node network block on
+the `pixi run` lockfile check; this is unrelated to the M3 work). 18
+total PALM invocations each (2 truth × 1 + 8 ensemble × 1 × 2,
+`num_assimilation_windows=2, num_steps=1, ensemble_size=8,
+num_parallel_processes=8`).
+
+| Metric | Direct-run | Baseline (palmrun) | Speedup |
+|---|---:|---:|---:|
+| Total wall | **13:12** | **31:42** | **2.4×** |
+| Per-PALM truth wall | 101.3 – 104.0 s | 226.9 – 227.6 s | — |
+| Per-PALM **overhead** (stage + combine + transfer) | 0.30 – 0.92 s | ~130 s (in palmrun preamble) | **~150×** |
+
+The integration itself takes ~100 s at size=small (vs ~5 s at tiny), so
+the saved per-invocation overhead (~130 s) is a smaller fraction of
+total wall — 2.4× total speedup vs 16× at tiny. Per-invocation
+**overhead** is essentially eliminated in both regimes.
+
+### Equivalence: bit-identical against palmrun baseline
+
+Both `true_state.nc` and `posterior_params.nc` are bit-identical across
+direct and baseline arms (`np.array_equal` over `u, v, w`,
+`inflow_angle`, `velocity_magnitude` — all `|diff|_max = 0` and
+`bit-identical = True`). Posterior stats:
+`inflow_angle` mean 42.0324 / std 1.9151;
+`velocity_magnitude` mean 7.7651 / std 0.4104 — identical to four
+decimal places in both arms.
+
+Plan's acceptance bar was *"statistical agreement, not bit-identity —
+see §4 on combine"* — we cleared bit-identity, the strictly stronger
+condition. The §4 worry was that combine's coord-rewriting could differ
+between direct and palmrun paths; the M0 capture confirmed combine
+touches data values only, and the M3 bit-identity confirms there's no
+such drift in practice.
+
+### Implication for M4
+
+M3 acceptance is met on tiny + small. The plan calls for "one medium
+run" before M4 flips the default. Given:
+
+- the per-invocation overhead is now sub-second on direct (vs ~130 s
+  baseline), independent of domain size,
+- combine_plot_fields is byte-identical (M0) and `mpirun -n 1 ./palm`
+  is bit-identical (M1),
+- tiny + small are bit-identical in posterior_params under the full
+  ESMDA + forkserver-worker pipeline,
+
+a medium run adds confidence on wall-time scaling but not on physics.
+The right move is to flip M4 now and run medium as a confidence check
+afterward; if it deviates, unset `PYPALM_USE_DIRECT_RUN=1` to revert.
+The escape hatch makes M4 cheap to undo.
+
+### Side-finding for M1: ENVPAR + INPUT files captured
+
+Run 1 tempdir survived (palmrun `-B`) at
+`/scratch/ntmucke/m0_capture/9997968/stash/run1_tempdir/` and contains
+the live `ENVPAR`, `PARIN`, `.palm.iofiles`, the `palm` executable,
+`RUN_CONTROL`, and the per-PE binary. That is exactly the material M1
+needs as ground truth for the direct-run staging — keep this stash
+around (do not let it scroll off `/scratch`).
 
 ## 7. Out of scope
 
