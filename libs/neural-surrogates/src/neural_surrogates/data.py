@@ -2,8 +2,9 @@
 
 The training-data layout is documented in `docs/training_data.md`. This
 module exposes `TransitionDataset`, which flattens every trajectory in a
-split into individual `(state_n, params_n, geometry) -> state_{n+1}`
-transition pairs so a one-step neural surrogate can be trained on them.
+split into individual `(state_n, params_n, geometry) -> state_{n+K}`
+training samples for one-step or K-step (pushforward-trick) neural
+surrogate training.
 """
 
 from __future__ import annotations
@@ -18,18 +19,23 @@ from torch.utils.data import Dataset
 
 
 class TransitionDataset(Dataset):
-    """One-step transition pairs flattened across every trajectory in a split.
+    """K-step training samples flattened across every trajectory in a split.
 
-    A trajectory with `T` saved time steps contributes `T - 1` pairs; the
-    dataset length is the sum across all trajectories in
-    `<root>/state/<split>/`.
+    ``pushforward_steps`` (``K``) selects the horizon: a trajectory with ``T``
+    saved time steps contributes ``T - K`` samples, and the dataset length
+    is the sum across all trajectories in ``<root>/state/<split>/``. With
+    ``K=1`` each sample is a one-step transition pair (the original
+    behavior); with ``K>1`` the trainer rolls the model forward through
+    ``K-1`` no-grad steps starting at ``state_n`` and computes loss against
+    ``state_next`` (Brandstetter et al.'s pushforward trick).
 
     Each item is a `dict` of `torch.Tensor`:
 
-    - ``state_n``    — ``(C, *grid)``  velocity channels stacked from `state_vars`.
-    - ``state_next`` — ``(C, *grid)``  the next snapshot in the same trajectory.
-    - ``params_n``   — ``(P,)``        parameter values at step `n` (time-varying
-      params sliced at `n`; scalar params broadcast).
+    - ``state_n``    — ``(C, *grid)``  velocity channels stacked from `state_vars`,
+      at trajectory time ``t``.
+    - ``state_next`` — ``(C, *grid)``  the snapshot at trajectory time ``t + K``.
+    - ``params_n``   — ``(K, P)``      parameter values at steps ``t, t+1, …, t+K-1``;
+      scalar params are broadcast along time.
     - ``geometry``   — ``(*grid,)``    binary mask, `1` = fluid, `0` = obstacle
       (buildings + ground). Same tensor for every item.
 
@@ -40,13 +46,16 @@ class TransitionDataset(Dataset):
     non-zero in the first trajectory's first snapshot.
 
     State snapshots are read lazily from netCDF on each ``__getitem__``
-    via ``xr.open_dataset(..., cache=cache).isel(time=...)`` so only two
-    slices per pair leave disk. With ``cache=False`` (default) nothing
-    accumulates between calls; with ``cache=True`` xarray keeps every
-    already-read slice in memory, so after one epoch the full trajectories
-    are resident and later epochs hit RAM instead of disk. Per-trajectory
-    parameter tensors are small and are kept in memory. State file handles
-    are cached per process, so the cache is rebuilt independently in each
+    via ``xr.open_dataset(..., cache=cache).isel(time=...)`` so only the
+    two endpoint slices (``t`` and ``t+K``) leave disk per sample;
+    intermediate ground-truth states are never read — the pushforward
+    unroll feeds the model its own predictions instead. With
+    ``cache=False`` (default) nothing accumulates between calls; with
+    ``cache=True`` xarray keeps every already-read slice in memory, so
+    after one epoch the visited trajectory endpoints are resident and
+    later epochs hit RAM instead of disk. Per-trajectory parameter
+    tensors are small and are kept in memory. State file handles are
+    cached per process, so the cache is rebuilt independently in each
     ``DataLoader`` worker.
     """
 
@@ -59,13 +68,19 @@ class TransitionDataset(Dataset):
         geometry_var: str | None = "blanking",
         cache: bool = False,
         dtype: torch.dtype = torch.float32,
+        pushforward_steps: int = 1,
     ) -> None:
+        if pushforward_steps < 1:
+            raise ValueError(
+                f"pushforward_steps must be >= 1, got {pushforward_steps}"
+            )
         self.root = Path(root_dir)
         self.split = split
         self.state_vars = tuple(state_vars)
         self.geometry_var = geometry_var
         self.cache = cache
         self.dtype = dtype
+        self.pushforward_steps = int(pushforward_steps)
 
         state_dir = self.root / "state" / split
         param_dir = self.root / "param" / split
@@ -98,10 +113,11 @@ class TransitionDataset(Dataset):
                     f"param variable set differs between samples: "
                     f"{self.param_names} vs {names} (in {param_path})"
                 )
-            if t_len < 2:
+            if t_len < self.pushforward_steps + 1:
                 raise ValueError(
-                    f"trajectory {state_path.name} has <2 time steps; "
-                    f"cannot form a transition pair"
+                    f"trajectory {state_path.name} has {t_len} time steps; "
+                    f"need at least pushforward_steps + 1 = "
+                    f"{self.pushforward_steps + 1}"
                 )
             self._params.append(params)
             traj_lengths.append(t_len)
@@ -109,7 +125,7 @@ class TransitionDataset(Dataset):
         self._index: list[tuple[int, int]] = [
             (traj, t)
             for traj, t_len in enumerate(traj_lengths)
-            for t in range(t_len - 1)
+            for t in range(t_len - self.pushforward_steps)
         ]
 
         self._geometry = self._load_geometry(self._state_files[0])
@@ -183,8 +199,9 @@ class TransitionDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         traj, t = self._index[idx]
+        K = self.pushforward_steps
         ds = self._get_state_ds(traj)
-        snap = ds.isel(time=slice(t, t + 2))
+        snap = ds.isel(time=[t, t + K])
         channels = np.stack(
             [np.asarray(snap[v].values) for v in self.state_vars], axis=1
         )
@@ -192,6 +209,6 @@ class TransitionDataset(Dataset):
         return {
             "state_n": pair[0],
             "state_next": pair[1],
-            "params_n": self._params[traj][t],
+            "params_n": self._params[traj][t : t + K],
             "geometry": self._geometry,
         }

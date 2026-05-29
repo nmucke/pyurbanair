@@ -59,8 +59,8 @@ def _plot_batch(
     )
     fig, ax = plt.subplots(figsize=(5, 5))
     ax.scatter(
-        params[:, name_to_col[angle_key]].numpy(),
-        params[:, name_to_col[vel_key]].numpy(),
+        params[:, 0, name_to_col[angle_key]].numpy(),
+        params[:, 0, name_to_col[vel_key]].numpy(),
     )
     ax.set_xlabel(angle_key)
     ax.set_ylabel(vel_key)
@@ -95,10 +95,12 @@ def run(cfg: DictConfig) -> None:
         param_vars=param_vars,
         cache=cfg.cache,
         dtype=dtype,
+        pushforward_steps=cfg.pushforward_steps,
     )
     print(
         f"split='{cfg.split}'  trajectories={len(dataset._state_files)}  "
-        f"pairs={len(dataset)}  param_names={dataset.param_names}"
+        f"samples={len(dataset)}  pushforward_steps={cfg.pushforward_steps}  "
+        f"param_names={dataset.param_names}"
     )
     print(f"geometry mask: shape={tuple(dataset._geometry.shape)}  "
           f"fluid_fraction={dataset._geometry.mean().item():.3f}")

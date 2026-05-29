@@ -29,10 +29,11 @@ dataset:
   param_vars: null
   cache: false
   dtype: float32
+  pushforward_steps: 5
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 8
+  batch_size: 32
   shuffle: true
   num_workers: 0
 

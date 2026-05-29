@@ -60,6 +60,13 @@ state file has a sibling under `param/` at the same path, with the
 inflow parameters interpolated onto the state's output time grid (one
 value per saved state time step).
 
+**Grid collocation.** pyudales solves on a staggered C-grid (`u@xm`,
+`v@ym`, `w@zm`); before saving, each member state is linearly
+interpolated to cell centers (`xt`, `yt`, `zt`) via
+`pyudales.utils.grid_utils.interpolate_grid` so all state channels land
+on a common regular grid. pylbm output is already cell-centered and is
+passed through unchanged.
+
 ### 2. Config layout
 
 Five preset sizes live in [conf/training_data/](../conf/training_data/):
@@ -250,16 +257,20 @@ keeps backend-specific datasets in separate trees.
 [libs/neural-surrogates/src/neural_surrogates/data.py](../libs/neural-surrogates/src/neural_surrogates/data.py)
 
 A `torch.utils.data.Dataset` that flattens every trajectory in a split
-into individual `(state_n, params_n, geometry) -> state_{n+1}` pairs. A
-split with `N` trajectories of length `T` produces `N · (T − 1)` samples;
-shuffling a `DataLoader` over it samples uniformly across all pairs and
-all trajectories. Each item is a dict:
+into `K`-step training samples (`K = pushforward_steps`, default `1`).
+Each sample anchors at trajectory time `t`, returns `state_n` at `t` and
+`state_next` at `t+K`, and provides the `K` parameter vectors needed to
+unroll the model forward. A split with `N` trajectories of length `T`
+produces `N · (T − K)` samples; shuffling a `DataLoader` over it samples
+uniformly across all transition windows and all trajectories. With `K=1`
+this reduces to one-step transition pairs (the original behavior); see
+§10 for how the trainer uses `K>1`. Each item is a dict:
 
 | Key          | Shape       | Notes |
 |---|---|---|
-| `state_n`    | `(C, *grid)` | velocity channels stacked in `state_vars` order |
-| `state_next` | `(C, *grid)` | the next snapshot in the same trajectory |
-| `params_n`   | `(P,)`      | inflow params at step `n`; scalar params (e.g. uDALES `pressure_gradient_magnitude`) are broadcast along `time` |
+| `state_n`    | `(C, *grid)` | velocity channels stacked in `state_vars` order, at time `t` |
+| `state_next` | `(C, *grid)` | snapshot at time `t + K` — the pushforward target |
+| `params_n`   | `(K, P)`    | inflow params at steps `t, …, t+K-1`; scalar params (e.g. uDALES `pressure_gradient_magnitude`) are broadcast along `time` |
 | `geometry`   | `(*grid,)`  | binary mask: `1` = fluid, `0` = obstacle. Same tensor for every item in the split |
 
 The geometry mask is read from the state file's `geometry_var`
@@ -274,7 +285,10 @@ the first trajectory's first snapshot; ground-and-building cells stay 0.
 only) so it can build the flat `(traj, t)` index. Parameters and the
 static geometry mask are loaded eagerly (both are small). State
 snapshots are read lazily on each `__getitem__` via
-`xr.open_dataset(..., cache=cache).isel(time=slice(t, t+2))`.
+`xr.open_dataset(..., cache=cache).isel(time=[t, t+K])` — only the two
+endpoint snapshots ever leave disk per sample, regardless of `K`. The
+intermediate ground-truth states are never read because the pushforward
+unroll feeds the model its own predictions in their place.
 
 The `cache` constructor flag (`cache: bool = False`) is threaded straight
 into xarray:
@@ -410,6 +424,19 @@ the loop; each epoch calls `_train_epoch` then `_validate` and prints
 the mean losses. Batch unpacking assumes the `TransitionDataset` dict
 layout (`state_n`, `state_next`, `params_n`, `geometry`).
 
+**Pushforward trick.** When the dataset is built with
+`pushforward_steps=K>1` ([Brandstetter et al., 2022](https://iclr-blogposts.github.io/2023/blog/2023/autoregressive-neural-pde-solver/)),
+`params_n` arrives as `(B, K, P)` and `_forward` rolls the model through
+`K-1` steps under `torch.no_grad()` starting at `state_n`, then takes one
+gradient-tracked step against `state_next` (the snapshot at `t+K`). This
+exposes the network to its own predictions during training — closing the
+distribution gap that pure one-step training leaves — without
+backpropagating through the unroll. With `K=1` (the default) the inner
+loop is skipped and behavior is identical to the original one-step
+trainer. Validation uses the same `_forward`, so with `K>1` the
+checkpointed best-val model minimizes a `K`-step error rather than a
+one-step error.
+
 **Best-checkpoint saving.** When `weights_path` is set, the trainer
 writes `model.state_dict()` to that path every time the val loss
 improves, and reloads it into the model at the end of `fit()` so the
@@ -485,6 +512,7 @@ Override individual fields:
 ```bash
 pixi run -e dev python scripts/train_neural_surrogate.py \
     dataset.root_dir=training_data/pylbm_small \
+    dataset.pushforward_steps=4 \
     dataloader.batch_size=16 \
     trainer.num_epochs=20 \
     optimizer.lr=5e-4 \
