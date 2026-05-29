@@ -562,9 +562,10 @@ A trained one-step network is wrapped as a
 [`BaseForwardModel`](../src/pyurbanair/base_forward_model.py) so it slots
 into the ensemble / ESMDA machinery as a fourth backend alongside pylbm,
 pyudales and pypalm. `run_single(state, params, sim_name)` rolls the
-network autoregressively and returns an `xarray.Dataset` over `time` with
-the same grid/coords as the spin-up backend (so the existing
-`ObservationOperator` works unchanged — set `solver_name` to match).
+network autoregressively and returns an `xarray.Dataset` over `time` on a
+regular cell-centered grid with coords `(z, y, x)` — so `solver_name:
+pylbm` (the regular-grid observation mapping) applies regardless of the
+spin-up backend.
 
 Everything describing the trained network is read from a **`model_dir`** —
 the folder [scripts/train_neural_surrogate.py](../scripts/train_neural_surrogate.py)
@@ -585,9 +586,9 @@ Key behaviours:
 
 | Concern | Behaviour |
 |---|---|
-| **Trained step size** | The network advances one *trained* output step per call. The requested `output_frequency` must be an integer multiple of `trained_output_frequency`; the model then takes `substeps = output_frequency / trained_output_frequency` internal steps per saved frame, and a non-integer ratio raises. |
+| **Trained step size** | The network always advances at its trained cadence (`trained_output_frequency`). To honour a requested `output_frequency` that differs, the rollout emits a frame at the internal step closest to each requested output time — so the result lands on the requested grid whether or not the two cadences divide evenly. A requested cadence *finer* than the trained step (the surrogate can't emit between steps) raises. |
 | **Domain check** | The requested `(nx, ny, nz, bounds)` must equal `trained_domain`; a mismatch raises (the network only applies to its training grid). |
-| **Spin-up** | A cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Warm starts (a `state` is passed) skip spin-up. `disable_spinup()` propagates to the backend. |
+| **Spin-up / collocation** | A cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. |
 | **Geometry** | When `stl_path` is set the geometry channel is voxelised from the STL onto the grid ([geometry.py](../libs/neural-surrogates/src/neural_surrogates/geometry.py)); otherwise it falls back to the non-zero-state convention used by `TransitionDataset`. |
 | **Parameters** | Time-varying inflow params are interpolated onto the internal step times in the trained `param_vars` order; scalar params are broadcast. |
 

@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import math
 import pathlib
 from importlib import import_module
 from typing import Any, Optional, Sequence
@@ -320,21 +319,53 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             )
 
     def _resolve_substeps(self) -> int:
-        """Number of network steps per saved output frame.
+        """Network steps per saved output frame, for the common case.
 
-        The network step is ``trained_output_frequency``; the requested
-        ``output_frequency`` must be an integer multiple of it.
+        Informational: equals ``round(output_frequency /
+        trained_output_frequency)``. The actual emit schedule is computed by
+        :meth:`_output_schedule`, which also handles non-integer ratios. The
+        surrogate cannot emit *between* trained steps, so a requested cadence
+        finer than the trained step size is rejected.
         """
         ratio = self.output_frequency / self.trained_output_frequency
-        substeps = round(ratio)
-        if substeps < 1 or not math.isclose(ratio, substeps, rel_tol=1e-6):
+        if ratio < 1.0 - 1e-6:
             raise ValueError(
-                f"requested output_frequency={self.output_frequency} is not an "
-                f"integer multiple of the trained step size "
-                f"{self.trained_output_frequency} (ratio={ratio:.6f}). The "
-                "surrogate can only emit at multiples of its trained cadence."
+                f"requested output_frequency={self.output_frequency} is finer "
+                f"than the trained step size {self.trained_output_frequency} "
+                f"(ratio={ratio:.6f}); the surrogate cannot emit between "
+                "trained network steps."
             )
-        return substeps
+        return max(1, round(ratio))
+
+    def _output_schedule(self) -> tuple[int, list[int]]:
+        """Plan the rollout: total network steps + which steps to emit at.
+
+        The network always advances at its trained cadence
+        (``trained_output_frequency``). To honour a *requested*
+        ``output_frequency`` that differs from it, we emit a frame at the
+        internal step whose time is closest to each requested output time —
+        so the returned trajectory lands on the requested grid regardless of
+        whether the two cadences match or divide evenly.
+        """
+        n_outputs = round(self.simulation_time / self.output_frequency)
+        if n_outputs < 1:
+            raise ValueError(
+                f"simulation_time={self.simulation_time} / output_frequency="
+                f"{self.output_frequency} yields no output frames."
+            )
+        n_internal = max(
+            round(self.simulation_time / self.trained_output_frequency), n_outputs
+        )
+        emit_steps: list[int] = []
+        prev = 0
+        for j in range(1, n_outputs + 1):
+            target_time = j * self.output_frequency
+            k = round(target_time / self.trained_output_frequency)
+            # Keep emits strictly increasing and within range.
+            k = min(max(k, prev + 1), n_internal)
+            emit_steps.append(k)
+            prev = k
+        return n_internal, emit_steps
 
     def _load_weights(
         self,
@@ -432,6 +463,32 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
 
     # -- the rollout -------------------------------------------------------
 
+    @staticmethod
+    def _to_regular_grid(state: xr.Dataset) -> xr.Dataset:
+        """Collocate to the regular cell-centered grid the network trained on.
+
+        ``scripts/generate_training_data.py`` interpolates pyudales'
+        staggered C-grid output (``u@xm``, ``v@ym``, ``w@zm``) to cell
+        centers before saving, so the network sees all channels on a common
+        regular grid. The spin-up backend, however, returns the *raw*
+        staggered field, so it must be collocated the same way before it is
+        stacked and fed to the network. Coordinates are then renamed to
+        ``(z, y, x)`` so the surrogate's output is a plain regular grid
+        (``solver_name: pylbm``). pylbm output is already cell-centered and
+        passes through unchanged; the operation is idempotent, so warm-start
+        states (the surrogate's own previous output) are left as-is.
+        """
+        if {"xm", "ym", "zm"} & set(state.dims):
+            from pyudales.utils.grid_utils import interpolate_grid
+
+            state = interpolate_grid(state)
+        rename = {
+            src: dst
+            for src, dst in (("xt", "x"), ("yt", "y"), ("zt", "z"))
+            if src in state.dims
+        }
+        return state.rename(rename) if rename else state
+
     def _get_template_and_initial_state(
         self,
         state: Optional[xr.Dataset],
@@ -441,24 +498,28 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         """Return a single-snapshot template carrying coords + initial field.
 
         On a warm start the supplied ``state`` is used; on a cold start the
-        spin-up backend is run to produce a physically developed field.
+        spin-up backend is run to produce a physically developed field. The
+        field is collocated to the regular grid the network expects (see
+        :meth:`_to_regular_grid`) before it is returned.
         """
         if state is not None:
-            return state.isel(time=-1) if "time" in state.dims else state
-
-        # Cold start: bootstrap with the CFD backend that produced the data.
-        self.spinup_forward_model.spinup_time = self.spinup_time
-        spun = self.spinup_forward_model(
-            params=self._initial_params(params),
-            state=None,
-            sim_name=f"{sim_name}_spinup" if sim_name else "spinup",
-        )
-        if spun is None:
-            raise RuntimeError(
-                "Spin-up forward model must run in memory (results_dir=None) "
-                "so its final field can seed the surrogate rollout."
+            snap = state
+        else:
+            # Cold start: bootstrap with the CFD backend that produced the data.
+            self.spinup_forward_model.spinup_time = self.spinup_time
+            snap = self.spinup_forward_model(
+                params=self._initial_params(params),
+                state=None,
+                sim_name=f"{sim_name}_spinup" if sim_name else "spinup",
             )
-        return spun.isel(time=-1) if "time" in spun.dims else spun
+            if snap is None:
+                raise RuntimeError(
+                    "Spin-up forward model must run in memory (results_dir=None) "
+                    "so its final field can seed the surrogate rollout."
+                )
+
+        snap = self._to_regular_grid(snap)
+        return snap.isel(time=-1) if "time" in snap.dims else snap
 
     def run_single(
         self,
@@ -466,13 +527,8 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         params: Optional[xr.Dataset] = None,
         sim_name: Optional[str] = "state",
     ) -> xr.Dataset:
-        n_outputs = round(self.simulation_time / self.output_frequency)
-        if n_outputs < 1:
-            raise ValueError(
-                f"simulation_time={self.simulation_time} / output_frequency="
-                f"{self.output_frequency} yields no output frames."
-            )
-        n_internal = n_outputs * self.substeps
+        n_internal, emit_steps = self._output_schedule()
+        emit_at = {step: pos for pos, step in enumerate(emit_steps)}
 
         template = self._get_template_and_initial_state(state, params, sim_name)
         geometry = self._build_geometry(template)
@@ -481,13 +537,14 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         current = self._stack_state(template).unsqueeze(0).to(self.device)
         geom = geometry.unsqueeze(0)
 
-        frames: list[np.ndarray] = []
+        frames: list[Optional[np.ndarray]] = [None] * len(emit_steps)
         with torch.no_grad():
             for k in range(n_internal):
                 param_k = schedule[k].unsqueeze(0)
                 current = self.model(current, param_k, geom)
-                if (k + 1) % self.substeps == 0:
-                    frames.append(current[0].cpu().numpy())
+                pos = emit_at.get(k + 1)
+                if pos is not None:
+                    frames[pos] = current[0].cpu().numpy()
 
         return self._assemble_output(template, frames)
 

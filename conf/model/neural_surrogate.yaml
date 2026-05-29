@@ -1,8 +1,9 @@
 name: neural_surrogate
-# The reconstructed state reuses the spin-up backend's grid/coords, so the
-# observation operator must use that backend's solver. Keep this in sync with
-# the spin-up backend below (udales for pyudales, pylbm for pylbm).
-solver_name: udales
+# The surrogate emits on a regular cell-centered grid with coords (z, y, x):
+# pyudales spin-up output is collocated off its staggered C-grid to match the
+# (collocated) training data, and pylbm output is already cell-centered. Either
+# way the regular-grid observation mapping (pylbm) applies.
+solver_name: pylbm
 
 forward_model:
   _target_: neural_surrogates.NeuralSurrogateForwardModel

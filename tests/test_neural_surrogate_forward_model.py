@@ -235,14 +235,31 @@ def test_bounds_mismatch_raises() -> None:
         _make_model(bounds=[[0.0, NX + 5], [0.0, NY], [0.0, NZ]])
 
 
-def test_output_frequency_must_be_multiple_of_trained_step() -> None:
-    with pytest.raises(ValueError, match="integer multiple"):
-        _make_model(output_frequency=0.7, trained_output_frequency=0.5)
+def test_output_frequency_finer_than_trained_raises() -> None:
+    # The surrogate cannot emit between trained network steps.
+    with pytest.raises(ValueError, match="finer than the trained step"):
+        _make_model(output_frequency=0.3, trained_output_frequency=0.5)
 
 
 def test_substeps_resolution() -> None:
     model = _make_model(output_frequency=1.0, trained_output_frequency=0.5)
     assert model.substeps == 2
+
+
+def test_mismatched_step_size_emits_only_at_requested_frequency() -> None:
+    # Requested cadence is not an integer multiple of the trained step; the
+    # network still steps at its trained cadence but emits at the requested one.
+    model = _make_model(
+        simulation_time=2.1,
+        output_frequency=0.7,
+        trained_output_frequency=0.5,
+    )
+    # 4 internal steps (round(2.1/0.5)); 3 emitted frames (round(2.1/0.7)).
+    n_internal, emit_steps = model._output_schedule()
+    assert n_internal == 4
+    assert len(emit_steps) == 3
+    out = model(params=_params())
+    assert out.sizes["time"] == 3
 
 
 def test_cold_start_rollout_shape_and_spinup() -> None:
@@ -261,6 +278,53 @@ def test_substeps_emit_correct_number_of_frames() -> None:
     out = model(params=_params())
     # 3 output frames even though the network takes 6 internal steps.
     assert out.sizes["time"] == 3
+
+
+def _staggered_udales_state() -> xr.Dataset:
+    """Synthetic pyudales-style staggered C-grid snapshot."""
+    rng = np.random.default_rng(1)
+    coords = {
+        "time": [0],
+        "xt": np.arange(NX) + 0.5,
+        "yt": np.arange(NY) + 0.5,
+        "zt": np.arange(NZ) + 0.5,
+        "xm": np.arange(NX).astype(float),
+        "ym": np.arange(NY).astype(float),
+        "zm": np.arange(NZ).astype(float),
+    }
+    return xr.Dataset(
+        {
+            "u": (("time", "zt", "yt", "xm"), rng.standard_normal((1, NZ, NY, NX))),
+            "v": (("time", "zt", "ym", "xt"), rng.standard_normal((1, NZ, NY, NX))),
+            "w": (("time", "zm", "yt", "xt"), rng.standard_normal((1, NZ, NY, NX))),
+        },
+        coords=coords,
+    )
+
+
+def test_staggered_spinup_state_is_collocated_before_network() -> None:
+    """A staggered spin-up field is interpolated to the regular (z,y,x) grid."""
+    regular = NeuralSurrogateForwardModel._to_regular_grid(_staggered_udales_state())
+    for v in STATE_VARS:
+        assert regular[v].dims == ("time", "z", "y", "x")
+    assert {"xm", "ym", "zm"}.isdisjoint(regular.dims)
+    assert {"x", "y", "z"}.issubset(regular.coords)
+
+
+class _StaggeredStubSpinup(_StubSpinup):
+    """Spin-up stub that returns a staggered C-grid field, like pyudales."""
+
+    def run_single(self, state=None, params=None, sim_name="state") -> xr.Dataset:
+        self.calls += 1
+        return _staggered_udales_state()
+
+
+def test_cold_start_collocates_spinup_output() -> None:
+    model = _make_model(spinup_forward_model=_StaggeredStubSpinup())
+    out = model(params=_params())
+    # Output lands on the regular grid even though spin-up was staggered.
+    for v in STATE_VARS:
+        assert out[v].dims == ("time", "z", "y", "x")
 
 
 def test_warm_start_skips_spinup() -> None:
