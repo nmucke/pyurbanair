@@ -6,13 +6,12 @@
 defaults:
   - override /model: pyudales
   - override /domain: small
-  - override /time: small
   - _self_
 
 training_data:
-  num_train: 64
-  num_val: 8
-  num_test: 8
+  num_train: 128
+  num_val: 16
+  num_test: 16
 
   output_dir: training_data/${model.name}_small/
 
@@ -39,10 +38,10 @@ training_data:
     _convert_: all
     external:
       inflow_angle:
-        mean: {min: 40.0, max: 70.0}   # uniform per sim
+        mean: {min: -70.0, max: 70.0}   # uniform per sim
         std: 5.0                          # fixed (use {min, max} to sample)
       velocity_magnitude:
-        mean: {min: 5.0, max: 8.0}        # uniform per sim
+        mean: {min: 3.0, max: 8.0}        # uniform per sim
         std: 0.5                          # fixed
     time_series:
       correlation_length: 60.0

@@ -34,6 +34,6 @@ dataset:
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 32
+  batch_size: 64
   shuffle: true
   num_workers: 0

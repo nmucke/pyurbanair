@@ -17,10 +17,10 @@ forward_model:
   # config.yaml supplies the architecture, state_vars and param_vars; the
   # training-data config it references supplies the trained domain and output
   # frequency; weights.pt supplies the parameters.
-  model_dir: model_weights/unet_convnext_tiny
+  model_dir: model_weights/unet_convnext_small
   weights_path: null
   allow_uninitialized_weights: false
-  device: cpu
+  device: cuda
   dtype: float32
   # Constant fallbacks for trained params a caller may omit (e.g. ESMDA only
   # varies the inflow, but a uDALES-trained net also expects pressure gradient).
