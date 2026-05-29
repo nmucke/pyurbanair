@@ -4,15 +4,15 @@
 # for prototyping the surrogate architecture. Uniform inflow sampler.
 
 defaults:
-  - override /model: pylbm
+  - override /model: pyudales
   - override /domain: small
   - override /time: small
   - _self_
 
 training_data:
-  num_train: 16
-  num_val: 4
-  num_test: 4
+  num_train: 64
+  num_val: 8
+  num_test: 8
 
   output_dir: training_data/${model.name}_small/
 
@@ -20,13 +20,13 @@ training_data:
   output_frequency: 1.0
   spinup_time: 10.0
 
-  num_time_points: 50
+  num_time_points: 10
   seed: 0
 
   # Parallel ensemble workers (see docs/ensemble_scaling.md for the
   # DRAM-bandwidth ceiling on this hardware — past ~4-8 workers returns
   # diminish). 1 = sequential.
-  num_parallel_processes: 4
+  num_parallel_processes: 8
 
   # The sampler has two parts:
   #   external.<param>.{mean, std}: each may be a scalar (fixed for all

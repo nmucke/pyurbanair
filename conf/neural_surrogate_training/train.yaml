@@ -1,10 +1,10 @@
 # @package _global_
 
 defaults:
-  - /neural_surrogate_architectures/unet_convnext@architecture: tiny
+  - /neural_surrogate_architectures/unet_convnext@architecture: small
   - _self_
 
-model_name: unet_convnext_tiny
+model_name: unet_convnext_small
 
 trainer:
   _target_: neural_surrogates.Trainer
@@ -21,7 +21,7 @@ loss:
 
 dataset:
   _target_: neural_surrogates.TransitionDataset
-  root_dir: training_data/pyudales_tiny
+  root_dir: training_data/pyudales_small
   state_vars:
     - u
     - v
