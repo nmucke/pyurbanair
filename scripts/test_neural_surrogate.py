@@ -69,7 +69,7 @@ def _plot_rollout(
     times = np.linspace(0, T - 1, min(n_show, T), dtype=int)
     mag_t = truth.norm(dim=1)[:, z_mid]
     mag_p = pred.norm(dim=1)[:, z_mid]
-    vmax = max(mag_t.max().item(), mag_p.max().item())
+    vmax = mag_t.max().item()
 
     fig, axes = plt.subplots(
         3, len(times), figsize=(3 * len(times), 9), squeeze=False
@@ -109,7 +109,7 @@ def _animate_rollout(
     mag_t = truth.norm(dim=1)[:, z_mid].numpy()
     mag_p = pred.norm(dim=1)[:, z_mid].numpy()
     err = np.abs(mag_p - mag_t)
-    vmax = float(max(mag_t.max(), mag_p.max()))
+    vmax = float(mag_t.max())
     err_max = float(err.max()) or 1.0
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)

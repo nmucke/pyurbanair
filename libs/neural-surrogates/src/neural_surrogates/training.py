@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
+import tqdm
 
 
 class Trainer:
@@ -43,7 +44,7 @@ class Trainer:
         self.model.train()
         total = 0.0
         n = 0
-        for batch in self.train_loader:
+        for batch in tqdm.tqdm(self.train_loader):
             loss = self._forward(batch)
             self.optimizer.zero_grad()
             loss.backward()

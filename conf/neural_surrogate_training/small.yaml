@@ -13,8 +13,9 @@ trainer:
   patience: 10
 
 optimizer:
-  _target_: torch.optim.Adam
+  _target_: torch.optim.AdamW
   lr: 1.0e-3
+  weight_decay: 1.0e-5
 
 loss:
   _target_: torch.nn.MSELoss
@@ -35,4 +36,3 @@ dataloader:
   batch_size: 8
   shuffle: true
   num_workers: 0
-
