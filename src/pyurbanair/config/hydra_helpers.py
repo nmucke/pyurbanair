@@ -52,6 +52,30 @@ def prepare_udales(
     )
 
 
+def prepare_neural_surrogate(
+    forward_model: Any,
+    spinup_backend: str,
+    compile: bool = True,
+    python_or_matlab: str = "python",
+) -> None:
+    """Prepare the surrogate's spin-up backend (compile / preprocess).
+
+    The neural surrogate itself needs no preparation, but the CFD backend it
+    uses to bootstrap cold starts does. ``spinup_backend`` selects which
+    preparation to run on ``forward_model.spinup_forward_model``.
+    """
+    surrogate = _unwrap_forward_model(forward_model)
+    spinup = surrogate.spinup_forward_model
+    if spinup_backend == "pyudales":
+        spinup.run_preprocessing(python_or_matlab=python_or_matlab)
+    elif spinup_backend in ("pylbm", "pypalm"):
+        spinup.compile(compile=compile)
+    else:
+        raise ValueError(
+            f"prepare_neural_surrogate: unknown spinup_backend {spinup_backend!r}."
+        )
+
+
 def clean_outputs(model_name: str, forward_model: Any) -> None:
     model = _unwrap_forward_model(forward_model)
     if model_name == "pylbm":
@@ -62,6 +86,10 @@ def clean_outputs(model_name: str, forward_model: Any) -> None:
         clean_palm_output_dir(model.dirs)
     elif model_name == "pyudales":
         clean_udales_output_dir(model.dirs)
+    elif model_name == "neural_surrogate":
+        # The surrogate keeps no solver output of its own; its spin-up
+        # backend cleans up after each call via BaseForwardModel.__call__.
+        return
     else:
         # Previously the else arm fell through to uDALES cleanup; raise instead
         # so an unrecognized backend can't silently get the wrong cleanup

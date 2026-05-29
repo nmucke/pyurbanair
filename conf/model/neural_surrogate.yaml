@@ -1,0 +1,83 @@
+name: neural_surrogate
+# The surrogate emits on a regular cell-centered grid with coords (z, y, x):
+# pyudales spin-up output is collocated off its staggered C-grid to match the
+# (collocated) training data, and pylbm output is already cell-centered. Either
+# way the regular-grid observation mapping (pylbm) applies.
+solver_name: pylbm
+
+forward_model:
+  _target_: neural_surrogates.NeuralSurrogateForwardModel
+  # Keep nested nodes (spinup_forward_model) as raw config so the surrogate
+  # can fill in n_state_channels / n_params itself and build the spin-up
+  # backend in memory.
+  _recursive_: false
+
+  # --- the trained network -------------------------------------------------
+  # Point at a folder written by scripts/train_neural_surrogate.py. Its
+  # config.yaml supplies the architecture, state_vars and param_vars; the
+  # training-data config it references supplies the trained domain and output
+  # frequency; weights.pt supplies the parameters.
+  model_dir: model_weights/unet_convnext_tiny
+  weights_path: null
+  allow_uninitialized_weights: false
+  device: cpu
+  dtype: float32
+  # Constant fallbacks for trained params a caller may omit (e.g. ESMDA only
+  # varies the inflow, but a uDALES-trained net also expects pressure gradient).
+  default_params:
+    pressure_gradient_magnitude: 0.0041912
+
+  # --- requested run settings ----------------------------------------------
+  nx: ${domain.nx}
+  ny: ${domain.ny}
+  nz: ${domain.nz}
+  bounds: ${domain.bounds}
+  simulation_time: ${time.simulation_time}
+  output_frequency: ${time.output_frequency}
+  spinup_time: ${time.spinup_time}
+
+  # Optional: voxelise this geometry for the network's geometry channel. When
+  # null the fluid mask falls back to the non-zero-state convention used by
+  # TransitionDataset.
+  stl_path: null
+
+  # --- spin-up backend (produces the cold-start initial condition) ---------
+  spinup_forward_model:
+    _target_: pyudales.forward_model.ForwardModel
+    _convert_: all
+    case_dir: examples/udales/experiments/xie_and_castro
+    # Distinct from the default pyudales experiment ("999") so a co-resident
+    # pyudales truth/assim model never shares (and clobbers) this template's
+    # experiment directory.
+    experiment_name: "899"
+    matlab_bin: /opt/sw/matlab-2023b/bin/matlab
+    ncpu: 1
+    save_only_last_timestep: false
+    verbose: false
+    boundary_condition: inflow_outflow
+    nudging_config:
+      tnudge: 30.0
+      nnudge: 4
+      profile_config:
+        type: power_law
+        alpha: 0.25
+    nx: ${domain.nx}
+    ny: ${domain.ny}
+    nz: ${domain.nz}
+    bounds: ${domain.bounds}
+    # One post-spin-up frame is enough to seed the surrogate rollout.
+    simulation_time: ${time.output_frequency}
+    output_frequency: ${time.output_frequency}
+    spinup_time: ${time.spinup_time}
+
+prepare:
+  _target_: pyurbanair.config.hydra_helpers.prepare_neural_surrogate
+  spinup_backend: pyudales
+  python_or_matlab: python
+
+ensemble_model:
+  _target_: neural_surrogates.NeuralSurrogateEnsembleForwardModel
+  _convert_: all
+  ensemble_size: ${ensemble.ensemble_size}
+  num_parallel_processes: ${ensemble.num_parallel_processes}
+  num_cpus_per_process: ${ensemble.num_cpus_per_process}

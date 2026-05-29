@@ -550,6 +550,82 @@ pixi run -e dev python scripts/test_neural_surrogate.py \
     model_dir=model_weights/unet_convnext_small sample_idx=0
 ```
 
+---
+
+## Part D — Running the surrogate as a forward model
+
+### 12. `NeuralSurrogateForwardModel`
+
+[libs/neural-surrogates/src/neural_surrogates/forward_model.py](../libs/neural-surrogates/src/neural_surrogates/forward_model.py)
+
+A trained one-step network is wrapped as a
+[`BaseForwardModel`](../src/pyurbanair/base_forward_model.py) so it slots
+into the ensemble / ESMDA machinery as a fourth backend alongside pylbm,
+pyudales and pypalm. `run_single(state, params, sim_name)` rolls the
+network autoregressively and returns an `xarray.Dataset` over `time` on a
+regular cell-centered grid with coords `(z, y, x)` — so `solver_name:
+pylbm` (the regular-grid observation mapping) applies regardless of the
+spin-up backend.
+
+Everything describing the trained network is read from a **`model_dir`** —
+the folder [scripts/train_neural_surrogate.py](../scripts/train_neural_surrogate.py)
+writes (§10):
+
+| Read from | Supplies |
+|---|---|
+| `model_dir/config.yaml` → `architecture` | the network to rebuild |
+| `model_dir/config.yaml` → `dataset.state_vars` / `param_vars` | channel & parameter ordering (`param_vars: null` → read from the first training param file) |
+| `model_dir/weights.pt` | trained parameters |
+| `dataset.root_dir/config.yaml` → `domain` | the **trained domain** the requested grid is checked against |
+| `dataset.root_dir/config.yaml` → `time.output_frequency` | the **trained step size** (one network step) |
+
+Each can still be overridden explicitly (handy for tests), but the normal
+path is to only set `model_dir`.
+
+Key behaviours:
+
+| Concern | Behaviour |
+|---|---|
+| **Trained step size** | The network always advances at its trained cadence (`trained_output_frequency`). To honour a requested `output_frequency` that differs, the rollout emits a frame at the internal step closest to each requested output time — so the result lands on the requested grid whether or not the two cadences divide evenly. A requested cadence *finer* than the trained step (the surrogate can't emit between steps) raises. |
+| **Domain check** | The requested `(nx, ny, nz, bounds)` must equal `trained_domain`; a mismatch raises (the network only applies to its training grid). |
+| **Spin-up / collocation** | A cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. |
+| **Geometry** | When `stl_path` is set the geometry channel is voxelised from the STL onto the grid ([geometry.py](../libs/neural-surrogates/src/neural_surrogates/geometry.py)); otherwise it falls back to the non-zero-state convention used by `TransitionDataset`. |
+| **Parameters** | Time-varying inflow params are interpolated onto the internal step times in the trained `param_vars` order; scalar params are broadcast. |
+
+`NeuralSurrogateEnsembleForwardModel`
+([ensemble_forward_model.py](../libs/neural-surrogates/src/neural_surrogates/ensemble_forward_model.py))
+clones each member by sharing the (stateless) network and cloning the
+spin-up backend into its own experiment directory via that backend's
+`create_new_forward_model` helper.
+
+### Config and usage
+
+[conf/model/neural_surrogate.yaml](../conf/model/neural_surrogate.yaml)
+mirrors the other `conf/model/*.yaml` files (`name`, `solver_name`,
+`forward_model._target_`, `ensemble_model._target_`, `prepare._target_`).
+The `forward_model` node points at a `model_dir` (default
+`model_weights/unet_convnext_tiny`) and uses `_recursive_: false` so the
+surrogate fills in `n_state_channels` / `n_params` and builds its spin-up
+backend itself. `prepare` runs `prepare_neural_surrogate`, which
+compiles/preprocesses the spin-up backend. `default_params` provides
+constant fallbacks for trained parameters a caller omits (e.g. ESMDA only
+varies the inflow, but a uDALES-trained net also expects
+`pressure_gradient_magnitude`).
+
+Select it as a truth or assimilation model just like any backend:
+
+```bash
+python scripts/run_time_varying_parameters_rollout_esmda.py \
+    model@truth_model=pyudales model@assim_model=neural_surrogate \
+    assim_model.forward_model.model_dir=model_weights/unet_convnext_tiny
+```
+
+The `pyudales_neural_surrogate` case in
+[tests/test_run_time_varying_parameters_rollout_esmda.py](../tests/test_run_time_varying_parameters_rollout_esmda.py)
+builds a throwaway `model_dir` (random weights, trained domain == the test
+grid) via the `surrogate_model_dir_factory` fixture, exercising the full
+load-from-folder path without needing a real checkpoint.
+
 ### Extending
 
 - **New architecture**: add a module under
