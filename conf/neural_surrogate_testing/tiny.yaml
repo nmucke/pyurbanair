@@ -1,0 +1,6 @@
+# @package _global_
+
+model_dir: model_weights/unet_convnext_tiny
+sample_idx: 0
+device: cuda
+output_dir: ${model_dir}/rollout_${sample_idx}

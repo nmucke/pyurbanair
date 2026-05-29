@@ -1,4 +1,4 @@
-data_dir: training_data/pylbm_tiny
+data_dir: training_data/pyudales_small
 split: train
 batch_size: 8
 shuffle: true
@@ -10,4 +10,5 @@ state_vars:
 param_vars: null
 cache: false
 dtype: float32
+pushforward_steps: 10
 plot_dir: .temp/dataloading

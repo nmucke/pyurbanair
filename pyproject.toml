@@ -183,10 +183,24 @@ typer = "*"
 [tool.pixi.feature.cuda]
 platforms = ["linux-64"]
 
+# Advertise the host's CUDA runtime to the solver. Without this, the `__cuda`
+# virtual package is missing and any conda-forge package gated on CUDA (e.g.
+# the `cuda*_mkl_*` pytorch builds) is treated as uninstallable.
+[tool.pixi.feature.cuda.system-requirements]
+cuda = "12.6"
+
 [tool.pixi.feature.cuda.dependencies]
 # NVIDIA CUDA toolkit and drivers are system-level and should be installed from NVIDIA:
 # https://developer.nvidia.com/cuda-downloads
 curl = ">=8.0.0,<9"
+
+# Force the CUDA build of pytorch. The neural-surrogates feature only pins
+# `pytorch >=2.4,<3` with no build-string, so conda-forge's solver picks the
+# `cpu_mkl_*` variant by default and torch.cuda.is_available() returns False.
+# `build = "cuda*"` selects any `cuda{NNN}_mkl_*` variant; `cuda-version` is
+# bounded to the host driver's max (560.x = CUDA 12.6).
+pytorch = { version = ">=2.4,<3", build = "cuda*" }
+cuda-version = ">=12.0,<12.7"
 
 # GPU JAX for the assimilation stack. The base `jax` resolves to a CPU jaxlib;
 # the `cuda12` extra adds the matching

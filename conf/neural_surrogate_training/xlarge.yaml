@@ -1,10 +1,10 @@
 # @package _global_
 
 defaults:
-  - /neural_surrogate_architectures/unet_convnext@architecture: small
+  - /neural_surrogate_architectures/unet_convnext@architecture: xlarge
   - _self_
 
-model_name: unet_convnext_small
+model_name: unet_convnext_xlarge
 
 trainer:
   _target_: neural_surrogates.Trainer
@@ -36,4 +36,3 @@ dataloader:
   batch_size: 32
   shuffle: true
   num_workers: 0
-

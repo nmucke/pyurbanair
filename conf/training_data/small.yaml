@@ -39,10 +39,10 @@ training_data:
     _convert_: all
     external:
       inflow_angle:
-        mean: {min: -30.0, max: 30.0}   # uniform per sim
+        mean: {min: 40.0, max: 70.0}   # uniform per sim
         std: 5.0                          # fixed (use {min, max} to sample)
       velocity_magnitude:
-        mean: {min: 3.0, max: 8.0}        # uniform per sim
+        mean: {min: 5.0, max: 8.0}        # uniform per sim
         std: 0.5                          # fixed
     time_series:
       correlation_length: 60.0
