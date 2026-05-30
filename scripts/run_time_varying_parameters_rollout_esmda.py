@@ -23,6 +23,7 @@ import hydra
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import netCDF4
 import numpy as np
 import xarray
 from hydra.utils import instantiate
@@ -194,6 +195,78 @@ def _plot_time_varying_params_rollout(
 
 
 # ---------------------------------------------------------------------------
+# Per-window persistence
+# ---------------------------------------------------------------------------
+#
+# Persist heavy per-window state files to disk inside the loop and stream-merge
+# them at the end so peak memory tracks one window's data instead of all of
+# them, and a final-step crash still leaves usable per-window artifacts.
+
+
+def _persist_window_dataset(
+    ds: xarray.Dataset,
+    w: int,
+    sim_time: float,
+    windows_dir: pathlib.Path,
+    kind: str,
+) -> pathlib.Path:
+    """Shift LOCAL window time coords to ABSOLUTE and write a per-window file."""
+    ds_abs = ds.assign_coords(time=ds["time"].values + w * sim_time)
+    path = windows_dir / f"window_{w:03d}_{kind}.nc"
+    ds_abs.to_netcdf(path)
+    return path
+
+
+def _stream_merge_along_time(
+    paths: list[pathlib.Path],
+    out_path: pathlib.Path,
+) -> None:
+    """Concatenate per-window NetCDFs along ``time`` without a full in-memory load.
+
+    Used for the big ensemble-state files (``true_state``, ``esmda_state``).
+    Peak memory ≈ one window's data, vs. ``xarray.concat`` which materializes
+    the full concatenation plus the target write buffer.
+
+    Time slices are appended verbatim — matching the existing ``join="override"``
+    semantics, duplicate boundary times between adjacent windows are kept.
+    """
+    with netCDF4.Dataset(paths[0]) as template:
+        time_size_first = template.dimensions["time"].size
+        with netCDF4.Dataset(out_path, "w") as dst:
+            dst.setncatts({k: template.getncattr(k) for k in template.ncattrs()})
+            for name, dim in template.dimensions.items():
+                dst.createDimension(name, None if name == "time" else len(dim))
+            for name, var in template.variables.items():
+                fill = getattr(var, "_FillValue", None)
+                new_var = dst.createVariable(
+                    name, var.datatype, var.dimensions, fill_value=fill
+                )
+                new_var.setncatts(
+                    {k: var.getncattr(k) for k in var.ncattrs() if k != "_FillValue"}
+                )
+                if "time" in var.dimensions:
+                    time_axis = var.dimensions.index("time")
+                    idx = [slice(None)] * var.ndim
+                    idx[time_axis] = slice(0, time_size_first)
+                    new_var[tuple(idx)] = var[...]
+                else:
+                    new_var[...] = var[...]
+
+    offset = time_size_first
+    for p in paths[1:]:
+        with netCDF4.Dataset(p) as src, netCDF4.Dataset(out_path, "a") as dst:
+            n_time = src.dimensions["time"].size
+            for name, var in src.variables.items():
+                if "time" not in var.dimensions:
+                    continue
+                time_axis = var.dimensions.index("time")
+                idx = [slice(None)] * var.ndim
+                idx[time_axis] = slice(offset, offset + n_time)
+                dst[name][tuple(idx)] = var[...]
+            offset += n_time
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -253,14 +326,31 @@ def run(cfg: DictConfig) -> None:
     configure_failure_policy(ensemble_model, cfg.ensemble.failure)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
 
+    # ---- Output paths -----------------------------------------------------
+    # Resolved BEFORE the window loop so each window can persist to
+    # ``windows_dir`` as soon as it finishes.
+    out_dir = resolve_output_dir(
+        cfg,
+        f"time_varying_rollout_esmda_{cfg.truth_model.name}_{cfg.assim_model.name}",
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    windows_dir = out_dir / "windows"
+    windows_dir.mkdir(parents=True, exist_ok=True)
+
     # ---- Storage ----------------------------------------------------------
     # ``prior_params_list[w]`` is the prior ensemble for window ``w``:
     # cold-start from ``ts_model.sample_prior`` for window 0, and
     # ``ts_model.extrapolate(posterior_{w-1})`` for windows 1+.
-    true_state_list: list[xarray.Dataset] = []
+    #
+    # Params lists are small (a few floats × ensemble × time points × windows)
+    # so we keep them in memory for the final concat-and-save + plotting.  The
+    # heavy state datasets (true_state, esmda_final_state) are written to
+    # ``windows_dir`` inside the loop and stream-merged at the end — only their
+    # per-window paths are kept in memory.
     prior_params_list: list[xarray.Dataset] = []
     posterior_params_list: list[xarray.Dataset] = []
-    esmda_state_list: list[xarray.Dataset] = []
+    true_state_paths: list[pathlib.Path] = []
+    esmda_state_paths: list[pathlib.Path] = []
 
     # ---- State tracking for handoff between windows -----------------------
     true_state: xarray.Dataset | None = None
@@ -278,7 +368,6 @@ def run(cfg: DictConfig) -> None:
         true_state = truth_model(params=true_params_w, state=true_state)
         if true_state is None:
             raise RuntimeError("Expected in-memory truth rollout state.")
-        true_state_list.append(true_state)
 
         # --- Noisy observations --------------------------------------------
         true_obs = jnp.asarray(truth_obs_op(true_state))
@@ -338,7 +427,32 @@ def run(cfg: DictConfig) -> None:
         # Extract final posterior (last ESMDA step)
         posterior_params = params_history.isel(esmda_step=-1)
         posterior_params_list.append(posterior_params)
-        esmda_state_list.append(esmda_final_state)
+
+        # --- Persist this window's heavy outputs to disk -------------------
+        # Writes the per-window NetCDFs immediately so a crash in a later
+        # window — or in the final stream-merge — leaves usable artifacts in
+        # ``windows_dir``. Params (small) are also written for symmetry; the
+        # in-memory params lists are still used by plotting and by the
+        # post-loop concat for the merged param NetCDFs.
+        true_state_paths.append(
+            _persist_window_dataset(
+                true_state, w, sim_time, windows_dir, "true_state"
+            )
+        )
+        esmda_state_paths.append(
+            _persist_window_dataset(
+                esmda_final_state, w, sim_time, windows_dir, "esmda_state"
+            )
+        )
+        _persist_window_dataset(
+            true_params_w, w, sim_time, windows_dir, "true_params"
+        )
+        _persist_window_dataset(
+            posterior_params, w, sim_time, windows_dir, "posterior_params"
+        )
+        _persist_window_dataset(
+            prior_params_list[-1], w, sim_time, windows_dir, "prior_params"
+        )
 
         # --- Build next window's prior ------------------------------------
         # Methods that fit-and-roll-forward (gp_linear_trend, ar1, OU) want
@@ -361,19 +475,24 @@ def run(cfg: DictConfig) -> None:
             params_ensemble = extrapolated
 
     # ---- Save outputs -----------------------------------------------------
-    out_dir = resolve_output_dir(
-        cfg,
-        f"time_varying_rollout_esmda_{cfg.truth_model.name}_{cfg.assim_model.name}",
-    )
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     # Each window's datasets carry LOCAL time coords [0, sim_time]; shift to
     # absolute times before concatenating so the global time axis is monotonic.
     def _shift_to_abs(ds: xarray.Dataset, w: int) -> xarray.Dataset:
         return ds.assign_coords(time=ds["time"].values + w * sim_time)
 
-    true_state_abs = [_shift_to_abs(ds, w) for w, ds in enumerate(true_state_list)]
-    esmda_state_abs = [_shift_to_abs(ds, w) for w, ds in enumerate(esmda_state_list)]
+    # Heavy state files: the per-window NetCDFs were already written inside the
+    # loop with absolute time coords. Stream-merge them rather than re-loading
+    # all windows into memory.
+    _stream_merge_along_time(true_state_paths, out_dir / "true_state.nc")
+    _stream_merge_along_time(esmda_state_paths, out_dir / "esmda_state.nc")
+
+    # Re-open the merged states for downstream viz. These are small enough
+    # post-merge for params/animation steps; if the animation OOMs we'd switch
+    # to per-window streaming there too.
+    true_state_all = xarray.open_dataset(out_dir / "true_state.nc")
+    esmda_state_all = xarray.open_dataset(out_dir / "esmda_state.nc")
+
+    # Small params files: concat in memory and write.
     true_params_abs = [
         _shift_to_abs(ds, w) for w, ds in enumerate(true_params_per_window)
     ]
@@ -384,19 +503,14 @@ def run(cfg: DictConfig) -> None:
         _shift_to_abs(ds, w) for w, ds in enumerate(prior_params_list)
     ]
 
-    true_state_all = xarray.concat(true_state_abs, dim="time", join="override")
-    esmda_state_all = xarray.concat(esmda_state_abs, dim="time", join="override")
     true_params_all = xarray.concat(true_params_abs, dim="time", join="override")
     posterior_params_all = xarray.concat(
         posterior_params_abs, dim="time", join="override"
     )
+    prior_params_all = xarray.concat(prior_params_abs, dim="time", join="override")
 
-    true_state_all.to_netcdf(out_dir / "true_state.nc")
-    esmda_state_all.to_netcdf(out_dir / "esmda_state.nc")
     true_params_all.to_netcdf(out_dir / "true_params.nc")
     posterior_params_all.to_netcdf(out_dir / "posterior_params.nc")
-
-    prior_params_all = xarray.concat(prior_params_abs, dim="time", join="override")
     prior_params_all.to_netcdf(out_dir / "prior_params.nc")
 
     # ---- Plotting ---------------------------------------------------------

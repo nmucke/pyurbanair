@@ -1,8 +1,8 @@
 # Sizing domain: medium. Selected via `size=medium`; override individually with
 # `domain=...` on the CLI. x starts at -20 to leave an open upstream inflow
 # region in front of the buildings (the Xie & Castro array starts at x=5).
-nx: 100
-ny: 80
+nx: 50
+ny: 40
 nz: 16
 bounds:
   - [-20.0, 80.0]
