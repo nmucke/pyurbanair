@@ -195,19 +195,29 @@ def _partition_states_into_splits(
     output_dir: pathlib.Path,
     sampled: xr.Dataset,
     split_specs: list[tuple[str, int, int]],
+    model_name: str,
 ) -> tuple[dict[str, xr.Dataset], xr.Dataset]:
     """Move ensemble outputs into the `state/{split}/` + `param/{split}/` layout.
 
     The ensemble writes `state_{i}.nc` for member `i` under `raw_dir`.
     For each member we:
-      * re-open the raw state, save it to `state/{split}/sample_{i:04d}.nc`,
-        and delete the raw file;
+      * re-open the raw state, collocate it to cell centers if the backend
+        uses a staggered grid (pyudales), save it to
+        `state/{split}/sample_{i:04d}.nc`, and delete the raw file;
       * save its interpolated parameter trajectory (one value per state
         time point) to `param/{split}/sample_{i:04d}.nc`.
 
     Returns the first state per split (for downstream viz) and the
     consolidated interpolated parameter dataset.
     """
+    # pyudales solves on a C-grid (u@xm, v@ym, w@zm); the neural surrogate
+    # stacks u/v/w channelwise, which assumes a common grid. Collocate to
+    # cell centers (xt, yt, zt) before saving so the on-disk training data
+    # is regular.
+    regrid = None
+    if model_name == "pyudales":
+        from pyudales.utils.grid_utils import interpolate_grid as regrid
+
     first_path = raw_dir / "state_0.nc"
     if not first_path.exists():
         raise FileNotFoundError(
@@ -237,6 +247,8 @@ def _partition_states_into_splits(
                 )
             with xr.open_dataset(src) as ds:
                 state = ds.load()
+            if regrid is not None:
+                state = regrid(state)
             state_dst = state_split_dir / f"sample_{i:04d}.nc"
             state.to_netcdf(state_dst)
             src.unlink()
@@ -368,6 +380,7 @@ def run(cfg: DictConfig) -> None:
         output_dir=output_dir,
         sampled=sampled,
         split_specs=split_specs,
+        model_name=model_name,
     )
 
     # Plot interpolated trajectories (what each sample_XXXX.nc actually
@@ -391,10 +404,6 @@ def run(cfg: DictConfig) -> None:
 
         for split, state in first_example.items():
             anim_state = add_velocity_magnitude(state)
-            if model_name == "pyudales":
-                from pyudales.utils.grid_utils import interpolate_grid
-
-                anim_state = interpolate_grid(anim_state)
             anim_path = output_dir / f"{split}_animation.mp4"
             animate_state(state=anim_state, output_path=anim_path, z_level=0)
             print(f"Saved animation -> {anim_path}")

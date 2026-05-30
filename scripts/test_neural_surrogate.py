@@ -69,7 +69,7 @@ def _plot_rollout(
     times = np.linspace(0, T - 1, min(n_show, T), dtype=int)
     mag_t = truth.norm(dim=1)[:, z_mid]
     mag_p = pred.norm(dim=1)[:, z_mid]
-    vmax = max(mag_t.max().item(), mag_p.max().item())
+    vmax = mag_t.max().item()
 
     fig, axes = plt.subplots(
         3, len(times), figsize=(3 * len(times), 9), squeeze=False
@@ -101,6 +101,25 @@ def _plot_rollout(
     plt.close(fig)
 
 
+def _plot_params(
+    params: torch.Tensor,
+    param_names: tuple[str, ...],
+    out_dir: Path,
+) -> None:
+    arr = params.numpy()
+    T, P = arr.shape
+    fig, axes = plt.subplots(P, 1, figsize=(8, 2.5 * max(P, 1)), squeeze=False)
+    for i, name in enumerate(param_names):
+        axes[i, 0].plot(np.arange(T), arr[:, i])
+        axes[i, 0].set_xlabel("time step")
+        axes[i, 0].set_ylabel(name)
+        axes[i, 0].grid(True, alpha=0.3)
+    fig.suptitle("Rollout parameters")
+    fig.tight_layout()
+    fig.savefig(out_dir / "params.png", dpi=120)
+    plt.close(fig)
+
+
 def _animate_rollout(
     truth: torch.Tensor, pred: torch.Tensor, out_path: Path, fps: int = 10
 ) -> None:
@@ -109,7 +128,7 @@ def _animate_rollout(
     mag_t = truth.norm(dim=1)[:, z_mid].numpy()
     mag_p = pred.norm(dim=1)[:, z_mid].numpy()
     err = np.abs(mag_p - mag_t)
-    vmax = float(max(mag_t.max(), mag_p.max()))
+    vmax = float(mag_t.max())
     err_max = float(err.max()) or 1.0
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
@@ -190,6 +209,7 @@ def run(cfg: DictConfig) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save({"truth": truth, "pred": pred}, out_dir / "trajectory.pt")
     _plot_rollout(truth, pred, out_dir)
+    _plot_params(params, test_ds.param_names, out_dir)
     anim_path = _animate_rollout(truth, pred, out_dir / "rollout.mp4")
 
     rmse = ((pred - truth) ** 2).mean().sqrt().item()

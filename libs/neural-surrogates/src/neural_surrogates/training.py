@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
+import tqdm
 
 
 class Trainer:
@@ -32,18 +33,25 @@ class Trainer:
         self.weights_path = Path(weights_path) if weights_path is not None else None
 
     def _forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        state_n = batch["state_n"].to(self.device)
+        state = batch["state_n"].to(self.device)
         state_next = batch["state_next"].to(self.device)
-        params_n = batch["params_n"].to(self.device)
+        params = batch["params_n"].to(self.device)
         geometry = batch["geometry"].to(self.device)
-        pred = self.model(state_n, params_n, geometry)
+        # params: (B, K, P). The K-1 pushforward steps run under no_grad so
+        # the model sees its own predictions without backprop through the
+        # unroll; only the final step contributes gradients.
+        K = params.shape[1]
+        with torch.no_grad():
+            for i in range(K - 1):
+                state = self.model(state, params[:, i, :], geometry)
+        pred = self.model(state, params[:, K - 1, :], geometry)
         return self.loss_fn(pred, state_next)
 
     def _train_epoch(self) -> float:
         self.model.train()
         total = 0.0
         n = 0
-        for batch in self.train_loader:
+        for batch in tqdm.tqdm(self.train_loader):
             loss = self._forward(batch)
             self.optimizer.zero_grad()
             loss.backward()
