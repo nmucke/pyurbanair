@@ -279,6 +279,18 @@ def apply_time_varying_inflow(
         tnudge,
     )
 
+    # Under inflow_outflow BCs the west inlet face (plus nudging) drives the
+    # flow, so the constant body-force pressure gradient (INPS dpdx/dpdy)
+    # inherited from the case namoptions is redundant.  Left non-zero it adds
+    # a direction-frozen momentum source that LBM (inlet-driven, no body force)
+    # has no equivalent of, biasing cross-model ESMDA.  Zero it so that
+    # velocity_magnitude is the only streamwise driver, matching LBM.
+    if boundary_condition == "inflow_outflow":
+        body_force_namoptions = NamoptionsFile(namoptions_path)
+        body_force_namoptions.set_value("INPS", "dpdx", "0.0")
+        body_force_namoptions.set_value("INPS", "dpdy", "0.0")
+        body_force_namoptions.write()
+
     zeros = np.zeros(ktot)
     update_prof_file_profile(
         dirs.experiment_dir / f"prof.inp.{dirs.experiment_name}",
