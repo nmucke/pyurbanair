@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from .dir_utils import DirectoryPaths
 
 from .infile_utils import Infile
+from .vertical_profile import build_profile_shape
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +75,9 @@ def apply_inflow_settings(
     if velocity_magnitude is None:
         raise ValueError("velocity_magnitude is required but not found in params")
 
-    # LBM's effective y-direction response is opposite to the user-facing
-    # convention used by pyudales, so negate the angle before writing udir.
+    # LBM's udir uses the same convention as pyudales' inflow_angle (measured
+    # from +x, CCW), so write it as-is (no negation). Verified by matching
+    # uDALES and LBM observations at identical parameters.
     inflow_angle_for_lbm = inflow_angle
 
     # Update infile.in using Infile class
@@ -146,8 +148,14 @@ def write_uvel_time_file(
     else:
         angles = np.full_like(times, float(params["inflow_angle"].item()))
 
-    # Negate angle for LBM convention (same as apply_inflow_settings)
-    angles_for_lbm = -angles
+    # LBM's udir uses the same convention as pyudales' inflow_angle (measured
+    # from +x, CCW): the inflow kernel applies cos(udir)/sin(udir) directly to
+    # the x/y momentum, matching angle_to_velocity. Write the angle as-is, so
+    # this path is consistent with the static apply_inflow_settings path. A
+    # previous negation here flipped the inflow direction ONLY in the
+    # time-varying path, which drove cross-model ESMDA (pyudales truth) to
+    # negative angles.
+    angles_for_lbm = angles
 
     if spinup_time > 0:
         # Prepend constant plateau at initial values for spinup period
@@ -166,6 +174,62 @@ def write_uvel_time_file(
 def remove_uvel_time_file(dirs: "DirectoryPaths") -> None:
     """Remove ``uvel_time.dat`` if it exists, preventing stale data."""
     file_path = dirs.experiment_dir / "uvel_time.dat"
+    if file_path.exists():
+        file_path.unlink()
+        logger.info("Removed stale %s", file_path)
+
+
+def write_uvel_shear_file(
+    dirs: "DirectoryPaths",
+    heights: np.ndarray,
+    zsize: float,
+    profile_config: dict,
+) -> None:
+    """Write ``uvel_shear.dat`` describing the vertical inflow shear profile.
+
+    The file format expected by ``m_inflow.F90`` is one row per vertical level::
+
+        k  z_meters  shape_value
+
+    The Fortran code reads the third column into ``uvel_h(k)`` and renormalizes
+    it by the top-cell value (``uvel_shear(k) = uvel_h(k)/uvel_h(nz)``), so the
+    inlet velocity becomes ``uini * uvel_shear(k)``.  We write the dimensionless
+    shape ``s(z) = (z/z_ref)**alpha`` produced by :func:`build_profile_shape`,
+    using the same ``power_law``/``z_ref`` convention as pyudales so that, for a
+    given ``velocity_magnitude``, both backends impose the same inflow shear.
+
+    Note: because the Fortran normalizes by the top cell, LBM's ``uini`` is the
+    speed at the top *cell center*, whereas pyudales' ``velocity_magnitude`` is
+    the speed at ``z_ref = zsize`` (domain top).  The profile *shape* matches
+    exactly; the reference height differs by half a cell (<1% for typical nz).
+
+    Args:
+        dirs: DirectoryPaths with ``experiment_dir``.
+        heights: Cell-center heights from the domain bottom, shape (nz,).
+        zsize: Domain height in meters (default ``z_ref`` for the power law).
+        profile_config: ``{"type": ..., ...}`` passed to ``build_profile_shape``.
+    """
+    shape = build_profile_shape(profile_config, heights, zsize)
+
+    file_path = dirs.experiment_dir / "uvel_shear.dat"
+    with open(file_path, "w") as f:
+        for k, (z, s) in enumerate(zip(heights, shape), start=1):
+            f.write(f"{k:6d}  {z:.6f}  {s:.6f}\n")
+
+    logger.info(
+        "Wrote vertical inflow shear (%s) with %d levels to %s",
+        profile_config.get("type", "uniform"),
+        len(heights),
+        file_path,
+    )
+
+
+def remove_uvel_shear_file(dirs: "DirectoryPaths") -> None:
+    """Remove ``uvel_shear.dat`` if it exists, preventing stale data.
+
+    Without the file ``m_inflow.F90`` defaults to a uniform inflow profile.
+    """
+    file_path = dirs.experiment_dir / "uvel_shear.dat"
     if file_path.exists():
         file_path.unlink()
         logger.info("Removed stale %s", file_path)
