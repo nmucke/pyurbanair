@@ -148,13 +148,17 @@ while IFS= read -r flag; do
   [ -n "${flag}" ] && EXTRA_FLAGS+=( "${flag}" )
 done < <(role_flags truth_model "${PUA_TRUTH_MODEL}"; role_flags assim_model "${PUA_ASSIM_MODEL}")
 
+# Correlation localization is on by default (esmda.localization in the config).
+# We pin a fixed truncation threshold so the run is well-posed at every ensemble
+# size (the adaptive null default, 3/sqrt(N_e), excludes all obs for N_e < 9).
+# Disable localization entirely with `esmda.localization=null`.
 PY_ARGS=(
   python -u scripts/run_time_varying_parameters_rollout_esmda.py
   "size=${PUA_SIZE}"
   "model@truth_model=${PUA_TRUTH_MODEL}"
   "model@assim_model=${PUA_ASSIM_MODEL}"
   "ensemble.num_parallel_processes=${PUA_NUM_PARALLEL}"
-  "localization=correlation"
+  "esmda.localization.truncation_correlation=0.3"
   "paths.base_results_dir=${PROJECT_STORAGE}"
   "${EXTRA_FLAGS[@]}"
   "$@"

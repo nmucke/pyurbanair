@@ -6,9 +6,23 @@
 
 defaults:
   - override /model: pyudales
-  - override /domain: tiny
-  - override /time: tiny
   - _self_
+
+# Grid + horizon for data generation (was the `domain=tiny` / `time=tiny`
+# groups, now inlined since those groups were flattened to single files).
+domain:
+  nx: 20
+  ny: 20
+  nz: 4
+  bounds:
+    - [0.0, 20.0]
+    - [0.0, 20.0]
+    - [0.0, 10.0]
+
+time:
+  simulation_time: 5.0
+  output_frequency: 1.0
+  spinup_time: 5.0
 
 training_data:
   num_train: 4

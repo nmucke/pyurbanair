@@ -1,28 +1,32 @@
 # @package _global_
 #
-# Sizing overlay: small — quick end-to-end run. Selects the matching per-group
-# `small` configs so each group (domain/time/ensemble/obs) lives in its own
-# file. Individual groups stay overridable on the CLI — a command-line
-# `domain=...`, `obs=...`, etc. wins over the selection here, e.g.
-#   ... size=small obs=grid_small domain=tiny
-defaults:
-  - override /domain: small
-  - override /time: small
-  - override /ensemble: small
-  - override /obs: small
-  - _self_
+# Sizing overlay: small — quick end-to-end run. Self-contained: this file is the
+# single place a `small` run is sized. It inlines `domain`/`time` in full and
+# overrides only the fields of `ensemble`/`obs`/`esmda`/`time_varying` that
+# scale with the run; size-invariant fields (obs mode/states/temporal_mode,
+# ensemble failure policy, esmda kind/seed/obs_error_std) stay in the base
+# groups selected by conf/config.yaml. Override any field per-run on the CLI,
+# e.g. `size=small ensemble.ensemble_size=20 time.simulation_time=120`. The
+# Snellius/DelftBlue submit wrappers read `ensemble.ensemble_size` from here to
+# size the SLURM core request.
 
-# --- Per-size knobs (edit these to tune the run) ---------------------------
-# These scalars override the values coming from the selected groups above and
-# are the recommended single place to size a run. The Snellius submit wrapper
-# (job_scripts/snellius/submit.sh) reads `ensemble.ensemble_size` from here to
-# size the SLURM core request. Each is still overridable per-run on the CLI,
-# e.g. `ensemble.ensemble_size=20 time.simulation_time=60 esmda.num_assimilation_windows=3`.
-ensemble:
-  ensemble_size: 8
+domain:
+  nx: 60
+  ny: 40
+  nz: 4
+  bounds:
+    - [-20.0, 40.0]
+    - [0.0, 40.0]
+    - [0.0, 10.0]
 
 time:
   simulation_time: 60.0
+  output_frequency: 5.0
+  spinup_time: 10.0
+
+ensemble:
+  ensemble_size: 8
+  num_parallel_processes: 1
 
 esmda:
   num_steps: 1
@@ -30,3 +34,13 @@ esmda:
 
 time_varying:
   num_time_points: 2
+
+# Sensor placement. All (x,y,z) must fall inside `domain.bounds`
+# ([-20,40] x [0,40] x [0,10]) and outside the buildings. x=-10 sits in the open
+# upstream inflow region; the N-S lanes at x in {2.5, 20, 38} fall in the gaps
+# between cube columns. Lengths must match.
+obs:
+  x_points: [-10.0, 2.5, 20.0, 20.0, 38.0]
+  y_points: [20.0, 10.0, 20.0, 35.0, 10.0]
+  z_points: [3.0, 3.0, 3.0, 3.0, 3.0]
+  interval_size: 3

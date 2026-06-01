@@ -27,6 +27,10 @@ def test_run_parameter_esmda(
     overrides = [
         f"model@truth_model={truth_model}",
         f"model@assim_model={assim_model}",
+        # Smoother-mechanics test: run the global update (localization has its
+        # own test, and the default correlation localization is degenerate at
+        # this 2-member ensemble).
+        "esmda.localization=null",
         "ensemble.ensemble_size=2",
         "ensemble.num_parallel_processes=2",
         "esmda.num_steps=1",
@@ -42,4 +46,4 @@ def test_run_parameter_esmda(
         results_dir.mkdir()
         overrides.append(f"run.results_dir={results_dir}")
 
-    run(compose_test_cfg(overrides))
+    run(compose_test_cfg(overrides, config_name="run_parameter_esmda"))

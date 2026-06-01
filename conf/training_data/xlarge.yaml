@@ -5,9 +5,23 @@
 
 defaults:
   - override /model: pylbm
-  - override /domain: xlarge
-  - override /time: xlarge
   - _self_
+
+# Grid + horizon for data generation (was the `domain=xlarge` / `time=xlarge`
+# groups, now inlined since those groups were flattened to single files).
+domain:
+  nx: 180
+  ny: 160
+  nz: 32
+  bounds:
+    - [-20.0, 160.0]
+    - [0.0, 160.0]
+    - [0.0, 64.0]
+
+time:
+  simulation_time: 300.0
+  output_frequency: 5.0
+  spinup_time: 10.0
 
 training_data:
   num_train: 128

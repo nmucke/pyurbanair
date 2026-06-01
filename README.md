@@ -63,36 +63,34 @@ ulimit -s unlimited
 
 ### Configuration
 
-All simulation and assimilation settings live in `conf/` as composable
-[Hydra](https://hydra.cc/) config groups. The top-level `conf/config.yaml`
-selects one option per group; any field can be overridden from the
-command line. The groups are:
+All simulation and assimilation settings live in `conf/`, composed by
+[Hydra](https://hydra.cc/). There is **one flat file per parameter
+category** (`conf/<category>.yaml`); any field can be overridden from the
+command line (`domain.nx=80`, `esmda.num_steps=4`). The categories are:
 
-- **`domain/`** — grid resolution (`nx`, `ny`, `nz`) and spatial bounds
-- **`time/`** — simulation duration, output frequency, spinup time
-- **`model/`** — per-backend forward-model and ensemble-model
-  `_target_` blocks (`pylbm`, `pyudales`, `pypalm`, `neural_surrogate`)
-- **`ensemble/`** — ensemble size, parallel processes, CPUs/process,
+- **`domain.yaml`** — grid resolution (`nx`, `ny`, `nz`) and spatial bounds
+- **`time.yaml`** — simulation duration, output frequency, spinup time
+- **`ensemble.yaml`** — ensemble size, parallel processes, CPUs/process,
   failure policy
-- **`obs/`** — observation operator schema (points/grid mode, sensor
+- **`obs.yaml`** — observation operator schema (points/grid mode, sensor
   locations, observed states, temporal aggregation)
-- **`esmda/`** — smoother variant (`parameter`, `state_and_parameter`,
-  `rollout`, `time_varying_parameter`, `time_varying_rollout`), number
-  of assimilation steps/windows, observation error std, random seed
-- **`localization/`** — ESMDA localization: `none` (global update) or
-  `correlation` (correlation-based observation tapering)
-- **`params/{true,prior,external}/`** — true parameter values,
-  assimilation prior, external/expert prior
-- **`time_varying/`** — time-varying-parameter method
-  (`ar2_relaxation`, `ar1`, `gp_linear_trend`, `ornstein_uhlenbeck`)
-  and per-method kwargs for both the assimilation prior and the truth
-  trajectory. The external prior `mean`/`std` (`params/external/`) may be
-  a scalar **or a list of control points** interpolated over the window,
-  letting `x_ext(t)` / `Σ_ext(t)` vary in time (see
-  `conf/params/external/time_varying.yaml`)
-- **`training_data/`** — neural-surrogate dataset size presets (`tiny`,
-  `small`, `medium`, `large`, `xlarge`); see
-  [`docs/neural_surrogates.md`](docs/neural_surrogates.md)
+- **`esmda.yaml`** — number of assimilation steps/windows, observation
+  error std, random seed, and `localization` (the adaptive correlation
+  localization, on by default; `esmda.localization=null` for the global
+  update). The smoother variant itself is supplied per-script (see below).
+- **`parameters.yaml`** — `params.{true,prior,external}` (true values,
+  assimilation prior, external/expert prior) plus `time_varying.*` (method
+  `ar2_relaxation`/`ar1`/`gp_linear_trend`/`ornstein_uhlenbeck` and
+  per-method kwargs). An external prior `mean`/`std` may be a scalar **or a
+  list of control points** interpolated over the window, letting
+  `x_ext(t)` / `Σ_ext(t)` vary in time.
+
+`model/` stays a group (`model@truth_model=pylbm model@assim_model=pyudales`),
+as do the `size/` overlays (`size=tiny` … `size=xlarge`), `preset/`, and
+`training_data/` (neural-surrogate dataset sizes; see
+[`docs/neural_surrogates.md`](docs/neural_surrogates.md)). Each esmda script
+has its own primary config (`conf/run_*_esmda.yaml`) that wires in its
+smoother, so you just run the script — no `esmda=<variant>` selector.
 - **`neural_surrogate_architectures/`, `neural_surrogate_training/`,
   `neural_surrogate_testing/`** — surrogate architecture presets,
   training loop, and autoregressive-rollout test config
@@ -117,10 +115,10 @@ python scripts/run_ensemble_rollout_forward_model.py model=pylbm
 
 ### Data assimilation
 
-The `esmda` group defaults to `parameter` in `conf/config.yaml`. Every
-other smoother variant needs an explicit `esmda=<name>` selector (the
-examples below do this for `state_and_parameter`, `rollout`, and
-`time_varying_parameter`).
+Each ESMDA script has its own primary config that wires in the right
+smoother (the one genuinely per-script piece), so no `esmda=<name>`
+selector is needed — just run the script. Shared ESMDA settings live in
+`conf/esmda.yaml`.
 
 ```bash
 # Parameter estimation with ESMDA
@@ -133,19 +131,21 @@ python scripts/run_parameter_esmda.py \
 
 # Joint state and parameter estimation
 python scripts/run_state_and_parameter_esmda.py \
-  esmda=state_and_parameter \
   model@truth_model=pylbm model@assim_model=pylbm
 
 # Rollout-based ESMDA with multiple assimilation windows
 python scripts/run_rollout_esmda.py \
-  esmda=rollout \
   model@truth_model=pylbm model@assim_model=pylbm
 
 # Time-varying-parameter ESMDA
 python scripts/run_time_varying_parameter_esmda.py \
-  esmda=time_varying_parameter \
   model@truth_model=pylbm model@assim_model=pylbm \
   esmda.num_steps=4 obs.interval_size=2
+
+# Adaptive correlation localization (Vossepoel et al. 2025) is on by default;
+# tune it, or disable it with esmda.localization=null
+python scripts/run_parameter_esmda.py \
+  esmda.localization.truncation_correlation=0.3
 
 # Fast test preset (small domain, few steps, CPU-only LBM)
 python scripts/run_parameter_esmda.py preset=test

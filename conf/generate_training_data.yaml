@@ -1,0 +1,10 @@
+# Primary config for scripts/generate_training_data.py.
+#
+# Extends the shared base config and selects a `training_data/` overlay (the one
+# remaining group whose options differ structurally, not just by scale). The
+# overlay inlines its own `domain`/`time` and a parameter sampler. Pick the
+# dataset size on the CLI, e.g. `training_data=small`.
+defaults:
+  - config
+  - training_data: tiny
+  - _self_

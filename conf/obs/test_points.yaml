@@ -1,9 +1,0 @@
-mode: points
-x_points: [10.0, 20.0, 30.0, 38.0, 10.0]
-y_points: [20.0, 25.0, 10.0, 30.0, 2.0]
-z_points: [1.0, 1.0, 1.0, 1.0, 1.0]
-states: [u, v, w]
-temporal_mode: intervals
-interval_size: 3
-aggregation_mode: mean
-

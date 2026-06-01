@@ -1,28 +1,32 @@
 # @package _global_
 #
-# Sizing overlay: tiny — fastest smoke run. Selects the matching per-group
-# `tiny` configs so each group (domain/time/ensemble/obs) lives in its own file.
-# Individual groups stay overridable on the CLI — a command-line `domain=...`,
-# `obs=...`, etc. wins over the selection here, e.g.
-#   ... size=tiny obs=grid_small domain=small
-defaults:
-  - override /domain: tiny
-  - override /time: tiny
-  - override /ensemble: tiny
-  - override /obs: tiny
-  - _self_
+# Sizing overlay: tiny — fastest smoke run. Self-contained: this file is the
+# single place a `tiny` run is sized. It inlines `domain`/`time` in full and
+# overrides only the fields of `ensemble`/`obs`/`esmda`/`time_varying` that
+# scale with the run; size-invariant fields (obs mode/states/temporal_mode,
+# ensemble failure policy, esmda kind/seed/obs_error_std) stay in the base
+# groups selected by conf/config.yaml. Override any field per-run on the CLI,
+# e.g. `size=tiny ensemble.ensemble_size=8 time.simulation_time=10`. The
+# Snellius/DelftBlue submit wrappers read `ensemble.ensemble_size` from here to
+# size the SLURM core request.
 
-# --- Per-size knobs (edit these to tune the run) ---------------------------
-# These scalars override the values coming from the selected groups above and
-# are the recommended single place to size a run. The Snellius submit wrapper
-# (job_scripts/snellius/submit.sh) reads `ensemble.ensemble_size` from here to
-# size the SLURM core request. Each is still overridable per-run on the CLI,
-# e.g. `ensemble.ensemble_size=20 time.simulation_time=60 esmda.num_assimilation_windows=3`.
-ensemble:
-  ensemble_size: 4
+domain:
+  nx: 20
+  ny: 20
+  nz: 4
+  bounds:
+    - [0.0, 20.0]
+    - [0.0, 20.0]
+    - [0.0, 10.0]
 
 time:
   simulation_time: 5.0
+  output_frequency: 1.0
+  spinup_time: 5.0
+
+ensemble:
+  ensemble_size: 4
+  num_parallel_processes: 4
 
 esmda:
   num_steps: 1
@@ -30,3 +34,13 @@ esmda:
 
 time_varying:
   num_time_points: 3
+
+# Sensor placement. All (x,y,z) must fall inside `domain.bounds`
+# ([0,20] x [0,20] x [0,10]) and outside the buildings. The Xie & Castro array
+# is a staggered grid of 10x10 cubes (period 20, height 17.2). The N-S lanes at
+# x in {2.5, 18} sit in the gaps between cube columns. Lengths must match.
+obs:
+  x_points: [2.5, 2.5, 18.0, 18.0]
+  y_points: [5.0, 15.0, 5.0, 15.0]
+  z_points: [3.0, 3.0, 3.0, 3.0]
+  interval_size: 3

@@ -167,14 +167,16 @@ def test_parameter_esmda_runs_with_correlation_localization(compose_test_cfg) ->
         [
             "model@truth_model=pyudales",
             "model@assim_model=pyudales",
-            "localization=correlation",
-            "localization.truncation_correlation=0.2",
+            # Correlation localization is the default `esmda.localization`; just
+            # tune its truncation threshold here.
+            "esmda.localization.truncation_correlation=0.2",
             "ensemble.ensemble_size=4",
             "ensemble.num_parallel_processes=2",
             "esmda.num_steps=1",
             "esmda.num_assimilation_windows=1",
             "run.skip_viz=true",
-        ]
+        ],
+        config_name="run_parameter_esmda",
     )
     run(cfg)
 

@@ -26,9 +26,11 @@ def test_run_time_varying_parameters_rollout_esmda(
     from scripts.run_time_varying_parameters_rollout_esmda import run
 
     overrides = [
-        "esmda=time_varying_rollout",
         f"model@truth_model={truth_model}",
         f"model@assim_model={assim_model}",
+        # Smoother-mechanics test: global update (see test_localization for the
+        # localized path; the default localization is degenerate at this size).
+        "esmda.localization=null",
         "run.skip_viz=true",
         "time_varying.num_time_points=3",
         "ensemble.ensemble_size=2",
@@ -63,4 +65,4 @@ def test_run_time_varying_parameters_rollout_esmda(
         )
         overrides.append(f"assim_model.forward_model.model_dir={model_dir}")
 
-    run(compose_test_cfg(overrides))
+    run(compose_test_cfg(overrides, config_name="time_varying_rollout_esmda"))

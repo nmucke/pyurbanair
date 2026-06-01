@@ -1,0 +1,4 @@
+# @package paths
+#
+# Output roots. Everything mutable lands under `.temp/` by default.
+base_results_dir: .temp/scripts

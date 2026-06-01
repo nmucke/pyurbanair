@@ -411,7 +411,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Done. Training data root: {output_dir}")
 
 
-@hydra.main(version_base=None, config_path="../conf", config_name="config")
+@hydra.main(version_base=None, config_path="../conf", config_name="generate_training_data")
 def main(cfg: DictConfig) -> None:
     run(cfg)
 
