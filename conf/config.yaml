@@ -1,22 +1,25 @@
 defaults:
-  - paths: default
-  - domain: xie_castro_60x40x16
-  - time: default
-  - ensemble: default
-  - obs: xie_castro_points
-  - esmda: parameter
-  - localization: none
-  - params/true: default
-  - params/prior: default
-  - params/external: default
-  - time_varying: ar2_relaxation
+  - paths
+  - domain
+  - time
+  - ensemble
+  - obs
+  - esmda
+  - parameters
   - model@model: pylbm
   - model@truth_model: pylbm
   - model@assim_model: pylbm
-  - training_data: tiny
-  - preset: null
   - size: null
+  - preset: null
   - _self_
+
+# One flat file per parameter category (conf/<category>.yaml) instead of a group
+# of per-variant files. Each holds the full set of fields the most involved run
+# case — scripts/run_time_varying_parameters_rollout_esmda.py — needs; every
+# other run_* script reads a subset. Rescale a whole run with the `size/`
+# overlays (`size=tiny` … `size=xlarge`). `model/` stays a group (one option per
+# backend). The per-script esmda smoother is supplied by each esmda script's own
+# primary config (see conf/run_*_esmda.yaml).
 
 hydra:
   job:

@@ -1,8 +1,0 @@
-inflow_angle:
-  mean: 25.0
-  std: 6.0
-velocity_magnitude:
-  mean: 5.0
-  std: 0.5
-  min: 0.1
-

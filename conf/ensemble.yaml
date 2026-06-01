@@ -1,0 +1,15 @@
+# @package ensemble
+#
+# Ensemble execution. Canonical values for the time-varying rollout ESMDA;
+# single-member / forward-only scripts read a subset. `size/` overlays adjust
+# `ensemble_size` / `num_parallel_processes`; the failure policy is
+# size-invariant and lives here. The Snellius/DelftBlue submit wrappers read
+# `ensemble.ensemble_size` from the selected `size/` overlay to size the SLURM
+# core request.
+ensemble_size: 16
+num_parallel_processes: 8
+num_cpus_per_process: 1
+failure:
+  policy: resample_from_successes
+  jitter_scale: 0.05
+  seed: 0

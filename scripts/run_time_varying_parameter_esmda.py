@@ -348,7 +348,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved outputs in {pathlib.Path(out_dir)}")
 
 
-@hydra.main(version_base=None, config_path="../conf", config_name="config")
+@hydra.main(version_base=None, config_path="../conf", config_name="run_time_varying_parameter_esmda")
 def main(cfg: DictConfig) -> None:
     run(cfg)
 

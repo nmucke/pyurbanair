@@ -23,9 +23,11 @@ def test_run_state_and_parameter_esmda(
     from scripts.run_state_and_parameter_esmda import run
 
     overrides = [
-        "esmda=state_and_parameter",
         f"model@truth_model={truth_model}",
         f"model@assim_model={assim_model}",
+        # Smoother-mechanics test: global update (see test_localization for the
+        # localized path; the default localization is degenerate at this size).
+        "esmda.localization=null",
         "run.skip_viz=true",
         "ensemble.ensemble_size=2",
         "ensemble.num_parallel_processes=2",
@@ -38,4 +40,4 @@ def test_run_state_and_parameter_esmda(
     if assim_model == "pylbm":
         overrides.append("assim_model.forward_model.cuda=false")
 
-    run(compose_test_cfg(overrides))
+    run(compose_test_cfg(overrides, config_name="run_state_and_parameter_esmda"))

@@ -1,11 +1,8 @@
-# Primary config for scripts/run_time_varying_parameters_rollout_esmda.py — the
-# most involved run case.
+# Primary config for scripts/run_time_varying_parameter_esmda.py.
 #
-# Extends the shared base config and supplies the time-varying smoother with
-# `pin_initial_time_point: true` (the script also passes `time_coords` and
-# re-toggles `pin_initial_time_point` per window; see the window loop). All
-# other groups (domain, time, ensemble, obs, parameters, model, size, …) remain
-# selectable on the CLI exactly as with the base config.
+# Extends the shared base config and supplies the time-varying-parameter
+# smoother (single window; no initial-time-point pinning). All other groups
+# remain selectable on the CLI.
 defaults:
   - config
   - _self_
@@ -23,5 +20,4 @@ esmda:
     num_steps: ${..num_steps}
     alpha: ${..alpha}
     num_time_points: ${time_varying.num_time_points}
-    pin_initial_time_point: true
     localization: ${..localization}

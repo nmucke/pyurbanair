@@ -1,0 +1,56 @@
+# @package _global_
+#
+# All inflow-parameter configuration in one place: the static parameter values
+# / priors (`params.*`) and the time-varying-parameter model that drives the
+# rollout scripts (`time_varying.*`). The time-varying rollout ESMDA uses every
+# field here; the static esmda scripts read only `params.*`; forward-only
+# scripts read only `params.true` (and `params.prior` when sampling an
+# ensemble). Per-parameter blocks carry `{mean, std, min?, max?}`.
+# `pressure_gradient_magnitude` is uDALES-only; the helpers filter it out for
+# other backends.
+params:
+  "true":
+    inflow_angle: 10.0
+    velocity_magnitude: 5.0
+    pressure_gradient_magnitude: 0.0041912
+  prior:
+    inflow_angle:
+      mean: 0.0
+      std: 10.0
+    velocity_magnitude:
+      mean: 5.0
+      std: 1.0
+      min: 0.1
+    pressure_gradient_magnitude:
+      mean: 0.0041912
+      std: 0.001
+  # External/expert prior for the parameter_time_series models. Each `mean` /
+  # `std` may be a scalar (constant over the window) OR a list of control
+  # points spaced evenly over the window and linearly interpolated, letting
+  # x_ext(t) / Σ_ext(t) vary in time, e.g. `inflow_angle.mean: [-30, 0, 30]`.
+  external:
+    inflow_angle:
+      mean: 25.0
+      std: 6.0
+    velocity_magnitude:
+      mean: 5.0
+      std: 0.5
+      min: 0.1
+
+time_varying:
+  num_time_points: 3
+  method: ar2_relaxation
+  method_kwargs:
+    correlation_length: 300.0
+  truth_method: ar2_relaxation
+  truth_method_kwargs:
+    correlation_length: 500.0
+  # Prior time-series model built from the fields above. Construction is
+  # declarative via hydra.utils.instantiate(cfg.time_varying.prior_model).
+  prior_model:
+    _target_: pyurbanair.parameter_time_series.build_parameter_time_series
+    _convert_: all
+    method: ${time_varying.method}
+    external_priors: ${params.external}
+    ensemble_size: ${ensemble.ensemble_size}
+    method_kwargs: ${time_varying.method_kwargs}

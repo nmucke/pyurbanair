@@ -52,6 +52,11 @@ Edit the per-size knobs in `conf/size/<size>.yaml`:
 | `time.simulation_time`            | forward-model simulation horizon         |
 | `esmda.num_assimilation_windows`  | number of assimilation windows           |
 
+Correlation localization is **on by default** (`esmda.localization` in the
+config). The template pins `esmda.localization.truncation_correlation=0.3` so the
+update is well-posed at any ensemble size; pass `esmda.localization=null` as an
+extra override for the global (unlocalized) update.
+
 `submit.sh` reads `ensemble.ensemble_size` and requests **one core per member**,
 rounded up to the partition's minimum billable share (16 on `rome`, 24 on
 `genoa`) and capped at a single node. `ensemble.num_parallel_processes` is set to

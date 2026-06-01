@@ -77,7 +77,7 @@ pixi run -e delftblue -- bash -c '
       ensemble.num_parallel_processes=2 \
       esmda.num_assimilation_windows=1 \
       esmda.num_steps=1 \
-      localization=correlation \
+      esmda.localization.truncation_correlation=0.3 \
       paths.base_results_dir='"${PROJECT_STORAGE}"' \
       +truth_model.forward_model.temp_dir='"${RUN_TEMP_DIR}"' \
       +assim_model.forward_model.temp_dir='"${RUN_TEMP_DIR}"' \

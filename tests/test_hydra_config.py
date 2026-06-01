@@ -81,14 +81,19 @@ def test_palm_target_does_not_import_for_non_palm_composition() -> None:
 
 
 def test_interpolations_resolve_under_aliased_packages() -> None:
-    cfg = _compose(
-        [
-            "model@truth_model=pylbm",
-            "model@assim_model=pypalm",
-            "assim_model.compile=false",
-            "esmda.num_steps=4",
-        ]
-    )
+    # The smoother is supplied by each esmda script's own primary config, so
+    # compose one of them (rather than the base ``config``) to exercise the
+    # smoother interpolations.
+    with initialize(version_base=None, config_path="../conf"):
+        cfg = compose(
+            config_name="run_parameter_esmda",
+            overrides=[
+                "model@truth_model=pylbm",
+                "model@assim_model=pypalm",
+                "assim_model.compile=false",
+                "esmda.num_steps=4",
+            ],
+        )
     resolved = OmegaConf.to_container(cfg, resolve=True)
 
     assert resolved["assim_model"]["prepare"]["compile"] is False
