@@ -6,7 +6,6 @@
 defaults:
   - override /model: pylbm
   - override /domain: xlarge
-  - override /time: xlarge
   - _self_
 
 training_data:

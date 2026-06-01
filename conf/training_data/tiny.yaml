@@ -7,7 +7,6 @@
 defaults:
   - override /model: pyudales
   - override /domain: tiny
-  - override /time: tiny
   - _self_
 
 training_data:

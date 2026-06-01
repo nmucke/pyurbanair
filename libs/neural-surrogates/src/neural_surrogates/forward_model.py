@@ -262,7 +262,17 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         data_cfg_path = root_dir / "config.yaml"
         if data_cfg_path.exists():
             data_cfg = OmegaConf.load(data_cfg_path)
-            resolved["output_frequency"] = float(data_cfg.time.output_frequency)
+            # generate_training_data.py uses cfg.training_data.output_frequency
+            # to drive the forward model, so that's the cadence the saved
+            # state files actually sit on. cfg.time.output_frequency is the
+            # /time group default and may have been overridden by the
+            # training_data overlay (e.g. /time=small says 5.0 but
+            # training_data=small sets 1.0).
+            td = data_cfg.get("training_data")
+            if td is not None and "output_frequency" in td:
+                resolved["output_frequency"] = float(td.output_frequency)
+            else:
+                resolved["output_frequency"] = float(data_cfg.time.output_frequency)
             resolved["domain"] = data_cfg.domain
         return resolved
 
@@ -527,26 +537,72 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         params: Optional[xr.Dataset] = None,
         sim_name: Optional[str] = "state",
     ) -> xr.Dataset:
+        template = self._get_template_and_initial_state(state, params, sim_name)
+        return self.rollout_batched([template], [params])[0]
+
+    def rollout_batched(
+        self,
+        templates: Sequence[xr.Dataset],
+        params: Sequence[Optional[xr.Dataset]],
+    ) -> list[xr.Dataset]:
+        """Roll the network forward for a batch of members at once.
+
+        Each ``templates[b]`` is a single-snapshot initial field already on
+        the regular grid the network expects (i.e. the output of
+        :meth:`_get_template_and_initial_state`), and ``params[b]`` is that
+        member's parameter dataset. The members share the trained network, so
+        their rollouts run as a single batched forward pass per step (batch
+        dimension = member) rather than one Python loop per member — this is
+        where the ensemble gets its speed-up once the (parallel) spin-up has
+        produced the per-member initial fields.
+
+        Returns one assembled trajectory :class:`~xarray.Dataset` per member,
+        in the same order as ``templates``.
+        """
+        if len(templates) != len(params):
+            raise ValueError(
+                f"templates ({len(templates)}) and params ({len(params)}) "
+                "must have the same length."
+            )
+
         n_internal, emit_steps = self._output_schedule()
         emit_at = {step: pos for pos, step in enumerate(emit_steps)}
+        n_members = len(templates)
 
-        template = self._get_template_and_initial_state(state, params, sim_name)
-        geometry = self._build_geometry(template)
-        schedule = self._param_schedule(params, n_internal)
+        # Stack per-member geometry, parameter schedule and initial state into
+        # leading-batch tensors; the network forward is batched over dim 0.
+        geom = torch.stack([self._build_geometry(t) for t in templates], dim=0)
+        # (n_members, n_internal, P)
+        schedule = torch.stack(
+            [self._param_schedule(p, n_internal) for p in params], dim=0
+        )
+        # (n_members, C, *grid)
+        initial = torch.stack([self._stack_state(t) for t in templates], dim=0)
+        current = initial.to(self.device)
 
-        current = self._stack_state(template).unsqueeze(0).to(self.device)
-        geom = geometry.unsqueeze(0)
-
-        frames: list[Optional[np.ndarray]] = [None] * len(emit_steps)
+        # Per member, per emitted frame: (n_members, n_emit, C, *grid).
+        member_frames: list[list[Optional[np.ndarray]]] = [
+            [None] * len(emit_steps) for _ in range(n_members)
+        ]
         with torch.no_grad():
             for k in range(n_internal):
-                param_k = schedule[k].unsqueeze(0)
+                param_k = schedule[:, k, :]
                 current = self.model(current, param_k, geom)
                 pos = emit_at.get(k + 1)
                 if pos is not None:
-                    frames[pos] = current[0].cpu().numpy()
+                    step_np = current.cpu().numpy()
+                    for b in range(n_members):
+                        member_frames[b][pos] = step_np[b]
 
-        return self._assemble_output(template, frames)
+        # Prepend each member's initial state at t=0 so the output trajectory
+        # starts where the spin-up template ended (matching the training-data
+        # convention, which includes t=0 in every saved trajectory).
+        initial_np = initial.cpu().numpy()
+        outputs: list[xr.Dataset] = []
+        for b in range(n_members):
+            frames = [initial_np[b], *member_frames[b]]
+            outputs.append(self._assemble_output(templates[b], frames))
+        return outputs
 
     # -- (de)serialisation between xarray and torch ------------------------
 
@@ -574,7 +630,11 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 snapshot[var] = (base[var].dims, frame[c])
             per_time.append(snapshot)
         out = xr.concat(per_time, dim="time", join="override")
-        return out.assign_coords(time=range(len(per_time)))
+        # Frame 0 is the initial state at t=0 (the spin-up template), and
+        # frame j (j>=1) is the prediction after j requested-output steps,
+        # i.e. at t = j * output_frequency.
+        times = np.arange(len(per_time)) * self.output_frequency
+        return out.assign_coords(time=times)
 
     def disable_spinup(self) -> None:
         """Disable spin-up so subsequent cold starts skip it."""

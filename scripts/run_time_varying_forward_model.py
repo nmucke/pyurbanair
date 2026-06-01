@@ -40,7 +40,7 @@ def run(cfg: DictConfig) -> None:
         print(f"Using TRUE_PARAMS: angle={angle}, vel={vel}")
         inflow_vec = np.full(n_snapshots, angle)
     else:
-        angle = -10.0
+        angle = -40.0
         vel = 3.0
 
         x = np.linspace(angle, -angle, n_snapshots)
