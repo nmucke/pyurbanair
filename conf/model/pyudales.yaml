@@ -8,7 +8,7 @@ forward_model:
   case_dir: ${geometry.udales_case_dir}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
-  ncpu: 1
+  ncpu: 4
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow

@@ -6,7 +6,7 @@ forward_model:
   _target_: pylbm.forward_model.ForwardModel
   _convert_: all
   # STL geometry follows the selected `case` (conf/case/<name>/geometry.yaml).
-  stl_path: ${geometry.lbm_stl_path}
+  stl_path: ${geometry.stl_path}
   experiment_name: runcase
   cuda: false
   verbose: false
