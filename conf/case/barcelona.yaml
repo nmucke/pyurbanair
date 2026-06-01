@@ -1,0 +1,11 @@
+# Case overlay: Barcelona urban geometry.
+#
+# Select with `case=barcelona`. For now the bundled domain/obs are a verbatim
+# copy of the xie_and_castro case and must be retuned to the real geometry. The
+# matching STL geometry (buildings.stl + groundpatched_extrude.stl) goes under
+# examples/<backend>/experiments/barcelona/ and must be wired via the model
+# config's `stl_path`.
+defaults:
+  - barcelona/domain
+  - barcelona/obs
+  - barcelona/geometry

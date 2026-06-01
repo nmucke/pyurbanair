@@ -1,9 +1,8 @@
 defaults:
   - paths
-  - domain
+  - case: xie_and_castro
   - time
   - ensemble
-  - obs
   - esmda
   - parameters
   - model@model: pylbm
@@ -20,6 +19,11 @@ defaults:
 # overlays (`size=tiny` … `size=xlarge`). `model/` stays a group (one option per
 # backend). The per-script esmda smoother is supplied by each esmda script's own
 # primary config (see conf/run_*_esmda.yaml).
+#
+# The geometry-specific categories (`domain`, `obs`) live in the `case/` group
+# (conf/case/<name>/), bundled by conf/case/<name>.yaml and switchable with
+# `case=barcelona`; `case=xie_and_castro` is the default. `size/` and `preset/`
+# still deep-merge over the case-provided domain/obs.
 
 hydra:
   job:

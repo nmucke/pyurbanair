@@ -1,0 +1,14 @@
+# @package obs
+#
+# Observation operator for the Barcelona case. NOTE: copied verbatim from the
+# xie_and_castro case for now — these sensor coordinates are placed inside the
+# Xie & Castro array and must be retuned to the Barcelona geometry (inside the
+# bounds, outside the buildings) once the STL files are added.
+mode: points
+x_points: [20.0, 20.0, 40.0]
+y_points: [20.0, 10.0, 10.0]
+z_points: [3.0, 3.0, 3.0]
+states: [u, v, w]
+temporal_mode: intervals
+interval_size: 4
+aggregation_mode: mean

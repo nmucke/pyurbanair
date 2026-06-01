@@ -5,8 +5,9 @@ compile: false
 forward_model:
   _target_: pypalm.forward_model.ForwardModel
   _convert_: all
-  case_dir: examples/palm/experiments/xie_and_castro_palm
-  stl_path: examples/palm/experiments/xie_and_castro_palm/xie_castro_2008_STL.stl
+  # Experiment dir + STL geometry follow the selected `case`.
+  case_dir: ${geometry.palm_case_dir}
+  stl_path: ${geometry.palm_stl_path}
   experiment_name: urban_run
   ncpu: 1
   save_only_last_timestep: false

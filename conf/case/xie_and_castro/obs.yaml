@@ -1,0 +1,18 @@
+# @package obs
+#
+# Observation operator. Canonical sensor layout for the time-varying rollout
+# ESMDA; forward-only scripts ignore the assimilation-specific fields. The
+# `size/` overlays supply size-appropriate sensor coordinates (and
+# `interval_size`); the size-invariant fields (mode/states/temporal_mode/
+# aggregation_mode) live here. Sensors must fall inside `domain.bounds` and
+# outside the buildings; the N-S lanes between the Xie & Castro cube columns
+# stay open for every y. `mode: grid` (with `x_min`/`x_max`/`n_per_axis`/`z`)
+# is the alternative to explicit `*_points`.
+mode: points
+x_points: [20.0, 20.0, 40.0]
+y_points: [20.0, 10.0, 10.0]
+z_points: [3.0, 3.0, 3.0]
+states: [u, v, w]
+temporal_mode: intervals
+interval_size: 4
+aggregation_mode: mean

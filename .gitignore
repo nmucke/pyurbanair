@@ -30,6 +30,13 @@ libs/pypalm/*.pyc
 # temp files
 .temp/*
 
+# Raw geometry exports dropped at the repo root (buildings.stl,
+# groundpatched_extrude.stl, ...). These are inputs to
+# tools/prepare_case_stl.py — often hundreds of MB — and are converted into the
+# committed, domain-frame STL under examples/<case>/. Never commit the raw ones.
+/*.stl
+/*.STL
+
 # Figures
 *.pdf
 *.png

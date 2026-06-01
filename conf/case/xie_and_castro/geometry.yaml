@@ -1,0 +1,12 @@
+# @package geometry
+#
+# Per-backend geometry paths for the Xie & Castro case. The model configs
+# (conf/model/<backend>.yaml) interpolate these so the STL / experiment dir
+# follows the selected `case` automatically. Absolute interpolation is used in
+# the model configs (`${geometry.lbm_stl_path}`) because the model group can be
+# mounted under several packages (model@model / @truth_model / @assim_model).
+# Layout: examples/<backend>/<case>/.
+lbm_stl_path: examples/lbm/xie_and_castro/xie_castro_2008_STL.stl
+udales_case_dir: examples/udales/xie_and_castro
+palm_case_dir: examples/palm/xie_and_castro
+palm_stl_path: examples/palm/xie_and_castro/xie_castro_2008_STL.stl

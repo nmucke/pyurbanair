@@ -1,0 +1,13 @@
+# Case overlay: Xie & Castro 2008 staggered cube array.
+#
+# A `case` bundles the geometry-specific config categories (domain bounds tuned
+# to the array, sensor layout inside it) into one switchable group. Select with
+# `case=xie_and_castro` (the default) or `case=barcelona`. The DA-method /
+# run-size categories (esmda, ensemble, time, parameters, paths) stay shared at
+# the conf root and are not part of a case. The matching STL geometry lives in
+# examples/<backend>/experiments/xie_and_castro/ and is wired via the model
+# config's `stl_path`.
+defaults:
+  - xie_and_castro/domain
+  - xie_and_castro/obs
+  - xie_and_castro/geometry

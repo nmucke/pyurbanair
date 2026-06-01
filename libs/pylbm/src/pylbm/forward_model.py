@@ -84,7 +84,7 @@ class ForwardModel(BaseForwardModel):
 
         self.dirs = get_lbm_directory_paths(
             temp_dir=pathlib.Path(".temp"),
-            case_dir=pathlib.Path("examples/lbm/experiments"),
+            case_dir=pathlib.Path("examples/lbm"),
             experiment_name=experiment_name,
         )
 

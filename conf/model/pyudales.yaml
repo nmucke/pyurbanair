@@ -4,7 +4,8 @@ solver_name: udales
 forward_model:
   _target_: pyudales.forward_model.ForwardModel
   _convert_: all
-  case_dir: examples/udales/experiments/xie_and_castro
+  # Experiment dir (holds namoptions + STL) follows the selected `case`.
+  case_dir: ${geometry.udales_case_dir}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
   ncpu: 1

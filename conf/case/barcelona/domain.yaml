@@ -1,0 +1,19 @@
+# @package domain
+#
+# Grid + physical bounds for the Barcelona case, matched to the domain-frame STL
+# produced by tools/prepare_case_stl.py (full geometry; merged buildings+ground
+# spans [0, 906.09] x [0, 874.37] x [0, 84.75] m). Grid is isotropic dx=dy=dz=2 m.
+#
+# uDALES treats `bounds` as a CROP WINDOW into the STL (the mesh is translated by
+# -bounds_lower, never scaled), so to run a smaller/cheaper region just narrow
+# `bounds` to a sub-window in these metre coordinates and lower nx/ny/nz to keep
+# the resolution, e.g. a 200 m square at the centre:
+#   domain.bounds=[[353,553],[337,537],[0,128]] domain.nx=100 domain.ny=100 domain.nz=64
+# (nfcts still counts all STL facets; regenerate the STL with --size for fewer.)
+nx: 454
+ny: 438
+nz: 64
+bounds:
+  - [0.0, 908.0]
+  - [0.0, 876.0]
+  - [0.0, 128.0]

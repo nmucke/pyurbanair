@@ -5,7 +5,8 @@ compile: true
 forward_model:
   _target_: pylbm.forward_model.ForwardModel
   _convert_: all
-  stl_path: examples/lbm/experiments/xie_castro_2008_STL.stl
+  # STL geometry follows the selected `case` (conf/case/<name>/geometry.yaml).
+  stl_path: ${geometry.lbm_stl_path}
   experiment_name: runcase
   cuda: false
   verbose: false

@@ -45,7 +45,7 @@ forward_model:
   spinup_forward_model:
     _target_: pyudales.forward_model.ForwardModel
     _convert_: all
-    case_dir: examples/udales/experiments/xie_and_castro
+    case_dir: ${geometry.udales_case_dir}
     # Distinct from the default pyudales experiment ("999") so a co-resident
     # pyudales truth/assim model never shares (and clobbers) this template's
     # experiment directory.
