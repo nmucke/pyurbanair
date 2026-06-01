@@ -8,7 +8,7 @@ forward_model:
   # STL geometry follows the selected `case` (conf/case/<name>/geometry.yaml).
   stl_path: ${geometry.stl_path}
   experiment_name: runcase
-  cuda: false
+  cuda: true
   verbose: false
   boundary_condition: inflow_outflow
   profile_config:

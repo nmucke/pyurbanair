@@ -14,7 +14,7 @@ forward_model:
   boundary_condition: inflow_outflow
   nudging_config:
     tnudge: 30.0
-    nnudge: 4
+    nnudge: 16
     profile_config:
       type: power_law
       alpha: 0.25

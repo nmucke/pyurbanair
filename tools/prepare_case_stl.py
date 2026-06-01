@@ -128,6 +128,7 @@ def prepare(
     z_datum: str,
     max_faces: int | None,
     repair_buildings: bool,
+    rotate: float,
 ) -> trimesh.Trimesh:
     print("Loading meshes:")
     buildings = _load(buildings_path)
@@ -174,6 +175,18 @@ def prepare(
 
     merged = trimesh.util.concatenate([buildings, ground])
     merged = _maybe_decimate(merged, max_faces)
+
+    # --- rotate (yaw about the vertical axis) ----------------------------------
+    # Rotate before the domain-frame translation: spin about the mesh's xy centre
+    # so the footprint turns in place, then let the min-bounds translation below
+    # re-seat the (now-rotated) extents back to the (0, 0) corner. Heights are
+    # untouched (rotation axis is +z), so the z datum logic stays valid.
+    if rotate % 360.0 != 0.0:
+        print(f"Rotating geometry by {rotate:.1f} deg about the vertical axis ...", flush=True)
+        pivot = merged.bounds.mean(axis=0)
+        pivot[2] = 0.0
+        R = trimesh.transformations.rotation_matrix(np.radians(rotate), [0, 0, 1], pivot)
+        merged.apply_transform(R)
 
     # --- move into the domain frame -------------------------------------------
     # Translate by the merged mesh's actual min bounds (not the window corner):
@@ -265,6 +278,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--margin", type=float, default=0.0, help="Extra metres added around the window.")
     p.add_argument(
+        "--rotate",
+        type=float,
+        default=45.0,
+        help="Yaw the final geometry by this many degrees (counter-clockwise) about the "
+        "vertical axis before seating it in the domain frame.",
+    )
+    p.add_argument(
         "--z-datum",
         choices=("min", "ground"),
         default="min",
@@ -305,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         z_datum=args.z_datum,
         max_faces=args.max_faces,
         repair_buildings=not args.no_repair,
+        rotate=args.rotate,
     )
 
     lo = mesh.bounds[0]
