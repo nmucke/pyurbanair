@@ -10,12 +10,12 @@ trainer:
   _target_: neural_surrogates.Trainer
   num_epochs: 500
   device: cuda
-  patience: 10
+  patience: 25
 
 optimizer:
   _target_: torch.optim.AdamW
   lr: 1.0e-3
-  weight_decay: 1.0e-5
+  weight_decay: 1.0e-6
 
 loss:
   _target_: torch.nn.MSELoss
@@ -34,6 +34,6 @@ dataset:
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 32
+  batch_size: 64
   shuffle: true
   num_workers: 0

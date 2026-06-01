@@ -20,20 +20,20 @@ domain:
     - [0.0, 10.0]
 
 time:
-  simulation_time: 60.0
+  simulation_time: 180.0
   output_frequency: 5.0
-  spinup_time: 10.0
+  spinup_time: 30.0
 
 ensemble:
-  ensemble_size: 8
+  ensemble_size: 64
   num_parallel_processes: 1
 
 esmda:
-  num_steps: 1
-  num_assimilation_windows: 2
+  num_steps: 3
+  num_assimilation_windows: 10
 
 time_varying:
-  num_time_points: 2
+  num_time_points: 3
 
 # Sensor placement. All (x,y,z) must fall inside `domain.bounds`
 # ([-20,40] x [0,40] x [0,10]) and outside the buildings. x=-10 sits in the open

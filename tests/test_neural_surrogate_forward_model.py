@@ -15,7 +15,9 @@ loop and bookkeeping are exercised in milliseconds.
 
 from __future__ import annotations
 
+import copy
 import pathlib
+from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
@@ -25,8 +27,16 @@ import xarray as xr
 torch = pytest.importorskip("torch")
 trimesh = pytest.importorskip("trimesh")
 
-from neural_surrogates import NeuralSurrogateForwardModel, UNetConvNeXt
+from neural_surrogates import (
+    NeuralSurrogateEnsembleForwardModel,
+    NeuralSurrogateForwardModel,
+    UNetConvNeXt,
+)
+from neural_surrogates import ensemble_forward_model as ens_mod
+from neural_surrogates import forward_model as fm_mod
 from neural_surrogates.geometry import stl_to_fluid_mask
+
+from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 from pyurbanair.base_forward_model import BaseForwardModel
 
 NZ, NY, NX = 4, 8, 8
@@ -159,7 +169,7 @@ def test_resolves_everything_from_model_dir(
     assert isinstance(model.model, UNetConvNeXt)
 
     out = model(params=_params())
-    assert out.sizes["time"] == 2  # 4.0 / 2.0
+    assert out.sizes["time"] == 3  # 4.0 / 2.0 outputs, plus the t=0 frame
 
 
 def test_model_dir_domain_mismatch_raises(
@@ -194,7 +204,11 @@ def test_model_dir_domain_mismatch_raises(
 def test_default_params_fill_missing_trained_param(tmp_path) -> None:
     """A trained param the caller omits is filled from default_params."""
     model = _make_model(
-        param_vars=("inflow_angle", "velocity_magnitude", "pressure_gradient_magnitude"),
+        param_vars=(
+            "inflow_angle",
+            "velocity_magnitude",
+            "pressure_gradient_magnitude",
+        ),
         architecture=UNetConvNeXt(
             n_state_channels=len(STATE_VARS),
             n_params=3,
@@ -208,7 +222,7 @@ def test_default_params_fill_missing_trained_param(tmp_path) -> None:
     )
     # _params() has no pressure_gradient_magnitude; the default fills it in.
     out = model(params=_params())
-    assert out.sizes["time"] == 3
+    assert out.sizes["time"] == 4  # 3 output frames plus the t=0 frame
 
 
 def test_missing_resolution_raises() -> None:
@@ -259,14 +273,15 @@ def test_mismatched_step_size_emits_only_at_requested_frequency() -> None:
     assert n_internal == 4
     assert len(emit_steps) == 3
     out = model(params=_params())
-    assert out.sizes["time"] == 3
+    assert out.sizes["time"] == 4  # 3 emitted frames plus the t=0 frame
 
 
 def test_cold_start_rollout_shape_and_spinup() -> None:
     model = _make_model()
     out = model(params=_params())
     assert out is not None
-    assert out.sizes["time"] == 3  # simulation_time / output_frequency
+    # simulation_time / output_frequency output frames, plus the t=0 frame.
+    assert out.sizes["time"] == 4
     for v in STATE_VARS:
         assert out[v].dims == ("time", "z", "y", "x")
     # Cold start must consult the spin-up backend exactly once.
@@ -276,8 +291,9 @@ def test_cold_start_rollout_shape_and_spinup() -> None:
 def test_substeps_emit_correct_number_of_frames() -> None:
     model = _make_model(output_frequency=1.0, trained_output_frequency=0.5)
     out = model(params=_params())
-    # 3 output frames even though the network takes 6 internal steps.
-    assert out.sizes["time"] == 3
+    # 3 output frames (plus the t=0 frame) even though the network takes 6
+    # internal steps.
+    assert out.sizes["time"] == 4
 
 
 def _staggered_udales_state() -> xr.Dataset:
@@ -332,7 +348,7 @@ def test_warm_start_skips_spinup() -> None:
     cold = model(params=_params())
     model.spinup_forward_model.calls = 0
     warm = model(state=cold, params=_params())
-    assert warm.sizes["time"] == 3
+    assert warm.sizes["time"] == 4  # 3 output frames plus the t=0 frame
     assert model.spinup_forward_model.calls == 0
 
 
@@ -367,4 +383,127 @@ def test_stl_geometry_used_in_rollout(tmp_path: pathlib.Path) -> None:
 
     model = _make_model(stl_path=stl_path)
     out = model(params=_params())
-    assert out.sizes["time"] == 3
+    assert out.sizes["time"] == 4  # 3 output frames plus the t=0 frame
+
+
+# -- batched rollout + ensemble (parallel spin-up) --------------------------
+
+
+def _regular_snapshot(seed: int) -> xr.Dataset:
+    """A single-snapshot regular-grid field, like a collocated spin-up state."""
+    rng = np.random.default_rng(seed)
+    coords = {
+        "z": np.arange(NZ) + 0.5,
+        "y": np.arange(NY) + 0.5,
+        "x": np.arange(NX) + 0.5,
+    }
+    return xr.Dataset(
+        {v: (("z", "y", "x"), rng.standard_normal((NZ, NY, NX))) for v in STATE_VARS},
+        coords=coords,
+    )
+
+
+def _member_params(velocity: float) -> xr.Dataset:
+    t = np.linspace(0.0, 3.0, 4)
+    return xr.Dataset(
+        {
+            "inflow_angle": ("time", np.linspace(10.0, 20.0, t.size)),
+            "velocity_magnitude": ("time", np.full(t.size, velocity)),
+        },
+        coords={"time": t},
+    )
+
+
+def test_rollout_batched_matches_per_member() -> None:
+    """A batched rollout equals rolling each member out on its own.
+
+    Guards against cross-member leakage in the batched forward pass: with the
+    network shared and the maths batched over dim 0, member b's trajectory
+    must depend only on member b's initial field and parameters.
+    """
+    model = _make_model()
+    templates = [_regular_snapshot(i) for i in range(3)]
+    params = [_member_params(v) for v in (2.0, 3.0, 4.0)]
+
+    batched = model.rollout_batched(templates, params)
+    assert len(batched) == 3
+    for i in range(3):
+        single = model.rollout_batched([templates[i]], [params[i]])[0]
+        for v in STATE_VARS:
+            np.testing.assert_allclose(
+                batched[i][v].values, single[v].values, rtol=1e-5, atol=1e-5
+            )
+
+
+def _ensemble_stub_factory(tmp_path: pathlib.Path):
+    """Spin-up stub carrying a ``dirs.temp_dir`` so the ensemble can build."""
+
+    def make_stub() -> _StubSpinup:
+        stub = _StubSpinup()
+        stub.dirs = SimpleNamespace(temp_dir=tmp_path)
+        return stub
+
+    return make_stub
+
+
+class _FakeBackendEnsemble(BaseEnsembleForwardModel):
+    """Stand-in for pyudales/pylbm ``EnsembleForwardModel`` (no CFD, no MATLAB)."""
+
+    def _create_new_forward_model(
+        self, forward_model, experiment_base_dir, experiment_name
+    ):
+        return copy.copy(forward_model)
+
+    def _pre_run_ensemble(self, *args, **kwargs) -> None:
+        pass
+
+    def _post_run_ensemble(self, *args, **kwargs) -> None:
+        pass
+
+
+def _patch_backend(monkeypatch, make_stub) -> None:
+    """Detach the surrogate ensemble from the real backend packages."""
+    # clone_for_member would import the backend's create_new_forward_model.
+    monkeypatch.setattr(
+        fm_mod, "_clone_backend_forward_model", lambda fm, base, name: make_stub()
+    )
+    # _get_spinup_ensemble imports "{backend}.ensemble_forward_model".
+    fake_module = SimpleNamespace(EnsembleForwardModel=_FakeBackendEnsemble)
+    monkeypatch.setattr(ens_mod, "import_module", lambda name: fake_module)
+
+
+def test_ensemble_parallel_spinup_and_batched_rollout(tmp_path, monkeypatch) -> None:
+    """Cold start: every member is spun up (in parallel) then rolled out batched."""
+    make_stub = _ensemble_stub_factory(tmp_path)
+    _patch_backend(monkeypatch, make_stub)
+
+    template = _make_model(spinup_forward_model=make_stub())
+    ensemble = NeuralSurrogateEnsembleForwardModel(template, ensemble_size=3)
+
+    out = ensemble.run_ensemble(params=_params())
+    assert out.sizes["ensemble"] == 3
+    assert out.sizes["time"] == 4  # 3 output frames plus the t=0 frame
+    for v in STATE_VARS:
+        assert out[v].dims == ("ensemble", "time", "z", "y", "x")
+
+    # Each member's spin-up backend ran exactly once.
+    for member in ensemble.ensemble_forward_models:
+        assert member.spinup_forward_model.calls == 1
+
+
+def test_ensemble_warm_start_skips_spinup(tmp_path, monkeypatch) -> None:
+    """Warm start: provided per-member states roll forward, no spin-up."""
+    make_stub = _ensemble_stub_factory(tmp_path)
+    _patch_backend(monkeypatch, make_stub)
+
+    template = _make_model(spinup_forward_model=make_stub())
+    ensemble = NeuralSurrogateEnsembleForwardModel(template, ensemble_size=3)
+
+    warm = xr.concat(
+        [_regular_snapshot(i) for i in range(3)], dim="ensemble", join="override"
+    )
+    out = ensemble.run_ensemble(state=warm, params=_params())
+    assert out.sizes["ensemble"] == 3
+    assert out.sizes["time"] == 4
+    for member in ensemble.ensemble_forward_models:
+        assert member.spinup_forward_model.calls == 0

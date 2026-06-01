@@ -30,10 +30,10 @@ params:
   # x_ext(t) / Σ_ext(t) vary in time, e.g. `inflow_angle.mean: [-30, 0, 30]`.
   external:
     inflow_angle:
-      mean: 50.0
+      mean: 25.0
       std: 6.0
     velocity_magnitude:
-      mean: 8.0
+      mean: 5.0
       std: 0.5
       min: 0.1
 
