@@ -30,7 +30,7 @@ import pytest
 import trimesh
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-XIE_STL = REPO_ROOT / "examples" / "lbm" / "xie_and_castro" / "xie_castro_2008_STL.stl"
+XIE_STL = REPO_ROOT / "examples" / "xie_and_castro" / "xie_castro_2008_STL.stl"
 
 
 def _load_tool():
@@ -244,6 +244,42 @@ def test_repair_makes_building_winding_consistent():
     assert not raw.is_winding_consistent, "synthetic input is intentionally inconsistent"
     fixed = tool._repair_buildings(raw)
     assert fixed.is_winding_consistent, "repair should make the winding consistent"
+
+
+def test_default_crop_keeps_all_buildings_when_centroid_is_off_center(tmp_path):
+    """The default (size=None) window must cover the full buildings footprint.
+
+    Regression: the window was once centred on ``mesh.centroid`` (area/volume
+    weighted centre of mass) while sized to the full ``extents``. On a mesh whose
+    mass is lopsided -- one big body plus a far-off small one -- that off-centre
+    window slides past the far edge and silently drops the small building. The
+    centre must be the bounding-box centre so every building is kept.
+    """
+    big = trimesh.creation.box(extents=(40.0, 40.0, BUILDING_HEIGHT))
+    big.apply_translation([OFFSET[0], OFFSET[1], GROUND_TOP + BUILDING_HEIGHT / 2])
+    far = trimesh.creation.box(extents=(6.0, 6.0, BUILDING_HEIGHT))
+    far.apply_translation([OFFSET[0] + 120.0, OFFSET[1], GROUND_TOP + BUILDING_HEIGHT / 2])
+    buildings = trimesh.util.concatenate([big, far])
+    # Mass is dominated by the big box, so the centroid sits far from the
+    # geometric (bounding-box) centre -- exactly the failure condition.
+    assert abs(buildings.centroid[0] - buildings.bounds.mean(axis=0)[0]) > 10.0
+
+    b_path = tmp_path / "buildings.stl"
+    g_path = tmp_path / "ground.stl"
+    buildings.export(b_path)
+    g = trimesh.creation.box(extents=(300.0, 300.0, GROUND_TOP - GROUND_BOTTOM))
+    g.apply_translation([OFFSET[0] + 60.0, OFFSET[1], (GROUND_TOP + GROUND_BOTTOM) / 2])
+    g.subdivide_to_size(8.0).export(g_path)
+
+    mesh = _prepare(b_path, g_path)
+    # Both buildings must survive: the footprint spans ~143 m (big box near edge
+    # to far box far edge). The buggy centroid-centred window only reached the
+    # big box (~40 m), so anything well past that proves the far box was kept.
+    assert mesh.bounds[1, 0] - mesh.bounds[0, 0] > 100.0, "far building was clipped"
+    # And both should split out as separate solid bodies (plus the ground).
+    tall = [b for b in mesh.split(only_watertight=False)
+            if b.bounds[1, 2] > BUILDING_HEIGHT * 0.8]
+    assert len(tall) >= 2, "expected both buildings to be present"
 
 
 def test_empty_crop_raises(synthetic_inputs):

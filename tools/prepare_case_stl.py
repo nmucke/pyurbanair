@@ -134,7 +134,12 @@ def prepare(
     ground = _load(ground_path)
 
     # --- choose the crop window ------------------------------------------------
-    bcx, bcy = buildings.centroid[:2]
+    # Default centre is the buildings' bounding-box centre, NOT ``.centroid``:
+    # ``.centroid`` is the area/volume-weighted centre of mass, which on the real
+    # (messy, denser-on-one-side) buildings mesh sits tens of metres off the
+    # geometric centre. Combined with the full-footprint default size below, an
+    # off-centre window slides past the far edges and clips whole buildings.
+    bcx, bcy = buildings.bounds.mean(axis=0)[:2]
     cx, cy = (bcx, bcy) if center is None else center
     if size is None:
         # Default: the full buildings footprint (+ margin), so every building is
