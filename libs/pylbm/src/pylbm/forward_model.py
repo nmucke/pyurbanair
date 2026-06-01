@@ -13,9 +13,9 @@ MAX_ITERATION = 999_999_999
 
 import numpy as np
 import xarray
-from pyurbanair.base_forward_model import BaseForwardModel
-
 from pylbm.utils import get_lbm_directory_paths
+
+from pyurbanair.base_forward_model import BaseForwardModel
 
 from .stl_to_lbm import stl_to_lbm_geometry
 from .utils import Infile, apply_inflow_settings, compile_lbm, create_infile
@@ -25,7 +25,9 @@ from .utils.mod_dimensions_utils import set_experiment
 from .utils.params_utils import (
     extract_initial_params,
     is_time_varying_params,
+    remove_uvel_shear_file,
     remove_uvel_time_file,
+    write_uvel_shear_file,
     write_uvel_time_file,
 )
 from .utils.state_utils import scale_velocity_to_physical
@@ -58,6 +60,7 @@ class ForwardModel(BaseForwardModel):
         enable_netcdf: Optional[bool] = None,
         boundary_condition: str = "periodic",
         spinup_time: float = 0.0,
+        profile_config: Optional[dict] = None,
     ) -> None:
         super().__init__(results_dir=results_dir)
 
@@ -108,6 +111,28 @@ class ForwardModel(BaseForwardModel):
 
         # Set experiment dimensions in mod_dimensions.F90 (add or update experiment, set active)
         set_experiment(dirs=self.dirs, nx=nx, ny=ny, nz=nz)
+
+        # Vertical inflow shear profile (e.g. power_law alpha=0.25), shared with
+        # pyudales via the same convention.  The profile is static in z and
+        # param-independent, so write it once here; ensemble members inherit the
+        # file when the experiment dir is cloned.  Heights are cell centers
+        # measured from the domain bottom and ``z_ref`` defaults to the domain
+        # height, matching pyudales' ``build_profile_shape``.
+        self.profile_config = profile_config
+        zsize = bounds[2][1] - bounds[2][0]
+        profile_heights = (np.arange(nz) + 0.5) * dz
+        if profile_config is not None and profile_config.get("type") not in (
+            None,
+            "uniform",
+        ):
+            write_uvel_shear_file(
+                dirs=self.dirs,
+                heights=profile_heights,
+                zsize=zsize,
+                profile_config=profile_config,
+            )
+        else:
+            remove_uvel_shear_file(self.dirs)
 
         self.simulation_time = simulation_time
         self.output_frequency = output_frequency

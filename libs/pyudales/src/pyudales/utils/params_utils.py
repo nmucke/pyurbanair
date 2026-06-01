@@ -212,13 +212,19 @@ def apply_inflow_settings(
     u0, v0 = angle_to_velocity(
         inflow_angle, velocity_magnitude if velocity_magnitude is not None else 0.0
     )
-    # if boundary_condition == "inflow_outflow":
-    #     dpdx, dpdy = 0.0, 0.0
-    # else:
-    dpdx, dpdy = angle_to_pressure_gradient(
-        inflow_angle,
-        pressure_gradient_magnitude if pressure_gradient_magnitude is not None else 0.0,
-    )
+    if boundary_condition == "inflow_outflow":
+        # The inlet face drives the flow, so an additional body-force pressure
+        # gradient is redundant and biases cross-model assimilation (LBM is
+        # inlet-driven with no body force).  Force it to zero so that
+        # velocity_magnitude is the only streamwise driver.
+        dpdx, dpdy = 0.0, 0.0
+    else:
+        dpdx, dpdy = angle_to_pressure_gradient(
+            inflow_angle,
+            pressure_gradient_magnitude
+            if pressure_gradient_magnitude is not None
+            else 0.0,
+        )
 
     namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
 

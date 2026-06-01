@@ -6,11 +6,13 @@ A Python framework for urban air flow simulation and ensemble-based data assimil
 
 ## Features
 
-- **Two CFD backends:** pylbm (Lattice Boltzmann Method, wrapping Geir Evensen's LBM) and pyudales (wrapping uDALES v2.2.0)
+- **Three CFD backends:** pylbm (Lattice Boltzmann Method, wrapping Geir Evensen's LBM), pyudales (wrapping uDALES v2.2.0), and pypalm (wrapping the PALM model system)
+- **Neural surrogate backend:** train a learned one-step network on CFD ensembles and run it as a drop-in fourth forward model — full stack (data generation, training, autoregressive rollout) in [`neural-surrogates`](libs/neural-surrogates), documented in [`docs/neural_surrogates.md`](docs/neural_surrogates.md)
 - **Ensemble-based data assimilation** using ESMDA (Ensemble Smoother with Multiple Data Assimilation), implemented in JAX
 - **Parameter estimation** and **joint state-parameter estimation**
+- **Localization** for ESMDA (correlation-based observation tapering)
 - **Multi-step rollout simulations** with state carry-over between time windows
-- **Cross-model assimilation** (e.g., use LBM as truth model with uDALES for assimilation)
+- **Cross-model assimilation** (e.g., use LBM as truth model with uDALES — or a neural surrogate — for assimilation)
 - **Time-varying parameters** with per-window mean/std profiles for the inflow priors
 - **Observation operators** for mapping simulation states to observation space
 - **Benchmark geometry generation** for the Xie and Castro 2008 case
@@ -69,7 +71,7 @@ command line. The groups are:
 - **`domain/`** — grid resolution (`nx`, `ny`, `nz`) and spatial bounds
 - **`time/`** — simulation duration, output frequency, spinup time
 - **`model/`** — per-backend forward-model and ensemble-model
-  `_target_` blocks (`pylbm`, `pyudales`, `pypalm`)
+  `_target_` blocks (`pylbm`, `pyudales`, `pypalm`, `neural_surrogate`)
 - **`ensemble/`** — ensemble size, parallel processes, CPUs/process,
   failure policy
 - **`obs/`** — observation operator schema (points/grid mode, sensor
@@ -77,6 +79,8 @@ command line. The groups are:
 - **`esmda/`** — smoother variant (`parameter`, `state_and_parameter`,
   `rollout`, `time_varying_parameter`, `time_varying_rollout`), number
   of assimilation steps/windows, observation error std, random seed
+- **`localization/`** — ESMDA localization: `none` (global update) or
+  `correlation` (correlation-based observation tapering)
 - **`params/{true,prior,external}/`** — true parameter values,
   assimilation prior, external/expert prior
 - **`time_varying/`** — time-varying-parameter method
@@ -86,6 +90,12 @@ command line. The groups are:
   a scalar **or a list of control points** interpolated over the window,
   letting `x_ext(t)` / `Σ_ext(t)` vary in time (see
   `conf/params/external/time_varying.yaml`)
+- **`training_data/`** — neural-surrogate dataset size presets (`tiny`,
+  `small`, `medium`, `large`, `xlarge`); see
+  [`docs/neural_surrogates.md`](docs/neural_surrogates.md)
+- **`neural_surrogate_architectures/`, `neural_surrogate_training/`,
+  `neural_surrogate_testing/`** — surrogate architecture presets,
+  training loop, and autoregressive-rollout test config
 - **`preset/`** — bundled overlays (`small`, `test`) for fast runs
 
 ### Forward simulations
@@ -142,6 +152,34 @@ python scripts/run_parameter_esmda.py preset=test
 ```
 
 All forward models generate a `.temp` folder where intermediate files are stored.
+
+### Neural surrogates
+
+A learned one-step network can be trained on a CFD ensemble and then used
+as a drop-in fourth forward model alongside pylbm, pyudales, and pypalm.
+The end-to-end stack (dataset generation → training → autoregressive
+rollout → use as a forward/assimilation model) is documented in
+[`docs/neural_surrogates.md`](docs/neural_surrogates.md). The headline
+commands:
+
+```bash
+# 1. Generate a training dataset by driving a CFD ensemble
+pixi run -e dev python scripts/generate_training_data.py training_data=small model=pylbm
+
+# 2. Train a surrogate (UNetConvNeXt by default; pick a preset/architecture)
+pixi run -e dev python scripts/train_neural_surrogate.py \
+    dataset.root_dir=training_data/pylbm_small \
+    'neural_surrogate_architectures/unet_convnext@architecture=small'
+
+# 3. Autoregressive rollout on the test split (diagnostic plots + animation)
+pixi run -e dev python scripts/test_neural_surrogate.py \
+    model_dir=model_weights/unet_convnext_small sample_idx=0
+
+# 4. Use the trained surrogate as an assimilation model
+python scripts/run_time_varying_parameters_rollout_esmda.py \
+    model@truth_model=pyudales model@assim_model=neural_surrogate \
+    assim_model.forward_model.model_dir=model_weights/unet_convnext_small
+```
 
 ### Running on Snellius (SLURM)
 
@@ -229,12 +267,33 @@ pyurbanair/
 │   │       ├── forward_model.py
 │   │       ├── ensemble_forward_model.py
 │   │       ├── rollout_forward_model.py
+│   │       ├── python_udgeom/            # Python preprocessing (Matlab alternative)
 │   │       └── utils/
+│   │
+│   ├── pypalm/                            # PALM model system wrapper (lazy import)
+│   │   ├── pyproject.toml
+│   │   └── src/pypalm/
+│   │       ├── forward_model.py
+│   │       ├── ensemble_forward_model.py
+│   │       └── utils/
+│   │
+│   └── neural-surrogates/                 # Learned one-step CFD surrogate
+│       ├── pyproject.toml
+│       └── src/neural_surrogates/
+│           ├── forward_model.py           # NeuralSurrogateForwardModel
+│           ├── ensemble_forward_model.py
+│           ├── data.py                    # TransitionDataset
+│           ├── training.py                # Trainer (train/val loop, pushforward)
+│           ├── geometry.py                # STL → voxel geometry channel
+│           └── architectures/             # SimpleConv, UNetConvNeXt
 │
 ├── conf/                                  # Hydra config groups (see Configuration)
 │   ├── config.yaml                        # Top-level composition
-│   ├── domain/, time/, model/, ensemble/
-│   ├── obs/, esmda/, params/, time_varying/
+│   ├── domain/, time/, model/, ensemble/, paths/, size/
+│   ├── obs/, esmda/, localization/, params/, time_varying/
+│   ├── training_data/                     # Surrogate dataset size presets
+│   ├── neural_surrogate_architectures/    # Surrogate architecture presets
+│   ├── neural_surrogate_training/, neural_surrogate_testing/
 │   └── preset/                            # Bundled overlays (small, test)
 │
 ├── scripts/                               # Main execution scripts
@@ -247,7 +306,11 @@ pyurbanair/
 │   ├── run_state_and_parameter_esmda.py   # Joint state-parameter estimation
 │   ├── run_rollout_esmda.py               # Rollout-based ESMDA
 │   ├── run_time_varying_parameter_esmda.py
-│   └── run_time_varying_parameters_rollout_esmda.py
+│   ├── run_time_varying_parameters_rollout_esmda.py
+│   ├── generate_training_data.py          # Build surrogate training dataset
+│   ├── train_neural_surrogate.py          # Train a surrogate
+│   ├── test_neural_surrogate.py           # Autoregressive rollout on test split
+│   └── dataloading.py                     # TransitionDataset smoke test
 │
 ├── examples/                              # Example experiments
 │   ├── benchmark_geometry/                # Xie and Castro 2008 geometry tools
@@ -268,7 +331,7 @@ The base library. It contains a base forward model, base ensemble forward model,
 
 #### data-assimilation
 
-Data assimilation functionalities implemented using JAX. Contains an observation operator (for mapping simulation states to observation locations), grid interpolation utilities, a base smoothing class, and ESMDA (Ensemble Smoother with Multiple Data Assimilation). Supports both parameter-only and joint state-parameter estimation. Compatible with both simulation backends.
+Data assimilation functionalities implemented using JAX. Contains an observation operator (for mapping simulation states to observation locations), grid interpolation utilities, a base smoothing class, ESMDA (Ensemble Smoother with Multiple Data Assimilation), and optional localization (correlation-based observation tapering). Supports parameter-only, joint state-parameter, and time-varying-parameter estimation. Compatible with every simulation backend.
 
 #### pylbm
 
@@ -278,7 +341,15 @@ A wrapper for Geir Evensen's Lattice Boltzmann simulator. On first import, it au
 
 #### pyudales
 
-A wrapper for the uDALES v2.2.0 simulator. On first import, it automatically downloads the repository from GitHub and compiles the code based on the experiment specifications. Requires Matlab for preprocessing.
+A wrapper for the uDALES v2.2.0 simulator. On first import, it automatically downloads the repository from GitHub and compiles the code based on the experiment specifications. Preprocessing can be done with Matlab or with the pure-Python preprocessor in `python_udgeom/`.
+
+#### pypalm
+
+A wrapper for the PALM model system. It is imported lazily (compiling on first import) so that non-PALM runs never pay the PALM compile cost. Same three-class forward/ensemble shape as the other backends.
+
+#### neural-surrogates
+
+A learned, one-step surrogate of the CFD forward models, built with PyTorch. It provides a dataset generation/loading stack (`TransitionDataset`), architectures (`SimpleConv` baseline and `UNetConvNeXt`), a generic `Trainer` (best-val checkpointing, patience-based early stopping, and the pushforward trick), and a `NeuralSurrogateForwardModel` that wraps a trained network as a `BaseForwardModel` so it slots into the ensemble/ESMDA machinery as a fourth backend. A cold start is bootstrapped by the CFD backend that generated its training data; warm starts step the network directly. See [`docs/neural_surrogates.md`](docs/neural_surrogates.md) for the full stack.
 
 ## Benchmark Geometry
 
