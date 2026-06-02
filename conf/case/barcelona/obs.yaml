@@ -30,5 +30,5 @@ z_points: [3.0, 3.0, 3.0, 3.0, 3.0]
 
 states: [u, v, w]
 temporal_mode: intervals
-interval_size: 4
+interval_seconds: 20.0
 aggregation_mode: mean
