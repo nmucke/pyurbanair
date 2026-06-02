@@ -102,6 +102,12 @@ pytorch = ">=2.4,<3"
 
 [tool.pixi.feature.neural-surrogates.pypi-dependencies]
 neural-surrogates = { path = "libs/neural-surrogates", editable = true }
+# UPT architecture deps (pure-torch/python, PyPI-only). kappamodules is not on
+# any configured conda channel, so it must live under pypi-dependencies. We
+# deliberately do NOT add torch_geometric/torch_scatter: torch 2.10 has no
+# prebuilt PyG wheels, so SupernodePooling is reimplemented in pure torch.
+einops = ">=0.7"
+kappamodules = ">=0.1.112"
 
 # Development tasks
 [tool.black]

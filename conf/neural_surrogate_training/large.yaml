@@ -1,10 +1,10 @@
 # @package _global_
 
 defaults:
-  - /neural_surrogate_architectures/unet_convnext@architecture: large
+  - /neural_surrogate_architectures/upt@architecture: large
   - _self_
 
-model_name: unet_convnext_large
+model_name: upt_large
 
 trainer:
   _target_: neural_surrogates.Trainer
