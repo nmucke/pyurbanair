@@ -61,9 +61,9 @@ NX=60
 NY=40
 NZ=16
 # Physical bounds as [lo, hi] per axis, in metres: x, y, z.
-X_BOUNDS="[-20.0, 40.0]"
-Y_BOUNDS="[0.0, 40.0]"
-Z_BOUNDS="[0.0, 40.0]"
+X_BOUNDS="[-20.0, 80.0]"
+Y_BOUNDS="[0.0, 80.0]"
+Z_BOUNDS="[0.0, 32.0]"
 
 # --- Observation sensors ----------------------------------------------------
 # Sensor coordinates [m], one entry per sensor across the three lists. They
