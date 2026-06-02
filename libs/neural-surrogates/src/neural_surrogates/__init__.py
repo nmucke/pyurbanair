@@ -1,5 +1,5 @@
 from neural_surrogates import architectures
-from neural_surrogates.architectures import SimpleConv, UNetConvNeXt
+from neural_surrogates.architectures import UPT, SimpleConv, UNetConvNeXt
 from neural_surrogates.data import TransitionDataset
 from neural_surrogates.ensemble_forward_model import (
     NeuralSurrogateEnsembleForwardModel,
@@ -13,6 +13,7 @@ __all__ = [
     "architectures",
     "SimpleConv",
     "UNetConvNeXt",
+    "UPT",
     "NeuralSurrogateForwardModel",
     "NeuralSurrogateEnsembleForwardModel",
 ]

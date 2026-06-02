@@ -1,10 +1,10 @@
 # @package _global_
 
 defaults:
-  - /neural_surrogate_architectures/unet_convnext@architecture: medium
+  - /neural_surrogate_architectures/upt@architecture: medium
   - _self_
 
-model_name: unet_convnext_medium
+model_name: upt_medium
 
 trainer:
   _target_: neural_surrogates.Trainer
@@ -21,7 +21,7 @@ loss:
 
 dataset:
   _target_: neural_surrogates.TransitionDataset
-  root_dir: training_data/pyudales_small
+  root_dir: training_data/pyudales_medium
   state_vars:
     - u
     - v
