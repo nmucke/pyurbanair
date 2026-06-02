@@ -140,7 +140,7 @@ python scripts/run_rollout_esmda.py \
 # Time-varying-parameter ESMDA
 python scripts/run_time_varying_parameter_esmda.py \
   model@truth_model=pylbm model@assim_model=pylbm \
-  esmda.num_steps=4 obs.interval_size=2
+  esmda.num_steps=4 obs.interval_seconds=10
 
 # Adaptive correlation localization (Vossepoel et al. 2025) is on by default;
 # tune it, or disable it with esmda.localization=null

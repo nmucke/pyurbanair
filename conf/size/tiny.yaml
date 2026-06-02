@@ -43,4 +43,4 @@ obs:
   x_points: [2.5, 2.5, 18.0, 18.0]
   y_points: [5.0, 15.0, 5.0, 15.0]
   z_points: [3.0, 3.0, 3.0, 3.0]
-  interval_size: 3
+  interval_seconds: 3.0

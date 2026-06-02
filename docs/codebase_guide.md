@@ -190,7 +190,7 @@ set of fields the most involved run case —
 | [`domain.yaml`](../conf/domain.yaml) | `domain` | `nx`, `ny`, `nz`, `bounds` |
 | [`time.yaml`](../conf/time.yaml) | `time` | `simulation_time`, `output_frequency`, `spinup_time` |
 | [`ensemble.yaml`](../conf/ensemble.yaml) | `ensemble` | `ensemble_size`, `num_parallel_processes`, `failure.{policy, jitter_scale, seed}` |
-| [`obs.yaml`](../conf/obs.yaml) | `obs` | `mode: points|grid`, sensor coords, `states`, `temporal_mode`, `interval_size` |
+| [`obs.yaml`](../conf/obs.yaml) | `obs` | `mode: points|grid`, sensor coords, `states`, `temporal_mode`, `interval_seconds` |
 | [`esmda.yaml`](../conf/esmda.yaml) | `esmda` | `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `seed`, `localization` (correlation block; `null` = global) |
 | [`parameters.yaml`](../conf/parameters.yaml) | `params.*` + `time_varying.*` | per-parameter `{mean, std, min?, max?}`; `method`, `method_kwargs.*`, `truth_method*`, `prior_model._target_` |
 
@@ -222,7 +222,7 @@ unlocalized update with `esmda.localization=null`.
 The `size/` overlays are `# @package _global_` and are the single place a run
 is sized (`size=medium`). Each inlines `domain`/`time` and overrides only the
 fields that scale with the run (`ensemble.ensemble_size`,
-`ensemble.num_parallel_processes`, the `obs` sensor coords + `interval_size`,
+`ensemble.num_parallel_processes`, the `obs` sensor coords + `interval_seconds`,
 `esmda.num_steps`/`num_assimilation_windows`, `time_varying.num_time_points`),
 deep-merging over the flat base files.
 
@@ -329,8 +329,8 @@ def test_something(compose_test_cfg) -> None:
 - Variable→dim mapping handles each backend's staggered grids.
 - `TemporalObservationOperator` wraps it with time aggregation:
   `mean | median | max | min | full | intervals`. `intervals` is the
-  config default — observations are aggregated in chunks of
-  `interval_size` time steps.
+  config default — observations are binned by their `time` coordinate (in
+  seconds) into `interval_seconds`-wide windows and aggregated within each.
 
 ### ESMDA
 - `BaseSmoothing` ([libs/data-assimilation/src/data_assimilation/smoothing/base.py](../libs/data-assimilation/src/data_assimilation/smoothing/base.py))

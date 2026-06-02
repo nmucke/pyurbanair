@@ -453,7 +453,13 @@ class ForwardModel(BaseForwardModel):
         if state.sizes["time"] > expected_outputs:
             state = state.isel(time=slice(-expected_outputs, None))
 
-        state = state.assign_coords(time=range(state.sizes["time"]))
+        # Store the time coordinate in seconds (0, dt, 2·dt, …) rather than
+        # bare step indices, so downstream consumers (e.g. the temporal
+        # observation operator's seconds-based interval binning) see a real
+        # time axis consistent with the other backends.
+        state = state.assign_coords(
+            time=np.arange(state.sizes["time"], dtype=float) * self.output_frequency
+        )
 
         remove_old_restart_files(self.dirs)
 

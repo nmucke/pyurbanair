@@ -19,6 +19,7 @@ from omegaconf import DictConfig
 
 from pyurbanair.config.hydra_helpers import (
     clean_outputs,
+    create_time_varying_true_params,
     resolve_output_dir,
 )
 from pyurbanair.utils.animation_utils import animate_state
@@ -31,37 +32,47 @@ def run(cfg: DictConfig) -> None:
     # Time is relative to the simulation interval (not including spinup).
     # The forward model internally prepends a constant plateau for spinup.
     sim_time = cfg.time.simulation_time
-    n_snapshots = 100
-    time_seconds = np.linspace(0, sim_time, n_snapshots)
+    # Number of temporal parameter values matches the time-varying knot grid
+    # (the same num_time_points the ESMDA scripts use). The closed-form AR(2)
+    # draw is exact at any resolution, so this controls how finely the inflow
+    # profile is resolved over the simulation.
+    n_snapshots = int(cfg.time_varying.num_time_points)
 
     if bool(cfg.run.use_true_params):
+        # Hold the inflow constant at the static truth values from params.true.
         angle = float(cfg.params.true.inflow_angle)
         vel = float(cfg.params.true.velocity_magnitude)
-        print(f"Using TRUE_PARAMS: angle={angle}, vel={vel}")
-        inflow_vec = np.full(n_snapshots, angle)
+        print(f"Using TRUE_PARAMS (constant inflow): angle={angle}, vel={vel}")
+        time_seconds = np.linspace(0, sim_time, n_snapshots)
+        data_vars: dict = {
+            "inflow_angle": ("time", np.full(n_snapshots, angle)),
+            "velocity_magnitude": ("time", np.full(n_snapshots, vel)),
+        }
+        # pressure_gradient_magnitude is only relevant for pyudales
+        if model_name == "pyudales":
+            data_vars["pressure_gradient_magnitude"] = float(
+                cfg.params.true.pressure_gradient_magnitude
+            )
+        params = xr.Dataset(data_vars=data_vars, coords={"time": time_seconds})
     else:
-        angle = -40.0
-        vel = 3.0
-
-        x = np.linspace(angle, -angle, n_snapshots)
-
-        def sigmoid(x, center, width, min_val, max_val):
-            return min_val + (max_val - min_val) / (1 + np.exp(-(x - center) / width))
-
-        inflow_vec = sigmoid(x, center=0.0, width=5.0, min_val=angle, max_val=-angle)
-
-    data_vars: dict = {
-        "inflow_angle": ("time", inflow_vec),
-        "velocity_magnitude": ("time", np.full(n_snapshots, vel)),
-    }
-
-    # pressure_gradient_magnitude is only relevant for pyudales
-    if model_name == "pyudales":
-        data_vars["pressure_gradient_magnitude"] = float(
-            cfg.params.true.pressure_gradient_magnitude
+        # Draw a time-varying inflow from the external-prior-driven AR(2)
+        # relaxation truth model — the same generator the time-varying ESMDA
+        # scripts use for their truth (uses time_varying.truth_method /
+        # truth_method_kwargs and params.external; pgm filtered for non-uDALES).
+        print(
+            "Using external time-varying inflow "
+            f"(method={cfg.time_varying.truth_method}, "
+            f"external={dict(cfg.params.external)})"
         )
-
-    params = xr.Dataset(data_vars=data_vars, coords={"time": time_seconds})
+        params = create_time_varying_true_params(
+            model_name=model_name,
+            tv_cfg=cfg.time_varying,
+            true_cfg=cfg.params.true,
+            external_cfg=cfg.params.external,
+            simulation_time=sim_time,
+            num_time_points=n_snapshots,
+            seed=cfg.esmda.seed,
+        )
 
     results_dir = (
         pathlib.Path(cfg.run.results_dir) if cfg.run.results_dir is not None else None
@@ -88,10 +99,17 @@ def run(cfg: DictConfig) -> None:
         f"{params['velocity_magnitude'].values[-1]:.1f} m/s"
     )
 
-    if not cfg.run.skip_viz:
-        out_dir = resolve_output_dir(cfg, "forward_model") / f"{model_name}_time_varying"
-        out_dir.mkdir(parents=True, exist_ok=True)
+    # Persist the simulated state and the parameter profile that produced it.
+    # This is the ground-truth artifact a downstream twin / DA experiment reads,
+    # so it is written regardless of the visualization toggle.
+    out_dir = resolve_output_dir(cfg, "forward_model") / f"{model_name}_time_varying"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    state.to_netcdf(out_dir / "state.nc")
+    params.to_netcdf(out_dir / "params.nc")
+    print(f"Saved state -> {out_dir / 'state.nc'}")
+    print(f"Saved params -> {out_dir / 'params.nc'}")
 
+    if not cfg.run.skip_viz:
         plot_var = "vel_magnitude" if "vel_magnitude" in state.data_vars else "u"
         plot_2d = extract_2d_slice(state[plot_var], z_level=0)
         plt.figure(figsize=(6, 5))

@@ -171,7 +171,7 @@ class TemporalObservationOperator:
         observation_operator: ObservationOperator,
         mode: str = "mean",
         num_time_steps: int | None = None,
-        interval_size: int | None = None,
+        interval_seconds: float | None = None,
         aggregation_mode: str = "mean",
     ):
         """
@@ -185,8 +185,11 @@ class TemporalObservationOperator:
             num_time_steps: Number of time steps in the state. Optional; if
                 not provided for "full" mode, it is detected from the first
                 observed state.
-            interval_size: Number of time steps per interval. Required when
-                mode is "intervals".
+            interval_seconds: Length of each aggregation interval in seconds.
+                Required when mode is "intervals". Observations are binned by
+                their ``time`` coordinate (in seconds): all frames whose time
+                falls in ``[t0 + k*interval_seconds, t0 + (k+1)*interval_seconds)``
+                are aggregated together.
             aggregation_mode: Aggregation function to apply within each
                 interval. Must be one of "mean", "median", "max", "min".
                 Only used when mode is "intervals".
@@ -209,16 +212,20 @@ class TemporalObservationOperator:
             self._num_time_steps = num_time_steps  # None is OK; set lazily
 
         if mode == "intervals":
-            if interval_size is None:
+            if interval_seconds is None:
                 raise ValueError(
-                    "interval_size must be provided when mode is 'intervals'."
+                    "interval_seconds must be provided when mode is 'intervals'."
+                )
+            if interval_seconds <= 0:
+                raise ValueError(
+                    f"interval_seconds must be positive, got {interval_seconds}."
                 )
             if aggregation_mode not in self.mode_mapping:
                 raise ValueError(
                     f"Invalid aggregation_mode '{aggregation_mode}'. "
                     f"Must be one of {list(self.mode_mapping.keys())}."
                 )
-            self.interval_size = interval_size
+            self.interval_seconds = float(interval_seconds)
             self.aggregation_mode = aggregation_mode
             self._num_intervals: int | None = None
 
@@ -260,27 +267,37 @@ class TemporalObservationOperator:
             return np.concatenate(obs_per_time)
 
         if self.mode == "intervals":
-            num_time_steps = state.sizes["time"]
-            num_intervals = num_time_steps // self.interval_size
-            if num_intervals == 0:
+            if "time" not in state.coords:
                 raise ValueError(
-                    f"interval_size ({self.interval_size}) exceeds the number "
-                    f"of time steps ({num_time_steps})."
+                    "mode 'intervals' requires a 'time' coordinate (in seconds) "
+                    "on the state."
                 )
+            time_values = np.asarray(state["time"].values, dtype=float)
+            if time_values.size == 0:
+                raise ValueError("State has no time steps to aggregate.")
+
+            # Bin each frame by its time coordinate (seconds): frame t belongs
+            # to interval floor((t - t0) / interval_seconds). Frames are emitted
+            # at a uniform cadence, so each populated bin holds the frames whose
+            # time falls in [t0 + k*dt, t0 + (k+1)*dt).
+            bin_indices = np.floor(
+                (time_values - time_values[0]) / self.interval_seconds
+            ).astype(int)
+            unique_bins = np.unique(bin_indices)
+            num_intervals = unique_bins.size
             if self._num_intervals is None:
                 self._num_intervals = num_intervals
 
             agg_fn = self.mode_mapping[self.aggregation_mode]
             obs_per_interval = []
-            for i in range(num_intervals):
-                interval_state = state.isel(
-                    time=slice(i * self.interval_size, (i + 1) * self.interval_size)
-                )
+            for b in unique_bins:
+                frame_ids = np.nonzero(bin_indices == b)[0]
+                interval_state = state.isel(time=frame_ids)
                 aggregated = agg_fn(interval_state)
                 obs_per_interval.append(
                     self.observation_operator._observation_single(aggregated)
                 )
-                
+
             return np.concatenate(obs_per_interval)
 
         # Aggregation path (mean, median, max, min)

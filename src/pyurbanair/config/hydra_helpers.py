@@ -288,7 +288,7 @@ def create_observation_operator(
     return TemporalObservationOperator(
         operator,
         mode=obs["temporal_mode"],
-        interval_size=obs.get("interval_size"),
+        interval_seconds=obs.get("interval_seconds"),
         aggregation_mode=obs.get("aggregation_mode", "mean"),
     )
 
