@@ -83,7 +83,7 @@ ENSEMBLE_SIZE=96             # number of ensemble members
 # allocated --cpus-per-task); set a number to pin it explicitly.
 NUM_PARALLEL=""
 NUM_ASSIM_WINDOWS=5          # requested windows (auto-clamped to the truth length)
-NUM_TIME_POINTS=20           # time-varying parameter knots per window
+NUM_TIME_POINTS=3           # time-varying parameter knots per window
 NUM_ESMDA_STEPS=2            # ESMDA iterations per window
 
 # --- Time discretisation (MUST match the ground-truth generation) -----------

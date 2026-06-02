@@ -38,19 +38,19 @@ CASE="xie_and_castro"         # xie_and_castro | barcelona
 
 # --- Domain arguments (grid resolution + physical bounds) -------------------
 # Grid cell counts per axis.
-NX=60
-NY=40
-NZ=16
+NX=200
+NY=160
+NZ=64
 # Physical bounds as [lo, hi] per axis, in metres: x, y, z.
-X_BOUNDS="[-20.0, 40.0]"
-Y_BOUNDS="[0.0, 40.0]"
-Z_BOUNDS="[0.0, 40.0]"
+X_BOUNDS="[-20.0, 80.0]"
+Y_BOUNDS="[0.0, 80.0]"
+Z_BOUNDS="[0.0, 32.0]"
 
 # --- Time / parameter resolution --------------------------------------------
-SIMULATION_TIME=1800.0         # length of the simulated window [s]
+SIMULATION_TIME=3600.0         # length of the simulated window [s]
 OUTPUT_FREQUENCY=5.0          # state snapshot interval [s]
 SPINUP_TIME=10.0              # constant-inflow plateau before the window [s]
-NUM_TIME_POINTS=30            # number of time-varying parameter knots
+NUM_TIME_POINTS=240            # number of time-varying parameter knots
 SEED=0                        # RNG seed for the AR(2) truth draw
 
 SKIP_VIZ="false"              # set "true" to skip animations/plots

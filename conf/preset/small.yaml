@@ -34,7 +34,7 @@ obs:
   z_points: [1.0, 1.0, 1.0, 1.0, 1.0]
   states: [u, v, w]
   temporal_mode: intervals
-  interval_size: 3
+  interval_seconds: 3.0
   aggregation_mode: mean
 
 params:
