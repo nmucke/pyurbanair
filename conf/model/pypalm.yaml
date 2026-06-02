@@ -9,7 +9,7 @@ forward_model:
   case_dir: ${geometry.palm_case_dir}
   stl_path: ${geometry.stl_path}
   experiment_name: urban_run
-  ncpu: 1
+  ncpu: 16
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow

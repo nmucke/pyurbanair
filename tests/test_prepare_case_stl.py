@@ -119,6 +119,8 @@ def _prepare(b_path, g_path, **kw):
         z_datum="min",
         max_faces=None,
         repair_buildings=True,
+        rotate_buildings=0.0,
+        rotate_ground=0.0,
     )
     defaults.update(kw)
     return tool.prepare(b_path, g_path, **defaults)
@@ -160,25 +162,21 @@ def test_output_matches_reference_contract(synthetic_inputs, tmp_path):
 # --------------------------------------------------------------------------- #
 # Geometry-preserving behaviour
 # --------------------------------------------------------------------------- #
-def test_writes_one_shared_stl_with_udales_symlink(synthetic_inputs, tmp_path):
+def test_writes_one_shared_stl(synthetic_inputs, tmp_path):
     b_path, g_path = synthetic_inputs
     examples_root = tmp_path / "examples"
-    shared, udales_link = tool.write_outputs(
+    (shared,) = tool.write_outputs(
         _prepare(b_path, g_path),
         examples_root=examples_root,
         case="barcelona",
         output_name="buildings.stl",
         dry_run=False,
     )
-    # Exactly one real file lives at examples/<case>/...
+    # Exactly one real file lives at examples/<case>/...; all backends reference
+    # it by path (no per-backend copies or symlinks).
     assert shared == examples_root / "barcelona" / "buildings.stl"
     assert shared.is_file() and not shared.is_symlink()
-    # uDALES gets a relative symlink to that one file (not a second copy).
-    assert udales_link == examples_root / "udales" / "barcelona" / "buildings.stl"
-    assert udales_link.is_symlink()
-    assert not os.path.isabs(os.readlink(udales_link)), "symlink should be relative"
-    assert udales_link.resolve() == shared.resolve()
-    # No per-backend copies for lbm/palm — they reference the shared file by path.
+    assert not (examples_root / "udales" / "barcelona" / "buildings.stl").exists()
     assert not (examples_root / "lbm" / "barcelona" / "buildings.stl").exists()
     assert not (examples_root / "palm" / "barcelona" / "buildings.stl").exists()
 
@@ -223,6 +221,162 @@ def test_z_datum_never_leaves_geometry_below_floor(synthetic_inputs, z_datum):
     b_path, g_path = synthetic_inputs
     mesh = _prepare(b_path, g_path, z_datum=z_datum)
     assert mesh.bounds[0, 2] >= -1e-4, "no solid may sit below the z=0 floor"
+
+
+# --------------------------------------------------------------------------- #
+# Independent building vs. ground rotation
+# --------------------------------------------------------------------------- #
+def _rect_building_inputs(tmp_path) -> tuple[pathlib.Path, pathlib.Path]:
+    """A single rectangular building (long in x) on a wide flat ground."""
+    b = trimesh.creation.box(extents=(40.0, 10.0, BUILDING_HEIGHT))
+    b.apply_translation([OFFSET[0], OFFSET[1], GROUND_TOP + BUILDING_HEIGHT / 2])
+    g = trimesh.creation.box(extents=(140.0, 140.0, GROUND_TOP - GROUND_BOTTOM))
+    g.apply_translation([OFFSET[0], OFFSET[1], (GROUND_TOP + GROUND_BOTTOM) / 2])
+    g = g.subdivide_to_size(8.0)
+    b_path, g_path = tmp_path / "b.stl", tmp_path / "g.stl"
+    b.export(b_path)
+    g.export(g_path)
+    return b_path, g_path
+
+
+def _tall_body_xy_extents(mesh) -> tuple[float, float]:
+    bodies = [
+        x for x in mesh.split(only_watertight=False)
+        if x.bounds[1, 2] > BUILDING_HEIGHT * 0.8
+    ]
+    assert bodies, "no tall building body found"
+    tall = max(bodies, key=lambda m: m.bounds[1, 2])
+    return float(tall.extents[0]), float(tall.extents[1])
+
+
+def test_rotate_buildings_is_independent_of_ground(tmp_path):
+    """--rotate-buildings rotates only the buildings; --rotate-ground does not."""
+    b_path, g_path = _rect_building_inputs(tmp_path)
+    win = dict(center=tuple(OFFSET), size=(90.0, 90.0))
+
+    # baseline: the building footprint is long in x.
+    x0, y0 = _tall_body_xy_extents(_prepare(b_path, g_path, **win))
+    assert x0 > y0 * 2, "baseline building should be long in x"
+
+    # rotating ONLY the buildings 90 deg swaps the footprint to long-in-y.
+    xb, yb = _tall_body_xy_extents(
+        _prepare(b_path, g_path, rotate_buildings=90.0, **win)
+    )
+    assert yb > xb * 2, "rotating the buildings should make them long in y"
+
+    # rotating ONLY the ground must NOT change the building's orientation.
+    xg, yg = _tall_body_xy_extents(
+        _prepare(b_path, g_path, rotate_ground=90.0, **win)
+    )
+    assert xg > yg * 2, "ground rotation must not rotate the buildings"
+
+
+def test_shared_rotate_flag_rotates_both(tmp_path):
+    """The CLI --rotate is the shared default for both per-mesh angles."""
+    b_path, g_path = _rect_building_inputs(tmp_path)
+    examples_root = tmp_path / "examples"
+    rc = tool.main(
+        [str(b_path), str(g_path), "--rotate", "90",
+         "--center", str(OFFSET[0]), str(OFFSET[1]), "--size", "90",
+         "--examples-root", str(examples_root)]
+    )
+    assert rc == 0
+    mesh = trimesh.load(examples_root / "barcelona" / "buildings.stl", force="mesh")
+    xb, yb = _tall_body_xy_extents(mesh)
+    assert yb > xb * 2, "--rotate should yaw the buildings too"
+
+
+# --------------------------------------------------------------------------- #
+# PALM regression: a deep basement must not lift the ground into a plateau
+# --------------------------------------------------------------------------- #
+def _built_fraction(mesh, n: int = 60, thresh: float = 2.0) -> float:
+    """Top-down built fraction, mimicking PALM's height-map rasterization."""
+    b = mesh.bounds
+    cx, cy = (b[0, 0] + b[1, 0]) / 2, (b[0, 1] + b[1, 1]) / 2
+    w = min(b[1, 0] - b[0, 0], b[1, 1] - b[0, 1]) * 0.8
+    xs = np.linspace(cx - w / 2, cx + w / 2, n)
+    ys = np.linspace(cy - w / 2, cy + w / 2, n)
+    xx, yy = np.meshgrid(xs, ys, indexing="xy")
+    o = np.column_stack([xx.ravel(), yy.ravel(), np.full(xx.size, b[1, 2] + 1.0)])
+    d = np.tile([0.0, 0.0, -1.0], (o.shape[0], 1))
+    loc, idr, _ = trimesh.ray.ray_triangle.RayMeshIntersector(mesh).intersects_location(
+        o, d, multiple_hits=False
+    )
+    h = np.zeros(o.shape[0])
+    for p, r in zip(loc, idr):
+        h[r] = max(h[r], p[2])
+    return float((h > thresh).mean())
+
+
+def test_deep_basement_does_not_lift_ground_into_plateau(tmp_path):
+    """Regression for the PALM 'one big building' bug.
+
+    A building basement dipping far below the ground used to drag the whole
+    near-zero ground sheet up (via z_datum='min' + the lift guard), so PALM's
+    top-down map read a solid plateau. With z_datum='ground' + floor clipping the
+    ground stays low and streets stay open.
+    """
+    g = trimesh.creation.box(extents=(120.0, 120.0, GROUND_TOP - GROUND_BOTTOM))
+    g.apply_translation([OFFSET[0], OFFSET[1], (GROUND_TOP + GROUND_BOTTOM) / 2])
+    g = g.subdivide_to_size(8.0)
+    # one small building with a DEEP basement (z from -30 to +20).
+    bld = trimesh.creation.box(extents=(20.0, 20.0, 50.0))
+    bld.apply_translation([OFFSET[0], OFFSET[1], -5.0])
+    b_path, g_path = tmp_path / "b.stl", tmp_path / "g.stl"
+    bld.export(b_path)
+    g.export(g_path)
+
+    mesh = _prepare(
+        b_path, g_path, z_datum="ground", center=tuple(OFFSET), size=(100.0, 100.0)
+    )
+    assert mesh.bounds[0, 2] >= -1e-4, "no solid may sit below the z=0 floor"
+    frac = _built_fraction(mesh)
+    assert frac < 0.4, f"streets should be open after the fix, got built fraction {frac:.2f}"
+
+
+# --------------------------------------------------------------------------- #
+# pylbm regression: flattening makes the ground a strippable z==0 plane
+# --------------------------------------------------------------------------- #
+def test_flatten_ground_makes_strippable_z0_plane(tmp_path):
+    """Option A: the ground must collapse to an EXACT z=0 plane so pylbm's
+    'all vertices z==0' rule removes it; otherwise the (sloped) terrain sheet is
+    mis-read as one giant building (see docs/palm_ground_topography_issue.md)."""
+    # Sloped terrain: a flat slab would trivially clamp to z=0, so tilt the
+    # ground in x to represent genuine relief (the case pylbm can't strip).
+    b = trimesh.creation.box(extents=(40.0, 10.0, BUILDING_HEIGHT))
+    b.apply_translation([OFFSET[0], OFFSET[1], GROUND_TOP + BUILDING_HEIGHT / 2])
+    g = trimesh.creation.box(extents=(140.0, 140.0, GROUND_TOP - GROUND_BOTTOM))
+    g.apply_translation([OFFSET[0], OFFSET[1], (GROUND_TOP + GROUND_BOTTOM) / 2])
+    g = g.subdivide_to_size(8.0)
+    gv = g.vertices.copy()
+    gv[:, 2] += 0.1 * (gv[:, 0] - OFFSET[0])  # ~10 m relief across the window
+    g.vertices = gv
+    b_path, g_path = tmp_path / "b.stl", tmp_path / "g.stl"
+    b.export(b_path)
+    g.export(g_path)
+    win = dict(center=tuple(OFFSET), size=(90.0, 90.0))
+
+    flat = _prepare(b_path, g_path, z_datum="ground", flatten_ground=True, **win)
+    z = flat.vertices[:, 2]
+    gmask = np.all(z[flat.faces] == 0.0, axis=1)  # pylbm's exact ground test
+    assert gmask.sum() > 0, "flattened ground must produce exact z==0 faces"
+    # Those z==0 faces ARE the ground: they span essentially the whole footprint.
+    gverts = flat.vertices[np.unique(flat.faces[gmask])]
+    cov_x = np.ptp(gverts[:, 0]) / np.ptp(flat.vertices[:, 0])
+    cov_y = np.ptp(gverts[:, 1]) / np.ptp(flat.vertices[:, 1])
+    assert cov_x > 0.9 and cov_y > 0.9, "the z==0 plane should span the domain"
+
+    # With terrain kept, the (tilted/elevated) ground is NOT an exact z==0 plane,
+    # which is exactly the case pylbm fails to strip.
+    kept = _prepare(b_path, g_path, z_datum="ground", flatten_ground=False, **win)
+    zk = kept.vertices[:, 2]
+    kept_ground = np.all(zk[kept.faces] == 0.0, axis=1)
+    kgv = kept.vertices[np.unique(kept.faces[kept_ground])] if kept_ground.any() else None
+    spans = kgv is not None and (
+        np.ptp(kgv[:, 0]) / np.ptp(kept.vertices[:, 0]) > 0.9
+        and np.ptp(kgv[:, 1]) / np.ptp(kept.vertices[:, 1]) > 0.9
+    )
+    assert not spans, "without flattening there should be no full-domain z==0 plane"
 
 
 # --------------------------------------------------------------------------- #
@@ -309,13 +463,12 @@ def test_cli_main_writes_outputs(synthetic_inputs, tmp_path):
     )
     assert rc == 0
     shared = examples_root / "barcelona" / "buildings.stl"
-    udales_link = examples_root / "udales" / "barcelona" / "buildings.stl"
     assert shared.is_file()
-    assert udales_link.is_symlink() and udales_link.resolve() == shared.resolve()
-    for dest in (shared, udales_link):
-        m = trimesh.load(dest, force="mesh")
-        assert_domain_frame(m)
-        assert_binary_stl(dest, len(m.faces))
+    # No per-backend copies/symlinks; all backends reference the shared file.
+    assert not (examples_root / "udales" / "barcelona" / "buildings.stl").exists()
+    m = trimesh.load(shared, force="mesh")
+    assert_domain_frame(m)
+    assert_binary_stl(shared, len(m.faces))
 
 
 # --------------------------------------------------------------------------- #
@@ -349,7 +502,7 @@ def test_real_files_produce_usable_stl(tmp_path):
         ]
     )
     assert rc == 0
-    dest = examples_root / "udales" / "barcelona" / "buildings.stl"
+    dest = examples_root / "barcelona" / "buildings.stl"
     m = trimesh.load(dest, force="mesh")
     assert_domain_frame(m)
     assert_binary_stl(dest, len(m.faces))

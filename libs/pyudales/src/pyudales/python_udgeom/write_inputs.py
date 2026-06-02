@@ -11,6 +11,91 @@ import trimesh
 from . import ibm, preprocessing, seb
 
 
+def _count_data_rows(path: pathlib.Path) -> int:
+    """Count data rows in a uDALES geometry file: non-blank lines minus 1 header.
+
+    These files have a single ``#`` header line; solid_*/fluid_boundary_* also
+    carry a trailing blank line while facet_sections_* do not. Counting only
+    non-blank lines (then dropping the header) yields the count uDALES expects
+    in either case, and is robust to a missing final newline. Streams the file
+    so large geometries (millions of rows) don't load into memory.
+    """
+    n = 0
+    with open(path, "r") as fh:
+        for line in fh:
+            if line.strip():
+                n += 1
+    return max(n - 1, 0)  # drop the single header line
+
+
+def _copy_precomputed_geometry(
+    geom_path: str,
+    fpath: str,
+    nfcts: int,
+) -> np.ndarray:
+    """Copy precomputed IBM geometry files and return the &WALLS count vector.
+
+    Mirrors the 13-element ``ncounts`` array produced by
+    ``ibm.write_ibm_files_using_fortran`` but sources the solid/fluid/
+    facet_sections files from ``geom_path`` instead of running the (expensive)
+    Fortran classifier. The counts are derived from the copied files so the
+    caller does not need to bake them into namoptions.
+
+    The ``solid_*``/``fluid_boundary_*`` files are required (the bundle is
+    invalid without them). The ``facet_sections_*`` files are copied if present:
+    the from-STL Fortran step always writes all four, so copying whatever the
+    bundle contains reproduces its counts exactly (a missing one -> count 0).
+    """
+    import shutil
+
+    if not geom_path:
+        raise ValueError(
+            "gen_geom is .false. but geom_path is not set. Point geom_path at a "
+            "directory of precomputed IBM geometry files (solid_*, "
+            "fluid_boundary_*, facet_sections_*)."
+        )
+    src = pathlib.Path(geom_path)
+    if not src.is_dir():
+        raise FileNotFoundError(f"Precomputed geometry directory not found: {src}")
+
+    required = [f"solid_{g}.txt" for g in "uvwc"] + [
+        f"fluid_boundary_{g}.txt" for g in "uvwc"
+    ]
+    optional = [f"facet_sections_{g}.txt" for g in "uvwc"]
+
+    counts: dict[str, int] = {}
+    for name in required:
+        src_file = src / name
+        if not src_file.exists():
+            raise FileNotFoundError(
+                f"Required precomputed geometry file missing: {src_file}. "
+                "Regenerate the bundle for this geometry/grid, or set "
+                "gen_geom=.true. to run preprocessing from the STL."
+            )
+        shutil.copy(src_file, os.path.join(fpath, name))
+        counts[name] = _count_data_rows(src_file)
+    for name in optional:
+        src_file = src / name
+        if src_file.exists():
+            shutil.copy(src_file, os.path.join(fpath, name))
+            counts[name] = _count_data_rows(src_file)
+
+    def c(name: str) -> int:
+        return counts.get(name, 0)
+
+    # Index order must match write_ibm_files_using_fortran's ncounts.
+    return np.array(
+        [
+            nfcts,
+            c("solid_u.txt"), c("solid_v.txt"), c("solid_w.txt"), c("solid_c.txt"),
+            c("fluid_boundary_u.txt"), c("fluid_boundary_v.txt"),
+            c("fluid_boundary_w.txt"), c("fluid_boundary_c.txt"),
+            c("facet_sections_u.txt"), c("facet_sections_v.txt"),
+            c("facet_sections_w.txt"), c("facet_sections_c.txt"),
+        ]
+    )
+
+
 def write_inputs(expnr: int, exppath: Optional[str] = None, toolsdir: Optional[str] = None) -> None:
     """
     Main function to generate input files for uDALES.
@@ -191,72 +276,61 @@ def write_inputs(expnr: int, exppath: Optional[str] = None, toolsdir: Optional[s
                         "Use isolid_bound=1 and ifacsec=1 to use Fortran routines."
                     )
 
-                # Update namoptions with counts
-                # ncounts indices: [nfcts, nsolpts_u, nsolpts_v, nsolpts_w, nsolpts_c,
-                #                  nbndpts_u, nbndpts_v, nbndpts_w, nbndpts_c,
-                #                  nfctsecs_u, nfctsecs_v, nfctsecs_w, nfctsecs_c]
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nfctsecs_c", int(ncounts[12])
-                )
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nfctsecs_w", int(ncounts[11])
-                )
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nfctsecs_v", int(ncounts[10])
-                )
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nfctsecs_u", int(ncounts[9])
-                )
-
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nbndpts_c", int(ncounts[8])
-                )
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nbndpts_w", int(ncounts[7])
-                )
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nbndpts_v", int(ncounts[6])
-                )
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nbndpts_u", int(ncounts[5])
-                )
-
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nsolpts_c", int(ncounts[4])
-                )
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nsolpts_w", int(ncounts[3])
-                )
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nsolpts_v", int(ncounts[2])
-                )
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nsolpts_u", int(ncounts[1])
-                )
-
-                preprocessing.Preprocessing.update_namoptions(
-                    namoptionsfile, "&WALLS", "nfcts", int(ncounts[0])
-                )
-
             else:
-                # Copy geometry files from geom_path
-                if not r.geom_path:
-                    raise ValueError("Need to specify the path to geometry files")
-                import shutil
+                # Use precomputed IBM geometry: copy the solid/fluid/facet
+                # files from geom_path into the experiment dir and derive the
+                # same counts the Fortran step would have produced. This skips
+                # the (very expensive) STL->IBM Fortran classification entirely.
+                ncounts = _copy_precomputed_geometry(
+                    r.geom_path,
+                    fpath,
+                    r.nfcts,
+                )
 
-                geom_path = pathlib.Path(r.geom_path)
-                for pattern in ["solid_*", "fluid_boundary_*"]:
-                    for src_file in geom_path.glob(pattern):
-                        shutil.copy(src_file, fpath)
-
-                if calculate_facet_sections_uvw:
-                    for pattern in ["facet_sections_u*", "facet_sections_v*", "facet_sections_w*"]:
-                        for src_file in geom_path.glob(pattern):
-                            shutil.copy(src_file, fpath)
-
-                if calculate_facet_sections_c:
-                    for src_file in geom_path.glob("facet_sections_c*"):
-                        shutil.copy(src_file, fpath)
+            # Update namoptions with counts (shared by the generate-from-STL and
+            # use-precomputed paths above).
+            # ncounts indices: [nfcts, nsolpts_u, nsolpts_v, nsolpts_w, nsolpts_c,
+            #                  nbndpts_u, nbndpts_v, nbndpts_w, nbndpts_c,
+            #                  nfctsecs_u, nfctsecs_v, nfctsecs_w, nfctsecs_c]
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nfctsecs_c", int(ncounts[12])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nfctsecs_w", int(ncounts[11])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nfctsecs_v", int(ncounts[10])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nfctsecs_u", int(ncounts[9])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nbndpts_c", int(ncounts[8])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nbndpts_w", int(ncounts[7])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nbndpts_v", int(ncounts[6])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nbndpts_u", int(ncounts[5])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nsolpts_c", int(ncounts[4])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nsolpts_w", int(ncounts[3])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nsolpts_v", int(ncounts[2])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nsolpts_u", int(ncounts[1])
+            )
+            preprocessing.Preprocessing.update_namoptions(
+                namoptionsfile, "&WALLS", "nfcts", int(ncounts[0])
+            )
 
             # Set facet types
             if r.read_types:

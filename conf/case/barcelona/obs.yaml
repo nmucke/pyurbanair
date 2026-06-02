@@ -1,13 +1,33 @@
 # @package obs
 #
-# Observation operator for the Barcelona case. NOTE: copied verbatim from the
-# xie_and_castro case for now — these sensor coordinates are placed inside the
-# Xie & Castro array and must be retuned to the Barcelona geometry (inside the
-# bounds, outside the buildings) once the STL files are added.
+# Observation operator for the Barcelona case. Sensor coordinates are in the
+# domain.bounds frame (metres): x in [200, 1000], y in [250, 1050], z in [0, 128]
+# (same frame as the STL, see conf/case/barcelona/domain.yaml). They were placed
+# by scripts/_place_barcelona_sensors.py against examples/barcelona/buildings.stl:
+# every sensor sits at street level (z=3 m) in an open street canyon, >=6 m
+# from the nearest building footprint in every direction, so none is inside a
+# building or directly in front of a facade (robust to the varying inflow angle).
+#
+# Three nested options are provided (10 = 5 + infill, 15 = 10 + infill). The
+# 5-sensor network is active; uncomment one of the larger blocks (and comment out
+# the active one) to switch density.
 mode: points
-x_points: [20.0, 20.0, 40.0]
-y_points: [20.0, 10.0, 10.0]
-z_points: [3.0, 3.0, 3.0]
+
+# --- 5 sensors (active) ---
+x_points: [937.0, 263.0, 637.0, 325.0, 959.0]
+y_points: [311.0, 339.0, 647.0, 971.0, 985.0]
+z_points: [3.0, 3.0, 3.0, 3.0, 3.0]
+
+# --- 10 sensors ---
+# x_points: [599.0, 937.0, 263.0, 449.0, 959.0, 637.0, 273.0, 325.0, 959.0, 641.0]
+# y_points: [311.0, 311.0, 339.0, 495.0, 633.0, 647.0, 657.0, 971.0, 985.0, 999.0]
+# z_points: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+
+# --- 15 sensors ---
+# x_points: [599.0, 937.0, 767.0, 431.0, 263.0, 789.0, 449.0, 959.0, 637.0, 273.0, 819.0, 495.0, 325.0, 959.0, 641.0]
+# y_points: [311.0, 311.0, 315.0, 325.0, 339.0, 489.0, 495.0, 633.0, 647.0, 657.0, 809.0, 845.0, 971.0, 985.0, 999.0]
+# z_points: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+
 states: [u, v, w]
 temporal_mode: intervals
 interval_size: 4

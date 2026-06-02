@@ -24,15 +24,19 @@ What this tool does
 2. Crops both to a square/rectangular window (region of interest).
 3. Repairs the buildings mesh (merge vertices, drop degenerate/duplicate faces,
    make winding/normals consistent).
-4. Merges cropped buildings + ground into one mesh.
-5. Translates it into the domain frame: ``(xmin, ymin) -> (0, 0)`` and the
-   chosen vertical datum -> ``z = 0`` (so all solid geometry is at ``z >= 0``).
-6. Writes **one** binary STL, shared by all three backends, at
-   ``examples/<case>/<output-name>``. pylbm/pypalm reference it directly through
-   their ``stl_path`` config; uDALES needs the STL inside its case dir, so a
-   relative symlink ``examples/udales/<case>/<output-name>`` is created pointing
-   at the shared file (uDALES dereferences it into the run dir when it copies
-   the case dir, so the shared file is never mutated by the in-run STL shift).
+4. Flattens the ground to a flat plane at its mean level (``--flatten-ground``,
+   on by default) so it lands at exactly ``z = 0`` after seating -- one shared
+   STL then works in every backend (open streets in PALM, a strippable z=0
+   sheet for pylbm, a standard flat floor for uDALES). ``--no-flatten-ground``
+   keeps the raw terrain.
+5. Merges cropped buildings + ground into one mesh.
+6. Translates it into the domain frame: ``(xmin, ymin) -> (0, 0)`` and the
+   chosen vertical datum -> ``z = 0`` (so all solid geometry is at ``z >= 0``),
+   clipping any sub-floor geometry (building basements) flush to the floor.
+7. Writes **one** binary STL, shared by all backends, at
+   ``examples/<case>/<output-name>``. All backends reference this single file
+   through their ``stl_path`` config; nothing is written under the per-backend
+   case dirs.
 
 It then prints the domain extents you should set in the uDALES ``namoptions``
 (``xlen``/``ylen``/``zsize``) and a reminder to regenerate the ``&WALLS`` facet
@@ -44,12 +48,14 @@ Example
     # smaller, cheaper window centred on a point:
     pixi run python tools/prepare_case_stl.py buildings.stl ground.stl \
         --size 250 --center -39 -53 --output-name buildings.stl
+    # rotate the buildings 30 deg relative to the (unrotated) ground:
+    pixi run python tools/prepare_case_stl.py buildings.stl ground.stl \
+        --rotate-buildings 30
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import pathlib
 import sys
 
@@ -118,6 +124,55 @@ def _maybe_decimate(mesh: trimesh.Trimesh, max_faces: int | None) -> trimesh.Tri
         return mesh
 
 
+def _rotate_about_center(mesh: trimesh.Trimesh, deg: float) -> trimesh.Trimesh:
+    """Yaw ``mesh`` by ``deg`` degrees about its own xy bounding-box centre.
+
+    The rotation axis is +z, so heights are untouched and the z-datum logic
+    stays valid. Each mesh is rotated about its own centre *before* the merge,
+    so the relative yaw between buildings and ground is exactly the difference
+    of the two angles. Because both meshes are cropped to the *same* xy window
+    first, their bbox centres nearly coincide, so a shared angle keeps them
+    registered while differing angles spin one relative to the other in place.
+    """
+    if deg % 360.0 == 0.0:
+        return mesh
+    pivot = mesh.bounds.mean(axis=0)
+    pivot[2] = 0.0
+    R = trimesh.transformations.rotation_matrix(np.radians(deg), [0, 0, 1], pivot)
+    out = mesh.copy()
+    out.apply_transform(R)
+    return out
+
+
+def _seat_floor(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Seat geometry onto the ``z = 0`` floor by CLIPPING, not by lifting.
+
+    After the vertical datum is applied, building basements and below-datum
+    terrain dips sit at ``z < 0``. The old behaviour lifted the *entire* mesh so
+    the lowest point reached ``z = 0`` -- which dragged the near-zero ground
+    sheet up into an elevated plateau and made PALM's top-down height map read
+    "one big building" with no open streets (see
+    docs/palm_ground_topography_issue.md).
+
+    Instead we drop faces lying entirely below the floor (basements, deep dips)
+    and clamp the remaining straddling vertices up to ``z = 0``. The forward
+    models classify solid cells with a vertical ray test and put their own floor
+    at ``z = 0``, so the ragged clamped underside is harmless. When nothing sits
+    below the floor (e.g. ``z_datum='min'``) this is a no-op.
+    """
+    face_max_z = mesh.vertices[mesh.faces][:, :, 2].max(axis=1)
+    out = mesh.copy()
+    out.update_faces(face_max_z >= 0.0)
+    out.remove_unreferenced_vertices()
+    verts = out.vertices.copy()
+    verts[:, 2] = np.maximum(verts[:, 2], 0.0)
+    out.vertices = verts
+    # Clamping flattens sub-floor triangles onto z=0; drop the resulting slivers.
+    out.update_faces(out.nondegenerate_faces())
+    out.remove_unreferenced_vertices()
+    return out
+
+
 def prepare(
     buildings_path: pathlib.Path,
     ground_path: pathlib.Path,
@@ -128,7 +183,9 @@ def prepare(
     z_datum: str,
     max_faces: int | None,
     repair_buildings: bool,
-    rotate: float,
+    rotate_buildings: float = 0.0,
+    rotate_ground: float = 0.0,
+    flatten_ground: bool = True,
 ) -> trimesh.Trimesh:
     print("Loading meshes:")
     buildings = _load(buildings_path)
@@ -173,37 +230,79 @@ def prepare(
     if len(ground.faces) == 0:
         raise ValueError("No ground faces left after cropping - check --center/--size.")
 
+    # --- rotate each mesh independently, BEFORE the merge ----------------------
+    # Yaw is applied per-mesh about its own xy centre so the relative rotation
+    # between buildings and ground is exactly (rotate_buildings - rotate_ground).
+    # A shared angle keeps them registered (their cropped centres ~coincide); a
+    # difference spins the buildings relative to the ground (e.g. to align blocks
+    # to the wind/grid). Rotation is about +z, so heights / the z datum are
+    # untouched. The min-bounds translation below re-seats the rotated footprint
+    # to the (0, 0) corner.
+    if rotate_buildings % 360.0 != 0.0:
+        print(f"Rotating buildings by {rotate_buildings:.1f} deg ...", flush=True)
+        buildings = _rotate_about_center(buildings, rotate_buildings)
+    if rotate_ground % 360.0 != 0.0:
+        print(f"Rotating ground by {rotate_ground:.1f} deg ...", flush=True)
+        ground = _rotate_about_center(ground, rotate_ground)
+
+    ground_mean = float(ground.triangles.mean(axis=1)[:, 2].mean())
+
+    # --- flatten the ground ----------------------------------------------------
+    # Collapse the ground to a flat plane at its mean level. After the datum
+    # translation below this lands at exactly z=0, which serves all three
+    # backends from one STL:
+    #   * PALM   -- street cells read 0 -> a fully open street grid;
+    #   * pylbm  -- its ground filter strips faces whose vertices are *exactly*
+    #               z==0, so a flat z=0 sheet is removed reliably. Real terrain
+    #               (z != 0) is NOT caught and gets mis-read as one giant
+    #               building, especially once buildings/ground are rotated by
+    #               different angles (the ground then spans <90% of one axis and
+    #               also escapes pylbm's coverage filter);
+    #   * uDALES -- a flat z=0 floor is the standard case.
+    # Buildings keep their real heights; their deep basements (well below the
+    # mean) are clipped flush to z=0 by _seat_floor, so they sit on the floor
+    # rather than floating.
+    #
+    # TODO(ntm): reintroduce real terrain relief later. Doing it correctly needs
+    # per-building re-seating (subtract the local ground height from each
+    # building) so blocks don't float/clip on slopes, plus a pylbm ground filter
+    # that no longer assumes a flat z==0 sheet. Use --no-flatten-ground to keep
+    # the raw terrain in the meantime.
+    if flatten_ground:
+        print(f"Flattening ground to a flat plane (z={ground_mean:.2f}) ...", flush=True)
+        gv = ground.vertices.copy()
+        gv[:, 2] = ground_mean
+        ground.vertices = gv
+
     merged = trimesh.util.concatenate([buildings, ground])
     merged = _maybe_decimate(merged, max_faces)
 
-    # --- rotate (yaw about the vertical axis) ----------------------------------
-    # Rotate before the domain-frame translation: spin about the mesh's xy centre
-    # so the footprint turns in place, then let the min-bounds translation below
-    # re-seat the (now-rotated) extents back to the (0, 0) corner. Heights are
-    # untouched (rotation axis is +z), so the z datum logic stays valid.
-    if rotate % 360.0 != 0.0:
-        print(f"Rotating geometry by {rotate:.1f} deg about the vertical axis ...", flush=True)
-        pivot = merged.bounds.mean(axis=0)
-        pivot[2] = 0.0
-        R = trimesh.transformations.rotation_matrix(np.radians(rotate), [0, 0, 1], pivot)
-        merged.apply_transform(R)
-
-    # --- move into the domain frame -------------------------------------------
-    # Translate by the merged mesh's actual min bounds (not the window corner):
-    # centroid-cropping leaves triangles whose vertices overhang the window, so
-    # the true minimum is what must map to 0 to keep every vertex >= 0.
-    x0, y0 = merged.bounds[0, 0], merged.bounds[0, 1]
+    # --- vertical datum --------------------------------------------------------
+    # 'ground' seats the mean ground level at z=0 so the ground sheet sits on the
+    # floor and PALM's top-down height map reads open streets. 'min' (legacy)
+    # seats the lowest point -- on meshes with building basements this lifts the
+    # ground into an elevated plateau (the PALM "one big building" bug), so it is
+    # kept only for back-compat. See docs/palm_ground_topography_issue.md.
     if z_datum == "min":
         z0 = merged.bounds[0, 2]
     elif z_datum == "ground":
-        z0 = float(ground.triangles.mean(axis=1)[:, 2].mean())
+        z0 = ground_mean
     else:  # pragma: no cover - argparse restricts choices
         raise ValueError(f"unknown z_datum {z_datum!r}")
-    merged.apply_translation([-x0, -y0, -z0])
-    # Guard against any solid dipping below the floor (always true for 'ground',
-    # possible for terrain roughness): push the lowest point exactly onto z=0.
-    if merged.bounds[0, 2] < 0:
-        merged.apply_translation([0.0, 0.0, -merged.bounds[0, 2]])
+    merged.apply_translation([0.0, 0.0, -z0])
+
+    # Seat onto z=0 by clipping sub-floor geometry (basements, terrain dips)
+    # rather than lifting everything -- lifting is what re-creates the plateau.
+    merged = _seat_floor(merged)
+
+    # --- move into the domain frame -------------------------------------------
+    # Map the (rotated, seated) min corner to (0, 0, 0). Translate by the actual
+    # min bounds (not the window corner): centroid cropping leaves triangles
+    # overhanging the window, so the true minimum is what must map to 0 to keep
+    # every vertex >= 0. The z shift here is always downward by the small gap
+    # between the floor and the lowest surviving surface -- _seat_floor has
+    # already dropped sub-floor basements, so this can never lift the ground.
+    merged.apply_translation(-merged.bounds[0])
 
     return merged
 
@@ -216,31 +315,21 @@ def write_outputs(
     output_name: str,
     dry_run: bool,
 ) -> list[pathlib.Path]:
-    """Write one shared STL and a relative uDALES symlink to it.
+    """Write the single shared domain-frame STL at ``examples/<case>/<name>``.
 
-    Returns ``[shared_file, udales_symlink]``. pylbm/pypalm point their
-    ``stl_path`` at ``shared_file``; the symlink lets uDALES find the STL inside
-    its case dir without a second copy.
+    Returns ``[shared_file]``. All backends reference this one file via their
+    ``stl_path`` config; nothing is written under the per-backend case dirs.
     """
     shared = examples_root / case / output_name
-    udales_link = examples_root / "udales" / case / output_name
-    rel_target = os.path.relpath(shared, udales_link.parent)
 
     if dry_run:
         print(f"[dry-run] would write {shared}")
-        print(f"[dry-run] would symlink {udales_link} -> {rel_target}")
-        return [shared, udales_link]
+        return [shared]
 
     shared.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(shared)  # .stl extension -> binary STL
     print(f"wrote {shared}  ({shared.stat().st_size / 1e6:.1f} MB)")
-
-    udales_link.parent.mkdir(parents=True, exist_ok=True)
-    if udales_link.is_symlink() or udales_link.exists():
-        udales_link.unlink()
-    udales_link.symlink_to(rel_target)
-    print(f"linked {udales_link} -> {rel_target}")
-    return [shared, udales_link]
+    return [shared]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -280,15 +369,42 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--rotate",
         type=float,
-        default=45.0,
-        help="Yaw the final geometry by this many degrees (counter-clockwise) about the "
-        "vertical axis before seating it in the domain frame.",
+        default=0.0,
+        help="Shared yaw (deg, counter-clockwise) applied to BOTH meshes about the "
+        "vertical axis before seating them in the domain frame. Used as the default "
+        "for --rotate-buildings / --rotate-ground when those are not given.",
+    )
+    p.add_argument(
+        "--rotate-buildings",
+        type=float,
+        default=None,
+        help="Yaw the buildings mesh by this many degrees about its own xy centre, "
+        "before the merge (overrides --rotate for the buildings).",
+    )
+    p.add_argument(
+        "--rotate-ground",
+        type=float,
+        default=None,
+        help="Yaw the ground mesh by this many degrees about its own xy centre, before "
+        "the merge (overrides --rotate for the ground). The relative building/ground "
+        "yaw is exactly (--rotate-buildings minus --rotate-ground).",
     )
     p.add_argument(
         "--z-datum",
         choices=("min", "ground"),
-        default="min",
-        help="Which level maps to z=0: lowest solid point ('min') or mean ground level.",
+        default="ground",
+        help="Which level maps to z=0: mean ground level ('ground', default -- keeps "
+        "streets open in PALM) or the lowest solid point ('min', legacy -- lifts the "
+        "ground into a plateau on basement-bearing meshes).",
+    )
+    p.add_argument(
+        "--flatten-ground",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Collapse the ground to a flat z=0 plane (default). Required for one "
+        "shared STL to work in all backends: PALM gets open streets and pylbm can "
+        "strip the ground. Use --no-flatten-ground to keep the raw terrain relief "
+        "(terrain reintroduction is future work; see the TODO in prepare()).",
     )
     p.add_argument(
         "--max-faces",
@@ -316,6 +432,10 @@ def main(argv: list[str] | None = None) -> int:
 
     center = tuple(args.center) if args.center is not None else None
 
+    # --rotate is the shared default; --rotate-buildings/-ground override per mesh.
+    rotate_buildings = args.rotate if args.rotate_buildings is None else args.rotate_buildings
+    rotate_ground = args.rotate if args.rotate_ground is None else args.rotate_ground
+
     mesh = prepare(
         args.buildings,
         args.ground,
@@ -325,7 +445,9 @@ def main(argv: list[str] | None = None) -> int:
         z_datum=args.z_datum,
         max_faces=args.max_faces,
         repair_buildings=not args.no_repair,
-        rotate=args.rotate,
+        rotate_buildings=rotate_buildings,
+        rotate_ground=rotate_ground,
+        flatten_ground=args.flatten_ground,
     )
 
     lo = mesh.bounds[0]

@@ -6,9 +6,14 @@ forward_model:
   _convert_: all
   # Experiment dir (holds namoptions + STL) follows the selected `case`.
   case_dir: ${geometry.udales_case_dir}
+  # Optional: reuse precomputed IBM geometry (solid_*/fluid_boundary_*/
+  # facet_sections_*) instead of re-running the expensive STL->IBM Fortran step
+  # on every prepare. Defaults to null (generate from the STL) for any case that
+  # does not set geometry.udales_precomputed_geom_dir. Relative to project root.
+  precomputed_geom_dir: ${oc.select:geometry.udales_precomputed_geom_dir,null}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
-  ncpu: 4
+  ncpu: 16
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow
