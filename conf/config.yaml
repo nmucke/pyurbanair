@@ -36,3 +36,8 @@ run:
   results_dir: null
   num_steps: 2
   use_true_params: false
+  # Directory holding a pre-simulated ground truth (state.nc + params.nc), as
+  # written by scripts/run_time_varying_forward_model.py. Only consumed by
+  # scripts that load the truth from disk instead of simulating it (e.g.
+  # run_time_varying_parameters_rollout_esmda_from_truth.py); null otherwise.
+  ground_truth_dir: null
