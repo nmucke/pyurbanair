@@ -1,0 +1,22 @@
+{
+  "grid": {
+    "itot": 400,
+    "jtot": 400,
+    "ktot": 32
+  },
+  "nfcts": 481653,
+  "files": [
+    "facet_sections_c.txt",
+    "facet_sections_u.txt",
+    "facet_sections_v.txt",
+    "facet_sections_w.txt",
+    "fluid_boundary_c.txt",
+    "fluid_boundary_u.txt",
+    "fluid_boundary_v.txt",
+    "fluid_boundary_w.txt",
+    "solid_c.txt",
+    "solid_u.txt",
+    "solid_v.txt",
+    "solid_w.txt"
+  ]
+}

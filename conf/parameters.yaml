@@ -41,10 +41,10 @@ time_varying:
   num_time_points: 3
   method: ar2_relaxation
   method_kwargs:
-    correlation_length: 300.0
+    correlation_length: 100.0
   truth_method: ar2_relaxation
   truth_method_kwargs:
-    correlation_length: 500.0
+    correlation_length: 100.0
   # Prior time-series model built from the fields above. Construction is
   # declarative via hydra.utils.instantiate(cfg.time_varying.prior_model).
   prior_model:

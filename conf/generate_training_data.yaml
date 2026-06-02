@@ -6,5 +6,5 @@
 # dataset size on the CLI, e.g. `training_data=small`.
 defaults:
   - config
-  - training_data: tiny
+  - training_data: medium
   - _self_
