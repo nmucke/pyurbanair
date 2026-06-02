@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import pathlib
@@ -42,6 +43,71 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 DEFAULT_MATLAB_BIN = pathlib.Path("/Applications/MATLAB_R2025b.app/bin/matlab")
+
+# Glob patterns for the grid-dependent IBM geometry files that the STL->IBM
+# Fortran step produces and that a precomputed bundle reuses.
+PRECOMPUTED_GEOM_PATTERNS = (
+    "solid_*.txt",
+    "fluid_boundary_*.txt",
+    "facet_sections_*.txt",
+)
+
+
+def save_precomputed_geometry(
+    experiment_dir: pathlib.Path,
+    dest_dir: pathlib.Path,
+    namoptions_path: Optional[pathlib.Path] = None,
+) -> pathlib.Path:
+    """Bundle IBM geometry files from a completed run for later reuse.
+
+    Copies the ``solid_*``/``fluid_boundary_*``/``facet_sections_*`` files
+    produced by a from-STL preprocessing run into ``dest_dir`` and writes a
+    ``geom_meta.json`` recording the grid (itot/jtot/ktot) and nfcts. Point a
+    later run's ``precomputed_geom_dir`` at ``dest_dir`` to skip the expensive
+    STL->IBM Fortran step.
+
+    Args:
+        experiment_dir: Experiment dir of a from-STL run (``gen_geom=.true.``).
+        dest_dir: Destination bundle directory (created if needed).
+        namoptions_path: namoptions to read the grid from; defaults to the
+            ``namoptions.*`` inside ``experiment_dir``.
+
+    Returns:
+        The destination directory.
+    """
+    experiment_dir = pathlib.Path(experiment_dir)
+    dest_dir = pathlib.Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    copied: list[str] = []
+    for pattern in PRECOMPUTED_GEOM_PATTERNS:
+        for src in sorted(experiment_dir.glob(pattern)):
+            shutil.copy2(src, dest_dir / src.name)
+            copied.append(src.name)
+    if not copied:
+        raise FileNotFoundError(
+            "No IBM geometry files (solid_*/fluid_boundary_*/facet_sections_*) "
+            f"found in {experiment_dir}; run preprocessing from the STL first."
+        )
+
+    if namoptions_path is None:
+        matches = sorted(experiment_dir.glob("namoptions.*"))
+        if not matches:
+            raise FileNotFoundError(f"No namoptions.* found in {experiment_dir}")
+        namoptions_path = matches[0]
+    namoptions = NamoptionsFile(pathlib.Path(namoptions_path))
+    meta = {
+        "grid": {
+            k: namoptions.get_value_as_int("DOMAIN", k)
+            for k in ("itot", "jtot", "ktot")
+        },
+        "nfcts": namoptions.get_value_as_int("WALLS", "nfcts"),
+        "files": sorted(copied),
+    }
+    with open(dest_dir / "geom_meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    logger.info("Saved precomputed geometry bundle (%d files) to %s", len(copied), dest_dir)
+    return dest_dir
 
 DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp")
 
@@ -135,6 +201,7 @@ class ForwardModel(BaseForwardModel):
         boundary_condition: str = "periodic",
         spinup_time: float = 0.0,
         nudging_config: Optional[dict] = None,
+        precomputed_geom_dir: Optional[str] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -167,6 +234,16 @@ class ForwardModel(BaseForwardModel):
             nudging_config: Optional dict with nudging tunables for time-varying params.
                 Supported keys: ``tnudge`` (relaxation timescale in seconds, default 10.0),
                 ``nnudge`` (number of levels from bottom NOT nudged, default 0).
+            precomputed_geom_dir: Optional path to a directory of precomputed IBM
+                geometry files (``solid_*``/``fluid_boundary_*``/``facet_sections_*``,
+                as written by a prior from-STL preprocessing run, e.g. via
+                :func:`save_precomputed_geometry`). When set, preprocessing copies
+                these files instead of re-running the expensive STL->IBM Fortran
+                classifier. Relative paths resolve against the project root. Leave
+                as ``None`` (default) to generate the geometry from the STL.
+                The files are grid-specific; if the directory contains a
+                ``geom_meta.json`` its recorded grid is checked against the active
+                domain and a mismatch raises.
         """
         super().__init__(results_dir=results_dir)
 
@@ -233,6 +310,13 @@ class ForwardModel(BaseForwardModel):
             )
         self.boundary_condition = boundary_condition
         self._apply_boundary_condition()
+
+        # Optionally reuse precomputed IBM geometry instead of re-running the
+        # (expensive) STL->IBM preprocessing. Runs after the domain overrides so
+        # the grid-consistency check sees the final itot/jtot/ktot.
+        self.precomputed_geom_dir = precomputed_geom_dir
+        if precomputed_geom_dir is not None:
+            self._configure_precomputed_geometry(precomputed_geom_dir)
 
         # Validate and sync NCPU with nprocx * nprocy from namoptions
         self.ncpu = validate_and_sync_ncpu(
@@ -449,6 +533,79 @@ class ForwardModel(BaseForwardModel):
     def _clean_output(self) -> None:
         """Clean the output directory."""
         clean_output_dir(self.dirs)
+
+    def _configure_precomputed_geometry(self, precomputed_geom_dir: str) -> None:
+        """Point preprocessing at precomputed IBM geometry instead of the STL.
+
+        The expensive part of uDALES preprocessing is the STL->IBM step
+        (solid/fluid point classification + facet-to-cell matching), run by the
+        Fortran ``IBM_preproc.exe``. For a fixed STL *and* grid it always
+        produces the same ``solid_*``/``fluid_boundary_*``/``facet_sections_*``
+        files, so they can be computed once and reused.
+
+        This flips ``gen_geom`` to ``.false.`` and sets ``geom_path`` in
+        namoptions; ``write_inputs`` then copies those files into the experiment
+        dir (and derives the matching &WALLS counts) rather than re-running the
+        Fortran. The STL is still used for the cheap facet geometry
+        (facets.inp/facetarea.inp), so the from-STL path is fully intact when
+        ``precomputed_geom_dir`` is left unset.
+        """
+        root = pathlib.Path(precomputed_geom_dir)
+        if not root.is_absolute():
+            root = get_project_root() / root
+        root = root.resolve()
+        if not root.is_dir():
+            raise FileNotFoundError(
+                f"precomputed_geom_dir does not exist or is not a directory: {root}"
+            )
+
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+
+        meta_path = root / "geom_meta.json"
+        if meta_path.exists():
+            self._validate_precomputed_geometry_grid(meta_path, namoptions)
+        else:
+            logger.warning(
+                "Using precomputed geometry from %s without geom_meta.json; grid "
+                "consistency with the current itot/jtot/ktot cannot be verified. "
+                "Ensure these files were generated for the active domain.",
+                root,
+            )
+
+        # gen_geom/geom_path live in &INPS; geom_path must be whitespace-free
+        # because the preprocessing namoptions reader strips all whitespace from
+        # values (so the path cannot contain spaces).
+        namoptions.set_value("INPS", "gen_geom", ".false.")
+        namoptions.set_value("INPS", "geom_path", str(root))
+        namoptions.write()
+        logger.info(
+            "Using precomputed uDALES geometry from %s (gen_geom=.false.)", root
+        )
+
+    def _validate_precomputed_geometry_grid(
+        self, meta_path: pathlib.Path, namoptions: NamoptionsFile
+    ) -> None:
+        """Raise if the precomputed bundle's grid differs from the active grid."""
+        with open(meta_path) as f:
+            meta = json.load(f)
+        grid = meta.get("grid", {})
+        mismatches = []
+        for key in ("itot", "jtot", "ktot"):
+            expected = grid.get(key)
+            actual = namoptions.get_value_as_int("DOMAIN", key)
+            if expected is not None and actual is not None and int(expected) != int(actual):
+                mismatches.append(f"{key}: bundle={expected} vs current={actual}")
+        if mismatches:
+            raise ValueError(
+                "Precomputed geometry grid does not match the active domain ("
+                + "; ".join(mismatches)
+                + f"). Regenerate the bundle in {meta_path.parent} for this grid "
+                "(see save_precomputed_geometry), or unset precomputed_geom_dir "
+                "to run preprocessing from the STL."
+            )
 
     def run_preprocessing(self, python_or_matlab: str = "python") -> None:
         """Run preprocessing."""

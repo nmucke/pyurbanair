@@ -46,8 +46,12 @@ def run(cfg: DictConfig) -> None:
         out_dir = resolve_output_dir(cfg, "forward_model") / model_name
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        z_level = 0
+        z_coord = "zt" if "zt" in state.coords else ("z" if "z" in state.coords else None)
+        if z_coord is not None:
+            print(f"z-levels: {state[z_coord].values}")
         plot_var = "vel_magnitude" if "vel_magnitude" in state.data_vars else "u"
-        plot_2d = extract_2d_slice(state[plot_var], z_level=0)
+        plot_2d = extract_2d_slice(state[plot_var], z_level=z_level)
         plt.figure(figsize=(6, 5))
         plt.imshow(plot_2d, origin="lower")
         plt.colorbar(label=plot_var)
@@ -59,10 +63,18 @@ def run(cfg: DictConfig) -> None:
         if model_name == "pyudales":
             state = interpolate_grid(state)
 
+        # Remove 'rho' and 'blanking' variables from the state, if they exist
+        vars_to_remove = []
+        for var in ["rho", "blanking", "pres"]:
+            if var in state:
+                vars_to_remove.append(var)
+        if vars_to_remove:
+            state = state.drop_vars(vars_to_remove)
+ 
         animate_state(
             state=state,
             output_path=out_dir / "state_animation.mp4",
-            z_level=0,
+            z_level=z_level,
         )
         print(f"Saved visualization outputs in {out_dir}")
 

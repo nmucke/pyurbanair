@@ -18,8 +18,8 @@ trestart     = 7200.
 dtmax        = 1.
 ladaptive    = .true.
 courant      = 0.7
-nprocx       = 1
-nprocy       = 1
+nprocx       = 4
+nprocy       = 4
 /
 
 &OUTPUT

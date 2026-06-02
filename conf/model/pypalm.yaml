@@ -7,9 +7,9 @@ forward_model:
   _convert_: all
   # Experiment dir + STL geometry follow the selected `case`.
   case_dir: ${geometry.palm_case_dir}
-  stl_path: ${geometry.palm_stl_path}
+  stl_path: ${geometry.stl_path}
   experiment_name: urban_run
-  ncpu: 1
+  ncpu: 16
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow

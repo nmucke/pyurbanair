@@ -1,0 +1,13 @@
+# UPT — xlarge preset.
+
+_target_: neural_surrogates.UPT
+dim: 768
+num_latent_tokens: 256
+num_supernodes: 256
+gnn_dim: 384
+enc_depth: 4
+approx_depth: 8
+dec_depth: 4
+num_heads: 12
+radius: 4.0
+max_degree: 32

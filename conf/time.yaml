@@ -4,5 +4,5 @@
 # time-varying rollout ESMDA; other run_* scripts read a subset. Rescale via the
 # `size/` overlays or override on the CLI (`time.simulation_time=120`).
 simulation_time: 180.0
-output_frequency: 5.0
-spinup_time: 10.0
+output_frequency: 1.0
+spinup_time: 50.0

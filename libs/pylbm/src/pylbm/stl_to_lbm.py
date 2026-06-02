@@ -65,25 +65,29 @@ def _split_buildings_edge_based(mesh: trimesh.Trimesh) -> list[trimesh.Trimesh]:
                     face_adjacency[face_indices[i]].add(face_indices[j])
                     face_adjacency[face_indices[j]].add(face_indices[i])
 
-    # Find connected components using BFS/DFS
+    # Find connected components with an explicit-stack DFS. This is iterative on
+    # purpose: a recursive DFS recurses once per face and overflows Python's
+    # recursion limit on large meshes (the Xie & Castro cubes have only a few
+    # hundred faces per component, but the Barcelona geometry has components
+    # with tens of thousands of faces -> RecursionError).
     visited = set()
     components = []
 
-    def dfs(face_idx: int, component: list[int]) -> None:
-        """Depth-first search to find all connected faces."""
-        visited.add(face_idx)
-        component.append(face_idx)
-        for neighbor in face_adjacency[face_idx]:
-            if neighbor not in visited:
-                dfs(neighbor, component)
-
-    # Find all connected components
-    for face_idx in range(len(building_faces)):
-        if face_idx not in visited:
-            component: list[int] = []
-            dfs(face_idx, component)
-            if len(component) > 0:
-                components.append(component)
+    for start_face_idx in range(len(building_faces)):
+        if start_face_idx in visited:
+            continue
+        component: list[int] = []
+        stack = [start_face_idx]
+        visited.add(start_face_idx)
+        while stack:
+            face_idx = stack.pop()
+            component.append(face_idx)
+            for neighbor in face_adjacency[face_idx]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+        if len(component) > 0:
+            components.append(component)
 
     # Create separate meshes for each component
     building_meshes: list[trimesh.Trimesh] = []
