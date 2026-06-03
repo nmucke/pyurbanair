@@ -123,3 +123,61 @@ def plot_derived_inflow_angle(state, params, out_dir: pathlib.Path) -> None:
     plt.tight_layout()
     plt.savefig(out_dir / "derived_inflow_angle.png")
     plt.close()
+
+
+def plot_derived_velocity_magnitude(state, params, out_dir: pathlib.Path) -> None:
+    """Plot the speed derived from the simulated field vs. the prescribed.
+
+    Mirrors :func:`plot_derived_inflow_angle`: recovers the horizontal speed
+    ``sqrt(u^2 + v^2)`` from the same three inlet probes and compares it against
+    the prescribed time-varying ``velocity_magnitude``.
+    """
+
+    def _pick_dim(da, candidates):
+        return next(d for d in candidates if d in da.dims)
+
+    x_cands = ("x", "xt", "xm", "xu")
+    y_cands = ("y", "yt", "ym", "yv")
+    z_cands = ("z", "zt", "zm", "zu")
+    u_x_dim = _pick_dim(state["u"], x_cands)
+    u_y_dim = _pick_dim(state["u"], y_cands)
+    u_z_dim = _pick_dim(state["u"], z_cands)
+    v_x_dim = _pick_dim(state["v"], x_cands)
+    v_y_dim = _pick_dim(state["v"], y_cands)
+    v_z_dim = _pick_dim(state["v"], z_cands)
+
+    x_left = float(state[u_x_dim].min())
+    y_min = float(state[u_y_dim].min())
+    y_max = float(state[u_y_dim].max())
+    y_probes = [
+        y_min + 0.2 * (y_max - y_min),
+        y_min + 0.5 * (y_max - y_min),
+        y_min + 0.8 * (y_max - y_min),
+    ]
+    z_probe = 0.5 * (float(state[u_z_dim].min()) + float(state[u_z_dim].max()))
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for y_p in y_probes:
+        u_sel = {u_x_dim: x_left, u_y_dim: y_p, u_z_dim: z_probe}
+        v_sel = {v_x_dim: x_left, v_y_dim: y_p, v_z_dim: z_probe}
+        u_t = state["u"].sel(**u_sel, method="nearest")
+        v_t = state["v"].sel(**v_sel, method="nearest")
+        speed_sim = np.hypot(u_t.values, v_t.values)
+        ax.plot(state.time.values, speed_sim, label=f"y={y_p:.1f} m")
+    ax.plot(
+        params["time"].values,
+        params["velocity_magnitude"].values,
+        "k--",
+        alpha=0.5,
+        label="prescribed",
+    )
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("velocity magnitude [m/s]")
+    ax.set_title(
+        f"Derived velocity magnitude near x={x_left:.1f} m (z={z_probe:.1f} m)"
+    )
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "derived_velocity_magnitude.png")
+    plt.close()
