@@ -13,20 +13,23 @@ def validate_and_sync_ncpu(
     ncpu: int,
 ) -> int:
     """
-    Validate and synchronize NCPU with nprocx * nprocy from namoptions.
+    Derive nprocx/nprocy from NCPU and write them into namoptions.
 
-    uDALES requires: nprocx * nprocy = NCPU
-    Also validates divisibility constraints:
+    uDALES requires: nprocx * nprocy = NCPU. To let callers pick only NCPU,
+    this sets nprocx = ncpu and nprocy = 1 (so nprocx * nprocy = ncpu) and
+    writes the values back to the namoptions file.
+
+    Validates divisibility constraints before writing:
     - itot must be divisible by nprocx
     - jtot must be divisible by nprocy
     - ktot must be divisible by nprocy
 
     Args:
         dirs: DirectoryPaths instance containing experiment_dir and experiment_name.
-        ncpu: The current NCPU value.
+        ncpu: The number of CPUs to use.
 
     Returns:
-        The validated/synchronized NCPU value (may be updated to match nprocx * nprocy).
+        The (unchanged) NCPU value.
 
     Raises:
         ValueError: If divisibility constraints are not met.
@@ -35,53 +38,46 @@ def validate_and_sync_ncpu(
 
     if not namoptions_path.exists():
         logger.warning(
-            f"namoptions.{dirs.experiment_name} not found, skipping NCPU validation"
+            f"namoptions.{dirs.experiment_name} not found, skipping NCPU sync"
         )
         return ncpu
 
-    # Read namoptions to get nprocx, nprocy, itot, jtot, ktot
+    # Derive domain decomposition from NCPU.
+    nprocx = ncpu
+    nprocy = 1
+
+    # Read namoptions to get itot, jtot, ktot for the divisibility checks.
     namoptions = NamoptionsFile(namoptions_path)
 
-    nprocx = namoptions.get_value_as_int("RUN", "nprocx")
-    nprocy = namoptions.get_value_as_int("RUN", "nprocy")
     itot = namoptions.get_value_as_int("DOMAIN", "itot")
     jtot = namoptions.get_value_as_int("DOMAIN", "jtot")
     ktot = namoptions.get_value_as_int("DOMAIN", "ktot")
 
-    # Validate and sync
-    if nprocx is not None and nprocy is not None:
-        expected_ncpu = nprocx * nprocy
-
-        # Check divisibility constraints
-        if itot is not None and itot % nprocx != 0:
-            raise ValueError(
-                f"itot ({itot}) must be divisible by nprocx ({nprocx}). "
-                f"Please adjust nprocx or itot in namoptions.{dirs.experiment_name}"
-            )
-
-        if jtot is not None and jtot % nprocy != 0:
-            raise ValueError(
-                f"jtot ({jtot}) must be divisible by nprocy ({nprocy}). "
-                f"Please adjust nprocy or jtot in namoptions.{dirs.experiment_name}"
-            )
-
-        if ktot is not None and ktot % nprocy != 0:
-            raise ValueError(
-                f"ktot ({ktot}) must be divisible by nprocy ({nprocy}). "
-                f"Please adjust nprocy or ktot in namoptions.{dirs.experiment_name}"
-            )
-
-        # Check if NCPU matches nprocx * nprocy
-        if ncpu != expected_ncpu:
-            logger.warning(
-                f"NCPU ({ncpu}) does not match nprocx * nprocy ({nprocx} * {nprocy} = {expected_ncpu}). "
-                f"Updating NCPU to {expected_ncpu} to match namoptions."
-            )
-            return expected_ncpu
-    else:
-        logger.warning(
-            f"Could not read nprocx and/or nprocy from namoptions.{dirs.experiment_name}. "
-            f"Using NCPU={ncpu} as specified."
+    # Check divisibility constraints.
+    if itot is not None and itot % nprocx != 0:
+        raise ValueError(
+            f"itot ({itot}) must be divisible by nprocx ({nprocx}). "
+            f"Choose an NCPU that divides itot evenly."
         )
+
+    if jtot is not None and jtot % nprocy != 0:
+        raise ValueError(
+            f"jtot ({jtot}) must be divisible by nprocy ({nprocy})."
+        )
+
+    if ktot is not None and ktot % nprocy != 0:
+        raise ValueError(
+            f"ktot ({ktot}) must be divisible by nprocy ({nprocy})."
+        )
+
+    # Write the derived decomposition back to namoptions.
+    namoptions.set_value("RUN", "nprocx", nprocx)
+    namoptions.set_value("RUN", "nprocy", nprocy)
+    namoptions.write()
+
+    logger.info(
+        f"Set nprocx={nprocx}, nprocy={nprocy} in namoptions."
+        f"{dirs.experiment_name} (NCPU={ncpu})"
+    )
 
     return ncpu
