@@ -1,14 +1,14 @@
 # @package _global_
 #
 # Training-data generation — medium. Production-shape dataset at the
-# 100x80x16 grid. Uniform inflow sampler.
+# 100x80x16 grid. Shared skeleton + constant sampler fields live in
+# conf/training_data/_base.yaml.
 
 defaults:
+  - _base
   - override /model: pylbm
   - _self_
 
-# Grid + horizon for data generation (was the `domain=medium` / `time=medium`
-# groups, now inlined since those groups were flattened to single files).
 domain:
   nx: 50
   ny: 40
@@ -30,32 +30,15 @@ training_data:
 
   output_dir: training_data/${model.name}_medium/
 
-  simulation_time: 300.0
-  output_frequency: 1.0
+  # Larger spin-up than the shared default for this grid.
   spinup_time: 30.0
 
   num_time_points: 50
-  seed: 0
-
-  # Parallel ensemble workers. 1 = sequential.
   num_parallel_processes: 8
 
-  # The sampler has two parts:
-  #   external.<param>.{mean, std}: each may be a scalar (fixed for all
-  #     sims) or a {min, max} dict (drawn uniformly per sim).
-  #   time_series.*: hyperparameters of the AR(2)-relaxation that
-  #     generates the smooth fluctuation z(t).
-  # Per simulation: x(t) = mean_per_sim + std_per_sim * z(t).
   params_sampler:
-    _target_: pyurbanair.training_data.UniformExternalAR2Sampler
-    _convert_: all
     external:
       inflow_angle:
-        mean: {min: -70.0, max: 70.0}   # uniform per sim
-        std: 5.0                          # fixed (use {min, max} to sample)
+        mean: {min: -70.0, max: 70.0}
       velocity_magnitude:
-        mean: {min: 3.0, max: 10.0}        # uniform per sim
-        std: 0.5                          # fixed
-    time_series:
-      correlation_length: 60.0
-    ensemble_size: 1
+        mean: {min: 3.0, max: 10.0}

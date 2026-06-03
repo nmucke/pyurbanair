@@ -103,14 +103,14 @@ smoother, so you just run the script — no `esmda=<variant>` selector.
 python scripts/run_forward_model.py model=pylbm
 python scripts/run_forward_model.py model=pyudales
 
-# Ensemble forward simulation
-python scripts/run_ensemble_forward_model.py model=pylbm
+# Ensemble forward simulation (run.ensemble=true)
+python scripts/run_forward_model.py model=pylbm run.ensemble=true
 
-# Multi-step rollout simulation
-python scripts/run_rollout_forward_model.py model=pylbm run.num_steps=4
+# Multi-step rollout (run.num_steps>1)
+python scripts/run_forward_model.py model=pylbm run.num_steps=4
 
-# Ensemble rollout simulation
-python scripts/run_ensemble_rollout_forward_model.py model=pylbm
+# Ensemble rollout (combine both flags)
+python scripts/run_forward_model.py model=pylbm run.ensemble=true run.num_steps=4
 ```
 
 ### Data assimilation
@@ -297,10 +297,7 @@ pyurbanair/
 │   └── preset/                            # Bundled overlays (small, test)
 │
 ├── scripts/                               # Main execution scripts
-│   ├── run_forward_model.py               # Single forward simulation
-│   ├── run_ensemble_forward_model.py      # Ensemble forward simulation
-│   ├── run_rollout_forward_model.py       # Multi-step rollout
-│   ├── run_ensemble_rollout_forward_model.py  # Ensemble rollout
+│   ├── run_forward_model.py               # Forward sim (run.ensemble / run.num_steps)
 │   ├── run_time_varying_forward_model.py  # Time-varying inflow
 │   ├── run_parameter_esmda.py             # Parameter estimation via ESMDA
 │   ├── run_state_and_parameter_esmda.py   # Joint state-parameter estimation

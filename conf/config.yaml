@@ -34,7 +34,11 @@ hydra:
 run:
   skip_viz: false
   results_dir: null
-  num_steps: 2
+  # Forward-model knobs (scripts/run_forward_model.py): run an ensemble instead
+  # of a single member with `run.ensemble=true`; roll the state forward over
+  # `run.num_steps` windows (num_steps=1 -> a single forward).
+  ensemble: false
+  num_steps: 1
   use_true_params: false
   # Directory holding a pre-simulated ground truth (state.nc + params.nc), as
   # written by scripts/run_time_varying_forward_model.py. Only consumed by

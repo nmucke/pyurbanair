@@ -24,16 +24,17 @@ def test_run_ensemble_forward_model(
     tmp_path: pathlib.Path,
     compose_test_cfg,
 ) -> None:
-    """Test run_ensemble_forward_model.py with pylbm and pyudales backends.
+    """Test run_forward_model.py (run.ensemble=true) with pylbm and pyudales.
 
     Covers both sequential (num_parallel_processes=1) and parallel
     (num_parallel_processes>1) execution paths.
     """
-    from scripts.run_ensemble_forward_model import run
+    from scripts.run_forward_model import run
 
     overrides = [
         f"model={model}",
         "run.skip_viz=true",
+        "run.ensemble=true",
         f"ensemble.num_parallel_processes={2 if parallel_execution else 1}",
     ]
     if model == "pylbm":

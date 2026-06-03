@@ -23,13 +23,14 @@ def test_run_ensemble_rollout_forward_model(
     tmp_path: pathlib.Path,
     compose_test_cfg,
 ) -> None:
-    """Spin-up path: ensemble rollout forward model with sequential and parallel
-    execution."""
-    from scripts.run_ensemble_rollout_forward_model import run
+    """Spin-up path: run_forward_model.py (run.ensemble=true, run.num_steps>1)
+    with sequential and parallel execution."""
+    from scripts.run_forward_model import run
 
     overrides = [
         f"model={model}",
         "run.skip_viz=true",
+        "run.ensemble=true",
         "run.num_steps=2",
         f"ensemble.num_parallel_processes={2 if parallel_execution else 1}",
         f"paths.base_results_dir={tmp_path}",

@@ -18,8 +18,8 @@ def test_run_rollout_forward_model(
     tmp_path: pathlib.Path,
     compose_test_cfg,
 ) -> None:
-    """Test run_rollout_forward_model.py with pylbm and pyudales backends."""
-    from scripts.run_rollout_forward_model import run
+    """Test run_forward_model.py (run.num_steps>1) with pylbm and pyudales."""
+    from scripts.run_forward_model import run
 
     overrides = [
         f"model={model}",

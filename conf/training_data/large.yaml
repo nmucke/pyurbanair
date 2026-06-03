@@ -1,14 +1,14 @@
 # @package _global_
 #
 # Training-data generation — large. 180x80x16 grid with the full Xie &
-# Castro array footprint. Uniform inflow sampler.
+# Castro array footprint. Shared skeleton + constant sampler fields live
+# in conf/training_data/_base.yaml.
 
 defaults:
+  - _base
   - override /model: pylbm
   - _self_
 
-# Grid + horizon for data generation (was the `domain=large` / `time=large`
-# groups, now inlined since those groups were flattened to single files).
 domain:
   nx: 180
   ny: 80
@@ -30,32 +30,12 @@ training_data:
 
   output_dir: training_data/${model.name}_large/
 
-  simulation_time: 300.0
-  output_frequency: 1.0
-  spinup_time: 10.0
-
   num_time_points: 50
-  seed: 0
-
-  # Parallel ensemble workers. 1 = sequential.
   num_parallel_processes: 8
 
-  # The sampler has two parts:
-  #   external.<param>.{mean, std}: each may be a scalar (fixed for all
-  #     sims) or a {min, max} dict (drawn uniformly per sim).
-  #   time_series.*: hyperparameters of the AR(2)-relaxation that
-  #     generates the smooth fluctuation z(t).
-  # Per simulation: x(t) = mean_per_sim + std_per_sim * z(t).
   params_sampler:
-    _target_: pyurbanair.training_data.UniformExternalAR2Sampler
-    _convert_: all
     external:
       inflow_angle:
-        mean: {min: -30.0, max: 30.0}   # uniform per sim
-        std: 5.0                          # fixed (use {min, max} to sample)
+        mean: {min: -30.0, max: 30.0}
       velocity_magnitude:
-        mean: {min: 3.0, max: 8.0}        # uniform per sim
-        std: 0.5                          # fixed
-    time_series:
-      correlation_length: 60.0
-    ensemble_size: 1
+        mean: {min: 3.0, max: 8.0}

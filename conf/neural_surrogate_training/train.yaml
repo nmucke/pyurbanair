@@ -12,6 +12,8 @@ trainer:
   device: cuda
   patience: 10
 
+# Alternative tuning that has worked well: torch.optim.AdamW with
+# weight_decay: 1.0e-6, patience: 25, dataloader.batch_size: 64.
 optimizer:
   _target_: torch.optim.Adam
   lr: 1.0e-3

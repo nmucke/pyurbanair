@@ -1,4 +1,4 @@
-"""Animation helpers used by scripts_new runners."""
+"""Animation helpers used by the scripts/ runners."""
 
 import pathlib
 
@@ -6,12 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray
 
-from pyurbanair.animation import (
-    _get_writer_and_output_path,
-    animate_3d,
-    animate_ensemble_state,
-    animate_state,
-)
+from pyurbanair.animation import _get_writer_and_output_path, animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
 
 
@@ -47,22 +42,6 @@ def _visualize_state_history(
             plt.tight_layout()
             plt.savefig(out_dir / "state_history_snapshot.png")
             plt.close()
-
-    return
-    # if "time" not in state_viz.dims:
-    #     return
-    # if "ensemble" in state_viz.dims:
-    #     animate_ensemble_state(
-    #         state=state_viz,
-    #         output_path=out_dir / "state_history_animation.mp4",
-    #         z_level=z_level,
-    #     )
-    # else:
-    #     animate_state(
-    #         state=state_viz,
-    #         output_path=out_dir / "state_history_animation.mp4",
-    #         z_level=z_level,
-    #     )
 
 
 def animate_rollout_state(
@@ -175,8 +154,6 @@ def animate_rollout_state(
 
 __all__ = [
     "animate_state",
-    "animate_3d",
-    "animate_ensemble_state",
     "animate_rollout_state",
     "_visualize_state_history",
 ]

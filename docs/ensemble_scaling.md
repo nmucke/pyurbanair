@@ -5,6 +5,13 @@ showed only modest speedup with multiple parallel workers. Started
 with uDALES, then extended to PALM and LBM. Captures what was
 measured, what was changed, and what's still open.
 
+> **Note:** the one-off benchmark scripts referenced below
+> (`scripts/benchmark_*_ensemble_scaling.py` and
+> `scripts/_bench_local_execute.sh`) were removed once the investigation
+> landed — they are recoverable from git history if you need to re-run a
+> sweep. The findings and the resulting config defaults
+> (`conf/ensemble.yaml`, `conf/model/pyudales.yaml`) remain in force.
+
 ## TL;DR
 
 On the local 16-core / Ryzen 9 3950X / single-socket box:

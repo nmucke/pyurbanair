@@ -8,13 +8,10 @@ defaults:
   - _self_
 
 esmda:
-  # Localization handed to the smoother below; `esmda.localization=null` runs
-  # the global (unlocalized) update. (Default also set in conf/esmda.yaml.)
-  localization:
-    _target_: data_assimilation.localization.correlation.CorrelationLocalization
-    truncation_correlation: null
-    tapering_beta: 0.5
-    max_inflation: 8.0
+  # localization (and num_steps/alpha) come from conf/esmda.yaml; the smoother
+  # wires it through via `localization: ${..localization}`. Override the default
+  # with `esmda.localization=...`, or `esmda.localization=null` for the global
+  # (unlocalized) update.
   smoother:
     _target_: data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA
     num_steps: ${..num_steps}

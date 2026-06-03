@@ -1,15 +1,14 @@
 # @package _global_
 #
 # Training-data generation — tiny. Smoke-run sizing: ~minute-scale per
-# sample, used to validate the pipeline end-to-end. Uniform inflow
-# sampler (constant per sim, drawn from `[min, max]`).
+# sample, used to validate the pipeline end-to-end. Shared skeleton +
+# constant sampler fields live in conf/training_data/_base.yaml.
 
 defaults:
+  - _base
   - override /model: pyudales
   - _self_
 
-# Grid + horizon for data generation (was the `domain=tiny` / `time=tiny`
-# groups, now inlined since those groups were flattened to single files).
 domain:
   nx: 20
   ny: 20
@@ -31,34 +30,12 @@ training_data:
 
   output_dir: training_data/${model.name}_tiny/
 
-  simulation_time: 300.0
-  output_frequency: 1.0
-  spinup_time: 10.0
-
   num_time_points: 5
-  seed: 0
-
-  # Parallel ensemble workers used by the forward-model ensemble. The
-  # script runs all (train+val+test) samples in one ensemble call; set
-  # this to match the host's available cores. 1 = sequential.
   num_parallel_processes: 2
 
-  # The sampler has two parts:
-  #   external.<param>.{mean, std}: each may be a scalar (fixed for all
-  #     sims) or a {min, max} dict (drawn uniformly per sim).
-  #   time_series.*: hyperparameters of the AR(2)-relaxation that
-  #     generates the smooth fluctuation z(t).
-  # Per simulation: x(t) = mean_per_sim + std_per_sim * z(t).
   params_sampler:
-    _target_: pyurbanair.training_data.UniformExternalAR2Sampler
-    _convert_: all
     external:
       inflow_angle:
-        mean: {min: -30.0, max: 30.0}   # uniform per sim
-        std: 5.0                          # fixed (use {min, max} to sample)
+        mean: {min: -30.0, max: 30.0}
       velocity_magnitude:
-        mean: {min: 7.0, max: 8.0}        # uniform per sim
-        std: 0.5                          # fixed
-    time_series:
-      correlation_length: 60.0
-    ensemble_size: 1
+        mean: {min: 7.0, max: 8.0}

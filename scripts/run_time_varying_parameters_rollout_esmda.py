@@ -1,16 +1,32 @@
 """Rollout ESMDA with time-varying parameters across multiple windows.
 
-Each assimilation window uses :class:`TimeVaryingParameterESMDA` to
-estimate time-varying inflow parameters.  Between windows the next
-window's prior parameter ensemble is produced by a
-:class:`pyurbanair.parameter_time_series.ParameterTimeSeries` instance
-selected via the Hydra ``time_varying.method`` config: that object both
-draws the initial-window prior and propagates the posterior into the next
-window's prior.
+Each assimilation window uses :class:`TimeVaryingParameterESMDA` to estimate
+time-varying inflow parameters. Between windows the next window's prior parameter
+ensemble is produced by a
+:class:`pyurbanair.parameter_time_series.ParameterTimeSeries` instance selected
+via the Hydra ``time_varying.method`` config: that object both draws the
+initial-window prior and propagates the posterior into the next window's prior.
 
-Window 0 starts cold (``state=None``) with spin-up enabled.  Subsequent
-windows warm-start from the previous window's final forecast state, with
-spin-up disabled.
+Window 0 starts cold (``state=None``) with spin-up enabled. Subsequent windows
+warm-start from the previous window's final forecast state, with spin-up
+disabled.
+
+Two truth sources are supported, selected by ``run.ground_truth_dir``:
+
+  * **Simulated** (default, ``run.ground_truth_dir=null``) — the truth is
+    generated on the fly: truth parameters are drawn from a separate
+    ``ParameterTimeSeries`` (a different correlation length than the assimilation
+    prior, to avoid the inverse crime) and the truth forward model is run forward
+    one window at a time, carrying its state between windows.
+  * **Loaded** (``run.ground_truth_dir=<dir>``) — a pre-computed ground truth
+    (``state.nc`` + ``params.nc``, as written by
+    ``scripts/run_time_varying_forward_model.py``) is read from disk and chopped
+    into consecutive windows. The number of windows is clamped so the rollout
+    never exceeds the time length of the loaded truth. The truth forward model is
+    never instantiated.
+
+Everything downstream of the truth (the assimilation prior, the window loop,
+persistence, plotting) is identical between the two modes.
 """
 
 import pathlib
@@ -47,7 +63,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 # ---------------------------------------------------------------------------
-# Truth generation
+# Truth generation (simulated mode)
 # ---------------------------------------------------------------------------
 
 
@@ -113,6 +129,228 @@ def _generate_truth_params_all_windows(
             xarray.Dataset(data_vars=data_vars, coords={"time": local_time})
         )
     return datasets
+
+
+# ---------------------------------------------------------------------------
+# Ground-truth loading (loaded mode)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_ground_truth_paths(
+    gt_dir: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """Locate ``state.nc`` and ``params.nc`` under ``gt_dir``.
+
+    Accepts either the directory that directly contains the two files, or a
+    parent of it (the forward-model script nests its outputs under a
+    ``<model>_time_varying/`` subfolder), in which case the shallowest match
+    is used.
+    """
+    gt_dir = pathlib.Path(gt_dir)
+    if not gt_dir.exists():
+        raise FileNotFoundError(f"Ground-truth directory does not exist: {gt_dir}")
+
+    direct_state = gt_dir / "state.nc"
+    direct_params = gt_dir / "params.nc"
+    if direct_state.exists() and direct_params.exists():
+        return direct_state, direct_params
+
+    state_hits = sorted(gt_dir.glob("**/state.nc"), key=lambda p: len(p.parts))
+    params_hits = sorted(gt_dir.glob("**/params.nc"), key=lambda p: len(p.parts))
+    if not state_hits or not params_hits:
+        raise FileNotFoundError(
+            f"Could not find both 'state.nc' and 'params.nc' under {gt_dir}. "
+            "Point run.ground_truth_dir at a directory produced by "
+            "scripts/run_time_varying_forward_model.py."
+        )
+    return state_hits[0], params_hits[0]
+
+
+def _slice_truth_params_per_window(
+    gt_params: xarray.Dataset,
+    num_windows: int,
+    num_time_points: int,
+    sim_time: float,
+) -> list[xarray.Dataset]:
+    """Interpolate the loaded truth parameter profile onto each window's grid.
+
+    The loaded profile is a function of absolute time over the full ground
+    truth. For window ``w`` we sample it at absolute times
+    ``w*sim_time + linspace(0, sim_time, num_time_points)`` and relabel to the
+    LOCAL window grid ``[0, sim_time]`` so it matches the ESMDA window grid
+    exactly (the same convention as the simulated-truth mode). Only
+    time-varying parameters are carried.
+    """
+    tv_names = [n for n in gt_params.data_vars if "time" in gt_params[n].dims]
+    if not tv_names:
+        raise ValueError(
+            "Loaded params.nc has no time-varying parameters (no variable with "
+            "a 'time' dim) — nothing to compare the estimate against."
+        )
+    local_time = np.asarray(jnp.linspace(0.0, sim_time, num_time_points))
+    datasets: list[xarray.Dataset] = []
+    for w in range(num_windows):
+        abs_grid = w * sim_time + local_time
+        window = gt_params[tv_names].interp(time=abs_grid)
+        window = window.assign_coords(time=local_time)
+        datasets.append(window)
+    return datasets
+
+
+# ---------------------------------------------------------------------------
+# Truth providers
+# ---------------------------------------------------------------------------
+#
+# A truth provider supplies, for each window, the truth parameters and truth
+# state, and owns how the truth state is persisted. The two modes differ only
+# here; the window loop and everything downstream are mode-agnostic.
+
+
+class _SimulatedTruth:
+    """Truth generated on the fly by running ``truth_model`` forward."""
+
+    def __init__(
+        self,
+        cfg: DictConfig,
+        num_windows: int,
+        num_time_points: int,
+        sim_time: float,
+        truth_key: jax.random.PRNGKey,
+    ) -> None:
+        self.sim_time = sim_time
+        self.num_windows = num_windows
+        self.out_dir_label = (
+            f"time_varying_rollout_esmda_{cfg.truth_model.name}_{cfg.assim_model.name}"
+        )
+
+        self.truth_model = instantiate(cfg.truth_model.forward_model)
+        instantiate(cfg.truth_model.prepare, forward_model=self.truth_model)
+
+        truth_ts_model = build_truth_ts_model(
+            tv_cfg=cfg.time_varying,
+            external_cfg=cfg.params.external,
+            ensemble_size=1,
+        )
+        self.params_per_window = _generate_truth_params_all_windows(
+            num_windows=num_windows,
+            num_time_points=num_time_points,
+            sim_time=sim_time,
+            truth_ts_model=truth_ts_model,
+            rng_key=truth_key,
+        )
+
+        self._true_state: xarray.Dataset | None = None
+        self._paths: list[pathlib.Path] = []
+
+    def state_for_window(self, w: int) -> xarray.Dataset:
+        # Warm-start each window from the previous truth forecast.
+        self._true_state = self.truth_model(
+            params=self.params_per_window[w], state=self._true_state
+        )
+        if self._true_state is None:
+            raise RuntimeError("Expected in-memory truth rollout state.")
+        return self._true_state
+
+    def persist_window(self, w: int, windows_dir: pathlib.Path) -> None:
+        # Persist per window (LOCAL->ABSOLUTE time) so a later crash still leaves
+        # usable per-window truth artifacts; stream-merged in ``finalize``.
+        self._paths.append(
+            _persist_window_dataset(
+                self._true_state, w, self.sim_time, windows_dir, "true_state"
+            )
+        )
+
+    def finalize(self, out_dir: pathlib.Path) -> xarray.Dataset:
+        _stream_merge_along_time(self._paths, out_dir / "true_state.nc")
+        return xarray.open_dataset(out_dir / "true_state.nc")
+
+
+class _LoadedTruth:
+    """Truth read from a pre-computed ``state.nc`` + ``params.nc`` directory."""
+
+    def __init__(
+        self,
+        cfg: DictConfig,
+        num_windows_req: int,
+        num_time_points: int,
+        sim_time: float,
+    ) -> None:
+        self.sim_time = sim_time
+        self.out_dir_label = (
+            f"time_varying_rollout_esmda_from_truth_"
+            f"{cfg.truth_model.name}_{cfg.assim_model.name}"
+        )
+        output_frequency = float(cfg.time.output_frequency)
+
+        state_path, params_path = _resolve_ground_truth_paths(
+            pathlib.Path(cfg.run.ground_truth_dir)
+        )
+        self.gt_state = xarray.open_dataset(state_path)
+        gt_params = xarray.open_dataset(params_path)
+        print(
+            f"Loaded ground-truth state  from {state_path}  "
+            f"dims={dict(self.gt_state.sizes)}"
+        )
+        print(f"Loaded ground-truth params from {params_path}")
+
+        # Clamp the rollout to the ground-truth time length. The assim model
+        # produces ``sim_time / output_frequency`` state snapshots per window
+        # (the backend trims to that count — see codebase guide §7), so the
+        # loaded truth is chopped into consecutive chunks of that size and the
+        # number of windows is capped so the rollout never runs past the end.
+        n_total = int(self.gt_state.sizes["time"])
+        self.n_per_window = max(int(round(sim_time / output_frequency)), 1)
+        if self.n_per_window > n_total:
+            raise ValueError(
+                f"One window needs {self.n_per_window} state snapshots "
+                f"(sim_time={sim_time} / output_frequency={output_frequency}) but "
+                f"the ground truth only has {n_total}. Shorten time.simulation_time "
+                "or regenerate a longer ground truth."
+            )
+        max_windows = n_total // self.n_per_window
+        self.num_windows = min(num_windows_req, max_windows)
+        if self.num_windows < 1:
+            raise ValueError("Ground truth is too short for even a single window.")
+        gt_total_time = float(np.asarray(self.gt_state["time"].values)[-1])
+        if self.num_windows < num_windows_req:
+            print(
+                f"Requested {num_windows_req} windows "
+                f"({num_windows_req * sim_time:.1f}s) but the ground truth spans "
+                f"only {gt_total_time:.1f}s ({n_total} snapshots) — clamping to "
+                f"{self.num_windows} window(s)."
+            )
+        print(
+            f"Rollout: {self.num_windows} window(s) x {sim_time:.1f}s "
+            f"({self.n_per_window} snapshots each) within {gt_total_time:.1f}s of "
+            "truth."
+        )
+
+        self.params_per_window = _slice_truth_params_per_window(
+            gt_params=gt_params,
+            num_windows=self.num_windows,
+            num_time_points=num_time_points,
+            sim_time=sim_time,
+        )
+        self._state_per_window = [
+            self.gt_state.isel(
+                time=slice(w * self.n_per_window, (w + 1) * self.n_per_window)
+            )
+            for w in range(self.num_windows)
+        ]
+
+    def state_for_window(self, w: int) -> xarray.Dataset:
+        return self._state_per_window[w]
+
+    def persist_window(self, w: int, windows_dir: pathlib.Path) -> None:
+        # Truth was loaded whole; saved once in ``finalize``.
+        pass
+
+    def finalize(self, out_dir: pathlib.Path) -> xarray.Dataset:
+        true_state_all = self.gt_state.isel(
+            time=slice(0, self.num_windows * self.n_per_window)
+        )
+        true_state_all.to_netcdf(out_dir / "true_state.nc")
+        return true_state_all
 
 
 # ---------------------------------------------------------------------------
@@ -273,38 +511,29 @@ def _stream_merge_along_time(
 
 def run(cfg: DictConfig) -> None:
     # ---- Config -----------------------------------------------------------
-    num_windows = int(cfg.esmda.num_assimilation_windows)
+    num_windows_req = int(cfg.esmda.num_assimilation_windows)
     num_time_points = int(cfg.time_varying.num_time_points)
-    sim_time = cfg.time.simulation_time
+    sim_time = float(cfg.time.simulation_time)
 
     rng_key = make_rng_key(cfg.esmda.seed)
 
-    # ---- Parameter time-series models ------------------------------------
+    # ---- Assimilation prior time-series model ----------------------------
     ts_model = instantiate(cfg.time_varying.prior_model)
-    truth_ts_model = build_truth_ts_model(
-        tv_cfg=cfg.time_varying,
-        external_cfg=cfg.params.external,
-        ensemble_size=1,
-    )
 
-    # ---- Truth parameters across all windows ------------------------------
-    rng_key, subkey = jax.random.split(rng_key)
-    true_params_per_window = _generate_truth_params_all_windows(
-        num_windows=num_windows,
-        num_time_points=num_time_points,
-        sim_time=sim_time,
-        truth_ts_model=truth_ts_model,
-        rng_key=subkey,
-    )
+    # ---- Truth source (simulated on the fly, or loaded from disk) ---------
+    if cfg.run.ground_truth_dir is None:
+        rng_key, truth_key = jax.random.split(rng_key)
+        truth: _SimulatedTruth | _LoadedTruth = _SimulatedTruth(
+            cfg, num_windows_req, num_time_points, sim_time, truth_key
+        )
+    else:
+        truth = _LoadedTruth(cfg, num_windows_req, num_time_points, sim_time)
+    num_windows = truth.num_windows
+    true_params_per_window = truth.params_per_window
 
-    # ---- Forward models ---------------------------------------------------
-    truth_model = instantiate(cfg.truth_model.forward_model)
-    instantiate(cfg.truth_model.prepare, forward_model=truth_model)
-
+    # ---- Assimilation forward model ---------------------------------------
     assim_results_dir = (
-        pathlib.Path(cfg.run.results_dir)
-        if cfg.run.results_dir is not None
-        else None
+        pathlib.Path(cfg.run.results_dir) if cfg.run.results_dir is not None else None
     )
     assim_model = instantiate(
         cfg.assim_model.forward_model,
@@ -318,6 +547,8 @@ def run(cfg: DictConfig) -> None:
     params_ensemble = ts_model.sample_prior(initial_time_coords, prior_key)
 
     # ---- Observation setup ------------------------------------------------
+    # Truth obs use the truth backend's grid mapping (truth_model.solver_name);
+    # in loaded mode the truth forward model itself is never instantiated.
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     ensemble_model = instantiate(
         cfg.assim_model.ensemble_model,
@@ -329,10 +560,7 @@ def run(cfg: DictConfig) -> None:
     # ---- Output paths -----------------------------------------------------
     # Resolved BEFORE the window loop so each window can persist to
     # ``windows_dir`` as soon as it finishes.
-    out_dir = resolve_output_dir(
-        cfg,
-        f"time_varying_rollout_esmda_{cfg.truth_model.name}_{cfg.assim_model.name}",
-    )
+    out_dir = resolve_output_dir(cfg, truth.out_dir_label)
     out_dir.mkdir(parents=True, exist_ok=True)
     windows_dir = out_dir / "windows"
     windows_dir.mkdir(parents=True, exist_ok=True)
@@ -343,17 +571,15 @@ def run(cfg: DictConfig) -> None:
     # ``ts_model.extrapolate(posterior_{w-1})`` for windows 1+.
     #
     # Params lists are small (a few floats × ensemble × time points × windows)
-    # so we keep them in memory for the final concat-and-save + plotting.  The
-    # heavy state datasets (true_state, esmda_final_state) are written to
-    # ``windows_dir`` inside the loop and stream-merged at the end — only their
-    # per-window paths are kept in memory.
+    # so we keep them in memory for the final concat-and-save + plotting. The
+    # heavy assim-state datasets are written to ``windows_dir`` inside the loop
+    # and stream-merged at the end; the truth provider owns truth-state
+    # persistence.
     prior_params_list: list[xarray.Dataset] = []
     posterior_params_list: list[xarray.Dataset] = []
-    true_state_paths: list[pathlib.Path] = []
     esmda_state_paths: list[pathlib.Path] = []
 
     # ---- State tracking for handoff between windows -----------------------
-    true_state: xarray.Dataset | None = None
     esmda_final_state: xarray.Dataset | None = None
     C_D: jnp.ndarray | None = None
     esmda: Any | None = None
@@ -364,10 +590,8 @@ def run(cfg: DictConfig) -> None:
         # Record the prior used for this window before ESMDA updates it.
         prior_params_list.append(params_ensemble)
 
-        # --- Truth forward -------------------------------------------------
-        true_state = truth_model(params=true_params_w, state=true_state)
-        if true_state is None:
-            raise RuntimeError("Expected in-memory truth rollout state.")
+        # --- Truth state for this window -----------------------------------
+        true_state = truth.state_for_window(w)
 
         # --- Noisy observations --------------------------------------------
         true_obs = jnp.asarray(truth_obs_op(true_state))
@@ -390,8 +614,8 @@ def run(cfg: DictConfig) -> None:
                 rng_key=rng_key,
             )
         # Pin t=0 from window 1 onward so the Kalman update preserves the
-        # continuity that the GP extrapolation established at each window
-        # boundary. Window 0's prior t=0 is a free parameter (just a GP
+        # continuity that the extrapolation established at each window
+        # boundary. Window 0's prior t=0 is a free parameter (just a prior
         # draw), so we let ESMDA fit it.
         esmda.pin_initial_time_point = w > 0
 
@@ -434,19 +658,13 @@ def run(cfg: DictConfig) -> None:
         # ``windows_dir``. Params (small) are also written for symmetry; the
         # in-memory params lists are still used by plotting and by the
         # post-loop concat for the merged param NetCDFs.
-        true_state_paths.append(
-            _persist_window_dataset(
-                true_state, w, sim_time, windows_dir, "true_state"
-            )
-        )
+        truth.persist_window(w, windows_dir)
         esmda_state_paths.append(
             _persist_window_dataset(
                 esmda_final_state, w, sim_time, windows_dir, "esmda_state"
             )
         )
-        _persist_window_dataset(
-            true_params_w, w, sim_time, windows_dir, "true_params"
-        )
+        _persist_window_dataset(true_params_w, w, sim_time, windows_dir, "true_params")
         _persist_window_dataset(
             posterior_params, w, sim_time, windows_dir, "posterior_params"
         )
@@ -480,16 +698,11 @@ def run(cfg: DictConfig) -> None:
     def _shift_to_abs(ds: xarray.Dataset, w: int) -> xarray.Dataset:
         return ds.assign_coords(time=ds["time"].values + w * sim_time)
 
-    # Heavy state files: the per-window NetCDFs were already written inside the
+    # Heavy assim state: the per-window NetCDFs were already written inside the
     # loop with absolute time coords. Stream-merge them rather than re-loading
-    # all windows into memory.
-    _stream_merge_along_time(true_state_paths, out_dir / "true_state.nc")
+    # all windows into memory. Truth state is finalized by its provider.
     _stream_merge_along_time(esmda_state_paths, out_dir / "esmda_state.nc")
-
-    # Re-open the merged states for downstream viz. These are small enough
-    # post-merge for params/animation steps; if the animation OOMs we'd switch
-    # to per-window streaming there too.
-    true_state_all = xarray.open_dataset(out_dir / "true_state.nc")
+    true_state_all = truth.finalize(out_dir)
     esmda_state_all = xarray.open_dataset(out_dir / "esmda_state.nc")
 
     # Small params files: concat in memory and write.
@@ -499,9 +712,7 @@ def run(cfg: DictConfig) -> None:
     posterior_params_abs = [
         _shift_to_abs(ds, w) for w, ds in enumerate(posterior_params_list)
     ]
-    prior_params_abs = [
-        _shift_to_abs(ds, w) for w, ds in enumerate(prior_params_list)
-    ]
+    prior_params_abs = [_shift_to_abs(ds, w) for w, ds in enumerate(prior_params_list)]
 
     true_params_all = xarray.concat(true_params_abs, dim="time", join="override")
     posterior_params_all = xarray.concat(
@@ -562,6 +773,7 @@ if __name__ == "__main__":
     # the traceback lands on disk even if tqdm swallows it.
     import sys as _sys
     import traceback as _traceback
+
     try:
         main()
     except BaseException:

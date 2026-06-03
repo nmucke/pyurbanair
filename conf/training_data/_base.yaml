@@ -1,0 +1,34 @@
+# @package _global_
+#
+# Shared skeleton for every training-data generation size. Each size file under
+# conf/training_data/ pulls this in via `defaults: [_base, ...]` and overrides
+# only what scales: the `domain`/`time` blocks, num_train/val/test,
+# num_time_points, num_parallel_processes, the output_dir size suffix, and the
+# inflow/velocity sampling *ranges* (the `mean: {min, max}` dicts).
+
+training_data:
+  # Generation horizon (constant across sizes). The top-level `time` block is
+  # the spin-up backend's own horizon and is set per size.
+  simulation_time: 300.0
+  output_frequency: 1.0
+  spinup_time: 10.0
+  seed: 0
+
+  # The sampler has two parts:
+  #   external.<param>.{mean, std}: each may be a scalar (fixed for all
+  #     sims) or a {min, max} dict (drawn uniformly per sim). The `std`
+  #     values are fixed here; each size file supplies the `mean` ranges.
+  #   time_series.*: hyperparameters of the AR(2)-relaxation that
+  #     generates the smooth fluctuation z(t).
+  # Per simulation: x(t) = mean_per_sim + std_per_sim * z(t).
+  params_sampler:
+    _target_: pyurbanair.training_data.UniformExternalAR2Sampler
+    _convert_: all
+    external:
+      inflow_angle:
+        std: 5.0
+      velocity_magnitude:
+        std: 0.5
+    time_series:
+      correlation_length: 60.0
+    ensemble_size: 1

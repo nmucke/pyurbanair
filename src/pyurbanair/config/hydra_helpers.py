@@ -35,14 +35,6 @@ def prepare_compile(forward_model: Any, compile: bool) -> None:
     _unwrap_forward_model(forward_model).compile(compile=compile)
 
 
-def prepare_lbm(forward_model: Any, compile: bool) -> None:
-    prepare_compile(forward_model, compile)
-
-
-def prepare_palm(forward_model: Any, compile: bool) -> None:
-    prepare_compile(forward_model, compile)
-
-
 def prepare_udales(
     forward_model: Any,
     python_or_matlab: str = "python",
@@ -124,15 +116,15 @@ def create_true_params(
     param_names: Any = None,
 ) -> xarray.Dataset:
     true = _plain(true_cfg)
-    names = param_names if param_names is not None else resolve_parameter_schema(model_name)
+    names = (
+        param_names if param_names is not None else resolve_parameter_schema(model_name)
+    )
     data_vars = {
         "inflow_angle": true["inflow_angle"],
         "velocity_magnitude": true["velocity_magnitude"],
     }
     if "pressure_gradient_magnitude" in names:
-        data_vars["pressure_gradient_magnitude"] = true[
-            "pressure_gradient_magnitude"
-        ]
+        data_vars["pressure_gradient_magnitude"] = true["pressure_gradient_magnitude"]
     return xarray.Dataset(data_vars=data_vars)
 
 
@@ -160,9 +152,13 @@ def create_parameter_ensemble(
 ) -> xarray.Dataset:
     prior = _plain(prior_cfg)
     rng_key = jax.random.PRNGKey(seed)
-    names = param_names if param_names is not None else resolve_parameter_schema(model_name)
+    names = (
+        param_names if param_names is not None else resolve_parameter_schema(model_name)
+    )
 
-    rng_key, inflow = _sample_gaussian_param(rng_key, prior["inflow_angle"], ensemble_size)
+    rng_key, inflow = _sample_gaussian_param(
+        rng_key, prior["inflow_angle"], ensemble_size
+    )
     rng_key, velocity = _sample_gaussian_param(
         rng_key, prior["velocity_magnitude"], ensemble_size
     )
@@ -234,9 +230,7 @@ def create_time_varying_true_params(
     for name in sampled.data_vars:
         data_vars[name] = ("time", np.asarray(sampled[name].isel(ensemble=0)))
     if model_name == "pyudales":
-        data_vars["pressure_gradient_magnitude"] = true[
-            "pressure_gradient_magnitude"
-        ]
+        data_vars["pressure_gradient_magnitude"] = true["pressure_gradient_magnitude"]
     return xarray.Dataset(
         data_vars=data_vars,
         coords={"time": np.asarray(time_coords)},
@@ -252,7 +246,9 @@ def create_initial_state_ensemble(
     return xarray.concat(members, dim="ensemble", join="override")
 
 
-def create_observation_points(obs_cfg: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def create_observation_points(
+    obs_cfg: Any,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     obs = _plain(obs_cfg)
     mode = obs.get("mode")
     if mode == "points":

@@ -71,17 +71,18 @@ libs/pypalm/src/pypalm/            # PALM wrapper. Similar shape.
 
 scripts/                           # All top-level executables run from here.
                                    # Each exposes `def run(cfg)` + a thin `@hydra.main` wrapper.
-  run_forward_model.py             # Single forward sim
-  run_ensemble_forward_model.py    # Ensemble forward sim
-  run_rollout_forward_model.py     # Multi-window rollout (state carries between windows)
-  run_ensemble_rollout_forward_model.py
+  _common.py                       # Shared script glue (results-dir resolution, forward viz)
+  run_forward_model.py             # Forward sim — single/ensemble (run.ensemble) and
+                                   #   single-step/rollout (run.num_steps). Replaces the former
+                                   #   run_{ensemble_,rollout_,ensemble_rollout_}forward_model.py.
   run_time_varying_forward_model.py
   run_parameter_esmda.py           # Parameter-only ESMDA
   run_state_and_parameter_esmda.py # Joint state+parameter ESMDA
   run_rollout_esmda.py             # Multi-window joint ESMDA
   run_time_varying_parameter_esmda.py
-  run_time_varying_parameters_rollout_esmda.py
-  benchmark_*_ensemble_scaling.py  # Throughput benchmarks (see docs/ensemble_scaling.md)
+  run_time_varying_parameters_rollout_esmda.py  # Multi-window TV-param ESMDA. Truth is
+                                   #   simulated on the fly, or loaded from disk when
+                                   #   run.ground_truth_dir is set (the former *_from_truth.py).
 
 examples/
   benchmark_geometry/              # Xie & Castro 2008 geometry generator (CLI)
@@ -202,7 +203,7 @@ scale):
 | `model/` | forward + ensemble backend | `model@truth_model=pylbm model@assim_model=pyudales` |
 | `size/` | run-size overlay (`tiny`→`xlarge`) | `# @package _global_`; deep-merges the flat files |
 | `preset/` | bundled overlays (`small`, `test`) | smaller domain / fewer steps / CPU-only LBM |
-| `training_data/` | data-generation overlay | inlines its own `domain`/`time` + a parameter sampler |
+| `training_data/` | data-generation overlay | each size pulls `training_data/_base.yaml` (constant sampler skeleton + horizon) and overrides only what scales (`domain`/`time`, counts, sampler `mean` ranges) |
 
 **ESMDA smoother** is the one genuinely per-script piece, so it is *not* in
 `esmda.yaml`. Each esmda script has its own primary config
@@ -599,4 +600,4 @@ ensemble_size, method_kwargs)`.
 | Per-window rollout logic | [src/pyurbanair/base_rollout_forward_model.py](../src/pyurbanair/base_rollout_forward_model.py) and `scripts/run_rollout_*.py` |
 | Time-varying parameter prior | [src/pyurbanair/parameter_time_series/](../src/pyurbanair/parameter_time_series/) and `time_varying.*` in [conf/parameters.yaml](../conf/parameters.yaml) |
 | Test fixture composition | [tests/conftest.py](../tests/conftest.py) (`compose_test_cfg`, `compose_module_cfg`) |
-| Benchmark / scaling experiments | `scripts/benchmark_*_ensemble_scaling.py`, [docs/ensemble_scaling.md](ensemble_scaling.md) |
+| Benchmark / scaling findings | [docs/ensemble_scaling.md](ensemble_scaling.md) (the one-off benchmark scripts were removed; recover from git history to re-run) |
