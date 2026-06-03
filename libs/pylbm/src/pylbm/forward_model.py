@@ -377,9 +377,16 @@ class ForwardModel(BaseForwardModel):
             env["PIXI_ENVIRONMENT"] = str(self.dirs.pixi_env_path)
         _augment_runtime_library_paths(env=env, pixi_env_path=self.dirs.pixi_env_path)
 
-        # Set stack size limit to unlimited
-        # shell_cmd = f"ulimit -s unlimited && {executable_path}"
-        shell_cmd = f"{self.dirs.executable_path}"
+        # Raise the stack size limit before launching. The LBM binary uses
+        # large automatic (stack) arrays sized by nx*ny*nz; on big grids (e.g.
+        # the Barcelona case at 400x400x32) these blow past the default 8 MB
+        # stack and the process dies with SIGSEGV. macOS /bin/sh refuses
+        # "unlimited" for the stack, so fall back to the hard limit (~64 MB);
+        # both attempts are best-effort so a failure never aborts the launch.
+        shell_cmd = (
+            f"ulimit -s unlimited 2>/dev/null || ulimit -s hard 2>/dev/null; "
+            f"{self.dirs.executable_path}"
+        )
         try:
             # check=True so a non-zero LBM exit raises CalledProcessError, which
             # the ensemble runner catches to resample the member from a survivor.
