@@ -13,7 +13,7 @@ forward_model:
   precomputed_geom_dir: ${oc.select:geometry.udales_precomputed_geom_dir,null}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
-  ncpu: 16
+  ncpu: 10
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow
