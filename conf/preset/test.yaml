@@ -44,27 +44,22 @@ esmda:
   num_assimilation_windows: 3
   obs_error_std: 0.1
 
+# Deep-merges onto the Distribution blocks in conf/parameters.yaml (the
+# `_target_`/`mean` survive; only these fields are overridden).
 params:
-  "true":
-    inflow_angle: 30.0
-  prior:
+  parameters:
     inflow_angle:
       std: 8.0
     velocity_magnitude:
       mean: 3.0
-  external:
-    inflow_angle:
-      std: 8.0
-    velocity_magnitude:
-      mean: 3.0
-      std: 1.0
 
 time_varying:
   num_time_points: 3
-  method: gp_linear_trend
-  method_kwargs:
-    correlation_length: 2.0
-    slope_damping_time: null
-  truth_method: gp_linear_trend
-  truth_method_kwargs:
+  prior_model:
     correlation_length: 1.0
+    external_parameters:
+      inflow_angle:
+        std: 8.0
+      velocity_magnitude:
+        mean: 3.0
+        std: 1.0

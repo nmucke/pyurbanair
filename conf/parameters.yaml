@@ -1,56 +1,58 @@
 # @package _global_
 #
-# All inflow-parameter configuration in one place: the static parameter values
-# / priors (`params.*`) and the time-varying-parameter model that drives the
-# rollout scripts (`time_varying.*`). The time-varying rollout ESMDA uses every
-# field here; the static esmda scripts read only `params.*`; forward-only
-# scripts read only `params.true` (and `params.prior` when sampling an
-# ensemble). Per-parameter blocks carry `{mean, std, min?, max?}`.
-# `pressure_gradient_magnitude` is uDALES-only; the helpers filter it out for
-# other backends.
+# Inflow-parameter configuration. Both the static sampler (`params`) and the
+# time-varying model (`time_varying.prior_model`) are built directly with
+# `hydra.utils.instantiate(...)` and share the same `sample_prior(ensemble_size)`
+# interface, so a run draws parameters with two lines:
+#
+#     params_sampler = hydra.utils.instantiate(cfg.params)        # or cfg.time_varying.prior_model
+#     params = params_sampler.sample_prior(ensemble_size)
+#
+# Each static parameter is a Distribution object: a random prior (`Normal`,
+# `Uniform`) or a fixed `Constant` — pick per parameter. A single deterministic
+# forward run uses `Constant`s; an ensemble uses random priors.
+# `pressure_gradient_magnitude` is uDALES-only (other backends ignore the extra
+# variable).
 params:
-  "true":
-    inflow_angle: 10.0
-    velocity_magnitude: 5.0
-    pressure_gradient_magnitude: 0.0041912
-  prior:
+  _target_: pyurbanair.parameters.ParameterSampler
+  _convert_: all
+  seed: ${esmda.seed}
+  parameters:
     inflow_angle:
+      _target_: pyurbanair.parameters.Normal
       mean: 0.0
       std: 10.0
     velocity_magnitude:
+      _target_: pyurbanair.parameters.Normal
       mean: 5.0
       std: 1.0
       min: 0.1
     pressure_gradient_magnitude:
-      mean: 0.0041912
-      std: 0.001
-  # External/expert prior for the parameter_time_series models. Each `mean` /
-  # `std` may be a scalar (constant over the window) OR a list of control
-  # points spaced evenly over the window and linearly interpolated, letting
-  # x_ext(t) / Σ_ext(t) vary in time, e.g. `inflow_angle.mean: [-30, 0, 30]`.
-  external:
-    inflow_angle:
-      mean: 25.0
-      std: 6.0
-    velocity_magnitude:
-      mean: 6.0
-      std: 0.5
-      min: 0.1
+      _target_: pyurbanair.parameters.Constant
+      value: 0.0041912
 
 time_varying:
   num_time_points: 3
-  method: ar2_relaxation
-  method_kwargs:
-    correlation_length: 100.0
-  truth_method: ar2_relaxation
-  truth_method_kwargs:
-    correlation_length: 100.0
-  # Prior time-series model built from the fields above. Construction is
-  # declarative via hydra.utils.instantiate(cfg.time_varying.prior_model).
+  # Time-varying parameter model — same sample_prior(ensemble_size) interface as
+  # the static sampler, but emits a `time` dim. Each external `mean` / `std` may
+  # be a scalar (constant over the window) OR a list of control points spaced
+  # evenly over the window and linearly interpolated, letting x_ext(t) / Σ_ext(t)
+  # vary in time, e.g. `inflow_angle.mean: [-30, 0, 30]`.
   prior_model:
-    _target_: pyurbanair.parameter_time_series.build_parameter_time_series
+    _target_: pyurbanair.parameter_time_series.ar2_relaxation.AR2RelaxationModel
     _convert_: all
-    method: ${time_varying.method}
-    external_priors: ${params.external}
-    ensemble_size: ${ensemble.ensemble_size}
-    method_kwargs: ${time_varying.method_kwargs}
+    correlation_length: 100.0
+    seed: ${esmda.seed}
+    external_parameters:
+      inflow_angle:
+        mean: 25.0
+        std: 6.0
+      velocity_magnitude:
+        mean: 6.0
+        std: 0.5
+        min: 0.1
+    time_coords:
+      _target_: numpy.linspace
+      start: 0.0
+      stop: ${time.simulation_time}
+      num: ${time_varying.num_time_points}

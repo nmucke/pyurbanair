@@ -29,7 +29,9 @@ src/pyurbanair/                    # Top-level package: base classes + glue
   base_forward_model.py            # BaseForwardModel
   base_ensemble_forward_model.py   # BaseEnsembleForwardModel (parallel/seq, failure policy)
   base_rollout_forward_model.py    # BaseRolloutForwardModel (multi-window state carry-over)
-  parameter_time_series/           # Time-varying parameter priors (AR1/AR2/OU/GP)
+  parameters/                      # Static parameter sampler (ParameterSampler +
+                                   #   Normal/Uniform/Constant Distributions)
+  parameter_time_series/           # Time-varying parameter prior (AR(2) relaxation)
   config/
     hydra_helpers.py               # Targets that Hydra `_target_` blocks instantiate
                                    #   (prepare_*, create_*, configure_failure_policy,
@@ -388,20 +390,33 @@ forecasts one step and ESMDA updates state+params for the assimilation
 model. The window's posterior state is fed in as the next window's
 initial state.
 
-### Time-varying parameter priors
-[src/pyurbanair/parameter_time_series/](../src/pyurbanair/parameter_time_series/) —
-four classes, all subclassing `ParameterTimeSeries` and registered in
-`_REGISTRY`:
-- `gp_linear_trend` — RBF GP prior; linear-trend + GP residual extrapolation.
-- `ar1` — stationary AR(1) prior; deterministic roll-forward.
-- `ornstein_uhlenbeck` — OU process; stochastic roll-forward.
-- `ar2_relaxation` — critically-damped AR(2); relaxation toward external
-  prior `x_ext`. **This is the config default.**
+### Parameter samplers (static + time-varying)
+Both kinds of sampler are built declaratively with
+`hydra.utils.instantiate(...)` and share one interface — all configuration is
+passed at construction time and `sample_prior(ensemble_size)` returns an
+`xarray.Dataset` with an `ensemble` dim — so a run draws parameters with two
+lines regardless of kind:
 
-Each exposes `sample_prior(time_coords, rng_key)` (initial window) and
-`extrapolate(posterior, prediction_times, rng_key)` (next window).
-Construct via `build_parameter_time_series(method, external_priors,
-ensemble_size, method_kwargs)`.
+```python
+params_sampler = instantiate(cfg.params)          # or cfg.time_varying.prior_model
+params = params_sampler.sample_prior(ensemble_size)
+```
+
+- **Static** ([src/pyurbanair/parameters/](../src/pyurbanair/parameters/)) —
+  `ParameterSampler` holds a `name -> Distribution` mapping. Each parameter is
+  a `Normal` / `Uniform` random prior or a fixed `Constant` (each its own
+  `_target_` block), so the same config covers both "sample an ensemble from a
+  prior" and "use these fixed values". Output has an `ensemble` dim only (no
+  `time`). Configured under `params` in [conf/parameters.yaml](../conf/parameters.yaml).
+- **Time-varying** ([src/pyurbanair/parameter_time_series/](../src/pyurbanair/parameter_time_series/)) —
+  `AR2RelaxationModel` (the only method): critically-damped AR(2) relaxing
+  toward the external prior `x_ext`. Output adds a `time` dim. It also exposes
+  `extrapolate(posterior, prediction_times, rng_key)` for the next rollout
+  window. Configured under `time_varying.prior_model` in the same file
+  (`external_priors`, `correlation_length`, `seed`, and a `time_coords` built
+  by a nested `numpy.linspace` target).
+
+A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`.
 
 ## 7. Backend-specific notes (gotchas)
 

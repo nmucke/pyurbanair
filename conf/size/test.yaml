@@ -1,0 +1,26 @@
+# @package _global_
+#
+# Sizing overlay: test — the smallest, fastest run, used only by the pytest
+# suite (tests/conftest.py injects `+size=test`). The goal is purely to exercise
+# the run_forward_model.py code paths, not to produce a meaningful flow, so the
+# domain and the time window are cut to the bare minimum the solvers accept.
+# Self-contained like the other `size/` overlays: inlines `domain`/`time` in
+# full and trims only the `ensemble` fields that scale with the run.
+
+domain:
+  nx: 20
+  ny: 20
+  nz: 4
+  bounds:
+    - [0.0, 20.0]
+    - [0.0, 20.0]
+    - [0.0, 10.0]
+
+time:
+  simulation_time: 3.0
+  output_frequency: 1.0
+  spinup_time: 3.0
+
+ensemble:
+  ensemble_size: 2
+  num_parallel_processes: 1
