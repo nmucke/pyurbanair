@@ -1,11 +1,19 @@
-"""Run a forward model: single member or ensemble, one window or a rollout.
+"""Run a forward model: single member or ensemble, one window or a rollout,
+with static or time-varying inflow.
 
-This single script replaces the former run_{ensemble_,rollout_,ensemble_rollout_}
-forward_model.py quartet. Two `run.*` knobs select the mode:
+This single script replaces the former
+run_{ensemble_,rollout_,ensemble_rollout_,time_varying_}forward_model.py
+family. Three `run.*` knobs select the mode:
 
-  * ``run.ensemble`` (bool)  -> run an N-member ensemble instead of one member.
-  * ``run.num_steps`` (int)  -> roll the state forward over this many windows
-                                (num_steps=1 is a single forward).
+  * ``run.ensemble`` (bool)     -> run an N-member ensemble instead of one member.
+  * ``run.num_steps`` (int)     -> roll the state forward over this many windows
+                                   (num_steps=1 is a single forward).
+  * ``run.time_varying`` (bool) -> drive a single member with a time-varying
+                                   inflow drawn from the external-prior AR(2)
+                                   truth model; persists state.nc + params.nc as
+                                   a ground-truth artifact and plots the derived
+                                   inflow angle. (Not combinable with
+                                   ``run.ensemble``.)
 
 Examples::
 
@@ -13,6 +21,7 @@ Examples::
     python scripts/run_forward_model.py model=pyudales run.ensemble=true
     python scripts/run_forward_model.py run.num_steps=3                # rollout
     python scripts/run_forward_model.py run.ensemble=true run.num_steps=3
+    python scripts/run_forward_model.py model=pylbm run.time_varying=true
 """
 
 import pathlib
@@ -30,19 +39,30 @@ from pyurbanair.config.hydra_helpers import (
     clean_outputs,
     configure_failure_policy,
     create_parameter_ensemble,
+    create_time_varying_true_params,
     create_true_params,
     resolve_output_dir,
     resolve_parameter_schema,
 )
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 
-from scripts._common import resolve_results_dir, visualize_forward_state
+from scripts._common import (
+    plot_derived_inflow_angle,
+    resolve_results_dir,
+    visualize_forward_state,
+)
 
 
 def run(cfg: DictConfig) -> None:
     model_name = cfg.model.name
     is_ensemble = bool(cfg.run.ensemble)
+    is_time_varying = bool(cfg.run.time_varying)
     num_steps = int(cfg.run.num_steps)
+    if is_ensemble and is_time_varying:
+        raise ValueError(
+            "run.ensemble and run.time_varying are mutually exclusive "
+            "(time-varying inflow is a single-member ground-truth run)."
+        )
     results_dir = resolve_results_dir(cfg)
     param_names = resolve_parameter_schema(model_name)
 
@@ -68,7 +88,18 @@ def run(cfg: DictConfig) -> None:
             return out if out is not None else runner.get_states()
 
     else:
-        params = create_true_params(model_name, cfg.params.true, param_names)
+        if is_time_varying:
+            params = create_time_varying_true_params(
+                model_name=model_name,
+                tv_cfg=cfg.time_varying,
+                true_cfg=cfg.params.true,
+                external_cfg=cfg.params.external,
+                simulation_time=cfg.time.simulation_time,
+                num_time_points=int(cfg.time_varying.num_time_points),
+                seed=cfg.esmda.seed,
+            )
+        else:
+            params = create_true_params(model_name, cfg.params.true, param_names)
 
         def step(state):
             out = forward_model(params=params, state=state)
@@ -86,7 +117,7 @@ def run(cfg: DictConfig) -> None:
 
     state = add_velocity_magnitude(state)
 
-    print(f"Model: {model_name}")
+    print(f"Model: {model_name}{' (time-varying inflow)' if is_time_varying else ''}")
     if is_ensemble:
         print(f"Ensemble size: {cfg.ensemble.ensemble_size}")
     if num_steps > 1:
@@ -94,6 +125,34 @@ def run(cfg: DictConfig) -> None:
     print(f"Elapsed: {elapsed:.2f} seconds")
     print(f"Dims: {dict(state.sizes)}")
     print(f"Vars: {list(state.data_vars)}")
+    if is_time_varying:
+        print(
+            f"Inflow angle: {params['inflow_angle'].values[0]:.1f} -> "
+            f"{params['inflow_angle'].values[-1]:.1f} deg"
+        )
+        print(
+            f"Velocity magnitude: {params['velocity_magnitude'].values[0]:.1f} -> "
+            f"{params['velocity_magnitude'].values[-1]:.1f} m/s"
+        )
+
+    if is_time_varying:
+        # Persist the simulated state and the parameter profile that produced
+        # it: this is the ground-truth artifact a downstream twin / DA
+        # experiment reads, so it is written regardless of the viz toggle.
+        out_dir = (
+            resolve_output_dir(cfg, "forward_model") / f"{model_name}_time_varying"
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        state.to_netcdf(out_dir / "state.nc")
+        params.to_netcdf(out_dir / "params.nc")
+        print(f"Saved state -> {out_dir / 'state.nc'}")
+        print(f"Saved params -> {out_dir / 'params.nc'}")
+        if not cfg.run.skip_viz:
+            visualize_forward_state(
+                state, model_name, out_dir, f"{model_name} time-varying"
+            )
+            plot_derived_inflow_angle(state, params, out_dir)
+        return
 
     if not cfg.run.skip_viz:
         suffix = model_name

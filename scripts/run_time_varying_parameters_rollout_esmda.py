@@ -20,10 +20,10 @@ Two truth sources are supported, selected by ``run.ground_truth_dir``:
     one window at a time, carrying its state between windows.
   * **Loaded** (``run.ground_truth_dir=<dir>``) — a pre-computed ground truth
     (``state.nc`` + ``params.nc``, as written by
-    ``scripts/run_time_varying_forward_model.py``) is read from disk and chopped
-    into consecutive windows. The number of windows is clamped so the rollout
-    never exceeds the time length of the loaded truth. The truth forward model is
-    never instantiated.
+    ``scripts/run_forward_model.py run.time_varying=true``) is read from disk and
+    chopped into consecutive windows. The number of windows is clamped so the
+    rollout never exceeds the time length of the loaded truth. The truth forward
+    model is never instantiated.
 
 Everything downstream of the truth (the assimilation prior, the window loop,
 persistence, plotting) is identical between the two modes.
@@ -161,7 +161,7 @@ def _resolve_ground_truth_paths(
         raise FileNotFoundError(
             f"Could not find both 'state.nc' and 'params.nc' under {gt_dir}. "
             "Point run.ground_truth_dir at a directory produced by "
-            "scripts/run_time_varying_forward_model.py."
+            "scripts/run_forward_model.py run.time_varying=true."
         )
     return state_hits[0], params_hits[0]
 

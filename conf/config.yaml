@@ -36,12 +36,15 @@ run:
   results_dir: null
   # Forward-model knobs (scripts/run_forward_model.py): run an ensemble instead
   # of a single member with `run.ensemble=true`; roll the state forward over
-  # `run.num_steps` windows (num_steps=1 -> a single forward).
+  # `run.num_steps` windows (num_steps=1 -> a single forward); drive a
+  # single-member time-varying-inflow ground-truth run with
+  # `run.time_varying=true` (mutually exclusive with `run.ensemble`).
   ensemble: false
   num_steps: 1
-  use_true_params: false
+  time_varying: false
   # Directory holding a pre-simulated ground truth (state.nc + params.nc), as
-  # written by scripts/run_time_varying_forward_model.py. Only consumed by
+  # written by `run_forward_model.py run.time_varying=true`. Only consumed by
   # scripts that load the truth from disk instead of simulating it (e.g.
-  # run_time_varying_parameters_rollout_esmda_from_truth.py); null otherwise.
+  # run_time_varying_parameters_rollout_esmda.py with run.ground_truth_dir set);
+  # null otherwise.
   ground_truth_dir: null

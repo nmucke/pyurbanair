@@ -72,10 +72,10 @@ libs/pypalm/src/pypalm/            # PALM wrapper. Similar shape.
 scripts/                           # All top-level executables run from here.
                                    # Each exposes `def run(cfg)` + a thin `@hydra.main` wrapper.
   _common.py                       # Shared script glue (results-dir resolution, forward viz)
-  run_forward_model.py             # Forward sim — single/ensemble (run.ensemble) and
-                                   #   single-step/rollout (run.num_steps). Replaces the former
-                                   #   run_{ensemble_,rollout_,ensemble_rollout_}forward_model.py.
-  run_time_varying_forward_model.py
+  run_forward_model.py             # Forward sim — single/ensemble (run.ensemble),
+                                   #   single-step/rollout (run.num_steps), and time-varying
+                                   #   inflow (run.time_varying). Replaces the former
+                                   #   run_{ensemble_,rollout_,ensemble_rollout_,time_varying_}forward_model.py.
   run_parameter_esmda.py           # Parameter-only ESMDA
   run_state_and_parameter_esmda.py # Joint state+parameter ESMDA
   run_rollout_esmda.py             # Multi-window joint ESMDA
