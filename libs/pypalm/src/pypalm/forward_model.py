@@ -435,12 +435,17 @@ class ForwardModel(BaseForwardModel):
         """Invoke PALM.
 
         Two paths:
-          - ``PYPALM_USE_DIRECT_RUN=1`` -> ``direct_palm.run_direct`` (bypasses
-            palmrun + palmbuild; ~16x faster on tiny — see docs/palm_overhead_plan.md).
-          - otherwise -> palmrun via the execute.sh wrapper (the historical path,
-            kept as a fallback until M4 flips the default).
+          - ``direct_palm.run_direct`` (default) — bypasses palmrun + palmbuild;
+            ~16x faster on tiny (see docs/palm_overhead_plan.md). It also runs
+            ``combine_plot_fields.x`` itself with the ``rrtmg.so`` symlinks it
+            needs, so the merged 3D netCDF is actually produced. The slurm
+            scripts already default to this; M4 flips it for local runs too.
+          - ``PYPALM_USE_DIRECT_RUN=0`` -> palmrun via the execute.sh wrapper
+            (the historical fallback). NOTE: on macOS palmrun's combine step
+            fails to load ``rrtmg.so`` and silently yields an all-zero field
+            (caught by ``_assert_combine_succeeded``); prefer the default path.
         """
-        if os.environ.get("PYPALM_USE_DIRECT_RUN") == "1":
+        if os.environ.get("PYPALM_USE_DIRECT_RUN", "1") != "0":
             self._run_direct()
             return
 
@@ -559,11 +564,45 @@ class ForwardModel(BaseForwardModel):
             f"{self.experiment_name}_3d.nc)."
         )
 
+    @staticmethod
+    def _assert_combine_succeeded(
+        state: xarray.Dataset, output_file: pathlib.Path
+    ) -> None:
+        """Fail loudly when PALM wrote a zero-filled skeleton instead of data.
+
+        For a ``__parallel`` PALM build with ``netcdf_data_format < 5`` the
+        velocity fields are streamed to a Fortran binary file and only merged
+        into the per-PE ``_3d.NNN.nc`` netCDF by ``combine_plot_fields.x``.
+        When that post-processing step is skipped or crashes (e.g. the macOS
+        dyld ``rrtmg.so`` load failure — see docs/pypalm_zero_field_debug.md),
+        the netCDF still opens cleanly but every u/v/w cell is exactly 0 with
+        **no** topography fill values. A correct PALM field always carries
+        NaN/fill at solid cells, so "finite everywhere AND identically zero"
+        is an unambiguous sentinel for a missing combine — surface it as an
+        error rather than silently returning a dead field downstream.
+        """
+        for var in ("u", "v", "w"):
+            if var not in state.data_vars:
+                continue
+            values = state[var].values
+            if values.size == 0:
+                continue
+            if np.all(np.isfinite(values)) and not np.any(values):
+                raise RuntimeError(
+                    f"PALM 3D output {output_file} has {var} identically zero "
+                    "with no topography fill values — combine_plot_fields almost "
+                    "certainly did not run (the per-PE netCDF skeleton was read "
+                    "instead of the merged field). See "
+                    "docs/pypalm_zero_field_debug.md."
+                )
+
     def _load_and_postprocess_state(self) -> xarray.Dataset:
         output_file = self._locate_3d_output()
         state = xarray.open_dataset(
             output_file, engine="netcdf4", decode_timedelta=False
         )
+
+        self._assert_combine_succeeded(state, output_file)
 
         # PALM uses staggered vertical coords: u/v/scalars on zu_3d,
         # w on zw_3d. Preserve both; rename zu_3d -> z (the "canonical" z

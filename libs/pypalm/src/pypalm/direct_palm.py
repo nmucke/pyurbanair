@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -79,6 +80,27 @@ def _augment_runtime_library_paths(env: dict[str, str]) -> None:
     existing = env.get("LD_LIBRARY_PATH", "")
     prefix = ":".join(str(p) for p in lib_paths)
     env["LD_LIBRARY_PATH"] = f"{prefix}:{existing}" if existing else prefix
+
+
+def _stack_limited(argv: list[str]) -> list[str]:
+    """Wrap ``argv`` in a shell that raises the stack limit before exec.
+
+    PALM allocates large automatic (stack) arrays during model initialization;
+    on big grids (e.g. the Barcelona case at 400x400x32) these overflow the
+    default 8 MB soft stack and ``palm`` dies with SIGSEGV before time-stepping.
+    palmrun raises this via ``ulimit -s unlimited``, but the direct path
+    bypasses palmrun, so do it here. The raised limit is inherited by mpirun and
+    its ``palm`` child. ``unlimited`` succeeds on Linux; macOS refuses it (and
+    Python's ``resource.setrlimit`` can't raise ``RLIMIT_STACK`` at all there),
+    so fall back to the hard cap (~64 MB) via ``ulimit -s hard``. Both attempts
+    are best-effort — a failure to raise must never abort the launch.
+    """
+    inner = "exec " + shlex.join(argv)
+    return [
+        "bash",
+        "-c",
+        f"ulimit -s unlimited 2>/dev/null || ulimit -s hard 2>/dev/null; {inner}",
+    ]
 
 
 @dataclass
@@ -155,6 +177,18 @@ def _link_binaries(dst_tempdir: pathlib.Path) -> None:
     if rrtmg_subdir.is_dir() and not rrtmg_link.exists():
         rrtmg_link.symlink_to(rrtmg_subdir, target_is_directory=True)
 
+    # combine_plot_fields.x is linked against a *bare leaf* `rrtmg.so` (no
+    # subdir): on macOS `otool -L` shows `rrtmg.so`, which dyld resolves only
+    # against CWD and DYLD_*_PATH — and the `rrtmg/` subdir symlink above does
+    # not satisfy it. Without this, combine exits on signal 9 (dyld "Library
+    # not loaded: rrtmg.so"), the combined `_3d.nc` is never written, and
+    # pypalm silently falls back to the zero-filled per-PE skeleton (see
+    # docs/pypalm_zero_field_debug.md). Provide `./rrtmg.so` in the tempdir too.
+    rrtmg_so = rrtmg_subdir / "rrtmg.so"
+    rrtmg_so_link = dst_tempdir / "rrtmg.so"
+    if rrtmg_so.is_file() and not rrtmg_so_link.exists():
+        rrtmg_so_link.symlink_to(rrtmg_so)
+
 
 def _transfer_outputs(
     tempdir: pathlib.Path,
@@ -219,11 +253,11 @@ def run_direct(
                 f"No {experiment_name}_p3d file in {dirs.input_dir} — cannot run PALM."
             )
 
-        # 2. mpirun -n <ncpu> ./palm
+        # 2. mpirun -n <ncpu> ./palm (under a raised stack limit; see _stack_limited)
         mpirun_cmd = ["mpirun", *(extra_mpirun_args or []), "-n", str(ncpu), "./palm"]
         t_palm = time.monotonic()
         palm_result = subprocess.run(
-            mpirun_cmd,
+            _stack_limited(mpirun_cmd),
             cwd=tempdir,
             env=env,
             stdin=subprocess.DEVNULL,
