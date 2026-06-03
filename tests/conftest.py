@@ -19,7 +19,7 @@ def _compose_test_cfg(
     with initialize(version_base=None, config_path="../conf"):
         return compose(
             config_name=config_name,
-            overrides=["size=tiny", *(overrides or [])],
+            overrides=["+size=test", *(overrides or [])],
         )
 
 
