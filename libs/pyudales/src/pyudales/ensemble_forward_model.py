@@ -26,6 +26,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         results_dir: Optional[pathlib.Path] = None,
         num_parallel_processes: int = 1,
         num_cpus_per_process: int = 1,
+        failure: Optional[dict] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -35,6 +36,8 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             results_dir: The directory where the results will be saved.
             num_parallel_processes: The number of parallel processes to use.
             num_cpus_per_process: The number of CPUs per process to use.
+            failure: Failure-handling policy mapping (see
+                ``BaseEnsembleForwardModel``).
         """
         super().__init__(
             forward_model=forward_model,  # type: ignore[arg-type]
@@ -43,6 +46,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             num_parallel_processes=num_parallel_processes,
             num_cpus_per_process=num_cpus_per_process,
             temp_dir=temp_dir,
+            failure=failure,
         )
 
     def _create_new_forward_model(  # type: ignore[override]

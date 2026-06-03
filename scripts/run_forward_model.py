@@ -32,144 +32,197 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import hydra
+import numpy as np
 import xarray
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from pyurbanair.config.hydra_helpers import (
     clean_outputs,
     configure_failure_policy,
-    create_parameter_ensemble,
-    create_time_varying_true_params,
-    create_true_params,
     resolve_output_dir,
-    resolve_parameter_schema,
 )
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 
 from scripts._common import (
     plot_derived_inflow_angle,
+    plot_derived_velocity_magnitude,
     resolve_results_dir,
     visualize_forward_state,
 )
 
 
-def run(cfg: DictConfig) -> None:
-    model_name = cfg.model.name
-    is_ensemble = bool(cfg.run.ensemble)
-    is_time_varying = bool(cfg.run.time_varying)
-    num_steps = int(cfg.run.num_steps)
-    if is_ensemble and is_time_varying:
-        raise ValueError(
-            "run.ensemble and run.time_varying are mutually exclusive "
-            "(time-varying inflow is a single-member ground-truth run)."
-        )
-    results_dir = resolve_results_dir(cfg)
-    param_names = resolve_parameter_schema(model_name)
+def get_stepper(model, is_ensemble):
+    if is_ensemble:
+        def step(params, state=None):
+            out = model.run_ensemble(params=params, state=state, sim_name="state")
+            return out if out is not None else model.get_states()
+        return step
+    else:
+        def step(params, state=None):
+            out = model(params=params, state=state)
+            return out if out is not None else model.get_states()
+        return step
 
-    forward_model = instantiate(cfg.model.forward_model, results_dir=results_dir)
+# The sampler always emits an `ensemble` dim. A single-member run must hand
+# the forward model params WITHOUT it (scalar for static, (time,) for
+# dynamic) -- the solver's inflow application can't handle a size-1 ensemble
+# axis. Keep the ensemble dim in params_list so extrapolate() still sees it;
+# drop it only at the model call.
+def _member_params(p, is_ensemble):
+    if not is_ensemble and "ensemble" in p.dims:
+        return p.isel(ensemble=0, drop=True)
+    return p
+
+# Stitch rollout windows onto a single, monotonic global time axis. Solvers
+# report a per-window local clock (each window restarts near 0), so re-base
+# window w to start at w * simulation_time. This puts the coarse params grid
+# and the fine state grid on the same axis, so the derived-vs-prescribed
+# inflow-angle plot lines up. A single window is returned unchanged.
+def _concat_windows(window_list, cfg):
+    if len(window_list) == 1:
+        return window_list[0]
+    sim = float(cfg.time.simulation_time)
+    rebased = []
+    for w, ds in enumerate(window_list):
+        t = np.asarray(ds["time"].values, dtype=float)
+        rebased.append(ds.assign_coords(time=(t - t[0]) + w * sim))
+    return xarray.concat(rebased, dim="time", join="override")
+
+
+def run(cfg: DictConfig) -> None:
+    import pdb
+
+    import jax
+    rng_key = jax.random.PRNGKey(int(cfg.params.get("seed", 0)))
+
+    is_ensemble = cfg.run.ensemble
+    model_name = cfg.model.name
+    rollout_steps = cfg.run.rollout_steps
+
+    # Instantiate parameters
+    params_sampler = instantiate(cfg.params)
+    params = params_sampler.sample(
+        cfg.ensemble.ensemble_size if is_ensemble else 1
+    )
+    is_dynamic_params = "time" in params.coords
+
+    # Instantiate forward model.
+    forward_model = instantiate(
+        cfg.model.forward_model,
+        results_dir=None#resolve_results_dir(cfg),
+    )
     instantiate(cfg.model.prepare, forward_model=forward_model)
+
+    # Clean outputs from previous runs
     clean_outputs(model_name=model_name, forward_model=forward_model)
 
+    # Instantiate ensemble model if running ensemble
     if is_ensemble:
-        runner = instantiate(cfg.model.ensemble_model, forward_model=forward_model)
-        configure_failure_policy(runner, cfg.ensemble.failure)
-        for member in runner.ensemble_forward_models:
-            clean_outputs(model_name=model_name, forward_model=member)
-        params = create_parameter_ensemble(
-            model_name=model_name,
-            prior_cfg=cfg.params.prior,
-            ensemble_size=cfg.ensemble.ensemble_size,
-            seed=cfg.esmda.seed,
-            param_names=param_names,
-        )
-
-        def step(state):
-            out = runner.run_ensemble(params=params, state=state, sim_name="state")
-            return out if out is not None else runner.get_states()
-
-    else:
-        if is_time_varying:
-            params = create_time_varying_true_params(
-                model_name=model_name,
-                tv_cfg=cfg.time_varying,
-                true_cfg=cfg.params.true,
-                external_cfg=cfg.params.external,
-                simulation_time=cfg.time.simulation_time,
-                num_time_points=int(cfg.time_varying.num_time_points),
-                seed=cfg.esmda.seed,
-            )
-        else:
-            params = create_true_params(model_name, cfg.params.true, param_names)
-
-        def step(state):
-            out = forward_model(params=params, state=state)
-            return out if out is not None else forward_model.get_states()
+        forward_model = instantiate(cfg.model.ensemble_model, forward_model=forward_model)
 
     t1 = time.time()
-    state = step(None)
-    state_list = [state]
-    for _ in range(num_steps - 1):
-        state = step(state)
-        state_list.append(state)
-    if num_steps > 1:
-        state = xarray.concat(state_list, dim="time", join="override")
-    elapsed = time.time() - t1
 
+    # Simulate
+    stepper = get_stepper(forward_model, is_ensemble)
+    out = stepper(params=_member_params(params, is_ensemble))
+
+    # Rollout simulation if rollout_steps > 0
+    sim = float(cfg.time.simulation_time)
+    state = [out]
+    params_list = [params]
+    for _ in range(rollout_steps):
+        if is_dynamic_params:
+            next_window_times = np.linspace(
+                0.0, sim, cfg.params.time_coords.num
+            )
+            rng_key, subkey = jax.random.split(rng_key)
+            params_next = params_sampler.extrapolate(
+                params_list[-1], next_window_times, subkey
+            )
+            params_list.append(params_next)
+        out = stepper(params=_member_params(params_list[-1], is_ensemble), state=state[-1])
+        state.append(out)
+
+    t2 = time.time()
+    elapsed = t2-t1
+
+    ##### Post processing and plotting #####
+    params = _concat_windows(params_list, cfg)
+    state = _concat_windows(state, cfg)
     state = add_velocity_magnitude(state)
 
-    print(f"Model: {model_name}{' (time-varying inflow)' if is_time_varying else ''}")
+    print(f"Model: {model_name}{' (time-varying inflow)' if is_dynamic_params else ''}")
     if is_ensemble:
         print(f"Ensemble size: {cfg.ensemble.ensemble_size}")
-    if num_steps > 1:
-        print(f"Rollout: {num_steps} steps")
+    if rollout_steps > 1:
+        print(f"Rollout: {rollout_steps} steps")
     print(f"Elapsed: {elapsed:.2f} seconds")
     print(f"Dims: {dict(state.sizes)}")
     print(f"Vars: {list(state.data_vars)}")
-    if is_time_varying:
+    if rollout_steps:
+        # Report the start -> end of the (time-varying) inflow. Reduce the
+        # ensemble dim to a representative mean and coerce to 1-D so this works
+        # whether or not params carry `ensemble` / `time` dims.
+        inflow = params["inflow_angle"]
+        velocity = params["velocity_magnitude"]
+        if "ensemble" in inflow.dims:
+            inflow = inflow.mean("ensemble")
+            velocity = velocity.mean("ensemble")
+        inflow = np.atleast_1d(inflow.values)
+        velocity = np.atleast_1d(velocity.values)
+        print(f"Inflow angle: {float(inflow[0]):.1f} -> {float(inflow[-1]):.1f} deg")
         print(
-            f"Inflow angle: {params['inflow_angle'].values[0]:.1f} -> "
-            f"{params['inflow_angle'].values[-1]:.1f} deg"
-        )
-        print(
-            f"Velocity magnitude: {params['velocity_magnitude'].values[0]:.1f} -> "
-            f"{params['velocity_magnitude'].values[-1]:.1f} m/s"
+            f"Velocity magnitude: {float(velocity[0]):.1f} -> "
+            f"{float(velocity[-1]):.1f} m/s"
         )
 
-    if is_time_varying:
-        # Persist the simulated state and the parameter profile that produced
-        # it: this is the ground-truth artifact a downstream twin / DA
-        # experiment reads, so it is written regardless of the viz toggle.
-        out_dir = (
-            resolve_output_dir(cfg, "forward_model") / f"{model_name}_time_varying"
-        )
-        out_dir.mkdir(parents=True, exist_ok=True)
+    # Nothing to write or draw.
+    if cfg.run.skip_viz and not is_dynamic_params:
+        return
+
+    # Single output folder for everything this run produces.
+    suffix = model_name
+    if is_ensemble:
+        suffix += "_ensemble"
+    if rollout_steps > 1:
+        suffix += "_rollout"
+    if is_dynamic_params:
+        suffix += "_time_varying"
+    out_dir = resolve_output_dir(cfg, "forward_model") / suffix
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if is_dynamic_params:
+        # The ground-truth artifact / derived-inflow plot are single-member
+        # concepts; pick member 0 when this was an ensemble run. The state/params
+        # are persisted regardless of the viz toggle (a downstream twin / DA
+        # experiment reads them).
+        if "ensemble" in state.dims:
+            state = state.isel(ensemble=0, drop=True)
+        if "ensemble" in params.dims:
+            params = params.isel(ensemble=0, drop=True)
         state.to_netcdf(out_dir / "state.nc")
         params.to_netcdf(out_dir / "params.nc")
         print(f"Saved state -> {out_dir / 'state.nc'}")
         print(f"Saved params -> {out_dir / 'params.nc'}")
-        if not cfg.run.skip_viz:
-            visualize_forward_state(
-                state, model_name, out_dir, f"{model_name} time-varying"
-            )
-            plot_derived_inflow_angle(state, params, out_dir)
+
+    if cfg.run.skip_viz:
         return
 
-    if not cfg.run.skip_viz:
-        suffix = model_name
-        if is_ensemble:
-            suffix += "_ensemble"
-        if num_steps > 1:
-            suffix += "_rollout"
-        out_dir = resolve_output_dir(cfg, "forward_model") / suffix
+    # Visualize once, into the single out_dir. For a plain ensemble show the
+    # ensemble mean; a dynamic run has already been reduced to member 0 above.
+    label = model_name
+    if is_dynamic_params:
+        label += " time-varying" + (" (member 0)" if is_ensemble else "")
+    elif is_ensemble:
+        label += " ensemble (mean)"
+    if rollout_steps > 1:
+        label += " rollout"
 
-        viz_state = state.mean(dim="ensemble") if "ensemble" in state.dims else state
-        label = model_name
-        if is_ensemble:
-            label += " ensemble (mean)"
-        if num_steps > 1:
-            label += " rollout"
-        visualize_forward_state(viz_state, model_name, out_dir, label)
-
+    viz_state = state.mean(dim="ensemble") if "ensemble" in state.dims else state
+    visualize_forward_state(viz_state, model_name, out_dir, label)
+    if is_dynamic_params:
+        plot_derived_inflow_angle(state, params, out_dir)
+        plot_derived_velocity_magnitude(state, params, out_dir)
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
 def main(cfg: DictConfig) -> None:

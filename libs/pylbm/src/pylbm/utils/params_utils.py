@@ -122,6 +122,7 @@ def write_uvel_time_file(
     params: xarray.Dataset,
     dirs: "DirectoryPaths",
     spinup_time: float = 0.0,
+    time_offset: float = 0.0,
 ) -> None:
     """Write ``uvel_time.dat`` for the Fortran LBM code.
 
@@ -138,8 +139,16 @@ def write_uvel_time_file(
         dirs: DirectoryPaths with ``experiment_dir``.
         spinup_time: If > 0, prepend a constant row at t=0 with initial values
                      and shift user-provided times by this offset.
+        time_offset: Shift applied to the (window-relative) schedule so it lands
+                     on the LBM's absolute clock. ``params["time"]`` is treated as
+                     global simulation time and first re-based to the window start
+                     (``time - time[0]``); ``time_offset`` (= ``nt0 * dt``) then
+                     places it at the warm-start clock position. 0 for a cold
+                     start (``nt0 = 0``).
     """
     times = params["time"].values.astype(float)
+    # Re-base global window time to window-relative, then onto the run clock.
+    times = times - times[0] + time_offset
     velocities = params["velocity_magnitude"].values.astype(float)
 
     # Broadcast scalar inflow_angle to match time dimension if needed

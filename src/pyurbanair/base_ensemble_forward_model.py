@@ -54,6 +54,7 @@ class BaseEnsembleForwardModel:
         num_parallel_processes: int = 1,
         num_cpus_per_process: int = 1,
         temp_dir: Optional[pathlib.Path] = None,
+        failure: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the ensemble forward model.
@@ -66,6 +67,10 @@ class BaseEnsembleForwardModel:
             num_parallel_processes: Number of parallel processes.
             num_cpus_per_process: Number of CPUs per process.
             temp_dir: Temporary directory for ensemble experiments.
+            failure: Failure-handling policy mapping
+                ``{"policy", "jitter_scale", "seed"}``. Defaults to the
+                historical ``"raise"`` behavior; can be reconfigured later
+                via :meth:`configure_failure_policy`.
         """
         self.forward_model = forward_model
         self.ensemble_size = ensemble_size
@@ -96,13 +101,17 @@ class BaseEnsembleForwardModel:
             ensemble_temp_dir / "ensemble_experiments"
         )
 
-        # Failure-handling state. Defaults preserve historical behavior
-        # (any per-member exception aborts the ensemble run). Configure via
-        # ``configure_failure_policy`` to opt into resample-from-successes.
-        self._failure_policy: FailurePolicy = "raise"
-        self._failure_jitter_scale: float = 0.05
-        self._failure_rng: np.random.Generator = np.random.default_rng(0)
+        # Failure-handling policy, set at instantiation. Defaults preserve
+        # historical behavior (any per-member exception aborts the ensemble
+        # run); pass ``failure`` to opt into resample-from-successes, or call
+        # ``configure_failure_policy`` later to reconfigure.
         self._last_failure_substitutions: dict[int, int] = {}
+        failure = dict(failure) if failure else {}
+        self.configure_failure_policy(
+            policy=failure.get("policy", "raise"),
+            jitter_scale=failure.get("jitter_scale", 0.05),
+            seed=failure.get("seed", 0),
+        )
 
         # Subclasses must populate this list with individual forward models
         self.ensemble_forward_models: list[BaseForwardModel] = []

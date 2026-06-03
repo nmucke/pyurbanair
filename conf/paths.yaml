@@ -1,4 +1,6 @@
 # @package paths
 #
 # Output roots. Everything mutable lands under `.temp/` by default.
-base_results_dir: .temp/scripts
+results_dir: .temp/${model.name}
+experiment_dir : ${hydra:runtime.cwd}/.temp
+
