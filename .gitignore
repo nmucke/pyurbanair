@@ -70,3 +70,6 @@ esmda_results/*
 
 # Stray Hydra default run dir (when a script runs without the configured run.dir).
 outputs/
+
+# latex
+latex/
