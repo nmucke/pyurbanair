@@ -10,7 +10,7 @@
 # what every smoother receives (`localization: ${..localization}`) and is the
 # adaptive correlation localization of Vossepoel et al. 2025. Run the global
 # (unlocalized) Kalman update with `esmda.localization=null`.
-num_steps: 3
+num_steps: 2
 alpha: ${.num_steps}
 num_assimilation_windows: 3
 seed: 42

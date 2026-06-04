@@ -29,8 +29,8 @@ defaults:
   - config
   - esmda
   - esmda/smoother: dynamic
-  - model@truth_model: pyudales
-  - model@assim_model: pyudales
+  - model@truth_model: pylbm
+  - model@assim_model: pylbm
   - params@truth_params: dynamic_truth
   - params@prior_params: dynamic
   - _self_

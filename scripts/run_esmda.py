@@ -208,7 +208,17 @@ def run(cfg: DictConfig) -> None:
                 simulation_time=sim_time * num_windows
             )
             if is_dynamic:
-                time_coords = jnp.linspace(0, sim_time * num_windows, cfg.truth_params.time_coords.num * num_windows)
+                # Match the assimilation grid: each window owns `num` control
+                # points spaced `sim_time/(num-1)` (conf/params/dynamic.yaml's
+                # per-window linspace(0, sim_time, num)). Sampling the truth on
+                # the same spacing puts its control points on the window
+                # boundaries instead of on a `num*num_windows`-point grid whose
+                # spacing (sim_time*num_windows/(num*num_windows-1)) drifts off
+                # the window edges, so truth and assim curves share x-locations.
+                num = cfg.truth_params.time_coords.num
+                time_coords = jnp.linspace(
+                    0, sim_time * num_windows, (num - 1) * num_windows + 1
+                )
                 truth_sampler = instantiate(cfg.truth_params, time_coords=time_coords)
         else:
             true_forward_model = instantiate(
@@ -286,6 +296,14 @@ def run(cfg: DictConfig) -> None:
     for window in tqdm(range(num_windows)):
         windows_dir.mkdir(parents=True, exist_ok=True)
         prior_params.to_netcdf(windows_dir / f"window_{window}_prior_params.nc")
+
+        # Pin the t=0 knot from window 1 onward so the Kalman update preserves
+        # the cross-window continuity that the GP extrapolation established at
+        # each window boundary. Window 0's prior t=0 is just a cold-start GP
+        # draw (over a spun-up flow), so ESMDA is free to fit it. Only the
+        # time-varying smoother carries this flag.
+        if hasattr(esmda, "pin_initial_time_point"):
+            esmda.pin_initial_time_point = window > 0
 
         # Get observations in window and add noise. Select the w-th contiguous
         # block of frames (half-open) rather than an inclusive time-slice: the
