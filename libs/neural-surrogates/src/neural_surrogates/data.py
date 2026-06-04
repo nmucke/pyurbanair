@@ -101,7 +101,7 @@ class TransitionDataset(Dataset):
 
         self._params: list[torch.Tensor] = []
         self.param_names: tuple[str, ...] = ()
-        traj_lengths: list[int] = []
+        self._traj_lengths: list[int] = []
 
         for state_path, param_path in zip(self._state_files, param_files):
             t_len = self._read_time_length(state_path)
@@ -113,23 +113,43 @@ class TransitionDataset(Dataset):
                     f"param variable set differs between samples: "
                     f"{self.param_names} vs {names} (in {param_path})"
                 )
-            if t_len < self.pushforward_steps + 1:
-                raise ValueError(
-                    f"trajectory {state_path.name} has {t_len} time steps; "
-                    f"need at least pushforward_steps + 1 = "
-                    f"{self.pushforward_steps + 1}"
-                )
             self._params.append(params)
-            traj_lengths.append(t_len)
+            self._traj_lengths.append(t_len)
 
-        self._index: list[tuple[int, int]] = [
-            (traj, t)
-            for traj, t_len in enumerate(traj_lengths)
-            for t in range(t_len - self.pushforward_steps)
-        ]
+        # Build the flattened (trajectory, start-time) index for the initial
+        # horizon. ``set_pushforward_steps`` rebuilds it whenever the horizon
+        # changes (e.g. a training-time rollout-length curriculum).
+        self._index: list[tuple[int, int]] = []
+        self.set_pushforward_steps(self.pushforward_steps)
 
         self._geometry = self._load_geometry(self._state_files[0])
         self._state_cache: dict[int, xr.Dataset] | None = None
+
+    def set_pushforward_steps(self, pushforward_steps: int) -> None:
+        """Switch the rollout horizon ``K`` and rebuild the sample index.
+
+        A trajectory with ``T`` saved steps contributes ``T - K`` samples, so
+        changing ``K`` changes both which targets are produced and how many
+        samples the split has. Used by the trainer to ramp the horizon up over
+        epochs (the pushforward curriculum). When a ``DataLoader`` uses worker
+        processes, the new horizon reaches them on the next epoch's re-fork
+        (see ``__getstate__``); call this before iterating the loader.
+        """
+        k = int(pushforward_steps)
+        if k < 1:
+            raise ValueError(f"pushforward_steps must be >= 1, got {k}")
+        for state_path, t_len in zip(self._state_files, self._traj_lengths):
+            if t_len < k + 1:
+                raise ValueError(
+                    f"trajectory {state_path.name} has {t_len} time steps; "
+                    f"need at least pushforward_steps + 1 = {k + 1}"
+                )
+        self.pushforward_steps = k
+        self._index = [
+            (traj, t)
+            for traj, t_len in enumerate(self._traj_lengths)
+            for t in range(t_len - k)
+        ]
 
     @staticmethod
     def _read_time_length(state_path: Path) -> int:
