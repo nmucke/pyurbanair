@@ -120,14 +120,18 @@ class DirectRunResult:
     output_files: list[str]
 
 
-def _envpar_text(run_identifier: str, host: str, ncpu: int) -> str:
+def _envpar_text(
+    run_identifier: str, host: str, ncpu: int, progress_bar_disabled: bool = False
+) -> str:
     """Render the ENVPAR Fortran namelist that PALM reads at startup.
 
     Mirrors palmrun's heredoc at
     ``palm_model_system/packages/palm/model/bin/palmrun`` (search for
-    ``cat  >  ENVPAR``). All booleans are written ``.false.`` because pypalm
-    doesn't use SVF, restart, or spinup writes (warm-start is deferred to v2).
+    ``cat  >  ENVPAR``). The SVF/restart/spinup booleans are ``.false.`` because
+    pypalm doesn't use those writes. ``progress_bar_disabled`` is flipped on for
+    quiet (``verbose=False``) runs so PALM doesn't stream its progress bar.
     """
+    pbar = ".true." if progress_bar_disabled else ".false."
     return (
         f" &envpar  run_identifier = '{run_identifier}', host = '{host}',\n"
         "          write_svf = .false., write_binary = .false., write_spinup_data = .false.,\n"
@@ -135,7 +139,7 @@ def _envpar_text(run_identifier: str, host: str, ncpu: int) -> str:
         "          maximum_parallel_io_streams = 1,\n"
         "          maximum_cpu_time_allowed = 10000000.,\n"
         "          version_string = 'PALM 25.10',\n"
-        "          progress_bar_disabled = .false., /\n"
+        f"          progress_bar_disabled = {pbar}, /\n"
     )
 
 
@@ -218,13 +222,25 @@ def run_direct(
     env: Optional[dict[str, str]] = None,
     keep_tempdir: bool = False,
     extra_mpirun_args: Optional[list[str]] = None,
+    verbose: bool = True,
 ) -> DirectRunResult:
     """Run one PALM invocation directly, bypassing palmrun/palmbuild.
 
     Mirrors what palmrun does for a single d3 run on a single PE:
     stage INPUT, generate ENVPAR, ``mpirun -n <ncpu> ./palm``,
     ``./combine_plot_fields.x``, transfer DATA_3D_NETCDF to OUTPUT/.
+
+    When ``verbose`` is False the ``palm`` and ``combine_plot_fields.x`` stdout
+    /stderr are captured rather than inherited, so nothing is streamed to the
+    terminal; on a non-zero exit the captured tail is logged so failures are
+    still diagnosable.
     """
+    capture = not verbose
+    _quiet = (
+        {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
+        if capture
+        else {}
+    )
     if env is None:
         env = os.environ.copy()
     _augment_runtime_library_paths(env)
@@ -244,7 +260,9 @@ def run_direct(
         # 1. Stage INPUT + binaries + ENVPAR
         staged = _stage_inputs(dirs.input_dir, tempdir, experiment_name)
         _link_binaries(tempdir)
-        (tempdir / "ENVPAR").write_text(_envpar_text(experiment_name, host, ncpu))
+        (tempdir / "ENVPAR").write_text(
+            _envpar_text(experiment_name, host, ncpu, progress_bar_disabled=capture)
+        )
         stage_s = time.monotonic() - t_start
         logger.info("direct_palm: staged %s in %.2fs", staged, stage_s)
 
@@ -261,11 +279,23 @@ def run_direct(
             cwd=tempdir,
             env=env,
             stdin=subprocess.DEVNULL,
+            **_quiet,
         )
         palm_s = time.monotonic() - t_palm
         logger.info("direct_palm: palm wall=%.2fs rc=%s", palm_s, palm_result.returncode)
         if palm_result.returncode != 0:
-            raise subprocess.CalledProcessError(palm_result.returncode, mpirun_cmd)
+            if capture and palm_result.stdout:
+                tail = "\n".join(palm_result.stdout.splitlines()[-80:])
+                logger.error(
+                    "direct_palm: palm failed (rc=%s). Last output:\n%s",
+                    palm_result.returncode,
+                    tail,
+                )
+            raise subprocess.CalledProcessError(
+                palm_result.returncode,
+                mpirun_cmd,
+                output=palm_result.stdout if capture else None,
+            )
 
         # 3. ./combine_plot_fields.x (no mpirun — M0 confirmed this is correct)
         t_combine = time.monotonic()
@@ -274,6 +304,7 @@ def run_direct(
             cwd=tempdir,
             env=env,
             stdin=subprocess.DEVNULL,
+            **_quiet,
         )
         combine_s = time.monotonic() - t_combine
         logger.info(
@@ -281,6 +312,12 @@ def run_direct(
             combine_s,
             combine_result.returncode,
         )
+        if capture and combine_result.returncode != 0 and combine_result.stdout:
+            logger.error(
+                "direct_palm: combine_plot_fields.x failed (rc=%s):\n%s",
+                combine_result.returncode,
+                "\n".join(combine_result.stdout.splitlines()[-40:]),
+            )
 
         # 4. Transfer outputs
         t_transfer = time.monotonic()
