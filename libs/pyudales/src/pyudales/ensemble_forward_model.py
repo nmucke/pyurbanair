@@ -2,8 +2,11 @@ import logging
 import pathlib
 from typing import Optional
 
+import xarray
+
 from pyudales.forward_model import ForwardModel
 from pyudales.utils.forward_model_utils import create_new_forward_model
+from pyudales.utils.warm_start_utils import copy_carry
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
@@ -61,3 +64,27 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             experiment_base_dir,
             experiment_name,
         )
+
+    def run_ensemble(
+        self,
+        state: Optional[xarray.Dataset | pathlib.Path] = None,
+        params: Optional[xarray.Dataset] = None,
+        sim_name: Optional[str] = "state",
+    ) -> xarray.Dataset | None:
+        """Run the ensemble, then realign warmstart carries after failures.
+
+        Each member persists its own end-of-run warmstart carry to disk inside
+        ``run_single``. When a member fails it is resampled from a donor whose
+        *state* then seeds the failed member's next window, so the failed
+        member must also inherit the donor's carry (its subgrid fields) for the
+        warm start to be consistent. The base records the failure-to-donor map
+        in ``_last_failure_substitutions``; we apply the matching carry copies
+        here, in the parent process after the (possibly parallel) run.
+        """
+        result = super().run_ensemble(state=state, params=params, sim_name=sim_name)
+        for failed, donor in self._last_failure_substitutions.items():
+            copy_carry(
+                self.ensemble_forward_models[donor].dirs,
+                self.ensemble_forward_models[failed].dirs,
+            )
+        return result

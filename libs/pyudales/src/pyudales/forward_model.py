@@ -32,10 +32,13 @@ from .utils.save_frequency_utils import (
 )
 from .utils.warm_start_utils import (
     clean_output_except_warmstart_files,
+    clear_carry,
+    fetch_carry,
     identify_generated_warmstart_file,
     remove_old_warmstart_files,
     set_trestart,
     set_warm_start,
+    store_carry,
     update_warmstart_file_from_xarray,
 )
 
@@ -671,13 +674,20 @@ class ForwardModel(BaseForwardModel):
     ) -> xarray.Dataset:
         """Run the forward model.
 
-        If ``state`` is None, run a cold start (with optional spinup). If a
-        warmstart template has not been captured yet, trestart is enabled so
-        the run produces a restart file that is harvested as the template.
+        If ``state`` is None, run a cold start (with optional spinup). trestart
+        is enabled so the run produces an end-of-run restart that is persisted
+        as this member's warmstart *carry* (see :mod:`.utils.warm_start_utils`).
 
-        If ``state`` is provided, run a warm start from that state: the
-        warmstart template is bootstrapped lazily if missing, filled with the
-        provided state, and the simulation runs without spinup.
+        If ``state`` is provided, run a warm start from that state without
+        spinup. The carry from this member's previous run — holding the real
+        subgrid fields (e120/ekm/thl0/...) — is reused as the restart template
+        when available, with only u/v/w/pres overwritten from ``state``; this
+        avoids the turbulence re-spin-up that resetting those fields to the
+        cold-start template would cause. When no carry exists (e.g. a state
+        loaded from disk), it falls back to the tiny cold-start template.
+
+        Either way the run emits a fresh carry for the next warm start. The
+        subgrid fields stay on disk in the carry and never enter ``result``.
         """
         self._apply_inflow_settings(params=params)
 
@@ -685,16 +695,29 @@ class ForwardModel(BaseForwardModel):
         saved_namoptions = self._snapshot_namoptions()
         try:
             if state is None:
+                set_trestart(self.dirs)
                 self._run_executable()
                 result = self._load_and_postprocess_state()
+                store_carry(self.dirs)
             else:
-                self._ensure_warmstart_template()
                 self.spinup_time = 0.0
                 self._rewrite_runtime(self._simulation_time)
                 set_trestart(self.dirs)
-                self._prepare_warmstart(state)
+                carry_file = fetch_carry(self.dirs)
+                if carry_file is not None:
+                    template_file = carry_file
+                else:
+                    self._ensure_warmstart_template()
+                    template_file = self.warmstart_template_file
+                self._prepare_warmstart(state, template_file=template_file)
                 self._run_executable()
                 result = self._load_and_postprocess_state()
+                # Capture the carry (newest restart by mtime) before the
+                # timestamp-based cleanup, which would otherwise keep the
+                # restored carry over the freshly written one when the cold
+                # start's restart timestamp (sim+spinup) exceeds this window's
+                # (sim).
+                store_carry(self.dirs)
                 clean_output_except_warmstart_files(self.dirs)
                 remove_old_warmstart_files(self.dirs)
 
@@ -812,11 +835,24 @@ class ForwardModel(BaseForwardModel):
         namoptions.set_value("RUN", "runtime", runtime)
         namoptions.write()
 
-    def _prepare_warmstart(self, state: xarray.Dataset) -> None:
-        """Fill the warmstart template with ``state`` and arm warm start flags."""
-        if self.warmstart_template_file is None:
+    def _prepare_warmstart(
+        self, state: xarray.Dataset, template_file: pathlib.Path | None = None
+    ) -> None:
+        """Fill ``template_file`` with ``state``'s flow and arm warm start flags.
+
+        ``template_file`` is the restart file whose u/v/w/pres are overwritten
+        from ``state`` while its other records (subgrid fields, ...) are kept.
+        It is the carry restart when one is available, otherwise the tiny
+        cold-start template. The filled file is placed in ``output_dir/{exp}``
+        (if not already there) so ``set_warm_start`` can point ``startfile`` at
+        it.
+        """
+        if template_file is None:
+            template_file = self.warmstart_template_file
+        if template_file is None:
             raise RuntimeError(
-                "warmstart_template_file is unset; call _ensure_warmstart_template first."
+                "No warmstart template available; call _ensure_warmstart_template "
+                "or fetch_carry first."
             )
         # Strip ``time`` so the warmstart's timee is written as 0. uDALES
         # treats RUN/runtime as an absolute end-time: leaving the previous
@@ -830,15 +866,19 @@ class ForwardModel(BaseForwardModel):
         update_warmstart_file_from_xarray(
             state_for_warmstart,
             self.dirs,
-            warmstart_file=self.warmstart_template_file,
+            warmstart_file=template_file,
         )
-        shutil.copy(
-            self.warmstart_template_file,
-            self.dirs.output_dir
-            / self.dirs.experiment_name
-            / self.warmstart_template_file.name,
+        dest = (
+            self.dirs.output_dir / self.dirs.experiment_name / template_file.name
         )
+        if template_file.resolve() != dest.resolve():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(template_file, dest)
         set_warm_start(self.dirs)
+
+    def clear_warmstart_carry(self) -> None:
+        """Discard this member's persisted warmstart carry (e.g. before a run)."""
+        clear_carry(self.dirs)
 
     def _ensure_warmstart_template(self) -> None:
         """Create a warmstart template via a short cold-start if missing."""

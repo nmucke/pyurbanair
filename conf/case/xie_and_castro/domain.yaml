@@ -7,8 +7,8 @@
 # deep-merge over these values, or override individual fields on the CLI
 # (`domain.nx=80`). x starts at -20 to leave an open upstream inflow region in
 # front of the Xie & Castro array (which starts at x=5).
-nx: 45
-ny: 40
+nx: 100
+ny: 80
 nz: 4
 bounds:
   - [-10.0, 80.0]
