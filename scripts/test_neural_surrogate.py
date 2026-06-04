@@ -65,7 +65,7 @@ def _plot_rollout(
     truth: torch.Tensor, pred: torch.Tensor, out_dir: Path, n_show: int = 5
 ) -> None:
     T = truth.shape[0]
-    z_mid = truth.shape[-3] // 2
+    z_mid = 0 #truth.shape[-3] // 2
     times = np.linspace(0, T - 1, min(n_show, T), dtype=int)
     mag_t = truth.norm(dim=1)[:, z_mid]
     mag_p = pred.norm(dim=1)[:, z_mid]
@@ -124,7 +124,7 @@ def _animate_rollout(
     truth: torch.Tensor, pred: torch.Tensor, out_path: Path, fps: int = 10
 ) -> None:
     T = truth.shape[0]
-    z_mid = truth.shape[-3] // 2
+    z_mid = 0 # truth.shape[-3] // 2
     mag_t = truth.norm(dim=1)[:, z_mid].numpy()
     mag_p = pred.norm(dim=1)[:, z_mid].numpy()
     err = np.abs(mag_p - mag_t)

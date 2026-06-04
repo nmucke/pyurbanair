@@ -11,6 +11,20 @@ trainer:
   num_epochs: 500
   device: cuda
   patience: 10
+  # Mixed precision (fp16 autocast + grad scaling) on CUDA; ignored on CPU.
+  amp: false
+  # Rollout-length curriculum: begin with `pushforward_start_steps`-step
+  # rollouts and add one step every `pushforward_epochs_per_step` epochs, up to
+  # `dataset.pushforward_steps`. Set the cadence to null to train at a fixed
+  # horizon (the original pushforward behavior).
+  pushforward_epochs_per_step: 50
+  pushforward_start_steps: 1
+  # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
+  # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`
+  # over the remaining epochs. Set `lr_warmup_epochs` to null to disable.
+  lr_warmup_epochs: 10
+  lr_warmup_start: 1.0e-6
+  lr_min: 1.0e-5
 
 optimizer:
   _target_: torch.optim.Adam
