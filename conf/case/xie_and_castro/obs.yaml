@@ -9,9 +9,12 @@
 # stay open for every y. `mode: grid` (with `x_min`/`x_max`/`n_per_axis`/`z`)
 # is the alternative to explicit `*_points`.
 mode: points
-x_points: [20.0, 20.0, 40.0]
-y_points: [20.0, 10.0, 10.0]
-z_points: [3.0, 3.0, 3.0]
+x_points: [20.0, 20.0, 30.0, 30.0] #, -5.0, -5.0]
+y_points: [20.0, 10.0, 10.0, 30.0] #, 10.0, 30.0]
+z_points: [2.0, 2.0, 2.0, 2.0] #, 2.0, 2.0]
+# x_points: [-10.0, -10.0, -10.0]
+# y_points: [10.0, 20.0, 30.0]
+# z_points: [3.0, 3.0, 3.0]
 states: [u, v, w]
 temporal_mode: intervals
 interval_seconds: 20.0

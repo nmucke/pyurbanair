@@ -1,0 +1,7 @@
+# Joint state+parameter ESMDA smoother (augmented state = flattened state +
+# parameters). Used for the static single-window and multi-window rollout cases;
+# run_esmda.py spins up the assim model once to seed the initial state ensemble.
+_target_: data_assimilation.smoothing.esmda.StateAndParameterESMDA
+num_steps: ${esmda.num_steps}
+alpha: ${esmda.alpha}
+localization: ${esmda.localization}

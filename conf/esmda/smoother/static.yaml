@@ -1,0 +1,10 @@
+# Parameter-only ESMDA smoother (augmented state = parameters).
+#
+# One option of the `esmda/smoother` group selected by run_esmda.py. The shared
+# num_steps/alpha/localization come from conf/esmda.yaml; override the default
+# localization with `esmda.localization=...`, or `esmda.localization=null` for
+# the global (unlocalized) update.
+_target_: data_assimilation.smoothing.esmda.ParameterESMDA
+num_steps: ${esmda.num_steps}
+alpha: ${esmda.alpha}
+localization: ${esmda.localization}

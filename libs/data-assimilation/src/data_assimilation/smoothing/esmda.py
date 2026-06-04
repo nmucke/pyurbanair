@@ -252,7 +252,6 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         forward_model: BaseEnsembleForwardModel,
         C_D: jnp.ndarray,
         num_time_points: int,
-        time_coords: jnp.ndarray,
         num_steps: int = 3,
         alpha: Optional[float] = None,
         rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
@@ -269,7 +268,6 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
             localization=localization,
         )
         self.num_time_points = num_time_points
-        self.time_coords = time_coords
         # When True, ``t=0`` of every time-varying parameter is excluded
         # from the Kalman-updated augmented state and reinserted unchanged
         # during unflatten — per ensemble member. Useful for preserving

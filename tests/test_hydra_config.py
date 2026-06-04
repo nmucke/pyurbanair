@@ -4,14 +4,10 @@ import pytest
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
-import numpy as np
-
 from pyurbanair.config.hydra_helpers import (
     configure_failure_policy,
     create_observation_operator,
     create_observation_points,
-    create_time_varying_true_params,
-    create_true_params,
 )
 
 
@@ -81,12 +77,12 @@ def test_palm_target_does_not_import_for_non_palm_composition() -> None:
 
 
 def test_interpolations_resolve_under_aliased_packages() -> None:
-    # The smoother is supplied by each esmda script's own primary config, so
-    # compose one of them (rather than the base ``config``) to exercise the
-    # smoother interpolations.
+    # The smoother is supplied by the run_esmda primary config's
+    # ``esmda/smoother`` group, so compose it (rather than the base ``config``)
+    # to exercise the smoother interpolations.
     with initialize(version_base=None, config_path="../conf"):
         cfg = compose(
-            config_name="run_parameter_esmda",
+            config_name="run_esmda",
             overrides=[
                 "model@truth_model=pylbm",
                 "model@assim_model=pypalm",
@@ -102,14 +98,6 @@ def test_interpolations_resolve_under_aliased_packages() -> None:
     assert resolved["esmda"]["smoother"]["alpha"] == 4
 
 
-def test_true_params_filter_pressure_gradient_for_non_udales() -> None:
-    cfg = _compose(["model=pylbm"])
-
-    true_params = create_true_params(cfg.model.name, cfg.params.true)
-
-    assert "pressure_gradient_magnitude" not in true_params
-
-
 def test_resolve_parameter_schema_includes_pressure_gradient_for_udales() -> None:
     from pyurbanair.config.hydra_helpers import resolve_parameter_schema
 
@@ -118,73 +106,6 @@ def test_resolve_parameter_schema_includes_pressure_gradient_for_udales() -> Non
         "velocity_magnitude",
     )
     assert "pressure_gradient_magnitude" in resolve_parameter_schema("pyudales")
-
-
-def test_time_varying_truth_and_prior_correlation_lengths_are_distinct() -> None:
-    cfg = _compose()
-
-    assert (
-        cfg.time_varying.truth_method_kwargs.correlation_length
-        != cfg.time_varying.method_kwargs.correlation_length
-    )
-
-
-def _build_time_varying_truth(cfg, num_time_points: int):
-    return create_time_varying_true_params(
-        model_name=cfg.truth_model.name,
-        tv_cfg=cfg.time_varying,
-        true_cfg=cfg.params.true,
-        external_cfg=cfg.params.external,
-        simulation_time=cfg.time.simulation_time,
-        num_time_points=num_time_points,
-        seed=cfg.esmda.seed,
-    )
-
-
-def test_create_time_varying_true_params_uses_ar2_relaxation_truth() -> None:
-    # Default time_varying is ar2_relaxation; truth_method is therefore
-    # ar2_relaxation by design. Pin the schema and prove that the truth
-    # trajectory is driven by truth_method (not method) by holding
-    # truth_method fixed while changing method — the truth must not move.
-    cfg_default = _compose(["model@truth_model=pylbm"])
-    cfg_other_prior = _compose(
-        [
-            "model@truth_model=pylbm",
-            "time_varying.method=ar1",
-            "time_varying.method_kwargs.correlation_length=12345.0",
-        ]
-    )
-
-    assert cfg_default.time_varying.truth_method == "ar2_relaxation"
-    assert cfg_other_prior.time_varying.truth_method == "ar2_relaxation"
-
-    num_time_points = 4
-    truth_default = _build_time_varying_truth(cfg_default, num_time_points)
-    truth_other = _build_time_varying_truth(cfg_other_prior, num_time_points)
-
-    assert set(truth_default.data_vars) == {"inflow_angle", "velocity_magnitude"}
-    assert truth_default["inflow_angle"].dims == ("time",)
-    assert truth_default["inflow_angle"].shape == (num_time_points,)
-    assert "ensemble" not in truth_default.dims
-
-    np.testing.assert_array_equal(
-        truth_default["inflow_angle"].values,
-        truth_other["inflow_angle"].values,
-    )
-    np.testing.assert_array_equal(
-        truth_default["velocity_magnitude"].values,
-        truth_other["velocity_magnitude"].values,
-    )
-
-
-def test_create_time_varying_true_params_includes_pressure_gradient_for_pyudales() -> None:
-    cfg = _compose(["model@truth_model=pyudales"])
-    truth = _build_time_varying_truth(cfg, num_time_points=4)
-
-    assert "pressure_gradient_magnitude" in truth
-    assert "pressure_gradient_magnitude" not in _build_time_varying_truth(
-        _compose(["model@truth_model=pylbm"]), num_time_points=4
-    )
 
 
 def test_observation_helpers_use_explicit_mode() -> None:

@@ -38,7 +38,6 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 from pyurbanair.config.hydra_helpers import (
     clean_outputs,
-    configure_failure_policy,
     resolve_output_dir,
 )
 from pyurbanair.utils.run_utils import add_velocity_magnitude
@@ -109,7 +108,7 @@ def run(cfg: DictConfig) -> None:
     # Instantiate forward model.
     forward_model = instantiate(
         cfg.model.forward_model,
-        results_dir=None#resolve_results_dir(cfg),
+        results_dir=resolve_results_dir(cfg),
     )
     instantiate(cfg.model.prepare, forward_model=forward_model)
 

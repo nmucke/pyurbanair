@@ -1,12 +1,12 @@
-# Time-varying parameter model — same sample_prior(ensemble_size) interface as
-# the static sampler, but emits a `time` dim. Each external `mean` / `std` may
-# be a scalar (constant over the window) OR a list of control points spaced
-# evenly over the window and linearly interpolated, letting x_ext(t) / Σ_ext(t)
-# vary in time, e.g. `inflow_angle.mean: [-30, 0, 30]`.
+# Time-varying TRUTH parameters. Same AR2RelaxationModel as the dynamic prior,
+# but with distinct external means / seed so the truth trajectory is not drawn
+# from the assimilation prior's generative process (anti-inverse-crime).
+# Mounted as `params@truth_params` by run_esmda.yaml; the assimilation prior is
+# the separate `params@prior_params=dynamic`.
 _target_: pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel
 _convert_: all
 correlation_length: 100.0
-seed: 2
+seed: 7
 external_parameters:
   inflow_angle:
     _target_: pyurbanair.static_parameters.Normal

@@ -161,12 +161,15 @@ def test_excluded_row_is_left_unchanged() -> None:
 
 def test_parameter_esmda_runs_with_correlation_localization(compose_test_cfg) -> None:
     """End-to-end: parameter ESMDA composes and runs with localization on."""
-    from scripts.run_parameter_esmda import run
+    from scripts.run_esmda import run
 
     cfg = compose_test_cfg(
         [
             "model@truth_model=pyudales",
             "model@assim_model=pyudales",
+            "esmda/smoother=parameter",
+            "params@prior_params=static",
+            "params@truth_params=static_truth",
             # Correlation localization is the default `esmda.localization`; just
             # tune its truncation threshold here.
             "esmda.localization.truncation_correlation=0.2",
@@ -176,7 +179,7 @@ def test_parameter_esmda_runs_with_correlation_localization(compose_test_cfg) ->
             "esmda.num_assimilation_windows=1",
             "run.skip_viz=true",
         ],
-        config_name="run_parameter_esmda",
+        config_name="run_esmda",
     )
     run(cfg)
 

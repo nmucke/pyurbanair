@@ -1,0 +1,18 @@
+# Static TRUTH parameters — a single fixed realization, drawn as Constants so
+# `.sample(1)` returns the exact true values. Mounted as `params@truth_params`
+# by run_esmda.yaml; the assimilation prior is the separate `params@prior_params`
+# (conf/params/static.yaml, with Normal priors), so truth and prior never share
+# a generative process (anti-inverse-crime).
+_target_: pyurbanair.static_parameters.ParameterSampler
+_convert_: all
+seed: 0
+parameters:
+  inflow_angle:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 10.0
+  velocity_magnitude:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 5.0
+  pressure_gradient_magnitude:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0041912

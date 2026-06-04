@@ -1,0 +1,14 @@
+# Time-varying parameter ESMDA smoother (each (time, parameter) knot is its own
+# scalar in the augmented state). Pair with `params@prior_params=dynamic`.
+#
+# `num_time_points` and `time_coords` are NOT set here: run_esmda.py supplies
+# them at instantiate time from the sampled dynamic prior's `time` coordinate
+# (there is no separate `time_varying` config group in the new params system).
+# `pin_initial_time_point` is re-toggled per window by the script (free at
+# window 0, pinned thereafter for cross-window continuity).
+_target_: data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA
+num_steps: ${esmda.num_steps}
+alpha: ${esmda.alpha}
+pin_initial_time_point: true
+localization: ${esmda.localization}
+num_time_points: ${params.time_coords.num}

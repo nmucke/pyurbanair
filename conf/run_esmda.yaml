@@ -1,0 +1,46 @@
+# Primary config for scripts/run_esmda.py — the single ESMDA entry point that
+# replaces run_{parameter,state_and_parameter,rollout,time_varying_parameter,
+# time_varying_parameters_rollout}_esmda.py.
+#
+# Three orthogonal, declarative axes select the mode:
+#   * esmda/smoother=parameter|state_and_parameter|time_varying  (augmented state)
+#   * params@prior_params=static|dynamic                          (static vs time-varying)
+#   * esmda.num_assimilation_windows=1|N                          (single window vs rollout)
+# and the truth source:
+#   * run.ground_truth_dir=null   -> simulate truth inline (default)
+#   * run.ground_truth_dir=<path> -> load a state.nc/params.nc artifact
+#                                    (as written by run_forward_model.py)
+#
+# Mirrors the model double-mount: the model group is mounted twice
+# (model@truth_model / model@assim_model) and the params group is mounted twice
+# (params@truth_params / params@prior_params). Keeping the truth and prior
+# samplers as separate configs is what avoids the inverse crime.
+#
+# Examples::
+#
+#   python scripts/run_esmda.py esmda/smoother=parameter \
+#     params@prior_params=static params@truth_params=static_truth
+#   python scripts/run_esmda.py esmda/smoother=state_and_parameter \
+#     params@prior_params=static esmda.num_assimilation_windows=3
+#   python scripts/run_esmda.py esmda/smoother=time_varying \
+#     params@prior_params=dynamic params@truth_params=dynamic_truth \
+#     esmda.num_assimilation_windows=3
+defaults:
+  - config
+  - esmda
+  - esmda/smoother: dynamic
+  - model@truth_model: pyudales
+  - model@assim_model: pyudales
+  - params@truth_params: dynamic_truth
+  - params@prior_params: dynamic
+  - _self_
+
+# This run mounts two models (model@truth_model / model@assim_model) and never
+# uses the base `model` package, so paths.yaml's default `.temp/${model.name}`
+# would always resolve to the unused base model (pylbm). Override the output root
+# to reflect the actual truth/assim backends chosen for the run.
+paths:
+  results_dir: .temp/${truth_model.name}_to_${assim_model.name}
+
+run:
+  truth_dir: null

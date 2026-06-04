@@ -3,8 +3,81 @@ import pathlib
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray
+from matplotlib.lines import Line2D
 
 from pyurbanair.utils.run_utils import add_velocity_magnitude
+
+# --- Shared figure style ----------------------------------------------------
+# Semantic colours used consistently across every figure.
+_COLOR_TRUTH = "#222222"        # near-black, drawn dashed
+_COLOR_PRIOR = "#ff7f0e"        # orange
+_COLOR_POSTERIOR = "#1f77b4"    # blue
+_COLOR_OBS = "#e6194b"          # crimson markers
+
+# Colourmaps by physical meaning.
+_CMAP_FIELD = "viridis"         # velocity magnitude
+_CMAP_STD = "magma"             # ensemble spread
+_CMAP_ERROR = "Reds"            # absolute error
+
+# rcParams applied (locally, via rc_context) inside each plotting function so we
+# never mutate global matplotlib state.
+_RC = {
+    "figure.dpi": 120,
+    "savefig.dpi": 150,
+    "savefig.bbox": "tight",
+    "font.size": 11,
+    "axes.titlesize": 13,
+    "axes.titleweight": "bold",
+    "axes.labelsize": 11,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "axes.axisbelow": True,
+    "grid.alpha": 0.3,
+    "grid.linewidth": 0.6,
+    "legend.frameon": True,
+    "legend.framealpha": 0.9,
+    "legend.fontsize": 9,
+    "image.cmap": _CMAP_FIELD,
+}
+
+_PARAM_LABELS = {
+    "inflow_angle": "Inflow angle",
+    "velocity_magnitude": "Velocity magnitude",
+}
+
+
+def _save(fig, output_path: str | pathlib.Path) -> None:
+    output_path = pathlib.Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def _shade_windows(ax, edges) -> None:
+    """Lightly shade alternating assimilation windows with dotted dividers."""
+    if edges is None or len(edges) < 2:
+        return
+    for k in range(len(edges) - 1):
+        if k % 2 == 1:
+            ax.axvspan(edges[k], edges[k + 1], color="0.5", alpha=0.06, zorder=0)
+    for e in edges[1:-1]:
+        ax.axvline(e, color="0.75", linewidth=0.6, linestyle=":", zorder=0)
+
+
+def _param_legend_handles(has_prior: bool) -> list[Line2D]:
+    handles: list[Line2D] = []
+    if has_prior:
+        handles += [
+            Line2D([0], [0], color=_COLOR_PRIOR, lw=2.5, label="Prior mean"),
+            Line2D([0], [0], color=_COLOR_PRIOR, lw=0.9, alpha=0.5, label="Prior members"),
+        ]
+    handles += [
+        Line2D([0], [0], color=_COLOR_POSTERIOR, lw=2.5, label="Posterior mean"),
+        Line2D([0], [0], color=_COLOR_POSTERIOR, lw=0.9, alpha=0.5, label="Posterior members"),
+        Line2D([0], [0], color=_COLOR_TRUTH, lw=2.0, ls="--", label="Truth"),
+    ]
+    return handles
 
 
 def _extract_2d_slice_with_extent(
@@ -457,55 +530,158 @@ def plot_rollout_time_evolution(
     esmda_state: xarray.Dataset,
     true_state: xarray.Dataset,
     output_path: str | pathlib.Path,
+    prior_params: xarray.Dataset | None = None,
+    window_edges: list[float] | None = None,
 ) -> None:
-    """Plot parameter and RMSE time evolution over rollout assimilation windows."""
+    """Plot parameter and RMSE time evolution over rollout assimilation windows.
+
+    For each parameter every ensemble member is drawn faintly (``alpha=0.35``)
+    for both the prior (if ``prior_params`` is given) and the posterior, with the
+    ensemble mean overlaid on top (opaque, thicker). The truth is a dashed line.
+    ``window_edges`` (if given) lightly shades alternating assimilation windows.
+    """
     from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 
-    esmda_mean = esmda_params.mean(dim="ensemble")
-    esmda_std = esmda_params.std(dim="ensemble")
+    def _members_and_x(da: xarray.DataArray):
+        """Return (x, members) with members shaped (n_ensemble, n_x)."""
+        da = da.transpose("ensemble", ...)
+        members = np.asarray(da.values).reshape(da.sizes["ensemble"], -1)
+        non_ens = [d for d in da.dims if d != "ensemble"]
+        if non_ens == ["time"] and "time" in da.coords:
+            x = np.asarray(da["time"].values, dtype=float)
+        else:
+            x = np.arange(members.shape[1])
+        return x, members
+
+    def _plot_ensemble(ax, ds, param_name, color):
+        x, members = _members_and_x(ds[param_name])
+        ax.plot(x, members.T, color=color, alpha=0.35, linewidth=0.9)
+        ax.plot(x, members.mean(axis=0), color=color, alpha=1.0, linewidth=2.5)
 
     true_state_mean = true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
-    esmda_state_mean = esmda_state.mean(dim="ensemble")
+    esmda_state_mean = esmda_state.mean(dim="ensemble") if "ensemble" in esmda_state.dims else esmda_state
 
     true_vel = np.asarray(get_velocity_magnitude_field(true_state_mean))
     esmda_vel = np.asarray(get_velocity_magnitude_field(esmda_state_mean))
     min_t = min(true_vel.shape[0], esmda_vel.shape[0])
     rmse = np.sqrt(np.mean((true_vel[:min_t] - esmda_vel[:min_t]) ** 2, axis=tuple(range(1, true_vel.ndim))))
 
-    param_names = [p for p in ("inflow_angle", "velocity_magnitude") if p in esmda_mean.data_vars]
+    param_names = [p for p in ("inflow_angle", "velocity_magnitude") if p in esmda_params.data_vars]
     n_params = len(param_names)
+    has_prior = prior_params is not None
 
-    fig, axes = plt.subplots(n_params + 1, 1, figsize=(10, 4 * (n_params + 1)), constrained_layout=True)
-    axes = np.atleast_1d(axes)
-
-    for i, param_name in enumerate(param_names):
-        ax = axes[i]
-        mean_vals = np.asarray(esmda_mean[param_name].values).reshape(-1)
-        std_vals = np.asarray(esmda_std[param_name].values).reshape(-1)
-        t = np.arange(len(mean_vals))
-        ax.plot(t, mean_vals, label="ESMDA Mean", linewidth=2, color="tab:blue")
-        ax.fill_between(
-            t,
-            mean_vals - 2 * std_vals,
-            mean_vals + 2 * std_vals,
-            color="tab:blue",
-            alpha=0.3,
-            label="ESMDA ±2 Std",
+    with plt.rc_context(_RC):
+        fig, axes = plt.subplots(
+            n_params + 1, 1, figsize=(11, 3.2 * (n_params + 1)), constrained_layout=True
         )
-        if param_name in true_params.data_vars:
-            true_vals = np.asarray(true_params[param_name].values).reshape(-1)
-            ax.plot(np.arange(len(true_vals)), true_vals, label="True", linewidth=2, color="tab:red")
-        ax.set_xlabel("Time Window")
-        ax.set_ylabel(param_name)
-        ax.legend()
+        axes = np.atleast_1d(axes)
 
-    ax_rmse = axes[n_params]
-    ax_rmse.plot(np.arange(len(rmse)), rmse, label="RMSE", linewidth=2, color="tab:blue")
-    ax_rmse.set_xlabel("Time Window")
-    ax_rmse.set_ylabel("RMSE (velocity magnitude)")
-    ax_rmse.legend()
+        for i, param_name in enumerate(param_names):
+            ax = axes[i]
+            _shade_windows(ax, window_edges)
+            if has_prior and param_name in prior_params.data_vars:
+                _plot_ensemble(ax, prior_params, param_name, _COLOR_PRIOR)
+            _plot_ensemble(ax, esmda_params, param_name, _COLOR_POSTERIOR)
+            if param_name in true_params.data_vars:
+                true_da = true_params[param_name]
+                if "ensemble" in true_da.dims:
+                    true_da = true_da.isel(ensemble=0)
+                x_true, true_members = _members_and_x(true_da.expand_dims("ensemble"))
+                ax.plot(
+                    x_true, true_members[0], color=_COLOR_TRUTH, linewidth=2.0,
+                    linestyle="--", zorder=5,
+                )
+            ax.set_ylabel(_PARAM_LABELS.get(param_name, param_name))
+            ax.set_xlabel("Time")
+            ax.margins(x=0.01)
+            ax.legend(handles=_param_legend_handles(has_prior), loc="best", ncol=1)
 
-    output_path = pathlib.Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
-    plt.close(fig)
+        ax_rmse = axes[n_params]
+        ax_rmse.plot(
+            np.arange(len(rmse)), rmse, color=_COLOR_POSTERIOR, linewidth=2.0,
+            marker="o", markersize=4,
+        )
+        ax_rmse.set_xlabel("Time step")
+        ax_rmse.set_ylabel("RMSE  |U|")
+        ax_rmse.set_title("State error")
+        ax_rmse.margins(x=0.01)
+
+        fig.suptitle("Parameter evolution over assimilation windows", fontsize=15, fontweight="bold")
+        _save(fig, output_path)
+
+
+def plot_final_state_with_obs(
+    mean_vel: xarray.DataArray,
+    std_vel: xarray.DataArray,
+    output_path: str | pathlib.Path,
+    true_vel: xarray.DataArray | None = None,
+    obs_x: np.ndarray | None = None,
+    obs_y: np.ndarray | None = None,
+    z_level: int | None = None,
+) -> None:
+    """Plot the velocity magnitude at the final time with observation locations.
+
+    Always shows the posterior ensemble mean and std; if ``true_vel`` is given,
+    the truth is added as a leading panel that shares the colour scale of the
+    posterior mean for a fair comparison.
+    """
+    mean_2d, mean_extent = _extract_2d_slice_with_extent(mean_vel, z_level=z_level)
+    std_2d, std_extent = _extract_2d_slice_with_extent(std_vel, z_level=z_level)
+
+    true_2d = true_extent = None
+    if true_vel is not None:
+        true_2d, true_extent = _extract_2d_slice_with_extent(true_vel, z_level=z_level)
+
+    # Share the colour scale between truth and posterior mean.
+    field_stack = [mean_2d] + ([true_2d] if true_2d is not None else [])
+    vmin = float(np.nanmin([np.nanmin(f) for f in field_stack]))
+    vmax = float(np.nanmax([np.nanmax(f) for f in field_stack]))
+
+    with plt.rc_context(_RC):
+        n_panels = 3 if true_2d is not None else 2
+        fig, axes = plt.subplots(
+            1, n_panels, figsize=(6.3 * n_panels, 5.4), constrained_layout=True
+        )
+
+        col = 0
+        if true_2d is not None:
+            im_true = axes[col].imshow(
+                true_2d, origin="lower", cmap=_CMAP_FIELD, extent=true_extent,
+                aspect="equal", vmin=vmin, vmax=vmax,
+            )
+            axes[col].set_title("Truth  |U|")
+            cb = fig.colorbar(im_true, ax=axes[col], fraction=0.046, pad=0.04)
+            cb.set_label("Velocity magnitude")
+            col += 1
+
+        im_mean = axes[col].imshow(
+            mean_2d, origin="lower", cmap=_CMAP_FIELD, extent=mean_extent,
+            aspect="equal", vmin=vmin, vmax=vmax,
+        )
+        axes[col].set_title("Posterior mean  |U|")
+        cb0 = fig.colorbar(im_mean, ax=axes[col], fraction=0.046, pad=0.04)
+        cb0.set_label("Velocity magnitude")
+        col += 1
+
+        im_std = axes[col].imshow(
+            std_2d, origin="lower", cmap=_CMAP_STD, extent=std_extent, aspect="equal"
+        )
+        axes[col].set_title("Posterior std  |U|")
+        cb1 = fig.colorbar(im_std, ax=axes[col], fraction=0.046, pad=0.04)
+        cb1.set_label("Ensemble std")
+
+        for ax in axes:
+            ax.set_xlabel("x")
+            ax.set_ylabel("y")
+            ax.grid(False)
+
+        if obs_x is not None and obs_y is not None:
+            for ax in axes:
+                ax.scatter(
+                    obs_x, obs_y, s=40, marker="o", facecolor=_COLOR_OBS,
+                    edgecolor="white", linewidth=0.8, zorder=5, label="Observations",
+                )
+            axes[0].legend(loc="upper right", framealpha=0.9)
+
+        fig.suptitle("State at final time", fontsize=15, fontweight="bold")
+        _save(fig, output_path)
