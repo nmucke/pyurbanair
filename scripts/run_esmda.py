@@ -234,17 +234,20 @@ def run(cfg: DictConfig) -> None:
         true_state = true_forward_model(params=true_params.isel(ensemble=0))
 
     else:
+        final_time = sim_time * num_windows
         truth_dir = pathlib.Path(cfg.run.truth_dir)
         true_params = xarray.load_dataset(truth_dir / "params.nc")
         true_state = xarray.load_dataset(truth_dir / "state.nc")
+        true_state = true_state.sel(time=true_state.time < final_time)
+
+        if "time" in true_params.dims:
+            true_params = true_params.sel(time=true_params.time < final_time)
+       
 
     # --- Output and windows dir ---------------------------------------------------------
-
-
     out_dir = resolve_output_dir(cfg, "esmda")
     out_dir.mkdir(parents=True, exist_ok=True)
     windows_dir = out_dir / "windows"
-    
 
     # --- Assimilation ensemble model -------------
     assim_results_dir = (

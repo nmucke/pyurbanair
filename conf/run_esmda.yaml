@@ -43,4 +43,5 @@ paths:
   results_dir: .temp/${truth_model.name}_to_${assim_model.name}
 
 run:
-  truth_dir: null
+  # truth_dir: null
+  truth_dir: .temp/pyudales/hydra/run_forward_model/2026-06-05/12-15-24/pyudales_rollout_time_varying
