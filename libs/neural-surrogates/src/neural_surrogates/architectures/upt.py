@@ -251,7 +251,9 @@ class UPT(nn.Module):
 
         # scatter back to the grid; obstacle cells stay 0
         out = state.new_zeros(b, c, d * h * w)
-        out[:, :, fluid_idx] = pred.transpose(1, 2)  # (B, C, N) placed
+        # pred may be half under autocast while out follows the input dtype;
+        # index_put won't cast, so match out's dtype explicitly (no-op otherwise).
+        out[:, :, fluid_idx] = pred.transpose(1, 2).to(out.dtype)  # (B, C, N) placed
         out = out.reshape(b, c, d, h, w)
         return out
 
