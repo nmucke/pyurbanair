@@ -1,10 +1,12 @@
 # @package _global_
 
 defaults:
-  - /neural_surrogate_architectures/upt@architecture: medium
+  # - /neural_surrogate_architectures/upt@architecture: medium
+  - /neural_surrogate_architectures/unet_convnext@architecture: medium
   - _self_
 
-model_name: upt_medium
+# model_name: upt_medium
+model_name: unet_convnext_medium
 
 trainer:
   _target_: neural_surrogates.Trainer
@@ -29,6 +31,7 @@ trainer:
 optimizer:
   _target_: torch.optim.Adam
   lr: 1.0e-3
+  weight_decay: 1.0e-5
 
 loss:
   _target_: torch.nn.MSELoss
