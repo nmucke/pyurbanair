@@ -27,16 +27,25 @@
     ug_surface = 3.0,
     vg_surface = 0.0,
 
-    roughness_length = 0.1,
+    roughness_length = 0.05,
 
     humidity = .F.,
     passive_scalar = .F.,
+
+    ! --- aligned with uDALES xie_and_castro setup ---
+    neutral = .T.,              ! match uDALES ltempeq=.false. (neutral, momentum-only)
+    omega = 0.0,                ! match uDALES lcoriol=.false. (no Coriolis)
+    momentum_advec = 'pw-scheme',   ! 2nd-order Piacsek-Williams ~ uDALES iadv_mom=2 (CD2)
+    scalar_advec = 'pw-scheme',
+    cfl_factor = 0.7,           ! match uDALES courant=0.7
 
 /
 
 &runtime_parameters
 
     end_time = 60.0,
+
+    dt_max = 1.0,               ! match uDALES dtmax=1.0
 
     dt_data_output = 10.0,
     dt_data_output_av = 10.0,

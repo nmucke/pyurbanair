@@ -14,7 +14,8 @@ an observation-error *inflation matrix* ``E_inf`` of shape ``(N_aug, N_d)``:
 
 * ``E_inf[l, j] == 1``    -> observation ``j`` fully influences row ``l``;
 * ``1 < E_inf[l, j] < inf`` -> observation ``j`` is tapered for row ``l``
-  (its error variance is inflated, reducing its impact);
+  (its perturbation/std is multiplied by ``E_inf``, i.e. its error variance
+  is inflated by ``E_inf ** 2``, reducing its impact);
 * ``E_inf[l, j] == inf``  -> observation ``j`` is excluded from row ``l``.
 
 Subclasses implement :meth:`inflation_factors`.  The shared local-analysis
@@ -22,9 +23,45 @@ math lives in :meth:`localized_update`.
 """
 
 from abc import ABC, abstractmethod
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
+
+
+def _group_inflation(
+    inflation: jnp.ndarray, group_ids: jnp.ndarray
+) -> jnp.ndarray:
+    """Share the per-observation inflation across rows in the same block.
+
+    Implements the paper's "grid block" local analysis (Vossepoel et al. 2025,
+    sec. 3b): co-located augmented rows are updated jointly with a *single*
+    observation selection and transition matrix.  For each block and each
+    observation we take the minimum inflation over the block's member rows,
+    which reproduces the reference EnKF_MS semantics
+    (``m_assimilation_old.F90``):
+
+    * an observation is active for the block if it is active for *any* member
+      (``|corrA| > rho_t .or. |corrO| > rho_t``) — the min of a finite and an
+      ``inf`` is finite;
+    * the taper is driven by the *strongest* correlation in the block
+      (``dist = 1 - max(|corr|)``) — the largest ``|rho|`` gives the smallest
+      ``d_c`` and hence the smallest inflation, i.e. the min.
+
+    Args:
+        inflation: Per-row inflation, shape ``(N_aug, N_d)``.
+        group_ids: Block id per augmented row, shape ``(N_aug,)``.  Rows
+            sharing an id are updated jointly.
+
+    Returns:
+        Inflation of shape ``(N_aug, N_d)`` in which every row has been
+        replaced by its block's shared inflation vector.
+    """
+    num_segments = int(group_ids.max()) + 1
+    block_min = jax.ops.segment_min(
+        inflation, group_ids, num_segments=num_segments
+    )  # (num_segments, N_d)
+    return block_min[group_ids]
 
 
 class BaseLocalization(ABC):
@@ -46,8 +83,9 @@ class BaseLocalization(ABC):
 
         Returns:
             Array of shape ``(N_aug, N_d)``.  Entry ``[l, j]`` is the factor
-            by which observation ``j``'s error variance is inflated when
-            updating augmented-state row ``l``.  ``1.0`` keeps the
+            ``E_inf`` that multiplies observation ``j``'s error perturbation
+            (std) when updating augmented-state row ``l`` — equivalently its
+            error variance is inflated by ``E_inf ** 2``.  ``1.0`` keeps the
             observation, larger values taper it, and ``jnp.inf`` excludes it.
         """
         raise NotImplementedError
@@ -63,8 +101,9 @@ class BaseLocalization(ABC):
         C_D_sqrt: jnp.ndarray,
         alpha: float,
         rng_key: jax.Array,
+        group_ids: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
-        """Apply the localized (row-by-row) ESMDA Kalman update.
+        """Apply the localized (row- or block-wise) ESMDA Kalman update.
 
         This mirrors the global update in
         ``_BaseESMDA._compute_kalman_update`` but computes an individual
@@ -73,6 +112,13 @@ class BaseLocalization(ABC):
         per-row inflation factors.  Rows whose observations are all excluded
         receive the identity update (no change), matching the paper's
         "transition matrix is just the identity" case.
+
+        When ``group_ids`` is given, co-located rows sharing a block id are
+        updated *jointly* with a single observation selection and transition
+        matrix (the paper's "grid block" local analysis, sec. 3b) — e.g. the
+        ``u``/``v``/``w`` state at one cell, or all time knots of one
+        parameter.  When ``group_ids`` is ``None`` each row is its own block
+        (per-row local analysis).
 
         Args:
             augmented: Augmented state, shape ``(N_aug, N_e)``.
@@ -87,6 +133,9 @@ class BaseLocalization(ABC):
                 ``(N_d, N_d)``.
             alpha: ESMDA inflation coefficient for this step.
             rng_key: PRNG key for the observation perturbations.
+            group_ids: Optional block id per augmented row, shape
+                ``(N_aug,)``.  Rows sharing an id are updated jointly with a
+                single selection/transition.  ``None`` -> per-row analysis.
 
         Returns:
             Updated augmented array, shape ``(N_aug, N_e)``.
@@ -100,14 +149,22 @@ class BaseLocalization(ABC):
         C_DD = jnp.dot(pred_obs_dev, pred_obs_dev.T) / (N_e - 1)
 
         Z = jax.random.normal(rng_key, (N_d, N_e))
-        # Base perturbation (un-inflated). Per-row inflation scales the
-        # observation errors, so the perturbed observations for row l use
-        # sqrt(E_inf[l]) on the perturbation as well as on C_D (the paper
-        # multiplies each row of the perturbation matrix E by E_inf).
+        # Base (un-inflated) measurement-error perturbation E.  Following
+        # Vossepoel et al. (2025) and the reference EnKF_MS implementation
+        # (``m_assimilation_old.F90``: ``subE(m,:) = subE(m,:) * Einfl``), the
+        # per-row tapering multiplies the perturbation matrix E — a *standard-
+        # deviation* quantity — by the inflation factor E_inf.  Consequently
+        # the measurement-error *variance* is scaled by ``E_inf ** 2``.
         base_perturbation = jnp.sqrt(alpha) * (C_D_sqrt @ Z)  # (N_d, N_e)
 
         C_D_diag = jnp.diag(C_D)  # (N_d,)
         inflation = self.inflation_factors(aug_dev, pred_obs_dev)  # (N_aug, N_d)
+
+        # Joint "grid block" update: rows in the same block share one selection
+        # and transition.  Sharing the inflation vector across the block is what
+        # makes the per-row solves below collapse to one transition per block.
+        if group_ids is not None:
+            inflation = _group_inflation(inflation, group_ids)
 
         def update_row(
             aug_row: jnp.ndarray,
@@ -118,13 +175,14 @@ class BaseLocalization(ABC):
             # finite; an infinite inflation factor means "excluded".
             active = jnp.isfinite(inflation_row)  # (N_d,) bool
 
-            # Finite tapering for active observations; placeholder 1.0 for
-            # excluded ones (they are decoupled below, so the value is moot).
-            tapered = jnp.where(active, inflation_row, 1.0)  # (N_d,)
-            sqrt_inf = jnp.sqrt(tapered)  # (N_d,)
-            C_D_row = C_D_diag * tapered  # (N_d,)
+            # E_inf for active observations; placeholder 1.0 for excluded ones
+            # (they are decoupled below, so the value is moot).  E_inf scales
+            # the perturbation E (std), so the error variance C_D — and hence
+            # the EE^T term in the analysis denominator — scales by E_inf ** 2.
+            e_inf = jnp.where(active, inflation_row, 1.0)  # (N_d,)
+            C_D_row = C_D_diag * e_inf**2  # (N_d,) variance scaled by E_inf**2
 
-            perturbed_obs = obs[:, None] + sqrt_inf[:, None] * base_perturbation
+            perturbed_obs = obs[:, None] + e_inf[:, None] * base_perturbation
             # Excluded observations carry no innovation.
             innovation = jnp.where(
                 active[:, None], perturbed_obs - pred_obs, 0.0

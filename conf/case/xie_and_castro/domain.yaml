@@ -9,8 +9,12 @@
 # front of the Xie & Castro array (which starts at x=5).
 nx: 50
 ny: 40
-nz: 4
+nz: 16
 bounds:
   - [-20.0, 80.0]
   - [0.0, 80.0]
   - [0.0, 32.0]
+# bounds:
+#   - [-20.0, 50.0]
+#   - [0.0, 40.0]
+#   - [0.0, 16.0]

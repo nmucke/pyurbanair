@@ -19,7 +19,12 @@ from __future__ import annotations
 from functools import partial
 
 from kappamodules.layers import ContinuousSincosEmbed, LinearProjection, Sequential
-from kappamodules.transformer import DitBlock, DitPerceiverBlock, PerceiverBlock
+from kappamodules.transformer import (
+    DitBlock,
+    DitPerceiverBlock,
+    PerceiverBlock,
+    PrenormBlock,
+)
 from kappamodules.vit import VitBlock
 from torch import nn
 
@@ -37,6 +42,7 @@ class DecoderPerceiver(nn.Module):
         perc_num_heads=None,
         cond_dim=None,
         init_weights="truncnormal002",
+        attn_ctor=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -58,11 +64,16 @@ class DecoderPerceiver(nn.Module):
             input_dim, dim, init_weights=init_weights, optional=True
         )
 
-        # blocks
+        # blocks. The default self-attention block here is ``VitBlock``, which
+        # has no ``attn_ctor`` hook; when a custom attention is requested fall
+        # back to the equivalent prenorm block that does (``PrenormBlock``).
         if cond_dim is None:
-            block_ctor = VitBlock
+            block_ctor = VitBlock if attn_ctor is None else partial(
+                PrenormBlock, attn_ctor=attn_ctor
+            )
         else:
-            block_ctor = partial(DitBlock, cond_dim=cond_dim)
+            attn_kwargs = {} if attn_ctor is None else {"attn_ctor": attn_ctor}
+            block_ctor = partial(DitBlock, cond_dim=cond_dim, **attn_kwargs)
         self.blocks = Sequential(
             *[
                 block_ctor(

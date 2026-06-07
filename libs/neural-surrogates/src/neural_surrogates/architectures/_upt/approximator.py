@@ -27,6 +27,7 @@ class Approximator(nn.Module):
         dim=None,
         cond_dim=None,
         init_weights="truncnormal002",
+        attn_ctor=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -42,11 +43,13 @@ class Approximator(nn.Module):
             input_dim, dim, init_weights=init_weights, optional=True
         )
 
-        # blocks
+        # blocks. ``attn_ctor`` (when given) selects the self-attention impl;
+        # both block types accept it, so it is simply forwarded.
+        attn_kwargs = {} if attn_ctor is None else {"attn_ctor": attn_ctor}
         if cond_dim is None:
-            block_ctor = PrenormBlock
+            block_ctor = partial(PrenormBlock, **attn_kwargs)
         else:
-            block_ctor = partial(DitBlock, cond_dim=cond_dim)
+            block_ctor = partial(DitBlock, cond_dim=cond_dim, **attn_kwargs)
         self.blocks = Sequential(
             *[
                 block_ctor(

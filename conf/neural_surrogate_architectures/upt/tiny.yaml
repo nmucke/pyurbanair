@@ -12,3 +12,6 @@ num_heads: 2
 radius: 2.5
 max_degree: 8
 # cond_dim: null   # default: params concatenated to per-point features
+# Self-attention impl: dot_product (default), dot_product_slow, efficient,
+# linformer, transsolver.
+attention_type: dot_product

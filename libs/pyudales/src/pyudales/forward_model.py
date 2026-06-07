@@ -26,6 +26,7 @@ from .utils.params_utils import (
     merge_params,
 )
 from .utils.random_utils import apply_random_initial_condition
+from .utils.run_monitor import InstabilityCheck, run_with_dt_watchdog
 from .utils.save_frequency_utils import (
     apply_output_frequency,
     apply_save_only_last_timestep,
@@ -205,6 +206,7 @@ class ForwardModel(BaseForwardModel):
         spinup_time: float = 0.0,
         nudging_config: Optional[dict] = None,
         precomputed_geom_dir: Optional[str] = None,
+        instability_check: Optional[dict] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -236,7 +238,9 @@ class ForwardModel(BaseForwardModel):
             output_dir: The directory for intermediate uDALES outputs (defaults to {temp_dir}/outputs).
             nudging_config: Optional dict with nudging tunables for time-varying params.
                 Supported keys: ``tnudge`` (relaxation timescale in seconds, default 10.0),
-                ``nnudge`` (number of levels from bottom NOT nudged, default 0).
+                ``nnudge`` (number of levels from bottom NOT nudged, default 0), and
+                ``nnudge_meters`` (height in meters below which nudging is NOT applied;
+                converted to a level count and takes precedence over ``nnudge``).
             precomputed_geom_dir: Optional path to a directory of precomputed IBM
                 geometry files (``solid_*``/``fluid_boundary_*``/``facet_sections_*``,
                 as written by a prior from-STL preprocessing run, e.g. via
@@ -247,6 +251,14 @@ class ForwardModel(BaseForwardModel):
                 The files are grid-specific; if the directory contains a
                 ``geom_meta.json`` its recorded grid is checked against the active
                 domain and a mismatch raises.
+            instability_check: Optional dict configuring the dt-collapse
+                watchdog (see :class:`.utils.run_monitor.InstabilityCheck`).
+                Supported keys: ``enabled`` (default True), ``min_dt``
+                (absolute timestep floor, default 1e-6), ``patience`` (consecutive
+                sub-floor steps before killing, default 40), ``warmup_steps``
+                (default 20), ``poll_interval_s`` (default 2.0). When the
+                timestep collapses the run is killed early and reported as a
+                failure, so the ensemble resamples it from a successful donor.
         """
         super().__init__(results_dir=results_dir)
 
@@ -340,6 +352,11 @@ class ForwardModel(BaseForwardModel):
         self._nudging_config = nudging_config or {}
         if not self._nudging_config and self.boundary_condition == "inflow_outflow":
             self._nudging_config = DEFAULT_NUDGING_CONFIG
+
+        # Watchdog that kills the run early if the timestep collapses (numerical
+        # instability), so the ensemble can resample it without waiting for the
+        # slow eventual crash.
+        self._instability_check = InstabilityCheck.from_config(instability_check)
 
         # NOTE: inflow settings (nudging files, prof.inp, lscale.inp updates)
         # are NOT applied here.  They are deferred to run_single() via
@@ -736,10 +753,16 @@ class ForwardModel(BaseForwardModel):
         ]
         env = os.environ.copy()
         _augment_runtime_library_paths(env)
-        subprocess.run(
+        log_path = (
+            self.dirs.output_dir
+            / self.dirs.experiment_name
+            / f"run.{self.dirs.experiment_name}.log"
+        )
+        run_with_dt_watchdog(
             command,
-            check=True,
             env=env,
+            log_path=log_path,
+            check=self._instability_check,
             stdout=self.stdout,
             stderr=self.stderr,
         )

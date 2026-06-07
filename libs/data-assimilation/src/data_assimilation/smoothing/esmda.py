@@ -1,11 +1,33 @@
 import os
 import pathlib
+import re
 from abc import abstractmethod
 from typing import Optional
 
 import jax
 import jax.numpy as jnp
 import xarray
+
+
+def _group_ids_by_base_name(names: list[str]) -> jnp.ndarray:
+    """Block id per row, grouping names that share a base (``_<int>`` stripped).
+
+    Co-locates all time knots of one parameter (e.g. ``inflow_angle_0``,
+    ``inflow_angle_1``, … -> one block) while leaving distinct parameters in
+    separate blocks.  Static parameters (no numeric suffix) each form their
+    own block, so block grouping then reduces to the per-row analysis.
+    """
+    base_names = [re.sub(r"_\d+$", "", name) for name in names]
+    order: dict[str, int] = {}
+    ids = []
+    for base in base_names:
+        ids.append(order.setdefault(base, len(order)))
+    return jnp.asarray(ids, dtype=int)
+
+
+def _block_grouping_enabled(localization) -> bool:
+    """True when a localization is set and requests joint block updates."""
+    return localization is not None and getattr(localization, "block_grouping", False)
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import ObservationOperator
 from data_assimilation.smoothing.base import BaseSmoothing
@@ -62,6 +84,7 @@ class _BaseESMDA(BaseSmoothing):
         pred_obs: jnp.ndarray,
         obs: jnp.ndarray,
         N_e: int,
+        group_ids: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """Compute the ESMDA Kalman update for an augmented state vector.
 
@@ -71,6 +94,9 @@ class _BaseESMDA(BaseSmoothing):
             pred_obs: Array of shape (N_d, N_e) — predicted observations.
             obs: Array of shape (N_d,) — true observations.
             N_e: Ensemble size.
+            group_ids: Optional block id per augmented row, shape (N_aug,),
+                used only by a localized update with block grouping enabled.
+                Rows sharing an id are updated jointly. ``None`` -> per-row.
 
         Returns:
             Updated augmented array of the same shape.
@@ -97,6 +123,7 @@ class _BaseESMDA(BaseSmoothing):
                 C_D_sqrt=self.C_D_sqrt,
                 alpha=self.alpha,
                 rng_key=subkey,
+                group_ids=group_ids,
             )
 
         C_MD = jnp.dot(aug_dev, pred_obs_dev.T) / (N_e - 1)
@@ -226,7 +253,17 @@ class ParameterESMDA(_BaseESMDA):
             )
 
         params_array = jnp.array([params[name].values for name in param_names])
-        params_updated = self._compute_kalman_update(params_array, pred_obs, obs, N_e)
+
+        # Block grouping: co-locate time knots of the same parameter so they
+        # share one observation selection and transition (paper sec. 3b).
+        group_ids = (
+            _group_ids_by_base_name(param_names)
+            if _block_grouping_enabled(self.localization)
+            else None
+        )
+        params_updated = self._compute_kalman_update(
+            params_array, pred_obs, obs, N_e, group_ids=group_ids
+        )
 
         updated_data_vars = {
             name: ("ensemble", params_updated[i, :])
@@ -379,6 +416,23 @@ class StateAndParameterESMDA(_BaseESMDA):
             flat_vars.append(flat_var.T)
         return jnp.concatenate(flat_vars, axis=0)
 
+    def _state_group_ids(self, state: xarray.Dataset) -> jnp.ndarray:
+        """Block id per flattened state row, grouping co-located cells.
+
+        Each variable flattens (in :meth:`_flatten_state`) to its per-cell
+        positions in the same order, so the within-variable position is the
+        cell id.  Sharing that id across variables groups the co-located
+        components — e.g. ``u``/``v``/``w`` at one grid cell — into one block,
+        giving them the joint, balanced update of the paper's grid-block
+        local analysis.
+        """
+        per_var = []
+        for var_name in sorted(state.data_vars):
+            variable = state[var_name]
+            n_cells = variable.size // variable.sizes["ensemble"]
+            per_var.append(jnp.arange(n_cells, dtype=int))
+        return jnp.concatenate(per_var)
+
     def _unflatten_state(
         self,
         states_array: jnp.ndarray,
@@ -450,7 +504,19 @@ class StateAndParameterESMDA(_BaseESMDA):
         params_array = jnp.array([params[name].values for name in param_names])
         augmented = jnp.concatenate([states_flat, params_array], axis=0)
 
-        augmented = self._compute_kalman_update(augmented, pred_obs, obs, N_e)
+        # Block grouping: co-locate state rows by grid cell (joining the
+        # u/v/w-type fields at each cell) and the time knots of each parameter,
+        # so each block shares one selection and transition (paper sec. 3b).
+        group_ids = None
+        if _block_grouping_enabled(self.localization):
+            state_groups = self._state_group_ids(states_array)
+            offset = int(state_groups.max()) + 1
+            param_groups = offset + _group_ids_by_base_name(param_names)
+            group_ids = jnp.concatenate([state_groups, param_groups])
+
+        augmented = self._compute_kalman_update(
+            augmented, pred_obs, obs, N_e, group_ids=group_ids
+        )
 
         # Split back into state and params
         updated_states = self._unflatten_state(augmented[:N_s, :], state_template)

@@ -159,6 +159,49 @@ def test_excluded_row_is_left_unchanged() -> None:
     assert jnp.allclose(updated, augmented, atol=1e-6)
 
 
+def test_block_grouping_shares_selection_and_transition() -> None:
+    """Co-located rows in one block get an identical (joint) update."""
+    from data_assimilation.localization.correlation import CorrelationLocalization
+
+    N_aug, N_d, N_e = 6, 5, 80
+    k1, k2, k3, k4 = jax.random.split(jax.random.PRNGKey(3), 4)
+    # Build co-located rows: rows {0,1} are near-duplicates (same cell), as are
+    # {2,3} and {4,5}. They individually correlate with different observations,
+    # so without grouping they would select different obs.
+    cells = jax.random.normal(k1, (3, N_e))
+    augmented = jnp.stack(
+        [cells[0], cells[0] + 1e-3 * jax.random.normal(k2, (N_e,)),
+         cells[1], cells[1] + 1e-3 * jax.random.normal(k3, (N_e,)),
+         cells[2], cells[2]]
+    )
+    M = jax.random.normal(k4, (N_d, 3))
+    pred_obs = M @ cells + 0.3 * jax.random.normal(jax.random.PRNGKey(9), (N_d, N_e))
+    obs = jax.random.normal(jax.random.PRNGKey(10), (N_d,))
+    C_D = jnp.diag(0.25 * jnp.ones(N_d))
+    C_D_sqrt = jnp.sqrt(C_D)
+
+    aug_dev = augmented - augmented.mean(axis=1, keepdims=True)
+    po_dev = pred_obs - pred_obs.mean(axis=1, keepdims=True)
+    group_ids = jnp.array([0, 0, 1, 1, 2, 2])
+
+    loc = CorrelationLocalization(truncation_correlation=0.2, max_inflation=8.0)
+    inflation = np.array(loc.inflation_factors(aug_dev, po_dev))
+
+    # Members of a block share an identical inflation row after grouping, so
+    # the active-observation set and transition are shared across the block.
+    from data_assimilation.localization.base import _group_inflation
+
+    grouped = np.array(_group_inflation(jnp.asarray(inflation), group_ids))
+    for a, b in [(0, 1), (2, 3), (4, 5)]:
+        assert np.array_equal(
+            np.isinf(grouped[a]), np.isinf(grouped[b])
+        ), "block members must select the same observations"
+        finite = np.isfinite(grouped[a])
+        assert np.allclose(grouped[a][finite], grouped[b][finite])
+    # The block min is <= each member's own inflation (strongest correlation).
+    assert np.all(grouped[0][np.isfinite(grouped[0])] <= inflation[0][np.isfinite(grouped[0])] + 1e-6)
+
+
 def test_parameter_esmda_runs_with_correlation_localization(compose_test_cfg) -> None:
     """End-to-end: parameter ESMDA composes and runs with localization on."""
     from scripts.run_esmda import run

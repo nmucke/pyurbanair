@@ -2,5 +2,5 @@
 #
 # Output roots. Everything mutable lands under `.temp/` by default.
 results_dir: .temp/${model.name}
-experiment_dir : ${hydra:runtime.cwd}/.temp
+experiment_dir : ${hydra:runtime.cwd}/.temp_palm
 

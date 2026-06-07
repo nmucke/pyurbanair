@@ -36,9 +36,20 @@ class CorrelationLocalization(BaseLocalization):
         tapering_beta: ``beta in (0, 1)``; the fraction of the truncation
             distance within which observations are *not* tapered (Eq. 9).
             Defaults to ``0.5`` as in the paper.
-        max_inflation: Maximum error-variance inflation ``E_max`` applied at
-            the truncation distance (Eq. 10).  Defaults to ``8.0`` — the value
-            the paper found best for correlation-based localization.
+        max_inflation: Maximum inflation ``E_max`` reached at the truncation
+            distance (Eq. 10).  As in the paper and reference code, ``E_max``
+            multiplies the observation-error perturbation (std), so the error
+            *variance* there is scaled by ``E_max ** 2``.  Defaults to ``8.0``
+            — the value the paper found best for correlation-based
+            localization.
+        block_grouping: Local-analysis granularity.  ``False`` (default)
+            updates each augmented row on its own (per-row local analysis).
+            ``True`` requests the paper's "grid block" analysis (sec. 3b):
+            co-located rows — the ``u``/``v``/``w`` state at one cell, or all
+            time knots of one parameter — are updated *jointly* with a single
+            observation selection and transition matrix.  The smoother builds
+            the block ids from the augmented-state layout; this flag only
+            selects which behaviour it asks for.
     """
 
     def __init__(
@@ -46,6 +57,7 @@ class CorrelationLocalization(BaseLocalization):
         truncation_correlation: Optional[float] = None,
         tapering_beta: float = 0.5,
         max_inflation: float = 8.0,
+        block_grouping: bool = False,
     ) -> None:
         if truncation_correlation is not None and not (
             0.0 < truncation_correlation < 1.0
@@ -59,6 +71,7 @@ class CorrelationLocalization(BaseLocalization):
         self.truncation_correlation = truncation_correlation
         self.tapering_beta = tapering_beta
         self.max_inflation = max_inflation
+        self.block_grouping = block_grouping
 
     def _truncation_correlation(self, N_e: int) -> float:
         """Resolve the truncation threshold, defaulting to ``3 / sqrt(N_e)``."""
@@ -80,8 +93,11 @@ class CorrelationLocalization(BaseLocalization):
         # Ensemble correlation between each augmented row and each predicted
         # observation.  Guard zero-variance rows/observations (constant across
         # the ensemble) by treating their correlation as zero -> excluded.
-        aug_std = jnp.std(aug_dev, axis=1)  # (N_aug,)
-        obs_std = jnp.std(pred_obs_dev, axis=1)  # (N_d,)
+        # Use a consistent (N_e - 1) normalization for both the covariance and
+        # the standard deviations so the ratio is the exact sample correlation
+        # (the reference uses a consistent 1/N in numerator and denominators).
+        aug_std = jnp.std(aug_dev, axis=1, ddof=1)  # (N_aug,)
+        obs_std = jnp.std(pred_obs_dev, axis=1, ddof=1)  # (N_d,)
         cov = jnp.dot(aug_dev, pred_obs_dev.T) / (N_e - 1)  # (N_aug, N_d)
         denom = jnp.outer(aug_std, obs_std)  # (N_aug, N_d)
         rho = jnp.where(denom > 0.0, cov / jnp.where(denom > 0.0, denom, 1.0), 0.0)

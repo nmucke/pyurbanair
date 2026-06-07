@@ -131,6 +131,26 @@ def create_observation_points(
     raise ValueError(f"Unknown observation mode: {mode!r}")
 
 
+def create_validation_points(
+    obs_cfg: Any,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return the validation sensor coordinates, or ``None`` if not configured.
+
+    Validation sensors are a held-out set, distinct from the assimilation
+    sensors (``*_points``), used only to score the posterior at locations the
+    Kalman update never saw. Configured via ``validation_{x,y,z}_points`` on the
+    obs config (points mode only).
+    """
+    obs = _plain(obs_cfg)
+    if "validation_x_points" not in obs:
+        return None
+    return (
+        np.asarray(obs["validation_x_points"]),
+        np.asarray(obs["validation_y_points"]),
+        np.asarray(obs["validation_z_points"]),
+    )
+
+
 def create_observation_operator(
     obs_cfg: Any,
     solver_name: str,

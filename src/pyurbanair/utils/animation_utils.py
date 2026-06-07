@@ -10,6 +10,26 @@ from pyurbanair.animation import _get_writer_and_output_path, animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
 
 
+def _regrid_horizontal(src: xarray.DataArray, tgt: xarray.DataArray) -> xarray.DataArray:
+    """Interpolate ``src``'s horizontal plane onto ``tgt``'s grid.
+
+    The last two dims of each array are treated as ``(y, x)`` and interpolation
+    is by physical coordinate value, so a truth and an assimilation state living
+    on different resolutions can be differenced. Returns ``src`` unchanged when
+    the grids already match or coordinates are unavailable.
+    """
+    sy, sx = src.dims[-2], src.dims[-1]
+    ty, tx = tgt.dims[-2], tgt.dims[-1]
+    if src.sizes[sy] == tgt.sizes[ty] and src.sizes[sx] == tgt.sizes[tx]:
+        return src
+    if not all(c in src.coords for c in (sy, sx)) or not all(c in tgt.coords for c in (ty, tx)):
+        return src
+    return src.interp(
+        {sy: np.asarray(tgt[ty].values), sx: np.asarray(tgt[tx].values)},
+        kwargs={"bounds_error": False, "fill_value": None},
+    )
+
+
 def _visualize_state_history(
     state_history: xarray.Dataset,
     out_dir: pathlib.Path,
@@ -76,6 +96,11 @@ def animate_rollout_state(
     true_vel = true_with_vel["vel_magnitude"]
     if "ensemble" in true_vel.dims:
         true_vel = true_vel.mean(dim="ensemble")
+
+    # Truth and assimilation states may sit on different resolutions; interpolate
+    # the truth onto the (mean) assimilation grid so the error panel
+    # (|mean - truth|) can be differenced point-for-point.
+    true_vel = _regrid_horizontal(true_vel, mean_vel)
 
     if any("time" not in da.dims for da in (true_vel, mean_vel, std_vel)):
         raise ValueError("true_state, mean_vel and std_vel must have a 'time' dimension")

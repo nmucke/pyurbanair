@@ -1,13 +1,32 @@
 # UPT — medium preset.
+#
+# Mirrors the upstream transient-flow-CFD tutorial config (the one shown to
+# learn time-stepping): dim=gnn_dim=192, 128 latent tokens, ~256 supernodes,
+# depth 4 everywhere, 3 heads, radius 5, max_degree 32. The supernode count /
+# radius / max_degree are deliberately much larger than the old preset
+# (64 / 3 / 16): with ~256k fluid cells and no input subsampling, a tiny
+# supernode set pooled over a 3-cell radius saw <1% of the domain, so the
+# encoder could not build a representative latent. The neighbour graph is cached
+# per geometry, so the larger supernode count is a one-off build cost.
 
 _target_: neural_surrogates.UPT
 dim: 192
-num_latent_tokens: 64
-num_supernodes: 64
-gnn_dim: 96
-enc_depth: 2
+num_latent_tokens: 128
+num_supernodes: 256
+gnn_dim: 192
+enc_depth: 4
 approx_depth: 4
-dec_depth: 2
-num_heads: 6
-radius: 3.0
-max_degree: 16
+dec_depth: 4
+num_heads: 3
+radius: 5.0
+max_degree: 32
+# normalize: true          # default; z-score state+params (load-bearing here)
+# predict_residual: true   # default; predict the change, not the absolute field
+# cond_dim: null           # default: params concatenated to per-point features
+
+# Self-attention used by the encoder/approximator/decoder transformer stacks.
+# One of: dot_product (default), dot_product_slow, efficient, linformer,
+# transsolver. `attention_kwargs` passes extras, e.g. {num_slices: 32} for
+# transsolver (required) or {kv_seqlen: 32} for linformer.
+attention_type: dot_product
+# attention_kwargs: {num_slices: 32}

@@ -203,8 +203,15 @@ class ForwardModel(BaseForwardModel):
             if is_time_varying_params(params):
                 velocity_magnitude = float(params["velocity_magnitude"].max().item())
             else:
-                velocity_magnitude = params["velocity_magnitude"].item()
+                velocity_magnitude = float(params["velocity_magnitude"].item())
             self.C_u = int(velocity_magnitude * 15)
+            # uini is the physical inflow magnitude [m/s]; uvel_shear.dat only
+            # carries the normalized vertical shape (=1 at the domain top), so the
+            # actual inflow speed comes from uini. Track velocity_magnitude here so
+            # the inflow matches the requested params instead of the LBM template
+            # default (8 m/s). For time-varying params this is only the fallback
+            # used when uvel_time.dat is absent (write_uvel_time_file overrides it).
+            self._set_infile_value("uini", velocity_magnitude)
         else:
             self.C_u = 75
         self._set_infile_value("C_u", self.C_u)
