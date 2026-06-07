@@ -99,9 +99,16 @@ scripts/                           # All top-level executables run from here.
                                    #   (esmda.num_assimilation_windows); truth simulated inline or
                                    #   loaded from disk (run.truth_dir).
   generate_training_data.py        # Build surrogate training dataset from a CFD ensemble
-  train_neural_surrogate.py        # Train a surrogate
+  train_neural_surrogate.py        # Train a surrogate (computes + bakes in normalization stats)
   test_neural_surrogate.py         # Autoregressive rollout on the test split
   dataloading.py                   # TransitionDataset smoke test
+  # --- ground-truth artifact utilities (argparse CLIs, not Hydra) ---
+  trim_spinup.py                   # Drop spin-up frames from a state.nc/params.nc pair and
+                                   #   rebase time to t=0 → a truth dir for run_esmda run.truth_dir
+  convert_ground_truth_to_32bit.py # Downcast f8→f4 NetCDF (ground_truth/64_bit → 32_bit),
+                                   #   streamed slice-by-slice; no args
+  visualize_ground_truth.py        # Diagnostic figures (params, field snapshot, derived
+                                   #   inflow_angle/velocity vs prescribed) from a truth dir
 
 examples/
   benchmark_geometry/              # Xie & Castro 2008 geometry generator (CLI)
@@ -214,7 +221,7 @@ the right runtime key:
 | [`paths.yaml`](../conf/paths.yaml) | `paths` | `results_dir` (default `.temp/${model.name}`), `experiment_dir` |
 | [`time.yaml`](../conf/time.yaml) | `time` | `simulation_time`, `output_frequency`, `spinup_time` |
 | [`ensemble.yaml`](../conf/ensemble.yaml) | `ensemble` | `ensemble_size`, `num_parallel_processes`, `failure.{policy, jitter_scale, seed}` |
-| [`esmda.yaml`](../conf/esmda.yaml) | `esmda` | `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `seed`, `localization` (correlation block; `null` = global). Mounted only by `run_esmda.yaml`. |
+| [`esmda.yaml`](../conf/esmda.yaml) | `esmda` | `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `seed`, `localization` (correlation block, **`null` = global update and is now the default** — the block is present but commented out; uncomment or set `esmda.localization.*` to enable). Mounted only by `run_esmda.yaml`. |
 
 Everything that varies per variant is a **group**:
 
@@ -257,9 +264,13 @@ pick the smoother via the group override (see [tests/conftest.py](../tests/conft
 > **filenames** (`esmda/smoother=static`, `esmda/smoother=dynamic`).
 
 **Localization** lives in the esmda namespace: `esmda.localization` is the
-adaptive correlation-localization block (Vossepoel et al. 2025) and is applied
-by every smoother (`localization: ${..localization}`). Run the global,
-unlocalized update with `esmda.localization=null`.
+adaptive correlation-localization block (Vossepoel et al. 2025), wired into every
+smoother via `localization: ${..localization}`. **It now defaults to `null` (the
+global, unlocalized update)** — the correlation `_target_` block is present in
+[conf/esmda.yaml](../conf/esmda.yaml) but commented out. Enable it by uncommenting
+the block (or set `esmda.localization.truncation_correlation=...` etc. on the CLI).
+Its `block_grouping` flag toggles per-row vs. the paper's "grid block" joint
+analysis (see §6).
 
 The `size/` overlays are `# @package _global_` and are the single place a run
 is sized (`size=medium`). Each inlines `domain`/`time` and overrides only the
@@ -417,9 +428,11 @@ def test_something(compose_test_cfg) -> None:
   defines `BaseLocalization`. Subclasses implement one method,
   `inflation_factors(aug_dev, pred_obs_dev) -> (N_aug, N_d)`, returning a
   per-(state-row, observation) observation-error inflation factor (`1.0` =
-  keep, `>1` = taper, `inf` = exclude). The shared local-analysis math lives
-  in `localized_update`, which updates each augmented row with only its
-  relevant observations (Vossepoel et al. 2025, MWR-D-24-0269.1).
+  keep, `>1` = taper, `inf` = exclude). Inflation multiplies the observation-error
+  *perturbation* (std), so the error variance is scaled by `inflation**2`. The
+  shared local-analysis math lives in `localized_update(aug, aug_dev, pred_obs,
+  pred_obs_dev, obs_pert, group_ids=None)`, which updates each augmented row with
+  only its relevant observations (Vossepoel et al. 2025, MWR-D-24-0269.1).
 - `CorrelationLocalization`
   ([localization/correlation.py](../libs/data-assimilation/src/data_assimilation/localization/correlation.py))
   selects observations by ensemble correlation: exclude `|ρ| < ρ_t`, taper the
@@ -430,10 +443,22 @@ def test_something(compose_test_cfg) -> None:
   it delegates to `localization.localized_update(...)`. The hook is in the
   shared base, so **all** variants (Parameter / TimeVaryingParameter /
   StateAndParameter) get it. Configured via `esmda.localization` in
-  [conf/esmda.yaml](../conf/esmda.yaml) (the correlation block, on by default);
-  every smoother YAML wires it through with `localization: ${..localization}`,
-  and `esmda.localization=null` selects the global update. No script changes
-  needed.
+  [conf/esmda.yaml](../conf/esmda.yaml); the correlation block is **commented out
+  → defaults to `null` (global update)**. Every smoother YAML wires it through
+  with `localization: ${..localization}`. No script changes needed.
+- **Grid-block joint analysis** (`block_grouping`, Vossepoel §3b). When
+  `CorrelationLocalization(block_grouping=True)`, co-located augmented rows are
+  updated *jointly* with one shared observation selection + transition matrix
+  instead of per-row. The grouping (`group_ids`) is built in
+  [smoothing/esmda.py](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py):
+  `ParameterESMDA` groups by parameter base name (`_group_ids_by_base_name` —
+  `inflow_angle_0/_1/_2…` → one block; static params each their own);
+  `StateAndParameterESMDA._state_group_ids` groups the u/v/w at one cell.
+  `_group_inflation` in
+  [localization/base.py](../libs/data-assimilation/src/data_assimilation/localization/base.py)
+  takes the per-observation min inflation across block members so they share the
+  active-observation set. (Correlation now uses `ddof=1` to match the `(N_e-1)`
+  covariance denominator — the ratio is the exact sample correlation.)
 - **Cost note**: `localized_update` is `jax.vmap` over augmented rows
   (`N_aug` small `N_d×N_d` solves). Cheap for parameter variants; for
   `StateAndParameterESMDA` (large `N_aug`) it is `O(N_aug·N_d²)` memory — the
@@ -451,6 +476,30 @@ window's `state`. For the **dynamic** (time-varying) case the next window's
 prior is `prior_sampler.extrapolate(posterior, ...)`; for the static case it is
 just the posterior. `_finish_rollout` then concatenates the per-window files
 (rebasing time for the dynamic case) into the final outputs.
+
+### Truth source — inline vs. on disk
+Truth (state + params) is either **simulated inline** (`run.truth_dir=null`,
+default historically) or **loaded from a saved artifact**. `conf/run_esmda.yaml`
+now defaults `run.truth_dir: ground_truth_spunup` — a `state.nc`/`params.nc` pair
+(as written by `run_forward_model.py params=dynamic`, then optionally passed
+through [`scripts/trim_spinup.py`](../scripts/trim_spinup.py) and
+[`convert_ground_truth_to_32bit.py`](../scripts/convert_ground_truth_to_32bit.py)).
+`run.truth_start_time` begins the assimilation horizon partway into a disk truth
+(drops earlier frames and rebases that time to `t=0`) to skip a spin-up.
+Because these truth files are multi-GB, disk truth is read **lazily/streamed**:
+the state NetCDF is opened (not loaded), frames are sliced per window, and
+state-error RMSE is streamed z-slice by z-slice (interpolating truth onto the
+assim grid when their coords differ). The `ground_truth*` dirs are gitignored.
+> **Naming drift**: the `run_esmda.yaml` header comments and `run_esmda.py`
+> docstring call the knob `run.ground_truth_dir`, but the actual config key the
+> code reads is **`run.truth_dir`** (+ `run.truth_start_time`).
+
+### Validation sensors
+`case/<name>/obs.yaml` may define a held-out sensor set via
+`validation_{x,y,z}_points`. These are extracted by `create_validation_points`
+in [hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py) (returns `None`
+if absent), **scored but never assimilated** — `run_esmda.py` plots and scores
+them as an out-of-sample check alongside the assimilated sensors.
 
 ### Parameter samplers (static + dynamic)
 Both kinds of sampler are built declaratively with
@@ -517,7 +566,23 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   grid before display.
 - Inflow profile is configured via the nested `nudging_config` field on
   `cfg.model.forward_model` (`profile_config = {"type": "uniform" |
-  "power_law", "alpha": ..., "z_ref": ...}`).
+  "power_law", "alpha": ..., "z_ref": ...}`). `nnudge_meters` (height in m,
+  converted to a grid-level count and overriding the raw `nnudge`) is supported
+  by `apply_time_varying_inflow` in
+  [utils/nudging_utils.py](../libs/pyudales/src/pyudales/utils/nudging_utils.py).
+- **Instability watchdog**: `run_single` runs uDALES via
+  `run_with_dt_watchdog` ([utils/run_monitor.py](../libs/pyudales/src/pyudales/utils/run_monitor.py))
+  instead of bare `subprocess.run`. It tails `run.<exp>.log`, and if the timestep
+  `dt` stays below `min_dt` for `patience` consecutive steps (after `warmup_steps`)
+  it kills the process tree and raises `CalledProcessError` so the ensemble's
+  failure policy can resample — instead of waiting out a slow divergence.
+  Configured by the `instability_check` dict on `ForwardModel`
+  (`InstabilityCheck.from_config`: `enabled, min_dt, patience, warmup_steps,
+  poll_interval_s`).
+- The initial inflow speed is written via `_set_infile_value("uini",
+  velocity_magnitude)` when params are given (fallback when a time-varying
+  `uvel_time.dat` is absent), so the run starts at the requested magnitude rather
+  than the template default. pylbm does the same (`uini`).
 - `pressure_gradient_magnitude` is the third parameter only this backend
   supports. The ordered per-model schema comes from `resolve_parameter_schema`
   in `hydra_helpers.py` (adds it for `pyudales` only); the sampler configs
@@ -533,6 +598,30 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 - Postprocess unifies the vertical staggers (`zu_3d → z`, `w`
   interpolated from `zw_3d`) so all three velocity components share a
   single `z` dim.
+
+### neural_surrogate (learned fourth backend)
+- Three architectures live in
+  [libs/neural-surrogates/.../architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/):
+  `SimpleConv` (baseline), `UNetConvNeXt`, and **`UPT`** (Universal Physics
+  Transformer — encoder/approximator/decoder over supernodes + latent tokens).
+  Presets are config groups: `neural_surrogate_architectures/{unet_convnext,upt}/<size>`
+  (UPT ships `tiny|small|medium|large|xlarge`).
+- **UPT has two load-bearing knobs — do not flip them off casually**
+  ([architectures/upt.py](../libs/neural-surrogates/src/neural_surrogates/architectures/upt.py)):
+  - `normalize=True` — z-scores state channels *and* inflow params with buffers
+    `state_mean/std`, `param_mean/std` set via `set_normalization(...)`. Raw
+    `inflow_angle` (~50× the velocity channels) otherwise swamps the encoder's
+    single `input_proj` and the rollout collapses to a constant (see the
+    docstring in `upt.py`, which marks both knobs "load-bearing").
+  - `predict_residual=True` — predicts `state_{t+1} − state_t` (added back to the
+    input), keeping near-identity (correct for a slow transient) as the default.
+  - `attention_type` selects the self-attention impl (`dot_product` default;
+    `efficient`/`linformer`/`transsolver` via `attention_kwargs`); a per-geometry
+    `_geom_cache` avoids rebuilding the supernode neighbour graph each step.
+- Normalization stats are computed by `_compute_normalization_stats` in
+  [scripts/train_neural_surrogate.py](../scripts/train_neural_surrogate.py)
+  (streamed in f64 over fluid cells only) and **baked into the checkpoint** via
+  `model.set_normalization(...)`, so no separate stats file is needed at inference.
 
 ## 8. Adding a new component — recipes
 
@@ -610,11 +699,11 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   distance-based strategy (Gaspari–Cohn taper + radius cutoff) drops in by
   implementing only this method.
 - Localization lives in [conf/esmda.yaml](../conf/esmda.yaml) under
-  `esmda.localization` (the default correlation block). Swap in your strategy
-  by overriding `esmda.localization._target_` (and its args), or replace the
-  block in `esmda.yaml`. Every smoother already receives it via
-  `localization: ${..localization}`; `esmda.localization=null` gives the global
-  update.
+  `esmda.localization` (the commented-out correlation block; `null` by default).
+  Swap in your strategy by uncommenting and overriding `esmda.localization._target_`
+  (and its args), or replace the block in `esmda.yaml`. Every smoother already
+  receives it via `localization: ${..localization}`; `esmda.localization=null`
+  gives the global update.
 
 ### Add a new run script
 - Place under [scripts/](../scripts/), mirror an existing one. The
@@ -682,5 +771,12 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 | How sensors map to grid points | [libs/data-assimilation/src/data_assimilation/observation_operator.py](../libs/data-assimilation/src/data_assimilation/observation_operator.py) |
 | Per-window rollout logic | `run_esmda.py`'s window loop / `run_forward_model.py`'s `run.rollout_steps` loop |
 | Parameter samplers (static + dynamic) | [src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/), [src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/), [conf/params/](../conf/params/) |
+| Truth source / spin-up trimming / 32-bit | `run.truth_dir`+`run.truth_start_time` in [run_esmda.yaml](../conf/run_esmda.yaml); [scripts/trim_spinup.py](../scripts/trim_spinup.py), [convert_ground_truth_to_32bit.py](../scripts/convert_ground_truth_to_32bit.py), [visualize_ground_truth.py](../scripts/visualize_ground_truth.py) |
+| Localization / grid-block grouping | [localization/](../libs/data-assimilation/src/data_assimilation/localization/), `esmda.localization` (`block_grouping`) in [conf/esmda.yaml](../conf/esmda.yaml) |
+| Neural-surrogate architectures (UPT etc.) | [architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/), [conf/neural_surrogate_architectures/](../conf/neural_surrogate_architectures/) |
+| uDALES instability / dt-collapse handling | [libs/pyudales/src/pyudales/utils/run_monitor.py](../libs/pyudales/src/pyudales/utils/run_monitor.py) (`instability_check`) |
+| DA metrics + diagnostic plots (RMSE/CRPS, sensor series) | [src/pyurbanair/plotting.py](../src/pyurbanair/plotting.py) (`compute_parameter_metrics`, `plot_parameter_error`, `compute_sensor_metrics`, `plot_sensor_timeseries`) |
+| Validation (held-out) sensors | `validation_{x,y,z}_points` in [conf/case/](../conf/case/) `obs.yaml` + `create_validation_points` |
 | Test fixture composition | [tests/conftest.py](../tests/conftest.py) (`compose_test_cfg`, `compose_module_cfg`) |
+| Dynamic multi-window ESMDA theory / config | [docs/esmda_dynamic_multiwindow.md](esmda_dynamic_multiwindow.md) |
 | Benchmark / scaling findings | [docs/ensemble_scaling.md](ensemble_scaling.md) (the one-off benchmark scripts were removed; recover from git history to re-run) |
