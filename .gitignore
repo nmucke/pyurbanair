@@ -73,3 +73,13 @@ outputs/
 
 # latex
 latex/
+
+# Ground truth simulations
+ground_truth/*
+ground_truth_spunup/*
+ground_truth_spunup/large/*
+
+# temp folders
+.temp_udales/*
+.temp_palm/*
+.temp_lbm/*

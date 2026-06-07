@@ -377,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--rotate-buildings",
         type=float,
-        default=None,
+        default=45,
         help="Yaw the buildings mesh by this many degrees about its own xy centre, "
         "before the merge (overrides --rotate for the buildings).",
     )

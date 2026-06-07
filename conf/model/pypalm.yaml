@@ -8,14 +8,17 @@ forward_model:
   # Experiment dir + STL geometry follow the selected `case`.
   case_dir: ${geometry.palm_case_dir}
   stl_path: ${geometry.stl_path}
+  # Base scratch dir shared across models; pypalm nests <temp_dir>/experiment/urban_run.
+  temp_dir: ${paths.experiment_dir}
   experiment_name: urban_run
-  ncpu: 16
+  ncpu: 1
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow
   nudging_config:
     profile_config:
-      type: uniform
+      type: power_law
+      alpha: 0.25
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

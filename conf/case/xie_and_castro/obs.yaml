@@ -9,9 +9,44 @@
 # stay open for every y. `mode: grid` (with `x_min`/`x_max`/`n_per_axis`/`z`)
 # is the alternative to explicit `*_points`.
 mode: points
-x_points: [20.0, 20.0, 40.0]
-y_points: [20.0, 10.0, 10.0]
-z_points: [3.0, 3.0, 3.0]
+
+# --- 5 sensors (active) ---
+# Placed in the three open N-S lanes between the cube columns (lane centres
+# x=20/40/60, each 10 m wide so the centreline is 5 m from the walls on both
+# sides) and spread across the full y-span (10/40/70) of domain.bounds
+# (x in [-20, 80], y in [0, 80]). Each sits 5 m downstream of a column's
+# leeward (east) face with an open gap on the windward (west/upstream) side, so
+# none is inside a building or in front of a windward facade (robust to the
+# varying inflow angle). z=2 m is street level, below every cube (min height
+# 2.8 m), i.e. a true in-canyon measurement.
+# x_points: [30.0, 60.0, 40.0, 10.0, 65.0]
+# y_points: [10.0, 20.0, 40.0, 60.0, 50.0]
+# z_points: [2.0, 2.0, 2.0, 2.0, 2.0]
+x_points: [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0]
+y_points: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
+z_points: [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
+# x_points: [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 30.0, 60.0, 40.0, 10.0, 65.0]
+# y_points: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 10.0, 20.0, 40.0, 60.0, 50.0]
+# z_points: [6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+
+# --- old 4-sensor layout (x=30 sat on the column-B centreline) ---
+# x_points: [20.0, 20.0, 30.0, 30.0] #, -5.0, -5.0]
+# y_points: [20.0, 10.0, 10.0, 30.0] #, 10.0, 30.0]
+# z_points: [2.0, 2.0, 2.0, 2.0] #, 2.0, 2.0]
+# x_points: [-10.0, -10.0, -10.0]
+# y_points: [10.0, 20.0, 30.0]
+# z_points: [3.0, 3.0, 3.0]
+# --- Validation sensors (held out from assimilation) ---
+# A separate set of sensors the Kalman update never sees, used only to score
+# the posterior at unseen locations (see scripts/run_esmda.py's sensor
+# time-series plots). Placed in the open N-S lanes between the cube columns
+# (lane centres x=20/40/60) and spread across the y-span, at street level
+# (z=2 m, below every cube) -- i.e. genuine in-canyon points distinct from the
+# upstream assimilation sensors above.
+validation_x_points: [30.0, 60.0, 40.0, 10.0, 65.0]
+validation_y_points: [10.0, 20.0, 40.0, 60.0, 50.0]
+validation_z_points: [2.0, 2.0, 2.0, 2.0, 2.0]
+
 states: [u, v, w]
 temporal_mode: intervals
 interval_seconds: 20.0

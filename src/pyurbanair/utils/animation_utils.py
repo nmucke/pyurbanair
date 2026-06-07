@@ -1,4 +1,4 @@
-"""Animation helpers used by scripts_new runners."""
+"""Animation helpers used by the scripts/ runners."""
 
 import pathlib
 
@@ -6,13 +6,28 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray
 
-from pyurbanair.animation import (
-    _get_writer_and_output_path,
-    animate_3d,
-    animate_ensemble_state,
-    animate_state,
-)
+from pyurbanair.animation import _get_writer_and_output_path, animate_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
+
+
+def _regrid_horizontal(src: xarray.DataArray, tgt: xarray.DataArray) -> xarray.DataArray:
+    """Interpolate ``src``'s horizontal plane onto ``tgt``'s grid.
+
+    The last two dims of each array are treated as ``(y, x)`` and interpolation
+    is by physical coordinate value, so a truth and an assimilation state living
+    on different resolutions can be differenced. Returns ``src`` unchanged when
+    the grids already match or coordinates are unavailable.
+    """
+    sy, sx = src.dims[-2], src.dims[-1]
+    ty, tx = tgt.dims[-2], tgt.dims[-1]
+    if src.sizes[sy] == tgt.sizes[ty] and src.sizes[sx] == tgt.sizes[tx]:
+        return src
+    if not all(c in src.coords for c in (sy, sx)) or not all(c in tgt.coords for c in (ty, tx)):
+        return src
+    return src.interp(
+        {sy: np.asarray(tgt[ty].values), sx: np.asarray(tgt[tx].values)},
+        kwargs={"bounds_error": False, "fill_value": None},
+    )
 
 
 def _visualize_state_history(
@@ -48,30 +63,15 @@ def _visualize_state_history(
             plt.savefig(out_dir / "state_history_snapshot.png")
             plt.close()
 
-    return
-    # if "time" not in state_viz.dims:
-    #     return
-    # if "ensemble" in state_viz.dims:
-    #     animate_ensemble_state(
-    #         state=state_viz,
-    #         output_path=out_dir / "state_history_animation.mp4",
-    #         z_level=z_level,
-    #     )
-    # else:
-    #     animate_state(
-    #         state=state_viz,
-    #         output_path=out_dir / "state_history_animation.mp4",
-    #         z_level=z_level,
-    #     )
-
 
 def animate_rollout_state(
     true_state: xarray.Dataset,
-    esmda_state: xarray.Dataset,
+    mean_vel: xarray.DataArray,
+    std_vel: xarray.DataArray,
     output_path: str | pathlib.Path,
     z_level: int | None = None,
     fps: int = 5,
-    dpi: int = 100,
+    dpi: int = 120,
     cmap: str = "viridis",
 ) -> None:
     """Animate 4-panel rollout comparison over time windows.
@@ -81,27 +81,31 @@ def animate_rollout_state(
       2. Ensemble mean velocity magnitude
       3. Ensemble std velocity magnitude
       4. |Ensemble mean − truth| velocity magnitude
+
+    ``mean_vel`` and ``std_vel`` are the precomputed ensemble mean and std of the
+    velocity magnitude (no ``ensemble`` dimension), so the full ensemble need not
+    be held in memory here.
     """
     true_with_vel = add_velocity_magnitude(true_state)
-    esmda_with_vel = add_velocity_magnitude(esmda_state)
 
-    if (
-        "vel_magnitude" not in true_with_vel.data_vars
-        or "vel_magnitude" not in esmda_with_vel.data_vars
-    ):
+    if "vel_magnitude" not in true_with_vel.data_vars:
         raise ValueError(
-            "Could not compute vel_magnitude (need u, v, w in both datasets)"
+            "Could not compute vel_magnitude for true_state (need u, v, w)"
         )
 
     true_vel = true_with_vel["vel_magnitude"]
-    esmda_vel = esmda_with_vel["vel_magnitude"]
+    if "ensemble" in true_vel.dims:
+        true_vel = true_vel.mean(dim="ensemble")
 
-    if "time" not in true_vel.dims or "time" not in esmda_vel.dims:
-        raise ValueError("Both true_state and esmda_state must have a 'time' dimension")
-    if "ensemble" not in esmda_vel.dims:
-        raise ValueError("esmda_state must have an 'ensemble' dimension")
+    # Truth and assimilation states may sit on different resolutions; interpolate
+    # the truth onto the (mean) assimilation grid so the error panel
+    # (|mean - truth|) can be differenced point-for-point.
+    true_vel = _regrid_horizontal(true_vel, mean_vel)
 
-    n_times = min(true_vel.sizes["time"], esmda_vel.sizes["time"])
+    if any("time" not in da.dims for da in (true_vel, mean_vel, std_vel)):
+        raise ValueError("true_state, mean_vel and std_vel must have a 'time' dimension")
+
+    n_times = min(true_vel.sizes["time"], mean_vel.sizes["time"], std_vel.sizes["time"])
 
     # Resolve z_level
     z_dim = next((d for d in ("z", "zm", "zt") if d in true_vel.dims), None)
@@ -120,8 +124,8 @@ def animate_rollout_state(
     frames_truth, frames_mean, frames_std, frames_diff = [], [], [], []
     for t in range(n_times):
         truth_2d = _get_2d(true_vel, t)
-        mean_2d = _get_2d(esmda_vel.mean(dim="ensemble"), t)
-        std_2d = _get_2d(esmda_vel.std(dim="ensemble"), t)
+        mean_2d = _get_2d(mean_vel, t)
+        std_2d = _get_2d(std_vel, t)
         diff_2d = np.abs(mean_2d - truth_2d)
         frames_truth.append(truth_2d)
         frames_mean.append(mean_2d)
@@ -134,28 +138,32 @@ def animate_rollout_state(
     vmax_std = float(np.nanmax([f for f in frames_std]))
     vmax_diff = float(np.nanmax([f for f in frames_diff]))
 
-    fig, axes = plt.subplots(1, 4, figsize=(22, 5), constrained_layout=True)
-    titles = ["Truth |U|", "Ensemble mean |U|", "Ensemble std |U|", "Abs error |U|"]
+    # Real time labels when available, else a frame counter.
+    times = np.asarray(mean_vel["time"].values) if "time" in mean_vel.coords else None
 
-    im_truth = axes[0].imshow(
-        frames_truth[0], origin="lower", cmap=cmap, vmin=vmin_vel, vmax=vmax_vel
-    )
-    im_mean = axes[1].imshow(
-        frames_mean[0], origin="lower", cmap=cmap, vmin=vmin_vel, vmax=vmax_vel
-    )
-    im_std = axes[2].imshow(
-        frames_std[0], origin="lower", cmap="plasma", vmin=0.0, vmax=vmax_std
-    )
-    im_diff = axes[3].imshow(
-        frames_diff[0], origin="lower", cmap="Reds", vmin=0.0, vmax=vmax_diff
-    )
+    def _frame_label(t: int) -> str:
+        return f"t = {times[t]:.2f}" if times is not None else f"Frame {t + 1} / {n_times}"
 
-    for ax, title, im in zip(axes, titles, [im_truth, im_mean, im_std, im_diff]):
-        ax.set_title(title)
+    fig, axes = plt.subplots(1, 4, figsize=(21, 5.4), constrained_layout=True)
+    fig.set_facecolor("white")
+    panels = [
+        ("Truth  |U|", frames_truth, cmap, vmin_vel, vmax_vel, "Velocity magnitude"),
+        ("Ensemble mean  |U|", frames_mean, cmap, vmin_vel, vmax_vel, "Velocity magnitude"),
+        ("Ensemble std  |U|", frames_std, "magma", 0.0, vmax_std, "Ensemble std"),
+        ("Absolute error  |U|", frames_diff, "Reds", 0.0, vmax_diff, "|mean − truth|"),
+    ]
+
+    images = []
+    for ax, (title, frames, cm, vmn, vmx, cb_label) in zip(axes, panels):
+        im = ax.imshow(frames[0], origin="lower", cmap=cm, vmin=vmn, vmax=vmx)
+        ax.set_title(title, fontsize=13, fontweight="bold")
         ax.set_axis_off()
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cb.set_label(cb_label, fontsize=10)
+        images.append(im)
+    im_truth, im_mean, im_std, im_diff = images
 
-    suptitle = fig.suptitle("Time step 0", fontsize=12)
+    suptitle = fig.suptitle(_frame_label(0), fontsize=15, fontweight="bold")
 
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,7 +175,7 @@ def animate_rollout_state(
             im_mean.set_array(frames_mean[t])
             im_std.set_array(frames_std[t])
             im_diff.set_array(frames_diff[t])
-            suptitle.set_text(f"Time step {t}")
+            suptitle.set_text(_frame_label(t))
             writer.grab_frame()
 
     plt.close(fig)
@@ -175,8 +183,6 @@ def animate_rollout_state(
 
 __all__ = [
     "animate_state",
-    "animate_3d",
-    "animate_ensemble_state",
     "animate_rollout_state",
     "_visualize_state_history",
 ]

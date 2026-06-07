@@ -1,10 +1,7 @@
 import pytest
 from hydra.utils import instantiate
 from pyudales.utils.namoptions_utils import NamoptionsFile
-from pyurbanair.config.hydra_helpers import (
-    clean_outputs,
-    create_true_params,
-)
+from pyurbanair.config.hydra_helpers import clean_outputs
 
 
 @pytest.mark.parametrize("model", ["pylbm", "pyudales"])
@@ -12,13 +9,15 @@ def test_spinup_trims_output(model: str, compose_test_cfg) -> None:
     """Verify spinup extends the run but trims output to simulation_time."""
     spinup_time = 2.0
 
-    overrides = [f"model={model}"]
+    # Static scalar params: the declarative sampler draws a single member, then
+    # we drop the ensemble dim the way the forward model does for single runs.
+    overrides = [f"model={model}", "params=static"]
     if model == "pylbm":
         overrides.append("model.forward_model.cuda=false")
 
     cfg = compose_test_cfg(overrides)
     expected_steps = round(cfg.time.simulation_time / cfg.time.output_frequency)
-    true_params = create_true_params(cfg.model.name, cfg.params.true)
+    true_params = instantiate(cfg.params).sample(1).isel(ensemble=0, drop=True)
 
     # --- Run without spinup ---
     fm = instantiate(cfg.model.forward_model)

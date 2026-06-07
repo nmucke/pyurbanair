@@ -38,15 +38,11 @@ obs:
   aggregation_mode: mean
 
 params:
-  "true":
-    velocity_magnitude: 3.0
-  prior:
+  parameters:
     velocity_magnitude:
       mean: 3.0
 
 time_varying:
   num_time_points: 4
-  method_kwargs:
-    correlation_length: 200.0
-  truth_method_kwargs:
+  prior_model:
     correlation_length: 200.0

@@ -266,11 +266,21 @@ def apply_time_varying_inflow(
     dy = (ymax - ymin) / ny
     # PALM's dim checks demand: driver z dim == nz, zw dim == nz-1,
     # y dim == pypalm.ny (= PALM's namelist ny+1).
-    z = np.arange(nz) * dz + 0.5 * dz + zmin
-    zw = np.arange(1, nz) * dz + zmin
-    y = np.arange(ny) * dy + 0.5 * dy + ymin
+    #
+    # The axes WRITTEN to the file use PALM's 0-based native grid (no
+    # physical-bounds offset). The inflow reader length-checks these axes only,
+    # so the offset never mattered here — but warm-start
+    # (utils.warm_start_utils) writes ``init_atmosphere_*`` into this same file,
+    # and PALM value-checks its ``z``/``zw`` to within 0.1*dz of the 0-based
+    # ``zu``/``zw`` (DRV0005). Sharing one 0-based vertical axis lets both
+    # mechanisms coexist in one PIDS_DYNAMIC file. The profile shape, however,
+    # is still evaluated at physical heights so a non-zero zmin is honoured.
+    z_phys = np.arange(nz) * dz + 0.5 * dz + zmin
+    z = np.arange(nz) * dz + 0.5 * dz
+    zw = np.arange(1, nz) * dz
+    y = np.arange(ny) * dy + 0.5 * dy
 
-    shape = build_profile_shape(profile_config, heights=z, zsize=zmax - zmin)
+    shape = build_profile_shape(profile_config, heights=z_phys, zsize=zmax - zmin)
 
     time_s, angles, speeds = _extract_schedule(params)
     time_s, angles, speeds = _prepend_spinup_plateau(

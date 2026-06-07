@@ -11,18 +11,33 @@ forward_model:
   # on every prepare. Defaults to null (generate from the STL) for any case that
   # does not set geometry.udales_precomputed_geom_dir. Relative to project root.
   precomputed_geom_dir: ${oc.select:geometry.udales_precomputed_geom_dir,null}
+  # Base scratch dir shared across models; pyudales nests <temp_dir>/experiment/999.
+  temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
-  ncpu: 10
+  ncpu: 1
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow
   nudging_config:
     tnudge: 30.0
-    nnudge: 16
+    # nnudge: number of bottom grid levels NOT nudged (raw level count).
+    # nnudge: 2
+    # nnudge_meters: height (m above the floor) below which nudging is NOT
+    # applied. When set, it is converted to a level count and OVERRIDES nnudge.
+    nnudge_meters: 16.0
     profile_config:
       type: power_law
       alpha: 0.25
+  # Kill numerically-unstable runs early: when the adaptive timestep collapses
+  # toward zero the run is terminated and reported as a failure, so the ensemble
+  # resamples it from a successful donor instead of waiting for the slow crash.
+  instability_check:
+    enabled: true
+    min_dt: 1.0e-3      # absolute timestep floor (s)
+    patience: 20        # consecutive sub-floor steps before killing
+    warmup_steps: 20    # ignore small startup dt for the first N steps
+    poll_interval_s: 2.0
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}
@@ -41,4 +56,5 @@ ensemble_model:
   ensemble_size: ${ensemble.ensemble_size}
   num_parallel_processes: ${ensemble.num_parallel_processes}
   num_cpus_per_process: ${ensemble.num_cpus_per_process}
+  failure: ${ensemble.failure}
 

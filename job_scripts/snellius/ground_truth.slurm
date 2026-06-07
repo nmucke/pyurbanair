@@ -11,10 +11,11 @@
 #
 #     sbatch job_scripts/snellius/ground_truth.slurm time.simulation_time=240
 #
-# It drives scripts/run_time_varying_forward_model.py, which draws the inflow
-# (inflow_angle / velocity_magnitude) from the external-prior AR(2) relaxation
-# truth model and runs a single forward simulation. The simulated state and the
-# parameter profile are written under ${PROJECT_STORAGE}/ground_truth/ as
+# It drives scripts/run_forward_model.py with run.time_varying=true, which draws
+# the inflow (inflow_angle / velocity_magnitude) from the external-prior AR(2)
+# relaxation truth model and runs a single forward simulation. The simulated
+# state and the parameter profile are written under
+# ${PROJECT_STORAGE}/ground_truth/ as
 # <model>_time_varying/{state.nc,params.nc} (plus animations unless viz is off).
 #SBATCH --job-name=ground_truth
 #SBATCH --partition=rome
@@ -116,8 +117,9 @@ case "${MODEL}" in
     ;;
 esac
 
-pixi run -e "${ENV}" -- python -u scripts/run_time_varying_forward_model.py \
+pixi run -e "${ENV}" -- python -u scripts/run_forward_model.py \
     model="${MODEL}" \
+    run.time_varying=true \
     case="${CASE}" \
     domain.nx="${NX}" \
     domain.ny="${NY}" \
@@ -128,7 +130,6 @@ pixi run -e "${ENV}" -- python -u scripts/run_time_varying_forward_model.py \
     time.spinup_time="${SPINUP_TIME}" \
     time_varying.num_time_points="${NUM_TIME_POINTS}" \
     esmda.seed="${SEED}" \
-    run.use_true_params=false \
     run.skip_viz="${SKIP_VIZ}" \
     paths.base_results_dir="${PROJECT_STORAGE}" \
     "hydra.run.dir=${GT_DIR}" \

@@ -1,0 +1,16 @@
+_target_: pyurbanair.static_parameters.ParameterSampler
+_convert_: all
+seed: 42
+parameters:
+  inflow_angle:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.0
+    std: 10.0
+  velocity_magnitude:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 5.0
+    std: 1.0
+    min: 0.1
+  pressure_gradient_magnitude:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0041912

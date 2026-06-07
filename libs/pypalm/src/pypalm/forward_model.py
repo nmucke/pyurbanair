@@ -19,6 +19,7 @@ from .utils.clean_up_utils import clean_palm_output_dir
 from .utils.compile_utils import compile_palm
 from .utils.dir_utils import PALMDirectoryPaths, get_palm_directory_paths
 from .utils.dynamic_driver_utils import (
+    DEFAULT_PT_SURFACE,
     apply_time_varying_inflow,
     disable_turbulent_inflow,
     is_time_varying_params,
@@ -27,6 +28,7 @@ from .utils.dynamic_driver_utils import (
 from .utils.inflow_utils import angle_to_velocity
 from .utils.p3d_utils import P3DFile
 from .utils.vertical_profile import build_profile_shape
+from .utils.warm_start_utils import write_warmstart_driver
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -96,12 +98,13 @@ def _merge_params(
 class ForwardModel(BaseForwardModel):
     """PALM LES ForwardModel.
 
-    Mirrors the interface of pylbm/pyudales. Scope for v1:
-    - Cold start only (``state`` argument is ignored with a warning).
+    Mirrors the interface of pylbm/pyudales:
+    - Cold start, or warm start from a handed-in ``state`` (the resolved 3D
+      velocity field) via PALM's dynamic-driver ``init_atmosphere_*`` LOD=2
+      mechanism — see ``run_single`` and :mod:`.utils.warm_start_utils`.
     - Inflow driven by geostrophic wind under cyclic BCs, or turbulent_inflow
       under dirichlet/radiation BCs (via the ``boundary_condition`` kwarg).
-    - Time-invariant params only (``inflow_angle``, ``velocity_magnitude``);
-      time-varying params raise NotImplementedError.
+    - Static or time-varying params (``inflow_angle``, ``velocity_magnitude``).
     """
 
     def __init__(
@@ -435,12 +438,17 @@ class ForwardModel(BaseForwardModel):
         """Invoke PALM.
 
         Two paths:
-          - ``PYPALM_USE_DIRECT_RUN=1`` -> ``direct_palm.run_direct`` (bypasses
-            palmrun + palmbuild; ~16x faster on tiny — see docs/palm_overhead_plan.md).
-          - otherwise -> palmrun via the execute.sh wrapper (the historical path,
-            kept as a fallback until M4 flips the default).
+          - ``direct_palm.run_direct`` (default) — bypasses palmrun + palmbuild;
+            ~16x faster on tiny (see docs/palm_overhead_plan.md). It also runs
+            ``combine_plot_fields.x`` itself with the ``rrtmg.so`` symlinks it
+            needs, so the merged 3D netCDF is actually produced. The slurm
+            scripts already default to this; M4 flips it for local runs too.
+          - ``PYPALM_USE_DIRECT_RUN=0`` -> palmrun via the execute.sh wrapper
+            (the historical fallback). NOTE: on macOS palmrun's combine step
+            fails to load ``rrtmg.so`` and silently yields an all-zero field
+            (caught by ``_assert_combine_succeeded``); prefer the default path.
         """
-        if os.environ.get("PYPALM_USE_DIRECT_RUN") == "1":
+        if os.environ.get("PYPALM_USE_DIRECT_RUN", "1") != "0":
             self._run_direct()
             return
 
@@ -532,6 +540,7 @@ class ForwardModel(BaseForwardModel):
             host="default",
             env=env,
             keep_tempdir=False,
+            verbose=self.verbose,
         )
         logger.info(
             "palm_direct(%s) wall=%.1fs (stage=%.2fs palm=%.2fs combine=%.2fs transfer=%.2fs) rc=%s",
@@ -559,11 +568,45 @@ class ForwardModel(BaseForwardModel):
             f"{self.experiment_name}_3d.nc)."
         )
 
+    @staticmethod
+    def _assert_combine_succeeded(
+        state: xarray.Dataset, output_file: pathlib.Path
+    ) -> None:
+        """Fail loudly when PALM wrote a zero-filled skeleton instead of data.
+
+        For a ``__parallel`` PALM build with ``netcdf_data_format < 5`` the
+        velocity fields are streamed to a Fortran binary file and only merged
+        into the per-PE ``_3d.NNN.nc`` netCDF by ``combine_plot_fields.x``.
+        When that post-processing step is skipped or crashes (e.g. the macOS
+        dyld ``rrtmg.so`` load failure — see docs/pypalm_zero_field_debug.md),
+        the netCDF still opens cleanly but every u/v/w cell is exactly 0 with
+        **no** topography fill values. A correct PALM field always carries
+        NaN/fill at solid cells, so "finite everywhere AND identically zero"
+        is an unambiguous sentinel for a missing combine — surface it as an
+        error rather than silently returning a dead field downstream.
+        """
+        for var in ("u", "v", "w"):
+            if var not in state.data_vars:
+                continue
+            values = state[var].values
+            if values.size == 0:
+                continue
+            if np.all(np.isfinite(values)) and not np.any(values):
+                raise RuntimeError(
+                    f"PALM 3D output {output_file} has {var} identically zero "
+                    "with no topography fill values — combine_plot_fields almost "
+                    "certainly did not run (the per-PE netCDF skeleton was read "
+                    "instead of the merged field). See "
+                    "docs/pypalm_zero_field_debug.md."
+                )
+
     def _load_and_postprocess_state(self) -> xarray.Dataset:
         output_file = self._locate_3d_output()
         state = xarray.open_dataset(
             output_file, engine="netcdf4", decode_timedelta=False
         )
+
+        self._assert_combine_succeeded(state, output_file)
 
         # PALM uses staggered vertical coords: u/v/scalars on zu_3d,
         # w on zw_3d. Preserve both; rename zu_3d -> z (the "canonical" z
@@ -645,8 +688,16 @@ class ForwardModel(BaseForwardModel):
                 pads = [last.expand_dims(time=1) for _ in range(expected_outputs - actual)]
                 state = xarray.concat([state, *pads], dim="time")
 
+        # Store the time coordinate in seconds (0, dt, 2·dt, …) rather than bare
+        # frame indices, matching pylbm/pyudales. Without this the rollout
+        # window-concat in run_forward_model.py (which re-bases each window by
+        # ``w * simulation_time``) and the temporal observation binning (which
+        # bins by the ``time`` coordinate in seconds) see an axis spaced by 1
+        # instead of ``output_frequency`` — a wrong, backend-specific clock.
         if state.sizes.get("time", 0) > 0:
-            state = state.assign_coords(time=range(state.sizes["time"]))
+            n = state.sizes["time"]
+            step = float(self.output_frequency) if self.output_frequency else 1.0
+            state = state.assign_coords(time=np.arange(n, dtype=float) * step)
 
         return state
 
@@ -656,19 +707,84 @@ class ForwardModel(BaseForwardModel):
         params: Optional[xarray.Dataset] = None,
         sim_name: Optional[str] = "state",
     ) -> xarray.Dataset:
-        if state is not None:
-            logger.warning(
-                "pypalm v1 does not support warm-start; ignoring provided state."
-            )
+        """Run PALM, optionally warm-started from ``state``.
+
+        ``state is None`` → cold start (with spinup): PALM initializes from
+        analytic profiles (``initializing_actions='set_constant_profiles'``).
+
+        ``state`` provided → warm start (no spinup): the resolved u/v/w field is
+        injected as PALM's full 3D initial condition via the dynamic-driver
+        ``init_atmosphere_*`` LOD=2 mechanism and ``initializing_actions`` is
+        switched to ``'read_from_file'`` (see :mod:`.utils.warm_start_utils`).
+        Warm-start carries no subgrid state — PALM re-derives SGS-TKE — so the
+        run is stateless and needs no per-member persistence.
+        """
+        warm_start = state is not None
+        if warm_start:
+            # No spinup on warm windows; also stops the time-varying inflow path
+            # from prepending a spinup plateau (it reads ``self.spinup_time``).
+            self.disable_spinup()
 
         if params is not None:
             self._apply_inflow_settings(params)
         else:
             self._apply_inflow_settings(self.params)
 
+        if warm_start:
+            # Must run AFTER _apply_inflow_settings: the static path removes any
+            # stale driver, and the time-varying path writes inflow_plane_* into
+            # the driver we then augment with init_atmosphere_*.
+            self._apply_warmstart(state)
+        else:
+            self._reset_cold_init()
+
         self._clean_output()
         self.run()
         return self._load_and_postprocess_state()
+
+    def _apply_warmstart(self, state: xarray.Dataset) -> None:
+        """Inject ``state`` as PALM's 3D initial condition for a warm start."""
+        if self.bounds is None or not self.nx or not self.ny or not self.nz:
+            raise ValueError(
+                "pypalm warm-start requires bounds, nx, ny, and nz to be set on "
+                "ForwardModel (needed to build the init_atmosphere_* fields)."
+            )
+        write_warmstart_driver(
+            driver_path=self.dynamic_driver_path,
+            state=state,
+            bounds=self.bounds,
+            nx=int(self.nx),
+            ny=int(self.ny),
+            nz=int(self.nz),
+            pt_surface=DEFAULT_PT_SURFACE,
+        )
+        self._p3d_set_string(
+            "initialization_parameters", "initializing_actions", "read_from_file"
+        )
+        # Suppress the initial random velocity perturbation PALM otherwise adds
+        # at init (init_3d_model.f90:1488, gated by create_disturbances +
+        # disturbance_energy_limit). On a cold start that kick seeds turbulence,
+        # but our injected field is already turbulent, so re-disturbing it just
+        # shocks the flow at every window boundary. PALM's own restart path
+        # (read_restart_data) skips this block entirely; mirror that. The
+        # divergence-removing pressure solve still runs (it is also gated on
+        # non-flat topography), so the injected field is still made solenoidal.
+        self._p3d_set_value("runtime_parameters", "create_disturbances", False)
+
+    def _reset_cold_init(self) -> None:
+        """Restore the cold-start initialization mode.
+
+        A prior warm-start run in this experiment_dir leaves
+        ``initializing_actions = 'read_from_file'`` (and disturbances disabled)
+        in the namelist; reset both so a subsequent cold start initializes from
+        analytic profiles and re-enables the turbulence-seeding perturbation.
+        """
+        self._p3d_set_string(
+            "initialization_parameters",
+            "initializing_actions",
+            "set_constant_profiles",
+        )
+        self._p3d_set_value("runtime_parameters", "create_disturbances", True)
 
     def disable_spinup(self) -> None:
         self.spinup_time = 0.0

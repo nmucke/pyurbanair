@@ -7,14 +7,15 @@ A Python framework for urban air flow simulation and ensemble-based data assimil
 ## Features
 
 - **Three CFD backends:** pylbm (Lattice Boltzmann Method, wrapping Geir Evensen's LBM), pyudales (wrapping uDALES v2.2.0), and pypalm (wrapping the PALM model system)
-- **Neural surrogate backend:** train a learned one-step network on CFD ensembles and run it as a drop-in fourth forward model — full stack (data generation, training, autoregressive rollout) in [`neural-surrogates`](libs/neural-surrogates), documented in [`docs/neural_surrogates.md`](docs/neural_surrogates.md)
+- **Neural surrogate backend:** train a learned one-step network on CFD ensembles and run it as a drop-in fourth forward model — three architectures (`SimpleConv`, `UNetConvNeXt`, and the transformer-based `UPT`), full stack (data generation, training, autoregressive rollout) in [`neural-surrogates`](libs/neural-surrogates), documented in [`docs/neural_surrogates.md`](docs/neural_surrogates.md)
 - **Ensemble-based data assimilation** using ESMDA (Ensemble Smoother with Multiple Data Assimilation), implemented in JAX
 - **Parameter estimation** and **joint state-parameter estimation**
-- **Localization** for ESMDA (correlation-based observation tapering)
+- **Localization** for ESMDA (adaptive correlation-based observation tapering, with optional "grid block" joint analysis; opt-in)
 - **Multi-step rollout simulations** with state carry-over between time windows
 - **Cross-model assimilation** (e.g., use LBM as truth model with uDALES — or a neural surrogate — for assimilation)
 - **Time-varying parameters** with per-window mean/std profiles for the inflow priors
-- **Observation operators** for mapping simulation states to observation space
+- **Observation operators** for mapping simulation states to observation space, with held-out validation sensors for out-of-sample scoring
+- **Reusable ground-truth artifacts** — simulate a truth once, trim its spin-up, downcast to 32-bit, and feed it to many assimilation runs
 - **Benchmark geometry generation** for the Xie and Castro 2008 case
 
 ## Installation
@@ -64,39 +65,60 @@ ulimit -s unlimited
 ### Configuration
 
 All simulation and assimilation settings live in `conf/`, composed by
-[Hydra](https://hydra.cc/). There is **one flat file per parameter
-category** (`conf/<category>.yaml`); any field can be overridden from the
-command line (`domain.nx=80`, `esmda.num_steps=4`). The categories are:
+[Hydra](https://hydra.cc/). Any field can be overridden from the command line
+(`domain.nx=80`, `esmda.num_steps=4`). There are two primary configs:
+`config.yaml` (forward-model runs) and `run_esmda.yaml` (all data-assimilation
+runs).
 
-- **`domain.yaml`** — grid resolution (`nx`, `ny`, `nz`) and spatial bounds
+**Shared flat files** (one per category, `# @package`-mounted):
+
 - **`time.yaml`** — simulation duration, output frequency, spinup time
 - **`ensemble.yaml`** — ensemble size, parallel processes, CPUs/process,
   failure policy
-- **`obs.yaml`** — observation operator schema (points/grid mode, sensor
-  locations, observed states, temporal aggregation)
 - **`esmda.yaml`** — number of assimilation steps/windows, observation
-  error std, random seed, and `localization` (the adaptive correlation
-  localization, on by default; `esmda.localization=null` for the global
-  update). The smoother variant itself is supplied per-script (see below).
-- **`parameters.yaml`** — `params.{true,prior,external}` (true values,
-  assimilation prior, external/expert prior) plus `time_varying.*` (method
-  `ar2_relaxation`/`ar1`/`gp_linear_trend`/`ornstein_uhlenbeck` and
-  per-method kwargs). An external prior `mean`/`std` may be a scalar **or a
-  list of control points** interpolated over the window, letting
-  `x_ext(t)` / `Σ_ext(t)` vary in time.
+  error std, random seed, and `localization`. The adaptive correlation
+  localization block is **off by default** (`localization: null`, the global
+  update); the block is present in `esmda.yaml` but commented out — uncomment it
+  (or set `esmda.localization.truncation_correlation=...` on the CLI) to enable.
+  The smoother variant itself is a group (see below). Only mounted by
+  `run_esmda.yaml`.
+- **`paths.yaml`** — output roots (everything mutable lands under `.temp/`)
 
-`model/` stays a group (`model@truth_model=pylbm model@assim_model=pyudales`),
-as do the `size/` overlays (`size=tiny` … `size=xlarge`), `preset/`, and
-`training_data/` (neural-surrogate dataset sizes; see
-[`docs/neural_surrogates.md`](docs/neural_surrogates.md)). Each esmda script
-has its own primary config (`conf/run_*_esmda.yaml`) that wires in its
-smoother, so you just run the script — no `esmda=<variant>` selector.
+**Groups** (one option per structurally-distinct variant):
+
+- **`case/`** — geometry bundle. A case packages the geometry-specific
+  categories (`domain` bounds, `obs` sensor layout, `geometry` STL paths) into
+  one switchable unit. `case=xie_and_castro` (default) or `case=barcelona`.
+  Override individual fields as usual (`domain.nx=80`). `obs.yaml` may also
+  declare `validation_{x,y,z}_points` — a held-out sensor set that is scored but
+  never assimilated.
+- **`model/`** — forward + ensemble backend, mounted under a package
+  (`model@truth_model=pylbm model@assim_model=pyudales`).
+- **`params/`** — parameter samplers: `static` / `dynamic` (assimilation prior)
+  and `static_truth` / `dynamic_truth` (the truth generator, kept separate to
+  avoid the inverse crime). `dynamic` is `AR2RelaxationModel`, a critically
+  damped AR(2) prior relaxing toward an external prior; each external `mean`/
+  `std` may be a scalar **or a list of control points** interpolated over the
+  window, letting `x_ext(t)` / `Σ_ext(t)` vary in time. Mounted once
+  (`params=...`) for forward runs, twice (`params@truth_params=...`
+  `params@prior_params=...`) for assimilation.
+- **`esmda/smoother/`** — the ESMDA variant: `static` (parameter-only),
+  `dynamic` (time-varying parameters), `state_and_parameter` (joint). Selected
+  with `esmda/smoother=...`.
+- **`size/`** — run-size overlays (`size=tiny` … `size=xlarge`, plus `test`).
+- **`preset/`** — bundled overlays (`small`, `test`) for fast runs.
+- **`training_data/`** — neural-surrogate dataset sizes; see
+  [`docs/neural_surrogates.md`](docs/neural_surrogates.md).
 - **`neural_surrogate_architectures/`, `neural_surrogate_training/`,
-  `neural_surrogate_testing/`** — surrogate architecture presets,
-  training loop, and autoregressive-rollout test config
-- **`preset/`** — bundled overlays (`small`, `test`) for fast runs
+  `neural_surrogate_testing/`** — surrogate architecture presets
+  (`unet_convnext/<size>`, `upt/<size>`), training loop, and
+  autoregressive-rollout test config.
 
 ### Forward simulations
+
+A single `run_forward_model.py` covers single/ensemble runs, single-window or
+multi-window rollouts, and static or time-varying inflow. The mode is selected
+by `run.ensemble`, `run.rollout_steps`, and `params=static|dynamic`:
 
 ```bash
 # Single forward simulation
@@ -104,61 +126,121 @@ python scripts/run_forward_model.py model=pylbm
 python scripts/run_forward_model.py model=pyudales
 
 # Ensemble forward simulation
-python scripts/run_ensemble_forward_model.py model=pylbm
+python scripts/run_forward_model.py model=pylbm run.ensemble=true
 
-# Multi-step rollout simulation
-python scripts/run_rollout_forward_model.py model=pylbm run.num_steps=4
+# Multi-window rollout (run.rollout_steps additional windows after the first)
+python scripts/run_forward_model.py model=pylbm run.rollout_steps=3
 
-# Ensemble rollout simulation
-python scripts/run_ensemble_rollout_forward_model.py model=pylbm
+# Ensemble rollout (combine both flags)
+python scripts/run_forward_model.py model=pylbm run.ensemble=true run.rollout_steps=3
+
+# Time-varying inflow (params=dynamic) — writes a state.nc/params.nc ground-truth
+# artifact that run_esmda.py can consume via run.truth_dir
+python scripts/run_forward_model.py model=pylbm params=dynamic run.rollout_steps=3
 ```
+
+### Ground-truth artifacts
+
+A truth simulation can be saved once and reused across many assimilation runs.
+`run_forward_model.py params=dynamic` writes a `state.nc`/`params.nc` pair; three
+helper scripts (plain CLIs, not Hydra) post-process it:
+
+```bash
+# Drop the spin-up transient and rebase the time axis to t=0
+python scripts/trim_spinup.py \
+    --state ground_truth/state.nc --params ground_truth/params.nc \
+    --spinup-time 50 --output-dir ground_truth_spunup
+
+# Downcast 64-bit NetCDF variables to 32-bit float (streamed; halves on-disk size)
+python scripts/convert_ground_truth_to_32bit.py        # ground_truth/64_bit -> ground_truth/32_bit
+
+# Diagnostic figures: prescribed params, a field snapshot, and the inflow
+# angle/speed recovered from the flow vs. the prescribed values
+python scripts/visualize_ground_truth.py ground_truth_spunup
+```
+
+The resulting folder is what `run_esmda.py` loads via `run.truth_dir` (see below).
+These (multi-GB) `ground_truth*` folders are gitignored.
 
 ### Data assimilation
 
-Each ESMDA script has its own primary config that wires in the right
-smoother (the one genuinely per-script piece), so no `esmda=<name>`
-selector is needed — just run the script. Shared ESMDA settings live in
-`conf/esmda.yaml`.
+All data assimilation runs through a **single** script, `run_esmda.py`. The
+mode is the cross product of three declarative axes plus a truth source:
+
+- `esmda/smoother=static | state_and_parameter | dynamic` — parameter-only,
+  joint state+parameter, or time-varying-parameter Kalman update.
+- `params@prior_params=static | dynamic` (paired with the matching
+  `params@truth_params=static_truth | dynamic_truth`) — static scalar
+  parameters vs. a time-varying AR(2) prior.
+- `esmda.num_assimilation_windows=1 | N` — a single window vs. an N-window
+  rollout.
+- `run.truth_dir=null` (simulate the truth inline) or `=<path>` to a saved
+  `state.nc`/`params.nc` truth artifact. `run_esmda.yaml` defaults this to
+  `ground_truth_spunup`. Use `run.truth_start_time=<seconds>` to begin the
+  assimilation horizon partway into a disk truth (skips a spin-up and rebases
+  that time to t=0). Disk truth is streamed, so multi-GB files never load fully.
+
+Shared ESMDA settings live in `conf/esmda.yaml`. The dynamic multi-window setup
+(time-varying inflow over a rollout, with localization) is written up in
+[`docs/esmda_dynamic_multiwindow.md`](docs/esmda_dynamic_multiwindow.md).
 
 ```bash
-# Parameter estimation with ESMDA
-python scripts/run_parameter_esmda.py \
+# Parameter estimation (parameter-only smoother, static params, single window)
+python scripts/run_esmda.py esmda/smoother=static \
+  params@prior_params=static params@truth_params=static_truth \
   model@truth_model=pylbm model@assim_model=pylbm
 
 # Cross-model assimilation (LBM truth, uDALES assimilation)
-python scripts/run_parameter_esmda.py \
+python scripts/run_esmda.py esmda/smoother=static \
+  params@prior_params=static params@truth_params=static_truth \
   model@truth_model=pylbm model@assim_model=pyudales
 
 # Joint state and parameter estimation
-python scripts/run_state_and_parameter_esmda.py \
-  model@truth_model=pylbm model@assim_model=pylbm
+python scripts/run_esmda.py esmda/smoother=state_and_parameter \
+  params@prior_params=static params@truth_params=static_truth
 
 # Rollout-based ESMDA with multiple assimilation windows
-python scripts/run_rollout_esmda.py \
-  model@truth_model=pylbm model@assim_model=pylbm
+python scripts/run_esmda.py esmda/smoother=state_and_parameter \
+  params@prior_params=static esmda.num_assimilation_windows=3
 
-# Time-varying-parameter ESMDA
-python scripts/run_time_varying_parameter_esmda.py \
-  model@truth_model=pylbm model@assim_model=pylbm \
-  esmda.num_steps=4 obs.interval_seconds=10
+# Time-varying-parameter ESMDA over a 3-window rollout
+python scripts/run_esmda.py esmda/smoother=dynamic \
+  params@prior_params=dynamic params@truth_params=dynamic_truth \
+  esmda.num_assimilation_windows=3
 
-# Adaptive correlation localization (Vossepoel et al. 2025) is on by default;
-# tune it, or disable it with esmda.localization=null
-python scripts/run_parameter_esmda.py \
-  esmda.localization.truncation_correlation=0.3
+# Assimilate against a saved truth instead of simulating it inline
+python scripts/run_esmda.py esmda/smoother=dynamic \
+  run.truth_dir=ground_truth_spunup run.truth_start_time=50
+
+# Adaptive correlation localization (Vossepoel et al. 2025) is OFF by default;
+# enable it by uncommenting the block in conf/esmda.yaml, or set its fields:
+python scripts/run_esmda.py esmda/smoother=static \
+  esmda.localization.truncation_correlation=0.35 esmda.localization.block_grouping=true
 
 # Fast test preset (small domain, few steps, CPU-only LBM)
-python scripts/run_parameter_esmda.py preset=test
+python scripts/run_esmda.py preset=test
 ```
 
-All forward models generate a `.temp` folder where intermediate files are stored.
+> **Note:** `run_esmda.yaml` defaults to the time-varying rollout
+> (`esmda/smoother=dynamic`, `params=dynamic`, `pyudales`↔`pyudales`); set the
+> axes above explicitly for the other modes. The smoother group filenames are
+> `static`/`dynamic`/`state_and_parameter`.
+
+Each run writes per-window prior/posterior parameters and state, a
+`run_summary.yaml` with timing and accuracy metrics (parameter RMSE/CRPS, state
+RMSE, assimilated- and validation-sensor RMSE/CRPS), and diagnostic figures
+(parameter time-evolution, parameter error, sensor time series, final state with
+observations, and an animation). All forward models also generate a `.temp`
+folder where intermediate files are stored.
 
 ### Neural surrogates
 
 A learned one-step network can be trained on a CFD ensemble and then used
 as a drop-in fourth forward model alongside pylbm, pyudales, and pypalm.
-The end-to-end stack (dataset generation → training → autoregressive
-rollout → use as a forward/assimilation model) is documented in
+Three architectures are available — `SimpleConv` (baseline), `UNetConvNeXt`, and
+the transformer-based `UPT` (Universal Physics Transformer). The end-to-end stack
+(dataset generation → training → autoregressive rollout → use as a
+forward/assimilation model) is documented in
 [`docs/neural_surrogates.md`](docs/neural_surrogates.md). The headline
 commands:
 
@@ -166,20 +248,27 @@ commands:
 # 1. Generate a training dataset by driving a CFD ensemble
 pixi run -e dev python scripts/generate_training_data.py training_data=small model=pylbm
 
-# 2. Train a surrogate (UNetConvNeXt by default; pick a preset/architecture)
+# 2. Train a surrogate (pick a preset/architecture; UNetConvNeXt or UPT)
 pixi run -e dev python scripts/train_neural_surrogate.py \
     dataset.root_dir=training_data/pylbm_small \
-    'neural_surrogate_architectures/unet_convnext@architecture=small'
+    'neural_surrogate_architectures/upt@architecture=small'
 
 # 3. Autoregressive rollout on the test split (diagnostic plots + animation)
 pixi run -e dev python scripts/test_neural_surrogate.py \
-    model_dir=model_weights/unet_convnext_small sample_idx=0
+    model_dir=model_weights/upt_small sample_idx=0
 
 # 4. Use the trained surrogate as an assimilation model
-python scripts/run_time_varying_parameters_rollout_esmda.py \
+python scripts/run_esmda.py esmda/smoother=dynamic \
+    params@prior_params=dynamic params@truth_params=dynamic_truth \
+    esmda.num_assimilation_windows=3 \
     model@truth_model=pyudales model@assim_model=neural_surrogate \
-    assim_model.forward_model.model_dir=model_weights/unet_convnext_small
+    assim_model.forward_model.model_dir=model_weights/upt_small
 ```
+
+`UPT` z-score-normalizes the state and inflow parameters and predicts the
+per-step residual; the normalization statistics are computed automatically at the
+start of training and baked into the checkpoint, so nothing extra is needed at
+inference time.
 
 ### Running on Snellius (SLURM)
 
@@ -232,9 +321,13 @@ pyurbanair/
 │   └── pyurbanair/                        # Main package
 │       ├── base_forward_model.py          # Abstract base class for forward models
 │       ├── base_ensemble_forward_model.py # Ensemble execution orchestration
-│       ├── base_rollout_forward_model.py  # Multi-step rollout simulations
+│       ├── base_rollout_forward_model.py  # Legacy multi-step rollout base (file-only, unused)
+│       ├── quiet_jax.py                    # Import before jax to silence CPU-fallback noise
 │       ├── animation.py                   # Animation utilities
-│       ├── plotting.py                    # Plotting utilities
+│       ├── plotting.py                    # Plotting + DA metrics (RMSE/CRPS, sensor series)
+│       ├── static_parameters/             # ParameterSampler + Normal/Uniform/Constant
+│       ├── dynamic_parameters/            # AR2RelaxationModel time-varying prior
+│       ├── training_data/                 # Sampler skeletons for surrogate data generation
 │       ├── config/
 │       │   └── hydra_helpers.py           # Helpers consumed by Hydra configs (instantiate targets)
 │       └── utils/
@@ -248,6 +341,7 @@ pyurbanair/
 │   │   └── src/data_assimilation/
 │   │       ├── observation_operator.py    # Maps states to observation space
 │   │       ├── interpolation.py           # Grid interpolation utilities
+│   │       ├── localization/              # BaseLocalization + CorrelationLocalization
 │   │       └── smoothing/
 │   │           ├── base.py                # Base smoothing class
 │   │           └── esmda.py               # ESMDA implementation
@@ -257,7 +351,6 @@ pyurbanair/
 │   │   └── src/pylbm/
 │   │       ├── forward_model.py
 │   │       ├── ensemble_forward_model.py
-│   │       ├── rollout_forward_model.py
 │   │       ├── stl_to_lbm.py             # STL geometry conversion
 │   │       └── utils/
 │   │
@@ -266,9 +359,8 @@ pyurbanair/
 │   │   └── src/pyudales/
 │   │       ├── forward_model.py
 │   │       ├── ensemble_forward_model.py
-│   │       ├── rollout_forward_model.py
 │   │       ├── python_udgeom/            # Python preprocessing (Matlab alternative)
-│   │       └── utils/
+│   │       └── utils/                    # namoptions, nudging, ncpu, dt-collapse watchdog (run_monitor.py)
 │   │
 │   ├── pypalm/                            # PALM model system wrapper (lazy import)
 │   │   ├── pyproject.toml
@@ -285,37 +377,46 @@ pyurbanair/
 │           ├── data.py                    # TransitionDataset
 │           ├── training.py                # Trainer (train/val loop, pushforward)
 │           ├── geometry.py                # STL → voxel geometry channel
-│           └── architectures/             # SimpleConv, UNetConvNeXt
+│           └── architectures/             # SimpleConv, UNetConvNeXt, UPT (_upt/)
 │
-├── conf/                                  # Hydra config groups (see Configuration)
-│   ├── config.yaml                        # Top-level composition
-│   ├── domain/, time/, model/, ensemble/, paths/, size/
-│   ├── obs/, esmda/, localization/, params/, time_varying/
+├── conf/                                  # Hydra config (see Configuration)
+│   ├── config.yaml                        # Primary config — forward-model runs
+│   ├── run_esmda.yaml                     # Primary config — all ESMDA runs
+│   ├── generate_training_data.yaml        # Primary config — surrogate data gen
+│   ├── paths.yaml, time.yaml, ensemble.yaml, esmda.yaml   # Shared flat files
+│   ├── case/                              # Geometry bundles (xie_and_castro, barcelona)
+│   ├── model/                             # Backend wiring (pylbm, pyudales, pypalm, neural_surrogate)
+│   ├── params/                            # Parameter samplers (static/dynamic + *_truth)
+│   ├── esmda/smoother/                    # ESMDA variants (static, dynamic, state_and_parameter)
+│   ├── size/                              # Run-size overlays (tiny … xlarge, test)
 │   ├── training_data/                     # Surrogate dataset size presets
-│   ├── neural_surrogate_architectures/    # Surrogate architecture presets
+│   ├── neural_surrogate_architectures/    # Surrogate architecture presets (unet_convnext, upt)
 │   ├── neural_surrogate_training/, neural_surrogate_testing/
 │   └── preset/                            # Bundled overlays (small, test)
 │
 ├── scripts/                               # Main execution scripts
-│   ├── run_forward_model.py               # Single forward simulation
-│   ├── run_ensemble_forward_model.py      # Ensemble forward simulation
-│   ├── run_rollout_forward_model.py       # Multi-step rollout
-│   ├── run_ensemble_rollout_forward_model.py  # Ensemble rollout
-│   ├── run_time_varying_forward_model.py  # Time-varying inflow
-│   ├── run_parameter_esmda.py             # Parameter estimation via ESMDA
-│   ├── run_state_and_parameter_esmda.py   # Joint state-parameter estimation
-│   ├── run_rollout_esmda.py               # Rollout-based ESMDA
-│   ├── run_time_varying_parameter_esmda.py
-│   ├── run_time_varying_parameters_rollout_esmda.py
+│   ├── run_forward_model.py               # Forward sim (run.ensemble / run.rollout_steps / params=static|dynamic)
+│   ├── run_esmda.py                       # Unified ESMDA entry point (smoother × params × windows)
+│   ├── _common.py                         # Shared script glue (viz, derived-param plots, metrics)
 │   ├── generate_training_data.py          # Build surrogate training dataset
 │   ├── train_neural_surrogate.py          # Train a surrogate
 │   ├── test_neural_surrogate.py           # Autoregressive rollout on test split
+│   ├── trim_spinup.py                     # Trim spin-up from a ground-truth artifact
+│   ├── convert_ground_truth_to_32bit.py   # Downcast ground-truth NetCDF to 32-bit
+│   ├── visualize_ground_truth.py          # Diagnostic figures for a ground-truth artifact
 │   └── dataloading.py                     # TransitionDataset smoke test
 │
 ├── examples/                              # Example experiments
 │   ├── benchmark_geometry/                # Xie and Castro 2008 geometry tools
 │   ├── lbm/experiments/                   # LBM experiment configs (STL files)
-│   └── udales/experiments/                # uDALES experiment configs
+│   ├── udales/experiments/                # uDALES experiment configs
+│   └── palm/                              # PALM experiment configs (_p3d)
+│
+├── docs/                                  # Documentation
+│   ├── codebase_guide.md                  # Orientation sheet for AI coding assistants
+│   ├── neural_surrogates.md               # Neural-surrogate stack
+│   ├── esmda_dynamic_multiwindow.md       # Dynamic multi-window ESMDA setup
+│   └── ensemble_scaling.md                # Ensemble parallel-scaling findings
 │
 ├── tests/                                 # Test suite
 ├── pyproject.toml                         # Project configuration
@@ -331,7 +432,7 @@ The base library. It contains a base forward model, base ensemble forward model,
 
 #### data-assimilation
 
-Data assimilation functionalities implemented using JAX. Contains an observation operator (for mapping simulation states to observation locations), grid interpolation utilities, a base smoothing class, ESMDA (Ensemble Smoother with Multiple Data Assimilation), and optional localization (correlation-based observation tapering). Supports parameter-only, joint state-parameter, and time-varying-parameter estimation. Compatible with every simulation backend.
+Data assimilation functionalities implemented using JAX. Contains an observation operator (for mapping simulation states to observation locations), grid interpolation utilities, a base smoothing class, ESMDA (Ensemble Smoother with Multiple Data Assimilation), and optional localization (adaptive correlation-based observation tapering, with an optional "grid block" mode that updates co-located rows jointly). Supports parameter-only, joint state-parameter, and time-varying-parameter estimation. Compatible with every simulation backend.
 
 #### pylbm
 
@@ -341,7 +442,7 @@ A wrapper for Geir Evensen's Lattice Boltzmann simulator. On first import, it au
 
 #### pyudales
 
-A wrapper for the uDALES v2.2.0 simulator. On first import, it automatically downloads the repository from GitHub and compiles the code based on the experiment specifications. Preprocessing can be done with Matlab or with the pure-Python preprocessor in `python_udgeom/`.
+A wrapper for the uDALES v2.2.0 simulator. On first import, it automatically downloads the repository from GitHub and compiles the code based on the experiment specifications. Preprocessing can be done with Matlab or with the pure-Python preprocessor in `python_udgeom/`. A timestep watchdog (`utils/run_monitor.py`) detects numerical instability (`dt` collapse) and kills a diverging run early so the ensemble can resample it instead of waiting out a slow crash.
 
 #### pypalm
 
@@ -349,7 +450,7 @@ A wrapper for the PALM model system. It is imported lazily (compiling on first i
 
 #### neural-surrogates
 
-A learned, one-step surrogate of the CFD forward models, built with PyTorch. It provides a dataset generation/loading stack (`TransitionDataset`), architectures (`SimpleConv` baseline and `UNetConvNeXt`), a generic `Trainer` (best-val checkpointing, patience-based early stopping, and the pushforward trick), and a `NeuralSurrogateForwardModel` that wraps a trained network as a `BaseForwardModel` so it slots into the ensemble/ESMDA machinery as a fourth backend. A cold start is bootstrapped by the CFD backend that generated its training data; warm starts step the network directly. See [`docs/neural_surrogates.md`](docs/neural_surrogates.md) for the full stack.
+A learned, one-step surrogate of the CFD forward models, built with PyTorch. It provides a dataset generation/loading stack (`TransitionDataset`), architectures (`SimpleConv` baseline, `UNetConvNeXt`, and the transformer-based `UPT`), a generic `Trainer` (best-val checkpointing, patience-based early stopping, and the pushforward trick), and a `NeuralSurrogateForwardModel` that wraps a trained network as a `BaseForwardModel` so it slots into the ensemble/ESMDA machinery as a fourth backend. `UPT` z-score-normalizes its inputs and predicts the per-step residual (both required for stable rollouts on dense grids), with normalization statistics computed at training time and stored in the checkpoint. A cold start is bootstrapped by the CFD backend that generated its training data; warm starts step the network directly. See [`docs/neural_surrogates.md`](docs/neural_surrogates.md) for the full stack.
 
 ## Benchmark Geometry
 
@@ -469,6 +570,10 @@ and it will apply formatting and give you errors to be fixed. Note that it only 
 ```
 
 There is currently no protection on the main branch. Committing directly is possible without passing pre-commit. Please be mindful before committing.
+
+For AI coding assistants, [`docs/codebase_guide.md`](docs/codebase_guide.md) is a
+fast-orientation sheet covering the internal structure, contracts, and
+conventions.
 
 ## License
 

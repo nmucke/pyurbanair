@@ -3,6 +3,6 @@
 _target_: neural_surrogates.UNetConvNeXt
 base_channels: 32
 channel_mults: [1, 2, 4, 8]
-depths: [2, 2, 2, 2]
+depths: [3, 3, 3, 3]
 kernel_size: 7
-expansion: 4
+expansion: 2

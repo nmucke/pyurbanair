@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -81,6 +82,27 @@ def _augment_runtime_library_paths(env: dict[str, str]) -> None:
     env["LD_LIBRARY_PATH"] = f"{prefix}:{existing}" if existing else prefix
 
 
+def _stack_limited(argv: list[str]) -> list[str]:
+    """Wrap ``argv`` in a shell that raises the stack limit before exec.
+
+    PALM allocates large automatic (stack) arrays during model initialization;
+    on big grids (e.g. the Barcelona case at 400x400x32) these overflow the
+    default 8 MB soft stack and ``palm`` dies with SIGSEGV before time-stepping.
+    palmrun raises this via ``ulimit -s unlimited``, but the direct path
+    bypasses palmrun, so do it here. The raised limit is inherited by mpirun and
+    its ``palm`` child. ``unlimited`` succeeds on Linux; macOS refuses it (and
+    Python's ``resource.setrlimit`` can't raise ``RLIMIT_STACK`` at all there),
+    so fall back to the hard cap (~64 MB) via ``ulimit -s hard``. Both attempts
+    are best-effort — a failure to raise must never abort the launch.
+    """
+    inner = "exec " + shlex.join(argv)
+    return [
+        "bash",
+        "-c",
+        f"ulimit -s unlimited 2>/dev/null || ulimit -s hard 2>/dev/null; {inner}",
+    ]
+
+
 @dataclass
 class DirectRunResult:
     """Timing / status for a single direct-run invocation. Returned for
@@ -98,14 +120,18 @@ class DirectRunResult:
     output_files: list[str]
 
 
-def _envpar_text(run_identifier: str, host: str, ncpu: int) -> str:
+def _envpar_text(
+    run_identifier: str, host: str, ncpu: int, progress_bar_disabled: bool = False
+) -> str:
     """Render the ENVPAR Fortran namelist that PALM reads at startup.
 
     Mirrors palmrun's heredoc at
     ``palm_model_system/packages/palm/model/bin/palmrun`` (search for
-    ``cat  >  ENVPAR``). All booleans are written ``.false.`` because pypalm
-    doesn't use SVF, restart, or spinup writes (warm-start is deferred to v2).
+    ``cat  >  ENVPAR``). The SVF/restart/spinup booleans are ``.false.`` because
+    pypalm doesn't use those writes. ``progress_bar_disabled`` is flipped on for
+    quiet (``verbose=False``) runs so PALM doesn't stream its progress bar.
     """
+    pbar = ".true." if progress_bar_disabled else ".false."
     return (
         f" &envpar  run_identifier = '{run_identifier}', host = '{host}',\n"
         "          write_svf = .false., write_binary = .false., write_spinup_data = .false.,\n"
@@ -113,7 +139,7 @@ def _envpar_text(run_identifier: str, host: str, ncpu: int) -> str:
         "          maximum_parallel_io_streams = 1,\n"
         "          maximum_cpu_time_allowed = 10000000.,\n"
         "          version_string = 'PALM 25.10',\n"
-        "          progress_bar_disabled = .false., /\n"
+        f"          progress_bar_disabled = {pbar}, /\n"
     )
 
 
@@ -155,6 +181,18 @@ def _link_binaries(dst_tempdir: pathlib.Path) -> None:
     if rrtmg_subdir.is_dir() and not rrtmg_link.exists():
         rrtmg_link.symlink_to(rrtmg_subdir, target_is_directory=True)
 
+    # combine_plot_fields.x is linked against a *bare leaf* `rrtmg.so` (no
+    # subdir): on macOS `otool -L` shows `rrtmg.so`, which dyld resolves only
+    # against CWD and DYLD_*_PATH — and the `rrtmg/` subdir symlink above does
+    # not satisfy it. Without this, combine exits on signal 9 (dyld "Library
+    # not loaded: rrtmg.so"), the combined `_3d.nc` is never written, and
+    # pypalm silently falls back to the zero-filled per-PE skeleton (see
+    # docs/pypalm_zero_field_debug.md). Provide `./rrtmg.so` in the tempdir too.
+    rrtmg_so = rrtmg_subdir / "rrtmg.so"
+    rrtmg_so_link = dst_tempdir / "rrtmg.so"
+    if rrtmg_so.is_file() and not rrtmg_so_link.exists():
+        rrtmg_so_link.symlink_to(rrtmg_so)
+
 
 def _transfer_outputs(
     tempdir: pathlib.Path,
@@ -184,13 +222,25 @@ def run_direct(
     env: Optional[dict[str, str]] = None,
     keep_tempdir: bool = False,
     extra_mpirun_args: Optional[list[str]] = None,
+    verbose: bool = True,
 ) -> DirectRunResult:
     """Run one PALM invocation directly, bypassing palmrun/palmbuild.
 
     Mirrors what palmrun does for a single d3 run on a single PE:
     stage INPUT, generate ENVPAR, ``mpirun -n <ncpu> ./palm``,
     ``./combine_plot_fields.x``, transfer DATA_3D_NETCDF to OUTPUT/.
+
+    When ``verbose`` is False the ``palm`` and ``combine_plot_fields.x`` stdout
+    /stderr are captured rather than inherited, so nothing is streamed to the
+    terminal; on a non-zero exit the captured tail is logged so failures are
+    still diagnosable.
     """
+    capture = not verbose
+    _quiet = (
+        {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
+        if capture
+        else {}
+    )
     if env is None:
         env = os.environ.copy()
     _augment_runtime_library_paths(env)
@@ -210,7 +260,9 @@ def run_direct(
         # 1. Stage INPUT + binaries + ENVPAR
         staged = _stage_inputs(dirs.input_dir, tempdir, experiment_name)
         _link_binaries(tempdir)
-        (tempdir / "ENVPAR").write_text(_envpar_text(experiment_name, host, ncpu))
+        (tempdir / "ENVPAR").write_text(
+            _envpar_text(experiment_name, host, ncpu, progress_bar_disabled=capture)
+        )
         stage_s = time.monotonic() - t_start
         logger.info("direct_palm: staged %s in %.2fs", staged, stage_s)
 
@@ -219,19 +271,31 @@ def run_direct(
                 f"No {experiment_name}_p3d file in {dirs.input_dir} — cannot run PALM."
             )
 
-        # 2. mpirun -n <ncpu> ./palm
+        # 2. mpirun -n <ncpu> ./palm (under a raised stack limit; see _stack_limited)
         mpirun_cmd = ["mpirun", *(extra_mpirun_args or []), "-n", str(ncpu), "./palm"]
         t_palm = time.monotonic()
         palm_result = subprocess.run(
-            mpirun_cmd,
+            _stack_limited(mpirun_cmd),
             cwd=tempdir,
             env=env,
             stdin=subprocess.DEVNULL,
+            **_quiet,
         )
         palm_s = time.monotonic() - t_palm
         logger.info("direct_palm: palm wall=%.2fs rc=%s", palm_s, palm_result.returncode)
         if palm_result.returncode != 0:
-            raise subprocess.CalledProcessError(palm_result.returncode, mpirun_cmd)
+            if capture and palm_result.stdout:
+                tail = "\n".join(palm_result.stdout.splitlines()[-80:])
+                logger.error(
+                    "direct_palm: palm failed (rc=%s). Last output:\n%s",
+                    palm_result.returncode,
+                    tail,
+                )
+            raise subprocess.CalledProcessError(
+                palm_result.returncode,
+                mpirun_cmd,
+                output=palm_result.stdout if capture else None,
+            )
 
         # 3. ./combine_plot_fields.x (no mpirun — M0 confirmed this is correct)
         t_combine = time.monotonic()
@@ -240,6 +304,7 @@ def run_direct(
             cwd=tempdir,
             env=env,
             stdin=subprocess.DEVNULL,
+            **_quiet,
         )
         combine_s = time.monotonic() - t_combine
         logger.info(
@@ -247,6 +312,12 @@ def run_direct(
             combine_s,
             combine_result.returncode,
         )
+        if capture and combine_result.returncode != 0 and combine_result.stdout:
+            logger.error(
+                "direct_palm: combine_plot_fields.x failed (rc=%s):\n%s",
+                combine_result.returncode,
+                "\n".join(combine_result.stdout.splitlines()[-40:]),
+            )
 
         # 4. Transfer outputs
         t_transfer = time.monotonic()

@@ -45,6 +45,7 @@ class EncoderSupernodes(nn.Module):
         num_latent_tokens=None,
         cond_dim=None,
         init_weights="truncnormal",
+        attn_ctor=None,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -74,10 +75,13 @@ class EncoderSupernodes(nn.Module):
         self.enc_proj = LinearProjection(
             gnn_dim, enc_dim, init_weights=init_weights, optional=True
         )
+        # ``attn_ctor`` (when given) selects the self-attention impl for the
+        # transformer blocks; the perceiver-pooling tail below is left untouched.
+        attn_kwargs = {} if attn_ctor is None else {"attn_ctor": attn_ctor}
         if cond_dim is None:
-            block_ctor = PrenormBlock
+            block_ctor = partial(PrenormBlock, **attn_kwargs)
         else:
-            block_ctor = partial(DitBlock, cond_dim=cond_dim)
+            block_ctor = partial(DitBlock, cond_dim=cond_dim, **attn_kwargs)
         self.blocks = Sequential(
             *[
                 block_ctor(dim=enc_dim, num_heads=enc_num_heads, init_weights=init_weights)

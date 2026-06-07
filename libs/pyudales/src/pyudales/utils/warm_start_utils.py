@@ -1,5 +1,6 @@
 """Utilities for handling warm start settings for uDALES."""
 
+import json
 import logging
 import os
 import pathlib
@@ -1190,3 +1191,219 @@ def write_warmstart_file_from_xarray(
                     f.write_record(np.float32(timee))
 
             logger.debug(f"Wrote warmstart file: {name}")
+
+
+# ---------------------------------------------------------------------------
+# Warmstart carry store
+# ---------------------------------------------------------------------------
+#
+# A "carry" is the full end-of-run restart file set (initd{ts}_*_*.{exp})
+# produced by a uDALES run with trestart enabled. Unlike the throwaway
+# template created by a tiny cold start, a carry holds the REAL subgrid fields
+# (e120/ekm/thl0/...) from an actual simulation. We persist it per member in
+# ``experiment_dir/warmstart_carry`` so the next warm start can reuse those
+# fields instead of resetting them to near-laminar template values (which
+# otherwise forces a turbulence re-spin-up and biases the flow). Only u/v/w/pres
+# are ever injected from the handed-in xarray state; the subgrid fields stay on
+# disk and never enter the returned state.
+
+CARRY_DIRNAME = "warmstart_carry"
+CARRY_META_NAME = "carry_meta.json"
+
+# Restart files for one timestep across processors: initd{ts}_{px}_{py}.{exp}
+_RESTART_RE_TEMPLATE = r"^initd(\d+)_(\d+)_(\d+)\.{exp}$"
+
+
+def _carry_dir(dirs: DirectoryPaths) -> pathlib.Path:
+    return dirs.experiment_dir / CARRY_DIRNAME
+
+
+def _grid_dims_from_namoptions(dirs: DirectoryPaths) -> dict[str, int]:
+    """Read the (itot, jtot, ktot) grid from this member's namoptions."""
+    namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
+    namoptions = NamoptionsFile(namoptions_path)
+    return {
+        "itot": int(namoptions.get_value("DOMAIN", "itot") or 0),
+        "jtot": int(namoptions.get_value("DOMAIN", "jtot") or 0),
+        "ktot": int(namoptions.get_value("DOMAIN", "ktot") or 0),
+    }
+
+
+def _newest_restart_files(
+    output_experiment_dir: pathlib.Path, experiment_name: str
+) -> list[pathlib.Path]:
+    """Return the processor restart file set written most recently.
+
+    uDALES writes one ``initd{ts}_{px}_{py}.{exp}`` per processor when it dumps
+    a restart. We select by modification time rather than by the ``{ts}`` field:
+    a warm-started window may still have last window's restored carry on disk
+    with a *larger* timestamp (a cold start runs to ``sim+spinup`` but warm
+    windows only to ``sim``), so "max timestamp" could pick the stale carry.
+    The freshly written restart is always the newest on disk.
+    """
+    pattern = re.compile(_RESTART_RE_TEMPLATE.format(exp=re.escape(experiment_name)))
+    by_ts: dict[int, list[pathlib.Path]] = {}
+    if not output_experiment_dir.exists():
+        return []
+    for item in output_experiment_dir.iterdir():
+        if not item.is_file():
+            continue
+        match = pattern.match(item.name)
+        if match:
+            by_ts.setdefault(int(match.group(1)), []).append(item)
+    if not by_ts:
+        return []
+    newest_ts = max(by_ts, key=lambda ts: max(f.stat().st_mtime for f in by_ts[ts]))
+    return by_ts[newest_ts]
+
+
+def store_carry(dirs: DirectoryPaths) -> pathlib.Path | None:
+    """Persist this member's newest end-of-run restart as its warmstart carry.
+
+    Copies the full processor file set of the newest restart in
+    ``output_dir/{exp}`` into ``experiment_dir/warmstart_carry`` (replacing any
+    previous carry) together with a small ``carry_meta.json`` recording the
+    grid. Returns the carry directory, or ``None`` if no restart was produced
+    (e.g. trestart was not enabled).
+    """
+    output_experiment_dir = dirs.output_dir / dirs.experiment_name
+    restart_files = _newest_restart_files(output_experiment_dir, dirs.experiment_name)
+    if not restart_files:
+        logger.debug(
+            "No restart file found in %s; nothing to carry.", output_experiment_dir
+        )
+        return None
+
+    carry_dir = _carry_dir(dirs)
+    if carry_dir.exists():
+        shutil.rmtree(carry_dir)
+    carry_dir.mkdir(parents=True, exist_ok=True)
+
+    for src in restart_files:
+        shutil.copy2(src, carry_dir / src.name)
+
+    meta = {
+        "experiment_name": dirs.experiment_name,
+        "grid": _grid_dims_from_namoptions(dirs),
+        "files": sorted(f.name for f in restart_files),
+    }
+    (carry_dir / CARRY_META_NAME).write_text(json.dumps(meta, indent=2))
+    logger.info(
+        "Stored warmstart carry (%d file(s)) in %s",
+        len(restart_files),
+        carry_dir,
+    )
+    return carry_dir
+
+
+def fetch_carry(dirs: DirectoryPaths) -> pathlib.Path | None:
+    """Restore this member's stored carry into ``output_dir/{exp}`` for reuse.
+
+    Returns the path to the restored ``_000_000`` restart file (the one u/v/w/
+    pres are injected into) when a grid-matching carry exists, otherwise
+    ``None`` so the caller falls back to the cold-start template. Copies the
+    full processor set so multi-rank ``startfile`` resolution still works.
+    """
+    carry_dir = _carry_dir(dirs)
+    meta_path = carry_dir / CARRY_META_NAME
+    if not meta_path.exists():
+        return None
+
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        logger.warning("Unreadable carry metadata at %s; ignoring carry.", meta_path)
+        return None
+
+    current_grid = _grid_dims_from_namoptions(dirs)
+    if meta.get("grid") != current_grid:
+        logger.warning(
+            "Warmstart carry grid %s does not match current grid %s; "
+            "falling back to cold-start template.",
+            meta.get("grid"),
+            current_grid,
+        )
+        return None
+
+    output_experiment_dir = dirs.output_dir / dirs.experiment_name
+    output_experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    restored_000 = None
+    for name in meta.get("files", []):
+        src = carry_dir / name
+        if not src.exists():
+            logger.warning("Carry file %s missing; falling back to template.", src)
+            return None
+        dst = output_experiment_dir / name
+        shutil.copy2(src, dst)
+        if re.match(rf"^initd\d+_000_000\.{re.escape(dirs.experiment_name)}$", name):
+            restored_000 = dst
+
+    if restored_000 is None:
+        logger.warning("Carry has no _000_000 file; falling back to template.")
+        return None
+
+    logger.info("Restored warmstart carry from %s", carry_dir)
+    return restored_000
+
+
+def clear_carry(dirs: DirectoryPaths) -> None:
+    """Remove this member's stored warmstart carry, if any."""
+    carry_dir = _carry_dir(dirs)
+    if carry_dir.exists():
+        shutil.rmtree(carry_dir)
+        logger.info("Cleared warmstart carry in %s", carry_dir)
+
+
+def copy_carry(src_dirs: DirectoryPaths, dst_dirs: DirectoryPaths) -> bool:
+    """Copy ``src_dirs``' warmstart carry into ``dst_dirs``, renaming for it.
+
+    Used when an ensemble member fails and is resampled from a donor: the donor
+    member's state seeds the failed member's next window, so the failed member
+    must warm start from the donor's carry. Restart filenames embed the
+    experiment name (``initd…_{px}_{py}.{exp}``), so each file's suffix is
+    rewritten from the source to the destination member. Returns ``True`` if a
+    carry was copied.
+    """
+    src_carry = _carry_dir(src_dirs)
+    meta_path = src_carry / CARRY_META_NAME
+    if not meta_path.exists():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    src_exp = src_dirs.experiment_name
+    dst_exp = dst_dirs.experiment_name
+
+    def _rename(name: str) -> str:
+        # Replace the trailing ".{src_exp}" extension with ".{dst_exp}".
+        stem = name.rsplit(".", 1)[0]
+        return f"{stem}.{dst_exp}"
+
+    dst_carry = _carry_dir(dst_dirs)
+    if dst_carry.exists():
+        shutil.rmtree(dst_carry)
+    dst_carry.mkdir(parents=True, exist_ok=True)
+
+    new_files = []
+    for name in meta.get("files", []):
+        src = src_carry / name
+        if not src.exists():
+            shutil.rmtree(dst_carry)
+            return False
+        new_name = _rename(name)
+        shutil.copy2(src, dst_carry / new_name)
+        new_files.append(new_name)
+
+    new_meta = {
+        "experiment_name": dst_exp,
+        "grid": meta.get("grid"),
+        "files": sorted(new_files),
+    }
+    (dst_carry / CARRY_META_NAME).write_text(json.dumps(new_meta, indent=2))
+    logger.info(
+        "Copied warmstart carry from member %s to %s", src_exp, dst_exp
+    )
+    return True

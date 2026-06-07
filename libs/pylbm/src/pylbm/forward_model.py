@@ -54,6 +54,7 @@ class ForwardModel(BaseForwardModel):
         ),
         output_frequency: float = 0.0538,
         results_dir: Optional[pathlib.Path] = None,
+        temp_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
         experiment_name: str = "runcase",
         cuda: bool = False,
@@ -83,7 +84,9 @@ class ForwardModel(BaseForwardModel):
         self.stderr = None if self.verbose else subprocess.DEVNULL
 
         self.dirs = get_lbm_directory_paths(
-            temp_dir=pathlib.Path(".temp"),
+            temp_dir=(
+                pathlib.Path(temp_dir) if temp_dir is not None else pathlib.Path(".temp")
+            ),
             case_dir=pathlib.Path("examples/lbm"),
             experiment_name=experiment_name,
         )
@@ -200,8 +203,15 @@ class ForwardModel(BaseForwardModel):
             if is_time_varying_params(params):
                 velocity_magnitude = float(params["velocity_magnitude"].max().item())
             else:
-                velocity_magnitude = params["velocity_magnitude"].item()
+                velocity_magnitude = float(params["velocity_magnitude"].item())
             self.C_u = int(velocity_magnitude * 15)
+            # uini is the physical inflow magnitude [m/s]; uvel_shear.dat only
+            # carries the normalized vertical shape (=1 at the domain top), so the
+            # actual inflow speed comes from uini. Track velocity_magnitude here so
+            # the inflow matches the requested params instead of the LBM template
+            # default (8 m/s). For time-varying params this is only the fallback
+            # used when uvel_time.dat is absent (write_uvel_time_file overrides it).
+            self._set_infile_value("uini", velocity_magnitude)
         else:
             self.C_u = 75
         self._set_infile_value("C_u", self.C_u)
@@ -321,8 +331,17 @@ class ForwardModel(BaseForwardModel):
         any stale ``uvel_time.dat`` and applies the values directly.
         """
         if is_time_varying_params(params):
+            # The LBM matches the schedule against its absolute clock
+            # t = (iteration - 1) * dt, which continues across warm starts
+            # (nt0 > 0). Shift the (window-relative) schedule onto that clock so
+            # window w is read over [nt0*dt, nt0*dt + simulation_time].
+            nt0 = self._get_infile_int_value("nt0", 0)
+            dt = self.seconds_per_timestep or 0.0
             write_uvel_time_file(
-                params=params, dirs=self.dirs, spinup_time=self.spinup_time
+                params=params,
+                dirs=self.dirs,
+                spinup_time=self.spinup_time,
+                time_offset=nt0 * dt,
             )
             initial_params = extract_initial_params(params)
             apply_inflow_settings(params=initial_params, dirs=self.dirs)
@@ -365,9 +384,16 @@ class ForwardModel(BaseForwardModel):
             env["PIXI_ENVIRONMENT"] = str(self.dirs.pixi_env_path)
         _augment_runtime_library_paths(env=env, pixi_env_path=self.dirs.pixi_env_path)
 
-        # Set stack size limit to unlimited
-        # shell_cmd = f"ulimit -s unlimited && {executable_path}"
-        shell_cmd = f"{self.dirs.executable_path}"
+        # Raise the stack size limit before launching. The LBM binary uses
+        # large automatic (stack) arrays sized by nx*ny*nz; on big grids (e.g.
+        # the Barcelona case at 400x400x32) these blow past the default 8 MB
+        # stack and the process dies with SIGSEGV. macOS /bin/sh refuses
+        # "unlimited" for the stack, so fall back to the hard limit (~64 MB);
+        # both attempts are best-effort so a failure never aborts the launch.
+        shell_cmd = (
+            f"ulimit -s unlimited 2>/dev/null || ulimit -s hard 2>/dev/null; "
+            f"{self.dirs.executable_path}"
+        )
         try:
             # check=True so a non-zero LBM exit raises CalledProcessError, which
             # the ensemble runner catches to resample the member from a survivor.
@@ -420,12 +446,24 @@ class ForwardModel(BaseForwardModel):
         try:
             if state is not None:
                 self.spinup_time = 0.0
+                # Set C_u for THIS window before reconstructing the restart, so
+                # the carried state (m/s) is scaled to lattice units with the C_u
+                # the run will actually use. Otherwise the warm start uses the
+                # previous window's C_u and the velocity field jumps when the
+                # inflow speed changes between windows.
+                self._set_scaling_factors(params)
                 self._prepare_warmstart(state)
 
+            # Finalize scaling: applies nt0 from the warm-start restart (set by
+            # _prepare_warmstart) and the current C_u/timestep duration.
+            self._set_scaling_factors(params)
+
+            # Written after scaling so the time-varying inflow schedule can be
+            # shifted onto the LBM's absolute, warm-start-continuing clock
+            # (t = iteration*dt); a window-local schedule would otherwise be read
+            # at the wrong (large) clock time and clamp to its last value.
             if params is not None:
                 self._apply_inflow_settings(params)
-
-            self._set_scaling_factors(params)
 
             # Remove stale output files before running to prevent files from a
             # previous run (which may have used a different iout) being collected.

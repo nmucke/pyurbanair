@@ -154,6 +154,7 @@ def apply_time_varying_inflow(
     dirs: DirectoryPaths,
     tnudge: float = 10.0,
     nnudge: Optional[int] = None,
+    nnudge_meters: Optional[float] = None,
     spinup_time: float = 0.0,
     simulation_time: float = 0.0,
     boundary_condition: str = "periodic",
@@ -187,6 +188,11 @@ def apply_time_varying_inflow(
         tnudge: Nudging relaxation timescale in seconds.
         nnudge: Number of vertical levels from the bottom that are NOT nudged.
             Defaults to 0 (nudge entire domain).
+        nnudge_meters: Height (in meters above the domain floor) below which
+            nudging is NOT applied; nudging is applied above this height. When
+            given, it is converted to a grid-level count and overrides
+            ``nnudge``.  Cells whose center lies below ``nnudge_meters`` are
+            excluded from nudging.
         spinup_time: Duration of the spinup period in seconds.  During spinup
             the nudging holds the initial parameter values constant.
     """
@@ -208,8 +214,31 @@ def apply_time_varying_inflow(
 
     profile_shape = build_profile_shape(profile_config, heights, zsize)
 
-    if nnudge is None:
+    # Resolve the number of un-nudged bottom levels. ``nnudge_meters`` (a
+    # physical height) takes precedence over ``nnudge`` (a raw level count):
+    # count the cells whose center lies below the requested height so that
+    # nudging is applied only above it.
+    if nnudge_meters is not None:
+        nnudge = int(np.count_nonzero(heights < nnudge_meters))
+        logger.info(
+            "Converted nnudge_meters=%.2f m to nnudge=%d levels (dz=%.3f m).",
+            nnudge_meters,
+            nnudge,
+            dz,
+        )
+    elif nnudge is None:
         nnudge = 0
+
+    if nnudge >= ktot:
+        raise ValueError(
+            f"nnudge={nnudge} leaves no nudged levels (ktot={ktot}). "
+            + (
+                f"nnudge_meters={nnudge_meters} m exceeds the domain height "
+                f"({zsize} m)."
+                if nnudge_meters is not None
+                else "Reduce nnudge below ktot."
+            )
+        )
 
     # Extract arrays from params.  When params has no ``time`` dimension
     # (scalar / constant params), create a synthetic constant schedule

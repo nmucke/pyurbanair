@@ -7,6 +7,8 @@ forward_model:
   _convert_: all
   # STL geometry follows the selected `case` (conf/case/<name>/geometry.yaml).
   stl_path: ${geometry.stl_path}
+  # Base scratch dir shared across models; pylbm nests <temp_dir>/experiment/runcase.
+  temp_dir: ${paths.experiment_dir}
   experiment_name: runcase
   cuda: true
   verbose: false
@@ -32,3 +34,4 @@ ensemble_model:
   ensemble_size: ${ensemble.ensemble_size}
   num_parallel_processes: ${ensemble.num_parallel_processes}
   num_cpus_per_process: ${ensemble.num_cpus_per_process}
+  failure: ${ensemble.failure}

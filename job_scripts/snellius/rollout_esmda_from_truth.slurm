@@ -9,9 +9,10 @@
 #
 #     sbatch job_scripts/snellius/rollout_esmda_from_truth.slurm esmda.num_steps=4
 #
-# It drives scripts/run_time_varying_parameters_rollout_esmda_from_truth.py,
-# which LOADS the ground truth (state.nc + params.nc) from GROUND_TRUTH_DIR
-# instead of simulating it, chops it into assimilation windows, and runs
+# It drives scripts/run_time_varying_parameters_rollout_esmda.py in its
+# loaded-truth mode (selected by run.ground_truth_dir): it LOADS the ground
+# truth (state.nc + params.nc) from GROUND_TRUTH_DIR instead of simulating it,
+# chops it into assimilation windows, and runs
 # TimeVaryingParameterESMDA. The number of windows is clamped automatically so
 # the rollout never exceeds the time length of the loaded ground truth.
 #
@@ -196,7 +197,7 @@ case "${ASSIM_MODEL}" in
 esac
 
 pixi run -e "${ENV}" -- python -u \
-    scripts/run_time_varying_parameters_rollout_esmda_from_truth.py \
+    scripts/run_time_varying_parameters_rollout_esmda.py \
     model@truth_model="${GROUND_TRUTH_MODEL}" \
     model@assim_model="${ASSIM_MODEL}" \
     case="${CASE}" \

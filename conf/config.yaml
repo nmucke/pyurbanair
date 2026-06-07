@@ -1,16 +1,33 @@
+# defaults:
+#   - paths
+#   - case: xie_and_castro
+#   - time
+#   - ensemble
+#   - esmda
+#   - params/static_params
+#   - model@model: pylbm
+#   - model@truth_model: pylbm
+#   - model@assim_model: pylbm
+#   - size: null
+#   - preset: null
+#   - _self_
+
 defaults:
+  - _self_
   - paths
   - case: xie_and_castro
   - time
   - ensemble
-  - esmda
-  - parameters
-  - model@model: pylbm
-  - model@truth_model: pylbm
-  - model@assim_model: pylbm
-  - size: null
-  - preset: null
-  - _self_
+  - params: dynamic
+  - model@model: pyudales
+
+
+run:
+  skip_viz: false
+  results_dir: null
+  ensemble: false
+  ground_truth_dir: null
+  rollout_steps: 3
 
 # One flat file per parameter category (conf/<category>.yaml) instead of a group
 # of per-variant files. Each holds the full set of fields the most involved run
@@ -29,15 +46,22 @@ hydra:
   job:
     chdir: false
   run:
-    dir: ${paths.base_results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
-run:
-  skip_viz: false
-  results_dir: null
-  num_steps: 2
-  use_true_params: false
-  # Directory holding a pre-simulated ground truth (state.nc + params.nc), as
-  # written by scripts/run_time_varying_forward_model.py. Only consumed by
-  # scripts that load the truth from disk instead of simulating it (e.g.
-  # run_time_varying_parameters_rollout_esmda_from_truth.py); null otherwise.
-  ground_truth_dir: null
+# run:
+#   skip_viz: false
+#   results_dir: null
+#   # Forward-model knobs (scripts/run_forward_model.py): run an ensemble instead
+#   # of a single member with `run.ensemble=true`; roll the state forward over
+#   # `run.num_steps` windows (num_steps=1 -> a single forward); drive a
+#   # single-member time-varying-inflow ground-truth run with
+#   # `run.time_varying=true` (mutually exclusive with `run.ensemble`).
+#   ensemble: false
+#   num_steps: 1
+#   time_varying: false
+#   # Directory holding a pre-simulated ground truth (state.nc + params.nc), as
+#   # written by `run_forward_model.py run.time_varying=true`. Only consumed by
+#   # scripts that load the truth from disk instead of simulating it (e.g.
+#   # run_time_varying_parameters_rollout_esmda.py with run.ground_truth_dir set);
+#   # null otherwise.
+#   ground_truth_dir: null

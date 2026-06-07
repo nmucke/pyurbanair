@@ -1,12 +1,10 @@
 # @package esmda
 #
-# ESMDA settings shared by every run_*_esmda.py script. The smoother itself
-# (the `smoother._target_` block) is NOT here: it is the one genuinely
-# per-script piece, so each esmda script supplies it in its own primary config
-# (conf/run_parameter_esmda.yaml, conf/run_state_and_parameter_esmda.yaml,
-# conf/run_rollout_esmda.yaml, conf/run_time_varying_parameter_esmda.yaml,
-# conf/time_varying_rollout_esmda.yaml). Forward-only scripts compose this file
-# and simply ignore it.
+# ESMDA settings shared across the run_esmda.py modes. The smoother itself
+# (the `_target_` block) is NOT here: it is the one genuinely mode-specific
+# piece, selected via the `esmda/smoother` group (conf/esmda/smoother/
+# {parameter,state_and_parameter,time_varying}.yaml). conf/run_esmda.yaml mounts
+# this file (`- esmda`) and a smoother default; forward-only scripts ignore it.
 #
 # Localization lives in this namespace, not a separate group. `localization` is
 # what every smoother receives (`localization: ${..localization}`) and is the
@@ -18,12 +16,19 @@ num_assimilation_windows: 5
 seed: 42
 obs_error_std: 0.25
 
-localization:
-  _target_: data_assimilation.localization.correlation.CorrelationLocalization
-  # Correlation truncation threshold rho_t. null -> theoretical 3/sqrt(N_e).
-  # The paper found tuned values in [0.3, 0.4] work best.
-  truncation_correlation: null
-  # Fraction of the truncation distance left un-tapered (beta in Eq. 9).
-  tapering_beta: 0.5
-  # Maximum error-variance inflation E_max at the truncation distance.
-  max_inflation: 8.0
+localization: null
+  # _target_: data_assimilation.localization.correlation.CorrelationLocalization
+  # # Correlation truncation threshold rho_t. null -> theoretical 3/sqrt(N_e).
+  # # The paper found tuned values in [0.3, 0.4] work best.
+  # truncation_correlation: 0.35
+  # # Fraction of the truncation distance left un-tapered (beta in Eq. 9).
+  # tapering_beta: 0.5
+  # # Maximum inflation E_max at the truncation distance. As in the paper and
+  # # reference code it multiplies the obs-error perturbation (std), so the error
+  # # variance there is scaled by E_max**2.
+  # max_inflation: 8.0
+  # # Local-analysis granularity. false -> per-row (each augmented row updated on
+  # # its own). true -> the paper's "grid block" analysis: co-located rows (the
+  # # u/v/w state at one cell, or all time knots of one parameter) are updated
+  # # jointly with a single observation selection and transition matrix.
+  # block_grouping: true

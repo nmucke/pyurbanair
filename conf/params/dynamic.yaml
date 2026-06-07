@@ -1,0 +1,24 @@
+# Time-varying parameter model — same sample_prior(ensemble_size) interface as
+# the static sampler, but emits a `time` dim. Each external `mean` / `std` may
+# be a scalar (constant over the window) OR a list of control points spaced
+# evenly over the window and linearly interpolated, letting x_ext(t) / Σ_ext(t)
+# vary in time, e.g. `inflow_angle.mean: [-30, 0, 30]`.
+_target_: pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel
+_convert_: all
+correlation_length: 100.0
+seed: 2
+external_parameters:
+  inflow_angle:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 25.0
+    std: 6.0
+  velocity_magnitude:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 6.0
+    std: 0.5
+    min: 0.1
+time_coords:
+  _target_: numpy.linspace
+  start: 0.0
+  stop: ${time.simulation_time}
+  num: 6
