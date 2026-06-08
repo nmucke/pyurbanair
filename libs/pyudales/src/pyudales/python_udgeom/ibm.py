@@ -151,33 +151,40 @@ def write_ibm_files_using_fortran(
                 f"{face_normals[i, 0]:15.10f} {face_normals[i, 1]:15.10f} {face_normals[i, 2]:15.10f}\n"
             )
 
-    # Compile and run Fortran code
-    os.chdir(fortran_path)
-    compile_cmd = [
-        "gfortran",
-        "-O3",
-        "-fopenmp",
+    # Compile the IBM preprocessor INTO the per-experiment dir (fpath), never the
+    # shared Fortran source tree (fortran_path). Concurrent runs -- e.g. an
+    # ensemble or a parameter/resolution sweep -- otherwise race on the shared
+    # .mod/.exe build artifacts and fail with gfortran's "Cannot rename/open
+    # module file 'in_mypoly_functions.mod'". Sources are referenced by absolute
+    # path; -J/-I point the .mod output and search path at fpath, and cwd=fpath,
+    # so every process builds in complete isolation.
+    src_files = [
         "in_mypoly_functions.f90",
         "boundaryMasking.f90",
         "matchFacetsCells.f90",
         "IBM_preproc_io.f90",
         "IBM_preproc_main.f90",
-        "-o",
-        "IBM_preproc.exe",
     ]
-    subprocess.run(compile_cmd, check=True)
+    compile_cmd = (
+        ["gfortran", "-O3", "-fopenmp", f"-J{fpath}", f"-I{fpath}"]
+        + [str(fortran_path / s) for s in src_files]
+        + ["-o", "IBM_preproc.exe"]
+    )
+    subprocess.run(compile_cmd, check=True, cwd=fpath)
 
-    # Copy executable to fpath
-    import shutil
+    # Clean up the .mod files produced in fpath (gfortran lowercases them).
+    for mod_file in [
+        "in_mypoly_functions.mod",
+        "boundarymasking.mod",
+        "matchfacets2cells.mod",
+        "ibm_preproc_io.mod",
+    ]:
+        mod_path = os.path.join(fpath, mod_file)
+        if os.path.exists(mod_path):
+            os.remove(mod_path)
 
-    shutil.copy("IBM_preproc.exe", fpath)
-    # Clean up mod files
-    for mod_file in ["in_mypoly_functions.mod", "boundaryMasking.mod", "matchFacets2Cells.mod", "IBM_preproc_io.mod"]:
-        if os.path.exists(mod_file):
-            os.remove(mod_file)
-    os.remove("IBM_preproc.exe")
-
-    # Run Fortran executable
+    # Run Fortran executable (in fpath, where its inputs were written and the
+    # executable was just built).
     os.chdir(fpath)
     run_cmd = ["./IBM_preproc.exe"]
     subprocess.run(run_cmd, check=True)

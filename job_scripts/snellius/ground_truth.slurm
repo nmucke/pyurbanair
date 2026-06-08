@@ -21,7 +21,7 @@
 #SBATCH --partition=rome
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=04:00:00
+#SBATCH --time=16:00:00
 #SBATCH --mem-per-cpu=1750M
 #SBATCH --account=tdsr72361
 #SBATCH --output=job_scripts/snellius/out_files/slurm-ground_truth-%j.out
@@ -39,9 +39,9 @@ CASE="xie_and_castro"         # xie_and_castro | barcelona
 
 # --- Domain arguments (grid resolution + physical bounds) -------------------
 # Grid cell counts per axis.
-NX=200
-NY=160
-NZ=64
+NX=100
+NY=80
+NZ=32
 # Physical bounds as [lo, hi] per axis, in metres: x, y, z.
 X_BOUNDS="[-20.0, 80.0]"
 Y_BOUNDS="[0.0, 80.0]"
@@ -49,10 +49,15 @@ Z_BOUNDS="[0.0, 32.0]"
 
 # --- Time / parameter resolution --------------------------------------------
 SIMULATION_TIME=3600.0         # length of the simulated window [s]
-OUTPUT_FREQUENCY=5.0          # state snapshot interval [s]
-SPINUP_TIME=10.0              # constant-inflow plateau before the window [s]
-NUM_TIME_POINTS=240            # number of time-varying parameter knots
+OUTPUT_FREQUENCY=1.0          # state snapshot interval [s]
+SPINUP_TIME=50.0              # constant-inflow plateau before the window [s]
+NUM_TIME_POINTS=120            # number of time-varying parameter knots
 SEED=0                        # RNG seed for the AR(2) truth draw
+
+# --- Solver parallelism ------------------------------------------------------
+# Number of CPU cores the solver runs on (pyudales/pypalm only; ignored by
+# pylbm). Keep this <= --cpus-per-task above.
+NCPU=1
 
 SKIP_VIZ="false"              # set "true" to skip animations/plots
 # ============================================================================
@@ -62,7 +67,7 @@ ENV="snellius"
 PROJECT_STORAGE="/projects/prjs2075/urbanair"
 # Final outputs land here. resolve_output_dir() in the script honours
 # hydra.run.dir, so all outputs are rooted at this "ground_truth" folder.
-GT_DIR="${PROJECT_STORAGE}/ground_truth"
+GT_DIR="${PROJECT_STORAGE}/ground_truth_small"
 
 # Run from the directory sbatch was invoked from (the repo root).
 cd "${SLURM_SUBMIT_DIR}"
@@ -75,7 +80,7 @@ mkdir -p "${RUN_TEMP_DIR}"
 trap '[ "$?" = "0" ] && rm -rf "${RUN_TEMP_DIR}"' EXIT
 
 echo "Job ${SLURM_JOB_ID} on $(hostname) — $(date)"
-echo "Model=${MODEL} case=${CASE} domain=${NX}x${NY}x${NZ} cores=${SLURM_CPUS_PER_TASK}"
+echo "Model=${MODEL} case=${CASE} domain=${NX}x${NY}x${NZ} cores=${SLURM_CPUS_PER_TASK} ncpu=${NCPU}"
 echo "Bounds: x=${X_BOUNDS} y=${Y_BOUNDS} z=${Z_BOUNDS}"
 echo "Output root: ${GT_DIR}  (temp: ${RUN_TEMP_DIR})"
 [ "$#" -gt 0 ] && echo "Extra hydra overrides: $*"
@@ -101,10 +106,12 @@ case "${MODEL}" in
     ln -sfn "${RUN_TEMP_DIR}" .temp
     ;;
   pyudales)
+    EXTRA_FLAGS+=( "model.forward_model.ncpu=${NCPU}" )
     EXTRA_FLAGS+=( "+model.forward_model.temp_dir=${RUN_TEMP_DIR}" )
     EXTRA_FLAGS+=( "+model.forward_model.output_dir=${RUN_TEMP_DIR}/outputs" )
     ;;
   pypalm)
+    EXTRA_FLAGS+=( "model.forward_model.ncpu=${NCPU}" )
     EXTRA_FLAGS+=( "+model.forward_model.temp_dir=${RUN_TEMP_DIR}" )
     export PYURBANAIR_DISABLE_CPU_PINNING=1
     export PYPALM_USE_DIRECT_RUN="${PYPALM_USE_DIRECT_RUN:-1}"

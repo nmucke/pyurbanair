@@ -113,3 +113,36 @@ Results land in `/projects/prjs2075/urbanair`; intermediate I/O uses node-local
 `$TMPDIR` (auto-purged at job end). To keep a failing run's solver logs for
 debugging, point temp at persistent scratch, e.g.
 `... +truth_model.forward_model.temp_dir=/scratch-shared/$USER/debug`.
+
+## Rollout-ESMDA-from-truth sweeps (per backend)
+
+The `pyudales/`, `pypalm/` and `pylbm/` folders each drive `scripts/run_esmda.py`
+in its loaded-truth mode (`run.truth_dir=<dir>`): they LOAD a pre-simulated
+ground truth (`state.nc` + `params.nc`) and run the time-varying (dynamic)
+smoother (`esmda/smoother=dynamic`) over `esmda.num_assimilation_windows`
+windows. All three folders point at the **same** ground truth (produced by
+`GROUND_TRUTH_MODEL=pyudales`) — only the assimilation backend differs — so the
+runs are directly comparable. Each folder contains:
+
+- `rollout_esmda_from_truth.slurm` — the self-contained job (edit its CONFIG
+  block, or append Hydra overrides). `ASSIM_MODEL` is fixed to the folder name;
+  `GROUND_TRUTH_MODEL`/`GROUND_TRUTH_DIR` select the shared truth.
+- `sweep_domain_rollout_esmda_from_truth.sh` — one job per grid resolution
+  (coarse → ground-truth resolution).
+- `sweep_ensemble_rollout_esmda_from_truth.sh` — one job per ensemble size.
+- `sweep_esmda_steps_rollout_esmda_from_truth.sh` — one job per
+  `esmda.num_steps`.
+
+The three sweep launchers are identical across folders (they submit the sibling
+`rollout_esmda_from_truth.slurm` found next to them). Run from the repo root:
+
+```bash
+bash job_scripts/snellius/pyudales/sweep_domain_rollout_esmda_from_truth.sh
+bash job_scripts/snellius/pylbm/sweep_ensemble_rollout_esmda_from_truth.sh esmda.seed=1
+```
+
+Each job writes to `/projects/prjs2075/urbanair/assim_from_ground_truth/<RUN_TAG>`
+where `RUN_TAG` embeds the assim model, grid, ensemble size and step count, so no
+two configurations (or backends) collide. Correlation localization is **off** by
+default (the config default is the global update); set `USE_LOCALIZATION=true` in
+the slurm CONFIG block to enable it.

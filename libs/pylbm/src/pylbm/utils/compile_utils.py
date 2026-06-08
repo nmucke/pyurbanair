@@ -279,10 +279,16 @@ def compile_lbm(
                 link_dirs.append(f"-L{netcdf_lib_dir}")
         link_dirs.append(f"-L{env_lib_dir}")
 
+        # Install the binary into the LBM tree (LBM/bin) instead of the makefile's
+        # default $(HOME)/bin (the shared pixi env). Keeps the executable beside
+        # its -- possibly per-run isolated -- source tree so parallel builds don't
+        # clobber a single shared boltzmann. Must match dir_utils.executable_path.
+        bindir = dirs.lbm_src_path.parent / "bin"
         make_args = [
             "make",
             "-B",
             f"HOME={build_env_path}",
+            f"BINDIR={bindir}",
             f"LIBDIR={' '.join(link_dirs)}",
         ]
         if enable_cuda:

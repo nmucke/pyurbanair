@@ -83,3 +83,17 @@ ground_truth_spunup/large/*
 .temp_udales/*
 .temp_palm/*
 .temp_lbm/*
+
+# Metrics and comparison
+comparison/*
+sweep_metrics/*
+
+# animations
+*.gif
+*.mp4
+
+# generated artifacts
+.temp
+slurm-*.out
+state.nc
+params.nc

@@ -82,7 +82,12 @@ def get_lbm_directory_paths(
     pixi_env_path = identify_environment(pathlib.Path.cwd())
 
     infile_path = experiment_dir / "infile.in"
-    executable_path = pixi_env_path / "bin" / "boltzmann"
+    # Install the compiled binary inside the LBM tree (LBM/bin) rather than the
+    # shared pixi env bin. The LBM tree can be isolated per run (PYLBM_LBM_PATH),
+    # so keeping the binary there lets concurrent builds avoid clobbering a single
+    # shared boltzmann executable. compile_utils passes the matching BINDIR to
+    # make. Falls back transparently to the in-repo submodule for normal runs.
+    executable_path = lbm_src_path.parent / "bin" / "boltzmann"
 
     if results_dir is not None:
         results_dir = create_dir(results_dir)

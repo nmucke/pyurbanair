@@ -25,7 +25,19 @@ LBM_PATH = None
 _lbm_path = None
 _lbm_url = None
 
-if _gitmodules_path.exists():
+# Per-job isolation hook. When PYLBM_LBM_PATH is set, use that copy of the LBM
+# tree directly and skip the shared in-repo submodule discovery/clone. The LBM
+# build mutates its own source tree (mod_dimensions.F90, generated m_*.F90, the
+# makefile) and writes object files plus the boltzmann binary in place, so two
+# processes building the shared submodule concurrently corrupt each other. HPC
+# jobs give each run a private copy (e.g. rsynced onto node-local scratch) and
+# point pylbm at it via this variable. Unset -> unchanged single-process default.
+_lbm_path_override = os.environ.get("PYLBM_LBM_PATH")
+
+if _lbm_path_override:
+    LBM_PATH = pathlib.Path(_lbm_path_override).resolve()
+    logger.info("LBM_PATH overridden via PYLBM_LBM_PATH: %s", LBM_PATH)
+elif _gitmodules_path.exists():
     try:
         gitmodules_content = _gitmodules_path.read_text()
         logger.info("Reading .gitmodules from: %s", _gitmodules_path)
@@ -59,9 +71,10 @@ if _gitmodules_path.exists():
 else:
     logger.warning(".gitmodules not found at: %s", _gitmodules_path)
 
-# Initialize git submodule from .gitmodules
+# Initialize git submodule from .gitmodules (skipped entirely when an explicit
+# PYLBM_LBM_PATH override is in effect -- that copy is managed by the caller).
 _repo_just_downloaded = False
-if _lbm_path:
+if _lbm_path and not _lbm_path_override:
     # Check if submodule needs to be initialized
     # Repository is considered downloaded if it exists, has content, and is a valid git repo
     is_repo_downloaded = (
@@ -140,5 +153,5 @@ if _lbm_path:
     # Set LBM_PATH from gitmodules path (always set it)
     LBM_PATH = _lbm_path.resolve()
     logger.info("LBM_PATH set to: %s", LBM_PATH)
-else:
+elif not _lbm_path_override:
     logger.warning("Could not find LBM path in .gitmodules")

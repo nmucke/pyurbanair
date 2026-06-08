@@ -262,6 +262,10 @@ def _sensor_vel_timeseries(state, obs_x, obs_y, obs_z, solver_name):
     an ``ObservationOperator``'s solver-specific dim mapping) at the sensor
     locations, keeping any leading dims (``ensemble``, ``time``), and combines
     them into |U|. Returns a DataArray with dims ``(..., time, sensor)``.
+
+    NB: this is the *base* per-run |U| diagnostic. The comprehensive per-component
+    (u/v/w) sensor series + prior/posterior ensembles used by the sweep figures
+    are computed downstream in scripts/compute_sweep_metrics.py.
     """
     op = ObservationOperator(
         obs_x=list(np.asarray(obs_x, dtype=float)),
@@ -539,6 +543,9 @@ def _finish_rollout(
         state_paths, sensor_sets, cfg.assim_model.solver_name, sim_time,
     )
 
+    # Base per-run sensor summary: |U| RMSE/CRPS only. The comprehensive
+    # per-component (u/v/w) sensor metrics + time series are computed downstream
+    # by scripts/compute_sweep_metrics.py from the saved prior/posterior states.
     sensor_metrics = {}
     for name, (sx, sy, sz) in sensor_sets.items():
         plot_sensor_timeseries(
@@ -758,22 +765,33 @@ def run(cfg: DictConfig) -> None:
         rng_key, subkey = jax.random.split(rng_key)
         window_obs = window_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, window_obs.shape)
         
-        # Sample posterior
+        # Sample posterior. ``return_state_history=True`` makes the smoother also
+        # return the per-iteration forecast states; esmda_step=0 is the PRIOR
+        # forecast (prior params, before any update) and esmda_step=-1 is the
+        # POSTERIOR forecast. Both are already computed inside the analysis loop,
+        # so capturing them is free (no extra ensemble forward). The prior state
+        # is persisted so scripts/compute_sweep_metrics.py can build prior sensor
+        # series; only the in-memory save mode supports the state history.
         solve_start = time.perf_counter()
         output = esmda(
             state=state_input,
             params=prior_params,
             observations=window_obs,
             return_params_history=True,
-            return_state_history=False,
+            return_state_history=True,
         )
         solve_seconds.append(time.perf_counter() - solve_start)
 
         posterior_params = output[0].isel(esmda_step=-1)
         posterior_params.to_netcdf(windows_dir / f"window_{window}_posterior_params.nc")
-        output[1].to_netcdf(windows_dir / f"window_{window}_posterior_state.nc")
 
-        state_input = output[1].isel(time=-1)
+        state_history = output[1]
+        posterior_state = state_history.isel(esmda_step=-1)
+        prior_state = state_history.isel(esmda_step=0)
+        posterior_state.to_netcdf(windows_dir / f"window_{window}_posterior_state.nc")
+        prior_state.to_netcdf(windows_dir / f"window_{window}_prior_state.nc")
+
+        state_input = posterior_state.isel(time=-1)
 
         # Next window's prior: extrapolate the posterior
         if window < num_windows - 1:
@@ -791,10 +809,30 @@ def run(cfg: DictConfig) -> None:
             else:
                 prior_params = posterior_params
 
-        del output
+        del output, state_history, prior_state, posterior_state
         window_seconds.append(time.perf_counter() - window_start)
 
     esmda_seconds = time.perf_counter() - esmda_start
+
+    # Persist the truth-access parameters (slicing/offsets) so the downstream
+    # metric script (scripts/compute_sweep_metrics.py) reconstructs the exact
+    # same lazy view of the on-disk truth without re-deriving the horizon logic.
+    _write_yaml(
+        {
+            "true_state_path": str(true_state_path),
+            "x_offset": float(x_offset),
+            "start_idx": int(start_idx),
+            "t_offset": float(t_offset),
+            "n_total": int(n_total),
+            "n_per_window": int(n_per_window),
+            "num_windows": int(num_windows),
+            "sim_time": float(sim_time),
+            "is_dynamic": bool(is_dynamic),
+            "truth_solver_name": str(cfg.truth_model.solver_name),
+            "assim_solver_name": str(cfg.assim_model.solver_name),
+        },
+        out_dir / "truth_access.yaml",
+    )
 
     # Run metadata + timing handed to ``_finish_rollout``, which augments it with
     # the estimation metrics and writes ``run_summary.yaml``.
