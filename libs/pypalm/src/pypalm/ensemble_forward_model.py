@@ -29,6 +29,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         results_dir: Optional[pathlib.Path] = None,
         num_parallel_processes: int = 1,
         num_cpus_per_process: int = 1,
+        failure: Optional[dict] = None,
     ) -> None:
         super().__init__(
             forward_model=forward_model,
@@ -37,6 +38,7 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             num_parallel_processes=num_parallel_processes,
             num_cpus_per_process=num_cpus_per_process,
             temp_dir=temp_dir,
+            failure=failure,
         )
 
     def _create_new_forward_model(  # type: ignore[override]

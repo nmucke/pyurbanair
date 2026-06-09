@@ -20,7 +20,7 @@ forward_model:
   verbose: false
   boundary_condition: inflow_outflow
   nudging_config:
-    tnudge: 30.0
+    tnudge: 15.0
     # nnudge: number of bottom grid levels NOT nudged (raw level count).
     # nnudge: 2
     # nnudge_meters: height (m above the floor) below which nudging is NOT
@@ -34,7 +34,7 @@ forward_model:
   # resamples it from a successful donor instead of waiting for the slow crash.
   instability_check:
     enabled: true
-    min_dt: 1.0e-3      # absolute timestep floor (s)
+    min_dt: 1.0e-4      # absolute timestep floor (s)
     patience: 20        # consecutive sub-floor steps before killing
     warmup_steps: 20    # ignore small startup dt for the first N steps
     poll_interval_s: 2.0

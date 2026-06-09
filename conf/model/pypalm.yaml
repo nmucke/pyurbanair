@@ -37,3 +37,8 @@ ensemble_model:
   ensemble_size: ${ensemble.ensemble_size}
   num_parallel_processes: ${ensemble.num_parallel_processes}
   num_cpus_per_process: ${ensemble.num_cpus_per_process}
+  # Resample numerically-diverged members from a successful donor instead of
+  # aborting the whole run. PALM handles the divergence itself (it terminates
+  # without writing a 3D output); pypalm reports the missing output as a member
+  # failure so this policy can replace it.
+  failure: ${ensemble.failure}
