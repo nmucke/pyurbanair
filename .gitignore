@@ -97,3 +97,6 @@ sweep_metrics/*
 slurm-*.out
 state.nc
 params.nc
+
+
+.local_runs/*
