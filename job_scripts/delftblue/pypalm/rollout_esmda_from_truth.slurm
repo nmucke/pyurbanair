@@ -54,6 +54,7 @@ NY="${NY:-40}"
 NZ="${NZ:-16}"
 ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-96}"
 NUM_ESMDA_STEPS="${NUM_ESMDA_STEPS:-3}"
+INTERVAL_SECONDS="${INTERVAL_SECONDS:-20.0}"   # obs.interval_seconds: time-aggregation bin width [s]
 
 # PALM cannot run with fewer than 16 vertical levels; enforce the floor so a
 # shared sweep handing pypalm a coarser nz (e.g. the k=1 domain-sweep row) is
@@ -73,7 +74,7 @@ source "${REPO_ROOT}/job_scripts/delftblue/common.sh"
 # --cpus-per-task == ENSEMBLE_SIZE up to a node). Pin an exact count with NUM_PARALLEL=….
 NUM_PARALLEL="${NUM_PARALLEL:-${ENSEMBLE_SIZE}}"
 
-RUN_TAG="${ASSIM_MODEL}_nx${NX}_ny${NY}_nz${NZ}_ens${ENSEMBLE_SIZE}_steps${NUM_ESMDA_STEPS}${LOCALIZATION_TAG}"
+RUN_TAG="${ASSIM_MODEL}_nx${NX}_ny${NY}_nz${NZ}_ens${ENSEMBLE_SIZE}_steps${NUM_ESMDA_STEPS}_int${INTERVAL_SECONDS}${LOCALIZATION_TAG}"
 RESULTS_DIR="${RESULTS_ROOT}/${RUN_TAG}"
 RUN_TEMP_DIR="${TEMP_ROOT}/${SLURM_JOB_ID:-$$}"
 
@@ -92,7 +93,7 @@ echo "Truth=${GROUND_TRUTH_MODEL} (loaded) assim=${ASSIM_MODEL} case=${CASE} dom
 echo "Ground truth: ${GROUND_TRUTH_PATH}"
 echo "Output: ${RESULTS_DIR}  (temp: ${RUN_TEMP_DIR})"
 echo "Ensemble=${ENSEMBLE_SIZE} parallel=${NUM_PARALLEL} windows=${NUM_ASSIM_WINDOWS} cores=${SLURM_CPUS_PER_TASK:-?}"
-echo "ESMDA steps=${NUM_ESMDA_STEPS} localization=${USE_LOCALIZATION}"
+echo "ESMDA steps=${NUM_ESMDA_STEPS} obs_interval=${INTERVAL_SECONDS}s localization=${USE_LOCALIZATION}"
 [ "$#" -gt 0 ] && echo "Extra hydra overrides: $*"
 
 module purge
@@ -135,6 +136,7 @@ PY_ARGS=(
   ensemble.ensemble_size="${ENSEMBLE_SIZE}"
   ensemble.num_parallel_processes="${NUM_PARALLEL}"
   esmda.num_steps="${NUM_ESMDA_STEPS}"
+  obs.interval_seconds="${INTERVAL_SECONDS}"
   "hydra.run.dir=${RESULTS_DIR}"
   "${EXTRA_FLAGS[@]}"
   "$@"
