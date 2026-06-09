@@ -42,12 +42,18 @@ z_points: [2.0, 2.0, 2.0, 2.0, 2.0]
 # --- Validation sensors (held out from assimilation) ---
 # A separate set of sensors the Kalman update never sees, used only to score
 # the posterior at unseen locations (see scripts/run_esmda.py's sensor
-# time-series plots). Placed in the open N-S lanes between the cube columns
-# (lane centres x=20/40/60) and spread across the y-span, at street level
-# (z=2 m, below every cube) -- i.e. genuine in-canyon points distinct from the
-# upstream assimilation sensors above.
-validation_x_points: [30.0, 60.0, 40.0, 10.0, 65.0]
-validation_y_points: [10.0, 20.0, 40.0, 60.0, 50.0]
+# time-series plots). These are DISTINCT from the assimilation sensors above and
+# every one sits in open space (verified >=5 m clear of any building footprint
+# against examples/xie_and_castro/xie_castro_2008_STL.stl).
+#
+# The 4x4 staggered cube array (in domain coords) occupies x-columns
+# [5,15], [25,35], [45,55], [65,75], leaving fully-open N-S street canyons at
+# x=20/40/60 (and the upstream region x<5). The points below sample one upstream
+# location plus all three canyons, spread across the y-span (25..70), at street
+# level z=2 m (below the 2.8 m minimum cube height) -- genuine in-canyon points
+# the assimilation set does not cover.
+validation_x_points: [-10.0, 20.0, 40.0, 60.0, 40.0]
+validation_y_points: [30.0, 55.0, 25.0, 45.0, 70.0]
 validation_z_points: [2.0, 2.0, 2.0, 2.0, 2.0]
 
 states: [u, v, w]
