@@ -1,38 +1,43 @@
 #!/bin/bash
-# Shared defaults for the LOCAL rollout-ESMDA-from-truth runners (pyudales,
-# pylbm, pypalm). SOURCE this from a backend runner -- it is not executable on
-# its own:
+# Shared defaults for the SNELLIUS rollout-ESMDA-from-truth runners (pyudales,
+# pylbm, pypalm). SOURCE this from a backend .slurm runner -- it is not meant to
+# be run on its own:
 #
-#     source "${REPO_ROOT}/job_scripts/local/common.sh"
+#     source "${REPO_ROOT}/job_scripts/snellius/common.sh"
 #
 # Everything here is run config that is IDENTICAL across the three backends, so
 # the runs stay directly comparable (same ground truth, domain, windows, time
 # horizon and dynamic-parameter settings -- only the assimilation solver
-# differs). Backend-specific knobs (pixi env, GPU vs CPU, parallelism policy,
-# solver flags) live in each runner; the SWEEP parameters (grid resolution
-# NX/NY/NZ, ENSEMBLE_SIZE, NUM_ESMDA_STEPS, INTERVAL_SECONDS) also live in the
-# runners so the sweep launchers can inject one value per job.
+# differs). Backend-specific knobs (pixi env, parallelism, solver flags) live in
+# each runner; the SWEEP parameters (grid resolution NX/NY/NZ, ENSEMBLE_SIZE,
+# NUM_ESMDA_STEPS) also live in the runners so the sweep launchers can inject one
+# value per job.
+#
+# This is the Snellius sibling of job_scripts/local/common.sh and carries the
+# SAME experiment config; only the paths (project storage + /scratch-shared) and
+# the absence of a parallel-worker cap differ (on Snellius the SLURM allocation
+# requests one core per ensemble member, so num_parallel == ensemble size).
 #
 # Every value is env-overridable: `export VAR=...` before invoking a runner or
-# sweep launcher changes it for that run. To retune the whole local suite at
+# sweep launcher changes it for that run. To retune the whole Snellius suite at
 # once, edit the defaults below.
 
-# Requires REPO_ROOT (the runner sets it before sourcing) to anchor the default
-# local paths under the repo.
-: "${REPO_ROOT:?common.sh: REPO_ROOT must be set before sourcing}"
-
 # --- Paths ------------------------------------------------------------------
-# Local run -> outputs and heavy intermediate solver I/O ("scratch") stay under
-# the repo by default. RESULTS_ROOT holds final per-run outputs; TEMP_ROOT is the
-# scratch base (each run gets its own RUN_TAG_$$ subdir, cleaned up on success).
-# RESULTS_ROOT="${RESULTS_ROOT:-${REPO_ROOT}/results/assim_from_ground_truth}"
-RESULTS_ROOT="/export/scratch2/ntm/results/assim_from_ground_truth"
-TEMP_ROOT="${TEMP_ROOT:-${REPO_ROOT}/.local_runs/temp}"
+# Final per-run outputs land on the project space; heavy intermediate solver I/O
+# ("scratch") goes to /scratch-shared (shared GPFS). Each job gets its own
+# RUN_TEMP_DIR subdir (keyed by SLURM_JOB_ID in the runner), cleaned up on
+# success.
+#
+# NB: do NOT point scratch at $TMPDIR (/scratch-local/<jobid>) for pyudales
+# same-model runs -- write_inputs.sh fails there in <40s; /scratch-shared is the
+# verified working location (see job_scripts/snellius/README.md).
+RESULTS_ROOT="${RESULTS_ROOT:-/projects/prjs2075/urbanair/assim_from_ground_truth}"
+TEMP_ROOT="${TEMP_ROOT:-/scratch-shared/${USER}/urbanair_temp}"
 
 # ROOT directory holding the pre-simulated ground truth shared by all backends.
 # The leaf actually loaded is ${GROUND_TRUTH_DIR}/${GROUND_TRUTH_MODEL}_time_varying
 # (set GROUND_TRUTH_SUBDIR="" if GROUND_TRUTH_DIR already points at the leaf).
-GROUND_TRUTH_DIR="${GROUND_TRUTH_DIR:-/export/scratch1/ntm/pyurbanair/ground_truth_spunup}"
+GROUND_TRUTH_DIR="${GROUND_TRUTH_DIR:-/projects/prjs2075/urbanair/ground_truth_small}"
 GROUND_TRUTH_MODEL="${GROUND_TRUTH_MODEL:-pyudales}"   # pylbm | pyudales | pypalm
 
 # --- Geometry / domain size -------------------------------------------------
@@ -55,7 +60,7 @@ NUM_ASSIM_WINDOWS="${NUM_ASSIM_WINDOWS:-4}"
 
 # --- Time horizon -----------------------------------------------------------
 SIMULATION_TIME="${SIMULATION_TIME:-300.0}"   # per-window length [s]
-OUTPUT_FREQUENCY="${OUTPUT_FREQUENCY:-1.0}"    # state snapshot interval [s]
+OUTPUT_FREQUENCY="${OUTPUT_FREQUENCY:-2.0}"    # state snapshot interval [s]
 SPINUP_TIME="${SPINUP_TIME:-50.0}"             # constant-inflow plateau before each window [s]
 
 # --- Dynamic (time-varying) parameter settings ------------------------------
@@ -74,16 +79,6 @@ DYNAMIC_PARAM_FLAGS=(
 # --- Misc run defaults ------------------------------------------------------
 SEED="${SEED:-0}"
 SKIP_VIZ="${SKIP_VIZ:-false}"          # set "true" to skip animations/plots
-
-# Maximum number of parallel ensemble processes a CPU-backend run (pyudales,
-# pypalm) may use -- CHOOSE this. The actual worker count is
-# min(ENSEMBLE_SIZE, LOCAL_MAX_PARALLEL), so it never exceeds your chosen ceiling
-# and never spawns more workers than there are ensemble members. Independent of
-# the machine's core count (set it to your core budget). Runs are sequential (one
-# after another, no scheduler). pylbm ignores this (it is GPU, single-process).
-# Choose it here, per run (`LOCAL_MAX_PARALLEL=32 bash …`), or pin an exact worker
-# count with NUM_PARALLEL=….
-LOCAL_MAX_PARALLEL="${LOCAL_MAX_PARALLEL:-16}"
 
 # --- Correlation localization -----------------------------------------------
 # Shared default is the global (unlocalized) update. Set USE_LOCALIZATION=true to
@@ -132,8 +127,9 @@ case "${GROUND_TRUTH_MODEL}" in
   *) echo "unknown GROUND_TRUTH_MODEL '${GROUND_TRUTH_MODEL}'" >&2; exit 1 ;;
 esac
 
-# Keep BLAS single-threaded so parallel ensemble workers don't oversubscribe the
-# cores; line-buffer Python output so a crash mid-run keeps its traceback.
+# Keep BLAS single-threaded so parallel ensemble workers (one per allocated core)
+# don't oversubscribe; line-buffer Python output so a crash mid-run keeps its
+# traceback.
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1

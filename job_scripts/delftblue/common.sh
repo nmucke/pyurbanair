@@ -1,38 +1,39 @@
 #!/bin/bash
-# Shared defaults for the LOCAL rollout-ESMDA-from-truth runners (pyudales,
-# pylbm, pypalm). SOURCE this from a backend runner -- it is not executable on
-# its own:
+# Shared defaults for the DELFTBLUE rollout-ESMDA-from-truth runners (pyudales,
+# pylbm, pypalm). SOURCE this from a backend .slurm runner -- it is not meant to
+# be run on its own:
 #
-#     source "${REPO_ROOT}/job_scripts/local/common.sh"
+#     source "${REPO_ROOT}/job_scripts/delftblue/common.sh"
 #
 # Everything here is run config that is IDENTICAL across the three backends, so
 # the runs stay directly comparable (same ground truth, domain, windows, time
 # horizon and dynamic-parameter settings -- only the assimilation solver
-# differs). Backend-specific knobs (pixi env, GPU vs CPU, parallelism policy,
-# solver flags) live in each runner; the SWEEP parameters (grid resolution
-# NX/NY/NZ, ENSEMBLE_SIZE, NUM_ESMDA_STEPS, INTERVAL_SECONDS) also live in the
-# runners so the sweep launchers can inject one value per job.
+# differs). Backend-specific knobs (pixi env, parallelism, solver flags) live in
+# each runner; the SWEEP parameters (grid resolution NX/NY/NZ, ENSEMBLE_SIZE,
+# NUM_ESMDA_STEPS) also live in the runners so the sweep launchers can inject one
+# value per job.
+#
+# This is the DelftBlue sibling of job_scripts/local/common.sh and carries the
+# SAME experiment config; only the paths (project storage + /scratch), the MPI
+# environment, and the absence of a parallel-worker cap differ (on DelftBlue the
+# SLURM allocation requests one core per ensemble member, capped at a single
+# 64-core compute node, and num_parallel == ensemble size).
 #
 # Every value is env-overridable: `export VAR=...` before invoking a runner or
-# sweep launcher changes it for that run. To retune the whole local suite at
+# sweep launcher changes it for that run. To retune the whole DelftBlue suite at
 # once, edit the defaults below.
 
-# Requires REPO_ROOT (the runner sets it before sourcing) to anchor the default
-# local paths under the repo.
-: "${REPO_ROOT:?common.sh: REPO_ROOT must be set before sourcing}"
-
 # --- Paths ------------------------------------------------------------------
-# Local run -> outputs and heavy intermediate solver I/O ("scratch") stay under
-# the repo by default. RESULTS_ROOT holds final per-run outputs; TEMP_ROOT is the
-# scratch base (each run gets its own RUN_TAG_$$ subdir, cleaned up on success).
-# RESULTS_ROOT="${RESULTS_ROOT:-${REPO_ROOT}/results/assim_from_ground_truth}"
-RESULTS_ROOT="/export/scratch2/ntm/results/assim_from_ground_truth"
-TEMP_ROOT="${TEMP_ROOT:-${REPO_ROOT}/.local_runs/temp}"
+# Final per-run outputs land on the project space; heavy intermediate solver I/O
+# ("scratch") goes to /scratch/$USER (beegfs). Each job gets its own RUN_TEMP_DIR
+# subdir (keyed by SLURM_JOB_ID in the runner), cleaned up on success.
+RESULTS_ROOT="${RESULTS_ROOT:-/projects/urbanair/assim_from_ground_truth}"
+TEMP_ROOT="${TEMP_ROOT:-/scratch/${USER}/urbanair_temp}"
 
 # ROOT directory holding the pre-simulated ground truth shared by all backends.
 # The leaf actually loaded is ${GROUND_TRUTH_DIR}/${GROUND_TRUTH_MODEL}_time_varying
 # (set GROUND_TRUTH_SUBDIR="" if GROUND_TRUTH_DIR already points at the leaf).
-GROUND_TRUTH_DIR="${GROUND_TRUTH_DIR:-/export/scratch1/ntm/pyurbanair/ground_truth_spunup}"
+GROUND_TRUTH_DIR="${GROUND_TRUTH_DIR:-/projects/urbanair/ground_truth_small}"
 GROUND_TRUTH_MODEL="${GROUND_TRUTH_MODEL:-pyudales}"   # pylbm | pyudales | pypalm
 
 # --- Geometry / domain size -------------------------------------------------
@@ -74,16 +75,6 @@ DYNAMIC_PARAM_FLAGS=(
 # --- Misc run defaults ------------------------------------------------------
 SEED="${SEED:-0}"
 SKIP_VIZ="${SKIP_VIZ:-false}"          # set "true" to skip animations/plots
-
-# Maximum number of parallel ensemble processes a CPU-backend run (pyudales,
-# pypalm) may use -- CHOOSE this. The actual worker count is
-# min(ENSEMBLE_SIZE, LOCAL_MAX_PARALLEL), so it never exceeds your chosen ceiling
-# and never spawns more workers than there are ensemble members. Independent of
-# the machine's core count (set it to your core budget). Runs are sequential (one
-# after another, no scheduler). pylbm ignores this (it is GPU, single-process).
-# Choose it here, per run (`LOCAL_MAX_PARALLEL=32 bash …`), or pin an exact worker
-# count with NUM_PARALLEL=….
-LOCAL_MAX_PARALLEL="${LOCAL_MAX_PARALLEL:-16}"
 
 # --- Correlation localization -----------------------------------------------
 # Shared default is the global (unlocalized) update. Set USE_LOCALIZATION=true to
@@ -132,8 +123,19 @@ case "${GROUND_TRUTH_MODEL}" in
   *) echo "unknown GROUND_TRUTH_MODEL '${GROUND_TRUTH_MODEL}'" >&2; exit 1 ;;
 esac
 
-# Keep BLAS single-threaded so parallel ensemble workers don't oversubscribe the
-# cores; line-buffer Python output so a crash mid-run keeps its traceback.
+# --- Cluster environment ----------------------------------------------------
+# Force ob1/tcp so a stale pixi cache or unsourced activation can't pull
+# UCX/InfiniBand into the MPI stack and crash MPI_Finalize on DelftBlue. Unlike
+# Snellius, DelftBlue's OpenMPI DOES need osc=pt2pt. This is the one MPI
+# difference between the two clusters.
+export OMPI_MCA_pml=ob1
+export OMPI_MCA_btl=self,vader,tcp
+export OMPI_MCA_osc=pt2pt
+export OMPI_MCA_btl_base_warn_component_unused=0
+
+# Keep BLAS single-threaded so parallel ensemble workers (one per allocated core)
+# don't oversubscribe; line-buffer Python output so a crash mid-run keeps its
+# traceback.
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1

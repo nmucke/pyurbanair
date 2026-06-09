@@ -117,3 +117,72 @@ Results land in `/projects/urbanair`; intermediate I/O uses
 `/scratch/$USER/urbanair_temp/<jobid>` (beegfs scratch). pypalm additionally
 routes its per-run working dir to node-local `/tmp` for the many-small-file
 build-tree copy.
+
+## Rollout-ESMDA-from-truth sweeps (per backend)
+
+Separate from the `submit.sh` / `conf/size` system above, this suite is the
+DelftBlue sibling of `job_scripts/local/` (and `job_scripts/snellius/`) and is
+organised the same way: two shared single-source-of-truth files plus thin
+per-backend runners and sweep wrappers, so **all three backends run the exact
+same experiment** at every configuration — same ground truth, domain, windows,
+time horizon, sensors and dynamic-parameter settings. Only the assimilation
+solver differs. It drives `scripts/run_esmda.py` in its loaded-truth mode
+(`run.truth_dir=<dir>`): it LOADS a pre-simulated ground truth
+(`state.nc` + `params.nc`) and runs the time-varying (dynamic) smoother.
+
+The one difference from `local/`: there is **no parallel-worker cap**. Each run
+sets `ensemble.num_parallel_processes == ensemble_size`, and the sweep launchers
+request **one core per ensemble member** (`--cpus-per-task == ENSEMBLE_SIZE`),
+capped at a single 64-core compute node. Ensembles above 64 still run
+`num_parallel == ensemble` (oversubscribed).
+
+```
+delftblue/
+├── common.sh          # shared defaults + COMMON_RUN_FLAGS (sourced by every runner)
+├── sweep_base.sh      # shared sweep engine + canonical value lists; submits one sbatch per point
+├── pyudales/  pylbm/  pypalm/
+│   ├── rollout_esmda_from_truth.slurm        # slim runner: backend specifics only
+│   ├── sweep_domain_rollout_esmda_from_truth.sh
+│   ├── sweep_ensemble_rollout_esmda_from_truth.sh
+│   ├── sweep_esmda_steps_rollout_esmda_from_truth.sh
+│   └── sweep_interval_rollout_esmda_from_truth.sh
+```
+
+- **`common.sh`** — every default and every `run_esmda.py` Hydra override that is
+  identical across backends, in one place: paths (`/projects/urbanair` results,
+  `/scratch/$USER` temp), domain bounds + sensors, windows, time horizon,
+  dynamic-parameter settings, localization, ground-truth resolution/validation,
+  the DelftBlue MPI env (`OMPI_MCA_pml=ob1`/TCP + `osc=pt2pt`), and the
+  `COMMON_RUN_FLAGS` array. Every value is env-overridable.
+- **`sweep_base.sh`** — the canonical swept value lists (resolutions, ensemble
+  sizes, ESMDA steps, observation intervals) with a per-row `--time` (≤24h, the compute limit), plus the
+  sizing logic (`--cpus-per-task = ensemble`, capped at a 64-core node). Submits
+  one job per swept value.
+- **`<backend>/rollout_esmda_from_truth.slurm`** — sources `common.sh` and adds
+  only what differs: `ASSIM_MODEL` (= folder name), `num_parallel = ensemble`,
+  `hydra.run.dir`, `--mem-per-cpu` (2G pypalm / 3G others), and the backend solver
+  flags (`cuda=false` + `paths.experiment_dir` + private LBM copy for pylbm;
+  `temp_dir`/`output_dir` for pyudales; `temp_dir` + PALM env + `nz≥16` floor +
+  the nvhpc-toolchain scrub for pypalm). Directly `sbatch`-able too.
+- the four sweep wrappers (domain / ensemble / esmda_steps / interval) are thin
+  and identical across folders — they delegate to `../sweep_base.sh` with the
+  sibling `.slurm`. The `interval` sweep varies `obs.interval_seconds` (the
+  observation temporal-aggregation bin width) at a fixed grid + ensemble + steps.
+
+Run a sweep with one backend (submits one job per point), or the same sweep
+across all three for directly comparable runs:
+
+```bash
+bash job_scripts/delftblue/pyudales/sweep_domain_rollout_esmda_from_truth.sh
+bash job_scripts/delftblue/pylbm/sweep_ensemble_rollout_esmda_from_truth.sh esmda.seed=1
+for m in pyudales pylbm pypalm; do
+  bash job_scripts/delftblue/$m/sweep_domain_rollout_esmda_from_truth.sh
+done
+```
+
+Each job writes to `/projects/urbanair/assim_from_ground_truth/<RUN_TAG>` where
+`RUN_TAG` embeds the assim model, grid, ensemble size, step count and
+observation interval, so no two configurations (or backends) collide. Correlation localization is **off** by
+default; set `USE_LOCALIZATION=true` (env var, propagated through the sweep) to
+enable it. Because pypalm requires `nz≥16`, the domain sweep's coarsest row
+(`25 20 8`) is automatically raised to `25 20 16` for pypalm only.
