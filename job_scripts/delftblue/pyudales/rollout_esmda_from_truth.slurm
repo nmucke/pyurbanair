@@ -1,34 +1,35 @@
 #!/bin/bash
-# SNELLIUS rollout-ESMDA-from-truth runner -- pyudales backend (CPU).
+# DELFTBLUE rollout-ESMDA-from-truth runner -- pyudales backend (CPU).
 #
-# Snellius sibling of job_scripts/local/pyudales/rollout_esmda_from_truth.sh:
+# DelftBlue sibling of job_scripts/local/pyudales/rollout_esmda_from_truth.sh:
 # it submits scripts/run_esmda.py in its loaded-truth mode (run.truth_dir),
 # loading a pre-simulated ground truth and running the time-varying (dynamic)
-# smoother over esmda.num_assimilation_windows windows. Run config that is shared
-# with the pylbm/pypalm runners lives in ../common.sh (sourced below); only the
+# smoother over esmda.num_assimilation_windows windows. Run config shared with the
+# pylbm/pypalm runners lives in ../common.sh (sourced below); only the
 # pyudales/CPU specifics are set here.
 #
 # Submit it directly (edit ../common.sh to retune the shared config), or append
 # Hydra overrides which take precedence:
 #
-#     sbatch job_scripts/snellius/pyudales/rollout_esmda_from_truth.slurm
-#     sbatch job_scripts/snellius/pyudales/rollout_esmda_from_truth.slurm esmda.num_steps=4
+#     sbatch job_scripts/delftblue/pyudales/rollout_esmda_from_truth.slurm
+#     sbatch job_scripts/delftblue/pyudales/rollout_esmda_from_truth.slurm esmda.num_steps=4
 #
 # NX/NY/NZ, ENSEMBLE_SIZE and NUM_ESMDA_STEPS are read from the environment (the
 # sweep launchers in this folder inject one value per job via --export), so each
 # configuration lands in its own RESULTS_DIR.
 #
-# No parallel cap on Snellius: num_parallel == ensemble size, and the sweep
-# launchers request one core per ensemble member (--cpus-per-task == ENSEMBLE_SIZE).
+# No parallel cap: num_parallel == ensemble size; the sweep launchers request one
+# core per ensemble member (--cpus-per-task == ENSEMBLE_SIZE, capped at a 64-core
+# node -- larger ensembles oversubscribe).
 #SBATCH --job-name=rollout_pyudales
-#SBATCH --partition=rome
+#SBATCH --partition=compute
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=96
+#SBATCH --cpus-per-task=64
+#SBATCH --mem-per-cpu=3G
 #SBATCH --time=16:00:00
-#SBATCH --mem-per-cpu=1750M
-#SBATCH --account=tdsr72361
-#SBATCH --output=job_scripts/snellius/out_files/slurm-rollout_pyudales-%j.out
-#SBATCH --error=job_scripts/snellius/out_files/slurm-rollout_pyudales-%j.err
+#SBATCH --account=innovation
+#SBATCH --output=job_scripts/delftblue/out_files/slurm-rollout_pyudales-%j.out
+#SBATCH --error=job_scripts/delftblue/out_files/slurm-rollout_pyudales-%j.err
 
 set -euo pipefail
 
@@ -37,7 +38,7 @@ cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 REPO_ROOT="$(pwd)"
 
 # Backend-specific knobs ------------------------------------------------------
-ENV="snellius"
+ENV="delftblue"
 ASSIM_MODEL="pyudales"
 
 # Sweep parameters (grid resolution / ensemble / ESMDA steps). Env-overridable so
@@ -49,23 +50,23 @@ ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-96}"
 NUM_ESMDA_STEPS="${NUM_ESMDA_STEPS:-3}"
 
 # Shared defaults: paths, domain bounds + sensors, windows, time horizon, dynamic
-# parameter settings, localization, ground-truth resolution/validation, and the
-# COMMON_RUN_FLAGS array of every shared Hydra override.
-source "${REPO_ROOT}/job_scripts/snellius/common.sh"
+# parameter settings, localization, ground-truth resolution/validation, MPI env,
+# and the COMMON_RUN_FLAGS array of every shared Hydra override.
+source "${REPO_ROOT}/job_scripts/delftblue/common.sh"
 
 # No parallel cap: one worker per ensemble member (the sweep launchers request
-# --cpus-per-task == ENSEMBLE_SIZE). Pin an exact count with NUM_PARALLEL=….
+# --cpus-per-task == ENSEMBLE_SIZE up to a node). Pin an exact count with NUM_PARALLEL=….
 NUM_PARALLEL="${NUM_PARALLEL:-${ENSEMBLE_SIZE}}"
 
 RUN_TAG="${ASSIM_MODEL}_nx${NX}_ny${NY}_nz${NZ}_ens${ENSEMBLE_SIZE}_steps${NUM_ESMDA_STEPS}${LOCALIZATION_TAG}"
 RESULTS_DIR="${RESULTS_ROOT}/${RUN_TAG}"
 RUN_TEMP_DIR="${TEMP_ROOT}/${SLURM_JOB_ID:-$$}"
 
-mkdir -p job_scripts/snellius/out_files "${RESULTS_DIR}" "${RUN_TEMP_DIR}"
+mkdir -p job_scripts/delftblue/out_files "${RESULTS_DIR}" "${RUN_TEMP_DIR}"
 # Clean this run's scratch on success; leave it for debugging on failure.
 trap '[ "$?" = "0" ] && rm -rf "${RUN_TEMP_DIR}"' EXIT
 
-echo "SNELLIUS pyudales rollout-ESMDA: job ${SLURM_JOB_ID:-local} on $(hostname) -- $(date)"
+echo "DELFTBLUE pyudales rollout-ESMDA: job ${SLURM_JOB_ID:-local} on $(hostname) -- $(date)"
 echo "Truth=${GROUND_TRUTH_MODEL} (loaded) assim=${ASSIM_MODEL} case=${CASE} domain=${NX}x${NY}x${NZ}"
 echo "Ground truth: ${GROUND_TRUTH_PATH}"
 echo "Output: ${RESULTS_DIR}  (temp: ${RUN_TEMP_DIR})"
