@@ -1,0 +1,27 @@
+# @package esmda
+# Distance-based localization. Observations are selected per state grid point by
+# the PHYSICAL (Euclidean) distance between that grid point and the sensor
+# location -- NOT by ensemble correlation. Points beyond `localization_radius`
+# are excluded; the rest are tapered by an error-variance inflation that grows to
+# `max_inflation` at the radius (the same tapering used for correlation, applied
+# to physical distance; Vossepoel et al. 2025 sec. 3d). Select with
+# `esmda/localization=distance`.
+#
+# Requires a state-bearing smoother (state_and_parameter / state_and_dynamic) and
+# coordinate-based observations: it needs the grid-point and sensor coordinates.
+# Applied to the STATE rows only; parameter rows always get the global update.
+localization:
+  _target_: data_assimilation.localization.distance.DistanceLocalization
+  # Localization radius (truncation distance) in domain length units (metres for
+  # the urban cases). Domain-dependent -- tune to the flow's correlation scale.
+  localization_radius: 25.0
+  # Fraction of the radius left un-tapered (beta in Eq. 9).
+  tapering_beta: 0.5
+  # Maximum error-variance inflation E_max reached at the radius. Paper: 4 for
+  # distance-based localization.
+  max_inflation: 4.0
+  # Grid-block joint analysis: co-located state rows (u/v/w at one cell) share
+  # one observation selection + transition.
+  block_grouping: true
+  # Use only the horizontal (x, y) distance, ignoring the vertical separation.
+  horizontal_only: false

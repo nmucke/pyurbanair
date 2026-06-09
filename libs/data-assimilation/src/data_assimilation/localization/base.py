@@ -64,14 +64,70 @@ def _group_inflation(
     return block_min[group_ids]
 
 
+def taper_inflation(
+    distance: jnp.ndarray,
+    truncation: float,
+    tapering_beta: float,
+    max_inflation: float,
+) -> jnp.ndarray:
+    """Error-variance inflation as a function of a (generic) distance.
+
+    Implements the tapering of Vossepoel et al. (2025), Eqs. (9)-(10), written
+    against an abstract ``distance`` and ``truncation`` distance so the *same*
+    taper drives both localization strategies:
+
+    * correlation-based: ``distance = 1 - |rho|``, ``truncation = 1 - rho_t``;
+    * physical-distance-based: ``distance = ||grid point - sensor||``,
+      ``truncation = localization_radius``.
+
+    Observations with ``distance <= truncation`` are kept; their error variance
+    is inflated by a factor that is ``1`` for ``distance <= beta*truncation`` and
+    grows to ``max_inflation`` at ``distance == truncation``.  Observations with
+    ``distance > truncation`` are excluded (``jnp.inf``).
+
+    Args:
+        distance: Distance per ``(row, observation)`` pair, any shape.
+        truncation: Truncation distance (scalar).
+        tapering_beta: ``beta in (0, 1)``; fraction of ``truncation`` left
+            un-tapered.
+        max_inflation: ``E_max >= 1`` reached at ``distance == truncation``.
+
+    Returns:
+        Inflation array, same shape as ``distance``: ``1.0`` (full weight),
+        ``> 1`` (tapered) or ``jnp.inf`` (excluded).
+    """
+    # b such that the inflation equals max_inflation at distance == truncation
+    # (Eq. 10). For max_inflation == 1 (log == 0) b -> inf, giving no taper.
+    b = (1.0 - tapering_beta) * truncation / jnp.sqrt(jnp.log(max_inflation))
+    taper_active = distance > (tapering_beta * truncation)
+    safe_b = jnp.where(b > 0.0, b, 1.0)  # guard div-by-zero when b == 0
+    taper = jnp.where(
+        taper_active,
+        jnp.exp(((distance - tapering_beta * truncation) / safe_b) ** 2),
+        1.0,
+    )
+    inflation = jnp.where(b > 0.0, taper, 1.0)
+    # Exclude observations beyond the truncation distance.
+    return jnp.where(distance <= truncation, inflation, jnp.inf)
+
+
 class BaseLocalization(ABC):
     """Base class for ESMDA localization strategies."""
+
+    #: Whether :meth:`inflation_factors` needs the physical coordinates of the
+    #: augmented rows and observations (``row_coords`` / ``obs_coords``).  The
+    #: correlation strategy works from ensemble anomalies alone (``False``); the
+    #: distance strategy needs grid/sensor coordinates (``True``), which only the
+    #: state-bearing smoothers can supply.
+    requires_coordinates: bool = False
 
     @abstractmethod
     def inflation_factors(
         self,
         aug_dev: jnp.ndarray,
         pred_obs_dev: jnp.ndarray,
+        row_coords: Optional[jnp.ndarray] = None,
+        obs_coords: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """Observation-error inflation factors for the local analysis.
 
@@ -80,6 +136,12 @@ class BaseLocalization(ABC):
                 (ensemble mean already subtracted).
             pred_obs_dev: Predicted-observation anomalies, shape
                 ``(N_d, N_e)`` (ensemble mean already subtracted).
+            row_coords: Optional physical coordinates of each augmented row,
+                shape ``(N_aug, 3)``.  Supplied by state-bearing smoothers when
+                :attr:`requires_coordinates` is ``True`` (parameter rows are
+                padded and then masked out via ``localize_mask``).
+            obs_coords: Optional physical coordinates of each observation
+                (sensor location), shape ``(N_d, 3)``.
 
         Returns:
             Array of shape ``(N_aug, N_d)``.  Entry ``[l, j]`` is the factor
@@ -102,6 +164,9 @@ class BaseLocalization(ABC):
         alpha: float,
         rng_key: jax.Array,
         group_ids: Optional[jnp.ndarray] = None,
+        localize_mask: Optional[jnp.ndarray] = None,
+        row_coords: Optional[jnp.ndarray] = None,
+        obs_coords: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """Apply the localized (row- or block-wise) ESMDA Kalman update.
 
@@ -136,6 +201,15 @@ class BaseLocalization(ABC):
             group_ids: Optional block id per augmented row, shape
                 ``(N_aug,)``.  Rows sharing an id are updated jointly with a
                 single selection/transition.  ``None`` -> per-row analysis.
+            localize_mask: Optional boolean array, shape ``(N_aug,)``.  Rows
+                where ``False`` receive the exact global (unlocalized) Kalman
+                update; rows where ``True`` (or when ``None``) use this
+                strategy's inflation factors.  Used to localize only the state
+                rows of a joint state-and-parameter augmented vector.
+            row_coords: Optional augmented-row coordinates, shape ``(N_aug, 3)``,
+                forwarded to :meth:`inflation_factors` (distance strategy).
+            obs_coords: Optional observation coordinates, shape ``(N_d, 3)``,
+                forwarded to :meth:`inflation_factors` (distance strategy).
 
         Returns:
             Updated augmented array, shape ``(N_aug, N_e)``.
@@ -158,7 +232,20 @@ class BaseLocalization(ABC):
         base_perturbation = jnp.sqrt(alpha) * (C_D_sqrt @ Z)  # (N_d, N_e)
 
         C_D_diag = jnp.diag(C_D)  # (N_d,)
-        inflation = self.inflation_factors(aug_dev, pred_obs_dev)  # (N_aug, N_d)
+        inflation = self.inflation_factors(
+            aug_dev, pred_obs_dev, row_coords=row_coords, obs_coords=obs_coords
+        )  # (N_aug, N_d)
+
+        # State-only localization: force masked-out rows to all-ones inflation
+        # so they receive the exact global update. An inflation row of all 1.0
+        # keeps every observation with no taper, so that row's per-row solve
+        # reduces to ``aug_row + C_MD_row @ solve(C_DD + alpha*C_D, innovation)``
+        # — exactly that row's slice of the global Kalman update — and it shares
+        # the SAME observation-perturbation realization as the localized rows
+        # (one consistent ESMDA step). Done before grouping so a masked row's
+        # all-ones inflation does not pull a block's min down.
+        if localize_mask is not None:
+            inflation = jnp.where(localize_mask[:, None], inflation, 1.0)
 
         # Joint "grid block" update: rows in the same block share one selection
         # and transition.  Sharing the inflation vector across the block is what

@@ -202,6 +202,161 @@ def test_block_grouping_shares_selection_and_transition() -> None:
     assert np.all(grouped[0][np.isfinite(grouped[0])] <= inflation[0][np.isfinite(grouped[0])] + 1e-6)
 
 
+def _build_localization_problem(seed: int = 21):
+    """Small augmented problem where state rows (0..3) correlate with obs and
+    param rows (4..5) are independent (so localization would taper/exclude obs
+    for them). Returns the inputs needed for ``localized_update``/``_global``.
+    """
+    N_state, N_param, N_d, N_e = 4, 2, 5, 120
+    k1, k2, k3, k4, k5 = jax.random.split(jax.random.PRNGKey(seed), 5)
+    state = jax.random.normal(k1, (N_state, N_e))
+    # Params independent of everything -> only sampling-noise correlations.
+    params = jax.random.normal(k2, (N_param, N_e))
+    augmented = jnp.concatenate([state, params], axis=0)
+    # Predicted obs driven by the state only.
+    M = jax.random.normal(k3, (N_d, N_state))
+    pred_obs = M @ state + 0.3 * jax.random.normal(k4, (N_d, N_e))
+    obs = jax.random.normal(k5, (N_d,))
+    C_D = jnp.diag(0.25 * jnp.ones(N_d))
+    C_D_sqrt = jnp.sqrt(C_D)
+    return augmented, pred_obs, obs, C_D, C_D_sqrt, N_state, N_param
+
+
+def test_localize_mask_gives_global_update_for_masked_rows() -> None:
+    """Masked-out (param) rows get the exact global update; some state rows
+    differ from theirs because localization tapers/excludes observations."""
+    from data_assimilation.localization.correlation import CorrelationLocalization
+
+    augmented, pred_obs, obs, C_D, C_D_sqrt, N_state, N_param = (
+        _build_localization_problem()
+    )
+    alpha = 2.0
+    rng = jax.random.PRNGKey(99)
+
+    aug_dev = augmented - augmented.mean(axis=1, keepdims=True)
+    po_dev = pred_obs - pred_obs.mean(axis=1, keepdims=True)
+
+    localize_mask = jnp.concatenate(
+        [jnp.ones(N_state, dtype=bool), jnp.zeros(N_param, dtype=bool)]
+    )
+
+    # Threshold high enough to exclude/taper observations for the masked rows.
+    loc = CorrelationLocalization(truncation_correlation=0.3, max_inflation=8.0)
+    localized = loc.localized_update(
+        augmented=augmented,
+        aug_dev=aug_dev,
+        pred_obs=pred_obs,
+        pred_obs_dev=po_dev,
+        obs=obs,
+        C_D=C_D,
+        C_D_sqrt=C_D_sqrt,
+        alpha=alpha,
+        rng_key=rng,
+        localize_mask=localize_mask,
+    )
+    global_result = _global_update(
+        augmented, pred_obs, obs, C_D, C_D_sqrt, alpha, rng
+    )
+
+    # Masked-out rows (params) match the global update exactly.
+    assert jnp.allclose(
+        localized[N_state:], global_result[N_state:], atol=1e-5
+    )
+    # At least one localized (state) row differs from its global update.
+    assert not jnp.allclose(
+        localized[:N_state], global_result[:N_state], atol=1e-5
+    )
+
+
+def test_localize_mask_none_unchanged() -> None:
+    """Passing ``localize_mask=None`` reproduces the call without the arg."""
+    from data_assimilation.localization.correlation import CorrelationLocalization
+
+    augmented, pred_obs, obs, C_D, C_D_sqrt, _, _ = _build_localization_problem(
+        seed=5
+    )
+    alpha = 2.0
+    rng = jax.random.PRNGKey(7)
+
+    aug_dev = augmented - augmented.mean(axis=1, keepdims=True)
+    po_dev = pred_obs - pred_obs.mean(axis=1, keepdims=True)
+
+    loc = CorrelationLocalization(truncation_correlation=0.3, max_inflation=8.0)
+    kwargs = dict(
+        augmented=augmented,
+        aug_dev=aug_dev,
+        pred_obs=pred_obs,
+        pred_obs_dev=po_dev,
+        obs=obs,
+        C_D=C_D,
+        C_D_sqrt=C_D_sqrt,
+        alpha=alpha,
+        rng_key=rng,
+    )
+    without_arg = loc.localized_update(**kwargs)
+    with_none = loc.localized_update(**kwargs, localize_mask=None)
+    assert jnp.array_equal(without_arg, with_none)
+
+
+def test_localize_mask_with_state_grouping() -> None:
+    """State rows grouped + params masked: block members get identical updates,
+    and the masked param rows still receive the global update."""
+    from data_assimilation.localization.correlation import CorrelationLocalization
+
+    N_d, N_e = 5, 80
+    k1, kp = jax.random.split(jax.random.PRNGKey(31), 2)
+    # State: cells {0,1} are exact duplicates (one block), {2,3} another block.
+    # Identical anomalies AND identical cross-covariance rows -> the joint block
+    # update is byte-for-byte identical across block members.
+    cells = jax.random.normal(k1, (2, N_e))
+    state = jnp.stack([cells[0], cells[0], cells[1], cells[1]])
+    params = jax.random.normal(kp, (2, N_e))  # independent param rows
+    augmented = jnp.concatenate([state, params], axis=0)
+    N_state, N_param = 4, 2
+
+    M = jax.random.normal(jax.random.PRNGKey(8), (N_d, 2))
+    pred_obs = M @ cells + 0.3 * jax.random.normal(jax.random.PRNGKey(9), (N_d, N_e))
+    obs = jax.random.normal(jax.random.PRNGKey(10), (N_d,))
+    C_D = jnp.diag(0.25 * jnp.ones(N_d))
+    C_D_sqrt = jnp.sqrt(C_D)
+    alpha = 2.0
+    rng = jax.random.PRNGKey(123)
+
+    aug_dev = augmented - augmented.mean(axis=1, keepdims=True)
+    po_dev = pred_obs - pred_obs.mean(axis=1, keepdims=True)
+
+    # State rows grouped by cell; each param gets its own unique block id.
+    group_ids = jnp.array([0, 0, 1, 1, 2, 3])
+    localize_mask = jnp.concatenate(
+        [jnp.ones(N_state, dtype=bool), jnp.zeros(N_param, dtype=bool)]
+    )
+
+    loc = CorrelationLocalization(truncation_correlation=0.2, max_inflation=8.0)
+    updated = loc.localized_update(
+        augmented=augmented,
+        aug_dev=aug_dev,
+        pred_obs=pred_obs,
+        pred_obs_dev=po_dev,
+        obs=obs,
+        C_D=C_D,
+        C_D_sqrt=C_D_sqrt,
+        alpha=alpha,
+        rng_key=rng,
+        group_ids=group_ids,
+        localize_mask=localize_mask,
+    )
+
+    # Block members share an identical (joint) update.
+    assert jnp.allclose(updated[0], updated[1], atol=1e-5)
+    assert jnp.allclose(updated[2], updated[3], atol=1e-5)
+
+    # The masked param rows still get the global update.
+    global_result = _global_update(
+        augmented, pred_obs, obs, C_D, C_D_sqrt, alpha, rng
+    )
+    assert jnp.allclose(updated[N_state:], global_result[N_state:], atol=1e-5)
+
+
 def test_parameter_esmda_runs_with_correlation_localization(compose_test_cfg) -> None:
     """End-to-end: parameter ESMDA composes and runs with localization on."""
     from scripts.run_esmda import run
@@ -210,17 +365,27 @@ def test_parameter_esmda_runs_with_correlation_localization(compose_test_cfg) ->
         [
             "model@truth_model=pyudales",
             "model@assim_model=pyudales",
-            "esmda/smoother=parameter",
+            "esmda/smoother=static",
             "params@prior_params=static",
             "params@truth_params=static_truth",
-            # Correlation localization is the default `esmda.localization`; just
-            # tune its truncation threshold here.
+            # Switch on adaptive correlation localization via the config group
+            # (`esmda/localization` defaults to `none`), then lower its threshold.
+            "esmda/localization=correlation",
             "esmda.localization.truncation_correlation=0.2",
             "ensemble.ensemble_size=4",
             "ensemble.num_parallel_processes=2",
             "esmda.num_steps=1",
             "esmda.num_assimilation_windows=1",
             "run.skip_viz=true",
+            # Inline truth + in-bounds test-grid sensors + a domain-appropriate
+            # nnudge_meters (see tests/test_run_esmda.py for the same reasons).
+            "run.truth_dir=null",
+            "obs.x_points=[2.5,2.5,18.0,18.0]",
+            "obs.y_points=[5.0,15.0,5.0,15.0]",
+            "obs.z_points=[3.0,3.0,3.0,3.0]",
+            "obs.interval_seconds=3.0",
+            "truth_model.forward_model.nudging_config.nnudge_meters=4.0",
+            "assim_model.forward_model.nudging_config.nnudge_meters=4.0",
         ],
         config_name="run_esmda",
     )
@@ -236,3 +401,127 @@ def test_invalid_parameters_raise() -> None:
         CorrelationLocalization(tapering_beta=0.0)
     with pytest.raises(ValueError):
         CorrelationLocalization(max_inflation=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Distance-based localization
+# ---------------------------------------------------------------------------
+
+def test_distance_excludes_beyond_radius_keeps_within() -> None:
+    from data_assimilation.localization.distance import DistanceLocalization
+
+    loc = DistanceLocalization(
+        localization_radius=10.0, tapering_beta=0.5, max_inflation=4.0
+    )
+    row = jnp.zeros((1, 3))  # one grid point at the origin
+    # Sensors at horizontal distance 3 (un-tapered), 8 (tapered), 20 (excluded).
+    obs = jnp.array([[3.0, 0.0, 0.0], [8.0, 0.0, 0.0], [20.0, 0.0, 0.0]])
+    inflation = np.array(loc.inflation_factors(None, None, row_coords=row, obs_coords=obs))
+
+    assert inflation[0, 0] == pytest.approx(1.0)  # within beta*radius -> no taper
+    assert np.isfinite(inflation[0, 1]) and inflation[0, 1] > 1.0  # tapered
+    assert np.isinf(inflation[0, 2])  # beyond the radius -> excluded
+
+
+def test_distance_inflation_reaches_max_at_radius() -> None:
+    from data_assimilation.localization.distance import DistanceLocalization
+
+    loc = DistanceLocalization(
+        localization_radius=10.0, tapering_beta=0.5, max_inflation=4.0
+    )
+    row = jnp.zeros((1, 3))
+    obs = jnp.array([[10.0, 0.0, 0.0]])  # exactly at the radius
+    inflation = float(loc.inflation_factors(None, None, row_coords=row, obs_coords=obs)[0, 0])
+    assert inflation == pytest.approx(4.0, rel=1e-5)
+
+
+def test_distance_requires_coordinates() -> None:
+    from data_assimilation.localization.distance import DistanceLocalization
+
+    loc = DistanceLocalization(localization_radius=10.0)
+    with pytest.raises(ValueError):
+        loc.inflation_factors(jnp.zeros((2, 5)), jnp.zeros((3, 5)))
+
+
+def test_distance_horizontal_only_ignores_vertical() -> None:
+    from data_assimilation.localization.distance import DistanceLocalization
+
+    row = jnp.zeros((1, 3))
+    obs = jnp.array([[3.0, 0.0, 100.0]])  # 3 m horizontally, 100 m vertically
+
+    horiz = DistanceLocalization(localization_radius=10.0, horizontal_only=True)
+    assert np.isfinite(
+        float(horiz.inflation_factors(None, None, row_coords=row, obs_coords=obs)[0, 0])
+    )  # horizontal distance 3 < radius -> kept
+
+    full = DistanceLocalization(localization_radius=10.0, horizontal_only=False)
+    assert np.isinf(
+        float(full.inflation_factors(None, None, row_coords=row, obs_coords=obs)[0, 0])
+    )  # 3-D distance ~100 > radius -> excluded
+
+
+def test_distance_invalid_parameters_raise() -> None:
+    from data_assimilation.localization.distance import DistanceLocalization
+
+    with pytest.raises(ValueError):
+        DistanceLocalization(localization_radius=0.0)
+    with pytest.raises(ValueError):
+        DistanceLocalization(localization_radius=10.0, tapering_beta=1.0)
+    with pytest.raises(ValueError):
+        DistanceLocalization(localization_radius=10.0, max_inflation=0.5)
+
+
+def test_observation_coords_tile_sensor_locations() -> None:
+    """obs j maps to sensor j % num_sensors (sensor is the innermost axis)."""
+    from data_assimilation.observation_operator import ObservationOperator
+    from data_assimilation.smoothing.esmda import StateAndParameterESMDA
+
+    op = ObservationOperator(
+        obs_x=[1.0, 2.0, 3.0],
+        obs_y=[4.0, 5.0, 6.0],
+        obs_z=[7.0, 8.0, 9.0],
+        obs_states=["u", "v", "w"],
+        solver_name="pylbm",
+    )
+    obj = StateAndParameterESMDA.__new__(StateAndParameterESMDA)
+    obj.observation_operator = op
+
+    n_d = op.num_obs  # 3 sensors * 3 states = 9
+    coords = np.array(obj._observation_coords(n_d))
+    sensors = np.array([[1, 4, 7], [2, 5, 8], [3, 6, 9]], dtype=float)
+    assert coords.shape == (9, 3)
+    for j in range(n_d):
+        assert np.allclose(coords[j], sensors[j % 3])
+
+
+def test_state_row_coords_match_flatten_order() -> None:
+    """`_state_row_coords` row order matches `_flatten_state` exactly.
+
+    Build a state whose ``u`` equals its x-coordinate and ``v`` equals its
+    y-coordinate at every cell; flattening then yields the coordinate per row,
+    which must equal the coordinate `_state_row_coords` reports for that row.
+    """
+    import xarray
+    from data_assimilation.smoothing.esmda import StateAndParameterESMDA
+
+    x = np.array([0.0, 10.0, 20.0, 30.0])
+    y = np.array([0.0, 5.0])
+    z = np.array([1.0, 2.0, 3.0])
+    ens = 2
+    shape = (ens, z.size, y.size, x.size)
+    u = np.broadcast_to(x[None, None, None, :], shape).astype(float)
+    v = np.broadcast_to(y[None, None, :, None], shape).astype(float)
+    state = xarray.Dataset(
+        {"u": (("ensemble", "z", "y", "x"), u.copy()),
+         "v": (("ensemble", "z", "y", "x"), v.copy())},
+        coords={"x": x, "y": y, "z": z},
+    )
+    obj = StateAndParameterESMDA.__new__(StateAndParameterESMDA)
+
+    flat = np.array(obj._flatten_state(state))  # (N_s, ens); u rows then v rows
+    coords = np.array(obj._state_row_coords(state))  # (N_s, 3)
+    n_cells = z.size * y.size * x.size
+
+    # u rows carry the x coordinate; v rows carry the y coordinate.
+    assert np.allclose(flat[:n_cells, 0], coords[:n_cells, 0])
+    assert np.allclose(flat[n_cells:, 0], coords[n_cells:, 1])

@@ -1,0 +1,19 @@
+# Joint state + time-varying-parameter ESMDA smoother. The augmented Kalman
+# state combines (a) the window's time=0 initial-condition STATE (flattened
+# per grid cell, like the static state_and_parameter smoother) with (b) the
+# TIME-VARYING (AR(2)) parameters flattened into per-time-knot scalars
+# (`{name}_{t}`), like the dynamic smoother. Pair with
+# `params@prior_params=dynamic` and `params@truth_params=dynamic_truth`.
+#
+# Modelled on conf/esmda/smoother/dynamic.yaml. `num_time_points` is supplied
+# here from the `params` mount's time grid (config.yaml mounts `params: dynamic`,
+# so `${params.time_coords.num}` resolves to the dynamic prior's knot count);
+# keep it consistent with `prior_params.time_coords.num` for a run. As with the
+# dynamic smoother, `pin_initial_time_point` is re-toggled per window by
+# run_esmda.py (free at window 0, pinned thereafter for cross-window continuity).
+_target_: data_assimilation.smoothing.esmda.StateAndTimeVaryingParameterESMDA
+num_steps: ${esmda.num_steps}
+alpha: ${esmda.alpha}
+pin_initial_time_point: true
+localization: ${esmda.localization}
+num_time_points: ${params.time_coords.num}

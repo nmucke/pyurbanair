@@ -1,0 +1,24 @@
+# @package esmda
+# Adaptive correlation-based localization (Vossepoel et al. 2025,
+# MWR-D-24-0269.1). Observations are selected per state row by the ensemble
+# correlation |rho| between the predicted measurement and that row; |rho| < rho_t
+# are excluded, the rest tapered by an error-variance inflation. Needs no spatial
+# coordinates. Select with `esmda/localization=correlation`.
+#
+# In the state-bearing smoothers (state_and_parameter, state_and_dynamic) the
+# localization is applied to the STATE rows only; parameter rows always get the
+# global update.
+localization:
+  _target_: data_assimilation.localization.correlation.CorrelationLocalization
+  # Correlation truncation threshold rho_t. null -> theoretical 3/sqrt(N_e).
+  # The paper found tuned values in [0.3, 0.4] work best.
+  truncation_correlation: 0.35
+  # Fraction of the truncation distance left un-tapered (beta in Eq. 9).
+  tapering_beta: 0.5
+  # Maximum error-variance inflation E_max at the truncation distance (multiplies
+  # the obs-error std, so the variance is scaled by E_max**2). Paper: 8 for
+  # correlation-based localization.
+  max_inflation: 8.0
+  # Grid-block joint analysis: co-located state rows (u/v/w at one cell) share
+  # one observation selection + transition.
+  block_grouping: true

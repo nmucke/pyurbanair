@@ -1,0 +1,4 @@
+# @package esmda
+# No localization: the global (unlocalized) ESMDA Kalman update.
+# Selected with `esmda/localization=none` (the default).
+localization: null

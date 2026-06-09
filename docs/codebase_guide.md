@@ -61,13 +61,14 @@ conf/                              # Hydra config (see §5 Configuration system)
 libs/data-assimilation/src/data_assimilation/
   observation_operator.py          # ObservationOperator + TemporalObservationOperator
   interpolation.py                 # Grid → sensor-point interpolation
-  localization/
-    base.py                        # BaseLocalization — inflation_factors + localized_update
+  localization/                    # see §6 (selected via the esmda/localization group)
+    base.py                        # BaseLocalization, taper_inflation, localized_update
     correlation.py                 # CorrelationLocalization (adaptive correlation-based)
-  localization/                    # see §6
+    distance.py                    # DistanceLocalization (physical-distance-based)
   smoothing/
     base.py                        # BaseSmoothing — _forecast_step, _observation_step
-    esmda.py                       # ParameterESMDA, StateAndParameterESMDA, TimeVaryingParameterESMDA
+    esmda.py                       # Parameter/StateAndParameter/TimeVaryingParameter/
+                                   #   StateAndTimeVaryingParameter ESMDA
 
 libs/pylbm/src/pylbm/              # LBM wrapper. __init__ git-clones the LBM Fortran code.
   forward_model.py                 # ForwardModel(BaseForwardModel)
@@ -221,7 +222,7 @@ the right runtime key:
 | [`paths.yaml`](../conf/paths.yaml) | `paths` | `results_dir` (default `.temp/${model.name}`), `experiment_dir` |
 | [`time.yaml`](../conf/time.yaml) | `time` | `simulation_time`, `output_frequency`, `spinup_time` |
 | [`ensemble.yaml`](../conf/ensemble.yaml) | `ensemble` | `ensemble_size`, `num_parallel_processes`, `failure.{policy, jitter_scale, seed}` |
-| [`esmda.yaml`](../conf/esmda.yaml) | `esmda` | `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `seed`, `localization` (correlation block, **`null` = global update and is now the default** — the block is present but commented out; uncomment or set `esmda.localization.*` to enable). Mounted only by `run_esmda.yaml`. |
+| [`esmda.yaml`](../conf/esmda.yaml) | `esmda` | `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `seed`. `localization` is set by the **`esmda/localization` group** (`none`\|`correlation`\|`distance`, default `none` = global update). Mounted only by `run_esmda.yaml`. |
 
 Everything that varies per variant is a **group**:
 
@@ -263,13 +264,18 @@ pick the smoother via the group override (see [tests/conftest.py](../tests/conft
 > `static|state_and_parameter|dynamic`. The CLI selector must match the
 > **filenames** (`esmda/smoother=static`, `esmda/smoother=dynamic`).
 
-**Localization** lives in the esmda namespace: `esmda.localization` is the
-adaptive correlation-localization block (Vossepoel et al. 2025), wired into every
-smoother via `localization: ${..localization}`. **It now defaults to `null` (the
-global, unlocalized update)** — the correlation `_target_` block is present in
-[conf/esmda.yaml](../conf/esmda.yaml) but commented out. Enable it by uncommenting
-the block (or set `esmda.localization.truncation_correlation=...` etc. on the CLI).
-Its `block_grouping` flag toggles per-row vs. the paper's "grid block" joint
+**Localization** is selected via the `esmda/localization` config **group**
+(`conf/esmda/localization/{none,correlation,distance}.yaml`), each setting
+`esmda.localization` which every smoother receives via
+`localization: ${esmda.localization}`. The default is **`none` (the global,
+unlocalized update)**. `correlation` = adaptive correlation-based (Vossepoel et
+al. 2025); `distance` = physical-distance-based. Pick one with
+`esmda/localization=distance` and tweak its fields
+(`esmda.localization.localization_radius=40`), or force the global update with
+`esmda.localization=null`. In the state-bearing smoothers
+(`state_and_parameter`, `state_and_dynamic`) localization is applied to the
+**state rows only**; parameters always get the global update. Each strategy's
+`block_grouping` flag toggles per-row vs. the paper's "grid block" joint
 analysis (see §6).
 
 The `size/` overlays are `# @package _global_` and are the single place a run
@@ -426,38 +432,55 @@ def test_something(compose_test_cfg) -> None:
 ### Localization (optional)
 - [localization/base.py](../libs/data-assimilation/src/data_assimilation/localization/base.py)
   defines `BaseLocalization`. Subclasses implement one method,
-  `inflation_factors(aug_dev, pred_obs_dev) -> (N_aug, N_d)`, returning a
-  per-(state-row, observation) observation-error inflation factor (`1.0` =
-  keep, `>1` = taper, `inf` = exclude). Inflation multiplies the observation-error
-  *perturbation* (std), so the error variance is scaled by `inflation**2`. The
-  shared local-analysis math lives in `localized_update(aug, aug_dev, pred_obs,
-  pred_obs_dev, obs_pert, group_ids=None)`, which updates each augmented row with
-  only its relevant observations (Vossepoel et al. 2025, MWR-D-24-0269.1).
-- `CorrelationLocalization`
-  ([localization/correlation.py](../libs/data-assimilation/src/data_assimilation/localization/correlation.py))
-  selects observations by ensemble correlation: exclude `|ρ| < ρ_t`, taper the
-  rest by correlation distance. Needs no spatial coordinates, so it works for
-  both abstract parameter rows and gridded state rows.
+  `inflation_factors(aug_dev, pred_obs_dev, row_coords=None, obs_coords=None) ->
+  (N_aug, N_d)`, returning a per-(state-row, observation) observation-error
+  inflation factor (`1.0` = keep, `>1` = taper, `inf` = exclude). Inflation
+  multiplies the observation-error *perturbation* (std), so the error variance is
+  scaled by `inflation**2`. The shared `taper_inflation(distance, truncation,
+  beta, max_inflation)` (Vossepoel Eqs. 9–10) drives **both** strategies. The
+  shared local-analysis math lives in `localized_update(..., group_ids=None,
+  localize_mask=None, row_coords=None, obs_coords=None)`, which updates each
+  augmented row with only its relevant observations (Vossepoel et al. 2025,
+  MWR-D-24-0269.1).
+- Two strategies (a `class.requires_coordinates` flag tells the smoother whether
+  to compute geometry):
+  - `CorrelationLocalization`
+    ([localization/correlation.py](../libs/data-assimilation/src/data_assimilation/localization/correlation.py))
+    selects observations by ensemble correlation: exclude `|ρ| < ρ_t`, taper the
+    rest by correlation distance `1-|ρ|`. Needs no spatial coordinates
+    (`requires_coordinates=False`).
+  - `DistanceLocalization`
+    ([localization/distance.py](../libs/data-assimilation/src/data_assimilation/localization/distance.py))
+    selects observations by **physical Euclidean distance** between the state
+    grid point and the sensor: exclude beyond `localization_radius`, taper the
+    rest. `requires_coordinates=True` (`horizontal_only` ignores the vertical);
+    only valid on a state-bearing smoother with coordinate-based observations.
+- **State-only localization.** Both state-bearing smoothers localize the STATE
+  rows only; parameter rows always get the global update. The augmented update is
+  built by the shared `StateAndParameterESMDA._augmented_state_update`, which sets
+  `localize_mask` (True=state, False=param → forced to all-ones inflation = exact
+  global update), and for `requires_coordinates` strategies computes
+  `_state_row_coords` (per-row x/y/z, dim axis from the dim-name prefix, in
+  `_flatten_state` order) and `_observation_coords` (sensor xyz tiled, since the
+  sensor is the innermost obs-vector axis → obs `j` ↔ sensor `j % num_sensors`).
 - `_BaseESMDA` takes an optional `localization=` arg. When `None`,
   `_compute_kalman_update` does the original global update unchanged; when set,
-  it delegates to `localization.localized_update(...)`. The hook is in the
-  shared base, so **all** variants (Parameter / TimeVaryingParameter /
-  StateAndParameter) get it. Configured via `esmda.localization` in
-  [conf/esmda.yaml](../conf/esmda.yaml); the correlation block is **commented out
-  → defaults to `null` (global update)**. Every smoother YAML wires it through
-  with `localization: ${..localization}`. No script changes needed.
-- **Grid-block joint analysis** (`block_grouping`, Vossepoel §3b). When
-  `CorrelationLocalization(block_grouping=True)`, co-located augmented rows are
-  updated *jointly* with one shared observation selection + transition matrix
-  instead of per-row. The grouping (`group_ids`) is built in
+  it delegates to `localization.localized_update(...)`. The hook is in the shared
+  base, so **all** variants get it. Selected via the `esmda/localization` config
+  **group** (`none` | `correlation` | `distance`, default `none`); every smoother
+  YAML wires it through with `localization: ${esmda.localization}`. No script
+  changes needed.
+- **Grid-block joint analysis** (`block_grouping`, Vossepoel §3b). When the
+  strategy has `block_grouping=True`, co-located augmented rows are updated
+  *jointly* with one shared observation selection + transition matrix instead of
+  per-row. The grouping (`group_ids`) is built in
   [smoothing/esmda.py](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py):
-  `ParameterESMDA` groups by parameter base name (`_group_ids_by_base_name` —
-  `inflow_angle_0/_1/_2…` → one block; static params each their own);
+  `ParameterESMDA` groups by parameter base name (`_group_ids_by_base_name`);
   `StateAndParameterESMDA._state_group_ids` groups the u/v/w at one cell.
   `_group_inflation` in
   [localization/base.py](../libs/data-assimilation/src/data_assimilation/localization/base.py)
   takes the per-observation min inflation across block members so they share the
-  active-observation set. (Correlation now uses `ddof=1` to match the `(N_e-1)`
+  active-observation set. (Correlation uses `ddof=1` to match the `(N_e-1)`
   covariance denominator — the ratio is the exact sample correlation.)
 - **Cost note**: `localized_update` is `jax.vmap` over augmented rows
   (`N_aug` small `N_d×N_d` solves). Cheap for parameter variants; for
@@ -693,17 +716,20 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 ### Add a new localization strategy
 - Subclass `BaseLocalization` in
   [localization/](../libs/data-assimilation/src/data_assimilation/localization/)
-  and implement `inflation_factors(aug_dev, pred_obs_dev)`. Return `(N_aug,
-  N_d)`: `1.0` keeps an observation for a row, `>1` tapers it, `jnp.inf`
-  excludes it. The shared `localized_update` handles the Kalman math — a
-  distance-based strategy (Gaspari–Cohn taper + radius cutoff) drops in by
-  implementing only this method.
-- Localization lives in [conf/esmda.yaml](../conf/esmda.yaml) under
-  `esmda.localization` (the commented-out correlation block; `null` by default).
-  Swap in your strategy by uncommenting and overriding `esmda.localization._target_`
-  (and its args), or replace the block in `esmda.yaml`. Every smoother already
-  receives it via `localization: ${..localization}`; `esmda.localization=null`
-  gives the global update.
+  and implement `inflation_factors(aug_dev, pred_obs_dev, row_coords=None,
+  obs_coords=None)`. Return `(N_aug, N_d)`: `1.0` keeps an observation for a row,
+  `>1` tapers it, `jnp.inf` excludes it. Reuse `taper_inflation(distance,
+  truncation, beta, max_inflation)` for the Vossepoel Eq. 9–10 taper. If the
+  strategy needs grid/sensor geometry (like `DistanceLocalization`), set the
+  class attribute `requires_coordinates = True`; the state-bearing smoothers then
+  pass `row_coords`/`obs_coords` (and it only works on those smoothers). The
+  shared `localized_update` handles the Kalman math.
+- Add an option file to the `esmda/localization` group
+  (`conf/esmda/localization/<name>.yaml`, `# @package esmda`, setting
+  `localization: {_target_: ..., ...}`) and select it with
+  `esmda/localization=<name>`. Every smoother already receives it via
+  `localization: ${esmda.localization}`; `esmda/localization=none` (or
+  `esmda.localization=null`) gives the global update.
 
 ### Add a new run script
 - Place under [scripts/](../scripts/), mirror an existing one. The
@@ -772,7 +798,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 | Per-window rollout logic | `run_esmda.py`'s window loop / `run_forward_model.py`'s `run.rollout_steps` loop |
 | Parameter samplers (static + dynamic) | [src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/), [src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/), [conf/params/](../conf/params/) |
 | Truth source / spin-up trimming / 32-bit | `run.truth_dir`+`run.truth_start_time` in [run_esmda.yaml](../conf/run_esmda.yaml); [scripts/trim_spinup.py](../scripts/trim_spinup.py), [convert_ground_truth_to_32bit.py](../scripts/convert_ground_truth_to_32bit.py), [visualize_ground_truth.py](../scripts/visualize_ground_truth.py) |
-| Localization / grid-block grouping | [localization/](../libs/data-assimilation/src/data_assimilation/localization/), `esmda.localization` (`block_grouping`) in [conf/esmda.yaml](../conf/esmda.yaml) |
+| Localization (correlation/distance/none) / grid-block grouping | [localization/](../libs/data-assimilation/src/data_assimilation/localization/) (`correlation.py`, `distance.py`), the `esmda/localization` group [conf/esmda/localization/](../conf/esmda/localization/) (`block_grouping`, state-only) |
 | Neural-surrogate architectures (UPT etc.) | [architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/), [conf/neural_surrogate_architectures/](../conf/neural_surrogate_architectures/) |
 | uDALES instability / dt-collapse handling | [libs/pyudales/src/pyudales/utils/run_monitor.py](../libs/pyudales/src/pyudales/utils/run_monitor.py) (`instability_check`) |
 | DA metrics + diagnostic plots (RMSE/CRPS, sensor series) | [src/pyurbanair/plotting.py](../src/pyurbanair/plotting.py) (`compute_parameter_metrics`, `plot_parameter_error`, `compute_sensor_metrics`, `plot_sensor_timeseries`) |

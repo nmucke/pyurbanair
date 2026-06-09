@@ -2,14 +2,19 @@
 # replaces run_{parameter,state_and_parameter,rollout,time_varying_parameter,
 # time_varying_parameters_rollout}_esmda.py.
 #
-# Three orthogonal, declarative axes select the mode:
-#   * esmda/smoother=parameter|state_and_parameter|time_varying  (augmented state)
+# Declarative axes select the mode:
+#   * esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic
+#                                                                 (augmented state)
+#       static             -> parameter-only, static params
+#       state_and_parameter-> joint time=0 state + static params
+#       dynamic            -> parameter-only, time-varying (AR(2)) params
+#       state_and_dynamic  -> joint time=0 state + time-varying params
 #   * params@prior_params=static|dynamic                          (static vs time-varying)
 #   * esmda.num_assimilation_windows=1|N                          (single window vs rollout)
 # and the truth source:
-#   * run.ground_truth_dir=null   -> simulate truth inline (default)
-#   * run.ground_truth_dir=<path> -> load a state.nc/params.nc artifact
-#                                    (as written by run_forward_model.py)
+#   * run.truth_dir=null   -> simulate truth inline (default)
+#   * run.truth_dir=<path> -> load a state.nc/params.nc artifact
+#                             (as written by run_forward_model.py)
 #
 # Mirrors the model double-mount: the model group is mounted twice
 # (model@truth_model / model@assim_model) and the params group is mounted twice
@@ -18,16 +23,20 @@
 #
 # Examples::
 #
-#   python scripts/run_esmda.py esmda/smoother=parameter \
+#   python scripts/run_esmda.py esmda/smoother=static \
 #     params@prior_params=static params@truth_params=static_truth
 #   python scripts/run_esmda.py esmda/smoother=state_and_parameter \
 #     params@prior_params=static esmda.num_assimilation_windows=3
-#   python scripts/run_esmda.py esmda/smoother=time_varying \
+#   python scripts/run_esmda.py esmda/smoother=dynamic \
+#     params@prior_params=dynamic params@truth_params=dynamic_truth \
+#     esmda.num_assimilation_windows=3
+#   python scripts/run_esmda.py esmda/smoother=state_and_dynamic \
 #     params@prior_params=dynamic params@truth_params=dynamic_truth \
 #     esmda.num_assimilation_windows=3
 defaults:
   - config
   - esmda
+  - esmda/localization: none
   - esmda/smoother: dynamic
   - model@truth_model: pyudales
   - model@assim_model: pyudales
