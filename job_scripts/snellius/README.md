@@ -135,7 +135,8 @@ snellius/
 │   ├── rollout_esmda_from_truth.slurm        # slim runner: backend specifics only
 │   ├── sweep_domain_rollout_esmda_from_truth.sh
 │   ├── sweep_ensemble_rollout_esmda_from_truth.sh
-│   └── sweep_esmda_steps_rollout_esmda_from_truth.sh
+│   ├── sweep_esmda_steps_rollout_esmda_from_truth.sh
+│   └── sweep_interval_rollout_esmda_from_truth.sh
 ```
 
 - **`common.sh`** — every default and every `run_esmda.py` Hydra override that is
@@ -145,7 +146,7 @@ snellius/
   resolution/validation, and the `COMMON_RUN_FLAGS` array. Every value is
   env-overridable; edit it once to retune the whole suite.
 - **`sweep_base.sh`** — the canonical swept value lists (resolutions, ensemble
-  sizes, ESMDA steps) with a per-row `--time`, plus the sizing logic
+  sizes, ESMDA steps, observation intervals) with a per-row `--time`, plus the sizing logic
   (`--cpus-per-task = ensemble`, partition auto-selected: `rome` ≤128 cores,
   `genoa` up to 192). Submits one job per swept value.
 - **`<backend>/rollout_esmda_from_truth.slurm`** — sources `common.sh` and adds
@@ -154,8 +155,10 @@ snellius/
   `paths.experiment_dir` + private LBM copy for pylbm; `temp_dir`/`output_dir`
   for pyudales; `temp_dir` + PALM env + `nz≥16` floor for pypalm). Directly
   `sbatch`-able too.
-- the three sweep wrappers are thin and identical across folders — they delegate
-  to `../sweep_base.sh` with the sibling `.slurm`.
+- the four sweep wrappers (domain / ensemble / esmda_steps / interval) are thin
+  and identical across folders — they delegate to `../sweep_base.sh` with the
+  sibling `.slurm`. The `interval` sweep varies `obs.interval_seconds` (the
+  observation temporal-aggregation bin width) at a fixed grid + ensemble + steps.
 
 Run a sweep with one backend (submits one job per point), or the same sweep
 across all three for directly comparable runs:
@@ -169,7 +172,8 @@ done
 ```
 
 Each job writes to `/projects/prjs2075/urbanair/assim_from_ground_truth/<RUN_TAG>`
-where `RUN_TAG` embeds the assim model, grid, ensemble size and step count, so no
+where `RUN_TAG` embeds the assim model, grid, ensemble size, step count and
+observation interval, so no
 two configurations (or backends) collide. Correlation localization is **off** by
 default; set `USE_LOCALIZATION=true` (env var, propagated through the sweep) to
 enable it. Because pypalm requires `nz≥16`, the domain sweep's coarsest row

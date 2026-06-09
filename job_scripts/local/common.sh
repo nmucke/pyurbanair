@@ -10,8 +10,8 @@
 # horizon and dynamic-parameter settings -- only the assimilation solver
 # differs). Backend-specific knobs (pixi env, GPU vs CPU, parallelism policy,
 # solver flags) live in each runner; the SWEEP parameters (grid resolution
-# NX/NY/NZ, ENSEMBLE_SIZE, NUM_ESMDA_STEPS) also live in the runners so the sweep
-# launchers can inject one value per job.
+# NX/NY/NZ, ENSEMBLE_SIZE, NUM_ESMDA_STEPS, INTERVAL_SECONDS) also live in the
+# runners so the sweep launchers can inject one value per job.
 #
 # Every value is env-overridable: `export VAR=...` before invoking a runner or
 # sweep launcher changes it for that run. To retune the whole local suite at

@@ -10,19 +10,19 @@
 # (one core per ensemble member -- NO parallel-worker cap) and the partition is
 # auto-selected by core count; each row also carries its own --time.
 #
-# Not run directly: each backend folder carries three thin wrappers
-# (sweep_{domain,ensemble,esmda_steps}_rollout_esmda_from_truth.sh) that call
-# this with the sweep kind and the sibling .slurm runner:
+# Not run directly: each backend folder carries four thin wrappers
+# (sweep_{domain,ensemble,esmda_steps,interval}_rollout_esmda_from_truth.sh) that
+# call this with the sweep kind and the sibling .slurm runner:
 #
-#     bash sweep_base.sh <domain|ensemble|steps> <path/to/rollout_esmda_from_truth.slurm> [hydra overrides...]
+#     bash sweep_base.sh <domain|ensemble|steps|interval> <path/to/rollout_esmda_from_truth.slurm> [hydra overrides...]
 #
 # The swept value is injected into each job via --export (NX/NY/NZ, ENSEMBLE_SIZE
 # or NUM_ESMDA_STEPS) so it lands in its own RESULTS_DIR. Any extra arguments are
 # forwarded as Hydra overrides to EVERY job.
 set -uo pipefail
 
-KIND="${1:?usage: sweep_base.sh <domain|ensemble|steps> <runner.slurm> [hydra overrides...]}"
-RUNNER="${2:?usage: sweep_base.sh <domain|ensemble|steps> <runner.slurm> [hydra overrides...]}"
+KIND="${1:?usage: sweep_base.sh <domain|ensemble|steps|interval> <runner.slurm> [hydra overrides...]}"
+RUNNER="${2:?usage: sweep_base.sh <domain|ensemble|steps|interval> <runner.slurm> [hydra overrides...]}"
 shift 2
 [ -f "${RUNNER}" ] || { echo "error: runner '${RUNNER}' not found" >&2; exit 1; }
 MODEL="$(basename "$(dirname "${RUNNER}")")"
@@ -56,6 +56,15 @@ ESMDA_STEPS=(
   "3   20:00:00"
   "4   24:00:00"
 )
+# Observation-interval sweep: "INTERVAL_SECONDS TIME", at the fixed grid +
+# ensemble + steps below. obs.interval_seconds is the temporal-aggregation bin
+# width; cost is ~flat across intervals (same number of ensemble forward solves).
+INTERVAL_SECONDS_LIST=(
+  "10   16:00:00"
+  "20   16:00:00"
+  "30   16:00:00"
+  "60   16:00:00"
+)
 
 # Fixed values for the dimensions a given sweep holds constant.
 FIXED_NX="${FIXED_NX:-75}"
@@ -63,6 +72,7 @@ FIXED_NY="${FIXED_NY:-60}"
 FIXED_NZ="${FIXED_NZ:-24}"
 FIXED_ENSEMBLE_SIZE="${FIXED_ENSEMBLE_SIZE:-96}"
 FIXED_NUM_ESMDA_STEPS="${FIXED_NUM_ESMDA_STEPS:-3}"
+FIXED_INTERVAL_SECONDS="${FIXED_INTERVAL_SECONDS:-20.0}"
 # ============================================================================
 
 # Size the SLURM allocation from the ensemble size: --cpus-per-task == ensemble
@@ -112,7 +122,8 @@ case "${KIND}" in
       read -r nx ny nz walltime <<<"${res}"
       submit_one "rollout_${MODEL}_${nx}x${ny}x${nz}" "${walltime}" \
         "NX=${nx}" "NY=${ny}" "NZ=${nz}" \
-        "ENSEMBLE_SIZE=${FIXED_ENSEMBLE_SIZE}" "NUM_ESMDA_STEPS=${FIXED_NUM_ESMDA_STEPS}"
+        "ENSEMBLE_SIZE=${FIXED_ENSEMBLE_SIZE}" "NUM_ESMDA_STEPS=${FIXED_NUM_ESMDA_STEPS}" \
+        "INTERVAL_SECONDS=${FIXED_INTERVAL_SECONDS}"
     done
     ;;
   ensemble)
@@ -123,7 +134,8 @@ case "${KIND}" in
       size_job "${ens}"
       submit_one "rollout_${MODEL}_ens${ens}" "${walltime}" \
         "NX=${FIXED_NX}" "NY=${FIXED_NY}" "NZ=${FIXED_NZ}" \
-        "ENSEMBLE_SIZE=${ens}" "NUM_ESMDA_STEPS=${FIXED_NUM_ESMDA_STEPS}"
+        "ENSEMBLE_SIZE=${ens}" "NUM_ESMDA_STEPS=${FIXED_NUM_ESMDA_STEPS}" \
+        "INTERVAL_SECONDS=${FIXED_INTERVAL_SECONDS}"
     done
     ;;
   steps)
@@ -134,11 +146,24 @@ case "${KIND}" in
       read -r steps walltime <<<"${row}"
       submit_one "rollout_${MODEL}_steps${steps}" "${walltime}" \
         "NX=${FIXED_NX}" "NY=${FIXED_NY}" "NZ=${FIXED_NZ}" \
-        "ENSEMBLE_SIZE=${FIXED_ENSEMBLE_SIZE}" "NUM_ESMDA_STEPS=${steps}"
+        "ENSEMBLE_SIZE=${FIXED_ENSEMBLE_SIZE}" "NUM_ESMDA_STEPS=${steps}" \
+        "INTERVAL_SECONDS=${FIXED_INTERVAL_SECONDS}"
+    done
+    ;;
+  interval)
+    size_job "${FIXED_ENSEMBLE_SIZE}"
+    echo "SNELLIUS [${MODEL}] INTERVAL sweep -- ${#INTERVAL_SECONDS_LIST[@]} obs intervals (grid=${FIXED_NX}x${FIXED_NY}x${FIXED_NZ}, ensemble=${FIXED_ENSEMBLE_SIZE}, steps=${FIXED_NUM_ESMDA_STEPS})."
+    [ "${#FORWARD[@]}" -gt 0 ] && echo "Forwarding to every job: ${FORWARD[*]}"
+    for row in "${INTERVAL_SECONDS_LIST[@]}"; do
+      read -r interval walltime <<<"${row}"
+      submit_one "rollout_${MODEL}_int${interval}" "${walltime}" \
+        "NX=${FIXED_NX}" "NY=${FIXED_NY}" "NZ=${FIXED_NZ}" \
+        "ENSEMBLE_SIZE=${FIXED_ENSEMBLE_SIZE}" "NUM_ESMDA_STEPS=${FIXED_NUM_ESMDA_STEPS}" \
+        "INTERVAL_SECONDS=${interval}"
     done
     ;;
   *)
-    echo "error: unknown sweep kind '${KIND}' (expected domain|ensemble|steps)" >&2
+    echo "error: unknown sweep kind '${KIND}' (expected domain|ensemble|steps|interval)" >&2
     exit 1
     ;;
 esac
