@@ -1,7 +1,5 @@
 import logging
-import os
 import pathlib
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -10,305 +8,86 @@ import trimesh
 from pylbm.utils import DirectoryPaths
 
 
-def _split_buildings_edge_based(mesh: trimesh.Trimesh) -> list[trimesh.Trimesh]:
+def _load_single_mesh(stl_path: str | pathlib.Path) -> trimesh.Trimesh:
     """
-    Split mesh into building components using edge-based connectivity analysis.
+    Load an STL file as a single concatenated trimesh.Trimesh.
 
-    Inspired by u-dales splitBuildings.m, this uses face-to-face connectivity
-    via shared edges rather than just vertex connectivity. This can better
-    separate buildings that are topologically connected.
+    A ``trimesh.Scene`` (multi-geometry STL) is concatenated into one mesh so
+    that the occupancy ray-casting sees a single triangle soup. The building
+    geometry is intentionally kept whole here: unlike the old bounding-box
+    approach we do NOT split into connected components, because the voxel
+    occupancy is evaluated per grid column and naturally preserves arbitrary
+    footprints, courtyards and concave shapes.
 
     Args:
-        mesh: trimesh.Trimesh object
+        stl_path: Path to the .stl file.
 
     Returns:
-        List of trimesh.Trimesh objects, one per building component
+        A single trimesh.Trimesh containing all geometry.
     """
-    if len(mesh.faces) == 0:
-        return []
+    loaded = trimesh.load(stl_path)
 
-    # Remove ground faces first (faces where all vertices have z=0)
-    # This is similar to deleteGround.m in u-dales
-    z_coords = mesh.vertices[:, 2]
-    ground_faces_mask = np.all(z_coords[mesh.faces] == 0, axis=1)
-    building_faces_mask = ~ground_faces_mask
-
-    if np.sum(building_faces_mask) == 0:
-        # All faces are ground, return empty
-        return []
-
-    # Get only building faces
-    building_faces = mesh.faces[building_faces_mask]
-
-    # Build edge-to-face mapping
-    # Each edge is represented as a sorted tuple (v1, v2) where v1 < v2
-    edge_to_faces = defaultdict(list)
-
-    for face_idx, face in enumerate(building_faces):
-        # Add all three edges of this triangle
-        edges = [
-            tuple(sorted([face[0], face[1]])),
-            tuple(sorted([face[1], face[2]])),
-            tuple(sorted([face[2], face[0]])),
+    if isinstance(loaded, trimesh.Scene):
+        scene_meshes = [
+            m for m in loaded.geometry.values() if isinstance(m, trimesh.Trimesh)
         ]
-        for edge in edges:
-            edge_to_faces[edge].append(face_idx)
+        logger.info("Loaded scene with %s separate meshes", len(scene_meshes))
+        if len(scene_meshes) == 0:
+            raise ValueError(f"No valid meshes found in {stl_path}")
+        mesh = trimesh.util.concatenate(scene_meshes)
+    elif isinstance(loaded, trimesh.Trimesh):
+        mesh = loaded
+    else:
+        raise ValueError(f"Could not load a valid mesh from {stl_path}")
 
-    # Build face adjacency graph
-    # Two faces are adjacent if they share an edge
-    face_adjacency = defaultdict(set)
-    for edge, face_indices in edge_to_faces.items():
-        # If an edge is shared by multiple faces, those faces are adjacent
-        if len(face_indices) > 1:
-            for i in range(len(face_indices)):
-                for j in range(i + 1, len(face_indices)):
-                    face_adjacency[face_indices[i]].add(face_indices[j])
-                    face_adjacency[face_indices[j]].add(face_indices[i])
+    if len(mesh.faces) == 0:
+        raise ValueError(f"Mesh loaded from {stl_path} has no faces")
 
-    # Find connected components with an explicit-stack DFS. This is iterative on
-    # purpose: a recursive DFS recurses once per face and overflows Python's
-    # recursion limit on large meshes (the Xie & Castro cubes have only a few
-    # hundred faces per component, but the Barcelona geometry has components
-    # with tens of thousands of faces -> RecursionError).
-    visited = set()
-    components = []
-
-    for start_face_idx in range(len(building_faces)):
-        if start_face_idx in visited:
-            continue
-        component: list[int] = []
-        stack = [start_face_idx]
-        visited.add(start_face_idx)
-        while stack:
-            face_idx = stack.pop()
-            component.append(face_idx)
-            for neighbor in face_adjacency[face_idx]:
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    stack.append(neighbor)
-        if len(component) > 0:
-            components.append(component)
-
-    # Create separate meshes for each component
-    building_meshes: list[trimesh.Trimesh] = []
-    for component_face_indices in components:
-        # Get faces for this component
-        component_faces = building_faces[component_face_indices]
-
-        # Find unique vertices used by this component
-        used_vertex_indices = np.unique(component_faces.flatten())
-        component_vertices = mesh.vertices[used_vertex_indices]
-
-        # Remap face indices to new vertex indices
-        vertex_map = {
-            old_idx: new_idx for new_idx, old_idx in enumerate(used_vertex_indices)
-        }
-        remapped_faces = np.array(
-            [[vertex_map[v] for v in face] for face in component_faces]
-        )
-
-        # Create new mesh for this building component
-        try:
-            building_mesh = trimesh.Trimesh(
-                vertices=component_vertices, faces=remapped_faces
-            )
-            if len(building_mesh.faces) > 0:
-                building_meshes.append(building_mesh)
-        except Exception as e:
-            logger.warning("Failed to create mesh for component: %s", e)
-            continue
-
-    return building_meshes
+    logger.info(
+        "Loaded mesh with %s vertices / %s faces, bounds %s",
+        len(mesh.vertices),
+        len(mesh.faces),
+        mesh.bounds.tolist(),
+    )
+    return mesh
 
 
-def get_building_grid_indices(
+def compute_solid_occupancy(
     stl_path: str | pathlib.Path,
     nx: int,
     ny: int,
     nz: int,
     domain_bounds: dict[str, float] | None = None,
-    verbose: bool = True,
-) -> list[dict[str, int]]:
+) -> np.ndarray:
     """
-    Function 1: Generates a list of building dimensions in grid points.
+    Build a 3D boolean solid-occupancy mask over the LBM grid from an STL mesh.
+
+    The buildings in these STLs are open-bottomed extrusions resting on z=0, so
+    they are not watertight and ``mesh.contains`` is unreliable. Instead we use
+    a vertical ray-cast height field: for each (i, j) grid column we cast one
+    ray straight down through the column centre and take the highest mesh hit as
+    that column's roof height. Cells whose centre lies at or below the roof are
+    marked solid. Columns with no roof hit (open courtyards, gaps between
+    buildings, the area outside the footprint) stay empty, so holes and
+    arbitrary/concave footprints are preserved exactly.
 
     Args:
-        stl_path (str): Path to the .stl file.
-        nx, ny, nz (int): Number of discrete points in x, y, z directions.
-        domain_bounds (dict, optional): Physical bounds of the simulation domain
-                                        {'xmin': float, 'xmax': float, ...}.
-                                        If None, the STL bounds are used.
+        stl_path: Path to the .stl file.
+        nx, ny, nz: Number of interior grid cells in x, y, z.
+        domain_bounds: Physical bounds {'xmin', 'xmax', ...}. If None, the mesh
+            bounding box is used.
 
     Returns:
-        list: A list of dictionaries, where each dict contains the
-              start and end indices for x, y, and z (1-based for Fortran).
+        Boolean array ``solid`` of shape (nx, ny, nz). ``solid[i, j, k]`` is True
+        when interior cell (i+1, j+1, k+1) in 1-based Fortran indexing is solid.
     """
+    mesh = _load_single_mesh(stl_path)
 
-    # 1. Load the mesh
-    loaded = trimesh.load(stl_path)
-
-    # 2. Handle Scene (multiple meshes) or single mesh
-    # Split into connected components (separate buildings)
-    buildings_meshes: list[trimesh.Trimesh] = []
-
-    if isinstance(loaded, trimesh.Scene):
-        # Extract all meshes from scene
-        scene_meshes = [
-            m for m in loaded.geometry.values() if isinstance(m, trimesh.Trimesh)
-        ]
-        logger.info("Loaded scene with %s separate meshes", len(scene_meshes))
-
-        # Split each mesh in the scene into connected components
-        # (in case some meshes contain multiple buildings)
-        for idx, mesh in enumerate(scene_meshes):
-            if len(mesh.vertices) == 0:
-                logger.warning("Mesh %s in scene has no vertices, skipping", idx + 1)
-                continue
-
-            # Use edge-based splitting for better building detection
-            split_meshes = _split_buildings_edge_based(mesh)
-            if len(split_meshes) > 0:
-                buildings_meshes.extend(split_meshes)
-                if len(split_meshes) > 1:
-                    logger.info(
-                        "Mesh %s split into %s components",
-                        idx + 1,
-                        len(split_meshes),
-                    )
-            else:
-                buildings_meshes.append(mesh)
-                logger.info("Mesh %s kept as single component", idx + 1)
-
-    elif isinstance(loaded, trimesh.Trimesh):
-        # Single mesh - use edge-based splitting for better building detection
-        logger.info(
-            "Splitting mesh into connected components using edge-based analysis..."
-        )
-        split_meshes = _split_buildings_edge_based(loaded)
-        if len(split_meshes) > 0:
-            buildings_meshes = split_meshes
-            logger.info("Found %s connected components", len(buildings_meshes))
-        else:
-            buildings_meshes = [loaded]
-            logger.info("Split returned empty, using original mesh as single building")
-    else:
-        raise ValueError(f"Could not load a valid mesh from {stl_path}")
-
-    if len(buildings_meshes) == 0:
-        raise ValueError(f"No valid meshes found in {stl_path}")
-
-    # Filter out very small meshes and ground planes (likely artifacts)
-    filtered_meshes: list[trimesh.Trimesh] = []
-
-    # First, calculate overall domain bounds for filtering
-    temp_all_bounds: dict[str, float] | None = None
-    for mesh in buildings_meshes:
-        bbox = mesh.bounds
-        if temp_all_bounds is None:
-            temp_all_bounds = {
-                "xmin": float(bbox[0, 0]),
-                "xmax": float(bbox[1, 0]),
-                "ymin": float(bbox[0, 1]),
-                "ymax": float(bbox[1, 1]),
-                "zmin": float(bbox[0, 2]),
-                "zmax": float(bbox[1, 2]),
-            }
-        else:
-            temp_all_bounds["xmin"] = min(temp_all_bounds["xmin"], float(bbox[0, 0]))
-            temp_all_bounds["xmax"] = max(temp_all_bounds["xmax"], float(bbox[1, 0]))
-            temp_all_bounds["ymin"] = min(temp_all_bounds["ymin"], float(bbox[0, 1]))
-            temp_all_bounds["ymax"] = max(temp_all_bounds["ymax"], float(bbox[1, 1]))
-            temp_all_bounds["zmin"] = min(temp_all_bounds["zmin"], float(bbox[0, 2]))
-            temp_all_bounds["zmax"] = max(temp_all_bounds["zmax"], float(bbox[1, 2]))
-
-    domain_x = temp_all_bounds["xmax"] - temp_all_bounds["xmin"]  # type: ignore[index]
-    domain_y = temp_all_bounds["ymax"] - temp_all_bounds["ymin"]  # type: ignore[index]
-    domain_z = temp_all_bounds["zmax"] - temp_all_bounds["zmin"]  # type: ignore[index]
-
-    for idx, mesh in enumerate(buildings_meshes):
-        bbox = mesh.bounds
-        x_size = bbox[1, 0] - bbox[0, 0]
-        y_size = bbox[1, 1] - bbox[0, 1]
-        z_size = bbox[1, 2] - bbox[0, 2]
-
-        # Filter out very flat structures (likely ground planes or walls)
-        if z_size < 0.1:  # Less than 0.1 units tall
-            logger.info(
-                "Filtering out building %s: too flat (height=%.3f)",
-                idx + 1,
-                z_size,
-            )
-            continue
-
-        # Filter out structures that cover too much of the domain (likely ground planes/bases)
-        # A ground plane typically covers >90% of the domain in x and y
-        if domain_x > 0 and domain_y > 0:
-            coverage_x = x_size / domain_x
-            coverage_y = y_size / domain_y
-            height_ratio = z_size / domain_z if domain_z > 0 else 0
-
-            # Filter if it covers >90% in both x and y
-            # This catches ground planes/bases that span the entire domain
-            # Even if they're tall, if they cover the entire x-y plane, they're likely a base/platform
-            if coverage_x > 0.90 and coverage_y > 0.90:
-                # Additional check: if height is also very high (>80% of domain), it might be a large building
-                # But if there are other buildings, this is likely still a base
-                # For now, filter anything covering >90% of both dimensions
-                logger.info(
-                    "Filtering out building %s: appears to be ground plane/base "
-                    "(coverage=%.1f%% x %.1f%%, height=%.2f, height_ratio=%.1f%%)",
-                    idx + 1,
-                    100 * coverage_x,
-                    100 * coverage_y,
-                    z_size,
-                    100 * height_ratio,
-                )
-                continue
-
-        filtered_meshes.append(mesh)
-
-    buildings_meshes = filtered_meshes
-
-    if len(buildings_meshes) == 0:
-        raise ValueError(
-            f"No valid buildings found after filtering (all were too flat)"
-        )
-
-    logger.info(
-        "Detected %s unique buildings in the STL (after filtering).",
-        len(buildings_meshes),
-    )
-
-    # 3. Determine Physical Domain for Grid Mapping
-    # Calculate overall bounds from all meshes
-    all_bounds: dict[str, float] | None = None
-    for mesh in buildings_meshes:
-        bbox = mesh.bounds
-        if all_bounds is None:
-            all_bounds = {
-                "xmin": float(bbox[0, 0]),
-                "xmax": float(bbox[1, 0]),
-                "ymin": float(bbox[0, 1]),
-                "ymax": float(bbox[1, 1]),
-                "zmin": float(bbox[0, 2]),
-                "zmax": float(bbox[1, 2]),
-            }
-        else:
-            all_bounds["xmin"] = min(all_bounds["xmin"], float(bbox[0, 0]))
-            all_bounds["xmax"] = max(all_bounds["xmax"], float(bbox[1, 0]))
-            all_bounds["ymin"] = min(all_bounds["ymin"], float(bbox[0, 1]))
-            all_bounds["ymax"] = max(all_bounds["ymax"], float(bbox[1, 1]))
-            all_bounds["zmin"] = min(all_bounds["zmin"], float(bbox[0, 2]))
-            all_bounds["zmax"] = max(all_bounds["zmax"], float(bbox[1, 2]))
-
-    # Use provided bounds or calculated bounds
+    # Determine the physical domain used for the grid mapping.
     if domain_bounds is None:
-        xmin = all_bounds["xmin"]  # type: ignore[index]
-        xmax = all_bounds["xmax"]  # type: ignore[index]
-        ymin = all_bounds["ymin"]  # type: ignore[index]
-        ymax = all_bounds["ymax"]  # type: ignore[index]
-        zmin = all_bounds["zmin"]  # type: ignore[index]
-        zmax = all_bounds["zmax"]  # type: ignore[index]
+        b = mesh.bounds
+        xmin, ymin, zmin = float(b[0, 0]), float(b[0, 1]), float(b[0, 2])
+        xmax, ymax, zmax = float(b[1, 0]), float(b[1, 1]), float(b[1, 2])
     else:
         xmin, ymin, zmin = (
             domain_bounds["xmin"],
@@ -321,144 +100,154 @@ def get_building_grid_indices(
             domain_bounds["zmax"],
         )
 
-    # Calculate cell sizes (physical units per grid index)
+    # Cell sizes and cell-centre coordinate convention (matches forward_model.py:
+    # x_grid = (arange(nx) + 0.5) * dx + xmin).
     dx = (xmax - xmin) / nx
     dy = (ymax - ymin) / ny
     dz = (zmax - zmin) / nz
 
-    buildings_indices: list[dict[str, int]] = []
+    x_centers = (np.arange(nx) + 0.5) * dx + xmin
+    y_centers = (np.arange(ny) + 0.5) * dy + ymin
+    z_centers = (np.arange(nz) + 0.5) * dz + zmin
 
-    # 4. Iterate through each building and calculate grid indices
-    for idx, mesh in enumerate(buildings_meshes):
-        b_min = mesh.bounds[0]
-        b_max = mesh.bounds[1]
+    # One downward ray per (i, j) column, originating just above the domain top.
+    # Columns whose centre falls outside the mesh's xy extent cannot produce a
+    # hit; we still cast them (cheap, and keeps indexing trivial).
+    grid_x, grid_y = np.meshgrid(x_centers, y_centers, indexing="ij")
+    n_cols = nx * ny
+    origins = np.column_stack(
+        [
+            grid_x.reshape(-1),
+            grid_y.reshape(-1),
+            np.full(n_cols, max(zmax, float(mesh.bounds[1, 2])) + max(dz, 1.0)),
+        ]
+    )
+    directions = np.tile(np.array([0.0, 0.0, -1.0]), (n_cols, 1))
 
-        # Skip buildings that do not overlap the simulation domain at all.
-        # Without this guard, fully out-of-domain buildings get clamped to
-        # boundary indices and can create artificial walls.
-        if (
-            b_max[0] <= xmin
-            or b_min[0] >= xmax
-            or b_max[1] <= ymin
-            or b_min[1] >= ymax
-            or b_max[2] <= zmin
-            or b_min[2] >= zmax
-        ):
-            logger.debug(
-                "Building %s outside domain and skipped: x=[%.3f, %.3f], "
-                "y=[%.3f, %.3f], z=[%.3f, %.3f]",
-                idx + 1,
-                b_min[0],
-                b_max[0],
-                b_min[1],
-                b_max[1],
-                b_min[2],
-                b_max[2],
-            )
-            continue
+    logger.info(
+        "Casting %s vertical rays (%sx%s grid) for solid occupancy...",
+        n_cols,
+        nx,
+        ny,
+    )
 
-        # Clip building bounds to the domain before discretization.
-        # This preserves buildings that partially intersect the domain.
-        b_min = np.array(
-            [
-                max(float(b_min[0]), xmin),
-                max(float(b_min[1]), ymin),
-                max(float(b_min[2]), zmin),
-            ]
-        )
-        b_max = np.array(
-            [
-                min(float(b_max[0]), xmax),
-                min(float(b_max[1]), ymax),
-                min(float(b_max[2]), zmax),
-            ]
-        )
+    # multiple_hits=True returns every intersection; we reduce to the per-column
+    # maximum z (the roof). Using intersects_location keeps the hit -> ray
+    # mapping explicit via index_ray.
+    locations, index_ray, _ = mesh.ray.intersects_location(
+        ray_origins=origins,
+        ray_directions=directions,
+        multiple_hits=True,
+    )
 
-        # Debug: print building physical bounds
-        logger.debug(
-            "Building %s: physical bounds x=[%.3f, %.3f], y=[%.3f, %.3f], "
-            "z=[%.3f, %.3f]",
-            idx + 1,
-            b_min[0],
-            b_max[0],
-            b_min[1],
-            b_max[1],
-            b_min[2],
-            b_max[2],
-        )
+    # roof_height[col] = highest hit z for that column; columns with no hit keep
+    # -inf and are excluded below (so they stay fluid).
+    roof_height = np.full(n_cols, -np.inf)
+    if len(index_ray) > 0:
+        np.maximum.at(roof_height, index_ray, locations[:, 2])
 
-        # Convert physical coordinates to 1-based Fortran grid indices
-        # blanking(0:nx+1, 0:nyg+1, 0:nz+1) — interior cells are 1..nx, 1..nyg, 1..nz
+    roof_height = roof_height.reshape(nx, ny)
 
-        # Start Indices (1-based Fortran): first cell whose left edge >= building lower bound
-        # Matches reference compute_index: argmax(lower <= xs) + 1
-        is_raw = int(np.ceil((b_min[0] - xmin) / dx)) + 1
-        js_raw = int(np.ceil((b_min[1] - ymin) / dy)) + 1
-        ks = max(1, int(np.ceil((b_min[2] - zmin) / dz)) + 1)
+    # A cell is solid when its centre z is at/below the column roof (and the
+    # column actually had a roof hit). A flat ground plane at z=0 yields
+    # roof ~ 0 < z_centers[0], so no cells are filled -> ground stays fluid.
+    solid = z_centers[None, None, :] <= roof_height[:, :, None]
+    solid &= np.isfinite(roof_height)[:, :, None]
 
-        # End Indices (1-based Fortran): last cell whose left edge <= building upper bound
-        # Matches reference compute_index: last j where xs[j] <= upper (no +1)
-        ie_raw_int = int(np.floor((b_max[0] - xmin) / dx))
-        je_raw_int = int(np.floor((b_max[1] - ymin) / dy))
-        ke = int(np.floor((b_max[2] - zmin) / dz))
+    logger.info(
+        "Solid occupancy: %s / %s cells (%.2f%%), %s occupied columns",
+        int(solid.sum()),
+        solid.size,
+        100.0 * solid.sum() / solid.size,
+        int((solid.any(axis=2)).sum()),
+    )
 
-        # Clamp to valid interior indices [1, nx] for x/y, [1, nz] for z
-        is_ = max(1, min(nx, is_raw))
-        ie = max(1, min(nx, ie_raw_int))
-        js = max(1, min(ny, js_raw))
-        je = max(1, min(ny, je_raw_int))
+    return solid
 
-        # Clamp z to valid range [1, nz]
-        ks = max(1, min(nz, ks))
-        ke = max(1, min(nz, ke))
 
-        building_data = {"is": is_, "ie": ie, "js": js, "je": je, "ks": ks, "ke": ke}
+def occupancy_to_column_runs(solid: np.ndarray) -> list[dict[str, int]]:
+    """
+    Run-length encode a solid-occupancy mask along z, per (i, j) column.
 
-        # Ensure start <= end for all dimensions
-        if building_data["is"] > building_data["ie"]:
-            building_data["ie"] = building_data["is"]
-        if building_data["js"] > building_data["je"]:
-            building_data["je"] = building_data["js"]
-        if building_data["ks"] > building_data["ke"]:
-            building_data["ke"] = building_data["ks"]
+    Args:
+        solid: Boolean array of shape (nx, ny, nz) in 0-based grid order.
 
-        # Final validation: ensure buildings are not at boundaries
-        if building_data["is"] == 1 or building_data["ie"] == nx:
-            logger.warning(
-                "Building %s would be at x-boundary, adjusted from i=[%s, %s] "
-                "to i=[%s, %s]",
-                idx + 1,
-                is_raw,
-                ie_raw_int,
-                building_data["is"],
-                building_data["ie"],
-            )
-        if building_data["js"] == 1 or building_data["je"] == ny:
-            logger.warning(
-                "Building %s would be at y-boundary, adjusted from j=[%s, %s] "
-                "to j=[%s, %s]",
-                idx + 1,
-                js_raw,
-                je_raw_int,
-                building_data["js"],
-                building_data["je"],
+    Returns:
+        A list of run dicts with 1-based Fortran indices:
+        ``{"i": I, "j": J, "ks": Z0, "ke": Z1}`` for each contiguous solid run
+        [Z0, Z1] in column (I, J). A pure height field yields one run per
+        occupied column; overhangs/gaps yield multiple runs.
+    """
+    nx, ny, nz = solid.shape
+    runs: list[dict[str, int]] = []
+
+    # Find occupied columns first to avoid scanning empty ones.
+    occupied_i, occupied_j = np.nonzero(solid.any(axis=2))
+    for i, j in zip(occupied_i.tolist(), occupied_j.tolist()):
+        column = solid[i, j]
+        # Detect run boundaries via padded diff: rising edge starts a run,
+        # falling edge ends it.
+        padded = np.concatenate(([False], column, [False]))
+        edges = np.diff(padded.astype(np.int8))
+        starts = np.nonzero(edges == 1)[0]
+        ends = np.nonzero(edges == -1)[0]  # exclusive end (0-based)
+        for z0, z1 in zip(starts.tolist(), ends.tolist()):
+            runs.append(
+                {
+                    "i": i + 1,  # 1-based Fortran
+                    "j": j + 1,
+                    "ks": z0 + 1,
+                    "ke": z1,  # inclusive 1-based end (exclusive 0-based == inclusive 1-based)
+                }
             )
 
-        # Debug: print grid indices
-        logger.debug(
-            "Building %s: grid indices i=[%s, %s], j=[%s, %s], k=[%s, %s]",
-            idx + 1,
-            building_data["is"],
-            building_data["ie"],
-            building_data["js"],
-            building_data["je"],
-            building_data["ks"],
-            building_data["ke"],
+    return runs
+
+
+def get_building_grid_indices(
+    stl_path: str | pathlib.Path,
+    nx: int,
+    ny: int,
+    nz: int,
+    domain_bounds: dict[str, float] | None = None,
+    verbose: bool = True,
+) -> list[dict[str, int]]:
+    """
+    Compute solid-occupancy column runs for the STL over the LBM grid.
+
+    This replaces the old bounding-box implementation: it returns one entry per
+    contiguous solid z-run per grid column (see :func:`occupancy_to_column_runs`)
+    rather than one rectangular block per building, which preserves courtyards
+    and arbitrary footprints.
+
+    Args:
+        stl_path: Path to the .stl file.
+        nx, ny, nz: Number of discrete cells in x, y, z directions.
+        domain_bounds: Physical bounds of the simulation domain
+            {'xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax'}. If None, the STL
+            bounds are used.
+        verbose: Unused; kept for backwards-compatible signature.
+
+    Returns:
+        A list of dictionaries with 1-based Fortran column-run indices:
+        ``{"i", "j", "ks", "ke"}``.
+    """
+    solid = compute_solid_occupancy(
+        stl_path=stl_path,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        domain_bounds=domain_bounds,
+    )
+    runs = occupancy_to_column_runs(solid)
+
+    if len(runs) == 0:
+        raise ValueError(
+            f"No solid cells found for {stl_path}; check domain bounds/resolution"
         )
 
-        buildings_indices.append(building_data)
-
-    return buildings_indices
+    logger.info("Generated %s solid column runs from occupancy mask.", len(runs))
+    return runs
 
 
 def generate_fortran_code(
@@ -471,14 +260,20 @@ def generate_fortran_code(
     filename: str = "runcase.f90",
 ) -> str:
     """
-    Function 2: Takes the output of function one and generates the Fortran code.
+    Function 2: Emit the solid column runs as a Fortran geometry module.
+
+    Each run dict (from :func:`occupancy_to_column_runs`) becomes one blanking
+    line for a single (i, j) column over its solid z-range, e.g.
+    ``blanking(ioff+12, joff+34, 1:5)=.true.``. This run-length encoding keeps
+    the generated file compact and self-contained.
 
     Args:
-        buildings_indices: List of building index dictionaries
-        nx, ny, nz: Grid dimensions
-        module_name: Name of the Fortran module
-        subroutine_name: Name of the Fortran subroutine
-        filename: Output file path
+        buildings_indices: List of column-run dicts with keys
+            ``{"i", "j", "ks", "ke"}`` (1-based Fortran indices).
+        nx, ny, nz: Grid dimensions (kept for signature compatibility).
+        module_name: Name of the Fortran module.
+        subroutine_name: Name of the Fortran subroutine.
+        filename: Output file path.
     """
 
     # Template strings for the Fortran boilerplate
@@ -500,7 +295,10 @@ def generate_fortran_code(
     body = ""
 
     for b in buildings_indices:
-        body += f"   blanking(ioff+{b['is']}:ioff+{b['ie']}, joff+{b['js']}:joff+{b['je']}, {b['ks']}:{b['ke']})=.true.\n"
+        body += (
+            f"   blanking(ioff+{b['i']}, joff+{b['j']}, "
+            f"{b['ks']}:{b['ke']})=.true.\n"
+        )
 
     full_code = header + body + footer
 
