@@ -42,9 +42,9 @@ size_job() {
 }
 
 # Fixed grid (k=4, == the 100x80x32 row of the domain sweep).
-NX=100
-NY=80
-NZ=32
+NX=50
+NY=40
+NZ=16
 
 # ============================================================================
 # Ensemble sizes to sweep, each with its OWN wall clock. With one core per member
@@ -58,8 +58,8 @@ ENSEMBLE_SIZES=(
   "16    14:00:00"
   "32    15:00:00"
   "64    16:00:00"
-  "96    16:00:00"
-  "128   18:00:00"
+  # "96    16:00:00"
+  # "128   18:00:00"
 )
 
 echo "Submitting ${#ENSEMBLE_SIZES[@]} rollout-ESMDA jobs (shared ground truth), one per ensemble size."

@@ -42,7 +42,7 @@ size_job() {
 }
 
 # Ensemble size, shared by every job (one core per member -> --cpus-per-task).
-ENSEMBLE_SIZE=16
+ENSEMBLE_SIZE=96
 
 # ============================================================================
 # Resolution sweep. The ground truth (job_scripts/snellius/ground_truth.slurm)
@@ -53,10 +53,10 @@ ENSEMBLE_SIZE=16
 # Format: "NX NY NZ TIME"   (each row submits one separate job)
 # ============================================================================
 RESOLUTIONS=(
-  "25 20 8     02:00:00"   # k=1  (coarsest)
-  "50 40 16    04:00:00"   # k=2
-  "75 60 24    08:00:00"   # k=3
-  "100 80 32   16:00:00"   # k=4  (== ground-truth resolution)
+  "25 20 8     04:00:00"   # k=1  (coarsest)
+  "50 40 16    08:00:00"   # k=2
+  "75 60 24    16:00:00"   # k=3
+  "100 80 32   32:00:00"   # k=4  (== ground-truth resolution)
 )
 
 size_job "${ENSEMBLE_SIZE}"

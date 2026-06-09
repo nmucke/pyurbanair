@@ -5,9 +5,19 @@
 #
 #     sbatch job_scripts/snellius/eval_sweep.slurm
 #
-# Extra args are forwarded to BOTH scripts where applicable, e.g. restrict models:
+# With no args this computes metrics for every run and draws BOTH the domain and
+# ensemble sweeps (-> comparison/domain and comparison/ensemble).
 #
-#     sbatch job_scripts/snellius/eval_sweep.slurm --models pyudales pylbm
+# Argument routing:
+#   * Positional args (after the script name) go to the COMPARE stage only -- use
+#     them for compare-only flags like the sweep selector or fixed domain:
+#         sbatch job_scripts/snellius/eval_sweep.slurm --sweep ensemble
+#         sbatch job_scripts/snellius/eval_sweep.slurm --sweep domain
+#         sbatch job_scripts/snellius/eval_sweep.slurm --sweep ensemble --domain 100x80x32
+#   * MODELS env var restricts BOTH stages (do NOT pass --models positionally --
+#     it would reach compare but crash the compute stage). The (expensive) compute
+#     stage only processes these backends:
+#         MODELS="pyudales pylbm" sbatch job_scripts/snellius/eval_sweep.slurm --sweep ensemble
 #
 # Stage 1 -- scripts/compute_sweep_metrics.py: reads the (large) posterior states
 #   under the project results root and the ground truth, and writes SMALL metric
@@ -43,15 +53,20 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 
+# MODELS (env) restricts both stages; "$@" (positional) goes to compare only.
+MODELS_ARG=()
+[ -n "${MODELS:-}" ] && MODELS_ARG=(--models ${MODELS})
+
 echo "Job ${SLURM_JOB_ID} on $(hostname) -- $(date)"
 echo "Results root: ${RESULTS_ROOT}"
-[ "$#" -gt 0 ] && echo "Extra args: $*"
+[ -n "${MODELS:-}" ] && echo "Restricting to models: ${MODELS}"
+[ "$#" -gt 0 ] && echo "Compare args: $*"
 
 echo "=== Stage 1: compute_sweep_metrics -> pyurbanair/sweep_metrics/ ==="
 pixi run -e "${ENV}" -- python -u scripts/compute_sweep_metrics.py \
-    --root "${RESULTS_ROOT}" "$@"
+    --root "${RESULTS_ROOT}" "${MODELS_ARG[@]}"
 
-echo "=== Stage 2: compare_sweep_results -> pyurbanair/comparison/ ==="
-pixi run -e "${ENV}" -- python -u scripts/compare_sweep_results.py "$@"
+echo "=== Stage 2: compare_sweep_results -> pyurbanair/comparison/{domain,ensemble} ==="
+pixi run -e "${ENV}" -- python -u scripts/compare_sweep_results.py "${MODELS_ARG[@]}" "$@"
 
 echo "Done -- metrics in sweep_metrics/, figures + CSV in comparison/  ($(date))"

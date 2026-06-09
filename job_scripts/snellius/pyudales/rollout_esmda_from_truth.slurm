@@ -81,9 +81,13 @@ Z_BOUNDS="[0.0, 32.0]"
 # lie inside the domain AND inside the solver's grid. For uDALES the velocity
 # components live on STAGGERED faces whose last node sits one cell inside the
 # domain max, so keep sensors strictly interior.
-X_POINTS="[20.0, 20.0, 38.0]"
-Y_POINTS="[20.0, 10.0, 10.0]"
-Z_POINTS="[3.0, 3.0, 3.0]"
+# X_POINTS="[20.0, 20.0, 38.0]"
+# Y_POINTS="[20.0, 10.0, 10.0]"
+# Z_POINTS="[3.0, 3.0, 3.0]"
+
+X_POINTS="[30.0, 60.0, 40.0, 10.0, 65.0]"
+Y_POINTS="[10.0, 20.0, 40.0, 60.0, 50.0]"
+Z_POINTS="[2.0, 2.0, 2.0, 2.0, 2.0]"
 
 # --- Ensemble / ESMDA -------------------------------------------------------
 # Overridable from the environment (the sweep launchers set it together with
@@ -92,12 +96,12 @@ ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-96}"             # number of ensemble members
 # Parallel workers. Leave empty to auto-track ENSEMBLE_SIZE (capped at the
 # allocated --cpus-per-task); set a number to pin it explicitly.
 NUM_PARALLEL=""
-NUM_ASSIM_WINDOWS=2          # number of assimilation windows
-NUM_TIME_POINTS=2            # time-varying param knots per window (sets the prior AND
+NUM_ASSIM_WINDOWS=4          # number of assimilation windows
+NUM_TIME_POINTS=10            # time-varying param knots per window (sets the prior AND
                              # the dynamic smoother's num_time_points; kept in sync below)
 # Overridable from the environment (the ESMDA-steps sweep launcher sets it); it
 # is folded into RUN_TAG below so each value lands in its own output subdir.
-NUM_ESMDA_STEPS="${NUM_ESMDA_STEPS:-2}"            # ESMDA iterations per window
+NUM_ESMDA_STEPS="${NUM_ESMDA_STEPS:-3}"            # ESMDA iterations per window
 
 # --- Time discretisation ----------------------------------------------------
 # Per-window length / snapshot interval for the ASSIM model. These need NOT match
@@ -105,9 +109,9 @@ NUM_ESMDA_STEPS="${NUM_ESMDA_STEPS:-2}"            # ESMDA iterations per window
 # obs.interval_seconds bins, so truth and assim frames align regardless of their
 # raw output cadence. Keep SIMULATION_TIME * NUM_ASSIM_WINDOWS <= the truth
 # length.
-SIMULATION_TIME=30.0        # per-window length [s]
+SIMULATION_TIME=300.0        # per-window length [s]
 OUTPUT_FREQUENCY=1.0         # state snapshot interval [s]
-SPINUP_TIME=5.0             # constant-inflow plateau before each window [s]
+SPINUP_TIME=50.0             # constant-inflow plateau before each window [s]
 
 SEED=0
 SKIP_VIZ="false"             # set "true" to skip animations/plots
