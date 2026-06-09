@@ -108,6 +108,12 @@ SIMULATION_TIME=180.0        # per-window length [s]
 OUTPUT_FREQUENCY=5.0         # state snapshot interval [s]
 SPINUP_TIME=10.0             # constant-inflow plateau before each window [s]
 
+# Observation time-aggregation bin width [s]: truth observations are binned into
+# obs.interval_seconds-wide windows and aggregated within each (obs.yaml's
+# temporal_mode=intervals). Env-overridable so the interval sweep launcher can
+# inject one value per job; folded into RUN_TAG below so each lands in its own dir.
+INTERVAL_SECONDS="${INTERVAL_SECONDS:-20.0}"
+
 SEED=0
 SKIP_VIZ="false"             # set "true" to skip animations/plots
 
@@ -151,7 +157,7 @@ esac
 # Final outputs land under "assim_from_ground_truth", in a subdir tagged with the
 # assim model and the run's domain / ensemble / step settings so different
 # configurations (and the three backend folders) don't overwrite each other.
-RUN_TAG="${ASSIM_MODEL}_nx${NX}_ny${NY}_nz${NZ}_ens${ENSEMBLE_SIZE}_steps${NUM_ESMDA_STEPS}${LOCALIZATION_TAG}"
+RUN_TAG="${ASSIM_MODEL}_nx${NX}_ny${NY}_nz${NZ}_ens${ENSEMBLE_SIZE}_steps${NUM_ESMDA_STEPS}_int${INTERVAL_SECONDS}${LOCALIZATION_TAG}"
 RESULTS_DIR="${PROJECT_STORAGE}/assim_from_ground_truth/${RUN_TAG}"
 
 # Select the ground-truth leaf that matches the chosen truth backend. Override
@@ -202,7 +208,7 @@ echo "Bounds: x=${X_BOUNDS} y=${Y_BOUNDS} z=${Z_BOUNDS}"
 echo "Ground truth: ${GROUND_TRUTH_PATH}"
 echo "Output: ${RESULTS_DIR}  (temp: ${RUN_TEMP_DIR})"
 echo "Ensemble=${ENSEMBLE_SIZE} parallel=${NUM_PARALLEL} windows=${NUM_ASSIM_WINDOWS} cores=${SLURM_CPUS_PER_TASK}"
-echo "ESMDA steps=${NUM_ESMDA_STEPS} localization=${USE_LOCALIZATION} (${LOCALIZATION_FLAGS[*]})"
+echo "ESMDA steps=${NUM_ESMDA_STEPS} obs_interval=${INTERVAL_SECONDS}s localization=${USE_LOCALIZATION} (${LOCALIZATION_FLAGS[*]})"
 [ "$#" -gt 0 ] && echo "Extra hydra overrides: $*"
 
 module purge
@@ -256,6 +262,7 @@ pixi run -e "${ENV}" -- python -u \
     "obs.x_points=${X_POINTS}" \
     "obs.y_points=${Y_POINTS}" \
     "obs.z_points=${Z_POINTS}" \
+    obs.interval_seconds="${INTERVAL_SECONDS}" \
     time.simulation_time="${SIMULATION_TIME}" \
     time.output_frequency="${OUTPUT_FREQUENCY}" \
     time.spinup_time="${SPINUP_TIME}" \

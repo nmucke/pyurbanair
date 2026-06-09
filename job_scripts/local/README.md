@@ -27,11 +27,12 @@ local/
 │   ├── rollout_esmda_from_truth.sh
 │   ├── sweep_domain_rollout_esmda_from_truth.sh
 │   ├── sweep_ensemble_rollout_esmda_from_truth.sh
-│   └── sweep_esmda_steps_rollout_esmda_from_truth.sh
+│   ├── sweep_esmda_steps_rollout_esmda_from_truth.sh
+│   └── sweep_interval_rollout_esmda_from_truth.sh
 ├── pyudales/          # CPU backend (dev pixi env, multi-process)
-│   └── … same four files …
+│   └── … same five files …
 └── pypalm/            # CPU backend (dev pixi env, multi-process, nested MPI)
-    └── … same four files …
+    └── … same five files …
 ```
 
 ## Usage
@@ -49,6 +50,7 @@ A full sweep with one backend (runs each point sequentially):
 bash job_scripts/local/pyudales/sweep_domain_rollout_esmda_from_truth.sh
 bash job_scripts/local/pylbm/sweep_ensemble_rollout_esmda_from_truth.sh esmda.seed=1
 bash job_scripts/local/pypalm/sweep_esmda_steps_rollout_esmda_from_truth.sh
+bash job_scripts/local/pyudales/sweep_interval_rollout_esmda_from_truth.sh
 ```
 
 The same sweep across **all three backends** (identical configs, comparable runs):
@@ -99,16 +101,18 @@ per-run sweep values, `hydra.run.dir`, backend solver flags). This array is what
 makes "the exact same thing" enforceable rather than copy-pasted.
 
 Note the **grid resolution `NX`/`NY`/`NZ` is NOT here** — it is a sweep parameter
-and lives in each runner (defaulted, env-overridable). Likewise `ENSEMBLE_SIZE`
-and `NUM_ESMDA_STEPS`.
+and lives in each runner (defaulted, env-overridable). Likewise `ENSEMBLE_SIZE`,
+`NUM_ESMDA_STEPS` and `INTERVAL_SECONDS` (the `obs.interval_seconds` bin width).
 
 ### `sweep_base.sh` — canonical swept values (one place, all backends)
 
-Defines the three value lists used by every backend:
+Defines the four value lists used by every backend:
 
 - `RESOLUTIONS` — coarse → ground-truth grid (`25 20 8` … `100 80 32`).
 - `ENSEMBLE_SIZES` — `8 16 32 64`, at a fixed grid.
 - `ESMDA_STEPS` — `1 2 4 8`, at a fixed grid + ensemble.
+- `INTERVAL_SECONDS_LIST` — `10 20 30 60`, the `obs.interval_seconds`
+  time-aggregation bin width, at a fixed grid + ensemble + steps.
 
 Plus the `FIXED_*` values for the dimensions each sweep holds constant. Edit
 these once to retune the sweeps for **all** backends. Runs sequentially; a single
@@ -140,7 +144,7 @@ so nothing collides.
 ## Outputs
 
 Each run writes to `${RESULTS_ROOT}/<RUN_TAG>` where
-`RUN_TAG=<assim>_nx<NX>_ny<NY>_nz<NZ>_ens<E>_steps<S>[_localization]`, so no two
+`RUN_TAG=<assim>_nx<NX>_ny<NY>_nz<NZ>_ens<E>_steps<S>_int<I>[_localization]`, so no two
 configurations (or backends) collide. Heavy intermediate solver I/O goes to a
 private `${TEMP_ROOT}/<RUN_TAG>_<pid>` scratch dir, removed on success and left
 behind on failure for post-mortem.

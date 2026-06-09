@@ -132,6 +132,8 @@ runs are directly comparable. Each folder contains:
 - `sweep_ensemble_rollout_esmda_from_truth.sh` — one job per ensemble size.
 - `sweep_esmda_steps_rollout_esmda_from_truth.sh` — one job per
   `esmda.num_steps`.
+- `sweep_interval_rollout_esmda_from_truth.sh` — one job per observation
+  interval (`obs.interval_seconds`, the time-aggregation bin width).
 
 The three sweep launchers are identical across folders (they submit the sibling
 `rollout_esmda_from_truth.slurm` found next to them). Run from the repo root:
@@ -142,7 +144,7 @@ bash job_scripts/snellius/pylbm/sweep_ensemble_rollout_esmda_from_truth.sh esmda
 ```
 
 Each job writes to `/projects/prjs2075/urbanair/assim_from_ground_truth/<RUN_TAG>`
-where `RUN_TAG` embeds the assim model, grid, ensemble size and step count, so no
-two configurations (or backends) collide. Correlation localization is **off** by
+where `RUN_TAG` embeds the assim model, grid, ensemble size, step count and
+observation interval, so no two configurations (or backends) collide. Correlation localization is **off** by
 default (the config default is the global update); set `USE_LOCALIZATION=true` in
 the slurm CONFIG block to enable it.
