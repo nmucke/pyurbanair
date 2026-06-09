@@ -563,10 +563,25 @@ class ForwardModel(BaseForwardModel):
         if alternates:
             return alternates[0]
 
-        raise FileNotFoundError(
+        # PALM detects its own numerical divergence and terminates (exit 0)
+        # before reaching the first ``dt_data_output`` dump, so it leaves the
+        # timeseries but no 3D field. Report that as a ``CalledProcessError`` --
+        # the same signal the ensemble layer's resample-from-successes policy
+        # already catches for crashed members -- so a single diverged member is
+        # replaced from a successful donor instead of aborting the whole run.
+        msg = (
             f"No PALM 3D output found in {self.dirs.output_dir} (expected "
-            f"{self.experiment_name}_3d.nc)."
+            f"{self.experiment_name}_3d.nc); the run most likely diverged and "
+            "terminated before the first 3D output dump."
         )
+        logger.error(msg)
+        # Pass returncode/cmd positionally: CalledProcessError only records
+        # *positional* constructor args in ``self.args``, and the ProcessPool
+        # pickles the exception back to the parent via ``self.args``. With
+        # keyword args ``self.args`` is empty and unpickling raises a TypeError
+        # ("missing returncode and cmd"), breaking the pool instead of being
+        # caught as a member failure.
+        raise subprocess.CalledProcessError(1, f"palm ({self.experiment_name})", output=msg)
 
     @staticmethod
     def _assert_combine_succeeded(

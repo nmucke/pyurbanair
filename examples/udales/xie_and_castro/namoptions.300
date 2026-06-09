@@ -51,5 +51,9 @@ stl_file     = xie_castro_2008_STL.stl
 &NAMSUBGRID
 lsmagorinsky = .true.
 lvreman      = .false.
-cs           = 0.20
+cs           = 0.24
+/
+
+&DYNAMICS
+ipoiss       = 0
 /

@@ -181,6 +181,16 @@ class _BaseESMDA(BaseSmoothing):
 
             state = self._forecast_step(state=initial_state, params=params)
             params = self.forward_model.apply_failure_substitutions_to_params(params)
+            # Also repair the pinned warm-start state: members that diverged this
+            # forecast would warm-start from the same divergence-prone field on
+            # every subsequent step (the IC is pinned for the window and the
+            # param resample never touches it), so re-fail every step. Cloning
+            # the donor's known-good field into each failed slot lets the next
+            # forecast integrate them cleanly. No-op on a cold start
+            # (``initial_state is None``) or when nothing failed.
+            initial_state = self.forward_model.apply_failure_substitutions_to_state(
+                initial_state
+            )
 
             if return_state_history and not self.forward_model.save_on_disk:
                 state_history.append(state)

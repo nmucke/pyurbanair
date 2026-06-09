@@ -362,6 +362,57 @@ class BaseEnsembleForwardModel:
             data_vars=new_data_vars, coords=params.coords, attrs=params.attrs
         )
 
+    def apply_failure_substitutions_to_state(
+        self,
+        state: Optional[xarray.Dataset],
+    ) -> Optional[xarray.Dataset]:
+        """Apply the most recent failure substitutions to a warm-start state.
+
+        Mirror of :meth:`apply_failure_substitutions_to_params` for the
+        ensemble's initial-condition state: for each failed member ``j`` recorded
+        in the previous ``run_ensemble`` call, replace its slice along the
+        ``ensemble`` dim with the donor member's slice. Returns a new dataset;
+        ``state`` is not mutated.
+
+        This is what lets a warm-started rollout stop re-failing the same
+        members at every ESMDA step. The ESMDA loop pins one warm-start state per
+        window and re-injects ``state.isel(ensemble=j)`` for member ``j`` on
+        every forecast, so a member whose injected field diverges keeps
+        diverging no matter how its *params* are resampled — the param
+        substitution never touches the input field. Cloning the donor's
+        (known-good, it just succeeded) state slice into the failed slot makes
+        the next forecast warm-start ``j`` from a field that integrates cleanly.
+
+        Unlike the param version this adds **no** jitter: perturbing a full 3-D
+        velocity field would break its divergence-free structure and risk
+        re-introducing exactly the instability we are escaping. Ensemble spread
+        is preserved by the (jittered) param substitution instead.
+
+        Returns ``state`` unchanged when it is ``None`` (cold start), when no
+        members failed, or when it carries no ``ensemble`` dim. Data variables
+        without an ``ensemble`` dim are copied through untouched.
+        """
+        substitutions = self._last_failure_substitutions
+        if state is None or not substitutions or "ensemble" not in state.dims:
+            return state
+
+        new_data_vars: dict = {}
+        for name, da in state.data_vars.items():
+            if "ensemble" not in da.dims:
+                new_data_vars[name] = (da.dims, da.values, da.attrs)
+                continue
+            arr = np.array(da.values, copy=True)
+            ensemble_axis = da.dims.index("ensemble")
+            for j, donor in substitutions.items():
+                donor_slice = np.take(arr, donor, axis=ensemble_axis)
+                idx: list[slice | int] = [slice(None)] * arr.ndim
+                idx[ensemble_axis] = j
+                arr[tuple(idx)] = donor_slice
+            new_data_vars[name] = (da.dims, arr, da.attrs)
+        return xarray.Dataset(
+            data_vars=new_data_vars, coords=state.coords, attrs=state.attrs
+        )
+
     def _run_ensemble_sequentially_on_disk(
         self,
         state: Optional[xarray.Dataset | pathlib.Path] = None,

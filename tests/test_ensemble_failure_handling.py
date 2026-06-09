@@ -162,6 +162,67 @@ def test_zero_jitter_yields_exact_clone() -> None:
         )
 
 
+def _make_state(n: int) -> xarray.Dataset:
+    """Per-member warm-start state: member i's field is the constant i.
+
+    Includes a variable without an ``ensemble`` dim to check it passes through.
+    """
+    return xarray.Dataset(
+        data_vars={
+            "u": (("ensemble", "x"), np.repeat(np.arange(n)[:, None], 3, axis=1).astype(float)),
+            "topo": ("x", np.array([1.0, 2.0, 3.0])),
+        },
+        coords={"ensemble": np.arange(n), "x": np.arange(3)},
+    )
+
+
+def test_apply_substitutions_clones_state_from_donor() -> None:
+    n = 16
+    failed = {3, 7}
+    ensemble = _MockEnsemble(n, fail_indices=failed)
+    ensemble.configure_failure_policy(
+        policy="resample_from_successes", jitter_scale=0.0, seed=123
+    )
+
+    _ = ensemble._run_ensemble_sequentially_in_memory(
+        params=_make_params(n), sim_name="state"
+    )
+
+    state = _make_state(n)
+    new_state = ensemble.apply_failure_substitutions_to_state(state)
+
+    # Original not mutated.
+    assert np.array_equal(state["u"].values, _make_state(n)["u"].values)
+
+    subs = ensemble._last_failure_substitutions
+    for j, donor in subs.items():
+        # Failed slot now holds an exact clone of the donor's field (no jitter).
+        assert np.array_equal(
+            new_state["u"].isel(ensemble=j).values,
+            state["u"].isel(ensemble=donor).values,
+        )
+    # Variable without an ``ensemble`` dim is passed through untouched.
+    assert np.array_equal(new_state["topo"].values, state["topo"].values)
+
+
+def test_apply_state_substitutions_noops_on_none_and_no_failures() -> None:
+    n = 6
+    ensemble = _MockEnsemble(n, fail_indices=set())
+    ensemble.configure_failure_policy(
+        policy="resample_from_successes", jitter_scale=0.0, seed=7
+    )
+    _ = ensemble._run_ensemble_sequentially_in_memory(
+        params=_make_params(n), sim_name="state"
+    )
+
+    # Cold start: None passes straight through.
+    assert ensemble.apply_failure_substitutions_to_state(None) is None
+    # No failures: state returned unchanged.
+    state = _make_state(n)
+    new_state = ensemble.apply_failure_substitutions_to_state(state)
+    assert np.array_equal(new_state["u"].values, state["u"].values)
+
+
 def test_raise_policy_propagates_called_process_error() -> None:
     ensemble = _MockEnsemble(8, fail_indices={4})
     # Default policy is "raise"; configure_failure_policy not called.
