@@ -116,35 +116,62 @@ debugging, point temp at persistent scratch, e.g.
 
 ## Rollout-ESMDA-from-truth sweeps (per backend)
 
-The `pyudales/`, `pypalm/` and `pylbm/` folders each drive `scripts/run_esmda.py`
-in its loaded-truth mode (`run.truth_dir=<dir>`): they LOAD a pre-simulated
-ground truth (`state.nc` + `params.nc`) and run the time-varying (dynamic)
-smoother (`esmda/smoother=dynamic`) over `esmda.num_assimilation_windows`
-windows. All three folders point at the **same** ground truth (produced by
-`GROUND_TRUTH_MODEL=pyudales`) — only the assimilation backend differs — so the
-runs are directly comparable. Each folder contains:
+This suite is the Snellius sibling of `job_scripts/local/` and is organised the
+same way: two shared single-source-of-truth files plus thin per-backend runners
+and sweep wrappers, so **all three backends run the exact same experiment** at
+every configuration — same ground truth, domain, windows, time horizon, sensors
+and dynamic-parameter settings. Only the assimilation solver differs.
 
-- `rollout_esmda_from_truth.slurm` — the self-contained job (edit its CONFIG
-  block, or append Hydra overrides). `ASSIM_MODEL` is fixed to the folder name;
-  `GROUND_TRUTH_MODEL`/`GROUND_TRUTH_DIR` select the shared truth.
-- `sweep_domain_rollout_esmda_from_truth.sh` — one job per grid resolution
-  (coarse → ground-truth resolution).
-- `sweep_ensemble_rollout_esmda_from_truth.sh` — one job per ensemble size.
-- `sweep_esmda_steps_rollout_esmda_from_truth.sh` — one job per
-  `esmda.num_steps`.
-- `sweep_interval_rollout_esmda_from_truth.sh` — one job per observation
-  interval (`obs.interval_seconds`, the time-aggregation bin width).
+The one difference from `local/`: there is **no parallel-worker cap**. Each run
+sets `ensemble.num_parallel_processes == ensemble_size`, and the sweep launchers
+request **one core per ensemble member** (`--cpus-per-task == ENSEMBLE_SIZE`),
+so the SLURM allocation tracks the ensemble size directly.
 
-The three sweep launchers are identical across folders (they submit the sibling
-`rollout_esmda_from_truth.slurm` found next to them). Run from the repo root:
+```
+snellius/
+├── common.sh          # shared defaults + COMMON_RUN_FLAGS (sourced by every runner)
+├── sweep_base.sh      # shared sweep engine + canonical value lists; submits one sbatch per point
+├── pyudales/  pylbm/  pypalm/
+│   ├── rollout_esmda_from_truth.slurm        # slim runner: backend specifics only
+│   ├── sweep_domain_rollout_esmda_from_truth.sh
+│   ├── sweep_ensemble_rollout_esmda_from_truth.sh
+│   └── sweep_esmda_steps_rollout_esmda_from_truth.sh
+```
+
+- **`common.sh`** — every default and every `run_esmda.py` Hydra override that is
+  identical across backends, in one place: paths (`/projects/prjs2075/urbanair`
+  results, `/scratch-shared` temp), domain bounds + sensors, windows, time
+  horizon, dynamic-parameter settings, localization, ground-truth
+  resolution/validation, and the `COMMON_RUN_FLAGS` array. Every value is
+  env-overridable; edit it once to retune the whole suite.
+- **`sweep_base.sh`** — the canonical swept value lists (resolutions, ensemble
+  sizes, ESMDA steps) with a per-row `--time`, plus the sizing logic
+  (`--cpus-per-task = ensemble`, partition auto-selected: `rome` ≤128 cores,
+  `genoa` up to 192). Submits one job per swept value.
+- **`<backend>/rollout_esmda_from_truth.slurm`** — sources `common.sh` and adds
+  only what differs: `ASSIM_MODEL` (= folder name), `num_parallel = ensemble`,
+  `hydra.run.dir`, and the backend solver flags (`cuda=false` +
+  `paths.experiment_dir` + private LBM copy for pylbm; `temp_dir`/`output_dir`
+  for pyudales; `temp_dir` + PALM env + `nz≥16` floor for pypalm). Directly
+  `sbatch`-able too.
+- the three sweep wrappers are thin and identical across folders — they delegate
+  to `../sweep_base.sh` with the sibling `.slurm`.
+
+Run a sweep with one backend (submits one job per point), or the same sweep
+across all three for directly comparable runs:
 
 ```bash
 bash job_scripts/snellius/pyudales/sweep_domain_rollout_esmda_from_truth.sh
 bash job_scripts/snellius/pylbm/sweep_ensemble_rollout_esmda_from_truth.sh esmda.seed=1
+for m in pyudales pylbm pypalm; do
+  bash job_scripts/snellius/$m/sweep_domain_rollout_esmda_from_truth.sh
+done
 ```
 
 Each job writes to `/projects/prjs2075/urbanair/assim_from_ground_truth/<RUN_TAG>`
-where `RUN_TAG` embeds the assim model, grid, ensemble size, step count and
-observation interval, so no two configurations (or backends) collide. Correlation localization is **off** by
-default (the config default is the global update); set `USE_LOCALIZATION=true` in
-the slurm CONFIG block to enable it.
+where `RUN_TAG` embeds the assim model, grid, ensemble size and step count, so no
+two configurations (or backends) collide. Correlation localization is **off** by
+default; set `USE_LOCALIZATION=true` (env var, propagated through the sweep) to
+enable it. Because pypalm requires `nz≥16`, the domain sweep's coarsest row
+(`25 20 8`) is automatically raised to `25 20 16` for pypalm only, landing in its
+own `nz16` output dir.
