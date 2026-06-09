@@ -15,13 +15,23 @@ It reads per run, under ``--root`` (default ``pyurbanair/sweep_metrics``):
 per-component u/v/w), the copied parameter NetCDFs, and per sensor set
 ``sensor_timeseries_<set>.nc`` (truth + prior/posterior ensemble series). It:
 
+Choose the sweep with ``--sweep``; each writes to its own subfolder:
+
+  * ``--sweep domain``   -> ``comparison/domain``   (x-axis = grid cells; the
+                            ensemble size + ESMDA steps are held at their modal
+                            value).
+  * ``--sweep ensemble`` -> ``comparison/ensemble`` (x-axis = ensemble size; the
+                            domain is fixed to a single grid first).
+  * ``--sweep all`` (default) does both.
+
+For the chosen sweep it:
+
   1. Flattens every ``metrics.yaml`` + the dir-name tag into one tidy CSV.
-  2. Auto-detects which sweep axes vary (grid, ensemble size, ESMDA steps) and,
-     per axis, plots each metric CATEGORY in its own figure -- parameters,
-     assimilation sensors, validation sensors, state field -- RMSE next to CRPS,
-     one line per (backend, localization).
-  3. Compares backends side by side; plots ESMDA wall-clock scaling.
-  4. Overlays posterior parameter trajectories vs the truth across each sweep.
+  2. Plots each metric CATEGORY in its own figure -- parameters, assimilation
+     sensors, validation sensors, state field -- RMSE next to CRPS, one line per
+     (backend, localization).
+  3. Compares backends side by side; plots ESMDA wall-clock scaling vs the axis.
+  4. Overlays posterior parameter trajectories vs the truth across the sweep.
   5. Draws per-model sensor time-series grids (rows = sensors, cols = sweep
      values; one figure per component) showing ground truth, prior members
      (alpha 0.3), posterior members (alpha 0.5) and the posterior mean.
@@ -30,9 +40,10 @@ It is read-only and plain argparse (not Hydra).
 
 Usage::
 
-    python scripts/compare_sweep_results.py
-    python scripts/compare_sweep_results.py --root pyurbanair/sweep_metrics \
-        --out pyurbanair/comparison --models pyudales pylbm
+    python scripts/compare_sweep_results.py                       # both sweeps
+    python scripts/compare_sweep_results.py --sweep ensemble      # ensemble only
+    python scripts/compare_sweep_results.py --sweep domain \
+        --root pyurbanair/sweep_metrics --out pyurbanair/comparison --models pyudales pylbm
 """
 
 from __future__ import annotations
@@ -426,11 +437,13 @@ def plot_backend_comparison(df: pd.DataFrame, out_dir: pathlib.Path) -> None:
     print(f"  wrote {out.name}")
 
 
-def plot_timing(df: pd.DataFrame, out_dir: pathlib.Path) -> None:
+def plot_timing(df: pd.DataFrame, out_dir: pathlib.Path,
+                only_cols: list[str] | None = None) -> None:
     if "esmda_total_seconds" not in df.columns or df["esmda_total_seconds"].isna().all():
         return
     sweepable = [(c, lbl, logx) for (c, lbl, logx) in AXES
-                 if c in df.columns and df[c].dropna().nunique() >= 2]
+                 if c in df.columns and df[c].dropna().nunique() >= 2
+                 and (only_cols is None or c in only_cols)]
     if not sweepable:
         return
     fig, axes = plt.subplots(1, len(sweepable), figsize=(5.6 * len(sweepable), 4.3),
@@ -632,6 +645,87 @@ def plot_sensor_timeseries_grid(df: pd.DataFrame, sweep_col: str, xlabel: str,
 
 
 # ---------------------------------------------------------------------------
+# Sweep selection (domain vs ensemble)
+# ---------------------------------------------------------------------------
+
+# One sweep == one x-axis. Each writes to its own ``comparison/<sweep>`` folder.
+SWEEPS = {
+    "domain": ("grid_cells", "grid cells (nx*ny*nz)", True),
+    "ensemble": ("ensemble_size", "ensemble size", True),
+}
+
+
+def _pick_domain(df: pd.DataFrame) -> str | None:
+    """Grid (``NXxNYxNZ``) with the most distinct ensemble sizes; tie-break most runs."""
+    if "grid" not in df.columns:
+        return None
+    sub = df.dropna(subset=["grid"])
+    if sub.empty:
+        return None
+    stats = sub.groupby("grid").agg(
+        n_ens=("ensemble_size", "nunique"),
+        n_runs=("name", "size"),
+    ).sort_values(["n_ens", "n_runs"], ascending=False)
+    return stats.index[0]
+
+
+def run_one_sweep(df: pd.DataFrame, sweep: str, out_dir: pathlib.Path, args) -> None:
+    """Draw every figure for ONE sweep axis into ``out_dir``.
+
+    ``domain``   -- x = grid cells; the ensemble size (+ ESMDA steps) is held at
+                    its modal value by ``_hold_other_axes`` inside each plot.
+    ``ensemble`` -- x = ensemble size; the domain is FIXED to a single grid first
+                    (``--domain`` or the grid with the most ensemble sizes) so it
+                    is the only structural axis that varies.
+    """
+    col, xlabel, logx = SWEEPS[sweep]
+    if args.linear_x:
+        logx = False
+
+    if sweep == "ensemble":
+        target = args.domain or _pick_domain(df)
+        if target is not None and "grid" in df.columns:
+            df = df[df["grid"] == target]
+        if df.empty:
+            print(f"[ensemble] no runs at domain {target}; skipping.")
+            return
+        print(f"[ensemble] domain fixed at {target}")
+
+    present = df[col].dropna() if col in df.columns else df.get(col, pd.Series(dtype=float))
+    if present.nunique() < 2:
+        print(f"[{sweep}] need >= 2 distinct {col} values to draw a sweep; "
+              f"found {sorted(present.dropna().unique().tolist())} -- skipping.")
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[{sweep}] {len(df)} run(s) -> {out_dir}")
+    csv = out_dir / "all_runs_metrics.csv"
+    df.to_csv(csv, index=False)
+    print(f"  wrote {csv.name} ({len(df.columns)} columns)")
+
+    # One figure per metric category (params / assim sensors / validation
+    # sensors / state field), RMSE next to CRPS.
+    groups = [
+        (param_metrics(), "Parameter metrics", "parameters", 3),
+        (sensor_metrics_group("assimilation"), "Assimilation sensor metrics", "assim_sensors", 2),
+        (sensor_metrics_group("validation"), "Validation sensor metrics", "validation_sensors", 2),
+        (STATE_METRICS, "State-field metrics", "state", 2),
+    ]
+    for metrics, title, stub, ncols in groups:
+        plot_group_vs_axis(df, col, xlabel, logx, out_dir, metrics, title, stub, ncols)
+    if not args.no_trajectories:
+        plot_param_trajectories(df, col, xlabel, out_dir)
+    if not args.no_timeseries:
+        for set_name in ("assimilation", "validation"):
+            for q in args.components:
+                plot_sensor_timeseries_grid(df, col, xlabel, out_dir, set_name, q)
+
+    plot_backend_comparison(df, out_dir)
+    plot_timing(df, out_dir, only_cols=[col])
+    print(f"  done -> {out_dir}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -639,13 +733,23 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     repo_root = pathlib.Path(__file__).resolve().parent.parent
+    ap.add_argument("--sweep", choices=["domain", "ensemble", "all"], default="all",
+                    help="Which sweep to visualize. 'domain' -> figures in "
+                         "comparison/domain (x=grid cells); 'ensemble' -> "
+                         "comparison/ensemble (x=ensemble size, domain fixed); "
+                         "'all' (default) does both.")
     ap.add_argument("--root", type=pathlib.Path, default=repo_root / "sweep_metrics",
                     help="Root holding compute_sweep_metrics output "
                          "(default: <repo>/sweep_metrics). May also point at the raw "
                          "ESMDA results root, in which case run_summary.yaml is used.")
     ap.add_argument("--out", type=pathlib.Path, default=None,
-                    help="Output dir for the comparison figures/CSV "
+                    help="Base output dir; each sweep lands in <out>/<sweep> "
                          "(default: <repo>/comparison).")
+    ap.add_argument("--domain", default=None,
+                    help="For the ensemble sweep: fix the grid to this NXxNYxNZ "
+                         "(default: the grid with the most ensemble sizes).")
+    ap.add_argument("--linear-x", action="store_true",
+                    help="Use a linear sweep x-axis instead of log.")
     ap.add_argument("--models", nargs="*", default=None,
                     help="Restrict to these assim backends (e.g. pyudales pylbm).")
     ap.add_argument("--no-trajectories", action="store_true",
@@ -659,11 +763,9 @@ def main() -> None:
     _setup_style()
 
     root = args.root
-    # Default output dir is the repo's ./comparison (next to scripts/).
-    out_dir = args.out or (repo_root / "comparison")
+    base_out = args.out or (repo_root / "comparison")
     if not root.exists():
         raise SystemExit(f"metrics root not found: {root}")
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Scanning {root} ...")
     df = load_runs(root, args.models)
@@ -672,36 +774,11 @@ def main() -> None:
     print(f"Loaded {len(df)} run(s): "
           f"{df['assim_model'].value_counts().to_dict()}")
 
-    csv = out_dir / "all_runs_metrics.csv"
-    df.to_csv(csv, index=False)
-    print(f"  wrote {csv.name} ({len(df.columns)} columns)")
+    sweeps = ["domain", "ensemble"] if args.sweep == "all" else [args.sweep]
+    for sweep in sweeps:
+        run_one_sweep(df.copy(), sweep, base_out / sweep, args)
 
-    # Per-axis metric comparisons, split into one figure per category
-    # (parameters / assimilation sensors / validation sensors / state field),
-    # each with RMSE next to CRPS, plus the parameter-trajectory overlays and the
-    # per-model sensor time-series grids.
-    groups = [
-        (param_metrics(), "Parameter metrics", "parameters", 3),
-        (sensor_metrics_group("assimilation"), "Assimilation sensor metrics", "assim_sensors", 2),
-        (sensor_metrics_group("validation"), "Validation sensor metrics", "validation_sensors", 2),
-        (STATE_METRICS, "State-field metrics", "state", 2),
-    ]
-    for col, xlabel, logx in AXES:
-        if col not in df.columns or df[col].dropna().nunique() < 2:
-            continue
-        for metrics, title, stub, ncols in groups:
-            plot_group_vs_axis(df, col, xlabel, logx, out_dir, metrics, title, stub, ncols)
-        if not args.no_trajectories:
-            plot_param_trajectories(df, col, xlabel, out_dir)
-        if not args.no_timeseries:
-            for set_name in ("assimilation", "validation"):
-                for q in args.components:
-                    plot_sensor_timeseries_grid(df, col, xlabel, out_dir, set_name, q)
-
-    plot_backend_comparison(df, out_dir)
-    plot_timing(df, out_dir)
-
-    print(f"\nDone. Comparison outputs in {out_dir}")
+    print(f"\nDone. Comparison outputs under {base_out}")
 
 
 if __name__ == "__main__":
