@@ -21,7 +21,7 @@ import math
 from typing import Optional
 
 import jax.numpy as jnp
-from data_assimilation.localization.base import BaseLocalization
+from data_assimilation.localization.base import BaseLocalization, taper_inflation
 
 
 class CorrelationLocalization(BaseLocalization):
@@ -83,9 +83,12 @@ class CorrelationLocalization(BaseLocalization):
         self,
         aug_dev: jnp.ndarray,
         pred_obs_dev: jnp.ndarray,
+        row_coords: Optional[jnp.ndarray] = None,
+        obs_coords: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
+        # ``row_coords`` / ``obs_coords`` are unused: correlation-based
+        # localization works from the ensemble anomalies alone.
         N_aug, N_e = aug_dev.shape
-        N_d = pred_obs_dev.shape[0]
 
         rho_t = self._truncation_correlation(N_e)
         d_t = 1.0 - rho_t  # truncation distance, Eq. (8)
@@ -103,21 +106,9 @@ class CorrelationLocalization(BaseLocalization):
         rho = jnp.where(denom > 0.0, cov / jnp.where(denom > 0.0, denom, 1.0), 0.0)
         rho = jnp.clip(rho, -1.0, 1.0)
 
-        d_c = 1.0 - jnp.abs(rho)  # correlation distance, Eq. (7)
-
-        # Error-variance inflation, Eqs. (9)-(10). The tapering turns on once
-        # d_c exceeds beta * d_t and reaches max_inflation at d_c = d_t.
-        b = (1.0 - self.tapering_beta) * d_t / jnp.sqrt(jnp.log(self.max_inflation))
-        taper_active = d_c > (self.tapering_beta * d_t)
-        # Guard b == 0 (max_inflation == 1 -> no tapering) to avoid div-by-0.
-        safe_b = jnp.where(b > 0.0, b, 1.0)
-        taper = jnp.where(
-            taper_active,
-            jnp.exp(((d_c - self.tapering_beta * d_t) / safe_b) ** 2),
-            1.0,
+        # Correlation distance d_c = 1 - |rho| (Eq. 7); tapered/excluded by the
+        # shared distance taper against the truncation distance d_t = 1 - rho_t.
+        d_c = 1.0 - jnp.abs(rho)
+        return taper_inflation(
+            d_c, d_t, self.tapering_beta, self.max_inflation
         )
-        inflation = jnp.where(b > 0.0, taper, 1.0)
-
-        # Exclude observations below the correlation threshold (|rho| < rho_t,
-        # i.e. d_c > d_t) by assigning infinite inflation.
-        return jnp.where(jnp.abs(rho) >= rho_t, inflation, jnp.inf)
