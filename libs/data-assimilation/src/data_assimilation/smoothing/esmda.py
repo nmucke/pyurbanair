@@ -214,12 +214,32 @@ class _BaseESMDA(BaseSmoothing):
         return_params_history: bool = False,
         return_state_history: bool = False,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
-        """Perform the ESMDA analysis loop."""
-        # Pin the caller-provided state so every forecast in this analysis
-        # loop integrates from the same initial condition. Without this,
-        # iteration i+1 would forecast from iteration i's output — which
-        # bypasses spin-up after the first iteration (when the caller
-        # passes state=None) and tangles the iterates' physical states.
+        """Perform the ESMDA analysis loop.
+
+        Iterated joint estimation: the forecast at iteration ``i`` starts from
+        the *current* initial-condition estimate. For the state-bearing variants
+        (``StateAndParameterESMDA`` / ``StateAndTimeVaryingParameterESMDA``) the
+        Kalman-updated initial condition from ``_one_step`` is fed forward, so it
+        is actually used by the next forecast (and hence the next Kalman update)
+        and propagates into the posterior forecast and the next window. For the
+        parameter-only variants ``_one_step`` returns no state (``None``), so
+        ``initial_state`` keeps the caller's pinned value and the loop reduces to
+        the original parameter-only behavior.
+
+        Note: feeding the analyzed IC forward warm-starts the next forecast from
+        it (skipping a fresh spin-up after iteration 0). This is intentional — it
+        is what makes the state estimate matter — but it means the analyzed field
+        is integrated directly, so it must be a usable warm-start state for the
+        forward model (as the cross-window carry-over already assumes).
+        """
+        if return_state_history and self.forward_model.save_on_disk:
+            raise ValueError(
+                "return_state_history is not supported in on-disk save mode: "
+                "the per-step states live in the step_{i}/ directories "
+                "(see get_state). Use an in-memory forward model "
+                "(results_dir=None) to collect the state history."
+            )
+
         initial_state = state
 
         params_history: list[xarray.Dataset] = [params] if return_params_history else []
@@ -230,35 +250,38 @@ class _BaseESMDA(BaseSmoothing):
 
             state = self._forecast_step(state=initial_state, params=params)
             params = self.forward_model.apply_failure_substitutions_to_params(params)
-            # Also repair the pinned warm-start state: members that diverged this
-            # forecast would warm-start from the same divergence-prone field on
-            # every subsequent step (the IC is pinned for the window and the
-            # param resample never touches it), so re-fail every step. Cloning
-            # the donor's known-good field into each failed slot lets the next
-            # forecast integrate them cleanly. No-op on a cold start
-            # (``initial_state is None``) or when nothing failed.
-            initial_state = self.forward_model.apply_failure_substitutions_to_state(
-                initial_state
-            )
 
-            if return_state_history and not self.forward_model.save_on_disk:
+            if return_state_history:
                 state_history.append(state)
 
-            state, params = self._one_step(
+            updated_state, params = self._one_step(
                 params=params,
                 obs=observations,
                 state=state,
             )
+
+            # Feed the Kalman-updated initial condition forward (state-bearing
+            # variants only; param-only variants return ``None`` and keep the
+            # caller's pinned IC).
+            if updated_state is not None:
+                initial_state = updated_state
+            # Repair any diverged members in the IC used by the next forecast
+            # (clones a donor's known-good field into each failed slot). No-op on
+            # a cold start (``initial_state is None``) or when nothing failed.
+            initial_state = self.forward_model.apply_failure_substitutions_to_state(
+                initial_state
+            )
+
             if return_params_history:
                 params_history.append(params)
 
             print(f"ESMDA step {i} completed")
 
-        # Final forecast with updated params
+        # Final forecast from the analyzed initial condition + updated params.
         self._set_step_results_dir(self.num_steps)
         state = self._forecast_step(state=initial_state, params=params)
 
-        if return_state_history and not self.forward_model.save_on_disk:
+        if return_state_history:
             state_history.append(state)
 
         # Build return values
@@ -451,7 +474,14 @@ class StateAndParameterESMDA(_BaseESMDA):
         state: Optional[xarray.Dataset] = None,
         results_dir: Optional[pathlib.Path] = None,
     ) -> xarray.Dataset:
-        """Get ensemble states, selecting the first timestep."""
+        """Get ensemble states, selecting the first timestep.
+
+        Both branches must select the same frame: the augmented Kalman vector
+        holds the window's initial condition, and ``_analysis`` feeds the
+        analyzed result forward as the next forecast's warm start. Reading a
+        different frame on disk would re-assimilate the window's observations
+        against a state from a different time.
+        """
         if state is not None:
             return state.isel(time=0)
         if results_dir is not None:
@@ -460,7 +490,7 @@ class StateAndParameterESMDA(_BaseESMDA):
                 raise FileNotFoundError(
                     f"No state_*.nc files found in results directory: {results_dir}"
                 )
-            states = [xarray.open_dataset(f).isel(time=-1) for f in state_files]
+            states = [xarray.open_dataset(f).isel(time=0) for f in state_files]
             return xarray.concat(states, dim="ensemble", join="override")
         raise ValueError("Either state or results_dir must be provided.")
 
@@ -533,11 +563,17 @@ class StateAndParameterESMDA(_BaseESMDA):
         for var_name in sorted(state.data_vars):
             variable = state[var_name]
             dims_no_ens = [d for d in variable.dims if d != "ensemble"]
+            for d in dims_no_ens:
+                if d not in state.coords:
+                    raise ValueError(
+                        f"State dimension '{d}' (variable '{var_name}') has no "
+                        "coordinate values; distance-based localization needs "
+                        "physical grid coordinates for every state dimension — "
+                        "grid indices would be compared against sensor "
+                        "coordinates in metres."
+                    )
             coord_1d = [
-                np.asarray(state[d].values, dtype=float)
-                if d in state.coords
-                else np.arange(variable.sizes[d], dtype=float)
-                for d in dims_no_ens
+                np.asarray(state[d].values, dtype=float) for d in dims_no_ens
             ]
             # meshgrid(indexing="ij").ravel() flattens in the same C-order as
             # transpose("ensemble", ...).reshape(ensemble, -1) in _flatten_state.

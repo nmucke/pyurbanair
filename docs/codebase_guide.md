@@ -415,8 +415,14 @@ def test_something(compose_test_cfg) -> None:
   (applies the observation operator).
 - `_BaseESMDA` provides the shared Kalman update
   (`_compute_kalman_update`) and the `_analysis` loop that drives
-  `num_steps` iterations with the same `initial_state` (pinned to avoid
-  spin-up bypass across iterations).
+  `num_steps` iterations. The loop is an **iterated joint update**: each
+  iteration forecasts from the *current* initial-condition estimate, and the
+  Kalman-updated IC from `_one_step` is fed forward to the next iteration (and
+  the posterior forecast / next window). Parameter-only variants return no
+  state, so their `initial_state` stays the caller's pinned value (behavior
+  unchanged); the state-bearing variants warm-start the next forecast from the
+  analyzed IC, which is what makes the state estimate actually affect the
+  results (it previously did not — the analyzed IC was discarded).
 - Three variants:
   - `ParameterESMDA` — augmented state is just parameters.
   - `StateAndParameterESMDA` — augmented state concatenates flattened state
@@ -771,10 +777,15 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 
 - Every state is expected to have a `time` dim, even when length 1. Some
   helpers (`extract_2d_slice`, observation operators) assume this.
-- ESMDA `_analysis` pins the caller-provided initial state for every
-  inner iteration — do **not** "optimize" this by feeding the previous
-  iteration's output forward; it would bypass spin-up after the first
-  iter and tangle iterates.
+- ESMDA `_analysis` feeds the Kalman-updated initial condition forward
+  between iterations (state-bearing variants) so the state estimate is actually
+  used — the next forecast warm-starts from the analyzed IC. This intentionally
+  skips a fresh spin-up after iteration 0, so the analyzed field must be a usable
+  warm-start state for the forward model (the cross-window carry-over already
+  assumes this). Parameter-only variants return no state and keep the caller's
+  pinned IC, so they are unaffected. (Before, the analyzed IC was discarded and
+  every forecast re-ran from the pinned IC — which made state estimation and
+  state localization a no-op.)
 - `BaseEnsembleForwardModel._set_save_mode` controls whether the
   ensemble result is concatenated or written to disk. Forward-model
   child `results_dir` is overridden to match the ensemble's at parallel

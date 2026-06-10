@@ -525,3 +525,61 @@ def test_state_row_coords_match_flatten_order() -> None:
     # u rows carry the x coordinate; v rows carry the y coordinate.
     assert np.allclose(flat[:n_cells, 0], coords[:n_cells, 0])
     assert np.allclose(flat[n_cells:, 0], coords[n_cells:, 1])
+
+
+def test_state_row_coords_raise_on_missing_coordinates() -> None:
+    """A spatial dim without coordinate values must raise, not fall back to
+    grid indices (which would be compared against sensor coords in metres)."""
+    import xarray
+    from data_assimilation.smoothing.esmda import StateAndParameterESMDA
+
+    state = xarray.Dataset(
+        {"u": (("ensemble", "z", "y", "x"), np.zeros((2, 3, 2, 4)))},
+        coords={"x": np.arange(4.0), "y": np.arange(2.0)},  # no z coordinate
+    )
+    obj = StateAndParameterESMDA.__new__(StateAndParameterESMDA)
+    with pytest.raises(ValueError, match="'z'.*no.*coordinate"):
+        obj._state_row_coords(state)
+
+
+def test_get_states_on_disk_selects_initial_frame(tmp_path) -> None:
+    """The on-disk branch must read the same frame as the in-memory branch
+    (time=0, the window's initial condition) — `_analysis` feeds the analyzed
+    result forward as the next forecast's warm start."""
+    import xarray
+    from data_assimilation.smoothing.esmda import StateAndParameterESMDA
+
+    time = np.array([0.0, 1.0])
+    members = []
+    for i in range(2):
+        u = np.full((2, 3), float(i))  # frame t: value i + 10*t
+        u[1, :] += 10.0
+        ds = xarray.Dataset(
+            {"u": (("time", "x"), u)},
+            coords={"time": time, "x": np.arange(3.0)},
+        )
+        ds.to_netcdf(tmp_path / f"state_{i}.nc")
+        members.append(ds)
+
+    obj = StateAndParameterESMDA.__new__(StateAndParameterESMDA)
+    on_disk = obj._get_states(results_dir=tmp_path)
+    in_memory = obj._get_states(
+        state=xarray.concat(members, dim="ensemble", join="override")
+    )
+
+    assert "time" not in on_disk.dims
+    np.testing.assert_allclose(on_disk["u"].values, in_memory["u"].values)
+    np.testing.assert_allclose(on_disk["u"].values, [[0.0] * 3, [1.0] * 3])
+
+
+def test_return_state_history_on_disk_raises() -> None:
+    """Silently returning params-only while the caller expects a state history
+    crashes downstream; the unsupported combination must fail loudly instead."""
+    from types import SimpleNamespace
+
+    from data_assimilation.smoothing.esmda import ParameterESMDA
+
+    obj = ParameterESMDA.__new__(ParameterESMDA)
+    obj.forward_model = SimpleNamespace(save_on_disk=True)
+    with pytest.raises(ValueError, match="return_state_history"):
+        obj._analysis(params=None, observations=None, return_state_history=True)

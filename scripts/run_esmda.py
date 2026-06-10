@@ -272,17 +272,15 @@ def _streaming_state_rmse(true_state, esmda_state, n_z_slices=4):
 # Sensor time-series extraction (truth vs ensemble at fixed points)
 # ---------------------------------------------------------------------------
 
-def _sensor_vel_timeseries(state, obs_x, obs_y, obs_z, solver_name):
-    """Velocity-magnitude time series at each sensor point.
+def _sensor_component_timeseries(state, obs_x, obs_y, obs_z, solver_name):
+    """Per-component ``(u, v, w)`` velocity time series at each sensor point.
 
     Trilinearly interpolates u/v/w (each on its own staggered grid, resolved via
     an ``ObservationOperator``'s solver-specific dim mapping) at the sensor
-    locations, keeping any leading dims (``ensemble``, ``time``), and combines
-    them into |U|. Returns a DataArray with dims ``(..., time, sensor)``.
-
-    NB: this is the *base* per-run |U| diagnostic. The comprehensive per-component
-    (u/v/w) sensor series + prior/posterior ensembles used by the sweep figures
-    are computed downstream in scripts/compute_sweep_metrics.py.
+    locations, keeping any leading dims (``ensemble``, ``time``). Returns a
+    DataArray with a leading ``component`` dim: ``(component, ..., time, sensor)``.
+    The velocity magnitude |U| is :func:`_sensor_magnitude` of this (used for the
+    sensor figures); the full vector is used for the sensor error metrics.
     """
     op = ObservationOperator(
         obs_x=list(np.asarray(obs_x, dtype=float)),
@@ -301,7 +299,14 @@ def _sensor_vel_timeseries(state, obs_x, obs_y, obs_z, solver_name):
                 obs_x=op.obs_x, obs_y=op.obs_y, obs_z=op.obs_z,
             )
         )
-    return np.sqrt(comps[0] ** 2 + comps[1] ** 2 + comps[2] ** 2)
+    return xarray.concat(comps, dim="component").assign_coords(
+        component=["u", "v", "w"]
+    )
+
+
+def _sensor_magnitude(components):
+    """Velocity magnitude |U| from a ``(component, ...)`` sensor series."""
+    return np.sqrt((components ** 2).sum("component"))
 
 
 def _concat_sensor_pieces(pieces):
@@ -317,20 +322,20 @@ def _concat_sensor_pieces(pieces):
 
 
 def _ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
-    """Ensemble |U| sensor series across rollout windows.
+    """Ensemble per-component ``(u, v, w)`` sensor series across rollout windows.
 
-    Opens each window's full-ensemble state file once and interpolates |U| at
-    every sensor set's points (keeping ``ensemble`` + ``time``), rebasing each
-    window's local time onto a single global axis (window ``w`` starts at
-    ``w*sim_time``) so it lines up with the truth. Returns
-    ``{name: DataArray(ensemble, time, sensor)}``.
+    Opens each window's full-ensemble state file once and interpolates u/v/w at
+    every sensor set's points (keeping ``component`` + ``ensemble`` + ``time``),
+    rebasing each window's local time onto a single global axis (window ``w``
+    starts at ``w*sim_time``) so it lines up with the truth. Returns
+    ``{name: DataArray(component, ensemble, time, sensor)}``.
     """
     pieces = {name: [] for name in sensor_sets}
     for w, path in enumerate(state_paths):
         ds = xarray.open_dataset(path).load()
         t = np.asarray(ds["time"].values, dtype=float) if "time" in ds.coords else None
         for name, (ox, oy, oz) in sensor_sets.items():
-            vel = _sensor_vel_timeseries(ds, ox, oy, oz, solver_name)
+            vel = _sensor_component_timeseries(ds, ox, oy, oz, solver_name)
             if t is not None and "time" in vel.dims:
                 vel = vel.assign_coords(time=(t - t[0]) + w * sim_time)
             pieces[name].append(vel)
@@ -342,11 +347,12 @@ def _truth_sensor_series(
     true_state_path, n_total, x_offset, start_idx, t_offset,
     sensor_sets, solver_name, num_windows, n_per_window,
 ):
-    """Truth |U| sensor series, read one assimilation window at a time.
+    """Truth per-component ``(u, v, w)`` sensor series, one window at a time.
 
     Mirrors the window loop's memory discipline: only one window's worth of the
     (potentially multi-GB) truth is held at once. The truth's ``time`` axis is
-    already global, so the per-window pieces concatenate directly.
+    already global, so the per-window pieces concatenate directly. Returns
+    ``{name: DataArray(component, time, sensor)}``.
     """
     pieces = {name: [] for name in sensor_sets}
     for w in range(num_windows):
@@ -354,9 +360,86 @@ def _truth_sensor_series(
             time=slice(w * n_per_window, (w + 1) * n_per_window)
         )
         for name, (ox, oy, oz) in sensor_sets.items():
-            pieces[name].append(_sensor_vel_timeseries(ts, ox, oy, oz, solver_name))
+            pieces[name].append(
+                _sensor_component_timeseries(ts, ox, oy, oz, solver_name)
+            )
         ts.close()
     return _concat_sensor_pieces(pieces)
+
+
+# ---------------------------------------------------------------------------
+# Vector (u,v,w) sensor error metrics
+# ---------------------------------------------------------------------------
+
+def _energy_score(members, truth):
+    """Per-timestep energy score, averaged over sensors.
+
+    The energy score is the multivariate generalization of the CRPS (Gneiting &
+    Raftery 2007): for a vector forecast ensemble ``{v_m}`` and truth ``v``,
+
+        ES = mean_m ||v_m - v|| - 0.5 * mean_{m,m'} ||v_m - v_{m'}||,
+
+    which reduces to the CRPS in 1-D. It rewards both accuracy (term 1) and a
+    calibrated spread (term 2), in the same |U| units as the velocity.
+
+    Args:
+        members: ``(component, ensemble, time, sensor)`` aligned member vectors.
+        truth: ``(component, time, sensor)`` aligned truth vectors.
+
+    Returns:
+        ``(time,)`` energy score, averaged over the sensors (matching the
+        per-time, over-sensors reduction of ``compute_sensor_metrics``).
+    """
+    n_time = members.shape[2]
+    es = np.empty(n_time)
+    # Loop over time so the pairwise term never materializes more than
+    # ``(component, ensemble, ensemble, sensor)`` at once.
+    for t in range(n_time):
+        m = members[:, :, t, :]  # (C, E, S)
+        v = truth[:, t, :]  # (C, S)
+        d_truth = np.sqrt(np.sum((m - v[:, None, :]) ** 2, axis=0))  # (E, S)
+        term1 = d_truth.mean(axis=0)  # (S,)
+        diff = m[:, :, None, :] - m[:, None, :, :]  # (C, E, E, S)
+        d_pair = np.sqrt(np.sum(diff ** 2, axis=0))  # (E, E, S)
+        term2 = 0.5 * d_pair.mean(axis=(0, 1))  # (S,)
+        es[t] = float((term1 - term2).mean())  # average over sensors
+    return es
+
+
+def _vector_sensor_metrics(truth_comp, ensemble_comp):
+    """Full-vector ``(u, v, w)`` sensor error, reduced over sensors per timestep.
+
+    One scalar per sensor per timestep is formed from the whole velocity vector
+    (not just its magnitude), then reduced over sensors:
+
+      * ``rmse(t) = sqrt(mean_s || <v>_ens - v_truth ||^2)`` -- the ensemble-mean
+        vector error, obtained by combining the per-component
+        :func:`compute_sensor_metrics` RMSEs as ``sqrt(sum_c rmse_c**2)`` (so the
+        shared, time-aligning metric is reused unchanged).
+      * ``energy_score(t)`` -- the multivariate CRPS (:func:`_energy_score`) over
+        the aligned member/truth vectors.
+
+    Args:
+        truth_comp: ``(component, time, sensor)`` truth series.
+        ensemble_comp: ``(component, ensemble, time, sensor)`` ensemble series.
+
+    Returns:
+        ``{"rmse": (T,), "energy_score": (T,)}``.
+    """
+    components = [str(c) for c in np.asarray(truth_comp["component"].values)]
+    # Per-component metrics reuse the shared compute_sensor_metrics, which also
+    # time-aligns the truth onto the ensemble axis identically for each
+    # component, so the returned members/truth stack into consistent vectors.
+    per = {
+        c: compute_sensor_metrics(
+            truth_comp.sel(component=c), ensemble_comp.sel(component=c)
+        )
+        for c in components
+    }
+    rmse = np.sqrt(np.sum([per[c]["rmse"] ** 2 for c in components], axis=0))  # (T,)
+    members = np.stack([per[c]["members"] for c in components], axis=0)  # (C,E,T,S)
+    truth = np.stack([per[c]["truth"] for c in components], axis=0)  # (C,T,S)
+    return {"rmse": rmse, "energy_score": _energy_score(members, truth)}
 
 
 # ---------------------------------------------------------------------------
@@ -560,25 +643,28 @@ def _finish_rollout(
         state_paths, sensor_sets, cfg.assim_model.solver_name, sim_time,
     )
 
-    # Base per-run sensor summary: |U| RMSE/CRPS only. The comprehensive
-    # per-component (u/v/w) sensor metrics + time series are computed downstream
-    # by scripts/compute_sweep_metrics.py from the saved prior/posterior states.
+    # Per-run sensor summary: the error is computed over the full velocity
+    # vector (u, v, w) -- one scalar per sensor per timestep -- giving a vector
+    # RMSE and an energy score (multivariate CRPS). The figures still show the
+    # |U| magnitude series (a vector error is not a state to plot). The
+    # comprehensive per-component series are computed downstream by
+    # scripts/compute_sweep_metrics.py from the saved prior/posterior states.
     sensor_metrics = {}
     for name, (sx, sy, sz) in sensor_sets.items():
         plot_sensor_timeseries(
-            true_sensor=truth_series[name],
-            ensemble_sensor=ensemble_series[name],
+            true_sensor=_sensor_magnitude(truth_series[name]),
+            ensemble_sensor=_sensor_magnitude(ensemble_series[name]),
             output_path=out_dir / f"sensor_timeseries_{name}.png",
             title=f"State at {name} sensors",
             sensor_x=sx,
             sensor_y=sy,
             sensor_z=sz,
         )
-        m = compute_sensor_metrics(truth_series[name], ensemble_series[name])
+        m = _vector_sensor_metrics(truth_series[name], ensemble_series[name])
         sensor_metrics[name] = {
             "num_sensors": int(np.asarray(sx).size),
-            "vel_magnitude_rmse": _series_stats(m["rmse"]),
-            "vel_magnitude_crps": _series_stats(m["crps"]),
+            "velocity_vector_rmse": _series_stats(m["rmse"]),
+            "velocity_vector_energy_score": _series_stats(m["energy_score"]),
         }
     summary["sensor_metrics"] = sensor_metrics
 
