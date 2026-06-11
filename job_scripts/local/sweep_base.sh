@@ -26,6 +26,12 @@ shift 2
 [ -f "${RUNNER}" ] || { echo "error: runner '${RUNNER}' not found" >&2; exit 1; }
 MODEL="$(basename "$(dirname "${RUNNER}")")"
 
+# Sweep runs ALWAYS skip the per-run visualization (the slow animations/plots).
+# The comparison figures are drawn afterwards from the metrics by eval_sweep.sh,
+# so per-run viz is wasted work in a sweep. Exported here so it reaches every
+# runner the loop launches (each runner's common.sh reads SKIP_VIZ from the env).
+export SKIP_VIZ=true
+
 # ============================================================================
 # Canonical sweep value lists -- defined ONCE here so every backend sweeps the
 # identical set. Edit these to retune the whole local suite at once.
@@ -33,10 +39,10 @@ MODEL="$(basename "$(dirname "${RUNNER}")")"
 # Resolution sweep (domain): "NX NY NZ" rows. The ground truth is 100 x 80 x 32
 # (aspect ratio 25:20:8); each row keeps that ratio, coarse -> ground-truth grid.
 RESOLUTIONS=(
-  "25 20 8"     # k=1  (coarsest)
+  # "25 20 8"     # k=1  (coarsest)
   "50 40 16"    # k=2
-  # "75 60 24"    # k=3
-  # "100 80 32"   # k=4  (== ground-truth resolution)
+  "75 60 16"    # k=3
+  "100 80 16"   # k=4  (== ground-truth resolution)
 )
 # Ensemble-size sweep, at the fixed grid below.
 ENSEMBLE_SIZES=( 8 16 32 64 96 )

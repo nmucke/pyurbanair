@@ -58,5 +58,5 @@ validation_z_points: [2.0, 2.0, 2.0, 2.0, 2.0]
 
 states: [u, v, w]
 temporal_mode: intervals
-interval_seconds: 20.0
+interval_seconds: 30.0
 aggregation_mode: mean

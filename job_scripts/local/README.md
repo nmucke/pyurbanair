@@ -23,6 +23,7 @@ guarantee comes from two shared files:
 local/
 ├── common.sh          # shared defaults + COMMON_RUN_FLAGS (sourced by every runner)
 ├── sweep_base.sh      # shared sweep engine + canonical value lists
+├── eval_sweep.sh      # post-process a runs folder -> metrics + comparison figures
 ├── pylbm/             # GPU backend (cuda pixi env, single process)
 │   ├── rollout_esmda_from_truth.sh
 │   ├── sweep_domain_rollout_esmda_from_truth.sh
@@ -62,6 +63,39 @@ done
 ```
 
 Any extra arguments are forwarded verbatim as Hydra overrides to **every** run.
+
+**Sweeps always skip the per-run visualization** (`run.skip_viz=true`, forced in
+`sweep_base.sh`) — the slow animations/plots are wasted work mid-sweep; the
+comparison figures are drawn afterwards by `eval_sweep.sh` from the metrics. A
+single direct runner call still produces its viz (default `SKIP_VIZ=false`).
+
+## Evaluating a sweep (`eval_sweep.sh`)
+
+Once the runs exist, post-process them into metrics + comparison figures. Just
+point it at the **folder holding all the runs** (the sweeps' `RESULTS_ROOT`,
+which contains one `<model>_nx..._ens..._steps...` subdir per run):
+
+```bash
+bash job_scripts/local/eval_sweep.sh /path/to/assim_from_ground_truth
+```
+
+It runs the two-stage pipeline: `compute_sweep_metrics.py` (→ `sweep_metrics/`)
+then `compare_sweep_results.py` (→ `comparison/domain` + `comparison/ensemble`).
+Eval is self-contained — it needs no ground truth or solver env (each run records
+its own truth path), so it just needs the runs folder.
+
+- Folder defaults to `$RESULTS_ROOT`, then the repo-local
+  `results/assim_from_ground_truth`, if you omit it.
+- Anything after the folder goes to the **compare stage only**:
+  ```bash
+  bash job_scripts/local/eval_sweep.sh /path/to/runs --sweep ensemble
+  bash job_scripts/local/eval_sweep.sh /path/to/runs --sweep domain --linear-x
+  ```
+- Restrict **both** stages to some backends with `MODELS` (env, not positional):
+  ```bash
+  MODELS="pyudales pylbm" bash job_scripts/local/eval_sweep.sh /path/to/runs
+  ```
+- Other env knobs: `ENV` (pixi env, default `dev`), `METRICS_DIR`, `COMPARISON_DIR`.
 
 ## Pointing at the ground truth
 

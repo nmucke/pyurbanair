@@ -28,6 +28,15 @@ run:
   ensemble: false
   ground_truth_dir: null
   rollout_steps: 3
+  # When true, the assimilation ensemble forecasts are written to disk (one
+  # NetCDF per member, per ESMDA step) instead of being concatenated into a
+  # single in-memory ensemble Dataset. This keeps the full 96-member field off
+  # the host RAM -- required for the high-resolution / large-ensemble local
+  # sweeps, where one ensemble state is tens of GB. Only the (sequential)
+  # single-process backends use it; the parallel CPU backends keep the
+  # in-memory path. run_esmda.py then assembles the per-window prior/posterior
+  # state files by streaming the per-member files (no dask needed).
+  ensemble_save_on_disk: false
 
 # One flat file per parameter category (conf/<category>.yaml) instead of a group
 # of per-variant files. Each holds the full set of fields the most involved run

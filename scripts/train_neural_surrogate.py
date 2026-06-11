@@ -78,6 +78,24 @@ def run(cfg: DictConfig) -> None:
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"total model parameters={num_params:,} (trainable={num_trainable:,})")
 
+    # Optionally warm-start from previously trained weights. This loads the full
+    # state dict (including any normalization buffers) before we recompute the
+    # standardisation stats below, so the stats always reflect the *current*
+    # training split -- the right invariant whether continuing on the same data
+    # or fine-tuning on a new dataset.
+    init_weights_path = cfg.get("init_weights_path")
+    if init_weights_path is not None:
+        init_weights_path = Path(init_weights_path)
+        if not init_weights_path.exists():
+            raise FileNotFoundError(
+                f"init_weights_path does not exist: {init_weights_path}"
+            )
+        state_dict = torch.load(
+            init_weights_path, map_location=cfg.trainer.device
+        )
+        model.load_state_dict(state_dict)
+        print(f"initialized model weights from {init_weights_path}")
+
     # Install standardisation statistics if the architecture supports it (UPT).
     # The stats are stored as model buffers, so they are saved with the weights
     # and restored automatically at rollout/test time -- no other call site

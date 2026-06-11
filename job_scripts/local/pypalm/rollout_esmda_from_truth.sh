@@ -98,8 +98,17 @@ export PYPALM_FAST_IO_CATALOG="${RUN_TEMP_DIR}/palm_fast_io"
 mkdir -p "${PYPALM_FAST_IO_CATALOG}"
 
 # pypalm scratch lands under this run's private temp dir.
+#
+# ensemble_save_on_disk=true: write the ensemble forecasts one NetCDF per member
+# (per ESMDA step) instead of concatenating the full 96-member field into one
+# in-memory Dataset. A single ensemble state is ~29 GB at 75x60x24 and ~70 GB at
+# 100x80x32, so the in-memory path overruns host RAM mid-window. run_esmda.py
+# reassembles the per-window prior/posterior states by streaming the per-member
+# files; the ~15% of pypalm members that diverge are resampled on disk (the
+# parallel path now clones a successful member's file into each failed slot).
 EXTRA_FLAGS=(
   "assim_model.forward_model.temp_dir=${RUN_TEMP_DIR}"
+  "run.ensemble_save_on_disk=true"
 )
 
 # COMMON_RUN_FLAGS (from common.sh) carries every shared Hydra override; only the

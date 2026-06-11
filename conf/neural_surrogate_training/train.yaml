@@ -6,6 +6,12 @@ defaults:
 
 model_name: unet_convnext_medium
 
+# Optional warm start: path to a previously trained `weights.pt` state dict to
+# initialize the model from before training (e.g. fine-tuning or continuing a
+# run). The architecture must match. Set to null to train from scratch.
+# Example: init_weights_path=model_weights/unet_convnext_medium/weights.pt
+init_weights_path: null
+
 trainer:
   _target_: neural_surrogates.Trainer
   num_epochs: 500

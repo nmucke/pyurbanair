@@ -52,6 +52,7 @@ Examples::
 """
 
 import pathlib
+import shutil
 import sys
 import time
 
@@ -60,6 +61,7 @@ import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; mus
 import hydra
 import jax
 import jax.numpy as jnp
+import netCDF4
 import numpy as np
 import xarray
 from data_assimilation.interpolation import interpolate_dataarray_at_points
@@ -123,6 +125,78 @@ def _concat_windows(paths, sim_time, rebase, transform=None):
     if len(pieces) == 1:
         return pieces[0]
     return xarray.concat(pieces, dim="time", join="override")
+
+
+# ---------------------------------------------------------------------------
+# Disk-backed ensemble reassembly (used when the assimilation ensemble ran
+# ``save_on_disk``: each member/ESMDA-step forecast is its own NetCDF on disk
+# instead of one in-memory ensemble Dataset). The full ensemble field is tens of
+# GB at the high-resolution sweep points, so it must never be concatenated in
+# RAM -- not here and not by xarray.concat. These helpers stream the per-member
+# files (no dask required) so peak memory stays at one member (~hundreds of MB).
+# ---------------------------------------------------------------------------
+
+def _member_state_files(step_dir, ensemble_size, sim_name="state"):
+    """Per-member state file paths for an ESMDA step directory, in member order."""
+    return [step_dir / f"{sim_name}_{m}.nc" for m in range(ensemble_size)]
+
+
+def _stream_concat_members(member_files, out_path):
+    """Concatenate per-member state files along a new leading ``ensemble`` dim.
+
+    On-disk equivalent of ``xarray.concat(members, dim="ensemble")``, written one
+    member at a time so the full ensemble is never materialised. Every data
+    variable (one whose name is not also a dimension, i.e. not a coordinate) gains
+    a leading ``ensemble`` axis; dimensions, coordinate variables and attributes
+    are copied verbatim from the first member. The result opens identically to the
+    old in-memory window state file for the downstream metric/plot scripts.
+    """
+    member_files = list(member_files)
+    n = len(member_files)
+    with netCDF4.Dataset(member_files[0]) as ref:
+        dim_names = set(ref.dimensions.keys())
+        data_vars = [name for name in ref.variables if name not in dim_names]
+        with netCDF4.Dataset(out_path, "w") as out:
+            out.setncatts({k: ref.getncattr(k) for k in ref.ncattrs()})
+            out.createDimension("ensemble", n)
+            for name, dim in ref.dimensions.items():
+                out.createDimension(name, len(dim))
+            # Coordinate variables (name == a dim) are identical across members,
+            # so copy them straight through with no ensemble axis.
+            for name in dim_names:
+                if name not in ref.variables:
+                    continue
+                var = ref.variables[name]
+                cvar = out.createVariable(name, var.dtype, var.dimensions)
+                cvar.setncatts({k: var.getncattr(k) for k in var.ncattrs()})
+                cvar[...] = var[...]
+            # Data variables get the leading ensemble axis; created empty here and
+            # filled member by member below.
+            for name in data_vars:
+                var = ref.variables[name]
+                dvar = out.createVariable(
+                    name, var.dtype, ("ensemble", *var.dimensions)
+                )
+                dvar.setncatts({k: var.getncattr(k) for k in var.ncattrs()})
+
+            for m, f in enumerate(member_files):
+                with netCDF4.Dataset(f) as src:
+                    for name in data_vars:
+                        out.variables[name][m, ...] = src.variables[name][...]
+
+
+def _last_frame_ensemble(member_files):
+    """Ensemble state at the final time step, read from per-member files.
+
+    Only the last time frame of each member is loaded, so this stays small (~one
+    frame x ensemble) even when each member's full series is many GB. Returns the
+    same thing as the in-memory path's ``posterior_state.isel(time=-1)`` -- the
+    warm-start initial condition for the next assimilation window.
+    """
+    frames = [
+        xarray.open_dataset(f).isel(time=-1).load() for f in member_files
+    ]
+    return xarray.concat(frames, dim="ensemble", join="override")
 
 
 # ---------------------------------------------------------------------------
@@ -798,8 +872,23 @@ def run(cfg: DictConfig) -> None:
         cfg.assim_model.forward_model, results_dir=assim_results_dir
     )
     instantiate(cfg.assim_model.prepare, forward_model=assim_model)
+
+    # When ``run.ensemble_save_on_disk`` is set, give the ensemble model a results
+    # directory so each member/ESMDA-step forecast is written to its own NetCDF
+    # rather than concatenated into one in-memory ensemble Dataset. This keeps the
+    # full (tens-of-GB) ensemble field off host RAM -- the per-window prior and
+    # posterior states are reassembled below by streaming the per-member files.
+    # The directory lives under the run's output dir (so it shares its disk and is
+    # cleaned up at the end); only sequential single-process backends use it.
+    ensemble_states_dir = (
+        out_dir / "_ensemble_states"
+        if bool(cfg.run.get("ensemble_save_on_disk", False))
+        else None
+    )
     ensemble_model = instantiate(
-        cfg.assim_model.ensemble_model, forward_model=assim_model
+        cfg.assim_model.ensemble_model,
+        forward_model=assim_model,
+        results_dir=ensemble_states_dir,
     )
 
     # --- Prior parameter sampler -----------------------------------------------------------
@@ -874,7 +963,7 @@ def run(cfg: DictConfig) -> None:
         # POSTERIOR forecast. Both are already computed inside the analysis loop,
         # so capturing them is free (no extra ensemble forward). The prior state
         # is persisted so scripts/compute_sweep_metrics.py can build prior sensor
-        # series; only the in-memory save mode supports the state history.
+        # series.
         solve_start = time.perf_counter()
         output = esmda(
             state=state_input,
@@ -885,16 +974,47 @@ def run(cfg: DictConfig) -> None:
         )
         solve_seconds.append(time.perf_counter() - solve_start)
 
-        posterior_params = output[0].isel(esmda_step=-1)
+        # The smoother returns ``(params_history, state_history)`` in the in-memory
+        # save mode and ``params_history`` alone in the disk save mode (the
+        # forecasts live as per-member files under the ESMDA step dirs instead).
+        if isinstance(output, tuple):
+            result_params, state_history = output
+        else:
+            result_params, state_history = output, None
+
+        posterior_params = result_params.isel(esmda_step=-1)
         posterior_params.to_netcdf(windows_dir / f"window_{window}_posterior_params.nc")
 
-        state_history = output[1]
-        posterior_state = state_history.isel(esmda_step=-1)
-        prior_state = state_history.isel(esmda_step=0)
-        posterior_state.to_netcdf(windows_dir / f"window_{window}_posterior_state.nc")
-        prior_state.to_netcdf(windows_dir / f"window_{window}_prior_state.nc")
-
-        state_input = posterior_state.isel(time=-1)
+        if state_history is not None:
+            # In-memory path: the full ensemble forecasts are already in RAM.
+            posterior_state = state_history.isel(esmda_step=-1)
+            prior_state = state_history.isel(esmda_step=0)
+            posterior_state.to_netcdf(windows_dir / f"window_{window}_posterior_state.nc")
+            prior_state.to_netcdf(windows_dir / f"window_{window}_prior_state.nc")
+            state_input = posterior_state.isel(time=-1)
+            del state_history, prior_state, posterior_state
+        else:
+            # Disk-backed path: stream the per-member forecast files into the
+            # per-window prior/posterior state files (step 0 = prior forecast,
+            # step num_steps = posterior forecast) without holding the full
+            # ensemble in RAM, then warm-start the next window from the
+            # posterior's final frame. The (tens-of-GB-per-step) per-member files
+            # are dropped once assembled, so scratch does not grow across windows.
+            base = esmda.base_results_dir
+            _stream_concat_members(
+                _member_state_files(base / "step_0", ensemble_size),
+                windows_dir / f"window_{window}_prior_state.nc",
+            )
+            posterior_files = _member_state_files(
+                base / f"step_{esmda.num_steps}", ensemble_size
+            )
+            _stream_concat_members(
+                posterior_files,
+                windows_dir / f"window_{window}_posterior_state.nc",
+            )
+            state_input = _last_frame_ensemble(posterior_files)
+            for step in range(esmda.num_steps + 1):
+                shutil.rmtree(base / f"step_{step}", ignore_errors=True)
 
         # Next window's prior: extrapolate the posterior
         if window < num_windows - 1:
@@ -912,7 +1032,7 @@ def run(cfg: DictConfig) -> None:
             else:
                 prior_params = posterior_params
 
-        del output, state_history, prior_state, posterior_state
+        del output, result_params
         window_seconds.append(time.perf_counter() - window_start)
 
     esmda_seconds = time.perf_counter() - esmda_start
