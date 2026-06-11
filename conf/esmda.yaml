@@ -23,3 +23,18 @@ obs_error_std: 0.25
 
 # Default value; normally set by the `esmda/localization` group (default `none`).
 localization: null
+
+# Online reduced SVD/KL state update, a config GROUP like localization:
+# `esmda/state_reduction=none|svd` (conf/esmda/state_reduction/), each setting
+# `esmda.state_reduction` which the STATE-BEARING smoothers receive
+# (`state_reduction: ${esmda.state_reduction}`). The default is `none` (the
+# full-space state update, exactly the previous behavior). Incompatible with
+# (state) localization. See docs/reduced_state_da.md.
+state_reduction: null
+
+# Optional post-loop Kalman smoothing of the FULL window trajectory (the state
+# at every time step, jointly) reusing the final posterior forecast — no extra
+# forward solve, parameters frozen. Requires `state_reduction` (the joint
+# all-time-steps update is only feasible in the reduced basis) and an
+# in-memory forward model. State-bearing smoothers only.
+final_time_smoothing: false

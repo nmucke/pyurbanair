@@ -1,0 +1,4 @@
+# @package esmda
+# No state reduction (the default): the state-bearing smoothers Kalman-update
+# the full flattened state, exactly as before this option existed.
+state_reduction: null

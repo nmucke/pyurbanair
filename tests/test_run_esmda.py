@@ -141,6 +141,41 @@ def test_run_esmda_distance_localization(
     run(compose_test_cfg(overrides, config_name="run_esmda"))
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "smoother,prior,reduction_overrides",
+    [
+        # Online reduced SVD/KL state update (esmda/state_reduction group),
+        # state-bearing smoothers only. IC-source basis on the static case;
+        # the dynamic case additionally exercises the window-snapshot basis
+        # and the optional post-loop full-trajectory smoothing step.
+        pytest.param(
+            "state_and_parameter",
+            "static",
+            ["esmda/state_reduction=svd"],
+            id="state_static_svd",
+        ),
+        pytest.param(
+            "state_and_dynamic",
+            "dynamic",
+            [
+                "esmda/state_reduction=svd",
+                "esmda.state_reduction.basis_source=window_snapshots",
+                "esmda.final_time_smoothing=true",
+            ],
+            id="state_tv_svd_snapshots_final_smoothing",
+        ),
+    ],
+)
+def test_run_esmda_state_reduction(
+    smoother: str, prior: str, reduction_overrides: list, compose_test_cfg
+) -> None:
+    """The state-bearing smoothers run with the reduced SVD state update."""
+    from scripts.run_esmda import run
+
+    overrides = _overrides("pylbm", "pylbm", smoother, prior, 1) + reduction_overrides
+    run(compose_test_cfg(overrides, config_name="run_esmda"))
+
+
 def test_run_esmda_loads_ground_truth_from_disk(
     tmp_path: pathlib.Path, compose_test_cfg
 ) -> None:
