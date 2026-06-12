@@ -3,7 +3,7 @@
 # Sizing overlay: xlarge — largest domain (Xie & Castro 100x80), longest
 # horizon, most windows. Self-contained: this file is the single place an
 # `xlarge` run is sized. It inlines `domain`/`time` in full and overrides only
-# the fields of `ensemble`/`obs`/`esmda`/`time_varying` that scale with the run;
+# the fields of `ensemble`/`obs`/`esmda`/params that scale with the run;
 # size-invariant fields (obs mode/states/temporal_mode, ensemble failure policy,
 # esmda kind/seed/obs_error_std) stay in the base groups selected by
 # conf/config.yaml. Expect long wall-clock times with the pyudales forward
@@ -33,8 +33,19 @@ esmda:
   num_steps: 4
   num_assimilation_windows: 10
 
-time_varying:
-  num_time_points: 6
+# Knots per window for the time-varying AR(2) inflow parameters, applied to
+# every params package mount: base `params` (run_forward_model.py) and the
+# truth/prior pair (run_esmda.py). Assumes the dynamic params variants; drop
+# or override when mounting `static` params (they take no time_coords).
+params:
+  time_coords:
+    num: 6
+truth_params:
+  time_coords:
+    num: 6
+prior_params:
+  time_coords:
+    num: 6
 
 # Sensor placement. All (x,y,z) must fall inside `domain.bounds`
 # ([-20,160] x [0,160] x [0,64]) and outside the buildings. x=-10 sits in the

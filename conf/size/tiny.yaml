@@ -2,7 +2,7 @@
 #
 # Sizing overlay: tiny — fastest smoke run. Self-contained: this file is the
 # single place a `tiny` run is sized. It inlines `domain`/`time` in full and
-# overrides only the fields of `ensemble`/`obs`/`esmda`/`time_varying` that
+# overrides only the fields of `ensemble`/`obs`/`esmda`/params that
 # scale with the run; size-invariant fields (obs mode/states/temporal_mode,
 # ensemble failure policy, esmda kind/seed/obs_error_std) stay in the base
 # groups selected by conf/config.yaml. Override any field per-run on the CLI,
@@ -32,8 +32,19 @@ esmda:
   num_steps: 1
   num_assimilation_windows: 2
 
-time_varying:
-  num_time_points: 3
+# Knots per window for the time-varying AR(2) inflow parameters, applied to
+# every params package mount: base `params` (run_forward_model.py) and the
+# truth/prior pair (run_esmda.py). Assumes the dynamic params variants; drop
+# or override when mounting `static` params (they take no time_coords).
+params:
+  time_coords:
+    num: 3
+truth_params:
+  time_coords:
+    num: 3
+prior_params:
+  time_coords:
+    num: 3
 
 # Sensor placement. All (x,y,z) must fall inside `domain.bounds`
 # ([0,20] x [0,20] x [0,10]) and outside the buildings. The Xie & Castro array

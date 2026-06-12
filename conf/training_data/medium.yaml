@@ -10,31 +10,31 @@ defaults:
   - _self_
 
 domain:
-  nx: 100
-  ny: 40
+  nx: 60
+  ny: 80
   nz: 16
   bounds:
-    - [-20.0, 80.0]
-    - [0.0, 40.0]
+    - [-20.0, 40.0]
+    - [0.0, 80.0]
     - [0.0, 32.0]
 
 time:
-  simulation_time: 180.0
-  output_frequency: 1.0
-  spinup_time: 30.0
+  simulation_time: 300.0
+  output_frequency: 2.0
+  spinup_time: 50.0
 
 training_data:
-  num_train: 200
+  num_train: 150
   num_val: 8
   num_test: 8
 
   output_dir: training_data/${model.name}_medium/
 
   # Larger spin-up than the shared default for this grid.
-  spinup_time: 30.0
+  spinup_time: 50.0
 
-  num_time_points: 9
-  num_parallel_processes: 16
+  num_time_points: 20
+  num_parallel_processes: 96
 
   params_sampler:
     external:
