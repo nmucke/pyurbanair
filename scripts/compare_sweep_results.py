@@ -69,7 +69,8 @@ import yaml
 # ``pyudales_nx100_ny80_nz32_ens96_steps2_localization``.
 _TAG_RE = re.compile(
     r"^(?P<model>[a-zA-Z]+)_nx(?P<nx>\d+)_ny(?P<ny>\d+)_nz(?P<nz>\d+)"
-    r"_ens(?P<ens>\d+)_steps(?P<steps>\d+)(?P<loc>_localization)?$"
+    r"_ens(?P<ens>\d+)_steps(?P<steps>\d+)(?:_int(?P<interval>[\d.]+))?"
+    r"(?P<loc>_localization)?$"
 )
 
 # Sweep axes: (column, human label, log-scale x?).
@@ -162,6 +163,9 @@ def _flatten_summary(run_dir: pathlib.Path, summary: dict) -> dict:
         rec["ensemble_size"] = int(m.group("ens"))
         rec["num_esmda_steps"] = int(m.group("steps"))
         rec["localization"] = bool(m.group("loc"))
+        rec["interval_seconds"] = (
+            float(m.group("interval")) if m.group("interval") else None
+        )
         rec["grid_cells"] = rec["nx"] * rec["ny"] * rec["nz"]
         rec["grid"] = f"{rec['nx']}x{rec['ny']}x{rec['nz']}"
     # Summary fallbacks / extras (override tag only when tag was absent).

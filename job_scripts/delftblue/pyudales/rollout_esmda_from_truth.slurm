@@ -22,7 +22,7 @@
 # core per ensemble member (--cpus-per-task == ENSEMBLE_SIZE, capped at a 64-core
 # node -- larger ensembles oversubscribe).
 #SBATCH --job-name=rollout_pyudales
-#SBATCH --partition=compute
+#SBATCH --partition=compute-p2
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem-per-cpu=3G

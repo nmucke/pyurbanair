@@ -105,8 +105,17 @@ export PYPALM_FAST_IO_CATALOG="${TMPDIR:-${RUN_TEMP_DIR}}/urbanair_palm_${SLURM_
 mkdir -p "${PYPALM_FAST_IO_CATALOG}"
 
 # pypalm scratch lands under this job's private temp dir.
+#
+# ensemble_save_on_disk=true (matches the local runner): write the ensemble
+# forecasts one NetCDF per member (per ESMDA step) instead of concatenating the
+# full ensemble field into one in-memory Dataset, keeping the tens-of-GB
+# ensemble state off the allocation's RAM (1750M/core). run_esmda.py
+# reassembles the per-window prior/posterior states by streaming the
+# per-member files; the pypalm members that diverge are resampled on disk (the
+# parallel path clones a successful member's file into each failed slot).
 EXTRA_FLAGS=(
   "assim_model.forward_model.temp_dir=${RUN_TEMP_DIR}"
+  "run.ensemble_save_on_disk=true"
 )
 
 # COMMON_RUN_FLAGS (from common.sh) carries every shared Hydra override; only the

@@ -37,9 +37,9 @@ MODEL="$(basename "$(dirname "${RUNNER}")")"
 # ground-truth grid.
 RESOLUTIONS=(
   # "25 20 8     04:00:00"   # k=1  (coarsest)
-  # "50 40 16    08:00:00"   # k=2
-  # "75 60 24    16:00:00"   # k=3
-  "100 80 32   32:00:00"   # k=4  (== ground-truth resolution)
+  # "30 40 16    6:00:00"   # k=2
+  "45 60 16    16:00:00"   # k=3
+  "60 80 16   24:00:00"   # k=4  (== ground-truth resolution)
 )
 # Ensemble-size sweep: "ENSEMBLE_SIZE TIME", at the fixed grid below.
 ENSEMBLE_SIZES=(
@@ -67,10 +67,10 @@ INTERVAL_SECONDS_LIST=(
 )
 
 # Fixed values for the dimensions a given sweep holds constant.
-FIXED_NX="${FIXED_NX:-75}"
-FIXED_NY="${FIXED_NY:-60}"
-FIXED_NZ="${FIXED_NZ:-24}"
-FIXED_ENSEMBLE_SIZE="${FIXED_ENSEMBLE_SIZE:-96}"
+FIXED_NX="${FIXED_NX:-60}"
+FIXED_NY="${FIXED_NY:-80}"
+FIXED_NZ="${FIXED_NZ:-16}"
+FIXED_ENSEMBLE_SIZE="${FIXED_ENSEMBLE_SIZE:-64}"
 FIXED_NUM_ESMDA_STEPS="${FIXED_NUM_ESMDA_STEPS:-3}"
 FIXED_INTERVAL_SECONDS="${FIXED_INTERVAL_SECONDS:-20.0}"
 # ============================================================================

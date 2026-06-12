@@ -40,10 +40,13 @@ class TransitionDataset(Dataset):
       (buildings + ground). Same tensor for every item.
 
     Geometry is sourced from the state file's ``geometry_var`` variable
-    (``"blanking"`` by default — pylbm's per-cell obstacle indicator,
-    inverted to match the requested convention). When that variable is
-    absent, the mask falls back to the cells where the stacked state is
-    non-zero in the first trajectory's first snapshot.
+    (``"blanking"`` by default — the per-cell obstacle indicator, inverted
+    to match the requested convention; with or without a time dimension).
+    When that variable is absent, the mask falls back to the cells where
+    the stacked state is non-zero in the first trajectory's first
+    snapshot. The fallback only works for backends that write exact zeros
+    inside obstacles (pylbm); uDALES fielddumps carry tiny non-zero
+    values there, so uDALES datasets must ship ``blanking`` explicitly.
 
     State snapshots are read lazily from netCDF on each ``__getitem__``
     via ``xr.open_dataset(..., cache=cache).isel(time=...)`` so only the
@@ -188,7 +191,12 @@ class TransitionDataset(Dataset):
     def _load_geometry(self, state_path: Path) -> torch.Tensor:
         with xr.open_dataset(state_path) as ds:
             if self.geometry_var is not None and self.geometry_var in ds.data_vars:
-                obstacle = np.asarray(ds[self.geometry_var].isel(time=0).values)
+                da = ds[self.geometry_var]
+                # pylbm stores the obstacle indicator per time step; pyudales
+                # datasets store it once, without a time dimension.
+                if "time" in da.dims:
+                    da = da.isel(time=0)
+                obstacle = np.asarray(da.values, dtype=np.float64)
                 return torch.from_numpy(1.0 - obstacle).to(self.dtype)
             channels = [
                 np.asarray(ds[v].isel(time=0).values) for v in self.state_vars

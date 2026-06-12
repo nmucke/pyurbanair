@@ -14,6 +14,12 @@ training_data:
   spinup_time: 10.0
   seed: 0
 
+  # Backend-specific constant forcing. uDALES needs a streamwise pressure
+  # gradient (the sampler only draws inflow_angle + velocity_magnitude); it is
+  # held fixed across every member. Ignored by backends that don't consume it
+  # (e.g. pylbm). Canonical value matches conf/params/static.yaml.
+  pressure_gradient_magnitude: 0.0041912
+
   # The sampler has two parts:
   #   external.<param>.{mean, std}: each may be a scalar (fixed for all
   #     sims) or a {min, max} dict (drawn uniformly per sim). The `std`

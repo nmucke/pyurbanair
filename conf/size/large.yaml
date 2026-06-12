@@ -3,7 +3,7 @@
 # Sizing overlay: large — full-height domain, larger ensemble. Self-contained:
 # this file is the single place a `large` run is sized. It inlines `domain`/
 # `time` in full and overrides only the fields of `ensemble`/`obs`/`esmda`/
-# `time_varying` that scale with the run; size-invariant fields (obs
+# params that scale with the run; size-invariant fields (obs
 # mode/states/temporal_mode, ensemble failure policy, esmda kind/seed/
 # obs_error_std) stay in the base groups selected by conf/config.yaml. Override
 # any field per-run on the CLI, e.g.
@@ -33,8 +33,19 @@ esmda:
   num_steps: 3
   num_assimilation_windows: 10
 
-time_varying:
-  num_time_points: 5
+# Knots per window for the time-varying AR(2) inflow parameters, applied to
+# every params package mount: base `params` (run_forward_model.py) and the
+# truth/prior pair (run_esmda.py). Assumes the dynamic params variants; drop
+# or override when mounting `static` params (they take no time_coords).
+params:
+  time_coords:
+    num: 5
+truth_params:
+  time_coords:
+    num: 5
+prior_params:
+  time_coords:
+    num: 5
 
 # Sensor placement. All (x,y,z) must fall inside `domain.bounds`
 # ([-20,160] x [0,80] x [0,32]) and outside the buildings. x=-10 sits in the

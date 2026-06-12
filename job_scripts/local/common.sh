@@ -55,7 +55,7 @@ NUM_ASSIM_WINDOWS="${NUM_ASSIM_WINDOWS:-4}"
 
 # --- Time horizon -----------------------------------------------------------
 SIMULATION_TIME="${SIMULATION_TIME:-300.0}"   # per-window length [s]
-OUTPUT_FREQUENCY="${OUTPUT_FREQUENCY:-1.0}"    # state snapshot interval [s]
+OUTPUT_FREQUENCY="${OUTPUT_FREQUENCY:-2.0}"    # state snapshot interval [s]
 SPINUP_TIME="${SPINUP_TIME:-50.0}"             # constant-inflow plateau before each window [s]
 
 # --- Dynamic (time-varying) parameter settings ------------------------------

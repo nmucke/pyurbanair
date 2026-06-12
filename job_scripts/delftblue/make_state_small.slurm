@@ -1,7 +1,7 @@
 #!/bin/bash
-# Write a reduced copy of the time-varying ground-truth state on Snellius.
+# Write a reduced copy of the time-varying ground-truth state on DelftBlue.
 #
-#     sbatch job_scripts/snellius/make_state_small.slurm
+#     sbatch job_scripts/delftblue/make_state_small.slurm
 #
 # Drives scripts/make_state_small.py, which streams a reduced copy of a large
 # ground-truth state (keeping only u, v, w and a clipped time range). The
@@ -10,21 +10,21 @@
 # -> state.nc, t in [0, 1000]) — edit them there before submitting. The source
 # file is opened read-only and left untouched.
 #SBATCH --job-name=make_state_small
-#SBATCH --partition=rome
+#SBATCH --partition=compute-p1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=01:00:00
-#SBATCH --mem-per-cpu=1750M
-#SBATCH --account=tdsr72361
-#SBATCH --output=job_scripts/snellius/out_files/slurm-make_state_small-%j.out
-#SBATCH --error=job_scripts/snellius/out_files/slurm-make_state_small-%j.err
+#SBATCH --mem-per-cpu=3G
+#SBATCH --account=innovation
+#SBATCH --output=job_scripts/delftblue/out_files/slurm-make_state_small-%j.out
+#SBATCH --error=job_scripts/delftblue/out_files/slurm-make_state_small-%j.err
 
 set -euo pipefail
 
-ENV="snellius"
+ENV="delftblue"
 
 cd "${SLURM_SUBMIT_DIR}"
-mkdir -p job_scripts/snellius/out_files
+mkdir -p job_scripts/delftblue/out_files
 
 module purge
 export PYTHONUNBUFFERED=1

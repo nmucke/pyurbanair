@@ -2,6 +2,7 @@ import logging
 import multiprocessing as mp
 import os
 import pathlib
+import shutil
 import subprocess
 from abc import abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -423,7 +424,18 @@ class BaseEnsembleForwardModel:
 
         Each member's results_dir is set to the ensemble's results_dir
         before running. Override in subclasses for custom behavior.
+
+        Member failures are handled exactly as in the in-memory path: under
+        ``resample_from_successes`` a diverged member (``CalledProcessError``,
+        e.g. a SIGFPE from the LBM binary) is recorded and, after the loop, its
+        missing state file is replaced by a clone of a randomly chosen
+        successful member's file. The same substitutions are recorded in
+        ``_last_failure_substitutions`` so the caller (ESMDA) applies the
+        matching (jittered) substitution to the parameter ensemble -- keeping
+        the on-disk path's resampling identical to ``_resolve_failures``.
         """
+        self._last_failure_substitutions = {}
+        failed: list[int] = []
         pbar = tqdm(
             enumerate(self.ensemble_forward_models),
             total=self.ensemble_size,
@@ -431,13 +443,66 @@ class BaseEnsembleForwardModel:
         )
         for i, model in pbar:
             model.set_results_dir(self.results_dir)
-            model(
-                state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
-                params=self.get_member_params(params, i),
-                sim_name=f"{sim_name}_{i}",
+            try:
+                model(
+                    state=self.get_member_state(state, i, sim_name),  # type: ignore[arg-type]
+                    params=self.get_member_params(params, i),
+                    sim_name=f"{sim_name}_{i}",
+                )
+            except subprocess.CalledProcessError as exc:
+                if self._failure_policy == "raise":
+                    raise
+                logger.warning(
+                    "Ensemble member %d failed (%s); will be resampled "
+                    "from a successful member.",
+                    i,
+                    exc,
+                )
+                failed.append(i)
+
+        self._resolve_failures_on_disk(failed, sim_name)
+        return None
+
+    def _resolve_failures_on_disk(
+        self,
+        failed: list[int],
+        sim_name: str,
+    ) -> None:
+        """Clone a successful member's state file into each failed member's slot.
+
+        On-disk analogue of :meth:`_resolve_failures`: the per-member NetCDF the
+        forward model writes plays the role of the in-memory state, so a failed
+        member (which produced no file) is repaired by copying a donor's file
+        over its expected path. Records the substitution in
+        ``_last_failure_substitutions`` so the parameter ensemble is resampled to
+        match. Uses the same ``_failure_rng`` draw as the in-memory path.
+        """
+        if not failed:
+            return
+
+        survivors = [
+            i for i in range(self.ensemble_size) if i not in set(failed)
+        ]
+        if not survivors:
+            raise RuntimeError(
+                "All ensemble members failed; cannot resample. "
+                "Inspect per-member logs and forward-model inputs."
             )
 
-        return None
+        donors = self._failure_rng.choice(survivors, size=len(failed))
+        substitutions = {int(j): int(d) for j, d in zip(failed, donors)}
+        self._last_failure_substitutions = substitutions
+
+        for j, donor in substitutions.items():
+            donor_file = self.results_dir / f"{sim_name}_{donor}.nc"  # type: ignore[operator]
+            failed_file = self.results_dir / f"{sim_name}_{j}.nc"  # type: ignore[operator]
+            shutil.copyfile(donor_file, failed_file)
+
+        logger.warning(
+            "Resampled %d failed ensemble members from successful donors: %s",
+            len(failed),
+            substitutions,
+        )
 
     def get_states(self) -> xarray.Dataset:
         """Get the state from disk."""
@@ -524,15 +589,13 @@ class BaseEnsembleForwardModel:
                 model.rollout_step = self.rollout_step  # type: ignore[attr-defined]
 
         if self.save_on_disk:
-            if failed:
-                # On-disk parallel failure handling is not implemented: failed
-                # members produced no state file, so a downstream consumer
-                # would read stale data. Fail loudly rather than silently.
-                raise RuntimeError(
-                    f"Parallel on-disk run had {len(failed)} member failure(s) "
-                    f"({failed}); on-disk resample-from-successes is not yet "
-                    "supported. Switch to save_in_memory or use sequential."
-                )
+            # Repair failed members on disk: each produced no state file, so clone
+            # a successful member's file into its slot and record the matching
+            # parameter substitution -- identical to the in-memory ``_resolve_failures``
+            # and to the sequential on-disk path. (Under the ``raise`` policy a
+            # failure already re-raised inside the future loop above, so ``failed``
+            # is only ever populated when resampling is enabled.)
+            self._resolve_failures_on_disk(sorted(failed), sim_name or "state")
             return None
 
         ordered = [states[i] for i in range(self.ensemble_size)]

@@ -79,9 +79,19 @@ export PYLBM_LBM_PATH="${JOB_LBM_DIR}"
 # pylbm runs on GPU here; its experiment/ensemble scratch lands under this run's
 # private temp dir (overrides paths.experiment_dir, which otherwise defaults to a
 # shared in-repo path).
+#
+# ensemble_save_on_disk=true: the ensemble forecasts are written one NetCDF per
+# member (per ESMDA step) instead of being concatenated into a single in-memory
+# ensemble Dataset. A single ensemble state is ~29 GB at 75x60x24 and ~70 GB at
+# 100x80x32, so the in-memory path (which also keeps num_steps+1 of them for the
+# state history) overruns host RAM and the run is OOM-killed mid-window. On the
+# GPU the ensemble is already evaluated sequentially (num_parallel=1), so the
+# disk path applies cleanly; run_esmda.py reassembles the per-window
+# prior/posterior states by streaming the per-member files.
 EXTRA_FLAGS=(
   "assim_model.forward_model.cuda=true"
   "paths.experiment_dir=${RUN_TEMP_DIR}"
+  "run.ensemble_save_on_disk=true"
 )
 
 # COMMON_RUN_FLAGS (from common.sh) carries every shared Hydra override; only the

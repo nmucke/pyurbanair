@@ -272,7 +272,20 @@ def run_direct(
             )
 
         # 2. mpirun -n <ncpu> ./palm (under a raised stack limit; see _stack_limited)
-        mpirun_cmd = ["mpirun", *(extra_mpirun_args or []), "-n", str(ncpu), "./palm"]
+        # Extra mpirun args may also be supplied via PYPALM_MPIRUN_EXTRA_ARGS
+        # (space-separated), e.g. "--map-by :OVERSUBSCRIBE" so OpenMPI 5's PRRTE
+        # launcher will start ncpu ranks under a --ntasks=1 SLURM allocation
+        # (it otherwise miscounts slots as 1 and aborts). The OMPI_MCA_rmaps_*
+        # env vars do NOT work for this in OpenMPI 5 — rmaps moved to PRRTE.
+        env_mpirun_args = shlex.split(os.environ.get("PYPALM_MPIRUN_EXTRA_ARGS", ""))
+        mpirun_cmd = [
+            "mpirun",
+            *(extra_mpirun_args or []),
+            *env_mpirun_args,
+            "-n",
+            str(ncpu),
+            "./palm",
+        ]
         t_palm = time.monotonic()
         palm_result = subprocess.run(
             _stack_limited(mpirun_cmd),

@@ -190,11 +190,27 @@ def run(cfg: DictConfig) -> None:
     model.eval()
 
     truth, params, geometry = _load_trajectory(test_ds, cfg.sample_idx, dtype)
+    truth = truth[0:50]
+    params = params[0:50]
     T = truth.shape[0]
     print(
         f"loaded trajectory {cfg.sample_idx}  "
         f"shape={tuple(truth.shape)}  param_names={test_ds.param_names}"
     )
+
+    plt.figure()
+    plt.subplot(1,5,1)
+    plt.imshow(geometry[0,:,:])
+    plt.subplot(1,5,2)
+    plt.imshow(geometry[3,:,:])
+    plt.subplot(1,5,3)
+    plt.imshow(geometry[8,:,:])
+    plt.subplot(1,5,4)
+    plt.imshow(geometry[10,:,:])
+    plt.subplot(1,5,5)
+    plt.imshow(geometry[15,:,:])
+    plt.savefig("lol.png")
+
 
     pred = _rollout(
         model=model,
