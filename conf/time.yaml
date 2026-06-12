@@ -5,4 +5,4 @@
 # `size/` overlays or override on the CLI (`time.simulation_time=120`).
 simulation_time: 300.0
 output_frequency: 1.0
-spinup_time: 50.0
+spinup_time: 25.0

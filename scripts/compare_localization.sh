@@ -75,7 +75,7 @@ SIZE=${SIZE:-test}
 TRUTH_DIR=${TRUTH_DIR:-ground_truth}
 TRUTH_START=${TRUTH_START:-0}
 TRUTH_MODEL=${TRUTH_MODEL:-pyudales}
-ASSIM_MODEL=${ASSIM_MODEL:-pylbm}
+ASSIM_MODEL=${ASSIM_MODEL:-pyudales}
 NNUDGE_M=${NNUDGE_M:-4.0}
 
 # Truth/assim solver selection (mounted twice via the model@ package syntax) plus
@@ -115,10 +115,10 @@ case "${SIZE}" in
     # overlay, so it inherits the case time.yaml (300 s window, 50 s spin-up)
     # -- substantially heavier than the tiny test grid.
     size_args=(
-      'domain.bounds=[[-20.0,40.0],[0.0,40.0],[0.0,32.0]]'
-      domain.nx=30 domain.ny=20
-      'obs.x_points=[10.0,20.0,20.0,30.0,30.0]' 'obs.y_points=[20.0,10.0,30.0,10.0,30.0]'
-      'obs.z_points=[2.0,2.0,2.0,2.0,2.0]'
+      'domain.bounds=[[-20.0,80.0],[0.0,40.0],[0.0,32.0]]'
+      domain.nx=50 domain.ny=20
+      'obs.x_points=[10.0,30.0,30.0,50.0,65.0,65.0]' 'obs.y_points=[20.0,10.0,30.0,20.0,10.0,30.0]'
+      'obs.z_points=[2.0,2.0,2.0,2.0,2.0,2.0]'
       'obs.validation_x_points=[10.0,10.0]' 'obs.validation_y_points=[15.0,25.0]'
       'obs.validation_z_points=[2.0,2.0]'
     )

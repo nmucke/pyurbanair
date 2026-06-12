@@ -21,4 +21,4 @@ time_coords:
   _target_: numpy.linspace
   start: 0.0
   stop: ${time.simulation_time}
-  num: 10
+  num: 15

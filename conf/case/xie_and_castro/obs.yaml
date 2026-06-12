@@ -22,9 +22,10 @@ mode: points
 # x_points: [-10.0, 30.0, 60.0, 40.0, 10.0, 65.0]
 # y_points: [40.0, 10.0, 20.0, 40.0, 60.0, 50.0]
 # z_points: [10.0, 2.0, 2.0, 2.0, 2.0, 2.0]
-x_points: [30.0, 60.0, 40.0, 10.0, 65.0]
-y_points: [10.0, 20.0, 40.0, 60.0, 50.0]
-z_points: [2.0, 2.0, 2.0, 2.0, 2.0]
+x_points: [10.0,30.0,30.0,50.0,75.0,75.0]
+y_points: [20.0,10.0,30.0,20.0,10.0,30.0]
+z_points: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+
 # x_points: [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0]
 # y_points: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
 # z_points: [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
@@ -53,10 +54,10 @@ z_points: [2.0, 2.0, 2.0, 2.0, 2.0]
 # level z=2 m (below the 2.8 m minimum cube height) -- genuine in-canyon points
 # the assimilation set does not cover.
 validation_x_points: [-10.0, 20.0, 40.0, 60.0, 40.0]
-validation_y_points: [30.0, 55.0, 25.0, 45.0, 70.0]
+validation_y_points: [30.0, 25.0, 25.0, 15.0, 20.0]
 validation_z_points: [2.0, 2.0, 2.0, 2.0, 2.0]
 
 states: [u, v, w]
 temporal_mode: intervals
-interval_seconds: 20.0
+interval_seconds: 10.0
 aggregation_mode: mean

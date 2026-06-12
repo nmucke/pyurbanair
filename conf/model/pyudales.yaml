@@ -25,7 +25,7 @@ forward_model:
     # nnudge: 2
     # nnudge_meters: height (m above the floor) below which nudging is NOT
     # applied. When set, it is converted to a level count and OVERRIDES nnudge.
-    nnudge_meters: 16.0
+    nnudge_meters: 4.0
     profile_config:
       type: power_law
       alpha: 0.25

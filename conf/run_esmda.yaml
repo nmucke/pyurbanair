@@ -55,7 +55,7 @@ paths:
 run:
   # truth_dir: null
   # truth_dir: .temp/pyudales/hydra/run_forward_model/2026-06-05/12-15-24/pyudales_rollout_time_varying
-  truth_dir: ground_truth_spunup
+  truth_dir: ground_truth
   # Begin the assimilation horizon partway into a disk-loaded truth (skips a
   # spin-up): keep state + params from this time onward and rebase the time axis
   # so this time becomes t=0. null/0 -> start from the truth's first frame.

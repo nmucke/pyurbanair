@@ -27,7 +27,7 @@ run:
   results_dir: null
   ensemble: false
   ground_truth_dir: null
-  rollout_steps: 3
+  rollout_steps: 0
 
 # One flat file per parameter category (conf/<category>.yaml) instead of a group
 # of per-variant files. Each holds the full set of fields the most involved run
