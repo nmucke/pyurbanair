@@ -68,12 +68,11 @@ fi
 [[ "${ENSEMBLE_SIZE}" =~ ^[0-9]+$ ]] || die "could not read a numeric ensemble_size from ${SIZE_CFG} (got '${ENSEMBLE_SIZE}')"
 (( ENSEMBLE_SIZE >= 1 )) || die "ensemble_size must be >= 1 (got ${ENSEMBLE_SIZE})"
 
-# DelftBlue compute node sizing: cap cores at one node (64). pypalm tolerates
-# oversubscription (it disables CPU pinning and lets OpenMPI yield), so workers
-# can go up to NODE_OVERSUB (96) past the core cap — matches the historical
-# xlarge pattern (96 workers on 64 cores). For pylbm/pyudales, one worker per
-# core, no oversubscription.
-PARTITION="compute"
+# DelftBlue compute node sizing: cap cores at one compute-p2 node (64). pypalm
+# tolerates oversubscription (it disables CPU pinning and lets OpenMPI yield),
+# so workers can go up to NODE_OVERSUB (96) past the core cap — matches the
+# historical xlarge pattern (96 workers on 64 cores). For pylbm/pyudales, one
+# worker per core, no oversubscription.
 NODE_MAX=64
 NODE_OVERSUB=96
 
@@ -84,6 +83,15 @@ esac
 
 NUM_PARALLEL=$(( ENSEMBLE_SIZE < WORKER_CAP ? ENSEMBLE_SIZE : WORKER_CAP ))
 CORES=$(( NUM_PARALLEL < NODE_MAX ? NUM_PARALLEL : NODE_MAX ))
+
+# Partition auto-selection: compute-p1 (48-core nodes, 218 of them) when the
+# request fits, compute-p2 (64-core nodes, 90 of them) above that — the old
+# combined `compute` partition is drained.
+if (( CORES <= 48 )); then
+  PARTITION="compute-p1"
+else
+  PARTITION="compute-p2"
+fi
 
 if (( ENSEMBLE_SIZE > WORKER_CAP )); then
   echo "warning: ensemble_size=${ENSEMBLE_SIZE} exceeds the worker cap (${WORKER_CAP});" >&2

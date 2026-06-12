@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pypalm_m0_capture
-#SBATCH --partition=compute
+#SBATCH --partition=compute-p1
 #SBATCH --time=00:15:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4

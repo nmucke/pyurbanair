@@ -35,61 +35,68 @@ MODEL="$(basename "$(dirname "${RUNNER}")")"
 # per-job wall clock --time (<=24h, the DelftBlue compute limit); tighten/loosen
 # as you learn the real runtimes.
 # ============================================================================
-# Resolution sweep (domain): "NX NY NZ TIME" rows. The ground truth is
-# 100 x 80 x 32 (aspect ratio 25:20:8); each row keeps that ratio, coarse ->
-# ground-truth grid.
+# Resolution sweep (domain): "NX NY NZ TIME" rows. Matches the Snellius list
+# (job_scripts/snellius/sweep_base.sh) so runs on the two clusters are directly
+# comparable, coarse -> ground-truth grid.
 RESOLUTIONS=(
-  "25 20 8     02:00:00"   # k=1  (coarsest)
-  "50 40 16    04:00:00"   # k=2
-  # "75 60 24    12:00:00"   # k=3
-  # "100 80 32   24:00:00"   # k=4  (== ground-truth resolution)
+  # "25 20 8     04:00:00"   # k=1  (coarsest)
+  # "30 40 16    6:00:00"   # k=2
+  "45 60 16    16:00:00"   # k=3
+  "60 80 16   24:00:00"   # k=4  (== ground-truth resolution)
 )
 # Ensemble-size sweep: "ENSEMBLE_SIZE TIME", at the fixed grid below.
 ENSEMBLE_SIZES=(
-  "8     08:00:00"
-  "16    08:00:00"
-  "32    10:00:00"
-  "64    12:00:00"
+  "8     14:00:00"
+  "16    14:00:00"
+  "32    15:00:00"
+  "64    16:00:00"
   "96    16:00:00"
 )
 # ESMDA-steps sweep: "NUM_ESMDA_STEPS TIME", at the fixed grid + ensemble below.
 ESMDA_STEPS=(
-  "1   04:00:00"
-  "2   08:00:00"
-  "3   12:00:00"
-  "4   16:00:00"
+  "1   08:00:00"
+  "2   16:00:00"
+  "3   20:00:00"
+  "4   24:00:00"
 )
 # Observation-interval sweep: "INTERVAL_SECONDS TIME", at the fixed grid +
 # ensemble + steps below. obs.interval_seconds is the temporal-aggregation bin
 # width; cost is ~flat across intervals (same number of ensemble forward solves).
 INTERVAL_SECONDS_LIST=(
-  "10   12:00:00"
-  "20   12:00:00"
-  "30   12:00:00"
-  "60   12:00:00"
+  "10   16:00:00"
+  "20   16:00:00"
+  "30   16:00:00"
+  "60   16:00:00"
 )
 
 # Fixed values for the dimensions a given sweep holds constant.
-FIXED_NX="${FIXED_NX:-75}"
-FIXED_NY="${FIXED_NY:-60}"
-FIXED_NZ="${FIXED_NZ:-24}"
-FIXED_ENSEMBLE_SIZE="${FIXED_ENSEMBLE_SIZE:-96}"
+FIXED_NX="${FIXED_NX:-60}"
+FIXED_NY="${FIXED_NY:-80}"
+FIXED_NZ="${FIXED_NZ:-16}"
+FIXED_ENSEMBLE_SIZE="${FIXED_ENSEMBLE_SIZE:-64}"
 FIXED_NUM_ESMDA_STEPS="${FIXED_NUM_ESMDA_STEPS:-3}"
 FIXED_INTERVAL_SECONDS="${FIXED_INTERVAL_SECONDS:-20.0}"
 # ============================================================================
 
 # Size the SLURM allocation from the ensemble size: --cpus-per-task == ensemble
 # size (one core per ensemble member, NO parallel cap), capped at one 64-core
-# compute node. Ensembles above 64 still run num_parallel == ensemble
-# (oversubscribed). Sets globals PARTITION and CORES_REQ.
+# compute-p2 node. Ensembles above 64 still run num_parallel == ensemble
+# (oversubscribed). Partition auto-selected: compute-p1 (48-core nodes, 218 of
+# them) when the request fits, compute-p2 (64-core nodes, 90 of them) above that
+# -- the old combined `compute` partition is drained. Sets globals PARTITION and
+# CORES_REQ.
 size_job() {
-  local want="$1" node_max=64
-  PARTITION="compute"
+  local want="$1" node_max=64 p1_cores=48
   CORES_REQ=${want}
   if (( CORES_REQ > node_max )); then
-    echo "warning: ensemble_size=${want} exceeds one compute node (${node_max} cores);" >&2
+    echo "warning: ensemble_size=${want} exceeds one compute-p2 node (${node_max} cores);" >&2
     echo "         requesting ${node_max} cores; the run still uses num_parallel=${want} (oversubscribed)." >&2
     CORES_REQ=${node_max}
+  fi
+  if (( CORES_REQ <= p1_cores )); then
+    PARTITION="compute-p1"
+  else
+    PARTITION="compute-p2"
   fi
 }
 

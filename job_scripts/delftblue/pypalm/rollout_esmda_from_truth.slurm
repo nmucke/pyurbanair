@@ -28,7 +28,7 @@
 # compute nodes have no internet, so build it once on a login node before
 # submitting. Prefix with `PYPALM_USE_DIRECT_RUN=` to fall back to palmrun/palmbuild.
 #SBATCH --job-name=rollout_pypalm
-#SBATCH --partition=compute
+#SBATCH --partition=compute-p2
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem-per-cpu=2G
