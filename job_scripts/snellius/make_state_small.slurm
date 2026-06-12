@@ -3,10 +3,12 @@
 #
 #     sbatch job_scripts/snellius/make_state_small.slurm
 #
-# Drives scripts/make_state_small.py, which reads
-#   ${PROJECT_STORAGE}/ground_truth/pyudales_time_varying/state.nc  (read-only)
-# and writes state_small.nc next to it, keeping only u, v, w and time in
-# [0, 1800]. The original state.nc is left untouched.
+# Drives scripts/make_state_small.py, which streams a reduced copy of a large
+# ground-truth state (keeping only u, v, w and a clipped time range). The
+# source/destination paths and the time range are hardcoded constants at the
+# top of the script (currently ground_truth/pyudales_time_varying/state_full.nc
+# -> state.nc, t in [0, 1000]) — edit them there before submitting. The source
+# file is opened read-only and left untouched.
 #SBATCH --job-name=make_state_small
 #SBATCH --partition=rome
 #SBATCH --ntasks=1

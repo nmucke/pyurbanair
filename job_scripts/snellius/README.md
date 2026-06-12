@@ -49,13 +49,14 @@ Edit the per-size knobs in `conf/size/<size>.yaml`:
 | Knob                              | Meaning                                  |
 |-----------------------------------|------------------------------------------|
 | `ensemble.ensemble_size`          | number of ensemble members               |
-| `time.simulation_time`            | forward-model simulation horizon         |
+| `time.simulation_time`            | per-window simulation horizon            |
 | `esmda.num_assimilation_windows`  | number of assimilation windows           |
+| `*_params.time_coords.num`        | time-varying parameter knots per window  |
 
-Correlation localization is **on by default** (`esmda.localization` in the
-config). The template pins `esmda.localization.truncation_correlation=0.3` so the
-update is well-posed at any ensemble size; pass `esmda.localization=null` as an
-extra override for the global (unlocalized) update.
+Correlation localization is **off by default** (`esmda/localization: none` in
+`conf/run_esmda.yaml`). Enable it by appending the `++esmda.localization.*`
+overrides — see the `USE_LOCALIZATION` block in `job_scripts/snellius/common.sh`
+for the canonical set.
 
 `submit.sh` reads `ensemble.ensemble_size` and requests **one core per member**,
 rounded up to the partition's minimum billable share (16 on `rome`, 24 on
@@ -87,7 +88,11 @@ WALLTIME=02:00:00 job_scripts/snellius/submit.sh pylbm medium
 - `submit.sh` — the wrapper (compute sizing, submit).
 - `templates/esmda.slurm` — one generic job body for all model combinations,
   driven by `PUA_SIZE` / `PUA_NUM_PARALLEL` / `PUA_TRUTH_MODEL` / `PUA_ASSIM_MODEL`
-  (set by the wrapper). Not meant to be `sbatch`ed directly.
+  (set by the wrapper). It runs `scripts/run_esmda.py` in simulate-truth-inline
+  mode (`run.truth_dir=null`) with the `+size=<size>` overlay; for runs against a
+  pre-simulated on-disk truth use the per-backend
+  `<model>/rollout_esmda_from_truth.slurm` runners below instead. Not meant to be
+  `sbatch`ed directly.
 
 ### Per-job working directories (concurrent-submission safety)
 
@@ -95,24 +100,23 @@ Each submission gets its own working directory under
 `/scratch-shared/$USER/urbanair_runs/<timestamp>-<jobname>-<pid>/`, populated
 with symlinks back to the read-only parts of the repo (`src`, `scripts`,
 `conf`, `libs`, `.pixi`, etc.) and passed to sbatch as `--chdir`. Anything the
-template writes at the working-dir root — most importantly the `.temp` symlink
-pylbm uses, which points at a node-local `/scratch-local/<jobid>` path — lives
-in that per-job dir, not in the shared repo root. Two jobs submitted back-to-back
-no longer clobber each other's `.temp`. The workdirs are tiny (just symlinks)
+template writes at the working-dir root (Hydra artifacts, stray cwd-relative
+writes) lives in that per-job dir, not in the shared repo root, so back-to-back
+submissions can't clobber each other. The workdirs are tiny (just symlinks)
 and `/scratch-shared` auto-purges, so no manual cleanup is needed.
 
 Note: the per-job dir contains symlinks to the repo's `libs/`, so concurrent
-**rebuilds** of pylbm / uDALES / PALM still touch the shared `libs/<solver>/build/`
-trees. After the first successful build, subsequent runs reuse the cache and
-don't write there, so this is usually fine — but avoid submitting jobs in
-parallel while a code change is forcing a rebuild.
+**rebuilds** of uDALES / PALM still touch the shared `libs/<solver>/build/`
+trees (pylbm is exempt: each job builds in a private copy of the LBM tree via
+`PYLBM_LBM_PATH`). After the first successful build, subsequent runs reuse the
+cache and don't write there, so this is usually fine — but avoid submitting
+jobs in parallel while a code change is forcing a rebuild.
 - `out_files/` — SLURM `.out`/`.err` logs, named `slurm-<model>_<size>-<jobid>`
   (gitignored).
 
-Results land in `/projects/prjs2075/urbanair`; intermediate I/O uses node-local
-`$TMPDIR` (auto-purged at job end). To keep a failing run's solver logs for
-debugging, point temp at persistent scratch, e.g.
-`... +truth_model.forward_model.temp_dir=/scratch-shared/$USER/debug`.
+Results land in `/projects/prjs2075/urbanair/esmda/<truth>_to_<assim>_<size>_<jobid>`;
+intermediate solver I/O goes to `/scratch-shared/$USER/urbanair_temp/<jobid>`
+(cleaned up on success, left behind on failure for post-mortem inspection).
 
 ## Rollout-ESMDA-from-truth sweeps (per backend)
 

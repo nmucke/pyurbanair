@@ -963,14 +963,17 @@ def run(cfg: DictConfig) -> None:
         # POSTERIOR forecast. Both are already computed inside the analysis loop,
         # so capturing them is free (no extra ensemble forward). The prior state
         # is persisted so scripts/compute_sweep_metrics.py can build prior sensor
-        # series.
+        # series. In on-disk save mode the per-step states live on disk (under the
+        # step_{i}/ dirs) instead of in RAM, so the smoother refuses to also return
+        # a state history -- request it only on the in-memory path; the disk path
+        # reassembles the prior/posterior states below by streaming those files.
         solve_start = time.perf_counter()
         output = esmda(
             state=state_input,
             params=prior_params,
             observations=window_obs,
             return_params_history=True,
-            return_state_history=True,
+            return_state_history=ensemble_states_dir is None,
         )
         solve_seconds.append(time.perf_counter() - solve_start)
 
