@@ -27,7 +27,7 @@ run:
   results_dir: null
   ensemble: false
   ground_truth_dir: null
-  rollout_steps: 3
+  rollout_steps: 0
   # When true, the assimilation ensemble forecasts are written to disk (one
   # NetCDF per member, per ESMDA step) instead of being concatenated into a
   # single in-memory ensemble Dataset. This keeps the full 96-member field off

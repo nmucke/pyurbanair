@@ -6,7 +6,7 @@
 # size-invariant and lives here. The Snellius/DelftBlue submit wrappers read
 # `ensemble.ensemble_size` from the selected `size/` overlay to size the SLURM
 # core request.
-ensemble_size: 64
+ensemble_size: 32
 num_parallel_processes: 16
 num_cpus_per_process: 1
 failure:

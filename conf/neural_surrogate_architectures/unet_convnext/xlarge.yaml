@@ -6,3 +6,18 @@ channel_mults: [1, 2, 4, 8]
 depths: [3, 3, 3, 3]
 kernel_size: 7
 expansion: 4
+
+# Factorized axis-aligned depthwise convs (3k vs k^3 taps). New weights
+# only: checkpoints trained with the dense stencil need this set false.
+separable_dwconv: true
+
+# Standardise state/params with buffered train-split stats and predict
+# the state increment. FiLM conditioning from a shared param embedding;
+# GroupNorm with 8 groups (legacy: 1). All weight-breaking vs. old
+# checkpoints except norm_groups; old artifacts load via their own saved
+# config.yaml, which predates these keys.
+normalize: true
+residual: true
+conditioning: film
+param_embed_dim: 64
+norm_groups: 8

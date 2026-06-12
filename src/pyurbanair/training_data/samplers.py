@@ -1,8 +1,8 @@
 """Parameter samplers for training-data generation.
 
-Each sampler exposes the same `sample_prior(time_coords, rng_key)`
-signature as `parameter_time_series.ParameterTimeSeries`, returning an
-`xarray.Dataset` with `(time, ensemble)` arrays for every parameter.
+Each sampler exposes a `sample_prior(time_coords, rng_key)` method,
+returning an `xarray.Dataset` with `(time, ensemble)` arrays for every
+parameter.
 The training-data script swaps them in via Hydra `_target_` blocks.
 """
 
@@ -13,7 +13,8 @@ import jax.numpy as jnp
 import numpy as np
 import xarray
 
-from pyurbanair.parameter_time_series.ar2_relaxation import AR2RelaxationModel
+from pyurbanair.dynamic_parameters.ar2_relaxation import AR2RelaxationModel
+from pyurbanair.static_parameters.distributions import Normal
 
 
 class UniformParameterSampler:
@@ -159,14 +160,6 @@ class UniformExternalAR2Sampler:
         self.param_names = list(external.keys())
         self.correlation_length = float(time_series["correlation_length"])
 
-        # Internal AR(2) with zero-mean, unit-std envelopes → bare z(t).
-        zero_ext = {n: {"mean": 0.0, "std": 1.0} for n in self.param_names}
-        self._ar2 = AR2RelaxationModel(
-            external_priors=zero_ext,
-            ensemble_size=ensemble_size,
-            correlation_length=self.correlation_length,
-        )
-
     def sample_prior(
         self,
         time_coords: jnp.ndarray,
@@ -174,9 +167,22 @@ class UniformExternalAR2Sampler:
     ) -> xarray.Dataset:
         time_coords = jnp.asarray(time_coords)
 
-        # Per-member z(t) for each parameter.
+        # Per-member z(t) for each parameter. The AR(2) model needs the
+        # window's `time_coords` at construction, so build it here. Zero-mean,
+        # unit-std `Normal` envelopes make `sample` return the bare anomaly
+        # `z(t)` (x_ext(t) + Σ_ext(t)·z with x_ext=0, Σ_ext=1). The threaded
+        # `rng_key` seeds the model's internal PRNG for reproducibility.
         rng_key, ar2_key = jax.random.split(rng_key)
-        z_ds = self._ar2.sample_prior(time_coords, ar2_key)
+        seed = int(jax.random.randint(ar2_key, (), 0, 2_000_000_000))
+        ar2 = AR2RelaxationModel(
+            external_parameters={
+                n: Normal(mean=0.0, std=1.0) for n in self.param_names
+            },
+            time_coords=time_coords,
+            correlation_length=self.correlation_length,
+            seed=seed,
+        )
+        z_ds = ar2.sample(self.ensemble_size)
 
         data_vars: dict = {}
         for name in self.param_names:

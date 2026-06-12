@@ -15,9 +15,9 @@
 # to the STATE rows only in the state-bearing smoothers. Tweak a chosen
 # strategy's fields on the CLI (e.g. `esmda.localization.localization_radius=40`)
 # or force the global update with `esmda.localization=null`.
-num_steps: 4
+num_steps: 2
 alpha: ${.num_steps}
-num_assimilation_windows: 5
+num_assimilation_windows: 1
 seed: 42
 obs_error_std: 0.25
 

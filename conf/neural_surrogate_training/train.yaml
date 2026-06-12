@@ -10,27 +10,49 @@ model_name: unet_convnext_medium
 # initialize the model from before training (e.g. fine-tuning or continuing a
 # run). The architecture must match. Set to null to train from scratch.
 # Example: init_weights_path=model_weights/unet_convnext_medium/weights.pt
+# init_weights_path: init_weights_path=model_weights/unet_convnext_medium/weights.pt
 init_weights_path: null
 
 trainer:
   _target_: neural_surrogates.Trainer
-  num_epochs: 500
+  num_epochs: 200
   device: cuda
-  patience: 10
-  # Mixed precision (fp16 autocast + grad scaling) on CUDA; ignored on CPU.
+  patience: 15
+  # Mixed precision autocast. bf16 needs no grad scaling and cannot
+  # underflow; the trainer falls back to fp16 (+ GradScaler) on GPUs
+  # without bf16 support.
   amp: true
+  amp_dtype: bfloat16
+  # torch.compile the model (static conv stack -> good fusion win). First
+  # batch pays one-off compilation latency.
+  compile_model: true
+  # channels-last-3d memory layout for cuDNN kernel selection under
+  # autocast. A/B this on the training GPU; correctness is unaffected.
+  channels_last: false
   # Rollout-length curriculum: begin with `pushforward_start_steps`-step
   # rollouts and add one step every `pushforward_epochs_per_step` epochs, up to
   # `dataset.pushforward_steps`. Set the cadence to null to train at a fixed
   # horizon (the original pushforward behavior).
-  pushforward_epochs_per_step: 10
+  pushforward_epochs_per_step: 5
   pushforward_start_steps: 1
   # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
   # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`
   # over the remaining epochs. Set `lr_warmup_epochs` to null to disable.
-  lr_warmup_epochs: 10
+  lr_warmup_epochs: 5
   lr_warmup_start: 1.0e-6
   lr_min: 1.0e-6
+  # Restrict the loss to fluid cells (uDALES targets carry junk values
+  # inside obstacles).
+  mask_loss: true
+  # Global grad-norm clip; set null to disable.
+  grad_clip_norm: 1.0
+  # Backprop through the last N unroll steps (1 = pure pushforward trick;
+  # the earlier steps always run no-grad).
+  grad_unroll_steps: 2
+  # Continue from <weights dir>/checkpoint.pt (model + optimizer +
+  # scheduler + scaler + curriculum state, written every epoch). Per-epoch
+  # metrics are appended to <weights dir>/metrics.csv.
+  resume: false
 
 # Alternative tuning that has worked well: torch.optim.AdamW with
 # weight_decay: 1.0e-6, patience: 25, dataloader.batch_size: 64.
@@ -52,11 +74,16 @@ dataset:
   param_vars: null
   cache: false
   dtype: float32
-  pushforward_steps: 10
+  pushforward_steps: 5
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 8
+  batch_size: 32
   shuffle: true
-  num_workers: 0
+  # Workers overlap the per-sample netCDF reads with GPU compute;
+  # pin_memory enables async host->GPU copies. Do NOT set
+  # persistent_workers: the pushforward curriculum relies on workers
+  # re-forking each epoch to pick up the new horizon.
+  num_workers: 4
+  pin_memory: true
 

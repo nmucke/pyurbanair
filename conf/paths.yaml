@@ -9,9 +9,9 @@ results_dir: .temp/${model.name}
 # config with hydra.compose, which does not populate the HydraConfig singleton).
 # Under a normal Hydra launch (hydra.job.chdir=false) $PWD equals the launch cwd,
 # so this matches the previous behaviour.
-experiment_dir : ${oc.env:PWD}/.temp_palm
+experiment_dir : ${oc.env:PWD}/.temp_lbm
 # Fallback output root used by resolve_output_dir() when Hydra isn't initialized
 # (i.e. direct run(cfg) calls from tests). With Hydra active the run dir comes
 # from hydra.runtime.output_dir instead.
-base_results_dir: .temp
+base_results_dir: .temp_lbm
 

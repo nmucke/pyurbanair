@@ -6,35 +6,35 @@
 
 defaults:
   - _base
-  - override /model: pylbm
+  - override /model: pyudales
   - _self_
 
 domain:
-  nx: 50
+  nx: 100
   ny: 40
   nz: 16
   bounds:
     - [-20.0, 80.0]
-    - [0.0, 80.0]
+    - [0.0, 40.0]
     - [0.0, 32.0]
 
 time:
   simulation_time: 180.0
-  output_frequency: 5.0
-  spinup_time: 10.0
+  output_frequency: 1.0
+  spinup_time: 30.0
 
 training_data:
-  num_train: 400
-  num_val: 32
-  num_test: 32
+  num_train: 200
+  num_val: 8
+  num_test: 8
 
   output_dir: training_data/${model.name}_medium/
 
   # Larger spin-up than the shared default for this grid.
   spinup_time: 30.0
 
-  num_time_points: 50
-  num_parallel_processes: 8
+  num_time_points: 9
+  num_parallel_processes: 16
 
   params_sampler:
     external:

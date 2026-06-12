@@ -73,7 +73,7 @@ def _augment_params_for_backend(
         if pressure_gradient_magnitude is None:
             raise ValueError(
                 f"{model_name} requires pressure_gradient_magnitude; "
-                "set params.true.pressure_gradient_magnitude."
+                "set training_data.pressure_gradient_magnitude."
             )
         n = sampled.sizes["ensemble"]
         sampled = sampled.assign(
@@ -87,6 +87,10 @@ def _augment_params_for_backend(
 
 def _copy_stl_if_present(cfg: DictConfig, output_dir: pathlib.Path) -> None:
     stl_path = OmegaConf.select(cfg, "model.forward_model.stl_path")
+    if stl_path is None:
+        # pyudales keeps the STL under geometry.stl_path rather than on the
+        # forward model.
+        stl_path = OmegaConf.select(cfg, "geometry.stl_path")
     if stl_path is None:
         return
     src = pathlib.Path(stl_path)
@@ -190,12 +194,35 @@ def _interpolate_params_to_state_time(
     )
 
 
+def _attach_blanking(state: xr.Dataset, solid_c_path: pathlib.Path) -> xr.Dataset:
+    """Attach the solver's obstacle mask to a collocated state dataset.
+
+    uDALES fielddumps carry small non-zero velocities inside buildings, so
+    the surrogate's "fluid = non-zero state" fallback cannot recover the
+    geometry from the data; the training files must ship it explicitly.
+    `solid_c.txt` (written by the geometry preprocessing into the template
+    experiment dir) lists 1-based (i, j, k) = (x, y, z) solid cell centres.
+    """
+    from add_geometry_to_training_data import load_obstacle_mask
+
+    obstacle = load_obstacle_mask(
+        solid_c_path,
+        (state.sizes["zt"], state.sizes["yt"], state.sizes["xt"]),
+    )
+    state["blanking"] = (("zt", "yt", "xt"), obstacle)
+    state["blanking"].attrs["long_name"] = (
+        "obstacle indicator (1 = solid/building, 0 = fluid)"
+    )
+    return state
+
+
 def _partition_states_into_splits(
     raw_dir: pathlib.Path,
     output_dir: pathlib.Path,
     sampled: xr.Dataset,
     split_specs: list[tuple[str, int, int]],
     model_name: str,
+    solid_c_path: pathlib.Path | None = None,
 ) -> tuple[dict[str, xr.Dataset], xr.Dataset]:
     """Move ensemble outputs into the `state/{split}/` + `param/{split}/` layout.
 
@@ -249,6 +276,8 @@ def _partition_states_into_splits(
                 state = ds.load()
             if regrid is not None:
                 state = regrid(state)
+            if solid_c_path is not None:
+                state = _attach_blanking(state, solid_c_path)
             state_dst = state_split_dir / f"sample_{i:04d}.nc"
             state.to_netcdf(state_dst)
             src.unlink()
@@ -327,7 +356,9 @@ def run(cfg: DictConfig) -> None:
     # saving + handing off to the ensemble.
     pgm = None
     if "pressure_gradient_magnitude" in resolve_parameter_schema(model_name):
-        pgm = float(cfg.params.true.pressure_gradient_magnitude)
+        pgm = OmegaConf.select(cfg, "training_data.pressure_gradient_magnitude")
+        if pgm is not None:
+            pgm = float(pgm)
     sampled = _augment_params_for_backend(
         sampled, model_name=model_name, pressure_gradient_magnitude=pgm
     )
@@ -375,12 +406,22 @@ def run(cfg: DictConfig) -> None:
     )
 
     # --- Partition outputs into split directories ------------------------
+    solid_c_path = None
+    if model_name == "pyudales":
+        solid_c_path = forward_model.dirs.experiment_dir / "solid_c.txt"
+        if not solid_c_path.exists():
+            raise FileNotFoundError(
+                f"{solid_c_path} not found; the geometry preprocessing should "
+                "have written it. Without it the training data ships no "
+                "obstacle mask."
+            )
     first_example, interpolated = _partition_states_into_splits(
         raw_dir=raw_states_dir,
         output_dir=output_dir,
         sampled=sampled,
         split_specs=split_specs,
         model_name=model_name,
+        solid_c_path=solid_c_path,
     )
 
     # Plot interpolated trajectories (what each sample_XXXX.nc actually

@@ -2,6 +2,6 @@
 
 # model_dir: model_weights/upt_medium
 model_dir: model_weights/unet_convnext_medium
-sample_idx: 0
+sample_idx: 2
 device: cpu
 output_dir: ${model_dir}/rollout_${sample_idx}
