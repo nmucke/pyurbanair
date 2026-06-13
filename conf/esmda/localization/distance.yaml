@@ -14,7 +14,7 @@ localization:
   _target_: data_assimilation.localization.distance.DistanceLocalization
   # Localization radius (truncation distance) in domain length units (metres for
   # the urban cases). Domain-dependent -- tune to the flow's correlation scale.
-  localization_radius: 25.0
+  localization_radius: 10.0
   # Fraction of the radius left un-tapered (beta in Eq. 9).
   tapering_beta: 0.5
   # Maximum error-variance inflation E_max reached at the radius. Paper: 4 for

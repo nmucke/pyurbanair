@@ -220,7 +220,42 @@ done
 
 Each job writes to `/projects/urbanair/assim_from_ground_truth/<RUN_TAG>` where
 `RUN_TAG` embeds the assim model, grid, ensemble size, step count and
-observation interval, so no two configurations (or backends) collide. Correlation localization is **off** by
-default; set `USE_LOCALIZATION=true` (env var, propagated through the sweep) to
-enable it. Because pypalm requires `nz≥16`, the domain sweep's coarsest row
+observation interval (plus an optional `RUN_SUFFIX`), so no two configurations
+(or backends) collide. Correlation localization is **off** by
+default; set `USE_LOCALIZATION=correlation` (or `distance`; env var, propagated
+through the sweep) to enable the localized state update. Because pypalm
+requires `nz≥16`, the domain sweep's coarsest row
 (`25 20 8`) is automatically raised to `25 20 16` for pypalm only.
+
+## State-estimation methods sweep
+
+`sweep_state_estimation_rollout_esmda_from_truth.sh` is a separate launcher
+(it does not go through `sweep_base.sh`): instead of varying one numeric knob
+it submits the SAME experiment once per state-update strategy of the joint
+state + time-varying-parameter smoother (`esmda/smoother=state_and_dynamic`),
+reusing the per-backend runners:
+
+| method    | state update                                                       |
+|-----------|--------------------------------------------------------------------|
+| `corr_ic` | correlation-based localization, updates the window IC               |
+| `dist_ic` | distance-based localization, updates the window IC                  |
+| `svd_ic`  | reduced-SVD update (basis from ALL window snapshots), IC only       |
+| `svd_all` | as `svd_ic` + post-loop joint update of every window time step (`esmda.final_time_smoothing=true`) |
+
+The experiment shape matches the loaded ground truth (a parameter knot every
+~30 s): **30 s windows** with **2 knots per window** (window start + end),
+**10 s** observation intervals, and **13 windows** (390 s ≈ the 400 s compute
+budget). Grid/ensemble/steps default to the sweeps' fixed values
+(60×80×16, 64, 3). All knobs are env-overridable (see the script header), e.g.
+`METHODS="svd_ic svd_all"` submits a subset.
+
+```bash
+bash job_scripts/delftblue/sweep_state_estimation_rollout_esmda_from_truth.sh pyudales
+bash job_scripts/delftblue/sweep_state_estimation_rollout_esmda_from_truth.sh pylbm esmda.seed=1
+```
+
+Each method lands in its own results dir via the runner's `RUN_SUFFIX`, e.g.
+`pyudales_nx60_ny80_nz16_ens64_steps3_int10.0_localization_corr_ic`. The SVD
+methods require the in-memory ensemble (`run.results_dir` unset, the default)
+and run with the global update (`esmda.localization=null`) — state reduction
+and state localization are mutually exclusive.

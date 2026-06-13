@@ -31,8 +31,8 @@
 #SBATCH --partition=compute-p2
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
-#SBATCH --mem-per-cpu=2G
-#SBATCH --time=16:00:00
+#SBATCH --mem-per-cpu=3800
+#SBATCH --time=24:00:00
 #SBATCH --account=innovation
 #SBATCH --output=job_scripts/delftblue/out_files/slurm-rollout_pypalm-%j.out
 #SBATCH --error=job_scripts/delftblue/out_files/slurm-rollout_pypalm-%j.err
@@ -55,6 +55,10 @@ NZ="${NZ:-16}"
 ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-96}"
 NUM_ESMDA_STEPS="${NUM_ESMDA_STEPS:-3}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-20.0}"   # obs.interval_seconds: time-aggregation bin width [s]
+# Optional extra RESULTS_DIR suffix so launchers running several configurations
+# at the SAME grid/ensemble/steps/interval (e.g. the state-estimation methods
+# sweep) do not collide.
+RUN_SUFFIX="${RUN_SUFFIX:-}"
 
 # PALM cannot run with fewer than 16 vertical levels; enforce the floor so a
 # shared sweep handing pypalm a coarser nz (e.g. the k=1 domain-sweep row) is
@@ -74,7 +78,7 @@ source "${REPO_ROOT}/job_scripts/delftblue/common.sh"
 # --cpus-per-task == ENSEMBLE_SIZE up to a node). Pin an exact count with NUM_PARALLEL=….
 NUM_PARALLEL="${NUM_PARALLEL:-${ENSEMBLE_SIZE}}"
 
-RUN_TAG="${ASSIM_MODEL}_nx${NX}_ny${NY}_nz${NZ}_ens${ENSEMBLE_SIZE}_steps${NUM_ESMDA_STEPS}_int${INTERVAL_SECONDS}${LOCALIZATION_TAG}"
+RUN_TAG="${ASSIM_MODEL}_nx${NX}_ny${NY}_nz${NZ}_ens${ENSEMBLE_SIZE}_steps${NUM_ESMDA_STEPS}_int${INTERVAL_SECONDS}${LOCALIZATION_TAG}${RUN_SUFFIX}"
 RESULTS_DIR="${RESULTS_ROOT}/${RUN_TAG}"
 RUN_TEMP_DIR="${TEMP_ROOT}/${SLURM_JOB_ID:-$$}"
 

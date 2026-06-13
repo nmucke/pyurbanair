@@ -222,3 +222,11 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+rsync -avhP /projects/urbanair/assim_from_ground_truth/pyudales_nx60_ny80_nz16_ens128_steps3_int6.0_localization_corr_ic snellius:/projects/prjs2075/urbanair/assim_with_state/
+rsync -avhP /projects/urbanair/assim_from_ground_truth/pyudales_nx60_ny80_nz16_ens128_steps3_int6.0_localization_dist_dist_ic snellius:/projects/prjs2075/urbanair/assim_with_state/
+rsync -avhP /projects/urbanair/assim_from_ground_truth/pyudales_nx60_ny80_nz16_ens128_steps3_int6.0_svd_all snellius:/projects/prjs2075/urbanair/assim_with_state/
+rsync -avhP /projects/urbanair/assim_from_ground_truth/pyudales_nx60_ny80_nz16_ens128_steps3_int6.0_svd_ic snellius:/projects/prjs2075/urbanair/assim_with_state/
+rsync -avhP /projects/urbanair/assim_from_ground_truth/pyudales_nx60_ny80_nz16_ens4_steps1_int5.0_svd_all snellius:/projects/prjs2075/urbanair/assim_with_state/
+rsync -avhP /projects/urbanair/assim_from_ground_truth/pyudales_nx60_ny80_nz16_ens4_steps1_int6.0_localization_corr_ic snellius:/projects/prjs2075/urbanair/assim_with_state/
+rsync -avhP /projects/urbanair/assim_from_ground_truth/pyudales_nx60_ny80_nz16_ens4_steps1_int6.0_localization_dist_dist_ic snellius:/projects/prjs2075/urbanair/assim_with_state/
+rsync -avhP /projects/urbanair/assim_from_ground_truth/pyudales_nx60_ny80_nz16_ens4_steps1_int6.0_svd_ic snellius:/projects/prjs2075/urbanair/assim_with_state/
