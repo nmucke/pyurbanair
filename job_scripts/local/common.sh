@@ -29,10 +29,14 @@
 RESULTS_ROOT="/export/scratch2/ntm/results/assim_from_ground_truth"
 TEMP_ROOT="${TEMP_ROOT:-${REPO_ROOT}/.local_runs/temp}"
 
-# ROOT directory holding the pre-simulated ground truth shared by all backends.
-# The leaf actually loaded is ${GROUND_TRUTH_DIR}/${GROUND_TRUTH_MODEL}_time_varying
-# (set GROUND_TRUTH_SUBDIR="" if GROUND_TRUTH_DIR already points at the leaf).
-GROUND_TRUTH_DIR="${GROUND_TRUTH_DIR:-/export/scratch1/ntm/pyurbanair/ground_truth_spunup}"
+# Directory holding the pre-simulated ground truth shared by all backends -- the
+# local copy of the Snellius truth (snellius:/projects/prjs2075/urbanair/
+# ground_truth_pyudales_wide/pyudales_time_varying): 60x80x16 on x=[-20,40],
+# y=[0,80], z=[0,32], 1500 s. Here state.nc + params.nc sit directly in
+# GROUND_TRUTH_DIR, so the default leaf subdir is empty (set GROUND_TRUTH_SUBDIR
+# to e.g. pyudales_time_varying if you point GROUND_TRUTH_DIR at a root that
+# nests per-model leaves, as on Snellius).
+GROUND_TRUTH_DIR="${GROUND_TRUTH_DIR:-/export/scratch1/ntm/pyurbanair/ground_truth}"
 GROUND_TRUTH_MODEL="${GROUND_TRUTH_MODEL:-pyudales}"   # pylbm | pyudales | pypalm
 
 # --- Geometry / domain size -------------------------------------------------
@@ -40,21 +44,21 @@ GROUND_TRUTH_MODEL="${GROUND_TRUTH_MODEL:-pyudales}"   # pylbm | pyudales | pypa
 # the grid resolution NX/NY/NZ (the number of discrete points) is NOT here -- it
 # is a sweep parameter and lives in each runner.
 CASE="${CASE:-xie_and_castro}"        # xie_and_castro | barcelona
-X_BOUNDS="${X_BOUNDS:-[-20.0, 80.0]}"
+X_BOUNDS="${X_BOUNDS:-[-20.0, 40.0]}"
 Y_BOUNDS="${Y_BOUNDS:-[0.0, 80.0]}"
 Z_BOUNDS="${Z_BOUNDS:-[0.0, 32.0]}"
 # Observation sensors: one entry per sensor across the three lists.
-X_POINTS="${X_POINTS:-[30.0, 60.0, 40.0, 10.0, 65.0]}"
-Y_POINTS="${Y_POINTS:-[10.0, 20.0, 40.0, 60.0, 50.0]}"
-Z_POINTS="${Z_POINTS:-[2.0, 2.0, 2.0, 2.0, 2.0]}"
+X_POINTS="${X_POINTS:-[10.0, 10.0, 20.0, 20.0, 30.0, 30.0]}"
+Y_POINTS="${Y_POINTS:-[20.0, 60.0, 10.0, 50.0, 30.0, 70.0]}"
+Z_POINTS="${Z_POINTS:-[2.0, 2.0, 2.0, 2.0, 2.0, 2.0]}"
 
 # --- Assimilation windows ---------------------------------------------------
 # Number of assimilation windows the loaded ground truth is chopped into. Keep
 # SIMULATION_TIME * NUM_ASSIM_WINDOWS <= the time length of the ground truth.
-NUM_ASSIM_WINDOWS="${NUM_ASSIM_WINDOWS:-4}"
+NUM_ASSIM_WINDOWS="${NUM_ASSIM_WINDOWS:-6}"
 
 # --- Time horizon -----------------------------------------------------------
-SIMULATION_TIME="${SIMULATION_TIME:-300.0}"   # per-window length [s]
+SIMULATION_TIME="${SIMULATION_TIME:-180.0}"   # per-window length [s]
 OUTPUT_FREQUENCY="${OUTPUT_FREQUENCY:-2.0}"    # state snapshot interval [s]
 SPINUP_TIME="${SPINUP_TIME:-50.0}"             # constant-inflow plateau before each window [s]
 
@@ -116,7 +120,7 @@ esac
 # --- Ground-truth leaf resolution + validation ------------------------------
 # Resolve the leaf that matches the chosen truth backend and verify it carries
 # the pre-simulated state.nc + params.nc. Sets GROUND_TRUTH_PATH for the runners.
-GROUND_TRUTH_SUBDIR="${GROUND_TRUTH_SUBDIR-${GROUND_TRUTH_MODEL}_time_varying}"
+GROUND_TRUTH_SUBDIR="${GROUND_TRUTH_SUBDIR-}"
 if [ -n "${GROUND_TRUTH_SUBDIR}" ]; then
   GROUND_TRUTH_PATH="${GROUND_TRUTH_DIR}/${GROUND_TRUTH_SUBDIR}"
 else
