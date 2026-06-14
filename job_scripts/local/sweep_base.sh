@@ -36,13 +36,14 @@ export SKIP_VIZ=true
 # Canonical sweep value lists -- defined ONCE here so every backend sweeps the
 # identical set. Edit these to retune the whole local suite at once.
 # ============================================================================
-# Resolution sweep (domain): "NX NY NZ" rows. The ground truth is 100 x 80 x 32
-# (aspect ratio 25:20:8); each row keeps that ratio, coarse -> ground-truth grid.
+# Resolution sweep (domain): "NX NY NZ" rows. Rows match
+# job_scripts/snellius/sweep_base.sh so local and Snellius sweep the identical
+# set, coarse -> ground-truth grid.
 RESOLUTIONS=(
   # "25 20 8"     # k=1  (coarsest)
-  "50 40 16"    # k=2
-  "75 60 16"    # k=3
-  "100 80 16"   # k=4  (== ground-truth resolution)
+  "30 40 16"    # k=2
+  "45 60 16"    # k=3
+  "60 80 16"    # k=4  (== ground-truth resolution)
 )
 # Ensemble-size sweep, at the fixed grid below.
 ENSEMBLE_SIZES=( 8 16 32 64 96 )
@@ -52,15 +53,15 @@ ESMDA_STEPS=( 1 2 3 4 )
 # ensemble + steps below. The interval is the time-aggregation bin width: truth
 # observations are binned into interval-wide windows and aggregated within each,
 # so larger bins fold more frames into each observation.
-INTERVAL_SECONDS_LIST=( 10 20 30 60 )
+INTERVAL_SECONDS_LIST=( 5 20 30 )
 
 # Fixed values for the dimensions a given sweep holds constant.
-FIXED_NX="${FIXED_NX:-75}"
-FIXED_NY="${FIXED_NY:-60}"
-FIXED_NZ="${FIXED_NZ:-24}"
-FIXED_ENSEMBLE_SIZE="${FIXED_ENSEMBLE_SIZE:-96}"
+FIXED_NX="${FIXED_NX:-60}"
+FIXED_NY="${FIXED_NY:-80}"
+FIXED_NZ="${FIXED_NZ:-16}"
+FIXED_ENSEMBLE_SIZE="${FIXED_ENSEMBLE_SIZE:-64}"
 FIXED_NUM_ESMDA_STEPS="${FIXED_NUM_ESMDA_STEPS:-3}"
-FIXED_INTERVAL_SECONDS="${FIXED_INTERVAL_SECONDS:-20.0}"
+FIXED_INTERVAL_SECONDS="${FIXED_INTERVAL_SECONDS:-10.0}"
 # ============================================================================
 
 FAILURES=()

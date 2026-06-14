@@ -1,9 +1,15 @@
 # DelftBlue job scripts
 
-Submit ESMDA runs on DelftBlue (CPU-only, `compute` partition) with the
-`submit.sh` wrapper. It sizes the SLURM allocation from the experiment config,
-so you tune the run in one place — `conf/size/<size>.yaml` — and the requested
-cores follow automatically.
+Submit ESMDA runs on DelftBlue (CPU-only, `compute-p1`/`compute-p2` partitions)
+with the `submit.sh` wrapper. It sizes the SLURM allocation from the experiment
+config, so you tune the run in one place — `conf/size/<size>.yaml` — and the
+requested cores follow automatically.
+
+Partitions: the old combined `compute` partition is **drained**; jobs go to
+`compute-p1` (48-core / 185 GB nodes, 218 of them) when the request fits in 48
+cores, and `compute-p2` (64-core / 250 GB nodes, 90 of them) above that. Both
+the wrapper and the sweep engine auto-select. Memory ceiling is ~3.9 GB per
+core on both.
 
 ## Usage
 
@@ -117,6 +123,38 @@ Results land in `/projects/urbanair`; intermediate I/O uses
 `/scratch/$USER/urbanair_temp/<jobid>` (beegfs scratch). pypalm additionally
 routes its per-run working dir to node-local `/tmp` for the many-small-file
 build-tree copy.
+
+## Standalone utility jobs
+
+DelftBlue siblings of the same-named Snellius scripts (results on
+`/projects/urbanair`, solver scratch on `/scratch/$USER/urbanair_temp/<jobid>`,
+pixi env `delftblue`). All are self-contained: edit the CONFIG block at the
+top (where there is one), then `sbatch` directly; extra Hydra overrides may be
+appended on the command line.
+
+- `ground_truth.slurm` — generate a time-varying ground truth with any backend
+  (`scripts/run_forward_model.py`, `params=dynamic_truth`). Output under
+  `/projects/urbanair/ground_truth/`; this is what the rollout-ESMDA runners
+  load (`GROUND_TRUTH_DIR` in `common.sh`, which points at the leaf holding
+  `state.nc` + `params.nc`).
+- `generate_training_data.slurm` — neural-surrogate training data
+  (`scripts/generate_training_data.py`, pyudales, full 64-core compute-p2
+  node). Output under `/projects/urbanair/training_data/pyudales_<size>`.
+- `run_esmda_test.slurm` — quick ESMDA smoke run of the committed
+  `conf/run_esmda.yaml` against an on-disk truth (`TRUTH_DIR` env var);
+  outputs under `test_outputs/`.
+- `eval_sweep.slurm` — post-process the rollout-ESMDA sweep (metrics +
+  comparison figures). `MODELS` env var restricts both stages; positional args
+  go to the compare stage only.
+- `visualize_run.slurm <run_dir>` — regenerate the figure set for one ESMDA run.
+- `trim_and_visualize.slurm` — trim the spin-up from a ground truth, then
+  visualize it.
+- `make_state_small.slurm` — stream a reduced copy of a large ground-truth
+  state (paths hardcoded in `scripts/make_state_small.py`).
+- `plot_state_slices.slurm [state.nc [var [z]]]` — z-slice plots + one mp4
+  animation. NB: DelftBlue has **no ffmpeg module**; run `pixi add ffmpeg`
+  once (login node) or export `FFMPEG_BIN`, otherwise the mp4 step fails
+  (static plots are still written).
 
 ## Rollout-ESMDA-from-truth sweeps (per backend)
 
