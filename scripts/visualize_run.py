@@ -127,7 +127,11 @@ def plot_param_trajectories(
         ax.plot(t, po.mean(0), color=_COLOR_POSTERIOR, linewidth=2.5, label="Posterior mean")
         if p in truth.data_vars:
             tr = np.asarray(truth[p].values)
-            ax.plot(t, tr, color=_COLOR_TRUTH, linewidth=2.0, linestyle="--",
+            # Truth may live on its own time grid (e.g. cross-model runs where the
+            # truth model and the assimilation model use different time samplings),
+            # so plot it against its own coordinate rather than the posterior's.
+            t_truth = np.asarray(truth["time"].values) if "time" in truth else t
+            ax.plot(t_truth, tr, color=_COLOR_TRUTH, linewidth=2.0, linestyle="--",
                     zorder=5, label="Truth")
         ax.set_ylabel(_PARAM_LABELS.get(p, p))
         ax.set_xlabel("Time")

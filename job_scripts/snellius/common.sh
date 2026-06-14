@@ -58,10 +58,10 @@ Z_POINTS="${Z_POINTS:-[2.0, 2.0, 2.0, 2.0, 2.0, 2.0]}"
 # --- Assimilation windows ---------------------------------------------------
 # Number of assimilation windows the loaded ground truth is chopped into. Keep
 # SIMULATION_TIME * NUM_ASSIM_WINDOWS <= the time length of the ground truth.
-NUM_ASSIM_WINDOWS="${NUM_ASSIM_WINDOWS:-4}"
+NUM_ASSIM_WINDOWS="${NUM_ASSIM_WINDOWS:-6}"
 
 # --- Time horizon -----------------------------------------------------------
-SIMULATION_TIME="${SIMULATION_TIME:-300.0}"   # per-window length [s]
+SIMULATION_TIME="${SIMULATION_TIME:-180.0}"   # per-window length [s]
 OUTPUT_FREQUENCY="${OUTPUT_FREQUENCY:-2.0}"    # state snapshot interval [s]
 SPINUP_TIME="${SPINUP_TIME:-50.0}"             # constant-inflow plateau before each window [s]
 
@@ -69,7 +69,7 @@ SPINUP_TIME="${SPINUP_TIME:-50.0}"             # constant-inflow plateau before 
 # The smoother and parameter groups that make the inflow parameters time-varying,
 # plus the number of knots per window (NUM_TIME_POINTS sets both the prior and the
 # truth parameterisation). Forwarded verbatim into the run via DYNAMIC_PARAM_FLAGS.
-NUM_TIME_POINTS="${NUM_TIME_POINTS:-10}"
+NUM_TIME_POINTS="${NUM_TIME_POINTS:-6}"
 DYNAMIC_PARAM_FLAGS=(
   "esmda/smoother=dynamic"
   "params@truth_params=dynamic_truth"
