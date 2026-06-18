@@ -25,11 +25,14 @@ backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.
 [tool.hatch.build.targets.wheel]
 packages = ["src/neural_surrogates"]
 
+# No conda pytorch here: torch is resolved from PyPI (see [project]
+# dependencies). The workspace pins the wheel variant per environment
+# (+cpu / +cu126); a conda pytorch would pin pypi torch to the conda
+# version and conflict with those variants.
 [tool.pixi.dependencies]
 xarray = ">=2025.12.0,<2026"
 netcdf4 = ">=1.7.3,<2"
 numpy = ">=2.3.5,<3"
-pytorch = ">=2.4,<3"
 
 [tool.pixi.pypi-dependencies]
 neural-surrogates = { path = "libs/neural_surrogates", editable = true }

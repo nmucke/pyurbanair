@@ -33,8 +33,8 @@ training_data:
   # Larger spin-up than the shared default for this grid.
   spinup_time: 50.0
 
-  num_time_points: 20
-  num_parallel_processes: 96
+  num_time_points: 10
+  num_parallel_processes: 16
 
   params_sampler:
     external:

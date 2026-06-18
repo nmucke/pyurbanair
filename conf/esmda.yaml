@@ -17,7 +17,7 @@
 # or force the global update with `esmda.localization=null`.
 num_steps: 3
 alpha: ${.num_steps}
-num_assimilation_windows: 3
+num_assimilation_windows: 6
 seed: 42
 obs_error_std: 0.25
 

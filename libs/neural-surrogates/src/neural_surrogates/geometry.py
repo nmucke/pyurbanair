@@ -77,6 +77,71 @@ def stl_to_fluid_mask(
     return (~obstacle).astype(np.float32)
 
 
+def solid_c_fluid_mask(
+    solid_c_path: str | Path,
+    template_var: xr.DataArray,
+) -> np.ndarray:
+    """Reproduce the training blanking mask from uDALES' ``solid_c.txt``.
+
+    This is the EXACT geometry the surrogate was trained on: the training-data
+    generator attaches ``blanking`` via
+    ``scripts/add_geometry_to_training_data.load_obstacle_mask`` (same file
+    format, same 1-based ``(i, j, k) = (x, y, z)`` indexing), and
+    :class:`~neural_surrogates.data.TransitionDataset` feeds the network
+    ``1 - obstacle``. At inference time the spin-up backend writes the same
+    ``solid_c.txt`` into its experiment dir, so loading it here makes the
+    inference mask byte-for-byte identical to the trained one — unlike the
+    non-zero-state fallback, which is wrong for uDALES (its fielddumps carry
+    tiny non-zero velocities inside obstacles).
+
+    Args:
+        solid_c_path: Path to uDALES' ``solid_c.txt`` (header line + one
+            ``i j k`` solid cell-centre per line).
+        template_var: A single state variable (no ``time`` dimension) whose
+            dims/sizes define the target grid and output dim order. Its
+            dimension names are mapped to physical axes by first letter, so it
+            works for both pylbm (``x/y/z``) and uDALES (``xt/yt/zt``).
+
+    Returns:
+        A float array shaped like ``template_var`` with ``1`` for fluid cells
+        and ``0`` for solid cells.
+    """
+    dims = list(template_var.dims)
+    axes = [_axis_of(d) for d in dims]
+    sizes = {axis: int(template_var.sizes[d]) for axis, d in zip(axes, dims)}
+    try:
+        nx, ny, nz = sizes["x"], sizes["y"], sizes["z"]
+    except KeyError as exc:  # pragma: no cover - defensive
+        raise ValueError(
+            f"template_var must have x, y and z dims; got {dims}"
+        ) from exc
+
+    idx = np.loadtxt(solid_c_path, skiprows=1, dtype=int)
+    if idx.ndim != 2 or idx.shape[1] != 3:
+        raise ValueError(
+            f"{solid_c_path}: expected (n, 3) indices, got {idx.shape}"
+        )
+    if (
+        idx.min() < 1
+        or idx[:, 0].max() > nx
+        or idx[:, 1].max() > ny
+        or idx[:, 2].max() > nz
+    ):
+        raise ValueError(
+            f"{solid_c_path}: indices out of range for grid "
+            f"(nx={nx}, ny={ny}, nz={nz})"
+        )
+
+    # Build the obstacle volume in (z, y, x) exactly like load_obstacle_mask,
+    # then permute it into the template's dim order so the mask aligns with the
+    # state tensors regardless of backend dim naming.
+    obstacle = np.zeros((nz, ny, nx), dtype=np.float32)
+    obstacle[idx[:, 2] - 1, idx[:, 1] - 1, idx[:, 0] - 1] = 1.0
+    perm = [("z", "y", "x").index(a) for a in axes]
+    obstacle = np.transpose(obstacle, perm)
+    return (1.0 - obstacle).astype(np.float32)
+
+
 def nonzero_fluid_mask(
     template: xr.Dataset,
     state_vars: tuple[str, ...],
