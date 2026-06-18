@@ -1,0 +1,28 @@
+# @package esmda
+# Online reduced SVD/KL state update (docs/reduced_state_da.md, with the basis
+# built ONLINE from the forecast ensemble each ESMDA iteration rather than
+# offline from prior samples). The state rows of the augmented Kalman vector
+# are replaced by reduced coefficients xi = Sigma_r^-1 Phi_r^T (u - u_bar);
+# the update increment is decoded back onto each member's full state.
+# Parameters always keep the exact global update. Only the state-bearing
+# smoothers (state_and_parameter, state_and_dynamic) consume this; it is
+# incompatible with (state) localization (the coefficients are nonlocal), so
+# pair it with esmda/localization=none. Select with esmda/state_reduction=svd.
+state_reduction:
+  _target_: data_assimilation.reduction.OnlineStateReduction
+  # Retained-energy truncation: keep the smallest rank r whose cumulative
+  # sigma_i^2 reaches this fraction of the total. 1.0 keeps every nonzero mode
+  # (with basis_source=initial_condition that is exactly the full-space update).
+  energy_fraction: 0.99
+  # Optional hard cap on r (null -> energy criterion only). Always additionally
+  # capped by the number of nonzero singular values.
+  max_rank: null
+  # Snapshots the per-iteration basis is fitted to:
+  #   initial_condition - the time=0 ensemble anomalies (rank <= N_e - 1,
+  #     exactly whitened coefficients);
+  #   window_snapshots  - every output frame of every member (N_e * N_t
+  #     samples; richer basis that can move the IC outside the IC-ensemble
+  #     span, approximately whitened).
+  basis_source: initial_condition
+  # Thin the time frames of the window_snapshots source (every n-th frame).
+  snapshot_stride: 1

@@ -51,13 +51,15 @@ X_POINTS="${X_POINTS:-[10.0, 10.0, 20.0, 20.0, 30.0, 30.0]}"
 Y_POINTS="${Y_POINTS:-[20.0, 60.0, 10.0, 50.0, 30.0, 70.0]}"
 Z_POINTS="${Z_POINTS:-[2.0, 2.0, 2.0, 2.0, 2.0, 2.0]}"
 
+
+
 # --- Assimilation windows ---------------------------------------------------
 # Number of assimilation windows the loaded ground truth is chopped into. Keep
 # SIMULATION_TIME * NUM_ASSIM_WINDOWS <= the time length of the ground truth.
-NUM_ASSIM_WINDOWS="${NUM_ASSIM_WINDOWS:-4}"
+NUM_ASSIM_WINDOWS="${NUM_ASSIM_WINDOWS:-6}"
 
 # --- Time horizon -----------------------------------------------------------
-SIMULATION_TIME="${SIMULATION_TIME:-300.0}"   # per-window length [s]
+SIMULATION_TIME="${SIMULATION_TIME:-180.0}"   # per-window length [s]
 OUTPUT_FREQUENCY="${OUTPUT_FREQUENCY:-2.0}"    # state snapshot interval [s]
 SPINUP_TIME="${SPINUP_TIME:-50.0}"             # constant-inflow plateau before each window [s]
 
@@ -65,7 +67,7 @@ SPINUP_TIME="${SPINUP_TIME:-50.0}"             # constant-inflow plateau before 
 # The smoother and parameter groups that make the inflow parameters time-varying,
 # plus the number of knots per window (NUM_TIME_POINTS sets both the prior and the
 # truth parameterisation). Forwarded verbatim into the run via DYNAMIC_PARAM_FLAGS.
-NUM_TIME_POINTS="${NUM_TIME_POINTS:-10}"
+NUM_TIME_POINTS="${NUM_TIME_POINTS:-6}"
 DYNAMIC_PARAM_FLAGS=(
   "esmda/smoother=dynamic"
   "params@truth_params=dynamic_truth"
@@ -78,15 +80,22 @@ DYNAMIC_PARAM_FLAGS=(
 SEED="${SEED:-0}"
 SKIP_VIZ="${SKIP_VIZ:-false}"          # set "true" to skip animations/plots
 
-# --- Correlation localization -----------------------------------------------
-# Shared default is the global (unlocalized) update. Set USE_LOCALIZATION=true to
-# enable the localized Kalman update with TRUNCATION_CORRELATION. This resolves
-# into LOCALIZATION_FLAGS (Hydra overrides) + LOCALIZATION_TAG (output-dir suffix)
-# for the runners to consume.
+# --- State localization -------------------------------------------------------
+# Shared default is the global (unlocalized) update. USE_LOCALIZATION selects the
+# localized Kalman update applied to the STATE rows (parameter rows always get
+# the global update):
+#   false (default)      global update (esmda.localization=null)
+#   true | correlation   adaptive correlation-based localization
+#                        (Vossepoel et al. 2025) with TRUNCATION_CORRELATION
+#   distance             physical-distance-based localization with
+#                        LOCALIZATION_RADIUS (needs coordinate observations)
+# This resolves into LOCALIZATION_FLAGS (Hydra overrides) + LOCALIZATION_TAG
+# (output-dir suffix) for the runners to consume.
 USE_LOCALIZATION="${USE_LOCALIZATION:-false}"
 TRUNCATION_CORRELATION="${TRUNCATION_CORRELATION:-0.3}"
+LOCALIZATION_RADIUS="${LOCALIZATION_RADIUS:-10.0}"
 case "${USE_LOCALIZATION}" in
-  true|True|TRUE|1|yes)
+  true|True|TRUE|1|yes|correlation)
     LOCALIZATION_TAG="_localization"
     LOCALIZATION_FLAGS=(
       "++esmda.localization._target_=data_assimilation.localization.correlation.CorrelationLocalization"
@@ -96,12 +105,23 @@ case "${USE_LOCALIZATION}" in
       "++esmda.localization.block_grouping=true"
     )
     ;;
+  distance)
+    LOCALIZATION_TAG="_localization_dist"
+    LOCALIZATION_FLAGS=(
+      "++esmda.localization._target_=data_assimilation.localization.distance.DistanceLocalization"
+      "++esmda.localization.localization_radius=${LOCALIZATION_RADIUS}"
+      "++esmda.localization.tapering_beta=0.5"
+      "++esmda.localization.max_inflation=4.0"
+      "++esmda.localization.block_grouping=true"
+      "++esmda.localization.horizontal_only=false"
+    )
+    ;;
   false|False|FALSE|0|no)
     LOCALIZATION_TAG=""
     LOCALIZATION_FLAGS=( "esmda.localization=null" )
     ;;
   *)
-    echo "error: USE_LOCALIZATION must be true/false (got '${USE_LOCALIZATION}')" >&2
+    echo "error: USE_LOCALIZATION must be false/true/correlation/distance (got '${USE_LOCALIZATION}')" >&2
     exit 1
     ;;
 esac

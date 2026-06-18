@@ -494,6 +494,27 @@ def test_something(compose_test_cfg) -> None:
   paper's grid-block transition-matrix reuse (§3b) is a documented future
   optimization, not yet implemented.
 
+### Reduced SVD/KL state update (optional)
+- [reduction.py](../libs/data-assimilation/src/data_assimilation/reduction.py)
+  defines `OnlineStateReduction`, taken by the **state-bearing** smoothers via
+  the `state_reduction=` constructor arg (default `None` = the full-space
+  update, byte-identical to before). When set, the state rows of the augmented
+  Kalman vector are replaced by reduced coefficients of an SVD/KL basis
+  **refitted each ESMDA iteration** from the forecast ensemble
+  (`basis_source`: the `time=0` IC anomalies, or every window frame), and the
+  Kalman increment is decoded back onto each member's full state. Parameters
+  always keep the global update; incompatible with (state) localization — the
+  constructor raises. Theory + implementation notes:
+  [docs/reduced_state_da.md](reduced_state_da.md).
+- `final_time_smoothing=True` (requires `state_reduction`, in-memory mode
+  only) adds one post-loop, un-tempered (`alpha=1`) Kalman update of the state
+  at **all window time steps jointly**, reusing the final posterior forecast
+  (no extra solve) with the parameters frozen.
+- Selected via the `esmda/state_reduction` config group (`none`|`svd`, default
+  `none`) + the `esmda.final_time_smoothing` flag; wired only into
+  [conf/esmda/smoother/](../conf/esmda/smoother/) `state_and_parameter.yaml`
+  and `state_and_dynamic.yaml`.
+
 ### Multi-window rollout ESMDA
 Handled directly inside [scripts/run_esmda.py](../scripts/run_esmda.py)'s window
 loop when `esmda.num_assimilation_windows > 1`. The full truth (state +
@@ -810,6 +831,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 | Parameter samplers (static + dynamic) | [src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/), [src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/), [conf/params/](../conf/params/) |
 | Truth source / spin-up trimming / 32-bit | `run.truth_dir`+`run.truth_start_time` in [run_esmda.yaml](../conf/run_esmda.yaml); [scripts/trim_spinup.py](../scripts/trim_spinup.py), [convert_ground_truth_to_32bit.py](../scripts/convert_ground_truth_to_32bit.py), [visualize_ground_truth.py](../scripts/visualize_ground_truth.py) |
 | Localization (correlation/distance/none) / grid-block grouping | [localization/](../libs/data-assimilation/src/data_assimilation/localization/) (`correlation.py`, `distance.py`), the `esmda/localization` group [conf/esmda/localization/](../conf/esmda/localization/) (`block_grouping`, state-only) |
+| Reduced SVD/KL state update / final trajectory smoothing | [reduction.py](../libs/data-assimilation/src/data_assimilation/reduction.py), the `esmda/state_reduction` group [conf/esmda/state_reduction/](../conf/esmda/state_reduction/), [docs/reduced_state_da.md](reduced_state_da.md) |
 | Neural-surrogate architectures (UPT etc.) | [architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/), [conf/neural_surrogate_architectures/](../conf/neural_surrogate_architectures/) |
 | uDALES instability / dt-collapse handling | [libs/pyudales/src/pyudales/utils/run_monitor.py](../libs/pyudales/src/pyudales/utils/run_monitor.py) (`instability_check`) |
 | DA metrics + diagnostic plots (RMSE/CRPS, sensor series) | [src/pyurbanair/plotting.py](../src/pyurbanair/plotting.py) (`compute_parameter_metrics`, `plot_parameter_error`, `compute_sensor_metrics`, `plot_sensor_timeseries`) |

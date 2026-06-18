@@ -5,3 +5,5 @@ _target_: data_assimilation.smoothing.esmda.StateAndParameterESMDA
 num_steps: ${esmda.num_steps}
 alpha: ${esmda.alpha}
 localization: ${esmda.localization}
+state_reduction: ${esmda.state_reduction}
+final_time_smoothing: ${esmda.final_time_smoothing}

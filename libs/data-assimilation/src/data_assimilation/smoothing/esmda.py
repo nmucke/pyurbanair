@@ -31,6 +31,7 @@ def _block_grouping_enabled(localization) -> bool:
     return localization is not None and getattr(localization, "block_grouping", False)
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import ObservationOperator
+from data_assimilation.reduction import OnlineStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
@@ -89,6 +90,7 @@ class _BaseESMDA(BaseSmoothing):
         localize_mask: Optional[jnp.ndarray] = None,
         row_coords: Optional[jnp.ndarray] = None,
         obs_coords: Optional[jnp.ndarray] = None,
+        alpha: Optional[float] = None,
     ) -> jnp.ndarray:
         """Compute the ESMDA Kalman update for an augmented state vector.
 
@@ -109,10 +111,14 @@ class _BaseESMDA(BaseSmoothing):
                 and ``obs_coords``: observation coordinates, shape (N_d, 3),
                 forwarded to a distance-based localized update. Ignored on the
                 global path and by coordinate-free strategies.
+            alpha: Optional override of the ESMDA inflation coefficient for
+                this single update (used by the un-tempered final trajectory
+                smoothing step). ``None`` -> ``self.alpha``.
 
         Returns:
             Updated augmented array of the same shape.
         """
+        alpha = self.alpha if alpha is None else alpha
         N_d = obs.shape[0]
 
         aug_mean = jnp.mean(augmented, axis=1, keepdims=True)
@@ -133,7 +139,7 @@ class _BaseESMDA(BaseSmoothing):
                 obs=obs,
                 C_D=self.C_D,
                 C_D_sqrt=self.C_D_sqrt,
-                alpha=self.alpha,
+                alpha=alpha,
                 rng_key=subkey,
                 group_ids=group_ids,
                 localize_mask=localize_mask,
@@ -146,10 +152,10 @@ class _BaseESMDA(BaseSmoothing):
 
         self.rng_key, subkey = jax.random.split(self.rng_key)
         Z = jax.random.normal(subkey, (N_d, N_e))
-        perturbed_obs = obs[:, None] + jnp.sqrt(self.alpha) * (self.C_D_sqrt @ Z)
+        perturbed_obs = obs[:, None] + jnp.sqrt(alpha) * (self.C_D_sqrt @ Z)
 
         innovation = perturbed_obs - pred_obs
-        C_DD_alpha = C_DD + self.alpha * self.C_D
+        C_DD_alpha = C_DD + alpha * self.C_D
 
         try:
             x = jnp.linalg.solve(C_DD_alpha, innovation)
@@ -191,6 +197,18 @@ class _BaseESMDA(BaseSmoothing):
                 f"{num_sensors}; cannot map observations to sensor coordinates."
             )
         return jnp.asarray(np.tile(sensor_xyz, (reps, 1)))  # (n_d, 3)
+
+    def _final_time_smoothing_step(
+        self,
+        state: Optional[xarray.Dataset],
+        observations: jnp.ndarray,
+    ) -> Optional[xarray.Dataset]:
+        """Optional post-loop smoothing of the full window trajectory.
+
+        No-op in the base class; overridden by the state-bearing variants when
+        ``final_time_smoothing`` is enabled.
+        """
+        return state
 
     @abstractmethod
     def _one_step(
@@ -280,6 +298,11 @@ class _BaseESMDA(BaseSmoothing):
         # Final forecast from the analyzed initial condition + updated params.
         self._set_step_results_dir(self.num_steps)
         state = self._forecast_step(state=initial_state, params=params)
+
+        # Optional post-loop trajectory smoothing (state-bearing variants with
+        # final_time_smoothing enabled; no-op otherwise). Reuses the final
+        # forecast — no extra forward solve — and never touches the params.
+        state = self._final_time_smoothing_step(state, observations)
 
         if return_state_history:
             state_history.append(state)
@@ -467,7 +490,47 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
 
 
 class StateAndParameterESMDA(_BaseESMDA):
-    """Joint state and parameter ESMDA smoothing."""
+    """Joint state and parameter ESMDA smoothing.
+
+    Optionally performs the state part of the Kalman update in a reduced
+    SVD/KL basis fitted ONLINE to the current forecast ensemble
+    (``state_reduction``, see :class:`~data_assimilation.reduction.\
+OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
+    post-loop Kalman smoothing of the full window trajectory
+    (``final_time_smoothing``). Both default to off, which reproduces the
+    full-space behavior exactly.
+    """
+
+    def __init__(
+        self,
+        *args,
+        state_reduction: Optional[OnlineStateReduction] = None,
+        final_time_smoothing: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        if state_reduction is not None and self.localization is not None:
+            raise ValueError(
+                "state_reduction is incompatible with (state) localization: "
+                "the reduced coefficients are nonlocal, so neither distance- "
+                "nor correlation-based state localization applies to them. "
+                "Set localization=null or disable the state reduction."
+            )
+        if final_time_smoothing and state_reduction is None:
+            raise ValueError(
+                "final_time_smoothing requires state_reduction: the joint "
+                "all-time-steps state update is only feasible in the reduced "
+                "SVD basis."
+            )
+        if final_time_smoothing and self.forward_model.save_on_disk:
+            raise ValueError(
+                "final_time_smoothing is not supported in on-disk save mode: "
+                "the analysis returns no state there, so the smoothed "
+                "trajectory would be discarded. Use an in-memory forward "
+                "model (results_dir=None)."
+            )
+        self.state_reduction = state_reduction
+        self.final_time_smoothing = final_time_smoothing
 
     def _get_states(
         self,
@@ -504,6 +567,68 @@ class StateAndParameterESMDA(_BaseESMDA):
             )
             flat_vars.append(flat_var.T)
         return jnp.concatenate(flat_vars, axis=0)
+
+    def _get_window_states(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        results_dir: Optional[pathlib.Path] = None,
+    ) -> xarray.Dataset:
+        """Get the full-window ensemble states (all time frames).
+
+        Used by the ``window_snapshots`` basis source; mirrors
+        :meth:`_get_states` without the ``time=0`` selection.
+        """
+        if state is not None:
+            return state
+        if results_dir is not None:
+            state_files = self._get_sorted_state_files(pathlib.Path(results_dir))
+            if not state_files:
+                raise FileNotFoundError(
+                    f"No state_*.nc files found in results directory: {results_dir}"
+                )
+            states = [xarray.open_dataset(f) for f in state_files]
+            return xarray.concat(states, dim="ensemble", join="override")
+        raise ValueError("Either state or results_dir must be provided.")
+
+    def _flatten_window_snapshots(self, state: xarray.Dataset) -> jnp.ndarray:
+        """Flatten every (member, time frame) into a snapshot column.
+
+        Returns an array of shape (degrees_of_freedom, N_e * N_t) whose row
+        ordering matches :meth:`_flatten_state` exactly (sorted variables,
+        spatial dims flattened in C-order), so a column is directly comparable
+        to a flattened ``time=0`` state vector. Time frames are thinned by the
+        reduction's ``snapshot_stride``.
+        """
+        state = state.isel(time=slice(None, None, self.state_reduction.snapshot_stride))
+        flat_vars = []
+        n_samples = state.sizes["ensemble"] * state.sizes["time"]
+        for var_name in sorted(state.data_vars):
+            variable = state[var_name]
+            flat_var = variable.transpose("ensemble", "time", ...).values.reshape(
+                n_samples, -1
+            )
+            flat_vars.append(flat_var.T)
+        return jnp.concatenate(flat_vars, axis=0)
+
+    def _basis_snapshots(
+        self,
+        state: Optional[xarray.Dataset],
+        results_dir: Optional[pathlib.Path],
+    ) -> Optional[jnp.ndarray]:
+        """Snapshot matrix for the online basis, or ``None`` for the IC source.
+
+        ``None`` makes :meth:`_augmented_state_update` fit the basis on the
+        flattened ``time=0`` ensemble itself (the ``initial_condition``
+        source); the ``window_snapshots`` source assembles every output frame
+        of every member.
+        """
+        if (
+            self.state_reduction is None
+            or self.state_reduction.basis_source != "window_snapshots"
+        ):
+            return None
+        window_states = self._get_window_states(state=state, results_dir=results_dir)
+        return self._flatten_window_snapshots(window_states)
 
     def _state_group_ids(self, state: xarray.Dataset) -> jnp.ndarray:
         """Block id per flattened state row, grouping co-located cells.
@@ -595,6 +720,7 @@ class StateAndParameterESMDA(_BaseESMDA):
         pred_obs: jnp.ndarray,
         obs: jnp.ndarray,
         N_e: int,
+        snapshots_flat: Optional[jnp.ndarray] = None,
     ) -> tuple[xarray.Dataset, xarray.Dataset]:
         """Build ``[state | params]``, apply the (state-only) Kalman update, split.
 
@@ -603,6 +729,12 @@ class StateAndParameterESMDA(_BaseESMDA):
         Localization — correlation- or distance-based — is applied to the STATE
         rows only; parameter rows always get the global update (``localize_mask``).
         Returns ``(updated_state, updated_flat_params)``.
+
+        With ``state_reduction`` set, the state rows are replaced by reduced
+        SVD/KL coefficients of a basis fitted online to ``snapshots_flat``
+        (``None`` -> the flattened ``time=0`` ensemble itself), and the Kalman
+        increment is decoded back onto each member's full state. Localization
+        is ``None`` on this path (enforced at construction).
         """
         param_names = list(flat_params.data_vars.keys())
         state_template = xarray.Dataset(
@@ -617,9 +749,34 @@ class StateAndParameterESMDA(_BaseESMDA):
         )
 
         states_flat = self._flatten_state(states_array)
-        N_s = states_flat.shape[0]
 
         params_array = jnp.array([flat_params[name].values for name in param_names])
+
+        # Reduced path: Kalman-update SVD/KL coefficients instead of the raw
+        # state rows, then decode the increment onto each member's full state
+        # (preserving the projection residual of the window_snapshots source).
+        if self.state_reduction is not None:
+            self.state_reduction.fit(
+                states_flat if snapshots_flat is None else snapshots_flat
+            )
+            xi = self.state_reduction.encode(states_flat)
+            N_s = xi.shape[0]
+            augmented = jnp.concatenate([xi, params_array], axis=0)
+            augmented = self._compute_kalman_update(augmented, pred_obs, obs, N_e)
+            states_updated_flat = states_flat + self.state_reduction.decode_increment(
+                augmented[:N_s, :] - xi
+            )
+            updated_states = self._unflatten_state(states_updated_flat, state_template)
+            updated_flat = xarray.Dataset(
+                {
+                    name: ("ensemble", augmented[N_s + i, :])
+                    for i, name in enumerate(param_names)
+                },
+                coords={"ensemble": flat_params.coords["ensemble"]},
+            )
+            return updated_states, updated_flat
+
+        N_s = states_flat.shape[0]
         augmented = jnp.concatenate([states_flat, params_array], axis=0)
 
         # State-only localization (no-op on the global path where localization is
@@ -688,12 +845,51 @@ class StateAndParameterESMDA(_BaseESMDA):
 
         # Static params are already scalar (ensemble,) vars: no flatten needed.
         updated_states, updated_flat = self._augmented_state_update(
-            states_array, params, pred_obs, obs, N_e
+            states_array,
+            params,
+            pred_obs,
+            obs,
+            N_e,
+            snapshots_flat=self._basis_snapshots(state, results_dir),
         )
         return updated_states, xarray.Dataset(
             data_vars={name: updated_flat[name] for name in updated_flat.data_vars},
             coords=params.coords,
         )
+
+    def _final_time_smoothing_step(
+        self,
+        state: Optional[xarray.Dataset],
+        observations: jnp.ndarray,
+    ) -> Optional[xarray.Dataset]:
+        """One un-tempered Kalman update of the FULL window trajectory.
+
+        Optional post-loop step (``final_time_smoothing=True``): the state at
+        every time step of the window is updated jointly in the reduced SVD
+        basis, reusing the final posterior forecast (no extra forward solve).
+        Parameters are not part of the augmented vector here — they are
+        frozen. ``alpha=1`` because the ESMDA ``sum(1/alpha_k) = 1`` schedule
+        already consumed the likelihood for the IC and parameters; this is a
+        single standard Kalman analysis of the trajectory. The result is the
+        smoothing estimate per frame, not a model integration.
+        """
+        if not self.final_time_smoothing or state is None:
+            return state
+
+        obs = jnp.asarray(observations)
+        pred_obs = jnp.asarray(self._observation_step(state=state)).T
+        N_e = state.sizes["ensemble"]
+
+        # _flatten_state/_unflatten_state are agnostic to the time dim: the
+        # full (time, space) trajectory of each member becomes one column.
+        traj_flat = self._flatten_state(state)
+        self.state_reduction.fit(traj_flat)
+        xi = self.state_reduction.encode(traj_flat)
+        xi_updated = self._compute_kalman_update(xi, pred_obs, obs, N_e, alpha=1.0)
+        traj_updated = traj_flat + self.state_reduction.decode_increment(
+            xi_updated - xi
+        )
+        return self._unflatten_state(traj_updated, state)
 
 
 class StateAndTimeVaryingParameterESMDA(
@@ -714,11 +910,13 @@ class StateAndTimeVaryingParameterESMDA(
     co-locates the state rows by cell and keeps parameters in separate blocks
     (moot, since they are masked to the global update).
 
-    The constructor is inherited from :class:`TimeVaryingParameterESMDA`
-    (``StateAndParameterESMDA`` defines no ``__init__``); its signature is
+    The constructor chains through the MRO: ``StateAndParameterESMDA.__init__``
+    consumes the state-specific keywords (``state_reduction``,
+    ``final_time_smoothing``) and forwards the rest to
+    :class:`TimeVaryingParameterESMDA`, so the effective signature is
     ``(observation_operator, forward_model, C_D, num_time_points,
     num_steps=3, alpha=None, rng_key=..., pin_initial_time_point=False,
-    localization=None)``.
+    localization=None, state_reduction=None, final_time_smoothing=False)``.
     """
 
     def _one_step(
@@ -745,7 +943,12 @@ class StateAndTimeVaryingParameterESMDA(
         N_e = flat_params.sizes["ensemble"]
 
         updated_states, updated_flat = self._augmented_state_update(
-            states_array, flat_params, pred_obs, obs, N_e
+            states_array,
+            flat_params,
+            pred_obs,
+            obs,
+            N_e,
+            snapshots_flat=self._basis_snapshots(state, results_dir),
         )
         updated_params = self._unflatten_params(updated_flat, params)
         return updated_states, updated_params

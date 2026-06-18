@@ -37,6 +37,7 @@ defaults:
   - config
   - esmda
   - esmda/localization: none
+  - esmda/state_reduction: none
   - esmda/smoother: dynamic
   - model@truth_model: pyudales
   - model@assim_model: pyudales

@@ -17,3 +17,5 @@ alpha: ${esmda.alpha}
 pin_initial_time_point: true
 localization: ${esmda.localization}
 num_time_points: ${params.time_coords.num}
+state_reduction: ${esmda.state_reduction}
+final_time_smoothing: ${esmda.final_time_smoothing}
