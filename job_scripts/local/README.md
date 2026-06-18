@@ -32,8 +32,15 @@ local/
 │   └── sweep_interval_rollout_esmda_from_truth.sh
 ├── pyudales/          # CPU backend (dev pixi env, multi-process)
 │   └── … same five files …
-└── pypalm/            # CPU backend (dev pixi env, multi-process, nested MPI)
-    └── … same five files …
+├── pypalm/            # CPU backend (dev pixi env, multi-process, nested MPI)
+│   └── … same five files …
+└── neural_surrogate/  # GPU backend (cuda pixi env): batched GPU rollout +
+    │                  #   pyudales CPU spin-up. FIXED grid 60x80x16 (trained),
+    │                  #   so NO domain sweep.
+    ├── rollout_esmda_from_truth.sh
+    ├── sweep_ensemble_rollout_esmda_from_truth.sh
+    ├── sweep_esmda_steps_rollout_esmda_from_truth.sh
+    └── sweep_interval_rollout_esmda_from_truth.sh
 ```
 
 ## Usage
@@ -159,6 +166,14 @@ failing point is reported but does not abort the rest.
 | `pylbm`   | `cuda`   | **GPU, single process** — `num_parallel=1` hard-pinned, ensemble run sequentially (one GPU) | `cuda=true`; private LBM build copy via `PYLBM_LBM_PATH` |
 | `pyudales`| `dev`    | CPU, `num_parallel` = min(ensemble, **`LOCAL_MAX_PARALLEL`** = 16 by default) | per-run `temp_dir`/`output_dir` |
 | `pypalm`  | `dev`    | CPU, `num_parallel` = min(ensemble, **`LOCAL_MAX_PARALLEL`** = 16 by default) | **nz floored at 16** (PALM minimum); nested per-member MPI: pinning off, OMPI oversubscribe; direct-run by default |
+| `neural_surrogate` | `cuda` | **Hybrid**: batched network rollout on the GPU + pyudales CPU spin-up fanned out across `num_parallel` = min(ensemble, **`LOCAL_MAX_PARALLEL`**) | **grid PINNED to the trained 60x80x16** (overrides any injected NX/NY/NZ); `MODEL_DIR` selects the weights (default `model_weights/unet_convnext_medium`); GPU required |
+
+The **`neural_surrogate`** backend runs the same experiment as the CFD backends
+with the trained surrogate as the assimilation model. Because the surrogate only
+runs at its trained resolution (60x80x16, the ground-truth grid), it has **no
+domain sweep** — only the ensemble / esmda-steps / interval sweeps apply (those
+already hold the grid fixed at 60x80x16). Pick the weights with
+`MODEL_DIR=model_weights/<name> bash …/neural_surrogate/rollout_esmda_from_truth.sh`.
 
 Execution model: no scheduler. Runs go **sequentially**, one after another, in
 the shell you launch. For the CPU backends (pyudales, pypalm) **you choose the

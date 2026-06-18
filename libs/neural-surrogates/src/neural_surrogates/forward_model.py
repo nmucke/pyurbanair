@@ -41,7 +41,7 @@ import xarray as xr
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
-from .geometry import nonzero_fluid_mask, stl_to_fluid_mask
+from .geometry import nonzero_fluid_mask, solid_c_fluid_mask, stl_to_fluid_mask
 
 logger = logging.getLogger(__name__)
 
@@ -413,12 +413,42 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
 
     # -- geometry ----------------------------------------------------------
 
+    def _spinup_solid_c_path(self) -> Optional[pathlib.Path]:
+        """Path to the spin-up backend's ``solid_c.txt``, if it wrote one.
+
+        uDALES spin-up writes the obstacle indicator the training data was
+        built from into its experiment dir; reading it back is the only way to
+        reproduce the trained geometry exactly (see :func:`solid_c_fluid_mask`).
+        Returns ``None`` for backends that don't (e.g. pylbm) or before the
+        spin-up has run.
+        """
+        dirs = getattr(self.spinup_forward_model, "dirs", None)
+        experiment_dir = getattr(dirs, "experiment_dir", None)
+        if experiment_dir is None:
+            return None
+        path = pathlib.Path(experiment_dir) / "solid_c.txt"
+        return path if path.exists() else None
+
     def _build_geometry(self, template: xr.Dataset) -> torch.Tensor:
-        """Build the binary geometry channel aligned to ``template``."""
+        """Build the binary geometry channel aligned to ``template``.
+
+        The mask must be IDENTICAL to the one the network trained on, so the
+        sources are tried in order of fidelity to the training pipeline:
+
+        1. The spin-up backend's ``solid_c.txt`` (uDALES) — exactly the file
+           ``generate_training_data.py`` built the training ``blanking`` from.
+        2. An explicit ``stl_path`` override, voxelised onto the grid.
+        3. The non-zero-state fallback — only correct for backends that write
+           exact zeros inside obstacles (pylbm), matching what
+           :class:`~neural_surrogates.data.TransitionDataset` falls back to.
+        """
         template_var = template[self.state_vars[0]]
         if "time" in template_var.dims:
             template_var = template_var.isel(time=-1)
-        if self.stl_path is not None:
+        solid_c_path = self._spinup_solid_c_path()
+        if solid_c_path is not None:
+            mask = solid_c_fluid_mask(solid_c_path, template_var)
+        elif self.stl_path is not None:
             mask = stl_to_fluid_mask(self.stl_path, template_var)
         else:
             single = template.isel(time=-1) if "time" in template.dims else template
@@ -594,14 +624,17 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                     for b in range(n_members):
                         member_frames[b][pos] = step_np[b]
 
-        # Prepend each member's initial state at t=0 so the output trajectory
-        # starts where the spin-up template ended (matching the training-data
-        # convention, which includes t=0 in every saved trajectory).
-        initial_np = initial.cpu().numpy()
+        # The forecast trajectory is the sequence of PREDICTED frames only (one
+        # per requested output step, at t = output_frequency, ..., simulation_time).
+        # The initial spin-up state at t=0 is deliberately NOT prepended: an
+        # assimilation window is half-open [0, simulation_time), so the trajectory
+        # must span the same frames as the CFD backends and the truth window.
+        # Prepending t=0 added a leading frame that stretched the span by one
+        # observation interval, making the interval-binned prediction vector one
+        # bin longer than the truth's and breaking the ESMDA Kalman update.
         outputs: list[xr.Dataset] = []
         for b in range(n_members):
-            frames = [initial_np[b], *member_frames[b]]
-            outputs.append(self._assemble_output(templates[b], frames))
+            outputs.append(self._assemble_output(templates[b], member_frames[b]))
         return outputs
 
     # -- (de)serialisation between xarray and torch ------------------------
@@ -630,10 +663,10 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 snapshot[var] = (base[var].dims, frame[c])
             per_time.append(snapshot)
         out = xr.concat(per_time, dim="time", join="override")
-        # Frame 0 is the initial state at t=0 (the spin-up template), and
-        # frame j (j>=1) is the prediction after j requested-output steps,
-        # i.e. at t = j * output_frequency.
-        times = np.arange(len(per_time)) * self.output_frequency
+        # The trajectory holds only predicted frames (no t=0 initial state):
+        # frame j is the prediction after (j + 1) requested-output steps, i.e. at
+        # t = (j + 1) * output_frequency, spanning (0, simulation_time].
+        times = (np.arange(len(per_time)) + 1) * self.output_frequency
         return out.assign_coords(time=times)
 
     def disable_spinup(self) -> None:

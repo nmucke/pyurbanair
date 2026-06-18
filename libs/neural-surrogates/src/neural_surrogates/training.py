@@ -49,7 +49,19 @@ class Trainer:
         # must go through the unwrapped module (parameters are shared).
         self._eager_model = self.model
         if compile_model:
-            self.model = torch.compile(self.model)
+            # Inductor's CUDA backend generates triton kernels; without a
+            # working triton, compilation raises mid-epoch. Fall back to
+            # eager instead of crashing the run.
+            from torch.utils._triton import has_triton
+
+            if self.device.type == "cuda" and not has_triton():
+                print(
+                    "compile_model=true but no working triton installation for "
+                    "CUDA inductor; running eager. Install triton in this env "
+                    "to enable torch.compile."
+                )
+            else:
+                self.model = torch.compile(self.model)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.optimizer = optimizer

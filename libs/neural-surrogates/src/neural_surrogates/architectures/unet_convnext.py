@@ -23,6 +23,17 @@ import torch.nn.functional as F
 from torch import nn
 
 
+def _circular_spec(
+    pads: tuple[int, int, int],
+) -> tuple[int, int, int, int, int, int] | None:
+    """``F.pad`` spec (last dim first) circularly padding the given (z, y, x)
+    amounts, or ``None`` when nothing needs wrapping."""
+    pz, py, px = pads
+    if not (pz or py or px):
+        return None
+    return (px, px, py, py, pz, pz)
+
+
 class _ConvNeXtBlock3d(nn.Module):
     def __init__(
         self,
@@ -33,6 +44,7 @@ class _ConvNeXtBlock3d(nn.Module):
         separable_dwconv: bool = False,
         conditioning: str = "bias",
         norm_groups: int = 1,
+        periodic: tuple[bool, bool, bool] = (False, False, False),
     ) -> None:
         super().__init__()
         if separable_dwconv:
@@ -41,38 +53,37 @@ class _ConvNeXtBlock3d(nn.Module):
             # receptive field; for k=7 this is ~16x fewer MACs in the
             # depthwise step, which dominates block cost at low channel
             # counts in 3D.
-            pad = kernel_size // 2
-            self.dwconv = nn.Sequential(
-                nn.Conv3d(
-                    channels,
-                    channels,
-                    kernel_size=(kernel_size, 1, 1),
-                    padding=(pad, 0, 0),
-                    groups=channels,
-                ),
-                nn.Conv3d(
-                    channels,
-                    channels,
-                    kernel_size=(1, kernel_size, 1),
-                    padding=(0, pad, 0),
-                    groups=channels,
-                ),
-                nn.Conv3d(
-                    channels,
-                    channels,
-                    kernel_size=(1, 1, kernel_size),
-                    padding=(0, 0, pad),
-                    groups=channels,
-                ),
+            kernels = (
+                (kernel_size, 1, 1),
+                (1, kernel_size, 1),
+                (1, 1, kernel_size),
             )
         else:
-            self.dwconv = nn.Conv3d(
-                channels,
-                channels,
-                kernel_size=kernel_size,
-                padding=kernel_size // 2,
-                groups=channels,
+            kernels = ((kernel_size,) * 3,)
+        # Periodic axes are wrapped with circular F.pad in the forward pass;
+        # the convs themselves only zero-pad the non-periodic axes. Module
+        # structure (and hence state-dict keys) is identical either way.
+        convs = []
+        self._dw_circ_specs: list[tuple[int, ...] | None] = []
+        for k3 in kernels:
+            pads = tuple(k // 2 for k in k3)
+            convs.append(
+                nn.Conv3d(
+                    channels,
+                    channels,
+                    kernel_size=k3,
+                    padding=tuple(
+                        0 if per else p for p, per in zip(pads, periodic)
+                    ),
+                    groups=channels,
+                )
             )
+            self._dw_circ_specs.append(
+                _circular_spec(
+                    tuple(p if per else 0 for p, per in zip(pads, periodic))
+                )
+            )
+        self.dwconv = convs[0] if len(convs) == 1 else nn.Sequential(*convs)
         self.norm = nn.GroupNorm(norm_groups, channels)
         hidden = channels * expansion
         self.pwconv1 = nn.Conv3d(channels, hidden, kernel_size=1)
@@ -95,9 +106,21 @@ class _ConvNeXtBlock3d(nn.Module):
                     f"conditioning must be 'bias' or 'film', got {conditioning!r}"
                 )
 
+    def _dwconv_forward(self, x: torch.Tensor) -> torch.Tensor:
+        convs = (
+            self.dwconv
+            if isinstance(self.dwconv, nn.Sequential)
+            else (self.dwconv,)
+        )
+        for conv, spec in zip(convs, self._dw_circ_specs):
+            if spec is not None:
+                x = F.pad(x, spec, mode="circular")
+            x = conv(x)
+        return x
+
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         residual = x
-        x = self.dwconv(x)
+        x = self._dwconv_forward(x)
         x = self.norm(x)
         spatial = (1,) * (x.dim() - 2)
         if self.film is not None:
@@ -125,6 +148,7 @@ class _Stage(nn.Module):
         separable_dwconv: bool = False,
         conditioning: str = "bias",
         norm_groups: int = 1,
+        periodic: tuple[bool, bool, bool] = (False, False, False),
     ) -> None:
         super().__init__()
         self.blocks = nn.ModuleList(
@@ -137,6 +161,7 @@ class _Stage(nn.Module):
                     separable_dwconv,
                     conditioning,
                     norm_groups,
+                    periodic,
                 )
                 for _ in range(depth)
             ]
@@ -194,6 +219,14 @@ class UNetConvNeXt(nn.Module):
     residual:
         Predict the state increment rather than the next state; the
         identity rollout becomes the zero-output solution.
+    periodic_axes:
+        Spatial axes (subset of ``"z", "y", "x"``; tensor layout is
+        ``(B, C, z, y, x)``) with periodic boundaries. Spatial convs wrap
+        circularly along these axes instead of zero-padding, i.e. the
+        last cell's neighbour is the first cell (no equality between
+        boundary values is imposed). Weight-compatible with models
+        trained without it (only padding semantics change). Sizes along
+        periodic axes must be divisible by ``2^(len(channel_mults)-1)``.
     """
 
     def __init__(
@@ -211,6 +244,7 @@ class UNetConvNeXt(nn.Module):
         norm_groups: int = 1,
         normalize: bool = False,
         residual: bool = False,
+        periodic_axes: Sequence[str] = (),
     ) -> None:
         super().__init__()
         if len(channel_mults) != len(depths):
@@ -225,6 +259,13 @@ class UNetConvNeXt(nn.Module):
         self.n_params = n_params
         self.normalize = normalize
         self.residual = residual
+        axes = tuple(periodic_axes or ())
+        unknown = set(axes) - {"z", "y", "x"}
+        if unknown:
+            raise ValueError(
+                f"periodic_axes entries must be in ('z', 'y', 'x'), got {sorted(unknown)}"
+            )
+        self._periodic = tuple(a in axes for a in ("z", "y", "x"))
         channels = [base_channels * m for m in channel_mults]
         self.n_levels = len(channels) - 1
 
@@ -245,7 +286,13 @@ class UNetConvNeXt(nn.Module):
             cond_dim = param_embed_dim
 
         self.stem = nn.Conv3d(
-            n_state_channels + 1, channels[0], kernel_size=3, padding=1
+            n_state_channels + 1,
+            channels[0],
+            kernel_size=3,
+            padding=tuple(0 if per else 1 for per in self._periodic),
+        )
+        self._stem_circ_spec = _circular_spec(
+            tuple(1 if per else 0 for per in self._periodic)
         )
 
         self.encoder_stages = nn.ModuleList()
@@ -256,6 +303,7 @@ class UNetConvNeXt(nn.Module):
             separable_dwconv=separable_dwconv,
             conditioning=conditioning,
             norm_groups=norm_groups,
+            periodic=self._periodic,
         )
         for i in range(self.n_levels):
             self.encoder_stages.append(
@@ -332,6 +380,17 @@ class UNetConvNeXt(nn.Module):
         pad_d = (multiple - d % multiple) % multiple
         pad_h = (multiple - h % multiple) % multiple
         pad_w = (multiple - w % multiple) % multiple
+        # Zero-padding a periodic axis would break the wrap (the strided
+        # down/upsamples would see a corrupted period), so periodic sizes
+        # must already be divisible.
+        for name, size, pad, per in zip(
+            ("z", "y", "x"), (d, h, w), (pad_d, pad_h, pad_w), self._periodic
+        ):
+            if per and pad:
+                raise ValueError(
+                    f"size along periodic axis '{name}' ({size}) must be "
+                    f"divisible by 2^n_levels = {multiple}"
+                )
         if pad_d or pad_h or pad_w:
             x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
         return x, (pad_d, pad_h, pad_w)
@@ -365,6 +424,8 @@ class UNetConvNeXt(nn.Module):
         orig_spatial = x.shape[-3:]
         x, _ = self._pad_to_multiple(x, 2**self.n_levels)
 
+        if self._stem_circ_spec is not None:
+            x = F.pad(x, self._stem_circ_spec, mode="circular")
         x = self.stem(x)
 
         skips = []

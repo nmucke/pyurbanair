@@ -38,6 +38,9 @@ python = {version="~=3.12.10", channel="conda-forge"}
 # Pixi dependencies
 [tool.pixi.dependencies]
 python = ">=3.12"
+# torch 2.12 requires setuptools <82 at runtime; the conda setuptools maps
+# onto the pypi one during the solve, so bound it here.
+setuptools = "<82"
 pdbpp = ">=0.11.7,<0.12"
 xarray = ">=2025.12.0,<2026"
 netcdf4 = ">=1.7.3,<2"
@@ -97,9 +100,11 @@ pypalm = { path = "libs/pypalm", editable = true }
 [tool.pixi.feature.data-assimilation.pypi-dependencies]
 data-assimilation = { path = "libs/data-assimilation", editable = true }
 
-[tool.pixi.feature.neural-surrogates.dependencies]
-pytorch = ">=2.4,<3"
-
+# torch comes from PyPI, not conda-forge: conda pytorch >=2.6 hard-depends
+# on conda triton, whose nvcc toolchain caps gcc <13 and conflicts with the
+# gcc 15.2 the CFD features pin. The generic requirement lives in the
+# neural-surrogates package itself (torch>=2.4,<3); the cpu/cuda features
+# pin the wheel variant (+cpu / +cu126) per environment.
 [tool.pixi.feature.neural-surrogates.pypi-dependencies]
 neural-surrogates = { path = "libs/neural-surrogates", editable = true }
 # UPT architecture deps (pure-torch/python, PyPI-only). kappamodules is not on
@@ -200,12 +205,10 @@ cuda = "12.6"
 # https://developer.nvidia.com/cuda-downloads
 curl = ">=8.0.0,<9"
 
-# Force the CUDA build of pytorch. The neural-surrogates feature only pins
-# `pytorch >=2.4,<3` with no build-string, so conda-forge's solver picks the
-# `cpu_mkl_*` variant by default and torch.cuda.is_available() returns False.
-# `build = "cuda*"` selects any `cuda{NNN}_mkl_*` variant; `cuda-version` is
-# bounded to the host driver's max (560.x = CUDA 12.6).
-pytorch = { version = ">=2.4,<3", build = "cuda*" }
+# `cuda-version` is bounded to the host driver's max (560.x = CUDA 12.6).
+# torch itself comes from PyPI (see pypi-dependencies below), not conda-forge:
+# the conda cuda126 builds stop at 2.7.1 and depend on conda triton, which is
+# uninstallable next to the gcc 15.2 the CFD features pin.
 cuda-version = ">=12.0,<12.7"
 
 # GPU JAX for the assimilation stack. The base `jax` resolves to a CPU jaxlib;
@@ -215,6 +218,11 @@ cuda-version = ">=12.0,<12.7"
 # "plugin ... not compatible" / "cuDNN not found" failure we hit from ~/.local.
 [tool.pixi.feature.cuda.pypi-dependencies]
 jax = { version = "==0.7.2", extras = ["cuda12"] }
+# The `+cu126` variant (bundled CUDA 12.6 libs) is the newest torch that runs
+# on the host's 560.x driver; the default PyPI wheel is CUDA 13 and needs a
+# >=580 driver. Lives only on the pytorch wheel index. torch's own deps pull
+# in the matching triton for torch.compile.
+torch = { version = "==2.12.0+cu126", index = "https://download.pytorch.org/whl/cu126" }
 
 [tool.pixi.feature.cuda.activation]
 scripts = ["activation_scripts/cuda_activation.sh"]
@@ -238,6 +246,12 @@ install-nvhpc = { cmd = "bash activation_scripts/install_nvhpc.sh", description 
 [tool.pixi.feature.cpu.activation.env]
 PYTHONNOUSERSITE = "1"
 JAX_PLATFORMS = "cpu"
+
+# Keep CPU-only Linux envs light: the default PyPI torch wheel bundles ~3 GB
+# of CUDA 13 libraries; the `+cpu` variant skips them. (macOS wheels have no
+# CUDA baggage, so no pin is needed there.)
+[tool.pixi.feature.cpu.target.linux-64.pypi-dependencies]
+torch = { version = "==2.12.0+cpu", index = "https://download.pytorch.org/whl/cpu" }
 
 
 [tool.pixi.environments]

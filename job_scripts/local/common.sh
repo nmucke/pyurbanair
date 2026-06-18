@@ -9,9 +9,10 @@
 # the runs stay directly comparable (same ground truth, domain, windows, time
 # horizon and dynamic-parameter settings -- only the assimilation solver
 # differs). Backend-specific knobs (pixi env, GPU vs CPU, parallelism policy,
-# solver flags) live in each runner; the SWEEP parameters (grid resolution
-# NX/NY/NZ, ENSEMBLE_SIZE, NUM_ESMDA_STEPS, INTERVAL_SECONDS) also live in the
-# runners so the sweep launchers can inject one value per job.
+# solver flags) live in each runner; the grid resolution NX/NY/NZ and the ESMDA
+# step count NUM_ESMDA_STEPS also live in the runners. ENSEMBLE_SIZE and
+# INTERVAL_SECONDS default HERE (so a direct run matches the sweep baseline); the
+# sweep launchers still inject one value per job via the environment.
 #
 # Every value is env-overridable: `export VAR=...` before invoking a runner or
 # sweep launcher changes it for that run. To retune the whole local suite at
@@ -62,11 +63,19 @@ SIMULATION_TIME="${SIMULATION_TIME:-180.0}"   # per-window length [s]
 OUTPUT_FREQUENCY="${OUTPUT_FREQUENCY:-2.0}"    # state snapshot interval [s]
 SPINUP_TIME="${SPINUP_TIME:-50.0}"             # constant-inflow plateau before each window [s]
 
+# --- Per-run sizing defaults ------------------------------------------------
+# Default ensemble size and observation interval for a single direct run. These
+# match the sweep baseline (FIXED_ENSEMBLE_SIZE / FIXED_INTERVAL_SECONDS in
+# sweep_base.sh), so a one-off run reproduces a sweep's fixed point. The ensemble
+# and interval sweep launchers still override these per job via the environment.
+ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-64}"
+INTERVAL_SECONDS="${INTERVAL_SECONDS:-10.0}"   # obs.interval_seconds: time-aggregation bin width [s]
+
 # --- Dynamic (time-varying) parameter settings ------------------------------
 # The smoother and parameter groups that make the inflow parameters time-varying,
 # plus the number of knots per window (NUM_TIME_POINTS sets both the prior and the
 # truth parameterisation). Forwarded verbatim into the run via DYNAMIC_PARAM_FLAGS.
-NUM_TIME_POINTS="${NUM_TIME_POINTS:-10}"
+NUM_TIME_POINTS="${NUM_TIME_POINTS:-6}"
 DYNAMIC_PARAM_FLAGS=(
   "esmda/smoother=dynamic"
   "params@truth_params=dynamic_truth"
