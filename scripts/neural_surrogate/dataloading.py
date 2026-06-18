@@ -4,18 +4,20 @@ Builds a `TransitionDataset` over the configured training-data split,
 wraps it in a `DataLoader`, and prints the shape of the first few batches
 so we can sanity-check the pair layout.
 
+A plain argparse CLI (not Hydra) — it is a dev smoke test, not part of the
+neural-surrogate config tree.
+
 Usage:
 
-    pixi run -e dev python scripts/dataloading.py
-    pixi run -e dev python scripts/dataloading.py data_dir=training_data/pylbm_small
+    pixi run -e dev python scripts/neural_surrogate/dataloading.py
+    pixi run -e dev python scripts/neural_surrogate/dataloading.py --data-dir training_data/pylbm_small
 """
 
+import argparse
 from pathlib import Path
 
-import hydra
 import matplotlib.pyplot as plt
 import torch
-from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
 from neural_surrogates import TransitionDataset
@@ -84,7 +86,7 @@ def _plot_batch(
     plt.close(fig)
 
 
-def run(cfg: DictConfig) -> None:
+def run(cfg: argparse.Namespace) -> None:
     dtype = getattr(torch, cfg.dtype)
     param_vars = list(cfg.param_vars) if cfg.param_vars else None
 
@@ -133,13 +135,20 @@ def run(cfg: DictConfig) -> None:
     print(f"\nplots written to {out_dir}/")
 
 
-@hydra.main(
-    version_base=None,
-    config_path="../conf/neural_surrogate_training",
-    config_name="default",
-)
-def main(cfg: DictConfig) -> None:
-    run(cfg)
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--data-dir", dest="data_dir", default="training_data/pyudales_medium")
+    p.add_argument("--split", default="train")
+    p.add_argument("--batch-size", dest="batch_size", type=int, default=8)
+    p.add_argument("--no-shuffle", dest="shuffle", action="store_false")
+    p.add_argument("--num-workers", dest="num_workers", type=int, default=0)
+    p.add_argument("--state-vars", dest="state_vars", nargs="+", default=["u", "v", "w"])
+    p.add_argument("--param-vars", dest="param_vars", nargs="+", default=None)
+    p.add_argument("--cache", action="store_true")
+    p.add_argument("--dtype", default="float32")
+    p.add_argument("--pushforward-steps", dest="pushforward_steps", type=int, default=10)
+    p.add_argument("--plot-dir", dest="plot_dir", default=".temp/dataloading")
+    run(p.parse_args())
 
 
 if __name__ == "__main__":

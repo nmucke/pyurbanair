@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - /neural_surrogate_architectures/unet_convnext@architecture: medium
+  - /neural_surrogate/architectures/unet_convnext@architecture: medium
   - _self_
 
 model_name: unet_convnext_medium

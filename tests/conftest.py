@@ -49,7 +49,7 @@ def compose_test_cfg():
 def surrogate_model_dir_factory():
     """Build a minimal trained-surrogate folder (config.yaml + weights.pt).
 
-    Mirrors what ``scripts/train_neural_surrogate.py`` writes: a model
+    Mirrors what ``scripts/neural_surrogate/train_neural_surrogate.py`` writes: a model
     ``config.yaml`` holding the architecture and dataset (state_vars /
     param_vars / root_dir), a sibling ``weights.pt`` matching that
     architecture, and a training-data ``config.yaml`` (under ``root_dir``)

@@ -245,8 +245,8 @@ def run(cfg: DictConfig) -> None:
 
 @hydra.main(
     version_base=None,
-    config_path="../conf",
-    config_name="neural_surrogate_testing/test",
+    config_path="../../conf",
+    config_name="neural_surrogate/testing",
 )
 def main(cfg: DictConfig) -> None:
     run(cfg)

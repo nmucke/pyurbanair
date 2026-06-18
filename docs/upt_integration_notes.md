@@ -429,7 +429,7 @@ path. For all current call sites the shared-geometry fast path applies.
 
 ## E. Preset hyperparameters (Hydra configs)
 
-Create `conf/neural_surrogate_architectures/upt/{tiny,small,medium,large,xlarge}.yaml`
+Create `conf/neural_surrogate/architectures/upt/{tiny,small,medium,large,xlarge}.yaml`
 mirroring the `unet_convnext/` preset pattern. Each sets `_target_:
 neural_surrogates.UPT` and overrides only the sizing fields (`n_state_channels` /
 `n_params` are injected by `instantiate`). Suggested values:

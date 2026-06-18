@@ -1,6 +1,6 @@
 # Training-data generation for the neural-surrogate library
 
-This describes how `scripts/generate_training_data.py` produces the
+This describes how `scripts/neural_surrogate/generate_training_data.py` produces the
 `(state, parameter)` datasets that downstream surrogate models are
 trained on. It complements the broader [codebase_guide.md](codebase_guide.md);
 read that first if you need orientation on the forward-model / ensemble
@@ -40,33 +40,35 @@ value per saved state time step).
 
 ## 2. Config layout
 
-Five preset sizes live in [conf/training_data/](../conf/training_data/):
-`tiny`, `small`, `medium`, `large`, `xlarge`. Each is a Hydra
-`# @package _global_` overlay so it can override the top-level `/model`,
-`/domain`, and `/time` selections from a single file. Pick a size with
-`training_data=<name>` on the CLI:
+A single config drives data generation:
+[conf/neural_surrogate/training_data.yaml](../conf/neural_surrogate/training_data.yaml)
+(the entry point — `config_name="neural_surrogate/training_data"`). It bases off
+the forward-model entry point, so the **physical setup — domain (grid + bounds),
+geometry/STL and the per-window time horizon — comes from the selected `case`**
+(default `xie_and_castro`; switch with `case=barcelona`). The file itself only
+adds the dataset shape + the parameter sampler:
 
 ```bash
-python scripts/generate_training_data.py training_data=small
+python scripts/neural_surrogate/generate_training_data.py             # default case + model
+python scripts/neural_surrogate/generate_training_data.py model=pylbm case=barcelona
 ```
 
-Each preset declares:
+It declares (under the top-level `training_data:` block):
 
 | Field | Purpose |
 |---|---|
 | `num_train`, `num_val`, `num_test` | per-split sample counts |
-| `output_dir` | resolves to `training_data/${model.name}_<size>/` |
-| `simulation_time` / `output_frequency` / `spinup_time` | forward-model horizon, output cadence, spin-up before time-varying inflow kicks in |
-| `num_time_points` | control points on the sampler's time grid (the forward model interpolates between these internally; the script also interpolates them onto the state time grid for the saved `param/*` files) |
+| `output_dir` | resolves to `training_data/${model.name}_medium/` |
+| `simulation_time` / `output_frequency` / `spinup_time` | generation horizon, output cadence, spin-up — interpolated from the case's `${time.*}` |
 | `seed` | RNG seed driving every random draw |
 | `num_parallel_processes` | ensemble parallelism — see §5 |
-| `params_sampler` | Hydra `_target_` block; see §3 |
+| `params_sampler` | Hydra `_target_` block (incl. `num_time_points`, the control points on the sampler's time grid); see §3 |
 
 CLI overrides apply to any field, e.g.:
 
 ```bash
-python scripts/generate_training_data.py training_data=tiny \
-  model=pylbm +scale=small \
+python scripts/neural_surrogate/generate_training_data.py \
+  model=pylbm \
   training_data.num_train=8 \
   training_data.params_sampler.time_series.correlation_length=30
 ```
@@ -117,7 +119,7 @@ call yields every member's trajectory in one shot.
 
 ## 4. End-to-end script flow
 
-[scripts/generate_training_data.py](../scripts/generate_training_data.py)
+[scripts/neural_surrogate/generate_training_data.py](../scripts/neural_surrogate/generate_training_data.py)
 runs:
 
 1. **Resolve `output_dir`** (`training_data/<model>_<size>/`), persist
@@ -210,15 +212,17 @@ Implement a class exposing the
 `(time, ensemble)` arrays for every parameter; non-time-varying vars
 (e.g. pyudales `pressure_gradient_magnitude`, shape `(ensemble,)`) are
 passed through unchanged by the interpolation step. Register it under
-`src/pyurbanair/training_data/` and point a new `conf/training_data/<name>.yaml`
-at it via a `_target_` block.
+`src/pyurbanair/training_data/` and point `training_data.params_sampler._target_`
+in [conf/neural_surrogate/training_data.yaml](../conf/neural_surrogate/training_data.yaml)
+at it.
 
-## 8. Adding a new size
+## 8. Changing the dataset size
 
-Mirror an existing preset under [conf/training_data/](../conf/training_data/).
-Pick matching `/domain` and `/time` overrides from the existing groups,
-and scale `num_*` and `num_parallel_processes` to the host. The
-`output_dir` pattern `training_data/${model.name}_<size>/` automatically
+There is a single data-generation config now (no size group). Edit the
+`training_data.*` fields in
+[conf/neural_surrogate/training_data.yaml](../conf/neural_surrogate/training_data.yaml)
+(or override them on the CLI), and switch the grid/horizon by selecting a
+different `case=`. The `output_dir` pattern `training_data/${model.name}_medium/`
 keeps backend-specific datasets in separate trees.
 
 ## 9. Consuming the training data — `neural_surrogates`
@@ -275,25 +279,9 @@ State file handles are kept in a per-process `_state_cache` dict; a
 worker rebuilds its own handles (avoids sharing netCDF descriptors across
 processes).
 
-### Config group and smoke script
+### Smoke script
 
-The data-loading config lives in
-[conf/neural_surrogate_training/default.yaml](../conf/neural_surrogate_training/default.yaml):
-
-```yaml
-data_dir: training_data/pylbm_tiny
-split: train
-batch_size: 8
-shuffle: true
-num_workers: 0
-state_vars: [u, v, w]
-param_vars: null      # null = use every var found in the param file
-cache: false
-dtype: float32
-plot_dir: .temp/dataloading
-```
-
-[scripts/dataloading.py](../scripts/dataloading.py) is the smoke test for
+[scripts/neural_surrogate/dataloading.py](../scripts/neural_surrogate/dataloading.py) is the smoke test for
 this stack. It builds a `TransitionDataset`, wraps it in a `DataLoader`,
 prints the shape of the first few batches, and writes three diagnostic
 plots into `plot_dir`:
@@ -305,10 +293,10 @@ plots into `plot_dir`:
 - `geometry.png` — one subplot per vertical (z) level, white = fluid,
   black = obstacle.
 
-Run it (any field is overridable on the CLI):
+It is a plain argparse CLI (not Hydra); every field has a flag:
 
 ```bash
-pixi run -e dev python scripts/dataloading.py
-pixi run -e dev python scripts/dataloading.py \
-  data_dir=training_data/pylbm_small cache=true batch_size=16
+pixi run -e dev python scripts/neural_surrogate/dataloading.py
+pixi run -e dev python scripts/neural_surrogate/dataloading.py \
+  --data-dir training_data/pylbm_medium --cache --batch-size 16
 ```

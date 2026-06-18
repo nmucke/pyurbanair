@@ -31,9 +31,12 @@ pulling them from separate files:
 | `scripts/run_forward_model.py` | [`run_forward_model.yaml`](run_forward_model.yaml) | `case` + `params` + `model@model` + the inlined base |
 | `scripts/run_esmda.py` | [`run_esmda.yaml`](run_esmda.yaml) | the inlined base + inlined `esmda:` scalars + the esmda axes; doubles the model mount (`@truth_model` / `@assim_model`) and the params mount (`@truth_params` / `@prior_params`) so truth and prior never share a generative process (anti-inverse-crime) |
 
-(`scripts/generate_training_data.py` uses `generate_training_data.yaml`, which
-currently bases off `run_forward_model` + `training_data=<size>`; the
-training-data / neural-surrogate configs are slated for their own pass.)
+(`scripts/neural_surrogate/generate_training_data.py` uses
+[`neural_surrogate/training_data.yaml`](neural_surrogate/training_data.yaml), and
+the surrogate train/test scripts use
+[`neural_surrogate/training.yaml`](neural_surrogate/training.yaml) /
+[`neural_surrogate/testing.yaml`](neural_surrogate/testing.yaml). All three base
+off the run entry points / `case` for their physical setup.)
 
 ## Groups (selected from the entry points)
 

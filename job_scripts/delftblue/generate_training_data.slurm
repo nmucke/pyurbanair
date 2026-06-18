@@ -9,12 +9,12 @@
 #
 #     sbatch job_scripts/delftblue/generate_training_data.slurm training_data.seed=1
 #
-# It drives scripts/generate_training_data.py with `training_data=${SIZE}`. That
-# overlay samples inflow params (inflow_angle / velocity_magnitude) from the
-# UniformExternalAR2 prior, runs ALL train+val+test members in ONE parallel
-# ensemble (one pyudales solve per member, ncpu=1), then partitions the
-# per-member NetCDFs into state/{split}/ + param/{split}/ under ${OUTPUT_DIR},
-# plus per-split figures/animations. The size overlays force model=pyudales.
+# It drives scripts/neural_surrogate/generate_training_data.py (single config
+# conf/neural_surrogate/training_data.yaml). It samples inflow params
+# (inflow_angle / velocity_magnitude) from the UniformExternalAR2 prior, runs ALL
+# train+val+test members in ONE parallel ensemble (one pyudales solve per member,
+# ncpu=1), then partitions the per-member NetCDFs into state/{split}/ +
+# param/{split}/ under ${OUTPUT_DIR}, plus per-split figures/animations.
 #
 # Memory: the ensemble writes one NetCDF per member to a staging dir and the
 # partition step re-opens them one at a time, so peak RAM is ~num_parallel
@@ -38,8 +38,9 @@ set -euo pipefail
 # ============================================================================
 # CONFIG — edit these for your training-data run.
 # ============================================================================
-# Dataset size overlay (conf/training_data/<SIZE>.yaml): tiny|small|medium|large|xlarge.
-# Each sets num_train/val/test, the grid, and the sampling ranges; all force pyudales.
+# Label used only for the output-dir name (the dataset shape now lives in the
+# single conf/neural_surrogate/training_data.yaml; override its fields with extra
+# `training_data.*` hydra args on the sbatch line).
 SIZE="medium"
 
 # Number of ensemble members run concurrently (one pyudales solve per worker at
@@ -97,8 +98,7 @@ export PYTHONUNBUFFERED=1
 # fielddump outputs redirected under this job's private /scratch dir (the
 # ensemble nests per-member subdirs beneath it).
 pixi run -e "${ENV}" -- python -u \
-    scripts/generate_training_data.py \
-    "training_data=${SIZE}" \
+    scripts/neural_surrogate/generate_training_data.py \
     "training_data.num_parallel_processes=${NUM_PARALLEL}" \
     "training_data.output_dir=${OUTPUT_DIR}" \
     "hydra.run.dir=${OUTPUT_DIR}/hydra" \

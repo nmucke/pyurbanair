@@ -49,14 +49,14 @@ conf/                              # Hydra config (see §5 Configuration system)
   README.md                        # Config overview (axes + recipes)
   run_forward_model.yaml           # Entry point for run_forward_model.py (self-contained base inlined)
   run_esmda.yaml                   # Entry point for run_esmda.py (inlined base + esmda: + smoother/double-mount)
-  generate_training_data.yaml      # Entry point for generate_training_data.py (bases off run_forward_model)
   case/                            # Experiment bundle: domain+grid+obs+geometry+time, one self-
                                    #   contained file per case (xie_and_castro, barcelona). `case=...`.
   params/                          # Parameter samplers: static, dynamic, static_truth,
                                    #   dynamic_truth (mounted twice: truth + prior)
   esmda/smoother/                  # ESMDA variant group: static, dynamic, state_and_parameter
   model/                           # forward + ensemble backend (mounted under model@<pkg>)
-  training_data/, neural_surrogate_*/   # remaining overlays/groups
+  neural_surrogate/                # surrogate: training.yaml, testing.yaml, training_data.yaml
+                                   #   (entry point for generate_training_data.py), architectures/
 
 libs/data-assimilation/src/data_assimilation/
   observation_operator.py          # ObservationOperator + TemporalObservationOperator
@@ -209,8 +209,8 @@ Run-time configuration is a [Hydra](https://hydra.cc/) tree rooted at
 each is **self-contained**:
 [`conf/run_forward_model.yaml`](../conf/run_forward_model.yaml) (forward-model
 runs) and [`conf/run_esmda.yaml`](../conf/run_esmda.yaml) (all ESMDA runs); a
-third, [`conf/generate_training_data.yaml`](../conf/generate_training_data.yaml),
-drives surrogate data generation (currently bases off `run_forward_model`).
+third, [`conf/neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml),
+drives surrogate data generation (bases off `run_forward_model`).
 
 Rather than pull shared `# @package`-mounted files, each entry point **inlines**
 the base directly in its body — there is no `config.yaml`/`paths.yaml`/
@@ -653,7 +653,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   [libs/neural-surrogates/.../architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/):
   `SimpleConv` (baseline), `UNetConvNeXt`, and **`UPT`** (Universal Physics
   Transformer — encoder/approximator/decoder over supernodes + latent tokens).
-  Presets are config groups: `neural_surrogate_architectures/{unet_convnext,upt}/<size>`
+  Presets are config groups: `neural_surrogate/architectures/{unet_convnext,upt}/<size>`
   (UPT ships `tiny|small|medium|large|xlarge`).
 - **UPT has two load-bearing knobs — do not flip them off casually**
   ([architectures/upt.py](../libs/neural-surrogates/src/neural_surrogates/architectures/upt.py)):
@@ -668,7 +668,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
     `efficient`/`linformer`/`transsolver` via `attention_kwargs`); a per-geometry
     `_geom_cache` avoids rebuilding the supernode neighbour graph each step.
 - Normalization stats are computed by `_compute_normalization_stats` in
-  [scripts/train_neural_surrogate.py](../scripts/train_neural_surrogate.py)
+  [scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py)
   (streamed in f64 over fluid cells only) and **baked into the checkpoint** via
   `model.set_normalization(...)`, so no separate stats file is needed at inference.
 
@@ -831,7 +831,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 | Truth source / spin-up trimming / 32-bit | `run.truth_dir`+`run.truth_start_time` in [run_esmda.yaml](../conf/run_esmda.yaml); [scripts/trim_spinup.py](../scripts/trim_spinup.py), [convert_ground_truth_to_32bit.py](../scripts/convert_ground_truth_to_32bit.py), [visualize_ground_truth.py](../scripts/figure_creation/visualize_ground_truth.py) |
 | Localization (correlation/distance/none) / grid-block grouping | [localization/](../libs/data-assimilation/src/data_assimilation/localization/) (`correlation.py`, `distance.py`), the `esmda/localization` group [conf/esmda/localization/](../conf/esmda/localization/) (`block_grouping`, state-only) |
 | Reduced SVD/KL state update / final trajectory smoothing | [reduction.py](../libs/data-assimilation/src/data_assimilation/reduction.py), the `esmda/state_reduction` group [conf/esmda/state_reduction/](../conf/esmda/state_reduction/), [docs/reduced_state_da.md](reduced_state_da.md) |
-| Neural-surrogate architectures (UPT etc.) | [architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/), [conf/neural_surrogate_architectures/](../conf/neural_surrogate_architectures/) |
+| Neural-surrogate architectures (UPT etc.) | [architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/), [conf/neural_surrogate/architectures/](../conf/neural_surrogate/architectures/) |
 | uDALES instability / dt-collapse handling | [libs/pyudales/src/pyudales/utils/run_monitor.py](../libs/pyudales/src/pyudales/utils/run_monitor.py) (`instability_check`) |
 | DA metrics + diagnostic plots (RMSE/CRPS, sensor series) | [src/pyurbanair/plotting.py](../src/pyurbanair/plotting.py) (`compute_parameter_metrics`, `plot_parameter_error`, `compute_sensor_metrics`, `plot_sensor_timeseries`) |
 | Validation (held-out) sensors | `validation_{x,y,z}_points` in [conf/case/](../conf/case/) `obs.yaml` + `create_validation_points` |

@@ -139,7 +139,7 @@ appended on the command line.
   load (`GROUND_TRUTH_DIR` in `common.sh`, which points at the leaf holding
   `state.nc` + `params.nc`).
 - `generate_training_data.slurm` — neural-surrogate training data
-  (`scripts/generate_training_data.py`, pyudales, full 64-core compute-p2
+  (`scripts/neural_surrogate/generate_training_data.py`, pyudales, full 64-core compute-p2
   node). Output under `/projects/urbanair/training_data/pyudales_<size>`.
 - `run_esmda_test.slurm` — quick ESMDA smoke run of the committed
   `conf/run_esmda.yaml` against an on-disk truth (`TRUTH_DIR` env var);

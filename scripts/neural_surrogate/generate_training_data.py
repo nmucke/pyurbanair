@@ -7,8 +7,8 @@ directories, and writes one figure + one animation per split.
 
 Usage:
 
-    python scripts/generate_training_data.py training_data=tiny
-    python scripts/generate_training_data.py training_data=small model=pyudales
+    python scripts/neural_surrogate/generate_training_data.py
+    python scripts/neural_surrogate/generate_training_data.py model=pyudales case=barcelona
 """
 
 from __future__ import annotations
@@ -325,13 +325,17 @@ def run(cfg: DictConfig) -> None:
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
 
     # --- Sample parameters ------------------------------------------------
+    # ``num_time_points`` (the number of knots in each parameter trajectory)
+    # lives under params_sampler in the config but is not a sampler constructor
+    # arg, so pop it before instantiating.
     sampler_cfg = OmegaConf.to_container(td.params_sampler, resolve=True)
+    num_time_points = int(sampler_cfg.pop("num_time_points"))
     sampler_cfg["ensemble_size"] = n_total
     params_sampler = hydra.utils.instantiate(sampler_cfg)
 
     sampled = _sample_params(
         params_sampler,
-        num_time_points=int(td.num_time_points),
+        num_time_points=num_time_points,
         simulation_time=float(td.simulation_time),
         seed=int(td.seed),
     )
@@ -452,7 +456,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Done. Training data root: {output_dir}")
 
 
-@hydra.main(version_base=None, config_path="../conf", config_name="generate_training_data")
+@hydra.main(version_base=None, config_path="../../conf", config_name="neural_surrogate/training_data")
 def main(cfg: DictConfig) -> None:
     run(cfg)
 

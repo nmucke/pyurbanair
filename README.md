@@ -111,12 +111,10 @@ shared files):
   param knots are baked into the two entry points at medium-sized defaults;
   change them with plain CLI overrides (`ensemble.ensemble_size=8`,
   `esmda.num_assimilation_windows=10`). See [`conf/README.md`](conf/README.md).
-- **`training_data/`** — neural-surrogate dataset sizes; see
+- **`neural_surrogate/`** — everything for the learned surrogate, in one folder:
+  `training.yaml`, `testing.yaml`, `training_data.yaml` (a single data-generation
+  config), and `architectures/{unet_convnext,upt}/<size>.yaml`. See
   [`docs/neural_surrogates.md`](docs/neural_surrogates.md).
-- **`neural_surrogate_architectures/`, `neural_surrogate_training/`,
-  `neural_surrogate_testing/`** — surrogate architecture presets
-  (`unet_convnext/<size>`, `upt/<size>`), training loop, and
-  autoregressive-rollout test config.
 
 ### Forward simulations
 
@@ -253,15 +251,15 @@ commands:
 
 ```bash
 # 1. Generate a training dataset by driving a CFD ensemble
-pixi run -e dev python scripts/generate_training_data.py training_data=small model=pylbm
+pixi run -e dev python scripts/neural_surrogate/generate_training_data.py model=pylbm
 
-# 2. Train a surrogate (pick a preset/architecture; UNetConvNeXt or UPT)
-pixi run -e dev python scripts/train_neural_surrogate.py \
-    dataset.root_dir=training_data/pylbm_small \
-    'neural_surrogate_architectures/upt@architecture=small'
+# 2. Train a surrogate (pick an architecture preset; UNetConvNeXt or UPT)
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
+    dataset.root_dir=training_data/pylbm_medium \
+    'neural_surrogate/architectures/upt@architecture=small'
 
 # 3. Autoregressive rollout on the test split (diagnostic plots + animation)
-pixi run -e dev python scripts/test_neural_surrogate.py \
+pixi run -e dev python scripts/neural_surrogate/test_neural_surrogate.py \
     model_dir=model_weights/upt_small sample_idx=0
 
 # 4. Use the trained surrogate as an assimilation model
@@ -390,15 +388,12 @@ pyurbanair/
 ├── conf/                                  # Hydra config (see Configuration)
 │   ├── run_forward_model.yaml             # Entry point — forward-model runs (self-contained)
 │   ├── run_esmda.yaml                     # Entry point — all ESMDA runs (self-contained)
-│   ├── generate_training_data.yaml        # Entry point — surrogate data gen
 │   ├── README.md                          # Config overview — the axes + recipes
 │   ├── case/                              # Experiment bundles: domain+grid+geometry+sensors+time (xie_and_castro, barcelona)
 │   ├── model/                             # Backend wiring (pylbm, pyudales, pypalm, neural_surrogate)
 │   ├── params/                            # Parameter samplers (static/dynamic + *_truth)
 │   ├── esmda/                             # ESMDA smoother/localization/state_reduction groups
-│   ├── training_data/                     # Surrogate dataset size presets
-│   ├── neural_surrogate_architectures/    # Surrogate architecture presets (unet_convnext, upt)
-│   └── neural_surrogate_training/, neural_surrogate_testing/
+│   └── neural_surrogate/                  # Surrogate: training.yaml, testing.yaml, training_data.yaml, architectures/
 │
 ├── scripts/                               # Main execution scripts
 │   ├── run_forward_model.py               # Forward sim (run.ensemble / run.rollout_steps / params=static|dynamic)
