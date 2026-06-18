@@ -1,9 +1,10 @@
 # DelftBlue job scripts
 
 Submit ESMDA runs on DelftBlue (CPU-only, `compute-p1`/`compute-p2` partitions)
-with the `submit.sh` wrapper. It sizes the SLURM allocation from the experiment
-config, so you tune the run in one place — `conf/size/<size>.yaml` — and the
-requested cores follow automatically.
+with the `submit.sh` wrapper. The `<size>` label maps to an ensemble size, from
+which the requested cores follow automatically; the run itself uses the
+medium-sized defaults baked into `conf/run_esmda.yaml` (override with extra
+hydra args).
 
 Partitions: the old combined `compute` partition is **drained**; jobs go to
 `compute-p1` (48-core / 185 GB nodes, 218 of them) when the request fits in 48
@@ -19,7 +20,7 @@ job_scripts/delftblue/submit.sh <model> <size> [extra hydra overrides...]
 
 - `<model>`: `pylbm` | `pyudales` | `pypalm` — the **assimilation** forward model
   (and the truth model too, unless `TRUTH_MODEL` overrides it).
-- `<size>`:  `tiny` | `small` | `medium` | `large` | `xlarge` (a `conf/size/<size>.yaml`)
+- `<size>`:  `tiny` | `small` | `medium` | `large` | `xlarge` (sizes the SLURM allocation)
 
 Examples:
 
@@ -51,9 +52,9 @@ get a `..._truth-<model>` suffix in the job name and log files.
 
 ## Tuning a run
 
-Edit the per-size knobs in `conf/size/<size>.yaml`:
+Append hydra overrides to the `submit.sh` call to change any of the medium-sized defaults (from `conf/run_esmda.yaml`):
 
-| Knob                              | Meaning                                  |
+| Override                          | Meaning                                  |
 |-----------------------------------|------------------------------------------|
 | `ensemble.ensemble_size`          | number of ensemble members               |
 | `time.simulation_time`            | forward-model simulation horizon         |
@@ -158,7 +159,7 @@ appended on the command line.
 
 ## Rollout-ESMDA-from-truth sweeps (per backend)
 
-Separate from the `submit.sh` / `conf/size` system above, this suite is the
+Separate from the `submit.sh` system above, this suite is the
 DelftBlue sibling of `job_scripts/local/` (and `job_scripts/snellius/`) and is
 organised the same way: two shared single-source-of-truth files plus thin
 per-backend runners and sweep wrappers, so **all three backends run the exact

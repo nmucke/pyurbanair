@@ -1,6 +1,6 @@
 #!/bin/bash
 # SNELLIUS comparison of multiple STATE-estimation ESMDA runs, via
-# scripts/compare_state_runs.py. Scans a directory of run folders, reads each
+# scripts/figure_creation/compare_state_runs.py. Scans a directory of run folders, reads each
 # run's run_summary.yaml and draws grouped metric-comparison figures + a summary
 # table / CSV under result_figures/comparison_<mode> (by default).
 #
@@ -44,6 +44,6 @@ echo "SNELLIUS compare_state_runs: job ${SLURM_JOB_ID:-local} on $(hostname) -- 
 [ "$#" -gt 0 ] && echo "Args: $*"
 
 # All arguments forward straight through (e.g. --mode, --root, --out).
-pixi run -e snellius -- python -u scripts/compare_state_runs.py "$@"
+pixi run -e snellius -- python -u scripts/figure_creation/compare_state_runs.py "$@"
 
 echo "Done -- comparison under result_figures/"

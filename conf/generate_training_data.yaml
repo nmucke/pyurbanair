@@ -1,10 +1,14 @@
 # Primary config for scripts/generate_training_data.py.
 #
-# Extends the shared base config and selects a `training_data/` overlay (the one
-# remaining group whose options differ structurally, not just by scale). The
-# overlay inlines its own `domain`/`time` and a parameter sampler. Pick the
-# dataset size on the CLI, e.g. `training_data=small`.
+# NOTE: temporarily bases off run_forward_model (the former shared `config.yaml`
+# was inlined into the two run entrypoints and removed). The training-data /
+# neural-surrogate configs still need their own pass — revisit this then.
+#
+# Selects a `training_data/` overlay (the one remaining group whose options
+# differ structurally, not just by scale). The overlay inlines its own
+# `domain`/`time` and a parameter sampler. Pick the dataset size on the CLI,
+# e.g. `training_data=small`.
 defaults:
-  - config
+  - run_forward_model
   - training_data: medium
   - _self_

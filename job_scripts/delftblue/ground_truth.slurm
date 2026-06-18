@@ -166,7 +166,7 @@ esac
 
 # params=dynamic_truth swaps in the time-varying TRUTH sampler (the old
 # run.time_varying=true switch); params.seed seeds the AR(2) draw and the
-# window-to-window extrapolation; params.time_coords.num sets the knots per
+# window-to-window extrapolation; time.num_param_knots sets the knots per
 # window (formerly time_varying.num_time_points).
 PY_ARGS=(
   python -u scripts/run_forward_model.py
@@ -174,7 +174,7 @@ PY_ARGS=(
   case="${CASE}"
   params=dynamic_truth
   params.seed="${SEED}"
-  params.time_coords.num="${NUM_TIME_POINTS}"
+  time.num_param_knots="${NUM_TIME_POINTS}"
   run.rollout_steps="${ROLLOUT_STEPS}"
   domain.nx="${NX}"
   domain.ny="${NY}"

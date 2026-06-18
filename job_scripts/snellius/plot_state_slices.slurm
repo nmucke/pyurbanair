@@ -49,7 +49,7 @@ echo "Job ${SLURM_JOB_ID} on $(hostname) — $(date)"
 echo "State: ${STATE_NC}"
 echo "Var=${VAR}  z_index='${Z_INDEX}'  out=${OUT_DIR}"
 
-pixi run -e "${ENV}" -- python -u scripts/plot_state_slices.py \
+pixi run -e "${ENV}" -- python -u scripts/figure_creation/plot_state_slices.py \
     "${STATE_NC}" "${OUT_DIR}" "${VAR}" "${Z_INDEX}" "${FPS}"
 
 echo "Done — plots under ${OUT_DIR}"

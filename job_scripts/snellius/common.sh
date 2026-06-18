@@ -74,8 +74,7 @@ DYNAMIC_PARAM_FLAGS=(
   "esmda/smoother=dynamic"
   "params@truth_params=dynamic_truth"
   "params@prior_params=dynamic"
-  "prior_params.time_coords.num=${NUM_TIME_POINTS}"
-  "params.time_coords.num=${NUM_TIME_POINTS}"
+  "time.num_param_knots=${NUM_TIME_POINTS}"
 )
 
 # --- Misc run defaults ------------------------------------------------------

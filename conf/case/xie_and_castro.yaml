@@ -1,13 +1,76 @@
-# Case overlay: Xie & Castro 2008 staggered cube array.
+# @package _global_
+#
+# Case: Xie & Castro 2008 staggered cube array.
 #
 # A `case` bundles the geometry-specific config categories (domain bounds tuned
-# to the array, sensor layout inside it) into one switchable group. Select with
-# `case=xie_and_castro` (the default) or `case=barcelona`. The DA-method /
-# run-size categories (esmda, ensemble, time, parameters, paths) stay shared at
-# the conf root and are not part of a case. The matching STL geometry lives in
-# examples/<backend>/experiments/xie_and_castro/ and is wired via the model
-# config's `stl_path`.
-defaults:
-  - xie_and_castro/domain
-  - xie_and_castro/obs
-  - xie_and_castro/geometry
+# to the array, sensor layout inside it, and the STL geometry) into one
+# switchable group. Select with `case=xie_and_castro` (the default) or
+# `case=barcelona`. The DA-method / run-size categories (esmda, ensemble, time,
+# parameters, paths) stay shared at the conf root and are not part of a case.
+# `size/` and `preset/` overlays deep-merge over the domain/obs below.
+
+domain:
+  # Grid + physical bounds — the canonical domain for scripts/run_esmda.py.
+  # Rescale a whole run with the `size/` overlays (`size=tiny` … `size=xlarge`),
+  # which deep-merge over these values, or override individual fields on the CLI
+  # (`domain.nx=80`). x starts at -20 to leave an open upstream inflow region in
+  # front of the Xie & Castro array (which starts at x=5).
+  nx: 60
+  ny: 80
+  nz: 16
+  bounds:
+    - [-20.0, 40.0]
+    - [0.0, 80.0]
+    - [0.0, 32.0]
+
+geometry:
+  # All three backends share ONE STL at examples/<case>/xie_castro_2008_STL.stl.
+  # pylbm/pypalm read it directly via `stl_path`; uDALES holds a relative symlink
+  # to it inside its case dir (dereferenced into the run dir at prepare time).
+  # `*_case_dir` are the per-backend dirs holding backend-specific config files
+  # (uDALES namoptions, PALM _p3d). Absolute interpolation (`${geometry.stl_path}`)
+  # is used in the model configs because the model group may be mounted under
+  # several packages (model@model / @truth_model / @assim_model).
+  stl_path: examples/xie_and_castro/xie_castro_2008_STL.stl
+  udales_case_dir: examples/udales/xie_and_castro
+  palm_case_dir: examples/palm/xie_and_castro
+
+obs:
+  # Observation operator. Canonical sensor layout for the rollout ESMDA;
+  # forward-only scripts ignore the assimilation-specific fields. The `size/`
+  # overlays supply size-appropriate sensor coordinates (and `interval_seconds`).
+  # Sensors must fall inside `domain.bounds` and outside the buildings; the N-S
+  # lanes between the Xie & Castro cube columns stay open for every y. `mode: grid`
+  # (with `x_min`/`x_max`/`n_per_axis`/`z`) is the alternative to explicit
+  # `*_points`.
+  mode: points
+
+  # Assimilation sensors, placed in the open N-S lanes between the cube columns
+  # at street level (z=2 m, below the 2.8 m minimum cube height) — true in-canyon
+  # measurements, inside domain.bounds and clear of every building footprint.
+  x_points: [10.0, 10.0, 20.0, 20.0, 30.0, 30.0]
+  y_points: [20.0, 60.0, 10.0, 50.0, 30.0, 70.0]
+  z_points: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+
+  # Validation sensors (held out from assimilation): a separate set the Kalman
+  # update never sees, used only to score the posterior at unseen locations (see
+  # scripts/run_esmda.py sensor time-series plots). Distinct from the
+  # assimilation sensors above, every one sits in open space (>=5 m clear of any
+  # building footprint).
+  validation_x_points: [-10.0, 20.0]
+  validation_y_points: [30.0, 55.0]
+  validation_z_points: [2.0, 2.0]
+
+  states: [u, v, w]
+  temporal_mode: intervals
+  interval_seconds: 10.0
+  aggregation_mode: mean
+
+time:
+  # Per-window simulation horizon for this geometry (seconds). One assimilation
+  # window is `simulation_time` long with a `spinup_time` constant-inflow plateau
+  # in front; the state is written every `output_frequency` s. The number of
+  # windows and the param-knot count are compute knobs and live in `scale/`.
+  simulation_time: 180.0
+  output_frequency: 2.0
+  spinup_time: 50.0

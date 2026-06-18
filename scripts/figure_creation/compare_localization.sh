@@ -100,9 +100,13 @@ esac
 # under run.skip_viz=false) validation sensors must sit inside the chosen grid.
 case "${SIZE}" in
   test)
-    # conf/size/test.yaml: [0,20] x [0,20] x [0,10] grid (nz=4), 3 s spin-up.
+    # Tiny smoke grid: [0,20] x [0,20] x [0,10] (nz=4), 3 s spin-up.
     size_args=(
-      +size=test
+      domain.nx=20 domain.ny=20 domain.nz=4
+      'domain.bounds=[[0.0,20.0],[0.0,20.0],[0.0,10.0]]'
+      time.simulation_time=3.0 time.output_frequency=1.0 time.spinup_time=3.0
+      time.num_param_knots=3
+      ensemble.ensemble_size=2 ensemble.num_parallel_processes=1
       'obs.x_points=[2.5,2.5,18.0,18.0]' 'obs.y_points=[5.0,15.0,5.0,15.0]'
       'obs.z_points=[3.0,3.0,3.0,3.0]'
       'obs.validation_x_points=[10.0,10.0]' 'obs.validation_y_points=[6.0,14.0]'
@@ -136,9 +140,9 @@ common=(
   params@prior_params=dynamic params@truth_params=dynamic_truth
   # 30 s assimilation window, with 2 time knots per window in the dynamic
   # parameters (params/prior/truth grids kept equal; the smoother's
-  # num_time_points = params.time_coords.num). Total horizon = 30*NUM_WINDOWS s.
+  # num_time_points = time.num_param_knots). Total horizon = 30*NUM_WINDOWS s.
   time.simulation_time=30
-  params.time_coords.num=3 prior_params.time_coords.num=3 truth_params.time_coords.num=3
+  time.num_param_knots=3
   "ensemble.ensemble_size=${ENSEMBLE_SIZE}" "ensemble.num_parallel_processes=${NPROC}"
   "esmda.num_steps=${NUM_STEPS}" "esmda.num_assimilation_windows=${NUM_WINDOWS}"
   # Truth from disk (state.nc/params.nc; x is auto-shifted onto the domain

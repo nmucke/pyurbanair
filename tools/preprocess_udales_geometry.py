@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with initialize_config_dir(version_base=None, config_dir=str(CONF_DIR)):
         cfg = compose(
-            config_name="config",
+            config_name="run_forward_model",
             overrides=[
                 "model=pyudales",
                 f"case={args.case}",

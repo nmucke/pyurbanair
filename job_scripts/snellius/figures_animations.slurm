@@ -1,6 +1,6 @@
 #!/bin/bash
 # SNELLIUS: render the talk ANIMATIONS (mp4) for the EnKF-2026 deck via
-# scripts/make_animations.py, into figures/{A_param_only,B_state_estimation,
+# scripts/figure_creation/make_animations.py, into figures/{A_param_only,B_state_estimation,
 # C_full_joint}/. These are the truth|estimate|error triptychs (Block A & C) and
 # the side-by-side methods panel (Block B).
 #
@@ -42,6 +42,6 @@ echo "SNELLIUS figures_anim: job ${SLURM_JOB_ID:-local} on $(hostname) -- $(date
 echo "ffmpeg: ${FFMPEG_BIN:-<none>}"
 [ "$#" -gt 0 ] && echo "Args: $*"
 
-pixi run -e snellius -- python -u scripts/make_animations.py "$@"
+pixi run -e snellius -- python -u scripts/figure_creation/make_animations.py "$@"
 
 echo "Done -- animations under figures/  ($(date))"

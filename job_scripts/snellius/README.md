@@ -1,8 +1,9 @@
 # Snellius job scripts
 
-Submit ESMDA runs on Snellius (CPU-only) with the `submit.sh` wrapper. It sizes
-the SLURM allocation from the experiment config, so you tune the run in one
-place — `conf/size/<size>.yaml` — and the requested cores follow automatically.
+Submit ESMDA runs on Snellius (CPU-only) with the `submit.sh` wrapper. The
+`<size>` label maps to an ensemble size, from which the requested cores follow
+automatically; the run itself uses the medium-sized defaults baked into
+`conf/run_esmda.yaml` (override anything with extra hydra args).
 
 ## Usage
 
@@ -12,7 +13,7 @@ job_scripts/snellius/submit.sh <model> <size> [extra hydra overrides...]
 
 - `<model>`: `pylbm` | `pyudales` | `pypalm` — the **assimilation** forward model
   (and the truth model too, unless `TRUTH_MODEL` overrides it).
-- `<size>`:  `tiny` | `small` | `medium` | `large` | `xlarge` (a `conf/size/<size>.yaml`)
+- `<size>`:  `tiny` | `small` | `medium` | `large` | `xlarge` (sizes the SLURM allocation)
 
 Examples:
 
@@ -44,14 +45,15 @@ a `..._truth-<model>` suffix in the job name and log files.
 
 ## Tuning a run
 
-Edit the per-size knobs in `conf/size/<size>.yaml`:
+Append hydra overrides to the `submit.sh` call to change any of the
+medium-sized defaults (from `conf/run_esmda.yaml`):
 
-| Knob                              | Meaning                                  |
+| Override                          | Meaning                                  |
 |-----------------------------------|------------------------------------------|
 | `ensemble.ensemble_size`          | number of ensemble members               |
 | `time.simulation_time`            | per-window simulation horizon            |
 | `esmda.num_assimilation_windows`  | number of assimilation windows           |
-| `*_params.time_coords.num`        | time-varying parameter knots per window  |
+| `time.num_param_knots`            | time-varying parameter knots per window  |
 
 Correlation localization is **off by default** (`esmda/localization: none` in
 `conf/run_esmda.yaml`). Enable it by appending the `++esmda.localization.*`
@@ -89,7 +91,7 @@ WALLTIME=02:00:00 job_scripts/snellius/submit.sh pylbm medium
 - `templates/esmda.slurm` — one generic job body for all model combinations,
   driven by `PUA_SIZE` / `PUA_NUM_PARALLEL` / `PUA_TRUTH_MODEL` / `PUA_ASSIM_MODEL`
   (set by the wrapper). It runs `scripts/run_esmda.py` in simulate-truth-inline
-  mode (`run.truth_dir=null`) with the `+size=<size>` overlay; for runs against a
+  mode (`run.truth_dir=null`) at the medium defaults; for runs against a
   pre-simulated on-disk truth use the per-backend
   `<model>/rollout_esmda_from_truth.slurm` runners below instead. Not meant to be
   `sbatch`ed directly.

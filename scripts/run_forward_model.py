@@ -223,7 +223,7 @@ def run(cfg: DictConfig) -> None:
         plot_derived_inflow_angle(state, params, out_dir)
         plot_derived_velocity_magnitude(state, params, out_dir)
 
-@hydra.main(version_base=None, config_path="../conf", config_name="config")
+@hydra.main(version_base=None, config_path="../conf", config_name="run_forward_model")
 def main(cfg: DictConfig) -> None:
     run(cfg)
 

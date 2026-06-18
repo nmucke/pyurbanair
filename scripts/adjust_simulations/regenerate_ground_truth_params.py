@@ -37,7 +37,7 @@ OVERRIDES = [
 
 def main() -> None:
     with initialize_config_dir(version_base=None, config_dir=str(REPO_ROOT / "conf")):
-        cfg = compose(config_name="config", overrides=OVERRIDES)
+        cfg = compose(config_name="run_forward_model", overrides=OVERRIDES)
 
     params = create_time_varying_true_params(
         model_name=cfg.model.name,

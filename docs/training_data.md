@@ -66,7 +66,7 @@ CLI overrides apply to any field, e.g.:
 
 ```bash
 python scripts/generate_training_data.py training_data=tiny \
-  model=pylbm size=small \
+  model=pylbm +scale=small \
   training_data.num_train=8 \
   training_data.params_sampler.time_series.correlation_length=30
 ```

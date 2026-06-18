@@ -66,32 +66,34 @@ ulimit -s unlimited
 
 All simulation and assimilation settings live in `conf/`, composed by
 [Hydra](https://hydra.cc/). Any field can be overridden from the command line
-(`domain.nx=80`, `esmda.num_steps=4`). There are two primary configs:
-`config.yaml` (forward-model runs) and `run_esmda.yaml` (all data-assimilation
-runs).
+(`domain.nx=80`, `esmda.num_steps=4`). There are exactly two run entry points,
+one per script, and each is **self-contained** —
+[`run_forward_model.yaml`](conf/run_forward_model.yaml) for
+`scripts/run_forward_model.py` and [`run_esmda.yaml`](conf/run_esmda.yaml) for
+`scripts/run_esmda.py`. See [`conf/README.md`](conf/README.md) for the full
+overview.
 
-**Shared flat files** (one per category, `# @package`-mounted):
+**Inlined base** (each entry point carries its own copy, rather than pulling
+shared files):
 
-- **`time.yaml`** — simulation duration, output frequency, spinup time
-- **`ensemble.yaml`** — ensemble size, parallel processes, CPUs/process,
-  failure policy
-- **`esmda.yaml`** — number of assimilation steps/windows, observation
-  error std, random seed, and `localization`. The adaptive correlation
-  localization block is **off by default** (`localization: null`, the global
-  update); the block is present in `esmda.yaml` but commented out — uncomment it
-  (or set `esmda.localization.truncation_correlation=...` on the CLI) to enable.
-  The smoother variant itself is a group (see below). Only mounted by
-  `run_esmda.yaml`.
-- **`paths.yaml`** — output roots (everything mutable lands under `.temp/`)
+- **output `paths`** — output roots (everything mutable lands under `.temp/`).
+- **`time.num_param_knots`** — the single source for the time-varying parameter
+  knot count (the per-window horizon — simulation duration, output frequency,
+  spinup time — lives in the `case`).
+- **`ensemble`** — ensemble size, parallel processes, CPUs/process, failure
+  policy.
+- **`esmda`** (run_esmda only) — assimilation steps/windows, observation error
+  std, seed, plus `localization` / `state_reduction` (default `none`; selected
+  via the `esmda/*` groups, see below).
+- the **`run:`** namespace and Hydra settings.
 
 **Groups** (one option per structurally-distinct variant):
 
-- **`case/`** — geometry bundle. A case packages the geometry-specific
-  categories (`domain` bounds, `obs` sensor layout, `geometry` STL paths) into
-  one switchable unit. `case=xie_and_castro` (default) or `case=barcelona`.
-  Override individual fields as usual (`domain.nx=80`). `obs.yaml` may also
-  declare `validation_{x,y,z}_points` — a held-out sensor set that is scored but
-  never assimilated.
+- **`case/`** — the experiment bundle, and the one file you edit to set up an
+  experiment. A case is self-contained: `domain` bounds + grid resolution, `obs`
+  sensor layout (incl. held-out `validation_{x,y,z}_points`), `geometry` STL
+  paths, and the per-window `time` horizon. `case=xie_and_castro` (default) or
+  `case=barcelona`. Override individual fields as usual (`domain.nx=80`).
 - **`model/`** — forward + ensemble backend, mounted under a package
   (`model@truth_model=pylbm model@assim_model=pyudales`).
 - **`params/`** — parameter samplers: `static` / `dynamic` (assimilation prior)
@@ -105,8 +107,10 @@ runs).
 - **`esmda/smoother/`** — the ESMDA variant: `static` (parameter-only),
   `dynamic` (time-varying parameters), `state_and_parameter` (joint). Selected
   with `esmda/smoother=...`.
-- **`size/`** — run-size overlays (`size=tiny` … `size=xlarge`, plus `test`).
-- **`preset/`** — bundled overlays (`small`, `test`) for fast runs.
+- **compute budget** — ensemble size / parallelism / ESMDA steps / windows /
+  param knots are baked into the two entry points at medium-sized defaults;
+  change them with plain CLI overrides (`ensemble.ensemble_size=8`,
+  `esmda.num_assimilation_windows=10`). See [`conf/README.md`](conf/README.md).
 - **`training_data/`** — neural-surrogate dataset sizes; see
   [`docs/neural_surrogates.md`](docs/neural_surrogates.md).
 - **`neural_surrogate_architectures/`, `neural_surrogate_training/`,
@@ -156,7 +160,7 @@ python scripts/convert_ground_truth_to_32bit.py        # ground_truth/64_bit -> 
 
 # Diagnostic figures: prescribed params, a field snapshot, and the inflow
 # angle/speed recovered from the flow vs. the prescribed values
-python scripts/visualize_ground_truth.py ground_truth_spunup
+python scripts/figure_creation/visualize_ground_truth.py ground_truth_spunup
 ```
 
 The resulting folder is what `run_esmda.py` loads via `run.truth_dir` (see below).
@@ -180,7 +184,8 @@ mode is the cross product of three declarative axes plus a truth source:
   assimilation horizon partway into a disk truth (skips a spin-up and rebases
   that time to t=0). Disk truth is streamed, so multi-GB files never load fully.
 
-Shared ESMDA settings live in `conf/esmda.yaml`. The dynamic multi-window setup
+Shared ESMDA settings live in the inlined `esmda:` block of `conf/run_esmda.yaml`.
+The dynamic multi-window setup
 (time-varying inflow over a rollout, with localization) is written up in
 [`docs/esmda_dynamic_multiwindow.md`](docs/esmda_dynamic_multiwindow.md).
 
@@ -213,12 +218,14 @@ python scripts/run_esmda.py esmda/smoother=dynamic \
   run.truth_dir=ground_truth_spunup run.truth_start_time=50
 
 # Adaptive correlation localization (Vossepoel et al. 2025) is OFF by default;
-# enable it by uncommenting the block in conf/esmda.yaml, or set its fields:
+# enable it with the esmda/localization group, or set its fields:
 python scripts/run_esmda.py esmda/smoother=static \
   esmda.localization.truncation_correlation=0.35 esmda.localization.block_grouping=true
 
-# Fast test preset (small domain, few steps, CPU-only LBM)
-python scripts/run_esmda.py preset=test
+# Fast smoke run (small domain, few steps)
+python scripts/run_esmda.py model@truth_model=pylbm model@assim_model=pylbm \
+  domain.nx=20 domain.ny=20 domain.nz=4 time.simulation_time=5 \
+  ensemble.ensemble_size=4 esmda.num_steps=1 esmda.num_assimilation_windows=1
 ```
 
 > **Note:** `run_esmda.yaml` defaults to the time-varying rollout
@@ -273,15 +280,15 @@ inference time.
 ### Running on Snellius (SLURM)
 
 The Snellius `snellius` env ships with a one-command submit wrapper that picks
-the partition, requests the right number of cores, and sets a sensible wall
-time — all from `conf/size/<size>.yaml`. Use it instead of writing your own
-sbatch files. Full details: [`job_scripts/snellius/README.md`](job_scripts/snellius/README.md).
+the partition, requests the right number of cores (from the size label), and
+sets a sensible wall time. Use it instead of writing your own sbatch files. Full
+details: [`job_scripts/snellius/README.md`](job_scripts/snellius/README.md).
 
 ```bash
 # Pattern
 job_scripts/snellius/submit.sh <model> <size> [extra hydra overrides...]
 #   <model>   pylbm | pyudales | pypalm     (assimilation forward model)
-#   <size>    tiny | small | medium | large | xlarge
+#   <size>    tiny | small | medium | large | xlarge   (sizes the SLURM allocation)
 ```
 
 Common launches:
@@ -293,15 +300,16 @@ Common launches:
 | pypalm, small run                             | `job_scripts/snellius/submit.sh pypalm small`                                 |
 | Twin experiment (truth ≠ assim model)         | `TRUTH_MODEL=pyudales job_scripts/snellius/submit.sh pylbm small`             |
 | Ad-hoc Hydra override (per submission)        | `job_scripts/snellius/submit.sh pylbm small esmda.num_assimilation_windows=3` |
-| Custom wall time (overrides the size default) | `WALLTIME=30:00:00 job_scripts/snellius/submit.sh pyudales medium`            |
+| Custom wall time (overrides the scale default)| `WALLTIME=30:00:00 job_scripts/snellius/submit.sh pyudales medium`            |
 | Preview only (don't submit)                   | `DRY_RUN=1 job_scripts/snellius/submit.sh pyudales medium`                    |
 
-**Tuning a run.** Edit the three per-size knobs in `conf/size/<size>.yaml`; the
-wrapper reads `ensemble.ensemble_size` and sizes the SLURM allocation
-automatically (one core per ensemble member, rounded up to the partition's
-billing minimum — 16 on `rome`, 24 on `genoa`):
+**Tuning a run.** Runs use the medium-sized defaults baked into
+`conf/run_esmda.yaml` (physical setup lives in `conf/case/<case>.yaml`). The
+`<size>` label maps to an ensemble size that the wrapper uses to size the SLURM
+allocation (one core per member, rounded up to the partition's billing minimum —
+16 on `rome`, 24 on `genoa`); pass hydra overrides to change anything else:
 
-| Knob                              | Meaning                            |
+| Override                          | Meaning                            |
 |-----------------------------------|------------------------------------|
 | `ensemble.ensemble_size`          | number of ensemble members         |
 | `time.simulation_time`            | per-window forward-model duration  |
@@ -380,19 +388,17 @@ pyurbanair/
 │           └── architectures/             # SimpleConv, UNetConvNeXt, UPT (_upt/)
 │
 ├── conf/                                  # Hydra config (see Configuration)
-│   ├── config.yaml                        # Primary config — forward-model runs
-│   ├── run_esmda.yaml                     # Primary config — all ESMDA runs
-│   ├── generate_training_data.yaml        # Primary config — surrogate data gen
-│   ├── paths.yaml, time.yaml, ensemble.yaml, esmda.yaml   # Shared flat files
-│   ├── case/                              # Geometry bundles (xie_and_castro, barcelona)
+│   ├── run_forward_model.yaml             # Entry point — forward-model runs (self-contained)
+│   ├── run_esmda.yaml                     # Entry point — all ESMDA runs (self-contained)
+│   ├── generate_training_data.yaml        # Entry point — surrogate data gen
+│   ├── README.md                          # Config overview — the axes + recipes
+│   ├── case/                              # Experiment bundles: domain+grid+geometry+sensors+time (xie_and_castro, barcelona)
 │   ├── model/                             # Backend wiring (pylbm, pyudales, pypalm, neural_surrogate)
 │   ├── params/                            # Parameter samplers (static/dynamic + *_truth)
-│   ├── esmda/smoother/                    # ESMDA variants (static, dynamic, state_and_parameter)
-│   ├── size/                              # Run-size overlays (tiny … xlarge, test)
+│   ├── esmda/                             # ESMDA smoother/localization/state_reduction groups
 │   ├── training_data/                     # Surrogate dataset size presets
 │   ├── neural_surrogate_architectures/    # Surrogate architecture presets (unet_convnext, upt)
-│   ├── neural_surrogate_training/, neural_surrogate_testing/
-│   └── preset/                            # Bundled overlays (small, test)
+│   └── neural_surrogate_training/, neural_surrogate_testing/
 │
 ├── scripts/                               # Main execution scripts
 │   ├── run_forward_model.py               # Forward sim (run.ensemble / run.rollout_steps / params=static|dynamic)

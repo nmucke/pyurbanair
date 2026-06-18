@@ -8,7 +8,7 @@ The `fix-palm` branch (commit
 on DelftBlue (coordinate shift to match `pyudales`/`pylbm`; palmrun stdin
 hardened; node-local `fast_io_catalog`; concurrent‑PALM pinning/OMPI env).
 What it does **not** fix is the per-invocation harness cost, which dominates
-runtime once you scale past `size=tiny`. This plan is the next step.
+runtime once you scale past a tiny smoke run. This plan is the next step.
 
 The pypalm forward model lives in
 [`libs/pypalm/src/pypalm/forward_model.py`](../libs/pypalm/src/pypalm/forward_model.py)
@@ -22,15 +22,15 @@ truth), so any per-invocation cost is multiplied enormously.
 
 ## 0. Problem
 
-A single PALM ensemble member, configured `size=tiny`
-([`conf/size/tiny.yaml`](../conf/size/tiny.yaml)), runs the actual
+A single PALM ensemble member, configured a tiny smoke run
+, runs the actual
 time-stepping in **~5 seconds** of CPU. The same invocation costs
 **~134 seconds of wall time** end to end. PALM's own report
 (`Required cpu-time: 0.000 sec`) confirms the simulation is trivial; the
 remaining ~129 s is harness overhead, paid identically on every invocation.
 
 That overhead is what hurts at scale. With the current
-[`conf/size/xlarge.yaml`](../conf/size/xlarge.yaml) shape
+an xlarge-style shape
 (`ensemble.ensemble_size=96`, `esmda.num_assimilation_windows=10`,
 `esmda.num_steps=4`, plus the truth model), an `xlarge` rollout makes
 **96 × 10 × 4 + 10 = 3 850 PALM invocations**. At ~130 s of overhead each
@@ -43,7 +43,7 @@ amortised startup. PALM is the outlier.
 
 ## 1. What we measured
 
-Decomposition of one 133.8 s `palmrun(urban_run)` (truth, `size=tiny`,
+Decomposition of one 133.8 s `palmrun(urban_run)` (truth, a tiny smoke run,
 `nz=16`, single MPI task), from the captured palmrun stdout and the
 `palmrun(...) wall=...` log added in `forward_model.py`:
 
@@ -151,7 +151,7 @@ Targeted savings, per invocation:
   for the further idea of dropping MPI for single-rank runs).
 - PALM integration: unchanged.
 
-Plausible per-run wall: **~30 s instead of ~134 s** for `size=tiny`,
+Plausible per-run wall: **~30 s instead of ~134 s** for a tiny smoke run,
 i.e. a ~4× reduction in overhead-bound runtime. For `xlarge` this is the
 difference between a multi-day overhead bill and a single-day one.
 
@@ -449,7 +449,7 @@ num_parallel_processes=8`).
 | Per-PALM truth wall | 101.3 – 104.0 s | 226.9 – 227.6 s | — |
 | Per-PALM **overhead** (stage + combine + transfer) | 0.30 – 0.92 s | ~130 s (in palmrun preamble) | **~150×** |
 
-The integration itself takes ~100 s at size=small (vs ~5 s at tiny), so
+The integration itself takes ~100 s at a small run (vs ~5 s at tiny), so
 the saved per-invocation overhead (~130 s) is a smaller fraction of
 total wall — 2.4× total speedup vs 16× at tiny. Per-invocation
 **overhead** is essentially eliminated in both regimes.

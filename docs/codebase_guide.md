@@ -46,17 +46,17 @@ src/pyurbanair/                    # Top-level package: base classes + glue
   plotting.py, animation.py
 
 conf/                              # Hydra config (see §5 Configuration system)
-  config.yaml                      # Base composition (forward-model runs) + `run:` namespace
-  run_esmda.yaml                   # Primary config for run_esmda.py (smoother + double-mount)
-  generate_training_data.yaml      # Primary config for generate_training_data.py
-  paths.yaml, time.yaml, ensemble.yaml, esmda.yaml   # Shared flat files (one per category)
-  case/                            # Geometry case bundles domain+obs+geometry (xie_and_castro,
-                                   #   barcelona). Switch with `case=...`.
+  README.md                        # Config overview (axes + recipes)
+  run_forward_model.yaml           # Entry point for run_forward_model.py (self-contained base inlined)
+  run_esmda.yaml                   # Entry point for run_esmda.py (inlined base + esmda: + smoother/double-mount)
+  generate_training_data.yaml      # Entry point for generate_training_data.py (bases off run_forward_model)
+  case/                            # Experiment bundle: domain+grid+obs+geometry+time, one self-
+                                   #   contained file per case (xie_and_castro, barcelona). `case=...`.
   params/                          # Parameter samplers: static, dynamic, static_truth,
                                    #   dynamic_truth (mounted twice: truth + prior)
   esmda/smoother/                  # ESMDA variant group: static, dynamic, state_and_parameter
   model/                           # forward + ensemble backend (mounted under model@<pkg>)
-  size/, preset/, training_data/, neural_surrogate_*/   # remaining overlays/groups
+  training_data/, neural_surrogate_*/   # remaining overlays/groups
 
 libs/data-assimilation/src/data_assimilation/
   observation_operator.py          # ObservationOperator + TemporalObservationOperator
@@ -117,7 +117,7 @@ examples/
 
 tests/                             # pytest suite. tests/conftest.py provides
                                    # `compose_test_cfg` / `compose_module_cfg` fixtures
-                                   # that compose `preset=test` + per-test overrides.
+                                   # that apply the smoke shape (_SMOKE_OVERRIDES) + per-test overrides.
 .temp/                             # Default scratch dir. Everything mutable lands here.
 ```
 
@@ -154,7 +154,7 @@ All three solvers conform to the same three-class shape, declared in
   reconfigurable later via `configure_failure_policy` (used by
   `generate_training_data.py` to force `"raise"`):
   - `"raise"` — first failure aborts the whole ensemble.
-  - `"resample_from_successes"` (the default in `conf/ensemble.yaml`) — failed
+  - `"resample_from_successes"` (the default in the inlined `ensemble:` block) — failed
     members are cloned from a random successful donor; the *params* ensemble can
     be re-cloned (with Gaussian jitter) by calling
     `apply_failure_substitutions_to_params(params)`.
@@ -205,35 +205,33 @@ For time-varying parameters, vars have a `time` dim. For ensembles, an
 ## 5. Configuration system
 
 Run-time configuration is a [Hydra](https://hydra.cc/) tree rooted at
-[`conf/`](../conf/). There are **two primary configs**:
-[`conf/config.yaml`](../conf/config.yaml) (forward-model runs) and
-[`conf/run_esmda.yaml`](../conf/run_esmda.yaml) (all ESMDA runs); a third,
-[`conf/generate_training_data.yaml`](../conf/generate_training_data.yaml),
-drives surrogate data generation. Each composes a mix of **shared flat files**
-(one per category) and **groups** (one option per structurally-distinct
-variant), and bundles a `run:` namespace for generic script-behavior knobs
-(`skip_viz`, `results_dir`, `ensemble`, `rollout_steps`, `truth_dir`).
+[`conf/`](../conf/). There are **two run entry points**, one per script, and
+each is **self-contained**:
+[`conf/run_forward_model.yaml`](../conf/run_forward_model.yaml) (forward-model
+runs) and [`conf/run_esmda.yaml`](../conf/run_esmda.yaml) (all ESMDA runs); a
+third, [`conf/generate_training_data.yaml`](../conf/generate_training_data.yaml),
+drives surrogate data generation (currently bases off `run_forward_model`).
 
-Shared flat files use a `# @package <category>` directive so the body lands at
-the right runtime key:
+Rather than pull shared `# @package`-mounted files, each entry point **inlines**
+the base directly in its body — there is no `config.yaml`/`paths.yaml`/
+`time.yaml`/`ensemble.yaml`/`esmda.yaml` anymore:
 
-| File | Runtime key | Notable fields |
+| Inlined block | Runtime key | Notable fields |
 |---|---|---|
-| [`paths.yaml`](../conf/paths.yaml) | `paths` | `results_dir` (default `.temp/${model.name}`), `experiment_dir` |
-| [`time.yaml`](../conf/time.yaml) | `time` | `simulation_time`, `output_frequency`, `spinup_time` |
-| [`ensemble.yaml`](../conf/ensemble.yaml) | `ensemble` | `ensemble_size`, `num_parallel_processes`, `failure.{policy, jitter_scale, seed}` |
-| [`esmda.yaml`](../conf/esmda.yaml) | `esmda` | `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `seed`. `localization` is set by the **`esmda/localization` group** (`none`\|`correlation`\|`distance`, default `none` = global update). Mounted only by `run_esmda.yaml`. |
+| `paths:` | `paths` | `results_dir` (fwd `.temp/${model.name}`; esmda `.temp/${truth_model.name}_to_${assim_model.name}`), `experiment_dir` |
+| `time:` | `time` | `num_param_knots` (per-window horizon `simulation_time`/`output_frequency`/`spinup_time` comes from the `case`) |
+| `ensemble:` | `ensemble` | `ensemble_size`, `num_parallel_processes`, `failure.{policy, jitter_scale, seed}` |
+| `esmda:` (run_esmda only) | `esmda` | `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `seed`. `localization`/`state_reduction` are set by the **`esmda/localization`** / **`esmda/state_reduction`** groups (default `none`); inlined *before* those groups in the defaults so they override it. |
+| `run:` | `run` | generic script knobs (`skip_viz`, `results_dir`, `ensemble`, `rollout_steps`, `truth_dir`, …) |
 
 Everything that varies per variant is a **group**:
 
 | Group | Selects | Notable |
 |---|---|---|
-| `case/` | geometry bundle (`xie_and_castro`, `barcelona`) | bundles `domain` + `obs` + `geometry` for one geometry. `case=xie_and_castro` is the default. `domain.yaml`/`obs.yaml` live here now, not at the conf root. |
+| `case/` | experiment bundle (`xie_and_castro`, `barcelona`) | one self-contained file per experiment: `domain` (bounds + grid) + `obs` (sensors incl. validation) + `geometry` (STL) + per-window `time`. `case=xie_and_castro` is the default. The single place to define/add an experiment. |
 | `model/` | forward + ensemble backend | mounted under a package: `model@model=pylbm` (forward), or twice for assimilation (see below) |
 | `params/` | parameter sampler | `static`, `dynamic`, `static_truth`, `dynamic_truth` — see below. Mounts at runtime key `params` (forward) or `truth_params`/`prior_params` (esmda). |
 | `esmda/smoother/` | ESMDA variant | `static` (`ParameterESMDA`), `dynamic` (`TimeVaryingParameterESMDA`), `state_and_parameter` (`StateAndParameterESMDA`). The one genuinely mode-specific `_target_`. |
-| `size/` | run-size overlay (`tiny`→`xlarge`, plus `test`) | `# @package _global_`; deep-merges over the case/flat files |
-| `preset/` | bundled overlays (`small`, `test`) | smaller domain / fewer steps / CPU-only LBM |
 | `training_data/` | surrogate data-generation overlay | each size pulls `training_data/_base.yaml` (sampler skeleton + horizon) and overrides only what scales |
 
 **Parameter samplers** are a group mounted *by package*, not a flat file. Each
@@ -244,14 +242,15 @@ option is a single sampler `_target_`:
   distinct AR(2) seed). Keeping truth and prior as separate configs avoids the
   inverse crime.
 
-`config.yaml` mounts one sampler at key `params` (`params=static|dynamic`).
-`run_esmda.yaml` mounts the group **twice** — `params@truth_params` and
-`params@prior_params` — exactly mirroring the model double-mount.
+`run_forward_model.yaml` mounts one sampler at key `params`
+(`params=static|dynamic`). `run_esmda.yaml` mounts the group **twice** —
+`params@truth_params` and `params@prior_params` — exactly mirroring the model
+double-mount.
 
 **ESMDA smoother** is selected via the `esmda/smoother` group (default
 `dynamic`). It is the one genuinely mode-specific piece; the shared
-`num_steps`/`alpha`/`localization` come from `esmda.yaml` via
-`${esmda.*}` interpolation. The single [`run_esmda.py`](../scripts/run_esmda.py)
+`num_steps`/`alpha`/`localization` come from the inlined `esmda:` block of
+`run_esmda.yaml` via `${esmda.*}` interpolation. The single [`run_esmda.py`](../scripts/run_esmda.py)
 script handles every former esmda script — mode is the cross product of
 `esmda/smoother`, `params@prior_params`, and `esmda.num_assimilation_windows`
 (1 = single window, N = rollout). Tests compose `config_name="run_esmda"` and
@@ -278,12 +277,12 @@ al. 2025); `distance` = physical-distance-based. Pick one with
 `block_grouping` flag toggles per-row vs. the paper's "grid block" joint
 analysis (see §6).
 
-The `size/` overlays are `# @package _global_` and are the single place a run
-is sized (`size=medium`). Each inlines `domain`/`time` and overrides only the
-fields that scale with the run (`ensemble.ensemble_size`,
-`ensemble.num_parallel_processes`, the `obs` sensor coords + `interval_seconds`,
-`esmda.num_steps`/`num_assimilation_windows`), deep-merging over the
-case/flat base files.
+The **compute budget** (`ensemble.ensemble_size`,
+`ensemble.num_parallel_processes`, `esmda.num_steps`/`num_assimilation_windows`,
+`time.num_param_knots`) is baked into the two entry points at medium-sized
+defaults — there is no separate scale/size group. Change it with plain CLI
+overrides; the pytest suite shrinks it to a tiny smoke shape via
+`_SMOKE_OVERRIDES` in `tests/conftest.py`.
 
 Forward-model runs mount the model once at `cfg.model.*`. Assimilation runs use
 Hydra's package-override syntax to mount the same `model/` and `params/` groups
@@ -349,7 +348,7 @@ Every script in [`scripts/`](../scripts/) follows the same shape:
 def run(cfg: DictConfig) -> None:
     ...
 
-@hydra.main(version_base=None, config_path="../conf", config_name="config")
+@hydra.main(version_base=None, config_path="../conf", config_name="run_forward_model")
 def main(cfg: DictConfig) -> None:
     run(cfg)
 ```
@@ -374,9 +373,9 @@ behavior:
   composer can't be invoked from a module-scoped fixture without
   pytest erroring on the scope mismatch.
 
-Every fixture injects `+size=test` (the smallest domain / shortest window /
-2-member ensemble; see [conf/size/test.yaml](../conf/size/test.yaml)). Override
-anything per-test:
+Every fixture applies the smoke shape (`_SMOKE_OVERRIDES` in
+[tests/conftest.py](../tests/conftest.py): the smallest domain / shortest window /
+2-member ensemble). Override anything per-test:
 
 ```python
 def test_something(compose_test_cfg) -> None:
@@ -778,17 +777,17 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 - `.temp/` is the default scratch directory. Every backend writes its
   per-experiment dir and per-member dirs underneath. The default
   `paths.results_dir` is `.temp/${model.name}` and `experiment_dir` is
-  `.temp` (see [conf/paths.yaml](../conf/paths.yaml)); `run_esmda.yaml`
+  `.temp` (see the inlined `paths:` block); `run_esmda.yaml`
   overrides `results_dir` to `.temp/${truth_model.name}_to_${assim_model.name}`.
-- Tests inject `+size=test` ([conf/size/test.yaml](../conf/size/test.yaml):
-  tiny domain / 3 s window / 2-member ensemble) via the conftest fixtures —
-  `pixi run py.test` in the dev env.
+- Tests apply the smoke shape (`_SMOKE_OVERRIDES` in
+  [tests/conftest.py](../tests/conftest.py): tiny domain / 3 s window / 2-member
+  ensemble) via the conftest fixtures — `pixi run py.test` in the dev env.
 - Pre-commit hooks (`black`, `isort`, `mypy`) installed via
   `pixi run pre-commit`. They are **not enforced** server-side; commits
   can bypass.
 - **Ensemble scaling on this hardware** is DRAM-bandwidth-bound past
   ~4 workers (see [docs/ensemble_scaling.md](ensemble_scaling.md) and
-  the comments in [conf/ensemble.yaml](../conf/ensemble.yaml)).
+  the comments in the inlined `ensemble:` block).
   Don't blindly raise `num_parallel_processes` past 8 — re-benchmark
   first.
 - `pyurbanair` deliberately uses `forkserver` not `fork` for parallel
@@ -829,7 +828,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 | How sensors map to grid points | [libs/data-assimilation/src/data_assimilation/observation_operator.py](../libs/data-assimilation/src/data_assimilation/observation_operator.py) |
 | Per-window rollout logic | `run_esmda.py`'s window loop / `run_forward_model.py`'s `run.rollout_steps` loop |
 | Parameter samplers (static + dynamic) | [src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/), [src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/), [conf/params/](../conf/params/) |
-| Truth source / spin-up trimming / 32-bit | `run.truth_dir`+`run.truth_start_time` in [run_esmda.yaml](../conf/run_esmda.yaml); [scripts/trim_spinup.py](../scripts/trim_spinup.py), [convert_ground_truth_to_32bit.py](../scripts/convert_ground_truth_to_32bit.py), [visualize_ground_truth.py](../scripts/visualize_ground_truth.py) |
+| Truth source / spin-up trimming / 32-bit | `run.truth_dir`+`run.truth_start_time` in [run_esmda.yaml](../conf/run_esmda.yaml); [scripts/trim_spinup.py](../scripts/trim_spinup.py), [convert_ground_truth_to_32bit.py](../scripts/convert_ground_truth_to_32bit.py), [visualize_ground_truth.py](../scripts/figure_creation/visualize_ground_truth.py) |
 | Localization (correlation/distance/none) / grid-block grouping | [localization/](../libs/data-assimilation/src/data_assimilation/localization/) (`correlation.py`, `distance.py`), the `esmda/localization` group [conf/esmda/localization/](../conf/esmda/localization/) (`block_grouping`, state-only) |
 | Reduced SVD/KL state update / final trajectory smoothing | [reduction.py](../libs/data-assimilation/src/data_assimilation/reduction.py), the `esmda/state_reduction` group [conf/esmda/state_reduction/](../conf/esmda/state_reduction/), [docs/reduced_state_da.md](reduced_state_da.md) |
 | Neural-surrogate architectures (UPT etc.) | [architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/), [conf/neural_surrogate_architectures/](../conf/neural_surrogate_architectures/) |

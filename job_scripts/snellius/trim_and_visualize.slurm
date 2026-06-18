@@ -7,7 +7,7 @@
 # Step 1 runs scripts/trim_spinup.py with --state-only, dropping the leading
 # 50 s of spin-up from state_not_spunup.nc and writing state.nc into GT_DIR
 # (params.nc is copied through unchanged). Step 2 runs
-# scripts/visualize_ground_truth.py on the trimmed GT_DIR.
+# scripts/figure_creation/visualize_ground_truth.py on the trimmed GT_DIR.
 #SBATCH --job-name=trim_and_visualize
 #SBATCH --partition=rome
 #SBATCH --ntasks=1
@@ -46,7 +46,7 @@ pixi run -e "${ENV}" -- python -u scripts/trim_spinup.py \
     --output-dir "${GT_DIR}"
 
 # Step 2: visualize the trimmed ground truth.
-pixi run -e "${ENV}" -- python -u scripts/visualize_ground_truth.py \
+pixi run -e "${ENV}" -- python -u scripts/figure_creation/visualize_ground_truth.py \
     "${GT_DIR}"
 
 echo "Done — trimmed state.nc and figures under ${GT_DIR}"

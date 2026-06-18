@@ -52,7 +52,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from visualize_run import _load_yaml  # noqa: E402
 from visualize_state_run import detect_mode_and_method  # noqa: E402

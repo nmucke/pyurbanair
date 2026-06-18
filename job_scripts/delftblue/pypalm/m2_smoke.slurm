@@ -68,8 +68,11 @@ fi
 pixi run -e delftblue -- bash -c '
   unset OPAL_PREFIX CC CXX F77 F90 FC
   export PATH="${CONDA_PREFIX}/bin:${PATH}"
-  exec python -u scripts/run_time_varying_parameters_rollout_esmda.py \
-      size=tiny \
+  exec python -u scripts/run_esmda.py \
+      domain.nx=20 domain.ny=20 \
+      domain.bounds=[[0.0,20.0],[0.0,20.0],[0.0,10.0]] \
+      time.simulation_time=5.0 time.output_frequency=1.0 time.spinup_time=5.0 \
+      time.num_param_knots=3 \
       domain.nz=16 \
       model@truth_model=pypalm \
       model@assim_model=pypalm \

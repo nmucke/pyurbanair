@@ -1,5 +1,5 @@
 #!/bin/bash
-# SNELLIUS batch visualizer. Runs scripts/visualize_run.py over EVERY run folder
+# SNELLIUS batch visualizer. Runs scripts/figure_creation/visualize_run.py over EVERY run folder
 # in a parent directory (default /projects/prjs2075/urbanair/assim_from_ground_truth).
 # Each subfolder that holds a run_summary.yaml is treated as one run; figures land
 # under result_figures/<run folder name>.
@@ -62,7 +62,7 @@ for run_dir in "$PARENT"/*/; do
         continue
     fi
     echo "=== visualizing: $run_dir ==="
-    if pixi run -e snellius -- python -u scripts/visualize_run.py "$run_dir" "$@"; then
+    if pixi run -e snellius -- python -u scripts/figure_creation/visualize_run.py "$run_dir" "$@"; then
         n_ok=$((n_ok + 1))
     else
         echo "!! failed: $run_dir" >&2

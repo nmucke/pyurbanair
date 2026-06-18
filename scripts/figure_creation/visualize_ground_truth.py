@@ -30,7 +30,7 @@ import pathlib
 import sys
 
 if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
 import matplotlib.pyplot as plt
 import numpy as np

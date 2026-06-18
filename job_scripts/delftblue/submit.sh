@@ -8,15 +8,16 @@
 #
 #   <model>  pylbm | pyudales | pypalm   (the assimilation forward model; also
 #            the truth model unless TRUTH_MODEL overrides it)
-#   <size>   tiny | small | medium | large | xlarge   (a conf/size/<size>.yaml)
+#   <size>   tiny | small | medium | large | xlarge   (sizes the SLURM allocation)
 #
-# The number of cores requested follows `ensemble.ensemble_size` from
-# conf/size/<size>.yaml (one worker per ensemble member), capped at a single
-# DelftBlue compute node (64 cores). For ensemble_size > 64 the wrapper
+# The size label maps to an ensemble size (tiny=4, small=32, medium/large=64,
+# xlarge=96), which sets the cores requested (one worker per member), capped at a
+# single DelftBlue compute node (64 cores). For ensemble_size > 64 the wrapper
 # oversubscribes workers up to 96 (matches the historical xlarge pattern). The
-# matching worker count is passed as `ensemble.num_parallel_processes`. Edit
-# ensemble_size in the size config and the allocation tracks it — no need to
-# touch this script.
+# worker count is passed as `ensemble.num_parallel_processes` and the ensemble
+# size as `ensemble.ensemble_size`. The run otherwise uses the medium-sized
+# defaults baked into conf/run_esmda.yaml; pass ensemble.ensemble_size=N (or any
+# hydra override) to change it.
 #
 # Examples:
 #   job_scripts/delftblue/submit.sh pylbm small
@@ -26,7 +27,7 @@
 #
 # Options (environment variables):
 #   TRUTH_MODEL=<m>     forward model that generates the truth (default: <model>)
-#   WALLTIME=HH:MM:SS   override the per-size default wall time
+#   WALLTIME=HH:MM:SS   override the per-scale default wall time
 #   DRY_RUN=1           print the sbatch command and computed sizing, do not submit
 
 set -euo pipefail
@@ -50,22 +51,31 @@ for m in "${ASSIM_MODEL}" "${TRUTH_MODEL}"; do
 done
 
 TEMPLATE="${SCRIPT_DIR}/templates/esmda.slurm"
-SIZE_CFG="${REPO_ROOT}/conf/size/${SIZE}.yaml"
 [ -f "${TEMPLATE}" ] || die "missing template ${TEMPLATE}"
-[ -f "${SIZE_CFG}" ] || die "no size config conf/size/${SIZE}.yaml (expected tiny|small|medium|large|xlarge)"
 
-# Resolve ensemble_size: a CLI override (ensemble.ensemble_size=N) wins over the
-# value in the size config, so the allocation matches what the run will use.
+# The conf/scale group was removed; runs use the medium-sized defaults baked into
+# conf/run_esmda.yaml. The size label only sizes the SLURM allocation (maps to an
+# ensemble size -> cores); pass extra hydra overrides (e.g.
+# esmda.num_assimilation_windows=10) to change the DA settings per run.
+case "${SIZE}" in
+  tiny)   SIZE_ENSEMBLE=4  ;;
+  small)  SIZE_ENSEMBLE=32 ;;
+  medium) SIZE_ENSEMBLE=64 ;;
+  large)  SIZE_ENSEMBLE=64 ;;
+  xlarge) SIZE_ENSEMBLE=96 ;;
+  *) die "unknown size '${SIZE}' (expected tiny|small|medium|large|xlarge)" ;;
+esac
+
+# A CLI override (ensemble.ensemble_size=N) wins over the size label, so the
+# allocation matches what the run will use (the wrapper passes it through).
 ENSEMBLE_SIZE=""
 for arg in "$@"; do
   case "${arg}" in
     ensemble.ensemble_size=*) ENSEMBLE_SIZE="${arg#*=}" ;;
   esac
 done
-if [ -z "${ENSEMBLE_SIZE}" ]; then
-  ENSEMBLE_SIZE="$(grep -E '^[[:space:]]*ensemble_size:' "${SIZE_CFG}" | head -1 | sed -E 's/.*:[[:space:]]*([0-9]+).*/\1/')"
-fi
-[[ "${ENSEMBLE_SIZE}" =~ ^[0-9]+$ ]] || die "could not read a numeric ensemble_size from ${SIZE_CFG} (got '${ENSEMBLE_SIZE}')"
+ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-${SIZE_ENSEMBLE}}"
+[[ "${ENSEMBLE_SIZE}" =~ ^[0-9]+$ ]] || die "ensemble_size must be numeric (got '${ENSEMBLE_SIZE}')"
 (( ENSEMBLE_SIZE >= 1 )) || die "ensemble_size must be >= 1 (got ${ENSEMBLE_SIZE})"
 
 # DelftBlue compute node sizing: cap cores at one compute-p2 node (64). pypalm
@@ -140,7 +150,7 @@ sbatch_cmd=(
   --output="${OUT}"
   --error="${ERR}"
   --chdir="${REPO_ROOT}"
-  --export="ALL,PUA_SIZE=${SIZE},PUA_NUM_PARALLEL=${NUM_PARALLEL},PUA_TRUTH_MODEL=${TRUTH_MODEL},PUA_ASSIM_MODEL=${ASSIM_MODEL}"
+  --export="ALL,PUA_SIZE=${SIZE},PUA_ENSEMBLE_SIZE=${ENSEMBLE_SIZE},PUA_NUM_PARALLEL=${NUM_PARALLEL},PUA_TRUTH_MODEL=${TRUTH_MODEL},PUA_ASSIM_MODEL=${ASSIM_MODEL}"
   "${TEMPLATE}"
   "$@"
 )

@@ -2,7 +2,7 @@
 # SNELLIUS: generate ALL static talk figures (Blocks A/B/C + summary + tables +
 # NOTES) for the EnKF-2026 deck, per docs/figure_specs.md, into figures/.
 #
-# Runs scripts/make_all_figures.py --heavy, which loads the posterior-mean
+# Runs scripts/figure_creation/make_all_figures.py --heavy, which loads the posterior-mean
 # rollouts (~0.25-2.6 GB each) and the wide ground truth (~0.9 GB), interpolates
 # everything onto the common truth grid and computes the field metrics. Single
 # process; the cores mainly buy RAM. No ffmpeg needed (animations are separate).
@@ -35,6 +35,6 @@ export MPLBACKEND=Agg
 echo "SNELLIUS figures_static: job ${SLURM_JOB_ID:-local} on $(hostname) -- $(date)"
 [ "$#" -gt 0 ] && echo "Args: $*"
 
-pixi run -e snellius -- python -u scripts/make_all_figures.py --heavy "$@"
+pixi run -e snellius -- python -u scripts/figure_creation/make_all_figures.py --heavy "$@"
 
 echo "Done -- static figures under figures/  ($(date))"

@@ -4,7 +4,7 @@ Covers the modes the single script replaces (the old
 run_{parameter,state_and_parameter,rollout,time_varying_parameter,
 time_varying_parameters_rollout}_esmda.py family) plus the joint
 state+time-varying-parameter mode, a cross-model case and a disk-loaded-truth
-case. Everything runs under the tiny `+size=test` overlay with the global
+case. Everything runs under the tiny smoke config (conftest `_SMOKE_OVERRIDES`) with the global
 (unlocalized) update — the default correlation localization is degenerate at
 this 2-member ensemble size and has its own test.
 
@@ -41,33 +41,28 @@ def _overrides(truth_model, assim_model, smoother, prior, num_windows, localizat
         # Simulate the truth inline (the default config points truth_dir at a
         # disk path that does not exist in the test environment).
         "run.truth_dir=null",
-        # The `+size=test` overlay shrinks the domain to [0,20]^2 but (unlike the
-        # other size overlays) does not supply matching sensor coordinates, so
-        # the case's full-domain obs points fall outside the test grid. Place the
-        # assimilation sensors in the open N-S lanes of the tiny domain, mirroring
-        # conf/size/tiny.yaml. Validation sensors are only used by the plots
-        # (skipped here via run.skip_viz=true).
+        # The conftest smoke overrides pin a tiny [0,20]^2 domain but do not
+        # supply matching sensor coordinates, so the case's full-domain obs points
+        # fall outside the test grid. Place the assimilation sensors in the open
+        # N-S lanes of the tiny [0,20]^2 domain. Validation sensors are only used
+        # by the plots (skipped here via run.skip_viz=true).
         "obs.x_points=[2.5,2.5,18.0,18.0]",
         "obs.y_points=[5.0,15.0,5.0,15.0]",
         "obs.z_points=[3.0,3.0,3.0,3.0]",
         "obs.interval_seconds=3.0",
     ]
     if prior == "dynamic":
-        # Keep all three time grids at the same small N. The state_and_dynamic
-        # smoother flattens `num_time_points` (= params.time_coords.num, the
-        # `params` mount from config.yaml) knots and isel(time=t_idx) into the
-        # sampled prior, so the `params`, prior and truth grids must agree.
-        ov += [
-            "params.time_coords.num=3",
-            "prior_params.time_coords.num=3",
-            "truth_params.time_coords.num=3",
-        ]
+        # Keep all the time grids small. `time.num_param_knots` is the single
+        # knot-count source: the dynamic smoothers' `num_time_points` and every
+        # params mount (`params`/prior/truth) interpolate it, so one override
+        # keeps the flattened knot grids in agreement.
+        ov += ["time.num_param_knots=3"]
     if truth_model == "pylbm":
         ov.append("truth_model.forward_model.cuda=false")
     if assim_model == "pylbm":
         ov.append("assim_model.forward_model.cuda=false")
     # conf/model/pyudales.yaml's default nnudge_meters=16 m is tuned for a
-    # full-size domain; on the `+size=test` grid (zsize=10 m, ktot=4) it would
+    # full-size domain; on the smoke grid (zsize=10 m, ktot=4) it would
     # leave no nudged levels and raise. Scale it down to the test domain so a
     # couple of bottom cells stay un-nudged while the rest are nudged.
     if truth_model == "pyudales":
@@ -195,13 +190,13 @@ def test_run_esmda_loads_ground_truth_from_disk(
                 # a `run.time_varying` flag — that flag no longer exists in the
                 # flattened config).
                 "params=dynamic",
-                "params.time_coords.num=3",
+                "time.num_param_knots=3",
                 "run.rollout_steps=1",
                 "run.skip_viz=true",
                 f"run.results_dir={gt_dir}",
                 f"paths.base_results_dir={gt_dir}",
                 # The tiny test domain ([0,20]^2) needs in-bounds sensors, as the
-                # `+size=test` overlay supplies none (see _overrides).
+                # smoke overrides supply none (see _overrides).
                 "obs.x_points=[2.5,2.5,18.0,18.0]",
                 "obs.y_points=[5.0,15.0,5.0,15.0]",
                 "obs.z_points=[3.0,3.0,3.0,3.0]",

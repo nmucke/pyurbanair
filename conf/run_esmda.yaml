@@ -1,10 +1,14 @@
-# Primary config for scripts/run_esmda.py — the single ESMDA entry point that
-# replaces run_{parameter,state_and_parameter,rollout,time_varying_parameter,
-# time_varying_parameters_rollout}_esmda.py.
+# Primary config (entry point) for scripts/run_esmda.py — the single ESMDA entry
+# point that replaces run_{parameter,state_and_parameter,rollout,
+# time_varying_parameter,time_varying_parameters_rollout}_esmda.py.
+#
+# Self-contained: this file inlines the shared base (output paths, time knobs,
+# ensemble defaults, the `run:` namespace and Hydra settings) and selects the DA
+# groups. The inlined defaults below are medium-sized; override the compute knobs
+# on the CLI (e.g. `esmda.num_assimilation_windows=3`). See conf/README.md.
 #
 # Declarative axes select the mode:
 #   * esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic
-#                                                                 (augmented state)
 #       static             -> parameter-only, static params
 #       state_and_parameter-> joint time=0 state + static params
 #       dynamic            -> parameter-only, time-varying (AR(2)) params
@@ -16,10 +20,11 @@
 #   * run.truth_dir=<path> -> load a state.nc/params.nc artifact
 #                             (as written by run_forward_model.py)
 #
-# Mirrors the model double-mount: the model group is mounted twice
-# (model@truth_model / model@assim_model) and the params group is mounted twice
-# (params@truth_params / params@prior_params). Keeping the truth and prior
-# samplers as separate configs is what avoids the inverse crime.
+# The model group is mounted twice (model@truth_model / model@assim_model) and
+# the params group is mounted twice (params@truth_params / params@prior_params);
+# keeping the truth and prior samplers as separate configs is what avoids the
+# inverse crime. There is deliberately no base `model`/`params` mount — this run
+# only uses the truth/assim and truth/prior pairs.
 #
 # Examples::
 #
@@ -27,15 +32,16 @@
 #     params@prior_params=static params@truth_params=static_truth
 #   python scripts/run_esmda.py esmda/smoother=state_and_parameter \
 #     params@prior_params=static esmda.num_assimilation_windows=3
-#   python scripts/run_esmda.py esmda/smoother=dynamic \
-#     params@prior_params=dynamic params@truth_params=dynamic_truth \
-#     esmda.num_assimilation_windows=3
 #   python scripts/run_esmda.py esmda/smoother=state_and_dynamic \
 #     params@prior_params=dynamic params@truth_params=dynamic_truth \
 #     esmda.num_assimilation_windows=3
 defaults:
-  - config
-  - esmda
+  - case: xie_and_castro
+  # `_self_` here (before the esmda/* groups) so the base `esmda:` scalars below
+  # are set first and the localization / state_reduction / smoother groups can
+  # override them (esmda.localization etc.). The model / params mounts write to
+  # their own packages, so their position relative to `_self_` is immaterial.
+  - _self_
   - esmda/localization: none
   - esmda/state_reduction: none
   - esmda/smoother: dynamic
@@ -43,20 +49,70 @@ defaults:
   - model@assim_model: pyudales
   - params@truth_params: dynamic_truth
   - params@prior_params: dynamic
-  - _self_
 
-# This run mounts two models (model@truth_model / model@assim_model) and never
-# uses the base `model` package, so paths.yaml's default `.temp/${model.name}`
-# would always resolve to the unused base model (pylbm). Override the output root
-# to reflect the actual truth/assim backends chosen for the run.
+# --- Output roots (everything mutable lands under .temp/). This run mounts two
+# models (truth/assim) and no base `model`, so name the output by both backends. ---
 paths:
   results_dir: .temp/${truth_model.name}_to_${assim_model.name}
+  # Absolute scratch dir for the solvers (they chdir into it). Resolved from $PWD
+  # so it also works under bare compose() in tests.
+  experiment_dir: ${oc.env:PWD}/.temp_lbm
+  base_results_dir: .temp_lbm
+
+# --- Time-varying parameter knot count (per-window horizon lives in the case) ---
+time:
+  num_param_knots: 5
+
+# --- Ensemble execution. Override per run on the CLI, e.g.
+# `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
+ensemble:
+  ensemble_size: 64
+  num_parallel_processes: 4
+  num_cpus_per_process: 1
+  failure:
+    policy: resample_from_successes
+    jitter_scale: 0.05
+    seed: 0
+
+# --- ESMDA settings shared across the smoother modes. The smoother itself (the
+# `_target_` block) is the one mode-specific piece, selected via the
+# `esmda/smoother` group above. Localization and state reduction are config
+# GROUPS (esmda/localization=none|correlation|distance,
+# esmda/state_reduction=none|svd) that override `esmda.localization` /
+# `esmda.state_reduction` below. ---
+esmda:
+  num_steps: 3
+  alpha: ${.num_steps}
+  num_assimilation_windows: 5
+  seed: 42
+  obs_error_std: 0.25
+  # Defaults; normally set by the esmda/localization and esmda/state_reduction
+  # groups (both default to `none`). Incompatible with each other for the state
+  # update (the reduced coefficients are nonlocal); see docs/reduced_state_da.md.
+  localization: null
+  state_reduction: null
+  # Optional post-loop Kalman smoothing of the full window trajectory (every time
+  # step jointly) reusing the final posterior forecast — no extra forward solve,
+  # parameters frozen. Requires state_reduction; state-bearing smoothers only.
+  final_time_smoothing: false
 
 run:
+  skip_viz: false
+  results_dir: null
+  # When true, ensemble forecasts are written to disk (one NetCDF per member,
+  # per ESMDA step) instead of one in-memory ensemble Dataset — keeps the full
+  # field off host RAM for the high-resolution / large-ensemble sweeps.
+  ensemble_save_on_disk: false
+  # Truth source: null -> simulate inline (default); a path -> load a
+  # state.nc/params.nc artifact written by run_forward_model.py params=dynamic.
   truth_dir: null
-  # truth_dir: .temp/pyudales/hydra/run_forward_model/2026-06-05/12-15-24/pyudales_rollout_time_varying
-  # truth_dir: ground_truth
   # Begin the assimilation horizon partway into a disk-loaded truth (skips a
   # spin-up): keep state + params from this time onward and rebase the time axis
   # so this time becomes t=0. null/0 -> start from the truth's first frame.
   truth_start_time: null
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

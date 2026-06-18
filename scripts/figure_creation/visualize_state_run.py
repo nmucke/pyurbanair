@@ -58,7 +58,7 @@ import numpy as np
 import xarray as xr
 
 if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 # Reuse the parameter + light-state figures (and IO helpers) from the
 # parameter-only visualizer so the two stay in lockstep.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))

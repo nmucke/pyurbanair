@@ -32,7 +32,7 @@ RUN_TEMP_DIR="${SCRATCH_DIR}/urbanair_temp/${SLURM_JOB_ID}"
 mkdir -p job_scripts/delftblue/out_files "${PROJECT_STORAGE}" "${RUN_TEMP_DIR}"
 
 echo "Job ${SLURM_JOB_ID} on $(hostname) — $(date)"
-echo "Truth=${PUA_TRUTH_MODEL} assim=${PUA_ASSIM_MODEL} size=${PUA_SIZE} cores=${SLURM_CPUS_PER_TASK} num_parallel=${PUA_NUM_PARALLEL}"
+echo "Truth=${PUA_TRUTH_MODEL} assim=${PUA_ASSIM_MODEL} scale=${PUA_SIZE} cores=${SLURM_CPUS_PER_TASK} num_parallel=${PUA_NUM_PARALLEL}"
 echo "Results: ${PROJECT_STORAGE}  (temp: ${RUN_TEMP_DIR})"
 [ "$#" -gt 0 ] && echo "Extra hydra overrides: $*"
 
@@ -154,7 +154,7 @@ done < <(role_flags truth_model "${PUA_TRUTH_MODEL}"; role_flags assim_model "${
 # Disable localization entirely with `esmda.localization=null`.
 PY_ARGS=(
   python -u scripts/run_time_varying_parameters_rollout_esmda.py
-  "size=${PUA_SIZE}"
+  "ensemble.ensemble_size=${PUA_ENSEMBLE_SIZE}"
   "model@truth_model=${PUA_TRUTH_MODEL}"
   "model@assim_model=${PUA_ASSIM_MODEL}"
   "ensemble.num_parallel_processes=${PUA_NUM_PARALLEL}"
