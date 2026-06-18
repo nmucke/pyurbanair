@@ -37,10 +37,9 @@ ASSIM_MODEL="pyudales"
 NX="${NX:-50}"
 NY="${NY:-40}"
 NZ="${NZ:-16}"
-ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-96}"
 NUM_ESMDA_STEPS="${NUM_ESMDA_STEPS:-3}"
-INTERVAL_SECONDS="${INTERVAL_SECONDS:-20.0}"   # obs.interval_seconds: time-aggregation bin width [s]
 NUM_PARALLEL="${NUM_PARALLEL:-}"    # empty -> min(ENSEMBLE_SIZE, LOCAL_MAX_PARALLEL)
+# ENSEMBLE_SIZE and INTERVAL_SECONDS default in common.sh (still env-overridable).
 
 # Shared defaults: paths, domain bounds + sensors, windows, time horizon, dynamic
 # parameter settings, localization, ground-truth resolution/validation, and the

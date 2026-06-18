@@ -41,8 +41,8 @@ export SKIP_VIZ=true
 # set, coarse -> ground-truth grid.
 RESOLUTIONS=(
   # "25 20 8"     # k=1  (coarsest)
-  "30 40 16"    # k=2
-  "45 60 16"    # k=3
+  # "30 40 16"    # k=2
+  # "45 60 16"    # k=3
   "60 80 16"    # k=4  (== ground-truth resolution)
 )
 # Ensemble-size sweep, at the fixed grid below.
@@ -53,7 +53,7 @@ ESMDA_STEPS=( 1 2 3 4 )
 # ensemble + steps below. The interval is the time-aggregation bin width: truth
 # observations are binned into interval-wide windows and aggregated within each,
 # so larger bins fold more frames into each observation.
-INTERVAL_SECONDS_LIST=( 5 20 30 )
+INTERVAL_SECONDS_LIST=( 10 20 30 60 )
 
 # Fixed values for the dimensions a given sweep holds constant.
 FIXED_NX="${FIXED_NX:-60}"

@@ -6,12 +6,20 @@ defaults:
 
 model_name: unet_convnext_medium
 
+# The uDALES runs are periodic in the spanwise (y) direction: spatial convs
+# wrap circularly along y instead of zero-padding. x stays non-periodic
+# (inflow-outflow), z stays non-periodic (ground / domain top). This is a
+# property of the data, so it lives here rather than in the architecture
+# presets.
+architecture:
+  periodic_axes: [y]
+
 # Optional warm start: path to a previously trained `weights.pt` state dict to
 # initialize the model from before training (e.g. fine-tuning or continuing a
 # run). The architecture must match. Set to null to train from scratch.
 # Example: init_weights_path=model_weights/unet_convnext_medium/weights.pt
-# init_weights_path: init_weights_path=model_weights/unet_convnext_medium/weights.pt
-init_weights_path: null
+init_weights_path: model_weights/unet_convnext_medium/weights.pt
+# init_weights_path: null
 
 trainer:
   _target_: neural_surrogates.Trainer
@@ -33,12 +41,12 @@ trainer:
   # rollouts and add one step every `pushforward_epochs_per_step` epochs, up to
   # `dataset.pushforward_steps`. Set the cadence to null to train at a fixed
   # horizon (the original pushforward behavior).
-  pushforward_epochs_per_step: 5
-  pushforward_start_steps: 1
+  pushforward_epochs_per_step: 7
+  pushforward_start_steps: 5
   # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
   # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`
   # over the remaining epochs. Set `lr_warmup_epochs` to null to disable.
-  lr_warmup_epochs: 5
+  lr_warmup_epochs: 2
   lr_warmup_start: 1.0e-6
   lr_min: 1.0e-6
   # Restrict the loss to fluid cells (uDALES targets carry junk values
@@ -74,11 +82,11 @@ dataset:
   param_vars: null
   cache: false
   dtype: float32
-  pushforward_steps: 5
+  pushforward_steps: 10
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 32
+  batch_size: 16
   shuffle: true
   # Workers overlap the per-sample netCDF reads with GPU compute;
   # pin_memory enables async host->GPU copies. Do NOT set

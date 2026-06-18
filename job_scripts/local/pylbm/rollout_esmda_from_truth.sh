@@ -1,17 +1,23 @@
 #!/bin/bash
-# LOCAL (no SLURM) rollout-ESMDA-from-truth runner -- pylbm backend ON GPU.
+# LOCAL (no SLURM) rollout-ESMDA-from-truth runner -- pylbm backend (GPU or CPU).
 #
 # Local sibling of job_scripts/snellius/pylbm/rollout_esmda_from_truth.slurm:
 # it runs scripts/run_esmda.py DIRECTLY (no sbatch / module / SLURM env vars),
 # keeping all heavy I/O and outputs under the repo (pyurbanair). Run config that
 # is shared with the pyudales/pypalm runners lives in ../common.sh (sourced
-# below); only the pylbm/GPU specifics are set here.
+# below); only the pylbm specifics are set here.
 #
-# GPU implies a SINGLE process: the pylbm forward model runs on CUDA
-# (assim_model.forward_model.cuda=true) and the ensemble is evaluated with
-# ensemble.num_parallel_processes=1 (members run in sequential batches sharing
-# the one GPU -- there is no multi-process fan-out as in the CPU/SLURM version).
-# Requires a machine with a visible NVIDIA GPU and the `cuda` pixi environment.
+# Device is chosen with USE_CUDA (default true):
+#   USE_CUDA=true  -- CUDA forward model (assim_model.forward_model.cuda=true) in
+#                     the `cuda` pixi env. One GPU => a SINGLE process: the
+#                     ensemble is evaluated with num_parallel_processes=1 (members
+#                     in sequential batches sharing the device). Needs a visible
+#                     NVIDIA GPU.
+#   USE_CUDA=false -- CPU forward model in the `dev` pixi env, with the ensemble
+#                     fanned out across up to LOCAL_MAX_PARALLEL worker processes
+#                     (cap with NUM_PARALLEL=…), exactly like the pyudales runner.
+#                     Use this on a laptop with no NVIDIA GPU, e.g.:
+#                         USE_CUDA=false LOCAL_MAX_PARALLEL=8 bash …
 #
 # Run it from anywhere (it cd's to the repo root itself):
 #
@@ -31,26 +37,42 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${REPO_ROOT}"
 
 # Backend-specific knobs ------------------------------------------------------
-ENV="${ENV:-cuda}"             # pixi env providing CUDA-enabled deps
 ASSIM_MODEL="pylbm"
 
-# pylbm ALWAYS runs on the GPU, and with a single GPU the ensemble is evaluated
-# SEQUENTIALLY: one process (num_parallel=1), members in back-to-back batches
-# sharing the one device. These are hard-pinned, not env-overridable.
-NUM_PARALLEL=1
+# Device toggle. GPU (default): CUDA forward model, `cuda` pixi env. CPU
+# (USE_CUDA=false): CPU forward model, `dev` pixi env. ENV may still be overridden
+# explicitly; otherwise it defaults to the env matching the chosen device.
+case "${USE_CUDA:-true}" in
+  true|True|TRUE|1|yes)   USE_CUDA=true ; DEVICE_LABEL="GPU" ; ENV="${ENV:-cuda}" ;;
+  false|False|FALSE|0|no) USE_CUDA=false; DEVICE_LABEL="CPU" ; ENV="${ENV:-dev}"  ;;
+  *) echo "error: USE_CUDA must be true/false (got '${USE_CUDA}')" >&2; exit 1 ;;
+esac
+
+# Worker count. GPU is hard-pinned to a SINGLE process (one device, ensemble
+# evaluated in sequential batches). CPU fans the ensemble out across up to
+# LOCAL_MAX_PARALLEL worker processes (your chosen ceiling, default 16; set
+# LOCAL_MAX_PARALLEL=… or pin an exact count with NUM_PARALLEL=…), capped at the
+# ensemble size. Resolved below, once common.sh has provided LOCAL_MAX_PARALLEL.
+NUM_PARALLEL="${NUM_PARALLEL:-}"
 
 # Sweep parameters (grid resolution / ensemble / ESMDA steps). Env-overridable so
 # the sweep launchers can inject one value per run; each lands in its own RESULTS_DIR.
 NX="${NX:-50}"
 NY="${NY:-40}"
 NZ="${NZ:-16}"
-ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-96}"
 NUM_ESMDA_STEPS="${NUM_ESMDA_STEPS:-3}"
-INTERVAL_SECONDS="${INTERVAL_SECONDS:-20.0}"   # obs.interval_seconds: time-aggregation bin width [s]
+# ENSEMBLE_SIZE and INTERVAL_SECONDS default in common.sh (still env-overridable).
 
 # Shared defaults: paths, domain bounds + sensors, windows, time horizon, dynamic
 # parameter settings, localization, ground-truth resolution/validation.
 source "${REPO_ROOT}/job_scripts/local/common.sh"
+
+# Resolve worker count now that LOCAL_MAX_PARALLEL is in scope (see note above).
+if [ "${USE_CUDA}" = true ]; then
+  NUM_PARALLEL=1
+elif [ -z "${NUM_PARALLEL}" ]; then
+  NUM_PARALLEL=$(( ENSEMBLE_SIZE < LOCAL_MAX_PARALLEL ? ENSEMBLE_SIZE : LOCAL_MAX_PARALLEL ))
+fi
 
 RUN_TAG="${ASSIM_MODEL}_nx${NX}_ny${NY}_nz${NZ}_ens${ENSEMBLE_SIZE}_steps${NUM_ESMDA_STEPS}_int${INTERVAL_SECONDS}${LOCALIZATION_TAG}"
 RESULTS_DIR="${RESULTS_ROOT}/${RUN_TAG}"
@@ -60,11 +82,11 @@ mkdir -p "${RESULTS_DIR}" "${RUN_TEMP_DIR}"
 # Clean this run's scratch on success; leave it for debugging on failure.
 trap '[ "$?" = "0" ] && rm -rf "${RUN_TEMP_DIR}"' EXIT
 
-echo "LOCAL pylbm GPU rollout-ESMDA on $(hostname) -- $(date)"
+echo "LOCAL pylbm ${DEVICE_LABEL} rollout-ESMDA on $(hostname) -- $(date)"
 echo "Truth=${GROUND_TRUTH_MODEL} (loaded) assim=${ASSIM_MODEL} case=${CASE} domain=${NX}x${NY}x${NZ}"
 echo "Ground truth: ${GROUND_TRUTH_PATH}"
 echo "Output: ${RESULTS_DIR}  (temp: ${RUN_TEMP_DIR})"
-echo "Ensemble=${ENSEMBLE_SIZE} parallel=${NUM_PARALLEL} (GPU) windows=${NUM_ASSIM_WINDOWS}"
+echo "Ensemble=${ENSEMBLE_SIZE} parallel=${NUM_PARALLEL} (${DEVICE_LABEL}) windows=${NUM_ASSIM_WINDOWS}"
 echo "ESMDA steps=${NUM_ESMDA_STEPS} obs_interval=${INTERVAL_SECONDS}s localization=${USE_LOCALIZATION}"
 [ "$#" -gt 0 ] && echo "Extra hydra overrides: $*"
 
@@ -89,7 +111,7 @@ export PYLBM_LBM_PATH="${JOB_LBM_DIR}"
 # disk path applies cleanly; run_esmda.py reassembles the per-window
 # prior/posterior states by streaming the per-member files.
 EXTRA_FLAGS=(
-  "assim_model.forward_model.cuda=true"
+  "assim_model.forward_model.cuda=${USE_CUDA}"
   "paths.experiment_dir=${RUN_TEMP_DIR}"
   "run.ensemble_save_on_disk=true"
 )

@@ -38,8 +38,8 @@ MODEL="$(basename "$(dirname "${RUNNER}")")"
 RESOLUTIONS=(
   # "25 20 8     04:00:00"   # k=1  (coarsest)
   # "30 40 16    4:00:00"   # k=2
-  "45 60 32    16:00:00"   # k=3
-  # "60 80 32   24:00:00"   # k=4  (== ground-truth resolution)
+  # "45 60 32    16:00:00"   # k=3
+  "60 80 32   24:00:00"   # k=4  (== ground-truth resolution)
 )
 # Ensemble-size sweep: "ENSEMBLE_SIZE TIME", at the fixed grid below.
 ENSEMBLE_SIZES=(

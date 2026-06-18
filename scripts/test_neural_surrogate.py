@@ -1,9 +1,14 @@
 """Autoregressively roll out a trained neural surrogate on a test trajectory.
 
 Loads the architecture and dataset from the saved
-`model_weights/<model_name>/config.yaml`, restores `weights.pt`, picks
-one test trajectory, and steps the model from its initial condition for
-the same number of steps as the ground-truth trajectory.
+`model_weights/<model_name>/config.yaml`, restores the model weights,
+picks one test trajectory, and steps the model from its initial
+condition for the same number of steps as the ground-truth trajectory.
+
+The model is restored from ``weights.pt`` — the best-validation weights.
+(The sibling ``checkpoint.pt`` is the trainer's full latest-epoch state and
+exists only for resuming training, not for evaluation.) ``metrics.csv`` is
+echoed for context when present.
 
 Usage:
 
@@ -188,10 +193,16 @@ def run(cfg: DictConfig) -> None:
         torch.load(model_dir / "weights.pt", map_location=device)
     )
     model.eval()
+    print("loaded weights.pt (best-validation weights)")
+
+    metrics_path = model_dir / "metrics.csv"
+    if metrics_path.exists():
+        lines = metrics_path.read_text().strip().splitlines()
+        print(f"training metrics: {len(lines) - 1} epochs logged; last: {lines[-1]}")
 
     truth, params, geometry = _load_trajectory(test_ds, cfg.sample_idx, dtype)
-    truth = truth[0:50]
-    params = params[0:50]
+    truth = truth[0:150]
+    params = params[0:150]
     T = truth.shape[0]
     print(
         f"loaded trajectory {cfg.sample_idx}  "
