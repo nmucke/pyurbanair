@@ -24,7 +24,7 @@
 #   artifacts to pyurbanair/sweep_metrics/. It opens one window's full-ensemble
 #   state at a time, so a high-resolution / large-ensemble sweep needs several GB
 #   of RAM -- hence this runs on a compute node, NOT the login node.
-# Stage 2 -- scripts/compare_sweep_results.py: reads pyurbanair/sweep_metrics/ and
+# Stage 2 -- scripts/figure_creation/compare_sweep_results.py: reads pyurbanair/sweep_metrics/ and
 #   writes figures + the big CSV to pyurbanair/comparison/ (light).
 #
 # mem-per-cpu: compute-p1 nodes carry ~3.9G per core (185 GB / 48 cores), so
@@ -70,6 +70,6 @@ pixi run -e "${ENV}" -- python -u scripts/compute_sweep_metrics.py \
     --root "${RESULTS_ROOT}" "${MODELS_ARG[@]}"
 
 echo "=== Stage 2: compare_sweep_results -> pyurbanair/comparison/{domain,ensemble} ==="
-pixi run -e "${ENV}" -- python -u scripts/compare_sweep_results.py "${MODELS_ARG[@]}" "$@"
+pixi run -e "${ENV}" -- python -u scripts/figure_creation/compare_sweep_results.py "${MODELS_ARG[@]}" "$@"
 
 echo "Done -- metrics in sweep_metrics/, figures + CSV in comparison/  ($(date))"

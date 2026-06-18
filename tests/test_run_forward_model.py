@@ -9,11 +9,11 @@ the esmda paths, refactored separately):
   * rollout:    off (`run.rollout_steps=0`, a single window)
                 on  (`run.rollout_steps=2`, three stitched windows)
   * ensemble:   single member vs. an N-member ensemble (`run.ensemble=true`,
-                sized by the `ensemble.*` fields of the `+size=test` overlay)
+                sized by the `ensemble.*` fields of the conftest smoke overrides)
 
 These are integration-style smoke tests: the goal is only to confirm the script
 runs end to end on every combination, not to assert on the physics. Everything
-is sized down hard by the `+size=test` overlay injected in conftest.
+is sized down hard by the smoke overrides injected in conftest.
 
 Two overrides exist purely to make the script composable outside `hydra.main`:
 `paths.experiment_dir` (normally `${hydra:runtime.cwd}/.temp`, which needs a live

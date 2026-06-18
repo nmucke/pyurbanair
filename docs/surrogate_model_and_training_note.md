@@ -28,7 +28,7 @@ ensemble machinery via
 
 ## 2. Training data
 
-Produced by `scripts/generate_training_data.py` from uDALES LES runs of
+Produced by `scripts/neural_surrogate/generate_training_data.py` from uDALES LES runs of
 the Xie & Castro urban canopy case (see [training_data.md](training_data.md)).
 The current production dataset is `training_data/pyudales_medium`:
 
@@ -118,7 +118,7 @@ residual add. Two non-standard choices, both motivated by 3D cost:
 
 ### Presets
 
-Config group: [conf/neural_surrogate_architectures/unet_convnext/](../conf/neural_surrogate_architectures/unet_convnext/)
+Config group: [conf/neural_surrogate/architectures/unet_convnext/](../conf/neural_surrogate/architectures/unet_convnext/)
 (tiny / small / medium / large / xlarge scale `base_channels`,
 `channel_mults`, `depths`, `kernel_size`, `expansion`). Default in
 training: **medium** (base 32, mults [1,2,4,8], depths [3,3,3,3], k = 7,
@@ -129,8 +129,8 @@ the `config.yaml` saved next to each `weights.pt`.
 ## 4. Training procedure
 
 Files: [training.py](../libs/neural-surrogates/src/neural_surrogates/training.py),
-[train.yaml](../conf/neural_surrogate_training/train.yaml),
-[train_neural_surrogate.py](../scripts/train_neural_surrogate.py).
+[train.yaml](../conf/neural_surrogate/training.yaml),
+[train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py).
 
 **Objective.** MSE on the predicted field at `t + K`, computed **over
 fluid cells only** (`mask_loss: true`) — obstacle interiors contain
@@ -212,7 +212,7 @@ restored.)
 
 ## 7. Evaluation & deployment
 
-- [`test_neural_surrogate.py`](../scripts/test_neural_surrogate.py)
+- [`test_neural_surrogate.py`](../scripts/neural_surrogate/test_neural_surrogate.py)
   loads `config.yaml` + `weights.pt`, rolls the model out
   autoregressively on the held-out test trajectories and reports/plots
   rollout error.

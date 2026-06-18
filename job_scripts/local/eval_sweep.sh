@@ -6,7 +6,7 @@
 #   Stage 1  scripts/compute_sweep_metrics.py  -- reads the per-run posterior
 #            results in the RUNS folder + each run's ground truth, writes SMALL
 #            metric artifacts to METRICS_DIR.
-#   Stage 2  scripts/compare_sweep_results.py  -- reads METRICS_DIR, writes the
+#   Stage 2  scripts/figure_creation/compare_sweep_results.py  -- reads METRICS_DIR, writes the
 #            comparison figures + big CSV to COMPARISON_DIR.
 #
 # The one thing you usually provide is the FOLDER HOLDING ALL THE RUNS (the
@@ -86,7 +86,7 @@ pixi run -e "${ENV}" -- python -u scripts/compute_sweep_metrics.py \
     --root "${RUNS_DIR}" --out "${METRICS_DIR}" "${MODELS_ARG[@]}"
 
 echo "=== Stage 2: compare_sweep_results -> ${COMPARISON_DIR}/{domain,ensemble} ==="
-pixi run -e "${ENV}" -- python -u scripts/compare_sweep_results.py \
+pixi run -e "${ENV}" -- python -u scripts/figure_creation/compare_sweep_results.py \
     --root "${METRICS_DIR}" --out "${COMPARISON_DIR}" "${MODELS_ARG[@]}" "$@"
 
 echo "Done -- metrics in ${METRICS_DIR}, figures + CSV in ${COMPARISON_DIR}  ($(date))"

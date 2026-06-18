@@ -12,8 +12,8 @@ trainer wiring on real data before any architecture work begins.
 | `SimpleConv` baseline | [libs/neural-surrogates/src/neural_surrogates/architectures/simple_conv.py](../libs/neural-surrogates/src/neural_surrogates/architectures/simple_conv.py) |
 | `Trainer` (train/val loop) | [libs/neural-surrogates/src/neural_surrogates/training.py](../libs/neural-surrogates/src/neural_surrogates/training.py) |
 | `TransitionDataset` | [libs/neural-surrogates/src/neural_surrogates/data.py](../libs/neural-surrogates/src/neural_surrogates/data.py) (pre-existing) |
-| Run script | [scripts/train_neural_surrogate.py](../scripts/train_neural_surrogate.py) |
-| Config | [conf/neural_surrogate_training/train.yaml](../conf/neural_surrogate_training/train.yaml) |
+| Run script | [scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py) |
+| Config | [conf/neural_surrogate/training.yaml](../conf/neural_surrogate/training.yaml) |
 
 ## 2. `SimpleConv`
 
@@ -44,7 +44,7 @@ augmentation, and config structure.
 
 ## 4. Script flow
 
-[scripts/train_neural_surrogate.py](../scripts/train_neural_surrogate.py):
+[scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py):
 
 1. Pull `dtype` from `cfg.dataset.dtype` (string → `torch.dtype`).
 2. `instantiate(cfg.dataset, split="train"|"val", dtype=...)` → two
@@ -65,7 +65,7 @@ and `n_params` depend on the dataset.
 
 ## 5. Config
 
-[conf/neural_surrogate_training/train.yaml](../conf/neural_surrogate_training/train.yaml)
+[conf/neural_surrogate/training.yaml](../conf/neural_surrogate/training.yaml)
 holds five `_target_` blocks (`trainer`, `optimizer`, `loss`, `dataset`,
 `dataloader`) plus the model's `kernel_size`. Defaults point at
 `training_data/pylbm_tiny`, 5 epochs, CPU.
@@ -73,8 +73,8 @@ holds five `_target_` blocks (`trainer`, `optimizer`, `loss`, `dataset`,
 Override anything on the CLI:
 
 ```bash
-pixi run -e dev python scripts/train_neural_surrogate.py
-pixi run -e dev python scripts/train_neural_surrogate.py \
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
   dataset.root_dir=training_data/pylbm_small \
   dataloader.batch_size=16 \
   trainer.num_epochs=20 \
@@ -91,7 +91,7 @@ pixi run -e dev python scripts/train_neural_surrogate.py \
   `Trainer` does not need to change as long as the new model accepts
   `(state, params, geometry)`.
 - **New optimizer / loss / loader**: change the `_target_` (and kwargs)
-  in [train.yaml](../conf/neural_surrogate_training/train.yaml). No code
+  in [train.yaml](../conf/neural_surrogate/training.yaml). No code
   edits required.
 - **New trainer behavior** (schedulers, checkpointing, logging): extend
   `Trainer` and bump the `_target_` in the `trainer:` block.

@@ -48,7 +48,7 @@ File:
 ## 2. Config group
 
 Directory:
-[conf/neural_surrogate_architectures/unet_convnext/](../conf/neural_surrogate_architectures/unet_convnext/)
+[conf/neural_surrogate/architectures/unet_convnext/](../conf/neural_surrogate/architectures/unet_convnext/)
 
 Five presets scale `base_channels`, `channel_mults`, `depths`,
 `kernel_size`, `expansion`. Each file is a single
@@ -69,11 +69,11 @@ Five presets scale `base_channels`, `channel_mults`, `depths`,
   [architectures/__init__.py](../libs/neural-surrogates/src/neural_surrogates/architectures/__init__.py)
   re-export `UNetConvNeXt`, so `_target_: neural_surrogates.UNetConvNeXt`
   resolves directly.
-- [conf/neural_surrogate_training/train.yaml](../conf/neural_surrogate_training/train.yaml)
+- [conf/neural_surrogate/training.yaml](../conf/neural_surrogate/training.yaml)
   is `# @package _global_` and pulls
-  `/neural_surrogate_architectures/unet_convnext@architecture: small`
+  `/neural_surrogate/architectures/unet_convnext@architecture: small`
   into its defaults list, so the preset lives at `cfg.architecture`.
-- [scripts/train_neural_surrogate.py](../scripts/train_neural_surrogate.py)
+- [scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py)
   calls `instantiate(cfg.architecture, n_state_channels=...,
   n_params=...)`; `n_state_channels` and `n_params` stay explicit
   because they're derived from the dataset, not the architecture
@@ -85,20 +85,20 @@ Five presets scale `base_channels`, `channel_mults`, `depths`,
 Default preset (`small`):
 
 ```bash
-pixi run -e dev python scripts/train_neural_surrogate.py
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py
 ```
 
 Swap presets — the override key is the full group path:
 
 ```bash
-pixi run -e dev python scripts/train_neural_surrogate.py \
-    'neural_surrogate_architectures/unet_convnext@architecture=medium'
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
+    'neural_surrogate/architectures/unet_convnext@architecture=medium'
 ```
 
 Override individual fields:
 
 ```bash
-pixi run -e dev python scripts/train_neural_surrogate.py \
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
     architecture.kernel_size=5 \
     architecture.expansion=2
 ```

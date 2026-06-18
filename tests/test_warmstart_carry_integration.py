@@ -43,9 +43,17 @@ def test_warm_start_reuses_carry_subgrid_fields():
     # ``${hydra:runtime.cwd}`` resolves under a bare compose() (no hydra.main).
     with initialize(version_base=None, config_path="../conf"):
         cfg = compose(
-            config_name="config",
+            config_name="run_forward_model",
             overrides=[
-                "+size=test",
+                # Tiny smoke shape (formerly the +scale=test overlay).
+                "domain.nx=20",
+                "domain.ny=20",
+                "domain.nz=4",
+                "domain.bounds=[[0.0,20.0],[0.0,20.0],[0.0,10.0]]",
+                "time.simulation_time=3.0",
+                "time.output_frequency=1.0",
+                "ensemble.ensemble_size=2",
+                "ensemble.num_parallel_processes=1",
                 "model=pyudales",
                 "params=static",
                 "time.spinup_time=2.0",

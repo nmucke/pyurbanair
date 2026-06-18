@@ -1,6 +1,6 @@
 #!/bin/bash
 # SNELLIUS single-run visualizer. Regenerates a consolidated figure set for ONE
-# successful scripts/run_esmda.py output folder via scripts/visualize_run.py.
+# successful scripts/run_esmda.py output folder via scripts/figure_creation/visualize_run.py.
 # Figures land under result_figures/<case> (case = run folder name by default).
 #
 # Pass the run folder as the first argument; any further args are forwarded to
@@ -47,6 +47,6 @@ echo "Run folder: $1"
 [ "$#" -gt 1 ] && echo "Extra args: ${*:2}"
 
 # First arg is the run folder; the rest pass straight through to the script.
-pixi run -e snellius -- python -u scripts/visualize_run.py "$@"
+pixi run -e snellius -- python -u scripts/figure_creation/visualize_run.py "$@"
 
 echo "Done -- figures under result_figures/"

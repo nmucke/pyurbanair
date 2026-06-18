@@ -55,7 +55,7 @@ ASSIM_MODEL="neural_surrogate"
 # reaches the forkserver/spawn workers.
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
 
-# Trained-weights folder (written by scripts/train_neural_surrogate.py). Its
+# Trained-weights folder (written by scripts/neural_surrogate/train_neural_surrogate.py). Its
 # config.yaml supplies the architecture/state_vars; weights.pt supplies the
 # parameters. Override with MODEL_DIR=… . NB: the conf default points at
 # unet_convnext_small, which is not present locally -- this runner defaults to the

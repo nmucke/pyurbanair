@@ -54,7 +54,8 @@ TINY = dict(
 PRESET_DIR = (
     pathlib.Path(__file__).resolve().parents[1]
     / "conf"
-    / "neural_surrogate_architectures"
+    / "neural_surrogate"
+    / "architectures"
     / "upt"
 )
 

@@ -265,9 +265,8 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             # generate_training_data.py uses cfg.training_data.output_frequency
             # to drive the forward model, so that's the cadence the saved
             # state files actually sit on. cfg.time.output_frequency is the
-            # /time group default and may have been overridden by the
-            # training_data overlay (e.g. /time=small says 5.0 but
-            # training_data=small sets 1.0).
+            # case default and may differ from the training_data generation
+            # cadence, so prefer the training_data value when present.
             td = data_cfg.get("training_data")
             if td is not None and "output_frequency" in td:
                 resolved["output_frequency"] = float(td.output_frequency)

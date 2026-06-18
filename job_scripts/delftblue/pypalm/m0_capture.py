@@ -11,7 +11,7 @@ Outputs three trees under ``$M0_STASH``:
                        captured by run2; timing + rc in ``combine_bare.log``.
 
 Driven directly via the pypalm Python API — no Hydra. Reads tiny-config
-constants from ``conf/size/tiny.yaml`` (which inlines the domain/time) by
+constants from a tiny smoke config (small domain/time) by
 mirroring the values (keeps the script self-contained on a compute node).
 """
 

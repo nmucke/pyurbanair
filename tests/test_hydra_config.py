@@ -5,7 +5,6 @@ from hydra import compose, initialize
 from omegaconf import OmegaConf
 
 from pyurbanair.config.hydra_helpers import (
-    configure_failure_policy,
     create_observation_operator,
     create_observation_points,
 )
@@ -13,7 +12,7 @@ from pyurbanair.config.hydra_helpers import (
 
 def _compose(overrides: list[str] | None = None):
     with initialize(version_base=None, config_path="../conf"):
-        return compose(config_name="config", overrides=overrides or [])
+        return compose(config_name="run_forward_model", overrides=overrides or [])
 
 
 @pytest.mark.parametrize(
@@ -36,34 +35,34 @@ def test_single_model_configs_compose(
 
 
 def test_truth_and_assim_model_aliases_compose() -> None:
-    cfg = _compose(["model@truth_model=pylbm", "model@assim_model=pyudales"])
+    # The truth/assim double-mount lives in the run_esmda entry point.
+    with initialize(version_base=None, config_path="../conf"):
+        cfg = compose(
+            config_name="run_esmda",
+            overrides=["model@truth_model=pylbm", "model@assim_model=pyudales"],
+        )
 
     assert cfg.truth_model.name == "pylbm"
     assert cfg.assim_model.name == "pyudales"
     assert cfg.assim_model.solver_name == "udales"
 
 
-@pytest.mark.parametrize("preset", ["small", "test"])
-def test_presets_compose_with_model_overrides(preset: str) -> None:
-    cfg = _compose([f"preset={preset}", "model=pyudales"])
+def test_entrypoint_composes_with_model_override() -> None:
+    cfg = _compose(["model=pyudales"])
 
     assert cfg.model.name == "pyudales"
-    assert cfg.domain.nx == 40
+    # Physics comes from the default case (xie_and_castro).
+    assert cfg.domain.nx == 60
     assert cfg.obs.mode in {"points", "grid"}
 
 
-def test_test_preset_matches_fast_test_shape() -> None:
-    cfg = _compose(["preset=test"])
+def test_default_compute_is_medium() -> None:
+    # The former scale=medium values are now baked straight into the entry point.
+    cfg = _compose([])
 
-    assert cfg.time.simulation_time == 5.0
-    assert cfg.time.output_frequency == 1.0
-    assert cfg.ensemble.ensemble_size == 4
-    assert cfg.ensemble.num_parallel_processes == 1
-    assert cfg.obs.mode == "grid"
-    assert cfg.obs.aggregation_mode is None
-    assert cfg.esmda.num_assimilation_windows == 3
-    assert cfg.params.true.inflow_angle == 30.0
-    assert True not in cfg.params
+    assert cfg.ensemble.ensemble_size == 64
+    assert cfg.ensemble.num_parallel_processes == 4
+    assert cfg.time.num_param_knots == 5
 
 
 def test_palm_target_does_not_import_for_non_palm_composition() -> None:
@@ -109,7 +108,22 @@ def test_resolve_parameter_schema_includes_pressure_gradient_for_udales() -> Non
 
 
 def test_observation_helpers_use_explicit_mode() -> None:
-    cfg = _compose(["preset=test", "model=pyudales"])
+    # Grid-mode obs supplied explicitly (the helpers dispatch on obs.mode); a
+    # 2x2 grid over [5,35]^2 at z=2 yields the four corner sensors below.
+    cfg = _compose(
+        [
+            "model=pyudales",
+            "obs.mode=grid",
+            "+obs.x_min=5.0",
+            "+obs.x_max=35.0",
+            "+obs.y_min=5.0",
+            "+obs.y_max=35.0",
+            "+obs.n_per_axis=2",
+            "+obs.z=2.0",
+            "obs.temporal_mode=mean",
+            "obs.aggregation_mode=null",
+        ]
+    )
 
     obs_x, obs_y, obs_z = create_observation_points(cfg.obs)
     obs_op = create_observation_operator(cfg.obs, cfg.model.solver_name)
@@ -126,21 +140,3 @@ def test_observation_helpers_use_explicit_mode() -> None:
     assert obs_op.mode == "mean"
     assert obs_op.observation_operator.num_sensors == 4
     assert obs_op.observation_operator.dim_mapping["u"]["x"] == "xm"
-
-
-def test_configure_failure_policy_uses_nested_ensemble_config() -> None:
-    cfg = _compose(["ensemble.failure.policy=raise", "ensemble.failure.seed=7"])
-
-    class DummyEnsemble:
-        def configure_failure_policy(self, policy, jitter_scale, seed):
-            self.failure_policy = policy
-            self.failure_jitter_scale = jitter_scale
-            self.failure_seed = seed
-
-    ensemble = DummyEnsemble()
-    returned = configure_failure_policy(ensemble, cfg.ensemble.failure)
-
-    assert returned is ensemble
-    assert ensemble.failure_policy == "raise"
-    assert ensemble.failure_jitter_scale == cfg.ensemble.failure.jitter_scale
-    assert ensemble.failure_seed == 7

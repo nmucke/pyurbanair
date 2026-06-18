@@ -7,19 +7,36 @@ from omegaconf import DictConfig
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
+# Test smoke shape: the smallest, fastest run the solvers accept — a tiny
+# [0,20]^2 x [0,10] domain, a 3 s window and a 2-member ensemble. Applied to
+# every composed test config so the suite exercises the code paths without
+# producing a meaningful flow (formerly the deleted `+scale=test` overlay).
+_SMOKE_OVERRIDES = [
+    "domain.nx=20",
+    "domain.ny=20",
+    "domain.nz=4",
+    "domain.bounds=[[0.0,20.0],[0.0,20.0],[0.0,10.0]]",
+    "time.simulation_time=3.0",
+    "time.output_frequency=1.0",
+    "time.spinup_time=3.0",
+    "time.num_param_knots=3",
+    "ensemble.ensemble_size=2",
+    "ensemble.num_parallel_processes=1",
+]
+
 
 def _compose_test_cfg(
     overrides: Sequence[str] | None = None,
-    config_name: str = "config",
+    config_name: str = "run_forward_model",
 ) -> DictConfig:
-    # ``config_name`` selects the primary config. Forward-model tests use the
-    # base ``config``; ESMDA tests use ``run_esmda`` (the single primary config
-    # for scripts/run_esmda.py) and pick the smoother via the ``esmda/smoother``
-    # group override.
+    # ``config_name`` selects the primary config (entry point). Forward-model
+    # tests use ``run_forward_model``; ESMDA tests use ``run_esmda`` (the single
+    # primary config for scripts/run_esmda.py) and pick the smoother via the
+    # ``esmda/smoother`` group override.
     with initialize(version_base=None, config_path="../conf"):
         return compose(
             config_name=config_name,
-            overrides=["+size=test", *(overrides or [])],
+            overrides=[*_SMOKE_OVERRIDES, *(overrides or [])],
         )
 
 
@@ -32,7 +49,7 @@ def compose_test_cfg():
 def surrogate_model_dir_factory():
     """Build a minimal trained-surrogate folder (config.yaml + weights.pt).
 
-    Mirrors what ``scripts/train_neural_surrogate.py`` writes: a model
+    Mirrors what ``scripts/neural_surrogate/train_neural_surrogate.py`` writes: a model
     ``config.yaml`` holding the architecture and dataset (state_vars /
     param_vars / root_dir), a sibling ``weights.pt`` matching that
     architecture, and a training-data ``config.yaml`` (under ``root_dir``)

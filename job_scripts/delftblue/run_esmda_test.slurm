@@ -7,7 +7,7 @@
 # overrides are hydra.run.dir (outputs under test_outputs/), the per-job scratch
 # temp_dir, and run.truth_dir (the loaded ground truth).
 #
-# Cores: the run uses ensemble.num_parallel_processes (16, conf/ensemble.yaml)
+# Cores: the run uses ensemble.num_parallel_processes (16, the inlined ensemble: block of conf/run_esmda.yaml)
 # workers at num_cpus_per_process=1, so 16 cores cover the concurrent need.
 # Submit from the repo root:
 #

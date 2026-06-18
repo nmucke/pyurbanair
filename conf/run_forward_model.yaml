@@ -1,0 +1,68 @@
+# Primary config (entry point) for scripts/run_forward_model.py.
+#
+# Self-contained: this file inlines the shared base (output paths, time knobs,
+# ensemble defaults, the `run:` namespace and Hydra settings) and selects the
+# groups a forward run varies — `case` (the experiment), `params` (the inflow
+# sampler) and `model@model` (the solver backend). The inlined defaults below are
+# medium-sized; override the compute knobs on the CLI (e.g.
+# `ensemble.ensemble_size=8`). See conf/README.md for the full set of axes.
+#
+# Modes are selected by the `run.*` knobs:
+#   run.ensemble=true        run an N-member ensemble instead of one member
+#   run.rollout_steps=N      roll the state forward over N extra windows
+#   params=dynamic           time-varying inflow; writes a state.nc/params.nc
+#                            ground-truth artifact run_esmda.py can consume
+#
+# Examples::
+#   python scripts/run_forward_model.py model=pylbm
+#   python scripts/run_forward_model.py model=pyudales run.ensemble=true
+#   python scripts/run_forward_model.py run.rollout_steps=3
+#   python scripts/run_forward_model.py model=pylbm params=dynamic run.rollout_steps=3
+defaults:
+  - case: xie_and_castro
+  - params: dynamic
+  - model@model: pyudales
+  - _self_
+
+# --- Output roots (everything mutable lands under .temp/) ---
+paths:
+  results_dir: .temp/${model.name}
+  # Absolute scratch dir for the solvers (pylbm/pyudales/pypalm chdir into it, so
+  # it must stay absolute and stable across chdirs). Resolved from $PWD rather
+  # than ${hydra:runtime.cwd} so it also works under bare compose() in tests.
+  experiment_dir: ${oc.env:PWD}/.temp_lbm
+  # Fallback output root used by resolve_output_dir() when Hydra isn't
+  # initialized (direct run(cfg) calls from tests).
+  base_results_dir: .temp_lbm
+
+# --- Time-varying parameter knot count (per-window horizon lives in the case) ---
+time:
+  num_param_knots: 5
+
+# --- Ensemble execution. Override per run on the CLI, e.g.
+# `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
+ensemble:
+  ensemble_size: 64
+  num_parallel_processes: 4
+  num_cpus_per_process: 1
+  failure:
+    policy: resample_from_successes
+    jitter_scale: 0.05
+    seed: 0
+
+run:
+  skip_viz: false
+  results_dir: null
+  ensemble: false
+  ground_truth_dir: null
+  rollout_steps: 0
+  # When true, ensemble forecasts are written to disk (one NetCDF per member)
+  # instead of one in-memory ensemble Dataset — keeps the full field off host
+  # RAM for the high-resolution / large-ensemble sweeps. Sequential backends only.
+  ensemble_save_on_disk: false
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

@@ -34,8 +34,7 @@ applies the (state-only) update, and splits it back.
 
 **Config / selection:** `conf/esmda/smoother/state_and_dynamic.yaml`, chosen with
 `esmda/smoother=state_and_dynamic` (pair with `params@prior_params=dynamic`,
-`params@truth_params=dynamic_truth`). `num_time_points` interpolates from
-`params.time_coords.num`.
+`params@truth_params=dynamic_truth`). `time.num_param_knots` (inlined in conf/run_esmda.yaml).
 
 ---
 
@@ -203,7 +202,7 @@ pixi run --environment dev python -m pytest tests/test_run_esmda.py -q
 | Smoother + geometry + IC fix | `libs/data-assimilation/src/data_assimilation/smoothing/esmda.py` |
 | Localization | `localization/{base,correlation,distance}.py` |
 | Vector sensor metric | `scripts/run_esmda.py` |
-| Config | `conf/esmda.yaml`, `conf/esmda/localization/{none,correlation,distance}.yaml`, `conf/esmda/smoother/state_and_dynamic.yaml`, `conf/run_esmda.yaml`, `conf/paths.yaml` |
+| Config | `conf/esmda/localization/{none,correlation,distance}.yaml`, `conf/esmda/smoother/state_and_dynamic.yaml`, `conf/run_esmda.yaml` |
 | Comparison driver | `scripts/compare_localization.sh` |
 | Tests | `tests/test_localization.py`, `tests/test_run_esmda.py` |
 | Docs | `docs/codebase_guide.md`, this file |

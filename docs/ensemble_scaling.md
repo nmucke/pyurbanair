@@ -10,7 +10,7 @@ measured, what was changed, and what's still open.
 > `scripts/_bench_local_execute.sh`) were removed once the investigation
 > landed — they are recoverable from git history if you need to re-run a
 > sweep. The findings and the resulting config defaults
-> (`conf/ensemble.yaml`, `conf/model/pyudales.yaml`) remain in force.
+> (the inlined `ensemble:` block (run_*.yaml), `conf/model/pyudales.yaml`) remain in force.
 
 ## TL;DR
 
@@ -23,7 +23,7 @@ On the local 16-core / Ryzen 9 3950X / single-socket box:
 | LBM | ≥ 16 (one per physical core) | ≥ 13.5× (≈ 7.5× at N=8) | none observed; compute-bound |
 
 `conf/model/pyudales.yaml` pins `ncpu: 1` (was 4) and
-`conf/ensemble.yaml` (and the `size/` overlays) set `num_parallel_processes`.
+the inlined `ensemble:` block (run_*.yaml) (and the `scale/` overlays) set `num_parallel_processes`.
 These defaults are uDALES-optimized; PALM and LBM run sub-optimally
 with the global default — they want more workers. See **Open questions
 / next steps** for the per-model-ensemble proposal.
@@ -45,7 +45,7 @@ with `PYURBANAIR_DISABLE_CPU_PINNING=1`.
 | `scripts/benchmark_ensemble_scaling.py` | **new** — uDALES benchmark. Sweeps `(ncpu, num_parallel_processes)`, captures per-stage timings (cp / mpiexec / gather), writes CSV. |
 | `scripts/benchmark_palm_ensemble_scaling.py` | **new** — PALM benchmark. Monkey-patches `pypalm.ForwardModel.run_single` to record per-member timings into `BENCH_TIMING_DIR`; the patch propagates through fork to all workers. |
 | `scripts/benchmark_lbm_ensemble_scaling.py` | **new** — LBM benchmark. Same monkey-patch trick; compiles LBM once at startup so the boltzmann binary matches the benchmark domain. |
-| `conf/model/pyudales.yaml` / `conf/ensemble.yaml` | `ncpu: 1` (was 4); `num_parallel_processes` capped per `size/` overlay; comment explains the cap. |
+| `conf/model/pyudales.yaml` / the inlined `ensemble:` block (run_*.yaml) | `ncpu: 1` (was 4); `num_parallel_processes` capped per `scale/` overlay; comment explains the cap. |
 | `examples/udales/experiments/xie_and_castro/namoptions.300` | `nprocx=1, nprocy=1` so `validate_and_sync_ncpu` doesn't override `ncpu=1` back to 4. |
 
 ## Benchmark numbers
@@ -289,14 +289,14 @@ PYURBANAIR_DISABLE_CPU_PINNING=1 pixi run -e dev python scripts/benchmark_ensemb
 In rough priority order:
 
 1. **Per-model `ensemble` defaults via Hydra**. The current
-   `conf/ensemble.yaml` / `size/` overlays set `num_parallel_processes`,
+   the inlined `ensemble:` block (run_*.yaml) / `scale/` overlays set `num_parallel_processes`,
    which is uDALES-optimal but leaves ~17% on the table for PALM (8 → 4:
    38s vs 32s) and ~2× on the table for LBM (8 → 4: 60s vs 31s). Two
    reasonable shapes:
 
    ```yaml
    # A per-backend ensemble overlay (e.g. selected by model) that overrides
-   # num_parallel_processes for its target backend on top of conf/ensemble.yaml.
+   # num_parallel_processes for its target backend on top of the inlined ensemble: block.
    ```
 
    then either (a) select per-run on the CLI

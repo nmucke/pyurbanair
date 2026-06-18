@@ -1,0 +1,58 @@
+# @package _global_
+#
+# Entry point for scripts/neural_surrogate/generate_training_data.py — the single
+# training-data generation config (replaces the former conf/training_data/ group
+# + conf/generate_training_data.yaml; dataset shape taken from the old medium preset).
+#
+# The PHYSICAL setup — domain (grid + bounds), geometry/STL and the per-window
+# time horizon — comes from the selected `case` (default xie_and_castro, via the
+# run_forward_model base; switch with `case=barcelona`). This file only adds the
+# dataset shape and the parameter sampler. Override on the CLI as usual, e.g.
+# `model=pylbm case=barcelona training_data.num_train=256`.
+defaults:
+  - /run_forward_model
+  - _self_
+
+training_data:
+  num_train: 150
+  num_val: 8
+  num_test: 8
+
+  output_dir: training_data/${model.name}_medium/
+
+  # Generation horizon — taken from the selected case's per-window time so the
+  # dataset uses the case's specifications rather than duplicating them.
+  simulation_time: ${time.simulation_time}
+  output_frequency: ${time.output_frequency}
+  spinup_time: ${time.spinup_time}
+  seed: 0
+
+  # Backend-specific constant forcing. uDALES needs a streamwise pressure
+  # gradient (the sampler only draws inflow_angle + velocity_magnitude); held
+  # fixed across every member. Ignored by backends that don't consume it (e.g.
+  # pylbm). Canonical value matches conf/params/static.yaml.
+  pressure_gradient_magnitude: 0.0041912
+
+  num_parallel_processes: 16
+
+  # The sampler has three parts:
+  #   num_time_points: number of knots in each parameter trajectory (the
+  #     time_coords spanning [0, simulation_time]).
+  #   external.<param>.{mean, std}: each may be a scalar (fixed for all sims) or
+  #     a {min, max} dict (drawn uniformly per sim).
+  #   time_series.*: hyperparameters of the AR(2)-relaxation generating the
+  #     smooth fluctuation z(t). Per simulation: x(t) = mean_per_sim + std_per_sim * z(t).
+  params_sampler:
+    _target_: pyurbanair.training_data.UniformExternalAR2Sampler
+    _convert_: all
+    num_time_points: 10
+    external:
+      inflow_angle:
+        mean: {min: -70.0, max: 70.0}
+        std: 5.0
+      velocity_magnitude:
+        mean: {min: 3.0, max: 10.0}
+        std: 0.5
+    time_series:
+      correlation_length: 60.0
+    ensemble_size: 1
