@@ -19,7 +19,7 @@ _SMOKE_OVERRIDES = [
     "time.simulation_time=3.0",
     "time.output_frequency=1.0",
     "time.spinup_time=3.0",
-    "time.num_param_knots=3",
+    "time.seconds_per_knot=1.5",
     "ensemble.ensemble_size=2",
     "ensemble.num_parallel_processes=1",
 ]

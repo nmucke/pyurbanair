@@ -77,9 +77,11 @@ overview.
 shared files):
 
 - **output `paths`** — output roots (everything mutable lands under `.temp/`).
-- **`time.num_param_knots`** — the single source for the time-varying parameter
-  knot count (the per-window horizon — simulation duration, output frequency,
-  spinup time — lives in the `case`).
+- **`time.seconds_per_knot`** — the spacing (in seconds) between time-varying
+  parameter knots; the parameter takes a new value every `seconds_per_knot` s,
+  with the last value linearly extrapolated onto the window end when the horizon
+  isn't an exact multiple. The per-window horizon — simulation duration, output
+  frequency, spinup time — lives in the `case`.
 - **`ensemble`** — ensemble size, parallel processes, CPUs/process, failure
   policy.
 - **`esmda`** (run_esmda only) — assimilation steps/windows, observation error

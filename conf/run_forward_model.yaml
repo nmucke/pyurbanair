@@ -35,9 +35,12 @@ paths:
   # initialized (direct run(cfg) calls from tests).
   base_results_dir: .temp_lbm
 
-# --- Time-varying parameter knot count (per-window horizon lives in the case) ---
+# --- Time-varying parameter knot spacing (per-window horizon lives in the case) ---
+# The dynamic prior takes a new value every `seconds_per_knot` seconds; if the
+# window length isn't a multiple of it, the last value is linearly extrapolated
+# onto the window end.
 time:
-  num_param_knots: 5
+  seconds_per_knot: 45.0
 
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---

@@ -17,8 +17,9 @@ external_parameters:
     mean: 6.0
     std: 0.5
     min: 0.1
-time_coords:
-  _target_: numpy.linspace
-  start: 0.0
-  stop: ${time.simulation_time}
-  num: ${time.num_param_knots}
+# The parameter takes a new value every `seconds_per_knot` seconds over the
+# per-window horizon `simulation_time`. When the horizon isn't an exact multiple
+# of the spacing, a final knot at `simulation_time` is reached by linearly
+# extrapolating the last value (see AR2RelaxationModel).
+simulation_time: ${time.simulation_time}
+seconds_per_knot: ${time.seconds_per_knot}

@@ -5,17 +5,17 @@
 # (`{name}_{t}`), like the dynamic smoother. Pair with
 # `params@prior_params=dynamic` and `params@truth_params=dynamic_truth`.
 #
-# Modelled on conf/esmda/smoother/dynamic.yaml. `num_time_points` comes from the
-# single knot-count source `${time.num_param_knots}` (inlined in run_esmda.yaml), the same
-# value the prior/truth param samplers interpolate, so the flattened knot grids
-# always agree. As with the dynamic smoother, `pin_initial_time_point` is
-# re-toggled per window by run_esmda.py (free at window 0, pinned thereafter for
-# cross-window continuity).
+# Modelled on conf/esmda/smoother/dynamic.yaml. `num_time_points` is the number
+# of knots in the (seconds-spaced) parameter trajectory; run_esmda.py overrides
+# it at instantiate time from the sampled prior's `time` dimension so the
+# flattened knot grids always agree. As with the dynamic smoother,
+# `pin_initial_time_point` is re-toggled per window by run_esmda.py (free at
+# window 0, pinned thereafter for cross-window continuity).
 _target_: data_assimilation.smoothing.esmda.StateAndTimeVaryingParameterESMDA
 num_steps: ${esmda.num_steps}
 alpha: ${esmda.alpha}
 pin_initial_time_point: true
 localization: ${esmda.localization}
-num_time_points: ${time.num_param_knots}
+num_time_points: 1  # overridden by run_esmda.py from the sampled prior's time dim
 state_reduction: ${esmda.state_reduction}
 final_time_smoothing: ${esmda.final_time_smoothing}

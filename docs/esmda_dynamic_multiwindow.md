@@ -353,7 +353,7 @@ signal), confirming this is a localization-gating issue, not a forward-model bug
 | ES-MDA iterations | `Na` | 3 | `esmda.num_steps` |
 | Inflation schedule | `α` | 3 (constant) | `esmda.alpha` |
 | Parameters | — | `inflow_angle`, `velocity_magnitude` | `params/dynamic` |
-| Knots per window | — | 6 | `time.num_param_knots` |
+| Knot spacing | — | 30 s | `time.seconds_per_knot` |
 | AR(2) correlation length | `ℓ` | 100 s | `correlation_length` |
 | Prior ext. mean / std (angle) | `x_ext,Σ_ext` | 25° / 6° | `params/dynamic` |
 | Prior ext. mean / std (speed) | `x_ext,Σ_ext` | 6 / 0.5 m/s | `params/dynamic` |
