@@ -14,8 +14,12 @@ The two new parameters:
 | `sgs_constant` | sub-grid-scale eddy-viscosity constant (turbulent mixing / wake-recovery rate) | template-fixed solver constant | per-model, per-ensemble-member, estimated |
 
 Both are **static** scalars (one value per member, no `time` dim) even in the
-time-varying inflow runs — they are model coefficients, not inflow schedules.
-See [§6 Phasing](#6-phasing) for the dynamic-sampler wrinkle.
+time-varying inflow runs — they are model coefficients, not inflow schedules. The
+typical run mixes them with dynamic inflow: `inflow_angle` / `velocity_magnitude`
+carry a `time` dim while `vertical_inflow_exponent` / `sgs_constant` do not, **all
+in one `params` Dataset**, sampled, assimilated and consumed together. See
+[§6 Mixing static and dynamic parameters](#6-mixing-static-and-dynamic-parameters-in-one-xarray-dataset)
+— this turns out to need no ESMDA-core change.
 
 Companion analysis: the reasoning for *why* these two (vs. roughness `z0`,
 nudging `tnudge`, viscosity) is in the chat that produced this plan; the short
@@ -218,26 +222,128 @@ byte-identical.
 
 ---
 
-## 6. Phasing
+## 6. Mixing static and dynamic parameters in one xarray Dataset
 
-- **Phase 1 — static smoother only** (`esmda/smoother=static`,
-  `params@prior_params=static`). Both new parameters are static scalars; the
-  `ParameterESMDA` flatten/unflatten handles extra scalar variables with no change.
-  This is where cross-model misspecification studies naturally start.
-- **Phase 2 — dynamic / time-varying inflow.** Wrinkle: the dynamic sampler
-  (`AR2RelaxationModel`) gives a `time` dim to **every** `external_parameters`
-  entry, and `TimeVaryingParameterESMDA` flattens per `(time, member)`. `α` and
-  `sgs_constant` must stay static (one value per member). Two sub-options:
-  (a) carry them as a separate static block the dynamic sampler concatenates
-  without a `time` dim, and teach the flatten/unflatten to leave non-time vars
-  alone; or (b) keep them out of the dynamic vector and only co-estimate them in
-  the static/joint variants. Decide in Phase 2; do not block Phase 1 on it.
-- **Phase 3 — PALM Option B** (namelist `c_0`) only if Phase 1 shows PALM's
+**Requirement.** A typical run keeps `vertical_inflow_exponent` and `sgs_constant`
+constant in time while `inflow_angle` / `velocity_magnitude` are dynamic — but all
+four must travel in **one** `params` Dataset, be **estimated together** by ESMDA,
+and be **processed at run time** (not frozen at construction).
+
+**Key finding — the ESMDA core already does this.**
+`TimeVaryingParameterESMDA._flatten_time_varying_params`
+([esmda.py:419-447](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py#L419-L447))
+expands **only** variables that have a `time` dim into contiguous `{name}_0…{name}_T`
+scalars and **passes time-less variables through unchanged**; `_unflatten_params`
+([esmda.py:449-478](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py#L449-L478))
+reverses it symmetrically. So a mixed Dataset is updated jointly with **no smoother
+change**: each dynamic knot becomes one augmented row, each static scalar becomes a
+single augmented row. `pin_initial_time_point` only affects the time vars (the
+`{name}_0` knot), so statics are always estimated. `num_time_points`, which
+`run_esmda.py` derives from `prior_params.sizes["time"]`
+([run_esmda.py:432-433](../scripts/run_esmda.py#L432-L433)), is **unaffected** by
+static vars (they add no `time` dim). `is_time_varying_params` inspects only
+`inflow_angle` / `velocity_magnitude`, so adding static extras never mis-routes the
+time-varying detection.
+
+The work therefore reduces to the **sampler** (emit the mixed Dataset) and the
+**consumption end** (already covered in [§1-2](#1-the-core-design-change)) — no
+change to the augmented-state math.
+
+### 6.1 Sampler — emit one mixed Dataset
+
+The shared `_build_dataset` already accepts a `passthrough` dict of time-less vars
+([base.py](../src/pyurbanair/dynamic_parameters/base.py)), and `extrapolate`
+already forwards non-time posterior vars. Add a **static block** to
+`AR2RelaxationModel`:
+
+- New constructor arg `static_parameters: dict[str, Distribution] | None` — the
+  same `Normal`/`Uniform`/`Constant` objects the static sampler uses
+  (`Distribution.sample(rng_key, ensemble_size) -> (ensemble,)`).
+- `sample()`: after building the dynamic `arrays`, draw each static distribution
+  **once** (its own RNG split) into an `(ensemble,)` array and pass them as
+  `passthrough` to `_build_dataset` → variables with no `time` dim.
+- `extrapolate()`: the existing `passthrough = {n: posterior[n] for n in
+  posterior.data_vars if "time" not in posterior[n].dims}` already carries the
+  statics forward — and because `posterior` holds the **ESMDA-updated** static
+  values, the next window's prior inherits the *refined* statics (constant in time,
+  refined across windows). This is the desired behavior; do **not** re-randomize
+  them per window. Ensure the new static draw happens only in `sample()` (window 0).
+
+### 6.2 Forward models — read statics on both inflow branches
+
+In each backend's `_apply_inflow_settings`, read `sgs_constant` /
+`vertical_inflow_exponent` via `get_param_value(params, …)` **outside** the
+`is_time_varying_params(...)` if/else, since they apply identically to the static
+and time-varying inflow paths. (The α and SGS writes from [§2](#2-per-model-mapping)
+are the same; this just notes they must not sit inside the time-varying-only
+branch.)
+
+### 6.3 Gotcha — the uDALES param whitelist drops unknown vars
+
+`pyudales/utils/params_utils.py` `extract_inflow_params` / `merge_params` /
+`create_params_dataset` hardcode a 3-name whitelist (`inflow_angle`,
+`velocity_magnitude`, `pressure_gradient_magnitude`). New variables are **silently
+dropped** there before reaching the solver. Extend those lists to include
+`vertical_inflow_exponent` / `sgs_constant` (or bypass the whitelist for model
+coefficients). pylbm and pypalm read `params` directly, so **only uDALES** needs
+this fix — and it is easy to miss because it fails *silently* (the parameter
+estimates would move but never affect the run).
+
+### 6.4 Config
+
+`conf/params/dynamic.yaml` (and `dynamic_truth.yaml`) gain a sibling
+`static_parameters:` block next to `external_parameters:`:
+
+```yaml
+external_parameters:        # time-varying (gets a `time` dim)
+  inflow_angle: {_target_: pyurbanair.static_parameters.Normal, mean: 25.0, std: 6.0}
+  velocity_magnitude: {_target_: pyurbanair.static_parameters.Normal, mean: 6.0, std: 0.5, min: 0.1}
+static_parameters:          # constant-in-time, still ESMDA-estimated
+  vertical_inflow_exponent:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.25
+    std: 0.05
+    min: 0.05
+  sgs_constant:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.15
+    std: 0.04
+    min: 0.01
+```
+
+`dynamic_truth.yaml` uses `Constant`s for the two static blocks (true values for
+the truth model).
+
+### 6.5 Extra file changes for the mixed case (on top of [§4](#4-file-by-file-change-list))
+
+- **`src/pyurbanair/dynamic_parameters/ar2_relaxation.py`** — `static_parameters`
+  arg + one-time draw in `sample()`, merged via `passthrough`.
+- **`src/pyurbanair/dynamic_parameters/base.py`** — only if a shared helper for the
+  static draw is preferred; `_build_dataset` passthrough already suffices.
+- **`libs/pyudales/src/pyudales/utils/params_utils.py`** — extend the three
+  whitelists ([§6.3](#63-gotcha--the-udales-param-whitelist-drops-unknown-vars)).
+- **`conf/params/dynamic.yaml`**, **`conf/params/dynamic_truth.yaml`** — add the
+  `static_parameters:` blocks.
+
+---
+
+## 7. Phasing
+
+- **Phase 1 — static smoother** (`esmda/smoother=static`,
+  `params@prior_params=static`). Both new parameters are static scalars;
+  `ParameterESMDA` handles extra scalar variables with no change. Where cross-model
+  misspecification studies naturally start.
+- **Phase 2 — mixed dynamic+static** (`esmda/smoother=dynamic`,
+  `params@prior_params=dynamic`). Per [§6](#6-mixing-static-and-dynamic-parameters-in-one-xarray-dataset):
+  sampler `static_parameters` block + uDALES whitelist fix + config. **No
+  smoother/flatten change** — the time-varying ESMDA already passes time-less vars
+  through. Small, well-scoped.
+- **Phase 3 — PALM Option B** (namelist `c_0`) only if Phase 1/2 show PALM's
   constant-`Km` proxy is poorly identifiable.
 
 ---
 
-## 7. Risks / watch-items
+## 8. Risks / watch-items
 
 - **Over-parameterization.** Few sensors + more free parameters → ensemble
   collapse / overfitting. Mitigate with tight priors ([§3.2](#32-samplers-static-first)),
