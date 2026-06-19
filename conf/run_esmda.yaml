@@ -56,7 +56,7 @@ paths:
   results_dir: .temp/${truth_model.name}_to_${assim_model.name}
   # Absolute scratch dir for the solvers (they chdir into it). Resolved from $PWD
   # so it also works under bare compose() in tests.
-  experiment_dir: ${oc.env:PWD}/.temp_lbm
+  experiment_dir: ${oc.env:PWD}/.temp
   base_results_dir: .temp_lbm
 
 # --- Time-varying parameter knot spacing (per-window horizon lives in the case) ---
@@ -87,7 +87,7 @@ ensemble:
 esmda:
   num_steps: 1
   alpha: ${.num_steps}
-  num_assimilation_windows: 2
+  num_assimilation_windows: 3
   seed: 42
   obs_error_std: 0.25
   # Defaults; normally set by the esmda/localization and esmda/state_reduction
