@@ -59,15 +59,19 @@ paths:
   experiment_dir: ${oc.env:PWD}/.temp_lbm
   base_results_dir: .temp_lbm
 
-# --- Time-varying parameter knot count (per-window horizon lives in the case) ---
+# --- Time-varying parameter knot spacing (per-window horizon lives in the case) ---
+# The dynamic prior/truth take a new value every `seconds_per_knot` seconds; if a
+# window length isn't a multiple of it, the last value is linearly extrapolated
+# onto the window end. The dynamic smoother's `num_time_points` is derived from
+# the resulting knot count by run_esmda.py.
 time:
-  num_param_knots: 5
+  seconds_per_knot: 45.0
 
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
 ensemble:
-  ensemble_size: 64
-  num_parallel_processes: 4
+  ensemble_size: 8
+  num_parallel_processes: 8
   num_cpus_per_process: 1
   failure:
     policy: resample_from_successes
@@ -81,9 +85,9 @@ ensemble:
 # esmda/state_reduction=none|svd) that override `esmda.localization` /
 # `esmda.state_reduction` below. ---
 esmda:
-  num_steps: 3
+  num_steps: 1
   alpha: ${.num_steps}
-  num_assimilation_windows: 5
+  num_assimilation_windows: 2
   seed: 42
   obs_error_std: 0.25
   # Defaults; normally set by the esmda/localization and esmda/state_reduction

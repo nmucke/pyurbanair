@@ -13,10 +13,11 @@ argument is passed at build time and :meth:`sample` takes only
 ``model.sample(ensemble_size)``.
 """
 
-from .ar2_relaxation import AR2RelaxationModel
+from .ar2_relaxation import AR2RelaxationModel, build_knot_times
 from .base import ParameterTimeSeries
 
 __all__ = [
     "AR2RelaxationModel",
     "ParameterTimeSeries",
+    "build_knot_times",
 ]

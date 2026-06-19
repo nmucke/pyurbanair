@@ -15,8 +15,8 @@ domain:
   # which deep-merge over these values, or override individual fields on the CLI
   # (`domain.nx=80`). x starts at -20 to leave an open upstream inflow region in
   # front of the Xie & Castro array (which starts at x=5).
-  nx: 60
-  ny: 80
+  nx: 30
+  ny: 40
   nz: 16
   bounds:
     - [-20.0, 40.0]
@@ -71,6 +71,6 @@ time:
   # window is `simulation_time` long with a `spinup_time` constant-inflow plateau
   # in front; the state is written every `output_frequency` s. The number of
   # windows and the param-knot count are compute knobs and live in `scale/`.
-  simulation_time: 180.0
+  simulation_time: 90.0
   output_frequency: 2.0
-  spinup_time: 50.0
+  spinup_time: 10.0

@@ -34,7 +34,7 @@ applies the (state-only) update, and splits it back.
 
 **Config / selection:** `conf/esmda/smoother/state_and_dynamic.yaml`, chosen with
 `esmda/smoother=state_and_dynamic` (pair with `params@prior_params=dynamic`,
-`params@truth_params=dynamic_truth`). `time.num_param_knots` (inlined in conf/run_esmda.yaml).
+`params@truth_params=dynamic_truth`). `time.seconds_per_knot` (inlined in conf/run_esmda.yaml).
 
 ---
 

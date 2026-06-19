@@ -33,9 +33,36 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import xarray
 
 from .base import ParameterTimeSeries
+
+
+def build_knot_times(
+    start: float, end: float, seconds_per_knot: float
+) -> jnp.ndarray:
+    """Knot times spaced ``seconds_per_knot`` over ``[start, end]``.
+
+    Regular knots fall on ``start, start + s, start + 2s, …`` up to the last
+    multiple ``≤ end``.  When ``end`` is not an exact multiple of the spacing
+    past ``start``, a final knot is appended *at* ``end`` — the trailing,
+    sub-spacing interval onto which the parameter trajectory is linearly
+    extrapolated (see :meth:`AR2RelaxationModel._append_linear_endpoint`).  A
+    ``seconds_per_knot`` larger than the whole span degenerates to the two
+    endpoints ``[start, end]``.
+    """
+    start = float(start)
+    end = float(end)
+    s = float(seconds_per_knot)
+    span = end - start
+    n_intervals = int(math.floor(span / s + 1e-9)) if s > 0 else 0
+    if n_intervals <= 0:
+        return jnp.asarray([start, end])
+    reg = start + s * np.arange(n_intervals + 1)
+    if reg[-1] < end - 1e-9:
+        reg = np.append(reg, end)
+    return jnp.asarray(reg)
 
 
 class AR2RelaxationModel(ParameterTimeSeries):
@@ -44,10 +71,19 @@ class AR2RelaxationModel(ParameterTimeSeries):
     def __init__(
         self,
         external_parameters: dict[str, dict[str, float]],
-        time_coords: jnp.ndarray,
+        simulation_time: float,
+        seconds_per_knot: float,
         correlation_length: float,
         seed: int = 0,
     ) -> None:
+        # The knots are the trajectory's time coordinates: the parameter takes a
+        # new value every ``seconds_per_knot`` seconds. When the window length is
+        # not an exact multiple of the spacing, the final knot sits at
+        # ``simulation_time`` and is reached by linear extrapolation rather than a
+        # fresh AR(2) step (see :meth:`_append_linear_endpoint`).
+        self.simulation_time = float(simulation_time)
+        self.seconds_per_knot = float(seconds_per_knot)
+        time_coords = build_knot_times(0.0, simulation_time, seconds_per_knot)
         super().__init__(external_parameters, time_coords, seed)
         self.correlation_length = correlation_length
         self.lam = math.sqrt(3.0) / max(correlation_length, 1e-6)
@@ -133,12 +169,47 @@ class AR2RelaxationModel(ParameterTimeSeries):
         return z_traj, z_final, w_final
 
     # ------------------------------------------------------------------
+    # Extrapolated endpoint (window length not a multiple of the spacing)
+    # ------------------------------------------------------------------
+
+    def _split_endpoint(
+        self, times: jnp.ndarray
+    ) -> tuple[jnp.ndarray, Optional[float]]:
+        """Split an output grid into ``(regular_knots, end_time | None)``.
+
+        A trailing interval shorter than ``seconds_per_knot`` marks the
+        linearly-extrapolated endpoint: the AR(2) is integrated only over the
+        regular knots and the final value is extrapolated onto ``end_time``.
+        """
+        times = jnp.asarray(times)
+        if times.shape[0] >= 2:
+            last_dt = float(times[-1] - times[-2])
+            if last_dt < self.seconds_per_knot - 1e-6:
+                return times[:-1], float(times[-1])
+        return times, None
+
+    @staticmethod
+    def _append_linear_endpoint(
+        values: jnp.ndarray, reg_times: jnp.ndarray, end_time: float
+    ) -> jnp.ndarray:
+        """Append a per-member linearly-extrapolated final row at ``end_time``.
+
+        ``values`` is ``(n_reg, N_e)`` on ``reg_times``; the appended row is the
+        linear extrapolation of the last two knots onto ``end_time``.
+        """
+        reg_times = jnp.asarray(reg_times)
+        slope = (values[-1] - values[-2]) / (reg_times[-1] - reg_times[-2])
+        end_val = values[-1] + slope * (end_time - reg_times[-1])
+        return jnp.concatenate([values, end_val[None, :]], axis=0)
+
+    # ------------------------------------------------------------------
     # ParameterTimeSeries API
     # ------------------------------------------------------------------
 
     def sample(self, ensemble_size: int) -> xarray.Dataset:
         """Cold-start AR(2) prior, eq. 36: x = x_ext + Σ_ext z."""
         time_coords = self.time_coords
+        reg_times, end_time = self._split_endpoint(time_coords)
         keys = jax.random.split(self.rng_key, 2 * len(self.param_names))
         arrays: dict[str, jnp.ndarray] = {}
         self._state = {}
@@ -147,12 +218,15 @@ class AR2RelaxationModel(ParameterTimeSeries):
             init_key, integ_key = keys[2 * i], keys[2 * i + 1]
             z0, w0 = self._stationary_init(init_key, ensemble_size)
             z_traj, z_end, w_end = self._integrate(
-                time_coords, z0, w0, integ_key
+                reg_times, z0, w0, integ_key
             )
             # z_traj is the unit-variance AR(2) anomaly; apply the (possibly
             # time-varying) external envelope x_ext(t) + Σ_ext(t)·z.
-            mean_t, std_t = self._ext_profile(name, time_coords)
-            arrays[name] = mean_t[:, None] + std_t[:, None] * z_traj
+            mean_t, std_t = self._ext_profile(name, reg_times)
+            vals = mean_t[:, None] + std_t[:, None] * z_traj
+            if end_time is not None:
+                vals = self._append_linear_endpoint(vals, reg_times, end_time)
+            arrays[name] = vals
             self._state[name] = (z_end, w_end)
 
         return self._build_dataset(arrays, time_coords, ensemble_size)
@@ -177,10 +251,11 @@ class AR2RelaxationModel(ParameterTimeSeries):
         window α(t) → 0 and the prior relaxes back to ``x_ext``.
         """
         prediction_times = jnp.asarray(prediction_times)
+        reg_times, end_time = self._split_endpoint(prediction_times)
         ensemble_size = posterior.sizes["ensemble"]
-        t0 = prediction_times[0]
+        t0 = reg_times[0]
         alpha = jnp.exp(
-            -(prediction_times - t0) / max(self.correlation_length, 1e-6)
+            -(reg_times - t0) / max(self.correlation_length, 1e-6)
         )
 
         keys = jax.random.split(rng_key, len(self.param_names))
@@ -223,15 +298,18 @@ class AR2RelaxationModel(ParameterTimeSeries):
                 mu_end = jnp.asarray(x_ext)
 
             z_traj, z_end, w_end = self._integrate(
-                prediction_times, z0, w0, key
+                reg_times, z0, w0, key
             )
             new_state[name] = (z_end, w_end)
 
-            ar2_part = mu_end + std * z_traj  # (N_t, N_e)
+            ar2_part = mu_end + std * z_traj  # (N_reg, N_e)
             ext_part = jnp.full_like(ar2_part, x_ext)
-            arrays[name] = (
+            vals = (
                 alpha[:, None] * ar2_part + (1.0 - alpha[:, None]) * (ext_part + std * z_traj)
             )
+            if end_time is not None:
+                vals = self._append_linear_endpoint(vals, reg_times, end_time)
+            arrays[name] = vals
 
         self._state = new_state
         return self._build_dataset(

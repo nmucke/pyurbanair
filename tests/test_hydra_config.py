@@ -62,7 +62,7 @@ def test_default_compute_is_medium() -> None:
 
     assert cfg.ensemble.ensemble_size == 64
     assert cfg.ensemble.num_parallel_processes == 4
-    assert cfg.time.num_param_knots == 5
+    assert cfg.time.seconds_per_knot == 45.0
 
 
 def test_palm_target_does_not_import_for_non_palm_composition() -> None:

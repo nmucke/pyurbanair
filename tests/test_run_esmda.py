@@ -52,11 +52,11 @@ def _overrides(truth_model, assim_model, smoother, prior, num_windows, localizat
         "obs.interval_seconds=3.0",
     ]
     if prior == "dynamic":
-        # Keep all the time grids small. `time.num_param_knots` is the single
-        # knot-count source: the dynamic smoothers' `num_time_points` and every
-        # params mount (`params`/prior/truth) interpolate it, so one override
-        # keeps the flattened knot grids in agreement.
-        ov += ["time.num_param_knots=3"]
+        # Keep all the time grids small. `time.seconds_per_knot` is the single
+        # knot-spacing source: the prior/truth samplers space their knots by it,
+        # and run_esmda.py derives the dynamic smoothers' `num_time_points` from
+        # the resulting knot count, so the flattened knot grids stay in agreement.
+        ov += ["time.seconds_per_knot=1.5"]
     if truth_model == "pylbm":
         ov.append("truth_model.forward_model.cuda=false")
     if assim_model == "pylbm":
@@ -190,7 +190,7 @@ def test_run_esmda_loads_ground_truth_from_disk(
                 # a `run.time_varying` flag — that flag no longer exists in the
                 # flattened config).
                 "params=dynamic",
-                "time.num_param_knots=3",
+                "time.seconds_per_knot=1.5",
                 "run.rollout_steps=1",
                 "run.skip_viz=true",
                 f"run.results_dir={gt_dir}",

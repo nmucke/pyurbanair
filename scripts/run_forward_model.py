@@ -131,9 +131,9 @@ def run(cfg: DictConfig) -> None:
     params_list = [params]
     for _ in range(rollout_steps):
         if is_dynamic_params:
-            next_window_times = np.linspace(
-                0.0, sim, cfg.params.time_coords.num
-            )
+            # Next window on the sampler's own knot grid (spaced by
+            # `seconds_per_knot`, incl. any extrapolated endpoint).
+            next_window_times = np.asarray(params_sampler.time_coords)
             rng_key, subkey = jax.random.split(rng_key)
             params_next = params_sampler.extrapolate(
                 params_list[-1], next_window_times, subkey

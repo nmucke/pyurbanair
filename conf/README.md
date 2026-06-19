@@ -22,7 +22,7 @@ with plain CLI overrides, e.g. `ensemble.ensemble_size=8`,
 ## Entry points (primary configs)
 
 There are exactly two run entry points, and each is **self-contained** — it
-inlines the shared base (output `paths`, the `time.num_param_knots` knob,
+inlines the shared base (output `paths`, the `time.seconds_per_knot` knob,
 `ensemble` defaults, the `run:` namespace and Hydra settings) rather than
 pulling them from separate files:
 

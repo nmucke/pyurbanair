@@ -219,7 +219,7 @@ the base directly in its body — there is no `config.yaml`/`paths.yaml`/
 | Inlined block | Runtime key | Notable fields |
 |---|---|---|
 | `paths:` | `paths` | `results_dir` (fwd `.temp/${model.name}`; esmda `.temp/${truth_model.name}_to_${assim_model.name}`), `experiment_dir` |
-| `time:` | `time` | `num_param_knots` (per-window horizon `simulation_time`/`output_frequency`/`spinup_time` comes from the `case`) |
+| `time:` | `time` | `seconds_per_knot` (spacing between time-varying parameter knots; per-window horizon `simulation_time`/`output_frequency`/`spinup_time` comes from the `case`) |
 | `ensemble:` | `ensemble` | `ensemble_size`, `num_parallel_processes`, `failure.{policy, jitter_scale, seed}` |
 | `esmda:` (run_esmda only) | `esmda` | `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `seed`. `localization`/`state_reduction` are set by the **`esmda/localization`** / **`esmda/state_reduction`** groups (default `none`); inlined *before* those groups in the defaults so they override it. |
 | `run:` | `run` | generic script knobs (`skip_viz`, `results_dir`, `ensemble`, `rollout_steps`, `truth_dir`, …) |
@@ -279,7 +279,7 @@ analysis (see §6).
 
 The **compute budget** (`ensemble.ensemble_size`,
 `ensemble.num_parallel_processes`, `esmda.num_steps`/`num_assimilation_windows`,
-`time.num_param_knots`) is baked into the two entry points at medium-sized
+`time.seconds_per_knot`) is baked into the two entry points at medium-sized
 defaults — there is no separate scale/size group. Change it with plain CLI
 overrides; the pytest suite shrinks it to a tiny smoke shape via
 `_SMOKE_OVERRIDES` in `tests/conftest.py`.

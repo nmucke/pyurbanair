@@ -17,8 +17,6 @@ external_parameters:
     mean: 6.0
     std: 0.5
     min: 0.1
-time_coords:
-  _target_: numpy.linspace
-  start: 0.0
-  stop: ${time.simulation_time}
-  num: ${time.num_param_knots}
+# See conf/params/dynamic.yaml — knots are spaced `seconds_per_knot` seconds.
+simulation_time: ${time.simulation_time}
+seconds_per_knot: ${time.seconds_per_knot}
