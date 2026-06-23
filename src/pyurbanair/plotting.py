@@ -44,7 +44,31 @@ _RC = {
 _PARAM_LABELS = {
     "inflow_angle": "Inflow angle",
     "velocity_magnitude": "Velocity magnitude",
+    "vertical_inflow_exponent": "Vertical inflow exponent (α)",
+    "sgs_constant": "SGS constant",
 }
+
+# Parameters drawn by the parameter figures, in panel order. The two inflow
+# drivers first, then the (constant-in-time) model-error knobs
+# (docs/esmda_model_error_parameters.md). Only those actually present in the
+# posterior are plotted, so single-model / inflow-only runs are unchanged.
+_PLOTTED_PARAMS = (
+    "inflow_angle",
+    "velocity_magnitude",
+    "vertical_inflow_exponent",
+    "sgs_constant",
+)
+
+
+def _plotted_param_names(
+    esmda_params: xarray.Dataset,
+    true_params: xarray.Dataset | None = None,
+) -> list[str]:
+    """Ordered estimable parameters present in ``esmda_params`` (and the truth)."""
+    names = [p for p in _PLOTTED_PARAMS if p in esmda_params.data_vars]
+    if true_params is not None:
+        names = [p for p in names if p in true_params.data_vars]
+    return names
 
 
 def _save(fig, output_path: str | pathlib.Path) -> None:
@@ -600,7 +624,7 @@ def plot_rollout_time_evolution(
     else:
         rmse = np.asarray(rmse)
 
-    param_names = [p for p in ("inflow_angle", "velocity_magnitude") if p in esmda_params.data_vars]
+    param_names = _plotted_param_names(esmda_params)
     n_params = len(param_names)
     has_prior = prior_params is not None
 
@@ -621,10 +645,20 @@ def plot_rollout_time_evolution(
                 if "ensemble" in true_da.dims:
                     true_da = true_da.isel(ensemble=0)
                 x_true, true_members = _param_members_and_x(true_da.expand_dims("ensemble"))
-                ax.plot(
-                    x_true, true_members[0], color=_COLOR_TRUTH, linewidth=2.0,
-                    linestyle="--", zorder=5,
-                )
+                truth = true_members[0]
+                # A constant-in-time (static) parameter has a single truth value;
+                # draw it as a horizontal line spanning the panel rather than a
+                # lone point so it reads against the posterior trajectory.
+                if truth.size == 1 or np.allclose(truth, truth[0]):
+                    ax.axhline(
+                        float(truth[0]), color=_COLOR_TRUTH, linewidth=2.0,
+                        linestyle="--", zorder=5,
+                    )
+                else:
+                    ax.plot(
+                        x_true, truth, color=_COLOR_TRUTH, linewidth=2.0,
+                        linestyle="--", zorder=5,
+                    )
             ax.set_ylabel(_PARAM_LABELS.get(param_name, param_name))
             ax.set_xlabel("Time")
             ax.margins(x=0.01)
@@ -668,9 +702,7 @@ def compute_parameter_metrics(
     same numbers :func:`plot_parameter_error` draws.
     """
     metrics: dict[str, dict[str, np.ndarray]] = {}
-    for param_name in ("inflow_angle", "velocity_magnitude"):
-        if param_name not in esmda_params.data_vars or param_name not in true_params.data_vars:
-            continue
+    for param_name in _plotted_param_names(esmda_params, true_params):
         x_est, members = _param_members_and_x(esmda_params[param_name])
 
         true_da = true_params[param_name]

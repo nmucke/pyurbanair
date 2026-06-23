@@ -75,6 +75,7 @@ class AR2RelaxationModel(ParameterTimeSeries):
         seconds_per_knot: float,
         correlation_length: float,
         seed: int = 0,
+        static_parameters: Optional[dict[str, object]] = None,
     ) -> None:
         # The knots are the trajectory's time coordinates: the parameter takes a
         # new value every ``seconds_per_knot`` seconds. When the window length is
@@ -87,6 +88,15 @@ class AR2RelaxationModel(ParameterTimeSeries):
         super().__init__(external_parameters, time_coords, seed)
         self.correlation_length = correlation_length
         self.lam = math.sqrt(3.0) / max(correlation_length, 1e-6)
+
+        # Static (constant-in-time) parameters that ride in the SAME params
+        # Dataset but carry no `time` dim — model coefficients (e.g.
+        # vertical_inflow_exponent, sgs_constant), not inflow schedules. They are
+        # drawn once in sample() (window 0) and thereafter carried forward via the
+        # ESMDA-updated posterior in extrapolate(), so they are estimated jointly
+        # but never re-randomized per window
+        # (docs/esmda_model_error_parameters.md §6.1).
+        self.static_parameters: dict[str, object] = static_parameters or {}
 
         # Carried state: per-parameter terminal (z, w) of the most
         # recent draw.  ``None`` triggers a stationary cold start.
@@ -229,7 +239,29 @@ class AR2RelaxationModel(ParameterTimeSeries):
             arrays[name] = vals
             self._state[name] = (z_end, w_end)
 
-        return self._build_dataset(arrays, time_coords, ensemble_size)
+        statics = self._sample_statics(ensemble_size)
+        return self._build_dataset(
+            arrays, time_coords, ensemble_size, passthrough=statics
+        )
+
+    def _sample_statics(
+        self, ensemble_size: int
+    ) -> dict[str, tuple[str, jnp.ndarray]]:
+        """Draw each static parameter once into an ``(ensemble,)`` array.
+
+        Returned as ``{name: ("ensemble", values)}`` so it merges into the prior
+        Dataset as a time-less variable via ``_build_dataset``'s ``passthrough``.
+        Uses an RNG stream split off the model seed and kept distinct from the
+        AR(2) integration keys, so adding statics never perturbs the dynamic draw.
+        """
+        if not self.static_parameters:
+            return {}
+        static_key = jax.random.fold_in(self.rng_key, 0x5A715)
+        keys = jax.random.split(static_key, len(self.static_parameters))
+        return {
+            name: ("ensemble", dist.sample(key, ensemble_size))
+            for key, (name, dist) in zip(keys, self.static_parameters.items())
+        }
 
     def extrapolate(
         self,

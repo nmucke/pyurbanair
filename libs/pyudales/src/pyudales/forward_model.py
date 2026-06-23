@@ -22,6 +22,7 @@ from .utils.ncpu_utils import validate_and_sync_ncpu
 from .utils.nudging_utils import apply_time_varying_inflow
 from .utils.params_utils import (
     apply_inflow_settings,
+    get_param_value,
     is_time_varying_params,
     merge_params,
 )
@@ -514,6 +515,15 @@ class ForwardModel(BaseForwardModel):
         if self.params is None:
             raise ValueError("ForwardModel parameters are unexpectedly unset.")
 
+        # Model-error knobs apply identically to both inflow branches, so resolve
+        # them here, outside the branch (docs/esmda_model_error_parameters.md §6.2).
+        # When ``vertical_inflow_exponent`` (α) is estimated it overrides the
+        # construction-time shear; ``sgs_constant`` is written to &NAMSUBGRID cs.
+        # Each is a no-op when its parameter is absent, keeping default runs
+        # byte-identical.
+        nudging_config = self._resolve_nudging_config(self.params)
+        self._apply_sgs_setting(self.params)
+
         use_nudging = (
             is_time_varying_params(self.params)
             or self.boundary_condition == "inflow_outflow"
@@ -525,7 +535,7 @@ class ForwardModel(BaseForwardModel):
                 "Applying inflow via nudging (time_varying=%s, BC=%s, nudging_config=%s)",
                 is_time_varying_params(self.params),
                 self.boundary_condition,
-                self._nudging_config,
+                nudging_config,
             )
 
             apply_time_varying_inflow(
@@ -536,7 +546,7 @@ class ForwardModel(BaseForwardModel):
                     self._simulation_time if self._simulation_time is not None else 0.0
                 ),
                 boundary_condition=self.boundary_condition,
-                **self._nudging_config,
+                **nudging_config,
             )
         else:
             logger.info("Applying inflow via static settings (periodic BC)")
@@ -545,6 +555,42 @@ class ForwardModel(BaseForwardModel):
                 dirs=self.dirs,
                 boundary_condition=self.boundary_condition,
             )
+
+    def _resolve_nudging_config(self, params: xarray.Dataset) -> dict:
+        """Return a nudging-config copy with α overridden from ``params``.
+
+        ``vertical_inflow_exponent`` overrides the power-law ``alpha`` inside the
+        nudging config's ``profile_config`` so the inlet shear is per-member and
+        ESMDA-estimable (docs/esmda_model_error_parameters.md §2.1). Falls back to
+        the construction-time config when the parameter is absent.
+        """
+        alpha = get_param_value(params, "vertical_inflow_exponent")
+        if alpha is None:
+            return self._nudging_config
+        nudging_config = dict(self._nudging_config)
+        profile_config = dict(nudging_config.get("profile_config") or {})
+        profile_config.setdefault("type", "power_law")
+        profile_config["alpha"] = float(alpha)
+        nudging_config["profile_config"] = profile_config
+        return nudging_config
+
+    def _apply_sgs_setting(self, params: xarray.Dataset) -> None:
+        """Write the per-member sub-grid-scale constant to ``&NAMSUBGRID cs``.
+
+        No-op when ``sgs_constant`` is absent, preserving the template value
+        (docs/esmda_model_error_parameters.md §2.2). Takes effect only under the
+        Smagorinsky closure (``lsmagorinsky=.true.``).
+        """
+        sgs = get_param_value(params, "sgs_constant")
+        if sgs is None:
+            return
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+        namoptions.set_value("NAMSUBGRID", "cs", f"{float(sgs):.4f}")
+        namoptions.write()
+        logger.info("Set uDALES Smagorinsky constant (sgs_constant) to %.4f", float(sgs))
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
         """Save simulation results to disk."""

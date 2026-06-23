@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import pathlib
 from typing import Any
 
@@ -93,11 +94,55 @@ def resolve_parameter_schema(model_name: str) -> tuple[str, ...]:
     """Resolve the ordered parameter names a model consumes.
 
     Keyed off ``model_name``: ``pressure_gradient_magnitude`` is uDALES-only.
+    ``vertical_inflow_exponent`` (power-law shear exponent α) and ``sgs_constant``
+    (sub-grid-scale mixing constant) are model-error compensation knobs every
+    backend can consume per-member; see docs/esmda_model_error_parameters.md.
     """
-    base = ("inflow_angle", "velocity_magnitude")
+    base = (
+        "inflow_angle",
+        "velocity_magnitude",
+        "vertical_inflow_exponent",
+        "sgs_constant",
+    )
     if model_name == "pyudales":
         return base + ("pressure_gradient_magnitude",)
     return base
+
+
+# Config blocks (in the static / dynamic params sampler configs) that hold the
+# per-parameter Distribution entries. ``parameters`` is the static sampler's
+# block; ``external_parameters`` / ``static_parameters`` are the time-varying
+# (AR(2)) sampler's dynamic and constant-in-time blocks.
+_PARAM_CONFIG_BLOCKS = ("parameters", "external_parameters", "static_parameters")
+
+
+def filter_parameter_config(params_cfg: DictConfig, selected: Any) -> DictConfig:
+    """Restrict a params sampler config to the parameters in ``selected``.
+
+    Lets a run choose *which* parameters ESMDA estimates from
+    ``conf/run_esmda.yaml`` (``params_to_estimate``) without editing the sampler
+    configs. ``selected`` is an iterable of parameter names, or ``None`` to keep
+    every parameter the config defines. Parameters dropped here are absent from
+    the sampled prior/truth Dataset, so the forward models fall back to their
+    construction-time/template defaults for them (see
+    docs/esmda_model_error_parameters.md §4 default-absent behaviour).
+
+    The same filter is applied to both the prior and truth samplers so excluding
+    a parameter reproduces the run as if that knob did not exist on either side.
+    """
+    if selected is None:
+        return params_cfg
+    keep = set(selected)
+    cfg = copy.deepcopy(params_cfg)
+    # A config composed by Hydra is in struct mode, which forbids key deletion;
+    # relax it on the copy (the original is untouched).
+    OmegaConf.set_struct(cfg, False)
+    for block in _PARAM_CONFIG_BLOCKS:
+        if block in cfg and cfg[block] is not None:
+            for name in list(cfg[block].keys()):
+                if name not in keep:
+                    del cfg[block][name]
+    return cfg
 
 
 def create_initial_state_ensemble(

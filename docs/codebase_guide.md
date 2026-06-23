@@ -638,6 +638,34 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   simply include or omit it (`conf/params/static.yaml` carries it as a
   `Constant`, which non-uDALES backends ignore).
 
+### Model-error compensation knobs (cross-model ESMDA)
+- Two parameters let the smoother absorb truth↔assim solver misspecification
+  instead of corrupting the inflow estimate (see
+  [docs/esmda_model_error_parameters.md](esmda_model_error_parameters.md)):
+  `vertical_inflow_exponent` (the power-law shear exponent α) and `sgs_constant`
+  (the sub-grid-scale mixing constant). Both are static scalars, advertised by
+  `resolve_parameter_schema` for every backend, and consumed per-member in each
+  backend's `_apply_inflow_settings` (outside the static/time-varying branch).
+- **Write sites differ per solver** and the `sgs_constant` value is NOT the same
+  quantity across them — they are different closures, intentionally untied:
+  - pylbm: α → `uvel_shear.dat` (rewritten via `resolve_profile_config` +
+    `write_uvel_shear_file`); SGS → `infile.in` `ivreman smagor` line
+    (`apply_sgs_setting`, `const = 2.5*smagorinsky**2` in `m_vreman.F90`).
+  - pyudales: α → nudging `profile_config` (`_resolve_nudging_config`); SGS →
+    `&NAMSUBGRID cs` (`_apply_sgs_setting`, takes effect under
+    `lsmagorinsky=.true.`).
+  - pypalm: α → `profile_config` for the driver / `u_profile`; SGS →
+    `km_constant` (Option A proxy — a constant eddy diffusivity [m²/s] that
+    *replaces* the prognostic SGS-TKE closure, since PALM's `c_0` is hardcoded).
+    A fixed `km` also forces `constant_flux_layer = .false.` (PALM rejects the
+    pair otherwise — check_parameters PAC0149), so this is a full constant-Km
+    regime switch. Note `km_constant` is in m²/s — a *different physical quantity*
+    from the dimensionless LBM/uDALES Smagorinsky constants, so a uDALES↔PALM run
+    needs PALM-appropriate `sgs_constant` ranges in the prior config, not the
+    uDALES `cs` defaults.
+- Each write is a no-op when its parameter is absent from `params`, so
+  single-model / default runs are unaffected.
+
 ### pypalm
 - Lazy-imported. All `pypalm.*` `_target_` blocks live exclusively in
   [conf/model/pypalm.yaml](../conf/model/pypalm.yaml), so Hydra only
@@ -714,14 +742,33 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   (prior) and `static_truth.yaml` (truth) and/or under `external_parameters`
   in `dynamic.yaml` / `dynamic_truth.yaml`. The samplers pick up any key in the
   mapping — no Python change needed for the sampling side.
+- A **constant-in-time** parameter that must still be ESMDA-estimated *alongside*
+  the time-varying inflow goes under `static_parameters:` (not
+  `external_parameters:`) in `dynamic.yaml` / `dynamic_truth.yaml`. The AR(2)
+  sampler draws it once (window 0), emits it with no `time` dim, and the
+  time-varying smoother passes time-less vars through its flatten/unflatten
+  unchanged — so it is updated jointly with no smoother change and refined (not
+  re-randomized) across windows. See
+  [docs/esmda_model_error_parameters.md](esmda_model_error_parameters.md) §6.
 - If the parameter is backend-specific (like `pressure_gradient_magnitude`),
   extend `resolve_parameter_schema` in
   [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py).
 - Extend each backend's `_apply_inflow_settings` /
   `apply_inflow_settings` in `utils/params_utils.py` so the value gets
-  written to that solver's input format.
+  written to that solver's input format. Read the value with
+  `get_param_value(params, name)` and **no-op when it is absent** so single-model
+  / default runs stay byte-identical.
+- **uDALES gotcha:** `pyudales/utils/params_utils.py` keeps a whitelist
+  (`INFLOW_PARAM_NAMES`) of variables that survive `extract_inflow_params` /
+  `merge_params`. A new variable not in it is *silently dropped* before reaching
+  the solver — add it there. pylbm and pypalm read `params` directly.
 - Time-varying support: implement reading in the backend (e.g. pylbm's
   `write_uvel_time_file`).
+- To let a run **choose which parameters ESMDA estimates**, set
+  `params_to_estimate` in [conf/run_esmda.yaml](../conf/run_esmda.yaml) (a list,
+  or `null` for all). It filters the prior *and* truth sampler configs via
+  `filter_parameter_config`; dropped parameters fall back to the forward model's
+  defaults on both sides.
 
 ### Add a new ESMDA variant
 - Subclass `_BaseESMDA` in

@@ -319,6 +319,11 @@ class ForwardModel(BaseForwardModel):
     def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
         self.params = _merge_params(self.params, params)
 
+        # Model-error knobs apply on both inflow branches, so resolve them up
+        # front (docs/esmda_model_error_parameters.md §6.2). ``profile_config``
+        # carries an α override from ``vertical_inflow_exponent`` when estimated.
+        profile_config = self._resolve_profile_config(self.params)
+
         if _is_time_varying_params(self.params):
             if self.bounds is None or not self.nz or not self.ny:
                 raise ValueError(
@@ -335,7 +340,7 @@ class ForwardModel(BaseForwardModel):
                 bounds=self.bounds,
                 nz=self.nz,
                 ny=self.ny,
-                profile_config=self._nudging_config.get("profile_config"),
+                profile_config=profile_config,
                 spinup_time=self.spinup_time,
             )
             angle = float(init_params["inflow_angle"].item())
@@ -353,13 +358,14 @@ class ForwardModel(BaseForwardModel):
         p3d = P3DFile(self.p3d_path)
         p3d.set_value("initialization_parameters", "ug_surface", float(u0))
         p3d.set_value("initialization_parameters", "vg_surface", float(v0))
+        self._apply_sgs_setting(p3d, self.params)
 
         if self.bounds is not None and self.nz:
             zmin, zmax = self.bounds[2]
             dz = (zmax - zmin) / self.nz
             cell_heights = np.arange(self.nz) * dz + 0.5 * dz + zmin
             shape = build_profile_shape(
-                self._nudging_config.get("profile_config"),
+                profile_config,
                 heights=cell_heights,
                 zsize=zmax - zmin,
             )
@@ -373,6 +379,57 @@ class ForwardModel(BaseForwardModel):
             p3d.set_array("initialization_parameters", "uv_heights", heights.tolist())
 
         p3d.write()
+
+    @staticmethod
+    def _param_value(params: Optional[xarray.Dataset], name: str) -> Optional[float]:
+        """Scalar value of ``name`` in ``params``, or ``None`` when absent."""
+        if params is None or name not in params:
+            return None
+        return float(params[name].item())
+
+    def _resolve_profile_config(self, params: Optional[xarray.Dataset]) -> Optional[dict]:
+        """Return a ``profile_config`` with ``alpha`` overridden from ``params``.
+
+        ``vertical_inflow_exponent`` overrides the power-law ``alpha`` so the
+        inlet shear is per-member and ESMDA-estimable
+        (docs/esmda_model_error_parameters.md §2.1). Falls back to the
+        construction-time profile config when the parameter is absent.
+        """
+        base = self._nudging_config.get("profile_config")
+        alpha = self._param_value(params, "vertical_inflow_exponent")
+        if alpha is None:
+            return base
+        profile_config = dict(base or {})
+        profile_config.setdefault("type", "power_law")
+        profile_config["alpha"] = alpha
+        return profile_config
+
+    def _apply_sgs_setting(self, p3d: P3DFile, params: Optional[xarray.Dataset]) -> None:
+        """Write the per-member SGS knob via the ``km_constant`` proxy (Option A).
+
+        PALM's LES TKE closure has no Smagorinsky-style namelist multiplier
+        (``c_0`` is hardcoded), so ``sgs_constant`` is mapped to ``km_constant`` —
+        a constant eddy diffusivity [m²/s]. This replaces the prognostic SGS-TKE
+        closure with a constant-Km model: a different turbulence regime, accepted
+        purely as a bias-absorbing knob. The PALM ``sgs_constant`` therefore is
+        NOT the same quantity as the LBM/uDALES Smagorinsky constants
+        (docs/esmda_model_error_parameters.md §2.3, §8). No-op when absent.
+
+        PALM forbids a fixed ``km`` together with a Monin-Obukhov surface flux
+        layer (check_parameters PAC0149), so a fixed ``km_constant`` also requires
+        ``constant_flux_layer = .false.`` — part of the same constant-Km regime
+        switch. No-op when ``sgs_constant`` is absent, leaving PALM's prognostic
+        SGS-TKE closure and default surface flux layer untouched.
+        """
+        sgs = self._param_value(params, "sgs_constant")
+        if sgs is None:
+            return
+        p3d.set_value("initialization_parameters", "km_constant", float(sgs))
+        # Required by PALM whenever km is fixed (PAC0149).
+        p3d.set_value("initialization_parameters", "constant_flux_layer", False)
+        logger.info(
+            "Set PALM km_constant (sgs_constant proxy, Option A) to %.4f m^2/s", sgs
+        )
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
         self._save_results(state, sim_name)

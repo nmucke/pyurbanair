@@ -19,6 +19,19 @@ from .namoptions_utils import NamoptionsFile
 
 logger = logging.getLogger(__name__)
 
+# Parameter names that survive extract/merge into the solver-facing Dataset.
+# Beyond the inflow trio, the model-error knobs ``vertical_inflow_exponent`` (α)
+# and ``sgs_constant`` must be whitelisted here too — otherwise they are silently
+# dropped before reaching the solver and their ESMDA estimates never take effect
+# (docs/esmda_model_error_parameters.md §6.3).
+INFLOW_PARAM_NAMES = (
+    "inflow_angle",
+    "velocity_magnitude",
+    "pressure_gradient_magnitude",
+    "vertical_inflow_exponent",
+    "sgs_constant",
+)
+
 
 def is_time_varying_params(params: Optional[xarray.Dataset]) -> bool:
     """Check if parameters contain time-varying inflow_angle or velocity_magnitude.
@@ -54,14 +67,9 @@ def extract_inflow_params(params: Optional[xarray.Dataset]) -> Optional[xarray.D
     if params is None:
         return None
 
-    inflow_param_names = [
-        "inflow_angle",
-        "velocity_magnitude",
-        "pressure_gradient_magnitude",
-    ]
     data_vars = {}
 
-    for param_name in inflow_param_names:
+    for param_name in INFLOW_PARAM_NAMES:
         if param_name in params:
             data_vars[param_name] = params[param_name]
 
@@ -103,11 +111,7 @@ def merge_params(
 
     # Merge: new params override existing ones
     merged = existing_inflow.copy(deep=True)
-    for param_name in [
-        "inflow_angle",
-        "velocity_magnitude",
-        "pressure_gradient_magnitude",
-    ]:
+    for param_name in INFLOW_PARAM_NAMES:
         if param_name in new_inflow:
             merged[param_name] = new_inflow[param_name]
 
@@ -118,6 +122,8 @@ def create_params_dataset(
     inflow_angle: Optional[float] = None,
     velocity_magnitude: Optional[float] = None,
     pressure_gradient_magnitude: Optional[float] = None,
+    vertical_inflow_exponent: Optional[float] = None,
+    sgs_constant: Optional[float] = None,
 ) -> Optional[xarray.Dataset]:
     """
     Create an xarray.Dataset from individual parameter values.
@@ -139,6 +145,10 @@ def create_params_dataset(
         data_vars["velocity_magnitude"] = velocity_magnitude
     if pressure_gradient_magnitude is not None:
         data_vars["pressure_gradient_magnitude"] = pressure_gradient_magnitude
+    if vertical_inflow_exponent is not None:
+        data_vars["vertical_inflow_exponent"] = vertical_inflow_exponent
+    if sgs_constant is not None:
+        data_vars["sgs_constant"] = sgs_constant
 
     if not data_vars:
         return None

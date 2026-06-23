@@ -1,10 +1,20 @@
 # Plan — model-error compensation parameters for cross-model ESMDA
 
-Status: **proposal / not yet implemented**. This document is the implementation
-plan for adding two new estimable parameters to the ESMDA pipeline so that, when
-the truth and assimilation models differ (e.g. `model@truth_model=pyudales`,
-`model@assim_model=pylbm`), the smoother has internal physics knobs to absorb the
-**model misspecification** instead of corrupting the inflow estimate.
+Status: **implemented** (Phases 1 & 2; PALM uses Option A). This document is the
+implementation plan for adding two new estimable parameters to the ESMDA pipeline
+so that, when the truth and assimilation models differ (e.g.
+`model@truth_model=pyudales`, `model@assim_model=pylbm`), the smoother has
+internal physics knobs to absorb the **model misspecification** instead of
+corrupting the inflow estimate.
+
+> Implemented: both knobs are advertised by `resolve_parameter_schema` for every
+> backend, consumed per-member in each backend's `_apply_inflow_settings`, and
+> carried in the static / dynamic sampler configs (the dynamic case uses the new
+> `static_parameters:` block). Additionally, which parameters ESMDA estimates is
+> selectable from `conf/run_esmda.yaml` via `params_to_estimate` (a list, or
+> `null` for all), applied to both the prior and truth samplers by
+> `filter_parameter_config`. PALM ships Option A (`km_constant`); Option B
+> (namelist `c_0`, Phase 3) remains a follow-up.
 
 The two new parameters:
 
@@ -102,6 +112,13 @@ namelist (`c_0` is fixed at `0.1`). Two ways to honour "works for all models":
   `sgs_constant` would mean "constant eddy viscosity [m²/s]", not "Smagorinsky
   constant". Acceptable *as a model-error knob* (its only job is to absorb bias),
   but document the unit/meaning divergence loudly.
+  **Implemented detail:** PALM rejects a fixed `km` together with a
+  Monin-Obukhov surface flux layer (`check_parameters` PAC0149), so the
+  `km_constant` write is paired with `constant_flux_layer = .false.` — the rest
+  of the constant-`Km` regime switch. Because `km_constant` is in m²/s (not a
+  dimensionless Smagorinsky constant), a uDALES↔PALM run must set a
+  PALM-appropriate `sgs_constant` range in the PALM-side prior config rather than
+  reusing the uDALES `cs` defaults.
 - **Option B (one-line patch): make `c_0` namelist-readable.** Add `c_0` to the
   `initialization_parameters` namelist in `parin.f90` and skip the hardcoded
   `c_0 = 0.1` assignment when the user set it. Pros: keeps the LES regime,
