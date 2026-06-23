@@ -1,0 +1,18 @@
+# P3D — tiny preset (CPU-fast; used by the unit tests).
+#
+# Wraps p3d_surrogate's P3D_S (hidden 64). The upstream S/B/L factories bake in
+# depth/heads/hidden, so the only freely-tunable knobs the wrapper exposes are
+# `size`, `window_size` (S only), `partition_size`, `shift`, `mending`. The grid
+# must be divisible by 16 (4x wrapper + 4x backbone downsampling); the wrapper
+# zero-pads non-periodic axes to a multiple of 16 and crops back.
+
+_target_: neural_surrogates.P3D
+size: S
+window_size: 2
+partition_size: 1
+
+# normalize: true          # default; z-score state+params (load-bearing here)
+# predict_residual: true   # default; predict the change, not the absolute field
+# param_conditioning: channels  # default: params broadcast as input channels.
+#   "native" routes params through P3D's scalar pde_parameters adaLN path
+#   (reduced to one scalar when n_params > 1) — lower capacity, experimental.

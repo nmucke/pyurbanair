@@ -14,6 +14,13 @@ name = "neural_surrogates"
 requires-python = ">= 3.12,<3.13"
 version = "0.1.0"
 
+# The P3D architecture wraps the heavy `p3d_surrogate` package (it pulls in
+# transformers/diffusers). It is imported lazily in architectures/p3d.py, so it
+# is an optional extra rather than a hard dependency: only `pip install
+# 'neural_surrogates[p3d]'` (or the pixi neural-surrogates feature) needs it.
+[project.optional-dependencies]
+p3d = ["p3d-surrogate>=0.0.4"]
+
 [tool.pixi.workspace]
 preview = ["pixi-build"]
 channels = ["conda-forge"]

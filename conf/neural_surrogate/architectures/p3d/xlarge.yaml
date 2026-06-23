@@ -1,0 +1,8 @@
+# P3D — xlarge preset. P3D_L (hidden 256, 8 heads). window_size fixed at 4
+# upstream and ignored by the wrapper for this size.
+
+_target_: neural_surrogates.P3D
+size: L
+partition_size: 1
+
+# normalize: true / predict_residual: true / param_conditioning: channels (defaults)

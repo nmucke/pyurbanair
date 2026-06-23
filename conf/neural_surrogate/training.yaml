@@ -1,10 +1,17 @@
 # @package _global_
 
+# defaults:
+# #   - /neural_surrogate/architectures/unet_convnext@architecture: medium
+#   - _self_
+
+# model_name: unet_convnext_medium_test
+
+
 defaults:
-  - /neural_surrogate/architectures/unet_convnext@architecture: medium
+  - /neural_surrogate/architectures/p3d@architecture: medium
   - _self_
 
-model_name: unet_convnext_medium
+model_name: p3d_medium
 
 # The uDALES runs are periodic in the spanwise (y) direction: spatial convs
 # wrap circularly along y instead of zero-padding. x stays non-periodic
@@ -18,8 +25,8 @@ architecture:
 # initialize the model from before training (e.g. fine-tuning or continuing a
 # run). The architecture must match. Set to null to train from scratch.
 # Example: init_weights_path=model_weights/unet_convnext_medium/weights.pt
-init_weights_path: model_weights/unet_convnext_medium/weights.pt
-# init_weights_path: null
+# init_weights_path: model_weights/unet_convnext_medium/weights.pt
+init_weights_path: null
 
 trainer:
   _target_: neural_surrogates.Trainer
@@ -41,12 +48,12 @@ trainer:
   # rollouts and add one step every `pushforward_epochs_per_step` epochs, up to
   # `dataset.pushforward_steps`. Set the cadence to null to train at a fixed
   # horizon (the original pushforward behavior).
-  pushforward_epochs_per_step: 7
-  pushforward_start_steps: 5
+  pushforward_epochs_per_step: 10
+  pushforward_start_steps: 1
   # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
   # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`
   # over the remaining epochs. Set `lr_warmup_epochs` to null to disable.
-  lr_warmup_epochs: 2
+  lr_warmup_epochs: 10
   lr_warmup_start: 1.0e-6
   lr_min: 1.0e-6
   # Restrict the loss to fluid cells (uDALES targets carry junk values
@@ -86,8 +93,16 @@ dataset:
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 16
+  batch_size: 32
   shuffle: true
+  # Drop the final short batch so every step sees the same batch size. A
+  # varying batch size forces torch.compile to recompile -- and P3D in
+  # particular folds the batch into its window-attention reshapes, so a
+  # different batch size cascades into many internal recompiles. Keeping the
+  # batch size fixed keeps compilation static and fast. Applies to train and
+  # val; with thousands of pairs per split, dropping the last partial batch is
+  # negligible.
+  drop_last: true
   # Workers overlap the per-sample netCDF reads with GPU compute;
   # pin_memory enables async host->GPU copies. Do NOT set
   # persistent_workers: the pushforward curriculum relies on workers

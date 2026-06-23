@@ -1,0 +1,8 @@
+# P3D — small preset. P3D_S (hidden 64) at the upstream default window size.
+
+_target_: neural_surrogates.P3D
+size: S
+window_size: 4
+partition_size: 1
+
+# normalize: true / predict_residual: true / param_conditioning: channels (defaults)

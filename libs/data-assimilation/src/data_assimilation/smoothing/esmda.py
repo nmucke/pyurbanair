@@ -1,6 +1,7 @@
 import os
 import pathlib
 import re
+import shutil
 from abc import abstractmethod
 from typing import Optional
 
@@ -61,6 +62,19 @@ class _BaseESMDA(BaseSmoothing):
         # via a local analysis driven by the strategy's inflation factors.
         self.localization = localization
 
+        # On-disk peak-storage control, set by the caller (e.g. run_esmda.py)
+        # after construction. When ``prune_disk_steps`` is True and the forward
+        # model saves on disk, each ESMDA step's per-member forecast directory is
+        # deleted as soon as its Kalman update is computed -- the warm-start IC
+        # for the next forecast is already carried in memory, and only the prior
+        # (step 0) and posterior (final step) forecasts are re-read by the caller.
+        # ``keep_prior_disk_step`` retains step 0 for the caller to assemble; set
+        # it False when the prior state is not being saved. Together these cap the
+        # on-disk peak at ~2x ensemble_size regardless of ``num_steps`` (instead of
+        # num_steps+1 step directories coexisting until the window ends).
+        self.prune_disk_steps = False
+        self.keep_prior_disk_step = True
+
         if self.forward_model.save_on_disk:
             self.base_results_dir = self.forward_model.results_dir
             for i in range(num_steps + 1):
@@ -73,6 +87,18 @@ class _BaseESMDA(BaseSmoothing):
         """Point the forward model's results directory at the given step."""
         if self.forward_model.save_on_disk:
             self.forward_model.set_results_dir(self.base_results_dir / f"step_{step}")
+
+    def _prune_step_results_dir(self, step: int) -> None:
+        """Delete one finished ESMDA step's on-disk forecast directory.
+
+        Called once a step's Kalman update is computed, so its per-member forecast
+        files are no longer needed (the next forecast warm-starts from the in-memory
+        analyzed IC, and the caller re-reads only the prior/posterior steps). No-op
+        unless on-disk pruning is enabled; ``ignore_errors`` so an already-removed
+        or never-written directory is harmless.
+        """
+        if self.forward_model.save_on_disk and self.prune_disk_steps:
+            shutil.rmtree(self.base_results_dir / f"step_{step}", ignore_errors=True)
 
     def get_state(self, ensemble_member: int, step: int) -> xarray.Dataset:
         """Get the state for one ensemble member at a given step."""
@@ -292,6 +318,15 @@ class _BaseESMDA(BaseSmoothing):
 
             if return_params_history:
                 params_history.append(params)
+
+            # Free this step's on-disk forecast now that its update is done. The
+            # next forecast warm-starts from the in-memory analyzed IC, and only
+            # the prior (step 0, kept when ``keep_prior_disk_step``) and the
+            # posterior (final step, written after the loop) are re-read by the
+            # caller -- so every intermediate step is safe to drop here. No-op
+            # unless on-disk pruning is enabled.
+            if not (i == 0 and self.keep_prior_disk_step):
+                self._prune_step_results_dir(i)
 
             print(f"ESMDA step {i} completed")
 

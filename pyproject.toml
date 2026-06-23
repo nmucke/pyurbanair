@@ -113,6 +113,9 @@ neural-surrogates = { path = "libs/neural-surrogates", editable = true }
 # prebuilt PyG wheels, so SupernodePooling is reimplemented in pure torch.
 einops = ">=0.7"
 kappamodules = ">=0.1.112"
+# P3D architecture. Pulls in transformers/diffusers; imported lazily in
+# architectures/p3d.py so it is only needed to actually build/train a P3D model.
+p3d-surrogate = ">=0.0.4"
 
 # Development tasks
 [tool.black]
@@ -223,6 +226,9 @@ jax = { version = "==0.7.2", extras = ["cuda12"] }
 # >=580 driver. Lives only on the pytorch wheel index. torch's own deps pull
 # in the matching triton for torch.compile.
 torch = { version = "==2.12.0+cu126", index = "https://download.pytorch.org/whl/cu126" }
+# torchvision (transitive via timm / p3d-surrogate) must match the torch wheel
+# ABI and index — see the cpu feature note. 0.27.0 pairs with torch 2.12.0.
+torchvision = { version = "==0.27.0+cu126", index = "https://download.pytorch.org/whl/cu126" }
 
 [tool.pixi.feature.cuda.activation]
 scripts = ["activation_scripts/cuda_activation.sh"]
@@ -252,6 +258,11 @@ JAX_PLATFORMS = "cpu"
 # CUDA baggage, so no pin is needed there.)
 [tool.pixi.feature.cpu.target.linux-64.pypi-dependencies]
 torch = { version = "==2.12.0+cpu", index = "https://download.pytorch.org/whl/cpu" }
+# torchvision is pulled in transitively by timm (a p3d-surrogate dep). It must
+# come from the same wheel index as torch: the generic-PyPI torchvision is built
+# against the CUDA torch ABI and fails with `operator torchvision::nms does not
+# exist` against torch +cpu. 0.27.0 is the build that pairs with torch 2.12.0.
+torchvision = { version = "==0.27.0+cpu", index = "https://download.pytorch.org/whl/cpu" }
 
 
 [tool.pixi.environments]
