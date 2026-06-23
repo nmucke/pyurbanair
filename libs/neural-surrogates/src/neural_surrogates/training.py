@@ -26,6 +26,7 @@ class Trainer:
         amp: bool = False,
         amp_dtype: str = "bfloat16",
         compile_model: bool = False,
+        compile_dynamic: bool | None = None,
         channels_last: bool = False,
         pushforward_epochs_per_step: int | None = None,
         pushforward_start_steps: int = 1,
@@ -61,7 +62,28 @@ class Trainer:
                     "to enable torch.compile."
                 )
             else:
-                self.model = torch.compile(self.model)
+                # `dynamic` controls whether inductor specialises on concrete
+                # spatial sizes. An explicit `compile_dynamic` wins; otherwise
+                # the model may request a setting via a `compile_dynamic`
+                # attribute (P3D sets False: its shape-dependent internal padding
+                # makes dynamo introduce symbolic spatial dims even on the first
+                # trace, and inductor then mis-infers the backward strides of its
+                # reshape/PixelShuffle ops -- an `assert_size_stride` crash in the
+                # compiled backward. Forcing static specialisation avoids it).
+                dynamic = compile_dynamic
+                if dynamic is None:
+                    dynamic = getattr(self._eager_model, "compile_dynamic", None)
+                # The pushforward loop calls the model under both no_grad and
+                # grad (plus separate autocast contexts), so a single forward
+                # legitimately needs several compiled graph variants. The
+                # default dynamo recompile limit (8) is tight for that and makes
+                # a frame silently fall back to eager; give it headroom.
+                import torch._dynamo as _dynamo
+
+                for _attr in ("recompile_limit", "cache_size_limit"):
+                    if hasattr(_dynamo.config, _attr):
+                        setattr(_dynamo.config, _attr, max(getattr(_dynamo.config, _attr), 64))
+                self.model = torch.compile(self.model, dynamic=dynamic)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.optimizer = optimizer

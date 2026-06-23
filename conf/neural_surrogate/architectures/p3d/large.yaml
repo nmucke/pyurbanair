@@ -1,0 +1,8 @@
+# P3D — large preset. P3D_B (hidden 128). window_size is fixed at 4 upstream for
+# B/L and is ignored by the wrapper for these sizes.
+
+_target_: neural_surrogates.P3D
+size: B
+partition_size: 1
+
+# normalize: true / predict_residual: true / param_conditioning: channels (defaults)

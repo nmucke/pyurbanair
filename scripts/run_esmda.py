@@ -7,7 +7,9 @@ This is the first stage of a three-script single-run pipeline (see
 
   1. scripts/run_esmda.py            (THIS) -- runs the assimilation and saves
                                        every raw artifact: the per-window
-                                       prior/posterior states + params, the
+                                       posterior (and, unless
+                                       run.save_prior_state=false, prior) states
+                                       + params, the
                                        assembled posterior_params.nc /
                                        prior_params.nc / posterior_state_mean.nc,
                                        the truth state/params, truth_access.yaml
@@ -408,6 +410,12 @@ def run(cfg: DictConfig) -> None:
         if bool(cfg.run.get("ensemble_save_on_disk", False))
         else None
     )
+
+    # Whether to persist the per-window prior ensemble state (the large artifact;
+    # the posterior state and the prior/posterior params are always saved). When
+    # false, the downstream prior-vs-posterior state diagnostics simply skip the
+    # absent files (see conf/run_esmda.yaml `run.save_prior_state`).
+    save_prior_state = bool(cfg.run.get("save_prior_state", True))
     ensemble_model = instantiate(
         cfg.assim_model.ensemble_model,
         forward_model=assim_model,
@@ -454,6 +462,15 @@ def run(cfg: DictConfig) -> None:
     )
     include_state = isinstance(esmda, StateAndParameterESMDA)
 
+    # Cap on-disk peak storage: have the smoother delete each ESMDA step's
+    # forecast as soon as its update is computed, keeping only the prior (step 0,
+    # when ``save_prior_state``) and the posterior (final step) for reassembly
+    # below. Without this, all num_steps+1 step directories coexist until the
+    # window ends; with it the peak is ~2x ensemble_size. No effect on the
+    # in-memory path (the in-memory analog is ``return_state_history`` below).
+    esmda.prune_disk_steps = True
+    esmda.keep_prior_disk_step = save_prior_state
+
     # --- Run ESMDA -----------------------------------------------------------
     # Time the assimilation. ``window_seconds`` is each window's full wall-clock
     # cost (observation extraction + Kalman solve + I/O + extrapolation);
@@ -489,44 +506,56 @@ def run(cfg: DictConfig) -> None:
         window_obs = window_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, window_obs.shape)
         
         # Sample posterior. ``return_state_history=True`` makes the smoother also
-        # return the per-iteration forecast states; esmda_step=0 is the PRIOR
-        # forecast (prior params, before any update) and esmda_step=-1 is the
-        # POSTERIOR forecast. Both are already computed inside the analysis loop,
-        # so capturing them is free (no extra ensemble forward). The prior state
-        # is persisted so scripts/compute_sweep_metrics.py can build prior sensor
-        # series. In on-disk save mode the per-step states live on disk (under the
-        # step_{i}/ dirs) instead of in RAM, so the smoother refuses to also return
-        # a state history -- request it only on the in-memory path; the disk path
-        # reassembles the prior/posterior states below by streaming those files.
+        # return the per-iteration forecast states (esmda_step=0 is the PRIOR
+        # forecast, esmda_step=-1 the POSTERIOR). We only need the full history to
+        # extract the prior, so request it solely on the in-memory path AND only
+        # when the prior state is being saved; otherwise ask for the posterior
+        # forecast alone (return_state_history=False) so the smoother never
+        # accumulates the num_steps+1 ensemble states in RAM -- the in-memory
+        # analog of the on-disk step pruning. In on-disk save mode the per-step
+        # states live under the step_{i}/ dirs (the smoother refuses a state
+        # history there); the disk path reassembles the prior/posterior states
+        # below by streaming those files.
+        in_memory = ensemble_states_dir is None
+        want_state_history = in_memory and save_prior_state
         solve_start = time.perf_counter()
         output = esmda(
             state=state_input,
             params=prior_params,
             observations=window_obs,
             return_params_history=True,
-            return_state_history=ensemble_states_dir is None,
+            return_state_history=want_state_history,
         )
         solve_seconds.append(time.perf_counter() - solve_start)
 
-        # The smoother returns ``(params_history, state_history)`` in the in-memory
-        # save mode and ``params_history`` alone in the disk save mode (the
-        # forecasts live as per-member files under the ESMDA step dirs instead).
-        if isinstance(output, tuple):
-            result_params, state_history = output
+        # In the in-memory save mode the smoother returns ``(params_history,
+        # state)`` -- ``state`` is the full per-step history when requested, else
+        # just the posterior forecast. In the disk save mode it returns
+        # ``params_history`` alone (the forecasts live as per-member files under
+        # the ESMDA step dirs instead).
+        if in_memory:
+            result_params, state_obj = output
         else:
-            result_params, state_history = output, None
+            result_params, state_obj = output, None
 
         posterior_params = result_params.isel(esmda_step=-1)
         posterior_params.to_netcdf(windows_dir / f"window_{window}_posterior_params.nc")
 
-        if state_history is not None:
-            # In-memory path: the full ensemble forecasts are already in RAM.
-            posterior_state = state_history.isel(esmda_step=-1)
-            prior_state = state_history.isel(esmda_step=0)
-            posterior_state.to_netcdf(windows_dir / f"window_{window}_posterior_state.nc")
-            prior_state.to_netcdf(windows_dir / f"window_{window}_prior_state.nc")
+        if in_memory:
+            # In-memory path: the ensemble forecasts are already in RAM. With the
+            # history requested, slice the prior (step 0) and posterior (step -1)
+            # out of it; without it, ``state_obj`` is already the posterior alone.
+            if want_state_history:
+                posterior_state = state_obj.isel(esmda_step=-1)
+                prior_state = state_obj.isel(esmda_step=0)
+                posterior_state.to_netcdf(windows_dir / f"window_{window}_posterior_state.nc")
+                prior_state.to_netcdf(windows_dir / f"window_{window}_prior_state.nc")
+                del prior_state
+            else:
+                posterior_state = state_obj
+                posterior_state.to_netcdf(windows_dir / f"window_{window}_posterior_state.nc")
             state_input = posterior_state.isel(time=-1)
-            del state_history, prior_state, posterior_state
+            del state_obj, posterior_state
         else:
             # Disk-backed path: stream the per-member forecast files into the
             # per-window prior/posterior state files (step 0 = prior forecast,
@@ -535,10 +564,11 @@ def run(cfg: DictConfig) -> None:
             # posterior's final frame. The (tens-of-GB-per-step) per-member files
             # are dropped once assembled, so scratch does not grow across windows.
             base = esmda.base_results_dir
-            _stream_concat_members(
-                _member_state_files(base / "step_0", ensemble_size),
-                windows_dir / f"window_{window}_prior_state.nc",
-            )
+            if save_prior_state:
+                _stream_concat_members(
+                    _member_state_files(base / "step_0", ensemble_size),
+                    windows_dir / f"window_{window}_prior_state.nc",
+                )
             posterior_files = _member_state_files(
                 base / f"step_{esmda.num_steps}", ensemble_size
             )

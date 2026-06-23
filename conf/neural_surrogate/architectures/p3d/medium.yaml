@@ -1,0 +1,11 @@
+# P3D — medium preset. P3D_S (hidden 64), window 4, with the global-context
+# region partition enabled (the paper's "messenger token" split). partition_size
+# must divide the padded grid along every axis; keep it 1 unless the grid is
+# known to be cleanly divisible.
+
+_target_: neural_surrogates.P3D
+size: S
+window_size: 4
+partition_size: 1
+
+# normalize: true / predict_residual: true / param_conditioning: channels (defaults)

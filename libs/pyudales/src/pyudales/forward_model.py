@@ -813,20 +813,80 @@ class ForwardModel(BaseForwardModel):
             stderr=self.stderr,
         )
 
+    def _read_fielddump(self) -> xarray.Dataset:
+        """Load the fielddump, reassembling the MPI domain decomposition.
+
+        uDALES decomposes the domain across ranks (here nprocx=NCPU, nprocy=1;
+        see utils.ncpu_utils) and writes one fielddump per rank,
+        ``fielddump.<procx>.<procy>.<expnr>.nc``, each holding a sub-domain slab
+        with globally-correct coordinates (modstat_nc.f90:writestat_dims_nc).
+
+        The shell ``gather_outputs.sh`` is supposed to merge these into a single
+        ``fielddump.<expnr>.nc``, but its NCO concat short-circuits when there is
+        only one slab along a direction (nprocy=1 -> the y-pass is a no-op, which
+        in turn starves the x-pass), so for any multi-rank run the merged file is
+        never produced. Reading rank 0 alone then yields a single strip.
+
+        Strategy: prefer a genuine merged file if one exists; otherwise stitch
+        the per-rank slabs ourselves along the (x-only) decomposition.
+        """
+        out_dir = self.dirs.output_dir / self.dirs.experiment_name
+        expnr = self.dirs.experiment_name
+
+        merged_file = out_dir / f"fielddump.{expnr}.nc"
+        if merged_file.exists():
+            return xarray.open_dataset(merged_file, engine="netcdf4")
+
+        per_rank = sorted(out_dir.glob(f"fielddump.*.*.{expnr}.nc"))
+        if not per_rank:
+            raise FileNotFoundError(
+                f"No fielddump output found in {out_dir} "
+                f"(neither merged fielddump.{expnr}.nc nor per-rank "
+                f"fielddump.*.*.{expnr}.nc)."
+            )
+
+        if len(per_rank) == 1:
+            # Single rank -> the lone slab already spans the full domain.
+            return xarray.open_dataset(per_rank[0], engine="netcdf4")
+
+        slabs = [xarray.open_dataset(f, engine="netcdf4") for f in per_rank]
+        return self._stitch_x_decomposition(slabs)
+
+    @staticmethod
+    def _stitch_x_decomposition(slabs: list) -> xarray.Dataset:
+        """Reassemble x-decomposed (nprocy=1) fielddump slabs into one field.
+
+        uDALES uses a staggered C-grid: cell-centred fields (and v/w/pres/
+        scalars) live on ``xt`` while ``u`` lives on the face grid ``xm``. Both
+        x-axes co-vary across ranks, so ``combine_by_coords`` mis-detects a 2-D
+        ``xt x xm`` tiling and broadcasts every variable across the *other*
+        x-axis (e.g. u -> (xt, time, zt, yt, xm)), exploding memory and yielding
+        a garbled field. Instead concatenate each variable along the single
+        x-dimension it actually carries, then merge.
+        """
+        slabs = sorted(slabs, key=lambda d: float(d["xt"].values.min()))
+        template = slabs[0]
+        parts = []
+        for xdim in ("xt", "xm"):
+            names = [v for v in template.data_vars if xdim in template[v].dims]
+            if names:
+                parts.append(
+                    xarray.concat(
+                        [d[names] for d in slabs],
+                        dim=xdim,
+                        data_vars="all",
+                        coords="minimal",
+                        compat="override",
+                    )
+                )
+        combined = parts[0] if len(parts) == 1 else xarray.merge(
+            parts, compat="override", combine_attrs="override"
+        )
+        return combined
+
     def _load_and_postprocess_state(self) -> xarray.Dataset:
         """Load fielddump output, shift coordinates, trim spinup outputs."""
-        output_file = self.dirs.output_dir.joinpath(
-            self.dirs.experiment_name, f"fielddump.{self.dirs.experiment_name}.nc"
-        )
-        if not output_file.exists():
-            single_proc_file = self.dirs.output_dir.joinpath(
-                self.dirs.experiment_name,
-                f"fielddump.000.000.{self.dirs.experiment_name}.nc",
-            )
-            if single_proc_file.exists():
-                output_file = single_proc_file
-
-        state = xarray.open_dataset(output_file, engine="netcdf4")
+        state = self._read_fielddump()
 
         if self.bounds is not None:
             x_offset = self.bounds[0][0]

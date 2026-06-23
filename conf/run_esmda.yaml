@@ -92,7 +92,7 @@ params_to_estimate:
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
 ensemble:
-  ensemble_size: 16
+  ensemble_size: 64
   num_parallel_processes: 1
   num_cpus_per_process: 1
   failure:
@@ -107,9 +107,9 @@ ensemble:
 # esmda/state_reduction=none|svd) that override `esmda.localization` /
 # `esmda.state_reduction` below. ---
 esmda:
-  num_steps: 2
+  num_steps: 3
   alpha: ${.num_steps}
-  num_assimilation_windows: 2
+  num_assimilation_windows: 3
   seed: 42
   obs_error_std: 0.25
   # Defaults; normally set by the esmda/localization and esmda/state_reduction
@@ -128,7 +128,17 @@ run:
   # When true, ensemble forecasts are written to disk (one NetCDF per member,
   # per ESMDA step) instead of one in-memory ensemble Dataset — keeps the full
   # field off host RAM for the high-resolution / large-ensemble sweeps.
-  ensemble_save_on_disk: false
+  ensemble_save_on_disk: true
+  # Whether to persist the per-window PRIOR ensemble state forecasts
+  # (windows/window_*_prior_state.nc). The POSTERIOR state and the prior/posterior
+  # PARAMETERS are always saved; the prior STATE ensemble is the large artifact
+  # (one full-ensemble field per window), so set this false to roughly halve the
+  # on-disk state footprint. Flip it per run on the CLI, e.g.
+  # `run.save_prior_state=false`. Downstream prior-vs-posterior state diagnostics
+  # (compute_sweep_metrics.py sensor series, visualize_state_run.py spread/increment
+  # plots) detect the absent files and skip those comparisons, so they still run —
+  # just without the prior curves/panels.
+  save_prior_state: false
   # Truth source: null -> simulate inline (default); a path -> load a
   # state.nc/params.nc artifact written by run_forward_model.py params=dynamic.
   truth_dir: null
