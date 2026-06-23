@@ -16,7 +16,7 @@ import numpy as np
 import xarray
 from omegaconf import DictConfig
 
-from pyurbanair.utils.animation_utils import animate_state
+from pyurbanair.utils.animation_utils import animate_height_panels
 from pyurbanair.utils.da_metrics import (
     per_knot_crps,
     per_knot_error,
@@ -69,10 +69,10 @@ def visualize_forward_state(
     if drop:
         state = state.drop_vars(drop)
 
-    animate_state(
+    animate_height_panels(
         state=state,
         output_path=out_dir / "state_animation.mp4",
-        z_level=z_level,
+        heights=(2.0, 10.0, 32.0),
     )
     print(f"Saved visualization outputs in {out_dir}")
 

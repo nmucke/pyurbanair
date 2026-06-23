@@ -6,6 +6,7 @@ logger = logging.getLogger(__name__)
 import numpy as np
 import trimesh
 from pylbm.utils import DirectoryPaths
+from scipy.io import FortranFile
 
 
 def _load_single_mesh(stl_path: str | pathlib.Path) -> trimesh.Trimesh:
@@ -250,6 +251,59 @@ def get_building_grid_indices(
     return runs
 
 
+def write_bathymetry_file(
+    solid: np.ndarray,
+    dirs: DirectoryPaths,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> pathlib.Path:
+    """
+    Write the building mask as a compact Fortran-unformatted bathymetry file.
+
+    This replaces the old per-gridpoint ``m_<experiment>.F90`` module (one
+    ``blanking(...)=.true.`` statement per solid column, ~10⁴ lines for a city
+    block) which was too large to compile. The LBM binary instead loads this
+    file at run time via ``m_read_bathymetry``; the layout mirrors that routine::
+
+        record 1:  nx, nyg(=ny), nz                       (3 × int32)
+        record 2:  blanking(0:nx+1, 0:nyg+1, 0:nz+1)      (logical, column-major)
+
+    The interior cells carry the solid occupancy; the one-cell ghost shell stays
+    fluid (the Fortran side zeroes its halos too). Logicals are written as int32
+    1/0, the canonical representation for the default 4-byte LOGICAL used by the
+    LBM build (matching how the codebase already round-trips restart ``.uf``
+    files through :class:`scipy.io.FortranFile`).
+
+    Args:
+        solid: Boolean occupancy of shape ``(nx, ny, nz)`` (0-based grid order).
+        dirs: DirectoryPaths; the file is written into ``experiment_dir`` (the
+            run cwd, and the dir cloned per ensemble member) and named after the
+            experiment so ``read_bathymetry(blanking, '<experiment>')`` finds it.
+        nx, ny, nz: Interior grid dimensions.
+
+    Returns:
+        Path to the written ``bathymetry_<experiment>.uf`` file.
+    """
+    # Full padded mask including the ghost shell, in Fortran (i,j,k) order.
+    blanking = np.zeros((nx + 2, ny + 2, nz + 2), dtype=np.int32)
+    blanking[1 : nx + 1, 1 : ny + 1, 1 : nz + 1] = solid.astype(np.int32)
+
+    out_path = dirs.experiment_dir / f"bathymetry_{dirs.experiment_name}.uf"
+    with FortranFile(str(out_path), "w") as f:
+        # nyg == ny in the serial build set_experiment configures.
+        f.write_record(np.array([nx, ny, nz], dtype=np.int32))
+        f.write_record(np.ravel(blanking, order="F").astype(np.int32))
+
+    logger.info(
+        "Wrote bathymetry geometry (%s solid cells, %.2f%%) to %s",
+        int(solid.sum()),
+        100.0 * solid.sum() / solid.size,
+        out_path,
+    )
+    return out_path
+
+
 def generate_fortran_code(
     buildings_indices: list[dict[str, int]],
     nx: int,
@@ -316,16 +370,24 @@ def update_solid_objects_init(
     experiment_name: str,
 ) -> None:
     """
-    Update m_solid_objects_init.F90 to include the generated geometry module.
+    Wire m_solid_objects_init.F90 to load this experiment's geometry at run time.
 
-    This function:
-    1. Adds `use m_{experiment_name}` to the use statements if not present
-    2. Adds a `case('{experiment_name}')` block in the select case statement
-       that calls the geometry subroutine
+    Ensures (idempotently):
+
+    1. ``use m_read_bathymetry`` is present among the module use statements.
+    2. a ``case('<experiment_name>')`` branch in the
+       ``select case(trim(experiment))`` calls
+       ``read_bathymetry(blanking_global, '<experiment_name>')`` and sets
+       ``lsolids=.true.``.
+
+    This replaces the previous approach, which generated a per-experiment
+    geometry module (``m_<experiment_name>.F90``) and called it directly. Any
+    leftover ``use m_<experiment_name>`` from that approach is removed here so the
+    file does not reference a module that no longer exists.
 
     Args:
-        solid_objects_init_path: Path to m_solid_objects_init.F90
-        experiment_name: Name of the experiment (e.g. "runcase", "city2")
+        solid_objects_init_path: Path to m_solid_objects_init.F90.
+        experiment_name: Name of the experiment (e.g. "runcase").
     """
     if not solid_objects_init_path.exists():
         logger.warning(
@@ -333,188 +395,95 @@ def update_solid_objects_init(
         )
         return
 
-    module_name = f"m_{experiment_name}"
-    use_statement = f"   use {module_name}"
+    lines = solid_objects_init_path.read_text().splitlines()
 
-    # Read the file
-    with open(solid_objects_init_path, "r") as f:
-        lines = f.readlines()
+    # The case body the LBM binary executes for this experiment.
+    desired_case = [
+        f"      case('{experiment_name}')",
+        f"         call read_bathymetry(blanking_global,'{experiment_name}')",
+        "         lsolids=.true.",
+    ]
 
-    # Check if use statement already exists (check for exact module name)
-    has_use = any(f"use {module_name}" in line for line in lines)
+    # --- 0. Drop the obsolete generated-module use statement, if present. ---
+    lines = [
+        line for line in lines if line.strip() != f"use m_{experiment_name}"
+    ]
 
-    # Check if case statement exists and is correctly implemented
-    case_pattern = f"case('{experiment_name}')"
-    case_line_idx = None
-    case_end_idx = None
-    case_correct = False
-
-    for i, line in enumerate(lines):
-        if case_pattern in line:
-            case_line_idx = i
-            # Find where this case block ends (next case or end select)
-            case_end_idx = i + 1
-            for j in range(i + 1, len(lines)):
-                if lines[j].strip().startswith("case(") or lines[j].strip().startswith(
-                    "end select"
-                ):
-                    case_end_idx = j
-                    break
-
-            # Check if case is empty (immediately followed by another case)
-            is_empty = case_end_idx > i + 1 and lines[i + 1].strip().startswith("case(")
-
-            if is_empty:
-                # Empty case is always incorrect
-                case_correct = False
-                break
-
-            # Check if the case block has the correct call and no wrong calls
-            has_correct_call = False
-            has_wrong_calls = False
-
-            # Look through all lines in the case block
-            for j in range(i + 1, case_end_idx):
-                line_content = lines[j]
-                # Check for correct call: call {experiment_name}(blanking_global)
-                if f"call {experiment_name}(blanking_global)" in line_content:
-                    has_correct_call = True
-                # Check for any call statements
-                elif "call " in line_content:
-                    # If it's calling something other than our experiment, it's wrong
-                    if f"call {experiment_name}" not in line_content:
-                        has_wrong_calls = True
-                    # If it's calling our experiment but with wrong signature
-                    elif f"call {experiment_name}" in line_content:
-                        if "(blanking_global)" not in line_content:
-                            has_wrong_calls = True
-
-            # Case is correct only if it has exactly the correct call and no wrong calls
-            case_correct = has_correct_call and not has_wrong_calls
-            break
-
-    modified = False
-
-    # Step 1: Add use statement if missing
-    if not has_use:
-        # Find the insertion point (after other use m_* statements, before MPI section)
+    # --- 1. Ensure `use m_read_bathymetry`. ---
+    if not any(line.strip() == "use m_read_bathymetry" for line in lines):
         insert_idx = None
         for i, line in enumerate(lines):
-            if line.strip().startswith("use m_") and not line.strip().startswith(
-                "use m_mpi"
-            ):
-                # Keep track of the last use m_* line
+            stripped = line.strip()
+            if stripped.startswith("use m_") and not stripped.startswith("use m_mpi"):
                 insert_idx = i + 1
-            elif line.strip().startswith("#ifdef MPI") or line.strip().startswith(
-                "implicit none"
-            ):
-                # Stop before MPI section or implicit none
-                if insert_idx is not None:
-                    break
-                insert_idx = i
+            elif stripped.startswith("implicit") or stripped.startswith("#ifdef MPI"):
                 break
-
         if insert_idx is None:
-            # Fallback: insert after use m_dump_elevation
-            for i, line in enumerate(lines):
-                if "use m_dump_elevation" in line:
-                    insert_idx = i + 1
-                    break
-
+            insert_idx = next(
+                (i for i, l in enumerate(lines) if l.strip().startswith("implicit")),
+                None,
+            )
         if insert_idx is not None:
-            lines.insert(insert_idx, use_statement + "\n")
-            modified = True
-            logger.info("Added use statement: %s", use_statement)
+            lines.insert(insert_idx, "   use m_read_bathymetry")
+            logger.info("Added 'use m_read_bathymetry' to m_solid_objects_init.F90")
 
-    # Step 2: Add or fix case statement
-    if not case_correct:
-        # Also check for and fix empty cases that might be before our target case
-        # (e.g., empty cylinder case before runcase)
-        lines_deleted_before = 0
-        if case_line_idx is not None:
-            # Check if there's an empty case immediately before our target case
-            if (
-                case_line_idx > 0
-                and lines[case_line_idx - 1].strip().startswith("case(")
-                and lines[case_line_idx - 1].strip() != f"case('{experiment_name}')"
-            ):
-                # Check if the previous case is empty (falls through to our case)
-                prev_case_line = case_line_idx - 1
-                # If the line immediately after the previous case is our case, it's empty
-                if prev_case_line + 1 == case_line_idx:
-                    # Remove the empty case line
-                    del lines[prev_case_line]
-                    lines_deleted_before = 1
-                    modified = True
-                    logger.info(
-                        "Removed empty case statement before '%s'",
-                        experiment_name,
-                    )
-                    # Adjust case_line_idx and case_end_idx since we deleted a line
-                    case_line_idx -= 1
-                    if case_end_idx is not None:
-                        case_end_idx -= 1
-
-        if case_line_idx is not None and case_end_idx is not None:
-            # Case exists but is broken - need to fix it
-            # Remove the broken case block
-            del lines[case_line_idx:case_end_idx]
-            modified = True
-            logger.info("Removed broken case statement for '%s'", experiment_name)
-
-        # Find the select case block and add/fix the case
-        # Need to recalculate indices after deletion
-        in_select_case = False
-        case_insert_idx = None
-
-        for i, line in enumerate(lines):
-            if "select case(trim(experiment))" in line:
-                in_select_case = True
-            elif in_select_case and line.strip().startswith("case("):
-                # Track the last case statement (but skip 'airfoil' which stops execution)
-                if "'airfoil'" not in line:
-                    # Find the end of this case block (next case or end select)
-                    case_block_end = i + 1
-                    for j in range(i + 1, len(lines)):
-                        if lines[j].strip().startswith("case(") or lines[
-                            j
-                        ].strip().startswith("end select"):
-                            case_block_end = j
-                            break
-                    # Insert after the entire case block, not just the case line
-                    case_insert_idx = case_block_end
-            elif in_select_case and line.strip().startswith("end select"):
-                # Insert before end select (or before airfoil if it exists)
-                if case_insert_idx is None:
-                    case_insert_idx = i
-                break
-
-        if case_insert_idx is not None:
-            # Generate the case block
-            case_block = f"""      case('{experiment_name}')
-         call {experiment_name}(blanking_global)
-         lsolids=.true.
-"""
-            lines.insert(case_insert_idx, case_block)
-            modified = True
-            if case_line_idx is not None:
-                logger.info("Fixed case statement for '%s'", experiment_name)
-            else:
-                logger.info("Added case statement for '%s'", experiment_name)
-
-    # Write back if modified
-    if modified:
-        with open(solid_objects_init_path, "w") as f:
-            f.writelines(lines)
-        logger.info(
-            "Updated m_solid_objects_init.F90 to include %s geometry",
-            experiment_name,
+    # --- 2. Replace or insert the case('<experiment>') block. ---
+    select_idx = next(
+        (i for i, l in enumerate(lines) if "select case(trim(experiment))" in l),
+        None,
+    )
+    if select_idx is None:
+        logger.warning(
+            "No 'select case(trim(experiment))' found in %s; cannot wire geometry.",
+            solid_objects_init_path,
         )
+        solid_objects_init_path.write_text("\n".join(lines) + "\n")
+        return
+
+    end_idx = next(
+        (
+            i
+            for i in range(select_idx + 1, len(lines))
+            if lines[i].strip().startswith("end select")
+        ),
+        len(lines),
+    )
+
+    case_start = next(
+        (
+            i
+            for i in range(select_idx + 1, end_idx)
+            if lines[i].strip() == f"case('{experiment_name}')"
+        ),
+        None,
+    )
+    if case_start is not None:
+        # Replace the existing block (up to the next case / end select).
+        case_end = next(
+            (
+                i
+                for i in range(case_start + 1, end_idx)
+                if lines[i].strip().startswith("case(")
+            ),
+            end_idx,
+        )
+        if lines[case_start:case_end] != desired_case:
+            lines[case_start:case_end] = desired_case
+            logger.info("Updated case('%s') to use read_bathymetry.", experiment_name)
     else:
-        logger.info(
-            "m_solid_objects_init.F90 already includes %s geometry",
-            experiment_name,
+        # Insert before the airfoil stop-case if present, else before end select.
+        insert_at = next(
+            (
+                i
+                for i in range(select_idx + 1, end_idx)
+                if lines[i].strip().startswith("case('airfoil')")
+            ),
+            end_idx,
         )
+        lines[insert_at:insert_at] = desired_case
+        logger.info("Added case('%s') calling read_bathymetry.", experiment_name)
+
+    solid_objects_init_path.write_text("\n".join(lines) + "\n")
 
 
 # --- Helper Wrapper for Testing ---
@@ -565,25 +534,27 @@ def stl_to_lbm_geometry(
     ) = None,
 ) -> None:
     """
-    Convert an STL file to a Fortran geometry module for LBM simulation.
+    Convert an STL file to LBM geometry: a compact bathymetry file the binary
+    loads at run time via ``m_read_bathymetry``.
 
-    This function wraps the new alternative implementation using get_building_grid_indices
-    and generate_fortran_code.
+    Earlier versions emitted a per-gridpoint ``m_<experiment>.F90`` module (one
+    ``blanking(...)=.true.`` per solid column), which grew to tens of thousands
+    of lines for a city block and was too large to compile. Now the solid
+    occupancy is written to ``bathymetry_<experiment>.uf`` and ``read_bathymetry``
+    is wired into ``m_solid_objects_init.F90``.
 
     Args:
-        stl_path: Path to the input STL file
-        dirs: DirectoryPaths object containing all relevant paths (including experiment_dir
-              and executable_path).
-        nx: Grid resolution in x-direction
-        ny: Grid resolution in y-direction
-        nz: Grid resolution in z-direction
+        stl_path: Path to the input STL file.
+        dirs: DirectoryPaths object (provides experiment_dir, lbm_src_path,
+              experiment_name).
+        nx: Grid resolution in x-direction.
+        ny: Grid resolution in y-direction.
+        nz: Grid resolution in z-direction.
         bounds: Optional bounding box as ((xmin, xmax), (ymin, ymax), (zmin, zmax))
                 in physical coordinates. If None, uses the mesh bounding box.
-        scale: Optional scaling factor (not yet implemented in new version)
-        translate: Optional translation (not yet implemented in new version)
 
     Returns:
-        None. Writes the Fortran file to output_path.
+        None.
     """
     stl_path = pathlib.Path(stl_path)
 
@@ -599,28 +570,29 @@ def stl_to_lbm_geometry(
             "zmax": float(bounds[2][1]),
         }
 
-    # Step 1: Get building grid indices
-    building_data = get_building_grid_indices(
+    # Step 1: Voxelize the STL into a solid-occupancy mask over the LBM grid.
+    solid = compute_solid_occupancy(
         stl_path=stl_path,
         nx=nx,
         ny=ny,
         nz=nz,
         domain_bounds=domain_bounds,
     )
+    if int(solid.sum()) == 0:
+        raise ValueError(
+            f"No solid cells found for {stl_path}; check domain bounds/resolution"
+        )
 
-    # Step 2: Generate Fortran code
-    generate_fortran_code(
-        buildings_indices=building_data,
-        nx=nx,
-        ny=ny,
-        nz=nz,
-        module_name=f"m_{dirs.experiment_name}",
-        subroutine_name=dirs.experiment_name,
-        filename=dirs.lbm_src_path / f"m_{dirs.experiment_name}.F90",  # type: ignore[arg-type]
-    )
+    # Step 2: Write the compact bathymetry file (read at run time, not compiled).
+    write_bathymetry_file(solid=solid, dirs=dirs, nx=nx, ny=ny, nz=nz)
 
-    # Step 3: Update m_solid_objects_init.F90 to use the generated geometry
+    # Step 3: Wire m_solid_objects_init.F90 to call read_bathymetry for this case.
     update_solid_objects_init(
         solid_objects_init_path=dirs.lbm_src_path / "m_solid_objects_init.F90",
         experiment_name=dirs.experiment_name,
     )
+
+    # Step 4: Drop any stale generated geometry module from the old approach so
+    # the makefile's `ls *.F90` does not recompile the obsolete (huge) file.
+    stale_module = dirs.lbm_src_path / f"m_{dirs.experiment_name}.F90"
+    stale_module.unlink(missing_ok=True)

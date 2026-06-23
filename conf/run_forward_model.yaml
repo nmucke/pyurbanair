@@ -26,14 +26,14 @@ defaults:
 
 # --- Output roots (everything mutable lands under .temp/) ---
 paths:
-  results_dir: .temp/${model.name}
+  results_dir: results/${model.name}
   # Absolute scratch dir for the solvers (pylbm/pyudales/pypalm chdir into it, so
   # it must stay absolute and stable across chdirs). Resolved from $PWD rather
   # than ${hydra:runtime.cwd} so it also works under bare compose() in tests.
-  experiment_dir: ${oc.env:PWD}/.temp_lbm
+  experiment_dir: ${oc.env:PWD}/.temp_${model.name}
   # Fallback output root used by resolve_output_dir() when Hydra isn't
   # initialized (direct run(cfg) calls from tests).
-  base_results_dir: .temp_lbm
+  base_results_dir: .temp_${model.name}
 
 # --- Time-varying parameter knot spacing (per-window horizon lives in the case) ---
 # The dynamic prior takes a new value every `seconds_per_knot` seconds; if the

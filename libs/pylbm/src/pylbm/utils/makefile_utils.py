@@ -165,6 +165,33 @@ class Makefile:
         if ncfdir is not None:
             self.set_path("NCFDIR", ncfdir)
 
+    def set_gpu_arch(self, cc: str) -> bool:
+        """
+        Retarget every ``-gpu=cc<NN>`` compute-capability token to ``cc<cc>``.
+
+        The upstream LBM makefile hardcodes a single GPU architecture (e.g.
+        ``cc120``) in CCFLAG/LINKFLAGS. On a host with a different GPU the binary
+        compiles but its device kernels are missing at run time ("Could not find
+        symbol ... Rebuild with -gpu=ccXX"). Rewriting the token to the host's
+        actual compute capability fixes that without touching anything else.
+
+        Args:
+            cc: Compute capability without the dot (e.g. "86" for an RTX 3090).
+
+        Returns:
+            True if at least one token was rewritten.
+        """
+        pattern = re.compile(r"-gpu=cc\d+")
+        replacement = f"-gpu=cc{cc}"
+        changed = False
+        for i, line in enumerate(self.raw_lines):
+            if "-gpu=cc" in line:
+                new_line = pattern.sub(replacement, line)
+                if new_line != line:
+                    self.raw_lines[i] = new_line
+                    changed = True
+        return changed
+
     def write(self, file_path: Optional[pathlib.Path] = None) -> None:
         """
         Write the makefile back to disk.
