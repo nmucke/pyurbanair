@@ -147,6 +147,35 @@ def _ensure_cuda_netcdf_fortran(
     return netcdf_root
 
 
+def _detect_gpu_compute_capability() -> Optional[str]:
+    """
+    Return the host GPU compute capability without the dot (e.g. "86"), or None.
+
+    Honors the ``PYLBM_GPU_ARCH`` override (e.g. ``PYLBM_GPU_ARCH=80``) for hosts
+    where nvidia-smi is unavailable or a specific arch is wanted; otherwise queries
+    nvidia-smi and uses the first GPU.
+    """
+    override = os.environ.get("PYLBM_GPU_ARCH")
+    if override:
+        cc = override.strip().replace(".", "")
+        return cc if cc.isdigit() else None
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception as e:
+        logger.warning("Could not query GPU compute capability via nvidia-smi: %s", e)
+        return None
+    caps = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not caps:
+        return None
+    cc = caps[0].replace(".", "")
+    return cc if cc.isdigit() else None
+
+
 def compile_lbm(
     dirs: DirectoryPaths,
     verbose: bool = True,
@@ -255,6 +284,21 @@ def compile_lbm(
         # Update NCFDIR to whichever NETCDF root we are actually using.
         if enable_netcdf:
             makefile.set_path("NCFDIR", netcdf_root)
+
+        # Retarget the GPU build to the host's compute capability. The upstream
+        # makefile hardcodes a single arch (e.g. cc120) which produces a binary
+        # whose device kernels are missing at run time on a different GPU.
+        if enable_cuda:
+            cc = _detect_gpu_compute_capability()
+            if cc is not None:
+                if makefile.set_gpu_arch(cc) and verbose:
+                    logger.info("Set GPU compute capability to cc%s", cc)
+            else:
+                logger.warning(
+                    "Could not determine host GPU compute capability; building "
+                    "with the makefile's default -gpu arch (set PYLBM_GPU_ARCH to "
+                    "override, e.g. PYLBM_GPU_ARCH=86)."
+                )
 
         makefile.write()
 

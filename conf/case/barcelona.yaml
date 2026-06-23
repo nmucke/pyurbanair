@@ -17,9 +17,9 @@ domain:
   # to keep the resolution, e.g. a 200 m square at the centre:
   #   domain.bounds=[[353,553],[337,537],[0,128]] domain.nx=100 domain.ny=100 domain.nz=64
   # (nfcts still counts all STL facets; regenerate the STL with --size for fewer.)
-  nx: 200
-  ny: 200
-  nz: 16
+  nx: 225
+  ny: 218
+  nz: 32
   bounds:
     - [0.0, 900.0]
     - [0.0, 870.0]

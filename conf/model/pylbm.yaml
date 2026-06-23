@@ -10,8 +10,8 @@ forward_model:
   # Base scratch dir shared across models; pylbm nests <temp_dir>/experiment/runcase.
   temp_dir: ${paths.experiment_dir}
   experiment_name: runcase
-  cuda: false
-  verbose: false
+  cuda: true
+  verbose: true
   boundary_condition: inflow_outflow
   profile_config:
     type: power_law
