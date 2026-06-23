@@ -61,9 +61,9 @@ obs:
   validation_y_points: [30.0, 55.0]
   validation_z_points: [2.0, 2.0]
 
-  states: [u, v, w]
+  states: [u, v]
   temporal_mode: intervals
-  interval_seconds: 10.0
+  interval_seconds: 60.0
   aggregation_mode: mean
 
 time:
@@ -71,6 +71,6 @@ time:
   # window is `simulation_time` long with a `spinup_time` constant-inflow plateau
   # in front; the state is written every `output_frequency` s. The number of
   # windows and the param-knot count are compute knobs and live in `scale/`.
-  simulation_time: 180.0
+  simulation_time: 300.0
   output_frequency: 2.0
-  spinup_time: 25.0
+  spinup_time: 50.0

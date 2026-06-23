@@ -112,6 +112,40 @@ def test_run_esmda(
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
+    "smoother,prior",
+    [
+        pytest.param("static", "static", id="static_model_error"),
+        pytest.param("dynamic", "dynamic", id="dynamic_model_error"),
+    ],
+)
+def test_run_esmda_with_model_error_parameters(
+    smoother: str, prior: str, compose_test_cfg
+) -> None:
+    """ESMDA estimates the model-error knobs when `params_to_estimate` includes
+    them: the static path adds two scalar knobs; the dynamic path additionally
+    rides the constant-in-time statics alongside the time-varying inflow
+    (docs/esmda_model_error_parameters.md). The augmented posterior must carry
+    both new parameters."""
+    import xarray
+
+    from scripts.run_esmda import run
+
+    overrides = _overrides("pyudales", "pyudales", smoother, prior, 1)
+    overrides.append(
+        "params_to_estimate=[inflow_angle,velocity_magnitude,"
+        "sgs_constant,vertical_inflow_exponent]"
+    )
+    cfg = compose_test_cfg(overrides, config_name="run_esmda")
+    run(cfg)
+
+    posterior = xarray.open_dataset(
+        pathlib.Path(cfg.paths.results_dir) / "posterior_params.nc"
+    )
+    assert "sgs_constant" in posterior.data_vars
+    assert "vertical_inflow_exponent" in posterior.data_vars
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
     "smoother,prior,num_windows",
     [
         # Distance-based localization on the STATE (params stay global), selected

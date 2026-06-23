@@ -23,10 +23,12 @@ from .utils.environment_utils import identify_environment
 from .utils.infile_utils import _augment_runtime_library_paths
 from .utils.mod_dimensions_utils import set_experiment
 from .utils.params_utils import (
+    apply_sgs_setting,
     extract_initial_params,
     is_time_varying_params,
     remove_uvel_shear_file,
     remove_uvel_time_file,
+    resolve_profile_config,
     write_uvel_shear_file,
     write_uvel_time_file,
 )
@@ -124,6 +126,11 @@ class ForwardModel(BaseForwardModel):
         self.profile_config = profile_config
         zsize = bounds[2][1] - bounds[2][0]
         profile_heights = (np.arange(nz) + 0.5) * dz
+        # Cached so _apply_inflow_settings can rewrite uvel_shear.dat per member
+        # when an estimated vertical_inflow_exponent (α) overrides the
+        # construction-time shear (docs/esmda_model_error_parameters.md §2.1).
+        self._profile_heights = profile_heights
+        self._zsize = zsize
         if profile_config is not None and profile_config.get("type") not in (
             None,
             "uniform",
@@ -330,6 +337,24 @@ class ForwardModel(BaseForwardModel):
         static values in ``infile.in``.  For static parameters, removes
         any stale ``uvel_time.dat`` and applies the values directly.
         """
+        # Model-error knobs (α shear exponent, SGS constant) apply identically to
+        # the static and time-varying inflow paths, so consume them here, outside
+        # the branch (docs/esmda_model_error_parameters.md §6.2). Each is a no-op
+        # when its parameter is absent, keeping single-model/default runs
+        # byte-identical.
+        override_cfg = resolve_profile_config(params, self.profile_config)
+        if override_cfg is not None and override_cfg.get("type") not in (
+            None,
+            "uniform",
+        ):
+            write_uvel_shear_file(
+                dirs=self.dirs,
+                heights=self._profile_heights,
+                zsize=self._zsize,
+                profile_config=override_cfg,
+            )
+        apply_sgs_setting(params, self.dirs)
+
         if is_time_varying_params(params):
             # The LBM matches the schedule against its absolute clock
             # t = (iteration - 1) * dt, which continues across warm starts

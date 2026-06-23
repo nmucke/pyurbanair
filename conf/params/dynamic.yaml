@@ -7,7 +7,7 @@ _target_: pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel
 _convert_: all
 correlation_length: 100.0
 seed: 2
-external_parameters:
+external_parameters:        # time-varying (each gets a `time` dim)
   inflow_angle:
     _target_: pyurbanair.static_parameters.Normal
     mean: 25.0
@@ -17,6 +17,24 @@ external_parameters:
     mean: 6.0
     std: 0.5
     min: 0.1
+# Constant-in-time model-error knobs that ride in the same params Dataset and are
+# ESMDA-estimated jointly with the dynamic inflow, but carry no `time` dim. Drawn
+# once (window 0) and refined across windows via the posterior — never
+# re-randomized (docs/esmda_model_error_parameters.md §6). Exclude them from a run
+# via run_esmda.yaml `params_to_estimate`.
+static_parameters:
+  vertical_inflow_exponent:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.25
+    std: 0.05
+    min: 0.05
+  # Keep near/above the solver's stable threshold (uDALES xie_and_castro: cs=0.24);
+  # too little SGS dissipation diverges the run.
+  sgs_constant:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.22
+    std: 0.03
+    min: 0.18
 # The parameter takes a new value every `seconds_per_knot` seconds over the
 # per-window horizon `simulation_time`. When the horizon isn't an exact multiple
 # of the spacing, a final knot at `simulation_time` is reached by linearly

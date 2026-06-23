@@ -92,6 +92,7 @@ from tqdm import tqdm
 from pyurbanair.config.hydra_helpers import (
     clean_outputs,
     create_observation_operator,
+    filter_parameter_config,
 )
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 
@@ -266,6 +267,18 @@ def run(cfg: DictConfig) -> None:
     domain_x_min = float(cfg.domain.bounds[0][0])
     rng_key = jax.random.PRNGKey(cfg.esmda.seed)
 
+    # Select which parameters ESMDA estimates (conf/run_esmda.yaml
+    # `params_to_estimate`): null -> every parameter the sampler configs define;
+    # a list -> that subset. The same filter is applied to the prior and the
+    # truth samplers, so excluding a parameter reproduces the run as if the knob
+    # did not exist on either side (docs/esmda_model_error_parameters.md §4).
+    selected = cfg.get("params_to_estimate", None)
+    selected = list(selected) if selected is not None else None
+    truth_params_cfg = filter_parameter_config(cfg.truth_params, selected)
+    prior_params_cfg = filter_parameter_config(cfg.prior_params, selected)
+    if selected is not None:
+        print(f"Estimating parameters: {selected}")
+
     # --- Output and windows dir ---------------------------------------------------------
     # The run lands in the configured results dir (conf/run_esmda.yaml's
     # ``paths.results_dir``), so the downstream metric/figure scripts -- and the
@@ -298,17 +311,17 @@ def run(cfg: DictConfig) -> None:
                 # (they coincide at every multiple of the spacing, and on the
                 # window boundaries when sim_time is a multiple of it).
                 truth_sampler = instantiate(
-                    cfg.truth_params, simulation_time=sim_time * num_windows
+                    truth_params_cfg, simulation_time=sim_time * num_windows
                 )
             else:
-                truth_sampler = instantiate(cfg.truth_params)
+                truth_sampler = instantiate(truth_params_cfg)
         else:
             true_forward_model = instantiate(
                 cfg.truth_model.forward_model,
                 results_dir=None,
                 simulation_time=sim_time
             )
-            truth_sampler = instantiate(cfg.truth_params)
+            truth_sampler = instantiate(truth_params_cfg)
 
         true_params = truth_sampler.sample(1)
 
@@ -402,7 +415,7 @@ def run(cfg: DictConfig) -> None:
     )
 
     # --- Prior parameter sampler -----------------------------------------------------------
-    prior_sampler = instantiate(cfg.prior_params)
+    prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
 
     # --- Observation operator -----------------------------------------------------------

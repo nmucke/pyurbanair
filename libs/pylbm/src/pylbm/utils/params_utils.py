@@ -49,6 +49,53 @@ def get_param_value(params: xarray.Dataset, param_name: str) -> Optional[float]:
     return params[param_name].item()  # type: ignore[no-any-return]
 
 
+def resolve_profile_config(
+    params: Optional[xarray.Dataset],
+    default_profile_config: Optional[dict],
+) -> Optional[dict]:
+    """Return a ``profile_config`` with ``alpha`` overridden from ``params``.
+
+    The vertical shear exponent ``alpha`` is normally fixed at construction
+    (``default_profile_config``). When the per-member ``params`` carry an
+    estimated ``vertical_inflow_exponent`` it overrides ``alpha`` so the shear
+    becomes a per-member, ESMDA-estimable model-error knob
+    (docs/esmda_model_error_parameters.md §2.1). Returns ``None`` when the
+    parameter is absent, signalling the caller to keep the construction-time
+    ``uvel_shear.dat`` untouched.
+    """
+    if params is None:
+        return None
+    alpha = get_param_value(params, "vertical_inflow_exponent")
+    if alpha is None:
+        return None
+    base = dict(default_profile_config) if default_profile_config else {}
+    base.setdefault("type", "power_law")
+    base["alpha"] = float(alpha)
+    return base
+
+
+def apply_sgs_setting(
+    params: Optional[xarray.Dataset],
+    dirs: "DirectoryPaths",
+) -> None:
+    """Write the per-member sub-grid-scale constant into ``infile.in``.
+
+    The ``ivreman smagor`` line carries ``"<ivreman> <smagorinsky>"``; the
+    Smagorinsky constant becomes ``const = 2.5*smagorinsky**2`` in
+    ``m_vreman.F90``. No-op when ``sgs_constant`` is absent so the template value
+    is preserved (docs/esmda_model_error_parameters.md §2.2).
+    """
+    if params is None:
+        return
+    sgs = get_param_value(params, "sgs_constant")
+    if sgs is None:
+        return
+    infile = Infile(dirs.infile_path)
+    infile.set_value("ivreman", f"1 {float(sgs):.4f}")
+    infile.write()
+    logger.info("Set LBM Smagorinsky constant (sgs_constant) to %.4f", float(sgs))
+
+
 def apply_inflow_settings(
     params: xarray.Dataset,
     dirs: "DirectoryPaths",

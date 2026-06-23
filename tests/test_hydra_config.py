@@ -103,8 +103,74 @@ def test_resolve_parameter_schema_includes_pressure_gradient_for_udales() -> Non
     assert resolve_parameter_schema("pylbm") == (
         "inflow_angle",
         "velocity_magnitude",
+        "vertical_inflow_exponent",
+        "sgs_constant",
     )
     assert "pressure_gradient_magnitude" in resolve_parameter_schema("pyudales")
+
+
+def test_resolve_parameter_schema_includes_model_error_knobs() -> None:
+    """Every backend advertises the two model-error compensation knobs."""
+    from pyurbanair.config.hydra_helpers import resolve_parameter_schema
+
+    for model in ("pylbm", "pyudales", "pypalm"):
+        schema = resolve_parameter_schema(model)
+        assert "vertical_inflow_exponent" in schema
+        assert "sgs_constant" in schema
+
+
+def test_filter_parameter_config_restricts_static_sampler() -> None:
+    """`params_to_estimate` prunes the static sampler's `parameters` block."""
+    from omegaconf import OmegaConf
+
+    from pyurbanair.config.hydra_helpers import filter_parameter_config
+
+    full = OmegaConf.create(
+        {
+            "parameters": {
+                "inflow_angle": {"a": 1},
+                "velocity_magnitude": {"a": 1},
+                "vertical_inflow_exponent": {"a": 1},
+                "sgs_constant": {"a": 1},
+            }
+        }
+    )
+
+    # null -> unchanged (all parameters kept).
+    assert set(filter_parameter_config(full, None)["parameters"]) == set(
+        full["parameters"]
+    )
+
+    # subset -> only the named parameters survive; original is not mutated.
+    selected = ["inflow_angle", "velocity_magnitude"]
+    pruned = filter_parameter_config(full, selected)
+    assert set(pruned["parameters"]) == set(selected)
+    assert "sgs_constant" in full["parameters"]
+
+
+def test_filter_parameter_config_restricts_dynamic_sampler() -> None:
+    """The filter prunes BOTH the dynamic and static blocks of the AR(2) config."""
+    from omegaconf import OmegaConf
+
+    from pyurbanair.config.hydra_helpers import filter_parameter_config
+
+    full = OmegaConf.create(
+        {
+            "external_parameters": {
+                "inflow_angle": {"a": 1},
+                "velocity_magnitude": {"a": 1},
+            },
+            "static_parameters": {
+                "vertical_inflow_exponent": {"a": 1},
+                "sgs_constant": {"a": 1},
+            },
+        }
+    )
+
+    # Keep one dynamic + one static parameter; drop the rest.
+    pruned = filter_parameter_config(full, ["inflow_angle", "sgs_constant"])
+    assert set(pruned["external_parameters"]) == {"inflow_angle"}
+    assert set(pruned["static_parameters"]) == {"sgs_constant"}
 
 
 def test_observation_helpers_use_explicit_mode() -> None:

@@ -11,6 +11,26 @@ parameters:
     mean: 5.0
     std: 1.0
     min: 0.1
+  # Model-error compensation knobs (docs/esmda_model_error_parameters.md). Tight
+  # priors: each extra free parameter risks an underdetermined inverse / ensemble
+  # collapse with few sensors. Exclude them from a run via run_esmda.yaml
+  # `params_to_estimate`.
+  # Power-law shear exponent α: u(z) = u_ref (z/z_ref)^α.
+  vertical_inflow_exponent:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.25
+    std: 0.05
+    min: 0.05
+  # Sub-grid-scale mixing constant. Meaning is per-solver (LBM smagorinsky /
+  # uDALES cs / PALM km_constant proxy), so set the range to the ASSIMILATION
+  # model. Keep the prior near/above the solver's stable threshold — too little
+  # SGS dissipation diverges the run (docs/esmda_model_error_parameters.md §8).
+  # Default range targets the uDALES xie_and_castro case (tuned at cs=0.24).
+  sgs_constant:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.22
+    std: 0.03
+    min: 0.18
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.0041912

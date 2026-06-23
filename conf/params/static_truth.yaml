@@ -13,6 +13,17 @@ parameters:
   velocity_magnitude:
     _target_: pyurbanair.static_parameters.Constant
     value: 5.0
+  # Truth-model values for the model-error knobs. The truth solver may differ
+  # from the assimilation solver, so these are the TRUTH model's coefficients and
+  # need not match conf/params/static.yaml's prior means (that mismatch is exactly
+  # the model error the assim knobs absorb — docs/esmda_model_error_parameters.md).
+  vertical_inflow_exponent:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.25
+  # Truth-model value at the case's stable SGS setting (uDALES cs=0.24).
+  sgs_constant:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.24
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.0041912
