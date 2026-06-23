@@ -11,7 +11,7 @@ forward_model:
   temp_dir: ${paths.experiment_dir}
   experiment_name: runcase
   cuda: true
-  verbose: true
+  verbose: false
   boundary_condition: inflow_outflow
   profile_config:
     type: power_law

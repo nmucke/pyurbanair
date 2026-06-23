@@ -37,7 +37,7 @@ PY
 )"
 echo "ESMDA pipeline output dir: ${RUN_DIR}"
 
-pixi run -e dev python scripts/run_esmda.py "$@"
+pixi run -e cuda python scripts/run_esmda.py "$@"
 pixi run -e dev python scripts/compute_esmda_metrics.py --run-dir "${RUN_DIR}"
 pixi run -e dev python scripts/make_esmda_figures.py --run-dir "${RUN_DIR}"
 

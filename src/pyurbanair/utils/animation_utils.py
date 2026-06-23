@@ -64,6 +64,127 @@ def _visualize_state_history(
             plt.close()
 
 
+def _resolve_dim(da: xarray.DataArray, candidates: tuple[str, ...]) -> str | None:
+    return next((d for d in candidates if d in da.dims), None)
+
+
+def animate_height_panels(
+    state: xarray.Dataset,
+    output_path: str | pathlib.Path,
+    heights: tuple[float, ...] = (2.0, 10.0, 32.0),
+    fps: int = 10,
+    dpi: int = 120,
+    speed_cmap: str = "viridis",
+    vort_cmap: str = "RdBu_r",
+) -> None:
+    """Animate velocity magnitude and vorticity at several heights, one file.
+
+    Layout is a 2 x ``len(heights)`` grid of panels sharing a single time axis:
+    the top row is the horizontal velocity magnitude and the bottom row the
+    vertical vorticity ``omega_z = dv/dx - du/dy``; each column is one height.
+    The requested heights are matched to the nearest available z-level.
+
+    ``state`` must already be reduced to a single member (no ``ensemble`` dim)
+    and carry ``u``/``v`` with a vertical and two horizontal coordinates.
+    """
+    if not all(v in state.data_vars for v in ("u", "v")):
+        raise ValueError("animate_height_panels needs 'u' and 'v' in the state")
+    if "time" not in state.dims:
+        raise ValueError("Dataset must have a 'time' dimension")
+
+    z_dim = _resolve_dim(state["u"], ("z", "zm", "zt", "zu"))
+    if z_dim is None:
+        raise ValueError("Could not find a vertical dimension on 'u'")
+
+    # Speed source: reuse the precomputed magnitude when present, else fall back
+    # to the horizontal speed sqrt(u^2 + v^2).
+    speed_da = state["vel_magnitude"] if "vel_magnitude" in state.data_vars else None
+
+    times = np.asarray(state["time"].values)
+    n_times = len(times)
+    z_coord = np.asarray(state[z_dim].values)
+
+    # Per-height precomputed (time, y, x) numpy arrays for both rows.
+    speed_frames: list[np.ndarray] = []
+    vort_frames: list[np.ndarray] = []
+    actual_heights: list[float] = []
+    extent = None
+    for h in heights:
+        k = int(np.argmin(np.abs(z_coord - h)))
+        u_h = state["u"].isel({z_dim: k})
+        v_h = state["v"].isel({z_dim: k})
+        actual_heights.append(float(z_coord[k]))
+
+        x_dim, y_dim = u_h.dims[-1], u_h.dims[-2]
+        x_coord = np.asarray(u_h[x_dim].values)
+        y_coord = np.asarray(u_h[y_dim].values)
+        if extent is None:
+            extent = [x_coord.min(), x_coord.max(), y_coord.min(), y_coord.max()]
+
+        u_arr = np.asarray(u_h.values)
+        v_arr = np.asarray(v_h.values)
+        # omega_z = dv/dx - du/dy, differentiated over physical coordinates.
+        dv_dx = np.gradient(v_arr, x_coord, axis=-1)
+        du_dy = np.gradient(u_arr, y_coord, axis=-2)
+        vort_frames.append(dv_dx - du_dy)
+
+        if speed_da is not None:
+            speed_frames.append(np.asarray(speed_da.isel({z_dim: k}).values))
+        else:
+            speed_frames.append(np.hypot(u_arr, v_arr))
+
+    # Shared colour limits per row: speed 0..max, vorticity symmetric about 0.
+    speed_max = float(np.nanmax([np.nanmax(f) for f in speed_frames]))
+    vort_lim = float(
+        np.nanmax([np.nanpercentile(np.abs(f), 99) for f in vort_frames])
+    )
+
+    n_cols = len(heights)
+    fig, axes = plt.subplots(
+        2, n_cols, figsize=(5 * n_cols, 9), squeeze=False, constrained_layout=True
+    )
+    fig.set_facecolor("white")
+
+    speed_ims, vort_ims = [], []
+    for col in range(n_cols):
+        ax_top, ax_bot = axes[0, col], axes[1, col]
+        im_s = ax_top.imshow(
+            speed_frames[col][0], origin="lower", aspect="auto",
+            cmap=speed_cmap, vmin=0.0, vmax=speed_max, extent=extent,
+        )
+        im_v = ax_bot.imshow(
+            vort_frames[col][0], origin="lower", aspect="auto",
+            cmap=vort_cmap, vmin=-vort_lim, vmax=vort_lim, extent=extent,
+        )
+        ax_top.set_title(f"z = {actual_heights[col]:.0f} m", fontweight="bold")
+        for ax in (ax_top, ax_bot):
+            ax.set_xticks([])
+            ax.set_yticks([])
+        speed_ims.append(im_s)
+        vort_ims.append(im_v)
+
+    axes[0, 0].set_ylabel("Velocity magnitude [m/s]", fontweight="bold")
+    axes[1, 0].set_ylabel(r"Vorticity $\omega_z$ [1/s]", fontweight="bold")
+    fig.colorbar(speed_ims[-1], ax=axes[0, :].tolist(), fraction=0.046, pad=0.02)
+    fig.colorbar(vort_ims[-1], ax=axes[1, :].tolist(), fraction=0.046, pad=0.02)
+
+    suptitle = fig.suptitle(f"t = {times[0]:.2f} s", fontsize=15, fontweight="bold")
+
+    output_path = pathlib.Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path, writer = _get_writer_and_output_path(output_path=output_path, fps=fps)
+
+    with writer.saving(fig, str(output_path), dpi=dpi):
+        for t in range(n_times):
+            for col in range(n_cols):
+                speed_ims[col].set_array(speed_frames[col][t])
+                vort_ims[col].set_array(vort_frames[col][t])
+            suptitle.set_text(f"t = {times[t]:.2f} s")
+            writer.grab_frame()
+
+    plt.close(fig)
+
+
 def animate_rollout_state(
     true_state: xarray.Dataset,
     mean_vel: xarray.DataArray,
@@ -183,6 +304,7 @@ def animate_rollout_state(
 
 __all__ = [
     "animate_state",
+    "animate_height_panels",
     "animate_rollout_state",
     "_visualize_state_history",
 ]
