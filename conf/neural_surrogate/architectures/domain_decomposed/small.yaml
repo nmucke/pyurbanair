@@ -7,8 +7,8 @@
 # family is swappable here, e.g.
 #   - /neural_surrogate/architectures/upt@coarse_net: tiny
 defaults:
-  - /neural_surrogate/architectures/unet_convnext@fine_net: small
-  - /neural_surrogate/architectures/unet_convnext@coarse_net: tiny
+  - /neural_surrogate/architectures/p3d@fine_net: tiny
+  - /neural_surrogate/architectures/p3d@coarse_net: tiny
   - _self_
 
 _target_: neural_surrogates.DomainDecomposed
@@ -21,9 +21,9 @@ _convert_: all
 # Two-level overlapping tiling. interior_size must divide any periodic axis
 # length exactly (y is periodic here -> Ny % interior_size == 0).
 decomposition:
-  interior_size: 32
-  halo: 8
-  taper: 4
+  interior_size: 16
+  halo: 4
+  taper: 2
   coarsen_factor: 4
   n_pos: 3
   boundary_mode: replicate

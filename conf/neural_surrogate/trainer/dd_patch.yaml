@@ -14,7 +14,7 @@
 # already configured in training.yaml.
 _target_: neural_surrogates.PatchTrainer
 num_epochs: 200
-device: cuda
+device: cpu
 patience: 15
 # Mixed precision autocast. bf16 needs no grad scaling and cannot underflow;
 # the trainer falls back to fp16 (+ GradScaler) on GPUs without bf16 support.
@@ -29,7 +29,7 @@ channels_last: false
 # `dataset.pushforward_steps`. The Eq (9) terms are evaluated on the final
 # rollout step. Set the cadence to null to train at a fixed (one-step) horizon,
 # the original PatchTrainer behavior.
-pushforward_epochs_per_step: null
+pushforward_epochs_per_step: 10
 pushforward_start_steps: 1
 # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
 # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`.

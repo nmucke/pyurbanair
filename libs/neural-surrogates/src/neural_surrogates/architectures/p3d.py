@@ -95,6 +95,16 @@ class P3D(nn.Module):
     predict_residual:
         Predict the state increment rather than the next state; the identity
         rollout becomes the zero-output solution.
+    extra_in_channels:
+        Number of *extra* raw input channels appended to the stem input
+        **after** the geometry mask (and any param channels). Passed to
+        :meth:`forward` via the ``extra`` argument and concatenated raw -- no
+        normalisation, no geometry masking -- so the domain-decomposition
+        wrapper (:class:`~neural_surrogates.architectures.DomainDecomposed`) can
+        use P3D as the per-patch fine net, feeding the prolonged coarse context
+        and positional encodings straight in. The default ``0`` keeps the stem
+        (and the whole state dict) byte-identical to a standard P3D, so a plain
+        (non-DD) model and its existing checkpoints are unaffected.
     """
 
     def __init__(
@@ -111,6 +121,7 @@ class P3D(nn.Module):
         param_conditioning: str = "channels",
         normalize: bool = True,
         predict_residual: bool = True,
+        extra_in_channels: int = 0,
     ) -> None:
         super().__init__()
 
@@ -140,6 +151,9 @@ class P3D(nn.Module):
                 f"periodic_axes entries must be in ('z', 'y', 'x'), got {sorted(unknown)}"
             )
 
+        if extra_in_channels < 0:
+            raise ValueError("extra_in_channels must be >= 0")
+
         # torch.compile hint honoured by neural_surrogates.Trainer: P3D's
         # internal window padding (P3DStage.maybe_pad) computes pad sizes from
         # `x.shape % window_size`, so dynamo introduces symbolic spatial dims
@@ -157,6 +171,13 @@ class P3D(nn.Module):
         self.param_conditioning = param_conditioning
         self.normalize = normalize
         self.predict_residual = predict_residual
+        # ``extra_in_channels`` are raw input-only channels appended to the stem
+        # input AFTER geometry (and any param channels): the domain-decomposition
+        # wrapper feeds the prolonged coarse context + positional encodings in
+        # this way. The default 0 keeps the upstream net's ``channel_size`` (and
+        # hence the whole state dict) byte-identical to a model built without it,
+        # so a standard (non-DD) P3D and its existing checkpoints are unaffected.
+        self.extra_in_channels = int(extra_in_channels)
         self._periodic = tuple(a in axes for a in ("z", "y", "x"))
         self._downsample_factor = _DOWNSAMPLE_FACTOR
 
@@ -170,10 +191,11 @@ class P3D(nn.Module):
             self.register_buffer("param_std", torch.ones(max(n_params, 1)))
 
         # Input channels: state + geometry, plus one channel per param in the
-        # channel-conditioning mode.
+        # channel-conditioning mode, plus any raw extra (DD context/positional).
         in_channels = n_state_channels + 1
         if param_conditioning == "channels":
             in_channels += n_params
+        in_channels += self.extra_in_channels
         self.in_channels = in_channels
 
         # native mode: reduce the P-vector to one scalar for pde_parameters.
@@ -281,7 +303,19 @@ class P3D(nn.Module):
         state: torch.Tensor,
         params: torch.Tensor,
         geometry: torch.Tensor,
+        extra: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if (extra is None) != (self.extra_in_channels == 0):
+            raise ValueError(
+                "extra must be provided iff extra_in_channels > 0 "
+                f"(extra_in_channels={self.extra_in_channels}, "
+                f"extra={'None' if extra is None else 'tensor'})"
+            )
+        if extra is not None and extra.shape[1] != self.extra_in_channels:
+            raise ValueError(
+                f"extra has {extra.shape[1]} channels, expected "
+                f"{self.extra_in_channels}"
+            )
         if geometry.dim() == state.dim() - 1:
             geometry = geometry.unsqueeze(1)
         geometry = geometry.to(dtype=state.dtype)
@@ -298,20 +332,25 @@ class P3D(nn.Module):
         else:
             x = state
 
+        # Assemble the stem input: [state, geometry, (param channels), (extra)].
+        # ``extra`` (DD coarse-context + positional encodings) is concatenated
+        # RAW -- no normalisation, no geometry masking -- so the stem widened by
+        # ``extra_in_channels`` ingests it directly (mirrors UNetConvNeXt).
         pde_parameters = None
+        pieces = [x, geometry]
         if self.param_conditioning == "channels" and self.n_params > 0:
             b, _, d, h, w = state.shape
             params_b = params[:, :, None, None, None].expand(b, self.n_params, d, h, w)
-            x = torch.cat([x, geometry, params_b.to(dtype=x.dtype)], dim=1)
+            pieces.append(params_b.to(dtype=x.dtype))
         elif self.param_conditioning == "native" and self.n_params > 0:
-            x = torch.cat([x, geometry], dim=1)
             if self.param_to_scalar is not None:
                 pde_parameters = self.param_to_scalar(params).squeeze(-1)
             else:
                 pde_parameters = params[:, 0]
             pde_parameters = pde_parameters.to(dtype=x.dtype)
-        else:
-            x = torch.cat([x, geometry], dim=1)
+        if extra is not None:
+            pieces.append(extra)
+        x = torch.cat(pieces, dim=1)
 
         x = x.contiguous()
         x, orig_spatial = self._pad_to_multiple(x)

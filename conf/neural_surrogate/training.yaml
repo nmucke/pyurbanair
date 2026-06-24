@@ -12,9 +12,11 @@ defaults:
   # (unet_convnext / upt / p3d / domain_decomposed) is swappable on the CLI:
   #   ...architectures@architecture=unet_convnext/large
   #   ...architectures@architecture=domain_decomposed/small
-  - /neural_surrogate/architectures@architecture: p3d/medium
-  - /neural_surrogate/trainer@trainer: standard
-  - /neural_surrogate/loss@loss: mse
+  # - /neural_surrogate/architectures@architecture: p3d/medium
+  - /neural_surrogate/architectures@architecture: domain_decomposed/small
+  - /neural_surrogate/trainer@trainer: dd_patch
+  # - /neural_surrogate/loss@loss: mse
+  - /neural_surrogate/loss@loss: dd
   - _self_
 
 # Domain-decomposed surrogate (two-level overlapping DD, Recommendation A).
@@ -35,7 +37,8 @@ defaults:
 # (z, y, x) periodicity (the inner patch nets stay non-periodic). For DD,
 # interior_size must divide Ny.
 
-model_name: p3d_medium
+# model_name: p3d_medium
+model_name: domain_decomp_small
 
 # The uDALES runs are periodic in the spanwise (y) direction: spatial convs
 # wrap circularly along y instead of zero-padding. x stays non-periodic
@@ -65,8 +68,17 @@ optimizer:
   weight_decay: 1e-5
 
 dataset:
+  # The dd_patch (PatchTrainer) + dd loss path trains on FULL-FIELD transition
+  # batches: the DomainDecomposed model tiles the field into patches internally
+  # and exposes every patch's neighbours via return_intermediates=True, which is
+  # what the Eq (9) interface/divergence terms need. Use TransitionDataset here.
+  # PatchTransitionDataset is a separate one-step, delta-only per-patch path
+  # whose items (state_n_patch/delta_target/...) lack the full-field state_n the
+  # trainer reads -- selecting it here raises `KeyError: 'state_n'`.
   _target_: neural_surrogates.TransitionDataset
-  root_dir: training_data/pyudales_medium
+  # _target_: neural_surrogates.PatchTransitionDataset
+  # root_dir: training_data/pyudales_medium
+  root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_medium
   state_vars:
     - u
     - v

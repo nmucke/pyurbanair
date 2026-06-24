@@ -95,7 +95,18 @@ def _compose(overrides):
 @pytest.mark.parametrize(
     "extra_overrides,model_name,expect_trainer,expect_loss",
     [
-        ([], "dd_dropin_test", "Trainer", "MSELoss"),
+        # Each path selects its trainer + loss explicitly rather than relying on
+        # the (mutable) training.yaml group defaults, so the test is robust to
+        # whatever default is currently checked in.
+        (
+            [
+                "neural_surrogate/trainer@trainer=standard",
+                "neural_surrogate/loss@loss=mse",
+            ],
+            "dd_dropin_test",
+            "Trainer",
+            "MSELoss",
+        ),
         (
             [
                 "neural_surrogate/trainer@trainer=dd_patch",
