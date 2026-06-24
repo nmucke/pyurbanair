@@ -14,11 +14,12 @@ defaults:
   - _self_
 
 training_data:
-  num_train: 150
-  num_val: 8
-  num_test: 8
+  num_train: 1
+  num_val: 1
+  num_test: 1
 
-  output_dir: training_data/${model.name}_medium/
+  # output_dir: training_data/${model.name}_medium/
+  output_dir: training_data/barcelona_test/
 
   # Generation horizon — taken from the selected case's per-window time so the
   # dataset uses the case's specifications rather than duplicating them.
@@ -33,11 +34,14 @@ training_data:
   # pylbm). Canonical value matches conf/params/static.yaml.
   pressure_gradient_magnitude: 0.0041912
 
-  num_parallel_processes: 16
+  num_parallel_processes: 1
 
   # The sampler has three parts:
-  #   num_time_points: number of knots in each parameter trajectory (the
-  #     time_coords spanning [0, simulation_time]).
+  #   seconds_per_knot: knot spacing of each parameter trajectory; a knot is
+  #     placed every `seconds_per_knot` seconds over [0, simulation_time] (with
+  #     a linearly-extrapolated final knot when the horizon isn't a multiple).
+  #     Pulled from the shared time knob so the dataset's knot spacing matches
+  #     the rest of the system rather than duplicating it.
   #   external.<param>.{mean, std}: each may be a scalar (fixed for all sims) or
   #     a {min, max} dict (drawn uniformly per sim).
   #   time_series.*: hyperparameters of the AR(2)-relaxation generating the
@@ -45,13 +49,13 @@ training_data:
   params_sampler:
     _target_: pyurbanair.training_data.UniformExternalAR2Sampler
     _convert_: all
-    num_time_points: 10
+    seconds_per_knot: ${time.seconds_per_knot}
     external:
       inflow_angle:
-        mean: {min: -70.0, max: 70.0}
+        mean: {min: -25.0, max: 25.0}
         std: 5.0
       velocity_magnitude:
-        mean: {min: 3.0, max: 10.0}
+        mean: {min: 5.0, max: 10.0}
         std: 0.5
     time_series:
       correlation_length: 60.0

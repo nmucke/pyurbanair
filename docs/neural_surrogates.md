@@ -493,15 +493,20 @@ defaults list:
 ```yaml
 defaults:
   - /neural_surrogate/architectures@architecture: unet_convnext/medium
-  - /neural_surrogate/trainer@trainer: standard
-  - /neural_surrogate/loss@loss: mse
   - _self_
+  - /neural_surrogate/mode@_global_: domain_decomposition
 ```
 
 `@hydra.main` is pointed at the top-level `conf/` so the cross-group
 defaults entries resolve. The architecture is selected at the `architectures`
-group level (value = `family/preset`) so any family is swappable on the CLI;
-`trainer` and `loss` are likewise groups (see §19). Default preset:
+group level (value = `family/preset`) so any family is swappable on the CLI.
+The trainer is **not** a group — its fields live in an inline `trainer:` block
+in `training.yaml`. The trainer *class* and the *loss* are bundled together by
+the `mode` group (see §19): `mode=standard` → `Trainer` + `MSELoss`,
+`mode=domain_decomposition` → `PatchTrainer` + `DomainDecompositionLoss`. The
+`mode` entry sits **after** `_self_` so it overrides the inline
+`trainer._target_`, and it supplies the whole `loss:` config (there is no
+separate `loss` group). Default preset:
 
 ```bash
 pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py
@@ -863,33 +868,37 @@ dedicated coarse net at `base_channels: 8`.)
 `family/preset` path):
 
 ```bash
-# (a) Drop-in path: generic Trainer + MSELoss on the full grid (default groups).
+# (a) Drop-in path: generic Trainer + MSELoss on the full grid.
 pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
     'neural_surrogate/architectures@architecture=domain_decomposed/small' \
+    neural_surrogate/mode@_global_=standard \
     model_name=domain_decomposed_small init_weights_path=null
 ```
 
-**`trainer` and `loss` are Hydra groups too** (in the `training.yaml` defaults):
-`trainer=standard` → `Trainer`, `loss=mse` → `MSELoss`. The patch objective is
-opt-in by swapping both to their DD variants — `trainer=dd_patch` →
-[`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/patch_training.py),
-`loss=dd` → `DomainDecompositionLoss`:
+**The trainer class and the loss are bundled into the `mode` group.** A single
+`mode` choice selects both: `mode=standard` → `neural_surrogates.Trainer` +
+`MSELoss`, `mode=domain_decomposition` →
+[`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/patch_training.py)
++ `DomainDecompositionLoss`. The mode entry sits **after** `_self_` in the
+defaults list so it overrides the inline `trainer._target_`, and it supplies the
+whole `loss:` config inline (there is no separate `loss` group). The trainer's
+remaining fields stay in the inline `trainer:` block:
 
 ```bash
-# (b) Patch (Eq 9) path: PatchTrainer + DomainDecompositionLoss.
+# (b) Patch (Eq 9) path: PatchTrainer + DomainDecompositionLoss (the default mode).
 pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
     'neural_surrogate/architectures@architecture=domain_decomposed/small' \
-    'neural_surrogate/trainer@trainer=dd_patch' \
-    'neural_surrogate/loss@loss=dd' \
+    neural_surrogate/mode@_global_=domain_decomposition \
     model_name=domain_decomposed_small init_weights_path=null
 ```
 
-`PatchTrainer` is lean: it has **no** AMP / `torch.compile` / pushforward-curriculum
-/ LR-schedule / early-stopping knobs (the four-term loss is single-step over full
-fields), so the `dd_patch` trainer config carries only `num_epochs` and `device`.
-`DomainDecompositionLoss` cannot be driven by the generic `Trainer` (its `forward`
-signature differs from a plain element-wise loss), so `loss=dd` is only valid with
-`trainer=dd_patch`.
+Both trainers share the inline `trainer:` config and the same machinery via
+`BaseTraining` (AMP, `torch.compile`, the pushforward-rollout curriculum, the
+warmup+cosine LR schedule, gradient clipping, early stopping, checkpoint/resume),
+so only `_target_` differs between the two paths. `DomainDecompositionLoss` cannot
+be driven by the generic `Trainer` (its `forward` signature differs from a plain
+element-wise loss), which is why the loss is paired with the trainer inside each
+mode rather than chosen independently.
 
 **Periodicity.** The single `architecture.periodic_axes: [y]` knob in
 `training.yaml` drives a DD model exactly as it drives a plain `UNetConvNeXt`:

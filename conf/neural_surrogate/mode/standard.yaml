@@ -1,0 +1,15 @@
+# @package _global_
+# Standard (single-grid) surrogate path. Bundles the trainer class + loss that
+# go together so a single `mode` choice selects both:
+#   neural_surrogates.Trainer  (generic full-grid MSE / pushforward) + MSELoss.
+# Pair with any non-decomposed architecture (unet_convnext / p3d / upt), or a
+# domain_decomposed model trained as a full-grid drop-in. The trainer's other
+# fields come from the inline `trainer:` block in training.yaml; mode only sets
+# `_target_` (which is why this entry must sit AFTER `_self_` in the defaults
+# list, so it overrides that inline default).
+model_name: standard
+trainer:
+  _target_: neural_surrogates.Trainer
+# Plain mean-squared error on the (masked) next-state prediction.
+loss:
+  _target_: torch.nn.MSELoss

@@ -1,10 +1,10 @@
 {
   "grid": {
-    "itot": 400,
-    "jtot": 400,
+    "itot": 225,
+    "jtot": 218,
     "ktot": 32
   },
-  "nfcts": 481653,
+  "nfcts": 347050,
   "files": [
     "facet_sections_c.txt",
     "facet_sections_u.txt",

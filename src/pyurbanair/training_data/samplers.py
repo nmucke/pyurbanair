@@ -174,11 +174,23 @@ class UniformExternalAR2Sampler:
         # `rng_key` seeds the model's internal PRNG for reproducibility.
         rng_key, ar2_key = jax.random.split(rng_key)
         seed = int(jax.random.randint(ar2_key, (), 0, 2_000_000_000))
+        # AR2RelaxationModel builds its own knot grid from
+        # (simulation_time, seconds_per_knot); recover both from the
+        # caller-supplied regular grid — its first interval is the knot spacing,
+        # its last point the horizon — so the model reconstructs the identical
+        # `time_coords` via build_knot_times.
+        simulation_time = float(time_coords[-1])
+        seconds_per_knot = (
+            float(time_coords[1] - time_coords[0])
+            if time_coords.shape[0] > 1
+            else simulation_time
+        )
         ar2 = AR2RelaxationModel(
             external_parameters={
                 n: Normal(mean=0.0, std=1.0) for n in self.param_names
             },
-            time_coords=time_coords,
+            simulation_time=simulation_time,
+            seconds_per_knot=seconds_per_knot,
             correlation_length=self.correlation_length,
             seed=seed,
         )
