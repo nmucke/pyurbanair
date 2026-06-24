@@ -8,44 +8,18 @@
 
 
 defaults:
-  # Architecture is selected at the `architectures` group level so any family
-  # (unet_convnext / upt / p3d / domain_decomposed) is swappable on the CLI:
-  #   ...architectures@architecture=unet_convnext/large
-  #   ...architectures@architecture=domain_decomposed/small
-  # - /neural_surrogate/architectures@architecture: p3d/medium
-  - /neural_surrogate/architectures@architecture: domain_decomposed/medium
   - _self_
-  # `mode` bundles the (trainer class + loss) pairing, so a single choice selects
-  # both: standard -> Trainer + MSELoss, domain_decomposition -> PatchTrainer +
+  # `mode` bundles everything that varies together -- the architecture default,
+  # the trainer class, the loss and model_name -- so a single choice selects them
+  # all: standard -> a non-DD architecture (unet_convnext/medium) + Trainer +
+  # MSELoss; domain_decomposition -> domain_decomposed/medium + PatchTrainer +
   # DomainDecompositionLoss. Switch with `neural_surrogate/mode@_global_=standard`.
-  # It must sit AFTER `_self_` so it overrides the inline `trainer:` block's
-  # `_target_` below. The trainer's remaining fields stay in that inline block;
-  # the loss is defined entirely inside the mode file (there is no `loss` group).
+  # The architecture *size/family* is still swappable on the CLI on top of the
+  # mode default, e.g. `neural_surrogate/architectures@architecture=p3d/large`.
+  # `mode` must sit AFTER `_self_` so it overrides the inline `trainer:` block's
+  # `_target_` below. The loss is defined entirely inside the mode file (there is
+  # no `loss` group).
   - /neural_surrogate/mode@_global_: domain_decomposition
-
-# Domain-decomposed surrogate (two-level overlapping DD, Recommendation A).
-# (a) Drop-in path -- train a DD model exactly like any other architecture
-#     (generic Trainer + MSE on the full grid). Use mode=standard + a DD arch:
-#       pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-#         'neural_surrogate/architectures@architecture=domain_decomposed/small' \
-#         neural_surrogate/mode@_global_=standard \
-#         model_name=domain_decomposed_small init_weights_path=null
-# (b) Patch (Eq 9) path -- add the interface/divergence/coarse terms via the
-#     PatchTrainer + DomainDecompositionLoss (this is mode=domain_decomposition,
-#     the default, so the mode override can be omitted):
-#       pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-#         'neural_surrogate/architectures@architecture=domain_decomposed/small' \
-#         neural_surrogate/mode@_global_=domain_decomposition \
-#         model_name=domain_decomposed_small init_weights_path=null
-# The `architecture.periodic_axes: [y]` knob below applies to BOTH a plain UNet
-# and a DD model: DomainDecomposed translates it into its decomposition's
-# (z, y, x) periodicity (the inner patch nets stay non-periodic). For DD,
-# interior_size must divide Ny.
-
-# model_name is set by the `mode` group (standard -> "standard",
-# domain_decomposition -> "domain_decomposition"); mode sits after `_self_` so it
-# overrides the value here. This fallback only applies if no mode is selected.
-model_name: domain_decomp_small
 
 # The uDALES runs are periodic in the spanwise (y) direction: spatial convs
 # wrap circularly along y instead of zero-padding. x stays non-periodic
@@ -61,15 +35,6 @@ architecture:
 # Example: init_weights_path=model_weights/unet_convnext_medium/weights.pt
 # init_weights_path: model_weights/unet_convnext_medium/weights.pt
 init_weights_path: null
-
-# The trainer config is inlined below (the `trainer:` block). The trainer CLASS
-# and the loss are selected together by the `mode` group (see the `defaults`
-# list above):
-#   neural_surrogate/mode@_global_=standard              -> Trainer + MSELoss
-#   neural_surrogate/mode@_global_=domain_decomposition  -> PatchTrainer + DD loss
-# The mode file overrides the inline `trainer._target_` and supplies the whole
-# `loss:` config. Override individual trainer fields inline as usual, e.g.
-# `trainer.num_epochs=10`.
 
 # Unified trainer config. neural_surrogates.Trainer (generic full-grid MSE /
 # pushforward) and neural_surrogates.PatchTrainer (patch-based Eq (9) DD

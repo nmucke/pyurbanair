@@ -492,21 +492,21 @@ defaults list:
 
 ```yaml
 defaults:
-  - /neural_surrogate/architectures@architecture: unet_convnext/medium
   - _self_
   - /neural_surrogate/mode@_global_: domain_decomposition
 ```
 
 `@hydra.main` is pointed at the top-level `conf/` so the cross-group
-defaults entries resolve. The architecture is selected at the `architectures`
-group level (value = `family/preset`) so any family is swappable on the CLI.
-The trainer is **not** a group — its fields live in an inline `trainer:` block
-in `training.yaml`. The trainer *class* and the *loss* are bundled together by
-the `mode` group (see §19): `mode=standard` → `Trainer` + `MSELoss`,
-`mode=domain_decomposition` → `PatchTrainer` + `DomainDecompositionLoss`. The
-`mode` entry sits **after** `_self_` so it overrides the inline
-`trainer._target_`, and it supplies the whole `loss:` config (there is no
-separate `loss` group). Default preset:
+defaults entries resolve. The trainer is **not** a group — its fields live in an
+inline `trainer:` block in `training.yaml`. The `mode` group (see §19) bundles
+everything that varies together — the **architecture default**, the trainer
+*class*, the *loss* and `model_name`: `mode=standard` → `unet_convnext/medium` +
+`Trainer` + `MSELoss`, `mode=domain_decomposition` → `domain_decomposed/medium` +
+`PatchTrainer` + `DomainDecompositionLoss`. The `mode` entry sits **after**
+`_self_` so it overrides the inline `trainer._target_`, and it supplies both the
+architecture default and the whole `loss:` config (there is no separate `loss`
+group). The architecture family/size is still swappable on the CLI on top of the
+mode default. Default preset:
 
 ```bash
 pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py
@@ -862,27 +862,26 @@ config; global periodicity lives under `decomposition.periodic_axes`.
 any_fluid`, `n_pos: 3`, FiLM conditioning, `normalize: true`, and a small
 dedicated coarse net at `base_channels: 8`.)
 
-**Selecting the architecture.** The `architecture` default is taken at the
-`architectures` group level (so any family — `unet_convnext` / `upt` / `p3d` /
-`domain_decomposed` — is swappable on the CLI; the override value is the nested
-`family/preset` path):
-
-```bash
-# (a) Drop-in path: generic Trainer + MSELoss on the full grid.
-pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-    'neural_surrogate/architectures@architecture=domain_decomposed/small' \
-    neural_surrogate/mode@_global_=standard \
-    model_name=domain_decomposed_small init_weights_path=null
-```
-
-**The trainer class and the loss are bundled into the `mode` group.** A single
-`mode` choice selects both: `mode=standard` → `neural_surrogates.Trainer` +
-`MSELoss`, `mode=domain_decomposition` →
+**The architecture, trainer class and loss are bundled into the `mode` group.**
+A single `mode` choice selects all three (plus `model_name`): `mode=standard` →
+`unet_convnext/medium` + `neural_surrogates.Trainer` + `MSELoss`,
+`mode=domain_decomposition` → `domain_decomposed/medium` +
 [`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/patch_training.py)
 + `DomainDecompositionLoss`. The mode entry sits **after** `_self_` in the
 defaults list so it overrides the inline `trainer._target_`, and it supplies the
-whole `loss:` config inline (there is no separate `loss` group). The trainer's
-remaining fields stay in the inline `trainer:` block:
+architecture default and the whole `loss:` config inline (there is no separate
+`loss` group). The trainer's remaining fields stay in the inline `trainer:`
+block. The architecture **family/size is still swappable on the CLI** on top of
+the mode default (the override value is the nested `family/preset` path) — e.g.
+to train a DD model as a full-grid drop-in (generic Trainer + MSELoss):
+
+```bash
+# (a) Drop-in path: mode=standard but with a domain_decomposed architecture.
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
+    neural_surrogate/mode@_global_=standard \
+    'neural_surrogate/architectures@architecture=domain_decomposed/small' \
+    model_name=domain_decomposed_small init_weights_path=null
+```
 
 ```bash
 # (b) Patch (Eq 9) path: PatchTrainer + DomainDecompositionLoss (the default mode).
