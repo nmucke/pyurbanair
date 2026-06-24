@@ -1,0 +1,568 @@
+\documentclass[11pt]{article}
+
+% ---------- packages ----------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{titlesec}
+\usepackage[hidelinks,colorlinks=true,linkcolor=teal!60!black,citecolor=teal!60!black,urlcolor=teal!60!black]{hyperref}
+
+% ---------- light styling ----------
+\definecolor{accent}{RGB}{20,90,90}
+\titleformat{\section}{\large\bfseries\color{accent}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.6em}{}
+\setlist{itemsep=2pt,topsep=3pt,parsep=0pt}
+\renewcommand{\arraystretch}{1.25}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{\vspace{-1.2cm}\textbf{Domain Decomposition for Neural Surrogate Models}\\[2pt]
+\large A survey of approaches for predicting large fields from shared subdomain networks}
+\author{Research note --- \texttt{pyurbanair} / domain-decomposition surrogates}
+\date{\today}
+
+\begin{document}
+\maketitle
+\vspace{-0.6cm}
+
+\begin{abstract}
+\noindent
+This note surveys methods for building neural surrogate models that operate on
+\emph{subdomains} of a large simulation rather than the full field at once, and
+that recombine subdomain predictions into a global solution. The motivation is
+practical: a single-shot surrogate over a full three-dimensional large-eddy
+simulation (LES) field is infeasible at the scales of interest, whereas a
+network trained to act on smaller patches can be reused across an arbitrarily
+large domain. The literature relevant to this idea is spread across numerical
+analysis (Schwarz and substructuring methods), scientific machine learning
+(domain-decomposed PINNs), operator learning (Fourier and graph neural
+operators), computer vision (overlap-tile inference), data-driven weather
+prediction (limited-area models with boundary forcing), and ML for turbulence.
+The note organizes these into a small set of design axes --- how the domain is
+split, how interface information is exchanged, and how subdomain outputs are
+merged --- and closes with the specific implications for the \texttt{pyurbanair}
+surrogate, which is a translation-invariant 3D convolutional one-step predictor,
+and a recommended staged approach for it. It is intended as an overview to
+support a decision on which approach to pursue.
+\end{abstract}
+
+\section{Motivation and problem setting}
+
+The \texttt{pyurbanair} neural surrogate is a learned one-step time-stepper for
+urban CFD. A convolutional network (a 3D UNet with ConvNeXt blocks, or a simpler
+convolutional baseline) maps a state $\mathbf{s}_n$ on a regular cell-centered
+grid, conditioned on inflow parameters and a binary geometry mask, to the next
+state $\mathbf{s}_{n+1}$; full trajectories are produced by autoregressive
+rollout. Training uses one-step transition pairs with an optional pushforward
+unroll for rollout stability \cite{brandstetter2022mppde}. At present the
+network models a single, fixed domain defined by the training data: the trained
+grid resolution and bounds are checked at inference and a mismatch is rejected.
+
+This whole-domain design does not scale. A 3D LES field of a realistic urban
+area has too many cells to fit a useful receptive field and the activations of a
+deep 3D network into memory, and the cost of a single forward pass grows with
+the volume. The proposal is to train \emph{one} network on subdomains (patches)
+of the field and apply it to many subdomains, combining the local predictions
+into a global state. The convolutional surrogate is well suited to this because
+convolutions are translation-equivariant: the same kernels are valid at any
+spatial location, so a patch-trained network can in principle be applied to any
+patch of a larger field without retraining. What is not automatic is (i) how
+each subdomain obtains the boundary information it needs from its neighbors, and
+(ii) how overlapping or abutting predictions are reconciled into a single
+consistent field, especially across many autoregressive steps.
+
+Those two questions --- interface coupling and merging --- are exactly the
+questions that classical domain decomposition has studied for decades, and that
+several recent machine-learning communities have re-encountered independently.
+The rest of this note reviews how each field answers them.
+
+\section{Design axes}\label{sec:axes}
+
+Across very different methods, the same choices recur. It is useful to fix them
+up front; the taxonomy table in Section~\ref{sec:synthesis} places the surveyed
+methods along these axes.
+
+\begin{description}[leftmargin=1.2em,style=nextline]
+\item[Partition geometry.] \emph{Overlapping} subdomains share a strip of cells
+with their neighbors; \emph{non-overlapping} subdomains meet at a shared
+interface of measure zero. Overlap costs redundant computation but simplifies
+continuity; non-overlapping partitions need explicit interface conditions.
+\item[Interface information.] How a subdomain learns about its neighbors. Options
+seen in the literature: a \emph{halo} (ghost cells / boundary strip) supplied as
+input; \emph{interface loss terms} penalizing discontinuity; \emph{Schwarz
+iteration} exchanging boundary traces until convergence; \emph{message passing}
+along a graph; or a built-in \emph{partition-of-unity} ansatz that is continuous
+by construction.
+\item[Merging.] How local outputs become one field. Options: \emph{exact
+center-cropping} (keep only the interior of each tile, valid when the halo is at
+least a receptive field wide); \emph{overlap averaging / partition-of-unity
+blending} with a smooth window; \emph{Schwarz assembly} after iteration; or
+provably \emph{consistent} distributed evaluation where the tiled result equals
+the whole-domain result.
+\item[Network sharing.] One shared network reused across all subdomains, versus
+one network per subdomain. Sharing is the norm in operator-learning and CV
+tiling; per-subdomain networks are common in PINN decompositions, where each
+network fits one local solution.
+\item[Coupling regime.] \emph{One-shot} (each subdomain predicted once, then
+merged) versus \emph{iterative} (subdomain solves repeated until interfaces
+agree). Iterative methods are accurate but expensive; one-shot methods are cheap
+but can leave seams.
+\end{description}
+
+\section{Classical domain decomposition}
+
+Domain decomposition methods (DDM) were developed to solve PDE discretizations
+in parallel by splitting the domain into subproblems. They provide both the
+vocabulary and the convergence theory that the ML methods reuse, and the
+standard references are \cite{toselli2005ddm,quarteroni1999ddm,dolean2015ddm}.
+
+Two families matter here. \emph{Overlapping Schwarz methods} go back to the
+alternating scheme analyzed by Lions \cite{lions1988schwarz}: each subdomain is
+solved with its neighbors' current solution imposed as Dirichlet data on the
+internal interface, and the process is iterated. The additive (parallel) variant
+with a coarse correction \cite{dryja1994smalloverlap} is the workhorse
+preconditioner; convergence improves with overlap width and, crucially, depends
+on a coarse space to avoid degrading as the number of subdomains grows.
+\emph{Non-overlapping substructuring methods} instead tear the domain at shared
+interfaces and reconnect it: FETI \cite{farhat1991feti} and its dual--primal
+successor FETI-DP \cite{farhat2001fetidp} enforce interface continuity with
+Lagrange multipliers, while the balancing methods BDD \cite{mandel1993bdd} and
+BDDC \cite{dohrmann2003bddc} use primal coarse constraints on corners, edges and
+faces. The recurring lesson, independent of the variant, is that purely local
+coupling does not propagate information globally fast enough: a coarse space (a
+second, global level) is needed for the iteration count to stay bounded as the
+domain is cut into more pieces. This reappears below in multilevel PINNs and in
+multipole graph operators.
+
+A further idea that the ML work has adopted is the \emph{optimized Schwarz}
+transmission condition: replacing Dirichlet interface data with a Robin
+combination of value and flux accelerates convergence, and the Robin parameter
+can be tuned to the problem \cite{dolean2015ddm}.
+
+\section{Domain decomposition in physics-informed neural networks}
+
+PINNs \cite{raissi2019pinn} fit a network to satisfy a PDE residual plus
+boundary data. A single global network struggles on large or multi-scale
+domains, which motivated decomposed variants; the review by Heinlein et al.
+\cite{heinlein2021review} is the standard entry point and separates two
+directions: using ML inside classical DDM (for example, predicting adaptive
+coarse-space constraints \cite{heinlein2019adaptive}), and using DDM to scale ML
+solvers. The second direction is the relevant one.
+
+\emph{Non-overlapping, interface-loss methods.} Conservative PINNs (cPINN)
+\cite{jagtap2020cpinn} place a separate network on each non-overlapping
+subdomain and stitch them with interface terms enforcing flux continuity and
+solution-average matching, preserving conservation for conservation laws.
+Extended PINNs (XPINN) \cite{jagtap2020xpinn} generalize this to arbitrary
+space--time partitions and any PDE, with residual and average-continuity
+interface losses. Both allow per-subdomain network sizing and parallel training;
+the MPI-parallel implementation is described in
+\cite{shukla2021parallelpinn}. The cost is that continuity is only enforced
+weakly, through penalty terms whose weighting must be tuned.
+
+\emph{Overlapping, partition-of-unity methods.} Finite basis PINNs (FBPINN)
+\cite{moseley2023fbpinn} take the opposite route: subdomains overlap, and each
+local network is multiplied by a smooth, compactly supported window function so
+that the global solution is a partition-of-unity sum of local networks. This is
+continuous by construction --- no interface loss is needed --- and per-subdomain
+input normalization mitigates spectral bias. The single-level version still
+suffers the classical scalability limit, which the multilevel extension
+\cite{dolean2024multilevel} addresses by stacking nested overlapping
+decompositions, exactly mirroring multilevel Schwarz.
+
+\emph{Schwarz-iterative methods.} DeepDDM \cite{li2020deepddm} replaces the
+subdomain solvers in an overlapping Schwarz iteration with PINNs: each subdomain
+is solved by a network, interface traces are exchanged, and the outer iteration
+is run to convergence; it inherits the classical behavior (iteration count
+roughly independent of network size, improving with overlap). The two-level
+extension \cite{dolean2024twolevel} adds a coarse network to recover scalability.
+The variational D3M \cite{li2020d3m} couples local networks through an energy
+formulation. Basir and Senocak \cite{basir2023schwarz} use a non-overlapping
+generalized Schwarz method with \emph{learnable} Robin interface parameters, and
+Snyder et al.\ \cite{snyder2023schwarzpinn} use the Schwarz alternating method to
+couple PINNs both to one another and to conventional FEM/FD solvers --- a
+template for hybrid neural/numerical coupling. Augmented PINNs (APINN)
+\cite{hu2023apinn} soften the hard partition into a trainable gating network, a
+learned partition of unity with partial weight sharing.
+
+For a surrogate (which learns a map, not a single solution) these methods are
+mostly relevant for their interface treatments rather than their training
+setups: PINN decompositions typically fit one network per subdomain to one
+problem instance, whereas the goal here is one shared network that generalizes.
+
+\section{Neural operators and the locality question}
+
+Operator-learning surrogates map function to function and, unlike PINNs,
+generalize across problem instances --- the regime of interest here. The Fourier
+Neural Operator (FNO) \cite{li2021fno} is the prominent example, but its spectral
+convolution is \emph{global}: truncated Fourier modes mix information across the
+entire domain, and the architecture assumes a single rectangular, periodic,
+uniform grid. This is precisely the property that obstructs tiling. The unifying
+theory of neural operators \cite{kovachki2023neuraloperator} establishes that one
+parameter set defines a discretization-invariant operator, which is the formal
+justification for reusing a single network across subdomains of differing size.
+
+Several lines address locality. Factorized FNO \cite{tran2023ffno} makes the
+spectral layers separable, cutting memory enough to reach 3D; Geo-FNO
+\cite{li2023geofno} learns a deformation to handle non-rectangular geometries;
+and localized-kernel operators \cite{liuschiaffini2024localized} add explicit
+local stencils to recover fine structure the global spectral layer misses. The
+local neural operator \cite{ye2024lno} is shift-invariant with a finite
+receptive field, so it applies to domains it was not trained on; its companion
+analysis quantifies how large that receptive field --- effectively, how large a
+halo --- must be to avoid spurious oscillation, which is directly useful for
+sizing overlaps.
+
+Three genuinely different meanings of ``decomposition'' appear in the operator
+literature and should not be conflated. \emph{Model-parallel} FNO
+\cite{grady2023modelparallelfno} shards a single global operator's data and
+weights across GPUs to reach billions of variables; because the FFT is global,
+each spectral layer requires halo/all-to-all communication, and the merged
+output is exact rather than approximate. This is parallelism for scale, not
+approximate stitching. \emph{Schwarz-type operator coupling} is the closer
+analogue: Huang et al.\ \cite{huang2025operatorddm} partition the domain, solve
+local problems with a shared neural operator, and stitch them with an iterative
+Schwarz neural inference scheme, with convergence and error analysis and strong
+geometry generalization; the structural-analysis DLD3 framework
+\cite{klawonn2024dld3} similarly wraps a shared local network in an overlapping
+Schwarz iteration.
+
+\section{Graph and message-passing surrogates: halo exchange}
+
+Graph-based simulators make locality explicit and are the cleanest setting for
+halo handling. Graph network simulators \cite{sanchezgonzalez2020gns} and
+MeshGraphNets \cite{pfaff2021meshgraphnets} run message passing over a particle
+or mesh graph, so each node depends only on a bounded neighborhood; message
+passing neural PDE solvers \cite{brandstetter2022mppde} add the pushforward trick
+for autoregressive stability (the same trick used in \texttt{pyurbanair}). Graph
+kernel \cite{li2020gno} and multipole graph \cite{li2020mgno} operators frame
+this as operator learning, with the multipole version using a coarsening
+hierarchy to capture long-range coupling at linear cost --- the operator-learning
+analogue of a coarse space.
+
+For scaling, the relevant references partition a large mesh and process subgraphs
+with a shared network. X-MeshGraphNet \cite{nabian2024xmeshgraphnet} augments each
+partition with a halo region so subgraphs can be processed independently, the
+halo supplying the boundary information that would otherwise cross the partition.
+The distributed GNN of Barwey et al.\ \cite{barwey2024consistentgnn} goes further
+with a consistent message-passing layer using halo-node exchange, so that
+evaluation on many partitions is arithmetically identical to evaluation on the
+whole graph --- a provably seam-free merge, demonstrated against a spectral-element
+CFD solver. CoMLSim-style latent decomposition \cite{hanna2024comlsim} encodes
+each subdomain into a latent vector and exchanges latent information between
+neighbors to enforce coupling, time-stepping autoregressively in latent space;
+it is the closest published match to ``a shared network tiled over subdomains,
+stepping in time.''
+
+\section{Tiling mechanics from computer vision}
+
+Computer vision has applied a single network to images larger than memory for a
+decade, and its stitching mechanics transfer directly. The overlap-tile strategy
+introduced with U-Net \cite{ronneberger2015unet} predicts each output tile from a
+larger input tile (the surrounding context is the halo); with unpadded
+convolutions the output tiles abut exactly, so no blending is needed, and the
+image border is handled by mirror padding. When exactness is required, keeping
+only the receptive-field-valid interior of each tile reproduces whole-image
+inference bit-for-bit. Where tiles do overlap, predictions are blended with a
+smooth partition-of-unity window (a Hann or Gaussian taper, weight one at the
+center decaying to zero at the edge); generative pipelines such as MultiDiffusion
+\cite{bartal2023multidiffusion} average overlapping tile predictions at every
+denoising step to produce seamless panoramas from one shared model. A subtle but
+citable pitfall: tiling artifacts often originate not in the overlap policy but
+in per-tile normalization statistics that differ between tiles
+\cite{buglakova2025tiling}; a convolutional surrogate with normalization layers
+can produce seams for the same reason. Fully convolutional super-resolution GANs
+trained on patches generalize to large fields at inference
+\cite{stengel2020phiregan}, evidence that patch-trained generators tile if their
+statistics are controlled.
+
+\section{Limited-area weather models and boundary forcing}
+
+Data-driven weather prediction faces the same scaling question on the sphere and
+has converged on instructive answers. Global models --- FourCastNet
+\cite{pathak2022fourcastnet} (adaptive FNO), GraphCast \cite{lam2023graphcast}
+(multi-mesh GNN), Pangu-Weather \cite{bi2023pangu} (3D windowed-attention
+transformer) --- process the whole field at once and handle locality implicitly,
+serving as the ``no decomposition'' baseline. The directly relevant work is the
+\emph{limited-area model} (LAM): Neural-LAM \cite{oskarsson2023neurallam}
+forecasts only an interior region and supplies lateral boundary conditions as
+forcing along a boundary strip at each autoregressive step --- the ML counterpart
+of a halo or relaxation zone fed from an external model. The MLLAM framework
+\cite{oskarsson2025mllam} and the operational AI-LAM of Nipen et al.
+\cite{nipen2025ailam} generalize boundary forcing, the latter taking its lateral
+boundaries from a global AI model in a one-way nesting. An alternative avoids
+explicit boundaries entirely: a global \emph{stretched grid}
+\cite{husain2024stretchedgrid} refines resolution over the region of interest so
+that systems pass seamlessly between coarse and fine zones within one continuous
+field. For \texttt{pyurbanair}, the LAM boundary-forcing pattern is the most
+transferable: it shows how to feed halo/interface state into an autoregressive
+surrogate each step rather than only at initialization.
+
+\section{Turbulence- and LES-specific surrogates}
+
+Within fluids, several works bear directly on tiling a turbulence network. The
+most on-point is the parallel super-resolution GAN coupled to an LES solver for
+subgrid reconstruction, which studies the halo (overlap) width required for
+accurate reconstruction at subdomain boundaries and reports scaling as a function
+of subdomain size; it finds training sub-boxes must be large relative to the
+Kolmogorov scale, a concrete constraint on minimum patch size. The convolutional
+super-resolution of turbulence by Fukami et al.\
+\cite{fukami2019superresolution,fukami2021spatiotemporal} establishes that
+fully-convolutional networks reconstruct turbulent fields from coarse input and
+can be applied locally; learned coarse turbulence models with dilated-convolution
+processors \cite{stachenfeld2022coarse} are translation-equivariant with a
+bounded receptive field, the same property \texttt{pyurbanair} relies on.
+Multi-agent RL wall models \cite{bae2022scimarl} decompose the near-wall region
+into local agents sharing one policy --- a subdomain structure with a single
+shared network. Finally, the difficulty of long autoregressive rollouts in 3D
+turbulence motivates generative alternatives such as TurbDiff
+\cite{lienen2024turbdiff} and autoregressive conditional diffusion
+\cite{kohl2023benchmarking}, and transformer neural operators are now being
+applied to LES closure directly \cite{li2024tno}. These are relevant because
+tiling in space compounds with stepping in time: errors can accumulate both at
+interfaces and over the rollout.
+
+\section{Synthesis}\label{sec:synthesis}
+
+Table~\ref{tab:taxonomy} places representative methods on the axes of
+Section~\ref{sec:axes}. Table~\ref{tab:merge} summarizes the merge strategies,
+which is the design decision most specific to the surrogate setting.
+
+\begin{table}[t]
+\centering\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\textwidth}{@{}l l l l l@{}}
+\toprule
+\textbf{Method} & \textbf{Partition} & \textbf{Interface} & \textbf{Merge} & \textbf{Network} \\
+\midrule
+Overlapping Schwarz \cite{lions1988schwarz} & overlap & Dirichlet trace, iterate & assembly & --- \\
+FETI-DP / BDDC \cite{farhat2001fetidp,dohrmann2003bddc} & none & multipliers + coarse & exact & --- \\
+cPINN / XPINN \cite{jagtap2020cpinn,jagtap2020xpinn} & none & residual + avg.\ loss & weak (loss) & per-subdomain \\
+FBPINN \cite{moseley2023fbpinn} & overlap & partition-of-unity ansatz & PoU sum & per-subdomain \\
+Multilevel FBPINN \cite{dolean2024multilevel} & overlap, nested & PoU + coarse levels & PoU sum & per-sub./level \\
+DeepDDM \cite{li2020deepddm} & overlap & Schwarz trace, iterate & assembly & per-subdomain \\
+Operator DDM (SNI) \cite{huang2025operatorddm} & overlap & Schwarz, iterate & assembly & \textbf{shared} \\
+Model-parallel FNO \cite{grady2023modelparallelfno} & sharded & global halo (FFT) & exact & shared (1 op) \\
+X-MeshGraphNet \cite{nabian2024xmeshgraphnet} & none & halo region & (consistent) & \textbf{shared} \\
+Consistent dist.\ GNN \cite{barwey2024consistentgnn} & none & halo-node exchange & exact & \textbf{shared} \\
+CoMLSim latent DDM \cite{hanna2024comlsim} & none & latent exchange & assembly & \textbf{shared} \\
+U-Net overlap-tile \cite{ronneberger2015unet} & overlap (input) & input halo & center-crop & \textbf{shared} \\
+MultiDiffusion \cite{bartal2023multidiffusion} & overlap & --- & PoU average & \textbf{shared} \\
+Neural-LAM \cite{oskarsson2023neurallam} & region + halo & boundary forcing & --- (single region) & \textbf{shared} \\
+\bottomrule
+\end{tabularx}
+\caption{Representative methods on the design axes of Section~\ref{sec:axes}.
+``Shared'' (bold) marks a single network reused across subdomains --- the regime
+relevant to \texttt{pyurbanair}.}
+\label{tab:taxonomy}
+\end{table}
+
+\begin{table}[t]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l Y Y@{}}
+\toprule
+\textbf{Merge strategy} & \textbf{How it works} & \textbf{Trade-off} \\
+\midrule
+Exact center-crop & Overlap input by $\geq$ one receptive field; keep only each tile's valid interior. & Seam-free and cheap; needs known, finite receptive field and wide halos. \\
+PoU / overlap averaging & Weight tiles by a smooth window (Hann/Gaussian) and sum in overlaps. & Simple, one-shot, robust to small mismatches; small blurring in overlaps. \\
+Schwarz assembly & Iterate subdomain solves exchanging interface data until convergence. & Accurate, theory available; iterative cost, harder for transient rollout. \\
+Consistent distributed & Halo-node exchange makes tiled evaluation equal whole-domain. & Provably seam-free; requires architecture and halo bookkeeping. \\
+Boundary forcing & Predict interior only; feed neighbor/coarse state on a boundary strip each step. & Natural for autoregressive stepping; needs a boundary source. \\
+\bottomrule
+\end{tabularx}
+\caption{Merge strategies for recombining subdomain predictions.}
+\label{tab:merge}
+\end{table}
+
+Three cross-cutting points stand out. First, a single shared network across
+subdomains is standard in every operator-learning, graph, and CV tiling method,
+and is well-justified by translation invariance and discretization-invariance
+theory \cite{kovachki2023neuraloperator}; the per-subdomain networks of the PINN
+literature are an artifact of fitting one solution, not a requirement.
+Second, every field rediscovers that purely local coupling under-propagates
+information, and adds either a coarse level
+\cite{dryja1994smalloverlap,dolean2024multilevel,li2020mgno} or wide enough
+halos \cite{ye2024lno,barwey2024consistentgnn} to compensate. Third, the merge
+strategy and the coupling regime (one-shot vs.\ iterative) are the levers with
+the largest effect on cost and seam quality.
+
+\section{Implications for \texttt{pyurbanair}}
+
+The current surrogate has properties that make several of these approaches
+directly applicable. It is convolutional and therefore translation-equivariant,
+so a single network can be tiled without retraining; it already conditions on a
+per-cell geometry mask, which means subdomain-specific urban geometry enters
+naturally as an input channel; and it already uses the pushforward trick for
+rollout stability. The main open design choices map onto the axes above.
+
+\paragraph{A pragmatic starting point.} Train on patches with a halo, and at
+inference tile the domain with overlapping patches, predict each with the shared
+network, and merge by either exact center-cropping (if the effective receptive
+field is known and the halo covers it) or partition-of-unity blending in the
+overlaps. This is the U-Net overlap-tile recipe \cite{ronneberger2015unet} plus
+MultiDiffusion-style averaging \cite{bartal2023multidiffusion}, and it requires
+no architectural change. The receptive-field analysis of local neural operators
+\cite{ye2024lno} and the LES halo-width study give concrete guidance on the
+minimum overlap.
+
+\paragraph{Feeding the halo each step.} Tiling in space interacts with stepping
+in time: a one-step network needs valid neighbor state at the patch boundary at
+\emph{every} step, not only at initialization. Two options exist. Supply the halo
+as a boundary-forcing input strip taken from neighboring patches' previous-step
+predictions, in the Neural-LAM style \cite{oskarsson2023neurallam}; or adopt an
+explicitly halo-aware evaluation with neighbor exchange between steps, as in the
+consistent distributed GNN \cite{barwey2024consistentgnn}. The former is simpler
+and one-shot; the latter is closer to seam-free but needs exchange bookkeeping.
+
+\paragraph{The global-coupling caveat.} The most important physics caveat is that
+incompressible (and low-Mach) flow has an elliptic pressure component: the
+pressure field couples the whole domain instantaneously, so a purely local
+tile-by-tile predictor will miss long-range coupling that the underlying LES
+resolves. Every numerical and ML domain decomposition that targets elliptic
+problems addresses this with a coarse space or a global level
+\cite{dryja1994smalloverlap,dolean2024multilevel,li2020mgno}. A serious
+\texttt{pyurbanair} decomposition will likely need an analogous mechanism --- a
+coarse global network, a multipole/multi-scale path, or a Schwarz iteration on
+the pressure --- rather than independent local rollouts alone. This is the single
+point most worth resolving before committing to an approach.
+
+\paragraph{Geometry and positional conditioning.} Because urban geometry varies
+between subdomains, the geometry mask channel is essential, and it may help to add
+positional or boundary-distance encodings so the network can distinguish an
+interior patch from a domain-edge patch. The CoMLSim latent decomposition
+\cite{hanna2024comlsim} and operator DDM \cite{huang2025operatorddm} are the
+closest published templates for a shared network stepping over coupled
+subdomains, and are worth reading in full before the next decision.
+
+\section{Recommendations}
+
+This section states a recommended path and the reasoning behind it. The reasoning
+rests on three facts about the present setup. The surrogate is convolutional and
+translation-equivariant, so one network can be tiled without retraining and
+per-subdomain networks (the PINN pattern) are unnecessary. The flow is
+incompressible, so pressure couples the whole domain through an elliptic
+constraint and a purely local predictor will be wrong in a way that does not
+shrink with longer training. And the model is a one-step time-stepper rolled out
+autoregressively, so a subdomain needs valid neighbor state at its boundary at
+every step, not only at initialization.
+
+\subsection*{Recommended target: a two-level overlapping decomposition with a shared local network}
+
+The recommended end state is a two-level scheme. A single shared convolutional
+network predicts one step on overlapping fine patches; each patch is conditioned
+on a halo strip of neighbor state and on a coarse global context field; patch
+predictions are merged by partition-of-unity blending. The coarse level is the
+part that distinguishes this from naive tiling, and it is included specifically
+to carry the long-range (pressure) coupling that local patches cannot. This
+mirrors the coarse-space construction that classical Schwarz
+\cite{dryja1994smalloverlap}, multilevel FBPINNs \cite{dolean2024multilevel}, and
+multipole graph operators \cite{li2020mgno} all converged on for the same reason.
+The local-patch-plus-neighbor-exchange structure follows the latent subdomain
+decomposition of CoMLSim \cite{hanna2024comlsim} and the operator domain
+decomposition of Huang et al.\ \cite{huang2025operatorddm}, which are the two
+closest published templates for a shared network stepping over coupled
+subdomains.
+
+Concretely: run the existing network (or a coarsened copy) on a downsampled
+full-domain field to produce a cheap, low-resolution global state each step;
+interpolate that coarse state onto each fine patch and pass it as additional
+input channels alongside the geometry mask and the halo; predict the fine patch;
+and blend overlaps with a smooth window. The coarse pass is cheap because it runs
+at low resolution, and it gives every patch a consistent view of the global field
+without an iterative solve.
+
+\subsection*{A staged path to get there}
+
+Building this in one step is risky, so the recommendation is to stage it and stop
+early if a simpler stage is good enough.
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Patch training and overlap-tile inference (no global coupling).}
+Train the current architecture on patches cropped from existing full-domain
+simulations, each crop carrying a halo, so the network sees realistic interface
+conditions during training rather than only at test time. At inference, tile with
+overlap, predict each patch, and merge by partition-of-unity blending
+\cite{ronneberger2015unet,bartal2023multidiffusion}. This is the cheapest thing
+that could work and requires no architecture change. Use it to measure how far a
+purely local predictor gets before the elliptic coupling becomes the dominant
+error --- that measurement decides how much of the rest is needed.
+\item \textbf{Halo forcing across the rollout.} Feed each patch's boundary strip
+from its neighbors' previous-step predictions every step, in the limited-area
+weather style \cite{oskarsson2023neurallam,oskarsson2025mllam}. This is a small
+change to the rollout loop and addresses the time-stepping interaction that
+single-shot tiling ignores.
+\item \textbf{Add the coarse global level.} Introduce the low-resolution global
+context described above. This is the step expected to matter most for
+incompressible urban flow, and the one to reach for as soon as stage~1 shows a
+local-coupling error floor.
+\item \textbf{Consistent exchange, only if seams persist.} If blended overlaps
+still accumulate visible seams over long rollouts, replace blending with explicit
+halo-node exchange between patches each step, which can make the tiled evaluation
+match a whole-domain evaluation \cite{barwey2024consistentgnn}. This is the most
+implementation-heavy option and should not be adopted pre-emptively.
+\end{enumerate}
+
+\subsection*{Supporting choices}
+
+A few smaller decisions are worth making deliberately. Predict a residual
+(delta-state) rather than the next state directly; the current architectures
+predict the state outright, and for a time-stepper a residual target usually
+improves rollout stability and is a small change. Add a boundary-distance or
+positional encoding as an input channel so the network can tell an interior patch
+from a domain-edge patch, since their correct boundary behavior differs. Be
+careful with normalization layers: per-patch normalization statistics are a known
+and avoidable cause of tiling seams \cite{buglakova2025tiling}, so use
+normalization whose statistics do not depend on the patch contents. Size the halo
+from the network's effective receptive field and the flow's Kolmogorov scale; the
+local-operator receptive-field analysis \cite{ye2024lno} and the LES
+super-resolution halo study give the relevant guidance. Evaluate not only
+pointwise error but interface continuity, the velocity divergence near patch
+boundaries (a direct check on the pressure-coupling problem), and energy spectra
+against full-domain references.
+
+\subsection*{What to avoid}
+
+Two tempting options are not recommended as the primary path. A global Fourier
+neural operator \cite{li2021fno} is a poor fit despite its popularity for
+turbulence: its spectral convolution is global and tied to a single periodic
+rectangular grid, which is the opposite of what a tiled urban-geometry surrogate
+needs, and the model-parallel route \cite{grady2023modelparallelfno} scales the
+whole-domain operator rather than enabling a small shared subdomain network. A
+full Schwarz iteration to convergence at every time step
+\cite{li2020deepddm,huang2025operatorddm} is accurate but expensive, and the
+iteration interacts awkwardly with autoregressive stepping; the coarse-level
+approach above buys most of the global-coupling benefit without the per-step
+iteration. Schwarz iteration remains a reasonable fallback if the coarse level
+proves insufficient.
+
+\section{Open questions for the next stage}
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Overlap vs.\ halo-forcing vs.\ consistent exchange} --- which merge
+strategy gives acceptable seams at acceptable cost for autoregressive 3D rollout?
+\item \textbf{Global coupling} --- is a coarse/global level required for the
+elliptic pressure, and if so, coarse network, multipole path, or Schwarz
+iteration?
+\item \textbf{Minimum patch and halo size} --- set by the Kolmogorov scale, the
+network's receptive field, and the geometry length scales of the urban canopy.
+\item \textbf{Interface error accumulation} --- does the pushforward trick suffice
+for stability when errors enter both at interfaces and over the rollout, or is a
+generative/diffusion formulation \cite{lienen2024turbdiff,kohl2023benchmarking}
+warranted?
+\item \textbf{Training distribution} --- patches sampled from full-domain
+simulations, with halos, so the network sees realistic interface conditions
+during training rather than only at inference.
+\end{enumerate}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

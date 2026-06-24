@@ -1,0 +1,78 @@
+\begin{thebibliography}{10}
+
+\bibitem{bartal2023multidiffusion}
+Omer Bar-Tal, Lior Yariv, Yaron Lipman, and Tali Dekel.
+\newblock {MultiDiffusion}: fusing diffusion paths for controlled image
+  generation.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2023.
+\newblock arXiv:2302.08113.
+
+\bibitem{barwey2024consistentgnn}
+Shivam Barwey, Varun Shankar, and Romit Maulik.
+\newblock Scalable and consistent graph neural networks for distributed
+  mesh-based data-driven modeling.
+\newblock {\em arXiv preprint arXiv:2410.01657}, 2024.
+
+\bibitem{brandstetter2022mppde}
+Johannes Brandstetter, Daniel~E. Worrall, and Max Welling.
+\newblock Message passing neural {PDE} solvers.
+\newblock In {\em International Conference on Learning Representations (ICLR)},
+  2022.
+\newblock arXiv:2202.03376.
+
+\bibitem{buglakova2025tiling}
+Anna Buglakova, Anwai Archit, et~al.
+\newblock Tiling artifacts and trade-offs of feature normalization in the
+  segmentation of large biological images.
+\newblock In {\em International Conference on Computer Vision (ICCV)}, 2025.
+\newblock arXiv:2503.19545.
+
+\bibitem{dolean2024multilevel}
+Victorita Dolean, Alexander Heinlein, Siddhartha Mishra, and Ben Moseley.
+\newblock Multilevel domain decomposition-based architectures for
+  physics-informed neural networks.
+\newblock {\em Computer Methods in Applied Mechanics and Engineering},
+  429:117116, 2024.
+
+\bibitem{dryja1994smalloverlap}
+Maksymilian Dryja and Olof~B. Widlund.
+\newblock Domain decomposition algorithms with small overlap.
+\newblock {\em SIAM Journal on Scientific Computing}, 15(3):604--620, 1994.
+
+\bibitem{huang2025operatorddm}
+Jiahao Huang, Tianyu Zhang, Hao Wu, and Xu~Cheng.
+\newblock Operator learning with domain decomposition for geometry
+  generalization in {PDE} solving.
+\newblock {\em arXiv preprint arXiv:2504.00510}, 2025.
+
+\bibitem{li2020deepddm}
+Wuyang Li, Xueshuang Xiang, and Yingxiang Xu.
+\newblock Deep domain decomposition method: elliptic problems.
+\newblock In {\em Proceedings of the First Mathematical and Scientific Machine
+  Learning Conference (MSML)}, volume 107 of {\em Proceedings of Machine
+  Learning Research}, pages 269--286, 2020.
+
+\bibitem{li2020mgno}
+Zongyi Li, Nikola Kovachki, Kamyar Azizzadenesheli, Burigede Liu, Andrew
+  Stuart, Kaushik Bhattacharya, and Anima Anandkumar.
+\newblock Multipole graph neural operator for parametric partial differential
+  equations.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)},
+  2020.
+\newblock arXiv:2006.09535.
+
+\bibitem{ronneberger2015unet}
+Olaf Ronneberger, Philipp Fischer, and Thomas Brox.
+\newblock {U-Net}: convolutional networks for biomedical image segmentation.
+\newblock In {\em Medical Image Computing and Computer-Assisted Intervention
+  (MICCAI)}, pages 234--241, 2015.
+\newblock arXiv:1505.04597.
+
+\bibitem{ye2024lno}
+Xinghao Ye, Hongsheng Li, Jiahao Huang, and Guoxue Qin.
+\newblock On the locality of local neural operator in learning fluid dynamics.
+\newblock {\em Computer Methods in Applied Mechanics and Engineering},
+  427:117035, 2024.
+\newblock arXiv:2312.09820.
+
+\end{thebibliography}

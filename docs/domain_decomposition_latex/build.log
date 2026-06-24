@@ -1,0 +1,1351 @@
+Rc files read:
+  /etc/LatexMk
+Latexmk: This is Latexmk, John Collins, 20 November 2021, version: 4.76.
+Rule 'pdflatex': File changes, etc:
+   Changed files, or newly in use since previous run(s):
+      'main.tex'
+------------
+Run number 1 of rule 'pdflatex'
+------------
+------------
+Running 'pdflatex  -interaction=nonstopmode -halt-on-error -recorder  "main.tex"'
+------------
+Latexmk: applying rule 'pdflatex'...
+This is pdfTeX, Version 3.141592653-2.6-1.40.22 (TeX Live 2022/dev/Debian) (preloaded format=pdflatex)
+ restricted \write18 enabled.
+entering extended mode
+(./main.tex
+LaTeX2e <2021-11-15> patch level 1
+L3 programming layer <2022-01-21>
+(/usr/share/texlive/texmf-dist/tex/latex/base/article.cls
+Document Class: article 2021/10/04 v1.4n Standard LaTeX document class
+(/usr/share/texlive/texmf-dist/tex/latex/base/size11.clo))
+(/usr/share/texlive/texmf-dist/tex/latex/base/inputenc.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/base/fontenc.sty)
+(/usr/share/texmf/tex/latex/lm/lmodern.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/geometry/geometry.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/keyval.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/iftex/ifvtex.sty
+(/usr/share/texlive/texmf-dist/tex/generic/iftex/iftex.sty)))
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsmath.sty
+For additional information on amsmath, use the `?' option.
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amstext.sty
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsgen.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsbsy.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsopn.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/amssymb.sty
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/amsfonts.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/booktabs/booktabs.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/tools/array.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/tools/tabularx.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/microtype.sty
+(/usr/share/texlive/texmf-dist/tex/latex/etoolbox/etoolbox.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/microtype-pdftex.def)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/microtype.cfg))
+(/usr/share/texlive/texmf-dist/tex/latex/enumitem/enumitem.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/xcolor/xcolor.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics-cfg/color.cfg)
+(/usr/share/texlive/texmf-dist/tex/latex/graphics-def/pdftex.def))
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/graphicx.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/graphics.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/trig.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/graphics-cfg/graphics.cfg)))
+(/usr/share/texlive/texmf-dist/tex/latex/titlesec/titlesec.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/hyperref.sty
+(/usr/share/texlive/texmf-dist/tex/generic/ltxcmds/ltxcmds.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/pdftexcmds/pdftexcmds.sty
+(/usr/share/texlive/texmf-dist/tex/generic/infwarerr/infwarerr.sty))
+(/usr/share/texlive/texmf-dist/tex/generic/kvsetkeys/kvsetkeys.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/kvdefinekeys/kvdefinekeys.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/pdfescape/pdfescape.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hycolor/hycolor.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/letltxmacro/letltxmacro.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/auxhook/auxhook.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/kvoptions/kvoptions.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/pd1enc.def)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/hyperref-langpatches.def)
+(/usr/share/texlive/texmf-dist/tex/generic/intcalc/intcalc.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/etexcmds/etexcmds.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/puenc.def)
+(/usr/share/texlive/texmf-dist/tex/latex/url/url.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/bitset/bitset.sty
+(/usr/share/texlive/texmf-dist/tex/generic/bigintcalc/bigintcalc.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/base/atbegshi-ltx.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/hpdftex.def
+(/usr/share/texlive/texmf-dist/tex/latex/base/atveryend-ltx.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/rerunfilecheck/rerunfilecheck.sty
+(/usr/share/texlive/texmf-dist/tex/generic/uniquecounter/uniquecounter.sty)))
+(/usr/share/texmf/tex/latex/lm/t1lmr.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def)
+(./main.aux)
+*geometry* driver: auto-detecting
+*geometry* detected driver: pdftex
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-cmr.cfg)
+(/usr/share/texlive/texmf-dist/tex/context/base/mkii/supp-pdf.mkii
+[Loading MPS to PDF converter (version 2006.09.02).]
+) (/usr/share/texlive/texmf-dist/tex/latex/epstopdf-pkg/epstopdf-base.sty
+(/usr/share/texlive/texmf-dist/tex/latex/latexconfig/epstopdf-sys.cfg))
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/nameref.sty
+(/usr/share/texlive/texmf-dist/tex/latex/refcount/refcount.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/gettitlestring/gettitlestring.sty))
+(/usr/share/texmf/tex/latex/lm/ot1lmr.fd)
+(/usr/share/texmf/tex/latex/lm/omllmm.fd)
+(/usr/share/texmf/tex/latex/lm/omslmsy.fd)
+(/usr/share/texmf/tex/latex/lm/omxlmex.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/umsa.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-msa.cfg)
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/umsb.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-msb.cfg)
+(/usr/share/texmf/tex/latex/lm/t1lmtt.fd)
+
+LaTeX Warning: Citation `brandstetter2022mppde' on page 1 undefined on input li
+ne 65.
+
+
+LaTeX Warning: Reference `sec:synthesis' on page 1 undefined on input line 90.
+
+[1{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}]
+
+LaTeX Warning: Citation `toselli2005ddm' on page 2 undefined on input line 125.
+
+
+
+LaTeX Warning: Citation `quarteroni1999ddm' on page 2 undefined on input line 1
+25.
+
+
+LaTeX Warning: Citation `dolean2015ddm' on page 2 undefined on input line 125.
+
+
+LaTeX Warning: Citation `lions1988schwarz' on page 2 undefined on input line 12
+8.
+
+
+LaTeX Warning: Citation `dryja1994smalloverlap' on page 2 undefined on input li
+ne 131.
+
+
+LaTeX Warning: Citation `farhat1991feti' on page 2 undefined on input line 135.
+
+
+
+LaTeX Warning: Citation `farhat2001fetidp' on page 2 undefined on input line 13
+6.
+
+
+LaTeX Warning: Citation `mandel1993bdd' on page 2 undefined on input line 137.
+
+
+LaTeX Warning: Citation `dohrmann2003bddc' on page 2 undefined on input line 13
+8.
+
+
+LaTeX Warning: Citation `dolean2015ddm' on page 2 undefined on input line 148.
+
+
+LaTeX Warning: Citation `raissi2019pinn' on page 2 undefined on input line 152.
+
+
+
+LaTeX Warning: Citation `heinlein2021review' on page 2 undefined on input line 
+155.
+
+
+LaTeX Warning: Citation `heinlein2019adaptive' on page 2 undefined on input lin
+e 157.
+
+[2]
+
+LaTeX Warning: Citation `jagtap2020cpinn' on page 3 undefined on input line 161
+.
+
+
+LaTeX Warning: Citation `jagtap2020xpinn' on page 3 undefined on input line 164
+.
+
+
+LaTeX Warning: Citation `shukla2021parallelpinn' on page 3 undefined on input l
+ine 168.
+
+
+LaTeX Warning: Citation `moseley2023fbpinn' on page 3 undefined on input line 1
+72.
+
+
+LaTeX Warning: Citation `dolean2024multilevel' on page 3 undefined on input lin
+e 178.
+
+
+LaTeX Warning: Citation `li2020deepddm' on page 3 undefined on input line 181.
+
+
+LaTeX Warning: Citation `dolean2024twolevel' on page 3 undefined on input line 
+186.
+
+
+LaTeX Warning: Citation `li2020d3m' on page 3 undefined on input line 187.
+
+
+LaTeX Warning: Citation `basir2023schwarz' on page 3 undefined on input line 18
+8.
+
+
+LaTeX Warning: Citation `snyder2023schwarzpinn' on page 3 undefined on input li
+ne 190.
+
+
+LaTeX Warning: Citation `hu2023apinn' on page 3 undefined on input line 193.
+
+
+LaTeX Warning: Citation `li2021fno' on page 3 undefined on input line 205.
+
+
+LaTeX Warning: Citation `kovachki2023neuraloperator' on page 3 undefined on inp
+ut line 209.
+
+
+LaTeX Warning: Citation `tran2023ffno' on page 3 undefined on input line 213.
+
+
+LaTeX Warning: Citation `li2023geofno' on page 3 undefined on input line 215.
+
+
+LaTeX Warning: Citation `liuschiaffini2024localized' on page 3 undefined on inp
+ut line 216.
+
+
+LaTeX Warning: Citation `ye2024lno' on page 3 undefined on input line 218.
+
+
+LaTeX Warning: Citation `grady2023modelparallelfno' on page 3 undefined on inpu
+t line 226.
+
+
+LaTeX Warning: Citation `huang2025operatorddm' on page 3 undefined on input lin
+e 231.
+
+
+LaTeX Warning: Citation `klawonn2024dld3' on page 3 undefined on input line 235
+.
+
+[3]
+
+LaTeX Warning: Citation `sanchezgonzalez2020gns' on page 4 undefined on input l
+ine 241.
+
+
+LaTeX Warning: Citation `pfaff2021meshgraphnets' on page 4 undefined on input l
+ine 242.
+
+
+LaTeX Warning: Citation `brandstetter2022mppde' on page 4 undefined on input li
+ne 244.
+
+
+LaTeX Warning: Citation `li2020gno' on page 4 undefined on input line 246.
+
+
+LaTeX Warning: Citation `li2020mgno' on page 4 undefined on input line 246.
+
+
+LaTeX Warning: Citation `nabian2024xmeshgraphnet' on page 4 undefined on input 
+line 252.
+
+
+LaTeX Warning: Citation `barwey2024consistentgnn' on page 4 undefined on input 
+line 255.
+
+
+LaTeX Warning: Citation `hanna2024comlsim' on page 4 undefined on input line 25
+9.
+
+
+LaTeX Warning: Citation `ronneberger2015unet' on page 4 undefined on input line
+ 269.
+
+
+LaTeX Warning: Citation `bartal2023multidiffusion' on page 4 undefined on input
+ line 277.
+
+
+LaTeX Warning: Citation `buglakova2025tiling' on page 4 undefined on input line
+ 281.
+
+
+LaTeX Warning: Citation `stengel2020phiregan' on page 4 undefined on input line
+ 284.
+
+
+LaTeX Warning: Citation `pathak2022fourcastnet' on page 4 undefined on input li
+ne 291.
+
+
+LaTeX Warning: Citation `lam2023graphcast' on page 4 undefined on input line 29
+1.
+
+
+LaTeX Warning: Citation `bi2023pangu' on page 4 undefined on input line 292.
+
+
+LaTeX Warning: Citation `oskarsson2023neurallam' on page 4 undefined on input l
+ine 295.
+
+
+LaTeX Warning: Citation `oskarsson2025mllam' on page 4 undefined on input line 
+299.
+
+
+LaTeX Warning: Citation `nipen2025ailam' on page 4 undefined on input line 300.
+
+
+
+LaTeX Warning: Citation `husain2024stretchedgrid' on page 4 undefined on input 
+line 303.
+
+[4]
+
+LaTeX Warning: Citation `fukami2019superresolution' on page 5 undefined on inpu
+t line 318.
+
+
+LaTeX Warning: Citation `fukami2021spatiotemporal' on page 5 undefined on input
+ line 318.
+
+
+LaTeX Warning: Citation `stachenfeld2022coarse' on page 5 undefined on input li
+ne 321.
+
+
+LaTeX Warning: Citation `bae2022scimarl' on page 5 undefined on input line 323.
+
+
+
+LaTeX Warning: Citation `lienen2024turbdiff' on page 5 undefined on input line 
+327.
+
+
+LaTeX Warning: Citation `kohl2023benchmarking' on page 5 undefined on input lin
+e 328.
+
+
+LaTeX Warning: Citation `li2024tno' on page 5 undefined on input line 329.
+
+
+LaTeX Warning: Reference `tab:taxonomy' on page 5 undefined on input line 335.
+
+
+LaTeX Warning: Reference `sec:axes' on page 5 undefined on input line 336.
+
+
+LaTeX Warning: Reference `tab:merge' on page 5 undefined on input line 336.
+
+
+LaTeX Warning: Citation `lions1988schwarz' on page 5 undefined on input line 36
+0.
+
+
+LaTeX Warning: Citation `farhat2001fetidp' on page 5 undefined on input line 36
+0.
+
+
+LaTeX Warning: Citation `dohrmann2003bddc' on page 5 undefined on input line 36
+0.
+
+
+LaTeX Warning: Citation `jagtap2020cpinn' on page 5 undefined on input line 360
+.
+
+
+LaTeX Warning: Citation `jagtap2020xpinn' on page 5 undefined on input line 360
+.
+
+
+LaTeX Warning: Citation `moseley2023fbpinn' on page 5 undefined on input line 3
+60.
+
+
+LaTeX Warning: Citation `dolean2024multilevel' on page 5 undefined on input lin
+e 360.
+
+
+LaTeX Warning: Citation `li2020deepddm' on page 5 undefined on input line 360.
+
+
+LaTeX Warning: Citation `huang2025operatorddm' on page 5 undefined on input lin
+e 360.
+
+
+LaTeX Warning: Citation `grady2023modelparallelfno' on page 5 undefined on inpu
+t line 360.
+
+
+LaTeX Warning: Citation `nabian2024xmeshgraphnet' on page 5 undefined on input 
+line 360.
+
+
+LaTeX Warning: Citation `barwey2024consistentgnn' on page 5 undefined on input 
+line 360.
+
+
+LaTeX Warning: Citation `hanna2024comlsim' on page 5 undefined on input line 36
+0.
+
+
+LaTeX Warning: Citation `ronneberger2015unet' on page 5 undefined on input line
+ 360.
+
+
+LaTeX Warning: Citation `bartal2023multidiffusion' on page 5 undefined on input
+ line 360.
+
+
+LaTeX Warning: Citation `oskarsson2023neurallam' on page 5 undefined on input l
+ine 360.
+
+
+Overfull \hbox (23.65785pt too wide) in alignment at lines 360--360
+[][][][][] 
+
+LaTeX Warning: Reference `sec:axes' on page 5 undefined on input line 363.
+
+
+LaTeX Warning: Reference `sec:axes' on page 5 undefined on input line 363.
+
+
+LaTeX Warning: Citation `kovachki2023neuraloperator' on page 5 undefined on inp
+ut line 387.
+
+
+LaTeX Warning: Citation `dryja1994smalloverlap' on page 5 undefined on input li
+ne 391.
+
+
+LaTeX Warning: Citation `dolean2024multilevel' on page 5 undefined on input lin
+e 391.
+
+
+LaTeX Warning: Citation `li2020mgno' on page 5 undefined on input line 391.
+
+
+LaTeX Warning: Citation `ye2024lno' on page 5 undefined on input line 392.
+
+
+LaTeX Warning: Citation `barwey2024consistentgnn' on page 5 undefined on input 
+line 392.
+
+
+LaTeX Warning: Citation `ronneberger2015unet' on page 5 undefined on input line
+ 409.
+
+
+LaTeX Warning: Citation `bartal2023multidiffusion' on page 5 undefined on input
+ line 410.
+
+
+LaTeX Warning: Citation `ye2024lno' on page 5 undefined on input line 412.
+
+[5]
+
+LaTeX Warning: Citation `oskarsson2023neurallam' on page 6 undefined on input l
+ine 419.
+
+
+LaTeX Warning: Citation `barwey2024consistentgnn' on page 6 undefined on input 
+line 421.
+
+
+LaTeX Warning: Citation `dryja1994smalloverlap' on page 6 undefined on input li
+ne 430.
+
+
+LaTeX Warning: Citation `dolean2024multilevel' on page 6 undefined on input lin
+e 430.
+
+
+LaTeX Warning: Citation `li2020mgno' on page 6 undefined on input line 430.
+
+
+LaTeX Warning: Citation `hanna2024comlsim' on page 6 undefined on input line 44
+0.
+
+
+LaTeX Warning: Citation `huang2025operatorddm' on page 6 undefined on input lin
+e 440.
+
+[6]
+
+LaTeX Warning: Citation `lienen2024turbdiff' on page 7 undefined on input line 
+456.
+
+
+LaTeX Warning: Citation `kohl2023benchmarking' on page 7 undefined on input lin
+e 456.
+
+No file main.bbl.
+[7] (./main.aux)
+
+LaTeX Warning: There were undefined references.
+
+
+LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.
+
+
+Package rerunfilecheck Warning: File `main.out' has changed.
+(rerunfilecheck)                Rerun to get outlines right
+(rerunfilecheck)                or use package `bookmark'.
+
+ )
+(see the transcript file for additional information){/usr/share/texmf/fonts/enc
+/dvips/lm/lm-mathsy.enc}{/usr/share/texmf/fonts/enc/dvips/lm/lm-ec.enc}{/usr/sh
+are/texmf/fonts/enc/dvips/lm/lm-rm.enc}{/usr/share/texmf/fonts/enc/dvips/lm/lm-
+mathit.enc}</usr/share/texmf/fonts/type1/public/lm/lmbx10.pfb></usr/share/texmf
+/fonts/type1/public/lm/lmbx12.pfb></usr/share/texmf/fonts/type1/public/lm/lmmi8
+.pfb></usr/share/texmf/fonts/type1/public/lm/lmr10.pfb></usr/share/texmf/fonts/
+type1/public/lm/lmr12.pfb></usr/share/texmf/fonts/type1/public/lm/lmr8.pfb></us
+r/share/texmf/fonts/type1/public/lm/lmri10.pfb></usr/share/texmf/fonts/type1/pu
+blic/lm/lmsy10.pfb></usr/share/texmf/fonts/type1/public/lm/lmtk10.pfb></usr/sha
+re/texmf/fonts/type1/public/lm/lmtt10.pfb></usr/share/texmf/fonts/type1/public/
+lm/lmtt12.pfb>
+Output written on main.pdf (7 pages, 258737 bytes).
+Transcript written on main.log.
+Latexmk: Missing bbl file 'main.bbl' in following:
+ No file main.bbl.
+Latexmk: References changed.
+Latexmk: References changed.
+Latexmk: Log file says output to 'main.pdf'
+Latexmk: List of undefined refs and citations:
+  Citation `bae2022scimarl' on page 5 undefined on input line 323
+  Citation `bartal2023multidiffusion' on page 4 undefined on input line 277
+  Citation `bartal2023multidiffusion' on page 5 undefined on input line 360
+  Citation `bartal2023multidiffusion' on page 5 undefined on input line 410
+  Citation `barwey2024consistentgnn' on page 4 undefined on input line 255
+  Citation `barwey2024consistentgnn' on page 5 undefined on input line 360
+  Citation `barwey2024consistentgnn' on page 5 undefined on input line 392
+  Citation `barwey2024consistentgnn' on page 6 undefined on input line 421
+  Citation `basir2023schwarz' on page 3 undefined on input line 188
+  Citation `bi2023pangu' on page 4 undefined on input line 292
+  Citation `brandstetter2022mppde' on page 1 undefined on input line 65
+  Citation `brandstetter2022mppde' on page 4 undefined on input line 244
+  Citation `buglakova2025tiling' on page 4 undefined on input line 281
+  Citation `dohrmann2003bddc' on page 2 undefined on input line 138
+  Citation `dohrmann2003bddc' on page 5 undefined on input line 360
+  Citation `dolean2015ddm' on page 2 undefined on input line 125
+  Citation `dolean2015ddm' on page 2 undefined on input line 148
+  Citation `dolean2024multilevel' on page 3 undefined on input line 178
+  Citation `dolean2024multilevel' on page 5 undefined on input line 360
+  Citation `dolean2024multilevel' on page 5 undefined on input line 391
+  Citation `dolean2024multilevel' on page 6 undefined on input line 430
+  Citation `dolean2024twolevel' on page 3 undefined on input line 186
+  Citation `dryja1994smalloverlap' on page 2 undefined on input line 131
+  Citation `dryja1994smalloverlap' on page 5 undefined on input line 391
+  Citation `dryja1994smalloverlap' on page 6 undefined on input line 430
+  Citation `farhat1991feti' on page 2 undefined on input line 135
+  Citation `farhat2001fetidp' on page 2 undefined on input line 136
+  Citation `farhat2001fetidp' on page 5 undefined on input line 360
+  Citation `fukami2019superresolution' on page 5 undefined on input line 318
+  Citation `fukami2021spatiotemporal' on page 5 undefined on input line 318
+  Citation `grady2023modelparallelfno' on page 3 undefined on input line 226
+  Citation `grady2023modelparallelfno' on page 5 undefined on input line 360
+  Citation `hanna2024comlsim' on page 4 undefined on input line 259
+  Citation `hanna2024comlsim' on page 5 undefined on input line 360
+  Citation `hanna2024comlsim' on page 6 undefined on input line 440
+  Citation `heinlein2019adaptive' on page 2 undefined on input line 157
+  Citation `heinlein2021review' on page 2 undefined on input line 155
+  Citation `hu2023apinn' on page 3 undefined on input line 193
+  Citation `huang2025operatorddm' on page 3 undefined on input line 231
+  Citation `huang2025operatorddm' on page 5 undefined on input line 360
+  Citation `huang2025operatorddm' on page 6 undefined on input line 440
+  Citation `husain2024stretchedgrid' on page 4 undefined on input line 303
+  Citation `jagtap2020cpinn' on page 3 undefined on input line 161
+  Citation `jagtap2020cpinn' on page 5 undefined on input line 360
+  Citation `jagtap2020xpinn' on page 3 undefined on input line 164
+  Citation `jagtap2020xpinn' on page 5 undefined on input line 360
+  Citation `klawonn2024dld3' on page 3 undefined on input line 235
+  Citation `kohl2023benchmarking' on page 5 undefined on input line 328
+  Citation `kohl2023benchmarking' on page 7 undefined on input line 456
+  Citation `kovachki2023neuraloperator' on page 3 undefined on input line 209
+  Citation `kovachki2023neuraloperator' on page 5 undefined on input line 387
+  Citation `lam2023graphcast' on page 4 undefined on input line 291
+  Citation `li2020d3m' on page 3 undefined on input line 187
+  Citation `li2020deepddm' on page 3 undefined on input line 181
+  Citation `li2020deepddm' on page 5 undefined on input line 360
+  Citation `li2020gno' on page 4 undefined on input line 246
+  Citation `li2020mgno' on page 4 undefined on input line 246
+  Citation `li2020mgno' on page 5 undefined on input line 391
+  Citation `li2020mgno' on page 6 undefined on input line 430
+  Citation `li2021fno' on page 3 undefined on input line 205
+  Citation `li2023geofno' on page 3 undefined on input line 215
+  Citation `li2024tno' on page 5 undefined on input line 329
+  Citation `lienen2024turbdiff' on page 5 undefined on input line 327
+  Citation `lienen2024turbdiff' on page 7 undefined on input line 456
+  Citation `lions1988schwarz' on page 2 undefined on input line 128
+  Citation `lions1988schwarz' on page 5 undefined on input line 360
+  Citation `liuschiaffini2024localized' on page 3 undefined on input line 216
+  Citation `mandel1993bdd' on page 2 undefined on input line 137
+  Citation `moseley2023fbpinn' on page 3 undefined on input line 172
+  Citation `moseley2023fbpinn' on page 5 undefined on input line 360
+  Citation `nabian2024xmeshgraphnet' on page 4 undefined on input line 252
+  Citation `nabian2024xmeshgraphnet' on page 5 undefined on input line 360
+  Citation `nipen2025ailam' on page 4 undefined on input line 300
+  Citation `oskarsson2023neurallam' on page 4 undefined on input line 295
+  Citation `oskarsson2023neurallam' on page 5 undefined on input line 360
+  Citation `oskarsson2023neurallam' on page 6 undefined on input line 419
+  Citation `oskarsson2025mllam' on page 4 undefined on input line 299
+  Citation `pathak2022fourcastnet' on page 4 undefined on input line 291
+  Citation `pfaff2021meshgraphnets' on page 4 undefined on input line 242
+  Citation `quarteroni1999ddm' on page 2 undefined on input line 125
+  Citation `raissi2019pinn' on page 2 undefined on input line 152
+  Citation `ronneberger2015unet' on page 4 undefined on input line 269
+  Citation `ronneberger2015unet' on page 5 undefined on input line 360
+  Citation `ronneberger2015unet' on page 5 undefined on input line 409
+  Citation `sanchezgonzalez2020gns' on page 4 undefined on input line 241
+  Citation `shukla2021parallelpinn' on page 3 undefined on input line 168
+  Citation `snyder2023schwarzpinn' on page 3 undefined on input line 190
+  Citation `stachenfeld2022coarse' on page 5 undefined on input line 321
+  Citation `stengel2020phiregan' on page 4 undefined on input line 284
+  Citation `toselli2005ddm' on page 2 undefined on input line 125
+  Citation `tran2023ffno' on page 3 undefined on input line 213
+  Citation `ye2024lno' on page 3 undefined on input line 218
+  Citation `ye2024lno' on page 5 undefined on input line 392
+  Citation `ye2024lno' on page 5 undefined on input line 412
+  Reference `sec:axes' on page 5 undefined on input line 336
+  Reference `sec:axes' on page 5 undefined on input line 363
+  Reference `sec:synthesis' on page 1 undefined on input line 90
+  Reference `tab:merge' on page 5 undefined on input line 336
+  Reference `tab:taxonomy' on page 5 undefined on input line 335
+Latexmk: Examining 'main.log'
+=== TeX engine is 'pdfTeX'
+Latexmk: Found bibliography file(s) [references.bib]
+Rule 'bibtex main': File changes, etc:
+   Changed files, or newly in use since previous run(s):
+      'main.aux'
+------------
+Run number 1 of rule 'bibtex main'
+------------
+------------
+Running 'bibtex  "main.aux"'
+------------
+Latexmk: applying rule 'bibtex main'...
+This is BibTeX, Version 0.99d (TeX Live 2022/dev/Debian)
+The top-level auxiliary file: main.aux
+The style file: plain.bst
+Database file #1: references.bib
+Rule 'pdflatex': File changes, etc:
+   Changed files, or newly in use since previous run(s):
+      'main.aux'
+      'main.bbl'
+      'main.out'
+------------
+Run number 2 of rule 'pdflatex'
+------------
+------------
+Running 'pdflatex  -interaction=nonstopmode -halt-on-error -recorder  "main.tex"'
+------------
+Latexmk: applying rule 'pdflatex'...
+This is pdfTeX, Version 3.141592653-2.6-1.40.22 (TeX Live 2022/dev/Debian) (preloaded format=pdflatex)
+ restricted \write18 enabled.
+entering extended mode
+(./main.tex
+LaTeX2e <2021-11-15> patch level 1
+L3 programming layer <2022-01-21>
+(/usr/share/texlive/texmf-dist/tex/latex/base/article.cls
+Document Class: article 2021/10/04 v1.4n Standard LaTeX document class
+(/usr/share/texlive/texmf-dist/tex/latex/base/size11.clo))
+(/usr/share/texlive/texmf-dist/tex/latex/base/inputenc.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/base/fontenc.sty)
+(/usr/share/texmf/tex/latex/lm/lmodern.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/geometry/geometry.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/keyval.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/iftex/ifvtex.sty
+(/usr/share/texlive/texmf-dist/tex/generic/iftex/iftex.sty)))
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsmath.sty
+For additional information on amsmath, use the `?' option.
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amstext.sty
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsgen.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsbsy.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsopn.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/amssymb.sty
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/amsfonts.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/booktabs/booktabs.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/tools/array.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/tools/tabularx.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/microtype.sty
+(/usr/share/texlive/texmf-dist/tex/latex/etoolbox/etoolbox.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/microtype-pdftex.def)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/microtype.cfg))
+(/usr/share/texlive/texmf-dist/tex/latex/enumitem/enumitem.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/xcolor/xcolor.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics-cfg/color.cfg)
+(/usr/share/texlive/texmf-dist/tex/latex/graphics-def/pdftex.def))
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/graphicx.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/graphics.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/trig.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/graphics-cfg/graphics.cfg)))
+(/usr/share/texlive/texmf-dist/tex/latex/titlesec/titlesec.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/hyperref.sty
+(/usr/share/texlive/texmf-dist/tex/generic/ltxcmds/ltxcmds.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/pdftexcmds/pdftexcmds.sty
+(/usr/share/texlive/texmf-dist/tex/generic/infwarerr/infwarerr.sty))
+(/usr/share/texlive/texmf-dist/tex/generic/kvsetkeys/kvsetkeys.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/kvdefinekeys/kvdefinekeys.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/pdfescape/pdfescape.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hycolor/hycolor.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/letltxmacro/letltxmacro.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/auxhook/auxhook.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/kvoptions/kvoptions.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/pd1enc.def)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/hyperref-langpatches.def)
+(/usr/share/texlive/texmf-dist/tex/generic/intcalc/intcalc.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/etexcmds/etexcmds.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/puenc.def)
+(/usr/share/texlive/texmf-dist/tex/latex/url/url.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/bitset/bitset.sty
+(/usr/share/texlive/texmf-dist/tex/generic/bigintcalc/bigintcalc.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/base/atbegshi-ltx.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/hpdftex.def
+(/usr/share/texlive/texmf-dist/tex/latex/base/atveryend-ltx.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/rerunfilecheck/rerunfilecheck.sty
+(/usr/share/texlive/texmf-dist/tex/generic/uniquecounter/uniquecounter.sty)))
+(/usr/share/texmf/tex/latex/lm/t1lmr.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def)
+(./main.aux)
+*geometry* driver: auto-detecting
+*geometry* detected driver: pdftex
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-cmr.cfg)
+(/usr/share/texlive/texmf-dist/tex/context/base/mkii/supp-pdf.mkii
+[Loading MPS to PDF converter (version 2006.09.02).]
+) (/usr/share/texlive/texmf-dist/tex/latex/epstopdf-pkg/epstopdf-base.sty
+(/usr/share/texlive/texmf-dist/tex/latex/latexconfig/epstopdf-sys.cfg))
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/nameref.sty
+(/usr/share/texlive/texmf-dist/tex/latex/refcount/refcount.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/gettitlestring/gettitlestring.sty))
+(./main.out) (./main.out) (/usr/share/texmf/tex/latex/lm/ot1lmr.fd)
+(/usr/share/texmf/tex/latex/lm/omllmm.fd)
+(/usr/share/texmf/tex/latex/lm/omslmsy.fd)
+(/usr/share/texmf/tex/latex/lm/omxlmex.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/umsa.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-msa.cfg)
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/umsb.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-msb.cfg)
+(/usr/share/texmf/tex/latex/lm/t1lmtt.fd)
+
+LaTeX Warning: Citation `brandstetter2022mppde' on page 1 undefined on input li
+ne 65.
+
+[1{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}]
+
+LaTeX Warning: Citation `toselli2005ddm' on page 2 undefined on input line 125.
+
+
+
+LaTeX Warning: Citation `quarteroni1999ddm' on page 2 undefined on input line 1
+25.
+
+
+LaTeX Warning: Citation `dolean2015ddm' on page 2 undefined on input line 125.
+
+
+LaTeX Warning: Citation `lions1988schwarz' on page 2 undefined on input line 12
+8.
+
+
+LaTeX Warning: Citation `dryja1994smalloverlap' on page 2 undefined on input li
+ne 131.
+
+
+LaTeX Warning: Citation `farhat1991feti' on page 2 undefined on input line 135.
+
+
+
+LaTeX Warning: Citation `farhat2001fetidp' on page 2 undefined on input line 13
+6.
+
+
+LaTeX Warning: Citation `mandel1993bdd' on page 2 undefined on input line 137.
+
+
+LaTeX Warning: Citation `dohrmann2003bddc' on page 2 undefined on input line 13
+8.
+
+
+LaTeX Warning: Citation `dolean2015ddm' on page 2 undefined on input line 148.
+
+
+LaTeX Warning: Citation `raissi2019pinn' on page 2 undefined on input line 152.
+
+
+
+LaTeX Warning: Citation `heinlein2021review' on page 2 undefined on input line 
+155.
+
+
+LaTeX Warning: Citation `heinlein2019adaptive' on page 2 undefined on input lin
+e 157.
+
+[2]
+
+LaTeX Warning: Citation `jagtap2020cpinn' on page 3 undefined on input line 161
+.
+
+
+LaTeX Warning: Citation `jagtap2020xpinn' on page 3 undefined on input line 164
+.
+
+
+LaTeX Warning: Citation `shukla2021parallelpinn' on page 3 undefined on input l
+ine 168.
+
+
+LaTeX Warning: Citation `moseley2023fbpinn' on page 3 undefined on input line 1
+72.
+
+
+LaTeX Warning: Citation `dolean2024multilevel' on page 3 undefined on input lin
+e 178.
+
+
+LaTeX Warning: Citation `li2020deepddm' on page 3 undefined on input line 181.
+
+
+LaTeX Warning: Citation `dolean2024twolevel' on page 3 undefined on input line 
+186.
+
+
+LaTeX Warning: Citation `li2020d3m' on page 3 undefined on input line 187.
+
+
+LaTeX Warning: Citation `basir2023schwarz' on page 3 undefined on input line 18
+8.
+
+
+LaTeX Warning: Citation `snyder2023schwarzpinn' on page 3 undefined on input li
+ne 190.
+
+
+LaTeX Warning: Citation `hu2023apinn' on page 3 undefined on input line 193.
+
+
+LaTeX Warning: Citation `li2021fno' on page 3 undefined on input line 205.
+
+
+LaTeX Warning: Citation `kovachki2023neuraloperator' on page 3 undefined on inp
+ut line 209.
+
+
+LaTeX Warning: Citation `tran2023ffno' on page 3 undefined on input line 213.
+
+
+LaTeX Warning: Citation `li2023geofno' on page 3 undefined on input line 215.
+
+
+LaTeX Warning: Citation `liuschiaffini2024localized' on page 3 undefined on inp
+ut line 216.
+
+
+LaTeX Warning: Citation `ye2024lno' on page 3 undefined on input line 218.
+
+
+LaTeX Warning: Citation `grady2023modelparallelfno' on page 3 undefined on inpu
+t line 226.
+
+
+LaTeX Warning: Citation `huang2025operatorddm' on page 3 undefined on input lin
+e 231.
+
+
+LaTeX Warning: Citation `klawonn2024dld3' on page 3 undefined on input line 235
+.
+
+[3]
+
+LaTeX Warning: Citation `sanchezgonzalez2020gns' on page 4 undefined on input l
+ine 241.
+
+
+LaTeX Warning: Citation `pfaff2021meshgraphnets' on page 4 undefined on input l
+ine 242.
+
+
+LaTeX Warning: Citation `brandstetter2022mppde' on page 4 undefined on input li
+ne 244.
+
+
+LaTeX Warning: Citation `li2020gno' on page 4 undefined on input line 246.
+
+
+LaTeX Warning: Citation `li2020mgno' on page 4 undefined on input line 246.
+
+
+LaTeX Warning: Citation `nabian2024xmeshgraphnet' on page 4 undefined on input 
+line 252.
+
+
+LaTeX Warning: Citation `barwey2024consistentgnn' on page 4 undefined on input 
+line 255.
+
+
+LaTeX Warning: Citation `hanna2024comlsim' on page 4 undefined on input line 25
+9.
+
+
+LaTeX Warning: Citation `ronneberger2015unet' on page 4 undefined on input line
+ 269.
+
+
+LaTeX Warning: Citation `bartal2023multidiffusion' on page 4 undefined on input
+ line 277.
+
+
+LaTeX Warning: Citation `buglakova2025tiling' on page 4 undefined on input line
+ 281.
+
+
+LaTeX Warning: Citation `stengel2020phiregan' on page 4 undefined on input line
+ 284.
+
+
+LaTeX Warning: Citation `pathak2022fourcastnet' on page 4 undefined on input li
+ne 291.
+
+
+LaTeX Warning: Citation `lam2023graphcast' on page 4 undefined on input line 29
+1.
+
+
+LaTeX Warning: Citation `bi2023pangu' on page 4 undefined on input line 292.
+
+
+LaTeX Warning: Citation `oskarsson2023neurallam' on page 4 undefined on input l
+ine 295.
+
+
+LaTeX Warning: Citation `oskarsson2025mllam' on page 4 undefined on input line 
+299.
+
+
+LaTeX Warning: Citation `nipen2025ailam' on page 4 undefined on input line 300.
+
+
+
+LaTeX Warning: Citation `husain2024stretchedgrid' on page 4 undefined on input 
+line 303.
+
+[4]
+
+LaTeX Warning: Citation `fukami2019superresolution' on page 5 undefined on inpu
+t line 318.
+
+
+LaTeX Warning: Citation `fukami2021spatiotemporal' on page 5 undefined on input
+ line 318.
+
+
+LaTeX Warning: Citation `stachenfeld2022coarse' on page 5 undefined on input li
+ne 321.
+
+
+LaTeX Warning: Citation `bae2022scimarl' on page 5 undefined on input line 323.
+
+
+
+LaTeX Warning: Citation `lienen2024turbdiff' on page 5 undefined on input line 
+327.
+
+
+LaTeX Warning: Citation `kohl2023benchmarking' on page 5 undefined on input lin
+e 328.
+
+
+LaTeX Warning: Citation `li2024tno' on page 5 undefined on input line 329.
+
+
+LaTeX Warning: Citation `lions1988schwarz' on page 5 undefined on input line 36
+0.
+
+
+LaTeX Warning: Citation `farhat2001fetidp' on page 5 undefined on input line 36
+0.
+
+
+LaTeX Warning: Citation `dohrmann2003bddc' on page 5 undefined on input line 36
+0.
+
+
+LaTeX Warning: Citation `jagtap2020cpinn' on page 5 undefined on input line 360
+.
+
+
+LaTeX Warning: Citation `jagtap2020xpinn' on page 5 undefined on input line 360
+.
+
+
+LaTeX Warning: Citation `moseley2023fbpinn' on page 5 undefined on input line 3
+60.
+
+
+LaTeX Warning: Citation `dolean2024multilevel' on page 5 undefined on input lin
+e 360.
+
+
+LaTeX Warning: Citation `li2020deepddm' on page 5 undefined on input line 360.
+
+
+LaTeX Warning: Citation `huang2025operatorddm' on page 5 undefined on input lin
+e 360.
+
+
+LaTeX Warning: Citation `grady2023modelparallelfno' on page 5 undefined on inpu
+t line 360.
+
+
+LaTeX Warning: Citation `nabian2024xmeshgraphnet' on page 5 undefined on input 
+line 360.
+
+
+LaTeX Warning: Citation `barwey2024consistentgnn' on page 5 undefined on input 
+line 360.
+
+
+LaTeX Warning: Citation `hanna2024comlsim' on page 5 undefined on input line 36
+0.
+
+
+LaTeX Warning: Citation `ronneberger2015unet' on page 5 undefined on input line
+ 360.
+
+
+LaTeX Warning: Citation `bartal2023multidiffusion' on page 5 undefined on input
+ line 360.
+
+
+LaTeX Warning: Citation `oskarsson2023neurallam' on page 5 undefined on input l
+ine 360.
+
+
+Overfull \hbox (23.65785pt too wide) in alignment at lines 360--360
+[][][][][] 
+
+LaTeX Warning: Citation `kovachki2023neuraloperator' on page 5 undefined on inp
+ut line 387.
+
+
+LaTeX Warning: Citation `dryja1994smalloverlap' on page 5 undefined on input li
+ne 391.
+
+
+LaTeX Warning: Citation `dolean2024multilevel' on page 5 undefined on input lin
+e 391.
+
+
+LaTeX Warning: Citation `li2020mgno' on page 5 undefined on input line 391.
+
+
+LaTeX Warning: Citation `ye2024lno' on page 5 undefined on input line 392.
+
+
+LaTeX Warning: Citation `barwey2024consistentgnn' on page 5 undefined on input 
+line 392.
+
+
+LaTeX Warning: Citation `ronneberger2015unet' on page 5 undefined on input line
+ 409.
+
+
+LaTeX Warning: Citation `bartal2023multidiffusion' on page 5 undefined on input
+ line 410.
+
+
+LaTeX Warning: Citation `ye2024lno' on page 5 undefined on input line 412.
+
+[5]
+
+LaTeX Warning: Citation `oskarsson2023neurallam' on page 6 undefined on input l
+ine 419.
+
+
+LaTeX Warning: Citation `barwey2024consistentgnn' on page 6 undefined on input 
+line 421.
+
+
+LaTeX Warning: Citation `dryja1994smalloverlap' on page 6 undefined on input li
+ne 430.
+
+
+LaTeX Warning: Citation `dolean2024multilevel' on page 6 undefined on input lin
+e 430.
+
+
+LaTeX Warning: Citation `li2020mgno' on page 6 undefined on input line 430.
+
+
+LaTeX Warning: Citation `hanna2024comlsim' on page 6 undefined on input line 44
+0.
+
+
+LaTeX Warning: Citation `huang2025operatorddm' on page 6 undefined on input lin
+e 440.
+
+[6]
+
+LaTeX Warning: Citation `lienen2024turbdiff' on page 7 undefined on input line 
+456.
+
+
+LaTeX Warning: Citation `kohl2023benchmarking' on page 7 undefined on input lin
+e 456.
+
+(./main.bbl [7] [8] [9] [10]) [11] (./main.aux)
+
+LaTeX Warning: There were undefined references.
+
+
+LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.
+
+ )
+(see the transcript file for additional information){/usr/share/texmf/fonts/enc
+/dvips/lm/lm-mathsy.enc}{/usr/share/texmf/fonts/enc/dvips/lm/lm-ec.enc}{/usr/sh
+are/texmf/fonts/enc/dvips/lm/lm-rm.enc}{/usr/share/texmf/fonts/enc/dvips/lm/lm-
+mathit.enc}</usr/share/texmf/fonts/type1/public/lm/lmbx10.pfb></usr/share/texmf
+/fonts/type1/public/lm/lmbx12.pfb></usr/share/texmf/fonts/type1/public/lm/lmmi8
+.pfb></usr/share/texmf/fonts/type1/public/lm/lmr10.pfb></usr/share/texmf/fonts/
+type1/public/lm/lmr12.pfb></usr/share/texmf/fonts/type1/public/lm/lmr8.pfb></us
+r/share/texmf/fonts/type1/public/lm/lmri10.pfb></usr/share/texmf/fonts/type1/pu
+blic/lm/lmsy10.pfb></usr/share/texmf/fonts/type1/public/lm/lmtk10.pfb></usr/sha
+re/texmf/fonts/type1/public/lm/lmtt10.pfb></usr/share/texmf/fonts/type1/public/
+lm/lmtt12.pfb>
+Output written on main.pdf (11 pages, 286355 bytes).
+Transcript written on main.log.
+Latexmk: Found input bbl file 'main.bbl'
+Latexmk: References changed.
+Latexmk: Log file says output to 'main.pdf'
+Latexmk: List of undefined refs and citations:
+  Citation `bae2022scimarl' on page 5 undefined on input line 323
+  Citation `bartal2023multidiffusion' on page 4 undefined on input line 277
+  Citation `bartal2023multidiffusion' on page 5 undefined on input line 360
+  Citation `bartal2023multidiffusion' on page 5 undefined on input line 410
+  Citation `barwey2024consistentgnn' on page 4 undefined on input line 255
+  Citation `barwey2024consistentgnn' on page 5 undefined on input line 360
+  Citation `barwey2024consistentgnn' on page 5 undefined on input line 392
+  Citation `barwey2024consistentgnn' on page 6 undefined on input line 421
+  Citation `basir2023schwarz' on page 3 undefined on input line 188
+  Citation `bi2023pangu' on page 4 undefined on input line 292
+  Citation `brandstetter2022mppde' on page 1 undefined on input line 65
+  Citation `brandstetter2022mppde' on page 4 undefined on input line 244
+  Citation `buglakova2025tiling' on page 4 undefined on input line 281
+  Citation `dohrmann2003bddc' on page 2 undefined on input line 138
+  Citation `dohrmann2003bddc' on page 5 undefined on input line 360
+  Citation `dolean2015ddm' on page 2 undefined on input line 125
+  Citation `dolean2015ddm' on page 2 undefined on input line 148
+  Citation `dolean2024multilevel' on page 3 undefined on input line 178
+  Citation `dolean2024multilevel' on page 5 undefined on input line 360
+  Citation `dolean2024multilevel' on page 5 undefined on input line 391
+  Citation `dolean2024multilevel' on page 6 undefined on input line 430
+  Citation `dolean2024twolevel' on page 3 undefined on input line 186
+  Citation `dryja1994smalloverlap' on page 2 undefined on input line 131
+  Citation `dryja1994smalloverlap' on page 5 undefined on input line 391
+  Citation `dryja1994smalloverlap' on page 6 undefined on input line 430
+  Citation `farhat1991feti' on page 2 undefined on input line 135
+  Citation `farhat2001fetidp' on page 2 undefined on input line 136
+  Citation `farhat2001fetidp' on page 5 undefined on input line 360
+  Citation `fukami2019superresolution' on page 5 undefined on input line 318
+  Citation `fukami2021spatiotemporal' on page 5 undefined on input line 318
+  Citation `grady2023modelparallelfno' on page 3 undefined on input line 226
+  Citation `grady2023modelparallelfno' on page 5 undefined on input line 360
+  Citation `hanna2024comlsim' on page 4 undefined on input line 259
+  Citation `hanna2024comlsim' on page 5 undefined on input line 360
+  Citation `hanna2024comlsim' on page 6 undefined on input line 440
+  Citation `heinlein2019adaptive' on page 2 undefined on input line 157
+  Citation `heinlein2021review' on page 2 undefined on input line 155
+  Citation `hu2023apinn' on page 3 undefined on input line 193
+  Citation `huang2025operatorddm' on page 3 undefined on input line 231
+  Citation `huang2025operatorddm' on page 5 undefined on input line 360
+  Citation `huang2025operatorddm' on page 6 undefined on input line 440
+  Citation `husain2024stretchedgrid' on page 4 undefined on input line 303
+  Citation `jagtap2020cpinn' on page 3 undefined on input line 161
+  Citation `jagtap2020cpinn' on page 5 undefined on input line 360
+  Citation `jagtap2020xpinn' on page 3 undefined on input line 164
+  Citation `jagtap2020xpinn' on page 5 undefined on input line 360
+  Citation `klawonn2024dld3' on page 3 undefined on input line 235
+  Citation `kohl2023benchmarking' on page 5 undefined on input line 328
+  Citation `kohl2023benchmarking' on page 7 undefined on input line 456
+  Citation `kovachki2023neuraloperator' on page 3 undefined on input line 209
+  Citation `kovachki2023neuraloperator' on page 5 undefined on input line 387
+  Citation `lam2023graphcast' on page 4 undefined on input line 291
+  Citation `li2020d3m' on page 3 undefined on input line 187
+  Citation `li2020deepddm' on page 3 undefined on input line 181
+  Citation `li2020deepddm' on page 5 undefined on input line 360
+  Citation `li2020gno' on page 4 undefined on input line 246
+  Citation `li2020mgno' on page 4 undefined on input line 246
+  Citation `li2020mgno' on page 5 undefined on input line 391
+  Citation `li2020mgno' on page 6 undefined on input line 430
+  Citation `li2021fno' on page 3 undefined on input line 205
+  Citation `li2023geofno' on page 3 undefined on input line 215
+  Citation `li2024tno' on page 5 undefined on input line 329
+  Citation `lienen2024turbdiff' on page 5 undefined on input line 327
+  Citation `lienen2024turbdiff' on page 7 undefined on input line 456
+  Citation `lions1988schwarz' on page 2 undefined on input line 128
+  Citation `lions1988schwarz' on page 5 undefined on input line 360
+  Citation `liuschiaffini2024localized' on page 3 undefined on input line 216
+  Citation `mandel1993bdd' on page 2 undefined on input line 137
+  Citation `moseley2023fbpinn' on page 3 undefined on input line 172
+  Citation `moseley2023fbpinn' on page 5 undefined on input line 360
+  Citation `nabian2024xmeshgraphnet' on page 4 undefined on input line 252
+  Citation `nabian2024xmeshgraphnet' on page 5 undefined on input line 360
+  Citation `nipen2025ailam' on page 4 undefined on input line 300
+  Citation `oskarsson2023neurallam' on page 4 undefined on input line 295
+  Citation `oskarsson2023neurallam' on page 5 undefined on input line 360
+  Citation `oskarsson2023neurallam' on page 6 undefined on input line 419
+  Citation `oskarsson2025mllam' on page 4 undefined on input line 299
+  Citation `pathak2022fourcastnet' on page 4 undefined on input line 291
+  Citation `pfaff2021meshgraphnets' on page 4 undefined on input line 242
+  Citation `quarteroni1999ddm' on page 2 undefined on input line 125
+  Citation `raissi2019pinn' on page 2 undefined on input line 152
+  Citation `ronneberger2015unet' on page 4 undefined on input line 269
+  Citation `ronneberger2015unet' on page 5 undefined on input line 360
+  Citation `ronneberger2015unet' on page 5 undefined on input line 409
+  Citation `sanchezgonzalez2020gns' on page 4 undefined on input line 241
+  Citation `shukla2021parallelpinn' on page 3 undefined on input line 168
+  Citation `snyder2023schwarzpinn' on page 3 undefined on input line 190
+  Citation `stachenfeld2022coarse' on page 5 undefined on input line 321
+  Citation `stengel2020phiregan' on page 4 undefined on input line 284
+  Citation `toselli2005ddm' on page 2 undefined on input line 125
+  Citation `tran2023ffno' on page 3 undefined on input line 213
+  Citation `ye2024lno' on page 3 undefined on input line 218
+  Citation `ye2024lno' on page 5 undefined on input line 392
+  Citation `ye2024lno' on page 5 undefined on input line 412
+Latexmk: Examining 'main.log'
+=== TeX engine is 'pdfTeX'
+Latexmk: Found bibliography file(s) [references.bib]
+Rule 'bibtex main': File changes, etc:
+   Changed files, or newly in use since previous run(s):
+      'main.aux'
+------------
+Run number 2 of rule 'bibtex main'
+------------
+------------
+Running 'bibtex  "main.aux"'
+------------
+Latexmk: applying rule 'bibtex main'...
+This is BibTeX, Version 0.99d (TeX Live 2022/dev/Debian)
+The top-level auxiliary file: main.aux
+The style file: plain.bst
+Database file #1: references.bib
+Rule 'pdflatex': File changes, etc:
+   Changed files, or newly in use since previous run(s):
+      'main.aux'
+------------
+Run number 3 of rule 'pdflatex'
+------------
+------------
+Running 'pdflatex  -interaction=nonstopmode -halt-on-error -recorder  "main.tex"'
+------------
+Latexmk: applying rule 'pdflatex'...
+This is pdfTeX, Version 3.141592653-2.6-1.40.22 (TeX Live 2022/dev/Debian) (preloaded format=pdflatex)
+ restricted \write18 enabled.
+entering extended mode
+(./main.tex
+LaTeX2e <2021-11-15> patch level 1
+L3 programming layer <2022-01-21>
+(/usr/share/texlive/texmf-dist/tex/latex/base/article.cls
+Document Class: article 2021/10/04 v1.4n Standard LaTeX document class
+(/usr/share/texlive/texmf-dist/tex/latex/base/size11.clo))
+(/usr/share/texlive/texmf-dist/tex/latex/base/inputenc.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/base/fontenc.sty)
+(/usr/share/texmf/tex/latex/lm/lmodern.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/geometry/geometry.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/keyval.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/iftex/ifvtex.sty
+(/usr/share/texlive/texmf-dist/tex/generic/iftex/iftex.sty)))
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsmath.sty
+For additional information on amsmath, use the `?' option.
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amstext.sty
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsgen.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsbsy.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsopn.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/amssymb.sty
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/amsfonts.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/booktabs/booktabs.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/tools/array.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/tools/tabularx.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/microtype.sty
+(/usr/share/texlive/texmf-dist/tex/latex/etoolbox/etoolbox.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/microtype-pdftex.def)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/microtype.cfg))
+(/usr/share/texlive/texmf-dist/tex/latex/enumitem/enumitem.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/xcolor/xcolor.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics-cfg/color.cfg)
+(/usr/share/texlive/texmf-dist/tex/latex/graphics-def/pdftex.def))
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/graphicx.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/graphics.sty
+(/usr/share/texlive/texmf-dist/tex/latex/graphics/trig.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/graphics-cfg/graphics.cfg)))
+(/usr/share/texlive/texmf-dist/tex/latex/titlesec/titlesec.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/hyperref.sty
+(/usr/share/texlive/texmf-dist/tex/generic/ltxcmds/ltxcmds.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/pdftexcmds/pdftexcmds.sty
+(/usr/share/texlive/texmf-dist/tex/generic/infwarerr/infwarerr.sty))
+(/usr/share/texlive/texmf-dist/tex/generic/kvsetkeys/kvsetkeys.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/kvdefinekeys/kvdefinekeys.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/pdfescape/pdfescape.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hycolor/hycolor.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/letltxmacro/letltxmacro.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/auxhook/auxhook.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/kvoptions/kvoptions.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/pd1enc.def)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/hyperref-langpatches.def)
+(/usr/share/texlive/texmf-dist/tex/generic/intcalc/intcalc.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/etexcmds/etexcmds.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/puenc.def)
+(/usr/share/texlive/texmf-dist/tex/latex/url/url.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/bitset/bitset.sty
+(/usr/share/texlive/texmf-dist/tex/generic/bigintcalc/bigintcalc.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/base/atbegshi-ltx.sty))
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/hpdftex.def
+(/usr/share/texlive/texmf-dist/tex/latex/base/atveryend-ltx.sty)
+(/usr/share/texlive/texmf-dist/tex/latex/rerunfilecheck/rerunfilecheck.sty
+(/usr/share/texlive/texmf-dist/tex/generic/uniquecounter/uniquecounter.sty)))
+(/usr/share/texmf/tex/latex/lm/t1lmr.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def)
+(./main.aux)
+*geometry* driver: auto-detecting
+*geometry* detected driver: pdftex
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-cmr.cfg)
+(/usr/share/texlive/texmf-dist/tex/context/base/mkii/supp-pdf.mkii
+[Loading MPS to PDF converter (version 2006.09.02).]
+) (/usr/share/texlive/texmf-dist/tex/latex/epstopdf-pkg/epstopdf-base.sty
+(/usr/share/texlive/texmf-dist/tex/latex/latexconfig/epstopdf-sys.cfg))
+(/usr/share/texlive/texmf-dist/tex/latex/hyperref/nameref.sty
+(/usr/share/texlive/texmf-dist/tex/latex/refcount/refcount.sty)
+(/usr/share/texlive/texmf-dist/tex/generic/gettitlestring/gettitlestring.sty))
+(./main.out) (./main.out) (/usr/share/texmf/tex/latex/lm/ot1lmr.fd)
+(/usr/share/texmf/tex/latex/lm/omllmm.fd)
+(/usr/share/texmf/tex/latex/lm/omslmsy.fd)
+(/usr/share/texmf/tex/latex/lm/omxlmex.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/umsa.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-msa.cfg)
+(/usr/share/texlive/texmf-dist/tex/latex/amsfonts/umsb.fd)
+(/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-msb.cfg)
+(/usr/share/texmf/tex/latex/lm/t1lmtt.fd) [1{/var/lib/texmf/fonts/map/pdftex/up
+dmap/pdftex.map}] [2] [3] [4]
+Overfull \hbox (28.22736pt too wide) in alignment at lines 360--360
+[][][][][] 
+[5] [6] (./main.bbl [7] [8] [9] [10]) [11] (./main.aux) )
+(see the transcript file for additional information){/usr/share/texmf/fonts/enc
+/dvips/lm/lm-mathsy.enc}{/usr/share/texmf/fonts/enc/dvips/lm/lm-ec.enc}{/usr/sh
+are/texmf/fonts/enc/dvips/lm/lm-rm.enc}{/usr/share/texmf/fonts/enc/dvips/lm/lm-
+mathit.enc}</usr/share/texmf/fonts/type1/public/lm/lmbx10.pfb></usr/share/texmf
+/fonts/type1/public/lm/lmbx12.pfb></usr/share/texmf/fonts/type1/public/lm/lmmi8
+.pfb></usr/share/texmf/fonts/type1/public/lm/lmr10.pfb></usr/share/texmf/fonts/
+type1/public/lm/lmr12.pfb></usr/share/texmf/fonts/type1/public/lm/lmr8.pfb></us
+r/share/texmf/fonts/type1/public/lm/lmri10.pfb></usr/share/texmf/fonts/type1/pu
+blic/lm/lmsy10.pfb></usr/share/texmf/fonts/type1/public/lm/lmtk10.pfb></usr/sha
+re/texmf/fonts/type1/public/lm/lmtt10.pfb></usr/share/texmf/fonts/type1/public/
+lm/lmtt12.pfb>
+Output written on main.pdf (11 pages, 290436 bytes).
+Transcript written on main.log.
+Latexmk: Found input bbl file 'main.bbl'
+Latexmk: Log file says output to 'main.pdf'
+Latexmk: Examining 'main.log'
+=== TeX engine is 'pdfTeX'
+Latexmk: Found bibliography file(s) [references.bib]
+Latexmk: All targets (main.pdf) are up-to-date

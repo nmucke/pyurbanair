@@ -1,0 +1,122 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{dryja1994smalloverlap}
+\citation{dolean2024multilevel}
+\citation{li2020mgno}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Contributions and design principle.}{1}{paragraph*.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \textbf  {One step of the two-level domain-decomposed update.} \emph  {Top (indigo):} a cheap coarse predictor average-pools the state by a factor $r$, takes one low-resolution step, and prolongs the result to a fine-grid \emph  {context} field $\bm  {C}_t$ that carries global coupling. \emph  {Bottom (teal):} the field is tiled into overlapping blocks; a single shared fine network predicts a residual per patch from the patch state, its halo, geometry, parameters, the restricted context $\mathcal  {R}_i\bm  {C}_t$ and a positional encoding $\bm  {e}_i$; the outputs are cropped to their interiors and blended by a partition of unity into the next state $\bm  {S}_{t+1}$. The whole diagram is one call of \texttt  {DomainDecomposed.forward}.\relax }}{2}{figure.caption.2}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:overview}{{1}{2}{\textbf {One step of the two-level domain-decomposed update.} \emph {Top (indigo):} a cheap coarse predictor average-pools the state by a factor $r$, takes one low-resolution step, and prolongs the result to a fine-grid \emph {context} field $\bm C_t$ that carries global coupling. \emph {Bottom (teal):} the field is tiled into overlapping blocks; a single shared fine network predicts a residual per patch from the patch state, its halo, geometry, parameters, the restricted context $\Rop _i\bm C_t$ and a positional encoding $\bm e_i$; the outputs are cropped to their interiors and blended by a partition of unity into the next state $\bm S_{t+1}$. The whole diagram is one call of \code {DomainDecomposed.forward}.\relax }{figure.caption.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Problem setup and notation}{2}{section.2}\protected@file@percent }
+\newlabel{sec:notation}{{2}{2}{Problem setup and notation}{section.2}{}}
+\newlabel{eq:truth}{{1}{2}{Problem setup and notation}{equation.2.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Subdomains, interiors, halos.}{2}{paragraph*.3}\protected@file@percent }
+\newlabel{eq:restrict-extend}{{2}{2}{Subdomains, interiors, halos}{equation.2.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces \textbf  {Overlapping decomposition.} Each subdomain predicts its interior block $\Omega _i^\circ $ (teal) but reads inputs from the larger extended block $\hat  \Omega _i$ (hatched), which adds a halo of width $h$ taken from neighbouring cells. Interior blocks tile the domain edge-to-edge; extended blocks overlap by $2h$.\relax }}{3}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:decomp}{{2}{3}{\textbf {Overlapping decomposition.} Each subdomain predicts its interior block $\Omega _i^\circ $ (teal) but reads inputs from the larger extended block $\hat \Omega _i$ (hatched), which adds a halo of width $h$ taken from neighbouring cells. Interior blocks tile the domain edge-to-edge; extended blocks overlap by $2h$.\relax }{figure.caption.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \textbf  {Uniform tiling by padding (one axis).} A non-periodic axis is padded up to a multiple of the interior size $n$ (grey, replicate/zero) so interior tiles (dashed, width $n$) cover it exactly, then a halo of width $h$ (orange) is added on each side. Every extended block is then a uniform $(n+2h)$ along this axis, which lets all $M$ patches batch into one network call. The final merged field is cropped back to $N_x$.\relax }}{3}{figure.caption.5}\protected@file@percent }
+\newlabel{fig:tiling}{{3}{3}{\textbf {Uniform tiling by padding (one axis).} A non-periodic axis is padded up to a multiple of the interior size $n$ (grey, replicate/zero) so interior tiles (dashed, width $n$) cover it exactly, then a halo of width $h$ (orange) is added on each side. Every extended block is then a uniform $(n+2h)$ along this axis, which lets all $M$ patches batch into one network call. The final merged field is cropped back to $N_x$.\relax }{figure.caption.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Domain-decomposition geometry}{3}{section.3}\protected@file@percent }
+\newlabel{sec:geometry}{{3}{3}{Domain-decomposition geometry}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Uniform tiling by padding}{3}{subsection.3.1}\protected@file@percent }
+\newlabel{sec:tiling}{{3.1}{3}{Uniform tiling by padding}{subsection.3.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Partition of unity}{3}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:pou}{{3.2}{3}{Partition of unity}{subsection.3.2}{}}
+\newlabel{eq:pou}{{3}{3}{Partition of unity}{equation.3.3}{}}
+\citation{ronneberger2015unet}
+\citation{bartal2023multidiffusion}
+\citation{ronneberger2015unet}
+\citation{bartal2023multidiffusion}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \textbf  {Partition-of-unity windows along one axis.} Each interior is extended by the taper width $\delta $ so adjacent Hann windows overlap by $2\delta $; inside the overlap two windows ramp so their sum stays $1$. Dividing by the overlap sum makes $\DOTSB \sum@ \slimits@ _i w_i\equiv 1$ exact, so the merge is a smooth convex blend across every seam \cite  {ronneberger2015unet,bartal2023multidiffusion}.\relax }}{4}{figure.caption.6}\protected@file@percent }
+\newlabel{fig:pou}{{4}{4}{\textbf {Partition-of-unity windows along one axis.} Each interior is extended by the taper width $\delta $ so adjacent Hann windows overlap by $2\delta $; inside the overlap two windows ramp so their sum stays $1$. Dividing by the overlap sum makes $\sum _i w_i\equiv 1$ exact, so the merge is a smooth convex blend across every seam \cite {ronneberger2015unet,bartal2023multidiffusion}.\relax }{figure.caption.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Periodicity}{4}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:periodic}{{3.3}{4}{Periodicity}{subsection.3.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}The coarse global level}{4}{section.4}\protected@file@percent }
+\newlabel{sec:coarse}{{4}{4}{The coarse global level}{section.4}{}}
+\newlabel{eq:coarse}{{4}{4}{The coarse global level}{equation.4.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces \textbf  {Periodic wrap-around (shown for $y$).} A seam-adjacent patch reads its halo circularly --- the last $h$ cells fill the left ghost halo and the first $h$ cells fill the right one --- so $\mathcal  {R}_i$ reads true neighbours, not a wall. The partition-of-unity window overhang is wrap-added across the seam in the same way, so $\DOTSB \sum@ \slimits@ _i w_i\equiv 1$ holds across $y=N_y\equiv 0$ and the merge is seamless there. Requires $n\mid N_y$.\relax }}{5}{figure.caption.7}\protected@file@percent }
+\newlabel{fig:periodic}{{5}{5}{\textbf {Periodic wrap-around (shown for $y$).} A seam-adjacent patch reads its halo circularly --- the last $h$ cells fill the left ghost halo and the first $h$ cells fill the right one --- so $\Rop _i$ reads true neighbours, not a wall. The partition-of-unity window overhang is wrap-added across the seam in the same way, so $\sum _i w_i\equiv 1$ holds across $y=N_y\equiv 0$ and the merge is seamless there. Requires $n\mid N_y$.\relax }{figure.caption.7}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces \textbf  {The coarse level.} The fine state is average-pooled by a factor $r$ to a small coarse grid, a dedicated coarse network takes one step there, and the result is trilinearly prolonged back to the fine grid as the global context field $\bm  {C}_t$. The coarse pass costs $r^{3}$ fewer cells than a fine step.\relax }}{5}{figure.caption.9}\protected@file@percent }
+\newlabel{fig:coarse}{{6}{5}{\textbf {The coarse level.} The fine state is average-pooled by a factor $r$ to a small coarse grid, a dedicated coarse network takes one step there, and the result is trilinearly prolonged back to the fine grid as the global context field $\bm C_t$. The coarse pass costs $r^{3}$ fewer cells than a fine step.\relax }{figure.caption.9}{}}
+\@writefile{toc}{\contentsline {paragraph}{Why a dedicated coarse net.}{5}{paragraph*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}The fine-scale local update}{5}{section.5}\protected@file@percent }
+\newlabel{sec:fine}{{5}{5}{The fine-scale local update}{section.5}{}}
+\citation{buglakova2025tiling}
+\@writefile{lof}{\contentsline {figure}{\numberline {7}{\ignorespaces \textbf  {Fine-net input assembly and the widened stem.} Per patch, four groups of channels are concatenated --- state, geometry, prolonged coarse context, and positional encoding --- and fed to the shared UNet through a stem widened by \texttt  {extra\_in\_channels}$=C+n_{\text  {pos}}$. The network predicts a residual $\Delta _i$ added to the patch state to give $\hat  {\bm  {S}}_i$. At \texttt  {extra\_in\_channels}$=0$ the widening is a no-op and the network is identical to the original.\relax }}{6}{figure.caption.11}\protected@file@percent }
+\newlabel{fig:stem}{{7}{6}{\textbf {Fine-net input assembly and the widened stem.} Per patch, four groups of channels are concatenated --- state, geometry, prolonged coarse context, and positional encoding --- and fed to the shared UNet through a stem widened by \code {extra\_in\_channels}$=C+n_{\text {pos}}$. The network predicts a residual $\Delta _i$ added to the patch state to give $\hat {\bm S}_i$. At \code {extra\_in\_channels}$=0$ the widening is a no-op and the network is identical to the original.\relax }{figure.caption.11}{}}
+\newlabel{eq:fine}{{5}{6}{The fine-scale local update}{equation.5.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{A minimal, back-compatible widening.}{6}{paragraph*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Partition-of-unity merge and the rollout}{6}{section.6}\protected@file@percent }
+\newlabel{sec:merge}{{6}{6}{Partition-of-unity merge and the rollout}{section.6}{}}
+\newlabel{eq:merge}{{6}{6}{Partition-of-unity merge and the rollout}{equation.6.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{Optional divergence projection.}{6}{paragraph*.13}\protected@file@percent }
+\citation{brandstetter2022mppde}
+\@writefile{lof}{\contentsline {figure}{\numberline {8}{\ignorespaces \textbf  {Where neighbours meet.} Two adjacent interior predictions overlap by $2\delta $ (indigo band). At inference the partition of unity blends them smoothly; at training time (path b, Section\nobreakspace  {}\ref {sec:training}) the interface term penalizes their disagreement on exactly this band.\relax }}{7}{figure.caption.12}\protected@file@percent }
+\newlabel{fig:interface}{{8}{7}{\textbf {Where neighbours meet.} Two adjacent interior predictions overlap by $2\delta $ (indigo band). At inference the partition of unity blends them smoothly; at training time (path b, Section~\ref {sec:training}) the interface term penalizes their disagreement on exactly this band.\relax }{figure.caption.12}{}}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces Two-level domain-decomposed rollout (one \texttt  {forward} per step)\relax }}{7}{algorithm.1}\protected@file@percent }
+\newlabel{alg:rollout}{{1}{7}{Two-level domain-decomposed rollout (one \code {forward} per step)\relax }{algorithm.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Inference rollout.}{7}{paragraph*.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Training}{7}{section.7}\protected@file@percent }
+\newlabel{sec:training}{{7}{7}{Training}{section.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Path (a): drop-in mean-squared training}{7}{subsection.7.1}\protected@file@percent }
+\newlabel{sec:dropin}{{7.1}{7}{Path (a): drop-in mean-squared training}{subsection.7.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Path (b): the patch objective}{7}{subsection.7.2}\protected@file@percent }
+\newlabel{sec:patch}{{7.2}{7}{Path (b): the patch objective}{subsection.7.2}{}}
+\newlabel{eq:loss}{{7}{7}{Path (b): the patch objective}{equation.7.7}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces The four terms of the patch objective \eqref  {eq:loss} and how \texttt  {DomainDecompositionLoss} evaluates them. Default weights follow standard practice: start the interface and divergence penalties small and tune on a held-out rollout.\relax }}{8}{table.caption.15}\protected@file@percent }
+\newlabel{tab:loss}{{1}{8}{The four terms of the patch objective \eqref {eq:loss} and how \code {DomainDecompositionLoss} evaluates them. Default weights follow standard practice: start the interface and divergence penalties small and tune on a held-out rollout.\relax }{table.caption.15}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {9}{\ignorespaces \textbf  {The decomposition is hidden behind the standard contract.} \texttt  {forward(state, params, geometry)$\to $state\_next} on full-grid tensors, byte-for-byte the signature of the other architectures. Trainer, forward model and ensemble path call it without modification.\relax }}{8}{figure.caption.16}\protected@file@percent }
+\newlabel{fig:contract}{{9}{8}{\textbf {The decomposition is hidden behind the standard contract.} \code {forward(state, params, geometry)$\to $state\_next} on full-grid tensors, byte-for-byte the signature of the other architectures. Trainer, forward model and ensemble path call it without modification.\relax }{figure.caption.16}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}Software architecture and usage}{8}{section.8}\protected@file@percent }
+\newlabel{sec:software}{{8}{8}{Software architecture and usage}{section.8}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.1}The embedded contract}{8}{subsection.8.1}\protected@file@percent }
+\newlabel{sec:contract}{{8.1}{8}{The embedded contract}{subsection.8.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.2}Flexible global grid}{8}{subsection.8.2}\protected@file@percent }
+\newlabel{sec:flexible}{{8.2}{8}{Flexible global grid}{subsection.8.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {10}{\ignorespaces \textbf  {Flexible global grid.} The patch size $n$ (with its halo) is the invariant; the same trained weights tile a larger domain just by adding more patches. Only the cell spacing must match training; $(N_x,N_y,N_z)$ is free.\relax }}{9}{figure.caption.17}\protected@file@percent }
+\newlabel{fig:flexible}{{10}{9}{\textbf {Flexible global grid.} The patch size $n$ (with its halo) is the invariant; the same trained weights tile a larger domain just by adding more patches. Only the cell spacing must match training; $(N_x,N_y,N_z)$ is free.\relax }{figure.caption.17}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {11}{\ignorespaces \textbf  {Two training routes, selected as config groups.} (a) the validated drop-in path through the unmodified trainer with an MSE loss; (b) the patch objective via \texttt  {PatchTrainer} and \texttt  {DomainDecompositionLoss}, reading the model's per-patch intermediates on full fields. Path (a) is the default; path (b) is opt-in.\relax }}{9}{figure.caption.18}\protected@file@percent }
+\newlabel{fig:training}{{11}{9}{\textbf {Two training routes, selected as config groups.} (a) the validated drop-in path through the unmodified trainer with an MSE loss; (b) the patch objective via \code {PatchTrainer} and \code {DomainDecompositionLoss}, reading the model's per-patch intermediates on full fields. Path (a) is the default; path (b) is opt-in.\relax }{figure.caption.18}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.3}Configuration groups and CLI}{9}{subsection.8.3}\protected@file@percent }
+\newlabel{sec:config}{{8.3}{9}{Configuration groups and CLI}{subsection.8.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.4}Module map}{9}{subsection.8.4}\protected@file@percent }
+\newlabel{sec:modules}{{8.4}{9}{Module map}{subsection.8.4}{}}
+\citation{barwey2024consistentgnn}
+\citation{li2020deepddm}
+\citation{huang2025operatorddm}
+\citation{ye2024lno}
+\bibstyle{plain}
+\bibdata{references}
+\bibcite{bartal2023multidiffusion}{1}
+\bibcite{barwey2024consistentgnn}{2}
+\@writefile{lof}{\contentsline {figure}{\numberline {12}{\ignorespaces \textbf  {As-built module map.} Teal = new files; orange = back-compatible edits. \texttt  {DomainDecomposed} composes the decomposition operators with the stem-widened UNet; the forward model only relaxes its domain check; the loss/patch-trainer and the patch dataset form the optional patch-objective path; the configuration groups wire the choices.\relax }}{10}{figure.caption.19}\protected@file@percent }
+\newlabel{fig:modules}{{12}{10}{\textbf {As-built module map.} Teal = new files; orange = back-compatible edits. \code {DomainDecomposed} composes the decomposition operators with the stem-widened UNet; the forward model only relaxes its domain check; the loss/patch-trainer and the patch dataset form the optional patch-objective path; the configuration groups wire the choices.\relax }{figure.caption.19}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {9}Validation}{10}{section.9}\protected@file@percent }
+\newlabel{sec:validation}{{9}{10}{Validation}{section.9}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {10}Limitations and future work}{10}{section.10}\protected@file@percent }
+\newlabel{sec:future}{{10}{10}{Limitations and future work}{section.10}{}}
+\bibcite{brandstetter2022mppde}{3}
+\bibcite{buglakova2025tiling}{4}
+\bibcite{dolean2024multilevel}{5}
+\bibcite{dryja1994smalloverlap}{6}
+\bibcite{huang2025operatorddm}{7}
+\bibcite{li2020deepddm}{8}
+\bibcite{li2020mgno}{9}
+\bibcite{ronneberger2015unet}{10}
+\bibcite{ye2024lno}{11}
+\gdef \@abspage@last{11}
