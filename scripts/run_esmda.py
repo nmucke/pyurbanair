@@ -96,7 +96,6 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_operator,
     filter_parameter_config,
 )
-from pyurbanair.utils.run_utils import add_velocity_magnitude
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -108,7 +107,7 @@ from scripts._esmda_common import open_truth, truth_x_min, write_yaml
 # Small helpers (in the style of run_forward_model.py)
 # ---------------------------------------------------------------------------
 
-def _concat_windows(paths, sim_time, rebase, transform=None):
+def _concat_windows(paths, sim_time, rebase, transform=None, open_fn=None):
     """Concatenate per-window NetCDF files along ``time``.
 
     Files are opened one at a time and (optionally) reduced by ``transform``
@@ -116,13 +115,20 @@ def _concat_windows(paths, sim_time, rebase, transform=None):
     the ensemble mean of a state field) keeps only the reduced result instead of
     holding every window's full data in memory at once.
 
+    ``open_fn`` opens (and may already reduce) one window file; it defaults to
+    loading the whole file into memory, which is fine for the small parameter
+    files but must NOT be used on the tens-of-GB ensemble state files -- pass
+    ``_streaming_state_summary`` there so the ensemble is never materialised.
+
     ``rebase`` (used for the time-varying case) shifts each window's local time
     onto a single monotonic global axis (window ``w`` starts at ``w*sim_time``);
     the static case stacks the windows as-is, matching the old rollout script.
     """
+    if open_fn is None:
+        open_fn = lambda path: xarray.open_dataset(path).load()
     pieces = []
     for w, path in enumerate(paths):
-        ds = xarray.open_dataset(path).load()
+        ds = open_fn(path)
         if transform is not None:
             ds = transform(ds)
         if rebase and "time" in ds.dims:
@@ -206,6 +212,88 @@ def _last_frame_ensemble(member_files):
     return xarray.concat(frames, dim="ensemble", join="override")
 
 
+def _streaming_state_summary(path):
+    """Ensemble-reduce one window state file without materialising the ensemble.
+
+    Equivalent to ``_state_summary(xarray.open_dataset(path).load())`` -- the
+    ensemble mean of every data variable plus ``vel_mean``/``vel_std`` (the
+    ensemble mean and population std of the velocity magnitude) -- but streams
+    over the leading ``ensemble`` axis one member at a time. Peak memory is one
+    member plus a handful of ensemble-free float64 accumulators (a couple of GB),
+    instead of the whole tens-of-GB window, which otherwise exhausts RAM/swap and
+    drops the reduction onto a single thread under heavy paging.
+
+    Means use a running sum; ``vel_std`` uses the running sum and sum-of-squares
+    of ``|vel|`` (``std = sqrt(<x^2> - <x>^2)``, ddof=0, matching the old
+    ``DataArray.std(dim="ensemble")``). The result opens identically to the old
+    in-memory summary for ``_concat_windows`` and the downstream scripts.
+    """
+    with netCDF4.Dataset(path) as ds:
+        dim_names = set(ds.dimensions.keys())
+        if "ensemble" not in dim_names:  # already reduced -- nothing to stream
+            return xarray.open_dataset(path).load()
+        data_vars = [name for name in ds.variables if name not in dim_names]
+        n_ens = len(ds.dimensions["ensemble"])
+        has_vel = all(v in ds.variables for v in ("u", "v", "w"))
+
+        def _member(var, m):
+            idx = tuple(m if d == "ensemble" else slice(None) for d in var.dimensions)
+            return np.asarray(var[idx], dtype=np.float64)  # owns its buffer
+
+        sums = {}  # data var -> running ensemble sum (ensemble axis dropped)
+        vel_s1 = vel_s2 = None  # running sum / sum-of-squares of |vel|
+        for m in range(n_ens):
+            for name in data_vars:
+                chunk = _member(ds.variables[name], m)
+                if name in sums:
+                    sums[name] += chunk
+                else:
+                    sums[name] = chunk
+            if has_vel:
+                u = _member(ds.variables["u"], m)
+                v = _member(ds.variables["v"], m)
+                w = _member(ds.variables["w"], m)
+                vmag = np.sqrt(u * u + v * v + w * w)
+                if vel_s1 is None:
+                    vel_s1, vel_s2 = vmag, vmag * vmag
+                else:
+                    vel_s1 += vmag
+                    vel_s2 += vmag * vmag
+
+        # Coordinate variables (name == a dim) are identical across members; copy
+        # them through with no ensemble axis, like ``_stream_concat_members``.
+        coords = {}
+        for name in dim_names:
+            if name == "ensemble" or name not in ds.variables:
+                continue
+            var = ds.variables[name]
+            coords[name] = (
+                var.dimensions,
+                np.asarray(var[...]),
+                {k: var.getncattr(k) for k in var.ncattrs()},
+            )
+
+        data = {}
+        for name in data_vars:
+            var = ds.variables[name]
+            out_dims = tuple(d for d in var.dimensions if d != "ensemble")
+            mean = (sums[name] / n_ens).astype(var.dtype)
+            data[name] = (out_dims, mean, {k: var.getncattr(k) for k in var.ncattrs()})
+        if has_vel:
+            vel_dims = tuple(
+                d for d in ds.variables["u"].dimensions if d != "ensemble"
+            )
+            vel_dtype = ds.variables["u"].dtype
+            mean = vel_s1 / n_ens
+            std = np.sqrt(np.maximum(vel_s2 / n_ens - mean * mean, 0.0))
+            data["vel_mean"] = (vel_dims, mean.astype(vel_dtype))
+            data["vel_std"] = (vel_dims, std.astype(vel_dtype))
+
+        attrs = {k: ds.getncattr(k) for k in ds.ncattrs()}
+
+    return xarray.Dataset(data, coords=coords, attrs=attrs)
+
+
 # ---------------------------------------------------------------------------
 # Assembled rollout outputs (the small, downstream-facing artifacts)
 # ---------------------------------------------------------------------------
@@ -239,19 +327,14 @@ def _save_assembled_outputs(out_dir, windows_dir, num_windows, sim_time, is_dyna
     posterior_params.to_netcdf(out_dir / "posterior_params.nc")
     prior_params.to_netcdf(out_dir / "prior_params.nc")
 
-    # States: reduce each window's ensemble in a single pass before
-    # concatenating, so the full ensemble is never held across windows. Keep the
-    # mean state (u/v/w) plus the ensemble mean/std of the velocity magnitude
+    # States: reduce each window's ensemble in a streaming, member-at-a-time pass
+    # (``_streaming_state_summary``) so the tens-of-GB ensemble is never loaded
+    # into memory -- the old ``open_dataset(path).load()`` materialised the whole
+    # window, exhausting RAM/swap and stalling on a single thread. Keep the mean
+    # state (u/v/w) plus the ensemble mean/std of the velocity magnitude
     # (``vel_mean``/``vel_std``).
-    def _state_summary(ds):
-        vmag = add_velocity_magnitude(ds)["vel_magnitude"]
-        reduced = ds.mean(dim="ensemble")
-        reduced["vel_mean"] = vmag.mean(dim="ensemble")
-        reduced["vel_std"] = vmag.std(dim="ensemble")
-        return reduced
-
     posterior_state = _concat_windows(
-        state_paths, sim_time, rebase=is_dynamic, transform=_state_summary
+        state_paths, sim_time, rebase=is_dynamic, open_fn=_streaming_state_summary
     )
     posterior_state.to_netcdf(out_dir / "posterior_state_mean.nc")
 
