@@ -13,7 +13,7 @@ Shared-geometry assumption
 --------------------------
 Within a single forward call the per-sample geometry masks are identical (every
 batch member voxelises the same STL onto the same trained grid -- see
-``forward_model.rollout_batched`` / ``data.TransitionDataset``). The fast path
+``forward_model.rollout_batched`` / ``datasets.transition.TransitionDataset``). The fast path
 builds ONE point set + supernode selection + neighbour graph from
 ``geometry[0]`` and batches only the features. A per-sample fallback loop covers
 the rare non-shared case so correctness never depends on the assumption.

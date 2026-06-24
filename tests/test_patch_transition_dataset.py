@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from neural_surrogates.data_patch import PatchTransitionDataset
+from neural_surrogates.datasets.patch import PatchTransitionDataset
 from neural_surrogates.decomposition import DomainDecomposition
 
 # Small grid where interior_size (4) divides the periodic (y) axis length (8).

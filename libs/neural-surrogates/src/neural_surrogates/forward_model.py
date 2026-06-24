@@ -24,7 +24,7 @@ Design notes / requirements honoured here:
 * **Geometry from STL.** When an ``stl_path`` is provided the binary
   geometry channel is voxelised from it onto the simulation grid;
   otherwise it falls back to the non-zero-state convention used by
-  :class:`~neural_surrogates.data.TransitionDataset`.
+  :class:`~neural_surrogates.datasets.transition.TransitionDataset`.
 """
 
 from __future__ import annotations
@@ -489,7 +489,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         2. An explicit ``stl_path`` override, voxelised onto the grid.
         3. The non-zero-state fallback — only correct for backends that write
            exact zeros inside obstacles (pylbm), matching what
-           :class:`~neural_surrogates.data.TransitionDataset` falls back to.
+           :class:`~neural_surrogates.datasets.transition.TransitionDataset` falls back to.
         """
         template_var = template[self.state_vars[0]]
         if "time" in template_var.dims:

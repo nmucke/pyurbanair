@@ -1,7 +1,7 @@
 """Per-patch PyTorch dataset for the domain-decomposed training objective.
 
 This module exposes :class:`PatchTransitionDataset`, a sibling of
-:class:`neural_surrogates.data.TransitionDataset` that reads the **same**
+:class:`neural_surrogates.datasets.transition.TransitionDataset` that reads the **same**
 on-disk ``training_data/`` split (see ``docs/training_data.md``) but yields
 one sample *per spatial patch* of a two-level overlapping domain
 decomposition (companion PDF §2 + §5, Eq 9). It subclasses
@@ -34,7 +34,7 @@ from typing import Sequence
 import numpy as np
 import torch
 
-from neural_surrogates.data import TransitionDataset
+from neural_surrogates.datasets.transition import TransitionDataset
 from neural_surrogates.decomposition import DomainDecomposition
 
 

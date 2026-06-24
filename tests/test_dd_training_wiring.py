@@ -121,14 +121,14 @@ def test_dd_training_paths(
     _shrink_dd(cfg)
     cfg.dataset.root_dir = str(data_dir)
     cfg.model_name = model_name
-    # The generic Trainer (drop-in path) defaults to GPU AMP + torch.compile +
-    # a pushforward curriculum; neutralise those for a 1-epoch CPU smoke run.
-    if expect_trainer == "Trainer":
-        cfg.trainer.amp = False
-        cfg.trainer.compile_model = False
-        cfg.trainer.pushforward_epochs_per_step = None
-        cfg.trainer.pushforward_start_steps = 1
-        cfg.trainer.patience = None
+    # Both trainers now default to GPU AMP + torch.compile + a pushforward
+    # curriculum (PatchTrainer shares the generic Trainer's machinery via
+    # BaseTraining); neutralise those for a 1-epoch CPU smoke run.
+    cfg.trainer.amp = False
+    cfg.trainer.compile_model = False
+    cfg.trainer.pushforward_epochs_per_step = None
+    cfg.trainer.pushforward_start_steps = 1
+    cfg.trainer.patience = None
 
     assert cfg.trainer._target_.split(".")[-1] == expect_trainer
     assert cfg.loss._target_.split(".")[-1] == expect_loss

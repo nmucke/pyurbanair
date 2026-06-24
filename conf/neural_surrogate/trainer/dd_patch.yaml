@@ -4,11 +4,48 @@
 # Pair it with `loss=dd` (DomainDecompositionLoss) and a `domain_decomposed`
 # architecture (its forward must accept return_intermediates=True).
 #
-# PatchTrainer is deliberately lean and does NOT support the generic Trainer's
-# amp / torch.compile / pushforward-curriculum / LR-schedule / early-stopping
-# knobs: the four-term loss is single-step and is computed from the model's
-# per-patch intermediates over full fields. It trains on the ordinary
-# (full-field) `TransitionDataset` already configured in training.yaml.
+# PatchTrainer now shares all of the generic Trainer's machinery via
+# BaseTraining: amp, torch.compile, channels-last, the warmup+cosine LR
+# schedule, the pushforward-rollout curriculum, gradient clipping, early
+# stopping and checkpoint/resume + metrics.csv logging are all available here
+# too. Under a pushforward horizon > 1 the rollout prefix advances the merged
+# field and the Eq (9) interface/divergence/coarse terms are evaluated on the
+# final step. It trains on the ordinary (full-field) `TransitionDataset`
+# already configured in training.yaml.
 _target_: neural_surrogates.PatchTrainer
 num_epochs: 200
 device: cuda
+patience: 15
+# Mixed precision autocast. bf16 needs no grad scaling and cannot underflow;
+# the trainer falls back to fp16 (+ GradScaler) on GPUs without bf16 support.
+amp: true
+amp_dtype: bfloat16
+# torch.compile the model. First batch pays one-off compilation latency.
+compile_model: true
+# channels-last-3d memory layout for cuDNN kernel selection under autocast.
+channels_last: false
+# Rollout-length curriculum: begin with `pushforward_start_steps`-step rollouts
+# and add one step every `pushforward_epochs_per_step` epochs, up to
+# `dataset.pushforward_steps`. The Eq (9) terms are evaluated on the final
+# rollout step. Set the cadence to null to train at a fixed (one-step) horizon,
+# the original PatchTrainer behavior.
+pushforward_epochs_per_step: null
+pushforward_start_steps: 1
+# Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
+# optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`.
+# Set `lr_warmup_epochs` to null to disable.
+lr_warmup_epochs: 2
+lr_warmup_start: 1.0e-6
+lr_min: 1.0e-6
+# The DomainDecompositionLoss handles fluid masking itself (its own `mask_loss`
+# in loss=dd), so this trainer-level flag is unused on the patch path.
+mask_loss: true
+# Global grad-norm clip; set null to disable.
+grad_clip_norm: 1.0
+# Backprop through the last N unroll steps (1 = pure pushforward trick; only
+# meaningful when the pushforward horizon is > 1).
+grad_unroll_steps: 1
+# Continue from <weights dir>/checkpoint.pt (model + optimizer + scheduler +
+# scaler + curriculum state, written every epoch). Per-epoch metrics (incl. the
+# one-step/interface/divergence/coarse term breakdown) append to metrics.csv.
+resume: false
