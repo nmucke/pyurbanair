@@ -492,22 +492,27 @@ defaults list:
 
 ```yaml
 defaults:
-  - /neural_surrogate/architectures/unet_convnext@architecture: small
+  - /neural_surrogate/architectures@architecture: unet_convnext/medium
+  - /neural_surrogate/trainer@trainer: standard
+  - /neural_surrogate/loss@loss: mse
   - _self_
 ```
 
 `@hydra.main` is pointed at the top-level `conf/` so the cross-group
-defaults entry resolves. Default preset:
+defaults entries resolve. The architecture is selected at the `architectures`
+group level (value = `family/preset`) so any family is swappable on the CLI;
+`trainer` and `loss` are likewise groups (see §19). Default preset:
 
 ```bash
 pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py
 ```
 
-Swap architecture presets — the override key is the full group path:
+Swap architecture presets / families — the override value is the nested
+`family/preset` path:
 
 ```bash
 pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-    'neural_surrogate/architectures/unet_convnext@architecture=medium'
+    'neural_surrogate/architectures@architecture=unet_convnext/large'
 ```
 
 Override individual fields:
@@ -646,3 +651,264 @@ load-from-folder path without needing a real checkpoint.
   edits required.
 - **New trainer behavior** (schedulers, checkpointing, logging): extend
   `Trainer` and bump the `_target_` in the `trainer:` block.
+
+---
+
+## Part E — Domain decomposition (two-level, Recommendation A)
+
+A learned one-step surrogate whose **spatial decomposition lives inside the
+model**. Instead of one network spanning the whole grid, a two-level
+overlapping decomposition splits the domain into a uniform batch of
+overlapping patches, runs a shared per-patch *fine* net, and stitches the
+patch outputs back together with a partition-of-unity (PoU) blend — while a
+small *coarse* net supplies global context. The design (companion PDF §2 +
+§5, Algorithm 1) is described in
+[docs/dd_implementation_plan.md](dd_implementation_plan.md).
+
+The point of the decomposition is **grid flexibility**: because the model
+tiles a fixed patch size, one trained instance runs on any global grid that
+shares its training cell spacing (§16) — the global grid becomes a free
+parameter.
+
+### 13. The two-level update (Algorithm 1)
+
+[libs/neural-surrogates/src/neural_surrogates/architectures/domain_decomposed.py](../libs/neural-surrogates/src/neural_surrogates/architectures/domain_decomposed.py)
+
+`DomainDecomposed.forward(state, params, geometry) -> state_next` is one step
+of Algorithm 1, executed entirely on full-grid tensors:
+
+1. **Coarse step (global context).** Average-pool the state
+   (`dd.restrict_coarse`, factor `coarsen_factor`) and the geometry mask
+   (`dd.restrict_coarse_geom`, `any_fluid` by default — a coarse cell is
+   fluid if *any* fine cell in its window is, keeping thin corridors visible),
+   run the small dedicated `coarse_net` (a residual `UNetConvNeXt`), and
+   trilinearly `prolong` the result back to the fine grid. This is the global
+   *context* field `C`.
+2. **Fine step.** Tile state, geometry and `C` into a uniform batch of
+   overlapping **extended (halo) blocks** of edge `n + 2h`
+   (`dd.restrict` — pad each axis to a multiple of `interior_size = n`, then
+   add `halo = h` on every side). Append the per-patch positional encoding
+   (`dd.positional`). The shared `fine_net` (residual `UNetConvNeXt`) runs
+   **once** on the whole patch batch and predicts a residual per patch; the
+   context + positional channels enter the stem **raw** through the widened
+   `extra_in_channels` path (§14). Each sample's `params` are broadcast to all
+   its patches.
+3. **Merge.** Crop each patch output to the `(n + 2·taper)` PoU footprint,
+   window-blend back to the full grid (`dd.extend_merge`, `Σ wᵢ ≡ 1`), crop
+   to the original shape, apply the optional divergence projection
+   (`divergence_projection`, default **off** — currently an identity stub
+   pending Eq 8), and **zero obstacle cells** with the geometry mask.
+
+The decomposition operators are pure torch in
+[decomposition.py](../libs/neural-surrogates/src/neural_surrogates/decomposition.py)
+(`DomainDecomposition`): `restrict` / `restrict_coarse` / `restrict_coarse_geom`
+/ `prolong` / `positional` / `extend_merge` / `neighbor_indices`. There is **no
+I/O** there — everything is tensor bookkeeping so it can sit inside the model.
+A small per-shape `_Plan` (tiling counts, padding, PoU window, positional
+encoding) is built lazily and cached per `(grid, device, dtype)`, so a change
+of grid size simply rebuilds the plan.
+
+**PoU windows.** Strict-`n` interiors are disjoint and give no blend, so the
+merge uses a slightly larger `(n + 2·taper)` footprint carrying a separable
+Hann taper (overlap `2·taper`), scatter-added into the padded grid and
+normalised by the overlap-sum so `Σᵢ wᵢ ≡ 1` everywhere. `taper ≤ halo` so the
+PoU band lies inside the extended block.
+
+### 14. The `extra_in_channels` widening of `UNetConvNeXt`
+
+[unet_convnext.py](../libs/neural-surrogates/src/neural_surrogates/architectures/unet_convnext.py)
+
+`UNetConvNeXt` gained `extra_in_channels: int = 0` and a
+`forward(..., extra=None)` argument. When set, the stem widens to
+`n_state_channels + 1 + extra_in_channels` and `extra` is concatenated
+**after** the geometry mask, **raw** — no standardisation, no geometry masking
+— so the DD wrapper can feed per-patch context (`C`) and positional encodings
+straight in. The fine net is built with
+`extra_in_channels = n_state_channels + n_pos`; the coarse net takes none.
+
+The default `0` / `None` keeps the stem (and the whole state dict)
+**byte-identical** to a model built without the argument, so pre-existing
+`UNetConvNeXt` checkpoints still load. `set_normalization` on the wrapper
+forwards the train-split statistics to **both** inner nets (a no-op for a net
+built with `normalize=False`).
+
+### 15. The key design property — it's a drop-in architecture
+
+The decomposition is **embedded inside the model**: `DomainDecomposed.forward`
+takes and returns **full-grid** tensors with exactly the
+`forward(state, params, geometry) -> state_next` contract every other
+architecture (§7) obeys. As a consequence:
+
+- it trains with the **existing `Trainer` on the existing `TransitionDataset`**
+  under a plain `MSELoss` on the merged prediction (no trainer or dataset
+  changes — verified; this is the primary, validated milestone);
+- it runs through the existing `NeuralSurrogateForwardModel` / ensemble /
+  ESMDA path (§12) unchanged, save for the relaxed domain check of §16.
+
+It is exported from
+[architectures/__init__.py](../libs/neural-surrogates/src/neural_surrogates/architectures/__init__.py)
+and the top-level
+[neural_surrogates/__init__.py](../libs/neural-surrogates/src/neural_surrogates/__init__.py)
+(`DomainDecomposed`, plus `DomainDecomposition` and `DomainDecompositionLoss`),
+so its `_target_` is the flat `neural_surrogates.DomainDecomposed`.
+
+### 16. Flexible grid at inference
+
+[forward_model.py](../libs/neural-surrogates/src/neural_surrogates/forward_model.py)
+
+`DomainDecomposed` advertises `domain_flexible = True`. The forward model's
+`_check_domain` detects this (`getattr(self.model, "domain_flexible", False)`)
+and switches to a **cell-spacing** invariant (`_check_domain_flexible`): the
+requested and trained `(dx, dy, dz) = (hi − lo) / (nx, ny, nz)` must agree per
+axis, but `nx/ny/nz` and the absolute bounds are otherwise free. The trained
+global grid is no longer required — only the spacing. Every non-flexible model
+keeps the strict `nx/ny/nz` + bounds equality check verbatim. `rollout_batched`
+and the rest of the forward-model path are unchanged.
+
+### 17. Periodicity
+
+Global periodicity is configured once, on the decomposition, via
+`decomposition.periodic_axes` in `(z, y, x)` order. The lab default is
+**y-periodic** `[false, true, false]` (uDALES runs are spanwise-periodic; x
+inflow-outflow and z ground/top are not). On a periodic axis:
+
+- the **halo fill** wraps circularly (`F.pad(mode='circular')`) instead of
+  using `boundary_mode`;
+- the **PoU overlap wraps around** the domain — the `taper` overhang of the
+  boundary tiles is wrap-added onto the opposite end before normalisation, so
+  `Σᵢ wᵢ ≡ 1` holds *across the seam* and the merge is seamless (C0-continuous)
+  there;
+- the **positional encoding** uses a periodic signal
+  (`sin(2π·wrapped_coord / g)`) instead of the signed wall-distance ramp, so a
+  tile against the seam is not told it sits against a wall;
+- `interior_size` must **divide** the periodic axis length exactly (periodic
+  axes are not padded — padding would corrupt the ring length).
+
+The **inner nets are NOT given `periodic_axes`** (the wrapper forces
+`periodic_axes=()` on both): patch interiors are not periodic, and all global
+periodicity is handled by the DD halo fill.
+
+### 18. Two training paths
+
+**(a) Drop-in path (primary, validated).** The existing
+[`Trainer`](../libs/neural-surrogates/src/neural_surrogates/training.py) +
+[`TransitionDataset`](../libs/neural-surrogates/src/neural_surrogates/data.py) +
+`MSELoss` on the full merged prediction (§15). Nothing about §10 changes; this
+is milestone 1.
+
+**(b) Patch-based Eq (9) objective.** The four-term loss of companion PDF §2.7
+in
+[dd_loss.py](../libs/neural-surrogates/src/neural_surrogates/dd_loss.py)
+(`DomainDecompositionLoss`):
+
+| Term | Weight | Computed on |
+|---|---|---|
+| **one-step** | `1` | MSE of the *merged* next-state vs ground truth on fluid cells |
+| **interface** | `λ_if = 0.1` | disagreement of adjacent patches' `(n+2·taper)` PoU blocks on their `2·taper` overlap band (`+z/+y/+x` faces, each shared band once; periodic wrap via `neighbor_indices`) |
+| **divergence** | `λ_div = 0.01` | squared `∇·u` (central differences, `dx = 1`) of the merged velocity channels on fluid cells |
+| **coarse** | `λ_c = 1.0` | MSE of `coarse_pred` vs `restrict_coarse(target)` |
+
+The loss consumes the `info` dict returned by
+`DomainDecomposed.forward(..., return_intermediates=True)` (`coarse_pred`,
+`patch_pred` — the per-patch PoU blocks before windowing —, `context`,
+`num_patches`, `dd`) alongside the merged prediction.
+
+[`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/patch_training.py)
+mirrors `Trainer` (device handling, best-checkpoint saving) but trains on
+**full-field** `TransitionDataset` batches via `return_intermediates=True`.
+**Why full fields rather than per-patch items?** The interface and divergence
+terms couple *neighbouring* patches; an isolated patch item cannot supply its
+neighbours' predictions (they may land in a different minibatch, or be absent),
+so those terms are only well-defined when the whole field — hence every
+patch — is present each step.
+
+[`PatchTransitionDataset`](../libs/neural-surrogates/src/neural_surrogates/data_patch.py)
+is a **new** dataset that reads the **same on-disk `training_data/` layout**
+(§1) but yields one sample per spatial patch: it subclasses `TransitionDataset`
+to reuse its file walking, parameter loading and lazy two-snapshot reads, and
+returns the extended block, its interior delta target, the patch geometry /
+positional / neighbour table, and the (global, per-`(traj, t)`) coarse fields.
+It is suited to one-step delta-only patch training; the coupled
+interface/divergence terms still need `PatchTrainer`'s full-field path.
+**`K = 1` is the supported patch path** — a `K > 1` patch pushforward needs the
+full PoU merge (a patch's halo at `t+1` depends on its neighbours' interiors),
+which only the model owns.
+
+### 19. Config and CLI
+
+The config group
+[conf/neural_surrogate/architectures/domain_decomposed/](../conf/neural_surrogate/architectures/domain_decomposed/)
+holds three presets. Each is a single
+`_target_: neural_surrogates.DomainDecomposed` block with
+`_recursive_: false` and `_convert_: all` (so the nested `decomposition` /
+`fine_net` / `coarse_net` arrive as plain kwarg dicts — they are **not**
+`_target_` nodes — and the wrapper builds `DomainDecomposition` /
+`UNetConvNeXt(**...)` itself). `extra_in_channels`, `residual=True` and the
+inner-net `periodic_axes=()` are fixed by the wrapper and must not be set in the
+config; global periodicity lives under `decomposition.periodic_axes`.
+
+| Preset | interior_size | halo | taper | coarsen | fine-net (base / mults / depths / kernel) |
+|---|---|---|---|---|---|
+| tiny | 16 | 4 | 2 | 4 | 8 / [1, 2] / [1, 1] / 3 |
+| small | 32 | 8 | 4 | 4 | 16 / [1, 2, 4] / [1, 1, 1] / 5 |
+| medium | 32 | 8 | 4 | 4 | 24 / [1, 2, 4] / [2, 2, 2] / 7 |
+
+(All three use `periodic_axes: [false, true, false]`, `geometry_coarsen:
+any_fluid`, `n_pos: 3`, FiLM conditioning, `normalize: true`, and a small
+dedicated coarse net at `base_channels: 8`.)
+
+**Selecting the architecture.** The `architecture` default is taken at the
+`architectures` group level (so any family — `unet_convnext` / `upt` / `p3d` /
+`domain_decomposed` — is swappable on the CLI; the override value is the nested
+`family/preset` path):
+
+```bash
+# (a) Drop-in path: generic Trainer + MSELoss on the full grid (default groups).
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
+    'neural_surrogate/architectures@architecture=domain_decomposed/small' \
+    model_name=domain_decomposed_small init_weights_path=null
+```
+
+**`trainer` and `loss` are Hydra groups too** (in the `training.yaml` defaults):
+`trainer=standard` → `Trainer`, `loss=mse` → `MSELoss`. The patch objective is
+opt-in by swapping both to their DD variants — `trainer=dd_patch` →
+[`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/patch_training.py),
+`loss=dd` → `DomainDecompositionLoss`:
+
+```bash
+# (b) Patch (Eq 9) path: PatchTrainer + DomainDecompositionLoss.
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
+    'neural_surrogate/architectures@architecture=domain_decomposed/small' \
+    'neural_surrogate/trainer@trainer=dd_patch' \
+    'neural_surrogate/loss@loss=dd' \
+    model_name=domain_decomposed_small init_weights_path=null
+```
+
+`PatchTrainer` is lean: it has **no** AMP / `torch.compile` / pushforward-curriculum
+/ LR-schedule / early-stopping knobs (the four-term loss is single-step over full
+fields), so the `dd_patch` trainer config carries only `num_epochs` and `device`.
+`DomainDecompositionLoss` cannot be driven by the generic `Trainer` (its `forward`
+signature differs from a plain element-wise loss), so `loss=dd` is only valid with
+`trainer=dd_patch`.
+
+**Periodicity.** The single `architecture.periodic_axes: [y]` knob in
+`training.yaml` drives a DD model exactly as it drives a plain `UNetConvNeXt`:
+`DomainDecomposed` translates the axis-letter list into its decomposition's
+`(z, y, x)` periodicity (overriding the preset's `decomposition.periodic_axes`);
+the inner patch nets stay non-periodic. For DD, `interior_size` must divide `Ny`.
+
+### 20. File map
+
+| Piece | File |
+|---|---|
+| `DomainDecomposition` (operators, PoU, periodic wrap, positional, coarse pool/prolong) | [decomposition.py](../libs/neural-surrogates/src/neural_surrogates/decomposition.py) |
+| `DomainDecomposed` (Algorithm 1; `domain_flexible`; `return_intermediates`) | [architectures/domain_decomposed.py](../libs/neural-surrogates/src/neural_surrogates/architectures/domain_decomposed.py) |
+| `UNetConvNeXt` `extra_in_channels` widening | [architectures/unet_convnext.py](../libs/neural-surrogates/src/neural_surrogates/architectures/unet_convnext.py) |
+| `PatchTransitionDataset` (per-patch dataset, same on-disk layout) | [data_patch.py](../libs/neural-surrogates/src/neural_surrogates/data_patch.py) |
+| `DomainDecompositionLoss` (Eq 9, four terms) | [dd_loss.py](../libs/neural-surrogates/src/neural_surrogates/dd_loss.py) |
+| `PatchTrainer` (full-field Eq-9 training) | [patch_training.py](../libs/neural-surrogates/src/neural_surrogates/patch_training.py) |
+| Spacing-invariant domain check (`domain_flexible`) | [forward_model.py](../libs/neural-surrogates/src/neural_surrogates/forward_model.py) |
+| Architecture presets `tiny` / `small` / `medium` | [conf/neural_surrogate/architectures/domain_decomposed/](../conf/neural_surrogate/architectures/domain_decomposed/) |
+| Trainer groups `standard` / `dd_patch` | [conf/neural_surrogate/trainer/](../conf/neural_surrogate/trainer/) |
+| Loss groups `mse` / `dd` | [conf/neural_surrogate/loss/](../conf/neural_surrogate/loss/) |
+| Tests | [test_decomposition.py](../tests/test_decomposition.py), [test_domain_decomposed.py](../tests/test_domain_decomposed.py), [test_unet_convnext_extra_channels.py](../tests/test_unet_convnext_extra_channels.py), [test_patch_transition_dataset.py](../tests/test_patch_transition_dataset.py), [test_dd_loss.py](../tests/test_dd_loss.py), [test_dd_forward_model_flexible.py](../tests/test_dd_forward_model_flexible.py), [test_dd_training_wiring.py](../tests/test_dd_training_wiring.py) |

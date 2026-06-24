@@ -8,8 +8,32 @@
 
 
 defaults:
-  - /neural_surrogate/architectures/p3d@architecture: medium
+  # Architecture is selected at the `architectures` group level so any family
+  # (unet_convnext / upt / p3d / domain_decomposed) is swappable on the CLI:
+  #   ...architectures@architecture=unet_convnext/large
+  #   ...architectures@architecture=domain_decomposed/small
+  - /neural_surrogate/architectures@architecture: p3d/medium
+  - /neural_surrogate/trainer@trainer: standard
+  - /neural_surrogate/loss@loss: mse
   - _self_
+
+# Domain-decomposed surrogate (two-level overlapping DD, Recommendation A).
+# (a) Drop-in path -- train a DD model exactly like any other architecture
+#     (generic Trainer + MSE on the full grid). Just swap the architecture:
+#       pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
+#         'neural_surrogate/architectures@architecture=domain_decomposed/small' \
+#         model_name=domain_decomposed_small init_weights_path=null
+# (b) Patch (Eq 9) path -- add the interface/divergence/coarse terms via the
+#     PatchTrainer + DomainDecompositionLoss groups:
+#       pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
+#         'neural_surrogate/architectures@architecture=domain_decomposed/small' \
+#         'neural_surrogate/trainer@trainer=dd_patch' \
+#         'neural_surrogate/loss@loss=dd' \
+#         model_name=domain_decomposed_small init_weights_path=null
+# The `architecture.periodic_axes: [y]` knob below applies to BOTH a plain UNet
+# and a DD model: DomainDecomposed translates it into its decomposition's
+# (z, y, x) periodicity (the inner patch nets stay non-periodic). For DD,
+# interior_size must divide Ny.
 
 model_name: p3d_medium
 
@@ -28,46 +52,10 @@ architecture:
 # init_weights_path: model_weights/unet_convnext_medium/weights.pt
 init_weights_path: null
 
-trainer:
-  _target_: neural_surrogates.Trainer
-  num_epochs: 200
-  device: cuda
-  patience: 15
-  # Mixed precision autocast. bf16 needs no grad scaling and cannot
-  # underflow; the trainer falls back to fp16 (+ GradScaler) on GPUs
-  # without bf16 support.
-  amp: true
-  amp_dtype: bfloat16
-  # torch.compile the model (static conv stack -> good fusion win). First
-  # batch pays one-off compilation latency.
-  compile_model: true
-  # channels-last-3d memory layout for cuDNN kernel selection under
-  # autocast. A/B this on the training GPU; correctness is unaffected.
-  channels_last: false
-  # Rollout-length curriculum: begin with `pushforward_start_steps`-step
-  # rollouts and add one step every `pushforward_epochs_per_step` epochs, up to
-  # `dataset.pushforward_steps`. Set the cadence to null to train at a fixed
-  # horizon (the original pushforward behavior).
-  pushforward_epochs_per_step: 10
-  pushforward_start_steps: 1
-  # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
-  # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`
-  # over the remaining epochs. Set `lr_warmup_epochs` to null to disable.
-  lr_warmup_epochs: 10
-  lr_warmup_start: 1.0e-6
-  lr_min: 1.0e-6
-  # Restrict the loss to fluid cells (uDALES targets carry junk values
-  # inside obstacles).
-  mask_loss: true
-  # Global grad-norm clip; set null to disable.
-  grad_clip_norm: 1.0
-  # Backprop through the last N unroll steps (1 = pure pushforward trick;
-  # the earlier steps always run no-grad).
-  grad_unroll_steps: 2
-  # Continue from <weights dir>/checkpoint.pt (model + optimizer +
-  # scheduler + scaler + curriculum state, written every epoch). Per-epoch
-  # metrics are appended to <weights dir>/metrics.csv.
-  resume: false
+# The trainer and loss are Hydra groups (see the `defaults` list above):
+#   trainer=standard  -> neural_surrogates.Trainer  (conf/.../trainer/standard.yaml)
+#   loss=mse          -> torch.nn.MSELoss           (conf/.../loss/mse.yaml)
+# Override individual trainer fields inline as usual, e.g. `trainer.num_epochs=10`.
 
 # Alternative tuning that has worked well: torch.optim.AdamW with
 # weight_decay: 1.0e-6, patience: 25, dataloader.batch_size: 64.
@@ -75,9 +63,6 @@ optimizer:
   _target_: torch.optim.AdamW
   lr: 1.0e-4
   weight_decay: 1e-5
-
-loss:
-  _target_: torch.nn.MSELoss
 
 dataset:
   _target_: neural_surrogates.TransitionDataset

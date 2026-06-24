@@ -1,0 +1,44 @@
+# Domain-decomposed surrogate — small preset. Two-level overlapping DD wrapping
+# a per-patch fine net and a small dedicated coarse net.
+#
+# Both sub-nets are composed BY REFERENCE from the existing architecture presets
+# (the `defaults` below) and instantiated by the wrapper via Hydra -- so their
+# hyperparameters live in one place (architectures/<family>/<size>) and any
+# family is swappable here, e.g.
+#   - /neural_surrogate/architectures/upt@coarse_net: tiny
+defaults:
+  - /neural_surrogate/architectures/unet_convnext@fine_net: small
+  - /neural_surrogate/architectures/unet_convnext@coarse_net: tiny
+  - _self_
+
+_target_: neural_surrogates.DomainDecomposed
+# The wrapper instantiates fine_net / coarse_net itself (injecting the channel
+# counts and overriding extra_in_channels / periodic_axes), so Hydra must NOT
+# recurse into those nodes. `_convert_: all` passes them as plain dict/list.
+_recursive_: false
+_convert_: all
+
+# Two-level overlapping tiling. interior_size must divide any periodic axis
+# length exactly (y is periodic here -> Ny % interior_size == 0).
+decomposition:
+  interior_size: 32
+  halo: 8
+  taper: 4
+  coarsen_factor: 4
+  n_pos: 3
+  boundary_mode: replicate
+  # (z, y, x) periodicity. The uDALES runs are spanwise (y) periodic; x
+  # (inflow-outflow) and z (ground/top) are not. Global periodicity lives
+  # here, never on the inner nets.
+  periodic_axes: [false, true, false]
+  # A coarse cell is fluid if ANY fine cell in its window is fluid -- keeps
+  # thin fluid corridors visible to the coarse pressure field.
+  geometry_coarsen: any_fluid
+
+# fine_net / coarse_net hyperparameters come from the referenced presets above.
+# The wrapper injects n_state_channels / n_params, widens the fine stem with
+# extra_in_channels (context + positional), and forces periodic_axes=() on both
+# inner nets. Override any preset key by adding it under `fine_net:` / `coarse_net:`.
+
+# Coarse-grid divergence-cleaning projection (Eq 8) is an identity stub; off.
+divergence_projection: false

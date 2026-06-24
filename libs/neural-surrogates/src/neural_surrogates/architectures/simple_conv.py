@@ -17,6 +17,7 @@ class SimpleConv(nn.Module):
         n_state_channels: int,
         n_params: int,
         kernel_size: int = 3,
+        extra_in_channels: int = 0,
     ) -> None:
         super().__init__()
         if n_params > n_state_channels:
@@ -24,10 +25,17 @@ class SimpleConv(nn.Module):
                 f"n_params ({n_params}) must be <= n_state_channels "
                 f"({n_state_channels}); each parameter is added to one output channel"
             )
+        if extra_in_channels < 0:
+            raise ValueError("extra_in_channels must be >= 0")
         self.n_state_channels = n_state_channels
         self.n_params = n_params
+        # ``extra_in_channels`` are raw input-only channels (e.g. a coarse-context
+        # field + positional encoding fed by the domain-decomposition wrapper).
+        # They widen the input stem but NOT the output: with the default 0 the
+        # stem and state-dict are byte-identical to the original.
+        self.extra_in_channels = int(extra_in_channels)
         self.conv = nn.Conv3d(
-            in_channels=n_state_channels + 1,
+            in_channels=n_state_channels + 1 + self.extra_in_channels,
             out_channels=n_state_channels,
             kernel_size=kernel_size,
             padding=kernel_size // 2,
@@ -38,10 +46,26 @@ class SimpleConv(nn.Module):
         state: torch.Tensor,
         params: torch.Tensor,
         geometry: torch.Tensor,
+        extra: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if (extra is None) != (self.extra_in_channels == 0):
+            raise ValueError(
+                "extra must be provided iff extra_in_channels > 0 "
+                f"(extra_in_channels={self.extra_in_channels}, "
+                f"extra={'None' if extra is None else 'tensor'})"
+            )
+        if extra is not None and extra.shape[1] != self.extra_in_channels:
+            raise ValueError(
+                f"extra has {extra.shape[1]} channels, expected "
+                f"{self.extra_in_channels}"
+            )
         if geometry.dim() == state.dim() - 1:
             geometry = geometry.unsqueeze(1)
-        x = torch.cat([state, geometry], dim=1)
+        pieces = [state, geometry]
+        if extra is not None:
+            # raw, unnormalised, unmasked -- concatenated right after geometry.
+            pieces.append(extra)
+        x = torch.cat(pieces, dim=1)
         y = self.conv(x)
 
         spatial_dims = y.dim() - 2

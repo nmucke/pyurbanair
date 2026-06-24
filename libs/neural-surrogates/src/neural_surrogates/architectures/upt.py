@@ -161,6 +161,16 @@ class UPT(nn.Module):
         correct behaviour for a slow transient) the model's default, which is
         what lets the rollout actually advance in time rather than freeze on a
         constant.
+    extra_in_channels:
+        Number of *extra* input-only channels gathered alongside the state at
+        the fluid cells and concatenated **raw** into the per-point features --
+        no normalisation, no geometry masking. These are passed to
+        :meth:`forward` via the ``extra`` argument and let the
+        domain-decomposition wrapper feed per-patch coarse context and
+        positional encodings straight in. They do **not** change the output
+        channel count (the decoder still emits ``n_state_channels``). The
+        default ``0`` keeps the encoder ``input_dim`` -- and hence the state
+        dict -- identical to a model built without this argument.
     attention_type:
         Self-attention implementation used by the encoder / approximator /
         decoder transformer stacks (the perceiver cross-attention tails are
@@ -196,6 +206,8 @@ class UPT(nn.Module):
         ndim: int = 3,
         normalize: bool = True,
         predict_residual: bool = True,
+        # --- extra input-only channels ---
+        extra_in_channels: int = 0,
         # --- attention ---
         attention_type: str = "dot_product",
         attention_kwargs: dict | None = None,
@@ -205,6 +217,8 @@ class UPT(nn.Module):
             raise ValueError(
                 f"dim ({dim}) must be divisible by num_heads ({num_heads})"
             )
+        if extra_in_channels < 0:
+            raise ValueError("extra_in_channels must be >= 0")
 
         self.n_state_channels = n_state_channels
         self.n_params = n_params
@@ -219,6 +233,7 @@ class UPT(nn.Module):
         self.ndim = ndim
         self.normalize = normalize
         self.predict_residual = predict_residual
+        self.extra_in_channels = int(extra_in_channels)
         self.attention_type = attention_type
 
         # Build the self-attention constructors for the transformer stacks. The
@@ -240,8 +255,18 @@ class UPT(nn.Module):
         self.register_buffer("param_mean", torch.zeros(n_params))
         self.register_buffer("param_std", torch.ones(n_params))
 
-        # default (cond_dim is None): inflow params concatenated to per-point feats
-        feat_dim = n_state_channels + (n_params if cond_dim is None else 0)
+        # default (cond_dim is None): inflow params concatenated to per-point feats.
+        # ``extra_in_channels`` widens the per-point input regardless of the
+        # conditioning path: the extra channels (DD coarse context + positional
+        # encodings) are gathered raw at the fluid cells and fed straight into the
+        # encoder's input projection. With the default 0 the encoder's
+        # ``input_dim`` -- and hence the whole state dict -- is byte-identical to a
+        # model built without this argument, so existing checkpoints load.
+        feat_dim = (
+            n_state_channels
+            + self.extra_in_channels
+            + (n_params if cond_dim is None else 0)
+        )
         self.feat_dim = feat_dim
 
         if cond_dim is not None:
@@ -400,6 +425,7 @@ class UPT(nn.Module):
         params: torch.Tensor,
         mask: torch.Tensor,
         coords: torch.Tensor,
+        extra: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode/approximate/decode a batch that SHARES the geometry ``mask``."""
         b, c, d, h, w = state.shape
@@ -427,9 +453,20 @@ class UPT(nn.Module):
             feat_in = flat
             params_in = params
 
+        # Gather the extra input-only channels at the SAME fluid cells as the
+        # state and concatenate them RAW: no standardisation, no geometry mask.
+        # They sit right after the (possibly normalised) state features and
+        # before the params, so the params stay last in the per-point vector.
+        if extra is not None:
+            ce = extra.shape[1]
+            extra_feat = extra.reshape(b, ce, -1)[:, :, fluid_idx].transpose(
+                1, 2
+            )  # (B, N, extra_in_channels)
+            feat_in = torch.cat([feat_in, extra_feat], dim=-1)
+
         if self.cond_dim is None:
             params_b = params_in[:, None, :].expand(b, feat_in.shape[1], -1)
-            feats = torch.cat([feat_in, params_b], dim=-1)  # (B, N, C + P)
+            feats = torch.cat([feat_in, params_b], dim=-1)  # (B, N, C + extra + P)
             condition = None
         else:
             feats = feat_in
@@ -478,7 +515,23 @@ class UPT(nn.Module):
         state: torch.Tensor,
         params: torch.Tensor,
         geometry: torch.Tensor,
+        extra: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # ``extra`` carries input-only channels (DD context + positional
+        # encodings) on the same spatial grid as ``state``. Validate exactly like
+        # UNetConvNeXt: required iff the model was built with extra channels, and
+        # its channel count must match.
+        if (extra is None) != (self.extra_in_channels == 0):
+            raise ValueError(
+                "extra must be provided iff extra_in_channels > 0 "
+                f"(extra_in_channels={self.extra_in_channels}, "
+                f"extra={'None' if extra is None else 'tensor'})"
+            )
+        if extra is not None and extra.shape[1] != self.extra_in_channels:
+            raise ValueError(
+                f"extra has {extra.shape[1]} channels, expected "
+                f"{self.extra_in_channels}"
+            )
         # normalize geometry to (B, D, H, W)
         if geometry.dim() == state.dim():  # (B, 1, D, H, W) -> (B, D, H, W)
             geometry = geometry.squeeze(1)
@@ -496,7 +549,10 @@ class UPT(nn.Module):
 
         if shared:
             # fast path: one point set / supernode graph for the whole batch
-            return self._run(state, params, mask0, coords) * geometry.unsqueeze(1)
+            return (
+                self._run(state, params, mask0, coords, extra)
+                * geometry.unsqueeze(1)
+            )
 
         # documented fallback: rebuild per sample (rare; geometry not shared)
         outs = []
@@ -507,6 +563,7 @@ class UPT(nn.Module):
                     params[i : i + 1],
                     geometry[i],
                     coords,
+                    None if extra is None else extra[i : i + 1],
                 )
             )
         out = torch.cat(outs, dim=0)

@@ -1,0 +1,15 @@
+# Four-term domain-decomposition objective of companion PDF Eq (9):
+# one-step + interface + divergence + coarse. Only consumed by the
+# `dd_patch` trainer (PatchTrainer); the generic Trainer cannot drive it
+# (its forward signature differs from a plain element-wise loss). Select with
+#   'neural_surrogate/loss@loss=dd'
+# Starting weights are Table 1 defaults.
+_target_: neural_surrogates.DomainDecompositionLoss
+lambda_interface: 0.1
+lambda_divergence: 0.01
+lambda_coarse: 1.0
+# Channels holding the velocity components (u, v, w) = (x-vel, y-vel, z-vel),
+# in that order, for the divergence term. Each is differenced along its own axis.
+velocity_channels: [0, 1, 2]
+# Restrict the one-step / divergence terms to fluid cells.
+mask_loss: true

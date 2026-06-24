@@ -227,6 +227,14 @@ class UNetConvNeXt(nn.Module):
         boundary values is imposed). Weight-compatible with models
         trained without it (only padding semantics change). Sizes along
         periodic axes must be divisible by ``2^(len(channel_mults)-1)``.
+    extra_in_channels:
+        Number of *extra* input channels appended to the stem input
+        **after** the geometry mask. These are passed to :meth:`forward` via
+        the ``extra`` argument and concatenated **raw** -- no normalisation,
+        no geometry masking -- so the domain-decomposition wrapper can feed
+        per-patch context and positional encodings straight in. The default
+        ``0`` keeps the stem (and hence the whole state dict) byte-identical
+        to a model built without this argument, so existing checkpoints load.
     """
 
     def __init__(
@@ -245,6 +253,7 @@ class UNetConvNeXt(nn.Module):
         normalize: bool = False,
         residual: bool = False,
         periodic_axes: Sequence[str] = (),
+        extra_in_channels: int = 0,
     ) -> None:
         super().__init__()
         if len(channel_mults) != len(depths):
@@ -255,10 +264,13 @@ class UNetConvNeXt(nn.Module):
         if len(channel_mults) < 1:
             raise ValueError("channel_mults must have at least one stage")
 
+        if extra_in_channels < 0:
+            raise ValueError("extra_in_channels must be >= 0")
         self.n_state_channels = n_state_channels
         self.n_params = n_params
         self.normalize = normalize
         self.residual = residual
+        self.extra_in_channels = int(extra_in_channels)
         axes = tuple(periodic_axes or ())
         unknown = set(axes) - {"z", "y", "x"}
         if unknown:
@@ -286,7 +298,7 @@ class UNetConvNeXt(nn.Module):
             cond_dim = param_embed_dim
 
         self.stem = nn.Conv3d(
-            n_state_channels + 1,
+            n_state_channels + 1 + self.extra_in_channels,
             channels[0],
             kernel_size=3,
             padding=tuple(0 if per else 1 for per in self._periodic),
@@ -400,7 +412,19 @@ class UNetConvNeXt(nn.Module):
         state: torch.Tensor,
         params: torch.Tensor,
         geometry: torch.Tensor,
+        extra: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if (extra is None) != (self.extra_in_channels == 0):
+            raise ValueError(
+                "extra must be provided iff extra_in_channels > 0 "
+                f"(extra_in_channels={self.extra_in_channels}, "
+                f"extra={'None' if extra is None else 'tensor'})"
+            )
+        if extra is not None and extra.shape[1] != self.extra_in_channels:
+            raise ValueError(
+                f"extra has {extra.shape[1]} channels, expected "
+                f"{self.extra_in_channels}"
+            )
         if geometry.dim() == state.dim() - 1:
             geometry = geometry.unsqueeze(1)
         # Zero out obstacle interiors: uDALES fielddumps carry junk values
@@ -420,6 +444,11 @@ class UNetConvNeXt(nn.Module):
         cond = self.param_embed(params) if self.param_embed is not None else params
 
         x = torch.cat([x, geometry], dim=1)
+        # ``extra`` (DD context + positional encodings) is concatenated RAW:
+        # no normalisation, no geometry masking. The stem was widened to
+        # absorb these channels.
+        if extra is not None:
+            x = torch.cat([x, extra], dim=1)
 
         orig_spatial = x.shape[-3:]
         x, _ = self._pad_to_multiple(x, 2**self.n_levels)

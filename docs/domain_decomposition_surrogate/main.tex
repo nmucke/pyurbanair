@@ -367,7 +367,7 @@ normalization, so $\sum_i w_i\equiv1$ holds \emph{across} the seam and the merge
 seamless there.
 \item \textbf{Positional wrap.} The positional encoding $\bm e_i$
 (Section~\ref{sec:fine}) uses a smooth $\sin(2\pi\,\cdot/N)$ signal on a periodic
-axis instead of signed distance to a (non-existent) wall.
+axis instead of a signed coordinate that would imply a (non-existent) wall.
 \end{itemize}
 The single constraint is that the interior size $n$ must divide a periodic axis's
 length, since such an axis cannot be zero-padded to a multiple of $n$ without
@@ -408,7 +408,9 @@ A purely local patch cannot see beyond its halo, so it cannot represent the
 instantaneous global coupling of incompressible flow within one step. The coarse
 level supplies that missing global view cheaply. Let $\Rop_H$ average-pool the fine
 state by an integer factor $r$ onto a coarse grid of shape
-$(N_z/r)\times(N_y/r)\times(N_x/r)$, and let $\mathcal P_H$ be the matching
+$\lceil N_z/r\rceil\times\lceil N_y/r\rceil\times\lceil N_x/r\rceil$ (each axis is
+first padded up to a multiple of $r$, so the division is exact after padding), and
+let $\mathcal P_H$ be the matching
 (trilinear) prolongation back to the fine grid. A small coarse network $\Gcoarse$
 takes one low-resolution step, and its prolongation is the \emph{context} field:
 \begin{equation}
@@ -460,8 +462,9 @@ $\bm C_t$. The coarse pass costs $r^{3}$ fewer cells than a fine step.}
 Each patch receives, channel-wise concatenated: its restricted state $\Rop_i\bm
 S_t$ ($C$ channels), its restricted geometry $\Rop_i\bm m$ ($1$ channel), the
 restricted coarse context $\Rop_i\bm C_t$ ($C$ channels), and a positional encoding
-$\bm e_i$ ($n_{\text{pos}}$ channels, signed distance to the global boundary on
-non-periodic axes and a periodic $\sin$ signal otherwise). The shared fine network
+$\bm e_i$ ($n_{\text{pos}}$ channels: a signed, normalized axis \emph{coordinate}
+on non-periodic axes --- monotonic from $-1$ at the low face to $+1$ at the high
+face, not a distance to the nearest wall --- and a periodic $\sin$ signal otherwise). The shared fine network
 predicts a \emph{residual} (delta-state), which is the standard stable choice for
 learned time-steppers:
 \begin{align}

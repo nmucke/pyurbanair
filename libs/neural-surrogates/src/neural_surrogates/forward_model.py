@@ -182,7 +182,6 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         self.device = torch.device(device)
         self.torch_dtype = getattr(torch, dtype)
 
-        self._check_domain(trained_domain)
         self.substeps = self._resolve_substeps()
 
         # With ``_recursive_: false`` on the Hydra config the spin-up backend
@@ -210,6 +209,11 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         self._load_weights(weights_path, allow_uninitialized_weights)
         self.model = self.model.to(device=self.device, dtype=self.torch_dtype)
         self.model.eval()
+
+        # The domain check needs ``self.model`` to detect whether the network is
+        # domain-flexible (decomposes the grid internally), so it runs after the
+        # network is built.
+        self._check_domain(trained_domain)
 
         # Geometry mask is grid-aligned; built lazily once we have a state
         # template (its dims/coords come from the spin-up backend).
@@ -297,18 +301,18 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
     # -- construction-time validation --------------------------------------
 
     def _check_domain(self, trained_domain: dict[str, Any]) -> None:
-        """Raise unless the requested domain matches the trained one."""
+        """Validate the requested domain against the trained one.
+
+        A *domain-flexible* model (``getattr(self.model, "domain_flexible",
+        False)`` -- e.g. :class:`~neural_surrogates.DomainDecomposed`) does the
+        spatial decomposition internally and so applies to any global grid that
+        shares the trained cell spacing ``(dx, dy, dz)``; for it ``nx/ny/nz``
+        and the absolute bounds are free, and only the spacing must match.
+        Every other model is pinned to its exact training grid, so the strict
+        ``nx/ny/nz`` + bounds equality check is kept verbatim.
+        """
         from omegaconf import OmegaConf
 
-        requested = {"nx": self.nx, "ny": self.ny, "nz": self.nz}
-        for key, value in requested.items():
-            trained_value = int(trained_domain[key])
-            if value != trained_value:
-                raise ValueError(
-                    f"requested {key}={value} does not match the domain the "
-                    f"surrogate was trained on ({key}={trained_value}). The "
-                    "network only applies to its training grid."
-                )
         trained_bounds = np.asarray(
             OmegaConf.to_container(trained_domain["bounds"])
             if OmegaConf.is_config(trained_domain.get("bounds"))
@@ -321,10 +325,56 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             else self.bounds,
             dtype=float,
         )
+
+        if getattr(self.model, "domain_flexible", False):
+            self._check_domain_flexible(
+                trained_domain, trained_bounds, requested_bounds
+            )
+            return
+
+        requested = {"nx": self.nx, "ny": self.ny, "nz": self.nz}
+        for key, value in requested.items():
+            trained_value = int(trained_domain[key])
+            if value != trained_value:
+                raise ValueError(
+                    f"requested {key}={value} does not match the domain the "
+                    f"surrogate was trained on ({key}={trained_value}). The "
+                    "network only applies to its training grid."
+                )
         if not np.allclose(trained_bounds, requested_bounds, atol=_BOUNDS_ATOL):
             raise ValueError(
                 f"requested bounds {requested_bounds.tolist()} do not match the "
                 f"trained bounds {trained_bounds.tolist()}."
+            )
+
+    def _check_domain_flexible(
+        self,
+        trained_domain: dict[str, Any],
+        trained_bounds: np.ndarray,
+        requested_bounds: np.ndarray,
+    ) -> None:
+        """Spacing-invariant domain check for a domain-flexible model.
+
+        The trained and requested cell spacings ``(dx, dy, dz) = (hi - lo) /
+        (nx, ny, nz)`` must agree per axis; ``nx/ny/nz`` and absolute bounds
+        are otherwise free. ``bounds`` is ordered ``(x, y, z)`` to match
+        ``(nx, ny, nz)``.
+        """
+        trained_dims = np.array(
+            [int(trained_domain["nx"]), int(trained_domain["ny"]), int(trained_domain["nz"])],
+            dtype=float,
+        )
+        requested_dims = np.array([self.nx, self.ny, self.nz], dtype=float)
+
+        d_trained = (trained_bounds[:, 1] - trained_bounds[:, 0]) / trained_dims
+        d_req = (requested_bounds[:, 1] - requested_bounds[:, 0]) / requested_dims
+
+        if not np.allclose(d_trained, d_req, atol=_BOUNDS_ATOL):
+            raise ValueError(
+                f"requested cell spacing (dx, dy, dz)={d_req.tolist()} does not "
+                f"match the trained cell spacing {d_trained.tolist()}. A "
+                "domain-flexible surrogate may run on a different grid size or "
+                "extent, but only at the spacing it was trained on."
             )
 
     def _resolve_substeps(self) -> int:

@@ -1,0 +1,14 @@
+# Patch-based Eq (9) trainer for the domain-decomposed surrogate
+# (neural_surrogates.PatchTrainer). Opt-in: select with
+#   'neural_surrogate/trainer@trainer=dd_patch'
+# Pair it with `loss=dd` (DomainDecompositionLoss) and a `domain_decomposed`
+# architecture (its forward must accept return_intermediates=True).
+#
+# PatchTrainer is deliberately lean and does NOT support the generic Trainer's
+# amp / torch.compile / pushforward-curriculum / LR-schedule / early-stopping
+# knobs: the four-term loss is single-step and is computed from the model's
+# per-patch intermediates over full fields. It trains on the ordinary
+# (full-field) `TransitionDataset` already configured in training.yaml.
+_target_: neural_surrogates.PatchTrainer
+num_epochs: 200
+device: cuda
