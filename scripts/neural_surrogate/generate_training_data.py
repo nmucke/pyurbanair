@@ -35,24 +35,32 @@ from pyurbanair.config.hydra_helpers import (
     resolve_output_dir,
     resolve_parameter_schema,
 )
+from pyurbanair.dynamic_parameters import build_knot_times
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
 
 
 def _sample_params(
     params_sampler,
     *,
-    num_time_points: int,
+    seconds_per_knot: float,
     simulation_time: float,
     seed: int,
 ) -> xr.Dataset:
     """Draw all parameter trajectories in one shot.
+
+    Knots are placed every ``seconds_per_knot`` seconds over
+    ``[0, simulation_time]`` (with a linearly-extrapolated final knot when the
+    horizon isn't an exact multiple), via the same ``build_knot_times`` grid the
+    AR(2) model uses internally so the two stay aligned.
 
     `params_sampler.sample_prior` must return `(time, ensemble)` arrays
     per parameter — true for both `ParameterTimeSeries` subclasses and
     `pyurbanair.training_data.UniformParameterSampler`.
     """
     rng_key = jax.random.PRNGKey(seed)
-    time_coords = np.linspace(0.0, float(simulation_time), num_time_points)
+    time_coords = np.asarray(
+        build_knot_times(0.0, float(simulation_time), seconds_per_knot)
+    )
     sampled = params_sampler.sample_prior(time_coords, rng_key)
     return sampled.assign_coords(time=time_coords)
 
@@ -325,17 +333,17 @@ def run(cfg: DictConfig) -> None:
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
 
     # --- Sample parameters ------------------------------------------------
-    # ``num_time_points`` (the number of knots in each parameter trajectory)
+    # ``seconds_per_knot`` (the knot spacing of each parameter trajectory)
     # lives under params_sampler in the config but is not a sampler constructor
     # arg, so pop it before instantiating.
     sampler_cfg = OmegaConf.to_container(td.params_sampler, resolve=True)
-    num_time_points = int(sampler_cfg.pop("num_time_points"))
+    seconds_per_knot = float(sampler_cfg.pop("seconds_per_knot"))
     sampler_cfg["ensemble_size"] = n_total
     params_sampler = hydra.utils.instantiate(sampler_cfg)
 
     sampled = _sample_params(
         params_sampler,
-        num_time_points=num_time_points,
+        seconds_per_knot=seconds_per_knot,
         simulation_time=float(td.simulation_time),
         seed=int(td.seed),
     )

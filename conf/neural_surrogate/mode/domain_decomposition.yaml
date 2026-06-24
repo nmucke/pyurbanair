@@ -1,0 +1,28 @@
+# @package _global_
+# Domain-decomposed (patch Eq (9)) surrogate path. Bundles the trainer class +
+# loss that go together so a single `mode` choice selects both:
+#   neural_surrogates.PatchTrainer (interface/divergence/coarse terms) +
+#   DomainDecompositionLoss.
+# Must be paired with a `domain_decomposed` architecture (its forward must
+# accept return_intermediates=True); architecture stays an independent choice in
+# training.yaml so the size preset is selected separately. The trainer's other
+# fields come from the inline `trainer:` block in training.yaml; mode only sets
+# `_target_` (which is why this entry must sit AFTER `_self_` in the defaults
+# list, so it overrides that inline default).
+model_name: domain_decomposition
+trainer:
+  _target_: neural_surrogates.PatchTrainer
+# Four-term domain-decomposition objective of companion PDF Eq (9):
+# one-step + interface + divergence + coarse. Starting weights are Table 1
+# defaults. The generic Trainer cannot drive this loss (its forward signature
+# differs from a plain element-wise loss), so it only pairs with PatchTrainer.
+loss:
+  _target_: neural_surrogates.DomainDecompositionLoss
+  lambda_interface: 0.1
+  lambda_divergence: 0.01
+  lambda_coarse: 1.0
+  # Channels holding the velocity components (u, v, w) = (x-vel, y-vel, z-vel),
+  # in that order, for the divergence term. Each is differenced along its own axis.
+  velocity_channels: [0, 1, 2]
+  # Restrict the one-step / divergence terms to fluid cells.
+  mask_loss: true

@@ -1,4 +1,0 @@
-# Default loss: plain mean-squared error on the (masked) next-state prediction.
-# Used by the generic Trainer for every architecture, including a
-# domain-decomposed model trained as a full-grid drop-in.
-_target_: torch.nn.MSELoss

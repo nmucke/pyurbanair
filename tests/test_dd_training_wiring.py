@@ -96,22 +96,18 @@ def _compose(overrides):
     "extra_overrides,model_name,expect_trainer,expect_loss",
     [
         # Each path selects its trainer + loss explicitly rather than relying on
-        # the (mutable) training.yaml group defaults, so the test is robust to
-        # whatever default is currently checked in.
+        # the (mutable) training.yaml default, so the test is robust to whatever
+        # default is currently checked in. The trainer class and the loss are
+        # bundled into the `mode` group: standard -> Trainer + MSELoss,
+        # domain_decomposition -> PatchTrainer + DomainDecompositionLoss.
         (
-            [
-                "neural_surrogate/trainer@trainer=standard",
-                "neural_surrogate/loss@loss=mse",
-            ],
+            ["neural_surrogate/mode@_global_=standard"],
             "dd_dropin_test",
             "Trainer",
             "MSELoss",
         ),
         (
-            [
-                "neural_surrogate/trainer@trainer=dd_patch",
-                "neural_surrogate/loss@loss=dd",
-            ],
+            ["neural_surrogate/mode@_global_=domain_decomposition"],
             "dd_patch_test",
             "PatchTrainer",
             "DomainDecompositionLoss",

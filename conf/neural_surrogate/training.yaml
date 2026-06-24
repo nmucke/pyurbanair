@@ -13,31 +13,38 @@ defaults:
   #   ...architectures@architecture=unet_convnext/large
   #   ...architectures@architecture=domain_decomposed/small
   # - /neural_surrogate/architectures@architecture: p3d/medium
-  - /neural_surrogate/architectures@architecture: domain_decomposed/small
-  - /neural_surrogate/trainer@trainer: dd_patch
-  # - /neural_surrogate/loss@loss: mse
-  - /neural_surrogate/loss@loss: dd
+  - /neural_surrogate/architectures@architecture: domain_decomposed/medium
   - _self_
+  # `mode` bundles the (trainer class + loss) pairing, so a single choice selects
+  # both: standard -> Trainer + MSELoss, domain_decomposition -> PatchTrainer +
+  # DomainDecompositionLoss. Switch with `neural_surrogate/mode@_global_=standard`.
+  # It must sit AFTER `_self_` so it overrides the inline `trainer:` block's
+  # `_target_` below. The trainer's remaining fields stay in that inline block;
+  # the loss is defined entirely inside the mode file (there is no `loss` group).
+  - /neural_surrogate/mode@_global_: domain_decomposition
 
 # Domain-decomposed surrogate (two-level overlapping DD, Recommendation A).
 # (a) Drop-in path -- train a DD model exactly like any other architecture
-#     (generic Trainer + MSE on the full grid). Just swap the architecture:
+#     (generic Trainer + MSE on the full grid). Use mode=standard + a DD arch:
 #       pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
 #         'neural_surrogate/architectures@architecture=domain_decomposed/small' \
+#         neural_surrogate/mode@_global_=standard \
 #         model_name=domain_decomposed_small init_weights_path=null
 # (b) Patch (Eq 9) path -- add the interface/divergence/coarse terms via the
-#     PatchTrainer + DomainDecompositionLoss groups:
+#     PatchTrainer + DomainDecompositionLoss (this is mode=domain_decomposition,
+#     the default, so the mode override can be omitted):
 #       pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
 #         'neural_surrogate/architectures@architecture=domain_decomposed/small' \
-#         'neural_surrogate/trainer@trainer=dd_patch' \
-#         'neural_surrogate/loss@loss=dd' \
+#         neural_surrogate/mode@_global_=domain_decomposition \
 #         model_name=domain_decomposed_small init_weights_path=null
 # The `architecture.periodic_axes: [y]` knob below applies to BOTH a plain UNet
 # and a DD model: DomainDecomposed translates it into its decomposition's
 # (z, y, x) periodicity (the inner patch nets stay non-periodic). For DD,
 # interior_size must divide Ny.
 
-# model_name: p3d_medium
+# model_name is set by the `mode` group (standard -> "standard",
+# domain_decomposition -> "domain_decomposition"); mode sits after `_self_` so it
+# overrides the value here. This fallback only applies if no mode is selected.
 model_name: domain_decomp_small
 
 # The uDALES runs are periodic in the spanwise (y) direction: spatial convs
@@ -55,10 +62,68 @@ architecture:
 # init_weights_path: model_weights/unet_convnext_medium/weights.pt
 init_weights_path: null
 
-# The trainer and loss are Hydra groups (see the `defaults` list above):
-#   trainer=standard  -> neural_surrogates.Trainer  (conf/.../trainer/standard.yaml)
-#   loss=mse          -> torch.nn.MSELoss           (conf/.../loss/mse.yaml)
-# Override individual trainer fields inline as usual, e.g. `trainer.num_epochs=10`.
+# The trainer config is inlined below (the `trainer:` block). The trainer CLASS
+# and the loss are selected together by the `mode` group (see the `defaults`
+# list above):
+#   neural_surrogate/mode@_global_=standard              -> Trainer + MSELoss
+#   neural_surrogate/mode@_global_=domain_decomposition  -> PatchTrainer + DD loss
+# The mode file overrides the inline `trainer._target_` and supplies the whole
+# `loss:` config. Override individual trainer fields inline as usual, e.g.
+# `trainer.num_epochs=10`.
+
+# Unified trainer config. neural_surrogates.Trainer (generic full-grid MSE /
+# pushforward) and neural_surrogates.PatchTrainer (patch-based Eq (9) DD
+# trainer) share all of this machinery via BaseTraining -- amp, torch.compile,
+# channels-last, the warmup+cosine LR schedule, the pushforward-rollout
+# curriculum, gradient clipping, early stopping and checkpoint/resume +
+# metrics.csv logging. The class is selected by the `mode` group (see above),
+# which overrides the `_target_` below; the domain_decomposition mode also needs
+# a `domain_decomposed` architecture whose forward accepts return_intermediates.
+trainer:
+  # Overridden by the `mode` group (standard -> Trainer, domain_decomposition ->
+  # PatchTrainer). This value only applies if no mode is selected.
+  _target_: neural_surrogates.Trainer
+  num_epochs: 200
+  device: cuda
+  patience: 15
+  # Mixed precision autocast. bf16 needs no grad scaling and cannot
+  # underflow; the trainer falls back to fp16 (+ GradScaler) on GPUs
+  # without bf16 support.
+  amp: true
+  amp_dtype: bfloat16
+  # torch.compile the model (static conv stack -> good fusion win). First
+  # batch pays one-off compilation latency.
+  compile_model: true
+  # channels-last-3d memory layout for cuDNN kernel selection under
+  # autocast. A/B this on the training GPU; correctness is unaffected.
+  channels_last: false
+  # Rollout-length curriculum: begin with `pushforward_start_steps`-step
+  # rollouts and add one step every `pushforward_epochs_per_step` epochs, up to
+  # `dataset.pushforward_steps`. The Eq (9) terms (PatchTrainer) are evaluated
+  # on the final rollout step. Set the cadence to null to train at a fixed
+  # horizon (the original pushforward behavior).
+  pushforward_epochs_per_step: 7
+  pushforward_start_steps: 5
+  # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
+  # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`
+  # over the remaining epochs. Set `lr_warmup_epochs` to null to disable.
+  lr_warmup_epochs: 2
+  lr_warmup_start: 1.0e-6
+  lr_min: 1.0e-6
+  # Restrict the loss to fluid cells (uDALES targets carry junk values inside
+  # obstacles). On the PatchTrainer path the DomainDecompositionLoss handles
+  # fluid masking itself (its own `mask_loss` in the domain_decomposition mode),
+  # so this trainer-level flag is unused there.
+  mask_loss: true
+  # Global grad-norm clip; set null to disable.
+  grad_clip_norm: 1.0
+  # Backprop through the last N unroll steps (1 = pure pushforward trick;
+  # the earlier steps always run no-grad).
+  grad_unroll_steps: 2
+  # Continue from <weights dir>/checkpoint.pt (model + optimizer + scheduler +
+  # scaler + curriculum state, written every epoch). Per-epoch metrics are
+  # appended to <weights dir>/metrics.csv.
+  resume: false
 
 # Alternative tuning that has worked well: torch.optim.AdamW with
 # weight_decay: 1.0e-6, patience: 25, dataloader.batch_size: 64.
@@ -90,7 +155,7 @@ dataset:
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 32
+  batch_size: 8
   shuffle: true
   # Drop the final short batch so every step sees the same batch size. A
   # varying batch size forces torch.compile to recompile -- and P3D in

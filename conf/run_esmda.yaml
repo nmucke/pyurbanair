@@ -53,10 +53,12 @@ defaults:
 # --- Output roots (everything mutable lands under .temp/). This run mounts two
 # models (truth/assim) and no base `model`, so name the output by both backends. ---
 paths:
-  results_dir: .temp/${truth_model.name}_to_${assim_model.name}
+  # results_dir: .temp/${truth_model.name}_to_${assim_model.name}
+  results_dir: /export/scratch2/ntm/${truth_model.name}_to_${assim_model.name}
   # Absolute scratch dir for the solvers (they chdir into it). Resolved from $PWD
   # so it also works under bare compose() in tests.
-  experiment_dir: ${oc.env:PWD}/.temp
+  # experiment_dir: ${oc.env:PWD}/.temp
+  experiment_dir: /export/scratch2/ntm/temp
   base_results_dir: .temp_lbm
 
 # --- Time-varying parameter knot spacing (per-window horizon lives in the case) ---
@@ -92,7 +94,7 @@ params_to_estimate:
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
 ensemble:
-  ensemble_size: 64
+  ensemble_size: 50
   num_parallel_processes: 1
   num_cpus_per_process: 1
   failure:
