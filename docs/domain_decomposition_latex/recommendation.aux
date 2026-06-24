@@ -1,0 +1,93 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{dryja1994smalloverlap}
+\citation{dolean2024multilevel}
+\citation{li2020mgno}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Scope and notation}{1}{section.1}\protected@file@percent }
+\newlabel{sec:notation}{{1}{1}{Scope and notation}{section.1}{}}
+\newlabel{eq:truth}{{1}{1}{Scope and notation}{equation.1.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Subdomains, halos, restriction.}{1}{paragraph*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Partition of unity.}{1}{paragraph*.2}\protected@file@percent }
+\newlabel{eq:pou}{{3}{1}{Partition of unity}{equation.1.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Overlapping decomposition. Each subdomain predicts its interior block $\Omega _i^\circ $ (teal) but reads inputs from the larger extended block $\hat  \Omega _i$ (hatched), which includes a halo of width $h$ drawn from neighboring cells. Interior blocks tile the domain; extended blocks overlap.\relax }}{2}{figure.caption.3}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:decomp}{{1}{2}{Overlapping decomposition. Each subdomain predicts its interior block $\Omega _i^\circ $ (teal) but reads inputs from the larger extended block $\hat \Omega _i$ (hatched), which includes a halo of width $h$ drawn from neighboring cells. Interior blocks tile the domain; extended blocks overlap.\relax }{figure.caption.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces One step of the two-level update. Top: a cheap coarse predictor produces a low-resolution global next state, prolonged to the fine grid as a context field $\bm  {C}_t$. Bottom: a shared fine network predicts each patch from its restricted state, halo, geometry, parameters, positional encoding $\bm  {e}_i$, and the coarse context. Patch predictions are blended by the partition of unity into $\bm  {S}_{t+1}$.\relax }}{2}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:dataflow}{{2}{2}{One step of the two-level update. Top: a cheap coarse predictor produces a low-resolution global next state, prolonged to the fine grid as a context field $\bm C_t$. Bottom: a shared fine network predicts each patch from its restricted state, halo, geometry, parameters, positional encoding $\bm e_i$, and the coarse context. Patch predictions are blended by the partition of unity into $\bm S_{t+1}$.\relax }{figure.caption.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Recommendation A --- two-level overlapping decomposition}{2}{section.2}\protected@file@percent }
+\newlabel{sec:recA}{{2}{2}{Recommendation A --- two-level overlapping decomposition}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Why two levels}{2}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Coarse global level}{2}{subsection.2.2}\protected@file@percent }
+\newlabel{eq:coarse}{{4}{2}{Coarse global level}{equation.2.4}{}}
+\citation{ronneberger2015unet}
+\citation{bartal2023multidiffusion}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Partition-of-unity windows along one axis. Inside the overlap regions two windows ramp so their sum stays $1$; the merge \textup  {\hbox {\mathsurround \z@ \normalfont  (\ignorespaces \ref  {eq:merge}\unskip \@@italiccorr )}} is therefore a smooth blend across patch boundaries.\relax }}{3}{figure.caption.5}\protected@file@percent }
+\newlabel{fig:pou}{{3}{3}{Partition-of-unity windows along one axis. Inside the overlap regions two windows ramp so their sum stays $1$; the merge \eqref {eq:merge} is therefore a smooth blend across patch boundaries.\relax }{figure.caption.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Fine-scale local update}{3}{subsection.2.3}\protected@file@percent }
+\newlabel{eq:fine}{{6}{3}{Fine-scale local update}{equation.2.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Partition-of-unity merge}{3}{subsection.2.4}\protected@file@percent }
+\newlabel{eq:merge}{{7}{3}{Partition-of-unity merge}{equation.2.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Optional divergence projection}{3}{subsection.2.5}\protected@file@percent }
+\newlabel{eq:proj}{{8}{3}{Optional divergence projection}{equation.2.8}{}}
+\citation{brandstetter2022mppde}
+\citation{ye2024lno}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces Two-level domain-decomposed rollout (inference)\relax }}{4}{algorithm.1}\protected@file@percent }
+\newlabel{alg:rollout}{{1}{4}{Two-level domain-decomposed rollout (inference)\relax }{algorithm.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6}Inference}{4}{subsection.2.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7}Training objective}{4}{subsection.2.7}\protected@file@percent }
+\newlabel{eq:loss}{{9}{4}{Training objective}{equation.2.9}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8}Defaults and hyperparameters}{4}{subsection.2.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Recommendation B --- consistent halo exchange (exact tiling)}{4}{section.3}\protected@file@percent }
+\newlabel{sec:recB}{{3}{4}{Recommendation B --- consistent halo exchange (exact tiling)}{section.3}{}}
+\citation{barwey2024consistentgnn}
+\citation{ronneberger2015unet}
+\citation{li2020deepddm}
+\citation{huang2025operatorddm}
+\citation{buglakova2025tiling}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {2}{\ignorespaces One training step (patch-based, with pushforward and interface terms)\relax }}{5}{algorithm.2}\protected@file@percent }
+\newlabel{alg:train}{{2}{5}{One training step (patch-based, with pushforward and interface terms)\relax }{algorithm.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Recommended starting hyperparameters for Recommendation\nobreakspace  {}A.\relax }}{5}{table.caption.6}\protected@file@percent }
+\newlabel{tab:hyper}{{1}{5}{Recommended starting hyperparameters for Recommendation~A.\relax }{table.caption.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Exactness condition}{5}{subsection.3.1}\protected@file@percent }
+\newlabel{eq:exact}{{10}{5}{Exactness condition}{equation.3.10}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Optional per-step Schwarz iteration for global coupling}{5}{subsection.3.2}\protected@file@percent }
+\citation{buglakova2025tiling}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {3}{\ignorespaces Per-step consistent update with optional Schwarz sweeps\relax }}{6}{algorithm.3}\protected@file@percent }
+\newlabel{alg:schwarz}{{3}{6}{Per-step consistent update with optional Schwarz sweeps\relax }{algorithm.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Trade-offs}{6}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Choosing between A and B}{6}{section.4}\protected@file@percent }
+\newlabel{sec:choice}{{4}{6}{Choosing between A and B}{section.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces A and B differ mainly in how they handle global coupling and seams.\relax }}{6}{table.caption.7}\protected@file@percent }
+\newlabel{tab:choice}{{2}{6}{A and B differ mainly in how they handle global coupling and seams.\relax }{table.caption.7}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Mapping onto the \texttt  {pyurbanair} codebase}{6}{section.5}\protected@file@percent }
+\newlabel{sec:mapping}{{5}{6}{Mapping onto the \texttt {pyurbanair} codebase}{section.5}{}}
+\bibstyle{plain}
+\bibdata{references}
+\bibcite{bartal2023multidiffusion}{1}
+\bibcite{barwey2024consistentgnn}{2}
+\bibcite{brandstetter2022mppde}{3}
+\bibcite{buglakova2025tiling}{4}
+\bibcite{dolean2024multilevel}{5}
+\bibcite{dryja1994smalloverlap}{6}
+\bibcite{huang2025operatorddm}{7}
+\bibcite{li2020deepddm}{8}
+\bibcite{li2020mgno}{9}
+\bibcite{ronneberger2015unet}{10}
+\bibcite{ye2024lno}{11}
+\gdef \@abspage@last{8}

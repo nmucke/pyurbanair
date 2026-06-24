@@ -1,4 +1,19 @@
-"""Generic single-loop trainer for the neural-surrogate baselines."""
+"""Shared training scaffolding for the neural-surrogate trainers.
+
+:class:`BaseTraining` holds every architecture-agnostic capability -- device &
+memory-format handling, ``torch.compile``, mixed-precision autocast + grad
+scaling, the warmup+cosine LR schedule, the pushforward-rollout curriculum,
+gradient clipping, best-weight saving, checkpoint/resume and per-epoch metrics
+logging -- and drives the train / validate / early-stop loop.
+
+Subclasses implement a single hook, :meth:`_final_loss`, that turns the final
+rollout step into a scalar loss. That one method is the *only* place the generic
+full-grid trainer (:class:`neural_surrogates.training.Trainer`) and the
+domain-decomposed patch trainer (:class:`neural_surrogates.training.PatchTrainer`)
+differ: the former applies a masked element-wise ``loss_fn(pred, target)``, the
+latter the four-term Eq (9) loss over the model's per-patch intermediates.
+Everything else -- including the pushforward rollout itself -- is shared.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +26,7 @@ from torch.utils.data import DataLoader
 import tqdm
 
 
-class Trainer:
+class BaseTraining:
     def __init__(
         self,
         model: torch.nn.Module,
@@ -88,7 +103,7 @@ class Trainer:
         self.val_loader = val_loader
         self.optimizer = optimizer
         self.loss_fn = loss_fn
-        self.num_epochs = num_epochs
+        self.num_epochs = int(num_epochs)
         self.patience = patience
         self.weights_path = Path(weights_path) if weights_path is not None else None
         # Pushforward-horizon curriculum: start the rollout at
@@ -159,6 +174,10 @@ class Trainer:
         # activations.
         self.grad_unroll_steps = max(1, int(grad_unroll_steps))
         self.resume = resume
+        # Per-batch auxiliary scalars a subclass may expose for logging (e.g.
+        # the DD loss term breakdown). ``None`` until/unless a subclass sets it
+        # inside ``_final_loss``; the generic full-grid trainer leaves it unset.
+        self._aux_terms: dict[str, torch.Tensor] | None = None
 
     def _build_lr_scheduler(self) -> torch.optim.lr_scheduler.LRScheduler | None:
         if self.lr_warmup_epochs is None:
@@ -193,7 +212,13 @@ class Trainer:
             device_type=self.device.type, dtype=self.amp_dtype, enabled=self.amp
         )
 
-    def _forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def _prepare_batch(
+        self, batch: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Move one transition batch to the device and return
+        ``(state, state_next, params, geometry)``. The geometry mask is cached
+        on the device on the first batch (it is identical for every sample) and
+        broadcast to the batch via ``expand`` (a view, not B copies)."""
         to_kwargs: dict = {"non_blocking": True}
         if self.channels_last:
             to_kwargs["memory_format"] = torch.channels_last_3d
@@ -203,18 +228,26 @@ class Trainer:
         if self._geometry is None:
             self._geometry = batch["geometry"][0].to(self.device)
             self._fluid_mask = self._geometry.bool()
-        # expand() is a broadcast view, not B copies.
         geometry = self._geometry.expand(state.shape[0], *self._geometry.shape)
-        # params: (B, K, P). The first K - g pushforward steps run under
-        # no_grad so the model sees its own predictions without backprop
-        # through the unroll; the final g = grad_unroll_steps calls carry
-        # gradients (g=1 is the pure pushforward trick).
+        return state, state_next, params, geometry
+
+    def _forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """One pushforward rollout + loss on a transition batch.
+
+        ``params`` is ``(B, K, P)``. The first ``K - g`` steps run under
+        ``no_grad`` so the model consumes its own predictions without backprop
+        through the unroll; the final ``g = grad_unroll_steps`` calls carry
+        gradients (``g = 1`` is the pure pushforward trick). The very last step
+        and its loss are delegated to the subclass hook :meth:`_final_loss`.
+
+        Two separate autocast contexts on purpose: autocast caches its weight
+        casts and clears the cache on exit. Running the no_grad pushforward in
+        the *same* context would cache casts with ``requires_grad=False`` and
+        poison the final, gradient-bearing forwards.
+        """
+        state, state_next, params, geometry = self._prepare_batch(batch)
         K = params.shape[1]
         g = min(self.grad_unroll_steps, K)
-        # Two separate autocast contexts on purpose: autocast caches its weight
-        # casts and clears the cache on exit. Running the no_grad pushforward in
-        # the *same* context would cache casts with requires_grad=False and
-        # poison the final, gradient-bearing forwards.
         with torch.no_grad():
             with self._autocast():
                 for i in range(K - g):
@@ -222,16 +255,37 @@ class Trainer:
         with self._autocast():
             for i in range(K - g, K - 1):
                 state = self.model(state, params[:, i, :], geometry)
-            pred = self.model(state, params[:, K - 1, :], geometry)
-            if self.mask_loss:
-                pred = pred[..., self._fluid_mask]
-                state_next = state_next[..., self._fluid_mask]
-            return self.loss_fn(pred, state_next)
+            return self._final_loss(state, state_next, params, geometry)
+
+    def _final_loss(
+        self,
+        state: torch.Tensor,
+        state_next: torch.Tensor,
+        params: torch.Tensor,
+        geometry: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the final rollout step (using ``params[:, -1]``) and return the
+        scalar loss for the batch. Called inside the gradient-bearing autocast
+        context. Subclasses define how the prediction becomes a loss; a subclass
+        may set ``self._aux_terms`` to a dict of detached scalars for logging."""
+        raise NotImplementedError
+
+    # -- term logging (no-op unless a subclass populates ``_aux_terms``) ----- #
+    def _accumulate_terms(self, sums: dict[str, float]) -> None:
+        if self._aux_terms is None:
+            return
+        for k, v in self._aux_terms.items():
+            sums[k] = sums.get(k, 0.0) + float(v)
+
+    @staticmethod
+    def _mean_terms(sums: dict[str, float], n: int) -> dict[str, float]:
+        return {k: v / max(n, 1) for k, v in sums.items()}
 
     def _train_epoch(self) -> float:
         self.model.train()
         total = 0.0
         n = 0
+        term_sums: dict[str, float] = {}
         for batch in tqdm.tqdm(self.train_loader):
             loss = self._forward(batch)
             self.optimizer.zero_grad()
@@ -247,6 +301,8 @@ class Trainer:
             self.scaler.update()
             total += loss.item()
             n += 1
+            self._accumulate_terms(term_sums)
+        self._train_terms = self._mean_terms(term_sums, n)
         return total / max(n, 1)
 
     @torch.no_grad()
@@ -254,9 +310,12 @@ class Trainer:
         self.model.eval()
         total = 0.0
         n = 0
+        term_sums: dict[str, float] = {}
         for batch in self.val_loader:
             total += self._forward(batch).item()
             n += 1
+            self._accumulate_terms(term_sums)
+        self._val_terms = self._mean_terms(term_sums, n)
         return total / max(n, 1)
 
     def _pushforward_steps_for_epoch(self, epoch: int) -> int:
@@ -308,11 +367,18 @@ class Trainer:
             path,
         )
 
-    def fit(self) -> None:
+    def fit(self) -> dict:
+        """Train + validate for ``num_epochs`` with the warmup/cosine schedule,
+        pushforward curriculum, per-epoch metrics + checkpoint logging and
+        early stopping. Saves the best (lowest val) weights and reloads them at
+        the end. Returns a small history dict (``train`` / ``val`` loss lists)."""
         best_val = float("inf")
         epochs_since_improvement = 0
         current_steps = 0
         start_epoch = 0
+        history: dict[str, list[float]] = {"train": [], "val": []}
+        self._train_terms: dict[str, float] = {}
+        self._val_terms: dict[str, float] = {}
         ckpt_path = self._checkpoint_path()
         metrics_path = self._metrics_path()
         if self.weights_path is not None:
@@ -358,10 +424,20 @@ class Trainer:
             epoch_seconds = time.monotonic() - epoch_start
             if self.scheduler is not None:
                 self.scheduler.step()
-            print(
+            history["train"].append(train_loss)
+            history["val"].append(val_loss)
+            msg = (
                 f"epoch {epoch + 1}/{self.num_epochs}  "
                 f"lr={lr:.2e}  train={train_loss:.6f}  val={val_loss:.6f}"
             )
+            # Append the loss-term breakdown when a subclass exposes one (e.g.
+            # the DD patch trainer's one-step / interface / divergence / coarse).
+            if self._train_terms:
+                terms = "  ".join(
+                    f"{k}={self._train_terms[k]:.4f}" for k in self._train_terms
+                )
+                msg += f"  [{terms}]"
+            print(msg)
             if val_loss < best_val:
                 best_val = val_loss
                 epochs_since_improvement = 0
@@ -371,18 +447,20 @@ class Trainer:
             else:
                 epochs_since_improvement += 1
             if metrics_path is not None:
-                self._log_metrics(
-                    metrics_path,
-                    {
-                        "epoch": epoch + 1,
-                        "pushforward_steps": steps,
-                        "lr": f"{lr:.6e}",
-                        "train_loss": f"{train_loss:.8f}",
-                        "val_loss": f"{val_loss:.8f}",
-                        "best_val": f"{best_val:.8f}",
-                        "seconds": f"{epoch_seconds:.1f}",
-                    },
-                )
+                row = {
+                    "epoch": epoch + 1,
+                    "pushforward_steps": steps,
+                    "lr": f"{lr:.6e}",
+                    "train_loss": f"{train_loss:.8f}",
+                    "val_loss": f"{val_loss:.8f}",
+                    "best_val": f"{best_val:.8f}",
+                    "seconds": f"{epoch_seconds:.1f}",
+                }
+                for k, v in self._train_terms.items():
+                    row[f"train_{k}"] = f"{v:.8f}"
+                for k, v in self._val_terms.items():
+                    row[f"val_{k}"] = f"{v:.8f}"
+                self._log_metrics(metrics_path, row)
             if ckpt_path is not None:
                 self._save_checkpoint(
                     ckpt_path, epoch, best_val, epochs_since_improvement, current_steps
@@ -404,3 +482,4 @@ class Trainer:
             self._eager_model.load_state_dict(
                 torch.load(self.weights_path, map_location=self.device)
             )
+        return history

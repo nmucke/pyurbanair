@@ -224,6 +224,89 @@ def test_channels_mode_input_channels() -> None:
     assert model.in_channels == N_STATE + 1 + N_PARAMS
 
 
+# -- 8b. extra_in_channels contract (domain-decomposition fine net) ---------
+
+
+def test_extra_in_channels_zero_is_byte_identical() -> None:
+    """The default extra_in_channels=0 leaves the stem (and the whole state
+    dict) byte-identical to a standard P3D, so existing checkpoints load."""
+    a = _tiny_p3d()
+    b = _tiny_p3d(extra_in_channels=0)
+    assert a.in_channels == N_STATE + 1 + N_PARAMS
+    assert set(a.state_dict()) == set(b.state_dict())
+    # state-dict tensor shapes must match exactly (load_state_dict succeeds).
+    b.load_state_dict(a.state_dict())
+
+
+def test_extra_in_channels_guard() -> None:
+    """extra must be provided iff extra_in_channels > 0, with matching width."""
+    torch.manual_seed(0)
+    state, params, geometry, _ = _inputs(batch=2)
+    # extra_in_channels=0 net rejects a stray extra tensor.
+    plain = _tiny_p3d().eval()
+    with pytest.raises(ValueError):
+        plain(state, params, geometry, extra=torch.randn(2, 4, NZ, NY, NX))
+    # extra_in_channels>0 net requires extra, and validates its channel count.
+    widened = _tiny_p3d(extra_in_channels=4).eval()
+    assert widened.in_channels == N_STATE + 1 + N_PARAMS + 4
+    with pytest.raises(ValueError):
+        widened(state, params, geometry)  # missing extra
+    with pytest.raises(ValueError):
+        widened(state, params, geometry, extra=torch.randn(2, 3, NZ, NY, NX))
+
+
+def test_extra_forward_runs_and_is_differentiable() -> None:
+    """With extra_in_channels>0, the raw extra channels flow through the stem
+    and gradients reach them."""
+    torch.manual_seed(0)
+    model = _tiny_p3d(extra_in_channels=4)
+    state, params, geometry, _ = _inputs(batch=2)
+    extra = torch.randn(2, 4, NZ, NY, NX, requires_grad=True)
+    out = model(state, params, geometry, extra=extra)
+    assert out.shape == (2, N_STATE, NZ, NY, NX)
+    assert torch.isfinite(out).all()
+    out.sum().backward()
+    assert extra.grad is not None and torch.isfinite(extra.grad).all()
+
+
+def test_p3d_as_domain_decomposed_fine_and_coarse_net() -> None:
+    """P3D works as BOTH the fine and coarse sub-net of DomainDecomposed: the
+    wrapper injects extra_in_channels on the fine net and the model runs the
+    drop-in forward plus the Eq (9) return_intermediates path end-to-end."""
+    from neural_surrogates import DomainDecomposed
+
+    torch.manual_seed(0)
+
+    def p3d_node() -> dict:
+        return dict(_target_="neural_surrogates.P3D", **TINY,
+                    normalize=True, predict_residual=True)
+
+    # interior 8 + 2*halo 4 -> 16-cell fine blocks (no P3D padding); coarse grid
+    # = grid / 2. y is periodic (16 % 8 == 0).
+    dd = DomainDecomposed(
+        n_state_channels=N_STATE,
+        n_params=N_PARAMS,
+        decomposition=dict(interior_size=8, halo=4, taper=2, coarsen_factor=2,
+                           n_pos=3, periodic_axes=(False, True, False)),
+        fine_net=p3d_node(),
+        coarse_net=p3d_node(),
+    )
+    # The wrapper widened the fine net's stem; the coarse net stays at extra=0.
+    assert dd.fine_net.extra_in_channels == N_STATE + dd.dd.n_pos
+    assert dd.coarse_net.extra_in_channels == 0
+
+    state, params, geometry, _ = _inputs(batch=2)
+
+    merged = dd(state, params, geometry)
+    assert merged.shape == (2, N_STATE, NZ, NY, NX)
+    assert torch.isfinite(merged).all()
+
+    merged2, info = dd(state, params, geometry, return_intermediates=True)
+    assert merged2.shape == merged.shape
+    assert {"coarse_pred", "patch_pred", "context", "num_patches", "dd"} <= set(info)
+    merged2.sum().backward()  # gradients flow through both sub-nets
+
+
 # -- 9. periodic-axis divisibility guard ------------------------------------
 
 

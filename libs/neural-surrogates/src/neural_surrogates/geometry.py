@@ -2,7 +2,7 @@
 
 The surrogate's network takes a binary geometry mask (``1`` = fluid,
 ``0`` = obstacle) as an extra channel, exactly like the
-:class:`~neural_surrogates.data.TransitionDataset` it was trained on.
+:class:`~neural_surrogates.datasets.transition.TransitionDataset` it was trained on.
 At inference time the mask has to be produced from whatever geometry the
 caller is simulating; this module voxelises a ``.stl`` building geometry
 onto the simulation grid so the same convention is reproduced.
@@ -87,7 +87,7 @@ def solid_c_fluid_mask(
     generator attaches ``blanking`` via
     ``scripts/add_geometry_to_training_data.load_obstacle_mask`` (same file
     format, same 1-based ``(i, j, k) = (x, y, z)`` indexing), and
-    :class:`~neural_surrogates.data.TransitionDataset` feeds the network
+    :class:`~neural_surrogates.datasets.transition.TransitionDataset` feeds the network
     ``1 - obstacle``. At inference time the spin-up backend writes the same
     ``solid_c.txt`` into its experiment dir, so loading it here makes the
     inference mask byte-for-byte identical to the trained one — unlike the
@@ -148,7 +148,7 @@ def nonzero_fluid_mask(
 ) -> np.ndarray:
     """Fallback mask: fluid cells are those with non-zero state.
 
-    Mirrors :class:`~neural_surrogates.data.TransitionDataset`'s fallback
+    Mirrors :class:`~neural_surrogates.datasets.transition.TransitionDataset`'s fallback
     when a backend ships no obstacle indicator. ``template`` must be a
     single snapshot (no ``time`` dimension).
     """

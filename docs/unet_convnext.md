@@ -71,8 +71,9 @@ Five presets scale `base_channels`, `channel_mults`, `depths`,
   resolves directly.
 - [conf/neural_surrogate/training.yaml](../conf/neural_surrogate/training.yaml)
   is `# @package _global_` and pulls
-  `/neural_surrogate/architectures/unet_convnext@architecture: small`
-  into its defaults list, so the preset lives at `cfg.architecture`.
+  `/neural_surrogate/architectures@architecture: unet_convnext/medium`
+  into its defaults list (selected at the `architectures` group level so any
+  family is swappable), so the preset lives at `cfg.architecture`.
 - [scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py)
   calls `instantiate(cfg.architecture, n_state_channels=...,
   n_params=...)`; `n_state_channels` and `n_params` stay explicit
@@ -88,11 +89,11 @@ Default preset (`small`):
 pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py
 ```
 
-Swap presets — the override key is the full group path:
+Swap presets / families — the override value is the nested `family/preset` path:
 
 ```bash
 pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-    'neural_surrogate/architectures/unet_convnext@architecture=medium'
+    'neural_surrogate/architectures@architecture=unet_convnext/large'
 ```
 
 Override individual fields:
