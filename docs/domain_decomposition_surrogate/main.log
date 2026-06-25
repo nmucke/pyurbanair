@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.25 (TeX Live 2023/Fedora 40) (preloaded format=pdflatex 2024.8.16)  23 JUN 2026 20:15
+This is pdfTeX, Version 3.141592653-2.6-1.40.25 (TeX Live 2023/Fedora 40) (preloaded format=pdflatex 2024.8.16)  25 JUN 2026 08:11
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -1030,13 +1030,13 @@ LaTeX Font Info:    Trying to load font information for TS1+lmr on input line 3
 File: ts1lmr.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
 ) [4{/usr/share/texlive/texmf-dist/fonts/enc/dvips/lm/lm-ts1.enc}] [5] [6]
 Package hyperref Info: bookmark level for unknown algorithm defaults to 0 on in
-put line 574.
+put line 577.
 LaTeX Font Info:    Font shape `T1/lmtt/bx/n' in size <10> not available
-(Font)              Font shape `T1/lmtt/b/n' tried instead on input line 577.
- [7] [8]
+(Font)              Font shape `T1/lmtt/b/n' tried instead on input line 580.
+ [7]
 LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <14.4> on input line 714.
- [9] (./main.bbl
+(Font)              <14.4> on input line 717.
+ [8] [9] (./main.bbl
 [10]) [11] (./main.aux)
 Package rerunfilecheck Info: File `main.out' has not changed.
 (rerunfilecheck)             Checksum: 11CB6EC0DD13C7B9EE3AA01EB486F91E;3259.
@@ -1044,7 +1044,7 @@ Package rerunfilecheck Info: File `main.out' has not changed.
 Here is how much of TeX's memory you used:
  29775 strings out of 476034
  551062 string characters out of 5792854
- 1890388 words of memory out of 6000000
+ 1889388 words of memory out of 6000000
  49315 multiletter control sequences out of 15000+600000
  645924 words of font info for 275 fonts, out of 8000000 for 9000
  1137 hyphenation exceptions out of 8191
@@ -1071,7 +1071,7 @@ ist/fonts/type1/public/lm/lmtt12.pfb></usr/share/texlive/texmf-dist/fonts/type1
 /public/lm/lmtt8.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/lm/lmtti
 10.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm1
 0.pfb>
-Output written on main.pdf (11 pages, 500803 bytes).
+Output written on main.pdf (11 pages, 501278 bytes).
 PDF statistics:
  420 PDF objects out of 1000 (max. 8388607)
  341 compressed objects within 4 object streams

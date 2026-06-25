@@ -14,12 +14,12 @@ defaults:
   - _self_
 
 training_data:
-  num_train: 1
-  num_val: 1
-  num_test: 1
+  num_train: 50
+  num_val: 4
+  num_test: 4
 
   # output_dir: training_data/${model.name}_medium/
-  output_dir: training_data/barcelona_test/
+  output_dir: training_data/pypalm_barcelona/
 
   # Generation horizon — taken from the selected case's per-window time so the
   # dataset uses the case's specifications rather than duplicating them.

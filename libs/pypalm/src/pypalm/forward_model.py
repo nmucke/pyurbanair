@@ -26,6 +26,7 @@ from .utils.dynamic_driver_utils import (
     remove_dynamic_driver_file,
 )
 from .utils.inflow_utils import angle_to_velocity
+from .utils.ncpu_utils import derive_npex_npey
 from .utils.p3d_utils import P3DFile
 from .utils.vertical_profile import build_profile_shape
 from .utils.warm_start_utils import write_warmstart_driver
@@ -286,6 +287,7 @@ class ForwardModel(BaseForwardModel):
         if self.boundary_condition == "periodic":
             p3d.set_string("initialization_parameters", "bc_lr", "cyclic")
             p3d.set_string("initialization_parameters", "bc_ns", "cyclic")
+            p3d.write()
         else:
             # Standard PALM urban inflow: non-cyclic east-west, cyclic north-south.
             # PALM forbids both pairs being dirichlet/radiation at once, and the
@@ -294,7 +296,27 @@ class ForwardModel(BaseForwardModel):
             p3d.set_string("initialization_parameters", "bc_lr", "dirichlet/radiation")
             p3d.set_string("initialization_parameters", "bc_ns", "cyclic")
             p3d.set_string("initialization_parameters", "psolver", "multigrid_noopt")
+            p3d.write()
+            # multigrid needs uniform subdomains, and PALM's auto-decomposition
+            # puts the larger factor on npey — which usually fails to divide the
+            # grid. Pin a slab decomposition (npex=ncpu, npey=1) derived from
+            # NCPU so any ncpu that divides nx+1 works (see ncpu_utils).
+            self._apply_processor_topology()
+
+    def _apply_processor_topology(self) -> None:
+        """Pin npex/npey in runtime_parameters from NCPU (slab decomposition).
+
+        Only meaningful once the grid is known; with nx unset PALM falls back to
+        its automatic decomposition.
+        """
+        if self.nx is None:
+            return
+        npex, npey = derive_npex_npey(int(self.ncpu), int(self.nx))
+        p3d = P3DFile(self.p3d_path)
+        p3d.set_value("runtime_parameters", "npex", npex)
+        p3d.set_value("runtime_parameters", "npey", npey)
         p3d.write()
+        logger.info("Pinned PALM processor topology: npex=%d, npey=%d", npex, npey)
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         super().set_results_dir(results_dir)

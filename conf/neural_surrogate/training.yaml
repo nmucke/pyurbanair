@@ -58,7 +58,7 @@ trainer:
   amp_dtype: bfloat16
   # torch.compile the model (static conv stack -> good fusion win). First
   # batch pays one-off compilation latency.
-  compile_model: true
+  compile_model: false
   # channels-last-3d memory layout for cuDNN kernel selection under
   # autocast. A/B this on the training GPU; correctness is unaffected.
   channels_last: false
@@ -67,12 +67,12 @@ trainer:
   # `dataset.pushforward_steps`. The Eq (9) terms (PatchTrainer) are evaluated
   # on the final rollout step. Set the cadence to null to train at a fixed
   # horizon (the original pushforward behavior).
-  pushforward_epochs_per_step: 7
-  pushforward_start_steps: 5
+  pushforward_epochs_per_step: 10
+  pushforward_start_steps: 1
   # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
   # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`
   # over the remaining epochs. Set `lr_warmup_epochs` to null to disable.
-  lr_warmup_epochs: 2
+  lr_warmup_epochs: 10
   lr_warmup_start: 1.0e-6
   lr_min: 1.0e-6
   # Restrict the loss to fluid cells (uDALES targets carry junk values inside

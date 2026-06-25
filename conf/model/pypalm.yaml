@@ -11,7 +11,12 @@ forward_model:
   # Base scratch dir shared across models; pypalm nests <temp_dir>/experiment/urban_run.
   temp_dir: ${paths.experiment_dir}
   experiment_name: urban_run
-  ncpu: 1
+  # PALM uses a slab decomposition (npex=ncpu, npey=1), derived automatically in
+  # ForwardModel._apply_processor_topology. The inflow/outflow multigrid solver
+  # needs uniform subdomains, so ncpu must divide nx (=domain.nx grid points).
+  # For barcelona nx=225 the valid choices are {1,3,5,9,15,25,45,75,225};
+  # 15 is the largest that fits a 16-core box.
+  ncpu: 15
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow
