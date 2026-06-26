@@ -15,10 +15,10 @@ their own:
 2. **Data loading** — `TransitionDataset` turns the on-disk layout into
    one-step transition pairs ready for PyTorch training. See §6.
 3. **Architectures + training loop** — `SimpleConv` baseline,
-   `UNetConvNeXt` architecture, and the generic `Trainer`. The trainer
-   checkpoints the best-val weights and supports patience-based early
-   stopping; resolved config + best weights land under
-   `model_weights/<model_name>/`. See §7–§10.
+   `UNetConvNeXt` architecture, `UPT` (Universal Physics Transformer),
+   `P3D`, and the generic `Trainer`. The trainer checkpoints the best-val
+   weights and supports patience-based early stopping; resolved config +
+   best weights land under `model_weights/<model_name>/`. See §7–§10.
 4. **Autoregressive rollout / test** — reload a saved model from its
    config + weights and step it through a full test trajectory,
    producing diagnostic plots and a `truth | pred | |err|`
@@ -202,7 +202,7 @@ Sizing defaults:
 The ensemble's worker pool uses `forkserver` (not `fork`) because the
 parent imports JAX, and Linux pins each worker to distinct physical
 cores via `pyurbanair.utils.cpu_pinning`. See
-[ensemble_scaling.md](ensemble_scaling.md) for the DRAM-bandwidth
+[ensemble_scaling.md](temp/ensemble_scaling.md) for the DRAM-bandwidth
 ceiling on the dev machine — past ~4–8 workers, returns diminish.
 
 **Failure modes:**
@@ -258,7 +258,7 @@ datasets in separate trees.
 
 ### 6. `TransitionDataset`
 
-[libs/neural-surrogates/src/neural_surrogates/data.py](../libs/neural-surrogates/src/neural_surrogates/data.py)
+[libs/neural-surrogates/src/neural_surrogates/datasets/transition.py](../libs/neural-surrogates/src/neural_surrogates/datasets/transition.py)
 
 A `torch.utils.data.Dataset` that flattens every trajectory in a split
 into `K`-step training samples (`K = pushforward_steps`, default `1`).
@@ -342,8 +342,11 @@ It is a plain argparse CLI (not Hydra) — run with `--help` to see every flag.
 |---|---|
 | `SimpleConv` baseline | [libs/neural-surrogates/src/neural_surrogates/architectures/simple_conv.py](../libs/neural-surrogates/src/neural_surrogates/architectures/simple_conv.py) |
 | `UNetConvNeXt` architecture | [libs/neural-surrogates/src/neural_surrogates/architectures/unet_convnext.py](../libs/neural-surrogates/src/neural_surrogates/architectures/unet_convnext.py) |
-| `Trainer` (train/val loop) | [libs/neural-surrogates/src/neural_surrogates/training.py](../libs/neural-surrogates/src/neural_surrogates/training.py) |
-| `TransitionDataset` | [libs/neural-surrogates/src/neural_surrogates/data.py](../libs/neural-surrogates/src/neural_surrogates/data.py) |
+| `UPT` architecture | [libs/neural-surrogates/src/neural_surrogates/architectures/upt.py](../libs/neural-surrogates/src/neural_surrogates/architectures/upt.py) |
+| `P3D` architecture | [libs/neural-surrogates/src/neural_surrogates/architectures/p3d.py](../libs/neural-surrogates/src/neural_surrogates/architectures/p3d.py) |
+| `BaseTraining` (shared machinery) | [libs/neural-surrogates/src/neural_surrogates/training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py) |
+| `Trainer` (full-grid train/val loop) | [libs/neural-surrogates/src/neural_surrogates/training/standard.py](../libs/neural-surrogates/src/neural_surrogates/training/standard.py) |
+| `TransitionDataset` | [libs/neural-surrogates/src/neural_surrogates/datasets/transition.py](../libs/neural-surrogates/src/neural_surrogates/datasets/transition.py) |
 | Run script | [scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py) |
 | Config | [conf/neural_surrogate/training.yaml](../conf/neural_surrogate/training.yaml) |
 
@@ -418,27 +421,130 @@ holds five presets that scale `base_channels`, `channel_mults`,
 | large | 32 | [1, 2, 4, 8] | [2, 2, 2, 2] | 7 | 4 |
 | xlarge | 48 | [1, 2, 4, 8] | [3, 3, 3, 3] | 7 | 4 |
 
-### 10. `Trainer` and run script
+### 9a. `UPT` — Universal Physics Transformer
 
-`Trainer` is a generic loop. Its constructor takes `model`,
-`train_loader`, `val_loader`, `optimizer`, `loss_fn`, `num_epochs`,
-`device`, optional `patience`, and optional `weights_path`. `fit()` runs
-the loop; each epoch calls `_train_epoch` then `_validate` and prints
-the mean losses. Batch unpacking assumes the `TransitionDataset` dict
-layout (`state_n`, `state_next`, `params_n`, `geometry`).
+[libs/neural-surrogates/src/neural_surrogates/architectures/upt.py](../libs/neural-surrogates/src/neural_surrogates/architectures/upt.py)
+
+UPT treats the fluid cells as an **unstructured point cloud** and avoids
+all convolutions on the full grid. One forward step:
+
+1. **Gather fluid points.** The geometry mask is used to extract fluid
+   cell indices and their `(z, y, x)` integer coordinates — obstacle
+   cells stay zero throughout and are never fed to the network.
+2. **Encode onto supernodes.** `EncoderSupernodes` builds a sparse
+   neighbourhood graph (radius `r`, up to `max_degree` neighbours per
+   supernode) and pools the `num_supernodes` supernode features via a
+   GNN message MLP (`gnn_dim`) into `enc_depth` transformer layers,
+   then projects to `num_latent_tokens` latent tokens via a perceiver
+   cross-attention tail.
+3. **Approximate in latent space.** `Approximator` runs `approx_depth`
+   self-attention layers over the latent tokens.
+4. **Decode back to fluid cells.** `DecoderPerceiver` uses cross-attention
+   from the latent tokens to the query fluid-cell positions, producing
+   `n_state_channels` values per fluid cell.
+5. **Scatter to grid.** Decoded values are written back at the fluid
+   indices; obstacle cells stay 0.
+
+**`_geom_cache`.** The supernode selection, neighbour graph, and fluid
+indices are a pure function of the geometry. They are cached in
+`self._geom_cache` keyed on `(total_cells, n_fluid, device, dtype)`, so
+the expensive `cdist`-based neighbour build runs only on the first step
+for a given geometry and is reused every subsequent step.
+
+**Key knobs:**
+
+| Knob | Default | Notes |
+|---|---|---|
+| `normalize` | `True` | Z-score state channels and inflow params before the encoder, de-normalise the output. **Load-bearing**: raw `inflow_angle` (~50°) swamps the velocity channels (~1 m/s); without normalisation the encoder's input projection ignores the state and the rollout collapses. |
+| `predict_residual` | `True` | Predict the *change* `state_{t+1} − state_t` rather than the absolute next state. At the compression ratios affordable on dense ~256k-cell grids, an absolute prediction collapses to a smooth mean; the residual keeps the task well-scaled and makes near-identity the model's natural default. |
+| `cond_dim` | `None` | `None`: inflow params are concatenated to every fluid-cell's feature vector. If set, params are projected to a `(B, cond_dim)` DiT condition vector passed to all transformer stacks. |
+| `attention_type` | `"dot_product"` | Self-attention implementation for all transformer stacks (perceiver cross-attention tails are unaffected). Options: `"dot_product"` (standard scaled-dot-product), `"dot_product_slow"`, `"efficient"` (linear), `"linformer"`, `"transsolver"`. `"transsolver"` requires `attention_kwargs: {num_slices: N}`. |
+| `extra_in_channels` | `0` | Extra input-only channels gathered at fluid cells raw (no normalisation) and concatenated before the params. Used by the DD wrapper to feed per-patch coarse context + positional encodings. Default 0 keeps the state dict byte-identical to a model built without the argument. |
+
+**Normalization stats.** Computed by `_compute_normalization_stats` in
+the training script: streamed file-by-file over the training split in
+float64, restricted to fluid cells via the geometry mask. Installed via
+`model.set_normalization(state_mean, state_std, param_mean, param_std)`;
+stored as buffers `state_mean/state_std/param_mean/param_std` and saved
+with the checkpoint so rollout/test callers get the correct
+standardisation for free.
+
+**Shared-geometry fast path.** Within one forward call, all batch members
+voxelise the same STL onto the same grid, so one point set and supernode
+graph serves the whole batch. The shared-geometry guard checks that all
+batch members have the same number of fluid cells (`O(B)` reductions per
+step, not `O(B·N)`) and falls back to a per-sample loop only when they
+differ.
+
+#### Size presets
+
+The config group
+[conf/neural_surrogate/architectures/upt/](../conf/neural_surrogate/architectures/upt/)
+holds five presets (`_target_: neural_surrogates.UPT`). All default to
+`normalize: true`, `predict_residual: true`, `attention_type:
+dot_product`, `cond_dim: null`.
+
+| Preset | dim | latent tokens | supernodes | gnn_dim | enc/approx/dec depth | heads | radius | max_degree |
+|---|---|---|---|---|---|---|---|---|
+| tiny | 32 | 16 | 16 | 16 | 1/1/1 | 2 | 2.5 | 8 |
+| small | 128 | 64 | 128 | 128 | 2/4/2 | 4 | 4.0 | 24 |
+| medium | 192 | 128 | 256 | 192 | 4/4/4 | 3 | 5.0 | 32 |
+| large | 384 | 256 | 512 | 256 | 4/6/4 | 6 | 5.0 | 32 |
+| xlarge | 768 | 512 | 1024 | 384 | 4/8/4 | 12 | 6.0 | 32 |
+
+### 10. `Trainer` / `BaseTraining` and run script
+
+`Trainer`
+([training/standard.py](../libs/neural-surrogates/src/neural_surrogates/training/standard.py))
+is a thin subclass of `BaseTraining`
+([training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py)).
+`BaseTraining` holds all architecture-agnostic machinery; `Trainer`'s
+only addition is `_final_loss` — a masked element-wise `loss_fn(pred,
+target)` applied to the final rollout step. `PatchTrainer` overrides the
+same hook with the four-term Eq (9) loss instead (see §18).
+
+`BaseTraining.__init__` accepts `model`, `train_loader`, `val_loader`,
+`optimizer`, `loss_fn`, `num_epochs`, `device`, plus a rich knob set:
+
+| Knob | Purpose |
+|---|---|
+| `patience` | epochs without val improvement before stopping (default `None`, disabled) |
+| `weights_path` | path for best-val `weights.pt` (written on every improvement, reloaded at end) |
+| `amp` / `amp_dtype` | mixed-precision autocast (`bfloat16` by default) with grad scaling |
+| `compile_model` / `compile_dynamic` | `torch.compile` the model before training |
+| `channels_last` | `channels_last_3d` memory layout for faster 3D-conv kernels |
+| `cudnn_benchmark` / `tf32` | CUDA backend tuning (autotuned conv, Ampere TF32) |
+| `pushforward_epochs_per_step` / `pushforward_start_steps` | pushforward-horizon curriculum (see below) |
+| `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` | linear warmup → cosine annealing LR schedule |
+| `grad_clip_norm` | gradient clipping (`torch.nn.utils.clip_grad_norm_`) |
+| `checkpoint_every` / `resume` | full checkpoint (model + optimizer + scheduler + scaler + curriculum) for resume |
+
+`fit()` runs the loop; each epoch calls `_train_epoch` then `_validate`
+and prints the mean losses. Batch unpacking assumes the `TransitionDataset`
+dict layout (`state_n`, `state_next`, `params_n`, `geometry`).
 
 **Pushforward trick.** When the dataset is built with
 `pushforward_steps=K>1` ([Brandstetter et al., 2022](https://iclr-blogposts.github.io/2023/blog/2023/autoregressive-neural-pde-solver/)),
-`params_n` arrives as `(B, K, P)` and `_forward` rolls the model through
+`params_n` arrives as `(B, K, P)` and the rollout runs the model through
 `K-1` steps under `torch.no_grad()` starting at `state_n`, then takes one
 gradient-tracked step against `state_next` (the snapshot at `t+K`). This
 exposes the network to its own predictions during training — closing the
 distribution gap that pure one-step training leaves — without
 backpropagating through the unroll. With `K=1` (the default) the inner
-loop is skipped and behavior is identical to the original one-step
-trainer. Validation uses the same `_forward`, so with `K>1` the
-checkpointed best-val model minimizes a `K`-step error rather than a
-one-step error.
+loop is skipped and behaviour is identical to one-step training.
+Validation uses the same rollout, so with `K>1` the checkpointed best-val
+model minimises a `K`-step error rather than a one-step error.
+
+**Pushforward curriculum.** Setting `pushforward_epochs_per_step` enables a
+curriculum that starts the rollout horizon at `pushforward_start_steps`
+and increments it by one every `pushforward_epochs_per_step` epochs up to
+the dataset's `pushforward_steps`. This lets the model first learn one-step
+transitions before being exposed to its own compounding errors.
+
+**LR schedule.** When `lr_warmup_epochs` is set the optimizer's LR ramps
+linearly from `lr_warmup_start` to its configured peak over the warmup
+window, then cosine-anneals down to `lr_min` over the remaining epochs.
+`lr_warmup_epochs=None` (default) keeps the LR fixed.
 
 **Best-checkpoint saving.** When `weights_path` is set, the trainer
 writes `model.state_dict()` to that path every time the val loss
@@ -451,6 +557,15 @@ nothing needs to be saved by the caller after `fit()`.
 (default `null`, disabled), training halts after `patience` consecutive
 epochs without val-loss improvement. Combine with a generous
 `num_epochs` to let the patience criterion choose when to stop.
+
+**Normalization.** After building the model but before saving the config,
+the training script calls `_compute_normalization_stats(train_ds)` if
+`hasattr(model, "set_normalization")` — currently only `UPT` exposes this
+hook. Stats are streamed file-by-file in float64, restricted to fluid
+cells via the geometry mask (so obstacle zeros don't bias the mean), and
+passed to `model.set_normalization(state_mean, state_std, param_mean,
+param_std)`. They are stored as model buffers, travel with the checkpoint,
+and are restored automatically at rollout / test time.
 
 The model and dataloaders are deliberately **constructed outside** the
 trainer and passed in — this keeps `Trainer` agnostic to backend choice,
@@ -628,13 +743,13 @@ varies the inflow, but a uDALES-trained net also expects
 Select it as a truth or assimilation model just like any backend:
 
 ```bash
-python scripts/run_time_varying_parameters_rollout_esmda.py \
+python scripts/run_esmda.py \
     model@truth_model=pyudales model@assim_model=neural_surrogate \
     assim_model.forward_model.model_dir=model_weights/unet_convnext_tiny
 ```
 
 The `pyudales_neural_surrogate` case in
-[tests/test_run_time_varying_parameters_rollout_esmda.py](../tests/test_run_time_varying_parameters_rollout_esmda.py)
+[tests/test_run_esmda.py](../tests/test_run_esmda.py)
 builds a throwaway `model_dir` (random weights, trained domain == the test
 grid) via the `surrogate_model_dir_factory` fixture, exercising the full
 load-from-folder path without needing a real checkpoint.
@@ -668,7 +783,7 @@ overlapping patches, runs a shared per-patch *fine* net, and stitches the
 patch outputs back together with a partition-of-unity (PoU) blend — while a
 small *coarse* net supplies global context. The design (companion PDF §2 +
 §5, Algorithm 1) is described in
-[docs/dd_implementation_plan.md](dd_implementation_plan.md).
+[docs/dd_implementation_plan.md](plans/dd_implementation_plan.md).
 
 The point of the decomposition is **grid flexibility**: because the model
 tiles a fixed patch size, one trained instance runs on any global grid that
@@ -796,8 +911,8 @@ periodicity is handled by the DD halo fill.
 ### 18. Two training paths
 
 **(a) Drop-in path (primary, validated).** The existing
-[`Trainer`](../libs/neural-surrogates/src/neural_surrogates/training.py) +
-[`TransitionDataset`](../libs/neural-surrogates/src/neural_surrogates/data.py) +
+[`Trainer`](../libs/neural-surrogates/src/neural_surrogates/training/standard.py) +
+[`TransitionDataset`](../libs/neural-surrogates/src/neural_surrogates/datasets/transition.py) +
 `MSELoss` on the full merged prediction (§15). Nothing about §10 changes; this
 is milestone 1.
 
@@ -818,7 +933,7 @@ The loss consumes the `info` dict returned by
 `patch_pred` — the per-patch PoU blocks before windowing —, `context`,
 `num_patches`, `dd`) alongside the merged prediction.
 
-[`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/patch_training.py)
+[`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/training/patch.py)
 mirrors `Trainer` (device handling, best-checkpoint saving) but trains on
 **full-field** `TransitionDataset` batches via `return_intermediates=True`.
 **Why full fields rather than per-patch items?** The interface and divergence
@@ -827,7 +942,7 @@ neighbours' predictions (they may land in a different minibatch, or be absent),
 so those terms are only well-defined when the whole field — hence every
 patch — is present each step.
 
-[`PatchTransitionDataset`](../libs/neural-surrogates/src/neural_surrogates/data_patch.py)
+[`PatchTransitionDataset`](../libs/neural-surrogates/src/neural_surrogates/datasets/patch.py)
 is a **new** dataset that reads the **same on-disk `training_data/` layout**
 (§1) but yields one sample per spatial patch: it subclasses `TransitionDataset`
 to reuse its file walking, parameter loading and lazy two-snapshot reads, and
@@ -864,16 +979,18 @@ dedicated coarse net at `base_channels: 8`.)
 
 **The architecture, trainer class and loss are bundled into the `mode` group.**
 A single `mode` choice selects all three (plus `model_name`): `mode=standard` →
-`unet_convnext/medium` + `neural_surrogates.Trainer` + `MSELoss`,
-`mode=domain_decomposition` → `domain_decomposed/medium` +
-[`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/patch_training.py)
+`p3d/medium` + `neural_surrogates.Trainer` + `MSELoss` (model_name
+`p3d_barcelona`), `mode=domain_decomposition` → `domain_decomposed/small` +
+[`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/training/patch.py)
 + `DomainDecompositionLoss`. The mode entry sits **after** `_self_` in the
 defaults list so it overrides the inline `trainer._target_`, and it supplies the
 architecture default and the whole `loss:` config inline (there is no separate
-`loss` group). The trainer's remaining fields stay in the inline `trainer:`
-block. The architecture **family/size is still swappable on the CLI** on top of
-the mode default (the override value is the nested `family/preset` path) — e.g.
-to train a DD model as a full-grid drop-in (generic Trainer + MSELoss):
+`loss` group and no separate `trainer` config group — both are embedded in the
+`mode/` files). The trainer's remaining fields stay in the inline `trainer:`
+block in `training.yaml`. The architecture **family/size is still swappable on
+the CLI** on top of the mode default (the override value is the nested
+`family/preset` path) — e.g. to train a DD model as a full-grid drop-in
+(generic Trainer + MSELoss):
 
 ```bash
 # (a) Drop-in path: mode=standard but with a domain_decomposed architecture.
@@ -912,11 +1029,10 @@ the inner patch nets stay non-periodic. For DD, `interior_size` must divide `Ny`
 | `DomainDecomposition` (operators, PoU, periodic wrap, positional, coarse pool/prolong) | [decomposition.py](../libs/neural-surrogates/src/neural_surrogates/decomposition.py) |
 | `DomainDecomposed` (Algorithm 1; `domain_flexible`; `return_intermediates`) | [architectures/domain_decomposed.py](../libs/neural-surrogates/src/neural_surrogates/architectures/domain_decomposed.py) |
 | `UNetConvNeXt` `extra_in_channels` widening | [architectures/unet_convnext.py](../libs/neural-surrogates/src/neural_surrogates/architectures/unet_convnext.py) |
-| `PatchTransitionDataset` (per-patch dataset, same on-disk layout) | [data_patch.py](../libs/neural-surrogates/src/neural_surrogates/data_patch.py) |
+| `PatchTransitionDataset` (per-patch dataset, same on-disk layout) | [datasets/patch.py](../libs/neural-surrogates/src/neural_surrogates/datasets/patch.py) |
 | `DomainDecompositionLoss` (Eq 9, four terms) | [dd_loss.py](../libs/neural-surrogates/src/neural_surrogates/dd_loss.py) |
-| `PatchTrainer` (full-field Eq-9 training) | [patch_training.py](../libs/neural-surrogates/src/neural_surrogates/patch_training.py) |
+| `PatchTrainer` (full-field Eq-9 training) | [training/patch.py](../libs/neural-surrogates/src/neural_surrogates/training/patch.py) |
 | Spacing-invariant domain check (`domain_flexible`) | [forward_model.py](../libs/neural-surrogates/src/neural_surrogates/forward_model.py) |
 | Architecture presets `tiny` / `small` / `medium` | [conf/neural_surrogate/architectures/domain_decomposed/](../conf/neural_surrogate/architectures/domain_decomposed/) |
-| Trainer groups `standard` / `dd_patch` | [conf/neural_surrogate/trainer/](../conf/neural_surrogate/trainer/) |
-| Loss groups `mse` / `dd` | [conf/neural_surrogate/loss/](../conf/neural_surrogate/loss/) |
+| Mode groups `standard` / `domain_decomposition` (bundle trainer class + loss + architecture default) | [conf/neural_surrogate/mode/](../conf/neural_surrogate/mode/) |
 | Tests | [test_decomposition.py](../tests/test_decomposition.py), [test_domain_decomposed.py](../tests/test_domain_decomposed.py), [test_unet_convnext_extra_channels.py](../tests/test_unet_convnext_extra_channels.py), [test_patch_transition_dataset.py](../tests/test_patch_transition_dataset.py), [test_dd_loss.py](../tests/test_dd_loss.py), [test_dd_forward_model_flexible.py](../tests/test_dd_forward_model_flexible.py), [test_dd_training_wiring.py](../tests/test_dd_training_wiring.py) |

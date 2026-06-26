@@ -7,7 +7,7 @@ A Python framework for urban air flow simulation and ensemble-based data assimil
 ## Features
 
 - **Three CFD backends:** pylbm (Lattice Boltzmann Method, wrapping Geir Evensen's LBM), pyudales (wrapping uDALES v2.2.0), and pypalm (wrapping the PALM model system)
-- **Neural surrogate backend:** train a learned one-step network on CFD ensembles and run it as a drop-in fourth forward model — three architectures (`SimpleConv`, `UNetConvNeXt`, and the transformer-based `UPT`), full stack (data generation, training, autoregressive rollout) in [`neural-surrogates`](libs/neural-surrogates), documented in [`docs/neural_surrogates.md`](docs/neural_surrogates.md)
+- **Neural surrogate backend:** train a learned one-step network on CFD ensembles and run it as a drop-in fourth forward model — several architectures (`SimpleConv`, `UNetConvNeXt`, the transformer-based `UPT`, `P3D`, and a domain-decomposed model that runs on any grid sharing its training cell spacing), full stack (data generation, training, autoregressive rollout) in [`neural-surrogates`](libs/neural-surrogates), documented in [`docs/neural_surrogates.md`](docs/neural_surrogates.md)
 - **Ensemble-based data assimilation** using ESMDA (Ensemble Smoother with Multiple Data Assimilation), implemented in JAX
 - **Parameter estimation** and **joint state-parameter estimation**
 - **Localization** for ESMDA (adaptive correlation-based observation tapering, with optional "grid block" joint analysis; opt-in)
@@ -151,12 +151,12 @@ helper scripts (plain CLIs, not Hydra) post-process it:
 
 ```bash
 # Drop the spin-up transient and rebase the time axis to t=0
-python scripts/trim_spinup.py \
+python scripts/adjust_simulations/trim_spinup.py \
     --state ground_truth/state.nc --params ground_truth/params.nc \
     --spinup-time 50 --output-dir ground_truth_spunup
 
 # Downcast 64-bit NetCDF variables to 32-bit float (streamed; halves on-disk size)
-python scripts/convert_ground_truth_to_32bit.py        # ground_truth/64_bit -> ground_truth/32_bit
+python scripts/adjust_simulations/convert_ground_truth_to_32bit.py   # ground_truth/64_bit -> 32_bit
 
 # Diagnostic figures: prescribed params, a field snapshot, and the inflow
 # angle/speed recovered from the flow vs. the prescribed values
@@ -187,7 +187,7 @@ mode is the cross product of three declarative axes plus a truth source:
 Shared ESMDA settings live in the inlined `esmda:` block of `conf/run_esmda.yaml`.
 The dynamic multi-window setup
 (time-varying inflow over a rollout, with localization) is written up in
-[`docs/esmda_dynamic_multiwindow.md`](docs/esmda_dynamic_multiwindow.md).
+[`docs/temp/esmda_dynamic_multiwindow.md`](docs/temp/esmda_dynamic_multiwindow.md).
 
 ```bash
 # Parameter estimation (parameter-only smoother, static params, single window)
@@ -244,8 +244,10 @@ folder where intermediate files are stored.
 
 A learned one-step network can be trained on a CFD ensemble and then used
 as a drop-in fourth forward model alongside pylbm, pyudales, and pypalm.
-Three architectures are available — `SimpleConv` (baseline), `UNetConvNeXt`, and
-the transformer-based `UPT` (Universal Physics Transformer). The end-to-end stack
+Several architectures are available — `SimpleConv` (baseline), `UNetConvNeXt`,
+the transformer-based `UPT` (Universal Physics Transformer), `P3D`, and a
+domain-decomposed model that tiles a fixed patch size so one trained instance
+runs on any global grid sharing its training cell spacing. The end-to-end stack
 (dataset generation → training → autoregressive rollout → use as a
 forward/assimilation model) is documented in
 [`docs/neural_surrogates.md`](docs/neural_surrogates.md). The headline
@@ -382,10 +384,11 @@ pyurbanair/
 │       └── src/neural_surrogates/
 │           ├── forward_model.py           # NeuralSurrogateForwardModel
 │           ├── ensemble_forward_model.py
-│           ├── data.py                    # TransitionDataset
-│           ├── training.py                # Trainer (train/val loop, pushforward)
+│           ├── datasets/                  # TransitionDataset, PatchTransitionDataset
+│           ├── training/                  # BaseTraining, Trainer, PatchTrainer
+│           ├── decomposition.py / dd_loss.py  # Domain-decomposition operators + Eq-9 loss
 │           ├── geometry.py                # STL → voxel geometry channel
-│           └── architectures/             # SimpleConv, UNetConvNeXt, UPT (_upt/)
+│           └── architectures/             # SimpleConv, UNetConvNeXt, UPT (_upt/), P3D, DomainDecomposed
 │
 ├── conf/                                  # Hydra config (see Configuration)
 │   ├── run_forward_model.yaml             # Entry point — forward-model runs (self-contained)
@@ -397,17 +400,20 @@ pyurbanair/
 │   ├── esmda/                             # ESMDA smoother/localization/state_reduction groups
 │   └── neural_surrogate/                  # Surrogate: training.yaml, testing.yaml, training_data.yaml, architectures/
 │
-├── scripts/                               # Main execution scripts
+├── scripts/                               # Main execution scripts (see docs/scripts_and_configs.md)
 │   ├── run_forward_model.py               # Forward sim (run.ensemble / run.rollout_steps / params=static|dynamic)
 │   ├── run_esmda.py                       # Unified ESMDA entry point (smoother × params × windows)
-│   ├── _common.py                         # Shared script glue (viz, derived-param plots, metrics)
-│   ├── generate_training_data.py          # Build surrogate training dataset
-│   ├── train_neural_surrogate.py          # Train a surrogate
-│   ├── test_neural_surrogate.py           # Autoregressive rollout on test split
-│   ├── trim_spinup.py                     # Trim spin-up from a ground-truth artifact
-│   ├── convert_ground_truth_to_32bit.py   # Downcast ground-truth NetCDF to 32-bit
-│   ├── visualize_ground_truth.py          # Diagnostic figures for a ground-truth artifact
-│   └── dataloading.py                     # TransitionDataset smoke test
+│   ├── _common.py / _esmda_common.py      # Shared script glue (viz, derived-param plots, metrics)
+│   ├── compute_esmda_metrics.py / make_esmda_figures.py  # Post-hoc metrics + figures
+│   ├── neural_surrogate/                  # Surrogate stack (generate/train/test/dataloading)
+│   ├── adjust_simulations/                # Ground-truth utilities (trim_spinup, 32-bit, ...)
+│   ├── figure_creation/                   # Paper/diagnostic figures (visualize_ground_truth, ...)
+│   └── figspec/                           # Internal figure-styling library
+│
+├── job_scripts/                           # HPC submission (see docs/job_scripts.md)
+│   ├── snellius/                          # Snellius SLURM wrapper + sweeps
+│   ├── delftblue/                         # DelftBlue SLURM wrapper + sweeps
+│   └── local/                             # Local multi-process runners
 │
 ├── examples/                              # Example experiments
 │   ├── benchmark_geometry/                # Xie and Castro 2008 geometry tools
@@ -416,10 +422,14 @@ pyurbanair/
 │   └── palm/                              # PALM experiment configs (_p3d)
 │
 ├── docs/                                  # Documentation
-│   ├── codebase_guide.md                  # Orientation sheet for AI coding assistants
+│   ├── codebase_guide.md                  # Orientation sheet for AI coding assistants (entrypoint)
+│   ├── pylbm.md / pyudales.md / pypalm.md # Per-backend deep dives
+│   ├── data_assimilation.md               # ESMDA / observation operator / localization
 │   ├── neural_surrogates.md               # Neural-surrogate stack
-│   ├── esmda_dynamic_multiwindow.md       # Dynamic multi-window ESMDA setup
-│   └── ensemble_scaling.md                # Ensemble parallel-scaling findings
+│   ├── scripts_and_configs.md             # conf/ + scripts/ reference
+│   ├── job_scripts.md                     # HPC job-script reference
+│   ├── plans/ · temp/                     # Working notes / design records (theory + history)
+│   └── ...
 │
 ├── tests/                                 # Test suite
 ├── pyproject.toml                         # Project configuration
@@ -428,6 +438,15 @@ pyurbanair/
 ```
 
 ### Libraries
+
+Each library has a dedicated deep-dive doc under [`docs/`](docs/):
+[pylbm](docs/pylbm.md), [pyudales](docs/pyudales.md), [pypalm](docs/pypalm.md),
+[data-assimilation](docs/data_assimilation.md), and
+[neural-surrogates](docs/neural_surrogates.md). The configs and scripts are
+covered in [`docs/scripts_and_configs.md`](docs/scripts_and_configs.md), HPC
+submission in [`docs/job_scripts.md`](docs/job_scripts.md), and
+[`docs/codebase_guide.md`](docs/codebase_guide.md) is the orientation entrypoint
+for contributors and AI coding assistants.
 
 #### pyurbanair
 
@@ -453,7 +472,7 @@ A wrapper for the PALM model system. It is imported lazily (compiling on first i
 
 #### neural-surrogates
 
-A learned, one-step surrogate of the CFD forward models, built with PyTorch. It provides a dataset generation/loading stack (`TransitionDataset`), architectures (`SimpleConv` baseline, `UNetConvNeXt`, and the transformer-based `UPT`), a generic `Trainer` (best-val checkpointing, patience-based early stopping, and the pushforward trick), and a `NeuralSurrogateForwardModel` that wraps a trained network as a `BaseForwardModel` so it slots into the ensemble/ESMDA machinery as a fourth backend. `UPT` z-score-normalizes its inputs and predicts the per-step residual (both required for stable rollouts on dense grids), with normalization statistics computed at training time and stored in the checkpoint. A cold start is bootstrapped by the CFD backend that generated its training data; warm starts step the network directly. See [`docs/neural_surrogates.md`](docs/neural_surrogates.md) for the full stack.
+A learned, one-step surrogate of the CFD forward models, built with PyTorch. It provides a dataset generation/loading stack (`TransitionDataset`), architectures (`SimpleConv` baseline, `UNetConvNeXt`, the transformer-based `UPT`, `P3D`, and a domain-decomposed model), a generic `Trainer` (best-val checkpointing, patience-based early stopping, and the pushforward trick), and a `NeuralSurrogateForwardModel` that wraps a trained network as a `BaseForwardModel` so it slots into the ensemble/ESMDA machinery as a fourth backend. `UPT`/`P3D` z-score-normalize their inputs and predict the per-step residual (both required for stable rollouts on dense grids), with normalization statistics computed at training time and stored in the checkpoint. A cold start is bootstrapped by the CFD backend that generated its training data; warm starts step the network directly. See [`docs/neural_surrogates.md`](docs/neural_surrogates.md) for the full stack.
 
 ## Benchmark Geometry
 
