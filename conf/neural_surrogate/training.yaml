@@ -19,21 +19,23 @@ defaults:
   # `mode` must sit AFTER `_self_` so it overrides the inline `trainer:` block's
   # `_target_` below. The loss is defined entirely inside the mode file (there is
   # no `loss` group).
-  - /neural_surrogate/mode@_global_: domain_decomposition
+  # - /neural_surrogate/mode@_global_: domain_decomposition
+  - /neural_surrogate/mode@_global_: standard
 
 # The uDALES runs are periodic in the spanwise (y) direction: spatial convs
 # wrap circularly along y instead of zero-padding. x stays non-periodic
 # (inflow-outflow), z stays non-periodic (ground / domain top). This is a
 # property of the data, so it lives here rather than in the architecture
 # presets.
-architecture:
-  periodic_axes: [y]
+# architecture:
+#   periodic_axes: [y]
 
 # Optional warm start: path to a previously trained `weights.pt` state dict to
 # initialize the model from before training (e.g. fine-tuning or continuing a
 # run). The architecture must match. Set to null to train from scratch.
 # Example: init_weights_path=model_weights/unet_convnext_medium/weights.pt
 # init_weights_path: model_weights/unet_convnext_medium/weights.pt
+# init_weights_path: model_weights/domain_decomposition_conv/weights.pt
 init_weights_path: null
 
 # Unified trainer config. neural_surrogates.Trainer (generic full-grid MSE /
@@ -58,10 +60,17 @@ trainer:
   amp_dtype: bfloat16
   # torch.compile the model (static conv stack -> good fusion win). First
   # batch pays one-off compilation latency.
-  compile_model: false
+  compile_model: true
   # channels-last-3d memory layout for cuDNN kernel selection under
   # autocast. A/B this on the training GPU; correctness is unaffected.
   channels_last: false
+  # cuDNN conv-algorithm autotuning. The grid + (drop_last) batch shape are
+  # fixed, so cuDNN benchmarks once on the first step and reuses the fastest
+  # kernels. Pure win for a static-shape conv stack.
+  cudnn_benchmark: true
+  # Run fp32 matmul/conv on Ampere+ tensor cores (TF32). Slightly lower mantissa
+  # precision; immaterial next to the bf16 autocast already in use.
+  tf32: true
   # Rollout-length curriculum: begin with `pushforward_start_steps`-step
   # rollouts and add one step every `pushforward_epochs_per_step` epochs, up to
   # `dataset.pushforward_steps`. The Eq (9) terms (PatchTrainer) are evaluated
@@ -86,9 +95,14 @@ trainer:
   # the earlier steps always run no-grad).
   grad_unroll_steps: 2
   # Continue from <weights dir>/checkpoint.pt (model + optimizer + scheduler +
-  # scaler + curriculum state, written every epoch). Per-epoch metrics are
-  # appended to <weights dir>/metrics.csv.
-  resume: false
+  # scaler + curriculum state). Per-epoch metrics are appended to
+  # <weights dir>/metrics.csv.
+  resume: true
+  # Write the full checkpoint every N epochs (plus the last one) instead of
+  # every epoch -- the optimizer state is ~2x the model size, so the per-epoch
+  # write is a synchronous disk stall. Best weights are still saved on every val
+  # improvement; this only coarsens resume granularity.
+  checkpoint_every: 5
 
 # Alternative tuning that has worked well: torch.optim.AdamW with
 # weight_decay: 1.0e-6, patience: 25, dataloader.batch_size: 64.
@@ -108,7 +122,8 @@ dataset:
   _target_: neural_surrogates.TransitionDataset
   # _target_: neural_surrogates.PatchTransitionDataset
   # root_dir: training_data/pyudales_medium
-  root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_medium
+  # root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_medium
+  root_dir: /export/scratch1/ntm/pyurbanair/training_data/pypalm_barcelona
   state_vars:
     - u
     - v
@@ -116,11 +131,11 @@ dataset:
   param_vars: null
   cache: false
   dtype: float32
-  pushforward_steps: 10
+  pushforward_steps: 7
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 8
+  batch_size: 4
   shuffle: true
   # Drop the final short batch so every step sees the same batch size. A
   # varying batch size forces torch.compile to recompile -- and P3D in
@@ -131,9 +146,17 @@ dataloader:
   # negligible.
   drop_last: true
   # Workers overlap the per-sample netCDF reads with GPU compute;
-  # pin_memory enables async host->GPU copies. Do NOT set
-  # persistent_workers: the pushforward curriculum relies on workers
-  # re-forking each epoch to pick up the new horizon.
+  # pin_memory enables async host->GPU copies. persistent_workers keeps the
+  # worker pool (and its per-process netCDF handle cache) alive across epochs
+  # instead of re-forking every epoch; the trainer recreates the loader only
+  # when the pushforward curriculum advances the horizon, so workers still pick
+  # up the new horizon (see BaseTraining._refork_loader).
   num_workers: 4
   pin_memory: true
+  persistent_workers: true
+  # Ship the (identical-for-every-sample) geometry mask once per batch as
+  # (1, *grid) instead of B redundant copies.
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
 

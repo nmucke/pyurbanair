@@ -60,6 +60,10 @@ def run(cfg: DictConfig) -> None:
 
     train_ds = instantiate(cfg.dataset, split="train", dtype=dtype)
     val_ds = instantiate(cfg.dataset, split="val", dtype=dtype)
+    # persistent_workers needs worker processes; force it off for workerless
+    # runs (CPU smoke tests / debugging) so the DataLoader accepts the config.
+    if int(cfg.dataloader.get("num_workers", 0)) == 0:
+        cfg.dataloader.persistent_workers = False
     train_loader = instantiate(cfg.dataloader, dataset=train_ds)
     val_loader = instantiate(cfg.dataloader, dataset=val_ds, shuffle=False)
 

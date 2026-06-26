@@ -18,17 +18,21 @@ domain:
   #   domain.bounds=[[353,553],[337,537],[0,128]] domain.nx=100 domain.ny=100 domain.nz=64
   # (nfcts still counts all STL facets; regenerate the STL with --size for fewer.)
   # 4m resolution
-  nx: 225
-  ny: 218
+  nx: 224
+  ny: 224
   nz: 32
 
   # 2m resolution
   # nx: 450
   # ny: 435
   # nz: 64
+  # bounds:
+  #   - [0.0, 900.0]
+  #   - [0.0, 870.0]
+  #   - [0.0, 128.0]
   bounds:
-    - [0.0, 900.0]
-    - [0.0, 870.0]
+    - [0.0, 896.0]
+    - [0.0, 896.0]
     - [0.0, 128.0]
 
 geometry:
@@ -78,3 +82,6 @@ time:
   simulation_time: 1200.0
   output_frequency: 10.0
   spinup_time: 500.0
+  # simulation_time: 100.0
+  # output_frequency: 10.0
+  # spinup_time: 100.0

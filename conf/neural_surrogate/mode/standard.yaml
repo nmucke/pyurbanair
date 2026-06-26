@@ -11,8 +11,9 @@
 # `neural_surrogate/architectures@architecture=p3d/large` (or unet_convnext/...,
 # upt/..., or domain_decomposed/... to train a DD model as a full-grid drop-in).
 defaults:
-  - /neural_surrogate/architectures@architecture: unet_convnext/medium
-model_name: standard
+  # - /neural_surrogate/architectures@architecture: unet_convnext/medium
+  - /neural_surrogate/architectures@architecture: p3d/medium
+model_name: p3d_barcelona
 trainer:
   _target_: neural_surrogates.Trainer
 # Plain mean-squared error on the (masked) next-state prediction.

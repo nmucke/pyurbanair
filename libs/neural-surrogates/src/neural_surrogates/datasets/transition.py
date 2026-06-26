@@ -15,7 +15,25 @@ from typing import Sequence
 import numpy as np
 import torch
 import xarray as xr
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
+
+
+def transition_collate(batch: list[dict]) -> dict:
+    """Collate transition items, shipping the geometry mask only once.
+
+    Every :class:`TransitionDataset` item carries the *same* geometry tensor
+    (the domain is fixed), so the default collate would stack ``B`` identical
+    copies and pin/transfer all of them to the GPU each step. Instead emit it
+    once with a leading singleton dim: ``batch['geometry']`` becomes
+    ``(1, *grid)`` rather than ``(B, *grid)``. Consumers index
+    ``batch['geometry'][0]`` and broadcast (see ``BaseTraining._prepare_batch``),
+    so this is a drop-in for the per-sample form with B-1 fewer copies.
+    """
+    geometry = batch[0]["geometry"]
+    rest = [{k: v for k, v in item.items() if k != "geometry"} for item in batch]
+    collated = default_collate(rest)
+    collated["geometry"] = geometry.unsqueeze(0)
+    return collated
 
 
 class TransitionDataset(Dataset):

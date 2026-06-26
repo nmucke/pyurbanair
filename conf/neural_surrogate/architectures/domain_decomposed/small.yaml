@@ -7,8 +7,8 @@
 # family is swappable here, e.g.
 #   - /neural_surrogate/architectures/upt@coarse_net: tiny
 defaults:
-  - /neural_surrogate/architectures/p3d@fine_net: tiny
-  - /neural_surrogate/architectures/p3d@coarse_net: tiny
+  - /neural_surrogate/architectures/unet_convnext@fine_net: small
+  - /neural_surrogate/architectures/unet_convnext@coarse_net: small
   - _self_
 
 _target_: neural_surrogates.DomainDecomposed

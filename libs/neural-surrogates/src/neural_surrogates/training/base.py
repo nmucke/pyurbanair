@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 import tqdm
 
 
@@ -43,6 +43,8 @@ class BaseTraining:
         compile_model: bool = False,
         compile_dynamic: bool | None = None,
         channels_last: bool = False,
+        cudnn_benchmark: bool = False,
+        tf32: bool = False,
         pushforward_epochs_per_step: int | None = None,
         pushforward_start_steps: int = 1,
         lr_warmup_epochs: int | None = None,
@@ -51,9 +53,23 @@ class BaseTraining:
         mask_loss: bool = True,
         grad_clip_norm: float | None = None,
         grad_unroll_steps: int = 2,
+        checkpoint_every: int = 1,
         resume: bool = False,
     ) -> None:
         self.device = torch.device(device)
+        # Global CUDA backend tuning (no-ops on CPU). cudnn.benchmark autotunes
+        # conv algorithms for the (fixed, drop_last) batch+grid shape on the
+        # first step and reuses them; TF32 lets Ampere+ run fp32 matmul/conv on
+        # the faster tensor-core path. Both trade nothing here -- the grid is
+        # static -- and benefit every architecture, so they live in the shared
+        # base trainer rather than per-model.
+        if self.device.type == "cuda":
+            if cudnn_benchmark:
+                torch.backends.cudnn.benchmark = True
+            if tf32:
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                torch.set_float32_matmul_precision("high")
         self.model = model.to(self.device)
         # channels-last memory layout lets cuDNN pick faster 3D-conv kernels
         # under autocast; a no-op for correctness either way.
@@ -173,6 +189,13 @@ class BaseTraining:
         # improves long-rollout error at the cost of holding N steps'
         # activations.
         self.grad_unroll_steps = max(1, int(grad_unroll_steps))
+        # Persist the full (model + optimizer + scheduler + scaler + curriculum)
+        # checkpoint only every ``checkpoint_every`` epochs (plus the final one).
+        # The optimizer state alone is ~2x the model size, so writing it every
+        # epoch is a synchronous disk stall; best-weights are saved separately on
+        # every val improvement, so a coarser checkpoint cadence only widens the
+        # resume granularity, not the quality of the saved model.
+        self.checkpoint_every = max(1, int(checkpoint_every))
         self.resume = resume
         # Per-batch auxiliary scalars a subclass may expose for logging (e.g.
         # the DD loss term breakdown). ``None`` until/unless a subclass sets it
@@ -271,24 +294,36 @@ class BaseTraining:
         raise NotImplementedError
 
     # -- term logging (no-op unless a subclass populates ``_aux_terms``) ----- #
-    def _accumulate_terms(self, sums: dict[str, float]) -> None:
+    def _accumulate_terms(self, sums: dict[str, torch.Tensor]) -> None:
+        # Accumulate the (detached) term tensors on-device; converting each to a
+        # Python float here would sync the GPU every step. The single sync per
+        # term happens in ``_mean_terms`` at epoch end.
         if self._aux_terms is None:
             return
         for k, v in self._aux_terms.items():
-            sums[k] = sums.get(k, 0.0) + float(v)
+            val = v.detach() if torch.is_tensor(v) else v
+            sums[k] = sums.get(k, 0.0) + val
 
     @staticmethod
-    def _mean_terms(sums: dict[str, float], n: int) -> dict[str, float]:
-        return {k: v / max(n, 1) for k, v in sums.items()}
+    def _mean_terms(sums: dict[str, torch.Tensor], n: int) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for k, v in sums.items():
+            mean = v / max(n, 1)
+            out[k] = mean.item() if torch.is_tensor(mean) else float(mean)
+        return out
 
     def _train_epoch(self) -> float:
         self.model.train()
-        total = 0.0
+        # Accumulate the running loss on-device and sync once at epoch end. A
+        # per-step ``loss.item()`` would force a host<->GPU sync every step,
+        # serialising the otherwise-async pipeline; the same goes for the
+        # per-term breakdown (kept as tensors in ``term_sums``).
+        total = torch.zeros((), device=self.device)
         n = 0
-        term_sums: dict[str, float] = {}
+        term_sums: dict[str, torch.Tensor] = {}
         for batch in tqdm.tqdm(self.train_loader):
             loss = self._forward(batch)
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             if self.grad_clip_norm is not None:
                 # No-op unscale when the scaler is disabled; scaler.step
@@ -299,24 +334,24 @@ class BaseTraining:
                 )
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            total += loss.item()
+            total = total + loss.detach()
             n += 1
             self._accumulate_terms(term_sums)
         self._train_terms = self._mean_terms(term_sums, n)
-        return total / max(n, 1)
+        return (total / max(n, 1)).item()
 
     @torch.no_grad()
     def _validate(self) -> float:
         self.model.eval()
-        total = 0.0
+        total = torch.zeros((), device=self.device)
         n = 0
-        term_sums: dict[str, float] = {}
+        term_sums: dict[str, torch.Tensor] = {}
         for batch in self.val_loader:
-            total += self._forward(batch).item()
+            total = total + self._forward(batch).detach()
             n += 1
             self._accumulate_terms(term_sums)
         self._val_terms = self._mean_terms(term_sums, n)
-        return total / max(n, 1)
+        return (total / max(n, 1)).item()
 
     def _pushforward_steps_for_epoch(self, epoch: int) -> int:
         """Active rollout horizon at ``epoch`` (0-based) under the curriculum."""
@@ -324,6 +359,31 @@ class BaseTraining:
             return self.pushforward_max_steps
         steps = self.pushforward_start_steps + epoch // self.pushforward_epochs_per_step
         return min(steps, self.pushforward_max_steps)
+
+    @staticmethod
+    def _refork_loader(loader: DataLoader) -> DataLoader:
+        """Rebuild ``loader`` so its (persistent) worker processes re-fork and
+        pick up an in-place dataset change -- here, the pushforward curriculum
+        advancing the rollout horizon. With ``persistent_workers=True`` the
+        workers hold a stale pickled copy of the dataset, so only recreating the
+        loader propagates ``set_pushforward_steps``. The curriculum steps at most
+        once per ``pushforward_epochs_per_step`` epochs, so this rare rebuild is
+        far cheaper than the every-epoch re-fork that ``persistent_workers=False``
+        would otherwise pay."""
+        kwargs: dict = dict(
+            batch_size=loader.batch_size,
+            num_workers=loader.num_workers,
+            pin_memory=loader.pin_memory,
+            drop_last=loader.drop_last,
+            collate_fn=loader.collate_fn,
+            persistent_workers=loader.persistent_workers,
+            timeout=loader.timeout,
+            worker_init_fn=loader.worker_init_fn,
+            shuffle=isinstance(loader.sampler, RandomSampler),
+        )
+        if loader.num_workers > 0:
+            kwargs["prefetch_factor"] = loader.prefetch_factor
+        return DataLoader(loader.dataset, **kwargs)
 
     def _checkpoint_path(self) -> Path | None:
         if self.weights_path is None:
@@ -410,6 +470,11 @@ class BaseTraining:
                 # best_val / patience need no per-stage reset.
                 if self._train_pushforward_dataset is not None:
                     self._train_pushforward_dataset.set_pushforward_steps(steps)
+                    # Persistent workers cache a pre-curriculum copy of the
+                    # dataset; recreate the loader so they re-fork with the new
+                    # horizon. Non-persistent loaders re-fork every epoch anyway.
+                    if getattr(self.train_loader, "persistent_workers", False):
+                        self.train_loader = self._refork_loader(self.train_loader)
                 current_steps = steps
                 # best_val stays global (validation is fixed at the target
                 # horizon, so it's comparable across stages), but give each new
@@ -461,7 +526,13 @@ class BaseTraining:
                 for k, v in self._val_terms.items():
                     row[f"val_{k}"] = f"{v:.8f}"
                 self._log_metrics(metrics_path, row)
-            if ckpt_path is not None:
+            # Full checkpoint only every ``checkpoint_every`` epochs (and on the
+            # last one) -- writing the optimizer state every epoch is a needless
+            # synchronous disk stall (best weights are saved separately above).
+            if ckpt_path is not None and (
+                (epoch + 1) % self.checkpoint_every == 0
+                or epoch == self.num_epochs - 1
+            ):
                 self._save_checkpoint(
                     ckpt_path, epoch, best_val, epochs_since_improvement, current_steps
                 )

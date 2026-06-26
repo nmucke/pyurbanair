@@ -134,6 +134,13 @@ class DomainDecomposed(nn.Module):
             extra_in_channels=0, role="coarse_net",
         )
 
+        # The positional encoding is constant per grid (cached in the DD plan),
+        # so its batch-tiled form ``pos_blocks`` is identical across every
+        # forward at a fixed batch size. Cache the materialised expand+reshape to
+        # skip that copy each step; rebuilt only when (batch, plan) change.
+        self._pos_blocks: torch.Tensor | None = None
+        self._pos_blocks_key: tuple | None = None
+
     # ------------------------------------------------------------------ #
     @staticmethod
     def _build_subnet(node, n_state_channels, n_params, *, extra_in_channels, role):
@@ -255,10 +262,21 @@ class DomainDecomposed(nn.Module):
         context_blocks = self.dd.restrict(context)  # (B*M, C, e, e, e)
 
         # Positional encoding: (M, n_pos, e, e, e) -> tile over batch to (B*M).
+        # ``pos`` is plan-cached (constant per grid), so the expand+reshape (a
+        # materialising copy) is cached too and only rebuilt when (b, plan, dtype,
+        # device) change -- keyed on id(pos) since the plan rebuilds it on a new
+        # grid.
         pos = self.dd.positional(state)  # (M, n_pos, e, e, e)
-        pos_blocks = pos.unsqueeze(0).expand(b, *pos.shape).reshape(
-            b * m, *pos.shape[1:]
-        )
+        pos_key = (b, m, id(pos), pos.dtype, pos.device)
+        if self._pos_blocks_key != pos_key:
+            self._pos_blocks = (
+                pos.unsqueeze(0)
+                .expand(b, *pos.shape)
+                .reshape(b * m, *pos.shape[1:])
+                .contiguous()
+            )
+            self._pos_blocks_key = pos_key
+        pos_blocks = self._pos_blocks
 
         extra = torch.cat([context_blocks, pos_blocks], dim=1)
 

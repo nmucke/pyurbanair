@@ -13,8 +13,8 @@
 # terms need the wrapper's return_intermediates). Override the size preset with
 # `neural_surrogate/architectures@architecture=domain_decomposed/small`.
 defaults:
-  - /neural_surrogate/architectures@architecture: domain_decomposed/medium
-model_name: domain_decomposition
+  - /neural_surrogate/architectures@architecture: domain_decomposed/small
+model_name: domain_decomposition_conv
 trainer:
   _target_: neural_surrogates.PatchTrainer
 # Four-term domain-decomposition objective of companion PDF Eq (9):
@@ -23,8 +23,10 @@ trainer:
 # differs from a plain element-wise loss), so it only pairs with PatchTrainer.
 loss:
   _target_: neural_surrogates.DomainDecompositionLoss
+  # Set any lambda to null to drop that term entirely: it is then neither
+  # computed nor logged (only the one-step base term is always present).
   lambda_interface: 0.1
-  lambda_divergence: 0.01
+  lambda_divergence: null
   lambda_coarse: 1.0
   # Channels holding the velocity components (u, v, w) = (x-vel, y-vel, z-vel),
   # in that order, for the divergence term. Each is differenced along its own axis.

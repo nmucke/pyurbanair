@@ -37,7 +37,7 @@ Design notes
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import torch
 from torch import nn
@@ -50,12 +50,14 @@ class DomainDecompositionLoss(nn.Module):
     ----------
     lambda_interface:
         Weight ``λ_if`` of the neighbour-overlap interface term (Table 1
-        default ``0.1``).
+        default ``0.1``). Set to ``None`` to drop the interface term entirely
+        -- it is then neither computed nor logged.
     lambda_divergence:
         Weight ``λ_div`` of the velocity-divergence regulariser (default
-        ``0.01``).
+        ``0.01``). ``None`` drops the divergence term (not computed/logged).
     lambda_coarse:
         Weight ``λ_c`` of the coarse-supervision term (default ``1.0``).
+        ``None`` drops the coarse term (not computed/logged).
     velocity_channels:
         State channels holding the velocity components ``(u, v, w)`` =
         ``(x-velocity, y-velocity, z-velocity)`` for the divergence term, in
@@ -68,16 +70,18 @@ class DomainDecompositionLoss(nn.Module):
 
     def __init__(
         self,
-        lambda_interface: float = 0.1,
-        lambda_divergence: float = 0.01,
-        lambda_coarse: float = 1.0,
+        lambda_interface: Optional[float] = 0.1,
+        lambda_divergence: Optional[float] = 0.01,
+        lambda_coarse: Optional[float] = 1.0,
         velocity_channels: Sequence[int] = (0, 1, 2),
         mask_loss: bool = True,
     ) -> None:
         super().__init__()
-        self.lambda_interface = float(lambda_interface)
-        self.lambda_divergence = float(lambda_divergence)
-        self.lambda_coarse = float(lambda_coarse)
+        # ``None`` disables a term: it is neither computed nor logged. A bare
+        # float keeps it active with that weight.
+        self.lambda_interface = None if lambda_interface is None else float(lambda_interface)
+        self.lambda_divergence = None if lambda_divergence is None else float(lambda_divergence)
+        self.lambda_coarse = None if lambda_coarse is None else float(lambda_coarse)
         self.velocity_channels = tuple(int(c) for c in velocity_channels)
         self.mask_loss = bool(mask_loss)
 
@@ -106,8 +110,10 @@ class DomainDecompositionLoss(nn.Module):
         dd:
             The :class:`DomainDecomposition`. Falls back to ``info['dd']``.
 
-        ``terms`` maps ``'one_step'``, ``'interface'``, ``'divergence'``,
-        ``'coarse'`` and ``'total'`` to detached scalar tensors.
+        ``terms`` always maps ``'one_step'`` and ``'total'`` to detached scalar
+        tensors; ``'interface'``, ``'divergence'`` and ``'coarse'`` appear only
+        when their weight is not ``None`` (a disabled term is never computed, so
+        it is omitted from ``terms`` rather than logged as zero).
         """
         dd = dd if dd is not None else info["dd"]
 
@@ -116,25 +122,28 @@ class DomainDecompositionLoss(nn.Module):
         geometry = geometry.to(dtype=state_next.dtype)
         fluid = geometry > 0  # (B, 1, Nz, Ny, Nx)
 
+        # one-step is the base supervision (implicit weight 1) and always on;
+        # each weighted term is computed only when its lambda is not None.
         one_step = self._one_step_term(state_next, target_next, fluid)
-        interface = self._interface_term(info, dd)
-        divergence = self._divergence_term(state_next, fluid)
-        coarse = self._coarse_term(info, target_next, dd)
+        total = one_step
+        terms = {"one_step": one_step.detach()}
 
-        total = (
-            one_step
-            + self.lambda_interface * interface
-            + self.lambda_divergence * divergence
-            + self.lambda_coarse * coarse
-        )
+        if self.lambda_interface is not None:
+            interface = self._interface_term(info, dd)
+            total = total + self.lambda_interface * interface
+            terms["interface"] = interface.detach()
 
-        terms = {
-            "one_step": one_step.detach(),
-            "interface": interface.detach(),
-            "divergence": divergence.detach(),
-            "coarse": coarse.detach(),
-            "total": total.detach(),
-        }
+        if self.lambda_divergence is not None:
+            divergence = self._divergence_term(state_next, fluid)
+            total = total + self.lambda_divergence * divergence
+            terms["divergence"] = divergence.detach()
+
+        if self.lambda_coarse is not None:
+            coarse = self._coarse_term(info, target_next, dd)
+            total = total + self.lambda_coarse * coarse
+            terms["coarse"] = coarse.detach()
+
+        terms["total"] = total.detach()
         return total, terms
 
     # ------------------------------------------------------------------ #
@@ -186,26 +195,30 @@ class DomainDecompositionLoss(nn.Module):
 
         band = 2 * t
         blk = blocks.shape[-1]
-        # (+z, +y, +x) live in slots 1, 3, 5; spatial axis a is dim 2+a of a
-        # single patch block (B, C, z, y, x).
+        # (+z, +y, +x) live in slots 1, 3, 5; spatial axis a is dim 3+a of the
+        # ``(B, M, C, z, y, x)`` block tensor.
         face_slots = ((0, 1), (1, 3), (2, 5))
 
-        total = patch_pred.new_zeros(())
-        count = 0
+        # Vectorised over patches: for each axis gather every patch's high band
+        # and its neighbour's low band in one indexed op (no Python loop over M,
+        # no per-pair ``int(neighbors[i])`` host sync, no M-long autograd chain).
+        # Every valid pair contributes a band of identical element count, so the
+        # element-summed MSE below is exactly the original mean-of-per-pair-means
+        # (equal group sizes), just in a single reduction.
+        total_sq = patch_pred.new_zeros(())
+        total_elems = 0
         for axis, slot in face_slots:
-            dim = 2 + axis  # spatial dim in a (B, C, z, y, x) patch block
-            for i in range(m):
-                j = int(neighbors[i, slot])
-                if j < 0:
-                    continue  # global boundary, non-periodic: no overlap
-                # patch i high band [blk-band : blk]; patch j low band [0:band]
-                hi_i = blocks[:, i].narrow(dim, blk - band, band)
-                lo_j = blocks[:, j].narrow(dim, 0, band)
-                total = total + (hi_i - lo_j).pow(2).mean()
-                count += 1
-        if count == 0:
-            return total
-        return total / count
+            dim = 3 + axis  # spatial dim in the (B, M, C, z, y, x) block tensor
+            nbr = neighbors[:, slot]  # (M,) flat neighbour index, -1 = boundary
+            valid = nbr >= 0  # drop non-periodic global-boundary faces
+            hi = blocks.narrow(dim, blk - band, band)[:, valid]  # (B, n_valid, ...)
+            lo = blocks.narrow(dim, 0, band)[:, nbr[valid]]  # neighbour low bands
+            diff = hi - lo
+            total_sq = total_sq + diff.pow(2).sum()
+            total_elems += diff.numel()
+        if total_elems == 0:
+            return total_sq
+        return total_sq / total_elems
 
     @staticmethod
     def _neighbor_indices(info: dict, dd, blocks: torch.Tensor) -> torch.Tensor:

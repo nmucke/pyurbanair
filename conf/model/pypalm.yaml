@@ -16,7 +16,7 @@ forward_model:
   # needs uniform subdomains, so ncpu must divide nx (=domain.nx grid points).
   # For barcelona nx=225 the valid choices are {1,3,5,9,15,25,45,75,225};
   # 15 is the largest that fits a 16-core box.
-  ncpu: 15
+  ncpu: 14
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow
