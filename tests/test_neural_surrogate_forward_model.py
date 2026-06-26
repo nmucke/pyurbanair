@@ -507,3 +507,147 @@ def test_ensemble_warm_start_skips_spinup(tmp_path, monkeypatch) -> None:
     assert out.sizes["time"] == 4
     for member in ensemble.ensemble_forward_models:
         assert member.spinup_forward_model.calls == 0
+
+
+# -- training_data cold-start source ----------------------------------------
+
+
+def _write_training_data(
+    root: pathlib.Path, n_samples: int, t_len: int = 5
+) -> pathlib.Path:
+    """Write a minimal ``training_data/`` split mirroring the real layout.
+
+    Each ``sample_<s>`` carries a distinct first-time-step inflow so tests can
+    tell which sample seeded a member: ``inflow_angle[0] = 100 + s`` and
+    ``velocity_magnitude[0] = 5 + s``. ``blanking`` is the per-cell obstacle
+    indicator (ground layer = obstacle), stored once without a time dim like a
+    pyudales dataset.
+    """
+    state_dir = root / "state" / "train"
+    param_dir = root / "param" / "train"
+    state_dir.mkdir(parents=True)
+    param_dir.mkdir(parents=True)
+
+    blanking = np.zeros((NZ, NY, NX))
+    blanking[0] = 1.0  # ground layer is an obstacle
+
+    for s in range(n_samples):
+        time = np.arange(t_len, dtype=float)
+        state = xr.Dataset(
+            {
+                **{
+                    v: (
+                        ("time", "zt", "yt", "xt"),
+                        np.full((t_len, NZ, NY, NX), float(s) + 0.1 * i),
+                    )
+                    for i, v in enumerate(STATE_VARS)
+                },
+                "blanking": (("zt", "yt", "xt"), blanking),
+            },
+            coords={
+                "time": time,
+                "zt": np.arange(NZ) + 0.5,
+                "yt": np.arange(NY) + 0.5,
+                "xt": np.arange(NX) + 0.5,
+            },
+        )
+        state.to_netcdf(state_dir / f"sample_{s:04d}.nc")
+
+        param = xr.Dataset(
+            {
+                "inflow_angle": ("time", 100.0 + s + np.linspace(0.0, 1.0, t_len)),
+                "velocity_magnitude": ("time", 5.0 + s + np.linspace(0.0, 0.5, t_len)),
+            },
+            coords={"time": time},
+        )
+        param.to_netcdf(param_dir / f"sample_{s:04d}.nc")
+
+    return root
+
+
+def test_training_sample_index_cycles(tmp_path) -> None:
+    root = _write_training_data(tmp_path / "td", n_samples=2)
+    model = _make_model(spinup_source="training_data", training_data_root=root)
+    # Two samples, so members cycle 0,1,0,1 with the repeat count incrementing.
+    assert model._training_sample_index(0) == (0, 0)
+    assert model._training_sample_index(1) == (1, 0)
+    assert model._training_sample_index(2) == (0, 1)
+    assert model._training_sample_index(3) == (1, 1)
+
+
+def test_training_data_cold_start_skips_cfd(tmp_path) -> None:
+    root = _write_training_data(tmp_path / "td", n_samples=2)
+    model = _make_model(spinup_source="training_data", training_data_root=root)
+    out = model(params=_params())
+    # The CFD spin-up backend is never run; the initial field came from disk.
+    assert model.spinup_forward_model.calls == 0
+    for v in STATE_VARS:
+        assert out[v].dims == ("time", "z", "y", "x")
+
+
+def test_training_data_initial_state_matches_file(tmp_path) -> None:
+    root = _write_training_data(tmp_path / "td", n_samples=2)
+    model = _make_model(spinup_source="training_data", training_data_root=root)
+    snap = model._load_training_initial_state(0)
+    with xr.open_dataset(root / "state" / "train" / "sample_0000.nc") as ds:
+        expected = ds.isel(time=0)
+        for v in STATE_VARS:
+            np.testing.assert_allclose(snap[v].values, expected[v].values)
+
+
+def test_geometry_built_from_blanking(tmp_path) -> None:
+    root = _write_training_data(tmp_path / "td", n_samples=1)
+    model = _make_model(spinup_source="training_data", training_data_root=root)
+    template = model._to_regular_grid(model._load_training_initial_state(0))
+    geom = model._build_geometry(template).cpu().numpy()
+    # Fluid mask is 1 - blanking: ground layer (z=0) is obstacle, rest fluid.
+    assert geom[0].sum() == 0.0
+    assert np.all(geom[1:] == 1.0)
+
+
+def test_param_overwrite_pins_first_value(tmp_path) -> None:
+    root = _write_training_data(tmp_path / "td", n_samples=2)
+    model = _make_model(spinup_source="training_data", training_data_root=root)
+    prior = _member_params(3.0)  # inflow_angle 10..20, velocity == 3
+    out = model._overwrite_params_from_training(prior, member_index=0)
+    # First time step is pinned to sample_0000's loaded values (100, 5)...
+    assert float(out["inflow_angle"].isel(time=0)) == pytest.approx(100.0)
+    assert float(out["velocity_magnitude"].isel(time=0)) == pytest.approx(5.0)
+    # ...while the prior draw's increments (shape) are preserved by the shift.
+    np.testing.assert_allclose(
+        out["inflow_angle"].values - out["inflow_angle"].values[0],
+        prior["inflow_angle"].values - prior["inflow_angle"].values[0],
+    )
+
+
+def test_param_jitter_only_when_sample_reused(tmp_path) -> None:
+    root = _write_training_data(tmp_path / "td", n_samples=2)
+    model = _make_model(spinup_source="training_data", training_data_root=root)
+    # Member 0 (first pass) gets the exact loaded initial value...
+    m0 = model._overwrite_params_from_training(_member_params(3.0), member_index=0)
+    assert float(m0["inflow_angle"].isel(time=0)) == pytest.approx(100.0)
+    # ...member 2 reuses sample 0 (repeat 1), so its pinned value is jittered
+    # away from 100 (but stays close: small relative jitter).
+    m2 = model._overwrite_params_from_training(_member_params(3.0), member_index=2)
+    pinned = float(m2["inflow_angle"].isel(time=0))
+    assert pinned != pytest.approx(100.0)
+    assert abs(pinned - 100.0) < 100.0 * 0.2
+
+
+def test_training_data_ensemble_cycles_and_skips_cfd(tmp_path, monkeypatch) -> None:
+    make_stub = _ensemble_stub_factory(tmp_path)
+    _patch_backend(monkeypatch, make_stub)
+
+    root = _write_training_data(tmp_path / "td", n_samples=2)
+    template = _make_model(
+        spinup_source="training_data",
+        training_data_root=root,
+        spinup_forward_model=make_stub(),
+    )
+    # 3 members over 2 samples: member 2 reuses sample 0 with jittered params.
+    ensemble = NeuralSurrogateEnsembleForwardModel(template, ensemble_size=3)
+    out = ensemble.run_ensemble(params=_params())
+    assert out.sizes["ensemble"] == 3
+    # No member ran a CFD spin-up; all initial fields came from disk.
+    for member in ensemble.ensemble_forward_models:
+        assert member.spinup_forward_model.calls == 0
