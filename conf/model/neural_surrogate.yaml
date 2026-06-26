@@ -41,6 +41,24 @@ forward_model:
   # TransitionDataset.
   stl_path: null
 
+  # --- cold-start source ---------------------------------------------------
+  # How a cold start obtains its initial field:
+  #   forward_model  -> run the CFD spin-up backend below (faithful, expensive)
+  #   training_data  -> load the first snapshot of a training trajectory
+  #                     (one sample per member, cycling over the split),
+  #                     skipping the CFD spin-up. The provided prior params are
+  #                     overwritten so their first time step matches the loaded
+  #                     sample; samples reused beyond the split get a small
+  #                     jitter on the pinned initial params (state is never
+  #                     jittered).
+  spinup_source: forward_model
+  # training_data root (defaults to the trained model's dataset.root_dir),
+  # which split to draw initial snapshots from, and the relative std of the
+  # initial-parameter jitter applied when the ensemble exceeds the split size.
+  training_data_root: null
+  training_data_split: train
+  initial_param_jitter_scale: 0.01
+
   # --- spin-up backend (produces the cold-start initial condition) ---------
   spinup_forward_model:
     _target_: pyudales.forward_model.ForwardModel

@@ -156,6 +156,27 @@ class NeuralSurrogateEnsembleForwardModel(BaseEnsembleForwardModel):
             for i in range(self.ensemble_size)
         ]
 
+    def _training_data_templates(
+        self,
+        sim_name: Optional[str],
+    ) -> list[xarray.Dataset]:
+        """Per-member cold-start templates loaded from the training split.
+
+        Skips the CFD spin-up ensemble entirely: each member's initial field
+        is the first snapshot of a training trajectory (sample ``i mod N``),
+        loaded directly from disk.
+        """
+        self._last_failure_substitutions = {}
+        return [
+            self.forward_model._get_template_and_initial_state(
+                state=None,
+                params=None,
+                sim_name=f"{sim_name}_{i}" if sim_name else None,
+                member_index=i,
+            )
+            for i in range(self.ensemble_size)
+        ]
+
     def _warm_start_templates(
         self,
         state: xarray.Dataset | pathlib.Path,
@@ -189,13 +210,21 @@ class NeuralSurrogateEnsembleForwardModel(BaseEnsembleForwardModel):
         per-member snapshots forward directly. Either way the network rollout
         is a single batched pass over all members.
         """
-        if state is None:
-            templates = self._spinup_templates(params, sim_name)
-        else:
+        cold_start = state is None
+        if not cold_start:
             templates = self._warm_start_templates(state, params, sim_name)
+        elif self.forward_model.spinup_source == "training_data":
+            templates = self._training_data_templates(sim_name)
+        else:
+            templates = self._spinup_templates(params, sim_name)
 
+        # On a training_data cold start each member's provided prior is
+        # overwritten so its first time step matches the loaded sample.
         member_params = [
-            self.get_member_params(params, i) for i in range(self.ensemble_size)
+            self.forward_model._resolve_run_params(
+                self.get_member_params(params, i), i, cold_start
+            )
+            for i in range(self.ensemble_size)
         ]
         outputs = self.forward_model.rollout_batched(templates, member_params)
 
