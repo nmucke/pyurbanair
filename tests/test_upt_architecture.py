@@ -145,12 +145,8 @@ def test_batched_matches_per_member() -> None:
     with torch.no_grad():
         batched = model(state, params, geometry)
         for b in range(3):
-            single = model(
-                state[b : b + 1], params[b : b + 1], geometry[b : b + 1]
-            )
-            torch.testing.assert_close(
-                batched[b : b + 1], single, rtol=1e-5, atol=1e-5
-            )
+            single = model(state[b : b + 1], params[b : b + 1], geometry[b : b + 1])
+            torch.testing.assert_close(batched[b : b + 1], single, rtol=1e-5, atol=1e-5)
 
 
 # -- 5. differentiable w.r.t. state and params ------------------------------
@@ -192,9 +188,7 @@ def test_autoregressive_rollout_stays_finite() -> None:
 # -- 7. all five Hydra presets instantiate; tiny forwards -------------------
 
 
-@pytest.mark.parametrize(
-    "preset", ["tiny", "small", "medium", "large", "xlarge"]
-)
+@pytest.mark.parametrize("preset", ["tiny", "small", "medium", "large", "xlarge"])
 def test_presets_instantiate(preset: str) -> None:
     cfg = OmegaConf.load(PRESET_DIR / f"{preset}.yaml")
     model = instantiate(cfg, n_state_channels=N_STATE, n_params=N_PARAMS)
@@ -323,8 +317,8 @@ def test_upt_cold_start_rollout_shape_and_spinup() -> None:
     model = _make_upt_model()
     out = model(params=_params())
     assert out is not None
-    # simulation_time / output_frequency output frames, plus the t=0 frame.
-    assert out.sizes["time"] == 4
+    # simulation_time / output_frequency predicted frames (no t=0 frame).
+    assert out.sizes["time"] == 3
     for v in STATE_VARS:
         assert out[v].dims == ("time", "z", "y", "x")
     # Cold start must consult the spin-up backend exactly once.

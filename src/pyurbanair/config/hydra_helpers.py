@@ -57,9 +57,10 @@ def prepare_neural_surrogate(
     uses to bootstrap cold starts does. ``spinup_backend`` selects which
     preparation to run on ``forward_model.spinup_forward_model``.
 
-    When ``spinup_source == "training_data"`` the CFD spin-up backend is never
-    invoked (cold starts load a training snapshot), so there is nothing to
-    prepare — skip the preprocessing/compile entirely. This keeps a
+    When ``spinup_source == "training_data"`` the surrogate never runs a spin-up
+    (the assimilation warm-starts every window from provided states), so the CFD
+    backend is never invoked and there is nothing to prepare — skip the
+    preprocessing/compile entirely. This keeps a
     training-data surrogate (e.g. a pypalm-trained net assimilated with a
     pyudales spin-up template) from running an unused uDALES preprocessing pass.
     """

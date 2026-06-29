@@ -75,6 +75,7 @@ import pathlib
 import shutil
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
 
@@ -102,10 +103,10 @@ if __package__ is None or __package__ == "":
 
 from scripts._esmda_common import open_truth, truth_x_min, write_yaml
 
-
 # ---------------------------------------------------------------------------
 # Small helpers (in the style of run_forward_model.py)
 # ---------------------------------------------------------------------------
+
 
 def _concat_windows(paths, sim_time, rebase, transform=None, open_fn=None):
     """Concatenate per-window NetCDF files along ``time``.
@@ -148,6 +149,7 @@ def _concat_windows(paths, sim_time, rebase, transform=None, open_fn=None):
 # RAM -- not here and not by xarray.concat. These helpers stream the per-member
 # files (no dask required) so peak memory stays at one member (~hundreds of MB).
 # ---------------------------------------------------------------------------
+
 
 def _member_state_files(step_dir, ensemble_size, sim_name="state"):
     """Per-member state file paths for an ESMDA step directory, in member order."""
@@ -206,27 +208,46 @@ def _last_frame_ensemble(member_files):
     same thing as the in-memory path's ``posterior_state.isel(time=-1)`` -- the
     warm-start initial condition for the next assimilation window.
     """
-    frames = [
-        xarray.open_dataset(f).isel(time=-1).load() for f in member_files
-    ]
+    frames = [xarray.open_dataset(f).isel(time=-1).load() for f in member_files]
     return xarray.concat(frames, dim="ensemble", join="override")
+
+
+# Reducing one window's ensemble is the bulk of ``_save_assembled_outputs`` and
+# is read-bandwidth-bound (the per-window file is uncompressed and tens of GB).
+# Split the ensemble axis across a few reader threads, each with its own netCDF
+# handle accumulating partial sums -- independent read-only HDF5 handles read
+# concurrently, overlapping I/O wait. The win plateaus at ~2 workers on this
+# DRAM-bandwidth-bound hardware (see the ensemble-scaling memory note), so keep
+# the count small; each worker holds one member, so peak memory stays bounded.
+_SUMMARY_WORKERS = 2
 
 
 def _streaming_state_summary(path):
     """Ensemble-reduce one window state file without materialising the ensemble.
 
-    Equivalent to ``_state_summary(xarray.open_dataset(path).load())`` -- the
-    ensemble mean of every data variable plus ``vel_mean``/``vel_std`` (the
-    ensemble mean and population std of the velocity magnitude) -- but streams
-    over the leading ``ensemble`` axis one member at a time. Peak memory is one
-    member plus a handful of ensemble-free float64 accumulators (a couple of GB),
-    instead of the whole tens-of-GB window, which otherwise exhausts RAM/swap and
-    drops the reduction onto a single thread under heavy paging.
+    Returns the ensemble mean of every reduced data variable plus
+    ``vel_mean``/``vel_std`` (the ensemble mean and population std of the
+    velocity magnitude), streaming over the leading ``ensemble`` axis a member at
+    a time so the tens-of-GB window is never held in full -- materialising it
+    exhausts RAM/swap and drops the reduction onto a single thread under heavy
+    paging. Peak memory is ``_SUMMARY_WORKERS`` members plus a few ensemble-free
+    float64 accumulators (a couple of GB).
+
+    Two cost cuts over a naive "mean every variable, then recompute |vel|" pass:
+
+    * Each member's ``u``/``v``/``w`` is read **once** and reused for both its own
+      mean and the ``|vel|`` accumulators, instead of read again for the velocity.
+    * A stored per-member ``vel_magnitude`` (== ``|vel|``) is **not** reduced: its
+      mean would equal ``vel_mean``, which every downstream consumer
+      (``velmag_field`` prefers ``vel_mean``; ``compute_esmda_metrics`` rebuilds
+      |U| from ``u``/``v``/``w``) uses instead. Dropping it avoids reading the
+      single largest (float64) variable off disk for an unused result.
 
     Means use a running sum; ``vel_std`` uses the running sum and sum-of-squares
     of ``|vel|`` (``std = sqrt(<x^2> - <x>^2)``, ddof=0, matching the old
     ``DataArray.std(dim="ensemble")``). The result opens identically to the old
-    in-memory summary for ``_concat_windows`` and the downstream scripts.
+    in-memory summary for ``_concat_windows`` and the downstream scripts (minus
+    the now-redundant ``vel_magnitude`` mean).
     """
     with netCDF4.Dataset(path) as ds:
         dim_names = set(ds.dimensions.keys())
@@ -235,30 +256,59 @@ def _streaming_state_summary(path):
         data_vars = [name for name in ds.variables if name not in dim_names]
         n_ens = len(ds.dimensions["ensemble"])
         has_vel = all(v in ds.variables for v in ("u", "v", "w"))
+        # ``vel_magnitude`` mean is redundant with ``vel_mean`` (see docstring);
+        # skip it so the largest variable is never read.
+        reduce_vars = [n for n in data_vars if not (has_vel and n == "vel_magnitude")]
 
-        def _member(var, m):
-            idx = tuple(m if d == "ensemble" else slice(None) for d in var.dimensions)
-            return np.asarray(var[idx], dtype=np.float64)  # owns its buffer
+        # One worker: own handle, accumulate sums (and |vel| moments) over the
+        # members assigned to it. Returns ensemble-free arrays, cheap to combine.
+        def _accumulate(members):
+            with netCDF4.Dataset(path) as wds:
 
-        sums = {}  # data var -> running ensemble sum (ensemble axis dropped)
-        vel_s1 = vel_s2 = None  # running sum / sum-of-squares of |vel|
-        for m in range(n_ens):
-            for name in data_vars:
-                chunk = _member(ds.variables[name], m)
-                if name in sums:
-                    sums[name] += chunk
-                else:
-                    sums[name] = chunk
-            if has_vel:
-                u = _member(ds.variables["u"], m)
-                v = _member(ds.variables["v"], m)
-                w = _member(ds.variables["w"], m)
-                vmag = np.sqrt(u * u + v * v + w * w)
-                if vel_s1 is None:
-                    vel_s1, vel_s2 = vmag, vmag * vmag
-                else:
-                    vel_s1 += vmag
-                    vel_s2 += vmag * vmag
+                def _member(var, m):
+                    idx = tuple(
+                        m if d == "ensemble" else slice(None) for d in var.dimensions
+                    )
+                    return np.asarray(var[idx], dtype=np.float64)  # owns its buffer
+
+                sums = {}  # data var -> running ensemble sum (ensemble axis dropped)
+                vel_s1 = vel_s2 = None  # running sum / sum-of-squares of |vel|
+                for m in members:
+                    buf = {}
+                    for name in reduce_vars:
+                        chunk = _member(wds.variables[name], m)
+                        buf[name] = chunk
+                        if name in sums:
+                            sums[name] += chunk
+                        else:
+                            sums[name] = chunk
+                    if has_vel:
+                        u, v, w = buf["u"], buf["v"], buf["w"]
+                        vmag = np.sqrt(u * u + v * v + w * w)
+                        if vel_s1 is None:
+                            vel_s1, vel_s2 = vmag, vmag * vmag
+                        else:
+                            vel_s1 += vmag
+                            vel_s2 += vmag * vmag
+                return sums, vel_s1, vel_s2
+
+        n_workers = max(1, min(_SUMMARY_WORKERS, n_ens))
+        if n_workers == 1:
+            partials = [_accumulate(range(n_ens))]
+        else:
+            # Round-robin members across workers for an even split.
+            groups = [list(range(i, n_ens, n_workers)) for i in range(n_workers)]
+            with ThreadPoolExecutor(n_workers) as ex:
+                partials = list(ex.map(_accumulate, groups))
+
+        sums = {}  # combined ensemble sums
+        vel_s1 = vel_s2 = None
+        for psums, ps1, ps2 in partials:
+            for name, arr in psums.items():
+                sums[name] = arr if name not in sums else sums[name] + arr
+            if ps1 is not None:
+                vel_s1 = ps1 if vel_s1 is None else vel_s1 + ps1
+                vel_s2 = ps2 if vel_s2 is None else vel_s2 + ps2
 
         # Coordinate variables (name == a dim) are identical across members; copy
         # them through with no ensemble axis, like ``_stream_concat_members``.
@@ -274,15 +324,13 @@ def _streaming_state_summary(path):
             )
 
         data = {}
-        for name in data_vars:
+        for name in reduce_vars:
             var = ds.variables[name]
             out_dims = tuple(d for d in var.dimensions if d != "ensemble")
             mean = (sums[name] / n_ens).astype(var.dtype)
             data[name] = (out_dims, mean, {k: var.getncattr(k) for k in var.ncattrs()})
         if has_vel:
-            vel_dims = tuple(
-                d for d in ds.variables["u"].dimensions if d != "ensemble"
-            )
+            vel_dims = tuple(d for d in ds.variables["u"].dimensions if d != "ensemble")
             vel_dtype = ds.variables["u"].dtype
             mean = vel_s1 / n_ens
             std = np.sqrt(np.maximum(vel_s2 / n_ens - mean * mean, 0.0))
@@ -297,6 +345,7 @@ def _streaming_state_summary(path):
 # ---------------------------------------------------------------------------
 # Assembled rollout outputs (the small, downstream-facing artifacts)
 # ---------------------------------------------------------------------------
+
 
 def _save_assembled_outputs(out_dir, windows_dir, num_windows, sim_time, is_dynamic):
     """Assemble the per-window files in ``windows_dir`` into the run's outputs.
@@ -322,7 +371,9 @@ def _save_assembled_outputs(out_dir, windows_dir, num_windows, sim_time, is_dyna
     ]
 
     # Parameters: full ensemble in memory.
-    posterior_params = _concat_windows(posterior_param_paths, sim_time, rebase=is_dynamic)
+    posterior_params = _concat_windows(
+        posterior_param_paths, sim_time, rebase=is_dynamic
+    )
     prior_params = _concat_windows(prior_param_paths, sim_time, rebase=is_dynamic)
     posterior_params.to_netcdf(out_dir / "posterior_params.nc")
     prior_params.to_netcdf(out_dir / "prior_params.nc")
@@ -342,6 +393,7 @@ def _save_assembled_outputs(out_dir, windows_dir, num_windows, sim_time, is_dyna
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def run(cfg: DictConfig) -> None:
     num_windows = int(cfg.esmda.num_assimilation_windows)
@@ -387,7 +439,7 @@ def run(cfg: DictConfig) -> None:
             true_forward_model = instantiate(
                 cfg.truth_model.forward_model,
                 results_dir=None,
-                simulation_time=sim_time * num_windows
+                simulation_time=sim_time * num_windows,
             )
             if is_dynamic:
                 # Sample the truth over the FULL horizon at the same
@@ -404,7 +456,7 @@ def run(cfg: DictConfig) -> None:
             true_forward_model = instantiate(
                 cfg.truth_model.forward_model,
                 results_dir=None,
-                simulation_time=sim_time
+                simulation_time=sim_time,
             )
             truth_sampler = instantiate(truth_params_cfg)
 
@@ -464,7 +516,9 @@ def run(cfg: DictConfig) -> None:
         n_total = int(((true_times[start_idx:] - t_offset) < final_time).sum())
 
     if x_offset:
-        print(f"Shifting truth x by {x_offset:+g} to align with domain x_min={domain_x_min:g}")
+        print(
+            f"Shifting truth x by {x_offset:+g} to align with domain x_min={domain_x_min:g}"
+        )
 
     # Number of truth frames per assimilation window (contiguous, half-open).
     n_per_window = n_total // max(num_windows, 1)
@@ -508,6 +562,48 @@ def run(cfg: DictConfig) -> None:
     # --- Prior parameter sampler -----------------------------------------------------------
     prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
+
+    # --- Optional training-data warm start --------------------------------------------
+    # When the neural surrogate is the assimilation model and its
+    # forward_model.spinup_source is "training_data", seed the FIRST assimilation
+    # window from pre-computed training trajectories instead of a CFD spin-up:
+    #   * each member starts from the LAST frame of a training sample, streamed
+    #     one frame at a time to per-member files on disk (the full ensemble
+    #     never sits in RAM), handed to ESMDA as the window-0 initial state; and
+    #   * its sampled prior inflow params are anchored to that sample's final
+    #     inflow value (the AR(2) draw's shape is kept, only its level is pinned),
+    #     so the params ESMDA estimates match the warm-start state's forcing.
+    # The (now known) t=0 is pinned in the window loop via pin_initial_from_spinup.
+    fm_cfg = cfg.assim_model.forward_model
+    initial_state_dir: pathlib.Path | None = None
+    pin_initial_from_spinup = False
+    if fm_cfg.get("spinup_source", None) == "training_data":
+        from neural_surrogates.training_spinup import (  # type: ignore[import-untyped]
+            anchor_prior_params,
+            list_split_samples,
+            resolve_training_root,
+            write_initial_state_files,
+        )
+
+        spinup_cfg = cfg.assim_model.get("training_data_spinup", {}) or {}
+        root = resolve_training_root(
+            fm_cfg.get("model_dir", None), spinup_cfg.get("root", None)
+        )
+        split = str(spinup_cfg.get("split", "train"))
+        jitter = float(spinup_cfg.get("initial_param_jitter_scale", 0.0))
+        state_files, param_files = list_split_samples(root, split)
+
+        initial_state_dir = write_initial_state_files(
+            state_files, ensemble_size, out_dir / "_initial_states"
+        )
+        prior_params = anchor_prior_params(
+            prior_params, param_files, ensemble_size, jitter
+        )
+        pin_initial_from_spinup = True
+        print(
+            f"Training-data warm start: seeded {ensemble_size} members from the "
+            f"'{split}' split of {root}"
+        )
 
     # --- Observation operator -----------------------------------------------------------
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
@@ -558,7 +654,10 @@ def run(cfg: DictConfig) -> None:
     # Time the assimilation. ``window_seconds`` is each window's full wall-clock
     # cost (observation extraction + Kalman solve + I/O + extrapolation);
     # ``solve_seconds`` isolates the ESMDA Kalman solve itself.
-    state_input = None
+    # When a training-data warm start was prepared, window 0 starts from the
+    # per-member initial-state files (a directory ESMDA reads one member at a
+    # time); otherwise window 0 cold-starts (``state_input is None``).
+    state_input = initial_state_dir
     window_seconds: list[float] = []
     solve_seconds: list[float] = []
     esmda_start = time.perf_counter()
@@ -569,11 +668,15 @@ def run(cfg: DictConfig) -> None:
 
         # Pin the t=0 knot from window 1 onward so the Kalman update preserves
         # the cross-window continuity that the GP extrapolation established at
-        # each window boundary. Window 0's prior t=0 is just a cold-start GP
-        # draw (over a spun-up flow), so ESMDA is free to fit it. Only the
-        # time-varying smoother carries this flag.
+        # each window boundary. Window 0's prior t=0 is normally just a
+        # cold-start GP draw (over a spun-up flow), so ESMDA is free to fit it.
+        # The exception is the training_data warm start: there window 0's t=0 is
+        # *known* — the provided initial state was generated under that inflow,
+        # and the prior was anchored to it above — so ESMDA must pin it too,
+        # leaving the known initial inflow fixed while it fits the rest of the
+        # window. Only the time-varying smoother carries this flag.
         if hasattr(esmda, "pin_initial_time_point"):
-            esmda.pin_initial_time_point = window > 0
+            esmda.pin_initial_time_point = window > 0 or pin_initial_from_spinup
 
         # Get observations in window and add noise. Select the w-th contiguous
         # block of frames (half-open) rather than an inclusive time-slice: the
@@ -586,8 +689,10 @@ def run(cfg: DictConfig) -> None:
         window_obs = jnp.asarray(truth_obs_op(window_true_state))
         window_true_state.close()
         rng_key, subkey = jax.random.split(rng_key)
-        window_obs = window_obs + jnp.sqrt(C_D) @ jax.random.normal(subkey, window_obs.shape)
-        
+        window_obs = window_obs + jnp.sqrt(C_D) @ jax.random.normal(
+            subkey, window_obs.shape
+        )
+
         # Sample posterior. ``return_state_history=True`` makes the smoother also
         # return the per-iteration forecast states (esmda_step=0 is the PRIOR
         # forecast, esmda_step=-1 the POSTERIOR). We only need the full history to
@@ -631,12 +736,16 @@ def run(cfg: DictConfig) -> None:
             if want_state_history:
                 posterior_state = state_obj.isel(esmda_step=-1)
                 prior_state = state_obj.isel(esmda_step=0)
-                posterior_state.to_netcdf(windows_dir / f"window_{window}_posterior_state.nc")
+                posterior_state.to_netcdf(
+                    windows_dir / f"window_{window}_posterior_state.nc"
+                )
                 prior_state.to_netcdf(windows_dir / f"window_{window}_prior_state.nc")
                 del prior_state
             else:
                 posterior_state = state_obj
-                posterior_state.to_netcdf(windows_dir / f"window_{window}_posterior_state.nc")
+                posterior_state.to_netcdf(
+                    windows_dir / f"window_{window}_posterior_state.nc"
+                )
             state_input = posterior_state.isel(time=-1)
             del state_obj, posterior_state
         else:
@@ -675,9 +784,7 @@ def run(cfg: DictConfig) -> None:
                 extrapolated = prior_sampler.extrapolate(
                     posterior_params, prediction_times, subkey
                 )
-                prior_params = extrapolated.assign_coords(
-                    time=np.asarray(window_times)
-                )
+                prior_params = extrapolated.assign_coords(time=np.asarray(window_times))
             else:
                 prior_params = posterior_params
 
@@ -724,13 +831,17 @@ def run(cfg: DictConfig) -> None:
             "truth_model": str(cfg.truth_model.name),
             "assimilation_model": str(cfg.assim_model.name),
             "truth_source": "disk" if cfg.run.truth_dir is not None else "inline",
-            "truth_dir": str(cfg.run.truth_dir) if cfg.run.truth_dir is not None else None,
+            "truth_dir": (
+                str(cfg.run.truth_dir) if cfg.run.truth_dir is not None else None
+            ),
             "num_truth_frames": int(n_total),
         },
         "timing": {
             "esmda_total_seconds": float(esmda_seconds),
             "esmda_solve_seconds": float(sum(solve_seconds)),
-            "mean_window_seconds": float(np.mean(window_seconds)) if window_seconds else None,
+            "mean_window_seconds": (
+                float(np.mean(window_seconds)) if window_seconds else None
+            ),
             "per_window_seconds": [float(s) for s in window_seconds],
             "per_window_solve_seconds": [float(s) for s in solve_seconds],
         },

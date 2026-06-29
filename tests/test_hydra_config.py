@@ -52,17 +52,18 @@ def test_entrypoint_composes_with_model_override() -> None:
 
     assert cfg.model.name == "pyudales"
     # Physics comes from the default case (xie_and_castro).
-    assert cfg.domain.nx == 60
+    assert cfg.domain.nx == 30
     assert cfg.obs.mode in {"points", "grid"}
 
 
 def test_default_compute_is_medium() -> None:
-    # The former scale=medium values are now baked straight into the entry point.
+    # The default compute values are baked straight into the entry point
+    # (conf/run_forward_model.yaml's ensemble/time blocks).
     cfg = _compose([])
 
     assert cfg.ensemble.ensemble_size == 64
-    assert cfg.ensemble.num_parallel_processes == 4
-    assert cfg.time.seconds_per_knot == 45.0
+    assert cfg.ensemble.num_parallel_processes == 1
+    assert cfg.time.seconds_per_knot == 30.0
 
 
 def test_palm_target_does_not_import_for_non_palm_composition() -> None:

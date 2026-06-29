@@ -19,8 +19,8 @@ defaults:
   # `mode` must sit AFTER `_self_` so it overrides the inline `trainer:` block's
   # `_target_` below. The loss is defined entirely inside the mode file (there is
   # no `loss` group).
-  - /neural_surrogate/mode@_global_: domain_decomposition
-  # - /neural_surrogate/mode@_global_: standard
+  # - /neural_surrogate/mode@_global_: domain_decomposition
+  - /neural_surrogate/mode@_global_: standard
 
 # The uDALES runs are periodic in the spanwise (y) direction: spatial convs
 # wrap circularly along y instead of zero-padding. x stays non-periodic
@@ -35,8 +35,8 @@ defaults:
 # run). The architecture must match. Set to null to train from scratch.
 # Example: init_weights_path=model_weights/unet_convnext_medium/weights.pt
 # init_weights_path: model_weights/unet_convnext_medium/weights.pt
-# init_weights_path: model_weights/domain_decomposition_conv/weights.pt
-init_weights_path: null
+init_weights_path: model_weights/p3d_barcelona/weights.pt
+# init_weights_path: null
 
 # Unified trainer config. neural_surrogates.Trainer (generic full-grid MSE /
 # pushforward) and neural_surrogates.PatchTrainer (patch-based Eq (9) DD
@@ -60,10 +60,10 @@ trainer:
   amp_dtype: bfloat16
   # torch.compile the model (static conv stack -> good fusion win). First
   # batch pays one-off compilation latency.
-  compile_model: false
+  compile_model: true
   # channels-last-3d memory layout for cuDNN kernel selection under
   # autocast. A/B this on the training GPU; correctness is unaffected.
-  channels_last: true
+  channels_last: false
   # cuDNN conv-algorithm autotuning. The grid + (drop_last) batch shape are
   # fixed, so cuDNN benchmarks once on the first step and reuses the fastest
   # kernels. Pure win for a static-shape conv stack.
@@ -76,12 +76,12 @@ trainer:
   # `dataset.pushforward_steps`. The Eq (9) terms (PatchTrainer) are evaluated
   # on the final rollout step. Set the cadence to null to train at a fixed
   # horizon (the original pushforward behavior).
-  pushforward_epochs_per_step: 20
-  pushforward_start_steps: 1
+  pushforward_epochs_per_step: 15
+  pushforward_start_steps: 2
   # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
   # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`
   # over the remaining epochs. Set `lr_warmup_epochs` to null to disable.
-  lr_warmup_epochs: 10
+  lr_warmup_epochs: 5
   lr_warmup_start: 1.0e-6
   lr_min: 1.0e-6
   # Restrict the loss to fluid cells (uDALES targets carry junk values inside
@@ -109,7 +109,7 @@ trainer:
 optimizer:
   _target_: torch.optim.AdamW
   lr: 1.0e-4
-  weight_decay: 1e-6
+  weight_decay: 1e-8
 
 dataset:
   # The dd_patch (PatchTrainer) + dd loss path trains on FULL-FIELD transition
@@ -131,7 +131,7 @@ dataset:
   param_vars: null
   cache: false
   dtype: float32
-  pushforward_steps: 5
+  pushforward_steps: 7
 
 dataloader:
   _target_: torch.utils.data.DataLoader

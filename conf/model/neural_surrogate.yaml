@@ -40,30 +40,21 @@ forward_model:
   # Max ensemble members rolled forward through the network in one batched
   # pass. null rolls the whole ensemble at once; set a positive int to chunk a
   # large ensemble and cap peak GPU memory (raise it as far as the GPU allows).
-  rollout_batch_size: 10
+  rollout_batch_size: 8
 
   # Optional: voxelise this geometry for the network's geometry channel. When
   # null the fluid mask falls back to the non-zero-state convention used by
   # TransitionDataset.
   stl_path: null
 
-  # --- cold-start source ---------------------------------------------------
-  # How a cold start obtains its initial field:
+  # --- spin-up source ------------------------------------------------------
+  # How the assimilation obtains each member's initial field:
   #   forward_model  -> run the CFD spin-up backend below (faithful, expensive)
-  #   training_data  -> load the first snapshot of a training trajectory
-  #                     (one sample per member, cycling over the split),
-  #                     skipping the CFD spin-up. The provided prior params are
-  #                     overwritten so their first time step matches the loaded
-  #                     sample; samples reused beyond the split get a small
-  #                     jitter on the pinned initial params (state is never
-  #                     jittered).
+  #   training_data  -> warm-start from training snapshots loaded by run_esmda
+  #                     (see the model-level `training_data_spinup` block below);
+  #                     the surrogate itself never runs a spin-up in this mode, so
+  #                     a cold start (state is None) is an error.
   spinup_source: training_data
-  # training_data root (defaults to the trained model's dataset.root_dir),
-  # which split to draw initial snapshots from, and the relative std of the
-  # initial-parameter jitter applied when the ensemble exceeds the split size.
-  training_data_root: null
-  training_data_split: train
-  initial_param_jitter_scale: 0.01
 
   # --- spin-up backend (produces the cold-start initial condition) ---------
   spinup_forward_model:
@@ -93,6 +84,20 @@ forward_model:
     simulation_time: ${time.output_frequency}
     output_frequency: ${time.output_frequency}
     spinup_time: ${time.spinup_time}
+
+# --- training-data warm start (consumed by scripts/run_esmda.py) -----------
+# Active only when this model is the assimilation model AND
+# forward_model.spinup_source is "training_data". run_esmda then seeds the first
+# assimilation window from training trajectories: each ensemble member starts
+# from the LAST frame of a training sample (streamed one frame at a time to
+# disk, so the full ensemble never sits in RAM) and its prior inflow params are
+# anchored to that sample's final inflow value (the AR2 prior draw's shape is
+# kept; only its level is pinned). Ignored by run_forward_model and by the CFD
+# spin-up source.
+training_data_spinup:
+  root: null          # training_data root; null -> trained model's dataset.root_dir
+  split: train        # which split to draw the initial snapshots from
+  initial_param_jitter_scale: 0.01  # jitter on reused samples when ensemble > split
 
 prepare:
   _target_: pyurbanair.config.hydra_helpers.prepare_neural_surrogate
