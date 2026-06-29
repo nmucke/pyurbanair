@@ -100,10 +100,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         allow_uninitialized_weights: bool = False,
         results_dir: Optional[pathlib.Path] = None,
         spinup_source: str = "forward_model",
-        training_data_root: Optional[str | pathlib.Path] = None,
-        training_data_split: str = "train",
         geometry_var: str = "blanking",
-        initial_param_jitter_scale: float = 0.01,
         rollout_batch_size: Optional[int] = None,
     ) -> None:
         """Initialise the surrogate.
@@ -149,28 +146,19 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             spinup_source: How a cold start (``state is None``) obtains its
                 initial field. ``"forward_model"`` (default) runs the CFD
                 spin-up backend that generated the training data — physically
-                faithful but expensive. ``"training_data"`` instead loads the
-                first saved snapshot of a training trajectory (one ``sample_*``
-                per member, cycling over the split), skipping the CFD run
-                entirely; the provided prior params are then overwritten so
-                their first time step matches the loaded sample (see
-                :meth:`_overwrite_params_from_training`).
-            training_data_root: Root of the ``training_data/`` layout to load
-                cold-start snapshots from when ``spinup_source ==
-                "training_data"``. Defaults to the ``dataset.root_dir`` the
-                trained model references.
-            training_data_split: Which split (``train``/``val``/``test``) the
-                cold-start snapshots are drawn from.
+                faithful but expensive. ``"training_data"`` means the run is
+                warm-started from training snapshots that are loaded and passed
+                in by the caller (``scripts/run_esmda.py`` via
+                :mod:`neural_surrogates.training_spinup`), so the surrogate never
+                runs a spin-up itself — it only rolls forward from the provided
+                state. A cold start (``state is None``) is therefore rejected in
+                this mode. The flag is kept so the ensemble can skip cloning the
+                (unused) CFD backend per member and ``prepare`` can skip
+                compiling it.
             geometry_var: State variable holding the per-cell obstacle
                 indicator (``"blanking"``). When present on the initial-field
                 template the geometry channel is built from it directly,
                 matching :class:`~neural_surrogates.datasets.transition.TransitionDataset`.
-            initial_param_jitter_scale: Relative std of the multiplicative
-                jitter added to a member's *pinned initial* parameter values
-                when the requested ensemble is larger than the split (so a
-                training sample seeds more than one member). Keeps duplicate
-                members from sharing identical parameters; the initial *state*
-                is never jittered. Set to ``0`` to disable.
             rollout_batch_size: Maximum number of ensemble members rolled
                 forward through the network in a single batched pass. ``None``
                 (default) rolls the whole batch at once; set a positive value to
@@ -196,11 +184,6 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         )
         trained_domain = (
             trained_domain if trained_domain is not None else trained.get("domain")
-        )
-        training_data_root = (
-            training_data_root
-            if training_data_root is not None
-            else trained.get("training_data_root")
         )
         self._require_resolved(
             architecture=architecture,
@@ -230,12 +213,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 f"spinup_source must be 'forward_model' or 'training_data', "
                 f"got {spinup_source!r}."
             )
-        self.training_data_root = (
-            pathlib.Path(training_data_root) if training_data_root is not None else None
-        )
-        self.training_data_split = training_data_split
         self.geometry_var = geometry_var
-        self.initial_param_jitter_scale = float(initial_param_jitter_scale)
         if rollout_batch_size is not None and rollout_batch_size < 1:
             raise ValueError(
                 f"rollout_batch_size must be a positive int or None, "
@@ -244,11 +222,6 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         self.rollout_batch_size = (
             int(rollout_batch_size) if rollout_batch_size is not None else None
         )
-        # Lazily-built (sorted) lists of the split's state/param sample files;
-        # only needed for the ``training_data`` cold-start source.
-        self._training_files_cache: Optional[
-            tuple[list[pathlib.Path], list[pathlib.Path]]
-        ] = None
 
         self.substeps = self._resolve_substeps()
 
@@ -323,7 +296,6 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             resolved["weights_path"] = weights
 
         root_dir = pathlib.Path(train_cfg.dataset.root_dir)
-        resolved["training_data_root"] = root_dir
         param_vars = train_cfg.dataset.get("param_vars")
         if param_vars is not None:
             resolved["param_vars"] = tuple(param_vars)
@@ -709,18 +681,22 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         """Return a single-snapshot template carrying coords + initial field.
 
         On a warm start the supplied ``state`` is used. On a cold start the
-        field comes from one of two sources depending on ``spinup_source``:
-        the CFD spin-up backend (run to produce a physically developed field),
-        or the first snapshot of a training trajectory (``training_data``).
+        field is produced by the CFD spin-up backend. The ``training_data``
+        spin-up source has no cold start of its own — the caller
+        (``scripts/run_esmda.py``) loads the training snapshots and passes them
+        in as the initial ``state`` — so a cold start in that mode is an error.
         The field is collocated to the regular grid the network expects (see
         :meth:`_to_regular_grid`) before it is returned.
         """
         if state is not None:
             snap = state
         elif self.spinup_source == "training_data":
-            # Cold start from disk: load a training trajectory's first snapshot
-            # instead of paying for a CFD spin-up run.
-            snap = self._load_training_initial_state(member_index)
+            raise RuntimeError(
+                "spinup_source='training_data' has no cold start: the training "
+                "snapshots are loaded and passed in as the initial state by the "
+                "caller (scripts/run_esmda.py / neural_surrogates.training_spinup). "
+                "Got state=None."
+            )
         else:
             # Cold start: bootstrap with the CFD backend that produced the data.
             self.spinup_forward_model.spinup_time = self.spinup_time
@@ -748,130 +724,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         template = self._get_template_and_initial_state(
             state, params, sim_name, member_index
         )
-        run_params = self._resolve_run_params(
-            params, member_index, cold_start=state is None
-        )
-        return self.rollout_batched([template], [run_params])[0]
-
-    # -- training-data cold start ------------------------------------------
-
-    def _training_files(self) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
-        """Sorted ``(state, param)`` sample files for the configured split.
-
-        Globs are sorted so member ``i`` maps to the same ``sample_*`` pair
-        the trainer's :class:`TransitionDataset` would index, and the result
-        is cached (the file set is fixed for the run).
-        """
-        if self._training_files_cache is not None:
-            return self._training_files_cache
-        if self.training_data_root is None:
-            raise ValueError(
-                "spinup_source='training_data' requires training_data_root; "
-                "none was provided and it could not be resolved from model_dir."
-            )
-        root = pathlib.Path(self.training_data_root)
-        state_dir = root / "state" / self.training_data_split
-        param_dir = root / "param" / self.training_data_split
-        state_files = sorted(state_dir.glob("sample_*.nc"))
-        param_files = sorted(param_dir.glob("sample_*.nc"))
-        if not state_files:
-            raise FileNotFoundError(
-                f"no training samples found under {state_dir}; cannot seed a "
-                "training_data cold start."
-            )
-        if len(state_files) != len(param_files):
-            raise ValueError(
-                f"training-data sample count mismatch in split "
-                f"'{self.training_data_split}': {len(state_files)} state vs "
-                f"{len(param_files)} param under {root}."
-            )
-        self._training_files_cache = (state_files, param_files)
-        return self._training_files_cache
-
-    def _training_sample_index(self, member_index: int) -> tuple[int, int]:
-        """Map a member to ``(sample_index, repeat)``, cycling over the split.
-
-        ``repeat`` is how many full passes over the split precede this member
-        (``0`` for the first ``N`` members); it gates the initial-parameter
-        jitter that keeps members reusing a sample from coinciding.
-        """
-        state_files, _ = self._training_files()
-        n = len(state_files)
-        return member_index % n, member_index // n
-
-    def _load_training_initial_state(self, member_index: int) -> xr.Dataset:
-        """First saved snapshot of this member's training trajectory.
-
-        The snapshot carries the obstacle indicator (``blanking``) so the
-        geometry channel is reconstructed exactly as in training; the state
-        itself is loaded verbatim (never jittered).
-        """
-        state_files, _ = self._training_files()
-        sample_index, _ = self._training_sample_index(member_index)
-        with xr.open_dataset(state_files[sample_index]) as ds:
-            return ds.isel(time=0).load()
-
-    def _resolve_run_params(
-        self,
-        params: Optional[xr.Dataset],
-        member_index: int,
-        cold_start: bool,
-    ) -> Optional[xr.Dataset]:
-        """Params driving the rollout, overwritten on a training_data cold start.
-
-        Only a cold start with ``spinup_source == "training_data"`` overwrites
-        the provided prior; warm starts and the CFD source pass ``params``
-        through untouched.
-        """
-        if cold_start and self.spinup_source == "training_data":
-            return self._overwrite_params_from_training(params, member_index)
-        return params
-
-    def _overwrite_params_from_training(
-        self, params: Optional[xr.Dataset], member_index: int
-    ) -> Optional[xr.Dataset]:
-        """Pin each time-varying param's first value to the loaded sample's.
-
-        The loaded training initial state was produced under the inflow at the
-        sample's first time step, so the rollout's forcing must start there.
-        Rather than discard the (already resampled) prior trajectory, each
-        time-varying parameter present in both the prior and the loaded sample
-        is shifted by a constant so its first value equals the loaded one,
-        preserving the prior draw's shape while pinning the initial value.
-
-        When the ensemble is larger than the split, members beyond the first
-        pass reuse a sample and would share an identical pinned initial value;
-        a small multiplicative jitter (``initial_param_jitter_scale``), seeded
-        per member, breaks the tie. Static (time-less) params and params absent
-        from the loaded sample are left as the prior provided them.
-        """
-        _, param_files = self._training_files()
-        sample_index, repeat = self._training_sample_index(member_index)
-        with xr.open_dataset(param_files[sample_index]) as ds:
-            loaded = ds.load()
-
-        out = params.copy() if params is not None else None
-        jitter = (
-            np.random.default_rng(member_index)
-            if repeat > 0 and self.initial_param_jitter_scale > 0.0
-            else None
-        )
-
-        for name in loaded.data_vars:
-            loaded_da = loaded[name]
-            if "time" not in loaded_da.dims:
-                continue  # only time-varying params are pinned/resampled
-            loaded_first = float(loaded_da.isel(time=0).values)
-            if jitter is not None:
-                loaded_first *= 1.0 + self.initial_param_jitter_scale * float(
-                    jitter.standard_normal()
-                )
-            if out is not None and name in out.data_vars and "time" in out[name].dims:
-                prior_first = float(out[name].isel(time=0).values)
-                out[name] = out[name] - prior_first + loaded_first
-
-        # No prior was supplied: fall back to the loaded trajectory verbatim.
-        return out if out is not None else loaded
+        return self.rollout_batched([template], [params])[0]
 
     def rollout_batched(
         self,
@@ -1020,11 +873,11 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         per-member cold starts don't clobber each other; the torch model is
         shared because inference is stateless.
 
-        In ``training_data`` mode the spin-up backend is never invoked (cold
-        starts load a training snapshot, geometry comes from its ``blanking``),
-        so per-member experiment directories serve no purpose — the template's
-        backend is shared instead of cloned. This skips building (and renaming
-        namoptions for) one CFD ForwardModel per member.
+        In ``training_data`` mode the surrogate never runs a spin-up (the caller
+        warm-starts every window from provided states), so per-member experiment
+        directories serve no purpose — the template's backend is shared instead
+        of cloned. This skips building (and renaming namoptions for) one CFD
+        ForwardModel per member.
         """
         clone = copy.copy(self)
         if self.spinup_source != "training_data":

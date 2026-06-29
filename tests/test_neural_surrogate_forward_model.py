@@ -169,7 +169,7 @@ def test_resolves_everything_from_model_dir(
     assert isinstance(model.model, UNetConvNeXt)
 
     out = model(params=_params())
-    assert out.sizes["time"] == 3  # 4.0 / 2.0 outputs, plus the t=0 frame
+    assert out.sizes["time"] == 2  # 4.0 / 2.0 predicted frames (no t=0 frame)
 
 
 def test_model_dir_domain_mismatch_raises(
@@ -222,7 +222,7 @@ def test_default_params_fill_missing_trained_param(tmp_path) -> None:
     )
     # _params() has no pressure_gradient_magnitude; the default fills it in.
     out = model(params=_params())
-    assert out.sizes["time"] == 4  # 3 output frames plus the t=0 frame
+    assert out.sizes["time"] == 3  # 3 predicted frames (no t=0 frame)
 
 
 def test_missing_resolution_raises() -> None:
@@ -273,15 +273,15 @@ def test_mismatched_step_size_emits_only_at_requested_frequency() -> None:
     assert n_internal == 4
     assert len(emit_steps) == 3
     out = model(params=_params())
-    assert out.sizes["time"] == 4  # 3 emitted frames plus the t=0 frame
+    assert out.sizes["time"] == 3  # 3 emitted frames (no t=0 frame)
 
 
 def test_cold_start_rollout_shape_and_spinup() -> None:
     model = _make_model()
     out = model(params=_params())
     assert out is not None
-    # simulation_time / output_frequency output frames, plus the t=0 frame.
-    assert out.sizes["time"] == 4
+    # simulation_time / output_frequency predicted frames (no t=0 frame).
+    assert out.sizes["time"] == 3
     for v in STATE_VARS:
         assert out[v].dims == ("time", "z", "y", "x")
     # Cold start must consult the spin-up backend exactly once.
@@ -291,9 +291,9 @@ def test_cold_start_rollout_shape_and_spinup() -> None:
 def test_substeps_emit_correct_number_of_frames() -> None:
     model = _make_model(output_frequency=1.0, trained_output_frequency=0.5)
     out = model(params=_params())
-    # 3 output frames (plus the t=0 frame) even though the network takes 6
+    # 3 predicted frames (no t=0 frame) even though the network takes 6
     # internal steps.
-    assert out.sizes["time"] == 4
+    assert out.sizes["time"] == 3
 
 
 def _staggered_udales_state() -> xr.Dataset:
@@ -399,7 +399,7 @@ def test_warm_start_skips_spinup() -> None:
     cold = model(params=_params())
     model.spinup_forward_model.calls = 0
     warm = model(state=cold, params=_params())
-    assert warm.sizes["time"] == 4  # 3 output frames plus the t=0 frame
+    assert warm.sizes["time"] == 3  # 3 predicted frames (no t=0 frame)
     assert model.spinup_forward_model.calls == 0
 
 
@@ -434,7 +434,7 @@ def test_stl_geometry_used_in_rollout(tmp_path: pathlib.Path) -> None:
 
     model = _make_model(stl_path=stl_path)
     out = model(params=_params())
-    assert out.sizes["time"] == 4  # 3 output frames plus the t=0 frame
+    assert out.sizes["time"] == 3  # 3 predicted frames (no t=0 frame)
 
 
 # -- batched rollout + ensemble (parallel spin-up) --------------------------
@@ -565,7 +565,7 @@ def test_ensemble_parallel_spinup_and_batched_rollout(tmp_path, monkeypatch) -> 
 
     out = ensemble.run_ensemble(params=_params())
     assert out.sizes["ensemble"] == 3
-    assert out.sizes["time"] == 4  # 3 output frames plus the t=0 frame
+    assert out.sizes["time"] == 3  # 3 predicted frames (no t=0 frame)
     for v in STATE_VARS:
         assert out[v].dims == ("ensemble", "time", "z", "y", "x")
 
@@ -587,7 +587,7 @@ def test_ensemble_warm_start_skips_spinup(tmp_path, monkeypatch) -> None:
     )
     out = ensemble.run_ensemble(state=warm, params=_params())
     assert out.sizes["ensemble"] == 3
-    assert out.sizes["time"] == 4
+    assert out.sizes["time"] == 3  # 3 predicted frames (no t=0 frame)
     for member in ensemble.ensemble_forward_models:
         assert member.spinup_forward_model.calls == 0
 
@@ -648,92 +648,41 @@ def _write_training_data(
     return root
 
 
-def test_training_sample_index_cycles(tmp_path) -> None:
-    root = _write_training_data(tmp_path / "td", n_samples=2)
-    model = _make_model(spinup_source="training_data", training_data_root=root)
-    # Two samples, so members cycle 0,1,0,1 with the repeat count incrementing.
-    assert model._training_sample_index(0) == (0, 0)
-    assert model._training_sample_index(1) == (1, 0)
-    assert model._training_sample_index(2) == (0, 1)
-    assert model._training_sample_index(3) == (1, 1)
+def test_training_data_cold_start_raises(tmp_path) -> None:
+    """A cold start is rejected in training_data mode.
 
-
-def test_training_data_cold_start_skips_cfd(tmp_path) -> None:
-    root = _write_training_data(tmp_path / "td", n_samples=2)
-    model = _make_model(spinup_source="training_data", training_data_root=root)
-    out = model(params=_params())
-    # The CFD spin-up backend is never run; the initial field came from disk.
-    assert model.spinup_forward_model.calls == 0
-    for v in STATE_VARS:
-        assert out[v].dims == ("time", "z", "y", "x")
-
-
-def test_training_data_initial_state_matches_file(tmp_path) -> None:
-    root = _write_training_data(tmp_path / "td", n_samples=2)
-    model = _make_model(spinup_source="training_data", training_data_root=root)
-    snap = model._load_training_initial_state(0)
-    with xr.open_dataset(root / "state" / "train" / "sample_0000.nc") as ds:
-        expected = ds.isel(time=0)
-        for v in STATE_VARS:
-            np.testing.assert_allclose(snap[v].values, expected[v].values)
+    Loading the training snapshots (and anchoring the prior to them) now lives in
+    run_esmda / neural_surrogates.training_spinup; the surrogate only rolls a
+    provided warm-start state forward, so ``state is None`` is an error.
+    """
+    model = _make_model(spinup_source="training_data")
+    with pytest.raises(RuntimeError, match="no cold start"):
+        model(params=_params())
 
 
 def test_geometry_built_from_blanking(tmp_path) -> None:
+    """The geometry channel is built from a warm-start state's ``blanking``."""
     root = _write_training_data(tmp_path / "td", n_samples=1)
-    model = _make_model(spinup_source="training_data", training_data_root=root)
-    template = model._to_regular_grid(model._load_training_initial_state(0))
+    model = _make_model(spinup_source="training_data")
+    with xr.open_dataset(root / "state" / "train" / "sample_0000.nc") as ds:
+        snap = ds.isel(time=-1).load()
+    template = model._to_regular_grid(snap)
     geom = model._build_geometry(template).cpu().numpy()
     # Fluid mask is 1 - blanking: ground layer (z=0) is obstacle, rest fluid.
     assert geom[0].sum() == 0.0
     assert np.all(geom[1:] == 1.0)
 
 
-def test_param_overwrite_pins_first_value(tmp_path) -> None:
-    root = _write_training_data(tmp_path / "td", n_samples=2)
-    model = _make_model(spinup_source="training_data", training_data_root=root)
-    prior = _member_params(3.0)  # inflow_angle 10..20, velocity == 3
-    out = model._overwrite_params_from_training(prior, member_index=0)
-    # First time step is pinned to sample_0000's loaded values (100, 5)...
-    assert float(out["inflow_angle"].isel(time=0)) == pytest.approx(100.0)
-    assert float(out["velocity_magnitude"].isel(time=0)) == pytest.approx(5.0)
-    # ...while the prior draw's increments (shape) are preserved by the shift.
-    np.testing.assert_allclose(
-        out["inflow_angle"].values - out["inflow_angle"].values[0],
-        prior["inflow_angle"].values - prior["inflow_angle"].values[0],
-    )
-
-
-def test_param_jitter_only_when_sample_reused(tmp_path) -> None:
-    root = _write_training_data(tmp_path / "td", n_samples=2)
-    model = _make_model(spinup_source="training_data", training_data_root=root)
-    # Member 0 (first pass) gets the exact loaded initial value...
-    m0 = model._overwrite_params_from_training(_member_params(3.0), member_index=0)
-    assert float(m0["inflow_angle"].isel(time=0)) == pytest.approx(100.0)
-    # ...member 2 reuses sample 0 (repeat 1), so its pinned value is jittered
-    # away from 100 (but stays close: small relative jitter).
-    m2 = model._overwrite_params_from_training(_member_params(3.0), member_index=2)
-    pinned = float(m2["inflow_angle"].isel(time=0))
-    assert pinned != pytest.approx(100.0)
-    assert abs(pinned - 100.0) < 100.0 * 0.2
-
-
-def test_training_data_ensemble_cycles_and_skips_cfd(tmp_path, monkeypatch) -> None:
+def test_training_data_ensemble_cold_start_raises(tmp_path, monkeypatch) -> None:
+    """The ensemble likewise rejects a cold start in training_data mode."""
     make_stub = _ensemble_stub_factory(tmp_path)
     _patch_backend(monkeypatch, make_stub)
-
-    root = _write_training_data(tmp_path / "td", n_samples=2)
     template = _make_model(
-        spinup_source="training_data",
-        training_data_root=root,
-        spinup_forward_model=make_stub(),
+        spinup_source="training_data", spinup_forward_model=make_stub()
     )
-    # 3 members over 2 samples: member 2 reuses sample 0 with jittered params.
-    ensemble = NeuralSurrogateEnsembleForwardModel(template, ensemble_size=3)
-    out = ensemble.run_ensemble(params=_params())
-    assert out.sizes["ensemble"] == 3
-    # No member ran a CFD spin-up; all initial fields came from disk.
-    for member in ensemble.ensemble_forward_models:
-        assert member.spinup_forward_model.calls == 0
+    ensemble = NeuralSurrogateEnsembleForwardModel(template, ensemble_size=2)
+    with pytest.raises(RuntimeError, match="no cold start"):
+        ensemble.run_ensemble(params=_params())
 
 
 def test_training_data_clone_shares_spinup_backend(tmp_path) -> None:
@@ -743,8 +692,7 @@ def test_training_data_clone_shares_spinup_backend(tmp_path) -> None:
     ForwardModel per member is pure waste; clone_for_member must hand back the
     same shared backend instead.
     """
-    root = _write_training_data(tmp_path / "td", n_samples=2)
-    template = _make_model(spinup_source="training_data", training_data_root=root)
+    template = _make_model(spinup_source="training_data")
 
     clone = template.clone_for_member(tmp_path / "exp", "000")
     assert clone.spinup_forward_model is template.spinup_forward_model

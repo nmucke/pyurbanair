@@ -716,7 +716,7 @@ Key behaviours:
 |---|---|
 | **Trained step size** | The network always advances at its trained cadence (`trained_output_frequency`). To honour a requested `output_frequency` that differs, the rollout emits a frame at the internal step closest to each requested output time — so the result lands on the requested grid whether or not the two cadences divide evenly. A requested cadence *finer* than the trained step (the surrogate can't emit between steps) raises. |
 | **Domain check** | The requested `(nx, ny, nz, bounds)` must equal `trained_domain`; a mismatch raises (the network only applies to its training grid). |
-| **Spin-up / collocation** | A cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. |
+| **Spin-up / collocation** | With `spinup_source: forward_model` a cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. With `spinup_source: training_data` the surrogate runs **no** spin-up of its own — the assimilation is warm-started from training snapshots loaded by `run_esmda` (see below), so a cold start (`state is None`) raises. |
 | **Geometry** | When `stl_path` is set the geometry channel is voxelised from the STL onto the grid ([geometry.py](../libs/neural-surrogates/src/neural_surrogates/geometry.py)); otherwise it falls back to the non-zero-state convention used by `TransitionDataset`. |
 | **Parameters** | Time-varying inflow params are interpolated onto the internal step times in the trained `param_vars` order; scalar params are broadcast. |
 
@@ -747,6 +747,22 @@ python scripts/run_esmda.py \
     model@truth_model=pyudales model@assim_model=neural_surrogate \
     assim_model.forward_model.model_dir=model_weights/unet_convnext_tiny
 ```
+
+**Training-data warm start (`spinup_source: training_data`).** When the surrogate
+is the assimilation model and `forward_model.spinup_source` is `training_data`,
+`scripts/run_esmda.py` seeds the **first** assimilation window from pre-computed
+training trajectories instead of a CFD spin-up, using the model-level
+`training_data_spinup` config node (`root` / `split` /
+`initial_param_jitter_scale`) and the helpers in
+[`neural_surrogates.training_spinup`](../libs/neural-surrogates/src/neural_surrogates/training_spinup.py):
+each ensemble member starts from the **last** frame of a training sample
+(streamed one frame at a time to per-member files on disk, so the full ensemble
+never sits in RAM — these files are handed to ESMDA as the window-0 initial
+state), and its sampled prior inflow is anchored to that sample's final inflow
+value (the AR(2) draw's shape is kept; only its level is pinned). The known `t=0`
+is then pinned in the smoother for window 0. The surrogate forward model itself
+holds **no** training-data logic — it only rolls a provided warm-start state
+forward — so the two pieces (loading + anchoring) live entirely in `run_esmda`.
 
 The `pyudales_neural_surrogate` case in
 [tests/test_run_esmda.py](../tests/test_run_esmda.py)
