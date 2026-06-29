@@ -15,17 +15,22 @@ state_and_dynamic (the old `parameter`/`time_varying` names mapped to
 
 import pathlib
 
+import numpy as np
 import pytest
 
 
-def _overrides(truth_model, assim_model, smoother, prior, num_windows, localization=None):
+def _overrides(
+    truth_model, assim_model, smoother, prior, num_windows, localization=None
+):
     truth = "static_truth" if prior == "static" else "dynamic_truth"
     # Localization selection. Default: the global (unlocalized) update — the
     # default correlation localization is degenerate at this 2-member ensemble
     # size. ``localization`` may instead be a list of overrides selecting a
     # config-group option (e.g. ["esmda/localization=distance", ...]); distance
     # localization is purely geometric, so it is meaningful even at 2 members.
-    localization = localization if localization is not None else ["esmda.localization=null"]
+    localization = (
+        localization if localization is not None else ["esmda.localization=null"]
+    )
     ov = [
         f"model@truth_model={truth_model}",
         f"model@assim_model={assim_model}",
@@ -90,7 +95,12 @@ def _overrides(truth_model, assim_model, smoother, prior, num_windows, localizat
             "pylbm", "pylbm", "state_and_dynamic", "dynamic", 1, id="state_and_tv_param"
         ),
         pytest.param(
-            "pylbm", "pylbm", "state_and_dynamic", "dynamic", 2, id="state_and_tv_rollout"
+            "pylbm",
+            "pylbm",
+            "state_and_dynamic",
+            "dynamic",
+            2,
+            id="state_and_tv_rollout",
         ),
         # Extra backend coverage on the cheapest mode.
         pytest.param("pyudales", "pyudales", "static", "static", 1, id="udales"),
@@ -161,7 +171,11 @@ def test_run_esmda_distance_localization(
     from scripts.run_esmda import run
 
     overrides = _overrides(
-        "pylbm", "pylbm", smoother, prior, num_windows,
+        "pylbm",
+        "pylbm",
+        smoother,
+        prior,
+        num_windows,
         localization=[
             "esmda/localization=distance",
             "esmda.localization.localization_radius=10.0",
@@ -243,9 +257,7 @@ def test_run_esmda_loads_ground_truth_from_disk(
     # under gt_dir, so a bare rglob("state.nc") is order-dependent and may pick
     # the scratch file (which has no sibling params.nc).
     truth_dir = next(
-        p.parent
-        for p in gt_dir.rglob("state.nc")
-        if (p.parent / "params.nc").exists()
+        p.parent for p in gt_dir.rglob("state.nc") if (p.parent / "params.nc").exists()
     )
 
     from scripts.run_esmda import run
@@ -256,3 +268,91 @@ def test_run_esmda_loads_ground_truth_from_disk(
     overrides = _overrides("pylbm", "pylbm", "dynamic", "dynamic", 1)
     overrides.append(f"run.truth_dir={truth_dir}")
     run(compose_test_cfg(overrides, config_name="run_esmda"))
+
+
+# ---------------------------------------------------------------------------
+# Unit test for the per-window ensemble reduction (the finalize bottleneck).
+# ---------------------------------------------------------------------------
+
+
+def _write_ensemble_window(path, n_ens=6, seed=0):
+    """Write a tiny ensemble window state file (leading ``ensemble`` axis).
+
+    Mirrors a real window_*_posterior_state.nc: u/v/w plus a stored
+    ``vel_magnitude`` == |vel|, a ``time`` coordinate and a global attr.
+    """
+    import netCDF4
+
+    nt, nz, ny, nx = 2, 3, 4, 4
+    rng = np.random.default_rng(seed)
+    arrs = {n: rng.standard_normal((n_ens, nt, nz, ny, nx)) for n in ("u", "v", "w")}
+    arrs["vel_magnitude"] = np.sqrt(arrs["u"] ** 2 + arrs["v"] ** 2 + arrs["w"] ** 2)
+    dtypes = {"u": "f4", "v": "f4", "w": "f8", "vel_magnitude": "f8"}
+    with netCDF4.Dataset(path, "w") as ds:
+        for d, s in [
+            ("ensemble", n_ens),
+            ("time", nt),
+            ("z", nz),
+            ("y", ny),
+            ("x", nx),
+        ]:
+            ds.createDimension(d, s)
+        tv = ds.createVariable("time", "f8", ("time",))
+        tv[:] = np.arange(nt)
+        ds.setncattr("solver", "test")
+        for name, a in arrs.items():
+            var = ds.createVariable(
+                name, dtypes[name], ("ensemble", "time", "z", "y", "x")
+            )
+            var[:] = a.astype(dtypes[name])
+    return arrs
+
+
+def test_streaming_state_summary_drops_redundant_velmag(tmp_path):
+    """The window reduction returns u/v/w means + vel_mean/vel_std and, when a
+    stored ``vel_magnitude`` is present, deliberately DROPS its (redundant with
+    ``vel_mean``) ensemble mean -- the largest variable is never read."""
+    from scripts.run_esmda import _streaming_state_summary
+
+    path = tmp_path / "window_0_posterior_state.nc"
+    arrs = _write_ensemble_window(path)
+    out = _streaming_state_summary(path)
+
+    # vel_magnitude mean is intentionally absent; vel_mean/vel_std take its place.
+    assert "vel_magnitude" not in out.data_vars
+    assert {"u", "v", "w", "vel_mean", "vel_std"} <= set(out.data_vars)
+    # Coordinate + global attrs pass through unchanged.
+    assert np.array_equal(out["time"].values, np.arange(2))
+    assert out.attrs.get("solver") == "test"
+
+    for name in ("u", "v", "w"):
+        ref = arrs[name].mean(axis=0).astype(out[name].dtype)
+        assert np.allclose(out[name].values, ref, rtol=1e-5, atol=1e-6)
+
+    vm = arrs["vel_magnitude"]
+    vmean = vm.mean(axis=0)
+    vstd = np.sqrt(np.maximum((vm**2).mean(axis=0) - vmean**2, 0.0))
+    assert np.allclose(out["vel_mean"].values, vmean.astype("f4"), rtol=1e-5, atol=1e-5)
+    assert np.allclose(out["vel_std"].values, vstd.astype("f4"), rtol=1e-5, atol=1e-5)
+    # The dropped quantity (mean vel_magnitude) equals vel_mean -- consumers that
+    # used it are unaffected.
+    assert np.allclose(out["vel_mean"].values, vmean.astype("f4"), rtol=1e-5, atol=1e-5)
+
+
+def test_streaming_state_summary_threading_matches_serial(tmp_path, monkeypatch):
+    """The multi-worker reduction agrees with the single-worker path."""
+    import scripts.run_esmda as run_esmda
+
+    path = tmp_path / "window_0_posterior_state.nc"
+    _write_ensemble_window(path, n_ens=7)  # odd count -> uneven round-robin split
+
+    monkeypatch.setattr(run_esmda, "_SUMMARY_WORKERS", 1)
+    serial = run_esmda._streaming_state_summary(path)
+    monkeypatch.setattr(run_esmda, "_SUMMARY_WORKERS", 3)
+    threaded = run_esmda._streaming_state_summary(path)
+
+    assert set(serial.data_vars) == set(threaded.data_vars)
+    for name in serial.data_vars:
+        assert np.allclose(
+            serial[name].values, threaded[name].values, rtol=1e-6, atol=1e-8
+        ), name
