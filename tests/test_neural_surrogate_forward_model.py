@@ -327,6 +327,57 @@ def test_staggered_spinup_state_is_collocated_before_network() -> None:
     assert {"x", "y", "z"}.issubset(regular.coords)
 
 
+def _staggered_palm_state() -> xr.Dataset:
+    """Synthetic PALM-style snapshot: u on xu, v on yv (same length as x/y)."""
+    rng = np.random.default_rng(2)
+    coords = {
+        "time": [0],
+        "x": np.arange(NX) + 0.5,
+        "y": np.arange(NY) + 0.5,
+        "z": np.arange(NZ) + 0.5,
+        "xu": np.arange(NX).astype(float),
+        "yv": np.arange(NY).astype(float),
+    }
+    return xr.Dataset(
+        {
+            "u": (("time", "z", "y", "xu"), rng.standard_normal((1, NZ, NY, NX))),
+            "v": (("time", "z", "yv", "x"), rng.standard_normal((1, NZ, NY, NX))),
+            "w": (("time", "z", "y", "x"), rng.standard_normal((1, NZ, NY, NX))),
+        },
+        coords=coords,
+    )
+
+
+def test_palm_staggered_state_is_relabeled_to_regular_grid() -> None:
+    """PALM xu/yv are relabeled onto x/y positionally (no interpolation).
+
+    The training pipeline stacks the staggered arrays as if collocated, so the
+    relabel must preserve values exactly and leave every channel on (z, y, x).
+    """
+    staggered = _staggered_palm_state()
+    regular = NeuralSurrogateForwardModel._to_regular_grid(staggered)
+
+    for v in STATE_VARS:
+        assert regular[v].dims == ("time", "z", "y", "x")
+    assert {"xu", "yv"}.isdisjoint(regular.dims)
+    assert {"x", "y", "z"}.issubset(regular.coords)
+    # Pure relabel: the underlying arrays are untouched (no half-cell shift).
+    for v in STATE_VARS:
+        np.testing.assert_array_equal(regular[v].values, staggered[v].values)
+    # u/v/w now share one cell-centered x/y axis (the w/scalar grid).
+    np.testing.assert_array_equal(regular["x"].values, staggered["x"].values)
+    np.testing.assert_array_equal(regular["y"].values, staggered["y"].values)
+
+
+def test_palm_destagger_is_idempotent() -> None:
+    """A field already on (z, y, x) passes through unchanged."""
+    regular = NeuralSurrogateForwardModel._to_regular_grid(_staggered_palm_state())
+    again = NeuralSurrogateForwardModel._to_regular_grid(regular)
+    for v in STATE_VARS:
+        assert again[v].dims == ("time", "z", "y", "x")
+        np.testing.assert_array_equal(again[v].values, regular[v].values)
+
+
 class _StaggeredStubSpinup(_StubSpinup):
     """Spin-up stub that returns a staggered C-grid field, like pyudales."""
 
@@ -433,6 +484,38 @@ def test_rollout_batched_matches_per_member() -> None:
             np.testing.assert_allclose(
                 batched[i][v].values, single[v].values, rtol=1e-5, atol=1e-5
             )
+
+
+def test_rollout_batch_size_chunks_match_single_batch() -> None:
+    """Chunked rollout (rollout_batch_size) equals rolling the full batch at once.
+
+    Splitting the ensemble to cap peak GPU memory must not change the result:
+    the per-chunk outputs, concatenated in order, must match the unchunked
+    rollout member-for-member.
+    """
+    templates = [_regular_snapshot(i) for i in range(5)]
+    params = [_member_params(v) for v in (2.0, 3.0, 4.0, 5.0, 6.0)]
+
+    # One model instance so both rollouts share the (randomly initialised)
+    # weights; only the batching differs.
+    model = _make_model()
+    full = model.rollout_batched(templates, params)
+    # A chunk size that does not evenly divide the ensemble exercises the ragged
+    # final chunk too (5 members -> 2 + 2 + 1).
+    model.rollout_batch_size = 2
+    chunked = model.rollout_batched(templates, params)
+
+    assert len(chunked) == len(full) == 5
+    for i in range(5):
+        for v in STATE_VARS:
+            np.testing.assert_allclose(
+                chunked[i][v].values, full[i][v].values, rtol=1e-5, atol=1e-5
+            )
+
+
+def test_rollout_batch_size_rejects_nonpositive() -> None:
+    with pytest.raises(ValueError, match="rollout_batch_size"):
+        _make_model(rollout_batch_size=0)
 
 
 def _ensemble_stub_factory(tmp_path: pathlib.Path):
@@ -651,3 +734,17 @@ def test_training_data_ensemble_cycles_and_skips_cfd(tmp_path, monkeypatch) -> N
     # No member ran a CFD spin-up; all initial fields came from disk.
     for member in ensemble.ensemble_forward_models:
         assert member.spinup_forward_model.calls == 0
+
+
+def test_training_data_clone_shares_spinup_backend(tmp_path) -> None:
+    """training_data members share the template's spin-up backend, not clones.
+
+    The spin-up backend is never invoked in this mode, so cloning one CFD
+    ForwardModel per member is pure waste; clone_for_member must hand back the
+    same shared backend instead.
+    """
+    root = _write_training_data(tmp_path / "td", n_samples=2)
+    template = _make_model(spinup_source="training_data", training_data_root=root)
+
+    clone = template.clone_for_member(tmp_path / "exp", "000")
+    assert clone.spinup_forward_model is template.spinup_forward_model

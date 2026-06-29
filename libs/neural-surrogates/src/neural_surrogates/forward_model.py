@@ -104,6 +104,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         training_data_split: str = "train",
         geometry_var: str = "blanking",
         initial_param_jitter_scale: float = 0.01,
+        rollout_batch_size: Optional[int] = None,
     ) -> None:
         """Initialise the surrogate.
 
@@ -170,6 +171,12 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 training sample seeds more than one member). Keeps duplicate
                 members from sharing identical parameters; the initial *state*
                 is never jittered. Set to ``0`` to disable.
+            rollout_batch_size: Maximum number of ensemble members rolled
+                forward through the network in a single batched pass. ``None``
+                (default) rolls the whole batch at once; set a positive value to
+                split a large ensemble into chunks of this size, trading a small
+                amount of throughput for a lower peak GPU memory footprint (the
+                fix for the rollout OOM on large ensembles / high resolution).
         """
         super().__init__(results_dir=results_dir)
 
@@ -229,6 +236,14 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         self.training_data_split = training_data_split
         self.geometry_var = geometry_var
         self.initial_param_jitter_scale = float(initial_param_jitter_scale)
+        if rollout_batch_size is not None and rollout_batch_size < 1:
+            raise ValueError(
+                f"rollout_batch_size must be a positive int or None, "
+                f"got {rollout_batch_size!r}."
+            )
+        self.rollout_batch_size = (
+            int(rollout_batch_size) if rollout_batch_size is not None else None
+        )
         # Lazily-built (sorted) lists of the split's state/param sample files;
         # only needed for the ``training_data`` cold-start source.
         self._training_files_cache: Optional[
@@ -635,17 +650,54 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         (``solver_name: pylbm``). pylbm output is already cell-centered and
         passes through unchanged; the operation is idempotent, so warm-start
         states (the surrogate's own previous output) are left as-is.
+
+        PALM training data (``solver_name: palm``) keeps the horizontal stagger
+        — ``u`` on ``xu``, ``v`` on ``yv`` — at the *same* length as the
+        cell-centered ``x``/``y`` axes. The training pipeline
+        (:class:`~neural_surrogates.datasets.transition.TransitionDataset`)
+        stacks those arrays by index, treating them as collocated, so the
+        network never sees the half-cell offset. Reproduce that here: relabel
+        ``xu``/``yv`` onto ``x``/``y`` *positionally* (no interpolation, which
+        would shift a field the network never trained on) and share one set of
+        cell-centered coords across ``u``/``v``/``w`` — yielding the regular
+        ``(z, y, x)`` grid the surrogate's observation mapping expects.
         """
         if {"xm", "ym", "zm"} & set(state.dims):
             from pyudales.utils.grid_utils import interpolate_grid
 
             state = interpolate_grid(state)
+        if {"xu", "yv"} & set(state.dims):
+            state = NeuralSurrogateForwardModel._destagger_palm_horizontal(state)
         rename = {
             src: dst
             for src, dst in (("xt", "x"), ("yt", "y"), ("zt", "z"))
             if src in state.dims
         }
         return state.rename(rename) if rename else state
+
+    @staticmethod
+    def _destagger_palm_horizontal(state: xr.Dataset) -> xr.Dataset:
+        """Relabel PALM's ``xu``/``yv`` axes onto the cell-centered ``x``/``y``.
+
+        Each staggered axis has the same length as its cell-centered partner in
+        the training data, so the collocation the trainer applies is a pure
+        index relabel: rebuild every variable on the canonical ``(z, y, x)``
+        dims and assign all of them the shared cell-centered coords. No values
+        are interpolated. A direct ``Dataset.rename`` cannot do this because the
+        target ``x``/``y`` dims already exist (carried by ``w``), so a per-variable
+        rebuild is used instead.
+        """
+        dim_swap = {"xu": "x", "yv": "y"}
+        canonical = {axis: state.coords[axis].values for axis in ("x", "y", "z")}
+        if "time" in state.coords:
+            canonical["time"] = state.coords["time"].values
+
+        rebuilt: dict[str, tuple] = {}
+        for name, da in state.data_vars.items():
+            dims = tuple(dim_swap.get(d, d) for d in da.dims)
+            rebuilt[name] = (dims, np.asarray(da.values), da.attrs)
+        coords = {axis: values for axis, values in canonical.items()}
+        return xr.Dataset(rebuilt, coords=coords, attrs=state.attrs)
 
     def _get_template_and_initial_state(
         self,
@@ -839,6 +891,10 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
 
         Returns one assembled trajectory :class:`~xarray.Dataset` per member,
         in the same order as ``templates``.
+
+        When ``rollout_batch_size`` is set the members are processed in chunks
+        of that size so the peak GPU footprint scales with the chunk, not the
+        full ensemble; the per-chunk outputs are concatenated back in order.
         """
         if len(templates) != len(params):
             raise ValueError(
@@ -846,6 +902,27 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 "must have the same length."
             )
 
+        chunk = self.rollout_batch_size
+        if chunk is not None and len(templates) > chunk:
+            outputs: list[xr.Dataset] = []
+            for start in range(0, len(templates), chunk):
+                stop = start + chunk
+                outputs.extend(
+                    self._rollout_chunk(templates[start:stop], params[start:stop])
+                )
+            return outputs
+        return self._rollout_chunk(templates, params)
+
+    def _rollout_chunk(
+        self,
+        templates: Sequence[xr.Dataset],
+        params: Sequence[Optional[xr.Dataset]],
+    ) -> list[xr.Dataset]:
+        """Roll a single batch (one chunk) of members forward through the net.
+
+        Carries the batched forward pass that :meth:`rollout_batched` splits the
+        ensemble across; see that method for the batching rationale.
+        """
         n_internal, emit_steps = self._output_schedule()
         emit_at = {step: pos for pos, step in enumerate(emit_steps)}
         n_members = len(templates)
@@ -942,10 +1019,17 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         The spin-up backend is cloned into its own experiment directories so
         per-member cold starts don't clobber each other; the torch model is
         shared because inference is stateless.
+
+        In ``training_data`` mode the spin-up backend is never invoked (cold
+        starts load a training snapshot, geometry comes from its ``blanking``),
+        so per-member experiment directories serve no purpose — the template's
+        backend is shared instead of cloned. This skips building (and renaming
+        namoptions for) one CFD ForwardModel per member.
         """
         clone = copy.copy(self)
-        clone.spinup_forward_model = _clone_backend_forward_model(
-            self.spinup_forward_model, experiment_base_dir, experiment_name
-        )
+        if self.spinup_source != "training_data":
+            clone.spinup_forward_model = _clone_backend_forward_model(
+                self.spinup_forward_model, experiment_base_dir, experiment_name
+            )
         clone._geometry = None
         return clone

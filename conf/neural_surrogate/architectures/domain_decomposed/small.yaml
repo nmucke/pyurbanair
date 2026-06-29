@@ -21,9 +21,9 @@ _convert_: all
 # Two-level overlapping tiling. interior_size must divide any periodic axis
 # length exactly (y is periodic here -> Ny % interior_size == 0).
 decomposition:
-  interior_size: 16
-  halo: 4
-  taper: 2
+  interior_size: 32
+  halo: 8
+  taper: 4
   coarsen_factor: 4
   n_pos: 3
   boundary_mode: replicate
@@ -39,6 +39,17 @@ decomposition:
 # The wrapper injects n_state_channels / n_params, widens the fine stem with
 # extra_in_channels (context + positional), and forces periodic_axes=() on both
 # inner nets. Override any preset key by adding it under `fine_net:` / `coarse_net:`.
+
+# Patch-batch streaming to bound GPU memory on large grids. The fine step runs
+# the fine net on B*M overlapping blocks; on a big domain (e.g. Barcelona) M is
+# large enough to OOM even at batch_size=2. fine_chunk_size caps how many blocks
+# go through the fine net per call (transient working set); fine_checkpoint
+# recomputes each call's activations in backward (saved-activation memory, the
+# part that actually pins ~all the memory while training). Use both together for
+# the full reduction. Leave both unset (null / false) for the original single
+# B*M call (byte-identical). Tune fine_chunk_size up for speed / down for memory.
+fine_chunk_size: 8
+fine_checkpoint: true
 
 # Coarse-grid divergence-cleaning projection (Eq 8) is an identity stub; off.
 divergence_projection: false

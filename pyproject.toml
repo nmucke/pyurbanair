@@ -235,7 +235,14 @@ scripts = ["activation_scripts/cuda_activation.sh"]
 # PYTHONNOUSERSITE keeps the incompatible jax_cuda12_plugin in the user's
 # ~/.local site-packages from leaking into and shadowing this env's GPU JAX.
 # (No JAX_PLATFORMS=cpu here — unlike the cpu feature, we want the GPU.)
-env = { PYTHONNOUSERSITE = "1" }
+#
+# XLA_PYTHON_CLIENT_PREALLOCATE=false: by default JAX grabs ~75% of the GPU
+# (~18 GiB of 24) on first use. When ESMDA (JAX) and a neural-surrogate rollout
+# (PyTorch) share one process, that preallocation starves the PyTorch rollout —
+# inference OOMs at batch 2 even though training fit batch 4. The ESMDA Kalman
+# math is tiny, so on-demand allocation lets JAX keep the GPU while leaving the
+# bulk of the card for the rollout. Exports to the forkserver workers too.
+env = { PYTHONNOUSERSITE = "1", XLA_PYTHON_CLIENT_PREALLOCATE = "false" }
 
 [tool.pixi.feature.cuda.tasks]
 install-nvhpc = { cmd = "bash activation_scripts/install_nvhpc.sh", description = "One-time download + install of the NVIDIA HPC SDK (nvfortran, ~16 GB) into the cuda env. Required before GPU pylbm/uDALES builds." }

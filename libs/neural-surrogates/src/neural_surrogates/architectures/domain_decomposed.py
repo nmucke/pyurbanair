@@ -35,9 +35,8 @@ import inspect
 from typing import Sequence
 
 import torch
-from torch import nn
-
 from neural_surrogates.decomposition import DomainDecomposition
+from torch import nn
 
 
 class DomainDecomposed(nn.Module):
@@ -70,6 +69,25 @@ class DomainDecomposed(nn.Module):
         accept ``extra_in_channels`` raises a clear error (it cannot ingest the
         context); everything else (residual mode, normalisation, channel widths)
         is taken from the chosen preset.
+    fine_chunk_size:
+        Maximum number of patch blocks to push through ``fine_net`` per call.
+        The fine step tiles the field into ``M`` overlapping blocks and, with a
+        batch of ``B`` samples, runs the fine net on ``B*M`` blocks. On a large
+        grid (e.g. Barcelona) ``M`` is large, so a single ``B*M`` call's
+        activations can exhaust GPU memory even at ``B=2``. When set, the blocks
+        are streamed through ``fine_net`` in chunks of this many and the outputs
+        concatenated -- bounding the per-call working set. ``None`` (default)
+        keeps the original single-call behaviour (byte-identical). Combine with
+        ``fine_checkpoint`` to also bound the saved-for-backward activations.
+    fine_checkpoint:
+        Gradient-checkpoint each ``fine_net`` (chunk) call during training so its
+        intermediate activations are recomputed in the backward pass instead of
+        all being held until ``backward()``. This is what actually frees the
+        memory that accumulates across patches while training (chunking alone
+        only bounds the transient forward working set, since autograd otherwise
+        retains every chunk's activations). Off in eval / no-grad. Default
+        ``False`` (no recompute cost). Pair with ``fine_chunk_size`` for the full
+        memory reduction.
     divergence_projection:
         Enable the (coarse-grid) divergence-cleaning projection of the merged
         velocity field. Default ``False``; the body is a runnable identity stub
@@ -96,11 +114,22 @@ class DomainDecomposed(nn.Module):
         coarse_net,
         divergence_projection: bool = False,
         periodic_axes: Sequence[str] | None = None,
+        fine_chunk_size: int | None = None,
+        fine_checkpoint: bool = False,
     ) -> None:
         super().__init__()
         self.n_state_channels = n_state_channels
         self.n_params = n_params
         self.divergence_projection = bool(divergence_projection)
+        # Patch-batch streaming knobs for large grids: cap the per-call fine-net
+        # block count (transient working set) and/or recompute its activations in
+        # backward (saved-activation memory). See the class docstring.
+        if fine_chunk_size is not None and fine_chunk_size <= 0:
+            raise ValueError(
+                f"fine_chunk_size must be a positive int or None, got {fine_chunk_size}"
+            )
+        self.fine_chunk_size = fine_chunk_size
+        self.fine_checkpoint = bool(fine_checkpoint)
 
         # ``periodic_axes`` (axis letters, e.g. ``["y"]``) is the data-level
         # periodicity knob shared with the other architectures and set once in
@@ -116,9 +145,7 @@ class DomainDecomposed(nn.Module):
                     "periodic_axes entries must be in ('z', 'y', 'x'), got "
                     f"{sorted(unknown)}"
                 )
-            decomposition["periodic_axes"] = tuple(
-                a in axes for a in ("z", "y", "x")
-            )
+            decomposition["periodic_axes"] = tuple(a in axes for a in ("z", "y", "x"))
         self.dd = DomainDecomposition(**decomposition)
 
         # The fine net ingests the prolonged coarse context (C channels) plus the
@@ -126,12 +153,18 @@ class DomainDecomposed(nn.Module):
         # widened by ``extra_in_channels``. The coarse net takes no extra input.
         extra_in = n_state_channels + self.dd.n_pos
         self.fine_net = self._build_subnet(
-            fine_net, n_state_channels, n_params,
-            extra_in_channels=extra_in, role="fine_net",
+            fine_net,
+            n_state_channels,
+            n_params,
+            extra_in_channels=extra_in,
+            role="fine_net",
         )
         self.coarse_net = self._build_subnet(
-            coarse_net, n_state_channels, n_params,
-            extra_in_channels=0, role="coarse_net",
+            coarse_net,
+            n_state_channels,
+            n_params,
+            extra_in_channels=0,
+            role="coarse_net",
         )
 
         # The positional encoding is constant per grid (cached in the DD plan),
@@ -199,6 +232,49 @@ class DomainDecomposed(nn.Module):
         for net in (self.fine_net, self.coarse_net):
             if hasattr(net, "set_normalization"):
                 net.set_normalization(state_mean, state_std, param_mean, param_std)
+
+    def _run_fine(
+        self,
+        state_blocks: torch.Tensor,
+        params_blocks: torch.Tensor,
+        geom_blocks: torch.Tensor,
+        extra: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run ``fine_net`` over the ``(B*M, ...)`` patch batch, optionally in
+        chunks and/or with gradient checkpointing to bound peak GPU memory.
+
+        Without ``fine_chunk_size`` and ``fine_checkpoint`` this is a single
+        ``fine_net`` call -- byte-identical to the original code path. With
+        chunking the blocks are streamed in groups of ``fine_chunk_size`` and the
+        outputs concatenated; with checkpointing each call's activations are
+        recomputed in backward (only while training under grad)."""
+        n = state_blocks.shape[0]
+        chunk = self.fine_chunk_size or n
+
+        def call(s, p, g, e):
+            if self.fine_checkpoint and self.training and torch.is_grad_enabled():
+                from torch.utils.checkpoint import checkpoint
+
+                return checkpoint(
+                    lambda s, p, g, e: self.fine_net(s, p, g, extra=e),
+                    s,
+                    p,
+                    g,
+                    e,
+                    use_reentrant=False,
+                )
+            return self.fine_net(s, p, g, extra=e)
+
+        if chunk >= n:
+            return call(state_blocks, params_blocks, geom_blocks, extra)
+
+        outs = []
+        for i in range(0, n, chunk):
+            sl = slice(i, i + chunk)
+            outs.append(
+                call(state_blocks[sl], params_blocks[sl], geom_blocks[sl], extra[sl])
+            )
+        return torch.cat(outs, dim=0)
 
     def _divergence_projection(self, state: torch.Tensor) -> torch.Tensor:
         """Project the merged velocity field to be (approximately) divergence
@@ -285,8 +361,8 @@ class DomainDecomposed(nn.Module):
             params.unsqueeze(1).expand(b, m, params.shape[1]).reshape(b * m, -1)
         )
 
-        fine_out = self.fine_net(
-            state_blocks, params_blocks, geom_blocks, extra=extra
+        fine_out = self._run_fine(
+            state_blocks, params_blocks, geom_blocks, extra
         )  # (B*M, C, e, e, e)
 
         # --- Merge: window-blend the patch outputs back to the full grid.

@@ -56,8 +56,16 @@ def prepare_neural_surrogate(
     The neural surrogate itself needs no preparation, but the CFD backend it
     uses to bootstrap cold starts does. ``spinup_backend`` selects which
     preparation to run on ``forward_model.spinup_forward_model``.
+
+    When ``spinup_source == "training_data"`` the CFD spin-up backend is never
+    invoked (cold starts load a training snapshot), so there is nothing to
+    prepare — skip the preprocessing/compile entirely. This keeps a
+    training-data surrogate (e.g. a pypalm-trained net assimilated with a
+    pyudales spin-up template) from running an unused uDALES preprocessing pass.
     """
     surrogate = _unwrap_forward_model(forward_model)
+    if getattr(surrogate, "spinup_source", None) == "training_data":
+        return
     spinup = surrogate.spinup_forward_model
     if spinup_backend == "pyudales":
         spinup.run_preprocessing(python_or_matlab=python_or_matlab)
@@ -219,7 +227,6 @@ def create_observation_operator(
 
 def create_C_D(num_obs: int, obs_error_std: float) -> jnp.ndarray:
     return jnp.diag((obs_error_std**2) * jnp.ones(num_obs))
-
 
 
 def make_time_coords(simulation_time: float, num_time_points: int) -> jnp.ndarray:

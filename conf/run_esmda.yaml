@@ -45,8 +45,8 @@ defaults:
   - esmda/localization: none
   - esmda/state_reduction: none
   - esmda/smoother: dynamic
-  - model@truth_model: pyudales
-  - model@assim_model: pyudales
+  - model@truth_model: pypalm
+  - model@assim_model: neural_surrogate
   - params@truth_params: dynamic_truth
   - params@prior_params: dynamic
 
@@ -109,9 +109,9 @@ ensemble:
 # esmda/state_reduction=none|svd) that override `esmda.localization` /
 # `esmda.state_reduction` below. ---
 esmda:
-  num_steps: 3
+  num_steps: 4
   alpha: ${.num_steps}
-  num_assimilation_windows: 3
+  num_assimilation_windows: 4
   seed: 42
   obs_error_std: 0.25
   # Defaults; normally set by the esmda/localization and esmda/state_reduction
@@ -143,7 +143,7 @@ run:
   save_prior_state: false
   # Truth source: null -> simulate inline (default); a path -> load a
   # state.nc/params.nc artifact written by run_forward_model.py params=dynamic.
-  truth_dir: null
+  truth_dir: ground_truth/barcelona
   # Begin the assimilation horizon partway into a disk-loaded truth (skips a
   # spin-up): keep state + params from this time onward and rebase the time axis
   # so this time becomes t=0. null/0 -> start from the truth's first frame.

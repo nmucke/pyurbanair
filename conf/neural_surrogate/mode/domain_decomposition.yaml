@@ -13,8 +13,8 @@
 # terms need the wrapper's return_intermediates). Override the size preset with
 # `neural_surrogate/architectures@architecture=domain_decomposed/small`.
 defaults:
-  - /neural_surrogate/architectures@architecture: domain_decomposed/small
-model_name: domain_decomposition_conv
+  - /neural_surrogate/architectures@architecture: domain_decomposed/medium
+model_name: domain_decomposition_conv_barcelona
 trainer:
   _target_: neural_surrogates.PatchTrainer
 # Four-term domain-decomposition objective of companion PDF Eq (9):

@@ -79,7 +79,7 @@ time:
   # window is `simulation_time` long with a `spinup_time` constant-inflow plateau
   # in front; the state is written every `output_frequency` s. The number of
   # windows and the param-knot count are compute knobs and live in `scale/`.
-  simulation_time: 1200.0
+  simulation_time: 300.0
   output_frequency: 10.0
   spinup_time: 500.0
   # simulation_time: 100.0
