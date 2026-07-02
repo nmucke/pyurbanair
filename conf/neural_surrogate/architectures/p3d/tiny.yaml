@@ -16,3 +16,10 @@ partition_size: 1
 # param_conditioning: channels  # default: params broadcast as input channels.
 #   "native" routes params through P3D's scalar pde_parameters adaLN path
 #   (reduced to one scalar when n_params > 1) — lower capacity, experimental.
+
+# Geometry features: uncomment to add the SDF + ∇SDF channels to the stem
+# (in_channels += 4). Must be paired with dataset.sdf_features=true and a
+# matching dataset.sdf_clamp_cells (default 32). Off by default -> existing
+# checkpoints load byte-identically.
+# sdf_features: true
+# sdf_clamp_cells: 32

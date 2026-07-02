@@ -6,3 +6,10 @@ window_size: 4
 partition_size: 1
 
 # normalize: true / predict_residual: true / param_conditioning: channels (defaults)
+
+# Geometry features: uncomment to add the SDF + ∇SDF channels to the stem
+# (in_channels += 4). Must be paired with dataset.sdf_features=true and a
+# matching dataset.sdf_clamp_cells (default 32). Off by default -> existing
+# checkpoints load byte-identically.
+# sdf_features: true
+# sdf_clamp_cells: 32

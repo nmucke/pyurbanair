@@ -73,6 +73,27 @@ def run(cfg: DictConfig) -> None:
         n_params=len(train_ds.param_names),
     ).to(dtype=dtype)
 
+    # Cross-check the SDF-feature flags: a model whose stem was widened for the
+    # SDF channels must be paired with a dataset that ships them (and at the same
+    # clamp radius), or training silently trains on the wrong stem. Fail loud on
+    # any mismatch. Both default off, so this is a no-op for standard runs.
+    model_wants_features = getattr(model, "n_geom_feature_channels", 0) > 0
+    dataset_has_features = bool(getattr(train_ds, "sdf_features", False))
+    if model_wants_features != dataset_has_features:
+        raise ValueError(
+            "SDF-feature mismatch: architecture.sdf_features="
+            f"{model_wants_features} but dataset.sdf_features={dataset_has_features}. "
+            "Enable (or disable) both together."
+        )
+    if model_wants_features and float(train_ds.sdf_clamp_cells) != float(
+        getattr(model, "sdf_clamp_cells", train_ds.sdf_clamp_cells)
+    ):
+        raise ValueError(
+            "SDF clamp mismatch: architecture.sdf_clamp_cells="
+            f"{model.sdf_clamp_cells} but dataset.sdf_clamp_cells="
+            f"{train_ds.sdf_clamp_cells}; they must match."
+        )
+
     print(
         f"train pairs={len(train_ds)}  param_names={train_ds.param_names}  "
         f"n_state_channels={len(cfg.dataset.state_vars)}"
@@ -94,9 +115,7 @@ def run(cfg: DictConfig) -> None:
             raise FileNotFoundError(
                 f"init_weights_path does not exist: {init_weights_path}"
             )
-        state_dict = torch.load(
-            init_weights_path, map_location=cfg.trainer.device
-        )
+        state_dict = torch.load(init_weights_path, map_location=cfg.trainer.device)
         model.load_state_dict(state_dict)
         print(f"initialized model weights from {init_weights_path}")
 

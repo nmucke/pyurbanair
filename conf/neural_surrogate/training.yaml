@@ -132,6 +132,15 @@ dataset:
   cache: false
   dtype: float32
   pushforward_steps: 7
+  # SDF + ∇SDF geometry features (see neural_surrogates.sdf): when true, the
+  # dataset ships 4 extra channels (clamped signed distance + unit gradient)
+  # alongside the `blanking` mask, computed once per geometry at init. Must be
+  # paired with an architecture built with `sdf_features=true` (the train script
+  # cross-checks this, and that the two `sdf_clamp_cells` agree). Default false
+  # keeps items byte-identical to the pre-feature dataset.
+  sdf_features: false
+  # Clamp radius L (in cells) for the normalised SDF channel: clip(sdf, -L, L)/L.
+  sdf_clamp_cells: 32
 
 dataloader:
   _target_: torch.utils.data.DataLoader
@@ -159,4 +168,3 @@ dataloader:
   collate_fn:
     _target_: neural_surrogates.datasets.transition.transition_collate
     _partial_: true
-

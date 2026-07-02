@@ -11,7 +11,14 @@ Mapping the upstream model onto this contract
 * **Geometry** is concatenated to the state as one extra input channel (so the
   underlying model's ``channel_size = n_state_channels + 1 [+ n_params]``), and
   the final output is multiplied pointwise by the geometry mask so obstacle
-  cells stay exactly zero -- identical to ``UPT`` / ``UNetConvNeXt``.
+  cells stay exactly zero -- identical to ``UPT`` / ``UNetConvNeXt``. With
+  ``sdf_features=True`` four further geometry channels (the clamped signed
+  distance field and its unit gradient) are inserted right after the mask, so
+  the "geometry block" is ``[geometry, sdf_n, g_z, g_y, g_x]`` and
+  ``channel_size`` grows by 4. During training these arrive precomputed via the
+  ``geom_features`` argument (never an EDT inside the training step); at
+  inference the model computes them itself, once per rollout, from a small
+  identity-keyed cache (see :meth:`forward`).
 * **Parameters.** The upstream model *does* expose native conditioning, but only
   through a single scalar per sample (``pde_parameters`` of shape ``(B,)``,
   sinusoidally embedded and applied as adaLN modulation in every block). It has
@@ -47,6 +54,8 @@ from typing import Sequence
 import numpy as np
 import torch
 import torch.nn.functional as F
+from neural_surrogates.sdf import N_SDF_FEATURE_CHANNELS
+from neural_surrogates.sdf import sdf_features as compute_sdf_features
 from torch import nn
 
 # Total spatial downsampling factor of the upstream U-structure for the default
@@ -95,6 +104,17 @@ class P3D(nn.Module):
     predict_residual:
         Predict the state increment rather than the next state; the identity
         rollout becomes the zero-output solution.
+    sdf_features:
+        Add the signed-distance-field geometry features (SDF + ∇SDF, 4 channels)
+        to the stem, inserted **right after** the geometry mask. ``in_channels``
+        grows by 4 and :attr:`n_geom_feature_channels` becomes 4 (the trainer
+        keys off it to fail loud when the dataset ships no features). The default
+        ``False`` keeps ``in_channels`` -- and the whole state dict --
+        byte-identical to today's models, so existing checkpoints load unchanged.
+    sdf_clamp_cells:
+        Clamp radius ``L`` (in cells) for the normalised SDF channel; forwarded
+        to :func:`neural_surrogates.sdf.sdf_features`. Must match the value the
+        training dataset used (the train script cross-checks this).
     extra_in_channels:
         Number of *extra* raw input channels appended to the stem input
         **after** the geometry mask (and any param channels). Passed to
@@ -121,6 +141,8 @@ class P3D(nn.Module):
         param_conditioning: str = "native",
         normalize: bool = True,
         predict_residual: bool = True,
+        sdf_features: bool = False,
+        sdf_clamp_cells: float = 32.0,
         extra_in_channels: int = 0,
     ) -> None:
         super().__init__()
@@ -171,6 +193,21 @@ class P3D(nn.Module):
         self.param_conditioning = param_conditioning
         self.normalize = normalize
         self.predict_residual = predict_residual
+        # SDF + ∇SDF geometry features (see neural_surrogates.sdf). When on, four
+        # channels are inserted right after the geometry mask; the trainer keys
+        # off ``n_geom_feature_channels`` to decide whether it must ship them.
+        # The default (off) leaves ``in_channels`` -- and the whole state dict --
+        # byte-identical to a standard P3D, so existing checkpoints are
+        # unaffected (the repo's no-op-when-absent rule).
+        self.sdf_features_enabled = bool(sdf_features)
+        self.sdf_clamp_cells = float(sdf_clamp_cells)
+        self.n_geom_feature_channels = (
+            N_SDF_FEATURE_CHANNELS if self.sdf_features_enabled else 0
+        )
+        # Size-1 inference cache for the self-computed features, keyed on the
+        # caller's geometry-tensor identity. A plain attribute (NOT a buffer) so
+        # it never enters the state dict. See ``_sdf_features_for``.
+        self._sdf_cache: tuple | None = None
         # ``extra_in_channels`` are raw input-only channels appended to the stem
         # input AFTER geometry (and any param channels): the domain-decomposition
         # wrapper feeds the prolonged coarse context + positional encodings in
@@ -190,9 +227,12 @@ class P3D(nn.Module):
             self.register_buffer("param_mean", torch.zeros(max(n_params, 1)))
             self.register_buffer("param_std", torch.ones(max(n_params, 1)))
 
-        # Input channels: state + geometry, plus one channel per param in the
-        # channel-conditioning mode, plus any raw extra (DD context/positional).
+        # Input channels: state + geometry, plus the SDF feature block (4) when
+        # enabled, plus one channel per param in the channel-conditioning mode,
+        # plus any raw extra (DD context/positional). Order at the stem is
+        # [state, geometry, sdf features, param channels, extra].
         in_channels = n_state_channels + 1
+        in_channels += self.n_geom_feature_channels
         if param_conditioning == "channels":
             in_channels += n_params
         in_channels += self.extra_in_channels
@@ -256,9 +296,7 @@ class P3D(nn.Module):
                 np.asarray(value), dtype=buf.dtype, device=buf.device
             ).reshape(-1)
             if t.numel() != buf.numel():
-                raise ValueError(
-                    f"expected {buf.numel()} values, got {t.numel()}"
-                )
+                raise ValueError(f"expected {buf.numel()} values, got {t.numel()}")
             return t
 
         self.state_mean.copy_(_to(self.state_mean, state_mean))
@@ -296,6 +334,56 @@ class P3D(nn.Module):
             x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
         return x, (d, h, w)
 
+    # -- SDF geometry features (inference self-compute path) ---------------
+
+    def _sdf_features_for(self, geometry: torch.Tensor) -> torch.Tensor:
+        """Fetch (or compute-and-cache) the SDF features for ``geometry``.
+
+        Keyed on the geometry tensor's *identity* -- ``(data_ptr, shape,
+        device)``. ``NeuralSurrogateForwardModel.rollout_batched`` builds the
+        stacked geometry tensor **once** and passes the *same object* to every
+        step, so step 1 computes the EDT and steps ``2..T`` hit the cache. The
+        cache is size-1 (a rollout has a single geometry; a new key evicts the
+        old), mirroring ``UPT._geom_cache``.
+
+        This runs ``scipy``'s EDT, so it must **never** be called from inside a
+        ``torch.compile``'d region. It isn't: training features always arrive
+        via ``geom_features`` (so this branch is unreachable under compile), and
+        the inference rollout is uncompiled. If an inference rollout is ever
+        compiled, this lookup must sit in a thin uncompiled wrapper.
+        """
+        key = (geometry.data_ptr(), tuple(geometry.shape), geometry.device)
+        if self._sdf_cache is not None and self._sdf_cache[0] == key:
+            cached: torch.Tensor = self._sdf_cache[1]
+            return cached
+        feat = self._compute_sdf_features(geometry)
+        self._sdf_cache = (key, feat)
+        return feat
+
+    def _compute_sdf_features(self, geometry: torch.Tensor) -> torch.Tensor:
+        """Compute ``(B, 4, *grid)`` SDF features from a geometry mask.
+
+        ``geometry`` may be ``(*grid,)``, ``(B, *grid)`` or ``(B, 1, *grid)``.
+        For a batched mask, member 0's features are reused for every member
+        whose mask equals member 0's (an ``O(B·N)`` compare, once per rollout):
+        the ensemble stacks identical masks per window, so this collapses ``B``
+        EDTs to 1, falling back to a per-member EDT only when they differ.
+        """
+        g = geometry
+        if g.dim() == 5:  # (B, 1, z, y, x)
+            g = g[:, 0]
+        clamp = self.sdf_clamp_cells
+        if g.dim() == 3:  # single (z, y, x)
+            return compute_sdf_features(g, clamp_cells=clamp).unsqueeze(0)
+        base = compute_sdf_features(g[0], clamp_cells=clamp)  # (4, *grid)
+        feats = [base]
+        for i in range(1, g.shape[0]):
+            if torch.equal(g[i], g[0]):
+                feats.append(base)
+            else:
+                feats.append(compute_sdf_features(g[i], clamp_cells=clamp))
+        return torch.stack(feats, dim=0)  # (B, 4, *grid)
+
     # -- forward -----------------------------------------------------------
 
     def forward(
@@ -303,6 +391,7 @@ class P3D(nn.Module):
         state: torch.Tensor,
         params: torch.Tensor,
         geometry: torch.Tensor,
+        geom_features: torch.Tensor | None = None,
         extra: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if (extra is None) != (self.extra_in_channels == 0):
@@ -316,6 +405,29 @@ class P3D(nn.Module):
                 f"extra has {extra.shape[1]} channels, expected "
                 f"{self.extra_in_channels}"
             )
+
+        # Resolve the SDF geometry features BEFORE ``geometry`` is reshaped/cast
+        # below, so the inference cache keys on the caller's stable geometry
+        # tensor identity (see ``_sdf_features_for``). Two paths:
+        #   * training -> features arrive precomputed via ``geom_features``;
+        #   * inference -> features absent, self-computed (cached) from the mask.
+        if geom_features is not None and not self.sdf_features_enabled:
+            raise ValueError(
+                "geom_features was provided but this model was built with "
+                "sdf_features=False; it has no stem channels for them."
+            )
+        feat = None
+        if self.sdf_features_enabled:
+            if geom_features is not None:
+                if geom_features.shape[1] != self.n_geom_feature_channels:
+                    raise ValueError(
+                        f"geom_features has {geom_features.shape[1]} channels, "
+                        f"expected {self.n_geom_feature_channels}"
+                    )
+                feat = geom_features
+            else:
+                feat = self._sdf_features_for(geometry)
+
         if geometry.dim() == state.dim() - 1:
             geometry = geometry.unsqueeze(1)
         geometry = geometry.to(dtype=state.dtype)
@@ -332,12 +444,21 @@ class P3D(nn.Module):
         else:
             x = state
 
-        # Assemble the stem input: [state, geometry, (param channels), (extra)].
-        # ``extra`` (DD coarse-context + positional encodings) is concatenated
-        # RAW -- no normalisation, no geometry masking -- so the stem widened by
-        # ``extra_in_channels`` ingests it directly (mirrors UNetConvNeXt).
+        # Assemble the stem input, in order:
+        #   [state, geometry, sdf_n, g_z, g_y, g_x, (param channels), (extra)].
+        # The 4 SDF features sit RIGHT AFTER the mask so the "geometry block" is
+        # contiguous; params/extra keep their relative positions. Like the mask
+        # and ``extra`` they enter RAW -- bounded in [-1, 1] by construction, so
+        # no normalisation and no geometry masking (mirrors UNetConvNeXt).
         pde_parameters = None
         pieces = [x, geometry]
+        if feat is not None:
+            feat = feat.to(dtype=x.dtype)
+            # Self-compute on a single shared mask yields a (1, 4, *grid) tensor;
+            # broadcast it (a view) to the state batch before concatenation.
+            if feat.shape[0] == 1 and state.shape[0] != 1:
+                feat = feat.expand(state.shape[0], *feat.shape[1:])
+            pieces.append(feat)
         if self.param_conditioning == "channels" and self.n_params > 0:
             b, _, d, h, w = state.shape
             params_b = params[:, :, None, None, None].expand(b, self.n_params, d, h, w)
