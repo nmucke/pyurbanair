@@ -118,7 +118,7 @@ class P3D(nn.Module):
         mending: bool = False,
         skip_connections_active: bool = True,
         periodic_axes: Sequence[str] = (),
-        param_conditioning: str = "channels",
+        param_conditioning: str = "native",
         normalize: bool = True,
         predict_residual: bool = True,
         extra_in_channels: int = 0,
