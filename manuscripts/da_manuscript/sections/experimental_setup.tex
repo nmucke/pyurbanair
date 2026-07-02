@@ -1,0 +1,123 @@
+\section{Experimental setup}
+\label{sec:setup}
+
+% ROUGH OUTLINE -- one bullet = one point (roughly one paragraph in the final
+% text). All concrete numbers (grids, priors, sensor counts, swept values) go
+% into the tables during writing.
+
+\subsection{Urban test cases}
+\label{sec:setup:cases}
+\begin{itemize}
+  \item Two cases bracketing the idealized--realistic axis
+        (\tabref{tab:cases}):
+        \begin{itemize}
+          \item \textbf{Case A:} Xie \& Castro staggered cube array ---
+                canonical, well-documented benchmark \cite{xie2006les,xie2009modelling}.
+          \item \textbf{Case B:} ``Barcelona'' real urban block --- irregular
+                heights and street layout from STL geometry.
+        \end{itemize}
+  \item Boundary conditions (both cases): prescribed inflow profile
+        (\velmag, \inflowangle, power-law shear \shearexp), periodic lateral,
+        free-slip lid, no-slip walls; spin-up before observations are drawn.
+  \item Grids and near-wall treatment deliberately differ per solver
+        (\tabref{tab:solver-differences}) --- part of the intended \discrepancy.
+\end{itemize}
+
+\begin{table}[t]
+  \centering
+  \caption{Test cases: domain, grid, and boundary conditions per solver.}
+  \label{tab:cases}
+  \todo{table body}
+\end{table}
+
+\begin{table}[t]
+  \centering
+  \caption{Structural solver differences (discretization, closure, geometry
+    representation, wall treatment) --- the source of \discrepancy.}
+  \label{tab:solver-differences}
+  \todo{table body}
+\end{table}
+
+\subsection{Cross-model experimental design}
+\label{sec:setup:crossmodel}
+\input{figures/cross_model_setup}   % \figref{fig:cross_model_setup}
+\begin{itemize}
+  \item Protocol (\figref{fig:cross_model_setup}): \truthmodel\ generates
+        synthetic observations with fixed true parameters; a \emph{different}
+        \assimmodel\ runs \esmda; recovery is scored against the known truth.
+  \item Pairings (\tabref{tab:pairings}): diagonal $=$ same-model \twinexp\
+        baselines (\invcrime); off-diagonal $=$ \crossmodel, ordered from
+        ``near'' (LES$\to$LES) to ``far'' (LES$\leftrightarrow$\lbmmodel)
+        \discrepancy.
+  \item True parameters drawn independently of the assimilation prior (prior
+        not secretly centred on truth).
+\end{itemize}
+
+\begin{table}[t]
+  \centering
+  \caption{Truth $\times$ assimilation pairings ($3\times3$; diagonal $=$
+    \twinexp\ baseline, off-diagonal $=$ \crossmodel).}
+  \label{tab:pairings}
+  \todo{table body}
+\end{table}
+
+\subsection{Estimated parameters and priors}
+\label{sec:setup:params}
+\begin{itemize}
+  \item Estimated vector: forcing (\inflowangle, \velmag, \shearexp) $+$
+        closure knob \sgs\ ($+$ \pgrad\ for \pyudales\ only); Gaussian priors
+        with physical bounds, static or AR(2) time-varying (\tabref{tab:priors}).
+  \item Key design point: \shearexp\ and \sgs\ are \discrepancy-absorbing
+        knobs --- nearly redundant in a \twinexp, load-bearing cross-model;
+        their admissible ranges are retuned per assimilation solver for
+        numerical stability.
+\end{itemize}
+
+\begin{table}[t]
+  \centering
+  \caption{Parameters: priors, bounds, truth values, temporal model.}
+  \label{tab:priors}
+  \todo{table body}
+\end{table}
+
+\subsection{Observation network}
+\label{sec:setup:obs}
+\begin{itemize}
+  \item Street-level velocity sensors, split into an assimilation set and a
+        held-out validation set (\figref{fig:sensors}); observations
+        time-aggregated over intervals; noise level $\sigma$ set to avoid the
+        unobservable-observation regime (and swept in the sensitivity study).
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \todo{plan-view sensor map per case (assimilation vs.\ held-out)}
+  \caption{Sensor network for the two cases.}
+  \label{fig:sensors}
+\end{figure}
+
+\subsection{Sensitivity study design}
+\label{sec:setup:study}
+\begin{itemize}
+  \item One-factor-at-a-time sweep from a fixed cross-model baseline
+        (\tabref{tab:study}). Core factors: model pairing, observation error
+        $\sigma$, estimated-parameter set (with/without \shearexp, \sgs),
+        static vs.\ AR(2). Secondary: \Ne, \Na, \Nw, localization, inflation,
+        sensor count/placement, prior spread, window length.
+\end{itemize}
+
+\begin{table}[t]
+  \centering
+  \caption{Sensitivity factors: swept values, baseline, hypothesis tested.}
+  \label{tab:study}
+  \todo{table body}
+\end{table}
+
+\subsection{Evaluation protocol}
+\label{sec:setup:eval}
+\begin{itemize}
+  \item Per configuration: parameter \RMSE/\CRPS\ (prior vs.\ posterior),
+        calibration (spread, coverage), and predictive skill at held-out
+        sensors; repeated over seeds; \twinexp\ as ceiling, prior as floor;
+        forcing and closure parameters reported separately.
+\end{itemize}

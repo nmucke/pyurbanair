@@ -1,0 +1,69 @@
+\section{Results}
+\label{sec:results}
+
+% ROUGH OUTLINE -- one bullet = the expected finding (roughly one paragraph +
+% one float in the final text). No numbers invented; all quantitative claims
+% filled once results exist.
+
+\subsection{Twin-experiment baseline}
+\label{sec:results:twin}
+\begin{itemize}
+  \item Each solver against itself (\invcrime\ reference): forcing parameters
+        recovered accurately with tight posteriors, fast monotone convergence,
+        observation fit at the noise floor. The ``it works'' ceiling every
+        cross-model result is read against. [Fig.: parameter convergence per
+        solver.]
+\end{itemize}
+
+\subsection{Cross-model parameter estimation}
+\label{sec:results:cross}
+\begin{itemize}
+  \item \textbf{Headline result.} Skill degrades relative to the \twinexp\
+        once \truthmodel\ $\neq$ \assimmodel\ --- the signature of the
+        \invcrime\ removed. [Fig.: twin vs.\ cross error per parameter;
+        Table: \RMSE/\CRPS\ for all pairings.]
+  \item Split identifiability: \inflowangle\ and \velmag\ remain recoverable
+        with modest bias; \shearexp\ and \sgs\ become systematically biased
+        (confident but wrong).
+  \item Pairings are asymmetric (which solver is truth vs.\ assimilation
+        matters); degradation expected to grow with \discrepancy\ ``distance''
+        (LES$\to$LES vs.\ LES$\leftrightarrow$\lbmmodel).
+\end{itemize}
+
+\subsection{Observation-space vs.\ parameter-space skill}
+\label{sec:results:obsvsparam}
+\begin{itemize}
+  \item \textbf{Key finding.} Cross-model runs can fit the sensors nearly at
+        the noise floor while parameter error stays large --- good data
+        mismatch masks wrong parameters, so obs-space residuals alone cannot
+        flag failure. [Fig.: obs-space vs.\ parameter-space error scatter.]
+\end{itemize}
+
+\subsection{Role of the model-error knobs}
+\label{sec:results:knobs}
+\begin{itemize}
+  \item Contrast three estimation targets (forcing only / $+\shearexp$ /
+        $+\shearexp+\sgs$) on one cross-model pairing: freeing the knobs
+        improves the observation fit by absorbing \discrepancy, but pushes the
+        knobs to non-physical values and can degrade the forcing estimates.
+        [Fig.: obs fit and parameter error across the three targets.]
+\end{itemize}
+
+\subsection{Sensitivity study}
+\label{sec:results:sensitivity}
+\begin{itemize}
+  \item One factor at a time from the cross-model baseline; trim to the
+        factors that matter once results are in. Expected: \Ne\ plateau;
+        diminishing returns in \Na; optimum \Cd\ inflation balancing overfit
+        vs.\ under-informing; localization helps at small \Ne; sensor
+        placement beats count; prior spread trades bias vs.\ convergence.
+        [Fig.: multi-panel skill vs.\ each retained factor.]
+\end{itemize}
+
+\subsection{Idealized vs.\ realistic geometry}
+\label{sec:results:cases}
+\begin{itemize}
+  \item Does the twin$\to$cross degradation widen from the Xie \& Castro array
+        to the Barcelona geometry, and which parameters are most affected?
+        [Fig.: twin-vs-cross degradation, both cases side by side.]
+\end{itemize}

@@ -1,0 +1,92 @@
+%==============================================================================
+%  macros.tex -- custom commands and notation
+%  Loaded from main.tex via \input{macros}
+%
+%  PURPOSE: one place to fix terminology and notation so every section stays
+%  consistent. If you want to rename a concept (e.g. "assimilation model"),
+%  change it here and it updates everywhere. Prefer these macros over spelling
+%  terms out by hand.
+%==============================================================================
+
+% ---- Editorial / draft helpers -------------------------------------------
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\note}[1]{\textcolor{blue}{[#1]}}
+\newcommand{\needcite}{\textcolor{red}{[?]}}          % missing citation marker
+
+% ---- Common math operators ------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}            % expectation
+\newcommand{\Var}{\mathrm{Var}}        % variance
+\newcommand{\Cov}{\mathrm{Cov}}        % covariance
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1 \right\rvert}
+\newcommand{\inner}[2]{\left\langle #1, #2 \right\rangle}
+\newcommand{\diff}{\mathrm{d}}
+\newcommand{\T}{^{\mathsf{T}}}         % transpose
+\newcommand{\Normal}{\ensuremath{\mathcal{N}}}      % Gaussian distribution
+\newcommand{\eqdef}{\vcentcolon=}      % "defined as"
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator{\diag}{diag}
+% RMSE/CRPS are used in running text too, so keep them text-safe via \ensuremath.
+\newcommand{\RMSE}{\ensuremath{\mathrm{RMSE}}}
+\newcommand{\CRPS}{\ensuremath{\mathrm{CRPS}}}
+
+% ---- Vectors and matrices -------------------------------------------------
+\newcommand{\vect}[1]{\boldsymbol{#1}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+
+% ---- State / parameter / observation vectors ------------------------------
+% All wrapped in \ensuremath so they render correctly in text AND math.
+\newcommand{\state}{\ensuremath{\vect{x}}}          % model state vector
+\newcommand{\param}{\ensuremath{\vect{\theta}}}     % parameter vector (estimated)
+\newcommand{\aug}{\ensuremath{\vect{z}}}            % augmented state-parameter vector
+\newcommand{\obs}{\ensuremath{\vect{d}}}            % observation vector (data)
+\newcommand{\pred}{\ensuremath{\vect{g}}}           % predicted obs g(z)=H(M(x,theta))
+\newcommand{\fwd}{\ensuremath{\mathcal{M}}}         % forward model operator
+\newcommand{\Hobs}{\ensuremath{\mathcal{H}}}        % observation operator
+\newcommand{\Gobs}{\ensuremath{\mathcal{G}}}        % composed forward+observation map
+
+% ---- Ensemble / DA notation -----------------------------------------------
+\newcommand{\Ne}{\ensuremath{N_{e}}}                % ensemble size
+\newcommand{\Na}{\ensuremath{N_{a}}}                % number of ES-MDA steps
+\newcommand{\Nw}{\ensuremath{N_{w}}}                % number of assimilation windows
+\newcommand{\Nd}{\ensuremath{N_{d}}}                % number of observations (data)
+\newcommand{\ememb}{^{(j)}}            % member superscript -- USE IN MATH ONLY (x\ememb)
+\newcommand{\ai}{\ensuremath{\alpha_{i}}}           % ES-MDA inflation coeff at step i
+\newcommand{\Cd}{\ensuremath{\mat{C}_{\mathrm{D}}}}   % observation-error covariance
+\newcommand{\Cmd}{\ensuremath{\mat{C}_{\mathrm{ZD}}}} % cross covariance (state/param,data)
+\newcommand{\Cdd}{\ensuremath{\mat{C}_{\mathrm{DD}}}} % predicted-observation covariance
+\newcommand{\Kgain}{\ensuremath{\widetilde{\mat{K}}}} % ES-MDA Kalman-like gain
+
+% ---- Estimated physical parameters (fix names once, use everywhere) --------
+\newcommand{\inflowangle}{\ensuremath{\theta_{\mathrm{in}}}}  % inflow (wind) direction
+\newcommand{\velmag}{\ensuremath{U_{\mathrm{in}}}}            % inflow velocity magnitude
+\newcommand{\shearexp}{\ensuremath{\alpha_{\mathrm{sh}}}}     % power-law shear exponent
+\newcommand{\sgs}{\ensuremath{C_{\mathrm{s}}}}               % SGS / mixing constant
+\newcommand{\pgrad}{\ensuremath{G_{p}}}                      % pressure-gradient magnitude
+
+% ---- Terminology (spell concepts consistently) ----------------------------
+\newcommand{\esmda}{ES-MDA}            % method name
+\newcommand{\les}{LES}
+\newcommand{\lbm}{LBM}
+\newcommand{\truthmodel}{\emph{truth model}}          % generates synthetic data
+\newcommand{\assimmodel}{\emph{assimilation model}}   % used inside ES-MDA
+\newcommand{\crossmodel}{cross-model}                 % different truth vs. assim
+\newcommand{\twinexp}{twin experiment}                % same-model (inverse crime)
+\newcommand{\invcrime}{inverse crime}
+\newcommand{\discrepancy}{model discrepancy}          % structural error term
+
+% ---- Solver / model names (typeset consistently) --------------------------
+% Three physics-based solvers only. Two are LES (uDALES, PALM); one is LBM.
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\lbmmodel}{LBM}          % lattice-Boltzmann solver
+\newcommand{\pyudales}{uDALES}       % LES solver (immersed boundary)
+\newcommand{\pypalm}{PALM}           % LES solver (terrain-following)
+\newcommand{\pyurbanair}{\code{pyurbanair}}  % reference implementation (cited, not the subject)
+
+% ---- Reference shortcuts --------------------------------------------------
+\newcommand{\figref}[1]{Fig.~\ref{#1}}
+\newcommand{\tabref}[1]{Table~\ref{#1}}
+\newcommand{\eqnref}[1]{Eq.~\eqref{#1}}
+\newcommand{\secref}[1]{Section~\ref{#1}}
+\newcommand{\algref}[1]{Algorithm~\ref{#1}}

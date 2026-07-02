@@ -1,0 +1,48 @@
+% =====================================================================
+%  macros.tex — notation macros for the surrogate manuscript.
+%
+%  Change a definition here to update the notation *everywhere* (prose,
+%  equations, and TikZ figure sources all use these commands). Keep new
+%  notation as a macro rather than hard-coding a symbol so it stays
+%  consistent across the paper.
+% =====================================================================
+
+% ----- Names / abbreviations -----------------------------------------
+\newcommand{\esmda}{ES-MDA}          % ensemble smoother, multiple DA
+\newcommand{\palm}{PALM}             % reference LES solver
+\newcommand{\pthreed}{P3D}           % surrogate backbone family
+\newcommand{\pthreeds}{P3D-S}        % specific variant used here
+
+% ----- Core fields ---------------------------------------------------
+\newcommand{\state}{\mathbf{s}}                 % velocity state
+\newcommand{\shat}{\hat{\mathbf{s}}}            % predicted state
+\newcommand{\sbar}{\bar{\mathbf{s}}}            % normalised (z-scored) state
+\newcommand{\mask}{\mathbf{g}}                  % binary fluid / geometry mask
+\newcommand{\resid}{\Delta_\theta}              % network residual output
+\newcommand{\sstd}{\sigma_s}                    % state std (denormalises residual)
+\newcommand{\fsur}{f_\theta}                    % full surrogate step operator
+
+% ----- Inflow parameters ---------------------------------------------
+\newcommand{\bth}{\boldsymbol{\theta}}          % inflow parameter vector
+\newcommand{\bthbar}{\bar{\boldsymbol{\theta}}} % normalised parameter vector
+\newcommand{\iang}{\alpha}                       % inflow wind angle
+\newcommand{\ivel}{V}                            % inflow velocity magnitude
+
+% ----- Velocity magnitude --------------------------------------------
+\newcommand{\umag}{\lvert\mathbf{u}\rvert}       % lower-case (field snapshots)
+\newcommand{\Umag}{\lvert\mathbf{U}\rvert}       % upper-case (sensor series)
+
+% ----- Rollout / curriculum ------------------------------------------
+\newcommand{\kmax}{K_{\max}}                     % maximum rollout horizon
+\newcommand{\kzero}{K_0}                          % initial rollout horizon
+
+% ----- Data assimilation ---------------------------------------------
+\newcommand{\niter}{N_{\mathrm{iter}}}           % ES-MDA analysis passes / window
+\newcommand{\xctrl}{\mathbf{x}}                  % augmented control vector
+\newcommand{\yobs}{\mathbf{y}}                   % observation vector
+\newcommand{\Hobs}{\mathbf{H}}                   % (linear) observation operator
+\newcommand{\Rcov}{\mathbf{R}}                   % observation-error covariance
+\newcommand{\Kgain}{\mathbf{K}_\alpha}           % (inflated) Kalman gain
+
+% ----- Misc ----------------------------------------------------------
+\newcommand{\Real}{\mathbb{R}}

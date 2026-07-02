@@ -1,0 +1,1275 @@
+% =====================================================================
+%  EnKF Workshop 2026 -- Rosendal, Norway
+%  Talk 7: Ensemble Smoothing for Joint State and Parameter Estimation
+%          in Turbulent Urban Flows
+%  Nikolaj T. Mucke, Femke Vossepoel -- TU Delft  (UrbanAIR project)
+%
+%  >>> Compile with XeLaTeX (twice for TikZ "remember picture"):
+%        xelatex main.tex ; xelatex main.tex
+%
+%  Structure: ~15 content slides + backup appendix.
+%  The talk follows Geir Evensen's invited talk (Talk 6), which
+%  introduces the LBM-LES model and the inflow-BC ESMDA setup --
+%  this deck deliberately builds on it instead of repeating it.
+% =====================================================================
+\documentclass[aspectratio=169,11pt]{beamer}
+
+\usepackage{beamerthemeUrbanAIR}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{textcomp}
+\usepackage{colortbl}
+\usepackage{animate}      % inline frame animation -- XeLaTeX, no Flash, plays in Adobe Acrobat
+
+% ---- math shortcuts -------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\state}{\bm{x}}
+\newcommand{\param}{\bm{\theta}}
+\newcommand{\obs}{\bm{d}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Cov}{\mathbf{C}}
+
+% ---- title metadata -------------------------------------------------
+\title{Ensemble Smoothing for Joint State and\\Parameter Estimation in Turbulent Urban Flows}
+\subtitle{Challenges of using LES simulators for data assimilation in urban areas}
+\author{\textbf{Nikolaj T.\ M\"ucke}, Femke Vossepoel}
+\institute{TU Delft \,$\cdot$\, UrbanAIR project}
+\setUAevent{EnKF Workshop 2026 \;|\; Rosendal, Norway \;|\; 15 -- 18 June}
+
+\begin{document}
+
+% =====================================================================
+%  TITLE
+% =====================================================================
+\uatitlepage
+
+% =====================================================================
+%  OVERVIEW
+% =====================================================================
+\begin{frame}{Overview}
+  \begin{itemize}\setlength\itemsep{11pt}
+    \item LES forward models: uDALES, PALM, LBM
+    \item The \texttt{pyurbanair} framework
+    \item Parameter estimation with ESMDA
+    \item State estimation
+    \item Neural surrogate model
+  \end{itemize}
+\end{frame}
+
+% =====================================================================
+%  MOTIVATION
+% =====================================================================
+\begin{frame}{Digital twins for cities}
+  \begin{columns}[T]
+    \begin{column}{0.58\textwidth}
+      \textbf{UrbanAIR} builds digital twins for urban air
+      quality and heat (part of \emph{Destination Earth}).
+      \smallskip
+      \begin{itemize}\setlength\itemsep{6pt}
+        \item Street-level forecasts of heat \& pollution hotspots
+        \item Decision support: zoning, greening, extreme-heat planning
+        \item Uncertainty quantificaiton, data assimilation
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.40\textwidth}
+      \uacard{%
+        \footnotesize
+        \uakeyt{Horizon Europe}\\ \texteuro14.3\,M, 2025--2028\\[4pt]
+        \uakeyt{Consortium}\\ 18 partners, 11 countries\\[4pt]
+        \uakeyt{Cities}\\ Antwerp, Barcelona;\\ Paris, Bristol,
+        Rotterdam}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ---- problem recap: builds on Evensen's talk -------------------------
+\begin{frame}{Connecting regional model with local model}
+  \centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex]
+    % ===== coarse regional grid (left) =====
+    \fill[uaOrange!22] (2.55,0.85) rectangle (3.4,1.70);          % highlighted cell
+    \draw[uaCharcoal!45,line width=0.5pt,step=0.85] (0,0) grid (3.4,2.55);
+    \draw[uaCharcoal!70,line width=0.9pt] (0,0) rectangle (3.4,2.55);
+    \draw[uaOrange,line width=1.1pt] (2.55,0.85) rectangle (3.4,1.70);
+    \node[font=\footnotesize\bfseries,text=uaCharcoal] at (1.7,2.95)
+      {Regional forecast};
+    \node[text=uaGrey,align=center] at (1.7,-0.55)
+      {coarse $\Delta x,\ \Delta t$ $\Rightarrow$\\ uncertain inflow prior};
+
+    % ===== fine urban grid (right) =====
+    \draw[uaTeal!30,line width=0.3pt,step=0.2] (7.8,0) grid (10.6,2.8);
+    \fill[uaTeal] (8.2,0.4) rectangle ++(0.4,0.4);
+    \fill[uaTeal] (9.0,0.4) rectangle ++(0.4,0.4);
+    \fill[uaTeal] (9.8,0.4) rectangle ++(0.4,0.4);
+    \fill[uaTeal] (8.6,1.2) rectangle ++(0.4,0.4);
+    \fill[uaTeal] (9.4,1.2) rectangle ++(0.4,0.4);
+    \fill[uaTeal] (10.2,1.2) rectangle ++(0.4,0.4);
+    \fill[uaTeal] (8.2,2.0) rectangle ++(0.4,0.4);
+    \fill[uaTeal] (9.0,2.0) rectangle ++(0.4,0.4);
+    \fill[uaTeal] (9.8,2.0) rectangle ++(0.4,0.4);
+    \draw[uaTeal,line width=0.9pt] (7.8,0) rectangle (10.6,2.8);
+    \node[font=\footnotesize\bfseries,text=uaTeal] at (9.2,3.05)
+      {Urban LES + assimilation};
+    \node[text=uaGrey,align=center] at (9.2,-0.55)
+      {fine $\Delta x,\ \Delta t$ $\Rightarrow$\\ state $\state$ + inflow $\param(t)$};
+
+    % ===== zoom trapezoid =====
+    \draw[uaGrey,densely dashed,line width=0.6pt] (3.4,1.70) -- (7.8,2.8);
+    \draw[uaGrey,densely dashed,line width=0.6pt] (3.4,0.85) -- (7.8,0.0);
+
+    % ===== downscaling arrow + external-prior chip =====
+    \draw[->,line width=1.3pt,uaTeal] (3.6,1.27) -- (7.6,1.4);
+    \node[rounded corners=3pt,draw=uaAmber,line width=1pt,fill=uaAmber!16,
+          align=center,inner sep=3pt] at (5.6,1.4)
+      {\textbf{external prior}\\ $\param_{\text{ext}} \pm \Sigma_{\text{ext}}$};
+  \end{tikzpicture}
+  \par\medskip
+  Correct the \uakey{time-varying inflow} (wind speed \&
+  direction) of an urban LES from \uakey{sparse in-domain sensors}.
+\end{frame}
+
+
+% ---- multiscale framing ----------------------------------------------
+\begin{frame}{Urban turbulence is multiscale}
+  \centering
+  \includegraphics[width=0.90\linewidth]{assets/multiscale.png}
+\end{frame}
+
+
+% ---- why hard + what this talk examines ------------------------------
+\begin{frame}{Why this is hard}
+  \begin{columns}[T]
+    \begin{column}{0.32\textwidth}
+      \uacard[uaTeal]{\centering
+        \uakeyt{Strong nonlinearity}\\[4pt]\footnotesize
+        chaotic dynamics; inflow changes cascade through wakes}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \uacard[uaOrange]{\centering
+        \uakey{Non-Gaussianity}\\[4pt]\footnotesize
+        flow--building interactions break Gaussian assumptions}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \uacard[uaAmber]{\centering
+        {\bfseries\color{uaAmber}High dimension}\\[4pt]\footnotesize
+        $\dim(\state)\sim10^{5}$--$10^{7}$,\\ $N_e\sim\mathcal{O}(10^{2})$}
+    \end{column}
+  \end{columns}
+  % \vfill
+  % \centering
+  % {\large Which \uakey{design choices} make ensemble smoothing work here?}
+  % \par\bigskip
+  % \begin{columns}[T]
+  %   \begin{column}{0.24\textwidth}\centering
+  %     \uakeyt{1.\ LES models}\\
+  %     {\small three solvers,\\ two paradigms}
+  %   \end{column}
+  %   \begin{column}{0.24\textwidth}\centering
+  %     \uakeyt{2.\ Data assimilation}\\
+  %     {\small ES-MDA, windows, localization}
+  %   \end{column}
+  %   \begin{column}{0.24\textwidth}\centering
+  %     \uakeyt{3.\ \texttt{pyurbanair}}\\
+  %     {\small one framework\\ + results}
+  %   \end{column}
+  %   \begin{column}{0.24\textwidth}\centering
+  %     \uakeyt{4.\ Neural surrogates}\\
+  %     {\small a learned solver\\ + results}
+  %   \end{column}
+  % \end{columns}
+\end{frame}
+
+
+% \begin{frame}{One benchmark geometry, three CFD solvers}
+%   \begin{columns}[T]
+%     \begin{column}{0.55\textwidth}
+%       % Why run several models on the \uakeyt{same} case?
+%       \medskip
+%       \begin{itemize}\setlength\itemsep{8pt}
+%         \item \uakey{Cross-model twins} 
+%         \item \uakey{Fidelity vs.\ cost}
+%         \item Clean comparison: same geometry, same DA pipeline
+%       \end{itemize}
+%     \end{column}
+%     \begin{column}{0.45\textwidth}
+%       \centering
+%       \includegraphics[width=\linewidth]{assets/xie_castro_geometry.png}\\[2pt]
+%       {\scriptsize\color{uaGrey} Xie \& Castro (2008): staggered cube
+%       array, 25\% plan density -- the standard urban-LES benchmark.}
+%     \end{column}
+%   \end{columns}
+% \end{frame}
+
+% =====================================================================
+%  PART 1 -- LES FORWARD MODELS
+% =====================================================================
+\uasection[Part 1]{LES forward models}
+
+\begin{frame}{Large-Eddy Simulation in a nutshell}
+  Resolve the large eddies, model the sub-grid scales. Filtered
+  incompressible Navier--Stokes:
+  \[
+    \frac{\partial \bar{\bm{u}}}{\partial t}
+    + (\bar{\bm{u}}\!\cdot\!\nabla)\bar{\bm{u}}
+    = -\frac{1}{\rho}\nabla \bar{p}
+    + \nu\nabla^{2}\bar{\bm{u}}
+    - \nabla\!\cdot\!\bm{\tau}^{\mathrm{sgs}},
+    \qquad \nabla\!\cdot\!\bar{\bm{u}} = 0 .
+  \]
+  \begin{itemize}\setlength\itemsep{3pt}
+    \item \uakeyt{sub-grid stress} $\bm{\tau}^{\mathrm{sgs}}$
+    \item buildings as no-slip walls
+    \item chaotic
+  \end{itemize}
+\end{frame}
+
+
+\begin{frame}{Three LES solvers}
+  \centering
+  \begin{tikzpicture}[font=\footnotesize,
+      banner/.style={rounded corners=4pt,align=center,minimum height=1.0cm,
+                     inner sep=4pt},
+      mdl/.style={rounded corners=4pt,align=center,text=white,
+                  minimum height=1.05cm,inner sep=4pt},
+      sub/.style={align=center,color=uaGrey,font=\scriptsize}]
+    % ---- paradigm divider ----
+    \draw[uaOrange,line width=1pt,dash pattern=on 3pt off 2pt] (6.2,-1.55) -- (6.2,2.55);
+    % ---- header banners ----
+    \node[banner,fill=uaCharcoal!8,text width=5.5cm] at (2.85,2.0)
+      {\bfseries\color{uaCharcoal}CONTINUUM\\[1pt]
+       {\scriptsize\color{uaGrey}solve Navier--Stokes directly}};
+    \node[banner,fill=uaTeal!12,text width=5.5cm] at (9.55,2.0)
+      {\bfseries\color{uaTeal}KINETIC\\[1pt]
+       {\scriptsize\color{uaGrey}recover N--S as a limit}};
+    % ---- model cards ----
+    \node[mdl,fill=uaOrange,text width=2.3cm] at (1.6,0.6)
+      {\bfseries uDALES};
+    \node[mdl,fill=uaAmber,text width=2.3cm] at (4.25,0.6)
+      {\bfseries PALM};
+    \node[mdl,fill=uaTeal,text width=3.6cm] at (9.55,0.6)
+      {\bfseries LBM};
+    % ---- one-line characterizations ----
+    % \node[sub,text width=2.5cm] at (1.6,-0.95) {geometry-faithful\\urban specialist};
+    % \node[sub,text width=2.5cm] at (4.25,-0.95) {high-order,\\feature-rich workhorse};
+    % \node[sub,text width=3.6cm] at (9.55,-0.95) {throughput-first,\\built for ensembles};
+  \end{tikzpicture}
+  \par\medskip
+  Different numerics \emph{and} physics.
+\end{frame}
+
+% ---- uDALES ----------------------------------------------------------
+% \begin{frame}[t]{uDALES}
+%   \uacard[uaCharcoal]{\footnotesize
+%     \uakeyt{Core.} Finite-difference Boussinesq N--S. \\ 
+%     \uakeyt{Geometry:} conservative cut-cell
+%     IBM (STL). \\ 
+%     \uakeyt{SGS:} Vreman and Smagorinsky.}
+  % \vspace{-2pt}
+  % \begin{columns}[T]
+  %   \begin{column}{0.5\textwidth}
+  %     {\bfseries\color{uaTeal}Advantages}\\[-3pt]
+  %     {\color{uaTeal}\rule{\linewidth}{0.8pt}}
+  %     \begin{itemize}\footnotesize\setlength\itemsep{2pt}
+  %       \item conservative, geometry-faithful walls
+  %       \item fits real, non-grid-aligned facades
+  %       \item non-dissipative, energy-conserving
+  %     \end{itemize}
+  %   \end{column}
+  %   \begin{column}{0.5\textwidth}
+  %     {\bfseries\color{uaOrange}Drawbacks}\\[-3pt]
+  %     {\color{uaOrange}\rule{\linewidth}{0.8pt}}
+  %     \begin{itemize}\footnotesize\setlength\itemsep{2pt}
+  %       \item only 2nd-order accurate interior
+  %       \item CPU/MPI only -- no production GPU
+  %       \item global pressure solve every step (cost)
+  %     \end{itemize}
+  %   \end{column}
+  % \end{columns}
+% \end{frame}
+
+% ---- uDALES discretization (visual) ----------------------------------
+\begin{frame}{uDALES: staggered C-grid, cut-cell walls}
+  \centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex]
+    % ================= LEFT: staggered Arakawa C-grid =================
+    \draw[uaCharcoal!45,line width=0.6pt,step=1.8] (0,0) grid (3.6,3.6);
+    \draw[uaCharcoal!70,line width=0.9pt] (0,0) rectangle (3.6,3.6);
+    % pressure / scalars at cell centers
+    \foreach \x in {0.9,2.7}
+      \foreach \y in {0.9,2.7}
+        \fill[uaCharcoal] (\x,\y) circle (2.6pt);
+    \node[text=uaCharcoal,anchor=west] at (0.98,1.12) {$p$};
+    % u on vertical faces (normal to x)
+    \foreach \x in {0,1.8,3.6}
+      \foreach \y in {0.9,2.7}
+        \draw[->,uaOrange,line width=1.1pt] (\x-0.28,\y) -- (\x+0.28,\y);
+    \node[text=uaOrange] at (1.8,3.0) {$u$};
+    % w on horizontal faces (normal to z)
+    \foreach \y in {0,1.8,3.6}
+      \foreach \x in {0.9,2.7}
+        \draw[->,uaTeal,line width=1.1pt] (\x,\y-0.28) -- (\x,\y+0.28);
+    \node[text=uaTeal] at (0.62,1.95) {$w$};
+    \node[font=\footnotesize\bfseries,text=uaCharcoal] at (1.8,4.05)
+      {Staggered Arakawa C-grid};
+    \node[text=uaGrey,align=center,text width=4.6cm] at (1.8,-0.55) {};
+
+    % ================= RIGHT: cut cells ================================
+    \begin{scope}[xshift=7.0cm]
+      % solid region (right of the slanted facade)
+      \fill[uaCharcoal!22] (1.35,3.6) -- (4.5,0.45) -- (4.5,3.6) -- cycle;
+      \draw[uaCharcoal!45,line width=0.5pt,step=0.9] (0,0) grid (4.5,3.6);
+      \draw[uaCharcoal!70,line width=0.9pt] (0,0) rectangle (4.5,3.6);
+      % cells crossed by the facade
+      \foreach \c in {(0.9,2.7),(1.8,2.7),(1.8,1.8),(2.7,1.8),(2.7,0.9),(3.6,0.9),(3.6,0)}
+        \draw[uaOrange,line width=1.1pt] \c rectangle ++(0.9,0.9);
+      % the facade itself
+      \draw[uaCharcoal,line width=1.6pt] (1.35,3.6) -- (4.5,0.45);
+      \node[text=uaCharcoal,rotate=-45] at (3.45,2.0) {\bfseries facade};
+      \node[font=\footnotesize\bfseries,text=uaOrange] at (2.25,4.05)
+        {Conservative cut cells};
+      \node[text=uaGrey,align=center,text width=5.6cm] at (2.25,-0.55)
+        {};
+    \end{scope}
+  \end{tikzpicture}
+\end{frame}
+
+% ---- PALM ------------------------------------------------------------
+% \begin{frame}[t]{PALM}
+%   \uacard[uaCharcoal]{\footnotesize
+%     \uakeyt{Core.} Finite-difference Boussinesq. \\
+%     \uakeyt{Geometry:} staircase. \\
+%     \uakeyt{SGS:} Deardorff TKE.}
+  % \vspace{-2pt}
+  % \begin{columns}[T]
+  %   \begin{column}{0.5\textwidth}
+  %     {\bfseries\color{uaTeal}Advantages}\\[-3pt]
+  %     {\color{uaTeal}\rule{\linewidth}{0.8pt}}
+  %     \begin{itemize}\footnotesize\setlength\itemsep{2pt}
+  %       \item high-order, accurate interior
+  %       \item richest physics (radiation / chemistry / USM)
+  %       \item scales to $\sim$\,50k cores; large domains
+  %     \end{itemize}
+  %   \end{column}
+  %   \begin{column}{0.5\textwidth}
+  %     {\bfseries\color{uaOrange}Drawbacks}\\[-3pt]
+  %     {\color{uaOrange}\rule{\linewidth}{0.8pt}}
+  %     \begin{itemize}\footnotesize\setlength\itemsep{2pt}
+  %       \item staircase walls;
+  %       \item upwind scheme is implicitly dissipative
+  %       \item GPU only experimental; modules CPU-only
+  %     \end{itemize}
+  %   \end{column}
+  % \end{columns}
+% \end{frame}
+
+% ---- PALM discretization (visual) -------------------------------------
+\begin{frame}{PALM: staircase walls, upwind advection}
+  \centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex]
+    % ================= LEFT: staircase topography ======================
+    % staircase fill (solid cells under the slanted surface)
+    \fill[uaCharcoal!60] (0,0) rectangle (0.9,0.9);
+    \fill[uaCharcoal!60] (0.9,0) rectangle (1.8,1.8);
+    \fill[uaCharcoal!60] (1.8,0) rectangle (2.7,1.8);
+    \fill[uaCharcoal!60] (2.7,0) rectangle (3.6,2.7);
+    \fill[uaCharcoal!60] (3.6,0) rectangle (4.5,2.7);
+    % MOST layer: first fluid cell above each step
+    \fill[uaAmber!45] (0,0.9) rectangle (0.9,1.8);
+    \fill[uaAmber!45] (0.9,1.8) rectangle (2.7,2.7);
+    \fill[uaAmber!45] (2.7,2.7) rectangle (4.5,3.6);
+    % grid
+    \draw[uaCharcoal!45,line width=0.5pt,step=0.9] (0,0) grid (4.5,3.6);
+    \draw[uaCharcoal!70,line width=0.9pt] (0,0) rectangle (4.5,3.6);
+    % true surface
+    \draw[uaOrange,line width=1.4pt,densely dashed] (0,1.0) -- (4.5,3.25);
+    \node[text=uaOrange,rotate=26] at (1.6,2.05) {\bfseries true surface};
+    \node[font=\footnotesize\bfseries,text=uaCharcoal] at (2.25,4.05)
+      {Mask method: staircase walls};
+    \node[text=uaGrey,align=center,text width=5.2cm] at (2.25,-0.65)
+      {};
+
+    % ================= RIGHT: 5th-order upwind stencil =================
+    \begin{scope}[xshift=7.2cm]
+      % wind direction
+      \draw[->,uaTeal,line width=1.4pt] (0.4,3.3) -- (2.2,3.3)
+        node[right,text=uaTeal]{\bfseries wind};
+      % row of cells
+      \draw[uaCharcoal!45,line width=0.6pt] (0,1.2) grid[step=0.9] (5.4,2.1);
+      \draw[uaCharcoal!70,line width=0.9pt] (0,1.2) rectangle (5.4,2.1);
+      % cell-center dots: 6-point stencil (4 upwind, 2 downwind)
+      \foreach \x in {0.45,1.35,2.25,3.15}
+        \fill[uaOrange] (\x,1.65) circle (2.6pt);
+      \foreach \x in {4.05,4.95}
+        \fill[uaOrange!40] (\x,1.65) circle (2.6pt);
+      % the flux face
+      \draw[uaTeal,line width=2.0pt] (3.6,1.08) -- (3.6,2.22);
+      \node[text=uaTeal,anchor=north] at (3.6,1.0) {\bfseries flux face};
+      % stencil brace
+      \draw[uaOrange,line width=0.9pt] (0.45,2.45) -- (0.45,2.6) -- (4.95,2.6)
+        -- (4.95,2.45);
+      \node[text=uaOrange] at (2.7,2.85) {6-point stencil, upwind-biased};
+      \node[font=\footnotesize\bfseries,text=uaCharcoal] at (2.7,4.05)
+        {5th-order upwind advection};
+      \node[text=uaGrey,align=center,text width=5.6cm] at (2.7,-0.65) {};
+    \end{scope}
+  \end{tikzpicture}
+\end{frame}
+
+% ---- LBM -------------------------------------------------------------
+% \begin{frame}[t]{LBM (Evensen)}
+%   \uacard[uaCharcoal]{\footnotesize
+%     \uakeyt{Core.} Mesoscopic lattice-BGK. \\ 
+%     \uakeyt{Geometry:} bounce-back. \\
+%     \uakeyt{SGS:} Vreman. GPU-native.}
+  % \vspace{-2pt}
+  % \begin{columns}[T]
+  %   \begin{column}{0.5\textwidth}
+  %     {\bfseries\color{uaTeal}Advantages}\\[-3pt]
+  %     {\color{uaTeal}\rule{\linewidth}{0.8pt}}
+  %     \begin{itemize}\footnotesize\setlength\itemsep{2pt}
+  %       \item GPU
+  %       \item explicit local step
+  %       \item density
+  %     \end{itemize}
+  %   \end{column}
+  %   \begin{column}{0.5\textwidth}
+  %     {\bfseries\color{uaOrange}Drawbacks}\\[-3pt]
+  %     {\color{uaOrange}\rule{\linewidth}{0.8pt}}
+  %     \begin{itemize}\footnotesize\setlength\itemsep{2pt}
+  %       \item weakly compressible
+  %       \item uniform lattice; bounce-back walls
+  %       \item DA state choice: $f$ vs.\ macrovars
+  %     \end{itemize}
+  %   \end{column}
+  % \end{columns}
+% \end{frame}
+
+% ---- LBM discretization (visual) --------------------------------------
+\begin{frame}{LBM: collide \& stream on a uniform lattice}
+  \centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex]
+    % ================= LEFT: discrete velocity set (D2Q9) =============
+    \draw[uaCharcoal!25,line width=0.5pt,step=1.1] (-1.1,-1.1) grid (1.1,1.1);
+    \fill[uaCharcoal] (0,0) circle (3pt);
+    \foreach \a in {0,90,180,270}
+      \draw[->,uaTeal,line width=1.2pt] (0,0) -- (\a:1.0);
+    \foreach \a in {45,135,225,315}
+      \draw[->,uaTeal!60,line width=1.2pt] (0,0) -- (\a:1.35);
+    \node[text=uaTeal] at (1.45,0.42) {$f_i$};
+    \node[font=\footnotesize\bfseries,text=uaCharcoal] at (0,1.85)
+      {Populations $f_i$};
+    \node[text=uaGrey,align=center,text width=3.4cm] at (0,-1.95)
+      {discrete velocity set\\ (D2Q9 sketch)};
+
+    % ================= MIDDLE: collide & stream ========================
+    \begin{scope}[xshift=4.6cm]
+      \draw[uaCharcoal!25,line width=0.5pt,step=1.1] (-1.1,-1.1) grid (2.2,1.1);
+      \foreach \x in {-1.1,0,1.1,2.2}
+        \foreach \y in {-1.1,0,1.1}
+          \fill[uaCharcoal!55] (\x,\y) circle (1.8pt);
+      % stream arrows from node (0,0) to its neighbours
+      \fill[uaCharcoal] (0,0) circle (3pt);
+      \foreach \t in {(1.1,0),(0,1.1),(-1.1,0),(0,-1.1),(1.1,1.1),(-1.1,1.1),(1.1,-1.1),(-1.1,-1.1)}
+        \draw[->,uaOrange,line width=1.1pt,shorten >=3pt,shorten <=4pt] (0,0) -- \t;
+      \node[font=\footnotesize\bfseries,text=uaOrange] at (0.55,1.85)
+        {Collide \& stream};
+      \node[text=uaGrey,align=center,text width=4.2cm] at (0.55,-1.95)
+        {local relaxation, then hop\\ to neighbours -- no global solve};
+    \end{scope}
+
+    % ================= RIGHT: bounce-back wall =========================
+    \begin{scope}[xshift=10.1cm]
+      % wall
+      \fill[uaCharcoal!60] (-1.4,-1.5) rectangle (1.4,-1.1);
+      \draw[uaCharcoal,line width=1.2pt] (-1.4,-1.1) -- (1.4,-1.1);
+      \draw[uaCharcoal!25,line width=0.5pt,step=1.1] (-1.1,-1.1) grid (1.1,1.1);
+      \fill[uaCharcoal] (0,0) circle (3pt);
+      % incoming population toward wall, reflected back (offset for clarity)
+      \draw[->,uaTeal,line width=1.2pt] (0.10,0.02) -- (-0.40,-0.98);
+      \draw[->,uaOrange,line width=1.2pt,densely dashed] (-0.62,-0.98) -- (-0.12,0.02);
+      \node[font=\footnotesize\bfseries,text=uaCharcoal] at (0,1.85)
+        {Bounce-back walls};
+      \node[text=uaGrey,align=center,text width=3.8cm] at (0,-2.35)
+        {populations reflect\\ at solid nodes};
+    \end{scope}
+  \end{tikzpicture}
+\end{frame}
+
+% =====================================================================
+%  PART 2 -- PYURBANAIR
+% =====================================================================
+\uasection[Part 2]{The \texttt{pyurbanair} framework}
+
+\begin{frame}{Three Fortran solvers}
+      uDALES, PALM and the LBM code are all \uakey{Fortran}
+      \medskip
+      \begin{itemize}\setlength\itemsep{8pt}
+        \item \uakeyt{Compilers \& libraries} -- each needs its own
+              build (MPI, netCDF\dots)
+        \item \uakeyt{Config \& geometry} -- a different format for each
+        \item \uakeyt{Output} -- different data types \& layouts
+        \item \uakeyt{Warm start} -- handled differently by each
+      \end{itemize}
+  %   \begin{column}{0.44\textwidth}
+  %     \uacard[uaOrange]{\footnotesize\centering
+  %       \textbf{uDALES} $\cdot$ \textbf{PALM} $\cdot$ \textbf{LBM}\\[6pt]
+  %       Cross-model experiments mean redoing all
+  % of this, by hand, for every model.}
+  %   \end{column}
+\end{frame}
+
+\begin{frame}{\texttt{pyurbanair}: one Python layer over all three}
+  \begin{itemize}\setlength\itemsep{8pt}
+    \item Automatic download
+    \item Environment and library handling
+    \item Unified config \& geometry
+    \item Unified input/output
+    \item Data assimilation
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Architecture: one abstraction, many backends}
+  \centering
+  \vspace{-6pt}
+  \begin{tikzpicture}[font=\scriptsize,>=latex,scale=0.94,transform shape,
+      bk/.style={rounded corners=2pt,draw=uaTeal,line width=0.7pt,fill=white,
+                 align=center,inner sep=3pt,text width=1.9cm,minimum height=0.7cm},
+      top/.style={rounded corners=3pt,line width=0.9pt,align=center,inner sep=5pt},
+      bar/.style={rounded corners=3pt,draw=uaOrange,line width=1pt,fill=uaOrange!10,
+                  align=center,inner sep=5pt,text width=8.2cm,minimum height=0.5cm},
+      da/.style={rounded corners=3pt,draw=uaTeal,line width=1pt,fill=uaTeal!16,
+                 align=center,inner sep=5pt,text width=8.2cm,minimum height=0.5cm},
+      ar/.style={->,line width=0.9pt,uaGrey}]
+    % --- enclosing forward-model layer ---
+    \draw[rounded corners=5pt,draw=uaTeal,line width=1.1pt,fill=uaTeal!5]
+      (-0.5,0.65) rectangle (9.0,3.35);
+    \node[font=\scriptsize\bfseries,text=uaTeal] at (4.25,3.07)
+      {Forward-model layer};
+    % backends
+    \node[bk] (b1) at (0.75,2.35) {\textbf{pylbm}\\LBM};
+    \node[bk] (b2) at (3.05,2.35) {\textbf{pyudales}\\uDALES};
+    \node[bk] (b3) at (5.35,2.35) {\textbf{pypalm}\\PALM};
+    \node[bk] (b4) at (7.65,2.35) {\textbf{neural}\\surrogate};
+    % common interface bar
+    \node[bar] (base) at (4.25,1.15)
+      {\textbf{\color{uaOrange}BaseForwardModel} -- common interface};
+    \draw[ar] (b1) -- (b1|-base.north);
+    \draw[ar] (b2) -- (b2|-base.north);
+    \draw[ar] (b3) -- (b3|-base.north);
+    \draw[ar] (b4) -- (b4|-base.north);
+    % --- common config + common setup ---
+    \node[top,draw=uaAmber,fill=uaAmber!16] (cfg) at (1.85,4.20)
+      {\textbf{\color{uaCharcoal}Common config}};
+    \node[top,draw=uaTeal,fill=uaTeal!10] (setup) at (6.55,4.20)
+      {\textbf{\color{uaCharcoal}Common setup:}\\ parameters \& initial states};
+    \draw[ar] (cfg.south) -- (1.85,3.35);
+    \draw[ar] (setup.south) -- (6.55,3.35);
+    % --- data assimilation ---
+    \node[da] (da) at (4.25,-0.35)
+      {\textbf{\color{uaTeal}data-assimilation} (JAX) -- ESMDA $\cdot$
+       localization $\cdot$ obs.\ operator};
+    \draw[ar] (4.25,0.65) -- (da.north);
+  \end{tikzpicture}
+\end{frame}
+
+% =====================================================================
+%  PART 3 -- DATA ASSIMILATION: PARAMETER ESTIMATION
+% =====================================================================
+\uasection[Part 3]{Data assimilation: \\ parameter estimation}
+
+% ---- pipeline / twin-experiment diagram ------------------------------
+\begin{frame}{Setup}
+  \centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex,scale=1.0,transform shape,
+      every node/.append style={align=center},
+      obox/.style={rounded corners=3pt,draw=uaOrange,line width=0.9pt,fill=uaOrange!6,
+                   inner sep=4pt,text width=1.9cm,minimum height=0.85cm},
+      tbox/.style={rounded corners=3pt,draw=uaTeal,line width=0.9pt,fill=uaTeal!6,
+                   inner sep=4pt,text width=1.9cm,minimum height=0.85cm},
+      ar/.style={->,line width=0.9pt}]
+    % truth lane (top)
+    \node[obox] (t1) at (0,1.5)    {truth inflow\\$\param(t)$};
+    \node[obox] (t2) at (2.45,1.5) {truth\\solver};
+    \node[obox] (t3) at (4.90,1.5) {truth\\state};
+    \node[obox] (t4) at (7.35,1.5) {obs.\\operator};
+    \node[obox,fill=uaOrange!16] (t5) at (9.80,1.5) {obs.\ $\obs$\\{\scriptsize($+$ noise)}};
+    \draw[ar,uaOrange] (t1)--(t2);
+    \draw[ar,uaOrange] (t2)--(t3);
+    \draw[ar,uaOrange] (t3)--(t4);
+    \draw[ar,uaOrange] (t4)--(t5);
+    % assimilation lane (bottom)
+    \node[tbox] (a1) at (0,-1.5)
+      {prior inflow\\ensemble\\{\scriptsize($N_e=64$)}};
+    \node[tbox,fill=uaTeal!10,text width=6.4cm,minimum height=1.1cm] (a2) at (5.2,-1.5)
+      {\textbf{\color{uaTeal}ESMDA}\\[2pt]
+       {\scriptsize forecast $\to$ predict obs.\ $\to$ update $\to$ repeat}};
+    \node[tbox] (a3) at (9.80,-1.5) {posterior\\inflow};
+    \draw[ar,uaTeal] (a1)--(a2);
+    \draw[ar,uaTeal] (a2)--(a3);
+    % observations feed INTO ES-MDA
+    \draw[ar,uaCharcoal] (t5.south) --
+       node[pos=0.62,right=1pt,font=\scriptsize]{observations} (a2.north east);
+    % rollout loop
+    \draw[ar,uaTeal] (a3.south) .. controls (9.8,-2.75) and (5.2,-2.75) ..
+       node[pos=0.5,below,font=\scriptsize]{rollout: warm-start state, extrapolate prior} (a2.south);
+  \end{tikzpicture}
+\end{frame}
+
+% ---- observation operator --------------------------------------------
+\begin{frame}{The observation operator}
+  \begin{columns}[T]
+    \begin{column}{0.42\textwidth}
+      \uakeyt{Spatial}: $N_{obs}$ sensors, \uakey{interpolated} from the grid
+      \par\medskip
+      \centering
+      \begin{tikzpicture}[font=\tiny,scale=1.35,transform shape]
+        \draw[uaCharcoal!22,line width=0.4pt] (0,0) grid (2,2);
+        \foreach \x in {0,1,2}\foreach \y in {0,1,2}
+          \fill[uaCharcoal!45] (\x,\y) circle (1.5pt);
+        \coordinate (s) at (0.6,0.55);
+        \draw[uaOrange!70,line width=0.6pt,densely dashed] (s)--(0,0);
+        \draw[uaOrange!70,line width=0.6pt,densely dashed] (s)--(1,0);
+        \draw[uaOrange!70,line width=0.6pt,densely dashed] (s)--(0,1);
+        \draw[uaOrange!70,line width=0.6pt,densely dashed] (s)--(1,1);
+        \fill[uaOrange] (s) circle (2.4pt);
+        \node[text=uaOrange,anchor=south west,inner sep=1pt] at (s) {sensor};
+        \node[text=uaGrey,anchor=north] at (1,-0.2) {grid nodes};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.58\textwidth}
+      \centering
+      \uakeyt{Temporal}: mean over \uakey{intervals}
+      \par\medskip
+      \begin{tikzpicture}[font=\tiny,>=latex,scale=1.4,transform shape]
+        % bin edges
+        \foreach \x in {0.5,1.0,...,4.0}
+          \draw[uaCharcoal!25,line width=0.5pt,densely dashed] (\x,0.55) -- (\x,2.0);
+        % axes
+        \draw[->,uaCharcoal!70,line width=0.7pt] (0,0.55) -- (4.75,0.55);
+        \node[text=uaGrey,anchor=north] at (0,0.5) {0};
+        \node[text=uaGrey,anchor=north] at (4.5,0.5) {180 s};
+        % 20 s bracket over first bin
+        \draw[uaGrey,line width=0.6pt] (0,2.12) -- (0,2.22) -- (0.5,2.22) -- (0.5,2.12);
+        \node[text=uaGrey,anchor=south] at (0.25,2.24) {10 s};
+        % sensor signal (1 s cadence)
+        \draw[uaTeal,line width=0.9pt] plot[smooth] coordinates
+          {(0,1.30) (0.25,1.05) (0.5,0.85) (0.75,1.00) (1.0,1.35)
+           (1.25,1.55) (1.5,1.45) (1.75,1.20) (2.0,1.10) (2.25,1.25)
+           (2.5,1.50) (2.75,1.65) (3.0,1.55) (3.25,1.30) (3.5,1.05)
+           (3.75,0.90) (4.0,1.00) (4.25,1.20) (4.5,1.35)};
+        % per-bin means -> observations
+        \foreach \xa/\m in {0.0/1.07, 0.5/1.07, 1.0/1.45, 1.5/1.25,
+                            2.0/1.28, 2.5/1.57, 3.0/1.30, 3.5/0.98, 4.0/1.18}{
+          \draw[uaOrange,line width=1.4pt] (\xa+0.05,\m) -- (\xa+0.45,\m);
+          \fill[uaOrange] (\xa+0.25,\m) circle (1.6pt);}
+        % legend
+        \draw[uaTeal,line width=0.9pt] (0.1,0.15) -- (0.45,0.15);
+        \node[text=uaGrey,anchor=west] at (0.5,0.15) {sensor signal};
+        \draw[uaOrange,line width=1.4pt] (2.3,0.15) -- (2.65,0.15);
+        \fill[uaOrange] (2.475,0.15) circle (1.6pt);
+        \node[text=uaGrey,anchor=west] at (2.7,0.15) {bin mean = one obs.};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+
+% ---- ESMDA core ------------------------------------------------------
+\begin{frame}[t]{Ensemble Smoother with Multiple Data Assimilation (ESMDA)}
+  \[
+    \underbrace{\bm{m}_j^{a}}_{\color{uaGrey}\text{\scriptsize posterior}}
+    =\underbrace{\bm{m}_j^{f}}_{\color{uaGrey}\text{\scriptsize prior}}
+    +\overbrace{\mathbf{C}_{MD}\big(\mathbf{C}_{DD}+\alpha\,\mathbf{C}_D\big)^{-1}}
+       ^{\color{uaTeal}\text{\scriptsize Kalman gain (from the ensemble)}}
+    \big(\,\underbrace{\bm{d}+\sqrt{\alpha}\,\mathbf{C}_D^{1/2}\bm{z}_j}
+              _{\color{uaOrange}\text{\scriptsize perturbed obs.}}
+     -\underbrace{g(\bm{m}_j^{f})}_{\color{uaOrange}\text{\scriptsize predicted obs.}}\,\big)
+  \]
+  \vspace{-3pt}
+  \begin{center}
+    {\footnotesize $\displaystyle\sum_i \tfrac{1}{\alpha_i}=1$ -- the
+    \uakeyt{inflation schedule} over $N_a$ steps.}
+  \end{center}
+\end{frame}
+
+% ---- what ES-MDA updates ---------------------------------------------
+\begin{frame}{What ESMDA actually updates}
+  The inflow is a \uakey{trajectory}, carried on a few time knots per
+  window:
+  \[
+    \bm{m}=\big[\,\underbrace{\alpha_0,\alpha_1,\dots}_{\text{inflow angle}},\;\;
+    \underbrace{|U|_0,|U|_1,\dots}_{\text{wind speed}}\,\big].
+  \]
+  \begin{itemize}\setlength\itemsep{6pt}
+    \item Smooth, time-correlated between knots
+    \item Assimilate whole window at once
+  \end{itemize}
+\end{frame}
+
+
+% ---- multi-window rollout --------------------------------------------
+\begin{frame}{Windowed rollout: re-open uncertainty, keep the flow}
+  \vspace{1pt}
+  \centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex,yscale=0.92]
+    % --- window boundaries, labels, time axis ---
+    \foreach \x in {0,3,6,9}{\draw[uaGrey,densely dashed,line width=0.6pt] (\x,0.15) -- (\x,4.35);}
+    \node[text=uaGrey] at (1.5,4.62) {window 1};
+    \node[text=uaGrey] at (4.5,4.62) {window 2};
+    \node[text=uaGrey] at (7.5,4.62) {window 3};
+    \draw[->,uaGrey] (0,0.15) -- (9.5,0.15) node[right,text=black] {time};
+
+    % ===== TOP: inflow parameter ensemble =====
+    \node[text=uaAmber!85!black,align=center] at (-0.75,3.5) {inflow\\param.};
+    % prior: wide ensemble -- tight at the seam, fanning open to the right
+    \foreach \a in {0,3,6}{\fill[uaAmber!24]
+        (\a,3.62) -- (\a+2.75,2.78) -- (\a+2.75,4.22) -- (\a,3.38) -- cycle;}
+    % posterior: narrower (blue) band around the estimate
+    \draw[uaTeal,opacity=0.32,line width=6.5pt,line cap=round]
+      (0,3.5) .. controls (1.3,3.72) and (2.6,3.34) .. (3,3.5)
+      .. controls (4.3,3.72) and (5.6,3.34) .. (6,3.5)
+      .. controls (7.3,3.72) and (8.4,3.34) .. (9,3.52);
+    % estimate / truth (black)
+    \draw[black,line width=1pt]
+      (0,3.5) .. controls (1.3,3.72) and (2.6,3.34) .. (3,3.5)
+      .. controls (4.3,3.72) and (5.6,3.34) .. (6,3.5)
+      .. controls (7.3,3.72) and (8.4,3.34) .. (9,3.52);
+    % labels
+    \node[text=uaAmber!85!black] at (2.5,2.48) {prior re-opens};
+    \draw[->,uaAmber!85!black,line width=0.7pt] (2.15,2.62) -- (1.7,3.0);
+    \node[text=uaTeal] at (5.5,2.72) {posterior};
+    \draw[->,uaTeal,line width=0.7pt] (5.4,2.86) -- (5.15,3.42);
+
+    % --- coupling: updated params re-simulate the state each update ---
+    \node[text=uaGrey,align=center,font=\scriptsize\itshape] at (-0.75,2.45) {re-run\\model};
+    \foreach \c in {1.5,4.5,7.5}{\draw[->,uaGrey,line width=0.6pt] (\c,2.66) -- (\c,2.12);}
+
+    % ===== BOTTOM: turbulent state =====
+    \node[text=uaTeal,align=center] at (-0.75,1.35) {turbulent\\state};
+    % ensemble spread (re-simulated from the parameter ensemble)
+    \draw[uaTeal,opacity=0.22,line width=8pt,line cap=round]
+      (0,1.35) .. controls (0.5,1.75) and (1.0,0.85) .. (1.5,1.45)
+      .. controls (2.0,2.0)  and (2.5,0.95) .. (3,1.55)
+      .. controls (3.5,1.95) and (4.0,0.9)  .. (4.5,1.4)
+      .. controls (5.0,1.85) and (5.5,0.95) .. (6,1.55)
+      .. controls (6.5,1.95) and (7.0,0.85) .. (7.5,1.45)
+      .. controls (8.0,1.9)  and (8.5,1.0)  .. (9,1.45);
+    % mean state (thin); IC continuous across seams
+    \draw[uaTeal,line width=1pt]
+      (0,1.35) .. controls (0.5,1.75) and (1.0,0.85) .. (1.5,1.45)
+      .. controls (2.0,2.0)  and (2.5,0.95) .. (3,1.55)
+      .. controls (3.5,1.95) and (4.0,0.9)  .. (4.5,1.4)
+      .. controls (5.0,1.85) and (5.5,0.95) .. (6,1.55)
+      .. controls (6.5,1.95) and (7.0,0.85) .. (7.5,1.45)
+      .. controls (8.0,1.9)  and (8.5,1.0)  .. (9,1.45);
+    \node[text=uaTeal] at (4.5,0.5) {re-simulated from the parameters};
+  \end{tikzpicture}
+  \par\smallskip
+  {\footnotesize\color{uaGrey}Every update \uakeyt{re-simulates} the state
+  from the new parameters -- only the IC carries over.}
+\end{frame}
+
+% ---- AR(2) dynamic parameters ----------------------------------------
+\begin{frame}{Dynamic parameters: AR(2) trajectories}
+  \par
+  \vspace{20pt}
+  \centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex,xscale=1.5]
+    % external envelope band (new window)
+    \fill[uaAmber!16] (0,0.9) rectangle (4.6,2.1);
+    \draw[uaGrey,densely dashed,line width=0.7pt] (-1.5,1.5) -- (4.6,1.5);
+    \node[text=uaGrey,anchor=west,align=left] at (4.62,1.5)
+      {$x_{\text{ext}}$};
+    \draw[<->,uaAmber!80!black,line width=0.8pt] (4.38,0.9) -- (4.38,2.1);
+    \node[text=uaAmber!80!black,anchor=east] at (4.34,1.78)
+      {$\pm\Sigma_{\text{ext}}$};
+    % previous-window posterior (tight bundle, orange)
+    \foreach \o in {-0.07,0,0.07}
+      \draw[uaOrange,line width=0.8pt] plot[smooth] coordinates
+        {(-1.5,1.85+\o) (-1.0,2.0+\o) (-0.5,2.25+\o) (0,2.6)};
+    \node[text=uaOrange,align=center] at (-0.78,2.85)
+      {posterior,\\ window $w$};
+    % window seam
+    \draw[uaCharcoal!60,densely dashed,line width=0.8pt] (0,0.55) -- (0,3.35);
+    % new-window prior ensemble (teal), pinned in value & slope at the seam
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.95) (1,3.05) (1.5,2.95) (2,2.7) (2.5,2.45) (3,2.25) (3.5,2.15) (4.2,2.1)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.92) (1,3.0) (1.5,2.8) (2,2.5) (2.5,2.2) (3,2.0) (3.5,1.9) (4.2,1.95)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.93) (1,2.95) (1.5,2.7) (2,2.35) (2.5,2.05) (3,1.85) (3.5,1.7) (4.2,1.65)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.9) (1,2.9) (1.5,2.6) (2,2.2) (2.5,1.9) (3,1.7) (3.5,1.6) (4.2,1.5)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.88) (1,2.85) (1.5,2.5) (2,2.1) (2.5,1.7) (3,1.4) (3.5,1.2) (4.2,1.1)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.9) (1,2.8) (1.5,2.4) (2,1.95) (2.5,1.55) (3,1.3) (3.5,1.05) (4.2,0.95)};
+    \fill[uaCharcoal] (0,2.6) circle (1.8pt);
+    % annotations
+    \node[text=uaCharcoal,align=center,anchor=west] at (0.65,3.5)
+      {\bfseries pinned at the seam: value \emph{and} slope};
+    \draw[->,uaCharcoal,line width=0.7pt] (0.62,3.45) -- (0.06,2.72);
+    \node[text=uaTeal,align=center] at (2.9,3.2)
+      {prior ensemble, window $w{+}1$};
+    \node[text=uaGrey,align=center] at (2.3,0.72)
+      {relaxes to $x_{\text{ext}}$; spread re-opens toward $\Sigma_{\text{ext}}$};
+    % t axis
+    \draw[->,uaCharcoal!70,line width=0.7pt] (-1.5,0.55) -- (4.7,0.55);
+    \node[text=uaGrey,anchor=north] at (4.6,0.5) {$t$};
+  \end{tikzpicture}
+\end{frame}
+
+% =====================================================================
+%  GROUND TRUTH & SENSORS  (right before results)
+% =====================================================================
+
+\begin{frame}{Sensor observations}
+  \centering
+  \animategraphics[autoplay,loop,controls,width=0.9\linewidth]{9}%
+    {figures/anim_sensors_frames/g_}{0}{67}
+  \par\smallskip
+  {\footnotesize\color{uaGrey}Sensors sample $u,v,w$; each is \uakey{averaged
+  over 10\,s} into one observation. \textit{(plays in Adobe Acrobat)}}
+\end{frame}
+
+% =====================================================================
+%  PART 3 -- PARAMETER-ESTIMATION RESULTS  (Block A)
+% =====================================================================
+
+% ===== Block A: parameter-only, model x resolution =====
+% ---- parameter trajectories at highest resolution ($\Delta x = 1$ m) ----
+\begin{frame}{uDALES ($\Delta x = 1$ m): parameter trajectories}
+  \centering
+  \includegraphics[width=0.72\linewidth]{figures/A_param_only/results/param_traj_udales.png}
+  \par\smallskip
+  {\footnotesize\color{uaGrey}Inflow angle \& speed: \uakeyt{posterior} (blue) vs.\
+  \uakey{truth} (black dashed); prior in orange.}
+\end{frame}
+
+\begin{frame}{uDALES ($\Delta x = 1$ m): reconstructed final state}
+  \centering
+  \includegraphics[width=\linewidth]{figures/A_param_only/results/final_state_udales.png}
+  \par\smallskip
+  {\footnotesize\color{uaGrey}$|U|$ at the final time: \uakey{truth},
+  \uakeyt{posterior mean}, and ensemble std; dots = assimilation sensors.}
+\end{frame}
+
+\begin{frame}{PALM ($\Delta x = 1$ m): parameter trajectories}
+  \centering
+  \includegraphics[width=0.72\linewidth]{figures/A_param_only/results/param_traj_palm.png}
+  \par\smallskip
+  {\footnotesize\color{uaGrey}Inflow angle \& speed: \uakeyt{posterior} (blue) vs.\
+  \uakey{truth} (black dashed); prior in orange.}
+\end{frame}
+
+
+\begin{frame}{PALM ($\Delta x = 1$ m): reconstructed final state}
+  \centering
+  \includegraphics[width=\linewidth]{figures/A_param_only/results/final_state_palm.png}
+  \par\smallskip
+  {\footnotesize\color{uaGrey}$|U|$ at the final time: \uakey{truth},
+  \uakeyt{posterior mean}, and ensemble std; dots = assimilation sensors.}
+\end{frame}
+
+
+\begin{frame}{LBM ($\Delta x = 1$ m): parameter trajectories}
+  \centering
+  \includegraphics[width=0.72\linewidth]{figures/A_param_only/results/param_traj_lbm.png}
+  \par\smallskip
+  {\footnotesize\color{uaGrey}Inflow angle \& speed: \uakeyt{posterior} (blue) vs.\
+  \uakey{truth} (black dashed); prior in orange.}
+\end{frame}
+
+\begin{frame}{LBM ($\Delta x = 1$ m): reconstructed final state}
+  \centering
+  \includegraphics[width=\linewidth]{figures/A_param_only/results/final_state_lbm.png}
+  \par\smallskip
+  {\footnotesize\color{uaGrey}$|U|$ at the final time: \uakey{truth},
+  \uakeyt{posterior mean}, and ensemble std; dots = assimilation sensors.}
+\end{frame}
+
+\begin{frame}{Accuracy at a glance: parameters \& state}
+  \centering\small
+  \renewcommand{\arraystretch}{1.15}
+  \begin{tabular}{llcccc}
+    \toprule
+    \rowcolor{uaTeal!12}
+    \textbf{Model} & \textbf{$\Delta x$} & \textbf{$\alpha$ RMSE} &
+      \textbf{$|U|$ RMSE} & \textbf{field RMSE} & \textbf{val.\ RMSE}\\
+    \rowcolor{uaTeal!12}
+     & [m] & [deg] & [m/s] & [m/s] & [m/s]\\
+    \midrule
+    LBM    & 2   & 27.0 & 2.23 & 2.34 & 1.54\\
+    LBM    & 1.3 & 11.2 & 0.61 & 0.78 & 0.35\\
+    LBM    & 1   & 14.2 & 0.90 & 1.00 & 0.78\\
+    PALM   & 2   & 11.8 & 0.68 & 0.96 & 0.84\\
+    PALM   & 1.3 & 15.5 & 0.62 & 0.78 & 0.63\\
+    PALM   & 1   & 11.1 & 0.35 & 0.76 & 1.00\\
+    uDALES & 2   & 18.5 & 1.18 & 1.01 & 0.71\\
+    uDALES & 1.3 & 7.49 & 0.45 & 0.37 & 0.31\\
+    \rowcolor{uaAmber!18}
+    \textbf{uDALES} & \textbf{1} & \textbf{3.37} & \textbf{0.30} &
+      \textbf{0.26} & \textbf{0.24}\\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+% =====================================================================
+%  PART 4 -- DATA ASSIMILATION: STATE & PARAMETER ESTIMATION
+% =====================================================================
+\uasection[Part 4]{\\ Data assimilation: \\
+state \& parameter \\estimation}
+
+\begin{frame}{Estimating the state, not just the inflow}
+      \smallskip
+
+      ESMDA now acts on the \uakeyt{augmented state}
+      $\bm{w}=[\,\bm{x},\,\bm{\theta}\,]$.
+      \medskip
+      \begin{itemize}\setlength\itemsep{7pt}
+        \item The state is \uakey{high-dimensional} ($10^5$--$10^7$)
+        \item Two routes: \uakeyt{localize} the update, or \uakeyt{reduce} the
+              state dimension
+        \item Focus on initial condition in each window
+      \end{itemize}
+\end{frame}
+
+\begin{frame}[t]{Localizing the initial-condition update}
+  \smallskip
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      {\bfseries\color{uaOrange}Distance-based}\\[-3pt]{\color{uaOrange}\rule{\linewidth}{0.8pt}}
+      \begin{itemize}\footnotesize\setlength\itemsep{4pt} 
+        \item keep obs within a physical distance $d_t$
+        \item must be \uakey{predefined}
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      {\bfseries\color{uaTeal}Correlation-based (adaptive)}\\[-3pt]{\color{uaTeal}\rule{\linewidth}{0.8pt}}
+      \begin{itemize}\footnotesize\setlength\itemsep{4pt}
+        \item keep obs with ensemble correlation $|\rho|>\rho_t$
+        \item \uakey{no coordinates}
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{State reduction with an SVD subspace}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      Alternative to localization. Two variants:
+      \begin{itemize}\setlength\itemsep{8pt}
+        \item \uakeyt{reduced IC} -- estimate the window's initial condition
+        \item \uakeyt{reduced IC + state} -- plus a \uakey{final full-state
+              Kalman update}
+      \end{itemize}
+      \medskip
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \centering
+      \begin{tikzpicture}[font=\scriptsize,>=latex,scale=0.92,transform shape,
+          big/.style={rounded corners=3pt,draw=uaTeal,line width=1pt,fill=uaTeal!8,
+                      align=center,inner sep=4pt,text width=3.7cm,minimum height=0.9cm},
+          red/.style={rounded corners=3pt,draw=uaOrange,line width=1.2pt,fill=uaOrange!12,
+                      align=center,inner sep=4pt,text width=2.3cm,minimum height=0.95cm},
+          dim/.style={text=uaGrey,font=\tiny,align=center}]
+        % --- nodes (wide -> narrow -> wide) ---
+        \node[big] (fs)  at (0,4.25) {full state $\bm{x}$\\{\tiny $u,v,w$ on the grid}};
+        \node[dim] at (3.05,4.25) {$10^5$\\$-10^7$};
+        \node[red] (z)   at (0,2.15) {\textbf{\color{uaOrange}ES-MDA in $\bm{z}$}\\{\tiny reduced coeffs}};
+        \node[dim] at (-2.6,2.15) {dim\\$\ll$};
+        \node[big] (fs2) at (0,0.05) {updated state $\bm{x}$};
+        % --- encode / decode arrows ---
+        \draw[->,line width=1pt,uaTeal] (fs.south) -- (z.north)
+          node[midway,right=1pt,text=uaTeal] {$\bm{z}=\bm{\Phi}^{\!\top}\bm{x}$}
+          node[midway,left=1pt,dim] {encode};
+        \draw[->,line width=1pt,uaTeal] (z.south) -- (fs2.north)
+          node[midway,right=1pt,text=uaTeal] {$\bm{x}=\bm{\Phi}\bm{z}$}
+          node[midway,left=1pt,dim] {decode};
+        % --- ES-MDA iteration self-loop ---
+        \draw[->,uaOrange,line width=0.9pt]
+          (z.east) .. controls +(1.05,0.6) and +(1.05,-0.6) .. (z.east);
+        \node[text=uaOrange,font=\tiny,align=center] at (2.65,2.15) {$N_a$\\iter.};
+      \end{tikzpicture}
+      \par\smallskip
+      {\tiny\color{uaGrey}$\bm{\Phi}$: SVD/POD basis of the ensemble}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===== state-estimation results (Block B) =====
+% ===== Block B: does state estimation help? (uDALES) =====
+% \begin{frame}{Does estimating the state help? (uDALES)}
+%   \centering
+%   \includegraphics[width=0.9\linewidth]{figures/B_state_estimation/B2_state_err_vs_time_methods.pdf}
+%   \par\smallskip
+%   {\footnotesize\color{uaGrey}\uakey{param-only} (black) stays lowest; state
+%   methods \uakey{spike at each window start} (30\,s windows).}
+% \end{frame}
+
+\begin{frame}{Validation sensors by method (uDALES)}
+  \centering
+  \includegraphics[width=0.74\linewidth]{figures/B_state_estimation/B4_valsensors_methods.pdf}
+  \par\smallskip
+\end{frame}
+
+\begin{frame}{Method comparison (uDALES, 0--300\,s)}
+  \centering\small
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{lccccc}
+    \toprule
+    \rowcolor{uaTeal!12}
+    \textbf{Method} & \textbf{$\alpha$ RMSE} & \textbf{$|U|$ RMSE} &
+      \textbf{field RMSE} & \textbf{val.\ RMSE} & \textbf{$N_e$}\\
+    \rowcolor{uaTeal!12}
+     & [deg] & [m/s] & [m/s] & [m/s] & \\
+    \midrule
+    \rowcolor{uaAmber!18}
+    \textbf{param-only} & \textbf{1.02} & \textbf{0.25} & \textbf{0.11} &
+      \textbf{0.08} & 64\\
+    IC+param (corr)            & 6.34 & 0.75 & 0.52 & 0.35 & 128\\
+    IC+param (dist)            & 6.35 & 0.75 & 0.51 & 0.41 & 128\\
+    IC+param (reduction)       & 6.97 & 0.79 & 0.54 & 0.41 & 128\\
+    IC+state+param (reduction) & 5.00 & 0.43 & 0.34 & 0.47 & 128\\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+% \begin{frame}{Cost vs.\ accuracy}
+%   \centering
+%   \includegraphics[width=0.62\linewidth]{figures/summary/S1_cost_vs_accuracy.pdf}
+%   \par\smallskip
+%   {\footnotesize\color{uaGrey}\uakeyt{uDALES} gives the best accuracy per
+%   wall-clock; LBM needs fine grids to compete.}
+% \end{frame}
+
+% =====================================================================
+%  PART 5 -- NEURAL SURROGATES
+% =====================================================================
+\uasection[Part 5]{Neural surrogates}
+
+\begin{frame}{Why a surrogate?}
+  \begin{columns}[T]
+    \begin{column}{0.56\textwidth}
+      \begin{itemize}\setlength\itemsep{6pt}
+        \item LES forward models are very expensive to run!
+        \item We need to run them many times
+        \item Train a surrogate \uakeyt{offline}, then use it \uakeyt{online}
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \uacard[uaOrange]{\footnotesize\centering
+        \textbf{\color{uaOrange}ESMDA inner loop}\\[5pt]
+        forecast $N_e$ members\\[5pt]
+        $\downarrow$\\ predict observations\\ $\downarrow$\\
+        update parameters\\ $\downarrow$\\ repeat\\[6pt]
+        \uakeyt{Surrogate replaces the forecast}}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ---- 2. general setup -------------------------------------------------
+\begin{frame}{General setup: learn the one-step transition}
+  \smallskip
+  \par\centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex,scale=0.96,transform shape,
+      inp/.style={rounded corners=3pt,draw=uaTeal,line width=0.9pt,fill=uaTeal!6,
+                  align=center,inner sep=4pt,text width=2.5cm,minimum height=0.62cm},
+      net/.style={rounded corners=4pt,draw=uaOrange,line width=1.1pt,fill=uaOrange!10,
+                  align=center,inner sep=6pt,text width=3.1cm,minimum height=2.1cm},
+      outp/.style={rounded corners=3pt,draw=uaTeal,line width=1pt,fill=uaTeal!16,
+                  align=center,inner sep=4pt,text width=2.2cm,minimum height=0.8cm}]
+    \node[inp] (st) at (0,1.45) {state $\state_t$\\{\tiny $u,v,w$ on the grid}};
+    \node[inp] (pr) at (0,0.55) {inflow $\param_t$\\{\tiny angle, speed}};
+    \node[inp] (ge) at (0,-0.45) {geometry mask\\{\tiny fluid/obstacle}};
+    \node[net] (nn) at (4.5,0.5)
+      {\textbf{\color{uaOrange}3D ConvNeXt U-Net}};
+    \node[outp] (o) at (8.4,0.5) {state $\state_{t+1}$};
+    \draw[->,line width=0.9pt,uaTeal] (st.east) -- (nn.west|-st.east);
+    \draw[->,line width=0.9pt,uaTeal] (pr.east) -- (nn.west|-pr.east);
+    \draw[->,line width=0.9pt,uaTeal] (ge.east) -- (nn.west|-ge.east);
+    \draw[->,line width=1.1pt,uaOrange] (nn.east) -- (o.west);
+  \end{tikzpicture}
+\end{frame}
+
+% ---- 3. architecture ---------------------------------------------------
+% \begin{frame}{Architecture: 3D ConvNeXt-UNet, 2.38\,M parameters}
+%   \begin{columns}[T]
+%     \begin{column}{0.46\textwidth}
+%       \centering
+%       \begin{tikzpicture}[font=\scriptsize,
+%           blk/.style={rounded corners=2pt,draw=uaTeal,line width=0.8pt,fill=uaTeal!6,
+%                       align=center,inner sep=3pt,text width=3.3cm,minimum height=0.5cm}]
+%         \node[font=\footnotesize\bfseries,text=uaCharcoal] at (0,4.45)
+%           {One ConvNeXt block};
+%         \node[blk] (b1) at (0,3.8) {depthwise conv $k{=}7$\\{\tiny separable: 3 axis-aligned passes}};
+%         \node[blk] (b2) at (0,2.9)  {GroupNorm(8)};
+%         \node[blk,draw=uaOrange,fill=uaOrange!10] (b3) at (0,2.1)
+%           {\textbf{\color{uaOrange}FiLM}: scale \& shift\\{\tiny from the inflow $\param$}};
+%         \node[blk] (b4) at (0,1.2) {$1{\times}1$ expand $\to$ GELU $\to$ project};
+%         \foreach \a/\b in {b1/b2,b2/b3,b3/b4}
+%           \draw[->,line width=0.8pt,uaGrey] (\a) -- (\b);
+%         % residual
+%         \draw[->,line width=0.8pt,uaGrey,rounded corners=3pt]
+%           (0,4.18) -| (2.1,0.55) -- (0.4,0.55);
+%         \node[circle,draw=uaGrey,inner sep=1pt,fill=white] at (0.25,0.55) {$+$};
+%         \node[text=uaGrey,font=\tiny] at (2.55,2.35) {residual};
+%       \end{tikzpicture}
+%     \end{column}
+%     \begin{column}{0.54\textwidth}
+%       U-Net encoder--decoder with skips; stages of ConvNeXt blocks
+%       {\footnotesize(base 32, depths $[3,3,3,3]$)}.
+%       \medskip
+
+%       \uakeyt{Physics-aware wrapping:}
+%       \begin{itemize}\footnotesize\setlength\itemsep{4pt}
+%         \item \uakey{Fluid masking} of inputs, outputs and loss --
+%               uDALES dumps carry junk inside obstacles; solid cells
+%               stay exactly zero in rollouts
+%         \item \uakey{Z-score normalization} over fluid cells, stored as
+%               model buffers -- ships with the weights
+%         \item \uakey{Residual prediction}: the head outputs the state
+%               \emph{increment} -- ``no change'' is the zero solution;
+%               markedly more stable rollouts
+%       \end{itemize}
+%     \end{column}
+%   \end{columns}
+% \end{frame}
+
+% ---- 3b. full architecture diagram --------------------------------------
+\begin{frame}{Architecture: ConvNeXt U-Net}
+  \centering
+  \includegraphics[width=\linewidth]{figures/E_surrogate/drift_term_unet.pdf}
+\end{frame}
+
+% ---- 4. training --------------------------------------------------------
+\begin{frame}{Training: pushforward unrolling + horizon curriculum}
+  \par\centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex,
+      s/.style={rounded corners=3pt,draw=uaCharcoal!60,line width=0.8pt,fill=white,
+                align=center,inner sep=3pt,minimum height=0.6cm,text width=1.0cm},
+      sp/.style={rounded corners=3pt,draw=uaGrey,line width=0.8pt,fill=uaCharcoal!6,
+                 align=center,inner sep=3pt,minimum height=0.6cm,text width=1.0cm},
+      sg/.style={rounded corners=3pt,draw=uaOrange,line width=1pt,fill=uaOrange!10,
+                 align=center,inner sep=3pt,minimum height=0.6cm,text width=1.0cm},
+      tr/.style={rounded corners=3pt,draw=uaTeal,line width=1pt,fill=uaTeal!10,
+                 align=center,inner sep=3pt,minimum height=0.6cm,text width=1.0cm}]
+    \node[s]  (x0) at (0,0)     {$\state_t$\\{\tiny data}};
+    \node[sp] (x1) at (1.85,0)  {$\hat\state_{t+1}$};
+    \node[sp] (x2) at (3.70,0)  {$\hat\state_{t+2}$};
+    \node[sp] (x3) at (5.55,0)  {$\hat\state_{t+3}$};
+    \node[sg] (x4) at (7.40,0)  {$\hat\state_{t+4}$};
+    \node[sg] (x5) at (9.25,0)  {$\hat\state_{t+5}$};
+    \node[tr] (xt) at (11.45,0) {$\state_{t+5}$\\{\tiny data}};
+    \draw[->,line width=0.9pt,uaGrey]   (x0) -- (x1);
+    \draw[->,line width=0.9pt,uaGrey]   (x1) -- (x2);
+    \draw[->,line width=0.9pt,uaGrey]   (x2) -- (x3);
+    \draw[->,line width=0.9pt,uaOrange] (x3) -- (x4);
+    \draw[->,line width=0.9pt,uaOrange] (x4) -- (x5);
+    \draw[<->,line width=0.9pt,uaTeal]  (x5) -- node[above]{loss} (xt);
+    \node[text=uaGrey,font=\scriptsize] at (2.8,-0.85)
+      {predictions, no gradients};
+    \node[text=uaOrange,font=\scriptsize\bfseries] at (8.3,-0.85)
+      {gradients through the last 2 steps};
+  \end{tikzpicture}
+  \par\medskip
+  \raggedright
+  \begin{itemize}\setlength\itemsep{4pt}
+    \item \uakey{Rollout} predictions
+    \item Only compute gradient of last 2 steps
+    \item Ramp up rollout steps during training
+  \end{itemize}
+\end{frame}
+
+% ---- 5. computational efficiency ----------------------------------------
+\begin{frame}{Computational efficiency}
+  \begin{itemize}\setlength\itemsep{8pt}
+    \item Separable depthwise convs
+    \item Compile model
+    \item bf16 autocast
+    \item Async dataloading
+    \item Geometry de-duplication
+  \end{itemize}
+\end{frame}
+
+% ---- 6. inside pyurbanair -------------------------------------------------
+\begin{frame}{Inside \texttt{pyurbanair}: a drop-in forward model}
+      \smallskip
+      \begin{itemize}\setlength\itemsep{4pt}
+        \item Trained neural network is wrapped in the same forward model setup
+        \item Cold start: \uakeyt{uDALES spins up} the flow
+        \item Vectorized over \uakeyt{ESMDA ensemble members}
+      \end{itemize}
+\end{frame}
+
+\begin{frame}{Neural surrogate: parameter trajectories}
+  \centering
+  \includegraphics[width=0.72\linewidth]{figures/E_surrogate/param_traj_surrogate.png}
+\end{frame}
+
+\begin{frame}{Surrogate vs.\ truth: reconstructed state (0--600\,s)}
+  \centering
+  \animategraphics[autoplay,loop,controls,width=0.78\linewidth]{10}%
+    {figures/anim_surrogate_truth/g_}{0}{59}
+\end{frame}
+
+% =====================================================================
+%  NEXT STEPS  (animated state-estimation videos -- play in Adobe Acrobat)
+% =====================================================================
+\uasection[Part 7]{Next steps}
+
+\begin{frame}{Where we go from here}
+  \begin{itemize}\setlength\itemsep{14pt}
+    \item \uakeyt{Unify model settings further}
+    \item \uakeyt{More tests on hyperparameters} -- ensemble size,
+          localization, window length, observation intervals
+    \item \uakeyt{State-estimation methods} -- improve state localization and reduction
+    \item \uakeyt{Improve the neural surrogate} -- accuracy and stability over
+          longer rollouts
+    \item \uakeyt{Larger cases} -- scale up to bigger domains and real urban
+          geometries
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Geometry from Barcelona: uDALES, PALM, LBM}
+  \centering
+  \animategraphics[autoplay,loop,controls,width=\linewidth]{10}%
+    {figures/anim_state3/g_}{0}{89}
+  \par\smallskip
+  {\footnotesize\color{uaGrey} Estimated velocity magnitude $|U|$ over the
+  building array -- the three solvers side by side.
+  \textit{(animation plays in Adobe Acrobat)}}
+\end{frame}
+
+% =====================================================================
+%  SUMMARY
+% =====================================================================
+\begin{frame}{Conclusion}
+  \begin{itemize}\setlength\itemsep{10pt}
+    \item Not easy to simply use a different model!
+    \item State estimation is difficult!
+    \item Neural surrogates show potential
+  \end{itemize}
+\end{frame}
+
+% =====================================================================
+%  THANKS
+% =====================================================================
+\begin{frame}[plain]
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[uaTeal](current page.south west)rectangle(current page.north east);
+    \fill[white,opacity=0.10]($(current page.north east)$) arc (0:-180:5.2cm and 5.2cm);
+    \node[anchor=north west,inner sep=0pt] at ($(current page.north west)+(\uaMargin,-0.4cm)$)
+      {\includegraphics[height=1.0cm]{\uaLogoWhite}};
+    \node[anchor=west,text width=11cm,inner sep=0pt] at ($(current page.west)+(\uaMargin,0.7cm)$)
+      {\uaTitleFont\bfseries\color{white}\Huge Thank you!\par
+       \vspace{0.3cm}\color{white}\normalsize Questions \& discussion welcome.\par};
+    \node[anchor=west,text width=11cm,inner sep=0pt] at ($(current page.west)+(\uaMargin,-1.7cm)$)
+      {\color{uaLightBlue}\footnotesize
+       Nikolaj T.\ M\"ucke \;$\cdot$\; ntmucke@tudelft.nl \;$\cdot$\;
+       github.com/nmucke/pyurbanair\par};
+  \end{tikzpicture}
+\end{frame}
+
+\end{document}

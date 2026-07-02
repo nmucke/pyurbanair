@@ -1,0 +1,96 @@
+% -----------------------------------------------------------------------
+\section{Preliminaries}
+\label{sec:prelim}
+% -----------------------------------------------------------------------
+
+This section fixes the problem setting: the flow-state and geometry
+representation, the stochastic model of the inflow forcing, and the ensemble
+data-assimilation scheme that the neural surrogate is later embedded in.
+
+\subsection{Domain and State Representation}
+\label{sec:domain}
+
+The computational domain covers an $896\,\mathrm{m} \times 896\,\mathrm{m}
+\times 128\,\mathrm{m}$ section of the Barcelona urban block, discretised onto a
+uniform Cartesian grid of $224 \times 224 \times 32$ cells at $4\,\mathrm{m}$
+resolution. At this resolution individual building facades are represented by
+two-to-four cell widths, capturing the dominant flow-blocking and street-canyon
+channelling effects while keeping the state dimensionality manageable.
+
+The flow state is the three-component velocity field
+\begin{equation}
+  \state \in \Real^{3 \times 32 \times 224 \times 224},
+  \label{eq:state}
+\end{equation}
+comprising horizontal components $u$ (west--east) and $v$ (south--north) and
+the vertical component $w$. Building geometry is encoded by a binary mask
+$\mask \in \{0,1\}^{32 \times 224 \times 224}$, where $g_{ijk}=1$ denotes
+a fluid cell and $g_{ijk}=0$ denotes an obstacle cell. The mask is fixed for
+a given domain and does not vary between ensemble members or time steps.
+
+The inflow forcing is characterised by two parameters
+$\bth = (\iang,\,\ivel)$,
+where $\iang$ is the inflow wind angle and $\ivel$ is the magnitude of the inflow
+velocity. These
+parameters vary across ensemble members and, within a member, evolve over time
+according to an AR(2) process (Section~\ref{sec:prior}).
+
+\subsection{Inflow Parameterisation}
+\label{sec:prior}
+
+The inflow parameters evolve in time according to an AR(2) relaxation process:
+\begin{equation}
+  \bth_{k+1}
+    = \mu_{\mathrm{ext}}
+      + \phi_1(\bth_k - \mu_{\mathrm{ext}})
+      + \phi_2(\bth_{k-1} - \mu_{\mathrm{ext}})
+      + \sigma_\eta\,\boldsymbol{\eta}_k,
+  \label{eq:ar2}
+\end{equation}
+where $\mu_{\mathrm{ext}}$ is an external climatological mean, $\phi_1$ and
+$\phi_2$ are the autoregressive coefficients that control the correlation
+length of the parameter trajectory, and $\sigma_\eta\boldsymbol{\eta}_k$ is
+white process noise. The stationary distribution of the AR(2) process provides
+the marginal prior on $\bth$ at any given time step. For the
+inflow angle the prior marginal is $\iang \sim \mathcal{N}(0,\,6^{\circ\,2})$,
+reflecting the typical range of wind direction variability in the Barcelona
+metropolitan area. For the velocity magnitude the prior is
+$\ivel \sim \mathcal{N}(7.5\,\mathrm{m/s},\,0.5^2\,\mathrm{m}^2/\mathrm{s}^2)$,
+consistent with moderate urban boundary-layer winds. The AR(2) structure ensures
+temporal coherence of the parameter trajectories within each ensemble member,
+preventing unphysical step-changes in inflow conditions between successive time
+steps.
+
+\subsection{Ensemble Smoother with Multiple Data Assimilation}
+\label{sec:esmda_framework}
+
+The Ensemble Smoother with Multiple Data Assimilation (\esmda{}) of
+\cite{emerick2013} is an iterative ensemble Kalman update scheme that performs
+$\niter$ analysis passes per assimilation window, each pass inflating
+the observation error covariance by a factor $\alpha$ chosen so that
+$\sum_{i=1}^{\niter} 1/\alpha_i = 1$. The ensemble update at each
+pass is
+\begin{equation}
+  \xctrl^{a,n}
+    = \xctrl^{f,n}
+      + \Kgain
+        \bigl(\yobs + \sqrt{\alpha}\,\boldsymbol{\varepsilon}^n
+              - \Hobs\xctrl^{f,n}\bigr),
+  \label{eq:esmda}
+\end{equation}
+where $\xctrl^{f,n}$ and $\xctrl^{a,n}$ are the forecast and analysis
+augmented state vectors for member $n$, $\yobs$ is the observation vector,
+$\Hobs$ is the linear observation operator, $\boldsymbol{\varepsilon}^n
+\sim \mathcal{N}(\mathbf{0},\Rcov)$ is perturbed noise, and the Kalman
+gain is
+\begin{equation}
+  \Kgain
+    = \mathbf{C}_{xH}
+      \bigl(\mathbf{C}_{HH} + \alpha\Rcov\bigr)^{-1},
+  \label{eq:gain}
+\end{equation}
+with $\mathbf{C}_{xH}$ the ensemble cross-covariance between the augmented
+state and the mapped state $\Hobs\xctrl^f$, and $\mathbf{C}_{HH}$
+the ensemble covariance of the mapped state. The augmented control vector
+$\xctrl$ can in general concatenate the velocity field and the inflow
+parameter vector for a joint state--parameter update.

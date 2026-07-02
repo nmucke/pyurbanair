@@ -1,0 +1,89 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,bm,mathtools}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{booktabs}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black]{hyperref}
+\usepackage{xcolor}
+\usepackage{parskip}
+\usepackage{microtype}
+
+\usetikzlibrary{shapes.geometric,shapes.misc,arrows.meta,positioning,fit,
+                backgrounds,decorations.pathreplacing,calc,patterns}
+\pgfplotsset{compat=1.18}
+
+% Figures live in figures/ (raster assets + TikZ figure sources)
+\graphicspath{{figures/}}
+
+% Notation macros — edit macros.tex to change symbols everywhere
+\input{macros.tex}
+
+% Colour palette (used by figure files)
+\definecolor{stateblue}{RGB}{31,119,180}
+\definecolor{geomgray}{RGB}{150,150,150}
+\definecolor{paramviolet}{RGB}{148,103,189}
+\definecolor{netcolor}{RGB}{255,165,0}
+\definecolor{lossred}{RGB}{214,39,40}
+\definecolor{nogradgray}{RGB}{210,210,210}
+\definecolor{gradblue}{RGB}{144,202,249}
+\definecolor{obsyellow}{RGB}{255,200,50}
+\definecolor{priorblue}{RGB}{100,160,240}
+\definecolor{postcolor}{RGB}{240,120,80}
+\definecolor{outputgreen}{RGB}{44,160,44}
+
+% TikZ styles (used by figure files)
+\tikzset{
+  surblock/.style={draw=black!80,rounded corners=4pt,line width=0.8pt,
+                   minimum height=0.75cm,inner sep=5pt,font=\small},
+  netblock/.style={draw=black!80,rounded corners=5pt,line width=1pt,
+                   inner sep=8pt,font=\small,minimum height=1.6cm,
+                   minimum width=2.0cm,text width=1.8cm,align=center},
+  opcirc/.style={draw=black!80,circle,inner sep=3pt,line width=0.8pt,
+                 fill=white,font=\small},
+  myarr/.style={-{Latex[length=4.5pt,width=3.5pt]},line width=1pt,color=black!80},
+  darr/.style={-{Latex[length=4.5pt,width=3.5pt]},line width=0.9pt,
+               color=black!50,dashed},
+}
+
+% -----------------------------------------------------------------------
+\title{\textbf{\pthreed{} Neural Surrogate for Urban Airflow Data Assimilation}}
+\author{Nikolaj T.~M\"ucke \and Femke Vossepoel \and Maarten van Reeuwijk
+        \and Jan Mateu Armengol \and Albert Moreno Catal\`a}
+\date{\today}
+% -----------------------------------------------------------------------
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+High-fidelity large-eddy simulation (LES) of urban airflow is prohibitively
+expensive for real-time data assimilation. We present a neural surrogate based
+on the \pthreed{} hybrid CNN-Transformer architecture \cite{holzschuh2025p3d} that
+replaces the \palm{} LES solver \cite{maronga2020} inside an Ensemble Smoother
+with Multiple Data Assimilation (\esmda{}) loop \cite{emerick2013}. The surrogate
+operates on the three-component velocity field over a $224\times224\times32$
+Barcelona urban-block grid and takes inflow parameters as explicit conditioning
+inputs, enabling joint state-parameter estimation. A pushforward rollout
+curriculum stabilises multi-step prediction, and a training-data warm-start
+strategy avoids CFD spin-up cost at inference time. On a held-out \palm{} truth
+trajectory the surrogate-driven \esmda{} recovers the inflow direction (angle RMSE
+reduced by $34\%$ relative to the prior) and a spatially faithful posterior
+velocity field in roughly $1.5\,\mathrm{h}$ of single-GPU wall time, with the
+street-level velocity amplitude limited by sensor observability.
+\end{abstract}
+
+\input{sections/introduction.tex}
+\input{sections/preliminaries.tex}
+\input{sections/method.tex}
+\input{sections/applications.tex}
+\input{sections/results.tex}
+\input{sections/conclusion.tex}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}

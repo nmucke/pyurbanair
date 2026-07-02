@@ -1,0 +1,60 @@
+%==============================================================================
+%  figures/ar2_dynamic_params.tex
+%  Time-varying (AR(2)) parameterization: the new-window prior is pinned in
+%  value and slope at the seam and relaxes to an external envelope.
+%  Adapted from presentation.tex.
+%  \input in the methodology problem-formulation (parameterization) subsection.
+%==============================================================================
+\begin{figure}[tb]
+  \centering
+  \begin{tikzpicture}[font=\scriptsize,>=latex,xscale=1.5]
+    % external envelope band (new window)
+    \fill[uaAmber!16] (0,0.9) rectangle (4.6,2.1);
+    \draw[uaGrey,densely dashed,line width=0.7pt] (-1.5,1.5) -- (4.6,1.5);
+    \node[text=uaGrey,anchor=west,align=left] at (4.62,1.5)
+      {$x_{\text{ext}}$};
+    \draw[<->,uaAmber!80!black,line width=0.8pt] (4.38,0.9) -- (4.38,2.1);
+    \node[text=uaAmber!80!black,anchor=east] at (4.34,1.78)
+      {$\pm\Sigma_{\text{ext}}$};
+    % previous-window posterior (tight bundle, orange)
+    \foreach \o in {-0.07,0,0.07}
+      \draw[uaOrange,line width=0.8pt] plot[smooth] coordinates
+        {(-1.5,1.85+\o) (-1.0,2.0+\o) (-0.5,2.25+\o) (0,2.6)};
+    \node[text=uaOrange,align=center] at (-0.78,2.85)
+      {posterior,\\ window $w$};
+    % window seam
+    \draw[uaCharcoal!60,densely dashed,line width=0.8pt] (0,0.55) -- (0,3.35);
+    % new-window prior ensemble (teal), pinned in value & slope at the seam
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.95) (1,3.05) (1.5,2.95) (2,2.7) (2.5,2.45) (3,2.25) (3.5,2.15) (4.2,2.1)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.92) (1,3.0) (1.5,2.8) (2,2.5) (2.5,2.2) (3,2.0) (3.5,1.9) (4.2,1.95)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.93) (1,2.95) (1.5,2.7) (2,2.35) (2.5,2.05) (3,1.85) (3.5,1.7) (4.2,1.65)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.9) (1,2.9) (1.5,2.6) (2,2.2) (2.5,1.9) (3,1.7) (3.5,1.6) (4.2,1.5)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.88) (1,2.85) (1.5,2.5) (2,2.1) (2.5,1.7) (3,1.4) (3.5,1.2) (4.2,1.1)};
+    \draw[uaTeal,line width=0.8pt] plot[smooth] coordinates
+      {(0,2.6) (0.5,2.9) (1,2.8) (1.5,2.4) (2,1.95) (2.5,1.55) (3,1.3) (3.5,1.05) (4.2,0.95)};
+    \fill[uaCharcoal] (0,2.6) circle (1.8pt);
+    % annotations
+    \node[text=uaCharcoal,align=center,anchor=west] at (0.65,3.5)
+      {\bfseries pinned at the seam: value \emph{and} slope};
+    \draw[->,uaCharcoal,line width=0.7pt] (0.62,3.45) -- (0.06,2.72);
+    \node[text=uaTeal,align=center] at (2.9,3.2)
+      {prior ensemble, window $w{+}1$};
+    \node[text=uaGrey,align=center] at (2.3,0.72)
+      {relaxes to $x_{\text{ext}}$; spread re-opens toward $\Sigma_{\text{ext}}$};
+    % t axis
+    \draw[->,uaCharcoal!70,line width=0.7pt] (-1.5,0.55) -- (4.7,0.55);
+    \node[text=uaGrey,anchor=north] at (4.6,0.5) {$t$};
+  \end{tikzpicture}
+  \caption{Time-varying parameterization for \crossmodel\ inflow. The
+    previous-window posterior (orange) sets the value \emph{and} slope of the
+    next window's AR(2) prior ensemble (teal) at the seam; the trajectories then
+    relax toward an external envelope $x_{\text{ext}}\pm\Sigma_{\text{ext}}$
+    (amber), re-opening the uncertainty. \note{use only if the paper studies the
+    time-varying (dynamic) parameterization; otherwise drop.}}
+  \label{fig:ar2_dynamic_params}
+\end{figure}

@@ -1,0 +1,53 @@
+\section{Discussion}
+\label{sec:discussion}
+
+% ROUGH OUTLINE -- one bullet = one point (roughly one paragraph in the final
+% text). Interprets \secref{sec:results}; no new results.
+
+\subsection{Why same-model success does not transfer}
+\label{sec:discussion:whynotransfer}
+\begin{itemize}
+  \item The \twinexp\ measures algorithm behaviour under a perfect model
+        (\discrepancy\ $= 0$), as the \invcrime\ literature predicts
+        \cite{kaipio2005statistical,wirgin2004inverse}; turbulent urban flow
+        amplifies the gap because the solvers produce genuinely different
+        time-averaged fields for the same nominal setup, and \Cd\ only
+        represents all error sources when it includes \discrepancy.
+\end{itemize}
+
+\subsection{Identifiability and bias compensation}
+\label{sec:discussion:identifiability}
+\begin{itemize}
+  \item Two parameter classes: physical forcing (\inflowangle, \velmag),
+        constrained by features that survive model differences, vs.\
+        closure/shear knobs (\shearexp, \sgs) that act as model-error
+        absorbers --- ``right answer, wrong reasons''.
+  \item Consequence: observation-space residuals are an insufficient
+        validation criterion under model error; held-out sensors and
+        parameter-space cross-checks are needed, especially when the estimated
+        parameters are themselves the deliverable.
+\end{itemize}
+
+\subsection{Practical guidance}
+\label{sec:discussion:guidance}
+\begin{itemize}
+  \item Recommendations, each traceable to a result: estimate forcing, treat
+        \shearexp/\sgs\ as absorbers (caveat or fix them); inflate \Cd\ beyond
+        sensor noise to represent \discrepancy; use \Ne\ at/above the plateau
+        with localization; place sensors in informative locations and avoid
+        the unobservable-observation regime; validate on held-out sensors, not
+        the data mismatch.
+\end{itemize}
+
+\subsection{Limitations and future work}
+\label{sec:discussion:limitations}
+\begin{itemize}
+  \item Limitations: synthetic truth only (cross-model \discrepancy\ is a
+        proxy for real model error); three solvers; quasi-steady forcing;
+        computational cost limits some sweeps; intrinsic member divergence
+        handled by resampling.
+  \item Future work: real field/wind-tunnel observations; broader solver and
+        closure set; source-term estimation for dispersion; genuinely unsteady
+        forcing; explicit structural-error-aware assimilation as the
+        principled fix to bias compensation.
+\end{itemize}

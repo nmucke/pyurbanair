@@ -40,7 +40,7 @@ forward_model:
   # Max ensemble members rolled forward through the network in one batched
   # pass. null rolls the whole ensemble at once; set a positive int to chunk a
   # large ensemble and cap peak GPU memory (raise it as far as the GPU allows).
-  rollout_batch_size: 8
+  rollout_batch_size: 10
 
   # Optional: voxelise this geometry for the network's geometry channel. When
   # null the fluid mask falls back to the non-zero-state convention used by

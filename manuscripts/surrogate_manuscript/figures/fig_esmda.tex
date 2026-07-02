@@ -1,0 +1,128 @@
+\begin{tikzpicture}[font=\small, x=1cm, y=1cm]
+
+%% ---------------------------------------------------------------
+%% INITIALISATION COLUMN  (x = 0)
+%% ---------------------------------------------------------------
+
+\node[surblock, fill=priorblue!30, text width=1.8cm, align=center]
+  (init_warm) at (0, 1.0)
+  {\textbf{Warm start}\\ $\state_0^{(n)}\!\sim\!\mathcal{D}$};
+
+\node[surblock, fill=priorblue!20, text width=1.8cm, align=center]
+  (init_prior) at (0, -0.4)
+  {AR(2) prior\\ $\bth_0^{(n)}\!\sim\!p(\bth)$};
+
+\begin{scope}[on background layer]
+  \node[draw=black!40, dashed, rounded corners=6pt, inner sep=7pt,
+        fit=(init_warm)(init_prior)] (init_box) {};
+\end{scope}
+\node[font=\small\itshape] at (0, 2.95) {Initialisation};
+
+
+%% ---------------------------------------------------------------
+%% WINDOW 1  (x = 3.5)
+%% ---------------------------------------------------------------
+
+\node[font=\small\bfseries] at (3.5, 2.95) {Window 1};
+
+\node[netblock, fill=netcolor!25, align=center,
+      minimum width=1.8cm, text width=1.6cm, minimum height=1.1cm]
+  (w1_rollout) at (3.5, 1.6)
+  {\textbf{P3D}\\ Rollout};
+
+\foreach \dy in {-0.25,-0.08,0.08,0.25}{
+  \draw[stateblue!60, line width=0.5pt, -{Latex[length=2pt,width=1.5pt]}]
+    ([yshift=\dy cm]w1_rollout.west) --
+    ([yshift=\dy*0.4 cm]w1_rollout.east);
+}
+
+\node[star, star points=5, fill=obsyellow, draw=obsyellow!70!black,
+      minimum size=0.5cm, inner sep=1pt]
+  (w1_obs) at (3.5, 0.3) {};
+\node[above=1pt of w1_obs, font=\tiny] {$\yobs_w$};
+\node[right=3pt of w1_obs, font=\tiny, align=left]
+  {6 sensors\\ $z{=}3\,$m};
+
+\node[surblock, fill=postcolor!30, text width=1.8cm, align=center]
+  (w1_esmda) at (3.5, -0.6)
+  {ES-MDA\\ $\textstyle\sum\tfrac{1}{\alpha_i}{=}1$};
+
+\node[surblock, fill=postcolor!50, align=center]
+  (w1_post) at (3.5, -1.6)
+  {Posterior $\xctrl^a_w$};
+
+\draw[myarr] (w1_rollout.south) -- (w1_obs.north)
+  node[midway, right=2pt, font=\tiny] {forecast};
+\draw[myarr] (w1_obs.south) -- (w1_esmda.north);
+\draw[myarr] (w1_esmda.south) -- (w1_post.north);
+
+
+%% ---------------------------------------------------------------
+%% WINDOW 2  (x = 7.0)
+%% ---------------------------------------------------------------
+
+\node[font=\small\bfseries] at (7.0, 2.95) {Window 2};
+
+\node[netblock, fill=netcolor!25, align=center,
+      minimum width=1.8cm, text width=1.6cm, minimum height=1.1cm]
+  (w2_rollout) at (7.0, 1.6)
+  {\textbf{P3D}\\ Rollout};
+
+\foreach \dy in {-0.25,-0.08,0.08,0.25}{
+  \draw[stateblue!60, line width=0.5pt, -{Latex[length=2pt,width=1.5pt]}]
+    ([yshift=\dy cm]w2_rollout.west) --
+    ([yshift=\dy*0.4 cm]w2_rollout.east);
+}
+
+\node[star, star points=5, fill=obsyellow, draw=obsyellow!70!black,
+      minimum size=0.5cm, inner sep=1pt]
+  (w2_obs) at (7.0, 0.3) {};
+\node[above=1pt of w2_obs, font=\tiny] {$\yobs_w$};
+\node[right=3pt of w2_obs, font=\tiny, align=left]
+  {6 sensors\\ $z{=}3\,$m};
+
+\node[surblock, fill=postcolor!30, text width=1.8cm, align=center]
+  (w2_esmda) at (7.0, -0.6)
+  {ES-MDA\\ $\textstyle\sum\tfrac{1}{\alpha_i}{=}1$};
+
+\node[surblock, fill=postcolor!50, align=center]
+  (w2_post) at (7.0, -1.6)
+  {Posterior $\xctrl^a_w$};
+
+\draw[myarr] (w2_rollout.south) -- (w2_obs.north)
+  node[midway, right=2pt, font=\tiny] {forecast};
+\draw[myarr] (w2_obs.south) -- (w2_esmda.north);
+\draw[myarr] (w2_esmda.south) -- (w2_post.north);
+
+
+%% ---------------------------------------------------------------
+%% CONTINUATION  (x = 10.0)
+%% ---------------------------------------------------------------
+
+\node[font=\large] at (10.2, 0.0) {$\cdots$};
+
+
+%% ---------------------------------------------------------------
+%% INTER-COLUMN CONNECTING ARROWS
+%% ---------------------------------------------------------------
+
+%% Init -> Window 1 rollout  (both arrive at w1_rollout.west staggered)
+\draw[myarr] (init_warm.east)  -- ++(0.25,0) |- (w1_rollout.west);
+\draw[myarr] (init_prior.east) -- ++(0.25,0) |- (w1_rollout.west);
+
+%% Window 1 posterior -> Window 2 rollout
+\draw[myarr] (w1_post.east) -- ++(0.3,0) |- (w2_rollout.west);
+
+%% Window 2 posterior -> continuation
+\draw[myarr] (w2_post.east) -- ++(0.4,0) |- ++(0.6,0.4) -- ++(0.4,0);
+
+
+%% ---------------------------------------------------------------
+%% COLUMN SEPARATOR LINES
+%% ---------------------------------------------------------------
+
+\draw[black!20, line width=0.5pt, dashed] (1.8, 3.3) -- (1.8, -2.1);
+\draw[black!20, line width=0.5pt, dashed] (5.3, 3.3) -- (5.3, -2.1);
+\draw[black!20, line width=0.5pt, dashed] (8.8, 3.3) -- (8.8, -2.1);
+
+\end{tikzpicture}

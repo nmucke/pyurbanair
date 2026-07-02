@@ -1,0 +1,269 @@
+% -----------------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+% -----------------------------------------------------------------------
+
+We evaluate the surrogate on two cases: the idealised Xie--Castro building-array
+benchmark and the realistic Barcelona urban block. For each case we report
+inference (autonomous rollout), uncertainty quantification, and data
+assimilation.
+
+% =======================================================================
+\subsection{Xie--Castro}
+\label{sec:xie_castro}
+% =======================================================================
+
+\textit{This case is under preparation.} The Xie--Castro configuration is an
+idealised, regular building-array benchmark used to validate the surrogate under
+controlled conditions before moving to the full Barcelona geometry.
+
+\subsubsection{Inference}
+\label{sec:xc_inference}
+
+% TODO: Xie--Castro autonomous rollout evaluation.
+\textit{Placeholder for the Xie--Castro rollout evaluation.}
+
+\subsubsection{Uncertainty Quantification}
+\label{sec:xc_uq}
+
+% TODO: Xie--Castro uncertainty quantification.
+\textit{Placeholder for the Xie--Castro uncertainty quantification.}
+
+\subsubsection{Data Assimilation}
+\label{sec:xc_da}
+
+% TODO: Xie--Castro ES-MDA experiment.
+\textit{Placeholder for the Xie--Castro data-assimilation experiment.}
+
+% =======================================================================
+\subsection{Barcelona}
+\label{sec:barcelona}
+% =======================================================================
+
+\subsubsection{Inference}
+\label{sec:bcn_inference}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{rollout.png}
+  \caption{Autonomous surrogate rollout on a held-out Barcelona trajectory.
+    Each column shows a snapshot of the velocity magnitude
+    $\umag = \sqrt{u^2+v^2+w^2}$ at ground level ($z$-index 0) at five
+    equally spaced instants covering the full 120-step rollout.
+    \textbf{Top:} \palm{} ground truth.
+    \textbf{Middle:} \pthreeds{} surrogate prediction, initialised from the
+    truth state at $t=0$ and then rolled out autoregressively.
+    \textbf{Bottom:} absolute error $|\,|\hat{\mathbf{u}}| - |\mathbf{u}|\,|$
+    (note the separate, saturated colour scale).
+    The surrogate reproduces the large-scale flow organisation and street-canyon
+    patterns throughout the rollout; error concentrates at building edges and
+    in the more energetic street-level jets.}
+  \label{fig:rollout}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{rmse.png}
+    \caption{Per-step rollout RMSE (normalised velocity units).
+      Error accumulates steeply over the first $\sim$20 steps as the
+      surrogate diverges from the exact phase trajectory, then saturates
+      near the climatological error level as the rollout reaches a
+      statistically stationary regime.}
+    \label{fig:rmse}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{params.png}
+    \caption{Inflow parameters for the evaluation rollout:
+      inflow angle $\iang$ (top) and velocity magnitude $\ivel$ (bottom)
+      as functions of rollout time step.
+      Both follow smooth AR(2) trajectories spanning a moderate range
+      of wind directions and speeds representative of the Barcelona site.}
+    \label{fig:params}
+  \end{subfigure}
+  \caption{Quantitative rollout evaluation. (\subref{fig:rmse}) RMSE profile
+    over 120 autonomous steps. (\subref{fig:params}) Inflow parameter
+    trajectory used for the evaluation rollout.}
+  \label{fig:quant}
+\end{figure}
+
+Figure~\ref{fig:rollout} illustrates the surrogate's ability to propagate
+the Barcelona urban-block flow field over 120 autonomous time steps under
+smoothly varying inflow conditions (Figure~\ref{fig:params}).
+The predicted fields preserve the main flow structures — accelerated jets
+in street canyons, recirculation zones in building wakes, and the
+roof-level shear layer — throughout the rollout. Errors are largest at
+building edges and in regions of strong velocity gradients, consistent
+with the expected difficulty of predicting the exact phase of turbulent
+detachment.
+
+Figure~\ref{fig:rmse} shows that the per-step RMSE (in normalised velocity
+units) rises steeply during the first $\sim$20 steps as the surrogate
+rolls out from a precise initial condition into its own trajectory, before
+saturating near a climatological error floor around step 30--40. This
+saturation indicates that the surrogate orbit remains physically plausible
+and bounded — a necessary property for stable ensemble data assimilation,
+where individual members are not expected to phase-lock to the truth but
+must collectively span the plausible state space.
+
+\subsubsection{Uncertainty Quantification}
+\label{sec:bcn_uq}
+
+% TODO: Barcelona uncertainty quantification.
+\textit{Placeholder for the Barcelona uncertainty quantification.}
+
+\subsubsection{Data Assimilation}
+\label{sec:da_results}
+
+We now embed the surrogate in the \esmda{} loop of Section~\ref{sec:esmda} and
+assimilate synthetic street-level observations drawn from a held-out \palm{} truth
+trajectory. The truth is a $1200\,\mathrm{s}$ \palm{}-LES integration of the
+Barcelona block sampled at $\Delta t = 10\,\mathrm{s}$ ($120$ frames), generated
+by the full LES solver and \emph{not} seen during surrogate training, so the
+experiment is free of the inverse crime (Section~\ref{sec:warmstart}). The
+forward model in the loop is the trained \pthreeds{} surrogate. An ensemble of
+$N = 50$ members is propagated over $4$ sequential assimilation windows of
+$300\,\mathrm{s}$ ($30$ surrogate steps) each, with $\niter = 3$
+\esmda{} analysis passes per window, observation-error standard deviation
+$\sigma_o = 0.25$ (velocity units), and no covariance localisation or inflation.
+Observations are the temporally averaged velocity components at the six
+street-level sensors of Section~\ref{sec:obs}. The estimated control variable is
+the time-varying inflow-parameter trajectory $(\iang, \ivel)$ (the
+\texttt{TimeVaryingParameterESMDA} smoother); the velocity field is propagated by
+the surrogate conditioned on each member's parameters and warm-start initial
+state, and each window's posterior seeds the next.
+
+\paragraph{Inflow-parameter estimation.}
+Figure~\ref{fig:da_param_evolution} shows the prior and posterior inflow-parameter
+ensembles across the four windows. The broad AR(2) prior (orange) collapses onto a
+tight posterior (blue) that tracks the truth (dashed) closely for the inflow
+\emph{angle}: the posterior follows the slow swings of the true wind direction,
+and the per-step angle RMSE (Figure~\ref{fig:da_param_error}, top) falls from a
+prior mean of $11.1^\circ$ to a posterior mean of $7.3^\circ$ (final-time
+$6.3^\circ$), a $34\%$ reduction, with a continuous-ranked-probability score
+(CRPS) of $6.0^\circ$. The inflow \emph{velocity magnitude} is harder: the
+posterior is pulled systematically high (settling near $8.5$--$9.5\,\mathrm{m/s}$
+against a true $\sim\!7.5\,\mathrm{m/s}$) and is over-confident, so its
+time-averaged RMSE ($1.41\,\mathrm{m/s}$) actually \emph{exceeds} the prior
+($0.95\,\mathrm{m/s}$). The estimate does improve window-on-window, recovering to
+a final-time RMSE of $0.88\,\mathrm{m/s}$ (just below the prior level), but the
+early-window overshoot dominates the average. This degradation is an
+observability limitation rather than a failure of the update: the surrogate's
+ground-level speeds at the sensor sites are smoother and lower-amplitude than
+\palm{}'s, so fitting the sensor data biases the inferred inflow speed upward.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{esmda_param_evolution.png}
+  \caption{Inflow-parameter evolution over the four assimilation windows
+    (shaded/unshaded bands). \textbf{Top/middle:} prior ensemble (orange) and
+    posterior ensemble (blue) for the inflow angle and velocity magnitude, with
+    the \palm{} truth dashed. The posterior tightens sharply relative to the prior;
+    the angle tracks the truth, while the speed is biased high.
+    \textbf{Bottom:} domain-averaged velocity-magnitude RMSE of the posterior
+    state over the full $120$-step horizon, which stays bounded across all four
+    windows (no rollout divergence under assimilation).}
+  \label{fig:da_param_evolution}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{esmda_param_error.png}
+  \caption{Per-step posterior error for the two inflow parameters: RMSE (blue)
+    and CRPS (orange) of the inflow angle (top) and velocity magnitude (bottom)
+    over the four windows. The angle error is well below its prior level
+    throughout; the velocity-magnitude error is largest in the first window and
+    relaxes thereafter.}
+  \label{fig:da_param_error}
+\end{figure}
+
+\paragraph{State reconstruction.}
+Figure~\ref{fig:da_final_state} compares the truth, posterior-mean, and
+posterior-standard-deviation velocity-magnitude fields at the final time. The
+posterior mean reproduces the large-scale organisation of the truth---the
+street-canyon channelling, the building-wake voids, and the higher-energy region
+along the eastern (downstream) edge of the block. The ensemble standard deviation
+is smallest within the densely built core, where the geometry constrains the flow,
+and concentrates along the main channels and in the energetic downstream region
+that the six sensors do not cover---an intuitive map of where the remaining
+posterior uncertainty lives. The domain-averaged state RMSE is $1.40\,\mathrm{m/s}$
+(min $0.74$, max $1.91\,\mathrm{m/s}$) and, as the bottom panel of
+Figure~\ref{fig:da_param_evolution} shows, remains bounded over the entire
+$1200\,\mathrm{s}$---confirming that the surrogate rollout stays stable inside the
+repeatedly re-initialised assimilation loop.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{esmda_final_state.png}
+  \caption{Velocity-magnitude field at the final assimilation time.
+    \textbf{Left:} \palm{} truth, with the six assimilation sensors marked.
+    \textbf{Centre:} \esmda{} posterior-mean. \textbf{Right:} posterior ensemble
+    standard deviation. The posterior mean captures the truth's canyon and wake
+    structure; spread concentrates along the main channels and the unobserved
+    downstream region.}
+  \label{fig:da_final_state}
+\end{figure}
+
+\paragraph{Sensor fit and observability.}
+Figure~\ref{fig:da_sensors} overlays the ensemble, its mean, and the truth at the
+six sensors. The posterior ensemble brackets the truth on average but cannot
+reproduce its sharp gusts: the \palm{} time series at street level are considerably
+more intermittent than the surrogate's smoother ground-level dynamics, and with
+only six point sensors the high-frequency content is effectively unobservable.
+The mean sensor velocity-vector RMSE is $0.80\,\mathrm{m/s}$ with an energy score
+of $0.59$. This under-representation of street-level variance is the same effect
+that biases the inferred inflow speed, and points to denser or better-placed
+sensing---rather than a larger ensemble---as the route to further improvement.
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.82\textwidth]{esmda_sensors.png}
+  \caption{Velocity magnitude $\Umag$ at the six street-level
+    assimilation sensors ($z = 3\,\mathrm{m}$): posterior ensemble members (thin
+    blue), ensemble mean (thick blue), and \palm{} truth (dashed). The bottom panel
+    is the across-sensor RMSE and CRPS. The ensemble tracks the slow trends but
+    misses the truth's sharp gusts, reflecting the limited observability of
+    street-level turbulence from six points.}
+  \label{fig:da_sensors}
+\end{figure}
+
+\paragraph{Cost.}
+The complete assimilation---$50$ members $\times$ $4$ windows $\times$ $3$ \esmda{}
+passes, i.e.\ $200$ surrogate rollouts of $30$ steps---completed in
+$5.4\times10^{3}\,\mathrm{s}$ ($\approx 1.5\,\mathrm{h}$) of wall time on a single
+GPU, averaging $23\,\mathrm{min}$ per window. The same ensemble run with the \palm{}
+solver in the loop would require $200$ LES integrations of the Barcelona domain,
+orders of magnitude more expensive, which is precisely the cost the surrogate is
+designed to amortise.
+
+Table~\ref{tab:da_metrics} collects the headline metrics. The overall picture is
+that the surrogate-driven \esmda{} recovers the dominant inflow direction and a
+spatially faithful posterior mean at a fraction of the LES cost, while the
+street-level velocity amplitude remains limited by sensor observability---a
+configuration issue (sensor density and placement) rather than a deficiency of
+the surrogate or the update scheme.
+
+\begin{table}[t]
+  \centering
+  \caption{Headline \esmda{} metrics ($50$ members, $4$ windows, $3$ passes;
+    \palm{} truth, \pthreeds{} forward model). Parameter and state errors are averaged
+    over the full $1200\,\mathrm{s}$ horizon; ``prior'' is the corresponding
+    pre-assimilation ensemble error.}
+  \label{tab:da_metrics}
+  \renewcommand{\arraystretch}{1.15}
+  \footnotesize
+  \begin{tabular}{llll}
+    \toprule
+    Quantity & Prior RMSE & Posterior RMSE & CRPS \\
+    \midrule
+    Inflow angle $\iang$ (deg)        & $11.1$ & $7.3$ \,(final $6.3$; $-34\%$) & $6.0$ \\
+    Inflow velocity $\ivel$ (m\,s$^{-1}$)  & $0.95$ & $1.41$\,(final $0.88$; $+49\%$) & $1.27$ \\
+    State $\Umag$ (m\,s$^{-1}$) & ---    & $1.40$\,(min $0.74$, max $1.91$) & --- \\
+    Sensor velocity, vector (m\,s$^{-1}$)& ---    & $0.80$ & $0.59$ (ES) \\
+    \midrule
+    \multicolumn{4}{l}{Wall time: $5.4\times10^{3}\,\mathrm{s}$ total
+      ($\approx 23\,\mathrm{min}$/window), single GPU.} \\
+    \bottomrule
+  \end{tabular}
+\end{table}

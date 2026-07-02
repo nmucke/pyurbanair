@@ -1,0 +1,282 @@
+%==============================================================================
+%  references.bib -- bibliography database
+%  Cited from the text with \cite{key}; rendered via \bibliography{references}
+%
+%  NOTE: these are seminal, well-known references seeded to give the outline
+%  working citation keys. VERIFY every volume/page/DOI against the publisher
+%  before submission -- some fields are approximate and marked accordingly.
+%==============================================================================
+
+% ---- Ensemble data assimilation / ES-MDA ---------------------------------
+@article{emerick2013esmda,
+  author  = {Emerick, Alexandre A. and Reynolds, Albert C.},
+  title   = {Ensemble smoother with multiple data assimilation},
+  journal = {Computers \& Geosciences},
+  volume  = {55},
+  pages   = {3--15},
+  year    = {2013},
+  doi     = {10.1016/j.cageo.2012.03.011}
+}
+
+@article{evensen2018analysis,
+  author  = {Evensen, Geir},
+  title   = {Analysis of iterative ensemble smoothers for solving inverse problems},
+  journal = {Computational Geosciences},
+  volume  = {22},
+  number  = {3},
+  pages   = {885--908},
+  year    = {2018},
+  doi     = {10.1007/s10596-018-9731-y}
+}
+
+@article{evensen1994sequential,
+  author  = {Evensen, Geir},
+  title   = {Sequential data assimilation with a nonlinear quasi-geostrophic
+             model using {Monte Carlo} methods to forecast error statistics},
+  journal = {Journal of Geophysical Research: Oceans},
+  volume  = {99},
+  number  = {C5},
+  pages   = {10143--10162},
+  year    = {1994},
+  doi     = {10.1029/94JC00572}
+}
+
+@book{evensen2009book,
+  author    = {Evensen, Geir},
+  title     = {Data Assimilation: The Ensemble {Kalman} Filter},
+  edition   = {2nd},
+  publisher = {Springer},
+  address   = {Berlin, Heidelberg},
+  year      = {2009},
+  doi       = {10.1007/978-3-642-03711-5}
+}
+
+@article{aanonsen2009ensemble,
+  author  = {Aanonsen, Sigurd I. and N{\ae}vdal, Geir and Oliver, Dean S.
+             and Reynolds, Albert C. and Vall{\`e}s, Brice},
+  title   = {The ensemble {Kalman} filter in reservoir engineering---a review},
+  journal = {SPE Journal},
+  volume  = {14},
+  number  = {3},
+  pages   = {393--412},
+  year    = {2009},
+  doi     = {10.2118/117274-PA}
+}
+
+% ---- Localization / inflation --------------------------------------------
+@article{gaspari1999construction,
+  author  = {Gaspari, Gregory and Cohn, Stephen E.},
+  title   = {Construction of correlation functions in two and three dimensions},
+  journal = {Quarterly Journal of the Royal Meteorological Society},
+  volume  = {125},
+  number  = {554},
+  pages   = {723--757},
+  year    = {1999},
+  doi     = {10.1002/qj.49712555417}
+}
+
+@article{houtekamer2001sequential,
+  author  = {Houtekamer, P. L. and Mitchell, Herschel L.},
+  title   = {A sequential ensemble {Kalman} filter for atmospheric data
+             assimilation},
+  journal = {Monthly Weather Review},
+  volume  = {129},
+  number  = {1},
+  pages   = {123--137},
+  year    = {2001},
+  doi     = {10.1175/1520-0493(2001)129<0123:ASEKFF>2.0.CO;2}
+}
+
+@article{vossepoel2025inflation,
+  author  = {Vossepoel, Femke C. and others},
+  title   = {Adaptive observation-error inflation for localized ensemble
+             data assimilation},
+  journal = {\needcite (verify) },
+  year    = {2025},
+  note    = {Placeholder -- verify full citation before submission.}
+}
+
+% ---- Inverse problems / inverse crime ------------------------------------
+@book{kaipio2005statistical,
+  author    = {Kaipio, Jari and Somersalo, Erkki},
+  title     = {Statistical and Computational Inverse Problems},
+  series    = {Applied Mathematical Sciences},
+  volume    = {160},
+  publisher = {Springer},
+  address   = {New York},
+  year      = {2005},
+  doi       = {10.1007/b138659}
+}
+
+@article{wirgin2004inverse,
+  author  = {Wirgin, Armand},
+  title   = {The inverse crime},
+  journal = {arXiv preprint math-ph/0401050},
+  year    = {2004},
+  note    = {Verify final citation form before submission.}
+}
+
+% ---- Scoring rules / verification metrics --------------------------------
+@article{gneiting2007strictly,
+  author  = {Gneiting, Tilmann and Raftery, Adrian E.},
+  title   = {Strictly proper scoring rules, prediction, and estimation},
+  journal = {Journal of the American Statistical Association},
+  volume  = {102},
+  number  = {477},
+  pages   = {359--378},
+  year    = {2007},
+  doi     = {10.1198/016214506000001437}
+}
+
+% ---- LES models: PALM, uDALES --------------------------------------------
+@article{maronga2020palm,
+  author  = {Maronga, Bj{\"o}rn and Banzhaf, Sebastian and Burmeister, Cornelia
+             and Esch, Thomas and Forkel, Renate and Fr{\"o}hlich, Dominik
+             and others},
+  title   = {Overview of the {PALM} model system 6.0},
+  journal = {Geoscientific Model Development},
+  volume  = {13},
+  number  = {3},
+  pages   = {1335--1372},
+  year    = {2020},
+  doi     = {10.5194/gmd-13-1335-2020}
+}
+
+@article{grylls2021udales,
+  author  = {Grylls, Tom and Suter, Ivo and van Reeuwijk, Maarten},
+  title   = {Steady-state large-eddy simulations of convective and stable urban
+             boundary layers},
+  journal = {Boundary-Layer Meteorology},
+  volume  = {178},
+  pages   = {1--30},
+  year    = {2021},
+  doi     = {10.1007/s10546-020-00559-0},
+  note    = {uDALES; verify -- see also Suter et al. (2022) GMD.}
+}
+
+@article{suter2022udales,
+  author  = {Suter, Ivo and Grylls, Tom and S{\"u}tzl, Birgit S. and
+             Owens, Sam O. and Wilson, Chris E. and van Reeuwijk, Maarten},
+  title   = {{uDALES} 2.0: a large-eddy simulation model for urban environments},
+  journal = {Geoscientific Model Development},
+  volume  = {15},
+  number  = {13},
+  pages   = {5309--5335},
+  year    = {2022},
+  doi     = {10.5194/gmd-15-5309-2022}
+}
+
+% ---- Lattice Boltzmann ----------------------------------------------------
+@article{chen1998lattice,
+  author  = {Chen, Shiyi and Doolen, Gary D.},
+  title   = {Lattice {Boltzmann} method for fluid flows},
+  journal = {Annual Review of Fluid Mechanics},
+  volume  = {30},
+  number  = {1},
+  pages   = {329--364},
+  year    = {1998},
+  doi     = {10.1146/annurev.fluid.30.1.329}
+}
+
+% ---- SGS turbulence closures ---------------------------------------------
+@article{smagorinsky1963general,
+  author  = {Smagorinsky, Joseph},
+  title   = {General circulation experiments with the primitive equations:
+             I. The basic experiment},
+  journal = {Monthly Weather Review},
+  volume  = {91},
+  number  = {3},
+  pages   = {99--164},
+  year    = {1963},
+  doi     = {10.1175/1520-0493(1963)091<0099:GCEWTP>2.3.CO;2}
+}
+
+@article{deardorff1980stratocumulus,
+  author  = {Deardorff, James W.},
+  title   = {Stratocumulus-capped mixed layers derived from a three-dimensional
+             model},
+  journal = {Boundary-Layer Meteorology},
+  volume  = {18},
+  number  = {4},
+  pages   = {495--527},
+  year    = {1980},
+  doi     = {10.1007/BF00119502}
+}
+
+@article{vreman2004eddy,
+  author  = {Vreman, A. W.},
+  title   = {An eddy-viscosity subgrid-scale model for turbulent shear flow:
+             Algebraic theory and applications},
+  journal = {Physics of Fluids},
+  volume  = {16},
+  number  = {10},
+  pages   = {3670--3681},
+  year    = {2004},
+  doi     = {10.1063/1.1785131}
+}
+
+% ---- Urban flow benchmarks / dispersion ----------------------------------
+@article{xie2006les,
+  author  = {Xie, Zheng-Tong and Castro, Ian P.},
+  title   = {{LES} and {RANS} for turbulent flow over arrays of wall-mounted
+             obstacles},
+  journal = {Flow, Turbulence and Combustion},
+  volume  = {76},
+  number  = {3},
+  pages   = {291--312},
+  year    = {2006},
+  doi     = {10.1007/s10494-006-9018-6}
+}
+
+@article{xie2009modelling,
+  author  = {Xie, Zheng-Tong and Castro, Ian P.},
+  title   = {Large-eddy simulation for flow and dispersion in urban streets},
+  journal = {Atmospheric Environment},
+  volume  = {43},
+  number  = {13},
+  pages   = {2174--2185},
+  year    = {2009},
+  doi     = {10.1016/j.atmosenv.2009.01.016}
+}
+
+@article{britter2003flow,
+  author  = {Britter, R. E. and Hanna, S. R.},
+  title   = {Flow and dispersion in urban areas},
+  journal = {Annual Review of Fluid Mechanics},
+  volume  = {35},
+  number  = {1},
+  pages   = {469--496},
+  year    = {2003},
+  doi     = {10.1146/annurev.fluid.35.101101.161147}
+}
+
+% ---- Urban / atmospheric data assimilation & inversion -------------------
+@article{kikumoto2018bayesian,
+  author  = {Kikumoto, Hideki and Ooka, Ryozo},
+  title   = {Inverse analysis of the source location and emission rate of
+             gaseous contaminants using {CFD}},
+  journal = {Building and Environment},
+  volume  = {\needcite},
+  year    = {2018},
+  note    = {Placeholder urban-inversion reference -- verify.}
+}
+
+@article{xue2017inverse,
+  author  = {Xue, Fei and Li, Xiaofeng},
+  title   = {The inverse identification of indoor/outdoor pollutant sources:
+             A review},
+  journal = {Building and Environment},
+  volume  = {\needcite},
+  year    = {2017},
+  note    = {Placeholder source-inversion review -- verify.}
+}
+
+@article{example2020,
+  author  = {Doe, Jane and Smith, John},
+  title   = {An example reference entry -- remove before submission},
+  journal = {Building and Environment},
+  volume  = {180},
+  pages   = {106--120},
+  year    = {2020},
+  doi     = {10.1016/j.buildenv.2020.000000}
+}

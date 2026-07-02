@@ -77,7 +77,8 @@
       "Bash(.pixi/envs/dev/bin/python -m black libs/neural-surrogates/src/neural_surrogates/architectures/domain_decomposed.py)",
       "Bash(.pixi/envs/dev/bin/python -m isort libs/neural-surrogates/src/neural_surrogates/architectures/domain_decomposed.py)",
       "Bash(.pixi/envs/dev/bin/python -m mypy libs/neural-surrogates/src/neural_surrogates/architectures/domain_decomposed.py)",
-      "Bash(sed -n '/mypy/,/^- /p' .pre-commit-config.yaml 2>/dev/null | head -30; echo \"=== mypy cfg ===\"; grep -rn \"no-untyped\\\\|disallow_untyped\\\\|ignore_missing\\\\|\\\\[.*mypy.*\\\\]\" pyproject.toml setup.cfg mypy.ini libs/neural-surrogates/pyproject.toml 2>/dev/null | head)"
+      "Bash(sed -n '/mypy/,/^- /p' .pre-commit-config.yaml 2>/dev/null | head -30; echo \"=== mypy cfg ===\"; grep -rn \"no-untyped\\\\|disallow_untyped\\\\|ignore_missing\\\\|\\\\[.*mypy.*\\\\]\" pyproject.toml setup.cfg mypy.ini libs/neural-surrogates/pyproject.toml 2>/dev/null | head)",
+      "Bash(python -c ' *)"
     ],
     "additionalDirectories": [
       "/export/scratch1/ntm/pyurbanair"

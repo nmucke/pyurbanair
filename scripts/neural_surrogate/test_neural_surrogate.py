@@ -129,35 +129,53 @@ def _animate_rollout(
     truth: torch.Tensor, pred: torch.Tensor, out_path: Path, fps: int = 10
 ) -> None:
     T = truth.shape[0]
-    z_mid = 0 # truth.shape[-3] // 2
-    mag_t = truth.norm(dim=1)[:, z_mid].numpy()
-    mag_p = pred.norm(dim=1)[:, z_mid].numpy()
-    err = np.abs(mag_p - mag_t)
-    vmax = float(mag_t.max())
-    err_max = float(err.max()) or 1.0
+    z_slices = [2, 10, 25, 50]
+    n_z = truth.shape[2]  # (T, C, Z, Y, X) → shape[2] is Z
+    z_slices = [z for z in z_slices if z < n_z]
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
-    ims = [
-        axes[0].imshow(mag_t[0], origin="lower", vmin=0, vmax=vmax, cmap="viridis"),
-        axes[1].imshow(mag_p[0], origin="lower", vmin=0, vmax=vmax, cmap="viridis"),
-        axes[2].imshow(err[0], origin="lower", vmin=0, vmax=err_max, cmap="magma"),
-    ]
-    titles = ["truth", "pred", "|err|"]
-    for ax, title in zip(axes, titles):
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title(title)
-    for im, ax in zip(ims[:2], axes[:2]):
-        fig.colorbar(im, ax=ax, fraction=0.046)
-    fig.colorbar(ims[2], ax=axes[2], fraction=0.046)
-    suptitle = fig.suptitle(f"|u| at z={z_mid}  t=0/{T - 1}")
+    mag_t_full = truth.norm(dim=1).numpy()   # (T, Z, Y, X)
+    mag_p_full = pred.norm(dim=1).numpy()
+
+    # per-slice arrays: list of (T, Y, X)
+    slices_t = [mag_t_full[:, z] for z in z_slices]
+    slices_p = [mag_p_full[:, z] for z in z_slices]
+    slices_e = [np.abs(p - t) for t, p in zip(slices_t, slices_p)]
+
+    n_rows = len(z_slices)
+    fig, axes = plt.subplots(
+        n_rows, 3, figsize=(12, 4 * n_rows), constrained_layout=True
+    )
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    ims = []
+    for row, (z, mt, mp, me) in enumerate(zip(z_slices, slices_t, slices_p, slices_e)):
+        vmax = float(mt.max()) or 1.0
+        err_max = float(me.max()) or 1.0
+        im_t = axes[row, 0].imshow(mt[0], origin="lower", vmin=0, vmax=vmax, cmap="viridis")
+        im_p = axes[row, 1].imshow(mp[0], origin="lower", vmin=0, vmax=vmax, cmap="viridis")
+        im_e = axes[row, 2].imshow(me[0], origin="lower", vmin=0, vmax=err_max, cmap="magma")
+        ims.append((im_t, im_p, im_e, mt, mp, me))
+        for col, (ax, title) in enumerate(zip(axes[row], ["truth", "pred", "|err|"])):
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_ylabel(f"z={z}", labelpad=2) if col == 0 else None
+            ax.set_title(title) if row == 0 else None
+        fig.colorbar(im_t, ax=axes[row, 0], fraction=0.046)
+        fig.colorbar(im_p, ax=axes[row, 1], fraction=0.046)
+        fig.colorbar(im_e, ax=axes[row, 2], fraction=0.046)
+
+    suptitle = fig.suptitle(f"|u| vertical slices  t=0/{T - 1}")
 
     def update(frame: int):
-        ims[0].set_array(mag_t[frame])
-        ims[1].set_array(mag_p[frame])
-        ims[2].set_array(err[frame])
-        suptitle.set_text(f"|u| at z={z_mid}  t={frame}/{T - 1}")
-        return [*ims, suptitle]
+        artists = [suptitle]
+        for im_t, im_p, im_e, mt, mp, me in ims:
+            im_t.set_array(mt[frame])
+            im_p.set_array(mp[frame])
+            im_e.set_array(me[frame])
+            artists.extend([im_t, im_p, im_e])
+        suptitle.set_text(f"|u| vertical slices  t={frame}/{T - 1}")
+        return artists
 
     if animation.writers.is_available("ffmpeg"):
         writer = animation.FFMpegWriter(fps=fps)

@@ -1,0 +1,39 @@
+% -----------------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+% -----------------------------------------------------------------------
+
+Urban airflow modelling is a cornerstone of applications ranging from air-quality
+monitoring and emergency dispersion prediction to urban heat-island mitigation
+and wind-comfort assessment. Accurate predictions require resolving the
+complex turbulent dynamics induced by densely packed building geometries, a task
+for which LES at metre-scale resolution is the accepted gold standard. The \palm{}
+model system \cite{maronga2020}, for example, resolves boundary-layer flow with
+sub-grid-scale closures appropriate for urban canopies. While the physical
+fidelity of such solvers is well established, their computational cost---hours of
+wall time per simulation on modern HPC hardware---makes them incompatible with
+the rapid update cycles demanded by operational data assimilation, where an
+ensemble of tens to hundreds of model integrations must be completed per
+assimilation window.
+
+Neural surrogates offer a promising alternative. By training a learned model on
+an offline library of high-fidelity CFD trajectories, one can amortise the
+simulation cost into a one-time training phase and achieve forward-model
+evaluations that are orders of magnitude faster at inference time. The challenge
+is to build surrogates that generalise faithfully over a physically diverse
+ensemble of inflow conditions, preserve mass-conservation constraints
+approximately, and remain stable under extended autonomous rollout---conditions
+that arise naturally in the data-assimilation setting \cite{brandstetter2022}.
+
+In this work we develop and evaluate a neural surrogate for the Barcelona
+urban-block geometry, targeting its use inside an \esmda{} framework. The
+surrogate is based on the \pthreed{} architecture \cite{holzschuh2025p3d}, a hybrid
+convolutional-attention model that couples a U-Net encoder--decoder with a
+windowed self-attention bottleneck, providing both local feature extraction
+and long-range spatial context at tractable cost. The model is conditioned on
+explicit inflow parameters (wind angle and velocity magnitude)
+and trained with a pushforward rollout curriculum that progressively increases the
+length of the predicted trajectory during training to reduce exposure to
+distribution shift during autonomous rollout. The trained surrogate is embedded in
+an \esmda{} loop that jointly updates the velocity-field state and inflow parameters
+conditioned on sparse point observations from virtual street-level sensors.

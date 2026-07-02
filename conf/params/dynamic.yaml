@@ -7,14 +7,14 @@ _target_: pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel
 _convert_: all
 correlation_length: 100.0
 seed: 2
-external_parameters:        # time-varying (each gets a `time` dim)
+external_parameters:
   inflow_angle:
     _target_: pyurbanair.static_parameters.Normal
-    mean: 25.0
+    mean: 0.0
     std: 6.0
   velocity_magnitude:
     _target_: pyurbanair.static_parameters.Normal
-    mean: 6.0
+    mean: 7.5
     std: 0.5
     min: 0.1
 # Constant-in-time model-error knobs that ride in the same params Dataset and are

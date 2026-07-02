@@ -1,0 +1,99 @@
+\section{Methodology}\label{sec:methodology}
+
+% ROUGH OUTLINE -- one bullet = one point (roughly one paragraph in the final
+% text). Equations and derivations added during writing. Solver-agnostic
+% presentation; \pyurbanair{} cited once as reference implementation.
+
+\subsection{Problem formulation}\label{sec:problem}
+\input{figures/ar2_dynamic_params}   % \figref{fig:ar2_dynamic_params}
+\begin{itemize}
+  \item Bayesian inverse problem for parameters
+        $\param = (\inflowangle, \velmag, \shearexp, \sgs)$
+        \cite{kaipio2005statistical}: data model
+        $\obs = \Gobs(\param) + \vect{\varepsilon}$,
+        $\vect{\varepsilon} \sim \Normal(\vect{0}, \Cd)$, with
+        $\Gobs = \Hobs \circ \fwd$ (chaotic \les\ forward model $\fwd$,
+        observation operator $\Hobs$); goal is the posterior
+        $p(\param \mid \obs)$, approximated by an ensemble.
+  \item Parameters are either static per window or time-varying via a
+        low-dimensional AR(2) knot representation (\figref{fig:ar2_dynamic_params}).
+  \item Gaussian priors with physical bounds (specified in \secref{sec:setup}).
+\end{itemize}
+
+\subsection{Ensemble smoother with multiple data assimilation}\label{sec:esmda}
+\input{figures/windowed_rollout}   % \figref{fig:windowed_rollout}
+\begin{itemize}
+  \item \esmda\ \cite{emerick2013esmda,evensen2018analysis}: iterated,
+        derivative-free Kalman-like update of the ensemble from empirical
+        covariances and perturbed observations, over \Na\ steps with inflation
+        schedule $\{\ai\}$, $\sum_i 1/\ai = 1$. Full update equations and
+        algorithm box here.
+  \item Multi-window rollout (\figref{fig:windowed_rollout}): a smoother
+        \emph{within} each of \Nw\ windows, posterior forecast carried to the
+        next window --- filter-like outer loop, lets time-varying \param\ track
+        the flow.
+\end{itemize}
+
+\subsection{Forward models}\label{sec:forward}
+\input{figures/solver_numerics}   % \figref{fig:solver_numerics}
+\begin{itemize}
+  \item Three solvers, same governing equations, same geometry and nominal
+        forcing --- but different discretization, SGS closure, geometry
+        representation, and wall treatment
+        (\figref{fig:solver_numerics}, \tabref{tab:solver-differences}):
+        \begin{itemize}
+          \item \lbmmodel: D3Q27 lattice Boltzmann, Vreman SGS, voxelized
+                geometry, bounce-back walls \cite{chen1998lattice,vreman2004eddy}.
+          \item \pyudales: finite-volume \les, Smagorinsky SGS,
+                immersed-boundary geometry \cite{grylls2021udales,smagorinsky1963general}.
+          \item \pypalm: finite-difference \les, Deardorff TKE SGS,
+                terrain-following topography \cite{maronga2020palm,deardorff1980stratocumulus}.
+        \end{itemize}
+  \item These structural differences \emph{are} the \discrepancy\ that the
+        \crossmodel\ experiments probe --- the scientific point of the section.
+\end{itemize}
+
+\subsection{Observation operator}\label{sec:obsop}
+\input{figures/observation_operator}   % \figref{fig:obs_operator}
+\begin{itemize}
+  \item Street-level point sensors measuring $(u,v,w)$: spatial (tri)linear
+        interpolation to sensor locations, temporal averaging over reporting
+        intervals; same operator for every solver grid
+        (\figref{fig:obs_operator}).
+  \item Diagonal observation-error covariance $\Cd = \sigma^2\mat{I}$;
+        $\sigma$ covers instrument plus representativeness error.
+\end{itemize}
+
+\subsection{Model discrepancy}\label{sec:discrepancy}
+\begin{itemize}
+  \item Central concept: with truth map $\Gobs^{\dagger}$ and assimilation map
+        $\Gobs$, the data contain a structural error term
+        $\vect{\delta} = \Gobs^{\dagger}(\param^{\dagger}) - \Gobs(\param^{\dagger})$
+        that vanishes in a \twinexp\ but not cross-model
+        \cite{kaipio2005statistical,wirgin2004inverse}.
+  \item Closure/shear knobs (\shearexp, \sgs) can partly absorb
+        $\vect{\delta}$; the failure mode to watch is contamination of the
+        physical forcing estimates (\inflowangle, \velmag) --- equifinality
+        means a good observation fit does not certify correct parameters.
+  \item This study leaves the discrepancy implicit (absorbed by parameters and
+        \Cd); no explicit bias term is estimated.
+\end{itemize}
+
+\subsection{Regularization}\label{sec:regularization}
+\begin{itemize}
+  \item Small-\Ne\ safeguards: distance-based localization
+        \cite{gaspari1999construction}, adaptive observation-error inflation
+        \cite{houtekamer2001sequential,vossepoel2025inflation}, and a
+        resampling policy for diverged members.
+\end{itemize}
+
+\subsection{Evaluation metrics}\label{sec:metrics}
+\begin{itemize}
+  \item Parameter space (truth known by construction): \RMSE\ and \CRPS\
+        \cite{gneiting2007strictly} of the posterior ensemble vs.\ truth, plus
+        spread/coverage diagnostics.
+  \item Observation space: \RMSE/\CRPS\ at \emph{held-out} sensors never
+        assimilated.
+  \item Reported jointly: good observation fit with poor parameter recovery is
+        the diagnostic signature of compensating bias under \discrepancy.
+\end{itemize}

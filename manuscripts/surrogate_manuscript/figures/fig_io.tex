@@ -1,0 +1,85 @@
+\begin{tikzpicture}[font=\small, x=1cm, y=1cm]
+
+  %% ── Input boxes (left column, x = 0) ──────────────────────────────────────
+  %% Wider vertical spacing so labels don't crowd each other or the skip path.
+
+  \node[surblock, fill=stateblue!35, minimum width=2.2cm]
+        (state) at (0, 1.9)
+        {$\state_t = (u,v,w)$};
+  \node[above=2pt of state, font=\tiny] {$z$-score};
+  \node[below=2pt of state, font=\tiny] {$3{\times}32{\times}224{\times}224$};
+
+  \node[surblock, fill=geomgray!35, minimum width=2.2cm]
+        (geom) at (0, 0)
+        {$\mask$ (fluid mask)};
+  \node[below=2pt of geom, font=\tiny] {$1{\times}32{\times}224{\times}224$};
+
+  \node[surblock, fill=paramviolet!35, minimum width=2.2cm]
+        (param) at (0, -1.9)
+        {$\bthbar_t = (\iang,\ivel)$};
+  \node[above=2pt of param, font=\tiny] {$z$-score + broadcast};
+  \node[below=2pt of param, font=\tiny] {$2{\times}32{\times}224{\times}224$};
+
+  %% ── Concatenation circle (x = 3.3) ────────────────────────────────────────
+
+  \node[opcirc] (catop) at (3.3, 0) {\small cat};
+
+  %% state and param use -| (horizontal then vertical) to reach north/south;
+  %% geom connects directly to the west.
+  \draw[myarr] (state.east)  -| (catop.north);
+  \draw[myarr] (geom.east)   -- (catop.west);
+  \draw[myarr] (param.east)  -| (catop.south);
+
+  %% ── P3D-S block (x = 6.0) ─────────────────────────────────────────────────
+
+  \node[netblock, fill=netcolor!25, minimum width=2.0cm, align=center]
+        (p3d) at (6.0, 0)
+        {\textbf{P3D-S}\\Conv Enc/Dec\\+ Win.\ Attn.};
+
+  \draw[myarr] (catop.east) -- node[above, font=\tiny] {6 ch.} (p3d.west);
+
+  %% ── Addition circle (x = 8.8) ─────────────────────────────────────────────
+
+  \node[opcirc] (plus) at (8.8, 0) {$+$};
+
+  \draw[myarr] (p3d.east) -- node[above, font=\tiny] {$\times\sstd$} (plus.west);
+
+  %% ── Residual skip: state → up 1.35 cm → across to above plus → down ───────
+  %% Named coordinate makes the horizontal portion clean and fully straight.
+
+  \coordinate (Askip) at ($(state.east) + (0.1, 1.35)$);
+
+  \draw[myarr]
+        ($(state.east) + (0.1, 0)$)
+        -- (Askip)
+        -- (Askip -| plus.north)
+        node[midway, above, font=\tiny] {$\state_t$}
+        -- (plus.north);
+
+  %% ── Masking circle (x = 10.8) ─────────────────────────────────────────────
+  %% Label embedded in the node to keep the area below the circle clear
+  %% for the dashed geom route.
+
+  \node[opcirc] (maskop) at (10.8, 0) {$\odot\,\mask$};
+
+  \draw[myarr] (plus.east) -- (maskop.west);
+
+  %% ── Dashed geom → mask route ───────────────────────────────────────────────
+  %% Exits geom from the south, drops well below the param box and its labels,
+  %% travels right, then rises vertically to maskop.south.
+  %% geom.south ≈ (0, -0.375); param bottom label ≈ y = -2.45.
+  %% Route at y = -2.8 clears everything.
+
+  \draw[darr]
+        (geom.south) -- ++(0, -2.4) -| (maskop.south);
+
+  %% ── Output box (x = 12.8) ─────────────────────────────────────────────────
+
+  \node[surblock, fill=outputgreen!40, minimum width=2.0cm]
+        (output) at (12.8, 0)
+        {$\shat_{t+1}$};
+  \node[below=2pt of output, font=\tiny] {$3{\times}32{\times}224{\times}224$};
+
+  \draw[myarr] (maskop.east) -- (output.west);
+
+\end{tikzpicture}

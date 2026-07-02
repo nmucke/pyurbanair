@@ -1,0 +1,79 @@
+% -----------------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+% -----------------------------------------------------------------------
+
+We have presented a \pthreed{}-based neural surrogate for urban airflow that enables
+fast ensemble data assimilation over a realistic Barcelona urban-block geometry.
+The surrogate conditions on explicit inflow parameters, enforces building geometry
+via a hard mask, and is trained with a pushforward rollout curriculum that
+promotes multi-step stability. Embedded in an \esmda{} framework, it supports
+inflow-parameter and state estimation from six street-level point sensors, with
+ensemble initialisation from \palm{} training snapshots eliminating spin-up cost. The
+training-data warm start and the \palm{}-vs-surrogate truth/assimilation model
+pairing together provide a principled and practically efficient evaluation
+framework.
+
+On a held-out \palm{} truth trajectory (Section~\ref{sec:da_results}), the
+surrogate-driven \esmda{} recovers the inflow direction---reducing the angle RMSE
+by $34\%$ relative to the prior---and produces a spatially faithful posterior
+velocity field whose error stays bounded across all four windows, all in
+$\approx 1.5\,\mathrm{h}$ of single-GPU wall time. The main limitation is the
+inflow velocity magnitude, whose street-level signal is only weakly observable
+from six point sensors; denser or better-placed sensing, rather than a larger
+ensemble or a different update scheme, is the natural next step.
+
+\begin{table}[t]
+  \centering
+  \caption{Key hyperparameters and configuration for the \pthreed{} surrogate (left)
+           and the \esmda{} assimilation setup (right).}
+  \label{tab:hparams}
+  \renewcommand{\arraystretch}{1.15}
+  \footnotesize
+  \begin{tabular}{lll@{\hspace{1em}}lll}
+    \toprule
+    \multicolumn{3}{c}{\textbf{Surrogate}} &
+    \multicolumn{3}{c}{\textbf{\esmda{}}} \\
+    \cmidrule(r){1-3}\cmidrule(l){4-6}
+    Parameter & Symbol & Value &
+    Parameter & & Setting \\
+    \midrule
+    Grid size          & ---          & $224\times224\times32$    &
+      Assimilation type  & & \esmda{} \\
+    Resolution         & $\Delta x$   & $4\,\mathrm{m}$           &
+      Forward model      & & \pthreed{} neural surrogate \\
+    Input channels     & $C$          & 6                         &
+      Truth model        & & \palm{} LES \\
+    Hidden dim         & $d$          & 64                        &
+      Estimated vars     & & Time-varying $(\iang,\ivel)$ \\
+    Window size        & $w$          & 4                         &
+      Sensors            & & 6 points, $z=3\,\mathrm{m}$ \\
+    Partition size     & $p$          & 1                         &
+      Observations       & & $u, v, w$ temporal mean \\
+    Parameters         & ---          & ${\sim}11\,\mathrm{M}$    &
+      Obs.\ noise        & & Isotropic Gaussian \\
+    Rollout start      & $\kzero$     & 2                         &
+      Inflow prior       & & AR(2) stationary marginal \\
+    Max rollout        & $\kmax$      & 7                         &
+      Angle prior        & & $\mathcal{N}(0,6^{\circ\,2})$ \\
+    Rollout step (ep.) & ---          & +1 per 15 epochs          &
+      Speed prior        & & $\mathcal{N}(7.5, 0.5^2)\,\mathrm{m/s}$ \\
+    Grad unroll steps  & $g$          & 2                         &
+      Ensemble init      & & Training-data warm start \\
+    Epochs             & ---          & 200 (patience 15)         &
+      Sequential windows & & Yes (posterior seeds next) \\
+    Optimiser          & ---          & AdamW                     &
+      & & \\
+    Learning rate      & $\eta$       & $10^{-4}$                 &
+      & & \\
+    Weight decay       & ---          & $10^{-8}$                 &
+      & & \\
+    LR schedule        & ---          & Warmup + cosine           &
+      & & \\
+    Precision          & ---          & bf16 AMP                  &
+      & & \\
+    Grad clip norm     & ---          & 1.0                       &
+      & & \\
+    \bottomrule
+  \end{tabular}
+\end{table}

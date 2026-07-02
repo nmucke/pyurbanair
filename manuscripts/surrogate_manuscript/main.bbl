@@ -1,0 +1,25 @@
+\begin{thebibliography}{1}
+
+\bibitem{brandstetter2022}
+Johannes Brandstetter, Daniel Worrall, and Max Welling.
+\newblock Message passing neural {PDE} solvers.
+\newblock {\em International Conference on Learning Representations}, 2022.
+
+\bibitem{emerick2013}
+Alexandre~A. Emerick and Albert~C. Reynolds.
+\newblock Ensemble smoother with multiple data assimilation.
+\newblock {\em Computers \& Geosciences}, 55:3--15, 2013.
+
+\bibitem{holzschuh2025p3d}
+Benjamin Holzschuh, Georg Kohl, Florian Redinger, and Nils Thuerey.
+\newblock {P3D}: Highly scalable {3D} neural surrogates for physics simulations
+  with global context.
+\newblock In {\em International Conference on Learning Representations}, 2026.
+
+\bibitem{maronga2020}
+Bj\"orn Maronga et~al.
+\newblock The {PALM} model system 6.0: a large-eddy simulation model for
+  atmospheric and oceanic boundary-layer flows.
+\newblock {\em Geoscientific Model Development}, 13(3):1335--1372, 2020.
+
+\end{thebibliography}

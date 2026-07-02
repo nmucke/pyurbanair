@@ -1,0 +1,147 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\bibstyle{elsarticle-num}
+\emailauthor{nmucke@gmail.com}{Nikolaj Mücke\corref {cor1}}
+\Newlabel{t1}{1}
+\Newlabel{cor1}{1}
+\citation{britter2003flow,xie2009modelling}
+\citation{emerick2013esmda,kikumoto2018bayesian,xue2017inverse}
+\citation{kaipio2005statistical,wirgin2004inverse}
+\Newlabel{a}{a}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:introduction}{{1}{1}{Introduction}{section.1}{}}
+\citation{kaipio2005statistical}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Time-varying parameterization for cross-model\ inflow. The previous-window posterior (orange) sets the value \emph  {and} slope of the next window's AR(2) prior ensemble (teal) at the seam; the trajectories then relax toward an external envelope $x_{\text  {ext}}\pm \Sigma _{\text  {ext}}$ (amber), re-opening the uncertainty. \textcolor {blue}{[use only if the paper studies the time-varying (dynamic) parameterization; otherwise drop.]}\relax }}{2}{figure.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:ar2_dynamic_params}{{1}{2}{Time-varying parameterization for \crossmodel \ inflow. The previous-window posterior (orange) sets the value \emph {and} slope of the next window's AR(2) prior ensemble (teal) at the seam; the trajectories then relax toward an external envelope $x_{\text {ext}}\pm \Sigma _{\text {ext}}$ (amber), re-opening the uncertainty. \note {use only if the paper studies the time-varying (dynamic) parameterization; otherwise drop.}\relax }{figure.caption.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Methodology}{2}{section.2}\protected@file@percent }
+\newlabel{sec:methodology}{{2}{2}{Methodology}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Problem formulation}{2}{subsection.2.1}\protected@file@percent }
+\newlabel{sec:problem}{{2.1}{2}{Problem formulation}{subsection.2.1}{}}
+\citation{emerick2013esmda,evensen2018analysis}
+\citation{chen1998lattice,vreman2004eddy}
+\citation{grylls2021udales,smagorinsky1963general}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Multi-window ES-MDA\ rollout over \ensuremath  {N_{w}}\ windows. At each window seam the parameter prior (amber) re-opens while the estimate (black) and posterior band (teal) stay continuous; the turbulent state (bottom) is re-simulated from the updated parameters, with only the initial condition carried across the seam. \textcolor {red}{[TODO: match window count \ensuremath  {N_{w}}\ to the runs.]}\relax }}{3}{figure.caption.2}\protected@file@percent }
+\newlabel{fig:windowed_rollout}{{2}{3}{Multi-window \esmda \ rollout over \Nw \ windows. At each window seam the parameter prior (amber) re-opens while the estimate (black) and posterior band (teal) stay continuous; the turbulent state (bottom) is re-simulated from the updated parameters, with only the initial condition carried across the seam. \todo {match window count \Nw \ to the runs.}\relax }{figure.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Ensemble smoother with multiple data assimilation}{3}{subsection.2.2}\protected@file@percent }
+\newlabel{sec:esmda}{{2.2}{3}{Ensemble smoother with multiple data assimilation}{subsection.2.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Forward models}{3}{subsection.2.3}\protected@file@percent }
+\newlabel{sec:forward}{{2.3}{3}{Forward models}{subsection.2.3}{}}
+\citation{maronga2020palm,deardorff1980stratocumulus}
+\citation{kaipio2005statistical,wirgin2004inverse}
+\citation{gaspari1999construction}
+\citation{houtekamer2001sequential,vossepoel2025inflation}
+\citation{gneiting2007strictly}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Observation operator}{4}{subsection.2.4}\protected@file@percent }
+\newlabel{sec:obsop}{{2.4}{4}{Observation operator}{subsection.2.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Model discrepancy}{4}{subsection.2.5}\protected@file@percent }
+\newlabel{sec:discrepancy}{{2.5}{4}{Model discrepancy}{subsection.2.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6}Regularization}{4}{subsection.2.6}\protected@file@percent }
+\newlabel{sec:regularization}{{2.6}{4}{Regularization}{subsection.2.6}{}}
+\citation{xie2006les,xie2009modelling}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Test cases: domain, grid, and boundary conditions per solver.\relax }}{5}{table.caption.5}\protected@file@percent }
+\newlabel{tab:cases}{{1}{5}{Test cases: domain, grid, and boundary conditions per solver.\relax }{table.caption.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Structural solver differences (discretization, closure, geometry representation, wall treatment) --- the source of model discrepancy.\relax }}{5}{table.caption.6}\protected@file@percent }
+\newlabel{tab:solver-differences}{{2}{5}{Structural solver differences (discretization, closure, geometry representation, wall treatment) --- the source of \discrepancy .\relax }{table.caption.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7}Evaluation metrics}{5}{subsection.2.7}\protected@file@percent }
+\newlabel{sec:metrics}{{2.7}{5}{Evaluation metrics}{subsection.2.7}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Experimental setup}{5}{section.3}\protected@file@percent }
+\newlabel{sec:setup}{{3}{5}{Experimental setup}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Urban test cases}{5}{subsection.3.1}\protected@file@percent }
+\newlabel{sec:setup:cases}{{3.1}{5}{Urban test cases}{subsection.3.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Truth $\times $ assimilation pairings ($3\times 3$; diagonal $=$ twin experiment\ baseline, off-diagonal $=$ cross-model).\relax }}{6}{table.caption.8}\protected@file@percent }
+\newlabel{tab:pairings}{{3}{6}{Truth $\times $ assimilation pairings ($3\times 3$; diagonal $=$ \twinexp \ baseline, off-diagonal $=$ \crossmodel ).\relax }{table.caption.8}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Parameters: priors, bounds, truth values, temporal model.\relax }}{6}{table.caption.9}\protected@file@percent }
+\newlabel{tab:priors}{{4}{6}{Parameters: priors, bounds, truth values, temporal model.\relax }{table.caption.9}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Cross-model experimental design}{6}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:setup:crossmodel}{{3.2}{6}{Cross-model experimental design}{subsection.3.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Estimated parameters and priors}{6}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:setup:params}{{3.3}{6}{Estimated parameters and priors}{subsection.3.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Observation network}{6}{subsection.3.4}\protected@file@percent }
+\newlabel{sec:setup:obs}{{3.4}{6}{Observation network}{subsection.3.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Sensitivity factors: swept values, baseline, hypothesis tested.\relax }}{7}{table.caption.11}\protected@file@percent }
+\newlabel{tab:study}{{5}{7}{Sensitivity factors: swept values, baseline, hypothesis tested.\relax }{table.caption.11}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Sensitivity study design}{7}{subsection.3.5}\protected@file@percent }
+\newlabel{sec:setup:study}{{3.5}{7}{Sensitivity study design}{subsection.3.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}Evaluation protocol}{7}{subsection.3.6}\protected@file@percent }
+\newlabel{sec:setup:eval}{{3.6}{7}{Evaluation protocol}{subsection.3.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Results}{7}{section.4}\protected@file@percent }
+\newlabel{sec:results}{{4}{7}{Results}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Twin-experiment baseline}{7}{subsection.4.1}\protected@file@percent }
+\newlabel{sec:results:twin}{{4.1}{7}{Twin-experiment baseline}{subsection.4.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Cross-model parameter estimation}{7}{subsection.4.2}\protected@file@percent }
+\newlabel{sec:results:cross}{{4.2}{7}{Cross-model parameter estimation}{subsection.4.2}{}}
+\citation{kaipio2005statistical,wirgin2004inverse}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Observation-space vs.\ parameter-space skill}{8}{subsection.4.3}\protected@file@percent }
+\newlabel{sec:results:obsvsparam}{{4.3}{8}{Observation-space vs.\ parameter-space skill}{subsection.4.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Role of the model-error knobs}{8}{subsection.4.4}\protected@file@percent }
+\newlabel{sec:results:knobs}{{4.4}{8}{Role of the model-error knobs}{subsection.4.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}Sensitivity study}{8}{subsection.4.5}\protected@file@percent }
+\newlabel{sec:results:sensitivity}{{4.5}{8}{Sensitivity study}{subsection.4.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6}Idealized vs.\ realistic geometry}{8}{subsection.4.6}\protected@file@percent }
+\newlabel{sec:results:cases}{{4.6}{8}{Idealized vs.\ realistic geometry}{subsection.4.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Discussion}{8}{section.5}\protected@file@percent }
+\newlabel{sec:discussion}{{5}{8}{Discussion}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Why same-model success does not transfer}{8}{subsection.5.1}\protected@file@percent }
+\newlabel{sec:discussion:whynotransfer}{{5.1}{8}{Why same-model success does not transfer}{subsection.5.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Identifiability and bias compensation}{9}{subsection.5.2}\protected@file@percent }
+\newlabel{sec:discussion:identifiability}{{5.2}{9}{Identifiability and bias compensation}{subsection.5.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Practical guidance}{9}{subsection.5.3}\protected@file@percent }
+\newlabel{sec:discussion:guidance}{{5.3}{9}{Practical guidance}{subsection.5.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Limitations and future work}{9}{subsection.5.4}\protected@file@percent }
+\newlabel{sec:discussion:limitations}{{5.4}{9}{Limitations and future work}{subsection.5.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Conclusion}{9}{section.6}\protected@file@percent }
+\newlabel{sec:conclusion}{{6}{9}{Conclusion}{section.6}{}}
+\bibdata{references}
+\bibcite{britter2003flow}{{1}{}{{}}{{}}}
+\bibcite{xie2009modelling}{{2}{}{{}}{{}}}
+\bibcite{emerick2013esmda}{{3}{}{{}}{{}}}
+\bibcite{kikumoto2018bayesian}{{4}{}{{}}{{}}}
+\bibcite{xue2017inverse}{{5}{}{{}}{{}}}
+\bibcite{kaipio2005statistical}{{6}{}{{}}{{}}}
+\bibcite{wirgin2004inverse}{{7}{}{{}}{{}}}
+\bibcite{evensen2018analysis}{{8}{}{{}}{{}}}
+\bibcite{chen1998lattice}{{9}{}{{}}{{}}}
+\bibcite{vreman2004eddy}{{10}{}{{}}{{}}}
+\bibcite{grylls2021udales}{{11}{}{{}}{{}}}
+\bibcite{smagorinsky1963general}{{12}{}{{}}{{}}}
+\bibcite{maronga2020palm}{{13}{}{{}}{{}}}
+\bibcite{deardorff1980stratocumulus}{{14}{}{{}}{{}}}
+\bibcite{gaspari1999construction}{{15}{}{{}}{{}}}
+\bibcite{houtekamer2001sequential}{{16}{}{{}}{{}}}
+\bibcite{vossepoel2025inflation}{{17}{}{{}}{{}}}
+\bibcite{gneiting2007strictly}{{18}{}{{}}{{}}}
+\bibcite{xie2006les}{{19}{}{{}}{{}}}
+\providecommand\NAT@force@numbers{}\NAT@force@numbers
+\newlabel{fig:solver:udales}{{3a}{13}{\pyudales : staggered C-grid with conservative cut-cell walls.\relax }{figure.caption.3}{}}
+\newlabel{sub@fig:solver:udales}{{a}{13}{\pyudales : staggered C-grid with conservative cut-cell walls.\relax }{figure.caption.3}{}}
+\newlabel{fig:solver:palm}{{3b}{13}{\pypalm : staircase (mask) topography with high-order upwind advection.\relax }{figure.caption.3}{}}
+\newlabel{sub@fig:solver:palm}{{b}{13}{\pypalm : staircase (mask) topography with high-order upwind advection.\relax }{figure.caption.3}{}}
+\newlabel{fig:solver:lbm}{{3c}{13}{\lbmmodel : collide-and-stream on a uniform lattice with bounce-back walls (2D D2Q9 sketch; the solver uses D3Q27).\relax }{figure.caption.3}{}}
+\newlabel{sub@fig:solver:lbm}{{c}{13}{\lbmmodel : collide-and-stream on a uniform lattice with bounce-back walls (2D D2Q9 sketch; the solver uses D3Q27).\relax }{figure.caption.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces The three solvers share the governing equations but differ in discretization, geometry representation, and near-wall treatment --- uDALES\ (a) cut cells, PALM\ (b) staircase masks, LBM\ (c) bounce-back on a uniform lattice. These structural differences are the source of the model discrepancy\ probed by the cross-model\ experiments; see Table\nobreakspace  {}\ref {tab:solver-differences}.\relax }}{13}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:solver_numerics}{{3}{13}{The three solvers share the governing equations but differ in discretization, geometry representation, and near-wall treatment --- \pyudales \ (a) cut cells, \pypalm \ (b) staircase masks, \lbmmodel \ (c) bounce-back on a uniform lattice. These structural differences are the source of the \discrepancy \ probed by the \crossmodel \ experiments; see \tabref {tab:solver-differences}.\relax }{figure.caption.3}{}}
+\newlabel{fig:obsop:spatial}{{4a}{14}{Spatial: interpolation from grid nodes to $\Nd $ sensors.\relax }{figure.caption.4}{}}
+\newlabel{sub@fig:obsop:spatial}{{a}{14}{Spatial: interpolation from grid nodes to $\Nd $ sensors.\relax }{figure.caption.4}{}}
+\newlabel{fig:obsop:temporal}{{4b}{14}{Temporal: each sensor signal is averaged over fixed intervals; one bin mean becomes one observation.\relax }{figure.caption.4}{}}
+\newlabel{sub@fig:obsop:temporal}{{b}{14}{Temporal: each sensor signal is averaged over fixed intervals; one bin mean becomes one observation.\relax }{figure.caption.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces The observation operator \ensuremath  {\mathcal  {H}}\ maps the model field to the data vector \ensuremath  {\boldsymbol  {d}}\ in two steps: spatial interpolation to street-level sensors (a) and temporal averaging over intervals (b). Averaging suppresses the turbulent fluctuations so that ES-MDA\ targets the mean forcing. \textcolor {red}{[TODO: state $\ensuremath  {N_{d}}$, sensor count, interval length, and window relation.]}\relax }}{14}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:obs_operator}{{4}{14}{The observation operator \Hobs \ maps the model field to the data vector \obs \ in two steps: spatial interpolation to street-level sensors (a) and temporal averaging over intervals (b). Averaging suppresses the turbulent fluctuations so that \esmda \ targets the mean forcing. \todo {state $\Nd $, sensor count, interval length, and window relation.}\relax }{figure.caption.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Cross-model experimental design. A \emph  {truth model}\ (orange, top) generates synthetic observations $\ensuremath  {\boldsymbol  {d}}$ that are corrupted with noise and fed to ES-MDA; the \emph  {assimilation model}\ (teal, bottom) is a \emph  {different} solver and never sees the data-generating model, so its structural model discrepancy\ is real and irreducible. This is the setup that avoids the inverse crime\ of same-model twin experiment{s}. \textcolor {red}{[TODO: confirm ensemble size and window count shown.]}\relax }}{14}{figure.caption.7}\protected@file@percent }
+\newlabel{fig:cross_model_setup}{{5}{14}{Cross-model experimental design. A \truthmodel \ (orange, top) generates synthetic observations $\obs $ that are corrupted with noise and fed to \esmda ; the \assimmodel \ (teal, bottom) is a \emph {different} solver and never sees the data-generating model, so its structural \discrepancy \ is real and irreducible. This is the setup that avoids the \invcrime \ of same-model \twinexp {s}. \todo {confirm ensemble size and window count shown.}\relax }{figure.caption.7}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces Sensor network for the two cases.\relax }}{14}{figure.caption.10}\protected@file@percent }
+\newlabel{fig:sensors}{{6}{14}{Sensor network for the two cases.\relax }{figure.caption.10}{}}
+\gdef \@abspage@last{14}
