@@ -337,16 +337,25 @@ def test_sdf_features_false_is_byte_identical() -> None:
     assert a.in_channels == b.in_channels == N_STATE + 1
     assert set(a.state_dict()) == set(b.state_dict())
     b.load_state_dict(a.state_dict())
-    # Fixed-seed forward is deterministic and unchanged by the (off) flag.
-    torch.manual_seed(0)
-    state, params, geometry, _ = _inputs(batch=2)
+
+
+def test_sdf_off_forward_matches_pre_change_golden() -> None:
+    """The sdf-off forward reproduces a golden output captured from the parent
+    P3D (commit cc19a62, before this branch touched p3d.py) -- a regression
+    guard on the shared, unchanged code path (plan §7.3a). Weight init is
+    deterministic under the seed because the sdf-off ctor draws no extra RNG, so
+    the same seed yields the same weights in the current and parent P3D.
+    Regenerate the fixture from the parent code only if the disabled path ever
+    legitimately changes."""
+    torch.manual_seed(1234)
+    model = _tiny_p3d().eval()  # sdf off
+    state, params, geometry, _ = _inputs(batch=2)  # generator-seeded, seed=0
     with torch.no_grad():
-        torch.testing.assert_close(
-            a(state, params, geometry),
-            b(state, params, geometry),
-            rtol=0.0,
-            atol=0.0,
-        )
+        out = model(state, params, geometry)
+    golden = np.load(
+        pathlib.Path(__file__).resolve().parent / "fixtures" / "p3d_sdf_off_golden.npz"
+    )["out"]
+    torch.testing.assert_close(out, torch.from_numpy(golden), rtol=1e-5, atol=1e-5)
 
 
 def test_sdf_features_true_widens_stem_and_accepts_provided() -> None:
@@ -396,9 +405,17 @@ def test_sdf_self_compute_caches_once_and_matches_provided(monkeypatch) -> None:
     assert calls["n"] == 1
     torch.testing.assert_close(out1, out2, rtol=0.0, atol=0.0)
 
-    # A different geometry tensor (new identity) forces a recompute.
+    # A distinct object with IDENTICAL content reuses the cache (content
+    # revalidation via torch.equal) -- no recompute.
     with torch.no_grad():
         model(state, params, geometry.clone())
+    assert calls["n"] == 1
+
+    # A DIFFERENT-content geometry forces a recompute.
+    other = geometry.clone()
+    other[:, 0, 0, 0] = 0.0
+    with torch.no_grad():
+        model(state, params, other)
     assert calls["n"] == 2
 
     # Self-computed output equals the explicitly-provided-features path.
@@ -406,6 +423,40 @@ def test_sdf_self_compute_caches_once_and_matches_provided(monkeypatch) -> None:
     with torch.no_grad():
         out_provided = model(state, params, geometry.clone(), geom_features=feat)
     torch.testing.assert_close(out1, out_provided, rtol=1e-5, atol=1e-5)
+
+
+def test_sdf_cache_no_stale_alias_on_content_change() -> None:
+    """The cache holds a reference to its keyed geometry (so a freed address
+    can't be recycled into a silent stale hit), and a distinct geometry with
+    the SAME shape+device but DIFFERENT mask content returns *its* features,
+    never the previously cached ones -- the exact aliasing failure a bare
+    data_ptr key would hit on a fixed domain."""
+    model = _tiny_p3d(sdf_features=True).eval()
+    state = torch.randn(2, N_STATE, NZ, NY, NX)
+    params = torch.randn(2, N_PARAMS)
+
+    m1 = torch.ones(NZ, NY, NX)
+    m1[:, 3, 3] = 0.0
+    g1 = m1.unsqueeze(0).expand(2, -1, -1, -1).contiguous()
+    with torch.no_grad():
+        out1 = model(state, params, g1)
+    # The cache keeps g1 alive -> its storage/address cannot be recycled.
+    assert model._sdf_cache[0] is g1
+
+    m2 = torch.ones(NZ, NY, NX)
+    m2[:, 6, 6] = 0.0  # different obstacle cell -> different features
+    g2 = m2.unsqueeze(0).expand(2, -1, -1, -1).contiguous()
+    del g1
+    with torch.no_grad():
+        out2 = model(state, params, g2)
+
+    # out2 must be g2's features (compared against the independent helper path),
+    # not g1's stale cached ones.
+    feat2 = _batched_sdf(g2, clamp=model.sdf_clamp_cells)
+    with torch.no_grad():
+        out2_provided = model(state, params, g2.clone(), geom_features=feat2)
+    torch.testing.assert_close(out2, out2_provided, rtol=1e-5, atol=1e-5)
+    assert not torch.allclose(out1, out2)
 
 
 def test_sdf_shared_mask_shortcut_vs_distinct_masks() -> None:

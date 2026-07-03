@@ -22,13 +22,13 @@ Mapping the upstream model onto this contract
 * **Parameters.** The upstream model *does* expose native conditioning, but only
   through a single scalar per sample (``pde_parameters`` of shape ``(B,)``,
   sinusoidally embedded and applied as adaLN modulation in every block). It has
-  no native length-``P`` parameter-vector input. So by default
-  (``param_conditioning="channels"``) we follow the proven pattern of the other
-  architectures here: z-score the inflow params and broadcast each as a constant
-  input channel. ``param_conditioning="native"`` instead routes the params
-  (reduced to one scalar via a learned linear when ``P > 1``) through the
-  upstream ``pde_parameters`` adaLN path; this is lower-capacity for multi-param
-  conditioning and is offered only as an experiment knob.
+  no native length-``P`` parameter-vector input. By default
+  (``param_conditioning="native"``) the params (reduced to one scalar via a
+  learned linear when ``P > 1``) are routed through this upstream
+  ``pde_parameters`` adaLN path. ``param_conditioning="channels"`` instead
+  follows the pattern of the other architectures here: z-score the inflow params
+  and broadcast each as a constant input channel (higher-capacity for
+  multi-param conditioning, at the cost of ``P`` extra stem channels).
 * **Spatial size.** The upstream window attention self-pads internally, but the
   U-structure downsamples 4x in the wrapper encoder and 4x in the backbone, so
   the input ``(D, H, W)`` must be divisible by 16. Non-periodic axes are
@@ -93,10 +93,10 @@ class P3D(nn.Module):
         circularly along these axes. A periodic axis must already be divisible by
         16 (it cannot be zero-padded without corrupting the wrap).
     param_conditioning:
-        ``"channels"`` (default): z-scored params broadcast as constant input
-        channels. ``"native"``: params routed through the upstream scalar
+        ``"native"`` (default): params routed through the upstream scalar
         ``pde_parameters`` adaLN conditioning (reduced to one scalar via a
-        learned linear when ``P > 1``).
+        learned linear when ``P > 1``). ``"channels"``: z-scored params
+        broadcast as constant input channels.
     normalize:
         Standardise state and params with buffered training statistics (install
         via :meth:`set_normalization`); the output is mapped back to physical
@@ -204,10 +204,13 @@ class P3D(nn.Module):
         self.n_geom_feature_channels = (
             N_SDF_FEATURE_CHANNELS if self.sdf_features_enabled else 0
         )
-        # Size-1 inference cache for the self-computed features, keyed on the
-        # caller's geometry-tensor identity. A plain attribute (NOT a buffer) so
-        # it never enters the state dict. See ``_sdf_features_for``.
-        self._sdf_cache: tuple | None = None
+        # Size-1 inference cache for the self-computed features: a
+        # ``(geometry_tensor, features)`` pair. Holding a reference to the keyed
+        # geometry tensor keeps its storage alive, so its address can't be
+        # recycled by a later allocation and alias a stale hit (see
+        # ``_sdf_features_for``). A plain attribute (NOT a buffer) so it never
+        # enters the state dict.
+        self._sdf_cache: tuple[torch.Tensor, torch.Tensor] | None = None
         # ``extra_in_channels`` are raw input-only channels appended to the stem
         # input AFTER geometry (and any param channels): the domain-decomposition
         # wrapper feeds the prolonged coarse context + positional encodings in
@@ -339,12 +342,21 @@ class P3D(nn.Module):
     def _sdf_features_for(self, geometry: torch.Tensor) -> torch.Tensor:
         """Fetch (or compute-and-cache) the SDF features for ``geometry``.
 
-        Keyed on the geometry tensor's *identity* -- ``(data_ptr, shape,
-        device)``. ``NeuralSurrogateForwardModel.rollout_batched`` builds the
-        stacked geometry tensor **once** and passes the *same object* to every
-        step, so step 1 computes the EDT and steps ``2..T`` hit the cache. The
-        cache is size-1 (a rollout has a single geometry; a new key evicts the
-        old), mirroring ``UPT._geom_cache``.
+        ``NeuralSurrogateForwardModel.rollout_batched`` builds the stacked
+        geometry tensor **once** and passes the *same object* to every step, so
+        step 1 computes the EDT and steps ``2..T`` hit the cache. The cache is
+        size-1 (a rollout has a single geometry; a new key evicts the old).
+
+        Two-tier lookup, both safe against ``data_ptr`` aliasing:
+
+        * **identity** (``is``) -- the hot path for the rollout's stable tensor
+          object, O(1). The cache *holds a reference* to that object, so its
+          storage stays alive and its address cannot be recycled underneath us.
+        * **content** (``torch.equal``) -- a distinct but identical mask (e.g. a
+          freshly built object for the same domain) reuses the cache after one
+          off-hot-path compare. This is the actual correctness guarantee against
+          a new mask that merely happens to reuse a freed address, and mirrors
+          ``UPT._geom_cache``'s revalidation (``upt.py``).
 
         This runs ``scipy``'s EDT, so it must **never** be called from inside a
         ``torch.compile``'d region. It isn't: training features always arrive
@@ -352,12 +364,19 @@ class P3D(nn.Module):
         the inference rollout is uncompiled. If an inference rollout is ever
         compiled, this lookup must sit in a thin uncompiled wrapper.
         """
-        key = (geometry.data_ptr(), tuple(geometry.shape), geometry.device)
-        if self._sdf_cache is not None and self._sdf_cache[0] == key:
-            cached: torch.Tensor = self._sdf_cache[1]
-            return cached
+        cached = self._sdf_cache
+        if cached is not None:
+            cached_geom, feat = cached
+            if cached_geom is geometry:
+                return feat
+            if (
+                cached_geom.shape == geometry.shape
+                and cached_geom.device == geometry.device
+                and torch.equal(cached_geom, geometry)
+            ):
+                return feat
         feat = self._compute_sdf_features(geometry)
-        self._sdf_cache = (key, feat)
+        self._sdf_cache = (geometry, feat)
         return feat
 
     def _compute_sdf_features(self, geometry: torch.Tensor) -> torch.Tensor:
