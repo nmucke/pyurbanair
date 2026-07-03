@@ -37,6 +37,12 @@ libs/pypalm/*.pyc
 /*.stl
 /*.STL
 
+# UrbanTALES geometry dataset — bulk data (~350 MB rasters + ~600 MB STLs),
+# regenerable via examples/geometries/{download_urbantales_geometries,rasters_to_stl}.py.
+# The scripts stay tracked; the downloaded/derived data does not.
+examples/geometries/raw/
+examples/geometries/processed/
+
 # Figures
 *.pdf
 *.png
