@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import torch
-
 from neural_surrogates.training.base import BaseTraining
 
 
@@ -24,7 +23,7 @@ class Trainer(BaseTraining):
         geometry: torch.Tensor,
     ) -> torch.Tensor:
         K = params.shape[1]
-        pred = self.model(state, params[:, K - 1, :], geometry)
+        pred = self._model_forward(state, params[:, K - 1, :], geometry)
         if self.mask_loss:
             # uDALES targets carry junk values inside obstacles, which would
             # otherwise be penalised against the model's (masked) zero output.

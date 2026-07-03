@@ -15,11 +15,12 @@ from typing import Sequence
 import numpy as np
 import torch
 import xarray as xr
+from neural_surrogates.sdf import sdf_features as compute_sdf_features
 from torch.utils.data import Dataset, default_collate
 
 
 def transition_collate(batch: list[dict]) -> dict:
-    """Collate transition items, shipping the geometry mask only once.
+    """Collate transition items, shipping the shared per-domain tensors once.
 
     Every :class:`TransitionDataset` item carries the *same* geometry tensor
     (the domain is fixed), so the default collate would stack ``B`` identical
@@ -28,11 +29,21 @@ def transition_collate(batch: list[dict]) -> dict:
     ``(1, *grid)`` rather than ``(B, *grid)``. Consumers index
     ``batch['geometry'][0]`` and broadcast (see ``BaseTraining._prepare_batch``),
     so this is a drop-in for the per-sample form with B-1 fewer copies.
+
+    The optional ``geom_features`` (SDF + ∇SDF channels) is shipped the same way
+    -- once as ``(1, 4, *grid)`` -- when the dataset was built with
+    ``sdf_features=True``.
     """
     geometry = batch[0]["geometry"]
-    rest = [{k: v for k, v in item.items() if k != "geometry"} for item in batch]
+    shared = {"geometry"}
+    has_features = "geom_features" in batch[0]
+    if has_features:
+        shared.add("geom_features")
+    rest = [{k: v for k, v in item.items() if k not in shared} for item in batch]
     collated = default_collate(rest)
     collated["geometry"] = geometry.unsqueeze(0)
+    if has_features:
+        collated["geom_features"] = batch[0]["geom_features"].unsqueeze(0)
     return collated
 
 
@@ -56,6 +67,9 @@ class TransitionDataset(Dataset):
       scalar params are broadcast along time.
     - ``geometry``   — ``(*grid,)``    binary mask, `1` = fluid, `0` = obstacle
       (buildings + ground). Same tensor for every item.
+    - ``geom_features`` — ``(4, *grid)``  SDF + ∇SDF channels, present only when
+      built with ``sdf_features=True``; same tensor for every item (computed
+      once at init from the mask, see :func:`neural_surrogates.sdf.sdf_features`).
 
     Geometry is sourced from the state file's ``geometry_var`` variable
     (``"blanking"`` by default — the per-cell obstacle indicator, inverted
@@ -90,11 +104,11 @@ class TransitionDataset(Dataset):
         cache: bool = False,
         dtype: torch.dtype = torch.float32,
         pushforward_steps: int = 1,
+        sdf_features: bool = False,
+        sdf_clamp_cells: float = 32.0,
     ) -> None:
         if pushforward_steps < 1:
-            raise ValueError(
-                f"pushforward_steps must be >= 1, got {pushforward_steps}"
-            )
+            raise ValueError(f"pushforward_steps must be >= 1, got {pushforward_steps}")
         self.root = Path(root_dir)
         self.split = split
         self.state_vars = tuple(state_vars)
@@ -102,6 +116,12 @@ class TransitionDataset(Dataset):
         self.cache = cache
         self.dtype = dtype
         self.pushforward_steps = int(pushforward_steps)
+        # Optional SDF + ∇SDF geometry features (see neural_surrogates.sdf).
+        # Computed once at init from the (single, shared) geometry mask and
+        # shipped once per batch like the mask itself; off by default so items
+        # stay byte-identical to the pre-feature dataset.
+        self.sdf_features = bool(sdf_features)
+        self.sdf_clamp_cells = float(sdf_clamp_cells)
 
         state_dir = self.root / "state" / split
         param_dir = self.root / "param" / split
@@ -144,6 +164,14 @@ class TransitionDataset(Dataset):
         self.set_pushforward_steps(self.pushforward_steps)
 
         self._geometry = self._load_geometry(self._state_files[0])
+        # One EDT per geometry, at init (never per __getitem__ / per step). When
+        # the multi-root dataset lands this becomes per-trajectory alongside the
+        # per-trajectory mask; nothing else here changes.
+        self._geom_features: torch.Tensor | None = (
+            compute_sdf_features(self._geometry, clamp_cells=self.sdf_clamp_cells)
+            if self.sdf_features
+            else None
+        )
         self._state_cache: dict[int, xr.Dataset] | None = None
 
     def set_pushforward_steps(self, pushforward_steps: int) -> None:
@@ -184,9 +212,7 @@ class TransitionDataset(Dataset):
         param_vars: Sequence[str] | None,
     ) -> tuple[torch.Tensor, tuple[str, ...]]:
         with xr.open_dataset(param_path) as ds:
-            names = (
-                tuple(param_vars) if param_vars is not None else tuple(ds.data_vars)
-            )
+            names = tuple(param_vars) if param_vars is not None else tuple(ds.data_vars)
             cols = []
             for name in names:
                 arr = np.asarray(ds[name].values)
@@ -216,9 +242,7 @@ class TransitionDataset(Dataset):
                     da = da.isel(time=0)
                 obstacle = np.asarray(da.values, dtype=np.float64)
                 return torch.from_numpy(1.0 - obstacle).to(self.dtype)
-            channels = [
-                np.asarray(ds[v].isel(time=0).values) for v in self.state_vars
-            ]
+            channels = [np.asarray(ds[v].isel(time=0).values) for v in self.state_vars]
         stacked = np.stack(channels, axis=0)
         nonzero = torch.from_numpy(stacked).ne(0).any(dim=0)
         return nonzero.to(self.dtype)
@@ -252,9 +276,12 @@ class TransitionDataset(Dataset):
             [np.asarray(snap[v].values) for v in self.state_vars], axis=1
         )
         pair = torch.from_numpy(channels).to(self.dtype)
-        return {
+        item = {
             "state_n": pair[0],
             "state_next": pair[1],
             "params_n": self._params[traj][t : t + K],
             "geometry": self._geometry,
         }
+        if self._geom_features is not None:
+            item["geom_features"] = self._geom_features
+        return item

@@ -35,8 +35,8 @@ defaults:
 # run). The architecture must match. Set to null to train from scratch.
 # Example: init_weights_path=model_weights/unet_convnext_medium/weights.pt
 # init_weights_path: model_weights/unet_convnext_medium/weights.pt
-init_weights_path: model_weights/p3d_barcelona/weights.pt
-# init_weights_path: null
+# init_weights_path: model_weights/p3d_barcelona/weights.pt
+init_weights_path: null
 
 # Unified trainer config. neural_surrogates.Trainer (generic full-grid MSE /
 # pushforward) and neural_surrogates.PatchTrainer (patch-based Eq (9) DD
@@ -60,7 +60,7 @@ trainer:
   amp_dtype: bfloat16
   # torch.compile the model (static conv stack -> good fusion win). First
   # batch pays one-off compilation latency.
-  compile_model: true
+  compile_model: false
   # channels-last-3d memory layout for cuDNN kernel selection under
   # autocast. A/B this on the training GPU; correctness is unaffected.
   channels_last: false
@@ -76,8 +76,8 @@ trainer:
   # `dataset.pushforward_steps`. The Eq (9) terms (PatchTrainer) are evaluated
   # on the final rollout step. Set the cadence to null to train at a fixed
   # horizon (the original pushforward behavior).
-  pushforward_epochs_per_step: 15
-  pushforward_start_steps: 2
+  pushforward_epochs_per_step: 10
+  pushforward_start_steps: 1
   # Warmup + cosine LR schedule: ramp from `lr_warmup_start` up to the
   # optimizer's peak LR over `lr_warmup_epochs`, then cosine-anneal to `lr_min`
   # over the remaining epochs. Set `lr_warmup_epochs` to null to disable.
@@ -122,8 +122,8 @@ dataset:
   _target_: neural_surrogates.TransitionDataset
   # _target_: neural_surrogates.PatchTransitionDataset
   # root_dir: training_data/pyudales_medium
-  # root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_medium
-  root_dir: /export/scratch1/ntm/pyurbanair/training_data/pypalm_barcelona
+  root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_medium
+  # root_dir: /export/scratch1/ntm/pyurbanair/training_data/pypalm_barcelona
   state_vars:
     - u
     - v
@@ -132,6 +132,15 @@ dataset:
   cache: false
   dtype: float32
   pushforward_steps: 7
+  # SDF + ∇SDF geometry features (see neural_surrogates.sdf): when true, the
+  # dataset ships 4 extra channels (clamped signed distance + unit gradient)
+  # alongside the `blanking` mask, computed once per geometry at init. Must be
+  # paired with an architecture built with `sdf_features=true` (the train script
+  # cross-checks this, and that the two `sdf_clamp_cells` agree). Default false
+  # keeps items byte-identical to the pre-feature dataset.
+  sdf_features: true
+  # Clamp radius L (in cells) for the normalised SDF channel: clip(sdf, -L, L)/L.
+  sdf_clamp_cells: 32
 
 dataloader:
   _target_: torch.utils.data.DataLoader
@@ -159,4 +168,3 @@ dataloader:
   collate_fn:
     _target_: neural_surrogates.datasets.transition.transition_collate
     _partial_: true
-

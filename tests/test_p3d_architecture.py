@@ -26,10 +26,9 @@ pytest.importorskip("p3d_surrogate")
 trimesh = pytest.importorskip("trimesh")
 
 from hydra.utils import instantiate
-from omegaconf import OmegaConf
-
-from neural_surrogates import NeuralSurrogateForwardModel, P3D
+from neural_surrogates import P3D, NeuralSurrogateForwardModel, sdf_features
 from neural_surrogates.architectures import P3D as P3D_from_architectures
+from omegaconf import OmegaConf
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
@@ -135,12 +134,8 @@ def test_batched_matches_per_member() -> None:
     with torch.no_grad():
         batched = model(state, params, geometry)
         for b in range(3):
-            single = model(
-                state[b : b + 1], params[b : b + 1], geometry[b : b + 1]
-            )
-            torch.testing.assert_close(
-                batched[b : b + 1], single, rtol=1e-4, atol=1e-4
-            )
+            single = model(state[b : b + 1], params[b : b + 1], geometry[b : b + 1])
+            torch.testing.assert_close(batched[b : b + 1], single, rtol=1e-4, atol=1e-4)
 
 
 # -- 5. differentiable w.r.t. state and params ------------------------------
@@ -220,7 +215,7 @@ def test_native_param_conditioning_path() -> None:
 
 
 def test_channels_mode_input_channels() -> None:
-    model = _tiny_p3d()
+    model = _tiny_p3d(param_conditioning="channels")
     assert model.in_channels == N_STATE + 1 + N_PARAMS
 
 
@@ -232,7 +227,8 @@ def test_extra_in_channels_zero_is_byte_identical() -> None:
     dict) byte-identical to a standard P3D, so existing checkpoints load."""
     a = _tiny_p3d()
     b = _tiny_p3d(extra_in_channels=0)
-    assert a.in_channels == N_STATE + 1 + N_PARAMS
+    # Default param_conditioning is "native" -> no per-param input channels.
+    assert a.in_channels == N_STATE + 1
     assert set(a.state_dict()) == set(b.state_dict())
     # state-dict tensor shapes must match exactly (load_state_dict succeeds).
     b.load_state_dict(a.state_dict())
@@ -248,7 +244,8 @@ def test_extra_in_channels_guard() -> None:
         plain(state, params, geometry, extra=torch.randn(2, 4, NZ, NY, NX))
     # extra_in_channels>0 net requires extra, and validates its channel count.
     widened = _tiny_p3d(extra_in_channels=4).eval()
-    assert widened.in_channels == N_STATE + 1 + N_PARAMS + 4
+    # native default -> N_STATE + geometry(1) + extra(4), no param channels.
+    assert widened.in_channels == N_STATE + 1 + 4
     with pytest.raises(ValueError):
         widened(state, params, geometry)  # missing extra
     with pytest.raises(ValueError):
@@ -278,16 +275,26 @@ def test_p3d_as_domain_decomposed_fine_and_coarse_net() -> None:
     torch.manual_seed(0)
 
     def p3d_node() -> dict:
-        return dict(_target_="neural_surrogates.P3D", **TINY,
-                    normalize=True, predict_residual=True)
+        return dict(
+            _target_="neural_surrogates.P3D",
+            **TINY,
+            normalize=True,
+            predict_residual=True,
+        )
 
     # interior 8 + 2*halo 4 -> 16-cell fine blocks (no P3D padding); coarse grid
     # = grid / 2. y is periodic (16 % 8 == 0).
     dd = DomainDecomposed(
         n_state_channels=N_STATE,
         n_params=N_PARAMS,
-        decomposition=dict(interior_size=8, halo=4, taper=2, coarsen_factor=2,
-                           n_pos=3, periodic_axes=(False, True, False)),
+        decomposition=dict(
+            interior_size=8,
+            halo=4,
+            taper=2,
+            coarsen_factor=2,
+            n_pos=3,
+            periodic_axes=(False, True, False),
+        ),
         fine_net=p3d_node(),
         coarse_net=p3d_node(),
     )
@@ -305,6 +312,192 @@ def test_p3d_as_domain_decomposed_fine_and_coarse_net() -> None:
     assert merged2.shape == merged.shape
     assert {"coarse_pred", "patch_pred", "context", "num_patches", "dd"} <= set(info)
     merged2.sum().backward()  # gradients flow through both sub-nets
+
+
+# -- 8c. SDF geometry features (sdf_features) -------------------------------
+
+
+def _batched_sdf(geometry: torch.Tensor, clamp: float = 32.0) -> torch.Tensor:
+    """(B, 4, *grid) features for a (B, *grid) mask, via the shared helper."""
+    return torch.stack(
+        [
+            sdf_features(geometry[b], clamp_cells=clamp)
+            for b in range(geometry.shape[0])
+        ],
+        dim=0,
+    )
+
+
+def test_sdf_features_false_is_byte_identical() -> None:
+    """Default sdf_features=False leaves in_channels and the state dict
+    byte-identical to a model built without the flag (repo no-op rule)."""
+    a = _tiny_p3d()  # flag absent -> default False
+    b = _tiny_p3d(sdf_features=False)
+    assert a.n_geom_feature_channels == 0
+    assert a.in_channels == b.in_channels == N_STATE + 1
+    assert set(a.state_dict()) == set(b.state_dict())
+    b.load_state_dict(a.state_dict())
+
+
+def test_sdf_off_forward_matches_pre_change_golden() -> None:
+    """The sdf-off forward reproduces a golden output captured from the parent
+    P3D (commit cc19a62, before this branch touched p3d.py) -- a regression
+    guard on the shared, unchanged code path (plan §7.3a). Weight init is
+    deterministic under the seed because the sdf-off ctor draws no extra RNG, so
+    the same seed yields the same weights in the current and parent P3D.
+    Regenerate the fixture from the parent code only if the disabled path ever
+    legitimately changes."""
+    torch.manual_seed(1234)
+    model = _tiny_p3d().eval()  # sdf off
+    state, params, geometry, _ = _inputs(batch=2)  # generator-seeded, seed=0
+    with torch.no_grad():
+        out = model(state, params, geometry)
+    golden = np.load(
+        pathlib.Path(__file__).resolve().parent / "fixtures" / "p3d_sdf_off_golden.npz"
+    )["out"]
+    torch.testing.assert_close(out, torch.from_numpy(golden), rtol=1e-5, atol=1e-5)
+
+
+def test_sdf_features_true_widens_stem_and_accepts_provided() -> None:
+    """sdf_features=True adds 4 stem channels and consumes provided features."""
+    model = _tiny_p3d(sdf_features=True).eval()
+    assert model.n_geom_feature_channels == 4
+    assert model.in_channels == N_STATE + 1 + 4  # native default: no param chans
+    state, params, geometry, mask = _inputs(batch=2)
+    feat = _batched_sdf(geometry)
+    assert feat.shape == (2, 4, NZ, NY, NX)
+    with torch.no_grad():
+        out = model(state, params, geometry, geom_features=feat)
+    assert out.shape == (2, N_STATE, NZ, NY, NX)
+    assert torch.isfinite(out).all()
+    # Output hard-masking still holds with the extra channels.
+    assert torch.all(out[:, :, mask == 0] == 0.0)
+    # Wrong channel count is rejected.
+    with pytest.raises(ValueError):
+        model(state, params, geometry, geom_features=feat[:, :3])
+    # A model without the flag rejects stray features.
+    with pytest.raises(ValueError):
+        _tiny_p3d().eval()(state, params, geometry, geom_features=feat)
+
+
+def test_sdf_self_compute_caches_once_and_matches_provided(monkeypatch) -> None:
+    """Inference self-compute: the EDT runs once for a stable geometry object
+    (steps 2..T hit the cache), a new geometry tensor recomputes, and the
+    self-computed output equals the explicitly-provided-features path."""
+    import neural_surrogates.architectures.p3d as p3d_mod
+
+    calls = {"n": 0}
+    real = p3d_mod.compute_sdf_features
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(p3d_mod, "compute_sdf_features", counting)
+
+    model = _tiny_p3d(sdf_features=True).eval()
+    state, params, geometry, _ = _inputs(batch=2)  # shared mask across batch
+    with torch.no_grad():
+        out1 = model(state, params, geometry)  # computes (member 0 only)
+        out2 = model(state, params, geometry)  # same tensor object -> cache hit
+    # Shared mask -> one EDT for member 0, reused for member 1; second call is a
+    # pure cache hit. So exactly one compute across both forwards.
+    assert calls["n"] == 1
+    torch.testing.assert_close(out1, out2, rtol=0.0, atol=0.0)
+
+    # A distinct object with IDENTICAL content reuses the cache (content
+    # revalidation via torch.equal) -- no recompute.
+    with torch.no_grad():
+        model(state, params, geometry.clone())
+    assert calls["n"] == 1
+
+    # A DIFFERENT-content geometry forces a recompute.
+    other = geometry.clone()
+    other[:, 0, 0, 0] = 0.0
+    with torch.no_grad():
+        model(state, params, other)
+    assert calls["n"] == 2
+
+    # Self-computed output equals the explicitly-provided-features path.
+    feat = _batched_sdf(geometry, clamp=model.sdf_clamp_cells)
+    with torch.no_grad():
+        out_provided = model(state, params, geometry.clone(), geom_features=feat)
+    torch.testing.assert_close(out1, out_provided, rtol=1e-5, atol=1e-5)
+
+
+def test_sdf_cache_no_stale_alias_on_content_change() -> None:
+    """The cache holds a reference to its keyed geometry (so a freed address
+    can't be recycled into a silent stale hit), and a distinct geometry with
+    the SAME shape+device but DIFFERENT mask content returns *its* features,
+    never the previously cached ones -- the exact aliasing failure a bare
+    data_ptr key would hit on a fixed domain."""
+    model = _tiny_p3d(sdf_features=True).eval()
+    state = torch.randn(2, N_STATE, NZ, NY, NX)
+    params = torch.randn(2, N_PARAMS)
+
+    m1 = torch.ones(NZ, NY, NX)
+    m1[:, 3, 3] = 0.0
+    g1 = m1.unsqueeze(0).expand(2, -1, -1, -1).contiguous()
+    with torch.no_grad():
+        out1 = model(state, params, g1)
+    # The cache keeps g1 alive -> its storage/address cannot be recycled.
+    assert model._sdf_cache[0] is g1
+
+    m2 = torch.ones(NZ, NY, NX)
+    m2[:, 6, 6] = 0.0  # different obstacle cell -> different features
+    g2 = m2.unsqueeze(0).expand(2, -1, -1, -1).contiguous()
+    del g1
+    with torch.no_grad():
+        out2 = model(state, params, g2)
+
+    # out2 must be g2's features (compared against the independent helper path),
+    # not g1's stale cached ones.
+    feat2 = _batched_sdf(g2, clamp=model.sdf_clamp_cells)
+    with torch.no_grad():
+        out2_provided = model(state, params, g2.clone(), geom_features=feat2)
+    torch.testing.assert_close(out2, out2_provided, rtol=1e-5, atol=1e-5)
+    assert not torch.allclose(out1, out2)
+
+
+def test_sdf_shared_mask_shortcut_vs_distinct_masks() -> None:
+    """The batched self-compute reuses member 0 for identical masks and falls
+    back to a per-member EDT when they differ."""
+    model = _tiny_p3d(sdf_features=True).eval()
+    state = torch.randn(2, N_STATE, NZ, NY, NX)
+    params = torch.randn(2, N_PARAMS)
+    # Two DIFFERENT masks in the batch -> per-member features.
+    m0 = torch.ones(NZ, NY, NX)
+    m0[:, 4, 4] = 0.0
+    m1 = torch.ones(NZ, NY, NX)
+    m1[:, 2, 6] = 0.0
+    geometry = torch.stack([m0, m1], dim=0)
+    with torch.no_grad():
+        out = model(state, params, geometry)
+    assert out.shape == (2, N_STATE, NZ, NY, NX)
+    assert torch.isfinite(out).all()
+    # Each member's obstacle column is zeroed by its own mask.
+    assert torch.all(out[0, :, m0 == 0] == 0.0)
+    assert torch.all(out[1, :, m1 == 0] == 0.0)
+
+
+def test_sdf_preset_comment_knob_instantiates() -> None:
+    """A p3d preset with sdf_features enabled builds a widened model."""
+    cfg = OmegaConf.load(PRESET_DIR / "tiny.yaml")
+    cfg.sdf_features = True
+    model = instantiate(cfg, n_state_channels=N_STATE, n_params=N_PARAMS)
+    assert model.n_geom_feature_channels == 4
+
+
+def test_p3d_sdf_features_cold_start_rollout() -> None:
+    """The forward-model / rollout plumbing is UNCHANGED: it still passes only
+    (state, params, geometry) and the sdf-enabled model self-computes."""
+    torch.manual_seed(0)
+    model = _make_p3d_model(architecture=_tiny_p3d(sdf_features=True))
+    out = model(params=_params())
+    assert out is not None
+    assert out.sizes["time"] == 3
+    for v in STATE_VARS:
+        assert out[v].dims == ("time", "z", "y", "x")
 
 
 # -- 9. periodic-axis divisibility guard ------------------------------------

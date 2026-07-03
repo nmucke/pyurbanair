@@ -13,6 +13,14 @@ partition_size: 1
 
 # normalize: true          # default; z-score state+params (load-bearing here)
 # predict_residual: true   # default; predict the change, not the absolute field
-# param_conditioning: channels  # default: params broadcast as input channels.
-#   "native" routes params through P3D's scalar pde_parameters adaLN path
-#   (reduced to one scalar when n_params > 1) — lower capacity, experimental.
+# param_conditioning: native  # default: params routed through P3D's scalar
+#   pde_parameters adaLN path (reduced to one scalar when n_params > 1).
+#   "channels" instead z-scores params and broadcasts each as an input channel
+#   (higher capacity for multi-param conditioning, + n_params stem channels).
+
+# Geometry features: uncomment to add the SDF + ∇SDF channels to the stem
+# (in_channels += 4). Must be paired with dataset.sdf_features=true and a
+# matching dataset.sdf_clamp_cells (default 32). Off by default -> existing
+# checkpoints load byte-identically.
+# sdf_features: true
+# sdf_clamp_cells: 32

@@ -7,5 +7,14 @@ _target_: neural_surrogates.P3D
 size: S
 window_size: 4
 partition_size: 1
+sdf_features: true
+sdf_clamp_cells: 32
 
-# normalize: true / predict_residual: true / param_conditioning: channels (defaults)
+# normalize: true / predict_residual: true / param_conditioning: native (defaults)
+
+# Geometry features: uncomment to add the SDF + ∇SDF channels to the stem
+# (in_channels += 4). Must be paired with dataset.sdf_features=true and a
+# matching dataset.sdf_clamp_cells (default 32). Off by default -> existing
+# checkpoints load byte-identically.
+# sdf_features: true
+# sdf_clamp_cells: 32

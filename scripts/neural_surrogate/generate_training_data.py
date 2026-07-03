@@ -5,10 +5,20 @@ Samples inflow parameters from the configured `params_sampler` (Hydra
 ensemble call, partitions the resulting per-member NetCDFs into split
 directories, and writes one figure + one animation per split.
 
+The geometry is a single fixed case selected by
+`training_data.geometry.source` (barcelona | xie_and_castro): the named case
+file is merged over the composed config, so the yaml knob alone switches
+geometry. Note the merged case wins over `case=` and over CLI overrides of
+the keys it sets (domain/geometry/obs/time). The random-sampling pool sources
+(idealized | realistic) belong to
+generate_random_geometries_training_data.py instead.
+
 Usage:
 
-    python scripts/neural_surrogate/generate_training_data.py
-    python scripts/neural_surrogate/generate_training_data.py model=pyudales case=barcelona
+    python scripts/neural_surrogate/generate_training_data.py \
+        training_data.geometry.source=xie_and_castro
+    python scripts/neural_surrogate/generate_training_data.py \
+        model=pyudales training_data.geometry.source=barcelona
 """
 
 from __future__ import annotations
@@ -17,6 +27,8 @@ import pathlib
 import shutil
 import sys
 import time as _time
+from collections.abc import Callable
+from typing import Any
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -38,9 +50,58 @@ from pyurbanair.config.hydra_helpers import (
 from pyurbanair.dynamic_parameters import build_knot_times
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
 
+_CASE_SOURCES = ("barcelona", "xie_and_castro")
+_POOL_SOURCES = ("idealized", "realistic")
+
+
+def _apply_geometry_source(cfg: DictConfig) -> DictConfig:
+    """Merge the case named by `training_data.geometry.source` over the config.
+
+    The composed `case` group already provides domain/geometry/obs/time; when
+    the config names a single-geometry case, merge that case file on top so
+    the yaml knob alone selects the geometry (its keys win over whatever
+    `case=` selected, including CLI overrides of those keys). Pool sources
+    are rejected here — they need per-geometry grids and belong to
+    generate_random_geometries_training_data.py.
+    """
+    source = OmegaConf.select(cfg, "training_data.geometry.source")
+    if source is None:
+        return cfg
+    if source in _POOL_SOURCES:
+        raise ValueError(
+            f"training_data.geometry.source={source!r} samples random "
+            "geometries; use scripts/neural_surrogate/"
+            "generate_random_geometries_training_data.py for it, or set the "
+            f"source to one of {_CASE_SOURCES}."
+        )
+    if source not in _CASE_SOURCES:
+        raise ValueError(
+            f"Unknown training_data.geometry.source={source!r}; expected one "
+            f"of {_CASE_SOURCES + _POOL_SOURCES}."
+        )
+    case_path = (
+        pathlib.Path(__file__).resolve().parents[2] / "conf" / "case" / f"{source}.yaml"
+    )
+    case_cfg = OmegaConf.load(case_path)
+    # Case files carry new-to-this-composition keys (e.g. barcelona's
+    # geometry.udales_precomputed_geom_dir), so merge with struct off.
+    OmegaConf.set_struct(cfg, False)
+    # Replace the case-owned namespaces wholesale instead of deep-merging:
+    # keys the composed case set but the target case does not (barcelona's
+    # geometry.udales_precomputed_geom_dir, xie's obs.validation_*_points)
+    # must not leak through. `time` stays a deep merge — case files set only
+    # a subset of it (seconds_per_knot lives in the run_forward_model base).
+    for node in ("domain", "geometry", "obs"):
+        if node in case_cfg:
+            cfg[node] = None
+    merged = OmegaConf.merge(cfg, case_cfg)
+    OmegaConf.set_struct(merged, True)
+    print(f"Geometry source '{source}': merged {case_path} over the composed config")
+    return merged
+
 
 def _sample_params(
-    params_sampler,
+    params_sampler: Any,
     *,
     seconds_per_knot: float,
     simulation_time: float,
@@ -91,6 +152,30 @@ def _augment_params_for_backend(
             )
         )
     return sampled
+
+
+def _clamp_palm_inflow_block(forward_model: Any) -> None:
+    """Keep PALM's turbulent-inflow reader within its subdomain limit.
+
+    ``input_block_size`` (default 30) is the number of inflow timesteps PALM
+    reads per IO call; ``turbulent_inflow_init`` requires it to be at most
+    2 x the per-rank subdomain width (nx / ncpu), which small grids at high
+    ncpu violate with the default (PALM error TUI0019). Pure IO chunking —
+    no physics impact. No-op when the default already fits.
+    """
+    from pypalm.utils.p3d_utils import P3DFile
+
+    limit = 2 * (int(forward_model.nx) // int(forward_model.ncpu))
+    if limit >= 30:
+        return
+    block_size = max(2, limit)
+    p3d = P3DFile(forward_model.p3d_path)
+    p3d.set_value("turbulent_inflow_parameters", "input_block_size", block_size)
+    p3d.write()
+    print(
+        f"Clamped PALM input_block_size to {block_size} "
+        f"(nx={forward_model.nx}, ncpu={forward_model.ncpu})"
+    )
 
 
 def _copy_stl_if_present(cfg: DictConfig, output_dir: pathlib.Path) -> None:
@@ -155,7 +240,9 @@ def _plot_split_examples(
 ) -> None:
     """Plot one mid-time velocity-magnitude slice per split, side-by-side."""
     splits = list(examples.keys())
-    fig, axes = plt.subplots(1, len(splits), figsize=(5 * len(splits), 4.5), squeeze=False)
+    fig, axes = plt.subplots(
+        1, len(splits), figsize=(5 * len(splits), 4.5), squeeze=False
+    )
     for ax, split in zip(axes[0], splits):
         state = add_velocity_magnitude(examples[split])
         plot_var = "vel_magnitude" if "vel_magnitude" in state.data_vars else "u"
@@ -218,9 +305,9 @@ def _attach_blanking(state: xr.Dataset, solid_c_path: pathlib.Path) -> xr.Datase
         (state.sizes["zt"], state.sizes["yt"], state.sizes["xt"]),
     )
     state["blanking"] = (("zt", "yt", "xt"), obstacle)
-    state["blanking"].attrs["long_name"] = (
-        "obstacle indicator (1 = solid/building, 0 = fluid)"
-    )
+    state["blanking"].attrs[
+        "long_name"
+    ] = "obstacle indicator (1 = solid/building, 0 = fluid)"
     return state
 
 
@@ -249,9 +336,11 @@ def _partition_states_into_splits(
     # stacks u/v/w channelwise, which assumes a common grid. Collocate to
     # cell centers (xt, yt, zt) before saving so the on-disk training data
     # is regular.
-    regrid = None
+    regrid: Callable[[xr.Dataset], xr.Dataset] | None = None
     if model_name == "pyudales":
-        from pyudales.utils.grid_utils import interpolate_grid as regrid
+        from pyudales.utils.grid_utils import interpolate_grid
+
+        regrid = interpolate_grid
 
     first_path = raw_dir / "state_0.nc"
     if not first_path.exists():
@@ -301,6 +390,7 @@ def _partition_states_into_splits(
 
 
 def run(cfg: DictConfig) -> None:
+    cfg = _apply_geometry_source(cfg)
     model_name = cfg.model.name
     td = cfg.training_data
 
@@ -386,6 +476,8 @@ def run(cfg: DictConfig) -> None:
     )
     instantiate(cfg.model.prepare, forward_model=forward_model)
     clean_outputs(model_name=model_name, forward_model=forward_model)
+    if model_name == "pypalm":
+        _clamp_palm_inflow_block(forward_model)
 
     _copy_stl_if_present(cfg, output_dir)
 
@@ -443,7 +535,9 @@ def run(cfg: DictConfig) -> None:
         split_offsets=split_specs,
         output_path=output_dir / "params_interpolated.png",
     )
-    print(f"Saved interpolated trajectories -> {output_dir / 'params_interpolated.png'}")
+    print(
+        f"Saved interpolated trajectories -> {output_dir / 'params_interpolated.png'}"
+    )
     # Best-effort cleanup of the staging dir.
     try:
         raw_states_dir.rmdir()
@@ -457,6 +551,11 @@ def run(cfg: DictConfig) -> None:
 
         for split, state in first_example.items():
             anim_state = add_velocity_magnitude(state)
+            # animate_state slices every data var along time; static vars
+            # (the pyudales blanking mask) would crash it.
+            anim_state = anim_state.drop_vars(
+                [n for n in anim_state.data_vars if "time" not in anim_state[n].dims]
+            )
             anim_path = output_dir / f"{split}_animation.mp4"
             animate_state(state=anim_state, output_path=anim_path, z_level=0)
             print(f"Saved animation -> {anim_path}")
@@ -464,7 +563,11 @@ def run(cfg: DictConfig) -> None:
     print(f"Done. Training data root: {output_dir}")
 
 
-@hydra.main(version_base=None, config_path="../../conf", config_name="neural_surrogate/training_data")
+@hydra.main(  # type: ignore[misc]
+    version_base=None,
+    config_path="../../conf",
+    config_name="neural_surrogate/training_data",
+)
 def main(cfg: DictConfig) -> None:
     run(cfg)
 

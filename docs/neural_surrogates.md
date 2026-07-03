@@ -71,15 +71,24 @@ passed through unchanged.
 
 A single config drives data generation:
 [conf/neural_surrogate/training_data.yaml](../conf/neural_surrogate/training_data.yaml)
-(`config_name="neural_surrogate/training_data"`). It bases off the forward-model
-entry point, so the **physical setup — domain (grid + bounds), geometry/STL and
-the per-window time horizon — comes from the selected `case`** (default
-`xie_and_castro`; switch with `case=barcelona`). The file only adds the dataset
-shape + parameter sampler:
+(`config_name="neural_surrogate/training_data"`), shared by both generation
+scripts. **The geometry is picked by `training_data.geometry.source`**:
+
+- `barcelona` / `xie_and_castro` — single fixed geometry
+  (`generate_training_data.py`). The script merges the named case file
+  (`conf/case/<source>.yaml`) over the composed config, so this one knob
+  switches domain/geometry/obs/time; the merged case wins over `case=` and
+  over CLI overrides of the keys it sets.
+- `idealized` / `realistic` — the UrbanTALES STL pools under
+  `examples/geometries/processed/<source>`
+  (`generate_random_geometries_training_data.py`, §2b). Each simulation gets
+  a randomly drawn geometry with a per-geometry grid.
 
 ```bash
-python scripts/neural_surrogate/generate_training_data.py            # default case + model
-python scripts/neural_surrogate/generate_training_data.py model=pylbm case=barcelona
+python scripts/neural_surrogate/generate_training_data.py \
+    training_data.geometry.source=xie_and_castro
+python scripts/neural_surrogate/generate_training_data.py \
+    model=pylbm training_data.geometry.source=barcelona
 ```
 
 It declares (under `training_data:`):
@@ -87,10 +96,13 @@ It declares (under `training_data:`):
 | Field | Purpose |
 |---|---|
 | `num_train`, `num_val`, `num_test` | per-split sample counts |
-| `output_dir` | resolves to `training_data/${model.name}_medium/` |
-| `simulation_time` / `output_frequency` / `spinup_time` | generation horizon — interpolated from the case's `${time.*}` |
+| `geometry.source` | geometry selection, see above |
+| `geometry.stl_dir` / `geometry.udales_case_dir` / `geometry.palm_case_dir` | pool + backend case-template dirs, derived from `source` (pool sources only) |
+| `geometry.resolution` / `geometry.z_size` | pool grid spacing + fixed vertical extent (§2b) |
+| `output_dir` | resolves to `training_data/${model.name}_${training_data.geometry.source}/` |
+| `simulation_time` / `output_frequency` / `spinup_time` | generation horizon — set directly in this file (not inherited from the case) |
 | `seed` | RNG seed driving every random draw |
-| `num_parallel_processes` | ensemble parallelism — see §5 |
+| `num_parallel_processes` | ensemble parallelism for `generate_training_data.py` — see §5. The random-geometry script runs strictly sequentially and ignores it. |
 | `params_sampler` | Hydra `_target_` block (incl. `num_time_points`, the sampler time-grid control points); see §3 |
 
 CLI overrides apply to any field, e.g.:
@@ -100,6 +112,53 @@ python scripts/neural_surrogate/generate_training_data.py \
   model=pylbm \
   training_data.num_train=8 \
   training_data.params_sampler.time_series.correlation_length=30
+```
+
+### 2b. Random-geometry generation
+
+[scripts/neural_surrogate/generate_random_geometries_training_data.py](../scripts/neural_surrogate/generate_random_geometries_training_data.py)
+consumes the pool sources (`training_data.geometry.source: idealized |
+realistic`) and shares the config, sampler and split layout of §1–2, with
+these differences:
+
+- **One geometry per simulation, geometry-disjoint splits.** `num_val` +
+  `num_test` geometries are held out (one simulation each); train draws
+  from the remainder and re-draws geometries (with fresh parameter
+  trajectories) when `num_train` exceeds the pool.
+- **Per-geometry grid.** Each geometry's physical domain size comes from the
+  pool's `manifest.csv` (mesh-bounds fallback for pools without one; the
+  bounds under-span the domain when buildings sit inset from its edges); at
+  `geometry.resolution` (metres), `nx`/`ny` are rounded UP to a multiple of
+  16 by extending the domain (the mesh stays anchored at the origin, the
+  slack is open fluid). The vertical extent is the fixed
+  `geometry.z_size` for every geometry; `nz = z_size / resolution` must
+  itself be a multiple of 16. Geometries whose tallest building reaches
+  `z_size` are dropped from the pool with a warning (pylbm SIGFPEs when
+  buildings pierce the domain top).
+- **Direct sequential single-model runs — no ensemble machinery.** Resampled
+  duplicates are grouped so each geometry's forward model is built and
+  prepared once, then called once per simulation (`save_on_disk` mode writes
+  `state_{j}.nc` per run). Each geometry gets a fresh scratch dir under
+  `paths.experiment_dir` (stale solver outputs from a previous grid are the
+  classic uDALES fielddump trap). For pyudales the script stages a
+  disposable case dir per geometry (template from
+  `geometry.udales_case_dir`, `stl_file` rewritten) and forces
+  `precomputed_geom_dir=None`; pylbm recompiles per grid; for pypalm the
+  turbulent-inflow `input_block_size` is clamped to 2·(nx/ncpu) when the
+  PALM default (30) exceeds it (error TUI0019 otherwise).
+- **Extra outputs.** `geometries.csv` (per-sample geometry + grid manifest)
+  and `geometries/` (copies of every STL used); each state file carries
+  `geometry_stl` / `geometry_source` / `resolution_m` attrs.
+- **ncpu must divide every sampled `nx`** (pypalm/pyudales slab
+  decomposition). All pool `nx` are multiples of 16, so `ncpu` ∈
+  {1, 2, 4, 8, 16} always works; the script validates this before running
+  anything.
+
+```bash
+python scripts/neural_surrogate/generate_random_geometries_training_data.py \
+    model=pypalm training_data.geometry.source=realistic \
+    training_data.geometry.resolution=2.0 training_data.geometry.z_size=64.0 \
+    model.forward_model.ncpu=16
 ```
 
 ### 3. The parameter sampler
@@ -276,12 +335,30 @@ this reduces to one-step transition pairs (the original behavior); see
 | `state_next` | `(C, *grid)` | snapshot at time `t + K` — the pushforward target |
 | `params_n`   | `(K, P)`    | inflow params at steps `t, …, t+K-1`; scalar params (e.g. uDALES `pressure_gradient_magnitude`) are broadcast along `time` |
 | `geometry`   | `(*grid,)`  | binary mask: `1` = fluid, `0` = obstacle. Same tensor for every item in the split |
+| `geom_features` | `(4, *grid)` | SDF + ∇SDF channels — present **only** when built with `sdf_features=True` (default off); same tensor for every item |
 
 The geometry mask is read from the state file's `geometry_var`
 (default `"blanking"` — pylbm's per-cell obstacle indicator, inverted to
 match the `1`-is-fluid convention). For backends that don't ship one,
 the fallback marks fluid cells as those with a non-zero stacked state in
 the first trajectory's first snapshot; ground-and-building cells stay 0.
+
+#### SDF geometry features (`sdf_features`)
+
+Built with `sdf_features=True` (default off), the dataset also ships a 4-channel
+geometry-feature tensor `geom_features` alongside the mask: the clamped signed
+distance field `sdf_n` and its unit gradient `(g_z, g_y, g_x)`, all bounded in
+`[-1, 1]` and in **cell** units (see
+[`neural_surrogates.sdf.sdf_features`](../libs/neural-surrogates/src/neural_surrogates/sdf.py)).
+`sdf = EDT(mask) − EDT(1 − mask)` is positive in fluid, negative in solid; the
+gradient (from the *unclamped* SDF, normalised) points away from the nearest
+wall. The single EDT is computed **once at init** from the (shared) mask — never
+per `__getitem__` and never inside the training step — and `transition_collate`
+ships it once per batch as `(1, 4, *grid)`, exactly like the mask. `sdf_clamp_cells`
+(default `32`) is the clamp radius `L`: `sdf_n = clip(sdf, −L, L) / L`. The
+features enter the model stem **raw** (no z-scoring, no masking) and are excluded
+from `_compute_normalization_stats`. Only `P3D` consumes them today (§10, §7);
+see the SDF plan in [docs/plans/sdf_features_plan.md](plans/sdf_features_plan.md).
 
 #### Memory model
 
@@ -354,6 +431,22 @@ All architectures share the contract
 `forward(state, params, geometry) -> state_next`. The geometry mask is
 concatenated to the state along the channel dimension at the stem; how
 parameters enter depends on the architecture.
+
+**SDF geometry features (P3D).** `P3D` accepts an optional
+`sdf_features=True` (default off) that widens the stem by 4 channels (the SDF +
+∇SDF block, inserted right after the mask: stem order `[state, geometry, sdf_n,
+g_z, g_y, g_x, params, extra]`) and advertises `n_geom_feature_channels = 4`.
+During **training** the features arrive precomputed via a `geom_features=`
+argument (shipped by `TransitionDataset`/`transition_collate` when
+`dataset.sdf_features=True`; the trainer keys off `n_geom_feature_channels` and
+fails loud if the batch lacks them). During **inference** callers keep the
+`(state, params, geometry)` contract unchanged — the model self-computes the
+features from the mask and caches them on the geometry tensor's identity, so the
+EDT runs once per rollout (step 1) and every later step hits the cache. The
+default (off) keeps `in_channels` and the whole state dict byte-identical, so
+existing checkpoints load untouched. The EDT is **never** run inside the training
+step or a `torch.compile`'d region. Other architectures can adopt the same
+`n_geom_feature_channels` + `geom_features=` convention later.
 
 ### 8. `SimpleConv` — baseline
 

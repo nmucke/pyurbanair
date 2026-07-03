@@ -22,8 +22,8 @@ import time
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, RandomSampler
 import tqdm
+from torch.utils.data import DataLoader, RandomSampler
 
 
 class BaseTraining:
@@ -113,7 +113,11 @@ class BaseTraining:
 
                 for _attr in ("recompile_limit", "cache_size_limit"):
                     if hasattr(_dynamo.config, _attr):
-                        setattr(_dynamo.config, _attr, max(getattr(_dynamo.config, _attr), 64))
+                        setattr(
+                            _dynamo.config,
+                            _attr,
+                            max(getattr(_dynamo.config, _attr), 64),
+                        )
                 self.model = torch.compile(self.model, dynamic=dynamic)
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -178,6 +182,13 @@ class BaseTraining:
         # the first batch, instead of shipping B copies host->GPU every step.
         self._geometry: torch.Tensor | None = None
         self._fluid_mask: torch.Tensor | None = None
+        # Optional SDF + ∇SDF geometry features, shared across the batch exactly
+        # like the mask: cached on the device once from the first batch (as
+        # ``(4, *grid)``) and broadcast to the batch at each model call. Stays
+        # ``None`` when the dataset ships no ``geom_features`` -- in which case a
+        # model that advertises ``n_geom_feature_channels > 0`` fails loud (see
+        # ``_prepare_batch``) rather than silently training on zeros.
+        self._geom_features: torch.Tensor | None = None
         # mask_loss restricts the loss to fluid cells: uDALES targets carry
         # junk values inside obstacles, which would otherwise be penalised
         # against the model's (masked) zero output there.
@@ -251,8 +262,40 @@ class BaseTraining:
         if self._geometry is None:
             self._geometry = batch["geometry"][0].to(self.device)
             self._fluid_mask = self._geometry.bool()
+            feat = batch.get("geom_features")
+            self._geom_features = feat[0].to(self.device) if feat is not None else None
+            # Fail loud on a model/dataset mismatch: a model built with SDF
+            # features wired into its stem cannot train on a dataset that ships
+            # none (it would either error at cat time or, worse, be fed zeros).
+            wants = getattr(self._eager_model, "n_geom_feature_channels", 0)
+            if wants > 0 and self._geom_features is None:
+                raise ValueError(
+                    f"model advertises n_geom_feature_channels={wants} but the "
+                    "batch carries no 'geom_features'; build the dataset with "
+                    "dataset.sdf_features=true (and a matching sdf_clamp_cells)."
+                )
         geometry = self._geometry.expand(state.shape[0], *self._geometry.shape)
         return state, state_next, params, geometry
+
+    def _model_forward(
+        self,
+        state: torch.Tensor,
+        params_i: torch.Tensor,
+        geometry: torch.Tensor,
+    ) -> torch.Tensor:
+        """One model step, injecting the shared ``geom_features`` when present.
+
+        The features are broadcast (a view, not B copies) from the cached
+        ``(4, *grid)`` tensor to ``(B, 4, *grid)``. When the dataset ships no
+        features the call is byte-for-byte the pre-feature ``self.model(state,
+        params_i, geometry)``. Used by both the pushforward unroll and the
+        subclass ``_final_loss`` hooks so the two never diverge."""
+        if self._geom_features is None:
+            pred: torch.Tensor = self.model(state, params_i, geometry)
+            return pred
+        feat = self._geom_features.expand(state.shape[0], *self._geom_features.shape)
+        pred = self.model(state, params_i, geometry, geom_features=feat)
+        return pred
 
     def _forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         """One pushforward rollout + loss on a transition batch.
@@ -274,10 +317,10 @@ class BaseTraining:
         with torch.no_grad():
             with self._autocast():
                 for i in range(K - g):
-                    state = self.model(state, params[:, i, :], geometry)
+                    state = self._model_forward(state, params[:, i, :], geometry)
         with self._autocast():
             for i in range(K - g, K - 1):
-                state = self.model(state, params[:, i, :], geometry)
+                state = self._model_forward(state, params[:, i, :], geometry)
             return self._final_loss(state, state_next, params, geometry)
 
     def _final_loss(
@@ -530,8 +573,7 @@ class BaseTraining:
             # last one) -- writing the optimizer state every epoch is a needless
             # synchronous disk stall (best weights are saved separately above).
             if ckpt_path is not None and (
-                (epoch + 1) % self.checkpoint_every == 0
-                or epoch == self.num_epochs - 1
+                (epoch + 1) % self.checkpoint_every == 0 or epoch == self.num_epochs - 1
             ):
                 self._save_checkpoint(
                     ckpt_path, epoch, best_val, epochs_since_improvement, current_steps
