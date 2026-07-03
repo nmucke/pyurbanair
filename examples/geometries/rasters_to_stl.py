@@ -34,9 +34,13 @@ analytically, straight from the raster: cell (i, j, k) is solid iff
 ``raster[i, j] > z_k``.
 
 Axis convention: raster axis 0 (rows) -> y, axis 1 (cols) -> x, so
-Lx = ncols * dx and Ly = nrows * dx. The physically correct spacing is 1 m
-(UrbanTALES resolution); ``--dx`` is exposed only if you deliberately want to
-rescale the whole domain.
+Lx = ncols * dx (+ inflow margin) and Ly = nrows * dx. The physically correct
+spacing is 1 m (UrbanTALES resolution); ``--dx`` is exposed only if you
+deliberately want to rescale the whole domain.
+
+``--inflow-margin`` (default 40 m) prepends open space upstream (+x) of the
+buildings, shifting every footprint downstream and growing Lx accordingly, so
+the inflow has a fetch to develop before it hits the first obstacle.
 
 Usage:
     pixi run -e dev python examples/geometries/rasters_to_stl.py
@@ -116,7 +120,7 @@ def _building_rects(z: np.ndarray) -> list[tuple[float, int, int, int, int]]:
 
 
 def raster_to_mesh(
-    z: np.ndarray, dx: float, watertight: bool = False
+    z: np.ndarray, dx: float, watertight: bool = False, inflow_margin: float = 0.0
 ) -> trimesh.Trimesh:
     """Extrude a height raster into a domain-frame binary-STL mesh.
 
@@ -125,10 +129,16 @@ def raster_to_mesh(
     same-height rectangle becomes a closed box from z=0 to its height; a flat
     ground sheet is added at z=0. With ``watertight=True`` the building boxes
     are boolean-unioned into a single manifold (needs a boolean engine).
+
+    ``inflow_margin`` (metres) prepends that much open space upstream of the
+    buildings along the streamwise (+x) direction: every footprint is shifted
+    downstream by ``inflow_margin`` and the domain grows to
+    ``Lx = ncols*dx + inflow_margin``, giving the flow a fetch to develop
+    before it reaches the first obstacle.
     """
     z = z.astype(np.float64)
     nrows, ncols = z.shape
-    lx, ly = ncols * dx, nrows * dx
+    lx, ly = ncols * dx + inflow_margin, nrows * dx
     rects = _building_rects(z)
 
     if watertight:
@@ -142,7 +152,9 @@ def raster_to_mesh(
         boxes = []
         for h, i, j, dh, dw in rects:
             b = trimesh.creation.box(extents=(dw * dx, dh * dx, h))
-            b.apply_translation(((j + dw / 2) * dx, (i + dh / 2) * dx, h / 2))
+            b.apply_translation(
+                ((j + dw / 2) * dx + inflow_margin, (i + dh / 2) * dx, h / 2)
+            )
             boxes.append(b)
         mesh = trimesh.boolean.union(boxes) if boxes else trimesh.Trimesh()
         mesh.fix_normals()
@@ -152,7 +164,7 @@ def raster_to_mesh(
     faces: list[np.ndarray] = []
     offset = 0
     for h, i, j, dh, dw in rects:
-        x0, x1 = j * dx, (j + dw) * dx
+        x0, x1 = j * dx + inflow_margin, (j + dw) * dx + inflow_margin
         y0, y1 = i * dx, (i + dh) * dx
         verts.append(
             np.array(
@@ -191,16 +203,16 @@ def raster_to_mesh(
     return mesh
 
 
-def process_one(args: tuple[str, str, str, float, bool, bool]) -> dict:
+def process_one(args: tuple[str, str, str, float, bool, bool, float]) -> dict:
     """Worker: convert one raster file. ``args`` is picklable for the pool."""
-    src, dst, name, dx, force, watertight = args
+    src, dst, name, dx, force, watertight, inflow_margin = args
     src_p, dst_p = Path(src), Path(dst)
     if dst_p.exists() and dst_p.stat().st_size > 0 and not force:
         return {"name": name, "status": "skip"}
     z = np.loadtxt(src_p, dtype=np.float64)
     if z.ndim != 2:
         return {"name": name, "status": "bad-shape"}
-    mesh = raster_to_mesh(z, dx, watertight=watertight)
+    mesh = raster_to_mesh(z, dx, watertight=watertight, inflow_margin=inflow_margin)
     dst_p.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(dst_p, file_type="stl")  # binary STL
     nrows, ncols = z.shape
@@ -209,8 +221,9 @@ def process_one(args: tuple[str, str, str, float, bool, bool]) -> dict:
         "status": "ok",
         "nx": ncols,
         "ny": nrows,
-        "Lx_m": round(ncols * dx, 3),
+        "Lx_m": round(ncols * dx + inflow_margin, 3),
         "Ly_m": round(nrows * dx, 3),
+        "inflow_margin_m": round(inflow_margin, 3),
         "z_max_m": round(float(z.max()), 3),
         "lambda_p": round(float((z > 0).mean()), 4),
         "n_faces": int(len(mesh.faces)),
@@ -225,6 +238,7 @@ def run_set(
     force: bool,
     limit: int | None,
     watertight: bool,
+    inflow_margin: float,
 ) -> None:
     raw_dir = root / "raw" / kind
     out_dir = root / "processed" / kind
@@ -245,7 +259,15 @@ def run_set(
     for src in topo:
         name = src.name[:-5] if src.name.endswith("_topo") else src.name
         jobs.append(
-            (str(src), str(out_dir / f"{name}.stl"), name, dx, force, watertight)
+            (
+                str(src),
+                str(out_dir / f"{name}.stl"),
+                name,
+                dx,
+                force,
+                watertight,
+                inflow_margin,
+            )
         )
 
     rows: list[dict] = []
@@ -270,7 +292,10 @@ def run_set(
     # Per-set manifest of the geometry stats -- handy for downstream indexing.
     if rows:
         rows.sort(key=lambda r: r["name"])
-        cols = ["name", "nx", "ny", "Lx_m", "Ly_m", "z_max_m", "lambda_p", "n_faces"]
+        cols = [
+            "name", "nx", "ny", "Lx_m", "Ly_m", "inflow_margin_m",
+            "z_max_m", "lambda_p", "n_faces",
+        ]
         with (out_dir / "manifest.csv").open("w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=cols)
             w.writeheader()
@@ -296,6 +321,13 @@ def main() -> int:
         type=float,
         default=1.0,
         help="grid spacing in metres (default 1.0 = UrbanTALES resolution)",
+    )
+    ap.add_argument(
+        "--inflow-margin",
+        type=float,
+        default=40.0,
+        help="metres of open space prepended upstream (+x) of the buildings so "
+        "the flow can develop before the first obstacle (default 40.0; 0 to disable)",
     )
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--force", action="store_true", help="overwrite existing STLs")
@@ -323,6 +355,7 @@ def main() -> int:
             args.force,
             args.limit,
             watertight=not args.multibody,
+            inflow_margin=args.inflow_margin,
         )
     print("All requested rasters converted to STL.")
     return 0
