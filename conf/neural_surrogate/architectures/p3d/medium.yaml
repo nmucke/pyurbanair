@@ -7,6 +7,8 @@ _target_: neural_surrogates.P3D
 size: S
 window_size: 4
 partition_size: 1
+sdf_features: true
+sdf_clamp_cells: 32
 
 # normalize: true / predict_residual: true / param_conditioning: native (defaults)
 

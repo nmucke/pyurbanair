@@ -4,28 +4,59 @@
 # training-data generation config (replaces the former conf/training_data/ group
 # + conf/generate_training_data.yaml; dataset shape taken from the old medium preset).
 #
-# The PHYSICAL setup — domain (grid + bounds), geometry/STL and the per-window
-# time horizon — comes from the selected `case` (default xie_and_castro, via the
-# run_forward_model base; switch with `case=barcelona`). This file only adds the
-# dataset shape and the parameter sampler. Override on the CLI as usual, e.g.
-# `model=pylbm case=barcelona training_data.num_train=256`.
+# The PHYSICAL setup is picked by `training_data.geometry.source`:
+#   barcelona | xie_and_castro — the single-geometry named cases; the case's
+#     domain/geometry/time replace the composed `case` selection, so the yaml
+#     knob alone switches geometry (generate_training_data.py).
+#   idealized | realistic — the UrbanTALES STL pools under
+#     examples/geometries/processed/<source>; geometries are randomly sampled
+#     per simulation and the grid is derived per geometry from the STL extent
+#     (generate_random_geometries_training_data.py).
+# Override on the CLI as usual, e.g.
+# `model=pylbm training_data.geometry.source=realistic training_data.num_train=256`.
 defaults:
   - /run_forward_model
+  # Backend selection lives here so the whole data-generation setup is this
+  # one file; `model=pylbm` on the CLI still wins over this entry.
+  - override /model@model: pyudales
   - _self_
 
 training_data:
-  num_train: 50
-  num_val: 4
-  num_test: 4
+  num_train: 3
+  num_val: 1
+  num_test: 1
 
-  # output_dir: training_data/${model.name}_medium/
-  output_dir: training_data/pypalm_barcelona/
+  output_dir: training_data/${model.name}_${training_data.geometry.source}/
 
-  # Generation horizon — taken from the selected case's per-window time so the
-  # dataset uses the case's specifications rather than duplicating them.
-  simulation_time: ${time.simulation_time}
-  output_frequency: ${time.output_frequency}
-  spinup_time: ${time.spinup_time}
+  # --- Geometry source --------------------------------------------------
+  geometry:
+    source: realistic
+
+    # Pool + per-backend case-template locations, derived from `source`.
+    # Only consumed for the pool sources (idealized/realistic); the named
+    # cases carry their own paths in conf/case/<source>.yaml.
+    stl_dir: examples/geometries/processed/${training_data.geometry.source}
+    udales_case_dir: examples/udales/${training_data.geometry.source}
+    palm_case_dir: examples/palm/${training_data.geometry.source}
+
+    # Grid spacing in metres, identical in x, y and z. Per geometry, nx/ny are
+    # derived from the physical domain size (the pool's manifest.csv, with a
+    # mesh-bounds fallback) and rounded UP to a multiple of 16 cells — the
+    # domain is extended (never the mesh), so the extra strip is open fluid
+    # at the far x/y ends.
+    resolution: 4.0
+
+    # Fixed vertical domain extent (m), shared by ALL sampled geometries.
+    # z_size / resolution must itself be a multiple of 16. Geometries whose
+    # tallest building reaches z_size are dropped from the pool with a
+    # warning (pylbm SIGFPEs when buildings pierce the domain top).
+    z_size: 64.0
+
+  # Generation horizon (seconds) — set here, NOT inherited from the case, so
+  # the dataset's time setup is controlled entirely by this file.
+  simulation_time: 10.0
+  output_frequency: 2.0
+  spinup_time: 5.0
   seed: 0
 
   # Backend-specific constant forcing. uDALES needs a streamwise pressure
@@ -40,8 +71,6 @@ training_data:
   #   seconds_per_knot: knot spacing of each parameter trajectory; a knot is
   #     placed every `seconds_per_knot` seconds over [0, simulation_time] (with
   #     a linearly-extrapolated final knot when the horizon isn't a multiple).
-  #     Pulled from the shared time knob so the dataset's knot spacing matches
-  #     the rest of the system rather than duplicating it.
   #   external.<param>.{mean, std}: each may be a scalar (fixed for all sims) or
   #     a {min, max} dict (drawn uniformly per sim).
   #   time_series.*: hyperparameters of the AR(2)-relaxation generating the
@@ -49,7 +78,7 @@ training_data:
   params_sampler:
     _target_: pyurbanair.training_data.UniformExternalAR2Sampler
     _convert_: all
-    seconds_per_knot: ${time.seconds_per_knot}
+    seconds_per_knot: 30.0
     external:
       inflow_angle:
         mean: {min: -25.0, max: 25.0}

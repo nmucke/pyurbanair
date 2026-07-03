@@ -71,15 +71,24 @@ passed through unchanged.
 
 A single config drives data generation:
 [conf/neural_surrogate/training_data.yaml](../conf/neural_surrogate/training_data.yaml)
-(`config_name="neural_surrogate/training_data"`). It bases off the forward-model
-entry point, so the **physical setup — domain (grid + bounds), geometry/STL and
-the per-window time horizon — comes from the selected `case`** (default
-`xie_and_castro`; switch with `case=barcelona`). The file only adds the dataset
-shape + parameter sampler:
+(`config_name="neural_surrogate/training_data"`), shared by both generation
+scripts. **The geometry is picked by `training_data.geometry.source`**:
+
+- `barcelona` / `xie_and_castro` — single fixed geometry
+  (`generate_training_data.py`). The script merges the named case file
+  (`conf/case/<source>.yaml`) over the composed config, so this one knob
+  switches domain/geometry/obs/time; the merged case wins over `case=` and
+  over CLI overrides of the keys it sets.
+- `idealized` / `realistic` — the UrbanTALES STL pools under
+  `examples/geometries/processed/<source>`
+  (`generate_random_geometries_training_data.py`, §2b). Each simulation gets
+  a randomly drawn geometry with a per-geometry grid.
 
 ```bash
-python scripts/neural_surrogate/generate_training_data.py            # default case + model
-python scripts/neural_surrogate/generate_training_data.py model=pylbm case=barcelona
+python scripts/neural_surrogate/generate_training_data.py \
+    training_data.geometry.source=xie_and_castro
+python scripts/neural_surrogate/generate_training_data.py \
+    model=pylbm training_data.geometry.source=barcelona
 ```
 
 It declares (under `training_data:`):
@@ -87,10 +96,13 @@ It declares (under `training_data:`):
 | Field | Purpose |
 |---|---|
 | `num_train`, `num_val`, `num_test` | per-split sample counts |
-| `output_dir` | resolves to `training_data/${model.name}_medium/` |
-| `simulation_time` / `output_frequency` / `spinup_time` | generation horizon — interpolated from the case's `${time.*}` |
+| `geometry.source` | geometry selection, see above |
+| `geometry.stl_dir` / `geometry.udales_case_dir` / `geometry.palm_case_dir` | pool + backend case-template dirs, derived from `source` (pool sources only) |
+| `geometry.resolution` / `geometry.z_size` | pool grid spacing + fixed vertical extent (§2b) |
+| `output_dir` | resolves to `training_data/${model.name}_${training_data.geometry.source}/` |
+| `simulation_time` / `output_frequency` / `spinup_time` | generation horizon — set directly in this file (not inherited from the case) |
 | `seed` | RNG seed driving every random draw |
-| `num_parallel_processes` | ensemble parallelism — see §5 |
+| `num_parallel_processes` | ensemble parallelism for `generate_training_data.py` — see §5. The random-geometry script runs strictly sequentially and ignores it. |
 | `params_sampler` | Hydra `_target_` block (incl. `num_time_points`, the sampler time-grid control points); see §3 |
 
 CLI overrides apply to any field, e.g.:
@@ -100,6 +112,53 @@ python scripts/neural_surrogate/generate_training_data.py \
   model=pylbm \
   training_data.num_train=8 \
   training_data.params_sampler.time_series.correlation_length=30
+```
+
+### 2b. Random-geometry generation
+
+[scripts/neural_surrogate/generate_random_geometries_training_data.py](../scripts/neural_surrogate/generate_random_geometries_training_data.py)
+consumes the pool sources (`training_data.geometry.source: idealized |
+realistic`) and shares the config, sampler and split layout of §1–2, with
+these differences:
+
+- **One geometry per simulation, geometry-disjoint splits.** `num_val` +
+  `num_test` geometries are held out (one simulation each); train draws
+  from the remainder and re-draws geometries (with fresh parameter
+  trajectories) when `num_train` exceeds the pool.
+- **Per-geometry grid.** Each geometry's physical domain size comes from the
+  pool's `manifest.csv` (mesh-bounds fallback for pools without one; the
+  bounds under-span the domain when buildings sit inset from its edges); at
+  `geometry.resolution` (metres), `nx`/`ny` are rounded UP to a multiple of
+  16 by extending the domain (the mesh stays anchored at the origin, the
+  slack is open fluid). The vertical extent is the fixed
+  `geometry.z_size` for every geometry; `nz = z_size / resolution` must
+  itself be a multiple of 16. Geometries whose tallest building reaches
+  `z_size` are dropped from the pool with a warning (pylbm SIGFPEs when
+  buildings pierce the domain top).
+- **Direct sequential single-model runs — no ensemble machinery.** Resampled
+  duplicates are grouped so each geometry's forward model is built and
+  prepared once, then called once per simulation (`save_on_disk` mode writes
+  `state_{j}.nc` per run). Each geometry gets a fresh scratch dir under
+  `paths.experiment_dir` (stale solver outputs from a previous grid are the
+  classic uDALES fielddump trap). For pyudales the script stages a
+  disposable case dir per geometry (template from
+  `geometry.udales_case_dir`, `stl_file` rewritten) and forces
+  `precomputed_geom_dir=None`; pylbm recompiles per grid; for pypalm the
+  turbulent-inflow `input_block_size` is clamped to 2·(nx/ncpu) when the
+  PALM default (30) exceeds it (error TUI0019 otherwise).
+- **Extra outputs.** `geometries.csv` (per-sample geometry + grid manifest)
+  and `geometries/` (copies of every STL used); each state file carries
+  `geometry_stl` / `geometry_source` / `resolution_m` attrs.
+- **ncpu must divide every sampled `nx`** (pypalm/pyudales slab
+  decomposition). All pool `nx` are multiples of 16, so `ncpu` ∈
+  {1, 2, 4, 8, 16} always works; the script validates this before running
+  anything.
+
+```bash
+python scripts/neural_surrogate/generate_random_geometries_training_data.py \
+    model=pypalm training_data.geometry.source=realistic \
+    training_data.geometry.resolution=2.0 training_data.geometry.z_size=64.0 \
+    model.forward_model.ncpu=16
 ```
 
 ### 3. The parameter sampler
