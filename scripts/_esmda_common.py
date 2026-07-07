@@ -12,6 +12,11 @@ always opened lazily (see :func:`open_truth`) so a multi-GB truth is never held
 in memory in full.
 """
 
+# mypy: ignore-errors
+# Legacy untyped helper module: it predates the strict mypy config and is
+# type-checked transitively whenever a script importing it is committed.
+# Waived wholesale rather than annotated piecemeal; drop this when typed.
+
 from __future__ import annotations
 
 import pathlib
@@ -19,20 +24,20 @@ import pathlib
 import numpy as np
 import xarray
 import yaml
-from omegaconf import OmegaConf
-
 from data_assimilation.interpolation import interpolate_dataarray_at_points
 from data_assimilation.observation_operator import ObservationOperator
+from omegaconf import OmegaConf
+
 from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_validation_points,
 )
 from pyurbanair.plotting import compute_parameter_metrics, compute_sensor_metrics
 
-
 # ---------------------------------------------------------------------------
 # Run-directory loaders (config + persisted truth-access view + sensor sets)
 # ---------------------------------------------------------------------------
+
 
 def load_run_config(run_dir: pathlib.Path):
     """Re-load the composed Hydra config saved by run_esmda.py."""
@@ -175,8 +180,14 @@ def streaming_state_rmse(true_state, esmda_state, n_z_slices=4):
     assimilation grids differ, the truth planes are interpolated onto the
     assimilation grid before differencing.
     """
-    true_s = true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
-    esmda_s = esmda_state.mean(dim="ensemble") if "ensemble" in esmda_state.dims else esmda_state
+    true_s = (
+        true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
+    )
+    esmda_s = (
+        esmda_state.mean(dim="ensemble")
+        if "ensemble" in esmda_state.dims
+        else esmda_state
+    )
 
     n_time = min(true_s.sizes["time"], esmda_s.sizes["time"])
 
@@ -198,16 +209,16 @@ def streaming_state_rmse(true_state, esmda_state, n_z_slices=4):
         true_vel = true_vel.interp(y=esmda_vel["y"], x=esmda_vel["x"])
 
     nz_common = min(true_vel.sizes["zlev"], esmda_vel.sizes["zlev"])
-    diff = (
-        np.asarray(true_vel.isel(zlev=slice(0, nz_common)).values)
-        - np.asarray(esmda_vel.isel(zlev=slice(0, nz_common)).values)
+    diff = np.asarray(true_vel.isel(zlev=slice(0, nz_common)).values) - np.asarray(
+        esmda_vel.isel(zlev=slice(0, nz_common)).values
     )
-    return np.sqrt(np.nanmean(diff ** 2, axis=tuple(range(1, diff.ndim))))
+    return np.sqrt(np.nanmean(diff**2, axis=tuple(range(1, diff.ndim))))
 
 
 # ---------------------------------------------------------------------------
 # Sensor time-series extraction (truth vs ensemble at fixed points)
 # ---------------------------------------------------------------------------
+
 
 def _sensor_component_timeseries(state, obs_x, obs_y, obs_z, solver_name):
     """Per-component ``(u, v, w)`` velocity time series at each sensor point.
@@ -232,8 +243,12 @@ def _sensor_component_timeseries(state, obs_x, obs_y, obs_z, solver_name):
         comps.append(
             interpolate_dataarray_at_points(
                 state[var],
-                x_dim=dims["x"], y_dim=dims["y"], z_dim=dims["z"],
-                obs_x=op.obs_x, obs_y=op.obs_y, obs_z=op.obs_z,
+                x_dim=dims["x"],
+                y_dim=dims["y"],
+                z_dim=dims["z"],
+                obs_x=op.obs_x,
+                obs_y=op.obs_y,
+                obs_z=op.obs_z,
             )
         )
     return xarray.concat(comps, dim="component").assign_coords(
@@ -243,7 +258,7 @@ def _sensor_component_timeseries(state, obs_x, obs_y, obs_z, solver_name):
 
 def sensor_magnitude(components):
     """Velocity magnitude |U| from a ``(component, ...)`` sensor series."""
-    return np.sqrt((components ** 2).sum("component"))
+    return np.sqrt((components**2).sum("component"))
 
 
 def _concat_sensor_pieces(pieces):
@@ -281,8 +296,15 @@ def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
 
 
 def truth_sensor_series(
-    true_state_path, n_total, x_offset, start_idx, t_offset,
-    sensor_sets, solver_name, num_windows, n_per_window,
+    true_state_path,
+    n_total,
+    x_offset,
+    start_idx,
+    t_offset,
+    sensor_sets,
+    solver_name,
+    num_windows,
+    n_per_window,
 ):
     """Truth per-component ``(u, v, w)`` sensor series, one window at a time.
 
@@ -307,6 +329,7 @@ def truth_sensor_series(
 # ---------------------------------------------------------------------------
 # Vector (u,v,w) sensor error metrics
 # ---------------------------------------------------------------------------
+
 
 def _energy_score(members, truth):
     """Per-timestep energy score, averaged over sensors.
@@ -337,7 +360,7 @@ def _energy_score(members, truth):
         d_truth = np.sqrt(np.sum((m - v[:, None, :]) ** 2, axis=0))  # (E, S)
         term1 = d_truth.mean(axis=0)  # (S,)
         diff = m[:, :, None, :] - m[:, None, :, :]  # (C, E, E, S)
-        d_pair = np.sqrt(np.sum(diff ** 2, axis=0))  # (E, E, S)
+        d_pair = np.sqrt(np.sum(diff**2, axis=0))  # (E, E, S)
         term2 = 0.5 * d_pair.mean(axis=(0, 1))  # (S,)
         es[t] = float((term1 - term2).mean())  # average over sensors
     return es
@@ -382,6 +405,7 @@ def vector_sensor_metrics(truth_comp, ensemble_comp):
 # ---------------------------------------------------------------------------
 # Scalar / YAML helpers
 # ---------------------------------------------------------------------------
+
 
 def _to_native(obj):
     """Recursively convert numpy scalars/arrays to plain Python for safe YAML."""

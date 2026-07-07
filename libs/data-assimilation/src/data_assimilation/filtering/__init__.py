@@ -10,9 +10,27 @@ from data_assimilation.filtering.analysis import (
     StochasticEnKFAnalysis,
     stochastic_enkf_update,
 )
+from data_assimilation.filtering.base import (
+    BaseFilter,
+    CycleDiagnostics,
+    EnsembleKalmanFilter,
+    FilterResult,
+)
+from data_assimilation.filtering.parameter_evolution import (
+    IdentityEvolution,
+    ParameterEvolution,
+    RandomWalkEvolution,
+)
 
 __all__ = [
     "AnalysisScheme",
+    "BaseFilter",
+    "CycleDiagnostics",
+    "EnsembleKalmanFilter",
+    "FilterResult",
+    "IdentityEvolution",
+    "ParameterEvolution",
+    "RandomWalkEvolution",
     "StochasticEnKFAnalysis",
     "stochastic_enkf_update",
 ]

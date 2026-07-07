@@ -12,7 +12,7 @@ orientation, then return here for field-level detail.
 
 ### Overview
 
-The configuration tree has exactly **two primary run entry points**, each
+The configuration tree has exactly **three primary run entry points**, each
 self-contained (they inline the shared base rather than pulling separate
 `paths.yaml`/`time.yaml`/`ensemble.yaml` files):
 
@@ -20,6 +20,7 @@ self-contained (they inline the shared base rather than pulling separate
 |---|---|---|
 | [`conf/run_forward_model.yaml`](../conf/run_forward_model.yaml) | `run_forward_model.py` | `case` + single `model@model` mount + single `params` mount |
 | [`conf/run_esmda.yaml`](../conf/run_esmda.yaml) | `run_esmda.py` | same base + `esmda:` scalars + double model mount (`@truth_model`/`@assim_model`) + double params mount (`@truth_params`/`@prior_params`) |
+| [`conf/run_filtering.yaml`](../conf/run_filtering.yaml) | `run_filtering.py` | same base + `filtering:` scalars + the `filtering/*` groups + the same double model/params mounts (static params only) |
 
 A third entry point, [`conf/neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml),
 extends `run_forward_model` with dataset-shape fields for surrogate data
@@ -75,6 +76,20 @@ rather than pulling them from separate files. The table below summarises each.
 | `localization` | `null` | Set by the `esmda/localization` group; `null` = global (unlocalized) update. |
 | `state_reduction` | `null` | Set by the `esmda/state_reduction` group; `null` = full-space update. |
 | `final_time_smoothing` | `false` | Post-loop Kalman update of the full trajectory (requires `state_reduction`). |
+
+#### `filtering:` (run_filtering only)
+
+| Field | Default | Purpose |
+|---|---|---|
+| `num_cycles` | 2 | Number of filter cycles; each forecasts one segment of `time.simulation_time` and applies ONE full-weight analysis. |
+| `seed` | 42 | JAX RNG seed. |
+| `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors). |
+| `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. Parameter mode requires spread maintenance (evolution or inflation). |
+| `analysis` | (group) | Set by `filtering/analysis` (default `stochastic`). |
+| `localization` | (group) | Set by `filtering/localization` (default `none`). |
+| `inflation` | (group) | Set by `filtering/inflation` (default `rtps`). |
+| `parameter_evolution` | (group) | Set by `filtering/evolution` (default `none`). |
+| `filter` | `EnsembleKalmanFilter` block | The composed filter `_target_`; normally left alone. |
 
 #### `run:`
 
@@ -249,7 +264,24 @@ implementation notes.
 
 ---
 
-### 1.8 Config group: `neural_surrogate/`
+### 1.8 Config groups: `filtering/*` (run_filtering only)
+
+The sequential-filter counterparts of the `esmda/*` groups. Each file uses
+`# @package filtering` so it sets the matching `filtering.*` field.
+
+| Group | Options (default first) | Sets |
+|---|---|---|
+| [`filtering/analysis/`](../conf/filtering/analysis/) | `stochastic` | `filtering.analysis` — the update math (`StochasticEnKFAnalysis`; ETKF/LETKF will land here) |
+| [`filtering/localization/`](../conf/filtering/localization/) | `none`, `correlation`, `distance` | `filtering.localization` — the same strategies as `esmda/localization` (reused unchanged); `distance` needs `filtering.mode=state\|joint` |
+| [`filtering/inflation/`](../conf/filtering/inflation/) | `rtps`, `none`, `multiplicative`, `rtpp` | `filtering.inflation` — ensemble spread maintenance |
+| [`filtering/evolution/`](../conf/filtering/evolution/) | `none`, `random_walk` | `filtering.parameter_evolution` — the parameters' forecast model between cycles |
+
+See [data_assimilation.md](data_assimilation.md) for the filtering library
+itself (`BaseFilter` / `EnsembleKalmanFilter`, cycle semantics, diagnostics).
+
+---
+
+### 1.9 Config group: `neural_surrogate/`
 
 Three primary configs (not groups) drive the surrogate scripts:
 
@@ -354,6 +386,29 @@ Truth is generated up front for all windows, then the window loop consumes it.
 For the dynamic case, `prior_sampler.extrapolate(posterior, ...)` seeds the next
 window's prior. `include_state` and `is_dynamic` flags (derived from the smoother
 type) drive the generic window loop without per-combination branching.
+
+#### [`run_filtering.py`](../scripts/run_filtering.py)
+**Hydra** — config: [`run_filtering.yaml`](../conf/run_filtering.yaml)
+
+The sequential-filtering (EnKF) entry point. Where ESMDA re-forecasts one
+window `num_steps` times with tempered updates, the filter forecasts one
+segment per cycle and applies ONE full-weight analysis to the end-of-segment
+state/parameters, warm-starting the next cycle from the analyzed state. The
+truth is generated over `filtering.num_cycles` segments up front; per-cycle
+observations are extracted with the case's temporal observation operator and
+the filter consumes the whole `(num_cycles, N_d)` batch in one `run()` call.
+
+Mode is the cross product of `filtering.mode=state|parameter|joint` and the
+`filtering/*` groups (§1.8). Truth source (`run.truth_dir`) mirrors
+`run_esmda.py`. Static scalar parameters only — a dynamic (AR(2)) params
+mount fails loudly; time-varying priors stay with the ESMDA smoothers.
+
+Saves: `posterior_params.nc` / `posterior_state.nc` (analyzed final-frame
+ensemble), optional `params_history.nc` / `state_history.nc`
+(`run.save_history`), per-cycle `cycle_diagnostics.yaml` (innovation χ²,
+obs-space prior/posterior RMSE, block spreads), `prior_params.nc`,
+`true_params.nc`, `true_state.nc` (inline truth), `run_info.yaml`,
+`config.yaml`.
 
 ---
 
@@ -592,7 +647,8 @@ Brief summary:
 | Change run size (ensemble, ESMDA steps, windows) | CLI overrides on `ensemble.*`/`esmda.*`; or edit the inlined blocks in [`run_esmda.yaml`](../conf/run_esmda.yaml) |
 | Switch CFD backend | `model@model=pylbm|pyudales|pypalm|neural_surrogate` (fwd) or `model@truth_model=...` + `model@assim_model=...` (esmda) |
 | Change DA mode | `esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic` |
-| Enable localization | `esmda/localization=correlation|distance` + optional field overrides |
+| Run a sequential filter (EnKF) instead of ESMDA | [`scripts/run_filtering.py`](../scripts/run_filtering.py) — `filtering.mode=state|parameter|joint` + `filtering/*` groups (§1.8) |
+| Enable localization | `esmda/localization=correlation|distance` (smoother) or `filtering/localization=...` (filter) + optional field overrides |
 | Enable reduced state update | `esmda/state_reduction=svd` (requires state-bearing smoother, incompatible with localization) |
 | Run the full ESMDA pipeline | [`scripts/run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh) |
 | Train a surrogate | [`scripts/neural_surrogate/train_neural_surrogate.py`](../scripts/neural_surrogate/train_neural_surrogate.py) — see [`docs/neural_surrogates.md`](neural_surrogates.md) |

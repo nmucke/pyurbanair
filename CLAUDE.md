@@ -65,6 +65,8 @@ pixi run -e dev pre-commit      # black + isort + mypy on staged files
 - Forward runs: `python scripts/run_forward_model.py model=pylbm ...`
 - Assimilation: `python scripts/run_esmda.py ...` (the single ESMDA entry point;
   mode = `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`).
+- Sequential filtering (EnKF): `python scripts/run_filtering.py ...`
+  (mode = `filtering.mode=state|parameter|joint` × the `filtering/*` groups).
 
 ## Workflow rules
 

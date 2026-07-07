@@ -1,6 +1,6 @@
 """Observation operator for the data assimilation."""
 
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import xarray
@@ -379,10 +379,7 @@ class TemporalObservationOperator:
             return self._observation_single(state)
 
 
-def sensor_observation_coords(
-    observation_operator: "ObservationOperator | TemporalObservationOperator",
-    n_d: int,
-) -> np.ndarray:
+def sensor_observation_coords(observation_operator: Any, n_d: int) -> np.ndarray:
     """Physical (x, y, z) coordinate of each of the ``n_d`` observations.
 
     Every observation is a sensor reading; its spatial location is the

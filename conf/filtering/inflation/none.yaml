@@ -1,0 +1,5 @@
+# @package filtering
+# No inflation. Fine for short state-mode experiments; parameter modes then
+# need filtering/evolution=random_walk for spread maintenance.
+# Selected with `filtering/inflation=none`.
+inflation: null

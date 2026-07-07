@@ -1,0 +1,7 @@
+# @package filtering
+# Relaxation to prior perturbations (Zhang et al. 2004): posterior anomalies
+# blended member-wise with the prior anomalies, weight `alpha` on the prior.
+# Selected with `filtering/inflation=rtpp`.
+inflation:
+  _target_: data_assimilation.inflation.RTPP
+  alpha: 0.5

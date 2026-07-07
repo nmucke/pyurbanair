@@ -1,0 +1,129 @@
+# Primary config (entry point) for scripts/run_filtering.py — sequential
+# ensemble filtering (EnKF) alongside the ESMDA entry point (run_esmda.yaml).
+#
+# Self-contained: inlines the shared base (output paths, ensemble defaults, the
+# `run:` namespace and Hydra settings) and selects the filtering groups.
+#
+# Declarative axes select the mode and machinery:
+#   * filtering.mode=state|parameter|joint     which blocks the analysis updates
+#   * filtering/analysis=stochastic            the update math (ETKF/LETKF later)
+#   * filtering/localization=none|correlation|distance
+#   * filtering/inflation=none|multiplicative|rtps|rtpp
+#   * filtering/evolution=none|random_walk     parameter forecast model
+#   * filtering.num_cycles=N                   one full-weight analysis per cycle
+# and the truth source (mirrors run_esmda.yaml):
+#   * run.truth_dir=null   -> simulate truth inline (default)
+#   * run.truth_dir=<path> -> load a state.nc/params.nc artifact
+#
+# One cycle = one forecast segment of `time.simulation_time` seconds; set it
+# equal to `obs.interval_seconds` to assimilate one observation interval per
+# analysis. Only STATIC parameters are supported (pair with
+# params@prior_params=static); time-varying priors stay with run_esmda.py.
+#
+# Examples::
+#
+#   python scripts/run_filtering.py filtering.mode=joint filtering.num_cycles=4
+#   python scripts/run_filtering.py filtering.mode=parameter \
+#     filtering/evolution=random_walk filtering/inflation=none
+#   python scripts/run_filtering.py filtering.mode=state \
+#     filtering/localization=correlation
+defaults:
+  - case: barcelona
+  # `_self_` before the filtering/* groups so the base `filtering:` scalars below
+  # are set first and the analysis / localization / inflation / evolution groups
+  # can override them. The model / params mounts write to their own packages.
+  - _self_
+  - filtering/analysis: stochastic
+  - filtering/localization: none
+  - filtering/inflation: rtps
+  - filtering/evolution: none
+  - model@truth_model: pylbm
+  - model@assim_model: pylbm
+  - params@truth_params: static_truth
+  - params@prior_params: static
+
+# --- Output roots (everything mutable lands under .temp/). Two model mounts
+# (truth/assim) and no base `model`, so name the output by both backends. ---
+paths:
+  results_dir: .temp/filtering_${truth_model.name}_to_${assim_model.name}
+  # Absolute scratch dir for the solvers (they chdir into it). Resolved from $PWD
+  # so it also works under bare compose() in tests.
+  experiment_dir: ${oc.env:PWD}/.temp
+  base_results_dir: .temp_lbm
+
+# --- Time-varying parameter knot spacing. NOT used by the filter itself (only
+# static parameters are supported), but the dynamic params sampler configs
+# interpolate it — keeping the key here lets a dynamic mount compose (and fail
+# with the script's explicit static-only error instead of a missing-key one),
+# and keeps shared overrides (tests) portable across the run_* entry points. ---
+time:
+  seconds_per_knot: 60.0
+
+# --- Which parameters the filter estimates (same contract as run_esmda.yaml
+# `params_to_estimate`: a list -> that subset of the sampler configs' params,
+# applied to BOTH prior and truth; null -> every parameter they define). ---
+params_to_estimate:
+  - inflow_angle
+  - velocity_magnitude
+  - pressure_gradient_magnitude
+
+# --- Ensemble execution. Override per run on the CLI, e.g.
+# `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
+ensemble:
+  ensemble_size: 50
+  num_parallel_processes: 8
+  num_cpus_per_process: 1
+  failure:
+    policy: resample_from_successes
+    jitter_scale: 0.05
+    seed: 0
+
+# --- Filtering settings. The filter itself (the `_target_` block) composes the
+# analysis / localization / inflation / evolution selected by the groups above;
+# `filtering.mode` picks which augmented blocks the analysis updates. ---
+filtering:
+  # One full-weight analysis per cycle; each cycle forecasts one segment of
+  # `time.simulation_time` seconds.
+  num_cycles: 2
+  seed: 42
+  obs_error_std: 0.25
+  # state | parameter | joint. Parameter mode REQUIRES spread maintenance
+  # (filtering/evolution=random_walk or a filtering/inflation option) — the
+  # filter refuses silently-collapsing configurations at construction.
+  mode: joint
+  # Defaults; normally set by the filtering/* groups above.
+  analysis: null
+  localization: null
+  inflation: null
+  parameter_evolution: null
+  filter:
+    _target_: data_assimilation.filtering.EnsembleKalmanFilter
+    _convert_: all
+    mode: ${filtering.mode}
+    analysis: ${filtering.analysis}
+    localization: ${filtering.localization}
+    inflation: ${filtering.inflation}
+    parameter_evolution: ${filtering.parameter_evolution}
+
+run:
+  results_dir: null
+  # When true, ensemble forecasts are written to disk (one NetCDF per member,
+  # per cycle, under cycle_{k}/ dirs) instead of one in-memory ensemble Dataset.
+  ensemble_save_on_disk: false
+  # Save the per-cycle analyzed params/state histories (params_history.nc /
+  # state_history.nc; the state history holds final frames only, so it stays
+  # small). Per-cycle diagnostics (cycle_diagnostics.yaml) are always saved.
+  save_history: true
+  # Truth source: null -> simulate inline (default); a path -> load a
+  # state.nc/params.nc artifact written by run_forward_model.py.
+  truth_dir: null
+  # Begin the assimilation horizon partway into a disk-loaded truth (skips a
+  # spin-up): frames before this time are dropped and the axis rebased so it
+  # becomes t=0. null/0 -> start from the truth's first frame.
+  truth_start_time: null
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
