@@ -29,9 +29,7 @@ import jax
 import jax.numpy as jnp
 
 
-def _group_inflation(
-    inflation: jnp.ndarray, group_ids: jnp.ndarray
-) -> jnp.ndarray:
+def _group_inflation(inflation: jnp.ndarray, group_ids: jnp.ndarray) -> jnp.ndarray:
     """Share the per-observation inflation across rows in the same block.
 
     Implements the paper's "grid block" local analysis (Vossepoel et al. 2025,
@@ -120,6 +118,13 @@ class BaseLocalization(ABC):
     #: distance strategy needs grid/sensor coordinates (``True``), which only the
     #: state-bearing smoothers can supply.
     requires_coordinates: bool = False
+
+    #: Whether the strategy requests the paper's "grid block" joint local
+    #: analysis (sec. 3b): co-located augmented rows are updated with a single
+    #: observation selection and transition.  Subclasses set it from their
+    #: constructor; declared here so the smoother can read it without a
+    #: ``getattr`` guard.
+    block_grouping: bool = False
 
     @abstractmethod
     def inflation_factors(

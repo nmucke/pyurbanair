@@ -5,9 +5,9 @@ from typing import Optional
 
 import jax.numpy as jnp
 import xarray
-from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
-
 from data_assimilation.observation_operator import ObservationOperator
+
+from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
 
 class BaseSmoothing:
@@ -42,7 +42,10 @@ class BaseSmoothing:
             results_dir: The directory to load the states from.
 
         Returns:
-            The observations as a jnp.ndarray of shape (num_observations, num_sensors).
+            The observations. The in-memory path returns whatever the operator
+            returns for the given state -- ``(N_e, num_obs)`` for an ensemble
+            Dataset. The disk path stacks per-member vectors into ``(N_e,
+            num_obs)``.
         """
         if state is not None:
             return self.observation_operator(state)
@@ -54,10 +57,13 @@ class BaseSmoothing:
                 )
             observations_list: list[jnp.ndarray] = []
             for state_file in file_list:
-                state = xarray.open_dataset(state_file)
-                observations_list.append(self.observation_operator(state))
+                with xarray.open_dataset(state_file) as member_state:
+                    observations_list.append(
+                        self.observation_operator(member_state.load())
+                    )
 
             return jnp.stack(observations_list, axis=0)
+        raise ValueError("Either state or results_dir must be provided.")
 
     @staticmethod
     def _get_sorted_state_files(results_dir: pathlib.Path) -> list[pathlib.Path]:

@@ -1,44 +1,50 @@
+import logging
 import os
 import pathlib
-import re
 import shutil
 from abc import abstractmethod
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray
-
-
-def _group_ids_by_base_name(names: list[str]) -> jnp.ndarray:
-    """Block id per row, grouping names that share a base (``_<int>`` stripped).
-
-    Co-locates all time knots of one parameter (e.g. ``inflow_angle_0``,
-    ``inflow_angle_1``, … -> one block) while leaving distinct parameters in
-    separate blocks.  Static parameters (no numeric suffix) each form their
-    own block, so block grouping then reduces to the per-row analysis.
-    """
-    base_names = [re.sub(r"_\d+$", "", name) for name in names]
-    order: dict[str, int] = {}
-    ids = []
-    for base in base_names:
-        ids.append(order.setdefault(base, len(order)))
-    return jnp.asarray(ids, dtype=int)
-
-
-def _block_grouping_enabled(localization) -> bool:
-    """True when a localization is set and requests joint block updates."""
-    return localization is not None and getattr(localization, "block_grouping", False)
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import ObservationOperator
 from data_assimilation.reduction import OnlineStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing
+
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
+
+logger = logging.getLogger(__name__)
+
+
+def _load_dataset(path: os.PathLike) -> xarray.Dataset:
+    """Open a NetCDF file, read it fully into memory, and close the handle.
+
+    Every call site consumes the arrays immediately (concatenated or observed),
+    so eager loading costs nothing and avoids leaking netCDF4 file handles --
+    long rollouts open ``ensemble_size x (num_steps + 1)`` files per window and
+    would otherwise hit ``Too many open files`` / HDF5 locking on clusters.
+    """
+    with xarray.open_dataset(path) as ds:
+        return ds.load()
+
+
+def _block_grouping_enabled(localization: Optional[BaseLocalization]) -> bool:
+    """True when a localization is set and requests joint block updates."""
+    return localization is not None and localization.block_grouping
 
 
 class _BaseESMDA(BaseSmoothing):
     """Shared ESMDA logic for parameter-only and joint state-parameter variants."""
+
+    #: Whether this smoother can supply physical row coordinates to a
+    #: coordinate-based localization (distance strategy).  Only the state-bearing
+    #: variants can; the parameter-only variants override nothing and stay
+    #: ``False`` so an incompatible pairing is rejected at construction rather
+    #: than deep inside the first Kalman update.
+    _supplies_row_coordinates: bool = False
 
     def __init__(
         self,
@@ -47,15 +53,51 @@ class _BaseESMDA(BaseSmoothing):
         C_D: jnp.ndarray,
         num_steps: int = 3,
         alpha: Optional[float] = None,
-        rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
+        rng_key: Optional[jax.Array] = None,
         localization: Optional[BaseLocalization] = None,
     ) -> None:
         super().__init__(observation_operator, forward_model)
 
+        # ``C_D_sqrt = sqrt(C_D)`` (element-wise) and ``jnp.diag(C_D)`` in the
+        # localized update are only correct for a diagonal covariance. Validate
+        # it here so a full (non-diagonal) C_D fails loudly instead of silently
+        # producing a wrong perturbation/inflation.
+        C_D = jnp.asarray(C_D)
+        if C_D.ndim != 2 or C_D.shape[0] != C_D.shape[1]:
+            raise ValueError(
+                f"C_D must be a square (N_d, N_d) matrix, got shape {C_D.shape}."
+            )
+        off_diagonal = C_D - jnp.diag(jnp.diag(C_D))
+        if not bool(jnp.all(off_diagonal == 0.0)):
+            raise ValueError(
+                "C_D must be diagonal: the element-wise C_D_sqrt and the "
+                "diagonal used by the localized update assume a diagonal "
+                "observation-error covariance. Pass sigma**2 on the diagonal."
+            )
+
+        # Reject a coordinate-based localization on a smoother that cannot supply
+        # row coordinates (parameter-only variants). Deferring this to the first
+        # Kalman update produces an opaque error deep in the analysis loop.
+        if (
+            localization is not None
+            and localization.requires_coordinates
+            and not self._supplies_row_coordinates
+        ):
+            raise ValueError(
+                f"{type(localization).__name__} requires physical row "
+                "coordinates, which this smoother cannot supply. Distance-based "
+                "localization only applies to a state-bearing smoother "
+                "(esmda/smoother=state_and_parameter or state_and_dynamic)."
+            )
+
         self.alpha = num_steps if alpha is None else alpha
         self.C_D = C_D
         self.C_D_sqrt = jnp.sqrt(self.C_D)
-        self.rng_key = rng_key
+        # Default the PRNG key here (not in the signature): a default argument
+        # would be evaluated at import time -- initializing the JAX backend as a
+        # side effect and sharing one key across every smoother built without an
+        # explicit one.
+        self.rng_key = jax.random.PRNGKey(42) if rng_key is None else rng_key
         self.num_steps = num_steps
         # Optional localization strategy. When None, the global (unlocalized)
         # Kalman update is used. When set, each augmented-state row is updated
@@ -102,7 +144,7 @@ class _BaseESMDA(BaseSmoothing):
 
     def get_state(self, ensemble_member: int, step: int) -> xarray.Dataset:
         """Get the state for one ensemble member at a given step."""
-        return xarray.open_dataset(
+        return _load_dataset(
             self.base_results_dir / f"step_{step}" / f"state_{ensemble_member}.nc"
         )
 
@@ -183,10 +225,18 @@ class _BaseESMDA(BaseSmoothing):
         innovation = perturbed_obs - pred_obs
         C_DD_alpha = C_DD + alpha * self.C_D
 
-        try:
-            x = jnp.linalg.solve(C_DD_alpha, innovation)
-        except jnp.linalg.LinAlgError:
-            x = jnp.linalg.lstsq(C_DD_alpha, innovation, rcond=None)[0]
+        # ``jnp.linalg.solve`` does not raise on a singular system -- it returns
+        # NaN/Inf, which would silently poison the whole ensemble. With positive
+        # observation-error variances ``alpha * C_D`` keeps the system SPD, so
+        # this should never fire; when it does, fail loudly instead.
+        x = jnp.linalg.solve(C_DD_alpha, innovation)
+        if not bool(jnp.all(jnp.isfinite(x))):
+            raise FloatingPointError(
+                "ESMDA Kalman solve produced non-finite values: the system "
+                "C_DD + alpha * C_D is singular or ill-conditioned. Check for "
+                "collapsed ensemble spread or a degenerate observation-error "
+                "covariance."
+            )
 
         return augmented + C_MD @ x
 
@@ -242,8 +292,13 @@ class _BaseESMDA(BaseSmoothing):
         params: xarray.Dataset,
         obs: jnp.ndarray,
         state: Optional[xarray.Dataset] = None,
+        group_ids: Optional[jnp.ndarray] = None,
     ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
         """Perform one ESMDA assimilation step.
+
+        ``group_ids`` is an optional block id per augmented row used by a
+        localized update with block grouping; a subclass that flattens a
+        structured parameter passes the ids it built while flattening.
 
         Returns:
             (updated_state_or_None, updated_params)
@@ -328,7 +383,7 @@ class _BaseESMDA(BaseSmoothing):
             if not (i == 0 and self.keep_prior_disk_step):
                 self._prune_step_results_dir(i)
 
-            print(f"ESMDA step {i} completed")
+            logger.info("ESMDA step %d completed", i)
 
         # Final forecast from the analyzed initial condition + updated params.
         self._set_step_results_dir(self.num_steps)
@@ -369,6 +424,7 @@ class ParameterESMDA(_BaseESMDA):
         params: xarray.Dataset,
         obs: jnp.ndarray,
         state: Optional[xarray.Dataset] = None,
+        group_ids: Optional[jnp.ndarray] = None,
     ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
         obs = jnp.asarray(obs)
         param_names = list(params.data_vars.keys())
@@ -394,13 +450,15 @@ class ParameterESMDA(_BaseESMDA):
 
         params_array = jnp.array([params[name].values for name in param_names])
 
-        # Block grouping: co-locate time knots of the same parameter so they
-        # share one observation selection and transition (paper sec. 3b).
-        group_ids = (
-            _group_ids_by_base_name(param_names)
-            if _block_grouping_enabled(self.localization)
-            else None
-        )
+        # Block grouping (paper sec. 3b): co-locate the augmented rows that
+        # share a block. A subclass that flattens a structured parameter (e.g.
+        # time knots) passes the block ids it built while flattening; the plain
+        # static case leaves each parameter in its own block.
+        if _block_grouping_enabled(self.localization):
+            if group_ids is None:
+                group_ids = jnp.arange(len(param_names), dtype=int)
+        else:
+            group_ids = None
         params_updated = self._compute_kalman_update(
             params_array, pred_obs, obs, N_e, group_ids=group_ids
         )
@@ -431,7 +489,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         num_time_points: int,
         num_steps: int = 3,
         alpha: Optional[float] = None,
-        rng_key: Optional[jax.random.PRNGKey] = jax.random.PRNGKey(42),
+        rng_key: Optional[jax.Array] = None,
         pin_initial_time_point: bool = False,
         localization: Optional[BaseLocalization] = None,
     ) -> None:
@@ -451,6 +509,41 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         # cross-window continuity in rollout ESMDA.
         self.pin_initial_time_point = pin_initial_time_point
 
+    def _check_num_time_points(self, params: xarray.Dataset) -> None:
+        """Validate the data's ``time`` size against the configured knot count.
+
+        The flatten/unflatten round-trip iterates ``range(self.num_time_points)``;
+        if the data has fewer knots the trailing ones are silently dropped, and if
+        it has more they raise an opaque out-of-bounds error. Check once, loudly.
+        """
+        if "time" not in params.dims:
+            return
+        data_time = int(params.sizes["time"])
+        if data_time != self.num_time_points:
+            raise ValueError(
+                f"num_time_points ({self.num_time_points}) does not match the "
+                f"params' time dimension ({data_time}). The time-varying "
+                "flatten/unflatten assumes they agree; set num_time_points to "
+                "the sampled prior's knot count."
+            )
+
+    def _time_varying_group_ids(self, params: xarray.Dataset) -> jnp.ndarray:
+        """Block id per flattened param row, grouping knots of one parameter.
+
+        Mirrors :meth:`_flatten_time_varying_params`' variable order exactly: a
+        time-varying parameter's ``{name}_{t}`` knots all share one block id;
+        each static parameter is its own block. Built from the true
+        name->(param, knot) mapping, so it cannot merge unrelated parameters the
+        way stripping a numeric name suffix could.
+        """
+        self._check_num_time_points(params)
+        n_knots = self.num_time_points - (1 if self.pin_initial_time_point else 0)
+        ids: list[int] = []
+        for block_id, name in enumerate(params.data_vars):
+            repeats = n_knots if "time" in params[name].dims else 1
+            ids.extend([block_id] * repeats)
+        return jnp.asarray(ids, dtype=int)
+
     def _flatten_time_varying_params(self, params: xarray.Dataset) -> xarray.Dataset:
         """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars.
 
@@ -462,6 +555,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         When ``self.pin_initial_time_point`` is True, ``{name}_0`` is
         omitted so ``t=0`` never enters the augmented state.
         """
+        self._check_num_time_points(params)
         start_idx = 1 if self.pin_initial_time_point else 0
         flat_data_vars: dict = {}
         for name in params.data_vars:
@@ -517,9 +611,16 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         params: xarray.Dataset,
         obs: jnp.ndarray,
         state: Optional[xarray.Dataset] = None,
+        group_ids: Optional[jnp.ndarray] = None,
     ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
         flat_params = self._flatten_time_varying_params(params)
-        _, updated_flat = super()._one_step(flat_params, obs, state)
+        # Group ids built from the true name->knot mapping (grouping this
+        # parameter's time knots), passed down so the block update never has to
+        # re-parse the flattened names.
+        knot_group_ids = self._time_varying_group_ids(params)
+        _, updated_flat = super()._one_step(
+            flat_params, obs, state, group_ids=knot_group_ids
+        )
         updated_params = self._unflatten_params(updated_flat, params)
         return None, updated_params
 
@@ -536,12 +637,16 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
     full-space behavior exactly.
     """
 
+    # State-bearing smoothers know each state row's physical grid coordinate, so
+    # they can pair with a coordinate-based (distance) localization.
+    _supplies_row_coordinates: bool = True
+
     def __init__(
         self,
-        *args,
+        *args: Any,
         state_reduction: Optional[OnlineStateReduction] = None,
         final_time_smoothing: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         if state_reduction is not None and self.localization is not None:
@@ -588,7 +693,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
                 raise FileNotFoundError(
                     f"No state_*.nc files found in results directory: {results_dir}"
                 )
-            states = [xarray.open_dataset(f).isel(time=0) for f in state_files]
+            states = [_load_dataset(f).isel(time=0) for f in state_files]
             return xarray.concat(states, dim="ensemble", join="override")
         raise ValueError("Either state or results_dir must be provided.")
 
@@ -621,7 +726,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
                 raise FileNotFoundError(
                     f"No state_*.nc files found in results directory: {results_dir}"
                 )
-            states = [xarray.open_dataset(f) for f in state_files]
+            states = [_load_dataset(f) for f in state_files]
             return xarray.concat(states, dim="ensemble", join="override")
         raise ValueError("Either state or results_dir must be provided.")
 
@@ -634,6 +739,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         to a flattened ``time=0`` state vector. Time frames are thinned by the
         reduction's ``snapshot_stride``.
         """
+        assert self.state_reduction is not None  # only called for window_snapshots
         state = state.isel(time=slice(None, None, self.state_reduction.snapshot_stride))
         flat_vars = []
         n_samples = state.sizes["ensemble"] * state.sizes["time"]
@@ -674,12 +780,30 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         components — e.g. ``u``/``v``/``w`` at one grid cell — into one block,
         giving them the joint, balanced update of the paper's grid-block
         local analysis.
+
+        This co-location by flat index is only physically correct when every
+        state variable lives on the **same grid shape** (pylbm's collocated
+        grid). On a staggered grid (uDALES/PALM, where ``u``/``v``/``w`` sit on
+        different ``xm``/``xt`` … axes) index ``i`` of ``u`` is not co-located
+        with index ``i`` of ``v``, and differing sizes would misalign the
+        blocks — so require a single shared shape and raise otherwise.
         """
         per_var = []
+        cell_shapes: set[tuple[int, ...]] = set()
         for var_name in sorted(state.data_vars):
             variable = state[var_name]
+            cell_shapes.add(
+                tuple(int(variable.sizes[d]) for d in variable.dims if d != "ensemble")
+            )
             n_cells = variable.size // variable.sizes["ensemble"]
             per_var.append(jnp.arange(n_cells, dtype=int))
+        if len(cell_shapes) > 1:
+            raise ValueError(
+                "Grid-block grouping requires collocated state variables (one "
+                f"shared grid shape), but got shapes {sorted(cell_shapes)}. On a "
+                "staggered grid the components are not co-located by flat index; "
+                "disable block_grouping or build ids from physical coordinates."
+            )
         return jnp.concatenate(per_var)
 
     def _unflatten_state(
@@ -732,14 +856,14 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
                         "grid indices would be compared against sensor "
                         "coordinates in metres."
                     )
-            coord_1d = [
-                np.asarray(state[d].values, dtype=float) for d in dims_no_ens
-            ]
+            coord_1d = [np.asarray(state[d].values, dtype=float) for d in dims_no_ens]
             # meshgrid(indexing="ij").ravel() flattens in the same C-order as
             # transpose("ensemble", ...).reshape(ensemble, -1) in _flatten_state.
             grids = np.meshgrid(*coord_1d, indexing="ij") if coord_1d else []
             flat = [g.ravel() for g in grids]
-            n_cells = flat[0].size if flat else variable.size // variable.sizes["ensemble"]
+            n_cells = (
+                flat[0].size if flat else variable.size // variable.sizes["ensemble"]
+            )
             per_axis = {d[0]: flat[i] for i, d in enumerate(dims_no_ens)}
             xyz = np.stack(
                 [per_axis.get(axis, np.zeros(n_cells)) for axis in ("x", "y", "z")],
@@ -772,16 +896,10 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         is ``None`` on this path (enforced at construction).
         """
         param_names = list(flat_params.data_vars.keys())
-        state_template = xarray.Dataset(
-            {
-                var: (
-                    states_array[var].dims,
-                    jnp.empty(states_array[var].shape, dtype=states_array[var].dtype),
-                )
-                for var in states_array.data_vars
-            },
-            coords={coord: states_array.coords[coord] for coord in states_array.coords},
-        )
+        # ``_unflatten_state`` reads only dims/sizes/coords/dtype from its
+        # template, so ``states_array`` itself serves -- no need to allocate a
+        # full ensemble-sized copy of empties (a real device allocation).
+        state_template = states_array
 
         states_flat = self._flatten_state(states_array)
 
@@ -824,15 +942,17 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
             localize_mask = jnp.concatenate(
                 [jnp.ones(N_s, dtype=bool), jnp.zeros(len(param_names), dtype=bool)]
             )
-            # Block grouping: co-locate state rows by grid cell; each parameter
-            # is its own block (and masked anyway), so it never joins a state one.
+            # Block grouping: co-locate state rows by grid cell. Each parameter
+            # gets its own block; parameter rows are masked to the global update
+            # regardless, so how they group among themselves is immaterial (which
+            # is why a plain per-parameter id, not a structured one, suffices).
             if _block_grouping_enabled(self.localization):
                 state_groups = self._state_group_ids(states_array)
                 offset = int(state_groups.max()) + 1
-                param_groups = offset + _group_ids_by_base_name(param_names)
+                param_groups = offset + jnp.arange(len(param_names), dtype=int)
                 group_ids = jnp.concatenate([state_groups, param_groups])
             # Distance-based localization additionally needs grid/sensor coords.
-            if getattr(self.localization, "requires_coordinates", False):
+            if self.localization.requires_coordinates:
                 state_coords = self._state_row_coords(states_array)  # (N_s, 3)
                 param_coords = jnp.zeros((len(param_names), 3))  # masked out
                 row_coords = jnp.concatenate([state_coords, param_coords], axis=0)
@@ -864,12 +984,13 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         params: xarray.Dataset,
         obs: jnp.ndarray,
         state: Optional[xarray.Dataset] = None,
+        group_ids: Optional[jnp.ndarray] = None,
     ) -> tuple[xarray.Dataset, xarray.Dataset]:
+        # ``group_ids`` is unused: the state-bearing variant builds its own block
+        # ids (state cells + per-parameter) inside ``_augmented_state_update``.
         obs = jnp.asarray(obs)
         results_dir = (
-            self.forward_model.results_dir
-            if self.forward_model.save_on_disk
-            else None
+            self.forward_model.results_dir if self.forward_model.save_on_disk else None
         )
 
         pred_obs = self._observation_step(state=state, results_dir=results_dir)
@@ -917,6 +1038,8 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
 
         # _flatten_state/_unflatten_state are agnostic to the time dim: the
         # full (time, space) trajectory of each member becomes one column.
+        # final_time_smoothing requires state_reduction (enforced at construction).
+        assert self.state_reduction is not None
         traj_flat = self._flatten_state(state)
         self.state_reduction.fit(traj_flat)
         xi = self.state_reduction.encode(traj_flat)
@@ -959,12 +1082,13 @@ class StateAndTimeVaryingParameterESMDA(
         params: xarray.Dataset,
         obs: jnp.ndarray,
         state: Optional[xarray.Dataset] = None,
+        group_ids: Optional[jnp.ndarray] = None,
     ) -> tuple[xarray.Dataset, xarray.Dataset]:
+        # ``group_ids`` is unused: block ids are built inside
+        # ``_augmented_state_update`` (state cells + per-parameter blocks).
         obs = jnp.asarray(obs)
         results_dir = (
-            self.forward_model.results_dir
-            if self.forward_model.save_on_disk
-            else None
+            self.forward_model.results_dir if self.forward_model.save_on_disk else None
         )
 
         pred_obs = self._observation_step(state=state, results_dir=results_dir)
