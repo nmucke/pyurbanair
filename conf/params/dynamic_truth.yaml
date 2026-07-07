@@ -5,7 +5,7 @@
 # the separate `params@prior_params=dynamic`.
 _target_: pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel
 _convert_: all
-correlation_length: 100.0
+correlation_length: 200.0
 seed: 7
 external_parameters:
   inflow_angle:
