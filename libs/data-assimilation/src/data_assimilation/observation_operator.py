@@ -1,5 +1,7 @@
 """Observation operator for the data assimilation."""
 
+from typing import cast
+
 import numpy as np
 import xarray
 from data_assimilation.interpolation import interpolate_dataarray_at_points
@@ -375,3 +377,44 @@ class TemporalObservationOperator:
             return self._observation_ensemble(state)
         else:
             return self._observation_single(state)
+
+
+def sensor_observation_coords(
+    observation_operator: "ObservationOperator | TemporalObservationOperator",
+    n_d: int,
+) -> np.ndarray:
+    """Physical (x, y, z) coordinate of each of the ``n_d`` observations.
+
+    Every observation is a sensor reading; its spatial location is the
+    sensor's, independent of which state component (u/v/w) or time interval
+    it belongs to.  In the flattened observation vector the sensor index is
+    the innermost/fastest axis (see :class:`ObservationOperator` and
+    :class:`TemporalObservationOperator`), so observation ``j`` sits at sensor
+    ``j % num_sensors``.  Tiling the sensor coordinates therefore reproduces
+    the per-observation coordinates regardless of the number of state
+    components or temporal intervals.
+
+    Requires coordinate-based observations (``obs_x``/``obs_y``/``obs_z``).
+    Accepts either an :class:`ObservationOperator` or a temporal wrapper
+    around one. Used by distance-based localization (smoothing and filtering).
+    """
+    base_op = cast(
+        ObservationOperator,
+        getattr(observation_operator, "observation_operator", observation_operator),
+    )
+    if not getattr(base_op, "use_interpolation", False):
+        raise ValueError(
+            "Distance-based localization requires coordinate-based "
+            "observations (obs_x/obs_y/obs_z), not index-based ones."
+        )
+    sensor_xyz = np.stack(
+        [base_op.obs_x, base_op.obs_y, base_op.obs_z], axis=1
+    )  # (num_sensors, 3)
+    num_sensors = base_op.num_sensors
+    reps, remainder = divmod(int(n_d), int(num_sensors))
+    if remainder != 0:
+        raise ValueError(
+            f"Observation count {n_d} is not a multiple of the sensor count "
+            f"{num_sensors}; cannot map observations to sensor coordinates."
+        )
+    return np.tile(sensor_xyz, (reps, 1))  # (n_d, 3)

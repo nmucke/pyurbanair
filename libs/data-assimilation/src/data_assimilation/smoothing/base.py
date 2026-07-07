@@ -1,10 +1,10 @@
 import pathlib
-import re
 from abc import abstractmethod
 from typing import Optional
 
 import jax.numpy as jnp
 import xarray
+from data_assimilation.io import get_sorted_state_files
 from data_assimilation.observation_operator import ObservationOperator
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
@@ -67,24 +67,8 @@ class BaseSmoothing:
 
     @staticmethod
     def _get_sorted_state_files(results_dir: pathlib.Path) -> list[pathlib.Path]:
-        """Return state files sorted by ensemble index.
-
-        Only files matching state_<int>.nc are considered to avoid stale or
-        unrelated NetCDF files from previous runs polluting ensemble size.
-        """
-        state_file_regex = re.compile(r"state_(\d+)\.nc")
-        state_files_with_idx: list[tuple[int, pathlib.Path]] = []
-
-        for file_path in results_dir.iterdir():
-            if not file_path.is_file():
-                continue
-            match = state_file_regex.fullmatch(file_path.name)
-            if match is None:
-                continue
-            state_files_with_idx.append((int(match.group(1)), file_path))
-
-        state_files_with_idx.sort(key=lambda item: item[0])
-        return [file_path for _, file_path in state_files_with_idx]
+        """Return state files sorted by ensemble index (shared io helper)."""
+        return get_sorted_state_files(results_dir)
 
     @abstractmethod
     def _analysis(
