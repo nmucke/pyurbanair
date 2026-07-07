@@ -5,9 +5,17 @@ from __future__ import annotations
 import numpy as np
 import xarray
 
+# Staggered-grid dimension aliases per physical axis, across every supported
+# solver: uDALES uses ``xt``/``xm`` (cell centre / x-face) and ``yt``/``ym``;
+# PALM stages ``u`` on ``xu`` and ``v`` on ``yv``.  Listing all variants here lets
+# the operator's requested dim (from its solver's ``dim_mapping``) resolve
+# against a state written by a *different* solver -- e.g. a udales observation
+# operator (which asks for ``xm``) reading a PALM truth (whose ``u`` lives on
+# ``xu``), which is exactly the cross-solver truth/assim pairing the pipeline
+# supports. Kept consistent with ``scripts/_common.py`` and ``figspec/dataio.py``.
 _AXIS_DIM_CANDIDATES: dict[str, tuple[str, ...]] = {
-    "x": ("x", "xt", "xm"),
-    "y": ("y", "yt", "ym"),
+    "x": ("x", "xt", "xm", "xu"),
+    "y": ("y", "yt", "ym", "yv"),
     "z": ("z", "zt", "zm"),
 }
 

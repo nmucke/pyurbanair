@@ -32,6 +32,52 @@ def _yz(num_points: int) -> tuple[np.ndarray, np.ndarray]:
     return np.full(num_points, 0.25), np.full(num_points, 0.25)
 
 
+def test_resolves_cross_solver_staggered_dim_names() -> None:
+    # A udales observation operator asks for ``x_dim="xm"``, but a PALM-generated
+    # truth state carries ``u`` on ``xu`` (PALM's staggered convention). The
+    # requested name must resolve to the state's actual staggered variant so
+    # cross-solver truth/assim pairings interpolate instead of raising.
+    x_coords = np.array([0.0, 1.0, 2.0, 3.0])
+    values = np.broadcast_to(x_coords.astype(float), (2, 2, x_coords.size))
+    palm_u = xarray.DataArray(
+        values.copy(),
+        dims=("z", "y", "xu"),  # PALM: u lives on xu
+        coords={
+            "xu": x_coords.astype(float),
+            "y": np.array([0.0, 1.0]),
+            "z": np.array([0.0, 1.0]),
+        },
+    )
+
+    result = interpolate_dataarray_at_points(
+        palm_u,
+        x_dim="xm",  # udales operator's requested name
+        y_dim="yt",
+        z_dim="zt",
+        obs_x=np.array([1.5]),
+        obs_y=np.array([0.5]),
+        obs_z=np.array([0.5]),
+    )
+    # The field equals its x coordinate, so interpolating at x=1.5 gives 1.5.
+    np.testing.assert_allclose(result.values, [1.5])
+
+
+def test_unresolvable_dim_still_raises() -> None:
+    # A genuinely absent axis (no known alias present) must still raise, so a real
+    # convention mismatch is not silently swallowed.
+    field = _make_field(np.array([0.0, 1.0, 2.0]))
+    with pytest.raises(ValueError, match="not present"):
+        interpolate_dataarray_at_points(
+            field.rename({"x": "longitude"}),
+            x_dim="x",
+            y_dim="y",
+            z_dim="z",
+            obs_x=np.array([1.0]),
+            obs_y=np.array([0.5]),
+            obs_z=np.array([0.5]),
+        )
+
+
 def test_uniform_grid_extrapolation_margin_matches_half_spacing() -> None:
     # Uniform grid: spacing is 2.0 everywhere, so median == edge spacing and
     # behavior must match the pre-fix single symmetric margin (1.0 each side).
