@@ -497,7 +497,9 @@ visible at cycle k instead of at the end).
   ([filtering/parameter_evolution.py](../libs/data-assimilation/src/data_assimilation/filtering/parameter_evolution.py)):
   the parameters' forecast model between cycles — `IdentityEvolution` or
   `RandomWalkEvolution(std | {name: std})`. Without one, an un-inflated
-  parameter ensemble collapses after a few cycles and stops learning.
+  parameter ensemble collapses after a few cycles and stops learning — so the
+  parameter-updating modes (`parameter`/`joint`) refuse to construct without
+  an evolution or an inflation.
 
 ### Run script
 

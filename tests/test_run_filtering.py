@@ -100,6 +100,15 @@ def test_run_filtering_distance_localization(compose_test_cfg: Any) -> None:
     run(cfg)
 
 
+def test_run_filtering_rejects_zero_cycles(compose_test_cfg: Any) -> None:
+    """num_cycles < 1 fails before any simulation is started."""
+    from scripts.run_filtering import run
+
+    cfg = compose_test_cfg(_overrides("joint", 0), config_name="run_filtering")
+    with pytest.raises(ValueError, match="num_cycles"):
+        run(cfg)
+
+
 def test_run_filtering_rejects_dynamic_prior(compose_test_cfg: Any) -> None:
     """The filter is static-parameters-only; a dynamic prior fails loudly."""
     from scripts.run_filtering import run

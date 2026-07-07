@@ -263,6 +263,9 @@ def _run_joint(localization: Optional[BaseLocalization]) -> tuple:
         C_D=jnp.array([0.1]),
         mode="joint",
         localization=localization,
+        # Joint mode requires spread maintenance; identical in both runs, so
+        # the localization equivalence below is unaffected.
+        inflation=RTPS(alpha=0.5),
         rng_key=jax.random.PRNGKey(7),
     )
     result = enkf.run(
@@ -301,6 +304,7 @@ def test_joint_mode_updates_both_blocks() -> None:
         forward_model=_ToyLinearModel(A, param_effect=0.5),
         C_D=jnp.array([0.1]),
         mode="joint",
+        inflation=RTPS(alpha=0.5),
         rng_key=jax.random.PRNGKey(10),
     )
     result = enkf.run(state=state, params=params, observations=jnp.array([[2.0]]))
@@ -328,9 +332,13 @@ def _dummy_filter_kwargs() -> dict:
     }
 
 
-def test_parameter_mode_without_spread_maintenance_raises() -> None:
+@pytest.mark.parametrize("mode", ["parameter", "joint"])  # type: ignore[misc]
+def test_parameter_updating_modes_without_spread_maintenance_raise(
+    mode: str,
+) -> None:
+    """Both parameter-updating modes refuse silently-collapsing configs."""
     with pytest.raises(ValueError, match="spread maintenance"):
-        EnsembleKalmanFilter(mode="parameter", **_dummy_filter_kwargs())
+        EnsembleKalmanFilter(mode=mode, **_dummy_filter_kwargs())  # type: ignore[arg-type]
 
 
 def test_parameter_mode_with_inflation_only_is_accepted() -> None:

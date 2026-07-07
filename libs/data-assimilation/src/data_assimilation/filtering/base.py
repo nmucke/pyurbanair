@@ -57,6 +57,9 @@ class CycleDiagnostics:
       ``d^T (C_DD + C_D)^{-1} d / N_d`` with ``d = y - H(x_f)`` (ensemble
       mean). Values persistently >> 1 mean the ensemble is overconfident
       (spread too small for the actual errors); << 1 means overdispersion.
+      ``C_DD`` is built from the *raw* forecast anomalies, before any prior
+      inflation — so the statistic keeps answering "does the forecast need
+      (more) inflation?" rather than measuring the spread the inflation chose.
     * ``obs_prior_rmse`` / ``obs_posterior_rmse``: observation-space RMSE of
       the ensemble-mean predicted observations before/after the analysis.
     * spreads: mean per-row ensemble standard deviation of each augmented
@@ -120,8 +123,9 @@ class BaseFilter:
             anomalies, keeping the gain consistent with the inflated
             ensemble).
         parameter_evolution: Parameter forecast model applied after each
-            analysis; required (or ``inflation``) for ``mode="parameter"``,
-            which otherwise collapses silently.
+            analysis; required (or ``inflation``) for the parameter-updating
+            modes (``"parameter"``/``"joint"``), whose parameter block
+            otherwise collapses silently.
         rng_key: PRNG key; defaults to a fresh ``PRNGKey(42)`` per instance.
 
     On-disk mode mirrors the smoother: each cycle's forecast is written to
@@ -157,12 +161,15 @@ class BaseFilter:
         if C_D.ndim == 2:
             # Convenience: accept the smoother's (N_d, N_d) diagonal matrix
             # (e.g. from create_C_D) and reduce it to the honest 1-D contract.
-            if C_D.shape[0] != C_D.shape[1] or not bool(
-                jnp.all(C_D - jnp.diag(jnp.diag(C_D)) == 0.0)
-            ):
+            if C_D.shape[0] != C_D.shape[1]:
                 raise ValueError(
-                    "C_D must be a 1-D variance vector (or a square diagonal "
-                    f"matrix), got shape {C_D.shape} with off-diagonal entries."
+                    "C_D must be a 1-D variance vector or a square diagonal "
+                    f"matrix, got shape {C_D.shape}."
+                )
+            if not bool(jnp.all(C_D - jnp.diag(jnp.diag(C_D)) == 0.0)):
+                raise ValueError(
+                    "C_D must be a 1-D variance vector or a square diagonal "
+                    "matrix; the given matrix has off-diagonal entries."
                 )
             C_D = jnp.diag(C_D)
         self.C_D_diag = validate_variances(C_D)
@@ -188,10 +195,16 @@ class BaseFilter:
             )
         # Refuse silently-collapsing configurations: an un-evolved,
         # un-inflated parameter ensemble loses spread every analysis and stops
-        # learning after a few cycles.
-        if mode == "parameter" and parameter_evolution is None and inflation is None:
+        # learning after a few cycles. Joint mode is just as exposed — the
+        # forecast regenerates state spread every cycle but never the
+        # parameter block's.
+        if (
+            mode in ("parameter", "joint")
+            and parameter_evolution is None
+            and inflation is None
+        ):
             raise ValueError(
-                "mode='parameter' needs spread maintenance: without "
+                f"mode={mode!r} needs spread maintenance: without "
                 "parameter_evolution (e.g. RandomWalkEvolution) or inflation "
                 "(e.g. RTPS) the parameter ensemble collapses after a few "
                 "cycles and the filter stops learning."
@@ -451,7 +464,6 @@ class BaseFilter:
         """Build the augmented vector, analyze, split back, evolve, diagnose."""
         obs = jnp.asarray(obs)
         N_d = obs.shape[0]
-        N_e = pred_obs.shape[1]
         if pred_obs.shape[0] != N_d:
             raise ValueError(
                 f"Predicted observations have N_d={pred_obs.shape[0]} but the "
@@ -482,6 +494,7 @@ class BaseFilter:
         # linear H to the inflated members).
         aug_mean = jnp.mean(augmented, axis=1, keepdims=True)
         dev_prior = augmented - aug_mean
+        pred_obs_forecast = pred_obs  # raw (pre-inflation), for the chi2 diagnostic
         if self.inflation is not None:
             dev_prior = self.inflation.inflate_prior(dev_prior)
             augmented = aug_mean + dev_prior
@@ -524,7 +537,14 @@ class BaseFilter:
             updated = post_mean + dev_post
 
         cycle_diag = self._cycle_diagnostics(
-            cycle, obs, pred_obs, pred_obs_post, dev_prior, dev_post, n_state, n_param
+            cycle,
+            obs,
+            pred_obs_forecast,
+            pred_obs_post,
+            dev_prior,
+            dev_post,
+            n_state,
+            n_param,
         )
 
         # Split the augmented vector back per mode.
@@ -622,7 +642,13 @@ class BaseFilter:
         n_state: int,
         n_param: int,
     ) -> CycleDiagnostics:
-        """Innovation statistics and block spreads for one cycle."""
+        """Innovation statistics and block spreads for one cycle.
+
+        ``pred_obs`` must be the raw forecast (pre-inflation) so the chi2
+        spread term reflects what the model produced, not what the inflation
+        chose; the block spreads intentionally use the (possibly inflated)
+        analysis anomalies.
+        """
         N_d = obs.shape[0]
         N_e = pred_obs.shape[1]
 

@@ -87,9 +87,10 @@ filtering:
   num_cycles: 2
   seed: 42
   obs_error_std: 0.25
-  # state | parameter | joint. Parameter mode REQUIRES spread maintenance
-  # (filtering/evolution=random_walk or a filtering/inflation option) — the
-  # filter refuses silently-collapsing configurations at construction.
+  # state | parameter | joint. The parameter-updating modes (parameter and
+  # joint) REQUIRE spread maintenance (filtering/evolution=random_walk or a
+  # filtering/inflation option) — the filter refuses silently-collapsing
+  # configurations at construction.
   mode: joint
   # Defaults; normally set by the filtering/* groups above.
   analysis: null

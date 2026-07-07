@@ -84,7 +84,7 @@ rather than pulling them from separate files. The table below summarises each.
 | `num_cycles` | 2 | Number of filter cycles; each forecasts one segment of `time.simulation_time` and applies ONE full-weight analysis. |
 | `seed` | 42 | JAX RNG seed. |
 | `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors). |
-| `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. Parameter mode requires spread maintenance (evolution or inflation). |
+| `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
 | `analysis` | (group) | Set by `filtering/analysis` (default `stochastic`). |
 | `localization` | (group) | Set by `filtering/localization` (default `none`). |
 | `inflation` | (group) | Set by `filtering/inflation` (default `rtps`). |

@@ -19,7 +19,7 @@ Mode and machinery are declarative axes (see conf/run_filtering.yaml):
         ensemble spread maintenance.
   * ``filtering/evolution=none|random_walk``
         the parameters' forecast model between cycles (required — or an
-        inflation — for ``mode=parameter``).
+        inflation — for the parameter-updating modes ``parameter``/``joint``).
 
 and the truth source mirrors run_esmda.py:
 
@@ -76,6 +76,8 @@ from scripts._esmda_common import open_truth, truth_x_min, write_yaml
 
 def run(cfg: DictConfig) -> None:
     num_cycles = int(cfg.filtering.num_cycles)
+    if num_cycles < 1:
+        raise ValueError(f"filtering.num_cycles must be >= 1, got {num_cycles}.")
     sim_time = float(cfg.time.simulation_time)
     ensemble_size = int(cfg.ensemble.ensemble_size)
     final_time = sim_time * num_cycles
@@ -152,8 +154,26 @@ def run(cfg: DictConfig) -> None:
             f"Shifting truth x by {x_offset:+g} to align with domain x_min={domain_x_min:g}"
         )
 
-    # Number of truth frames per cycle (contiguous, half-open blocks).
-    n_per_cycle = n_total // max(num_cycles, 1)
+    # Number of truth frames per cycle (contiguous, half-open blocks). Guard
+    # the degenerate slicings explicitly: zero frames per cycle would feed the
+    # observation operator empty segments, and a remainder would be dropped
+    # silently.
+    if n_total < num_cycles:
+        raise ValueError(
+            f"The truth provides {n_total} frame(s) within the {final_time:g}s "
+            f"horizon, fewer than filtering.num_cycles={num_cycles} (each "
+            "cycle needs at least one frame). Increase time.simulation_time, "
+            "reduce filtering.num_cycles, or point run.truth_dir at a longer "
+            "truth."
+        )
+    n_per_cycle = n_total // num_cycles
+    n_dropped = n_total - n_per_cycle * num_cycles
+    if n_dropped:
+        print(
+            f"Truth frames ({n_total}) do not divide evenly into {num_cycles} "
+            f"cycles of {n_per_cycle}; the trailing {n_dropped} frame(s) are "
+            "not assimilated."
+        )
     true_params.to_netcdf(out_dir / "true_params.nc")
 
     # --- Assimilation ensemble model ------------------------------------------
