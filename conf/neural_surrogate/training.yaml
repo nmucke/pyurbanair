@@ -59,14 +59,18 @@ trainer:
   amp: true
   amp_dtype: bfloat16
   # torch.compile the model (static conv stack -> good fusion win). First
-  # batch pays one-off compilation latency.
+  # batch pays one-off compilation latency. Multi-geometry caveat: P3D needs
+  # dynamic=False (backward stride assert), so every distinct grid shape
+  # triggers a recompile -- fine for the idealized pool (14 shapes at 2 m),
+  # impractical for the realistic pool (~98 shapes; keep this false there).
   compile_model: false
   # channels-last-3d memory layout for cuDNN kernel selection under
   # autocast. A/B this on the training GPU; correctness is unaffected.
   channels_last: false
-  # cuDNN conv-algorithm autotuning. The grid + (drop_last) batch shape are
-  # fixed, so cuDNN benchmarks once on the first step and reuses the fastest
-  # kernels. Pure win for a static-shape conv stack.
+  # cuDNN conv-algorithm autotuning. With a fixed grid + (drop_last) batch
+  # shape cuDNN benchmarks once on the first step and reuses the fastest
+  # kernels. On multi-geometry runs it re-tunes once per distinct
+  # (grid, batch-size) pair -- a bounded first-epoch cost, then the same win.
   cudnn_benchmark: true
   # Run fp32 matmul/conv on Ampere+ tensor cores (TF32). Slightly lower mantissa
   # precision; immaterial next to the bf16 autocast already in use.
@@ -121,9 +125,17 @@ dataset:
   # trainer reads -- selecting it here raises `KeyError: 'state_n'`.
   _target_: neural_surrogates.TransitionDataset
   # _target_: neural_surrogates.PatchTransitionDataset
+  # root_dir may be a single-geometry dataset (barcelona / xie_and_castro) or a
+  # multi-geometry one (geometry.source idealized/realistic, one grid+geometry
+  # per trajectory). The dataset handles both without extra arguments --
+  # geometry, SDF features and normalization stats are per-trajectory, and
+  # equal masks are deduped so single-geometry runs behave exactly as before.
+  # Multi-geometry roots additionally REQUIRE the batch_sampler block below.
   # root_dir: training_data/pyudales_medium
-  root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_medium
+  root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_idealized
+  # root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_medium
   # root_dir: /export/scratch1/ntm/pyurbanair/training_data/pypalm_barcelona
+  # root_dir: /export/scratch1/ntm/pyurbanair/training_data/pypalm_realistic
   state_vars:
     - u
     - v
@@ -141,6 +153,50 @@ dataset:
   sdf_features: true
   # Clamp radius L (in cells) for the normalised SDF channel: clip(sdf, -L, L)/L.
   sdf_clamp_cells: 32
+
+# Optional trajectory-bucketed batch sampler.
+#
+# WHEN TO SET IT:
+#   * REQUIRED for multi-geometry datasets (root_dir produced by
+#     generate_random_geometries_training_data.py, i.e. geometry.source
+#     idealized/realistic): every trajectory has its own grid + geometry, so
+#     plain shuffled batches cannot be stacked -- each batch must come from a
+#     single trajectory, which is exactly what this sampler does. Batches are
+#     shuffled across trajectories each epoch, so geometries still mix.
+#   * Leave null for single-geometry datasets (barcelona / xie_and_castro):
+#     the plain shuffled DataLoader path below is used, exactly as before.
+#
+# When set, the sampler REPLACES the dataloader's batch_size / shuffle /
+# drop_last (PyTorch forbids combining them with a batch sampler; the train
+# script neutralises them automatically -- you don't need to edit the
+# dataloader block). The val loader reuses this block with shuffle forced off.
+#
+# Arguments:
+#   batch_size   -- upper bound on samples per batch. At least one of
+#                   batch_size / cell_budget must be set; with both, the
+#                   smaller bound wins per trajectory.
+#   cell_budget  -- upper bound on TOTAL grid cells per batch: a trajectory on
+#                   N cells gets batches of max(1, cell_budget // N). This is
+#                   what keeps GPU memory flat when domain sizes vary (the
+#                   UrbanTALES realistic pool spans ~25x in cell count). Set it
+#                   to batch_size * cells-per-sample of a known-good
+#                   single-geometry run, e.g. 4 * (128*128*64) = 4194304.
+#   shuffle      -- shuffle within trajectories + batch order across them
+#                   (seeded, advances per epoch). Default true; the script
+#                   forces false for the val loader.
+#   drop_last    -- drop each trajectory's final short batch so batch shapes
+#                   stay fixed per trajectory (less torch.compile /
+#                   cudnn-benchmark churn). A trajectory with fewer samples
+#                   than its batch size is then dropped entirely.
+#   seed         -- base seed for the per-epoch shuffles.
+# batch_sampler: null
+batch_sampler:
+  _target_: neural_surrogates.TrajectoryBatchSampler
+  batch_size: 4
+  cell_budget: 4194304
+  shuffle: true
+  drop_last: true
+  seed: 0
 
 dataloader:
   _target_: torch.utils.data.DataLoader
@@ -163,8 +219,9 @@ dataloader:
   num_workers: 4
   pin_memory: true
   persistent_workers: true
-  # Ship the (identical-for-every-sample) geometry mask once per batch as
-  # (1, *grid) instead of B redundant copies.
+  # Ship the (identical-within-each-batch) geometry mask once per batch as
+  # (1, *grid) instead of B redundant copies. Fails loud on a mixed-geometry
+  # batch (use batch_sampler above for multi-geometry datasets).
   collate_fn:
     _target_: neural_surrogates.datasets.transition.transition_collate
     _partial_: true

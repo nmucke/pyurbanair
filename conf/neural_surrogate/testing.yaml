@@ -1,8 +1,9 @@
 # @package _global_
 
 # model_dir: model_weights/domain_decomposition_conv
-model_dir: model_weights/p3d_barcelona
+# model_dir: model_weights/p3d_barcelona
 # model_dir: model_weights/unet_convnext_medium
+model_dir: model_weights/p3d_idealized
 sample_idx: 0
 device: cuda
 output_dir: ${model_dir}/rollout_${sample_idx}

@@ -13,7 +13,7 @@
 defaults:
   # - /neural_surrogate/architectures@architecture: unet_convnext/medium
   - /neural_surrogate/architectures@architecture: p3d/medium
-model_name: p3d_xie_and_castro
+model_name: p3d_idealized
 trainer:
   _target_: neural_surrogates.Trainer
 # Plain mean-squared error on the (masked) next-state prediction.

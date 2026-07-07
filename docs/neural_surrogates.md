@@ -334,14 +334,45 @@ this reduces to one-step transition pairs (the original behavior); see
 | `state_n`    | `(C, *grid)` | velocity channels stacked in `state_vars` order, at time `t` |
 | `state_next` | `(C, *grid)` | snapshot at time `t + K` — the pushforward target |
 | `params_n`   | `(K, P)`    | inflow params at steps `t, …, t+K-1`; scalar params (e.g. uDALES `pressure_gradient_magnitude`) are broadcast along `time` |
-| `geometry`   | `(*grid,)`  | binary mask: `1` = fluid, `0` = obstacle. Same tensor for every item in the split |
-| `geom_features` | `(4, *grid)` | SDF + ∇SDF channels — present **only** when built with `sdf_features=True` (default off); same tensor for every item |
+| `geometry`   | `(*grid,)`  | binary mask: `1` = fluid, `0` = obstacle. The item's *trajectory's* mask; equal masks are content-deduped to one shared tensor at init |
+| `geom_features` | `(4, *grid)` | SDF + ∇SDF channels — present **only** when built with `sdf_features=True` (default off); one tensor per unique mask |
 
-The geometry mask is read from the state file's `geometry_var`
+The geometry mask is read from each state file's `geometry_var`
 (default `"blanking"` — pylbm's per-cell obstacle indicator, inverted to
 match the `1`-is-fluid convention). For backends that don't ship one,
 the fallback marks fluid cells as those with a non-zero stacked state in
-the first trajectory's first snapshot; ground-and-building cells stay 0.
+that trajectory's first snapshot; ground-and-building cells stay 0.
+
+#### Multi-geometry splits (`TrajectoryBatchSampler`)
+
+Random-geometry training data (§2b) gives every trajectory its own grid
+and geometry. The dataset handles this natively: geometry, SDF features
+and state shapes are all per-trajectory, with equal masks deduped to one
+tensor object — a single-geometry split therefore behaves byte-identically
+to the fixed-domain dataset (one mask in memory, plain shuffled batching
+works unchanged). What plain shuffling *cannot* do on a multi-geometry
+split is stack different grids into one batch, so
+[`TrajectoryBatchSampler`](../libs/neural-surrogates/src/neural_surrogates/datasets/sampler.py)
+draws every batch from a single trajectory: `default_collate` sees one
+shape and `transition_collate` ships that trajectory's mask (it fails
+loud on a mixed-geometry batch rather than training against the wrong
+mask). Batches are shuffled across trajectories each epoch, and the
+per-trajectory batch size is `min(batch_size, cell_budget // cells)` —
+the `cell_budget` (total grid cells per batch) keeps memory flat across
+domain sizes (the UrbanTALES realistic pool spans ~25× in cell count).
+The sampler re-reads the dataset's flat index at each epoch, so the
+pushforward curriculum (`set_pushforward_steps`) propagates without a
+rebuild. Enable it via the `batch_sampler:` block in
+[conf/neural_surrogate/training.yaml](../conf/neural_surrogate/training.yaml)
+(default `null` — single-geometry runs keep the plain DataLoader path);
+the trainer keys its device-side geometry/SDF cache on the batch's mask,
+so `state_mean`/`std` stats, the masked loss and the SDF features always
+match the current batch's trajectory. The P3D wrapper itself accepts any
+grid divisible by 16 (§7), which the random-geometry generator
+guarantees. With `torch.compile` P3D requires `dynamic=False`, i.e. one
+recompile per distinct grid shape — fine for the idealized pool (14
+shapes at 2 m resolution), impractical for the realistic pool (~98
+shapes); leave `compile_model: false` there.
 
 #### SDF geometry features (`sdf_features`)
 
@@ -556,11 +587,24 @@ for a given geometry and is reused every subsequent step.
 
 **Normalization stats.** Computed by `_compute_normalization_stats` in
 the training script: streamed file-by-file over the training split in
-float64, restricted to fluid cells via the geometry mask. Installed via
+float64, restricted to fluid cells via each trajectory's geometry mask
+(per-trajectory on multi-geometry splits). Installed via
 `model.set_normalization(state_mean, state_std, param_mean, param_std)`;
 stored as buffers `state_mean/state_std/param_mean/param_std` and saved
 with the checkpoint so rollout/test callers get the correct
 standardisation for free.
+
+The streaming pass is slow on large splits, so it is **cached in the data
+folder** at `<root_dir>/normalization_stats/<split>.npz` (via
+`_get_normalization_stats`). The cache is keyed by a signature of every
+input the computation reads — split name, `state_vars`/`param_names`
+order, `geometry_var`, and each state file's `(name, size, mtime)` — so
+regenerating or editing the training data (or changing any of those
+knobs) invalidates it and forces a recompute; `pushforward_steps` is not
+part of the key (the stats span every snapshot regardless of horizon). A
+missing/corrupt/stale cache silently recomputes, and a write failure is
+non-fatal. This is purely a training-time speedup — inference still reads
+the stats from the checkpoint buffers, not this file.
 
 **Shared-geometry fast path.** Within one forward call, all batch members
 voxelise the same STL onto the same grid, so one point set and supernode

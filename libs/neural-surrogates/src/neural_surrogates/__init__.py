@@ -6,7 +6,11 @@ from neural_surrogates.architectures import (
     SimpleConv,
     UNetConvNeXt,
 )
-from neural_surrogates.datasets import PatchTransitionDataset, TransitionDataset
+from neural_surrogates.datasets import (
+    PatchTransitionDataset,
+    TrajectoryBatchSampler,
+    TransitionDataset,
+)
 from neural_surrogates.dd_loss import DomainDecompositionLoss
 from neural_surrogates.decomposition import DomainDecomposition
 from neural_surrogates.ensemble_forward_model import NeuralSurrogateEnsembleForwardModel
@@ -17,6 +21,7 @@ from neural_surrogates.training import BaseTraining, PatchTrainer, Trainer
 __all__ = [
     "TransitionDataset",
     "PatchTransitionDataset",
+    "TrajectoryBatchSampler",
     "DomainDecompositionLoss",
     "BaseTraining",
     "PatchTrainer",

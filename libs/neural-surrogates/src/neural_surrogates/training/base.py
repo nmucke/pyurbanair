@@ -23,7 +23,7 @@ from pathlib import Path
 
 import torch
 import tqdm
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 
 
 class BaseTraining:
@@ -177,16 +177,21 @@ class BaseTraining:
             and self.device.type == "cuda"
             and resolved_dtype is torch.float16,
         )
-        # The geometry mask is identical for every sample (see
-        # TransitionDataset), so it is moved to the device once, lazily from
-        # the first batch, instead of shipping B copies host->GPU every step.
+        # The geometry mask is identical for every sample *within a batch*
+        # (transition_collate enforces it), so it lives on the device in a
+        # size-1 cache keyed on the batch's host mask -- identity fast path,
+        # content-equal revalidation (see ``_prepare_batch``) -- instead of
+        # shipping B copies host->GPU every step. Single-geometry datasets hit
+        # the cache on every batch (the old cache-once behaviour); multi-
+        # geometry datasets refresh it whenever the batch's trajectory changes.
+        self._geometry_host: torch.Tensor | None = None
         self._geometry: torch.Tensor | None = None
         self._fluid_mask: torch.Tensor | None = None
         # Optional SDF + ∇SDF geometry features, shared across the batch exactly
-        # like the mask: cached on the device once from the first batch (as
-        # ``(4, *grid)``) and broadcast to the batch at each model call. Stays
-        # ``None`` when the dataset ships no ``geom_features`` -- in which case a
-        # model that advertises ``n_geom_feature_channels > 0`` fails loud (see
+        # like the mask: cached on the device alongside it (as ``(4, *grid)``)
+        # and broadcast to the batch at each model call. Stays ``None`` when the
+        # dataset ships no ``geom_features`` -- in which case a model that
+        # advertises ``n_geom_feature_channels > 0`` fails loud (see
         # ``_prepare_batch``) rather than silently training on zeros.
         self._geom_features: torch.Tensor | None = None
         # mask_loss restricts the loss to fluid cells: uDALES targets carry
@@ -250,17 +255,35 @@ class BaseTraining:
         self, batch: dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Move one transition batch to the device and return
-        ``(state, state_next, params, geometry)``. The geometry mask is cached
-        on the device on the first batch (it is identical for every sample) and
-        broadcast to the batch via ``expand`` (a view, not B copies)."""
+        ``(state, state_next, params, geometry)``. The batch's geometry mask
+        (identical for every sample in it) is kept on the device in a size-1
+        cache and broadcast to the batch via ``expand`` (a view, not B copies).
+
+        Cache lookup mirrors ``P3D._sdf_features_for``: an identity (``is``)
+        fast path, then a content (``torch.equal``) revalidation. The identity
+        path hits for workerless loaders (the dataset dedupes equal masks to
+        one object); with worker processes every batch arrives as a fresh
+        pickled tensor, and the content compare keeps a same-geometry stream
+        from re-uploading mask + SDF features each step. A genuinely different
+        geometry (multi-geometry datasets under a per-trajectory batch sampler)
+        refreshes the cache -- ``self._geometry`` / ``self._fluid_mask`` /
+        ``self._geom_features`` always describe the *current* batch."""
         to_kwargs: dict = {"non_blocking": True}
         if self.channels_last:
             to_kwargs["memory_format"] = torch.channels_last_3d
         state = batch["state_n"].to(self.device, **to_kwargs)
         state_next = batch["state_next"].to(self.device, non_blocking=True)
         params = batch["params_n"].to(self.device, non_blocking=True)
-        if self._geometry is None:
-            self._geometry = batch["geometry"][0].to(self.device)
+        geom_host = batch["geometry"][0]
+        cached = self._geometry_host
+        stale = cached is None or (
+            cached is not geom_host
+            and not (cached.shape == geom_host.shape and torch.equal(cached, geom_host))
+        )
+
+        if stale:
+            self._geometry_host = geom_host
+            self._geometry = geom_host.to(self.device)
             self._fluid_mask = self._geometry.bool()
             feat = batch.get("geom_features")
             self._geom_features = feat[0].to(self.device) if feat is not None else None
@@ -274,6 +297,7 @@ class BaseTraining:
                     "batch carries no 'geom_features'; build the dataset with "
                     "dataset.sdf_features=true (and a matching sdf_clamp_cells)."
                 )
+        assert self._geometry is not None  # set on the first (always-stale) batch
         geometry = self._geometry.expand(state.shape[0], *self._geometry.shape)
         return state, state_next, params, geometry
 
@@ -412,20 +436,33 @@ class BaseTraining:
         loader propagates ``set_pushforward_steps``. The curriculum steps at most
         once per ``pushforward_epochs_per_step`` epochs, so this rare rebuild is
         far cheaper than the every-epoch re-fork that ``persistent_workers=False``
-        would otherwise pay."""
+        would otherwise pay.
+
+        A loader built on a *custom* batch sampler (e.g.
+        ``TrajectoryBatchSampler``; a stock ``BatchSampler`` is what DataLoader
+        wraps around ``batch_size``/``shuffle``) is rebuilt around the same
+        sampler object: it reads the dataset's index lazily at each epoch, so
+        it needs no rebuild itself, and ``batch_size``/``shuffle``/``drop_last``
+        are mutually exclusive with it."""
         kwargs: dict = dict(
-            batch_size=loader.batch_size,
             num_workers=loader.num_workers,
             pin_memory=loader.pin_memory,
-            drop_last=loader.drop_last,
             collate_fn=loader.collate_fn,
             persistent_workers=loader.persistent_workers,
             timeout=loader.timeout,
             worker_init_fn=loader.worker_init_fn,
-            shuffle=isinstance(loader.sampler, RandomSampler),
         )
         if loader.num_workers > 0:
             kwargs["prefetch_factor"] = loader.prefetch_factor
+        batch_sampler = loader.batch_sampler
+        if batch_sampler is not None and not isinstance(batch_sampler, BatchSampler):
+            kwargs["batch_sampler"] = batch_sampler
+        else:
+            kwargs.update(
+                batch_size=loader.batch_size,
+                drop_last=loader.drop_last,
+                shuffle=isinstance(loader.sampler, RandomSampler),
+            )
         return DataLoader(loader.dataset, **kwargs)
 
     def _checkpoint_path(self) -> Path | None:

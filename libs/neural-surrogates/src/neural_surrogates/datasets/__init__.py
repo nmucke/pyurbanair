@@ -8,9 +8,13 @@ datasets read the same on-disk split:
   (pushforward-trick) samples.
 * :class:`PatchTransitionDataset` -- a subclass that instead yields one sample
   *per spatial patch* of a two-level overlapping domain decomposition.
+
+:class:`TrajectoryBatchSampler` batches multi-geometry splits (one trajectory
+-- one grid/geometry -- per batch) with an optional per-batch cell budget.
 """
 
 from neural_surrogates.datasets.patch import PatchTransitionDataset
+from neural_surrogates.datasets.sampler import TrajectoryBatchSampler
 from neural_surrogates.datasets.transition import TransitionDataset
 
-__all__ = ["TransitionDataset", "PatchTransitionDataset"]
+__all__ = ["TransitionDataset", "PatchTransitionDataset", "TrajectoryBatchSampler"]

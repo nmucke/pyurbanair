@@ -22,19 +22,36 @@ from torch.utils.data import Dataset, default_collate
 def transition_collate(batch: list[dict]) -> dict:
     """Collate transition items, shipping the shared per-domain tensors once.
 
-    Every :class:`TransitionDataset` item carries the *same* geometry tensor
-    (the domain is fixed), so the default collate would stack ``B`` identical
-    copies and pin/transfer all of them to the GPU each step. Instead emit it
-    once with a leading singleton dim: ``batch['geometry']`` becomes
-    ``(1, *grid)`` rather than ``(B, *grid)``. Consumers index
-    ``batch['geometry'][0]`` and broadcast (see ``BaseTraining._prepare_batch``),
-    so this is a drop-in for the per-sample form with B-1 fewer copies.
+    Every item in a batch must carry the *same* geometry tensor, so the default
+    collate would stack ``B`` identical copies and pin/transfer all of them to
+    the GPU each step. Instead emit it once with a leading singleton dim:
+    ``batch['geometry']`` becomes ``(1, *grid)`` rather than ``(B, *grid)``.
+    Consumers index ``batch['geometry'][0]`` and broadcast (see
+    ``BaseTraining._prepare_batch``), so this is a drop-in for the per-sample
+    form with B-1 fewer copies.
+
+    Sharing is checked by tensor *identity*: :class:`TransitionDataset` dedupes
+    equal masks to one object at init, so any same-geometry batch passes -- a
+    single-geometry split under plain shuffling exactly as before, and
+    multi-geometry splits when batches are grouped per trajectory
+    (:class:`~neural_surrogates.datasets.sampler.TrajectoryBatchSampler`). A
+    mixed-geometry batch fails loud here rather than training against the wrong
+    mask (or crashing later in ``default_collate`` when the grids differ too).
 
     The optional ``geom_features`` (SDF + ∇SDF channels) is shipped the same way
     -- once as ``(1, 4, *grid)`` -- when the dataset was built with
     ``sdf_features=True``.
     """
     geometry = batch[0]["geometry"]
+    for item in batch[1:]:
+        if item["geometry"] is not geometry:
+            raise ValueError(
+                "transition_collate needs every item in a batch to share one "
+                "geometry; this batch mixes trajectories with different "
+                "geometries. Use TrajectoryBatchSampler (dataloader "
+                "batch_sampler) instead of plain shuffling for multi-geometry "
+                "datasets."
+            )
     shared = {"geometry"}
     has_features = "geom_features" in batch[0]
     if has_features:
@@ -66,16 +83,27 @@ class TransitionDataset(Dataset):
     - ``params_n``   — ``(K, P)``      parameter values at steps ``t, t+1, …, t+K-1``;
       scalar params are broadcast along time.
     - ``geometry``   — ``(*grid,)``    binary mask, `1` = fluid, `0` = obstacle
-      (buildings + ground). Same tensor for every item.
+      (buildings + ground). The item's *trajectory's* mask; trajectories with
+      equal masks share one tensor object (content-deduped at init), so a
+      single-geometry split ships the same tensor for every item exactly as
+      before.
     - ``geom_features`` — ``(4, *grid)``  SDF + ∇SDF channels, present only when
-      built with ``sdf_features=True``; same tensor for every item (computed
-      once at init from the mask, see :func:`neural_surrogates.sdf.sdf_features`).
+      built with ``sdf_features=True``; one tensor per *unique* mask (computed
+      once at init, see :func:`neural_surrogates.sdf.sdf_features`).
 
-    Geometry is sourced from the state file's ``geometry_var`` variable
+    Trajectories may live on different spatial grids (the random-geometry
+    training data gives every trajectory its own domain): the geometry, SDF
+    features and state shapes are all per-trajectory. Batches must then group
+    samples of a single trajectory — see
+    :class:`~neural_surrogates.datasets.sampler.TrajectoryBatchSampler`; a
+    single-geometry split needs no sampler and behaves byte-identically to the
+    fixed-domain dataset.
+
+    Geometry is sourced from each state file's ``geometry_var`` variable
     (``"blanking"`` by default — the per-cell obstacle indicator, inverted
     to match the requested convention; with or without a time dimension).
     When that variable is absent, the mask falls back to the cells where
-    the stacked state is non-zero in the first trajectory's first
+    the stacked state is non-zero in that trajectory's first
     snapshot. The fallback only works for backends that write exact zeros
     inside obstacles (pylbm); uDALES fielddumps carry tiny non-zero
     values there, so uDALES datasets must ship ``blanking`` explicitly.
@@ -163,16 +191,67 @@ class TransitionDataset(Dataset):
         self._index: list[tuple[int, int]] = []
         self.set_pushforward_steps(self.pushforward_steps)
 
-        self._geometry = self._load_geometry(self._state_files[0])
-        # One EDT per geometry, at init (never per __getitem__ / per step). When
-        # the multi-root dataset lands this becomes per-trajectory alongside the
-        # per-trajectory mask; nothing else here changes.
-        self._geom_features: torch.Tensor | None = (
-            compute_sdf_features(self._geometry, clamp_cells=self.sdf_clamp_cells)
+        # Per-trajectory geometry, content-deduped: `_geometries` holds one
+        # tensor per *unique* mask and `_traj_geometry[traj]` indexes into it.
+        # Equal masks share one object, which (a) keeps a single-geometry split
+        # at exactly one mask in memory, and (b) lets `transition_collate` and
+        # the trainer's device cache key on tensor identity. The (shape,
+        # fluid-count) bucket key makes the dedup scan O(1) per file unless
+        # masks genuinely collide.
+        self._geometries: list[torch.Tensor] = []
+        self._traj_geometry: list[int] = []
+        buckets: dict[tuple, list[int]] = {}
+        for state_path in self._state_files:
+            geom = self._load_geometry(state_path)
+            key = (tuple(geom.shape), int(geom.sum().item()))
+            gi = next(
+                (
+                    i
+                    for i in buckets.get(key, [])
+                    if torch.equal(self._geometries[i], geom)
+                ),
+                None,
+            )
+            if gi is None:
+                self._geometries.append(geom)
+                gi = len(self._geometries) - 1
+                buckets.setdefault(key, []).append(gi)
+            self._traj_geometry.append(gi)
+        # One EDT per *unique* geometry, at init (never per __getitem__ / per
+        # step).
+        self._geom_features: list[torch.Tensor] | None = (
+            [
+                compute_sdf_features(g, clamp_cells=self.sdf_clamp_cells)
+                for g in self._geometries
+            ]
             if self.sdf_features
             else None
         )
         self._state_cache: dict[int, xr.Dataset] | None = None
+
+    @property
+    def sample_index(self) -> list[tuple[int, int]]:
+        """Flat ``(trajectory, start-time)`` pair per sample (read-only).
+
+        Rebuilt in place by :meth:`set_pushforward_steps`; batch samplers read
+        it lazily at each ``__iter__`` so the curriculum propagates.
+        """
+        return self._index
+
+    def geometry_for(self, traj: int) -> torch.Tensor:
+        """Fluid mask ``(*grid,)`` of trajectory ``traj`` (shared when equal)."""
+        return self._geometries[self._traj_geometry[traj]]
+
+    def geom_features_for(self, traj: int) -> torch.Tensor | None:
+        """SDF features ``(4, *grid)`` of trajectory ``traj``; ``None`` when the
+        dataset was built with ``sdf_features=False``."""
+        if self._geom_features is None:
+            return None
+        return self._geom_features[self._traj_geometry[traj]]
+
+    def grid_shape(self, traj: int) -> tuple[int, ...]:
+        """Spatial grid ``(nz, ny, nx)`` of trajectory ``traj``."""
+        return tuple(self.geometry_for(traj).shape)
 
     def set_pushforward_steps(self, pushforward_steps: int) -> None:
         """Switch the rollout horizon ``K`` and rebuild the sample index.
@@ -280,8 +359,9 @@ class TransitionDataset(Dataset):
             "state_n": pair[0],
             "state_next": pair[1],
             "params_n": self._params[traj][t : t + K],
-            "geometry": self._geometry,
+            "geometry": self.geometry_for(traj),
         }
-        if self._geom_features is not None:
-            item["geom_features"] = self._geom_features
+        features = self.geom_features_for(traj)
+        if features is not None:
+            item["geom_features"] = features
         return item

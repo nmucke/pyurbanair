@@ -22,15 +22,15 @@ defaults:
   - _self_
 
 training_data:
-  num_train: 3
-  num_val: 1
-  num_test: 1
+  num_train: 250
+  num_val: 5
+  num_test: 5
 
   output_dir: training_data/${model.name}_${training_data.geometry.source}/
 
   # --- Geometry source --------------------------------------------------
   geometry:
-    source: realistic
+    source: idealized
 
     # Pool + per-backend case-template locations, derived from `source`.
     # Only consumed for the pool sources (idealized/realistic); the named
@@ -44,19 +44,19 @@ training_data:
     # mesh-bounds fallback) and rounded UP to a multiple of 16 cells — the
     # domain is extended (never the mesh), so the extra strip is open fluid
     # at the far x/y ends.
-    resolution: 4.0
+    resolution: 2.0
 
     # Fixed vertical domain extent (m), shared by ALL sampled geometries.
     # z_size / resolution must itself be a multiple of 16. Geometries whose
     # tallest building reaches z_size are dropped from the pool with a
     # warning (pylbm SIGFPEs when buildings pierce the domain top).
-    z_size: 64.0
+    z_size: 32.0
 
   # Generation horizon (seconds) — set here, NOT inherited from the case, so
   # the dataset's time setup is controlled entirely by this file.
-  simulation_time: 10.0
-  output_frequency: 2.0
-  spinup_time: 5.0
+  simulation_time: 500.0
+  output_frequency: 10.0
+  spinup_time: 100.0
   seed: 0
 
   # Backend-specific constant forcing. uDALES needs a streamwise pressure

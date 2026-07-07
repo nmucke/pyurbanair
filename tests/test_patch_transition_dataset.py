@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import xarray as xr
-
 from neural_surrogates.datasets.patch import PatchTransitionDataset
 from neural_surrogates.decomposition import DomainDecomposition
 
@@ -42,8 +41,7 @@ def _write_sample(
     dims = ("time", "z", "y", "x")
     shape = (T_LEN, NZ, NY, NX)
     data_vars = {
-        v: (dims, rng.standard_normal(shape).astype(np.float32))
-        for v in STATE_VARS
+        v: (dims, rng.standard_normal(shape).astype(np.float32)) for v in STATE_VARS
     }
     if with_blanking:
         # Obstacle indicator: 1 inside a small solid block, 0 in fluid.
@@ -180,9 +178,7 @@ def test_delta_target_matches_raw_netcdf(blanking_root: Path) -> None:
     flat = ds._patch_index.index((traj, t, p))
     item = ds[flat]
 
-    raw = xr.open_dataset(
-        blanking_root / "state" / "train" / f"sample_{traj:04d}.nc"
-    )
+    raw = xr.open_dataset(blanking_root / "state" / "train" / f"sample_{traj:04d}.nc")
     # interior slice for this patch (stride n, no halo).
     zsl = slice(pz * n, pz * n + n)
     ysl = slice(py * n, py * n + n)
@@ -234,8 +230,8 @@ def test_neighbors_periodic_y_and_boundary(blanking_root: Path) -> None:
 def test_blanking_geometry_present(blanking_root: Path) -> None:
     ds = _make_ds(blanking_root)
     # Geometry mask should mark the solid block as 0 (obstacle).
-    assert float(ds._geometry[0, 2, 2]) == 0.0
-    assert float(ds._geometry[4, 0, 0]) == 1.0
+    assert float(ds.geometry_for(0)[0, 2, 2]) == 0.0
+    assert float(ds.geometry_for(0)[4, 0, 0]) == 1.0
     # Patch geometry is restricted from the same mask.
     assert ds[0]["geometry_patch"].shape[0] == 1
 
@@ -248,4 +244,4 @@ def test_fallback_geometry_constructs(fallback_root: Path) -> None:
     item = ds[0]
     assert item["geometry_patch"].shape[0] == 1
     # The zeroed obstacle block is recovered as 0 in the fallback mask.
-    assert float(ds._geometry[0, 2, 2]) == 0.0
+    assert float(ds.geometry_for(0)[0, 2, 2]) == 0.0

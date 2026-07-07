@@ -41,7 +41,7 @@ def _load_trajectory(
         )
     truth = torch.from_numpy(channels).to(dtype)
     params = dataset._params[sample_idx]
-    geometry = dataset._geometry
+    geometry = dataset.geometry_for(sample_idx)
     return truth, params, geometry
 
 
@@ -70,15 +70,13 @@ def _plot_rollout(
     truth: torch.Tensor, pred: torch.Tensor, out_dir: Path, n_show: int = 5
 ) -> None:
     T = truth.shape[0]
-    z_mid = 0 #truth.shape[-3] // 2
+    z_mid = 0  # truth.shape[-3] // 2
     times = np.linspace(0, T - 1, min(n_show, T), dtype=int)
     mag_t = truth.norm(dim=1)[:, z_mid]
     mag_p = pred.norm(dim=1)[:, z_mid]
     vmax = mag_t.max().item()
 
-    fig, axes = plt.subplots(
-        3, len(times), figsize=(3 * len(times), 9), squeeze=False
-    )
+    fig, axes = plt.subplots(3, len(times), figsize=(3 * len(times), 9), squeeze=False)
     for i, t in enumerate(times):
         axes[0, i].imshow(mag_t[t].numpy(), origin="lower", vmin=0, vmax=vmax)
         axes[0, i].set_title(f"truth t={t}")
@@ -133,7 +131,7 @@ def _animate_rollout(
     n_z = truth.shape[2]  # (T, C, Z, Y, X) → shape[2] is Z
     z_slices = [z for z in z_slices if z < n_z]
 
-    mag_t_full = truth.norm(dim=1).numpy()   # (T, Z, Y, X)
+    mag_t_full = truth.norm(dim=1).numpy()  # (T, Z, Y, X)
     mag_p_full = pred.norm(dim=1).numpy()
 
     # per-slice arrays: list of (T, Y, X)
@@ -152,9 +150,15 @@ def _animate_rollout(
     for row, (z, mt, mp, me) in enumerate(zip(z_slices, slices_t, slices_p, slices_e)):
         vmax = float(mt.max()) or 1.0
         err_max = float(me.max()) or 1.0
-        im_t = axes[row, 0].imshow(mt[0], origin="lower", vmin=0, vmax=vmax, cmap="viridis")
-        im_p = axes[row, 1].imshow(mp[0], origin="lower", vmin=0, vmax=vmax, cmap="viridis")
-        im_e = axes[row, 2].imshow(me[0], origin="lower", vmin=0, vmax=err_max, cmap="magma")
+        im_t = axes[row, 0].imshow(
+            mt[0], origin="lower", vmin=0, vmax=vmax, cmap="viridis"
+        )
+        im_p = axes[row, 1].imshow(
+            mp[0], origin="lower", vmin=0, vmax=vmax, cmap="viridis"
+        )
+        im_e = axes[row, 2].imshow(
+            me[0], origin="lower", vmin=0, vmax=err_max, cmap="magma"
+        )
         ims.append((im_t, im_p, im_e, mt, mp, me))
         for col, (ax, title) in enumerate(zip(axes[row], ["truth", "pred", "|err|"])):
             ax.set_xticks([])
@@ -207,9 +211,7 @@ def run(cfg: DictConfig) -> None:
         .to(dtype=dtype)
         .to(device)
     )
-    model.load_state_dict(
-        torch.load(model_dir / "weights.pt", map_location=device)
-    )
+    model.load_state_dict(torch.load(model_dir / "weights.pt", map_location=device))
     model.eval()
     print("loaded weights.pt (best-validation weights)")
 
@@ -228,18 +230,17 @@ def run(cfg: DictConfig) -> None:
     )
 
     plt.figure()
-    plt.subplot(1,5,1)
-    plt.imshow(geometry[0,:,:])
-    plt.subplot(1,5,2)
-    plt.imshow(geometry[3,:,:])
-    plt.subplot(1,5,3)
-    plt.imshow(geometry[8,:,:])
-    plt.subplot(1,5,4)
-    plt.imshow(geometry[10,:,:])
-    plt.subplot(1,5,5)
-    plt.imshow(geometry[15,:,:])
+    plt.subplot(1, 5, 1)
+    plt.imshow(geometry[0, :, :])
+    plt.subplot(1, 5, 2)
+    plt.imshow(geometry[3, :, :])
+    plt.subplot(1, 5, 3)
+    plt.imshow(geometry[8, :, :])
+    plt.subplot(1, 5, 4)
+    plt.imshow(geometry[10, :, :])
+    plt.subplot(1, 5, 5)
+    plt.imshow(geometry[15, :, :])
     plt.savefig("lol.png")
-
 
     pred = _rollout(
         model=model,

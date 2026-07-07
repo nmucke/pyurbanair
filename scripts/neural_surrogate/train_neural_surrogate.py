@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import hydra
@@ -21,6 +22,10 @@ import torch
 import xarray as xr
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
+from torch.utils.data import DataLoader, Dataset
+
+# Bump when the meaning of the cached arrays changes so old caches are ignored.
+_NORM_STATS_VERSION = 1
 
 
 def _compute_normalization_stats(
@@ -30,15 +35,16 @@ def _compute_normalization_stats(
 
     Mirrors upstream UPT's dataset standardisation: the network sees zero-mean,
     unit-variance fields. Stats are streamed file-by-file (sum / sum-of-squares
-    in float64) and restricted to fluid cells via the dataset geometry mask so
-    the masked-out obstacle zeros do not bias them.
+    in float64) and restricted to fluid cells via each trajectory's own geometry
+    mask (multi-geometry splits have per-trajectory masks and grids) so the
+    masked-out obstacle zeros do not bias them.
     """
-    fluid = train_ds._geometry.cpu().numpy().astype(bool)
     n_state = len(train_ds.state_vars)
     s_sum = np.zeros(n_state, dtype=np.float64)
     s_sqsum = np.zeros(n_state, dtype=np.float64)
     s_count = 0
-    for state_path in train_ds._state_files:
+    for traj, state_path in enumerate(train_ds._state_files):
+        fluid = train_ds.geometry_for(traj).cpu().numpy().astype(bool)
         with xr.open_dataset(state_path) as ds:
             for c, var in enumerate(train_ds.state_vars):
                 vals = np.asarray(ds[var].values)  # (T, *grid)
@@ -55,6 +61,134 @@ def _compute_normalization_stats(
     return state_mean, state_std, param_mean, param_std
 
 
+def _normalization_signature(train_ds) -> str:
+    """A stable fingerprint of every input `_compute_normalization_stats` reads.
+
+    The cached stats are only valid for the exact split, channel/param order and
+    on-disk state files they were computed from. We key on the split name, the
+    state/param variable tuples, the geometry variable (it selects the fluid
+    mask), and each state file's ``(name, size, mtime)`` — so regenerating or
+    editing the training data, or changing any of these knobs, invalidates the
+    cache and forces a recompute. ``pushforward_steps`` is deliberately absent:
+    the stats stream every snapshot regardless of the rollout horizon.
+    """
+    files = [
+        [p.name, st.st_size, int(st.st_mtime)]
+        for p in train_ds._state_files
+        for st in (p.stat(),)
+    ]
+    return json.dumps(
+        {
+            "version": _NORM_STATS_VERSION,
+            "split": train_ds.split,
+            "state_vars": list(train_ds.state_vars),
+            "param_names": list(train_ds.param_names),
+            "geometry_var": train_ds.geometry_var,
+            "files": files,
+        },
+        sort_keys=True,
+    )
+
+
+def _normalization_cache_path(train_ds) -> Path:
+    """Where the cached stats for this split live, inside the data folder."""
+    return Path(train_ds.root) / "normalization_stats" / f"{train_ds.split}.npz"
+
+
+def _load_cached_normalization_stats(
+    train_ds,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return cached stats if present and still matching the data, else ``None``."""
+    path = _normalization_cache_path(train_ds)
+    if not path.exists():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if str(data["signature"]) != _normalization_signature(train_ds):
+                return None
+            return (
+                data["state_mean"],
+                data["state_std"],
+                data["param_mean"],
+                data["param_std"],
+            )
+    except (OSError, KeyError, ValueError) as exc:
+        # A corrupt / stale-format cache file must never break training; just
+        # fall back to recomputing (which overwrites it).
+        print(f"ignoring unreadable normalization cache {path}: {exc}")
+        return None
+
+
+def _save_normalization_stats(
+    train_ds,
+    stats: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+) -> None:
+    """Persist stats next to the training data; a write failure is non-fatal."""
+    path = _normalization_cache_path(train_ds)
+    state_mean, state_std, param_mean, param_std = stats
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            path,
+            state_mean=state_mean,
+            state_std=state_std,
+            param_mean=param_mean,
+            param_std=param_std,
+            signature=_normalization_signature(train_ds),
+        )
+    except OSError as exc:
+        print(f"could not cache normalization stats to {path}: {exc}")
+
+
+def _get_normalization_stats(
+    train_ds,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load cached normalization stats when available, else compute and cache.
+
+    Computing the stats streams the whole training split from disk, which is
+    slow on large datasets; caching the result in the data folder makes reruns
+    on the same data effectively free.
+    """
+    cached = _load_cached_normalization_stats(train_ds)
+    if cached is not None:
+        print(
+            f"loaded cached normalization stats from {_normalization_cache_path(train_ds)}"
+        )
+        return cached
+    stats = _compute_normalization_stats(train_ds)
+    _save_normalization_stats(train_ds, stats)
+    print(f"cached normalization stats to {_normalization_cache_path(train_ds)}")
+    return stats
+
+
+def _build_loader(cfg: DictConfig, dataset: Dataset, *, train: bool) -> DataLoader:
+    """DataLoader for one split, honouring the optional ``batch_sampler`` block.
+
+    Without it (``batch_sampler: null``, the default) this is the original
+    ``instantiate(cfg.dataloader, ...)`` with shuffle forced off for val. With
+    it, the sampler groups every batch by trajectory — required for
+    multi-geometry datasets, whose grids cannot be stacked by plain shuffled
+    batching — and DataLoader's own ``batch_size`` / ``shuffle`` / ``drop_last``
+    must be neutralised (they are mutually exclusive with a batch sampler; the
+    sampler config carries them instead). Val keeps a deterministic order.
+    """
+    sampler_cfg = cfg.get("batch_sampler")
+    if sampler_cfg is None:
+        if train:
+            return instantiate(cfg.dataloader, dataset=dataset)
+        return instantiate(cfg.dataloader, dataset=dataset, shuffle=False)
+    overrides = {} if train else {"shuffle": False}
+    sampler = instantiate(sampler_cfg, dataset=dataset, **overrides)
+    return instantiate(
+        cfg.dataloader,
+        dataset=dataset,
+        batch_sampler=sampler,
+        batch_size=1,
+        shuffle=False,
+        drop_last=False,
+    )
+
+
 def run(cfg: DictConfig) -> None:
     dtype = getattr(torch, cfg.dataset.dtype)
 
@@ -64,8 +198,8 @@ def run(cfg: DictConfig) -> None:
     # runs (CPU smoke tests / debugging) so the DataLoader accepts the config.
     if int(cfg.dataloader.get("num_workers", 0)) == 0:
         cfg.dataloader.persistent_workers = False
-    train_loader = instantiate(cfg.dataloader, dataset=train_ds)
-    val_loader = instantiate(cfg.dataloader, dataset=val_ds, shuffle=False)
+    train_loader = _build_loader(cfg, train_ds, train=True)
+    val_loader = _build_loader(cfg, val_ds, train=False)
 
     model = instantiate(
         cfg.architecture,
@@ -124,7 +258,7 @@ def run(cfg: DictConfig) -> None:
     # and restored automatically at rollout/test time -- no other call site
     # needs to know about normalisation.
     if hasattr(model, "set_normalization"):
-        s_mean, s_std, p_mean, p_std = _compute_normalization_stats(train_ds)
+        s_mean, s_std, p_mean, p_std = _get_normalization_stats(train_ds)
         model.set_normalization(s_mean, s_std, p_mean, p_std)
         print(
             f"normalization set:\n"

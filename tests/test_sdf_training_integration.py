@@ -80,7 +80,9 @@ def test_dataset_ships_features_when_enabled(data_root: Path) -> None:
     # sdf_n channel matches the standalone helper on the mask.
     from neural_surrogates import sdf_features as sf
 
-    torch.testing.assert_close(item["geom_features"], sf(ds._geometry, clamp_cells=8.0))
+    torch.testing.assert_close(
+        item["geom_features"], sf(ds.geometry_for(0), clamp_cells=8.0)
+    )
 
 
 def test_dataset_byte_identical_when_disabled(data_root: Path) -> None:

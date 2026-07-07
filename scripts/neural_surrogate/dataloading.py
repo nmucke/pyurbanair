@@ -18,9 +18,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
-from torch.utils.data import DataLoader
-
 from neural_surrogates import TransitionDataset
+from torch.utils.data import DataLoader
 
 
 def _plot_batch(
@@ -104,8 +103,11 @@ def run(cfg: argparse.Namespace) -> None:
         f"samples={len(dataset)}  pushforward_steps={cfg.pushforward_steps}  "
         f"param_names={dataset.param_names}"
     )
-    print(f"geometry mask: shape={tuple(dataset._geometry.shape)}  "
-          f"fluid_fraction={dataset._geometry.mean().item():.3f}")
+    geometry = dataset.geometry_for(0)
+    print(
+        f"geometry mask (trajectory 0): shape={tuple(geometry.shape)}  "
+        f"fluid_fraction={geometry.mean().item():.3f}"
+    )
 
     loader = DataLoader(
         dataset,
@@ -117,14 +119,22 @@ def run(cfg: argparse.Namespace) -> None:
     last_batch = None
     for i, batch in enumerate(loader):
         print(f"\nbatch {i}:")
-        print(f"  state_n     shape={tuple(batch['state_n'].shape)}     "
-              f"dtype={batch['state_n'].dtype}")
-        print(f"  state_next  shape={tuple(batch['state_next'].shape)}  "
-              f"dtype={batch['state_next'].dtype}")
-        print(f"  params_n    shape={tuple(batch['params_n'].shape)}    "
-              f"dtype={batch['params_n'].dtype}")
-        print(f"  geometry    shape={tuple(batch['geometry'].shape)}    "
-              f"dtype={batch['geometry'].dtype}")
+        print(
+            f"  state_n     shape={tuple(batch['state_n'].shape)}     "
+            f"dtype={batch['state_n'].dtype}"
+        )
+        print(
+            f"  state_next  shape={tuple(batch['state_next'].shape)}  "
+            f"dtype={batch['state_next'].dtype}"
+        )
+        print(
+            f"  params_n    shape={tuple(batch['params_n'].shape)}    "
+            f"dtype={batch['params_n'].dtype}"
+        )
+        print(
+            f"  geometry    shape={tuple(batch['geometry'].shape)}    "
+            f"dtype={batch['geometry'].dtype}"
+        )
         last_batch = batch
         if i >= 2:
             break
@@ -137,16 +147,22 @@ def run(cfg: argparse.Namespace) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--data-dir", dest="data_dir", default="training_data/pyudales_medium")
+    p.add_argument(
+        "--data-dir", dest="data_dir", default="training_data/pyudales_medium"
+    )
     p.add_argument("--split", default="train")
     p.add_argument("--batch-size", dest="batch_size", type=int, default=8)
     p.add_argument("--no-shuffle", dest="shuffle", action="store_false")
     p.add_argument("--num-workers", dest="num_workers", type=int, default=0)
-    p.add_argument("--state-vars", dest="state_vars", nargs="+", default=["u", "v", "w"])
+    p.add_argument(
+        "--state-vars", dest="state_vars", nargs="+", default=["u", "v", "w"]
+    )
     p.add_argument("--param-vars", dest="param_vars", nargs="+", default=None)
     p.add_argument("--cache", action="store_true")
     p.add_argument("--dtype", default="float32")
-    p.add_argument("--pushforward-steps", dest="pushforward_steps", type=int, default=10)
+    p.add_argument(
+        "--pushforward-steps", dest="pushforward_steps", type=int, default=10
+    )
     p.add_argument("--plot-dir", dest="plot_dir", default=".temp/dataloading")
     run(p.parse_args())
 

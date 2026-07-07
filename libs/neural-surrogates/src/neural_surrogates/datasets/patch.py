@@ -33,7 +33,6 @@ from typing import Sequence
 
 import numpy as np
 import torch
-
 from neural_surrogates.datasets.transition import TransitionDataset
 from neural_surrogates.decomposition import DomainDecomposition
 
@@ -137,9 +136,7 @@ class PatchTransitionDataset(TransitionDataset):
 
         # Re-flatten the base (traj, t) index into (traj, t, patch).
         self._patch_index: list[tuple[int, int, int]] = [
-            (traj, t, p)
-            for (traj, t) in self._index
-            for p in range(self._num_patches)
+            (traj, t, p) for (traj, t) in self._index for p in range(self._num_patches)
         ]
 
     def _read_spatial_grid(self, state_path: Path) -> tuple[int, int, int]:
@@ -174,7 +171,7 @@ class PatchTransitionDataset(TransitionDataset):
         state_t = pair[0:1]  # (1, C, Nz, Ny, Nx)
         state_tk = pair[1:2]  # (1, C, Nz, Ny, Nx)
 
-        geom = self._geometry.to(self.dtype).view(1, 1, *self._grid)
+        geom = self.geometry_for(traj).to(self.dtype).view(1, 1, *self._grid)
 
         # Restrict to the extended-block batch (B=1 -> M blocks) and pick p.
         ext_t = self.dd.restrict(state_t)[p]  # (C, n+2h, n+2h, n+2h)
