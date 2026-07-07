@@ -1,5 +1,8 @@
 """Tests for ESMDA localization (data_assimilation.localization)."""
 
+import pathlib
+from typing import Any, Callable
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -82,13 +85,23 @@ def test_max_inflation_one_disables_tapering() -> None:
     assert np.allclose(inflation, 1.0)
 
 
-def _global_update(augmented, pred_obs, obs, C_D, C_D_sqrt, alpha, rng_key):
+def _global_update(
+    augmented: jnp.ndarray,
+    pred_obs: jnp.ndarray,
+    obs: jnp.ndarray,
+    C_D: jnp.ndarray,
+    C_D_sqrt: jnp.ndarray,
+    alpha: float,
+    rng_key: jax.Array,
+) -> jnp.ndarray:
     N_e = augmented.shape[1]
     aug_dev = augmented - augmented.mean(axis=1, keepdims=True)
     po_dev = pred_obs - pred_obs.mean(axis=1, keepdims=True)
     C_MD = (aug_dev @ po_dev.T) / (N_e - 1)
     C_DD = (po_dev @ po_dev.T) / (N_e - 1)
     Z = jax.random.normal(rng_key, (obs.shape[0], N_e))
+    # Center the perturbations to match localized_update / _compute_kalman_update.
+    Z = Z - Z.mean(axis=1, keepdims=True)
     perturbed = obs[:, None] + jnp.sqrt(alpha) * (C_D_sqrt @ Z)
     x = jnp.linalg.solve(C_DD + alpha * C_D, perturbed - pred_obs)
     return augmented + C_MD @ x
@@ -170,9 +183,14 @@ def test_block_grouping_shares_selection_and_transition() -> None:
     # so without grouping they would select different obs.
     cells = jax.random.normal(k1, (3, N_e))
     augmented = jnp.stack(
-        [cells[0], cells[0] + 1e-3 * jax.random.normal(k2, (N_e,)),
-         cells[1], cells[1] + 1e-3 * jax.random.normal(k3, (N_e,)),
-         cells[2], cells[2]]
+        [
+            cells[0],
+            cells[0] + 1e-3 * jax.random.normal(k2, (N_e,)),
+            cells[1],
+            cells[1] + 1e-3 * jax.random.normal(k3, (N_e,)),
+            cells[2],
+            cells[2],
+        ]
     )
     M = jax.random.normal(k4, (N_d, 3))
     pred_obs = M @ cells + 0.3 * jax.random.normal(jax.random.PRNGKey(9), (N_d, N_e))
@@ -199,10 +217,13 @@ def test_block_grouping_shares_selection_and_transition() -> None:
         finite = np.isfinite(grouped[a])
         assert np.allclose(grouped[a][finite], grouped[b][finite])
     # The block min is <= each member's own inflation (strongest correlation).
-    assert np.all(grouped[0][np.isfinite(grouped[0])] <= inflation[0][np.isfinite(grouped[0])] + 1e-6)
+    assert np.all(
+        grouped[0][np.isfinite(grouped[0])]
+        <= inflation[0][np.isfinite(grouped[0])] + 1e-6
+    )
 
 
-def _build_localization_problem(seed: int = 21):
+def _build_localization_problem(seed: int = 21) -> tuple:
     """Small augmented problem where state rows (0..3) correlate with obs and
     param rows (4..5) are independent (so localization would taper/exclude obs
     for them). Returns the inputs needed for ``localized_update``/``_global``.
@@ -254,27 +275,19 @@ def test_localize_mask_gives_global_update_for_masked_rows() -> None:
         rng_key=rng,
         localize_mask=localize_mask,
     )
-    global_result = _global_update(
-        augmented, pred_obs, obs, C_D, C_D_sqrt, alpha, rng
-    )
+    global_result = _global_update(augmented, pred_obs, obs, C_D, C_D_sqrt, alpha, rng)
 
     # Masked-out rows (params) match the global update exactly.
-    assert jnp.allclose(
-        localized[N_state:], global_result[N_state:], atol=1e-5
-    )
+    assert jnp.allclose(localized[N_state:], global_result[N_state:], atol=1e-5)
     # At least one localized (state) row differs from its global update.
-    assert not jnp.allclose(
-        localized[:N_state], global_result[:N_state], atol=1e-5
-    )
+    assert not jnp.allclose(localized[:N_state], global_result[:N_state], atol=1e-5)
 
 
 def test_localize_mask_none_unchanged() -> None:
     """Passing ``localize_mask=None`` reproduces the call without the arg."""
     from data_assimilation.localization.correlation import CorrelationLocalization
 
-    augmented, pred_obs, obs, C_D, C_D_sqrt, _, _ = _build_localization_problem(
-        seed=5
-    )
+    augmented, pred_obs, obs, C_D, C_D_sqrt, _, _ = _build_localization_problem(seed=5)
     alpha = 2.0
     rng = jax.random.PRNGKey(7)
 
@@ -351,13 +364,13 @@ def test_localize_mask_with_state_grouping() -> None:
     assert jnp.allclose(updated[2], updated[3], atol=1e-5)
 
     # The masked param rows still get the global update.
-    global_result = _global_update(
-        augmented, pred_obs, obs, C_D, C_D_sqrt, alpha, rng
-    )
+    global_result = _global_update(augmented, pred_obs, obs, C_D, C_D_sqrt, alpha, rng)
     assert jnp.allclose(updated[N_state:], global_result[N_state:], atol=1e-5)
 
 
-def test_parameter_esmda_runs_with_correlation_localization(compose_test_cfg) -> None:
+def test_parameter_esmda_runs_with_correlation_localization(
+    compose_test_cfg: Callable[..., Any],
+) -> None:
     """End-to-end: parameter ESMDA composes and runs with localization on."""
     from scripts.run_esmda import run
 
@@ -407,6 +420,7 @@ def test_invalid_parameters_raise() -> None:
 # Distance-based localization
 # ---------------------------------------------------------------------------
 
+
 def test_distance_excludes_beyond_radius_keeps_within() -> None:
     from data_assimilation.localization.distance import DistanceLocalization
 
@@ -416,7 +430,9 @@ def test_distance_excludes_beyond_radius_keeps_within() -> None:
     row = jnp.zeros((1, 3))  # one grid point at the origin
     # Sensors at horizontal distance 3 (un-tapered), 8 (tapered), 20 (excluded).
     obs = jnp.array([[3.0, 0.0, 0.0], [8.0, 0.0, 0.0], [20.0, 0.0, 0.0]])
-    inflation = np.array(loc.inflation_factors(None, None, row_coords=row, obs_coords=obs))
+    inflation = np.array(
+        loc.inflation_factors(None, None, row_coords=row, obs_coords=obs)
+    )
 
     assert inflation[0, 0] == pytest.approx(1.0)  # within beta*radius -> no taper
     assert np.isfinite(inflation[0, 1]) and inflation[0, 1] > 1.0  # tapered
@@ -431,7 +447,9 @@ def test_distance_inflation_reaches_max_at_radius() -> None:
     )
     row = jnp.zeros((1, 3))
     obs = jnp.array([[10.0, 0.0, 0.0]])  # exactly at the radius
-    inflation = float(loc.inflation_factors(None, None, row_coords=row, obs_coords=obs)[0, 0])
+    inflation = float(
+        loc.inflation_factors(None, None, row_coords=row, obs_coords=obs)[0, 0]
+    )
     assert inflation == pytest.approx(4.0, rel=1e-5)
 
 
@@ -512,8 +530,10 @@ def test_state_row_coords_match_flatten_order() -> None:
     u = np.broadcast_to(x[None, None, None, :], shape).astype(float)
     v = np.broadcast_to(y[None, None, :, None], shape).astype(float)
     state = xarray.Dataset(
-        {"u": (("ensemble", "z", "y", "x"), u.copy()),
-         "v": (("ensemble", "z", "y", "x"), v.copy())},
+        {
+            "u": (("ensemble", "z", "y", "x"), u.copy()),
+            "v": (("ensemble", "z", "y", "x"), v.copy()),
+        },
         coords={"x": x, "y": y, "z": z},
     )
     obj = StateAndParameterESMDA.__new__(StateAndParameterESMDA)
@@ -542,7 +562,7 @@ def test_state_row_coords_raise_on_missing_coordinates() -> None:
         obj._state_row_coords(state)
 
 
-def test_get_states_on_disk_selects_initial_frame(tmp_path) -> None:
+def test_get_states_on_disk_selects_initial_frame(tmp_path: pathlib.Path) -> None:
     """The on-disk branch must read the same frame as the in-memory branch
     (time=0, the window's initial condition) — `_analysis` feeds the analyzed
     result forward as the next forecast's warm start."""

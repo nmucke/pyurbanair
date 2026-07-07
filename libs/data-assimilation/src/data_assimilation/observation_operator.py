@@ -288,16 +288,28 @@ class TemporalObservationOperator:
             bin_indices = np.floor(
                 (time_values - time_values[0]) / self.interval_seconds
             ).astype(int)
-            unique_bins = np.unique(bin_indices)
-            num_intervals = unique_bins.size
+
+            # Bin against the ABSOLUTE interval range spanned by the window, not
+            # just the populated bins. Iterating only over np.unique(bin_indices)
+            # would make element k of the returned vector "the k-th populated
+            # interval" rather than "absolute interval k" -- if the model output
+            # ever skips an interval (irregular cadence, a short window, a
+            # missing frame), predicted and real observations would silently
+            # misalign and shift the whole innovation vector.
+            num_intervals = (
+                int(
+                    np.floor((time_values[-1] - time_values[0]) / self.interval_seconds)
+                )
+                + 1
+            )
             if self._num_intervals is None:
                 self._num_intervals = num_intervals
             elif num_intervals != self._num_intervals:
                 # The observation vector length (and hence C_D, sized from the
                 # first window) is fixed by the first call's interval count. A
-                # later window with a different number of populated bins -- a
-                # short final window, a missing frame, a changed output cadence
-                # -- would silently return a mismatched-length vector.
+                # later window with a different number of absolute intervals --
+                # a short final window, a changed output cadence -- would
+                # silently return a mismatched-length vector.
                 raise ValueError(
                     f"Interval count changed between calls: first call produced "
                     f"{self._num_intervals} intervals, this one produced "
@@ -308,8 +320,19 @@ class TemporalObservationOperator:
 
             agg_fn = self.mode_mapping[self.aggregation_mode]
             obs_per_interval = []
-            for b in unique_bins:
+            for b in range(num_intervals):
                 frame_ids = np.nonzero(bin_indices == b)[0]
+                if frame_ids.size == 0:
+                    # A silent gap here would misalign every subsequent element
+                    # of the observation vector against absolute interval index,
+                    # rather than raising loudly.
+                    raise ValueError(
+                        f"Absolute interval {b} (of {num_intervals}, "
+                        f"interval_seconds={self.interval_seconds}) has no frames. "
+                        "Output cadence is irregular or a frame is missing, so "
+                        "absolute-interval alignment cannot be guaranteed; check "
+                        "the model output cadence and window length."
+                    )
                 interval_state = state.isel(time=frame_ids)
                 aggregated = agg_fn(interval_state)
                 obs_per_interval.append(

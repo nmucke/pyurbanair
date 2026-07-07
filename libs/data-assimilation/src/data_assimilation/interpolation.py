@@ -51,17 +51,24 @@ def _compute_linear_indices_and_weights(
     max_coord = float(coords[-1])
 
     # Staggered grids can place observations up to half a cell beyond a variable's
-    # native coordinates (e.g., center observations against face velocities).
+    # native coordinates (e.g., center observations against face velocities). The
+    # allowed margin must come from the LOCAL edge spacing, not a single grid-wide
+    # median: on a stretched (non-uniform) grid the median spacing is unrelated to
+    # the spacing of the edge cell, so a wall-refined edge could otherwise accept
+    # extrapolation far beyond half of its own cell. On a uniform grid median ==
+    # edge spacing, so this is a no-op there.
     spacing = np.diff(coords)
-    extrapolation_margin = 0.5 * float(np.median(spacing))
+    lower_margin = 0.5 * float(spacing[0])
+    upper_margin = 0.5 * float(spacing[-1])
+    lower_bound = min_coord - lower_margin
+    upper_bound = max_coord + upper_margin
 
-    if np.any(points < (min_coord - extrapolation_margin)) or np.any(
-        points > (max_coord + extrapolation_margin)
-    ):
+    if np.any(points < lower_bound) or np.any(points > upper_bound):
         raise ValueError(
             f"Observation points for axis '{axis_name}' are outside the grid bounds "
             f"[{min_coord}, {max_coord}] (including allowed staggered extrapolation "
-            f"margin {extrapolation_margin})."
+            f"margins of {lower_margin} below and {upper_margin} above, i.e. "
+            f"[{lower_bound}, {upper_bound}])."
         )
 
     upper_idx = np.searchsorted(coords, points, side="right")

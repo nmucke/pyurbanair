@@ -129,6 +129,17 @@ class OnlineStateReduction:
 
         Returns:
             Coefficients of shape (r, N_e).
+
+        Note:
+            The whitening divides by the retained singular values, and the rank
+            rule (see :meth:`fit`) keeps modes down to ``s > s0 * 1e-12``, so with
+            ``energy_fraction = 1.0`` the smallest coefficients can be scaled by
+            up to ~1e12.  In exact arithmetic the Kalman update is invariant to
+            this diagonal scaling (``decode_increment`` multiplies it straight
+            back), but under JAX's default float32 that dynamic range is
+            exhausted and the tail coefficients become numerically meaningless.
+            Prefer ``energy_fraction < 1`` or a ``max_rank`` cap so the retained
+            singular values stay well-conditioned.
         """
         if self._modes is None:
             raise RuntimeError("fit() must be called before encode().")

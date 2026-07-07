@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg
 import numpy as np
 import xarray
 from data_assimilation.localization.base import BaseLocalization
@@ -73,6 +74,35 @@ class _BaseESMDA(BaseSmoothing):
                 "C_D must be diagonal: the element-wise C_D_sqrt and the "
                 "diagonal used by the localized update assume a diagonal "
                 "observation-error covariance. Pass sigma**2 on the diagonal."
+            )
+        # Strictly positive variances keep ``C_DD + alpha * C_D`` positive
+        # definite (C_DD is only rank <= N_e - 1). A zero/negative variance -- a
+        # config typo or a "perfect" synthetic sensor -- makes the analysis
+        # system singular in the directions outside the ensemble span, and JAX's
+        # solve returns NaN without raising.
+        if not bool(jnp.all(jnp.diag(C_D) > 0.0)):
+            raise ValueError(
+                "C_D must have strictly positive diagonal variances; a zero or "
+                "negative observation-error variance makes the analysis system "
+                "singular (NaN-poisoning the ensemble). Check obs_error_std."
+            )
+
+        # ES-MDA consistency: the tempering coefficients must satisfy
+        # ``sum_k 1/alpha_k = 1`` for the multiple updates to equal one Bayesian
+        # conditioning (Emerick & Reynolds 2013). With a single scalar alpha
+        # applied every step that means ``num_steps / alpha == 1``. A mismatched
+        # alpha silently tempers the likelihood by ``num_steps / alpha`` -- a
+        # different inference problem -- so reject it here (the default
+        # ``alpha = num_steps`` is always consistent). The final-time trajectory
+        # smoothing passes alpha=1 through ``_compute_kalman_update`` directly,
+        # not via ``self.alpha``, so it is unaffected by this check.
+        effective_alpha = num_steps if alpha is None else alpha
+        if abs(num_steps / effective_alpha - 1.0) > 1e-6:
+            raise ValueError(
+                f"Inconsistent ES-MDA schedule: num_steps={num_steps} and "
+                f"alpha={effective_alpha} give sum_k 1/alpha_k = "
+                f"{num_steps / effective_alpha:.4g} != 1. Set alpha=num_steps "
+                "(the default) or leave alpha unset."
             )
 
         # Reject a coordinate-based localization on a smoother that cannot supply
@@ -220,16 +250,27 @@ class _BaseESMDA(BaseSmoothing):
 
         self.rng_key, subkey = jax.random.split(self.rng_key)
         Z = jax.random.normal(subkey, (N_d, N_e))
+        # Center the observation perturbations: the raw draw has a sample mean of
+        # order 1/sqrt(N_e), which biases the analysis mean. Removing the row
+        # mean makes the perturbations exactly zero-mean across the ensemble --
+        # the standard, essentially free stochastic-EnKF correction (Evensen
+        # 2004), most visible at the N_e ~ 50-100 used here.
+        Z = Z - jnp.mean(Z, axis=1, keepdims=True)
         perturbed_obs = obs[:, None] + jnp.sqrt(alpha) * (self.C_D_sqrt @ Z)
 
         innovation = perturbed_obs - pred_obs
         C_DD_alpha = C_DD + alpha * self.C_D
 
-        # ``jnp.linalg.solve`` does not raise on a singular system -- it returns
-        # NaN/Inf, which would silently poison the whole ensemble. With positive
-        # observation-error variances ``alpha * C_D`` keeps the system SPD, so
-        # this should never fire; when it does, fail loudly instead.
-        x = jnp.linalg.solve(C_DD_alpha, innovation)
+        # ``C_DD + alpha * C_D`` is symmetric positive definite by construction
+        # (positive observation-error variances; see the C_D check at
+        # construction), so solve it with a Cholesky factorization: ~2x cheaper
+        # than generic LU and better-conditioned. A non-SPD system (a collapsed
+        # ensemble or a degenerate C_D slipping through) yields NaNs in the
+        # factor, which the finiteness check below turns into a loud failure
+        # rather than a silently NaN-poisoned ensemble.
+        x = jax.scipy.linalg.cho_solve(
+            jax.scipy.linalg.cho_factor(C_DD_alpha), innovation
+        )
         if not bool(jnp.all(jnp.isfinite(x))):
             raise FloatingPointError(
                 "ESMDA Kalman solve produced non-finite values: the system "
@@ -1023,14 +1064,35 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         Optional post-loop step (``final_time_smoothing=True``): the state at
         every time step of the window is updated jointly in the reduced SVD
         basis, reusing the final posterior forecast (no extra forward solve).
-        Parameters are not part of the augmented vector here — they are
-        frozen. ``alpha=1`` because the ESMDA ``sum(1/alpha_k) = 1`` schedule
-        already consumed the likelihood for the IC and parameters; this is a
-        single standard Kalman analysis of the trajectory. The result is the
-        smoothing estimate per frame, not a model integration.
+        Parameters are not part of the augmented vector here — they are frozen.
+
+        .. warning::
+            This applies the observations a **second** time. The MDA loop already
+            consumed the full likelihood (``sum_k 1/alpha_k = 1``), and the
+            trajectory being smoothed here was forecast from the analyzed IC and
+            parameters — so it is *already conditioned* on these observations
+            (through the dynamics). Adding one more full-weight (``alpha=1``)
+            update conditions on the same data twice: in the linear-Gaussian
+            limit the total likelihood weight is 2, so the returned trajectory
+            ensemble is **overconfident** — its spread underestimates the
+            posterior spread and its mean is pulled too hard toward the data.
+
+            Use this only as a point (RMSE) estimate of the trajectory; the
+            resulting ensemble spread is NOT a posterior spread and must not be
+            used for uncertainty quantification. The rigorous alternative is to
+            carry the reduced trajectory coefficients in the augmented vector
+            through the MDA schedule so the trajectory is conditioned exactly
+            once (see docs/temp/da_review_math.md §1.1 / §3.10).
         """
         if not self.final_time_smoothing or state is None:
             return state
+
+        logger.warning(
+            "final_time_smoothing applies the observations a second time: the "
+            "returned trajectory ensemble is overconfident. Use its mean as a "
+            "point estimate only, not its spread for uncertainty quantification "
+            "(see _final_time_smoothing_step docstring)."
+        )
 
         obs = jnp.asarray(observations)
         pred_obs = jnp.asarray(self._observation_step(state=state)).T

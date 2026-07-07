@@ -67,13 +67,15 @@ def test_global_kalman_update_matches_esmda_formula() -> None:
 
     result = esmda._compute_kalman_update(augmented, pred_obs, obs, N_e)
 
-    # Independent replication of the same computation, including the rng split.
+    # Independent replication of the same computation, including the rng split
+    # and the perturbation centering the implementation performs.
     _, subkey = jax.random.split(key)
     aug_dev = augmented - augmented.mean(axis=1, keepdims=True)
     po_dev = pred_obs - pred_obs.mean(axis=1, keepdims=True)
     C_MD = (aug_dev @ po_dev.T) / (N_e - 1)
     C_DD = (po_dev @ po_dev.T) / (N_e - 1)
     Z = jax.random.normal(subkey, (N_d, N_e))
+    Z = Z - Z.mean(axis=1, keepdims=True)
     perturbed = obs[:, None] + jnp.sqrt(alpha) * (jnp.sqrt(C_D) @ Z)
     x = jnp.linalg.solve(C_DD + alpha * C_D, perturbed - pred_obs)
     expected = augmented + C_MD @ x
@@ -261,6 +263,44 @@ def test_constructor_rejects_non_diagonal_C_D() -> None:
             forward_model=_forward_model(),
             C_D=C_D,
         )
+
+
+def test_constructor_rejects_zero_variance_C_D() -> None:
+    # A zero observation-error variance makes C_DD + alpha*C_D singular.
+    C_D = jnp.diag(jnp.array([1.0, 0.0]))
+    with pytest.raises(ValueError, match="positive"):
+        ParameterESMDA(
+            observation_operator=_dummy_obs_op(),
+            forward_model=_forward_model(),
+            C_D=C_D,
+        )
+
+
+def test_constructor_rejects_inconsistent_alpha_schedule() -> None:
+    # num_steps / alpha must equal 1 (sum_k 1/alpha_k = 1); alpha != num_steps
+    # tempers the likelihood into a different inference problem.
+    C_D = jnp.diag(jnp.ones(1))
+    with pytest.raises(ValueError, match="Inconsistent ES-MDA schedule"):
+        ParameterESMDA(
+            observation_operator=_dummy_obs_op(),
+            forward_model=_forward_model(),
+            C_D=C_D,
+            num_steps=4,
+            alpha=2.0,
+        )
+
+
+def test_constructor_accepts_consistent_explicit_alpha() -> None:
+    # alpha == num_steps is the consistent uniform schedule.
+    C_D = jnp.diag(jnp.ones(1))
+    esmda = ParameterESMDA(
+        observation_operator=_dummy_obs_op(),
+        forward_model=_forward_model(),
+        C_D=C_D,
+        num_steps=4,
+        alpha=4.0,
+    )
+    assert esmda.alpha == 4.0
 
 
 def test_constructor_rejects_distance_localization_on_parameter_smoother() -> None:
