@@ -20,6 +20,33 @@ an observation-error *inflation matrix* ``E_inf`` of shape ``(N_aug, N_d)``:
 
 Subclasses implement :meth:`inflation_factors`.  The shared local-analysis
 math lives in :meth:`localized_update`.
+
+Mathematical notes
+------------------
+
+*The taper (Vossepoel Eqs. 9-10), derived once.*  With un-tapered fraction
+``beta``, truncation distance ``T`` and peak inflation ``E_max``, the width is
+``b = (1 - beta) T / sqrt(log E_max)`` and, for ``d > beta T``, the inflation is
+``E_inf(d) = exp(((d - beta T) / b)^2)``.  At ``d = beta T`` the exponent is 0 so
+``E_inf = 1`` (taper switches on continuously); at ``d = T`` the exponent is
+``((1 - beta) T / b)^2 = log E_max`` so ``E_inf = E_max`` exactly; beyond ``T`` the
+observation is excluded (``inf``).  The ``E_max = 1`` edge case gives ``log = 0``
+so ``b -> inf`` and ``E_inf`` collapses to 1 -- a hard cutoff with no taper.  This
+single formula drives both strategies; only ``d`` and ``T`` differ (correlation:
+``d = 1 - |rho|``, ``T = 1 - rho_t``; distance: ``d = ||x_l - x_j||``,
+``T = radius``).  See :func:`taper_inflation`.
+
+*Localization and the ES-MDA likelihood budget.*  Per-row observation-error
+inflation means different augmented rows assimilate *different tempered
+likelihoods*.  The ES-MDA identity ``sum_k 1/alpha_k = 1`` (one Bayesian
+conditioning) holds per row only in the linear-Gaussian limit AND when the
+inflation pattern is the same at every step.  Correlation localization re-selects
+observations every step from the current (shrinking) ensemble, so the effective
+per-row data weight over the schedule is not strictly controlled.  This is
+inherent to the paper's method, not a bug here; treat localized posteriors as
+approximate and prefer innovation-consistency diagnostics over exact-MDA
+assumptions.  (Also note ``rho_t = 3/sqrt(N_e)`` is fixed across steps while the
+ensemble spread shrinks; per-step adaptive thresholds are an open choice.)
 """
 
 from abc import ABC, abstractmethod
@@ -29,9 +56,7 @@ import jax
 import jax.numpy as jnp
 
 
-def _group_inflation(
-    inflation: jnp.ndarray, group_ids: jnp.ndarray
-) -> jnp.ndarray:
+def _group_inflation(inflation: jnp.ndarray, group_ids: jnp.ndarray) -> jnp.ndarray:
     """Share the per-observation inflation across rows in the same block.
 
     Implements the paper's "grid block" local analysis (Vossepoel et al. 2025,
@@ -120,6 +145,13 @@ class BaseLocalization(ABC):
     #: distance strategy needs grid/sensor coordinates (``True``), which only the
     #: state-bearing smoothers can supply.
     requires_coordinates: bool = False
+
+    #: Whether the strategy requests the paper's "grid block" joint local
+    #: analysis (sec. 3b): co-located augmented rows are updated with a single
+    #: observation selection and transition.  Subclasses set it from their
+    #: constructor; declared here so the smoother can read it without a
+    #: ``getattr`` guard.
+    block_grouping: bool = False
 
     @abstractmethod
     def inflation_factors(
@@ -223,6 +255,10 @@ class BaseLocalization(ABC):
         C_DD = jnp.dot(pred_obs_dev, pred_obs_dev.T) / (N_e - 1)
 
         Z = jax.random.normal(rng_key, (N_d, N_e))
+        # Center the perturbations so their ensemble mean is exactly zero,
+        # removing the O(1/sqrt(N_e)) sampling bias in the analysis mean (Evensen
+        # 2004); matches the global path in ``_compute_kalman_update``.
+        Z = Z - jnp.mean(Z, axis=1, keepdims=True)
         # Base (un-inflated) measurement-error perturbation E.  Following
         # Vossepoel et al. (2025) and the reference EnKF_MS implementation
         # (``m_assimilation_old.F90``: ``subE(m,:) = subE(m,:) * Einfl``), the

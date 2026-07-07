@@ -5,9 +5,17 @@ from __future__ import annotations
 import numpy as np
 import xarray
 
+# Staggered-grid dimension aliases per physical axis, across every supported
+# solver: uDALES uses ``xt``/``xm`` (cell centre / x-face) and ``yt``/``ym``;
+# PALM stages ``u`` on ``xu`` and ``v`` on ``yv``.  Listing all variants here lets
+# the operator's requested dim (from its solver's ``dim_mapping``) resolve
+# against a state written by a *different* solver -- e.g. a udales observation
+# operator (which asks for ``xm``) reading a PALM truth (whose ``u`` lives on
+# ``xu``), which is exactly the cross-solver truth/assim pairing the pipeline
+# supports. Kept consistent with ``scripts/_common.py`` and ``figspec/dataio.py``.
 _AXIS_DIM_CANDIDATES: dict[str, tuple[str, ...]] = {
-    "x": ("x", "xt", "xm"),
-    "y": ("y", "yt", "ym"),
+    "x": ("x", "xt", "xm", "xu"),
+    "y": ("y", "yt", "ym", "yv"),
     "z": ("z", "zt", "zm"),
 }
 
@@ -51,17 +59,24 @@ def _compute_linear_indices_and_weights(
     max_coord = float(coords[-1])
 
     # Staggered grids can place observations up to half a cell beyond a variable's
-    # native coordinates (e.g., center observations against face velocities).
+    # native coordinates (e.g., center observations against face velocities). The
+    # allowed margin must come from the LOCAL edge spacing, not a single grid-wide
+    # median: on a stretched (non-uniform) grid the median spacing is unrelated to
+    # the spacing of the edge cell, so a wall-refined edge could otherwise accept
+    # extrapolation far beyond half of its own cell. On a uniform grid median ==
+    # edge spacing, so this is a no-op there.
     spacing = np.diff(coords)
-    extrapolation_margin = 0.5 * float(np.median(spacing))
+    lower_margin = 0.5 * float(spacing[0])
+    upper_margin = 0.5 * float(spacing[-1])
+    lower_bound = min_coord - lower_margin
+    upper_bound = max_coord + upper_margin
 
-    if np.any(points < (min_coord - extrapolation_margin)) or np.any(
-        points > (max_coord + extrapolation_margin)
-    ):
+    if np.any(points < lower_bound) or np.any(points > upper_bound):
         raise ValueError(
             f"Observation points for axis '{axis_name}' are outside the grid bounds "
             f"[{min_coord}, {max_coord}] (including allowed staggered extrapolation "
-            f"margin {extrapolation_margin})."
+            f"margins of {lower_margin} below and {upper_margin} above, i.e. "
+            f"[{lower_bound}, {upper_bound}])."
         )
 
     upper_idx = np.searchsorted(coords, points, side="right")

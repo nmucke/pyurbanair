@@ -3,7 +3,6 @@
 import numpy as np
 import xarray
 from data_assimilation.interpolation import interpolate_dataarray_at_points
-from pandas.core.indexing import Any
 
 
 class ObservationOperator:
@@ -59,8 +58,8 @@ class ObservationOperator:
 
         self.obs_states = obs_states
 
-        self.num_sensors = num_sensors
-        self.num_obs = num_sensors * len(obs_states)
+        self.num_sensors = int(num_sensors)
+        self.num_obs = self.num_sensors * len(obs_states)
 
         if solver_name == "udales":
             self.dim_mapping = {
@@ -130,8 +129,8 @@ class ObservationOperator:
                         dims["x"]: xarray.DataArray(self.obs_ids_x, dims="sensor"),
                     }
                 )
-            # Flatten to handle time dimension: (time, sensor) -> (time * sensor,)
-            # If time dimension is size 1, this gives shape (num_sensors,)
+            # Any time dimension was already selected away (isel(time=-1)
+            # above), so this is a plain (sensor,) vector per variable.
             obs_list.append(sensor_obs.values.ravel())
 
         # Concatenate all state variables: pattern is [all_sensors_var0, all_sensors_var1, ...]
@@ -146,7 +145,8 @@ class ObservationOperator:
             states: xarray Dataset with ensemble dimension.
 
         Returns:
-            Matrix of shape (ensemble, num_obs) where num_obs = NUM_OBS * 3.
+            Matrix of shape (ensemble, num_obs) where
+            num_obs = num_sensors * len(obs_states).
         """
         ensemble_size = states.sizes["ensemble"]
         obs_matrix = np.zeros((ensemble_size, self.num_obs))
@@ -230,9 +230,14 @@ class TemporalObservationOperator:
             self._num_intervals: int | None = None
 
     @property
-    def num_obs(self) -> int | Any:
+    def num_obs(self) -> int:
         """Number of observations produced by the operator."""
         if self.mode == "full":
+            if self._num_time_steps is None:
+                raise RuntimeError(
+                    "num_obs is not available until the operator has been "
+                    "called at least once (number of time steps is unknown)."
+                )
             return self.observation_operator.num_obs * self._num_time_steps
         if self.mode == "intervals":
             if self._num_intervals is None:
@@ -283,15 +288,51 @@ class TemporalObservationOperator:
             bin_indices = np.floor(
                 (time_values - time_values[0]) / self.interval_seconds
             ).astype(int)
-            unique_bins = np.unique(bin_indices)
-            num_intervals = unique_bins.size
+
+            # Bin against the ABSOLUTE interval range spanned by the window, not
+            # just the populated bins. Iterating only over np.unique(bin_indices)
+            # would make element k of the returned vector "the k-th populated
+            # interval" rather than "absolute interval k" -- if the model output
+            # ever skips an interval (irregular cadence, a short window, a
+            # missing frame), predicted and real observations would silently
+            # misalign and shift the whole innovation vector.
+            num_intervals = (
+                int(
+                    np.floor((time_values[-1] - time_values[0]) / self.interval_seconds)
+                )
+                + 1
+            )
             if self._num_intervals is None:
                 self._num_intervals = num_intervals
+            elif num_intervals != self._num_intervals:
+                # The observation vector length (and hence C_D, sized from the
+                # first window) is fixed by the first call's interval count. A
+                # later window with a different number of absolute intervals --
+                # a short final window, a changed output cadence -- would
+                # silently return a mismatched-length vector.
+                raise ValueError(
+                    f"Interval count changed between calls: first call produced "
+                    f"{self._num_intervals} intervals, this one produced "
+                    f"{num_intervals}. The observation vector length must stay "
+                    "constant across windows (C_D is sized from the first "
+                    "window); check the output cadence and window length."
+                )
 
             agg_fn = self.mode_mapping[self.aggregation_mode]
             obs_per_interval = []
-            for b in unique_bins:
+            for b in range(num_intervals):
                 frame_ids = np.nonzero(bin_indices == b)[0]
+                if frame_ids.size == 0:
+                    # A silent gap here would misalign every subsequent element
+                    # of the observation vector against absolute interval index,
+                    # rather than raising loudly.
+                    raise ValueError(
+                        f"Absolute interval {b} (of {num_intervals}, "
+                        f"interval_seconds={self.interval_seconds}) has no frames. "
+                        "Output cadence is irregular or a frame is missing, so "
+                        "absolute-interval alignment cannot be guaranteed; check "
+                        "the model output cadence and window length."
+                    )
                 interval_state = state.isel(time=frame_ids)
                 aggregated = agg_fn(interval_state)
                 obs_per_interval.append(

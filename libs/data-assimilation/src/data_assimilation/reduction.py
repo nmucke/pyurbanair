@@ -14,9 +14,12 @@ full rank with ``basis_source="initial_condition"`` the update is identical to
 the full-space update (which is confined to the ensemble span anyway).
 """
 
+import logging
 from typing import Optional
 
 import jax.numpy as jnp
+
+logger = logging.getLogger(__name__)
 
 BASIS_SOURCES = ("initial_condition", "window_snapshots")
 
@@ -108,10 +111,14 @@ class OnlineStateReduction:
 
         self._modes = modes[:, :rank]
         self._singular_values = singular_values[:rank]
-        print(
-            f"SVD state reduction: rank {rank}/{nonzero} nonzero modes "
-            f"(rows {snapshots_flat.shape[0]}, snapshots {n_samples}, "
-            f"retained energy {float(cumulative[rank - 1]):.4f})"
+        logger.info(
+            "SVD state reduction: rank %d/%d nonzero modes (rows %d, snapshots "
+            "%d, retained energy %.4f)",
+            rank,
+            nonzero,
+            snapshots_flat.shape[0],
+            n_samples,
+            float(cumulative[rank - 1]),
         )
 
     def encode(self, states_flat: jnp.ndarray) -> jnp.ndarray:
@@ -122,9 +129,21 @@ class OnlineStateReduction:
 
         Returns:
             Coefficients of shape (r, N_e).
+
+        Note:
+            The whitening divides by the retained singular values, and the rank
+            rule (see :meth:`fit`) keeps modes down to ``s > s0 * 1e-12``, so with
+            ``energy_fraction = 1.0`` the smallest coefficients can be scaled by
+            up to ~1e12.  In exact arithmetic the Kalman update is invariant to
+            this diagonal scaling (``decode_increment`` multiplies it straight
+            back), but under JAX's default float32 that dynamic range is
+            exhausted and the tail coefficients become numerically meaningless.
+            Prefer ``energy_fraction < 1`` or a ``max_rank`` cap so the retained
+            singular values stay well-conditioned.
         """
         if self._modes is None:
             raise RuntimeError("fit() must be called before encode().")
+        assert self._singular_values is not None  # set together with _modes in fit()
         return (self._modes.T @ (states_flat - self._mean)) / self._singular_values[
             :, None
         ]
@@ -140,4 +159,5 @@ class OnlineStateReduction:
         """
         if self._modes is None:
             raise RuntimeError("fit() must be called before decode_increment().")
+        assert self._singular_values is not None  # set together with _modes in fit()
         return self._modes @ (self._singular_values[:, None] * d_xi)
