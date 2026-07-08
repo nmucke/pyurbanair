@@ -20,6 +20,14 @@ Three guarantees, matching the requirements this exists for:
      makes every new trajectory distinct from every existing one. A direct
      on-disk (STL, trajectory) comparison against the current data is run as a
      belt-and-suspenders check and aborts on any collision.
+  4. **Even geometry usage.** New simulations are assigned by water-filling
+     against the *existing* per-geometry counts (read from ``geometries.csv``),
+     so the least-used geometries are topped up first. Across the whole train
+     split no geometry ends up used more than one time beyond any other — you
+     never get one geometry at 4x while another sits at 1x, even over repeated
+     extensions. (Geometries are still reused when samples outnumber the pool;
+     each reuse gets a fresh trajectory, so it is a new simulation, not a
+     re-run.)
 
 New samples are numbered contiguously after the existing train samples
 (``sample_0250.nc`` … for a 250-sample folder) in both ``state/train`` and
@@ -84,26 +92,8 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from pyurbanair.animation import animate_state
-from pyurbanair.config.hydra_helpers import (
-    clean_outputs,
-    resolve_parameter_schema,
-)
+from pyurbanair.config.hydra_helpers import clean_outputs, resolve_parameter_schema
 from pyurbanair.utils.run_utils import add_velocity_magnitude
-
-_MANIFEST_HEADER = [
-    "split",
-    "sample",
-    "stl_file",
-    "lx_stl_m",
-    "ly_stl_m",
-    "z_max_m",
-    "nx",
-    "ny",
-    "nz",
-    "lx_domain_m",
-    "ly_domain_m",
-    "lz_domain_m",
-]
 
 
 def _read_manifest(path: pathlib.Path) -> list[dict[str, str]]:
@@ -136,28 +126,31 @@ def _append_manifest_rows(path: pathlib.Path, samples: list[Sample]) -> None:
 
 
 def _assign_train_geometries(
-    n_pool: int, num_new: int, rng: np.random.Generator
+    current_counts: np.ndarray, num_new: int, rng: np.random.Generator
 ) -> np.ndarray:
-    """Draw ``num_new`` pool indices, tiling the shuffled pool when it's short.
+    """Assign ``num_new`` eligible geometries by balanced water-filling.
 
-    Mirrors the train branch of ``_assign_split_geometries`` in the generator:
-    each geometry is used either floor or ceil of ``num_new / n_pool`` times, so
-    coverage stays as uniform as possible.
+    ``current_counts[i]`` is how many *existing* train samples already use
+    eligible geometry ``i``. Each new simulation is handed to a geometry that is
+    currently least-used across the whole train split (ties broken uniformly at
+    random), so the final per-geometry usage is as even as possible given that
+    existing samples can't be moved: no geometry ends up used more than one time
+    beyond any other, and the imbalance already present in the original data is
+    ironed out first (the under-used geometries are topped up before any
+    geometry is used an extra time). This holds across repeated extensions,
+    since the counts are read fresh from ``geometries.csv`` each run.
     """
+    n_pool = current_counts.size
     if n_pool == 0:
         raise ValueError("No eligible training geometries after excluding val/test.")
-    pool_ids = rng.permutation(n_pool)
-    if num_new <= pool_ids.size:
-        return pool_ids[:num_new]
-    reps, remainder = divmod(num_new, pool_ids.size)
-    return rng.permutation(
-        np.concatenate(
-            [
-                np.tile(pool_ids, reps),
-                rng.choice(pool_ids, size=remainder, replace=False),
-            ]
-        )
-    )
+    counts = current_counts.astype(np.int64).copy()
+    picks = np.empty(num_new, dtype=np.int64)
+    for k in range(num_new):
+        least_used = np.flatnonzero(counts == counts.min())
+        pick = int(rng.choice(least_used))
+        picks[k] = pick
+        counts[pick] += 1
+    return picks
 
 
 def _param_signature(member: xr.Dataset) -> str:
@@ -211,7 +204,7 @@ def run(
             f"{config_path} not found; point --data-dir at a folder produced by "
             "generate_random_geometries_training_data.py."
         )
-    cfg: DictConfig = OmegaConf.load(config_path)  # type: ignore[assignment]
+    cfg: DictConfig = OmegaConf.load(config_path)
 
     model_name = cfg.model.name
     if model_name not in _SUPPORTED_MODELS:
@@ -281,8 +274,26 @@ def run(
         f"(excluded {len(pool) - len(eligible)} val/test geometries)."
     )
 
+    # How many existing train samples already use each eligible geometry, so the
+    # new assignment tops up the least-used geometries first (even distribution
+    # across the whole train split, not just within this batch). Held-out
+    # geometries aren't eligible, so their absence here is expected; a train STL
+    # missing from the pool (e.g. now too tall for a changed z_size) is a real
+    # inconsistency and aborts.
+    eligible_idx = {g.stl_path.name: i for i, g in enumerate(eligible)}
+    current_counts = np.zeros(len(eligible), dtype=np.int64)
+    for stl in train_stls:
+        idx = eligible_idx.get(stl)
+        if idx is None:
+            raise ValueError(
+                f"Existing train geometry {stl!r} is not in the eligible pool; "
+                "the pool or z_size must have changed since generation. Cannot "
+                "balance usage safely."
+            )
+        current_counts[idx] += 1
+
     rng = np.random.default_rng(seed)
-    geom_ids = _assign_train_geometries(len(eligible), num_new, rng)
+    geom_ids = _assign_train_geometries(current_counts, num_new, rng)
     new_samples: list[Sample] = [
         Sample(
             global_idx=k,  # index into the freshly-sampled param ensemble
@@ -293,10 +304,15 @@ def run(
         for k, pool_id in enumerate(geom_ids)
     ]
     _validate_ncpu(cfg, new_samples)
+
+    final_counts = current_counts + np.bincount(geom_ids, minlength=len(eligible))
     print(
         f"Planned {num_new} new train sims over "
         f"{len({s.geom.name for s in new_samples})} geometries "
-        f"(samples {num_existing_train}..{num_existing_train + num_new - 1})."
+        f"(samples {num_existing_train}..{num_existing_train + num_new - 1}).\n"
+        f"Per-geometry usage across the full train split after this run: "
+        f"min={int(final_counts.min())}, max={int(final_counts.max())} "
+        f"(was min={int(current_counts.min())}, max={int(current_counts.max())})."
     )
 
     # --- Sample fresh parameter trajectories -------------------------------
@@ -471,7 +487,9 @@ def run(
                 .isel(ensemble=0)
                 .drop_vars("ensemble")
             )
-            member_params.to_netcdf(param_train_dir / f"sample_{sample.local_idx:04d}.nc")
+            member_params.to_netcdf(
+                param_train_dir / f"sample_{sample.local_idx:04d}.nc"
+            )
 
             if "train" not in first_example:
                 first_example["train"] = state
