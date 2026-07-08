@@ -20,6 +20,7 @@ from __future__ import annotations
 import csv
 import time
 from pathlib import Path
+from typing import Callable
 
 import torch
 import tqdm
@@ -38,6 +39,7 @@ class BaseTraining:
         device: str | torch.device = "cpu",
         patience: int | None = None,
         weights_path: str | Path | None = None,
+        weights_transform: Callable[[torch.nn.Module], dict] | None = None,
         amp: bool = False,
         amp_dtype: str = "bfloat16",
         compile_model: bool = False,
@@ -126,6 +128,17 @@ class BaseTraining:
         self.num_epochs = int(num_epochs)
         self.patience = patience
         self.weights_path = Path(weights_path) if weights_path is not None else None
+        # Optional transform applied to the (eager) model when persisting the
+        # best-val ``weights.pt``. Default ``None`` keeps the existing behavior
+        # byte-identical (save ``model.state_dict()`` verbatim). LoRA fine-tuning
+        # passes ``neural_surrogates.finetuning.merge_to_state_dict`` so the
+        # on-disk weights are always a plain, *merged* base state dict -- valid to
+        # load into a fresh architecture even if the run is killed mid-training
+        # (the wrapped PeftModel state dict would not be). When set, the best-val
+        # *wrapped* state is also kept in RAM so ``fit()`` can restore the best
+        # (not last) epoch into the wrapped model at the end -- the transformed
+        # on-disk form is not loadable back into the PeftModel.
+        self.weights_transform = weights_transform
         # Pushforward-horizon curriculum: start the rollout at
         # ``pushforward_start_steps`` and add one step every
         # ``pushforward_epochs_per_step`` epochs, up to the target horizon the
@@ -490,6 +503,7 @@ class BaseTraining:
         best_val: float,
         epochs_since_improvement: int,
         pushforward_steps: int,
+        best_model_state: dict | None = None,
     ) -> None:
         torch.save(
             {
@@ -503,6 +517,13 @@ class BaseTraining:
                 "best_val": best_val,
                 "epochs_since_improvement": epochs_since_improvement,
                 "pushforward_steps": pushforward_steps,
+                # The best-val *wrapped* snapshot (weights_transform runs only).
+                # Persisting it lets a resumed run restore the true best at the end
+                # of fit() even when the resumed epochs never beat best_val --
+                # otherwise the on-disk best-val weights.pt would be silently
+                # overwritten with last-epoch weights by the caller. None for
+                # plain training (which reloads the best from weights.pt on disk).
+                "best_model_state": best_model_state,
             },
             path,
         )
@@ -516,6 +537,15 @@ class BaseTraining:
         epochs_since_improvement = 0
         current_steps = 0
         start_epoch = 0
+        # Best-val wrapped state kept in RAM only when a weights_transform is set
+        # (the on-disk weights.pt is then the transformed/merged form, which is
+        # not loadable back into the wrapped model). None => reload from disk.
+        best_state: dict | None = None
+        # Whether fit() ends holding the best-val weights in the model. False only
+        # when a weights_transform run cannot recover them (no improvement this
+        # run *and* no persisted best snapshot to restore) -- the caller uses this
+        # to avoid overwriting the on-disk best-val weights.pt with a worse model.
+        self.restored_best_weights = False
         history: dict[str, list[float]] = {"train": [], "val": []}
         self._train_terms: dict[str, float] = {}
         self._val_terms: dict[str, float] = {}
@@ -532,6 +562,10 @@ class BaseTraining:
             self.scaler.load_state_dict(ckpt["scaler"])
             best_val = ckpt["best_val"]
             epochs_since_improvement = ckpt["epochs_since_improvement"]
+            # Recover the best-val wrapped snapshot so end-of-fit can restore the
+            # true best even if this resumed run never improves (weights_transform
+            # runs; None for plain training and for pre-this-change checkpoints).
+            best_state = ckpt.get("best_model_state")
             # Restore the curriculum horizon so the stage-change branch below
             # does not fire (it would reset the patience window).
             current_steps = ckpt["pushforward_steps"]
@@ -587,7 +621,20 @@ class BaseTraining:
                 best_val = val_loss
                 epochs_since_improvement = 0
                 if self.weights_path is not None:
-                    torch.save(self._eager_model.state_dict(), self.weights_path)
+                    if self.weights_transform is not None:
+                        # Persist the transformed (merged, plain) form -- always
+                        # valid on disk -- and snapshot the wrapped best-val state
+                        # in RAM to restore into the model at the end of fit().
+                        torch.save(
+                            self.weights_transform(self._eager_model),
+                            self.weights_path,
+                        )
+                        best_state = {
+                            k: v.detach().cpu().clone()
+                            for k, v in self._eager_model.state_dict().items()
+                        }
+                    else:
+                        torch.save(self._eager_model.state_dict(), self.weights_path)
                     print(f"  saved new best weights to {self.weights_path}")
             else:
                 epochs_since_improvement += 1
@@ -613,7 +660,12 @@ class BaseTraining:
                 (epoch + 1) % self.checkpoint_every == 0 or epoch == self.num_epochs - 1
             ):
                 self._save_checkpoint(
-                    ckpt_path, epoch, best_val, epochs_since_improvement, current_steps
+                    ckpt_path,
+                    epoch,
+                    best_val,
+                    epochs_since_improvement,
+                    current_steps,
+                    best_model_state=best_state,
                 )
             # Only stop once the curriculum has reached the target horizon;
             # an intermediate-stage plateau must not cut the ramp short.
@@ -628,8 +680,19 @@ class BaseTraining:
                     f"(best val={best_val:.6f})"
                 )
                 break
-        if self.weights_path is not None and self.weights_path.exists():
+        # Restore the best-val weights into the (eager) model. With a
+        # weights_transform the on-disk weights.pt is the merged/plain form (not
+        # loadable into the wrapped model), so restore from the (possibly
+        # checkpoint-recovered) RAM snapshot instead; without one, reload from disk
+        # exactly as before. ``restored_best_weights`` records whether this
+        # succeeded so the caller knows the model holds the best (not last) epoch.
+        if self.weights_transform is not None:
+            if best_state is not None:
+                self._eager_model.load_state_dict(best_state)
+                self.restored_best_weights = True
+        elif self.weights_path is not None and self.weights_path.exists():
             self._eager_model.load_state_dict(
                 torch.load(self.weights_path, map_location=self.device)
             )
+            self.restored_best_weights = True
         return history

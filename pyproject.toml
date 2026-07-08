@@ -116,6 +116,13 @@ kappamodules = ">=0.1.112"
 # P3D architecture. Pulls in transformers/diffusers; imported lazily in
 # architectures/p3d.py so it is only needed to actually build/train a P3D model.
 p3d-surrogate = ">=0.0.4"
+# LoRA / PEFT fine-tuning (neural_surrogates.finetuning). Pulls in
+# transformers/accelerate/safetensors, but transformers is already present via
+# p3d-surrogate; imported lazily inside finetuning/ so `import neural_surrogates`
+# stays free of it. Needs >=0.11 for the lora.Conv3d layer (P3D has Conv3d stems).
+# Also mirrored as the neural-surrogates `[finetuning]` extra (for standalone pip
+# installs); here it is unconditional so the pixi dev/cuda envs always have it.
+peft = ">=0.11"
 
 # Development tasks
 [tool.black]

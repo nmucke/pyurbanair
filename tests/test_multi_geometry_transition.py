@@ -12,12 +12,11 @@ geometry mask. Covers:
 * :class:`BaseTraining._prepare_batch` — refreshes the device geometry cache
   when the batch's geometry changes (the silent-stale-mask trap);
 * ``_refork_loader`` — rebuilds a loader around its custom batch sampler;
-* the train script's ``_compute_normalization_stats`` — per-trajectory masks.
+* the library's ``_compute_normalization_stats`` — per-trajectory masks.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import math
 from pathlib import Path
 
@@ -37,9 +36,6 @@ T_LEN = 4
 # Trajectories 0 and 1 share grid + mask (dedup pair); trajectory 2 has its
 # own, larger grid.
 GRIDS = [(4, 8, 8), (4, 8, 8), (4, 8, 16)]
-
-_WORKTREE = Path(__file__).resolve().parents[1]
-_TRAIN_SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "train_neural_surrogate.py"
 
 
 def _write_sample(root: Path, split: str, idx: int, grid: tuple, seed: int) -> None:
@@ -256,12 +252,12 @@ def test_refork_loader_keeps_custom_batch_sampler(data_root: Path) -> None:
 
 
 def test_normalization_stats_use_per_trajectory_masks(data_root: Path) -> None:
-    spec = importlib.util.spec_from_file_location("train_ns_stats", _TRAIN_SCRIPT)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # The normalization pass now lives in the library (imported by both the train
+    # and fine-tune scripts) rather than as a script-local helper.
+    from neural_surrogates.training.data_utils import _compute_normalization_stats
 
     ds = _make_ds(data_root)
-    s_mean, s_std, p_mean, p_std = mod._compute_normalization_stats(ds)
+    s_mean, s_std, p_mean, p_std = _compute_normalization_stats(ds)
 
     # Reference: gather every trajectory's fluid values per channel directly.
     ref = {v: [] for v in STATE_VARS}

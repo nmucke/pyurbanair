@@ -1,0 +1,18 @@
+# @package _global_
+# LoRA fine-tuning of an existing next-step surrogate (focus: P3D). Bundles the
+# trainer class + loss that go together, exactly like the `mode` group does for
+# training.yaml, so a single `finetune_mode` choice selects both:
+#   neural_surrogates.Trainer (generic full-grid MSE / pushforward) + MSELoss.
+# Unlike the training `mode` group this does NOT set an architecture default --
+# the architecture is read from the pretrained model_dir's own config.yaml (the
+# single source of truth) by finetune_neural_surrogate.py, so the fine-tuned net
+# can never diverge from the one whose weights it loads. Plan 03 adds a `dft`
+# finetune_mode for the autoencoder -> time-stepper path.
+# Must sit AFTER `_self_` in finetuning.yaml's defaults so it overrides the
+# inline `trainer._target_` there.
+trainer:
+  _target_: neural_surrogates.Trainer
+# Plain mean-squared error on the (masked) next-state prediction, same as the
+# standard training mode.
+loss:
+  _target_: torch.nn.MSELoss

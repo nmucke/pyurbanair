@@ -20,6 +20,15 @@ version = "0.1.0"
 # 'neural_surrogates[p3d]'` (or the pixi neural-surrogates feature) needs it.
 [project.optional-dependencies]
 p3d = ["p3d-surrogate>=0.0.4"]
+# LoRA / BaLoRA fine-tuning (neural_surrogates.finetuning). peft>=0.11 ships the
+# lora.Conv3d layer P3D needs; imported lazily inside finetuning/ so the base
+# package import stays light.
+#
+# Intentionally declared in TWO places (not a mistake to "fix"): this extra is for
+# standalone `pip install neural_surrogates[finetuning]`, while the pixi dev/cuda
+# environments pull peft in unconditionally via the `neural-surrogates` feature
+# (root pyproject.toml) so the dev env always has it without opting into an extra.
+finetuning = ["peft>=0.11"]
 
 [tool.pixi.workspace]
 preview = ["pixi-build"]
