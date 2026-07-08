@@ -15,6 +15,7 @@ from typing import Sequence
 import numpy as np
 import torch
 import xarray as xr
+from neural_surrogates.sdf import normalize_sdf_mode
 from neural_surrogates.sdf import sdf_features as compute_sdf_features
 from torch.utils.data import Dataset, default_collate
 
@@ -38,9 +39,9 @@ def transition_collate(batch: list[dict]) -> dict:
     mixed-geometry batch fails loud here rather than training against the wrong
     mask (or crashing later in ``default_collate`` when the grids differ too).
 
-    The optional ``geom_features`` (SDF + ∇SDF channels) is shipped the same way
-    -- once as ``(1, 4, *grid)`` -- when the dataset was built with
-    ``sdf_features=True``.
+    The optional ``geom_features`` (SDF / ∇SDF channels) is shipped the same way
+    -- once as ``(1, C, *grid)`` -- when the dataset was built with a
+    non-``"none"`` ``sdf_features`` mode (``C`` set by that mode).
     """
     geometry = batch[0]["geometry"]
     for item in batch[1:]:
@@ -87,9 +88,10 @@ class TransitionDataset(Dataset):
       equal masks share one tensor object (content-deduped at init), so a
       single-geometry split ships the same tensor for every item exactly as
       before.
-    - ``geom_features`` — ``(4, *grid)``  SDF + ∇SDF channels, present only when
-      built with ``sdf_features=True``; one tensor per *unique* mask (computed
-      once at init, see :func:`neural_surrogates.sdf.sdf_features`).
+    - ``geom_features`` — ``(C, *grid)``  SDF / ∇SDF channels, present only when
+      built with a non-``"none"`` ``sdf_features`` mode (``C`` set by that mode);
+      one tensor per *unique* mask (computed once at init, see
+      :func:`neural_surrogates.sdf.sdf_features`).
 
     Trajectories may live on different spatial grids (the random-geometry
     training data gives every trajectory its own domain): the geometry, SDF
@@ -132,7 +134,7 @@ class TransitionDataset(Dataset):
         cache: bool = False,
         dtype: torch.dtype = torch.float32,
         pushforward_steps: int = 1,
-        sdf_features: bool = False,
+        sdf_features: bool | str = "none",
         sdf_clamp_cells: float = 32.0,
     ) -> None:
         if pushforward_steps < 1:
@@ -144,11 +146,14 @@ class TransitionDataset(Dataset):
         self.cache = cache
         self.dtype = dtype
         self.pushforward_steps = int(pushforward_steps)
-        # Optional SDF + ∇SDF geometry features (see neural_surrogates.sdf).
-        # Computed once at init from the (single, shared) geometry mask and
-        # shipped once per batch like the mask itself; off by default so items
-        # stay byte-identical to the pre-feature dataset.
-        self.sdf_features = bool(sdf_features)
+        # Optional SDF / ∇SDF geometry features (see neural_surrogates.sdf).
+        # ``sdf_features`` selects which channels: "none" (off), "sdf" (clamped
+        # SDF only), "grad" (unit-gradient only) or "both"; ``True``/``False``
+        # are accepted as aliases for "both"/"none". Computed once at init from
+        # the (single, shared) geometry mask and shipped once per batch like the
+        # mask itself; "none" keeps items byte-identical to the pre-feature
+        # dataset.
+        self.sdf_feature_mode = normalize_sdf_mode(sdf_features)
         self.sdf_clamp_cells = float(sdf_clamp_cells)
 
         state_dir = self.root / "state" / split
@@ -221,10 +226,14 @@ class TransitionDataset(Dataset):
         # step).
         self._geom_features: list[torch.Tensor] | None = (
             [
-                compute_sdf_features(g, clamp_cells=self.sdf_clamp_cells)
+                compute_sdf_features(
+                    g,
+                    clamp_cells=self.sdf_clamp_cells,
+                    mode=self.sdf_feature_mode,
+                )
                 for g in self._geometries
             ]
-            if self.sdf_features
+            if self.sdf_feature_mode != "none"
             else None
         )
         self._state_cache: dict[int, xr.Dataset] | None = None
@@ -243,8 +252,9 @@ class TransitionDataset(Dataset):
         return self._geometries[self._traj_geometry[traj]]
 
     def geom_features_for(self, traj: int) -> torch.Tensor | None:
-        """SDF features ``(4, *grid)`` of trajectory ``traj``; ``None`` when the
-        dataset was built with ``sdf_features=False``."""
+        """SDF features ``(C, *grid)`` of trajectory ``traj`` (``C`` set by the
+        feature mode); ``None`` when the dataset was built with
+        ``sdf_features="none"``."""
         if self._geom_features is None:
             return None
         return self._geom_features[self._traj_geometry[traj]]

@@ -32,8 +32,44 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-# Number of derived channels: sdf_n + (g_z, g_y, g_x).
+# Number of derived channels in the FULL stack: sdf_n + (g_z, g_y, g_x).
 N_SDF_FEATURE_CHANNELS = 4
+
+# Channel order of the full stack, and the sub-selection each feature mode keeps
+# (indices into that order). ``sdf`` -> the clamped signed distance only, ``grad``
+# -> the 3 unit-gradient components only, ``both`` -> all 4, ``none`` -> disabled.
+# This dict is the single source of truth for *which* channels a mode selects and
+# *how many* (its length); the dataset and the model both key off it, so the two
+# paths can never disagree on channel count or order.
+_SDF_MODE_INDICES: dict[str, tuple[int, ...]] = {
+    "none": (),
+    "sdf": (0,),
+    "grad": (1, 2, 3),
+    "both": (0, 1, 2, 3),
+}
+
+
+def normalize_sdf_mode(mode: bool | str) -> str:
+    """Canonicalise an ``sdf_features`` value to one of the mode strings.
+
+    Accepts the mode strings (``"none" | "sdf" | "grad" | "both"``) and, for
+    backward compatibility with the old boolean flag (and already-trained
+    ``config.yaml`` files that stored it), ``True`` -> ``"both"`` and ``False``
+    -> ``"none"``. Raises ``ValueError`` on anything else.
+    """
+    if isinstance(mode, bool):
+        return "both" if mode else "none"
+    if isinstance(mode, str) and mode in _SDF_MODE_INDICES:
+        return mode
+    raise ValueError(
+        f"sdf_features must be one of {sorted(_SDF_MODE_INDICES)} (or a bool), "
+        f"got {mode!r}"
+    )
+
+
+def n_sdf_feature_channels(mode: bool | str) -> int:
+    """Number of SDF feature channels selected by ``mode`` (0 when disabled)."""
+    return len(_SDF_MODE_INDICES[normalize_sdf_mode(mode)])
 
 
 def _sdf_features_single(
@@ -41,8 +77,14 @@ def _sdf_features_single(
     clamp_cells: float,
     spacing: tuple[float, float, float] | None,
     eps: float,
+    indices: tuple[int, ...],
 ) -> np.ndarray:
-    """Compute the ``(4, *grid)`` feature stack for one 3-D mask (numpy)."""
+    """Compute the feature stack for one 3-D mask (numpy).
+
+    The full ``[sdf_n, g_z, g_y, g_x]`` stack is always computed (the gradient
+    needs the unclamped SDF regardless), then sliced down to ``indices`` -- so
+    the returned shape is ``(len(indices), *grid)``.
+    """
     from scipy.ndimage import distance_transform_edt
 
     fluid = mask.astype(bool)
@@ -75,14 +117,14 @@ def _sdf_features_single(
     norm = np.sqrt(np.sum(grad**2, axis=0, keepdims=True))
     grad_unit = grad / np.maximum(norm, eps)
 
-    return np.ascontiguousarray(
-        np.concatenate([sdf_n[None], grad_unit], axis=0)
-    )  # (4, *grid)
+    full = np.concatenate([sdf_n[None], grad_unit], axis=0)  # (4, *grid)
+    return np.ascontiguousarray(full[list(indices)])  # (len(indices), *grid)
 
 
 def sdf_features(
     mask: torch.Tensor,
     clamp_cells: float = 32.0,
+    mode: bool | str = "both",
     spacing: tuple[float, float, float] | None = None,
     eps: float = 1e-6,
 ) -> torch.Tensor:
@@ -93,6 +135,16 @@ def sdf_features(
             solid. ``*grid`` must be 3-D (``z, y, x``).
         clamp_cells: clamp radius ``L`` (in cells) for the normalised SDF
             channel; the SDF is clipped to ``[-L, L]`` and divided by ``L``.
+        mode: which channels of the full ``[sdf_n, g_z, g_y, g_x]`` stack to
+            return -- ``"both"`` (all 4), ``"sdf"`` (the clamped SDF only, 1
+            channel), or ``"grad"`` (the 3 unit-gradient components only).
+            ``True`` is accepted as an alias for ``"both"``. Only these
+            channel-producing values are valid here: ``"none"`` (and its alias
+            ``False``) select zero channels and **raise** -- this low-level
+            helper is never asked to compute an empty stack (callers gate on the
+            mode first). Defaults to ``"both"`` so external callers of
+            ``sdf_features(mask)`` keep the original full-stack behaviour; note
+            the dataset/model constructors instead default to ``"none"`` (off).
         spacing: optional ``(dz, dy, dx)`` cell spacing forwarded to scipy's
             EDT ``sampling`` (and the gradient step). ``None`` (default) works
             in cell units -- the trained/deployed convention.
@@ -100,13 +152,17 @@ def sdf_features(
             gradient.
 
     Returns:
-        ``(4, *grid)`` for an unbatched mask, or ``(B, 4, *grid)`` for a
-        batched one, on the input's device and dtype. Channel order is
-        ``[sdf_n, g_z, g_y, g_x]``.
+        ``(C, *grid)`` for an unbatched mask, or ``(B, C, *grid)`` for a
+        batched one, where ``C = n_sdf_feature_channels(mode)``, on the input's
+        device and dtype. Channel order follows the full stack
+        ``[sdf_n, g_z, g_y, g_x]``, restricted to the selected channels.
 
     The EDT runs on CPU via numpy/scipy; the single ``.cpu()`` round-trip is
     paid once per geometry, never per rollout step.
     """
+    indices = _SDF_MODE_INDICES[normalize_sdf_mode(mode)]
+    if not indices:
+        raise ValueError("sdf_features called with mode 'none' (no channels)")
     if mask.dim() not in (3, 4):
         raise ValueError(
             "sdf_features expects a (z, y, x) or (B, z, y, x) mask, got shape "
@@ -117,11 +173,11 @@ def sdf_features(
     if batched:
         feats = np.stack(
             [
-                _sdf_features_single(arr[b], clamp_cells, spacing, eps)
+                _sdf_features_single(arr[b], clamp_cells, spacing, eps, indices)
                 for b in range(arr.shape[0])
             ],
             axis=0,
         )
     else:
-        feats = _sdf_features_single(arr, clamp_cells, spacing, eps)
+        feats = _sdf_features_single(arr, clamp_cells, spacing, eps, indices)
     return torch.from_numpy(feats).to(device=mask.device, dtype=mask.dtype)

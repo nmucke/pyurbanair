@@ -207,17 +207,19 @@ def run(cfg: DictConfig) -> None:
         n_params=len(train_ds.param_names),
     ).to(dtype=dtype)
 
-    # Cross-check the SDF-feature flags: a model whose stem was widened for the
-    # SDF channels must be paired with a dataset that ships them (and at the same
-    # clamp radius), or training silently trains on the wrong stem. Fail loud on
-    # any mismatch. Both default off, so this is a no-op for standard runs.
+    # Cross-check the SDF-feature modes: a model whose stem was widened for a
+    # specific set of SDF channels must be paired with a dataset that ships
+    # exactly those (and at the same clamp radius), or training silently trains
+    # on the wrong stem. Fail loud on any mismatch of the selected mode. Both
+    # default to "none", so this is a no-op for standard runs.
+    model_mode = getattr(model, "sdf_feature_mode", "none")
+    dataset_mode = getattr(train_ds, "sdf_feature_mode", "none")
     model_wants_features = getattr(model, "n_geom_feature_channels", 0) > 0
-    dataset_has_features = bool(getattr(train_ds, "sdf_features", False))
-    if model_wants_features != dataset_has_features:
+    if model_mode != dataset_mode:
         raise ValueError(
             "SDF-feature mismatch: architecture.sdf_features="
-            f"{model_wants_features} but dataset.sdf_features={dataset_has_features}. "
-            "Enable (or disable) both together."
+            f"{model_mode!r} but dataset.sdf_features={dataset_mode!r}. "
+            "They must select the same channels (set both to the same mode)."
         )
     if model_wants_features and float(train_ds.sdf_clamp_cells) != float(
         getattr(model, "sdf_clamp_cells", train_ds.sdf_clamp_cells)

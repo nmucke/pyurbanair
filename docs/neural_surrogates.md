@@ -335,7 +335,7 @@ this reduces to one-step transition pairs (the original behavior); see
 | `state_next` | `(C, *grid)` | snapshot at time `t + K` — the pushforward target |
 | `params_n`   | `(K, P)`    | inflow params at steps `t, …, t+K-1`; scalar params (e.g. uDALES `pressure_gradient_magnitude`) are broadcast along `time` |
 | `geometry`   | `(*grid,)`  | binary mask: `1` = fluid, `0` = obstacle. The item's *trajectory's* mask; equal masks are content-deduped to one shared tensor at init |
-| `geom_features` | `(4, *grid)` | SDF + ∇SDF channels — present **only** when built with `sdf_features=True` (default off); one tensor per unique mask |
+| `geom_features` | `(C, *grid)` | SDF / ∇SDF channels — present **only** when built with a non-`none` `sdf_features` mode (default `none`); `C` = 1 (`sdf`), 3 (`grad`) or 4 (`both`); one tensor per unique mask |
 
 The geometry mask is read from each state file's `geometry_var`
 (default `"blanking"` — pylbm's per-cell obstacle indicator, inverted to
@@ -376,16 +376,22 @@ shapes); leave `compile_model: false` there.
 
 #### SDF geometry features (`sdf_features`)
 
-Built with `sdf_features=True` (default off), the dataset also ships a 4-channel
-geometry-feature tensor `geom_features` alongside the mask: the clamped signed
-distance field `sdf_n` and its unit gradient `(g_z, g_y, g_x)`, all bounded in
-`[-1, 1]` and in **cell** units (see
+Built with a non-`none` `sdf_features` mode (default `none`), the dataset also
+ships a geometry-feature tensor `geom_features` alongside the mask, drawn from the
+clamped signed distance field `sdf_n` and its unit gradient `(g_z, g_y, g_x)`, all
+bounded in `[-1, 1]` and in **cell** units (see
 [`neural_surrogates.sdf.sdf_features`](../libs/neural-surrogates/src/neural_surrogates/sdf.py)).
+The `sdf_features` mode selects which channels: `sdf` (the SDF only, `C=1`), `grad`
+(the gradient only, `C=3`) or `both` (`C=4`); `true`/`false` are accepted as
+aliases for `both`/`none`, so already-trained configs load unchanged. The
+sub-modes are exact slices of the full 4-channel stack — the full stack is always
+computed (the gradient needs the unclamped SDF) and then sliced, so a mode can
+never diverge from the full computation.
 `sdf = EDT(mask) − EDT(1 − mask)` is positive in fluid, negative in solid; the
 gradient (from the *unclamped* SDF, normalised) points away from the nearest
 wall. The single EDT is computed **once at init** from the (shared) mask — never
 per `__getitem__` and never inside the training step — and `transition_collate`
-ships it once per batch as `(1, 4, *grid)`, exactly like the mask. `sdf_clamp_cells`
+ships it once per batch as `(1, C, *grid)`, exactly like the mask. `sdf_clamp_cells`
 (default `32`) is the clamp radius `L`: `sdf_n = clip(sdf, −L, L) / L`. The
 features enter the model stem **raw** (no z-scoring, no masking) and are excluded
 from `_compute_normalization_stats`. Only `P3D` consumes them today (§10, §7);
@@ -463,18 +469,22 @@ All architectures share the contract
 concatenated to the state along the channel dimension at the stem; how
 parameters enter depends on the architecture.
 
-**SDF geometry features (P3D).** `P3D` accepts an optional
-`sdf_features=True` (default off) that widens the stem by 4 channels (the SDF +
-∇SDF block, inserted right after the mask: stem order `[state, geometry, sdf_n,
-g_z, g_y, g_x, params, extra]`) and advertises `n_geom_feature_channels = 4`.
+**SDF geometry features (P3D).** `P3D` accepts an optional `sdf_features` mode
+(`none` | `sdf` | `grad` | `both`, default `none`) that widens the stem by the
+selected channels, inserted right after the mask: stem order `[state, geometry,
+<sdf channels>, params, extra]` where `<sdf channels>` is `sdf_n` (`sdf`), `g_z,
+g_y, g_x` (`grad`), or all four (`both`). It advertises `n_geom_feature_channels`
+= 1 / 3 / 4 accordingly (`true`/`false` alias `both`/`none`). The dataset and the
+model must agree on the mode — the train script cross-checks it and fails loud on
+a mismatch.
 During **training** the features arrive precomputed via a `geom_features=`
 argument (shipped by `TransitionDataset`/`transition_collate` when
-`dataset.sdf_features=True`; the trainer keys off `n_geom_feature_channels` and
-fails loud if the batch lacks them). During **inference** callers keep the
+`dataset.sdf_features` is non-`none`; the trainer keys off `n_geom_feature_channels`
+and fails loud if the batch lacks them). During **inference** callers keep the
 `(state, params, geometry)` contract unchanged — the model self-computes the
 features from the mask and caches them on the geometry tensor's identity, so the
 EDT runs once per rollout (step 1) and every later step hits the cache. The
-default (off) keeps `in_channels` and the whole state dict byte-identical, so
+default (`none`) keeps `in_channels` and the whole state dict byte-identical, so
 existing checkpoints load untouched. The EDT is **never** run inside the training
 step or a `torch.compile`'d region. Other architectures can adopt the same
 `n_geom_feature_channels` + `geom_features=` convention later.

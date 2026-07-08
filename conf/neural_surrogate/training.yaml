@@ -144,13 +144,14 @@ dataset:
   cache: false
   dtype: float32
   pushforward_steps: 7
-  # SDF + ∇SDF geometry features (see neural_surrogates.sdf): when true, the
-  # dataset ships 4 extra channels (clamped signed distance + unit gradient)
-  # alongside the `blanking` mask, computed once per geometry at init. Must be
-  # paired with an architecture built with `sdf_features=true` (the train script
-  # cross-checks this, and that the two `sdf_clamp_cells` agree). Default false
-  # keeps items byte-identical to the pre-feature dataset.
-  sdf_features: true
+  # SDF / ∇SDF geometry features (see neural_surrogates.sdf). Selects which extra
+  # channels the dataset ships alongside the `blanking` mask, computed once per
+  # geometry at init: `none` (off), `sdf` (clamped signed distance only, +1),
+  # `grad` (unit gradient only, +3), or `both` (SDF + ∇SDF, +4). Must match the
+  # architecture's `sdf_features` mode (the train script cross-checks this, and
+  # that the two `sdf_clamp_cells` agree). `none` keeps items byte-identical to
+  # the pre-feature dataset.
+  sdf_features: both  # none | sdf | grad | both
   # Clamp radius L (in cells) for the normalised SDF channel: clip(sdf, -L, L)/L.
   sdf_clamp_cells: 32
 

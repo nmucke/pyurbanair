@@ -380,6 +380,38 @@ def test_sdf_features_true_widens_stem_and_accepts_provided() -> None:
         _tiny_p3d().eval()(state, params, geometry, geom_features=feat)
 
 
+@pytest.mark.parametrize("mode, n_feat", [("sdf", 1), ("grad", 3), ("both", 4)])
+def test_sdf_feature_mode_widens_stem_by_selected_channels(
+    mode: str, n_feat: int
+) -> None:
+    """Each mode widens the stem by exactly the channels it selects, and the
+    model consumes matching precomputed features and self-computes them the same
+    way at inference."""
+    model = _tiny_p3d(sdf_features=mode).eval()
+    assert model.sdf_feature_mode == mode
+    assert model.n_geom_feature_channels == n_feat
+    assert model.in_channels == N_STATE + 1 + n_feat
+    state, params, geometry, mask = _inputs(batch=2)
+    feat = torch.stack(
+        [sdf_features(geometry[b], mode=mode) for b in range(geometry.shape[0])],
+        dim=0,
+    )
+    assert feat.shape == (2, n_feat, NZ, NY, NX)
+    with torch.no_grad():
+        provided = model(state, params, geometry, geom_features=feat)
+        self_computed = model(state, params, geometry)  # inference self-compute
+    torch.testing.assert_close(provided, self_computed)
+    assert torch.all(provided[:, :, mask == 0] == 0.0)
+
+
+def test_sdf_bool_true_is_both_mode() -> None:
+    """The legacy boolean flag still works: True == 'both' (4 channels), so
+    already-trained config.yaml files (which stored a bool) load unchanged."""
+    model = _tiny_p3d(sdf_features=True)
+    assert model.sdf_feature_mode == "both"
+    assert model.n_geom_feature_channels == 4
+
+
 def test_sdf_self_compute_caches_once_and_matches_provided(monkeypatch) -> None:
     """Inference self-compute: the EDT runs once for a stable geometry object
     (steps 2..T hit the cache), a new geometry tensor recomputes, and the
