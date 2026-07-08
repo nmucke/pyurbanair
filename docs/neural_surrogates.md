@@ -1199,3 +1199,149 @@ the inner patch nets stay non-periodic. For DD, `interior_size` must divide `Ny`
 | Architecture presets `tiny` / `small` / `medium` | [conf/neural_surrogate/architectures/domain_decomposed/](../conf/neural_surrogate/architectures/domain_decomposed/) |
 | Mode groups `standard` / `domain_decomposition` (bundle trainer class + loss + architecture default) | [conf/neural_surrogate/mode/](../conf/neural_surrogate/mode/) |
 | Tests | [test_decomposition.py](../tests/test_decomposition.py), [test_domain_decomposed.py](../tests/test_domain_decomposed.py), [test_unet_convnext_extra_channels.py](../tests/test_unet_convnext_extra_channels.py), [test_patch_transition_dataset.py](../tests/test_patch_transition_dataset.py), [test_dd_loss.py](../tests/test_dd_loss.py), [test_dd_forward_model_flexible.py](../tests/test_dd_forward_model_flexible.py), [test_dd_training_wiring.py](../tests/test_dd_training_wiring.py) |
+
+---
+
+## Part E — Parameter-efficient fine-tuning (LoRA / PEFT)
+
+Take an already-trained next-step surrogate (focus: `P3D`, but
+architecture-agnostic), inject LoRA adapters, train **only** the adapter weights
+on new data with the existing `Trainer`, and export a fine-tuned `model_dir`
+that drops into `NeuralSurrogateForwardModel` unchanged. This is plan 01 of
+[neural_surrogate_plans](neural_surrogate_plans/00_master_plan.md); it supersedes
+the crude full-weight `init_weights_path` warm start for parameter-efficient
+fine-tuning (that hook still exists).
+
+### 21. `neural_surrogates.finetuning`
+
+[libs/neural-surrogates/src/neural_surrogates/finetuning/](../libs/neural-surrogates/src/neural_surrogates/finetuning/)
+wraps HF **PEFT** — the single LoRA stack for the whole repo (the Tadpole and
+BaLoRA plans reuse it). `peft` is a **lazy import** inside the submodules, so
+`import neural_surrogates` stays free of the transformers/accelerate stack; it is
+declared in the pixi `neural-surrogates` feature and as the package
+`[finetuning]` extra.
+
+| Symbol | Role |
+|---|---|
+| `inject_lora(model, *, rank, alpha, dropout, target_modules, variant, modules_to_save)` | `get_peft_model(model, LoraConfig(...))`. `variant="balora"` raises `NotImplementedError` (plan 04). Returns a `PeftModel` whose forward preserves our `(state, params, geometry, geom_features)` contract and forwards attribute access (e.g. `n_geom_feature_channels`) to the base model. |
+| `merge_to_state_dict(peft_model)` | `merge_and_unload()` on a **deepcopy** → a plain, full base-architecture state dict (no `lora_*` keys), byte-loadable into a fresh architecture. The ESMDA-critical export. |
+| `save_adapter` / `load_adapter` | PEFT adapter checkpoint I/O (`adapter_model.safetensors` + `adapter_config.json`). |
+| `resolve_target_modules(model, *, preset, target_modules)` | Explicit `target_modules` (regex/list) wins; else the per-architecture `preset`. |
+| `all_adaptable_module_names(model)` | Every LoRA-adaptable `nn.Linear`/`nn.Conv3d` leaf, used by the `all` preset. |
+
+**P3D target presets** ([targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py), derived by enumerating `P3D(...).net.named_modules()`):
+
+- `attention` (default) — the transformer-block Linears: `attn.qkv`,
+  `mlp.fc1/.fc2`, per-block adaLN `adain_*.linear`, and the outer
+  `mlp_scale_bias`.
+- `attention+conv` — the above plus the 3×3×3 downsample convs
+  (`down*_*.body.*`).
+- `all` — every adaptable leaf.
+
+**Conv gotcha (verified, peft 0.19).** LoRA on a **1×1×1** Conv3d crashes at
+merge time (`get_delta_weight` reuses the Conv2d squeeze path), and a **grouped**
+Conv3d requires `rank % groups == 0` at inject time. Both classes are excluded
+from the presets and from `all_adaptable_module_names`, so the auto presets
+always inject *and* merge cleanly (P3D's `reduce_chan_level*` 1×1 convs are
+dropped; UNetConvNeXt's depthwise convs are dropped). Target one explicitly via
+`lora.target_modules` (divisible rank, never merged) only if you must.
+`param_to_scalar` (P3D's native-conditioning head) is excluded too — train it
+fully via `lora.modules_to_save: [param_to_scalar]` instead.
+
+### 22. `BaseTraining.weights_transform`
+
+The trainer writes best-val `weights.pt` on every improvement. A LoRA run's
+in-loop `state_dict()` is the *wrapped* (base + adapter) dict, which a crash
+mid-training would leave behind in a format `NeuralSurrogateForwardModel` can't
+load. The optional `weights_transform` callable (default `None` → byte-identical
+old behavior) is applied when persisting best weights; the fine-tune script
+passes `merge_to_state_dict`, so the on-disk `weights.pt` is **always** a plain
+merged dict. When it is set, `BaseTraining` also keeps the best-val *wrapped*
+state in RAM and restores that (not the on-disk merged form) into the model at
+the end of `fit()`.
+
+**Resume-safety.** The best-val wrapped snapshot is also persisted into
+`checkpoint.pt` (`best_model_state`) and recovered on resume, so a resumed run
+that never beats the pre-resume `best_val` still restores the *true* best at the
+end of `fit()` — otherwise the caller's final `save(merge(...))` would clobber the
+on-disk best with last-epoch weights. `fit()` exposes `restored_best_weights`; the
+fine-tune script only overwrites `weights.pt` in step 7 when it is `True` (else it
+keeps the trainer's on-disk best and warns). `merge_to_state_dict` returns
+**CPU** tensors, so the per-improvement deepcopy+merge retains no GPU memory and
+`weights.pt` is device-agnostic.
+
+### 23. Config + script
+
+[conf/neural_surrogate/finetuning.yaml](../conf/neural_surrogate/finetuning.yaml)
+(`config_name="neural_surrogate/finetuning"`) mirrors `training.yaml`'s shape
+(reused `trainer`/`dataset`/`dataloader`/`optimizer` blocks) plus a `lora:` block
+and `pretrained_model_dir` / `model_name`. A `finetune_mode` group
+([lora_nextstep](../conf/neural_surrogate/finetune_mode/lora_nextstep.yaml))
+bundles `Trainer` + `MSELoss` exactly like the training `mode` group — but leaves
+the **architecture to the pretrained config** (plan 03 adds `dft`).
+
+[scripts/neural_surrogate/finetune_neural_surrogate.py](../scripts/neural_surrogate/finetune_neural_surrogate.py)
+(`def run(cfg)` + thin `@hydra.main`, mirrors `train_neural_surrogate.py`):
+
+1. Load `<pretrained_model_dir>/config.yaml`; take the `architecture` node and
+   the `state_vars`/`param_vars`/`sdf_features`/`sdf_clamp_cells` as the **single
+   source of truth**, stamping them onto the fine-tune dataset. The dataloader +
+   normalization-stats helpers are shared with the train script via
+   [`neural_surrogates.training.data_utils`](../libs/neural-surrogates/src/neural_surrogates/training/data_utils.py)
+   (`build_loader`, `get_normalization_stats`) — a normal import, not a
+   cross-script reach-in.
+2. Build the fine-tune `TransitionDataset`s and **cross-check** their
+   `state_vars`/`param_names` against the pretrained spec (fail loud on
+   mismatch).
+3. Instantiate the architecture, `load_state_dict(weights.pt)`, optionally
+   recompute normalization (`recompute_normalization`, default off — **fails
+   loud** if set on an architecture without a `set_normalization` hook).
+4. Freeze all params; `inject_lora(...)`; `print_trainable_parameters()`.
+5. Save the resolved config to the new `model_dir` — the pretrained
+   `architecture` node, the fine-tune `dataset` (root/state_vars/param_vars), and
+   a `pretrained:` provenance block — so ESMDA rebuilds the net without chasing
+   the source dir.
+6. `Trainer` on the `PeftModel` with `weights_transform=merge_to_state_dict` and
+   the optimizer over the trainable (adapter) params only.
+7. After `fit()`: `save_adapter` → `model_dir/adapter/`, then overwrite
+   `weights.pt` with the final merged plain dict **only when
+   `trainer.restored_best_weights`** (else keep the trainer's on-disk best and
+   warn — see §22 resume-safety).
+
+```bash
+pixi run -e dev python scripts/neural_surrogate/finetune_neural_surrogate.py \
+    pretrained_model_dir=model_weights/p3d_xie_and_castro \
+    model_name=p3d_xie_and_castro_ft_barcelona \
+    dataset.root_dir=training_data/pylbm_barcelona \
+    lora.rank=32 lora.target_preset=attention
+```
+
+### 24. Artifact layout + ESMDA compatibility
+
+```
+model_weights/<name>/
+  config.yaml           # pretrained architecture + fine-tune dataset + pretrained:
+  weights.pt            # full MERGED plain state dict — ESMDA loads this, unchanged
+  adapter/
+    adapter_model.safetensors   # PEFT adapter (small, portable)
+    adapter_config.json
+  checkpoint.pt, metrics.csv    # training-loop artifacts (unchanged)
+```
+
+`weights.pt` is indistinguishable from a fully trained model, so
+[§12](#12-neuralsurrogateforwardmodel) works with **zero changes**: the fine-tune
+`config.yaml` presents the same top-level keys the loader reads (`architecture`,
+`dataset.state_vars/param_vars/root_dir`), with `dataset.root_dir` pointing at the
+fine-tune data (that *is* the domain the fine-tuned model targets).
+
+### 25. File map
+
+| Piece | File |
+|---|---|
+| `inject_lora` / `merge_to_state_dict` / `save_adapter` / `load_adapter` | [finetuning/inject.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/inject.py) |
+| `resolve_target_modules` / presets / `all_adaptable_module_names` | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
+| `weights_transform` hook + resume-safe best-val restore | [training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py) |
+| Shared loader + normalization helpers (both scripts) | [training/data_utils.py](../libs/neural-surrogates/src/neural_surrogates/training/data_utils.py) |
+| Config + `finetune_mode` group | [conf/neural_surrogate/finetuning.yaml](../conf/neural_surrogate/finetuning.yaml), [conf/neural_surrogate/finetune_mode/](../conf/neural_surrogate/finetune_mode/) |
+| Run script | [scripts/neural_surrogate/finetune_neural_surrogate.py](../scripts/neural_surrogate/finetune_neural_surrogate.py) |
+| Tests | [test_lora_finetuning.py](../tests/test_lora_finetuning.py), [test_base_training_weights_transform.py](../tests/test_base_training_weights_transform.py) |

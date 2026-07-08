@@ -1,0 +1,121 @@
+# @package _global_
+#
+# LoRA fine-tuning of an already-trained next-step surrogate (plan 01). Takes a
+# `model_dir` produced by train_neural_surrogate.py, injects LoRA adapters,
+# trains ONLY the adapter weights on new data with the existing Trainer, and
+# writes a new `model_dir` (standard layout + adapter/) whose merged `weights.pt`
+# drops into NeuralSurrogateForwardModel unchanged. Entry point:
+#   scripts/neural_surrogate/finetune_neural_surrogate.py
+#
+# The architecture and the state_vars / param_vars / SDF-feature mode are read
+# from the pretrained model_dir's config.yaml (single source of truth) -- they
+# are NOT declared here. The finetune data root, the LoRA knobs and the
+# fine-tune-shaped trainer/optimizer live below.
+#
+#   pixi run -e dev python scripts/neural_surrogate/finetune_neural_surrogate.py \
+#     pretrained_model_dir=model_weights/p3d_xie_and_castro \
+#     model_name=p3d_xie_and_castro_ft_barcelona \
+#     dataset.root_dir=training_data/pylbm_barcelona
+
+defaults:
+  - _self_
+  # `finetune_mode` bundles the trainer class + loss (like training.yaml's `mode`
+  # group) but leaves the architecture to the pretrained config. Must sit AFTER
+  # `_self_` so it overrides the inline `trainer._target_` below. Plan 03 adds:
+  # `dft` (autoencoder -> time-stepper).
+  - /neural_surrogate/finetune_mode@_global_: lora_nextstep
+
+# Pretrained source: a model_dir written by train_neural_surrogate.py. Its
+# config.yaml supplies the `architecture` node and the state_vars / param_vars /
+# sdf_features the fine-tuned model must match (the script cross-checks the
+# fine-tune dataset against them and fails loud on a mismatch).
+pretrained_model_dir: ???
+
+# Where the fine-tuned model lands: model_weights/<model_name>/ (standard layout
+# + an adapter/ subdir). Must be set explicitly.
+model_name: ???
+
+lora:
+  # standard LoRA (PEFT) today; `balora` (plan 04) raises NotImplementedError.
+  variant: standard
+  # Tadpole's default rank; sweep 8 / 16 / 32 / 64. alpha at 2*rank is the usual
+  # starting point.
+  rank: 32
+  alpha: 64
+  dropout: 0.0
+  # Which modules to adapt. `target_preset` picks a per-architecture regex from
+  # neural_surrogates.finetuning.targets (P3D: attention | attention+conv | all);
+  # an explicit `target_modules` regex/list overrides the preset when set.
+  target_preset: attention
+  target_modules: null
+  # Small modules to train fully (not via LoRA), e.g. the P3D native-conditioning
+  # head [param_to_scalar]. Empty by default.
+  modules_to_save: []
+
+# Keep the pretrained normalization stats by default. `true` recomputes them on
+# the fine-tune split (then val metrics are not comparable to the base model's).
+recompute_normalization: false
+
+# Fine-tune-shaped trainer. Same keys as training.yaml (shared BaseTraining
+# machinery); `_target_` is set by the finetune_mode group above. Short runs, no
+# torch.compile (see plan 01 pre-flight -- acceptable, and the dev box has no
+# CUDA triton anyway).
+trainer:
+  _target_: neural_surrogates.Trainer
+  num_epochs: 50
+  device: cuda
+  patience: 10
+  amp: true
+  amp_dtype: bfloat16
+  compile_model: false
+  channels_last: false
+  cudnn_benchmark: true
+  tf32: true
+  # No pushforward curriculum by default for a short fine-tune; set
+  # pushforward_epochs_per_step to enable it, and dataset.pushforward_steps > 1.
+  pushforward_epochs_per_step: null
+  pushforward_start_steps: 1
+  lr_warmup_epochs: 3
+  lr_warmup_start: 1.0e-6
+  lr_min: 1.0e-6
+  mask_loss: true
+  grad_clip_norm: 1.0
+  grad_unroll_steps: 2
+  resume: true
+  checkpoint_every: 5
+
+optimizer:
+  _target_: torch.optim.AdamW
+  # LoRA tolerates ~10x the full-FT LR; no weight decay on adapter weights.
+  lr: 1.0e-3
+  weight_decay: 0.0
+
+dataset:
+  _target_: neural_surrogates.TransitionDataset
+  # The NEW (fine-tune) data root.
+  root_dir: ???
+  # state_vars / param_vars / sdf_features / sdf_clamp_cells are filled from the
+  # pretrained config by the script (single source of truth); leave them null.
+  state_vars: null
+  param_vars: null
+  sdf_features: null
+  sdf_clamp_cells: null
+  cache: false
+  dtype: float32
+  pushforward_steps: 1
+
+# Optional trajectory-bucketed batch sampler (multi-geometry fine-tune data). See
+# training.yaml for the full contract; null keeps the plain shuffled DataLoader.
+batch_sampler: null
+
+dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: 4
+  shuffle: true
+  drop_last: true
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
