@@ -7,29 +7,21 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
-import jax.scipy.linalg
-import numpy as np
 import xarray
+from data_assimilation.augmentation import ParamAugmentation, StateAugmentation
+from data_assimilation.filtering.analysis import stochastic_enkf_update
+from data_assimilation.io import load_dataset as _load_dataset
 from data_assimilation.localization.base import BaseLocalization
-from data_assimilation.observation_operator import ObservationOperator
+from data_assimilation.observation_operator import (
+    ObservationOperator,
+    sensor_observation_coords,
+)
 from data_assimilation.reduction import OnlineStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
 logger = logging.getLogger(__name__)
-
-
-def _load_dataset(path: os.PathLike) -> xarray.Dataset:
-    """Open a NetCDF file, read it fully into memory, and close the handle.
-
-    Every call site consumes the arrays immediately (concatenated or observed),
-    so eager loading costs nothing and avoids leaking netCDF4 file handles --
-    long rollouts open ``ensemble_size x (num_steps + 1)`` files per window and
-    would otherwise hit ``Too many open files`` / HDF5 locking on clusters.
-    """
-    with xarray.open_dataset(path) as ds:
-        return ds.load()
 
 
 def _block_grouping_enabled(localization: Optional[BaseLocalization]) -> bool:
@@ -216,104 +208,37 @@ class _BaseESMDA(BaseSmoothing):
         Returns:
             Updated augmented array of the same shape.
         """
+        # The ESMDA per-step update IS the stochastic EnKF analysis with a
+        # tempered alpha; the single shared implementation lives in
+        # ``filtering/analysis.py`` (1-D variance-vector C_D contract). ``N_e``
+        # is kept in the signature for callers but derived from the arrays.
         alpha = self.alpha if alpha is None else alpha
-        N_d = obs.shape[0]
-
-        aug_mean = jnp.mean(augmented, axis=1, keepdims=True)
-        pred_obs_mean = jnp.mean(pred_obs, axis=1, keepdims=True)
-
-        aug_dev = augmented - aug_mean
-        pred_obs_dev = pred_obs - pred_obs_mean
-
-        # Localized (local-analysis) update: each augmented row is updated
-        # with only the observations the localization strategy deems relevant.
-        if self.localization is not None:
-            self.rng_key, subkey = jax.random.split(self.rng_key)
-            return self.localization.localized_update(
-                augmented=augmented,
-                aug_dev=aug_dev,
-                pred_obs=pred_obs,
-                pred_obs_dev=pred_obs_dev,
-                obs=obs,
-                C_D=self.C_D,
-                C_D_sqrt=self.C_D_sqrt,
-                alpha=alpha,
-                rng_key=subkey,
-                group_ids=group_ids,
-                localize_mask=localize_mask,
-                row_coords=row_coords,
-                obs_coords=obs_coords,
-            )
-
-        C_MD = jnp.dot(aug_dev, pred_obs_dev.T) / (N_e - 1)
-        C_DD = jnp.dot(pred_obs_dev, pred_obs_dev.T) / (N_e - 1)
-
         self.rng_key, subkey = jax.random.split(self.rng_key)
-        Z = jax.random.normal(subkey, (N_d, N_e))
-        # Center the observation perturbations: the raw draw has a sample mean of
-        # order 1/sqrt(N_e), which biases the analysis mean. Removing the row
-        # mean makes the perturbations exactly zero-mean across the ensemble --
-        # the standard, essentially free stochastic-EnKF correction (Evensen
-        # 2004), most visible at the N_e ~ 50-100 used here.
-        Z = Z - jnp.mean(Z, axis=1, keepdims=True)
-        perturbed_obs = obs[:, None] + jnp.sqrt(alpha) * (self.C_D_sqrt @ Z)
-
-        innovation = perturbed_obs - pred_obs
-        C_DD_alpha = C_DD + alpha * self.C_D
-
-        # ``C_DD + alpha * C_D`` is symmetric positive definite by construction
-        # (positive observation-error variances; see the C_D check at
-        # construction), so solve it with a Cholesky factorization: ~2x cheaper
-        # than generic LU and better-conditioned. A non-SPD system (a collapsed
-        # ensemble or a degenerate C_D slipping through) yields NaNs in the
-        # factor, which the finiteness check below turns into a loud failure
-        # rather than a silently NaN-poisoned ensemble.
-        x = jax.scipy.linalg.cho_solve(
-            jax.scipy.linalg.cho_factor(C_DD_alpha), innovation
+        return stochastic_enkf_update(
+            augmented=augmented,
+            pred_obs=pred_obs,
+            obs=obs,
+            C_D_diag=jnp.diag(self.C_D),
+            rng_key=subkey,
+            alpha=alpha,
+            localization=self.localization,
+            group_ids=group_ids,
+            localize_mask=localize_mask,
+            row_coords=row_coords,
+            obs_coords=obs_coords,
         )
-        if not bool(jnp.all(jnp.isfinite(x))):
-            raise FloatingPointError(
-                "ESMDA Kalman solve produced non-finite values: the system "
-                "C_DD + alpha * C_D is singular or ill-conditioned. Check for "
-                "collapsed ensemble spread or a degenerate observation-error "
-                "covariance."
-            )
-
-        return augmented + C_MD @ x
 
     def _observation_coords(self, n_d: int) -> jnp.ndarray:
         """Physical (x, y, z) coordinate of each of the ``n_d`` observations.
 
-        Every observation is a sensor reading; its spatial location is the
-        sensor's, independent of which state component (u/v/w) or time interval
-        it belongs to.  In the flattened observation vector the sensor index is
-        the innermost/fastest axis (see ``ObservationOperator`` and
-        ``TemporalObservationOperator``), so observation ``j`` sits at sensor
-        ``j % num_sensors``.  Tiling the sensor coordinates therefore reproduces
-        the per-observation coordinates regardless of the number of state
-        components or temporal intervals.
-
-        Requires coordinate-based observations (``obs_x``/``obs_y``/``obs_z``).
+        Delegates to :func:`~data_assimilation.observation_operator.\
+sensor_observation_coords` (shared with the filtering package); see its
+        docstring for the sensor-tiling layout. Requires coordinate-based
+        observations (``obs_x``/``obs_y``/``obs_z``).
         """
-        base_op = getattr(
-            self.observation_operator, "observation_operator", self.observation_operator
-        )
-        if not getattr(base_op, "use_interpolation", False):
-            raise ValueError(
-                "Distance-based localization requires coordinate-based "
-                "observations (obs_x/obs_y/obs_z), not index-based ones."
-            )
-        sensor_xyz = np.stack(
-            [base_op.obs_x, base_op.obs_y, base_op.obs_z], axis=1
-        )  # (num_sensors, 3)
-        num_sensors = base_op.num_sensors
-        reps, remainder = divmod(int(n_d), int(num_sensors))
-        if remainder != 0:
-            raise ValueError(
-                f"Observation count {n_d} is not a multiple of the sensor count "
-                f"{num_sensors}; cannot map observations to sensor coordinates."
-            )
-        return jnp.asarray(np.tile(sensor_xyz, (reps, 1)))  # (n_d, 3)
+        return jnp.asarray(
+            sensor_observation_coords(self.observation_operator, n_d)
+        )  # (n_d, 3)
 
     def _final_time_smoothing_step(
         self,
@@ -550,102 +475,39 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         # cross-window continuity in rollout ESMDA.
         self.pin_initial_time_point = pin_initial_time_point
 
-    def _check_num_time_points(self, params: xarray.Dataset) -> None:
-        """Validate the data's ``time`` size against the configured knot count.
+    @property
+    def _param_augmentation(self) -> ParamAugmentation:
+        """The shared flatten/unflatten transform for time-varying params.
 
-        The flatten/unflatten round-trip iterates ``range(self.num_time_points)``;
-        if the data has fewer knots the trailing ones are silently dropped, and if
-        it has more they raise an opaque out-of-bounds error. Check once, loudly.
+        Built on the fly from ``num_time_points`` / ``pin_initial_time_point``
+        (cheap, stateless) so it always reflects the instance's current
+        attributes. See :class:`~data_assimilation.augmentation.\
+ParamAugmentation` for the flattening semantics.
         """
-        if "time" not in params.dims:
-            return
-        data_time = int(params.sizes["time"])
-        if data_time != self.num_time_points:
-            raise ValueError(
-                f"num_time_points ({self.num_time_points}) does not match the "
-                f"params' time dimension ({data_time}). The time-varying "
-                "flatten/unflatten assumes they agree; set num_time_points to "
-                "the sampled prior's knot count."
-            )
+        return ParamAugmentation(
+            num_time_points=self.num_time_points,
+            pin_initial_time_point=self.pin_initial_time_point,
+        )
+
+    def _check_num_time_points(self, params: xarray.Dataset) -> None:
+        """Validate the data's ``time`` size against the configured knot count."""
+        self._param_augmentation.check_num_time_points(params)
 
     def _time_varying_group_ids(self, params: xarray.Dataset) -> jnp.ndarray:
-        """Block id per flattened param row, grouping knots of one parameter.
-
-        Mirrors :meth:`_flatten_time_varying_params`' variable order exactly: a
-        time-varying parameter's ``{name}_{t}`` knots all share one block id;
-        each static parameter is its own block. Built from the true
-        name->(param, knot) mapping, so it cannot merge unrelated parameters the
-        way stripping a numeric name suffix could.
-        """
-        self._check_num_time_points(params)
-        n_knots = self.num_time_points - (1 if self.pin_initial_time_point else 0)
-        ids: list[int] = []
-        for block_id, name in enumerate(params.data_vars):
-            repeats = n_knots if "time" in params[name].dims else 1
-            ids.extend([block_id] * repeats)
-        return jnp.asarray(ids, dtype=int)
+        """Block id per flattened param row, grouping knots of one parameter."""
+        return self._param_augmentation.group_ids(params)
 
     def _flatten_time_varying_params(self, params: xarray.Dataset) -> xarray.Dataset:
-        """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars.
-
-        Each variable with a ``time`` dimension is expanded into
-        ``{name}_0``, ``{name}_1``, … so that all time points of one
-        parameter are contiguous.  Variables without a ``time`` dimension
-        are passed through unchanged.
-
-        When ``self.pin_initial_time_point`` is True, ``{name}_0`` is
-        omitted so ``t=0`` never enters the augmented state.
-        """
-        self._check_num_time_points(params)
-        start_idx = 1 if self.pin_initial_time_point else 0
-        flat_data_vars: dict = {}
-        for name in params.data_vars:
-            if "time" in params[name].dims:
-                for t_idx in range(start_idx, self.num_time_points):
-                    flat_data_vars[f"{name}_{t_idx}"] = (
-                        "ensemble",
-                        jnp.asarray(params[name].isel(time=t_idx).values),
-                    )
-            else:
-                flat_data_vars[name] = (
-                    "ensemble",
-                    jnp.asarray(params[name].values),
-                )
-        return xarray.Dataset(
-            data_vars=flat_data_vars,
-            coords={"ensemble": params.coords["ensemble"]},
-        )
+        """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars."""
+        return self._param_augmentation.flatten(params)
 
     def _unflatten_params(
         self,
         flat_params: xarray.Dataset,
         original_params: xarray.Dataset,
     ) -> xarray.Dataset:
-        """Reverse :meth:`_flatten_time_varying_params`.
-
-        When ``self.pin_initial_time_point`` is True, ``t=0`` was not
-        flattened — reinsert it per-member from ``original_params``.
-        """
-        start_idx = 1 if self.pin_initial_time_point else 0
-        data_vars: dict = {}
-        for name in original_params.data_vars:
-            if "time" in original_params[name].dims:
-                time_slices: list = []
-                if self.pin_initial_time_point:
-                    time_slices.append(
-                        jnp.asarray(original_params[name].isel(time=0).values)
-                    )
-                time_slices.extend(
-                    jnp.asarray(flat_params[f"{name}_{t_idx}"].values)
-                    for t_idx in range(start_idx, self.num_time_points)
-                )
-                data_vars[name] = (
-                    ("time", "ensemble"),
-                    jnp.stack(time_slices, axis=0),
-                )
-            else:
-                data_vars[name] = flat_params[name]
-        return xarray.Dataset(data_vars=data_vars, coords=original_params.coords)
+        """Reverse :meth:`_flatten_time_varying_params`."""
+        return self._param_augmentation.unflatten(flat_params, original_params)
 
     def _one_step(
         self,
@@ -681,6 +543,11 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
     # State-bearing smoothers know each state row's physical grid coordinate, so
     # they can pair with a coordinate-based (distance) localization.
     _supplies_row_coordinates: bool = True
+
+    #: Shared, stateless state flatten/unflatten transform (class attribute so
+    #: it is available on instances built without ``__init__``, as some unit
+    #: tests do via ``__new__``).
+    _state_augmentation: StateAugmentation = StateAugmentation()
 
     def __init__(
         self,
@@ -740,14 +607,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
 
     def _flatten_state(self, state: xarray.Dataset) -> jnp.ndarray:
         """Flatten ensemble state to (degrees_of_freedom, ensemble_size)."""
-        flat_vars = []
-        for var_name in sorted(state.data_vars):
-            variable = state[var_name]
-            flat_var = variable.transpose("ensemble", ...).values.reshape(
-                variable.sizes["ensemble"], -1
-            )
-            flat_vars.append(flat_var.T)
-        return jnp.concatenate(flat_vars, axis=0)
+        return self._state_augmentation.flatten(state)
 
     def _get_window_states(
         self,
@@ -781,16 +641,9 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         reduction's ``snapshot_stride``.
         """
         assert self.state_reduction is not None  # only called for window_snapshots
-        state = state.isel(time=slice(None, None, self.state_reduction.snapshot_stride))
-        flat_vars = []
-        n_samples = state.sizes["ensemble"] * state.sizes["time"]
-        for var_name in sorted(state.data_vars):
-            variable = state[var_name]
-            flat_var = variable.transpose("ensemble", "time", ...).values.reshape(
-                n_samples, -1
-            )
-            flat_vars.append(flat_var.T)
-        return jnp.concatenate(flat_vars, axis=0)
+        return self._state_augmentation.flatten_snapshots(
+            state, self.state_reduction.snapshot_stride
+        )
 
     def _basis_snapshots(
         self,
@@ -824,28 +677,10 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
 
         This co-location by flat index is only physically correct when every
         state variable lives on the **same grid shape** (pylbm's collocated
-        grid). On a staggered grid (uDALES/PALM, where ``u``/``v``/``w`` sit on
-        different ``xm``/``xt`` … axes) index ``i`` of ``u`` is not co-located
-        with index ``i`` of ``v``, and differing sizes would misalign the
-        blocks — so require a single shared shape and raise otherwise.
+        grid); see :meth:`~data_assimilation.augmentation.StateAugmentation.\
+group_ids`, which raises on staggered (non-collocated) shapes.
         """
-        per_var = []
-        cell_shapes: set[tuple[int, ...]] = set()
-        for var_name in sorted(state.data_vars):
-            variable = state[var_name]
-            cell_shapes.add(
-                tuple(int(variable.sizes[d]) for d in variable.dims if d != "ensemble")
-            )
-            n_cells = variable.size // variable.sizes["ensemble"]
-            per_var.append(jnp.arange(n_cells, dtype=int))
-        if len(cell_shapes) > 1:
-            raise ValueError(
-                "Grid-block grouping requires collocated state variables (one "
-                f"shared grid shape), but got shapes {sorted(cell_shapes)}. On a "
-                "staggered grid the components are not co-located by flat index; "
-                "disable block_grouping or build ids from physical coordinates."
-            )
-        return jnp.concatenate(per_var)
+        return self._state_augmentation.group_ids(state)
 
     def _unflatten_state(
         self,
@@ -853,25 +688,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         state_template: xarray.Dataset,
     ) -> xarray.Dataset:
         """Unflatten a (degrees_of_freedom, ensemble_size) array back to xarray."""
-        new_data_vars = {}
-        ensemble_size = states_array.shape[1]
-        current_pos = 0
-
-        for var_name in sorted(state_template.data_vars):
-            template_var = state_template[var_name]
-            var_flat_size = template_var.size // template_var.sizes["ensemble"]
-            flat_var_chunk = states_array[current_pos : current_pos + var_flat_size, :]
-            current_pos += var_flat_size
-
-            dims_no_ensemble = [d for d in template_var.dims if d != "ensemble"]
-            shape_no_ensemble = [template_var.sizes[d] for d in dims_no_ensemble]
-            data = flat_var_chunk.T.reshape((ensemble_size, *shape_no_ensemble))
-
-            new_dims_order = ["ensemble"] + dims_no_ensemble
-            data_array = xarray.DataArray(data, dims=new_dims_order)
-            new_data_vars[var_name] = data_array.transpose(*template_var.dims)
-
-        return xarray.Dataset(new_data_vars, coords=state_template.coords)
+        return self._state_augmentation.unflatten(states_array, state_template)
 
     def _state_row_coords(self, state: xarray.Dataset) -> jnp.ndarray:
         """Physical ``(x, y, z)`` coordinate of each flattened state row.
@@ -884,34 +701,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         ``z``/``zt``/``zm`` -> z), which holds for every supported solver grid.
         Used only by distance-based localization.
         """
-        coords_list = []
-        for var_name in sorted(state.data_vars):
-            variable = state[var_name]
-            dims_no_ens = [d for d in variable.dims if d != "ensemble"]
-            for d in dims_no_ens:
-                if d not in state.coords:
-                    raise ValueError(
-                        f"State dimension '{d}' (variable '{var_name}') has no "
-                        "coordinate values; distance-based localization needs "
-                        "physical grid coordinates for every state dimension — "
-                        "grid indices would be compared against sensor "
-                        "coordinates in metres."
-                    )
-            coord_1d = [np.asarray(state[d].values, dtype=float) for d in dims_no_ens]
-            # meshgrid(indexing="ij").ravel() flattens in the same C-order as
-            # transpose("ensemble", ...).reshape(ensemble, -1) in _flatten_state.
-            grids = np.meshgrid(*coord_1d, indexing="ij") if coord_1d else []
-            flat = [g.ravel() for g in grids]
-            n_cells = (
-                flat[0].size if flat else variable.size // variable.sizes["ensemble"]
-            )
-            per_axis = {d[0]: flat[i] for i, d in enumerate(dims_no_ens)}
-            xyz = np.stack(
-                [per_axis.get(axis, np.zeros(n_cells)) for axis in ("x", "y", "z")],
-                axis=1,
-            )
-            coords_list.append(xyz)
-        return jnp.asarray(np.concatenate(coords_list, axis=0))
+        return self._state_augmentation.row_coords(state)
 
     def _augmented_state_update(
         self,

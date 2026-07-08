@@ -165,7 +165,7 @@ organised the same way: two shared single-source-of-truth files plus thin
 per-backend runners and sweep wrappers, so **all three backends run the exact
 same experiment** at every configuration — same ground truth, domain, windows,
 time horizon, sensors and dynamic-parameter settings. Only the assimilation
-solver differs. It drives `scripts/run_esmda.py` in its loaded-truth mode
+solver differs. It drives `scripts/esmda/run_esmda.py` in its loaded-truth mode
 (`run.truth_dir=<dir>`): it LOADS a pre-simulated ground truth
 (`state.nc` + `params.nc`) and runs the time-varying (dynamic) smoother.
 

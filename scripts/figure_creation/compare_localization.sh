@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run scripts/run_esmda.py once per mode on an otherwise identical joint
+# Run scripts/esmda/run_esmda.py once per mode on an otherwise identical joint
 # state + time-varying-parameter ESMDA config, so the state-update strategies
 # can be compared. Each run writes its outputs (incl. run_summary.yaml) to its
 # own .temp/loc_<mode> dir.
@@ -156,7 +156,7 @@ common=(
   truth_params.correlation_length=30
 )
 
-run_esmda() { pixi run --environment dev python scripts/run_esmda.py "$@"; }
+run_esmda() { pixi run --environment dev python scripts/esmda/run_esmda.py "$@"; }
 
 # echo "== 1/7  none (global update)  [SIZE=${SIZE}] =="
 # run_esmda "${common[@]}" "${model_args[@]}" "${size_args[@]}" \

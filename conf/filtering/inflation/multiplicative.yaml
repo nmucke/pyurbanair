@@ -1,0 +1,7 @@
+# @package filtering
+# Fixed multiplicative prior inflation: forecast anomalies (and, consistently,
+# the predicted-observation anomalies) scaled by `factor` before each analysis.
+# Selected with `filtering/inflation=multiplicative`.
+inflation:
+  _target_: data_assimilation.inflation.MultiplicativeInflation
+  factor: 1.05

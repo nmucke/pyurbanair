@@ -2,7 +2,7 @@
 # LOCAL (no SLURM) rollout-ESMDA-from-truth runner -- pylbm backend (GPU or CPU).
 #
 # Local sibling of job_scripts/snellius/pylbm/rollout_esmda_from_truth.slurm:
-# it runs scripts/run_esmda.py DIRECTLY (no sbatch / module / SLURM env vars),
+# it runs scripts/esmda/run_esmda.py DIRECTLY (no sbatch / module / SLURM env vars),
 # keeping all heavy I/O and outputs under the repo (pyurbanair). Run config that
 # is shared with the pyudales/pypalm runners lives in ../common.sh (sourced
 # below); only the pylbm specifics are set here.
@@ -120,7 +120,7 @@ EXTRA_FLAGS=(
 # assim model, the per-run sweep values, hydra.run.dir and the pylbm/GPU solver
 # flags are added here.
 pixi run -e "${ENV}" -- python -u \
-    scripts/run_esmda.py \
+    scripts/esmda/run_esmda.py \
     "${COMMON_RUN_FLAGS[@]}" \
     model@assim_model="${ASSIM_MODEL}" \
     domain.nx="${NX}" \

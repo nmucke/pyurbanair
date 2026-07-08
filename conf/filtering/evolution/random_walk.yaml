@@ -1,0 +1,10 @@
+# @package filtering
+# Additive Gaussian random walk between cycles: theta_{k+1} = theta_k + xi.
+# The standard augmented-state approach to parameter estimation in a filter.
+# `std` is one scalar for every parameter, or a per-parameter mapping, e.g.
+#   filtering.parameter_evolution.std='{inflow_angle: 1.0, velocity_magnitude: 0.05}'
+# (parameters absent from the mapping receive no noise).
+# Selected with `filtering/evolution=random_walk`.
+parameter_evolution:
+  _target_: data_assimilation.filtering.parameter_evolution.RandomWalkEvolution
+  std: 0.05

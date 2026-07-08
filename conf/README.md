@@ -9,19 +9,20 @@ mix them freely:
 | `case=<name>` | **What** physical experiment: domain bounds + grid resolution, geometry/STL, sensors (assimilation **and** validation), per-window time | [`case/`](case/) — **one self-contained file per case** |
 | `model@…=<backend>` | **Which** solver: `pylbm` / `pyudales` / `pypalm` / `neural_surrogate` | [`model/`](model/) |
 | `params…=<kind>` | parameter prior: `static` / `dynamic` (+ `*_truth`) | [`params/`](params/) |
-| `esmda/smoother=…` `esmda/localization=…` `esmda/state_reduction=…` | the DA method | [`esmda/`](esmda/) |
+| `esmda/smoother=…` `esmda/localization=…` `esmda/state_reduction=…` | the DA (smoothing) method | [`esmda/`](esmda/) |
+| `filtering/analysis=…` `filtering/localization=…` `filtering/inflation=…` `filtering/evolution=…` | the DA (sequential filtering) method | [`filtering/`](filtering/) |
 
 > **Set up a new experiment = edit (or copy) one file in [`case/`](case/).** Domain,
 > grid, geometry and sensors all live there.
 
-The **compute budget** (ensemble size, parallelism, ESMDA steps/windows, param
-knots) is baked into the two entry points at medium-sized defaults — change it
-with plain CLI overrides, e.g. `ensemble.ensemble_size=8`,
-`esmda.num_assimilation_windows=10`.
+The **compute budget** (ensemble size, parallelism, ESMDA steps/windows, filter
+cycles, param knots) is baked into the entry points at medium-sized defaults —
+change it with plain CLI overrides, e.g. `ensemble.ensemble_size=8`,
+`esmda.num_assimilation_windows=10`, `filtering.num_cycles=4`.
 
 ## Entry points (primary configs)
 
-There are exactly two run entry points, and each is **self-contained** — it
+There are exactly three run entry points, and each is **self-contained** — it
 inlines the shared base (output `paths`, the `time.seconds_per_knot` knob,
 `ensemble` defaults, the `run:` namespace and Hydra settings) rather than
 pulling them from separate files:
@@ -29,7 +30,8 @@ pulling them from separate files:
 | Script | `config_name` | What it adds |
 |--------|---------------|--------------|
 | `scripts/run_forward_model.py` | [`run_forward_model.yaml`](run_forward_model.yaml) | `case` + `params` + `model@model` + the inlined base |
-| `scripts/run_esmda.py` | [`run_esmda.yaml`](run_esmda.yaml) | the inlined base + inlined `esmda:` scalars + the esmda axes; doubles the model mount (`@truth_model` / `@assim_model`) and the params mount (`@truth_params` / `@prior_params`) so truth and prior never share a generative process (anti-inverse-crime) |
+| `scripts/esmda/run_esmda.py` | [`run_esmda.yaml`](run_esmda.yaml) | the inlined base + inlined `esmda:` scalars + the esmda axes; doubles the model mount (`@truth_model` / `@assim_model`) and the params mount (`@truth_params` / `@prior_params`) so truth and prior never share a generative process (anti-inverse-crime) |
+| `scripts/filtering/run_filtering.py` | [`run_filtering.yaml`](run_filtering.yaml) | the inlined base + inlined `filtering:` scalars + the `filtering/*` axes; the same double model/params mounts as ESMDA (static params only) |
 
 (`scripts/neural_surrogate/generate_training_data.py` uses
 [`neural_surrogate/training_data.yaml`](neural_surrogate/training_data.yaml), and
@@ -45,6 +47,9 @@ off the run entry points / `case` for their physical setup.)
 - [`params/`](params/) — parameter samplers (static/dynamic + `*_truth`).
 - [`esmda/`](esmda/) — `smoother/`, `localization/`, `state_reduction/` (the base
   `esmda:` scalars are inlined in `run_esmda.yaml`; these groups override them).
+- [`filtering/`](filtering/) — `analysis/`, `localization/`, `inflation/`,
+  `evolution/` (the base `filtering:` scalars are inlined in
+  `run_filtering.yaml`; these groups override them).
 
 ## Smoke runs
 
@@ -60,9 +65,12 @@ The pytest suite applies exactly such a smoke shape (`_SMOKE_OVERRIDES` in
 python scripts/run_forward_model.py model@model=pylbm ensemble.ensemble_size=8
 
 # ESMDA: joint state + time-varying params, distance localization, Barcelona
-python scripts/run_esmda.py case=barcelona \
+python scripts/esmda/run_esmda.py case=barcelona \
   esmda/smoother=state_and_dynamic esmda/localization=distance \
   params@prior_params=dynamic params@truth_params=dynamic_truth
+
+# Sequential EnKF: joint state+parameter filtering, 4 cycles, RTPS inflation
+python scripts/filtering/run_filtering.py filtering.mode=joint filtering.num_cycles=4
 
 # One-off override: coarsen the grid on the CLI
 python scripts/run_forward_model.py domain.nx=40 domain.ny=40

@@ -70,7 +70,7 @@ All simulation and assimilation settings live in `conf/`, composed by
 one per script, and each is **self-contained** —
 [`run_forward_model.yaml`](conf/run_forward_model.yaml) for
 `scripts/run_forward_model.py` and [`run_esmda.yaml`](conf/run_esmda.yaml) for
-`scripts/run_esmda.py`. See [`conf/README.md`](conf/README.md) for the full
+`scripts/esmda/run_esmda.py`. See [`conf/README.md`](conf/README.md) for the full
 overview.
 
 **Inlined base** (each entry point carries its own copy, rather than pulling
@@ -191,39 +191,39 @@ The dynamic multi-window setup
 
 ```bash
 # Parameter estimation (parameter-only smoother, static params, single window)
-python scripts/run_esmda.py esmda/smoother=static \
+python scripts/esmda/run_esmda.py esmda/smoother=static \
   params@prior_params=static params@truth_params=static_truth \
   model@truth_model=pylbm model@assim_model=pylbm
 
 # Cross-model assimilation (LBM truth, uDALES assimilation)
-python scripts/run_esmda.py esmda/smoother=static \
+python scripts/esmda/run_esmda.py esmda/smoother=static \
   params@prior_params=static params@truth_params=static_truth \
   model@truth_model=pylbm model@assim_model=pyudales
 
 # Joint state and parameter estimation
-python scripts/run_esmda.py esmda/smoother=state_and_parameter \
+python scripts/esmda/run_esmda.py esmda/smoother=state_and_parameter \
   params@prior_params=static params@truth_params=static_truth
 
 # Rollout-based ESMDA with multiple assimilation windows
-python scripts/run_esmda.py esmda/smoother=state_and_parameter \
+python scripts/esmda/run_esmda.py esmda/smoother=state_and_parameter \
   params@prior_params=static esmda.num_assimilation_windows=3
 
 # Time-varying-parameter ESMDA over a 3-window rollout
-python scripts/run_esmda.py esmda/smoother=dynamic \
+python scripts/esmda/run_esmda.py esmda/smoother=dynamic \
   params@prior_params=dynamic params@truth_params=dynamic_truth \
   esmda.num_assimilation_windows=3
 
 # Assimilate against a saved truth instead of simulating it inline
-python scripts/run_esmda.py esmda/smoother=dynamic \
+python scripts/esmda/run_esmda.py esmda/smoother=dynamic \
   run.truth_dir=ground_truth_spunup run.truth_start_time=50
 
 # Adaptive correlation localization (Vossepoel et al. 2025) is OFF by default;
 # enable it with the esmda/localization group, or set its fields:
-python scripts/run_esmda.py esmda/smoother=static \
+python scripts/esmda/run_esmda.py esmda/smoother=static \
   esmda.localization.truncation_correlation=0.35 esmda.localization.block_grouping=true
 
 # Fast smoke run (small domain, few steps)
-python scripts/run_esmda.py model@truth_model=pylbm model@assim_model=pylbm \
+python scripts/esmda/run_esmda.py model@truth_model=pylbm model@assim_model=pylbm \
   domain.nx=20 domain.ny=20 domain.nz=4 time.simulation_time=5 \
   ensemble.ensemble_size=4 esmda.num_steps=1 esmda.num_assimilation_windows=1
 ```
@@ -267,7 +267,7 @@ pixi run -e dev python scripts/neural_surrogate/test_neural_surrogate.py \
     model_dir=model_weights/upt_small sample_idx=0
 
 # 4. Use the trained surrogate as an assimilation model
-python scripts/run_esmda.py esmda/smoother=dynamic \
+python scripts/esmda/run_esmda.py esmda/smoother=dynamic \
     params@prior_params=dynamic params@truth_params=dynamic_truth \
     esmda.num_assimilation_windows=3 \
     model@truth_model=pyudales model@assim_model=neural_surrogate \
@@ -402,9 +402,11 @@ pyurbanair/
 │
 ├── scripts/                               # Main execution scripts (see docs/scripts_and_configs.md)
 │   ├── run_forward_model.py               # Forward sim (run.ensemble / run.rollout_steps / params=static|dynamic)
-│   ├── run_esmda.py                       # Unified ESMDA entry point (smoother × params × windows)
-│   ├── _common.py / _esmda_common.py      # Shared script glue (viz, derived-param plots, metrics)
-│   ├── compute_esmda_metrics.py / make_esmda_figures.py  # Post-hoc metrics + figures
+│   ├── _common.py                         # Shared script glue (viz, derived-param plots, metrics)
+│   ├── run_esmda_pipeline.sh              # ESMDA: run → metrics → figures
+│   ├── run_filtering_pipeline.sh          # Filtering: run → metrics → figures
+│   ├── esmda/                             # ESMDA pipeline: run_esmda.py, compute_esmda_metrics.py, make_esmda_figures.py, _esmda_common.py
+│   ├── filtering/                         # Filtering (EnKF) pipeline: run_filtering.py, compute_filtering_metrics.py, make_filtering_figures.py, _filtering_common.py
 │   ├── neural_surrogate/                  # Surrogate stack (generate/train/test/dataloading)
 │   ├── adjust_simulations/                # Ground-truth utilities (trim_spinup, 32-bit, ...)
 │   ├── figure_creation/                   # Paper/diagnostic figures (visualize_ground_truth, ...)

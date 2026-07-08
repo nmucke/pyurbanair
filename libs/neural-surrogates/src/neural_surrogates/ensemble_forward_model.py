@@ -190,7 +190,7 @@ class NeuralSurrogateEnsembleForwardModel(BaseEnsembleForwardModel):
         is a single batched pass over all members.
 
         The ``training_data`` spin-up source has no cold start of its own — the
-        caller (``scripts/run_esmda.py``) loads the training snapshots and passes
+        caller (``scripts/esmda/run_esmda.py``) loads the training snapshots and passes
         them in as the warm-start ``state`` — so ``state is None`` is an error
         there.
         """
@@ -201,7 +201,7 @@ class NeuralSurrogateEnsembleForwardModel(BaseEnsembleForwardModel):
             raise RuntimeError(
                 "spinup_source='training_data' has no cold start: the training "
                 "snapshots must be loaded and passed in as the initial state "
-                "(scripts/run_esmda.py / neural_surrogates.training_spinup). "
+                "(scripts/esmda/run_esmda.py / neural_surrogates.training_spinup). "
                 "Got state=None."
             )
         else:

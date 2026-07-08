@@ -1,6 +1,6 @@
 """Visualize all relevant metrics and results for a SINGLE rollout-ESMDA run.
 
-Point this at a successful ``scripts/run_esmda.py`` output folder (the per-run
+Point this at a successful ``scripts/esmda/run_esmda.py`` output folder (the per-run
 directory that holds ``run_summary.yaml``, the ``*_params.nc`` files and
 ``posterior_state_mean.nc``). It regenerates a consolidated set of figures into
 ``result_figures/<case>/`` -- by default ``<case>`` is the run folder's name.
@@ -73,6 +73,7 @@ _COPY_FIGURES = (
 # Small IO helpers
 # ---------------------------------------------------------------------------
 
+
 def _load_yaml(path: pathlib.Path) -> dict:
     if not path.exists():
         return {}
@@ -98,6 +99,7 @@ def _shade_windows(ax, edges: np.ndarray | None) -> None:
 # Figures
 # ---------------------------------------------------------------------------
 
+
 def plot_param_trajectories(
     prior: xr.Dataset,
     post: xr.Dataset,
@@ -121,24 +123,38 @@ def plot_param_trajectories(
         if p in prior.data_vars:
             pr = np.asarray(prior[p].transpose("ensemble", "time").values)
             ax.plot(t, pr.T, color=_COLOR_PRIOR, alpha=0.18, linewidth=0.7)
-            ax.plot(t, pr.mean(0), color=_COLOR_PRIOR, linewidth=2.0, label="Prior mean")
+            ax.plot(
+                t, pr.mean(0), color=_COLOR_PRIOR, linewidth=2.0, label="Prior mean"
+            )
         po = np.asarray(post[p].transpose("ensemble", "time").values)
         ax.plot(t, po.T, color=_COLOR_POSTERIOR, alpha=0.18, linewidth=0.7)
-        ax.plot(t, po.mean(0), color=_COLOR_POSTERIOR, linewidth=2.5, label="Posterior mean")
+        ax.plot(
+            t, po.mean(0), color=_COLOR_POSTERIOR, linewidth=2.5, label="Posterior mean"
+        )
         if p in truth.data_vars:
             tr = np.asarray(truth[p].values)
             # Truth may live on its own time grid (e.g. cross-model runs where the
             # truth model and the assimilation model use different time samplings),
             # so plot it against its own coordinate rather than the posterior's.
             t_truth = np.asarray(truth["time"].values) if "time" in truth else t
-            ax.plot(t_truth, tr, color=_COLOR_TRUTH, linewidth=2.0, linestyle="--",
-                    zorder=5, label="Truth")
+            ax.plot(
+                t_truth,
+                tr,
+                color=_COLOR_TRUTH,
+                linewidth=2.0,
+                linestyle="--",
+                zorder=5,
+                label="Truth",
+            )
         ax.set_ylabel(_PARAM_LABELS.get(p, p))
         ax.set_xlabel("Time")
         ax.margins(x=0.01)
         ax.legend(loc="best")
-    fig.suptitle("Parameter trajectories: truth vs prior vs posterior",
-                 fontsize=15, fontweight="bold")
+    fig.suptitle(
+        "Parameter trajectories: truth vs prior vs posterior",
+        fontsize=15,
+        fontweight="bold",
+    )
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
@@ -158,7 +174,12 @@ def plot_parameter_metric_bars(summary: dict, out_path: pathlib.Path) -> None:
         entry = pm[p]
         rmse = entry.get("rmse", {}) or {}
         crps = entry.get("crps", {}) or {}
-        labels = ["prior\nRMSE", "post\nRMSE\n(mean)", "post\nRMSE\n(final)", "post\nCRPS\n(mean)"]
+        labels = [
+            "prior\nRMSE",
+            "post\nRMSE\n(mean)",
+            "post\nRMSE\n(final)",
+            "post\nCRPS\n(mean)",
+        ]
         values = [
             entry.get("prior_rmse_mean"),
             rmse.get("mean"),
@@ -170,8 +191,14 @@ def plot_parameter_metric_bars(summary: dict, out_path: pathlib.Path) -> None:
         bars = ax.bar(labels, values, color=colors)
         for b, v in zip(bars, values):
             if not np.isnan(v):
-                ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.3g}",
-                        ha="center", va="bottom", fontsize=9)
+                ax.text(
+                    b.get_x() + b.get_width() / 2,
+                    v,
+                    f"{v:.3g}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                )
         red = entry.get("rmse_reduction_vs_prior")
         title = _PARAM_LABELS.get(p, p)
         if red is not None:
@@ -190,8 +217,13 @@ def plot_state_montage(
     """Posterior mean |U| at n evenly-spaced times (z-plane)."""
     n_t = mean_vel.sizes.get("time", 1)
     idxs = np.unique(np.linspace(0, n_t - 1, n_frames, dtype=int)) if n_t > 1 else [0]
-    slabs = [extract_2d_slice(mean_vel.isel(time=int(i)) if "time" in mean_vel.dims
-                              else mean_vel, z_level=z_level) for i in idxs]
+    slabs = [
+        extract_2d_slice(
+            mean_vel.isel(time=int(i)) if "time" in mean_vel.dims else mean_vel,
+            z_level=z_level,
+        )
+        for i in idxs
+    ]
     vmin = float(np.nanmin([np.nanmin(s) for s in slabs]))
     vmax = float(np.nanmax([np.nanmax(s) for s in slabs]))
 
@@ -227,9 +259,18 @@ def plot_metrics_summary(summary: dict, out_path: pathlib.Path) -> None:
 
     rows: list[tuple[str, str]] = []
     rows.append(("== CONFIGURATION ==", ""))
-    for k in ("smoother", "assimilation_model", "truth_model", "ensemble_size",
-              "num_esmda_steps", "num_assimilation_windows",
-              "simulation_time_per_window", "final_time", "obs_error_std", "seed"):
+    for k in (
+        "smoother",
+        "assimilation_model",
+        "truth_model",
+        "ensemble_size",
+        "num_esmda_steps",
+        "num_assimilation_windows",
+        "simulation_time_per_window",
+        "final_time",
+        "obs_error_std",
+        "seed",
+    ):
         if k in cfg:
             rows.append((k, fmt(cfg[k])))
 
@@ -245,16 +286,28 @@ def plot_metrics_summary(summary: dict, out_path: pathlib.Path) -> None:
             e = pm[p]
             rows.append(("", ""))
             rows.append((f"== PARAM: {p} ==", ""))
-            rows.append(("rmse mean / final", f"{fmt(e.get('rmse',{}).get('mean'))} / {fmt(e.get('rmse',{}).get('final'))}"))
+            rows.append(
+                (
+                    "rmse mean / final",
+                    f"{fmt(e.get('rmse',{}).get('mean'))} / {fmt(e.get('rmse',{}).get('final'))}",
+                )
+            )
             rows.append(("crps mean", fmt(e.get("crps", {}).get("mean"))))
             rows.append(("prior rmse mean", fmt(e.get("prior_rmse_mean"))))
-            rows.append(("rmse reduction vs prior", fmt(e.get("rmse_reduction_vs_prior"))))
+            rows.append(
+                ("rmse reduction vs prior", fmt(e.get("rmse_reduction_vs_prior")))
+            )
 
     if sm.get("vel_magnitude_rmse"):
         rows.append(("", ""))
         rows.append(("== STATE ==", ""))
         v = sm["vel_magnitude_rmse"]
-        rows.append(("vel |U| rmse mean / final", f"{fmt(v.get('mean'))} / {fmt(v.get('final'))}"))
+        rows.append(
+            (
+                "vel |U| rmse mean / final",
+                f"{fmt(v.get('mean'))} / {fmt(v.get('final'))}",
+            )
+        )
 
     for s in ("assimilation", "validation"):
         if s in sen:
@@ -263,7 +316,12 @@ def plot_metrics_summary(summary: dict, out_path: pathlib.Path) -> None:
             rows.append((f"== SENSORS: {s} ({e.get('num_sensors','?')}) ==", ""))
             rmse = e.get("velocity_vector_rmse", {}) or {}
             es = e.get("velocity_vector_energy_score", {}) or {}
-            rows.append(("vector rmse mean / final", f"{fmt(rmse.get('mean'))} / {fmt(rmse.get('final'))}"))
+            rows.append(
+                (
+                    "vector rmse mean / final",
+                    f"{fmt(rmse.get('mean'))} / {fmt(rmse.get('final'))}",
+                )
+            )
             rows.append(("energy score mean", fmt(es.get("mean"))))
 
     fig_h = max(4.0, 0.32 * len(rows))
@@ -273,8 +331,15 @@ def plot_metrics_summary(summary: dict, out_path: pathlib.Path) -> None:
     dy = 1.0 / (len(rows) + 1)
     for label, value in rows:
         bold = label.startswith("==")
-        ax.text(0.01, y, label, family="monospace", fontsize=10,
-                fontweight="bold" if bold else "normal", va="top")
+        ax.text(
+            0.01,
+            y,
+            label,
+            family="monospace",
+            fontsize=10,
+            fontweight="bold" if bold else "normal",
+            va="top",
+        )
         if value:
             ax.text(0.62, y, value, family="monospace", fontsize=10, va="top")
         y -= dy
@@ -286,6 +351,7 @@ def plot_metrics_summary(summary: dict, out_path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 # Truth / obs loading (best-effort)
 # ---------------------------------------------------------------------------
+
 
 def _load_truth_final_vel(run_dir: pathlib.Path) -> xr.DataArray | None:
     """Final-frame truth |U| (one z-plane's worth of field), or None on failure."""
@@ -319,12 +385,21 @@ def _obs_points(cfg: dict) -> tuple[np.ndarray | None, np.ndarray | None]:
 # Driver
 # ---------------------------------------------------------------------------
 
-def visualize(run_dir: pathlib.Path, out_dir: pathlib.Path, *,
-              z_level: int, want_truth: bool, copy_existing: bool) -> None:
+
+def visualize(
+    run_dir: pathlib.Path,
+    out_dir: pathlib.Path,
+    *,
+    z_level: int,
+    want_truth: bool,
+    copy_existing: bool,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = _load_yaml(run_dir / "run_summary.yaml")
     cfg = _load_yaml(run_dir / "config.yaml")
-    num_windows = (summary.get("configuration", {}) or {}).get("num_assimilation_windows")
+    num_windows = (summary.get("configuration", {}) or {}).get(
+        "num_assimilation_windows"
+    )
 
     print(f"Run:    {run_dir}")
     print(f"Output: {out_dir}")
@@ -339,11 +414,14 @@ def visualize(run_dir: pathlib.Path, out_dir: pathlib.Path, *,
         print(f"  ! parameter NetCDFs missing ({e}); skipping parameter figures")
 
     if post is not None and truth is not None:
-        plot_param_trajectories(prior, post, truth, out_dir / "parameter_trajectories.png", num_windows)
+        plot_param_trajectories(
+            prior, post, truth, out_dir / "parameter_trajectories.png", num_windows
+        )
         print("  + parameter_trajectories.png")
         edges = _window_edges(np.asarray(post["time"].values), num_windows)
         plot_parameter_error(
-            esmda_params=post, true_params=truth,
+            esmda_params=post,
+            true_params=truth,
             output_path=out_dir / "parameter_error.png",
             window_edges=list(edges) if edges is not None else None,
         )
@@ -360,9 +438,13 @@ def visualize(run_dir: pathlib.Path, out_dir: pathlib.Path, *,
             true_vel = _load_truth_final_vel(run_dir) if want_truth else None
             obs_x, obs_y = _obs_points(cfg)
             plot_final_state_with_obs(
-                mean_vel=psm["vel_mean"], std_vel=psm["vel_std"],
+                mean_vel=psm["vel_mean"],
+                std_vel=psm["vel_std"],
                 output_path=out_dir / "final_state.png",
-                true_vel=true_vel, obs_x=obs_x, obs_y=obs_y, z_level=z_level,
+                true_vel=true_vel,
+                obs_x=obs_x,
+                obs_y=obs_y,
+                z_level=z_level,
             )
             print("  + final_state.png")
             plot_state_montage(psm["vel_mean"], out_dir / "state_montage.png", z_level)
@@ -396,15 +478,30 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("run", type=pathlib.Path, help="run_esmda output folder")
-    ap.add_argument("--out", type=pathlib.Path, default=None,
-                    help="output dir (default: <repo>/result_figures/<case>)")
-    ap.add_argument("--case", default=None,
-                    help="case name for result_figures/<case> (default: run folder name)")
-    ap.add_argument("--z-level", type=int, default=0, help="z-plane index for field plots")
-    ap.add_argument("--no-truth", action="store_true",
-                    help="skip loading the ground truth for the final-state panel")
-    ap.add_argument("--no-copy-existing", action="store_true",
-                    help="do not copy sensor-timeseries / animation figures from the run folder")
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=None,
+        help="output dir (default: <repo>/result_figures/<case>)",
+    )
+    ap.add_argument(
+        "--case",
+        default=None,
+        help="case name for result_figures/<case> (default: run folder name)",
+    )
+    ap.add_argument(
+        "--z-level", type=int, default=0, help="z-plane index for field plots"
+    )
+    ap.add_argument(
+        "--no-truth",
+        action="store_true",
+        help="skip loading the ground truth for the final-state panel",
+    )
+    ap.add_argument(
+        "--no-copy-existing",
+        action="store_true",
+        help="do not copy sensor-timeseries / animation figures from the run folder",
+    )
     args = ap.parse_args()
 
     run_dir = args.run.resolve()
@@ -415,7 +512,8 @@ def main() -> None:
     out_dir = args.out or (repo_root / "result_figures" / case)
 
     visualize(
-        run_dir, out_dir,
+        run_dir,
+        out_dir,
         z_level=args.z_level,
         want_truth=not args.no_truth,
         copy_existing=not args.no_copy_existing,

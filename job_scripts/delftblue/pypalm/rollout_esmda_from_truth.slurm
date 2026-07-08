@@ -2,7 +2,7 @@
 # DELFTBLUE rollout-ESMDA-from-truth runner -- pypalm backend (CPU).
 #
 # DelftBlue sibling of job_scripts/local/pypalm/rollout_esmda_from_truth.sh:
-# it submits scripts/run_esmda.py in its loaded-truth mode (run.truth_dir).
+# it submits scripts/esmda/run_esmda.py in its loaded-truth mode (run.truth_dir).
 # PALM launches a nested `mpirun palm` per ensemble member; the ensemble fans out
 # across parallel processes with CPU pinning off and OpenMPI told to
 # yield/no-bind/oversubscribe so the concurrent PALMs coexist. Run config shared
@@ -131,7 +131,7 @@ EXTRA_FLAGS=(
 # are added here. The run is routed through a bash -c that scrubs nvhpc's CC/F90/...
 # and prepends CONDA_PREFIX/bin so palmbuild + palmrun pick conda's gfortran.
 PY_ARGS=(
-  python -u scripts/run_esmda.py
+  python -u scripts/esmda/run_esmda.py
   "${COMMON_RUN_FLAGS[@]}"
   model@assim_model="${ASSIM_MODEL}"
   domain.nx="${NX}"

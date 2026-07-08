@@ -3,12 +3,12 @@
 Second stage of the three-script single-run ESMDA pipeline (see
 ``scripts/run_esmda_pipeline.sh``):
 
-  1. scripts/run_esmda.py            -- runs the assimilation, saves the raw
+  1. scripts/esmda/run_esmda.py            -- runs the assimilation, saves the raw
                                        artifacts + truth_access.yaml + run_info.yaml.
-  2. scripts/compute_esmda_metrics.py (THIS) -- reads those, computes the
+  2. scripts/esmda/compute_esmda_metrics.py (THIS) -- reads those, computes the
                                        parameter / state / sensor metrics and
                                        writes run_summary.yaml.
-  3. scripts/make_esmda_figures.py   -- reads those, draws the figures.
+  3. scripts/esmda/make_esmda_figures.py   -- reads those, draws the figures.
 
 ``run_summary.yaml`` is the run_info (configuration + timing) saved by
 run_esmda.py, augmented with:
@@ -22,22 +22,22 @@ run_esmda.py, augmented with:
 
 Usage::
 
-    python scripts/compute_esmda_metrics.py --run-dir <esmda output dir>
+    python scripts/esmda/compute_esmda_metrics.py --run-dir <esmda output dir>
 """
 
 import argparse
 import pathlib
 import sys
 
-import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise)
-
 import numpy as np
 import xarray
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise)
 
-from scripts._esmda_common import (
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
+from scripts.esmda._esmda_common import (
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
@@ -82,8 +82,11 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     # field (interpolating onto the assim grid if coords differ).
     posterior_state = xarray.open_dataset(run_dir / "posterior_state_mean.nc")
     true_state = open_truth(
-        ta["true_state_path"], ta["n_total"],
-        ta["x_offset"], ta["start_idx"], ta["t_offset"],
+        ta["true_state_path"],
+        ta["n_total"],
+        ta["x_offset"],
+        ta["start_idx"],
+        ta["t_offset"],
     )
     rmse = streaming_state_rmse(true_state, posterior_state)
     summary["state_metrics"] = {"vel_magnitude_rmse": series_stats(rmse)}
@@ -95,16 +98,25 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     sensor_sets = build_sensor_sets(cfg)
     num_windows = int(ta["num_windows"])
     truth_series = truth_sensor_series(
-        ta["true_state_path"], ta["n_total"],
-        ta["x_offset"], ta["start_idx"], ta["t_offset"],
-        sensor_sets, ta["truth_solver_name"], num_windows, int(ta["n_per_window"]),
+        ta["true_state_path"],
+        ta["n_total"],
+        ta["x_offset"],
+        ta["start_idx"],
+        ta["t_offset"],
+        sensor_sets,
+        ta["truth_solver_name"],
+        num_windows,
+        int(ta["n_per_window"]),
     )
     state_paths = [
         run_dir / "windows" / f"window_{w}_posterior_state.nc"
         for w in range(num_windows)
     ]
     ensemble_series = ensemble_sensor_series(
-        state_paths, sensor_sets, ta["assim_solver_name"], float(ta["sim_time"]),
+        state_paths,
+        sensor_sets,
+        ta["assim_solver_name"],
+        float(ta["sim_time"]),
     )
 
     sensor_metrics = {}
@@ -127,8 +139,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument(
-        "--run-dir", type=pathlib.Path, required=True,
-        help="The ESMDA run output directory written by scripts/run_esmda.py.",
+        "--run-dir",
+        type=pathlib.Path,
+        required=True,
+        help="The ESMDA run output directory written by scripts/esmda/run_esmda.py.",
     )
     args = ap.parse_args()
     if not args.run_dir.exists():

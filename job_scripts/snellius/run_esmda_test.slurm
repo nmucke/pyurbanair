@@ -1,7 +1,7 @@
 #!/bin/bash
 # SNELLIUS quick ESMDA test runner.
 #
-# Runs scripts/run_esmda.py with the CURRENT config setup, i.e. conf/run_esmda.yaml
+# Runs scripts/esmda/run_esmda.py with the CURRENT config setup, i.e. conf/run_esmda.yaml
 # exactly as committed (smoother=dynamic, truth/assim=pyudales) with NO experiment
 # overrides -- unlike the sweep runners this does not source common.sh. The only
 # overrides are hydra.run.dir (outputs under test_outputs/), the per-job scratch
@@ -58,7 +58,7 @@ module purge
 # loaded from disk, so only the assim model simulates). Any extra args ("$@") are
 # appended as Hydra overrides and take precedence.
 pixi run -e snellius -- python -u \
-    scripts/run_esmda.py \
+    scripts/esmda/run_esmda.py \
     "hydra.run.dir=${RESULTS_DIR}" \
     "assim_model.forward_model.temp_dir=${RUN_TEMP_DIR}" \
     "run.truth_dir=/projects/prjs2075/urbanair/ground_truth_small_small/pyudales_time_varying" \

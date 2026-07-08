@@ -5,7 +5,7 @@ or loaded from disk.
 This is the first stage of a three-script single-run pipeline (see
 ``scripts/run_esmda_pipeline.sh``):
 
-  1. scripts/run_esmda.py            (THIS) -- runs the assimilation and saves
+  1. scripts/esmda/run_esmda.py            (THIS) -- runs the assimilation and saves
                                        every raw artifact: the per-window
                                        posterior (and, unless
                                        run.save_prior_state=false, prior) states
@@ -14,13 +14,13 @@ This is the first stage of a three-script single-run pipeline (see
                                        prior_params.nc / posterior_state_mean.nc,
                                        the truth state/params, truth_access.yaml
                                        and run_info.yaml.
-  2. scripts/compute_esmda_metrics.py -- reads those, computes the parameter /
+  2. scripts/esmda/compute_esmda_metrics.py -- reads those, computes the parameter /
                                        state / sensor metrics and writes
                                        run_summary.yaml.
-  3. scripts/make_esmda_figures.py   -- reads those, draws the figures.
+  3. scripts/esmda/make_esmda_figures.py   -- reads those, draws the figures.
 
 The metric and figure stages share their truth-access / sensor-series logic via
-``scripts/_esmda_common.py``.
+``scripts/esmda/_esmda_common.py``.
 
 This single script replaces the former
 run_{parameter,state_and_parameter,rollout,time_varying_parameter,
@@ -59,14 +59,14 @@ assimilation runs. The window loop then consumes the precomputed truth.
 
 Examples::
 
-    python scripts/run_esmda.py esmda/smoother=static \
+    python scripts/esmda/run_esmda.py esmda/smoother=static \
         params@prior_params=static params@truth_params=static_truth
-    python scripts/run_esmda.py esmda/smoother=state_and_parameter \
+    python scripts/esmda/run_esmda.py esmda/smoother=state_and_parameter \
         params@prior_params=static esmda.num_assimilation_windows=3
-    python scripts/run_esmda.py esmda/smoother=dynamic \
+    python scripts/esmda/run_esmda.py esmda/smoother=dynamic \
         params@prior_params=dynamic params@truth_params=dynamic_truth \
         esmda.num_assimilation_windows=3
-    python scripts/run_esmda.py esmda/smoother=state_and_dynamic \
+    python scripts/esmda/run_esmda.py esmda/smoother=state_and_dynamic \
         params@prior_params=dynamic params@truth_params=dynamic_truth \
         esmda.num_assimilation_windows=3
 """
@@ -77,21 +77,18 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
-
 import hydra
 import jax
 import jax.numpy as jnp
 import netCDF4
 import numpy as np
 import xarray
-from data_assimilation.smoothing.esmda import (
-    StateAndParameterESMDA,
-)
+from data_assimilation.smoothing.esmda import StateAndParameterESMDA
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
+import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
 from pyurbanair.config.hydra_helpers import (
     clean_outputs,
     create_observation_operator,
@@ -99,9 +96,9 @@ from pyurbanair.config.hydra_helpers import (
 )
 
 if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from scripts._esmda_common import open_truth, truth_x_min, write_yaml
+from scripts.esmda._esmda_common import open_truth, truth_x_min, write_yaml
 
 # ---------------------------------------------------------------------------
 # Small helpers (in the style of run_forward_model.py)
@@ -357,7 +354,7 @@ def _save_assembled_outputs(out_dir, windows_dir, num_windows, sim_time, is_dyna
     never held across windows.
 
     Metrics (``run_summary.yaml``) and figures are produced downstream by
-    ``scripts/compute_esmda_metrics.py`` and ``scripts/make_esmda_figures.py``
+    ``scripts/esmda/compute_esmda_metrics.py`` and ``scripts/esmda/make_esmda_figures.py``
     from these artifacts plus ``truth_access.yaml``/``run_info.yaml``.
     """
     state_paths = [
@@ -814,7 +811,7 @@ def run(cfg: DictConfig) -> None:
     )
 
     # Run metadata + timing persisted as ``run_info.yaml``. The downstream
-    # ``scripts/compute_esmda_metrics.py`` seeds ``run_summary.yaml`` from it and
+    # ``scripts/esmda/compute_esmda_metrics.py`` seeds ``run_summary.yaml`` from it and
     # augments it with the parameter / state / sensor estimation metrics.
     run_info = {
         "configuration": {
@@ -854,7 +851,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved outputs in {out_dir}")
 
 
-@hydra.main(version_base=None, config_path="../conf", config_name="run_esmda")
+@hydra.main(version_base=None, config_path="../../conf", config_name="run_esmda")
 def main(cfg: DictConfig) -> None:
     run(cfg)
 

@@ -1,4 +1,4 @@
-"""End-to-end smoke tests for the unified scripts/run_esmda.py.
+"""End-to-end smoke tests for the unified scripts/esmda/run_esmda.py.
 
 Covers the modes the single script replaces (the old
 run_{parameter,state_and_parameter,rollout,time_varying_parameter,
@@ -115,7 +115,7 @@ def test_run_esmda(
     num_windows: int,
     compose_test_cfg,
 ) -> None:
-    from scripts.run_esmda import run
+    from scripts.esmda.run_esmda import run
 
     overrides = _overrides(truth_model, assim_model, smoother, prior, num_windows)
     run(compose_test_cfg(overrides, config_name="run_esmda"))
@@ -138,7 +138,7 @@ def test_run_esmda_with_model_error_parameters(
     both new parameters."""
     import xarray
 
-    from scripts.run_esmda import run
+    from scripts.esmda.run_esmda import run
 
     overrides = _overrides("pyudales", "pyudales", smoother, prior, 1)
     overrides.append(
@@ -168,7 +168,7 @@ def test_run_esmda_distance_localization(
     smoother: str, prior: str, num_windows: int, compose_test_cfg
 ) -> None:
     """The state-bearing smoothers run with distance-based state localization."""
-    from scripts.run_esmda import run
+    from scripts.esmda.run_esmda import run
 
     overrides = _overrides(
         "pylbm",
@@ -213,7 +213,7 @@ def test_run_esmda_state_reduction(
     smoother: str, prior: str, reduction_overrides: list, compose_test_cfg
 ) -> None:
     """The state-bearing smoothers run with the reduced SVD state update."""
-    from scripts.run_esmda import run
+    from scripts.esmda.run_esmda import run
 
     overrides = _overrides("pylbm", "pylbm", smoother, prior, 1) + reduction_overrides
     run(compose_test_cfg(overrides, config_name="run_esmda"))
@@ -260,7 +260,7 @@ def test_run_esmda_loads_ground_truth_from_disk(
         p.parent for p in gt_dir.rglob("state.nc") if (p.parent / "params.nc").exists()
     )
 
-    from scripts.run_esmda import run
+    from scripts.esmda.run_esmda import run
 
     # The code reads run.truth_dir (not run.ground_truth_dir). _overrides appends
     # `run.truth_dir=null` to force inline truth; override it here with the real
@@ -312,7 +312,7 @@ def test_streaming_state_summary_drops_redundant_velmag(tmp_path):
     """The window reduction returns u/v/w means + vel_mean/vel_std and, when a
     stored ``vel_magnitude`` is present, deliberately DROPS its (redundant with
     ``vel_mean``) ensemble mean -- the largest variable is never read."""
-    from scripts.run_esmda import _streaming_state_summary
+    from scripts.esmda.run_esmda import _streaming_state_summary
 
     path = tmp_path / "window_0_posterior_state.nc"
     arrs = _write_ensemble_window(path)
@@ -341,7 +341,7 @@ def test_streaming_state_summary_drops_redundant_velmag(tmp_path):
 
 def test_streaming_state_summary_threading_matches_serial(tmp_path, monkeypatch):
     """The multi-worker reduction agrees with the single-worker path."""
-    import scripts.run_esmda as run_esmda
+    import scripts.esmda.run_esmda as run_esmda
 
     path = tmp_path / "window_0_posterior_state.nc"
     _write_ensemble_window(path, n_ens=7)  # odd count -> uneven round-robin split

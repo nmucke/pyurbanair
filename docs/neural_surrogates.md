@@ -880,14 +880,14 @@ varies the inflow, but a uDALES-trained net also expects
 Select it as a truth or assimilation model just like any backend:
 
 ```bash
-python scripts/run_esmda.py \
+python scripts/esmda/run_esmda.py \
     model@truth_model=pyudales model@assim_model=neural_surrogate \
     assim_model.forward_model.model_dir=model_weights/unet_convnext_tiny
 ```
 
 **Training-data warm start (`spinup_source: training_data`).** When the surrogate
 is the assimilation model and `forward_model.spinup_source` is `training_data`,
-`scripts/run_esmda.py` seeds the **first** assimilation window from pre-computed
+`scripts/esmda/run_esmda.py` seeds the **first** assimilation window from pre-computed
 training trajectories instead of a CFD spin-up, using the model-level
 `training_data_spinup` config node (`root` / `split` /
 `initial_param_jitter_scale`) and the helpers in

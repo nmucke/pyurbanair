@@ -1,7 +1,7 @@
 #!/bin/bash
 # LOCAL (no SLURM) rollout-ESMDA-from-truth runner -- neural-surrogate backend.
 #
-# Runs scripts/run_esmda.py DIRECTLY (no sbatch / module / SLURM env vars),
+# Runs scripts/esmda/run_esmda.py DIRECTLY (no sbatch / module / SLURM env vars),
 # keeping all heavy I/O and outputs under the repo (pyurbanair). Run config that
 # is shared with the pyudales/pylbm/pypalm runners lives in ../common.sh (sourced
 # below); only the neural-surrogate specifics are set here. The point of this
@@ -132,7 +132,7 @@ EXTRA_FLAGS=(
 # assim model, the per-run sweep values, hydra.run.dir and the surrogate flags are
 # added here -- so this run is the EXACT same experiment as the other backends.
 pixi run -e "${ENV}" -- python -u \
-    scripts/run_esmda.py \
+    scripts/esmda/run_esmda.py \
     "${COMMON_RUN_FLAGS[@]}" \
     model@assim_model="${ASSIM_MODEL}" \
     domain.nx="${NX}" \

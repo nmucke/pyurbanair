@@ -1,0 +1,4 @@
+# @package filtering
+# No localization: the global (unlocalized) analysis update.
+# Selected with `filtering/localization=none` (the default).
+localization: null

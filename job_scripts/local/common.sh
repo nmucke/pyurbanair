@@ -152,7 +152,7 @@ export OPENBLAS_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
 # --- The single source of truth for every shared run argument ---------------
-# COMMON_RUN_FLAGS is EVERY scripts/run_esmda.py Hydra override that is identical
+# COMMON_RUN_FLAGS is EVERY scripts/esmda/run_esmda.py Hydra override that is identical
 # across the three backends. Each runner expands it verbatim and only adds the
 # bits that genuinely differ: the assimilation model, the per-run sweep values
 # (domain.nx/ny/nz, ensemble.ensemble_size, ensemble.num_parallel_processes,

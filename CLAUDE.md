@@ -63,8 +63,10 @@ pixi run -e dev pre-commit      # black + isort + mypy on staged files
   tiny "smoke shape" (small domain / short window / 2-member ensemble) keeps
   them fast. See `tests/conftest.py` (`compose_test_cfg`, `_SMOKE_OVERRIDES`).
 - Forward runs: `python scripts/run_forward_model.py model=pylbm ...`
-- Assimilation: `python scripts/run_esmda.py ...` (the single ESMDA entry point;
+- Assimilation: `python scripts/esmda/run_esmda.py ...` (the single ESMDA entry point;
   mode = `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`).
+- Sequential filtering (EnKF): `python scripts/filtering/run_filtering.py ...`
+  (mode = `filtering.mode=state|parameter|joint` × the `filtering/*` groups).
 
 ## Workflow rules
 

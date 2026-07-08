@@ -1,0 +1,8 @@
+# @package filtering
+# Relaxation to prior spread (Whitaker & Hamill 2012): posterior anomalies are
+# rescaled so each row's spread relaxes a fraction `alpha` of the way back
+# toward the prior spread. The usual default for EnKF cycling.
+# Selected with `filtering/inflation=rtps` (the default).
+inflation:
+  _target_: data_assimilation.inflation.RTPS
+  alpha: 0.6

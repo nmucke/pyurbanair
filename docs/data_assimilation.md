@@ -9,11 +9,22 @@ is kept brief here; the guide is the primary source for it.
 
 ## 1. Purpose and scope
 
-The library implements **Ensemble Smoother with Multiple Data Assimilation
-(ESMDA)** in JAX. It is **solver-agnostic**: every smoother variant takes any
-`BaseEnsembleForwardModel` (see
+The library implements ensemble data assimilation in JAX, in two flavors:
+
+* **Smoothing** — Ensemble Smoother with Multiple Data Assimilation (ESMDA):
+  per assimilation window, the whole window is re-forecast `num_steps` times
+  with tempered (`alpha`-weighted) Kalman updates of the window's initial
+  condition and/or parameters (§4–§5).
+* **Filtering** — the sequential ensemble Kalman filter (EnKF): per cycle, the
+  ensemble is forecast one segment and ONE full-weight analysis updates the
+  end-of-segment state and/or parameters, which warm-start the next cycle
+  (§8).
+
+Both are **solver-agnostic**: they take any `BaseEnsembleForwardModel` (see
 [base_ensemble_forward_model.py](../src/pyurbanair/base_ensemble_forward_model.py))
 so the same classes cover pylbm, pyudales, pypalm, and the neural surrogate.
+They share one analysis implementation, one augmentation (flatten/unflatten)
+layer, and the localization machinery.
 
 All public entry points accept and return `xarray.Dataset`; internal arrays
 are `jax.numpy` (JAX-CPU throughout; no JAX GPU use within this library).
@@ -22,9 +33,15 @@ Source tree:
 
 ```
 libs/data-assimilation/src/data_assimilation/
-  observation_operator.py   # ObservationOperator, TemporalObservationOperator
+  observation_operator.py   # ObservationOperator, TemporalObservationOperator,
+                            #   sensor_observation_coords
   interpolation.py          # trilinear grid-to-point interpolation
   reduction.py              # OnlineStateReduction (SVD/KL reduced update)
+  augmentation.py           # ParamAugmentation, StateAugmentation — the
+                            #   Dataset <-> flat-array transforms shared by
+                            #   smoothing and filtering
+  inflation.py              # InflationScheme, MultiplicativeInflation, RTPS, RTPP
+  io.py                     # load_dataset, get_sorted_state_files (shared file I/O)
   localization/
     base.py                 # BaseLocalization, taper_inflation, localized_update
     correlation.py          # CorrelationLocalization
@@ -32,6 +49,13 @@ libs/data-assimilation/src/data_assimilation/
   smoothing/
     base.py                 # BaseSmoothing (_forecast_step, _observation_step)
     esmda.py                # all four ESMDA variant classes
+  filtering/
+    analysis.py             # stochastic_enkf_update (shared with ESMDA),
+                            #   AnalysisScheme, StochasticEnKFAnalysis
+    base.py                 # BaseFilter (cycle loop), EnsembleKalmanFilter,
+                            #   FilterResult, CycleDiagnostics
+    parameter_evolution.py  # ParameterEvolution, IdentityEvolution,
+                            #   RandomWalkEvolution
 ```
 
 ---
@@ -179,10 +203,23 @@ C_DD = pred_obs_dev @ pred_obs_dev.T / (N_e - 1)
 augmented += C_MD @ solve(C_DD + alpha * C_D, perturbed_obs - pred_obs)
 ```
 
-When `self.localization` is set the call is forwarded to
+The body is the shared
+[`filtering/analysis.py::stochastic_enkf_update`](../libs/data-assimilation/src/data_assimilation/filtering/analysis.py)
+(the ESMDA per-step update *is* the stochastic EnKF analysis with a tempered
+`alpha`); this method is a thin wrapper that splits `self.rng_key` and passes
+`jnp.diag(self.C_D)` under the shared function's 1-D variance-vector
+contract. When `self.localization` is set the shared function forwards to
 `localization.localized_update(...)` instead (see §6). Accepts optional
 `group_ids`, `localize_mask`, `row_coords`, `obs_coords` forwarded from the
 variant.
+
+**Augmentation delegation.** The structure transforms
+(`_flatten_state`/`_unflatten_state`, `_flatten_time_varying_params`/
+`_unflatten_params`, `_state_group_ids`, `_state_row_coords`,
+`_time_varying_group_ids`) are thin wrappers over the shared
+[`augmentation.py`](../libs/data-assimilation/src/data_assimilation/augmentation.py)
+classes `StateAugmentation` / `ParamAugmentation`, which the filtering
+package uses too — one flatten order, one pinning semantics.
 
 **`_analysis` loop (iterated joint update).** Runs `num_steps` iterations.
 Each iteration:
@@ -389,10 +426,99 @@ are the canonical references until that file is written).
 
 ---
 
-## 8. Configuration
+## 8. Filtering — the sequential EnKF
 
-All configuration is via Hydra groups under
-[conf/esmda/](../conf/esmda/).
+**Files:**
+[filtering/base.py](../libs/data-assimilation/src/data_assimilation/filtering/base.py),
+[filtering/analysis.py](../libs/data-assimilation/src/data_assimilation/filtering/analysis.py),
+[filtering/parameter_evolution.py](../libs/data-assimilation/src/data_assimilation/filtering/parameter_evolution.py),
+[inflation.py](../libs/data-assimilation/src/data_assimilation/inflation.py).
+Design record: [docs/temp/da_filtering_module_plan.md](temp/da_filtering_module_plan.md).
+
+### Cycle semantics
+
+A filter's unit of work is a **cycle**: forecast the ensemble over one segment
+(the forward model's configured horizon), apply ONE full-weight (`alpha = 1`)
+analysis to the state *at the end of the segment* and/or the parameters, and
+warm-start the next cycle from the analyzed state. Each observation batch is
+consumed exactly once — there is no MDA schedule. The observation operator is
+applied to the whole segment, so with the config-default
+`TemporalObservationOperator(mode="intervals")` and one interval per segment
+the batch is the segment's interval mean — an observation *of the segment*,
+assimilated into the end-of-segment state (an operator choice, not an
+approximation error).
+
+### `BaseFilter` / `EnsembleKalmanFilter`
+
+`BaseFilter` owns the cycle loop: forecasting, augmentation, inflation,
+parameter evolution, failure substitution, on-disk `cycle_{k}/` management
+(mirroring the smoother's `step_{i}/` pattern, with `prune_disk_cycles` /
+`keep_first_disk_cycle` knobs) and per-cycle diagnostics. The analysis math is
+an injected `AnalysisScheme` — a pure function of arrays; `EnsembleKalmanFilter`
+is `BaseFilter` composed with the default `StochasticEnKFAnalysis`. New update
+flavors (ETKF/LETKF, particle-style) are new `AnalysisScheme` implementations,
+not new filter classes.
+
+```python
+enkf = EnsembleKalmanFilter(
+    observation_operator=obs_op, forward_model=ensemble_model,
+    C_D=variance_vector,            # 1-D (N_d,) variances (diag matrix accepted)
+    mode="joint",                   # "state" | "parameter" | "joint"
+    localization=None, inflation=RTPS(0.6), parameter_evolution=None,
+)
+result = enkf.run(state=None, params=prior_params,
+                  observations=obs_batches,      # (num_cycles, N_d)
+                  return_history=True)           # -> FilterResult
+```
+
+Mode semantics: `"state"` updates the flattened end-of-segment state only
+(params, if any, are carried unmodified); `"parameter"` updates the flattened
+params only (applied from the next cycle onward) and **requires spread
+maintenance** (`parameter_evolution` or `inflation` — the constructor refuses
+silently-collapsing configurations); `"joint"` updates `[state | params]` with
+parameter rows always globally updated under localization (`localize_mask`),
+exactly as the joint smoothers do. Localization strategies are reused from
+`localization/` unchanged; distance-based strategies need state rows.
+
+`FilterResult` is a plain dataclass (`params`, `state`, optional
+`cycle`-concatenated histories, and `diagnostics`: one `CycleDiagnostics` per
+cycle with innovation χ² consistency, observation-space prior/posterior RMSE
+and per-block spreads — the "is the filter diverging/overconfident" signals,
+visible at cycle k instead of at the end).
+
+### Spread maintenance
+
+* **Inflation** ([inflation.py](../libs/data-assimilation/src/data_assimilation/inflation.py)):
+  `MultiplicativeInflation(factor)` scales forecast anomalies before the
+  analysis (the predicted-observation anomalies are scaled consistently);
+  `RTPS(alpha)` / `RTPP(alpha)` rescale/blend the posterior anomalies toward
+  the prior spread/perturbations after it.
+* **Parameter evolution**
+  ([filtering/parameter_evolution.py](../libs/data-assimilation/src/data_assimilation/filtering/parameter_evolution.py)):
+  the parameters' forecast model between cycles — `IdentityEvolution` or
+  `RandomWalkEvolution(std | {name: std})`. Without one, an un-inflated
+  parameter ensemble collapses after a few cycles and stops learning — so the
+  parameter-updating modes (`parameter`/`joint`) refuse to construct without
+  an evolution or an inflation.
+
+### Run script
+
+[scripts/filtering/run_filtering.py](../scripts/filtering/run_filtering.py) (config
+[conf/run_filtering.yaml](../conf/run_filtering.yaml)) is the entry point:
+truth inline or from disk (as run_esmda.py), one cycle per
+`time.simulation_time` segment, Hydra groups
+`filtering/analysis|localization|inflation|evolution`, static scalar
+parameters only (time-varying/AR(2) priors stay with the ESMDA smoothers).
+See [scripts_and_configs.md](scripts_and_configs.md) §1.8 / §2.1.
+
+---
+
+## 9. Configuration
+
+All smoother configuration is via Hydra groups under
+[conf/esmda/](../conf/esmda/); the filter's equivalents live under
+[conf/filtering/](../conf/filtering/) (see §8 and
+[scripts_and_configs.md §1.8](scripts_and_configs.md)).
 
 ### `esmda/smoother` group
 
@@ -446,10 +572,10 @@ and `state_and_dynamic.yaml` (the two smoother YAMLs that list it). Selecting
 
 ---
 
-## 9. End-to-end run
+## 10. End-to-end run
 
 A run uses the library as follows (very brief; see
-[scripts/run_esmda.py](../scripts/run_esmda.py),
+[scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py),
 [codebase_guide.md §6](codebase_guide.md#6-data-assimilation-flow), and
 [conf/run_esmda.yaml](../conf/run_esmda.yaml) for the full picture):
 
@@ -480,7 +606,7 @@ truth; see `codebase_guide.md §6` and the script's docstring.
 
 ---
 
-## 10. Extension recipes
+## 11. Extension recipes
 
 ### Adding a new ESMDA variant
 
@@ -516,6 +642,19 @@ truth; see `codebase_guide.md §6` and the script's docstring.
    `localization: ${esmda.localization}` so no smoother YAML changes are
    needed. `esmda/localization=none` (or `esmda.localization=null`) restores
    the global update.
+
+### Adding a new filter analysis scheme
+
+1. Implement the `AnalysisScheme` interface in
+   [filtering/analysis.py](../libs/data-assimilation/src/data_assimilation/filtering/analysis.py)
+   (or a sibling module): a pure function
+   `(augmented, pred_obs, obs, C_D_diag, rng_key, localization?, ...) ->
+   updated augmented`. `BaseFilter` handles everything around it (cycle loop,
+   augmentation, inflation, evolution, diagnostics).
+2. Add a YAML option to
+   [conf/filtering/analysis/](../conf/filtering/analysis/)
+   (`# @package filtering`, setting `analysis: {_target_: ...}`) and select it
+   with `filtering/analysis=<name>`.
 
 ### Adding a new solver to the observation operator
 

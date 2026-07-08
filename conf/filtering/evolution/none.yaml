@@ -1,0 +1,6 @@
+# @package filtering
+# No parameter evolution between cycles. The parameter-updating modes
+# (parameter/joint) then require an inflation option for spread maintenance
+# (enforced at construction).
+# Selected with `filtering/evolution=none` (the default).
+parameter_evolution: null

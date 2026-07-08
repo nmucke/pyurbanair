@@ -10,7 +10,7 @@
 # `size/` and `preset/` overlays deep-merge over the domain/obs below.
 
 domain:
-  # Grid + physical bounds — the canonical domain for scripts/run_esmda.py.
+  # Grid + physical bounds — the canonical domain for scripts/esmda/run_esmda.py.
   # Rescale a whole run with the `size/` overlays (`size=tiny` … `size=xlarge`),
   # which deep-merge over these values, or override individual fields on the CLI
   # (`domain.nx=80`). x starts at -20 to leave an open upstream inflow region in
@@ -54,7 +54,7 @@ obs:
 
   # Validation sensors (held out from assimilation): a separate set the Kalman
   # update never sees, used only to score the posterior at unseen locations (see
-  # scripts/run_esmda.py sensor time-series plots). Distinct from the
+  # scripts/esmda/run_esmda.py sensor time-series plots). Distinct from the
   # assimilation sensors above, every one sits in open space (>=5 m clear of any
   # building footprint).
   validation_x_points: [-10.0, 20.0]
@@ -63,7 +63,7 @@ obs:
 
   states: [u, v]
   temporal_mode: intervals
-  interval_seconds: 30.0
+  interval_seconds: 10.0
   aggregation_mode: mean
 
 time:
@@ -71,6 +71,6 @@ time:
   # window is `simulation_time` long with a `spinup_time` constant-inflow plateau
   # in front; the state is written every `output_frequency` s. The number of
   # windows and the param-knot count are compute knobs and live in `scale/`.
-  simulation_time: 300.0
-  output_frequency: 5.0
+  simulation_time: 10.0
+  output_frequency: 2.0
   spinup_time: 100.0

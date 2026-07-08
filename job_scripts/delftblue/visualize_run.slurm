@@ -1,6 +1,6 @@
 #!/bin/bash
 # DELFTBLUE single-run visualizer. Regenerates a consolidated figure set for ONE
-# successful scripts/run_esmda.py output folder via scripts/figure_creation/visualize_run.py.
+# successful scripts/esmda/run_esmda.py output folder via scripts/figure_creation/visualize_run.py.
 # Figures land under result_figures/<case> (case = run folder name by default).
 #
 # Pass the run folder as the first argument; any further args are forwarded to

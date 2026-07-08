@@ -4,7 +4,7 @@
 # Snellius sibling of job_scripts/local/pylbm/rollout_esmda_from_truth.sh, BUT on
 # the Snellius CPU compute partition pylbm runs on the CPU (cuda=false), fanning
 # the ensemble out across parallel processes -- it does NOT use the GPU/single-
-# process path of the local runner. It submits scripts/run_esmda.py in its
+# process path of the local runner. It submits scripts/esmda/run_esmda.py in its
 # loaded-truth mode (run.truth_dir). Run config shared with the pyudales/pypalm
 # runners lives in ../common.sh (sourced below); only the pylbm specifics here.
 #
@@ -103,7 +103,7 @@ EXTRA_FLAGS=(
 # assim model, the per-run sweep values, hydra.run.dir and the pylbm solver flags
 # are added here.
 pixi run -e "${ENV}" -- python -u \
-    scripts/run_esmda.py \
+    scripts/esmda/run_esmda.py \
     "${COMMON_RUN_FLAGS[@]}" \
     model@assim_model="${ASSIM_MODEL}" \
     domain.nx="${NX}" \

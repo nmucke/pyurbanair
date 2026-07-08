@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Run the full single-run ESMDA pipeline: assimilation, then metrics, then figures.
 #
-#   1. scripts/run_esmda.py             -- runs the DA and saves every artifact.
-#   2. scripts/compute_esmda_metrics.py -- writes run_summary.yaml.
-#   3. scripts/make_esmda_figures.py    -- draws the figures.
+#   1. scripts/esmda/run_esmda.py             -- runs the DA and saves every artifact.
+#   2. scripts/esmda/compute_esmda_metrics.py -- writes run_summary.yaml.
+#   3. scripts/esmda/make_esmda_figures.py    -- draws the figures.
 #
 # All three stages share one output directory: conf/run_esmda.yaml's
 # `paths.results_dir` (`.temp/<truth_model>_to_<assim_model>` by default). The
@@ -37,8 +37,8 @@ PY
 )"
 echo "ESMDA pipeline output dir: ${RUN_DIR}"
 
-pixi run -e cuda python scripts/run_esmda.py "$@"
-pixi run -e dev python scripts/compute_esmda_metrics.py --run-dir "${RUN_DIR}"
-pixi run -e dev python scripts/make_esmda_figures.py --run-dir "${RUN_DIR}"
+pixi run -e cuda python scripts/esmda/run_esmda.py "$@"
+pixi run -e dev python scripts/esmda/compute_esmda_metrics.py --run-dir "${RUN_DIR}"
+pixi run -e dev python scripts/esmda/make_esmda_figures.py --run-dir "${RUN_DIR}"
 
 echo "ESMDA pipeline complete: ${RUN_DIR}"
