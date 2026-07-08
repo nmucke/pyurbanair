@@ -294,8 +294,8 @@ class BaseTraining:
             if wants > 0 and self._geom_features is None:
                 raise ValueError(
                     f"model advertises n_geom_feature_channels={wants} but the "
-                    "batch carries no 'geom_features'; build the dataset with "
-                    "dataset.sdf_features=true (and a matching sdf_clamp_cells)."
+                    "batch carries no 'geom_features'; build the dataset with a "
+                    "matching dataset.sdf_features mode (and sdf_clamp_cells)."
                 )
         assert self._geometry is not None  # set on the first (always-stale) batch
         geometry = self._geometry.expand(state.shape[0], *self._geometry.shape)

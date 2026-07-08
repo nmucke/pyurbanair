@@ -15,7 +15,11 @@ from neural_surrogates.dd_loss import DomainDecompositionLoss
 from neural_surrogates.decomposition import DomainDecomposition
 from neural_surrogates.ensemble_forward_model import NeuralSurrogateEnsembleForwardModel
 from neural_surrogates.forward_model import NeuralSurrogateForwardModel
-from neural_surrogates.sdf import sdf_features
+from neural_surrogates.sdf import (
+    n_sdf_feature_channels,
+    normalize_sdf_mode,
+    sdf_features,
+)
 from neural_surrogates.training import BaseTraining, PatchTrainer, Trainer
 
 __all__ = [
@@ -36,4 +40,6 @@ __all__ = [
     "NeuralSurrogateForwardModel",
     "NeuralSurrogateEnsembleForwardModel",
     "sdf_features",
+    "n_sdf_feature_channels",
+    "normalize_sdf_mode",
 ]

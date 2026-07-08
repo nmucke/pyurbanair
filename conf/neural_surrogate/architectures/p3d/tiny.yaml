@@ -18,9 +18,9 @@ partition_size: 1
 #   "channels" instead z-scores params and broadcasts each as an input channel
 #   (higher capacity for multi-param conditioning, + n_params stem channels).
 
-# Geometry features: uncomment to add the SDF + ∇SDF channels to the stem
-# (in_channels += 4). Must be paired with dataset.sdf_features=true and a
-# matching dataset.sdf_clamp_cells (default 32). Off by default -> existing
-# checkpoints load byte-identically.
-# sdf_features: true
+# Geometry features: uncomment to add SDF channels to the stem, right after the
+# geometry mask. `sdf_features` selects which: `sdf` (+1), `grad` (+3) or `both`
+# (+4). Must match dataset.sdf_features (same mode) and dataset.sdf_clamp_cells
+# (default 32). Default `none` -> existing checkpoints load byte-identically.
+# sdf_features: both  # none | sdf | grad | both
 # sdf_clamp_cells: 32

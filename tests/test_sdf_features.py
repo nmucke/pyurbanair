@@ -13,7 +13,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from neural_surrogates import sdf_features
+from neural_surrogates import n_sdf_feature_channels, normalize_sdf_mode, sdf_features
 from neural_surrogates.sdf import N_SDF_FEATURE_CHANNELS
 
 NZ = NY = NX = 9
@@ -107,3 +107,42 @@ def test_dtype_and_device_round_trip() -> None:
 def test_rejects_bad_ndim() -> None:
     with pytest.raises(ValueError):
         sdf_features(torch.ones(NY, NX))  # 2-D grid unsupported
+
+
+# -- feature-mode selection (none | sdf | grad | both) ----------------------
+
+
+def test_mode_channel_counts() -> None:
+    assert n_sdf_feature_channels("none") == 0
+    assert n_sdf_feature_channels("sdf") == 1
+    assert n_sdf_feature_channels("grad") == 3
+    assert n_sdf_feature_channels("both") == N_SDF_FEATURE_CHANNELS
+
+
+def test_bool_aliases() -> None:
+    assert normalize_sdf_mode(True) == "both"
+    assert normalize_sdf_mode(False) == "none"
+
+
+def test_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError):
+        normalize_sdf_mode("gradient")
+
+
+def test_modes_are_slices_of_both() -> None:
+    """`sdf`/`grad` return exactly the corresponding channels of the full stack,
+    so the selection can never diverge from the full computation."""
+    mask = _block_obstacle_mask()
+    full = sdf_features(mask, clamp_cells=6.0, mode="both")
+    only_sdf = sdf_features(mask, clamp_cells=6.0, mode="sdf")
+    only_grad = sdf_features(mask, clamp_cells=6.0, mode="grad")
+
+    assert only_sdf.shape[0] == 1
+    assert only_grad.shape[0] == 3
+    torch.testing.assert_close(only_sdf, full[:1])
+    torch.testing.assert_close(only_grad, full[1:])
+
+
+def test_none_mode_rejected_by_helper() -> None:
+    with pytest.raises(ValueError, match="none"):
+        sdf_features(_point_obstacle_mask(), mode="none")
