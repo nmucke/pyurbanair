@@ -1,4 +1,4 @@
-# Primary config (entry point) for scripts/run_filtering.py — sequential
+# Primary config (entry point) for scripts/filtering/run_filtering.py — sequential
 # ensemble filtering (EnKF) alongside the ESMDA entry point (run_esmda.yaml).
 #
 # Self-contained: inlines the shared base (output paths, ensemble defaults, the
@@ -22,10 +22,10 @@
 #
 # Examples::
 #
-#   python scripts/run_filtering.py filtering.mode=joint filtering.num_cycles=4
-#   python scripts/run_filtering.py filtering.mode=parameter \
+#   python scripts/filtering/run_filtering.py filtering.mode=joint filtering.num_cycles=4
+#   python scripts/filtering/run_filtering.py filtering.mode=parameter \
 #     filtering/evolution=random_walk filtering/inflation=none
-#   python scripts/run_filtering.py filtering.mode=state \
+#   python scripts/filtering/run_filtering.py filtering.mode=state \
 #     filtering/localization=correlation
 defaults:
   - case: barcelona
@@ -37,8 +37,8 @@ defaults:
   - filtering/localization: none
   - filtering/inflation: rtps
   - filtering/evolution: none
-  - model@truth_model: pylbm
-  - model@assim_model: pylbm
+  - model@truth_model: pyudales
+  - model@assim_model: pyudales
   - params@truth_params: static_truth
   - params@prior_params: static
 
@@ -93,10 +93,10 @@ filtering:
   # configurations at construction.
   mode: joint
   # Defaults; normally set by the filtering/* groups above.
-  analysis: null
-  localization: null
-  inflation: null
-  parameter_evolution: null
+  analysis: stochastic
+  localization: correlation
+  inflation: meultiplicative
+  parameter_evolution: random_walk
   filter:
     _target_: data_assimilation.filtering.EnsembleKalmanFilter
     _convert_: all

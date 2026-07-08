@@ -3,10 +3,10 @@
 Third stage of the three-script single-run ESMDA pipeline (see
 ``scripts/run_esmda_pipeline.sh``):
 
-  1. scripts/run_esmda.py            -- runs the assimilation, saves the raw
+  1. scripts/esmda/run_esmda.py            -- runs the assimilation, saves the raw
                                        artifacts + truth_access.yaml + run_info.yaml.
-  2. scripts/compute_esmda_metrics.py -- reads those, writes run_summary.yaml.
-  3. scripts/make_esmda_figures.py   (THIS) -- reads those, draws the figures.
+  2. scripts/esmda/compute_esmda_metrics.py -- reads those, writes run_summary.yaml.
+  3. scripts/esmda/make_esmda_figures.py   (THIS) -- reads those, draws the figures.
 
 Writes, into the run directory:
 
@@ -21,20 +21,20 @@ the old in-script behaviour.
 
 Usage::
 
-    python scripts/make_esmda_figures.py --run-dir <esmda output dir>
+    python scripts/esmda/make_esmda_figures.py --run-dir <esmda output dir>
 """
 
 import argparse
 import pathlib
 import sys
 
-import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise)
-
 import numpy as np
 import xarray
 
+import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise)
+
 if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from pyurbanair.config.hydra_helpers import create_observation_points
 from pyurbanair.plotting import (
@@ -45,17 +45,16 @@ from pyurbanair.plotting import (
 )
 from pyurbanair.utils.animation_utils import animate_rollout_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude
-
-from scripts._esmda_common import (
+from scripts.esmda._esmda_common import (
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
     open_truth,
+    read_yaml,
     select_z_plane,
     sensor_magnitude,
     streaming_state_rmse,
     truth_sensor_series,
-    read_yaml,
 )
 
 
@@ -80,8 +79,11 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # only the slice they need: a single z-plane for the animation/final state
     # and a few z-slices for the streamed error curve.
     true_state = open_truth(
-        ta["true_state_path"], ta["n_total"],
-        ta["x_offset"], ta["start_idx"], ta["t_offset"],
+        ta["true_state_path"],
+        ta["n_total"],
+        ta["x_offset"],
+        ta["start_idx"],
+        ta["t_offset"],
     )
     obs_x, obs_y, obs_z = create_observation_points(cfg.obs)
 
@@ -140,16 +142,25 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # Extracted one window at a time to keep the truth/full ensemble out of memory.
     sensor_sets = build_sensor_sets(cfg)
     truth_series = truth_sensor_series(
-        ta["true_state_path"], ta["n_total"],
-        ta["x_offset"], ta["start_idx"], ta["t_offset"],
-        sensor_sets, ta["truth_solver_name"], num_windows, int(ta["n_per_window"]),
+        ta["true_state_path"],
+        ta["n_total"],
+        ta["x_offset"],
+        ta["start_idx"],
+        ta["t_offset"],
+        sensor_sets,
+        ta["truth_solver_name"],
+        num_windows,
+        int(ta["n_per_window"]),
     )
     state_paths = [
         run_dir / "windows" / f"window_{w}_posterior_state.nc"
         for w in range(num_windows)
     ]
     ensemble_series = ensemble_sensor_series(
-        state_paths, sensor_sets, ta["assim_solver_name"], sim_time,
+        state_paths,
+        sensor_sets,
+        ta["assim_solver_name"],
+        sim_time,
     )
     for name, (sx, sy, sz) in sensor_sets.items():
         plot_sensor_timeseries(
@@ -171,8 +182,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument(
-        "--run-dir", type=pathlib.Path, required=True,
-        help="The ESMDA run output directory written by scripts/run_esmda.py.",
+        "--run-dir",
+        type=pathlib.Path,
+        required=True,
+        help="The ESMDA run output directory written by scripts/esmda/run_esmda.py.",
     )
     args = ap.parse_args()
     if not args.run_dir.exists():

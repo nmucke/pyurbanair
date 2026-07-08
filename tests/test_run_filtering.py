@@ -1,4 +1,4 @@
-"""End-to-end smoke tests for scripts/run_filtering.py (sequential EnKF).
+"""End-to-end smoke tests for scripts/filtering/run_filtering.py (sequential EnKF).
 
 Mirrors tests/test_run_esmda.py: everything runs under the tiny smoke config
 (conftest ``_SMOKE_OVERRIDES``) with the global (unlocalized) update — the
@@ -61,7 +61,7 @@ def test_run_filtering(
 ) -> None:
     import xarray
 
-    from scripts.run_filtering import run
+    from scripts.filtering.run_filtering import run
 
     cfg = compose_test_cfg(
         _overrides(mode, num_cycles, extra), config_name="run_filtering"
@@ -84,7 +84,7 @@ def test_run_filtering(
 
 def test_run_filtering_distance_localization(compose_test_cfg: Any) -> None:
     """State rows localized by physical distance (params stay global)."""
-    from scripts.run_filtering import run
+    from scripts.filtering.run_filtering import run
 
     cfg = compose_test_cfg(
         _overrides(
@@ -102,7 +102,7 @@ def test_run_filtering_distance_localization(compose_test_cfg: Any) -> None:
 
 def test_run_filtering_rejects_zero_cycles(compose_test_cfg: Any) -> None:
     """num_cycles < 1 fails before any simulation is started."""
-    from scripts.run_filtering import run
+    from scripts.filtering.run_filtering import run
 
     cfg = compose_test_cfg(_overrides("joint", 0), config_name="run_filtering")
     with pytest.raises(ValueError, match="num_cycles"):
@@ -111,7 +111,7 @@ def test_run_filtering_rejects_zero_cycles(compose_test_cfg: Any) -> None:
 
 def test_run_filtering_rejects_dynamic_prior(compose_test_cfg: Any) -> None:
     """The filter is static-parameters-only; a dynamic prior fails loudly."""
-    from scripts.run_filtering import run
+    from scripts.filtering.run_filtering import run
 
     cfg = compose_test_cfg(
         _overrides(

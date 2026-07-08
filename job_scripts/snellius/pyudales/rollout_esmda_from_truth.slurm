@@ -2,7 +2,7 @@
 # SNELLIUS rollout-ESMDA-from-truth runner -- pyudales backend (CPU).
 #
 # Snellius sibling of job_scripts/local/pyudales/rollout_esmda_from_truth.sh:
-# it submits scripts/run_esmda.py in its loaded-truth mode (run.truth_dir),
+# it submits scripts/esmda/run_esmda.py in its loaded-truth mode (run.truth_dir),
 # loading a pre-simulated ground truth and running the time-varying (dynamic)
 # smoother over esmda.num_assimilation_windows windows. Run config that is shared
 # with the pylbm/pypalm runners lives in ../common.sh (sourced below); only the
@@ -95,7 +95,7 @@ EXTRA_FLAGS=(
 # assim model, the per-run sweep values, hydra.run.dir and the pyudales solver
 # flags are added here.
 pixi run -e "${ENV}" -- python -u \
-    scripts/run_esmda.py \
+    scripts/esmda/run_esmda.py \
     "${COMMON_RUN_FLAGS[@]}" \
     model@assim_model="${ASSIM_MODEL}" \
     domain.nx="${NX}" \

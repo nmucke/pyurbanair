@@ -1,6 +1,6 @@
 """Tests for :mod:`neural_surrogates.training_spinup`.
 
-The training-data warm start (used by ``scripts/run_esmda.py`` when the neural
+The training-data warm start (used by ``scripts/esmda/run_esmda.py`` when the neural
 surrogate is the assimilation model with ``spinup_source: training_data``) loads
 the LAST frame of each training trajectory as the window-0 initial state and
 anchors each member's sampled prior to that sample's final inflow value.

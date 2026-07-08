@@ -372,7 +372,7 @@ def test_parameter_esmda_runs_with_correlation_localization(
     compose_test_cfg: Callable[..., Any],
 ) -> None:
     """End-to-end: parameter ESMDA composes and runs with localization on."""
-    from scripts.run_esmda import run
+    from scripts.esmda.run_esmda import run
 
     cfg = compose_test_cfg(
         [

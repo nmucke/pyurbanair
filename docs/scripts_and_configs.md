@@ -367,7 +367,7 @@ time clock onto a global monotonic axis.
 **Produces:** field snapshot PNG, velocity-magnitude animation, derived
 inflow-angle vs prescribed plot (when `params=dynamic`).
 
-#### [`run_esmda.py`](../scripts/run_esmda.py)
+#### [`run_esmda.py`](../scripts/esmda/run_esmda.py)
 **Hydra** — config: [`run_esmda.yaml`](../conf/run_esmda.yaml)
 
 The consolidated ESMDA entry point. Replaces `run_{parameter,state_and_parameter,rollout,time_varying_parameter,time_varying_parameters_rollout}_esmda.py`.
@@ -387,7 +387,7 @@ For the dynamic case, `prior_sampler.extrapolate(posterior, ...)` seeds the next
 window's prior. `include_state` and `is_dynamic` flags (derived from the smoother
 type) drive the generic window loop without per-combination branching.
 
-#### [`run_filtering.py`](../scripts/run_filtering.py)
+#### [`run_filtering.py`](../scripts/filtering/run_filtering.py)
 **Hydra** — config: [`run_filtering.yaml`](../conf/run_filtering.yaml)
 
 The sequential-filtering (EnKF) entry point. Where ESMDA re-forecasts one
@@ -403,11 +403,15 @@ Mode is the cross product of `filtering.mode=state|parameter|joint` and the
 `run_esmda.py`. Static scalar parameters only — a dynamic (AR(2)) params
 mount fails loudly; time-varying priors stay with the ESMDA smoothers.
 
+Stage 1 of the single-run filtering pipeline (§2.5), orchestrated by
+[`run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh).
+
 Saves: `posterior_params.nc` / `posterior_state.nc` (analyzed final-frame
 ensemble), optional `params_history.nc` / `state_history.nc`
 (`run.save_history`), per-cycle `cycle_diagnostics.yaml` (innovation χ²,
 obs-space prior/posterior RMSE, block spreads), `prior_params.nc`,
-`true_params.nc`, `true_state.nc` (inline truth), `run_info.yaml`,
+`true_params.nc`, `true_state.nc` (inline truth), `truth_access.yaml` (the
+lazy-truth slicing/offsets the metric/figure stages read back), `run_info.yaml`,
 `config.yaml`.
 
 ---
@@ -426,11 +430,13 @@ Not a Hydra script; imported directly. Provides:
   derived-vs-prescribed inflow diagnostics.
 - DA metric utilities (CRPS, per-knot error/spread/in-band, summary scalars).
 
-#### [`_esmda_common.py`](../scripts/_esmda_common.py)
+#### [`_esmda_common.py`](../scripts/esmda/_esmda_common.py)
 
 Post-processing helpers shared by `compute_esmda_metrics.py` and
-`make_esmda_figures.py`. Read-only with respect to the run directory except
-explicit write calls. Provides:
+`make_esmda_figures.py` (and reused by the filtering pipeline's
+[`_filtering_common.py`](../scripts/filtering/_filtering_common.py), §2.5).
+Read-only with respect to the run directory except explicit write calls.
+Provides:
 - `load_run_config(run_dir)` — re-load the Hydra config saved by `run_esmda.py`.
 - `build_sensor_sets(cfg)` — assimilation + optional validation sensor coordinates
   from the obs config.
@@ -448,8 +454,8 @@ explicit write calls. Provides:
 These three scripts form the standard single-run pipeline, orchestrated by
 [`run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh).
 
-#### [`compute_esmda_metrics.py`](../scripts/compute_esmda_metrics.py)
-**Plain argparse CLI** — usage: `python scripts/compute_esmda_metrics.py --run-dir <dir>`
+#### [`compute_esmda_metrics.py`](../scripts/esmda/compute_esmda_metrics.py)
+**Plain argparse CLI** — usage: `python scripts/esmda/compute_esmda_metrics.py --run-dir <dir>`
 
 Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
@@ -458,8 +464,8 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set
   (assimilation + validation).
 
-#### [`make_esmda_figures.py`](../scripts/make_esmda_figures.py)
-**Plain argparse CLI** — usage: `python scripts/make_esmda_figures.py --run-dir <dir>`
+#### [`make_esmda_figures.py`](../scripts/esmda/make_esmda_figures.py)
+**Plain argparse CLI** — usage: `python scripts/esmda/make_esmda_figures.py --run-dir <dir>`
 
 Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
 - `rollout_time_evolution.png` — parameter trajectories + state `|U|` RMSE.
@@ -483,7 +489,52 @@ scripts/run_esmda_pipeline.sh esmda/smoother=static \
 
 ---
 
-### 2.4 Ground-truth artifact utilities
+### 2.4 Filtering pipeline scripts
+
+The filtering (EnKF) analogue of §2.3, orchestrated by
+[`run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh). Stage 1 is
+[`run_filtering.py`](../scripts/filtering/run_filtering.py) (§2.1). The metric and
+figure stages reuse the ESMDA truth-access / sensor-series helpers via
+[`_filtering_common.py`](../scripts/filtering/_filtering_common.py), which adapts
+them to the filter's per-**cycle** time axis (the truth is compared at each
+cycle's end-of-segment frame).
+
+#### [`compute_filtering_metrics.py`](../scripts/filtering/compute_filtering_metrics.py)
+**Plain argparse CLI** — usage: `python scripts/filtering/compute_filtering_metrics.py --run-dir <dir>`
+
+Stage 2. Reads the artifacts saved by `run_filtering.py` and writes
+`run_summary.yaml` — the `run_info` metadata augmented with:
+- `filter_diagnostics` — summary stats of the per-cycle innovation χ² and
+  observation-space prior/posterior RMSE (always available; every mode).
+- `parameter_metrics` — per-parameter RMSE/CRPS of the final analyzed ensemble
+  + reduction vs prior (absent in `mode=state`).
+- `state_metrics` — per-cycle `|U|` field RMSE vs the truth's end-of-cycle frames.
+- `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set.
+
+#### [`make_filtering_figures.py`](../scripts/filtering/make_filtering_figures.py)
+**Plain argparse CLI** — usage: `python scripts/filtering/make_filtering_figures.py --run-dir <dir>`
+
+Stage 3. Reads artifacts and writes into the run directory:
+- `parameter_evolution.png` — parameter trajectories over cycles + per-cycle `|U|` RMSE.
+- `parameter_error.png` — per-parameter posterior error over cycles.
+- `rollout_animation.mp4` — analyzed ensemble-mean `|U|` field vs truth (one frame/cycle).
+- `final_state_with_obs.png` — final analyzed `|U|` field with sensor locations.
+- `sensor_timeseries_<set>.png` — truth vs ensemble at each sensor set.
+
+The parameter figures are skipped in `mode=state` (no parameters estimated).
+
+#### [`run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh)
+**Shell script** (executable). Runs all three stages in sequence, resolving the
+run dir from `conf/run_filtering.yaml` with the same Hydra overrides forwarded to
+`run_filtering.py`.
+
+```bash
+scripts/run_filtering_pipeline.sh filtering.mode=joint filtering.num_cycles=4
+```
+
+---
+
+### 2.5 Ground-truth artifact utilities
 
 Located in [`scripts/adjust_simulations/`](../scripts/adjust_simulations/).
 All are **plain argparse or zero-argument CLIs** — not Hydra.
@@ -523,7 +574,7 @@ manageable artifact.
 
 ---
 
-### 2.5 Figure creation pipeline
+### 2.6 Figure creation pipeline
 
 Located in [`scripts/figure_creation/`](../scripts/figure_creation/).
 All are **plain argparse CLIs** unless noted. These scripts operate on already-saved
@@ -605,7 +656,7 @@ via env vars: `SIZE`, `TRUTH_DIR`, `TRUTH_MODEL`, `ASSIM_MODEL`,
 
 ---
 
-### 2.6 `figspec/` — shared figure primitives
+### 2.7 `figspec/` — shared figure primitives
 
 Located in [`scripts/figspec/`](../scripts/figspec/). A small internal library
 imported by the block drivers in `figure_creation/`.
@@ -621,7 +672,7 @@ imported by the block drivers in `figure_creation/`.
 
 ---
 
-### 2.7 Neural surrogate scripts
+### 2.8 Neural surrogate scripts
 
 Located in [`scripts/neural_surrogate/`](../scripts/neural_surrogate/).
 Full documentation is in [`docs/neural_surrogates.md`](neural_surrogates.md).
@@ -647,10 +698,11 @@ Brief summary:
 | Change run size (ensemble, ESMDA steps, windows) | CLI overrides on `ensemble.*`/`esmda.*`; or edit the inlined blocks in [`run_esmda.yaml`](../conf/run_esmda.yaml) |
 | Switch CFD backend | `model@model=pylbm|pyudales|pypalm|neural_surrogate` (fwd) or `model@truth_model=...` + `model@assim_model=...` (esmda) |
 | Change DA mode | `esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic` |
-| Run a sequential filter (EnKF) instead of ESMDA | [`scripts/run_filtering.py`](../scripts/run_filtering.py) — `filtering.mode=state|parameter|joint` + `filtering/*` groups (§1.8) |
+| Run a sequential filter (EnKF) instead of ESMDA | [`scripts/filtering/run_filtering.py`](../scripts/filtering/run_filtering.py) — `filtering.mode=state|parameter|joint` + `filtering/*` groups (§1.8) |
 | Enable localization | `esmda/localization=correlation|distance` (smoother) or `filtering/localization=...` (filter) + optional field overrides |
 | Enable reduced state update | `esmda/state_reduction=svd` (requires state-bearing smoother, incompatible with localization) |
 | Run the full ESMDA pipeline | [`scripts/run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh) |
+| Run the full filtering pipeline | [`scripts/run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh) |
 | Train a surrogate | [`scripts/neural_surrogate/train_neural_surrogate.py`](../scripts/neural_surrogate/train_neural_surrogate.py) — see [`docs/neural_surrogates.md`](neural_surrogates.md) |
 | Understand config groups at a glance | [`conf/README.md`](../conf/README.md) |
 | Understand the data-assimilation abstractions | [`docs/codebase_guide.md §6`](codebase_guide.md) |

@@ -85,7 +85,7 @@ forward_model:
     output_frequency: ${time.output_frequency}
     spinup_time: ${time.spinup_time}
 
-# --- training-data warm start (consumed by scripts/run_esmda.py) -----------
+# --- training-data warm start (consumed by scripts/esmda/run_esmda.py) -----------
 # Active only when this model is the assimilation model AND
 # forward_model.spinup_source is "training_data". run_esmda then seeds the first
 # assimilation window from training trajectories: each ensemble member starts

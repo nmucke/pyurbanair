@@ -2,7 +2,7 @@
 
 Middle stage of the three-script sweep pipeline:
 
-  1. scripts/run_esmda.py            -- runs the DA, writes the (large) posterior
+  1. scripts/esmda/run_esmda.py            -- runs the DA, writes the (large) posterior
                                         states/params + a base run_summary.yaml +
                                         per-window prior/posterior states +
                                         truth_access.yaml, all under the project
@@ -51,16 +51,15 @@ import shutil
 import numpy as np
 import xarray as xr
 import yaml
-from omegaconf import OmegaConf
-
 from data_assimilation.interpolation import interpolate_dataarray_at_points
 from data_assimilation.observation_operator import ObservationOperator
+from omegaconf import OmegaConf
+
 from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_validation_points,
 )
 from pyurbanair.plotting import compute_parameter_metrics, compute_sensor_metrics
-
 
 # Velocity components plus magnitude; ``vel`` keeps the historical summary key.
 QUANTITIES = ("u", "v", "w", "vel")
@@ -71,6 +70,7 @@ _X_COORDS = ("x", "xt", "xm")
 # ---------------------------------------------------------------------------
 # Truth access (mirrors run_esmda.py's lazy view, driven by truth_access.yaml)
 # ---------------------------------------------------------------------------
+
 
 def _open_truth(true_state_path, n_total, x_offset=0.0, start_idx=0, t_offset=0.0):
     """Lazily open the truth state, limited to ``n_total`` frames from ``start_idx``.
@@ -97,6 +97,7 @@ def _open_truth(true_state_path, n_total, x_offset=0.0, start_idx=0, t_offset=0.
 # Sensor interpolation (per component) + per-window series assembly
 # ---------------------------------------------------------------------------
 
+
 def _sensor_components(state, obs_x, obs_y, obs_z, solver_name):
     """Interpolate u/v/w (+ |U|) at the sensor points, keeping leading dims.
 
@@ -116,15 +117,21 @@ def _sensor_components(state, obs_x, obs_y, obs_z, solver_name):
         dims = op.dim_mapping[var]
         comps[var] = interpolate_dataarray_at_points(
             state[var],
-            x_dim=dims["x"], y_dim=dims["y"], z_dim=dims["z"],
-            obs_x=op.obs_x, obs_y=op.obs_y, obs_z=op.obs_z,
+            x_dim=dims["x"],
+            y_dim=dims["y"],
+            z_dim=dims["z"],
+            obs_x=op.obs_x,
+            obs_y=op.obs_y,
+            obs_z=op.obs_z,
         )
     comps["vel"] = np.sqrt(comps["u"] ** 2 + comps["v"] ** 2 + comps["w"] ** 2)
     return comps
 
 
 def _concat(parts):
-    return parts[0] if len(parts) == 1 else xr.concat(parts, dim="time", join="override")
+    return (
+        parts[0] if len(parts) == 1 else xr.concat(parts, dim="time", join="override")
+    )
 
 
 def _ensemble_series(state_paths, sensor_sets, solver_name, sim_time):
@@ -147,7 +154,10 @@ def _ensemble_series(state_paths, sensor_sets, solver_name, sim_time):
                     da = da.assign_coords(time=(t - t[0]) + w * sim_time)
                 pieces[name][q].append(da)
         ds.close()
-    return {n: {q: _concat(parts) for q, parts in by_q.items()} for n, by_q in pieces.items()}
+    return {
+        n: {q: _concat(parts) for q, parts in by_q.items()}
+        for n, by_q in pieces.items()
+    }
 
 
 def _truth_series(ta, sensor_sets, solver_name):
@@ -159,20 +169,27 @@ def _truth_series(ta, sensor_sets, solver_name):
     pieces = {name: {q: [] for q in QUANTITIES} for name in sensor_sets}
     for w in range(ta["num_windows"]):
         ts = _open_truth(
-            ta["true_state_path"], ta["n_total"], ta["x_offset"],
-            ta["start_idx"], ta["t_offset"],
+            ta["true_state_path"],
+            ta["n_total"],
+            ta["x_offset"],
+            ta["start_idx"],
+            ta["t_offset"],
         ).isel(time=slice(w * ta["n_per_window"], (w + 1) * ta["n_per_window"]))
         for name, (ox, oy, oz) in sensor_sets.items():
             fields = _sensor_components(ts, ox, oy, oz, solver_name)
             for q, da in fields.items():
                 pieces[name][q].append(da)
         ts.close()
-    return {n: {q: _concat(parts) for q, parts in by_q.items()} for n, by_q in pieces.items()}
+    return {
+        n: {q: _concat(parts) for q, parts in by_q.items()}
+        for n, by_q in pieces.items()
+    }
 
 
 # ---------------------------------------------------------------------------
 # Scalar metric helpers
 # ---------------------------------------------------------------------------
+
 
 def _series_stats(arr):
     """{mean, final, max, min} of a 1-D series, or ``None`` if it has no values."""
@@ -226,6 +243,7 @@ def _parameter_metrics(post, true, prior):
 # Sensor time-series persistence
 # ---------------------------------------------------------------------------
 
+
 def _save_sensor_timeseries(out_run, name, coords, truth_q, prior_q, post_q):
     """Write one sensor set's truth/prior/posterior u/v/w/|U| series to NetCDF.
 
@@ -265,6 +283,7 @@ def _save_sensor_timeseries(out_run, name, coords, truth_q, prior_q, post_q):
 # Per-run processing
 # ---------------------------------------------------------------------------
 
+
 def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     """Compute every metric + time series for one run; returns a short status dict."""
     out_run.mkdir(parents=True, exist_ok=True)
@@ -274,8 +293,10 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
         summary = yaml.safe_load(f) or {}
     cfg = OmegaConf.load(run_dir / "config.yaml")
 
-    metrics: dict = {"configuration": summary.get("configuration", {}),
-                     "timing": summary.get("timing", {})}
+    metrics: dict = {
+        "configuration": summary.get("configuration", {}),
+        "timing": summary.get("timing", {}),
+    }
 
     # --- Parameters (recomputed from the small param NetCDFs) ----------------
     post_p = xr.open_dataset(run_dir / "posterior_params.nc")
@@ -308,8 +329,12 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
         prior_paths = [windows / f"window_{w}_prior_state.nc" for w in range(nwin)]
 
         truth_s = _truth_series(ta, sensor_sets, ta["truth_solver_name"])
-        post_s = _ensemble_series(post_paths, sensor_sets, ta["assim_solver_name"], ta["sim_time"])
-        prior_s = _ensemble_series(prior_paths, sensor_sets, ta["assim_solver_name"], ta["sim_time"])
+        post_s = _ensemble_series(
+            post_paths, sensor_sets, ta["assim_solver_name"], ta["sim_time"]
+        )
+        prior_s = _ensemble_series(
+            prior_paths, sensor_sets, ta["assim_solver_name"], ta["sim_time"]
+        )
         status["sensor_timeseries"] = post_s is not None
         status["components"] = post_s is not None
 
@@ -321,8 +346,11 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
                     entry[f"{_Q_KEY[q]}_rmse"] = _series_stats(m["rmse"])
                     entry[f"{_Q_KEY[q]}_crps"] = _series_stats(m["crps"])
                 _save_sensor_timeseries(
-                    out_run, name, (sx, sy, sz),
-                    truth_s[name], prior_s[name] if prior_s is not None else None,
+                    out_run,
+                    name,
+                    (sx, sy, sz),
+                    truth_s[name],
+                    prior_s[name] if prior_s is not None else None,
                     post_s[name],
                 )
             sensor_metrics[name] = entry
@@ -330,7 +358,9 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     if not sensor_metrics:
         # No truth_access (pre-update run): fall back to the base |U| summary.
         sensor_metrics = summary.get("sensor_metrics", {})
-        status["note"] = "no truth_access.yaml -> base |U| sensor metrics only (re-run ESMDA)"
+        status["note"] = (
+            "no truth_access.yaml -> base |U| sensor metrics only (re-run ESMDA)"
+        )
     metrics["sensor_metrics"] = sensor_metrics
 
     _write_yaml(metrics, out_run / "metrics.yaml")
@@ -341,17 +371,30 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--root", type=pathlib.Path,
-                    default=pathlib.Path("/projects/prjs2075/urbanair/assim_from_ground_truth"),
-                    help="Root holding the per-run ESMDA result directories.")
-    ap.add_argument("--out", type=pathlib.Path, default=None,
-                    help="Output dir for the small metric artifacts "
-                         "(default: <repo>/sweep_metrics).")
-    ap.add_argument("--models", nargs="*", default=None,
-                    help="Restrict to these assim backends (by dir-name prefix).")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--root",
+        type=pathlib.Path,
+        default=pathlib.Path("/projects/prjs2075/urbanair/assim_from_ground_truth"),
+        help="Root holding the per-run ESMDA result directories.",
+    )
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=None,
+        help="Output dir for the small metric artifacts "
+        "(default: <repo>/sweep_metrics).",
+    )
+    ap.add_argument(
+        "--models",
+        nargs="*",
+        default=None,
+        help="Restrict to these assim backends (by dir-name prefix).",
+    )
     args = ap.parse_args()
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
@@ -362,7 +405,9 @@ def main() -> None:
 
     run_dirs = sorted(p.parent for p in args.root.glob("*/run_summary.yaml"))
     if args.models:
-        run_dirs = [d for d in run_dirs if any(d.name.startswith(m) for m in args.models)]
+        run_dirs = [
+            d for d in run_dirs if any(d.name.startswith(m) for m in args.models)
+        ]
     if not run_dirs:
         raise SystemExit("No runs with run_summary.yaml found.")
 
@@ -374,12 +419,16 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001
             print(f"  ! {run_dir.name}: FAILED ({type(e).__name__}: {e})")
             continue
-        tag = "with u/v/w series" if st["components"] else st.get("note", "summary only")
+        tag = (
+            "with u/v/w series" if st["components"] else st.get("note", "summary only")
+        )
         n_ts += int(st["sensor_timeseries"])
         print(f"  {run_dir.name}: {tag}")
 
-    print(f"\nDone. {n_ts}/{len(run_dirs)} run(s) have per-component sensor series. "
-          f"Metrics in {out_root}")
+    print(
+        f"\nDone. {n_ts}/{len(run_dirs)} run(s) have per-component sensor series. "
+        f"Metrics in {out_root}"
+    )
 
 
 if __name__ == "__main__":

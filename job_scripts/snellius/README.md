@@ -90,7 +90,7 @@ WALLTIME=02:00:00 job_scripts/snellius/submit.sh pylbm medium
 - `submit.sh` — the wrapper (compute sizing, submit).
 - `templates/esmda.slurm` — one generic job body for all model combinations,
   driven by `PUA_SIZE` / `PUA_NUM_PARALLEL` / `PUA_TRUTH_MODEL` / `PUA_ASSIM_MODEL`
-  (set by the wrapper). It runs `scripts/run_esmda.py` in simulate-truth-inline
+  (set by the wrapper). It runs `scripts/esmda/run_esmda.py` in simulate-truth-inline
   mode (`run.truth_dir=null`) at the medium defaults; for runs against a
   pre-simulated on-disk truth use the per-backend
   `<model>/rollout_esmda_from_truth.slurm` runners below instead. Not meant to be

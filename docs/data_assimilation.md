@@ -503,7 +503,7 @@ visible at cycle k instead of at the end).
 
 ### Run script
 
-[scripts/run_filtering.py](../scripts/run_filtering.py) (config
+[scripts/filtering/run_filtering.py](../scripts/filtering/run_filtering.py) (config
 [conf/run_filtering.yaml](../conf/run_filtering.yaml)) is the entry point:
 truth inline or from disk (as run_esmda.py), one cycle per
 `time.simulation_time` segment, Hydra groups
@@ -575,7 +575,7 @@ and `state_and_dynamic.yaml` (the two smoother YAMLs that list it). Selecting
 ## 10. End-to-end run
 
 A run uses the library as follows (very brief; see
-[scripts/run_esmda.py](../scripts/run_esmda.py),
+[scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py),
 [codebase_guide.md §6](codebase_guide.md#6-data-assimilation-flow), and
 [conf/run_esmda.yaml](../conf/run_esmda.yaml) for the full picture):
 

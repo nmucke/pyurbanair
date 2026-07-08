@@ -1,11 +1,26 @@
 """Run sequential ensemble filtering (EnKF): state / parameter / joint modes.
 
-The filtering counterpart of ``scripts/run_esmda.py``: instead of ESMDA's
+The filtering counterpart of ``scripts/esmda/run_esmda.py``: instead of ESMDA's
 multiple tempered updates per assimilation window, the ensemble Kalman filter
 forecasts the ensemble one segment at a time and applies ONE full-weight
 analysis per segment (cycle), warm-starting the next cycle from the analyzed
 end-of-segment state (see ``docs/data_assimilation.md`` and
 ``libs/data-assimilation/src/data_assimilation/filtering/``).
+
+This is the first stage of a three-script single-run pipeline (see
+``scripts/run_filtering_pipeline.sh``), mirroring the ESMDA pipeline:
+
+  1. scripts/filtering/run_filtering.py         (THIS) -- runs the filter and
+                                       saves every raw artifact (posterior/prior
+                                       params, posterior/history states, the
+                                       truth state/params, cycle_diagnostics.yaml,
+                                       truth_access.yaml and run_info.yaml).
+  2. scripts/filtering/compute_filtering_metrics.py -- reads those, writes
+                                       run_summary.yaml.
+  3. scripts/filtering/make_filtering_figures.py -- reads those, draws figures.
+
+The metric and figure stages reuse the ESMDA pipeline's truth-access and
+sensor-series helpers via ``scripts/filtering/_filtering_common.py``.
 
 Mode and machinery are declarative axes (see conf/run_filtering.yaml):
 
@@ -41,10 +56,10 @@ smoothers for the time being) — pair with ``params@prior_params=static``.
 
 Examples::
 
-    python scripts/run_filtering.py filtering.mode=joint filtering.num_cycles=4
-    python scripts/run_filtering.py filtering.mode=parameter \
+    python scripts/filtering/run_filtering.py filtering.mode=joint filtering.num_cycles=4
+    python scripts/filtering/run_filtering.py filtering.mode=parameter \
         filtering/evolution=random_walk filtering/inflation=none
-    python scripts/run_filtering.py filtering.mode=state \
+    python scripts/filtering/run_filtering.py filtering.mode=state \
         filtering/localization=correlation
 """
 
@@ -69,9 +84,9 @@ from pyurbanair.config.hydra_helpers import (
 )
 
 if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from scripts._esmda_common import open_truth, truth_x_min, write_yaml
+from scripts.esmda._esmda_common import open_truth, truth_x_min, write_yaml
 
 
 def run(cfg: DictConfig) -> None:
@@ -95,7 +110,7 @@ def run(cfg: DictConfig) -> None:
                 f"{name} is a time-varying (dynamic) sampler, which the filter "
                 "does not support yet. Use params@prior_params=static / "
                 "params@truth_params=static_truth, or the ESMDA smoothers "
-                "(scripts/run_esmda.py) for time-varying parameters."
+                "(scripts/esmda/run_esmda.py) for time-varying parameters."
             )
 
     # Select which parameters the filter estimates (same contract as
@@ -260,6 +275,26 @@ def run(cfg: DictConfig) -> None:
         out_dir / "cycle_diagnostics.yaml",
     )
 
+    # Persist the truth-access parameters (slicing/offsets + per-cycle frame
+    # count) so the downstream metric/figure scripts reconstruct the exact same
+    # lazy view of the on-disk truth without re-deriving the horizon logic.
+    # Mirrors run_esmda.py's truth_access.yaml, with cycles in place of windows.
+    write_yaml(
+        {
+            "true_state_path": str(true_state_path),
+            "x_offset": float(x_offset),
+            "start_idx": int(start_idx),
+            "t_offset": float(t_offset),
+            "n_total": int(n_total),
+            "n_per_cycle": int(n_per_cycle),
+            "num_cycles": int(num_cycles),
+            "sim_time": float(sim_time),
+            "truth_solver_name": str(cfg.truth_model.solver_name),
+            "assim_solver_name": str(cfg.assim_model.solver_name),
+        },
+        out_dir / "truth_access.yaml",
+    )
+
     write_yaml(
         {
             "configuration": {
@@ -290,7 +325,7 @@ def run(cfg: DictConfig) -> None:
 
 
 @hydra.main(  # type: ignore[misc]
-    version_base=None, config_path="../conf", config_name="run_filtering"
+    version_base=None, config_path="../../conf", config_name="run_filtering"
 )
 def main(cfg: DictConfig) -> None:
     run(cfg)

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SNELLIUS single-run visualizer for STATE-estimation ESMDA runs. Regenerates a
-# consolidated figure set for ONE scripts/run_esmda.py output folder that
+# consolidated figure set for ONE scripts/esmda/run_esmda.py output folder that
 # estimates the state as well as parameters, via scripts/figure_creation/visualize_state_run.py.
 # Figures land under result_figures/<case> (case = run folder name by default).
 #

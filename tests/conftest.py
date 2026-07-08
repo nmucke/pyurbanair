@@ -31,7 +31,7 @@ def _compose_test_cfg(
 ) -> DictConfig:
     # ``config_name`` selects the primary config (entry point). Forward-model
     # tests use ``run_forward_model``; ESMDA tests use ``run_esmda`` (the single
-    # primary config for scripts/run_esmda.py) and pick the smoother via the
+    # primary config for scripts/esmda/run_esmda.py) and pick the smoother via the
     # ``esmda/smoother`` group override.
     with initialize(version_base=None, config_path="../conf"):
         return compose(

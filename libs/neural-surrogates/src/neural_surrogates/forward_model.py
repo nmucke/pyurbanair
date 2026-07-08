@@ -148,7 +148,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 spin-up backend that generated the training data — physically
                 faithful but expensive. ``"training_data"`` means the run is
                 warm-started from training snapshots that are loaded and passed
-                in by the caller (``scripts/run_esmda.py`` via
+                in by the caller (``scripts/esmda/run_esmda.py`` via
                 :mod:`neural_surrogates.training_spinup`), so the surrogate never
                 runs a spin-up itself — it only rolls forward from the provided
                 state. A cold start (``state is None``) is therefore rejected in
@@ -683,7 +683,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         On a warm start the supplied ``state`` is used. On a cold start the
         field is produced by the CFD spin-up backend. The ``training_data``
         spin-up source has no cold start of its own — the caller
-        (``scripts/run_esmda.py``) loads the training snapshots and passes them
+        (``scripts/esmda/run_esmda.py``) loads the training snapshots and passes them
         in as the initial ``state`` — so a cold start in that mode is an error.
         The field is collocated to the regular grid the network expects (see
         :meth:`_to_regular_grid`) before it is returned.
@@ -694,7 +694,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             raise RuntimeError(
                 "spinup_source='training_data' has no cold start: the training "
                 "snapshots are loaded and passed in as the initial state by the "
-                "caller (scripts/run_esmda.py / neural_surrogates.training_spinup). "
+                "caller (scripts/esmda/run_esmda.py / neural_surrogates.training_spinup). "
                 "Got state=None."
             )
         else:

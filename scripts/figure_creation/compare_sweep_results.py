@@ -2,7 +2,7 @@
 
 Third stage of the three-script sweep pipeline:
 
-  1. scripts/run_esmda.py             -- runs the DA, writes the large posterior
+  1. scripts/esmda/run_esmda.py             -- runs the DA, writes the large posterior
                                          states/params + base run_summary.yaml.
   2. scripts/compute_sweep_metrics.py -- computes every metric + metric time series
                                          and writes SMALL artifacts to
@@ -64,7 +64,6 @@ import pandas as pd
 import xarray as xr
 import yaml
 
-
 # Directory tag written by the slurm scripts, e.g.
 # ``pyudales_nx100_ny80_nz32_ens96_steps2_localization``.
 _TAG_RE = re.compile(
@@ -101,7 +100,9 @@ def param_metrics() -> list[tuple[str, str, bool]]:
         pretty, unit = _PARAM_PRETTY[p], _PARAM_UNIT[p]
         out.append((f"param_{p}_rmse_mean", f"{pretty} RMSE [{unit}]", True))
         out.append((f"param_{p}_crps_mean", f"{pretty} CRPS [{unit}]", True))
-        out.append((f"param_{p}_rmse_reduction", f"{pretty} RMSE reduction vs prior", False))
+        out.append(
+            (f"param_{p}_rmse_reduction", f"{pretty} RMSE reduction vs prior", False)
+        )
     return out
 
 
@@ -133,6 +134,7 @@ SUMMARY_METRICS = [
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
+
 
 def _safe(d: dict, *keys, default=None):
     """Nested ``dict.get`` that tolerates missing intermediate keys."""
@@ -208,7 +210,9 @@ def load_runs(root: pathlib.Path, models: list[str] | None) -> pd.DataFrame:
     records = []
     # Prefer compute_sweep_metrics' metrics.yaml; fall back to run_summary.yaml so
     # the script also works when pointed straight at the raw ESMDA results root.
-    summaries = sorted(root.glob("*/metrics.yaml")) or sorted(root.glob("*/run_summary.yaml"))
+    summaries = sorted(root.glob("*/metrics.yaml")) or sorted(
+        root.glob("*/run_summary.yaml")
+    )
     for summ in summaries:
         run_dir = summ.parent
         try:
@@ -223,7 +227,9 @@ def load_runs(root: pathlib.Path, models: list[str] | None) -> pd.DataFrame:
         records.append(rec)
     df = pd.DataFrame(records)
     if not df.empty:
-        df = df.sort_values(["assim_model", "grid_cells", "ensemble_size", "num_esmda_steps"])
+        df = df.sort_values(
+            ["assim_model", "grid_cells", "ensemble_size", "num_esmda_steps"]
+        )
     return df
 
 
@@ -231,10 +237,15 @@ def load_runs(root: pathlib.Path, models: list[str] | None) -> pd.DataFrame:
 # Plot helpers
 # ---------------------------------------------------------------------------
 
-def _present_metrics(df: pd.DataFrame,
-                     metrics: list[tuple[str, str, bool]]) -> list[tuple[str, str, bool]]:
-    return [(c, lbl, lo) for (c, lbl, lo) in metrics
-            if c in df.columns and df[c].notna().any()]
+
+def _present_metrics(
+    df: pd.DataFrame, metrics: list[tuple[str, str, bool]]
+) -> list[tuple[str, str, bool]]:
+    return [
+        (c, lbl, lo)
+        for (c, lbl, lo) in metrics
+        if c in df.columns and df[c].notna().any()
+    ]
 
 
 # Curated, colour-blind-friendly palette + a distinct marker per backend.
@@ -246,44 +257,48 @@ _FALLBACK_MARKERS = ["^", "v", "P", "X"]
 
 def _setup_style() -> None:
     """A clean, consistent house style for every figure."""
-    plt.rcParams.update({
-        "figure.dpi": 120,
-        "savefig.dpi": 160,
-        "savefig.bbox": "tight",
-        "figure.facecolor": "white",
-        "axes.facecolor": "#FBFBFD",
-        "axes.edgecolor": "#5A5A5A",
-        "axes.linewidth": 1.0,
-        "axes.grid": True,
-        "axes.axisbelow": True,
-        "axes.titlesize": 11,
-        "axes.titleweight": "bold",
-        "axes.titlepad": 8,
-        "axes.labelsize": 10.5,
-        "axes.labelweight": "medium",
-        "axes.labelcolor": "#1A1A1A",
-        "axes.prop_cycle": plt.cycler(color=list(PALETTE.values()) + _FALLBACK_COLORS),
-        "grid.color": "#C7C7D1",
-        "grid.linewidth": 0.7,
-        "grid.alpha": 0.55,
-        "xtick.color": "#3A3A3A",
-        "ytick.color": "#3A3A3A",
-        "xtick.labelsize": 9.5,
-        "ytick.labelsize": 9.5,
-        "xtick.direction": "out",
-        "ytick.direction": "out",
-        "legend.fontsize": 8.5,
-        "legend.frameon": True,
-        "legend.framealpha": 0.92,
-        "legend.edgecolor": "#D0D0D0",
-        "legend.borderpad": 0.5,
-        "font.family": "DejaVu Sans",
-        "lines.linewidth": 2.3,
-        "lines.markersize": 7.5,
-        "lines.markeredgewidth": 1.3,
-        "figure.titlesize": 14,
-        "figure.titleweight": "bold",
-    })
+    plt.rcParams.update(
+        {
+            "figure.dpi": 120,
+            "savefig.dpi": 160,
+            "savefig.bbox": "tight",
+            "figure.facecolor": "white",
+            "axes.facecolor": "#FBFBFD",
+            "axes.edgecolor": "#5A5A5A",
+            "axes.linewidth": 1.0,
+            "axes.grid": True,
+            "axes.axisbelow": True,
+            "axes.titlesize": 11,
+            "axes.titleweight": "bold",
+            "axes.titlepad": 8,
+            "axes.labelsize": 10.5,
+            "axes.labelweight": "medium",
+            "axes.labelcolor": "#1A1A1A",
+            "axes.prop_cycle": plt.cycler(
+                color=list(PALETTE.values()) + _FALLBACK_COLORS
+            ),
+            "grid.color": "#C7C7D1",
+            "grid.linewidth": 0.7,
+            "grid.alpha": 0.55,
+            "xtick.color": "#3A3A3A",
+            "ytick.color": "#3A3A3A",
+            "xtick.labelsize": 9.5,
+            "ytick.labelsize": 9.5,
+            "xtick.direction": "out",
+            "ytick.direction": "out",
+            "legend.fontsize": 8.5,
+            "legend.frameon": True,
+            "legend.framealpha": 0.92,
+            "legend.edgecolor": "#D0D0D0",
+            "legend.borderpad": 0.5,
+            "font.family": "DejaVu Sans",
+            "lines.linewidth": 2.3,
+            "lines.markersize": 7.5,
+            "lines.markeredgewidth": 1.3,
+            "figure.titlesize": 14,
+            "figure.titleweight": "bold",
+        }
+    )
 
 
 def _despine(ax) -> None:
@@ -312,10 +327,16 @@ def _plot_series(ax, x, y, model: str, loc: bool, label: str) -> None:
     """One styled line: solid colour, white-filled marker, dashed if localized."""
     color, ls = _series_style(model, loc)
     ax.plot(
-        x, y,
-        color=color, ls=ls, marker=_model_marker(model),
-        markerfacecolor="white", markeredgecolor=color,
-        label=label, zorder=3, clip_on=False,
+        x,
+        y,
+        color=color,
+        ls=ls,
+        marker=_model_marker(model),
+        markerfacecolor="white",
+        markeredgecolor=color,
+        label=label,
+        zorder=3,
+        clip_on=False,
     )
 
 
@@ -341,9 +362,17 @@ def _hold_other_axes(df: pd.DataFrame, sweep_col: str) -> tuple[pd.DataFrame, di
     return sub, held
 
 
-def plot_group_vs_axis(df: pd.DataFrame, sweep_col: str, xlabel: str, logx: bool,
-                       out_dir: pathlib.Path, metrics: list[tuple[str, str, bool]],
-                       title: str, fname_stub: str, ncols: int = 2) -> None:
+def plot_group_vs_axis(
+    df: pd.DataFrame,
+    sweep_col: str,
+    xlabel: str,
+    logx: bool,
+    out_dir: pathlib.Path,
+    metrics: list[tuple[str, str, bool]],
+    title: str,
+    fname_stub: str,
+    ncols: int = 2,
+) -> None:
     """One figure: every metric in ``metrics`` vs ``sweep_col`` (RMSE next to CRPS)."""
     sub, held = _hold_other_axes(df, sweep_col)
     if sub[sweep_col].dropna().nunique() < 2:
@@ -353,8 +382,13 @@ def plot_group_vs_axis(df: pd.DataFrame, sweep_col: str, xlabel: str, logx: bool
         return
     cols = min(ncols, len(present))
     rows = math.ceil(len(present) / cols)
-    fig, axes = plt.subplots(rows, cols, figsize=(5.4 * cols, 3.7 * rows),
-                             squeeze=False, constrained_layout=True)
+    fig, axes = plt.subplots(
+        rows,
+        cols,
+        figsize=(5.4 * cols, 3.7 * rows),
+        squeeze=False,
+        constrained_layout=True,
+    )
     held_str = ", ".join(f"{k}={v}" for k, v in held.items()) or "none"
 
     handles_labels = {}
@@ -377,14 +411,18 @@ def plot_group_vs_axis(df: pd.DataFrame, sweep_col: str, xlabel: str, logx: bool
         _despine(ax)
         for h, l in zip(*ax.get_legend_handles_labels()):
             handles_labels.setdefault(l, h)
-    for ax in axes.flat[len(present):]:
+    for ax in axes.flat[len(present) :]:
         ax.set_visible(False)
 
     # Shared legend BELOW the panels so it never collides with the suptitle
     # (constrained_layout reserves the space).
     if handles_labels:
-        fig.legend(handles_labels.values(), handles_labels.keys(),
-                   loc="outside lower center", ncol=min(len(handles_labels), 6))
+        fig.legend(
+            handles_labels.values(),
+            handles_labels.keys(),
+            loc="outside lower center",
+            ncol=min(len(handles_labels), 6),
+        )
     fig.suptitle(f"{title}  vs  {xlabel}    ·    other axes held at: {held_str}")
     out = out_dir / f"{fname_stub}_vs_{sweep_col}.png"
     fig.savefig(out)
@@ -396,32 +434,56 @@ def plot_backend_comparison(df: pd.DataFrame, out_dir: pathlib.Path) -> None:
     """Bar chart comparing backends at the single most common (grid, ens, steps)."""
     if df["assim_model"].nunique() < 2:
         return
-    keys = [c for c in ("grid_cells", "ensemble_size", "num_esmda_steps") if c in df.columns]
+    keys = [
+        c for c in ("grid_cells", "ensemble_size", "num_esmda_steps") if c in df.columns
+    ]
     combo = df.groupby(keys).size().sort_values(ascending=False)
     # Prefer a combo covered by the most backends, then most frequent.
     best, best_score = None, (-1, -1)
     for combo_vals in combo.index:
-        mask = np.logical_and.reduce([df[k] == v for k, v in zip(keys, np.atleast_1d(combo_vals))])
+        mask = np.logical_and.reduce(
+            [df[k] == v for k, v in zip(keys, np.atleast_1d(combo_vals))]
+        )
         score = (df[mask]["assim_model"].nunique(), int(mask.sum()))
         if score > best_score:
             best, best_score = combo_vals, score
     if best is None or best_score[0] < 2:
         return
-    mask = np.logical_and.reduce([df[k] == v for k, v in zip(keys, np.atleast_1d(best))])
+    mask = np.logical_and.reduce(
+        [df[k] == v for k, v in zip(keys, np.atleast_1d(best))]
+    )
     sub = df[mask]
     metrics = _present_metrics(sub, SUMMARY_METRICS)
     if not metrics:
         return
 
     rows, cols = _grid_dims(len(metrics))
-    fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 3.9 * rows),
-                             squeeze=False, constrained_layout=True)
+    fig, axes = plt.subplots(
+        rows,
+        cols,
+        figsize=(5.2 * cols, 3.9 * rows),
+        squeeze=False,
+        constrained_layout=True,
+    )
     for ax, (col, lbl, lower_better) in zip(axes.flat, metrics):
         g = sub[["assim_model", "localization", col]].dropna()
-        labels = [f"{m}{' + loc' if l else ''}" for m, l in zip(g["assim_model"], g["localization"])]
-        colors = [_series_style(m, bool(l))[0] for m, l in zip(g["assim_model"], g["localization"])]
-        bars = ax.bar(range(len(g)), g[col], color=colors, edgecolor="white",
-                      linewidth=1.2, width=0.68, zorder=3)
+        labels = [
+            f"{m}{' + loc' if l else ''}"
+            for m, l in zip(g["assim_model"], g["localization"])
+        ]
+        colors = [
+            _series_style(m, bool(l))[0]
+            for m, l in zip(g["assim_model"], g["localization"])
+        ]
+        bars = ax.bar(
+            range(len(g)),
+            g[col],
+            color=colors,
+            edgecolor="white",
+            linewidth=1.2,
+            width=0.68,
+            zorder=3,
+        )
         ax.bar_label(bars, fmt="%.3g", padding=3, fontsize=8, color="#333333")
         ax.set_xticks(range(len(g)))
         ax.set_xticklabels(labels, rotation=20, ha="right")
@@ -431,7 +493,7 @@ def plot_backend_comparison(df: pd.DataFrame, out_dir: pathlib.Path) -> None:
         ax.grid(False, axis="x")
         ax.margins(y=0.18)
         _despine(ax)
-    for ax in axes.flat[len(metrics):]:
+    for ax in axes.flat[len(metrics) :]:
         ax.set_visible(False)
     combo_str = ", ".join(f"{k}={v}" for k, v in zip(keys, np.atleast_1d(best)))
     fig.suptitle(f"Backend comparison at {combo_str}")
@@ -441,25 +503,44 @@ def plot_backend_comparison(df: pd.DataFrame, out_dir: pathlib.Path) -> None:
     print(f"  wrote {out.name}")
 
 
-def plot_timing(df: pd.DataFrame, out_dir: pathlib.Path,
-                only_cols: list[str] | None = None) -> None:
-    if "esmda_total_seconds" not in df.columns or df["esmda_total_seconds"].isna().all():
+def plot_timing(
+    df: pd.DataFrame, out_dir: pathlib.Path, only_cols: list[str] | None = None
+) -> None:
+    if (
+        "esmda_total_seconds" not in df.columns
+        or df["esmda_total_seconds"].isna().all()
+    ):
         return
-    sweepable = [(c, lbl, logx) for (c, lbl, logx) in AXES
-                 if c in df.columns and df[c].dropna().nunique() >= 2
-                 and (only_cols is None or c in only_cols)]
+    sweepable = [
+        (c, lbl, logx)
+        for (c, lbl, logx) in AXES
+        if c in df.columns
+        and df[c].dropna().nunique() >= 2
+        and (only_cols is None or c in only_cols)
+    ]
     if not sweepable:
         return
-    fig, axes = plt.subplots(1, len(sweepable), figsize=(5.6 * len(sweepable), 4.3),
-                             squeeze=False, constrained_layout=True)
+    fig, axes = plt.subplots(
+        1,
+        len(sweepable),
+        figsize=(5.6 * len(sweepable), 4.3),
+        squeeze=False,
+        constrained_layout=True,
+    )
     for ax, (col, xlabel, logx) in zip(axes.flat, sweepable):
         sub, held = _hold_other_axes(df, col)
         for (model, loc), g in sub.groupby(["assim_model", "localization"]):
             g = g[[col, "esmda_total_seconds"]].dropna().sort_values(col)
             if g.empty:
                 continue
-            _plot_series(ax, g[col], g["esmda_total_seconds"] / 60.0, model, bool(loc),
-                         f"{model}{' + loc' if loc else ''}")
+            _plot_series(
+                ax,
+                g[col],
+                g["esmda_total_seconds"] / 60.0,
+                model,
+                bool(loc),
+                f"{model}{' + loc' if loc else ''}",
+            )
         ax.set_xlabel(xlabel)
         ax.set_ylabel("ESMDA total [min]")
         if logx:
@@ -487,19 +568,28 @@ def _load_param_mean_std(run_dir: pathlib.Path, fname: str):
     return ds
 
 
-def plot_param_trajectories(df: pd.DataFrame, sweep_col: str, xlabel: str,
-                            out_dir: pathlib.Path) -> None:
+def plot_param_trajectories(
+    df: pd.DataFrame, sweep_col: str, xlabel: str, out_dir: pathlib.Path
+) -> None:
     """Overlay posterior parameter trajectories (mean +/- std) vs truth across a sweep."""
     sub, held = _hold_other_axes(df, sweep_col)
     sub = sub[sub[sweep_col].notna()]
     if sub[sweep_col].nunique() < 2:
         return
-    _PRETTY = {"inflow_angle": "inflow angle [deg]", "velocity_magnitude": "velocity magnitude [m/s]"}
+    _PRETTY = {
+        "inflow_angle": "inflow angle [deg]",
+        "velocity_magnitude": "velocity magnitude [m/s]",
+    }
     # One figure per backend present (truth is shared).
     for model, gm in sub.groupby("assim_model"):
         gm = gm.sort_values(sweep_col)
-        fig, axes = plt.subplots(1, len(_PARAMS), figsize=(6.8 * len(_PARAMS), 4.6),
-                                 squeeze=False, constrained_layout=True)
+        fig, axes = plt.subplots(
+            1,
+            len(_PARAMS),
+            figsize=(6.8 * len(_PARAMS), 4.6),
+            squeeze=False,
+            constrained_layout=True,
+        )
         cmap = plt.get_cmap("plasma")
         vals = gm[sweep_col].to_numpy(dtype=float)
         vmin, vmax = (vals.min(), vals.max()) if len(vals) else (0, 1)
@@ -520,15 +610,28 @@ def plot_param_trajectories(df: pd.DataFrame, sweep_col: str, xlabel: str,
                 any_data = True
                 t = np.asarray(post["time"].values, dtype=float)
                 da = post[pname]
-                mean = da.mean(dim="ensemble").values if "ensemble" in da.dims else da.values
+                mean = (
+                    da.mean(dim="ensemble").values
+                    if "ensemble" in da.dims
+                    else da.values
+                )
                 ax.plot(t, mean, color=color, lw=2.0, zorder=3)
                 if "ensemble" in da.dims:
                     std = da.std(dim="ensemble").values
-                    ax.fill_between(t, mean - std, mean + std, color=color, alpha=0.10, zorder=1)
+                    ax.fill_between(
+                        t, mean - std, mean + std, color=color, alpha=0.10, zorder=1
+                    )
                 if truth is not None and pname in truth and not truth_plotted:
                     tt = np.asarray(truth["time"].values, dtype=float)
-                    ax.plot(tt, truth[pname].values, color="#111111", lw=3.0, ls=(0, (4, 2)),
-                            label="truth", zorder=5)
+                    ax.plot(
+                        tt,
+                        truth[pname].values,
+                        color="#111111",
+                        lw=3.0,
+                        ls=(0, (4, 2)),
+                        label="truth",
+                        zorder=5,
+                    )
             truth_plotted = truth_plotted or (truth is not None)
         if not any_data:
             plt.close(fig)
@@ -551,8 +654,10 @@ def plot_param_trajectories(df: pd.DataFrame, sweep_col: str, xlabel: str,
             cbar.set_ticks(sorted(set(vals)))
             cbar.ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%g"))
         held_str = ", ".join(f"{k}={v}" for k, v in held.items()) or "none"
-        fig.suptitle(f"{model} · posterior parameter trajectories vs truth, coloured by {xlabel}"
-                     f"    ·    held: {held_str}")
+        fig.suptitle(
+            f"{model} · posterior parameter trajectories vs truth, coloured by {xlabel}"
+            f"    ·    held: {held_str}"
+        )
         out = out_dir / f"param_trajectories_{model}_vs_{sweep_col}.png"
         fig.savefig(out)
         plt.close(fig)
@@ -566,9 +671,15 @@ def plot_param_trajectories(df: pd.DataFrame, sweep_col: str, xlabel: str,
 _Q_PRETTY = {"vel": "|U|", "u": "u", "v": "v", "w": "w"}
 
 
-def plot_sensor_timeseries_grid(df: pd.DataFrame, sweep_col: str, xlabel: str,
-                                out_dir: pathlib.Path, set_name: str, q: str,
-                                max_members: int = 40) -> None:
+def plot_sensor_timeseries_grid(
+    df: pd.DataFrame,
+    sweep_col: str,
+    xlabel: str,
+    out_dir: pathlib.Path,
+    set_name: str,
+    q: str,
+    max_members: int = 40,
+) -> None:
     """One figure per (model, sensor set, sweep axis, component).
 
     Grid: rows = sensors, cols = sweep values. Each panel overlays, for component
@@ -600,32 +711,59 @@ def plot_sensor_timeseries_grid(df: pd.DataFrame, sweep_col: str, xlabel: str,
 
         ncols, nrows = len(runs), n_sensors
         color = _model_color(model)
-        fig, axes = plt.subplots(nrows, ncols, figsize=(3.5 * ncols, 2.4 * nrows),
-                                 squeeze=False, sharex=True, constrained_layout=True)
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(3.5 * ncols, 2.4 * nrows),
+            squeeze=False,
+            sharex=True,
+            constrained_layout=True,
+        )
         for ci, (val, path) in enumerate(runs):
             ds = xr.open_dataset(path)
             t = np.asarray(ds["time"].values, dtype=float)
-            truth = np.asarray(ds[f"{q}_truth"].values)            # (time, sensor)
+            truth = np.asarray(ds[f"{q}_truth"].values)  # (time, sensor)
             prior = ds[f"{q}_prior"].values if f"{q}_prior" in ds else None
             post = ds[f"{q}_post"].values if f"{q}_post" in ds else None
             for si in range(n_sensors):
                 ax = axes[si, ci]
                 if prior is not None:
                     mem = prior[:, :, si]
-                    idx = np.linspace(0, mem.shape[0] - 1, min(max_members, mem.shape[0])).astype(int)
+                    idx = np.linspace(
+                        0, mem.shape[0] - 1, min(max_members, mem.shape[0])
+                    ).astype(int)
                     ax.plot(t, mem[idx].T, color="#9AA0A6", lw=0.6, alpha=0.3, zorder=1)
                 if post is not None:
                     mem = post[:, :, si]
-                    idx = np.linspace(0, mem.shape[0] - 1, min(max_members, mem.shape[0])).astype(int)
+                    idx = np.linspace(
+                        0, mem.shape[0] - 1, min(max_members, mem.shape[0])
+                    ).astype(int)
                     ax.plot(t, mem[idx].T, color=color, lw=0.6, alpha=0.5, zorder=2)
-                    ax.plot(t, mem.mean(axis=0), color=color, lw=2.4, zorder=4,
-                            label="posterior mean")
-                ax.plot(t, truth[:, si], color="black", lw=2.0, ls=(0, (4, 2)),
-                        zorder=5, label="truth")
+                    ax.plot(
+                        t,
+                        mem.mean(axis=0),
+                        color=color,
+                        lw=2.4,
+                        zorder=4,
+                        label="posterior mean",
+                    )
+                ax.plot(
+                    t,
+                    truth[:, si],
+                    color="black",
+                    lw=2.0,
+                    ls=(0, (4, 2)),
+                    zorder=5,
+                    label="truth",
+                )
                 _despine(ax)
                 ax.margins(x=0.02, y=0.12)
                 if ci == 0:
-                    loc = f"({sx[si]:g},{sy[si]:g},{sz[si]:g})" if sx is not None else f"S{si}"
+                    loc = (
+                        f"({sx[si]:g},{sy[si]:g},{sz[si]:g})"
+                        if sx is not None
+                        else f"S{si}"
+                    )
                     ax.set_ylabel(f"sensor {si}\n{loc}", fontsize=8)
                 if si == 0:
                     ax.set_title(f"{xlabel}\n= {val:g}", fontsize=9.5)
@@ -636,12 +774,13 @@ def plot_sensor_timeseries_grid(df: pd.DataFrame, sweep_col: str, xlabel: str,
         h, l = axes[0, 0].get_legend_handles_labels()
         seen = dict(zip(l, h))
         if seen:
-            fig.legend(seen.values(), seen.keys(), loc="outside lower center",
-                       ncol=2)
+            fig.legend(seen.values(), seen.keys(), loc="outside lower center", ncol=2)
         held_str = ", ".join(f"{k}={v}" for k, v in held.items()) or "none"
-        fig.suptitle(f"{model} · {set_name} sensors · {_Q_PRETTY.get(q, q)} time series "
-                     f"vs {xlabel}    ·    truth (black), prior α0.3, posterior α0.5 + mean"
-                     f"    ·    held: {held_str}")
+        fig.suptitle(
+            f"{model} · {set_name} sensors · {_Q_PRETTY.get(q, q)} time series "
+            f"vs {xlabel}    ·    truth (black), prior α0.3, posterior α0.5 + mean"
+            f"    ·    held: {held_str}"
+        )
         out = out_dir / f"timeseries_{set_name}_{model}_{q}_vs_{sweep_col}.png"
         fig.savefig(out)
         plt.close(fig)
@@ -666,10 +805,14 @@ def _pick_domain(df: pd.DataFrame) -> str | None:
     sub = df.dropna(subset=["grid"])
     if sub.empty:
         return None
-    stats = sub.groupby("grid").agg(
-        n_ens=("ensemble_size", "nunique"),
-        n_runs=("name", "size"),
-    ).sort_values(["n_ens", "n_runs"], ascending=False)
+    stats = (
+        sub.groupby("grid")
+        .agg(
+            n_ens=("ensemble_size", "nunique"),
+            n_runs=("name", "size"),
+        )
+        .sort_values(["n_ens", "n_runs"], ascending=False)
+    )
     return stats.index[0]
 
 
@@ -695,10 +838,14 @@ def run_one_sweep(df: pd.DataFrame, sweep: str, out_dir: pathlib.Path, args) -> 
             return
         print(f"[ensemble] domain fixed at {target}")
 
-    present = df[col].dropna() if col in df.columns else df.get(col, pd.Series(dtype=float))
+    present = (
+        df[col].dropna() if col in df.columns else df.get(col, pd.Series(dtype=float))
+    )
     if present.nunique() < 2:
-        print(f"[{sweep}] need >= 2 distinct {col} values to draw a sweep; "
-              f"found {sorted(present.dropna().unique().tolist())} -- skipping.")
+        print(
+            f"[{sweep}] need >= 2 distinct {col} values to draw a sweep; "
+            f"found {sorted(present.dropna().unique().tolist())} -- skipping."
+        )
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -711,8 +858,18 @@ def run_one_sweep(df: pd.DataFrame, sweep: str, out_dir: pathlib.Path, args) -> 
     # sensors / state field), RMSE next to CRPS.
     groups = [
         (param_metrics(), "Parameter metrics", "parameters", 3),
-        (sensor_metrics_group("assimilation"), "Assimilation sensor metrics", "assim_sensors", 2),
-        (sensor_metrics_group("validation"), "Validation sensor metrics", "validation_sensors", 2),
+        (
+            sensor_metrics_group("assimilation"),
+            "Assimilation sensor metrics",
+            "assim_sensors",
+            2,
+        ),
+        (
+            sensor_metrics_group("validation"),
+            "Validation sensor metrics",
+            "validation_sensors",
+            2,
+        ),
         (STATE_METRICS, "State-field metrics", "state", 2),
     ]
     for metrics, title, stub, ncols in groups:
@@ -733,35 +890,69 @@ def run_one_sweep(df: pd.DataFrame, sweep: str, out_dir: pathlib.Path, args) -> 
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    ap.add_argument("--sweep", choices=["domain", "ensemble", "all"], default="all",
-                    help="Which sweep to visualize. 'domain' -> figures in "
-                         "comparison/domain (x=grid cells); 'ensemble' -> "
-                         "comparison/ensemble (x=ensemble size, domain fixed); "
-                         "'all' (default) does both.")
-    ap.add_argument("--root", type=pathlib.Path, default=repo_root / "sweep_metrics",
-                    help="Root holding compute_sweep_metrics output "
-                         "(default: <repo>/sweep_metrics). May also point at the raw "
-                         "ESMDA results root, in which case run_summary.yaml is used.")
-    ap.add_argument("--out", type=pathlib.Path, default=None,
-                    help="Base output dir; each sweep lands in <out>/<sweep> "
-                         "(default: <repo>/comparison).")
-    ap.add_argument("--domain", default=None,
-                    help="For the ensemble sweep: fix the grid to this NXxNYxNZ "
-                         "(default: the grid with the most ensemble sizes).")
-    ap.add_argument("--linear-x", action="store_true",
-                    help="Use a linear sweep x-axis instead of log.")
-    ap.add_argument("--models", nargs="*", default=None,
-                    help="Restrict to these assim backends (e.g. pyudales pylbm).")
-    ap.add_argument("--no-trajectories", action="store_true",
-                    help="Skip the (slower) per-run NetCDF parameter-trajectory overlays.")
-    ap.add_argument("--no-timeseries", action="store_true",
-                    help="Skip the per-model sensor time-series grids.")
-    ap.add_argument("--components", nargs="*", default=["vel", "u", "v", "w"],
-                    help="Velocity quantities for the sensor time-series grids.")
+    ap.add_argument(
+        "--sweep",
+        choices=["domain", "ensemble", "all"],
+        default="all",
+        help="Which sweep to visualize. 'domain' -> figures in "
+        "comparison/domain (x=grid cells); 'ensemble' -> "
+        "comparison/ensemble (x=ensemble size, domain fixed); "
+        "'all' (default) does both.",
+    )
+    ap.add_argument(
+        "--root",
+        type=pathlib.Path,
+        default=repo_root / "sweep_metrics",
+        help="Root holding compute_sweep_metrics output "
+        "(default: <repo>/sweep_metrics). May also point at the raw "
+        "ESMDA results root, in which case run_summary.yaml is used.",
+    )
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=None,
+        help="Base output dir; each sweep lands in <out>/<sweep> "
+        "(default: <repo>/comparison).",
+    )
+    ap.add_argument(
+        "--domain",
+        default=None,
+        help="For the ensemble sweep: fix the grid to this NXxNYxNZ "
+        "(default: the grid with the most ensemble sizes).",
+    )
+    ap.add_argument(
+        "--linear-x",
+        action="store_true",
+        help="Use a linear sweep x-axis instead of log.",
+    )
+    ap.add_argument(
+        "--models",
+        nargs="*",
+        default=None,
+        help="Restrict to these assim backends (e.g. pyudales pylbm).",
+    )
+    ap.add_argument(
+        "--no-trajectories",
+        action="store_true",
+        help="Skip the (slower) per-run NetCDF parameter-trajectory overlays.",
+    )
+    ap.add_argument(
+        "--no-timeseries",
+        action="store_true",
+        help="Skip the per-model sensor time-series grids.",
+    )
+    ap.add_argument(
+        "--components",
+        nargs="*",
+        default=["vel", "u", "v", "w"],
+        help="Velocity quantities for the sensor time-series grids.",
+    )
     args = ap.parse_args()
 
     _setup_style()
@@ -775,8 +966,7 @@ def main() -> None:
     df = load_runs(root, args.models)
     if df.empty:
         raise SystemExit("No runs with metrics.yaml / run_summary.yaml found.")
-    print(f"Loaded {len(df)} run(s): "
-          f"{df['assim_model'].value_counts().to_dict()}")
+    print(f"Loaded {len(df)} run(s): " f"{df['assim_model'].value_counts().to_dict()}")
 
     sweeps = ["domain", "ensemble"] if args.sweep == "all" else [args.sweep]
     for sweep in sweeps:

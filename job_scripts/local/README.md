@@ -2,7 +2,7 @@
 
 Local (no-SLURM) siblings of `job_scripts/snellius/<backend>/rollout_esmda_from_truth.slurm`.
 They run time-varying-parameter **rollout ESMDA against a pre-simulated ground
-truth** by invoking `scripts/run_esmda.py` **directly** in this shell — no
+truth** by invoking `scripts/esmda/run_esmda.py` **directly** in this shell — no
 `sbatch`, no `module`, no partitions, no wall clock. Everything stays under the
 repo by default (`results/`, `.local_runs/temp/`).
 

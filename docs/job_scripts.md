@@ -126,7 +126,7 @@ Logs: `job_scripts/snellius/out_files/slurm-<model>_<size>-<jobid>.{out,err}`
 is the generic job body used by `submit.sh`. It is driven by
 `PUA_SIZE` / `PUA_ENSEMBLE_SIZE` / `PUA_NUM_PARALLEL` / `PUA_TRUTH_MODEL` /
 `PUA_ASSIM_MODEL` injected by the wrapper, and calls
-`scripts/run_esmda.py` with `run.truth_dir=null` (truth generated inline).
+`scripts/esmda/run_esmda.py` with `run.truth_dir=null` (truth generated inline).
 It is not meant to be `sbatch`-ed directly.
 
 For runs against a **pre-simulated ground truth** use the per-backend SLURM
@@ -363,7 +363,7 @@ fails unless you run `pixi add ffmpeg` once on the login node or export
 
 Full README: [job_scripts/local/README.md](../job_scripts/local/README.md)
 
-Runs `scripts/run_esmda.py` **directly** in your shell — no `sbatch`, no
+Runs `scripts/esmda/run_esmda.py` **directly** in your shell — no `sbatch`, no
 `module`, no wall clock. All three CFD backends plus the neural surrogate are
 supported. Runs go **sequentially** (no job scheduler); within each run the
 ensemble is parallelised across up to `LOCAL_MAX_PARALLEL` processes (default

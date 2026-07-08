@@ -1,8 +1,8 @@
 """Shared post-processing helpers for the ESMDA three-script pipeline.
 
-``scripts/run_esmda.py`` runs the assimilation and saves the raw artifacts;
-``scripts/compute_esmda_metrics.py`` turns those into ``run_summary.yaml`` and
-``scripts/make_esmda_figures.py`` draws the figures. The metric and figure
+``scripts/esmda/run_esmda.py`` runs the assimilation and saves the raw artifacts;
+``scripts/esmda/compute_esmda_metrics.py`` turns those into ``run_summary.yaml`` and
+``scripts/esmda/make_esmda_figures.py`` draws the figures. The metric and figure
 stages both need the same lazy truth access, sensor-series extraction and
 small scalar/YAML helpers, so they live here instead of being duplicated.
 

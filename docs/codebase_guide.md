@@ -282,7 +282,7 @@ double-mount.
 **ESMDA smoother** is selected via the `esmda/smoother` group (default
 `dynamic`). It is the one genuinely mode-specific piece; the shared
 `num_steps`/`alpha`/`localization` come from the inlined `esmda:` block of
-`run_esmda.yaml` via `${esmda.*}` interpolation. The single [`run_esmda.py`](../scripts/run_esmda.py)
+`run_esmda.yaml` via `${esmda.*}` interpolation. The single [`run_esmda.py`](../scripts/esmda/run_esmda.py)
 script handles every former esmda script — mode is the cross product of
 `esmda/smoother`, `params@prior_params`, and `esmda.num_assimilation_windows`
 (1 = single window, N = rollout). Tests compose `config_name="run_esmda"` and
@@ -321,7 +321,7 @@ Hydra's package-override syntax to mount the same `model/` and `params/` groups
 **twice**, once as the truth and once as the assim/prior:
 
 ```bash
-python scripts/run_esmda.py \
+python scripts/esmda/run_esmda.py \
   model@truth_model=pylbm model@assim_model=pyudales \
   params@truth_params=static_truth params@prior_params=static \
   esmda/smoother=static
@@ -547,7 +547,7 @@ def test_something(compose_test_cfg) -> None:
   and `state_and_dynamic.yaml`.
 
 ### Multi-window rollout ESMDA
-Handled directly inside [scripts/run_esmda.py](../scripts/run_esmda.py)'s window
+Handled directly inside [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py)'s window
 loop when `esmda.num_assimilation_windows > 1`. The full truth (state +
 parameters) for every window is simulated up front; the loop then, per window:
 slices that window's truth observations (a contiguous block of frames), adds
@@ -821,7 +821,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   `conf/esmda/smoother/<name>.yaml` with your class's `_target_` and the
   shared fields wired via `${esmda.num_steps}` / `${esmda.alpha}` /
   `${esmda.localization}`. No new script or primary config is needed —
-  [scripts/run_esmda.py](../scripts/run_esmda.py) instantiates whatever
+  [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py) instantiates whatever
   `cfg.esmda.smoother` resolves to, and you select it with
   `esmda/smoother=<name>`. If the variant needs the augmented state to include
   the flattened field, branch on `isinstance(esmda, StateAndParameterESMDA)` as
@@ -912,7 +912,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 | What an ensemble member does in parallel | [src/pyurbanair/base_ensemble_forward_model.py](../src/pyurbanair/base_ensemble_forward_model.py) |
 | How a solver consumes params | `libs/<solver>/src/<solver>/utils/params_utils.py` |
 | ESMDA Kalman update / variants | [libs/data-assimilation/src/data_assimilation/smoothing/esmda.py](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py) |
-| Which ESMDA mode runs (smoother/prior/windows) | [scripts/run_esmda.py](../scripts/run_esmda.py) + [conf/run_esmda.yaml](../conf/run_esmda.yaml), [conf/esmda/smoother/](../conf/esmda/smoother/) |
+| Which ESMDA mode runs (smoother/prior/windows) | [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py) + [conf/run_esmda.yaml](../conf/run_esmda.yaml), [conf/esmda/smoother/](../conf/esmda/smoother/) |
 | How sensors map to grid points | [libs/data-assimilation/src/data_assimilation/observation_operator.py](../libs/data-assimilation/src/data_assimilation/observation_operator.py) |
 | Per-window rollout logic | `run_esmda.py`'s window loop / `run_forward_model.py`'s `run.rollout_steps` loop |
 | Parameter samplers (static + dynamic) | [src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/), [src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/), [conf/params/](../conf/params/) |

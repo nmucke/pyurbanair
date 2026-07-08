@@ -1,4 +1,4 @@
-# Primary config (entry point) for scripts/run_esmda.py — the single ESMDA entry
+# Primary config (entry point) for scripts/esmda/run_esmda.py — the single ESMDA entry
 # point that replaces run_{parameter,state_and_parameter,rollout,
 # time_varying_parameter,time_varying_parameters_rollout}_esmda.py.
 #
@@ -28,11 +28,11 @@
 #
 # Examples::
 #
-#   python scripts/run_esmda.py esmda/smoother=static \
+#   python scripts/esmda/run_esmda.py esmda/smoother=static \
 #     params@prior_params=static params@truth_params=static_truth
-#   python scripts/run_esmda.py esmda/smoother=state_and_parameter \
+#   python scripts/esmda/run_esmda.py esmda/smoother=state_and_parameter \
 #     params@prior_params=static esmda.num_assimilation_windows=3
-#   python scripts/run_esmda.py esmda/smoother=state_and_dynamic \
+#   python scripts/esmda/run_esmda.py esmda/smoother=state_and_dynamic \
 #     params@prior_params=dynamic params@truth_params=dynamic_truth \
 #     esmda.num_assimilation_windows=3
 defaults:

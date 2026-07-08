@@ -323,7 +323,7 @@ Key field notes:
 Select pypalm for forward or assimilation runs:
 ```bash
 python scripts/run_forward_model.py model=pypalm
-python scripts/run_esmda.py model@assim_model=pypalm model@truth_model=pylbm \
+python scripts/esmda/run_esmda.py model@assim_model=pypalm model@truth_model=pylbm \
     esmda/smoother=static params@truth_params=static_truth params@prior_params=static
 ```
 
