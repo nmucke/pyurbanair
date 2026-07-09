@@ -140,6 +140,8 @@ extend-exclude = '''
   | \.venv
   | build
   | dist
+  # Vendored third-party code (kept byte-for-byte upstream; do not reformat).
+  | _tadpole
 )/
 '''
 
@@ -148,6 +150,8 @@ profile = "black"
 multi_line_output = 3
 line_length = 88
 known_first_party = ["pyurbanair"]
+# Vendored third-party code (kept byte-for-byte upstream; do not reorder imports).
+extend_skip_glob = ["*/_tadpole/*"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -163,6 +167,12 @@ warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
 strict_equality = true
+
+# Vendored third-party autoencoder (neural_surrogates.architectures._tadpole):
+# kept byte-for-byte upstream, so it does not satisfy this repo's strict mypy.
+[[tool.mypy.overrides]]
+module = "neural_surrogates.architectures._tadpole.*"
+ignore_errors = true
 
 
 

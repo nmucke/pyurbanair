@@ -8,10 +8,13 @@ concrete trainers differ only in how a batch becomes a loss:
 * :class:`Trainer` -- generic full-grid masked element-wise loss.
 * :class:`PatchTrainer` -- the four-term Eq (9) domain-decomposition loss over
   the model's per-patch intermediates.
+* :class:`AutoencoderTrainer` -- snapshot (V)AE reconstruction + KL loss (no
+  rollout / pushforward), for Tadpole-style pre-training.
 """
 
+from neural_surrogates.training.autoencoder import AutoencoderTrainer
 from neural_surrogates.training.base import BaseTraining
 from neural_surrogates.training.patch import PatchTrainer
 from neural_surrogates.training.standard import Trainer
 
-__all__ = ["BaseTraining", "Trainer", "PatchTrainer"]
+__all__ = ["BaseTraining", "Trainer", "PatchTrainer", "AutoencoderTrainer"]

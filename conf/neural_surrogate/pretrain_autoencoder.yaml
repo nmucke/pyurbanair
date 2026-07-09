@@ -1,0 +1,143 @@
+# @package _global_
+#
+# Tadpole-style (V)AE pre-training (plan 02): representation learning on flow
+# snapshots, NO next-step objective. Trains a `TadpoleAE` with the
+# `AutoencoderTrainer` on a `SnapshotDataset` split and writes the standard
+# `model_weights/<model_name>/` layout (config.yaml + full weights.pt), plus
+# `encoder.pt` / `decoder.pt` (the handoff format for plan 03). Entry point:
+#   scripts/neural_surrogate/pretrain_autoencoder.py
+#
+#   pixi run -e dev python scripts/neural_surrogate/pretrain_autoencoder.py \
+#     dataset.root_dir=training_data/pylbm_barcelona model_name=tadpole_ae_s
+#
+# Unlike training.yaml this has no `mode` group: the AE is a single trainer +
+# architecture pairing, so everything is inline.
+
+defaults:
+  - _self_
+
+# Where the pre-trained model lands: model_weights/<model_name>/.
+model_name: tadpole_ae_s
+
+architecture:
+  _target_: neural_surrogates.TadpoleAE
+  # Upstream size S/B/L (8.8M / 38.1M / 152.1M params; latent compression
+  # 16/8/4). n_state_channels is injected by the script from dataset.state_vars.
+  size: S
+  # Spatial crop the field is tiled into internally. MUST be a multiple of 16
+  # (the encoder's total downsampling). Pick one that divides the trained grid
+  # to avoid padding; the model zero-pads to a multiple of it otherwise.
+  encoder_crop_size: 64
+  # "sample" (VAE-proper) or "mode" (deterministic-AE ablation; pair with
+  # loss.kl_weight: 0 for a plain AE).
+  latent_type: sample
+  # Encode the geometry mask (+ SDF channels, if any) as extra folded channels so
+  # their latents are available to the plan-03 DFT sub-network. false = A/B it
+  # (state channels only).
+  encode_geometry: true
+  # SDF / ∇SDF geometry features appended alongside the encoded mask (requires
+  # encode_geometry: true): none | sdf (+1) | grad (+3) | both (+4). Must match
+  # dataset.sdf_features (the script cross-checks it) and dataset.sdf_clamp_cells.
+  sdf_features: sdf
+  sdf_clamp_cells: 32
+  # Pretrained init: none (random) | hf (thuerey-group/Tadpole weights for this
+  # size; needs huggingface_hub) | {encoder: path, decoder: path} (local files).
+  pretrained: none
+  # Cap on folded crops processed at once (bound memory); null = all together.
+  max_internal_batchsize: null
+  normalize: true
+
+# VAE loss weights (the reconstruction metric itself is MSE, set in the script).
+loss:
+  # β: KL weight. Tiny by default (latent-diffusion convention). 0 with
+  # latent_type: mode degrades to a plain deterministic autoencoder.
+  kl_weight: 1.0e-6
+  # Weight on reconstructing the geometry/SDF channels (only when
+  # encode_geometry: true); keeps the total loss dominated by state recon.
+  geometry_recon_weight: 0.1
+
+# AE trainer. Shares BaseTraining machinery (amp, warmup+cosine LR, grad clip,
+# early stopping, checkpoint/resume, metrics.csv) but has NO pushforward
+# curriculum (a snapshot AE has no time dimension).
+trainer:
+  _target_: neural_surrogates.AutoencoderTrainer
+  num_epochs: 200
+  device: cpu
+  patience: 20
+  amp: true
+  amp_dtype: bfloat16
+  # torch.compile off by default (the transformer AE + the dev box's lack of a
+  # CUDA triton); turn on for long GPU runs.
+  compile_model: false
+  channels_last: false
+  cudnn_benchmark: true
+  tf32: true
+  lr_warmup_epochs: 5
+  lr_warmup_start: 1.0e-6
+  lr_min: 1.0e-6
+  # Restrict the state reconstruction loss to fluid cells (obstacle cells carry
+  # no signal).
+  mask_loss: true
+  grad_clip_norm: 1.0
+  resume: true
+  checkpoint_every: 5
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  weight_decay: 1.0e-8
+
+dataset:
+  _target_: neural_surrogates.SnapshotDataset
+  root_dir: training_data/pyudales_idealized
+  # root_dir: /export/scratch2/ntm/pyudales_medium
+  state_vars:
+    - u
+    - v
+    - w
+  # Sample every Nth time slice to decorrelate snapshots (1 = every frame).
+  time_stride: 1
+  # Random spatial crop per item (the paper's intermediate pre-cropping): more
+  # crop diversity per epoch, smaller batches. null = full field (and the
+  # shared-geometry collate fast path). A multiple of encoder_crop_size avoids
+  # in-model padding.
+  random_crop_size: null
+  cache: false
+  dtype: float32
+  # Must match architecture.sdf_features / sdf_clamp_cells.
+  sdf_features: sdf
+  sdf_clamp_cells: 32
+
+# Optional trajectory-bucketed batch sampler.
+#
+# The default (null) plain shuffled DataLoader only supports a SINGLE-GEOMETRY
+# (or uniform-grid) split: with `random_crop_size: null`, a shuffled batch that
+# mixes trajectories of different grid shapes hits `snapshot_collate`'s
+# default_collate fallback, which raises on mismatched tensor shapes. For a
+# MULTI-GEOMETRY snapshot corpus (root produced by
+# generate_random_geometries_training_data.py) set this block: it draws every
+# batch from a single trajectory (one grid/geometry), exactly as for
+# TransitionDataset (see training.yaml for the full argument contract). The
+# shipped `pylbm_barcelona` target is single-geometry, so it stays null.
+# batch_sampler: null
+batch_sampler:
+  _target_: neural_surrogates.TrajectoryBatchSampler
+  batch_size: 2
+  cell_budget: 4194304
+  shuffle: true
+  drop_last: true
+  seed: 0
+
+dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: 2
+  shuffle: true
+  drop_last: true
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  # Ship the (shared) geometry mask + SDF features once per batch; falls back to
+  # stacking per-sample geometry when random-cropping.
+  collate_fn:
+    _target_: neural_surrogates.snapshot_collate
+    _partial_: true

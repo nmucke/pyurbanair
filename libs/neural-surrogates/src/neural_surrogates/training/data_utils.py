@@ -101,12 +101,16 @@ def _normalization_signature(train_ds: "TransitionDataset") -> str:
     """A stable fingerprint of every input `_compute_normalization_stats` reads.
 
     The cached stats are only valid for the exact split, channel/param order and
-    on-disk state files they were computed from. We key on the split name, the
-    state/param variable tuples, the geometry variable (it selects the fluid
-    mask), and each state file's ``(name, size, mtime)`` -- so regenerating or
-    editing the training data, or changing any of these knobs, invalidates the
-    cache and forces a recompute. ``pushforward_steps`` is deliberately absent:
-    the stats stream every snapshot regardless of the rollout horizon.
+    on-disk state files they were computed from. We key on the dataset class, the
+    split name, the state/param variable tuples, the geometry variable (it selects
+    the fluid mask), and each state file's ``(name, size, mtime)`` -- so
+    regenerating or editing the training data, or changing any of these knobs,
+    invalidates the cache and forces a recompute. ``pushforward_steps`` is
+    deliberately absent: the stats stream every snapshot regardless of the rollout
+    horizon. The dataset class is included so a ``SnapshotDataset`` and a
+    ``TransitionDataset`` over the same root/split never read each other's cache
+    (the values coincide today, but the two could diverge in how they compute
+    stats).
     """
     files = [
         [p.name, st.st_size, int(st.st_mtime)]
@@ -116,6 +120,7 @@ def _normalization_signature(train_ds: "TransitionDataset") -> str:
     return json.dumps(
         {
             "version": _NORM_STATS_VERSION,
+            "dataset_class": type(train_ds).__name__,
             "split": train_ds.split,
             "state_vars": list(train_ds.state_vars),
             "param_names": list(train_ds.param_names),

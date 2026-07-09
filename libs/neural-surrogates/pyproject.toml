@@ -29,6 +29,14 @@ p3d = ["p3d-surrogate>=0.0.4"]
 # environments pull peft in unconditionally via the `neural-surrogates` feature
 # (root pyproject.toml) so the dev env always has it without opting into an extra.
 finetuning = ["peft>=0.11"]
+# Tadpole autoencoder pre-training (neural_surrogates.TadpoleAE, plan 02). The
+# upstream `tadpole` package is NOT a dependency: only the autoencoder subtree is
+# vendored under architectures/_tadpole/ (see its __init__ for the why -- upstream
+# pulls in torchfsm -> vape4d, an unused, resolution-risky chain). This extra just
+# names the vendored code's runtime deps (einops is already a base pixi dep); they
+# are imported lazily inside TadpoleAE so the base package import stays light. The
+# pixi dev/cuda envs already carry diffusers/timm transitively via p3d-surrogate.
+tadpole = ["diffusers", "timm", "einops"]
 
 [tool.pixi.workspace]
 preview = ["pixi-build"]
