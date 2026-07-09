@@ -1,5 +1,23 @@
 # Plan 02 — Autoencoder (foundation-model) pre-training, Tadpole-style
 
+**Status: implemented (2026-07-09).** Delivered: the vendored autoencoder subtree
+`neural_surrogates.architectures._tadpole` (Tadpole @ 4232e698, Apache-2.0),
+`TadpoleAE` (`architectures/tadpole_ae.py`), `SnapshotDataset` + `snapshot_collate`
+(`datasets/snapshot.py`), `AutoencoderTrainer` (`training/autoencoder.py`),
+`conf/neural_surrogate/pretrain_autoencoder.yaml`,
+`scripts/neural_surrogate/pretrain_autoencoder.py`,
+`tests/test_autoencoder_pretraining.py`. See `docs/neural_surrogates.md` Part F.
+**Dependency decision baked in (§1):** the upstream `tadpole` package is *not* a
+dependency — only the autoencoder subtree is vendored (like `_upt/`), because
+upstream's `requirements.txt` pulls in `torchfsm` → `vape4d` (its unused online
+data-gen chain). The vendored files are byte-for-byte upstream except that the
+`GIFt` import (its integer-rank LoRA path, which we never take — LoRA goes through
+PEFT) is made optional. **Crop-size constraint found in implementation:**
+`encoder_crop_size` must be a multiple of 16 (the encoder's total downsampling);
+smaller values make the upstream decoder over-upsample (output ≠ input shape), so
+the wrapper validates it. The adversarial (GAN) loss remains the scoped optional
+extension (the discriminator is vendored but not wired).
+
 **Goal:** a new training submodule + config for pre-training a Tadpole
 autoencoder on our flow data — representation learning only, no next-step
 objective. Faithful to the paper's single-channel-crop design. Staged scope:

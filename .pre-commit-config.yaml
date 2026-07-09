@@ -1,3 +1,9 @@
+# Vendored third-party code is kept byte-for-byte upstream: skip every hook
+# (black/isort/mypy reformat + type-check explicitly-passed files, which
+# tool-config excludes don't cover). Currently just the vendored Tadpole
+# autoencoder subtree (neural_surrogates.architectures._tadpole).
+exclude: '(^|/)_tadpole/'
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0

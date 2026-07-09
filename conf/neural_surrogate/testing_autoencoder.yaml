@@ -1,0 +1,35 @@
+# @package _global_
+#
+# Evaluate a trained Tadpole autoencoder (plan 02): reconstruct test-split
+# snapshots, visualise reconstructions + error at several heights across several
+# trajectories, and report aggregate reconstruction metrics. Entry point:
+#   scripts/neural_surrogate/test_autoencoder.py
+#
+#   pixi run -e dev python scripts/neural_surrogate/test_autoencoder.py \
+#     model_dir=model_weights/tadpole_ae_s
+
+# A model_dir written by pretrain_autoencoder.py (config.yaml + weights.pt).
+model_dir: model_weights/tadpole_ae_s
+device: cuda
+# Where the plots / metrics land.
+output_dir: ${model_dir}/ae_eval
+# Which split to evaluate (train | val | test).
+split: test
+
+# Latent sampling at eval: "mode" (deterministic — use the latent mean, the
+# right choice for reproducible reconstruction metrics) or "sample" (draw from
+# the posterior, as in training).
+latent_type: mode
+
+# Visualisation: how many distinct trajectories to show, how many time slices
+# per trajectory, and how many z-heights per reconstruction figure.
+num_trajectories: 3
+snapshots_per_traj: 1
+num_heights: 5
+
+# How many snapshots (sampled across trajectories/times) to aggregate the
+# quantitative metrics over. null = every snapshot in the split.
+num_metric_samples: 48
+# Per-trajectory forward batch size (snapshots reconstructed at once).
+batch_size: 8
+seed: 0

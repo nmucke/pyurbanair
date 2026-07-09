@@ -825,6 +825,51 @@ pixi run -e dev python scripts/neural_surrogate/test_neural_surrogate.py \
     model_dir=model_weights/unet_convnext_small sample_idx=0
 ```
 
+### 11b. Comparing several models
+
+[scripts/neural_surrogate/compare_surrogate_models.py](../scripts/neural_surrogate/compare_surrogate_models.py)
+is the multi-model sibling of §11: it rolls out *several* trained
+surrogates on the **same** test trajectories and writes side-by-side
+plots plus a metrics table, so different architectures / sizes /
+fine-tunes can be compared apples-to-apples. Each model is rebuilt from
+its own `model_weights/<name>/config.yaml` + `weights.pt` exactly as in
+§11; the diagnostics are the same ones, restructured so models overlay
+(per-step RMSE) or stack (slice grids / animation) instead of standing
+alone. The config is
+[conf/neural_surrogate/comparison.yaml](../conf/neural_surrogate/comparison.yaml):
+
+- `models` — the list of `{name, dir}` entries to include. `dir` is a
+  `model_weights/<...>` folder; `name` labels it in every plot/table.
+- `data` — the trajectories every model is evaluated on. `data.root_dir`
+  forces all models onto one shared dataset (leave `null` to use each
+  model's own training `root_dir` — only meaningful when they match; a
+  warning fires otherwise). `data.split`, `data.sample_indices` and
+  `data.max_steps` pick the split / trajectories / rollout horizon.
+- `animate` — render the stacked truth/pred/`|err|` animation (needs
+  ffmpeg/pillow; disable for a metrics-only pass).
+
+Because the rollout only feeds `(state, params, geometry)`, SDF-consuming
+models (P3D) self-compute their features at inference; the dataset is
+built with `sdf_features=none` to skip the init-time EDT.
+
+Outputs in `${output_dir}/` (default `model_comparison/`):
+
+| File | Contents |
+|---|---|
+| `metrics.csv` | per-(model, sample) + per-model aggregate RMSE / MAE / rel-L2 / final-step RMSE / ms-per-step / param count |
+| `per_step_rmse_sample_*.png` | per-step rollout RMSE, all models overlaid, one figure per sample |
+| `per_step_rmse_mean.png` | per-step RMSE averaged across samples, all models overlaid |
+| `summary_metrics.png` | bar charts of the aggregate metrics per model (accuracy, speed, size) |
+| `slices_sample_*.png` | mid-z `|u|` grid: a truth row, then a pred + `|err|` row per model, across evenly-spaced times |
+| `rollout_sample_*.mp4` | stacked truth/pred/`|err|` animation, one row per model (falls back to `.gif` without ffmpeg) |
+
+```bash
+pixi run -e dev python scripts/neural_surrogate/compare_surrogate_models.py \
+    data.root_dir=training_data/pyudales_idealized \
+    'data.sample_indices=[0,1,2]' data.max_steps=100 \
+    'models=[{name:p3d,dir:model_weights/p3d_idealized},{name:unet,dir:model_weights/unet_convnext_medium}]'
+```
+
 ---
 
 ## Part D — Running the surrogate as a forward model
@@ -1345,3 +1390,129 @@ fine-tune data (that *is* the domain the fine-tuned model targets).
 | Config + `finetune_mode` group | [conf/neural_surrogate/finetuning.yaml](../conf/neural_surrogate/finetuning.yaml), [conf/neural_surrogate/finetune_mode/](../conf/neural_surrogate/finetune_mode/) |
 | Run script | [scripts/neural_surrogate/finetune_neural_surrogate.py](../scripts/neural_surrogate/finetune_neural_surrogate.py) |
 | Tests | [test_lora_finetuning.py](../tests/test_lora_finetuning.py), [test_base_training_weights_transform.py](../tests/test_base_training_weights_transform.py) |
+
+---
+
+## Part F — Autoencoder (foundation-model) pre-training (Tadpole)
+
+Pre-train a **Tadpole-style (V)AE** on flow snapshots as pure representation
+learning — **no** next-step objective. This is plan 02 of
+[neural_surrogate_plans](neural_surrogate_plans/00_master_plan.md); it brings in
+the autoencoder wrapper, a single-snapshot dataset and an AE trainer. Plan 03
+(not yet implemented) turns a pre-trained AE into a next-step time-stepper; the
+AE itself is **never** an ESMDA forward model.
+
+### 26. `TadpoleAE` — the wrapper architecture
+
+[architectures/tadpole_ae.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_ae.py)
+wraps the **vendored** `TadpoleAutoencoder`
+([architectures/_tadpole/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/),
+from [tum-pbs/Tadpole](https://github.com/tum-pbs/Tadpole)) behind this repo's
+conventions. We do **not** touch our `P3D` wrapper or `p3d_surrogate` — the AE
+uses Tadpole's own P3D encoder/decoder, which ship the KL/VAE head.
+
+Only the autoencoder subtree is vendored (like `_upt/`), **not** an external
+`tadpole` dependency: upstream's `requirements.txt` pulls in `torchfsm` (its
+online data-generation dep, unused here) → `vape4d`, an unnecessary,
+resolution-risky chain the AE path never imports. The vendored files are
+byte-for-byte upstream except one edit — the `GIFt` import (upstream's
+integer-rank LoRA library, used only by a branch we never take; we drive LoRA
+through PEFT) is made optional. Preserving the exact subtree keeps every internal
+relative import valid **and** the encoder/decoder `state_dict` keys identical, so
+the HF `thuerey-group/Tadpole` weights still load. Runtime deps
+(`diffusers`/`timm`/`einops`) are the `neural_surrogates[tadpole]` extra, imported
+lazily inside `TadpoleAE.__init__` so `import neural_surrogates` stays light.
+
+What the wrapper adds:
+
+| Concern | Behaviour |
+|---|---|
+| **Normalization** | `normalize=True` z-scores each state channel with buffered training stats (`set_normalization`, saved with the weights) — the same contract as `P3D`/`UPT`, so the pre-train script's `get_normalization_stats` path just works. Standardising *before* the autoencoder folds channels into the batch makes each folded **state** crop ~`N(0,1)`, matching Tadpole's pre-training statistics (this is what the HF warm start relies on). The geometry-block channels are fed **raw** (see below), so on those few auxiliary channels the HF encoder sees out-of-distribution inputs — acceptable: they carry a bounded, near-constant geometry cue (not primary flow statistics) that the encoder adapts to during continued pre-training. |
+| **Geometry** | Input is masked (`state * geometry`, obstacles zeroed) like `P3D`. With `encode_geometry=True` the mask (`{0,1}`) and, if `sdf_features` is on, the SDF channels (`[-1,1]`) are appended **raw** (already bounded; a 0/1 mask has no mean/std to standardise) as **extra folded encoder channels**, and *reconstructed* — on purpose: recon loss on the state alone would let the encoder discard geometry from the latent, so making it reconstruct the geometry block is the supervision that forces geometry *into* the latent, which is what the plan-03 DFT attends over. On a single-geometry corpus this re-encodes a constant per snapshot (intended for the multi-geometry regime; use `encode_geometry=False` for state-only / single-geometry). |
+| **SDF features** | `sdf_features` (`none`/`sdf`/`grad`/`both`) appends the clamped-SDF / gradient channels alongside the encoded mask; requires `encode_geometry=True` and must match the dataset's mode + `sdf_clamp_cells` (the script cross-checks). |
+| **Padding** | Each spatial dim is zero-padded up to a multiple of `encoder_crop_size` (which must be a multiple of 16 — the encoder's total downsampling) so the field tiles cleanly, then the reconstruction is cropped back. |
+| **Params** | Deliberately **not** an AE input — physical params condition dynamics, not single-snapshot appearance (they enter in plan 03). `n_params` is accepted for signature parity and ignored. |
+| **Pretrained** | `pretrained`: `none` (random) / `hf` (`thuerey-group/Tadpole` weights for the size, via `huggingface_hub`) / `{encoder, decoder}` local paths. |
+
+`forward(state, geometry, geom_features=None, *, return_kl_element=False,
+working_space=False)`: by default returns the **physical-units** state
+reconstruction `(B, C, *grid)` (obstacles zeroed) — the clean contract for plan
+03 / notebooks. With `working_space=True` it returns `(recon, target)` of the
+**full-channel working-space** reconstruction and its input target, which is what
+the trainer needs to split the state / geometry loss without recomputing the
+assembled input. `encode(...)` / `decode(...)` passthroughs are exposed for plan
+03 and analysis. Sizes `S`/`B`/`L` (8.8M/38.1M/152.1M params; latent compression
+16/8/4).
+
+### 27. `SnapshotDataset` — single time slices
+
+[datasets/snapshot.py](../libs/neural-surrogates/src/neural_surrogates/datasets/snapshot.py)
+is the representation-learning sibling of `TransitionDataset` (§6): it reads the
+same on-disk split but every `(trajectory, t)` pair is a sample — a single state
+snapshot, **no** next-step target and **no** params. It reuses the file
+discovery, lazy `xr.open_dataset`, geometry-mask loading and content-deduped SDF
+computation, and exposes empty `param_names` / zero-width `_params` so the shared
+`get_normalization_stats` path (`training/data_utils.py`) works unchanged (its
+param branch degenerates to empty stats). Items: `state` `(C, *grid)`, `geometry`
+`(*grid,)`, optional `geom_features` `(C, *grid)`. `time_stride` sub-samples
+snapshots to decorrelate them; `random_crop_size` returns a random spatial crop
+per item (the paper's intermediate pre-cropping — more crop diversity, smaller
+batches; default `null` = full field). `snapshot_collate` ships a shared
+geometry once as `(1, *grid)` (the full-field fast path) and falls back to
+stacking per-sample geometry when random-cropping.
+
+### 28. `AutoencoderTrainer` — the (V)AE loss
+
+[training/autoencoder.py](../libs/neural-surrogates/src/neural_surrogates/training/autoencoder.py)
+reuses all of `BaseTraining`'s machinery (device/AMP, warmup+cosine LR, grad
+clip, early stopping, checkpoint/resume, `metrics.csv`, best-weights) but has
+**no** pushforward curriculum (a snapshot AE has no time axis). It overrides
+`_forward` to compute
+
+```
+loss = masked_mse(state_recon, state)                       # fluid cells only
+     + geometry_recon_weight * mse(geometry_recon, geometry_block)
+     + kl_weight * kl_elem.mean()
+```
+
+on a `SnapshotDataset` batch. The state reconstruction MSE is fluid-masked
+(obstacle cells carry no signal); the geometry/SDF channels (present only when
+`encode_geometry`) get their own small weight so the total stays dominated by
+state reconstruction; `kl_weight` (β) defaults tiny (latent-diffusion
+convention). `kl_weight=0` + `latent_type="mode"` degrades to a plain
+deterministic AE — the "AE core" of the staged scope, one config knob away. The
+per-term breakdown (`recon` / `geom` / `kl`) lands in `metrics.csv` via
+`_aux_terms`. The **adversarial (GAN) loss** is a scoped optional extension
+(`architecture/_tadpole/discriminator.py` is vendored for it) — not yet wired.
+
+### 29. Config + script + artifacts
+
+[conf/neural_surrogate/pretrain_autoencoder.yaml](../conf/neural_surrogate/pretrain_autoencoder.yaml)
+(`# @package _global_`, no `mode` group — a single trainer + architecture
+pairing) drives
+[scripts/neural_surrogate/pretrain_autoencoder.py](../scripts/neural_surrogate/pretrain_autoencoder.py)
+(`run(cfg)` + `@hydra.main`, same skeleton as `train_neural_surrogate.py`):
+datasets → normalization stats → `set_normalization` → save `config.yaml` →
+`AutoencoderTrainer.fit()`.
+
+```bash
+pixi run -e dev python scripts/neural_surrogate/pretrain_autoencoder.py \
+    dataset.root_dir=training_data/pylbm_barcelona model_name=tadpole_ae_s
+```
+
+Artifacts in `model_weights/<name>/`: `weights.pt` (full `TadpoleAE` state dict —
+our standard), plus `encoder.pt` / `decoder.pt` via `save_separate_weights` (the
+handoff format for plan 03 and HF-style reuse), and `config.yaml` /
+`checkpoint.pt` / `metrics.csv` as usual.
+
+### 30. File map
+
+| Piece | File |
+|---|---|
+| `TadpoleAE` wrapper | [architectures/tadpole_ae.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_ae.py) |
+| Vendored autoencoder subtree | [architectures/_tadpole/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/) |
+| `SnapshotDataset` / `snapshot_collate` | [datasets/snapshot.py](../libs/neural-surrogates/src/neural_surrogates/datasets/snapshot.py) |
+| `AutoencoderTrainer` | [training/autoencoder.py](../libs/neural-surrogates/src/neural_surrogates/training/autoencoder.py) |
+| Config | [conf/neural_surrogate/pretrain_autoencoder.yaml](../conf/neural_surrogate/pretrain_autoencoder.yaml) |
+| Run script | [scripts/neural_surrogate/pretrain_autoencoder.py](../scripts/neural_surrogate/pretrain_autoencoder.py) |
+| Tests | [test_autoencoder_pretraining.py](../tests/test_autoencoder_pretraining.py) |

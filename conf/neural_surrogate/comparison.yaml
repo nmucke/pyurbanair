@@ -1,0 +1,44 @@
+# @package _global_
+#
+# Config for scripts/neural_surrogate/compare_surrogate_models.py.
+#
+# Roll out several trained surrogates on the SAME set of test trajectories and
+# produce side-by-side plots + a metrics table so different models can be
+# compared directly.
+#
+# Two things you set here:
+#   * `models` -- which trained models to include. Each entry is a
+#     `{name, dir}` pair; `dir` is a model_weights/<...> folder holding
+#     `config.yaml` + `weights.pt` (what train_neural_surrogate.py writes).
+#     `name` is the label used in every plot/table (defaults to the dir name).
+#   * `data`   -- which trajectories to compare on. All models roll out on the
+#     SAME data so the comparison is apples-to-apples.
+
+models:
+  - name: p3d_idealized
+    dir: model_weights/p3d_idealized
+  - name: p3d_barcelona
+    dir: model_weights/p3d_barcelona
+
+data:
+  # Dataset root to evaluate on. `null` -> each model uses the `root_dir` from
+  # its own training `config.yaml` (only meaningful when every model was trained
+  # on the same dataset; a warning is printed otherwise). Set this to a single
+  # dataset dir to force every model onto the same trajectories.
+  root_dir: training_data/pyudales_idealized
+  # Which split to pull trajectories from.
+  split: test
+  # Trajectory indices within the split to evaluate. Each is rolled out from its
+  # own initial condition for the full trajectory length.
+  sample_indices: [0]
+  # Cap the rollout horizon (truth trajectories can be long). null -> full length.
+  max_steps: 150
+
+device: cuda
+
+# Root output dir; per-run artifacts land directly here.
+output_dir: model_comparison
+
+# Render the stacked truth-vs-models animation (one row per model). Slower and
+# needs ffmpeg/pillow; disable for a quick metrics-only pass.
+animate: true

@@ -4,12 +4,15 @@ from neural_surrogates.architectures import (
     UPT,
     DomainDecomposed,
     SimpleConv,
+    TadpoleAE,
     UNetConvNeXt,
 )
 from neural_surrogates.datasets import (
     PatchTransitionDataset,
+    SnapshotDataset,
     TrajectoryBatchSampler,
     TransitionDataset,
+    snapshot_collate,
 )
 from neural_surrogates.dd_loss import DomainDecompositionLoss
 from neural_surrogates.decomposition import DomainDecomposition
@@ -20,22 +23,31 @@ from neural_surrogates.sdf import (
     normalize_sdf_mode,
     sdf_features,
 )
-from neural_surrogates.training import BaseTraining, PatchTrainer, Trainer
+from neural_surrogates.training import (
+    AutoencoderTrainer,
+    BaseTraining,
+    PatchTrainer,
+    Trainer,
+)
 
 __all__ = [
     "TransitionDataset",
     "PatchTransitionDataset",
     "TrajectoryBatchSampler",
+    "SnapshotDataset",
+    "snapshot_collate",
     "DomainDecompositionLoss",
     "BaseTraining",
     "PatchTrainer",
     "Trainer",
+    "AutoencoderTrainer",
     "architectures",
     "SimpleConv",
     "UNetConvNeXt",
     "UPT",
     "P3D",
     "DomainDecomposed",
+    "TadpoleAE",
     "DomainDecomposition",
     "NeuralSurrogateForwardModel",
     "NeuralSurrogateEnsembleForwardModel",
