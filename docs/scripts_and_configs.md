@@ -330,9 +330,16 @@ architecture comes from the pretrained `model_dir`.
 | File | Trainer | Loss |
 |---|---|---|
 | [`finetune_mode/lora_nextstep.yaml`](../conf/neural_surrogate/finetune_mode/lora_nextstep.yaml) | `neural_surrogates.Trainer` | `torch.nn.MSELoss` |
+| [`finetune_mode/dft.yaml`](../conf/neural_surrogate/finetune_mode/dft.yaml) | `neural_surrogates.Trainer` | `torch.nn.MSELoss` |
 
-Plan 03 adds a `dft` mode (autoencoder → time-stepper). Like `mode/`, the entry
-sits **after** `_self_` so it overrides the inline `trainer._target_`.
+Both entries sit **after** `_self_` so they override the inline `trainer._target_`.
+Unlike `lora_nextstep` (architecture read from the pretrained `model_dir`),
+`dft` (plan 03: autoencoder → time-stepper) declares the `TadpoleTimeStepper`
+architecture **inline** — its `pretrained_model_dir` is the **AE** dir, and the
+script instantiates the stepper fresh with `pretrained_ae_dir` set to it. It also
+carries a `lora.target_preset: tadpole_encdec` and a `trainable_modules` list (the
+sub-network + γ skips + `latent_residual_scale`, trained fully, not via LoRA). See
+[neural_surrogates.md §31–34](neural_surrogates.md#part-g--autoencoder--time-stepper-tadpole-dft).
 
 ---
 

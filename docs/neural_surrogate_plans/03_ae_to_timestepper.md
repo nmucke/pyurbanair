@@ -1,5 +1,24 @@
 # Plan 03 — Pre-trained autoencoder → time-stepping predictor (Tadpole DFT)
 
+**Status: implemented (2026-07-09).** Delivered: the vendored `TadpoleDFT` +
+downstream sub-network subtree (`architectures/_tadpole/model/dft.py`,
+`architecture/downstream/`, optional-dep-shimmed for the no-triton/no-mamba/no-flash
+env), the `TadpoleTimeStepper` + `ParamConditionedSubnetwork` wrapper
+(`architectures/tadpole_stepper.py`) sharing field IO with `TadpoleAE` via the
+`_TadpoleFieldIO` mixin (`architectures/_tadpole_field_io.py`), the `tadpole_encdec`
+LoRA preset (`finetuning/targets.py`), the `dft` finetune mode
+(`conf/neural_surrogate/finetune_mode/dft.yaml` + the DFT dispatch in
+`scripts/neural_surrogate/finetune_neural_surrogate.py`), and
+`tests/test_ae_to_timestepper.py`. See `docs/neural_surrogates.md` Part G. **Wiring
+decisions baked in:** the residual is *intrinsic* — `state_next = dft_state * mask`
+(the DFT morphs its own reconstruction toward `u_{t+Δt}`; `predict_residual` is a
+no-op framing). The honest init invariant is `stepper(state) ==
+stepper._ae_reference_recon(state, geometry)` **exactly** (zero-init sub-network + γ
+skips ⇒ the DFT output equals the plain-AE reconstruction), *not* `state_next ==
+state` (a perfectly-reconstructing-AE / training outcome). Deploy stamps
+`skip_pretrained_load: true` + `pretrained_ae_dir: null` into the saved config so
+ESMDA rebuilds the net from the merged `weights.pt` without the AE dir.
+
 **Goal:** load a pre-trained autoencoder (plan 02) and fine-tune it into a
 next-step predictor with Tadpole's DFT recipe — latent sub-network +
 γ-gated reintroduced skip connections + LoRA on encoder/decoder — trained

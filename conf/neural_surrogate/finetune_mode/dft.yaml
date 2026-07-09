@@ -1,0 +1,79 @@
+# @package _global_
+# AE -> time-stepper fine-tuning (plan 03). Turns a PRE-TRAINED Tadpole
+# autoencoder (plan 02, `pretrain_autoencoder.py`) into a next-step predictor by
+# wrapping it in a `TadpoleTimeStepper` (frozen encoder/decoder + a zero-init
+# latent subnetwork + zero-init gamma skip scales) and fine-tuning through the
+# existing plan-01 pipeline: LoRA on the encoder/decoder, the new modules trained
+# fully, masked next-state MSE with the standard Trainer.
+#
+#   pixi run -e dev python scripts/neural_surrogate/finetune_neural_surrogate.py \
+#     finetune_mode=dft \
+#     pretrained_model_dir=model_weights/tadpole_ae_s \
+#     model_name=tadpole_dft_s_barcelona \
+#     dataset.root_dir=training_data/pylbm_barcelona
+#
+# Unlike `lora_nextstep` (which reads the architecture from the pretrained
+# config), THIS mode declares the architecture inline: `pretrained_model_dir` is
+# the AE dir (a TadpoleAE, not a stepper), so the stepper node lives here and the
+# AE dir only supplies encoder.pt/decoder.pt + the state normalization stats. The
+# finetune script detects DFT mode by the presence of this `architecture` node.
+# Must sit AFTER `_self_` in finetuning.yaml's defaults so it overrides the inline
+# `trainer._target_` there.
+architecture:
+  _target_: neural_surrogates.TadpoleTimeStepper
+  # Encoder/decoder size -- MUST match the pre-trained AE (cross-checked against
+  # the AE config.yaml; the script fails loud on a mismatch). n_state_channels /
+  # n_params are injected by the script from the fine-tune dataset.
+  size: S
+  # The AE export dir (encoder.pt / decoder.pt / weights.pt). Filled from
+  # `pretrained_model_dir` by the script; re-stamped to null + skip_pretrained_load
+  # in the SAVED config so ESMDA rebuilds the net from the merged weights alone.
+  pretrained_ae_dir: ???
+  # "default" builds the param-conditioned latent transformer (zero-init); None
+  # gives a pure frozen AE (no time-stepping increment).
+  subnetwork: default
+  # film (adaLN scale/shift, default) | token (additive param embedding) | none.
+  param_conditioning: film
+  # Deterministic latent for rollouts (identity-at-init parity holds in "mode").
+  latent_type: mode
+  # Spatial crop the field is tiled into (multiple of 16). Match the AE's grid /
+  # crop; the model zero-pads to a multiple of it otherwise.
+  encoder_crop_size: 64
+  # Geometry / SDF handling -- MUST mirror the AE (cross-checked). The stepper
+  # feeds the same geometry block through the frozen encoder the AE was trained on.
+  encode_geometry: true
+  sdf_features: none
+  sdf_clamp_cells: 32
+  # Cap on folded crops processed at once (bound memory); null = all together.
+  max_internal_batchsize: null
+  normalize: true
+
+# The EXISTING next-step trainer + plain masked MSE (same pairing as
+# lora_nextstep). Overrides finetuning.yaml's inline trainer._target_.
+trainer:
+  _target_: neural_surrogates.Trainer
+loss:
+  _target_: torch.nn.MSELoss
+
+# LoRA on the encoder/decoder (Tadpole's default rank 32). `tadpole_encdec` is the
+# targets.py preset: Linear + 3x3x3 Conv3d leaves inside dft.encoder/dft.decoder
+# (excludes the 1x1x1 convs + cpb_mlp so the merged weights.pt stays foldable).
+lora:
+  variant: standard
+  rank: 32
+  alpha: 64
+  dropout: 0.0
+  target_preset: tadpole_encdec
+  target_modules: null
+  # The new modules are NOT LoRA -- they are unfrozen fully (below), so nothing
+  # rides `modules_to_save` here.
+  modules_to_save: []
+
+# Fully-trained NEW modules (not LoRA): the latent subnetwork + param
+# conditioning, the latent residual scale, and the two gamma skip scales. Matched
+# against the (base-relative) parameter names by the finetune script.
+trainable_modules:
+  - subnetwork
+  - latent_residual_scale
+  - dft.decoder.conv_decoder.scales
+  - dft.decoder.transformer_decoder.scales

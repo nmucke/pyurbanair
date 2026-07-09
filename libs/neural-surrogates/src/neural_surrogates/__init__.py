@@ -3,8 +3,10 @@ from neural_surrogates.architectures import (
     P3D,
     UPT,
     DomainDecomposed,
+    ParamConditionedSubnetwork,
     SimpleConv,
     TadpoleAE,
+    TadpoleTimeStepper,
     UNetConvNeXt,
 )
 from neural_surrogates.datasets import (
@@ -48,6 +50,8 @@ __all__ = [
     "P3D",
     "DomainDecomposed",
     "TadpoleAE",
+    "TadpoleTimeStepper",
+    "ParamConditionedSubnetwork",
     "DomainDecomposition",
     "NeuralSurrogateForwardModel",
     "NeuralSurrogateEnsembleForwardModel",
