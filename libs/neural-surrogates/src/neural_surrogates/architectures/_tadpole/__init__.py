@@ -28,5 +28,6 @@ weights still load via ``weight_encoder``/``weight_decoder``.
 from __future__ import annotations
 
 from .model.autoencoder import TadpoleAutoencoder
+from .model.dft import TadpoleDFT
 
-__all__ = ["TadpoleAutoencoder"]
+__all__ = ["TadpoleAutoencoder", "TadpoleDFT"]

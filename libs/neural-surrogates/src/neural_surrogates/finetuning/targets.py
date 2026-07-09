@@ -28,6 +28,8 @@ fully via ``modules_to_save`` instead, per the plan).
 
 from __future__ import annotations
 
+import re
+
 from torch import nn
 
 # Transformer-block Linears present in every P3D stage, plus the outer adaLN.
@@ -47,11 +49,65 @@ P3D_PRESETS: dict[str, str | None] = {
     "all": None,
 }
 
+# -- TadpoleTimeStepper (plan 03: AE -> time-stepper) ------------------------
+#
+# Derived by enumerating ``TadpoleTimeStepper(...).named_modules()`` (the module
+# tree of the vendored ``TadpoleDFT`` under ``dft.encoder`` / ``dft.decoder`` is
+# fixed across S/B/L, only the block counts differ, so the *suffixes* are stable):
+#
+#   dft.encoder.conv_encoder.conv_encoder.feature_embed          Conv3d 3x3x3
+#   dft.encoder.conv_encoder.conv_encoder.downsampling_layers.N  Conv3d 3x3x3
+#   dft.{enc,dec}...conv_encoder/conv_decoder.blocks.N.conv_{1,2} Conv3d 3x3x3
+#   dft.{enc,dec}...transformer.{downsamples,upsamples}.N.body.M  Conv3d 3x3x3
+#   dft.decoder.conv_decoder.conv_decoder.decompress             Conv3d 3x3x3
+#   dft.decoder.transformer_decoder.transformer.final_layer.out_proj Conv3d 3x3x3
+#   dft.{enc,dec}...blocks.N.attn.qkv                            Linear (fused QKV)
+#   dft.{enc,dec}...blocks.N.mlp.fc1 / .mlp.fc2                  Linear (block FFN)
+#   dft.decoder...final_layer.adaLN_modulation.N                Linear (final adaLN)
+#     -- verified by enumeration: the ONLY adaLN_modulation in this tree is the
+#     decoder's final_layer (there is no per-block adaLN modulation), and its
+#     sibling ``.0`` SiLU is dropped by the adaptable-leaf filter, so this suffix
+#     adapts exactly the one final-layer modulation Linear.
+#
+# EXCLUDED (same rationale as the P3D presets -- keep the merged ``weights.pt``
+# foldable and avoid dead capacity):
+#   * the 1x1x1 convs ``dft.encoder.to_latent`` and
+#     ``...upsampling_layers.N.linear_conv`` -- peft (0.19) merges a 1x1x1 Conv3d
+#     LoRA via the Conv2d squeeze path and crashes in ``get_delta_weight``
+#     (verified on P3D's ``reduce_chan_level*``); ``all_adaptable_module_names``
+#     drops them for the same reason.
+#   * the tiny continuous-position-bias net ``attn.pos_emb_funct.cpb_mlp.*``
+#     (geometry-independent, not worth adapting -- mirrors the P3D exclusion).
+# No grouped convs exist in this tree, so nothing is dropped on that count.
+#
+# The NEW trainable modules (``dft.subnetwork``, ``dft.latent_residual_scale``,
+# and the gamma skip ``scales``) are NOT LoRA-adapted -- the fine-tune script
+# unfreezes them fully via ``trainable_modules`` instead.
+_TADPOLE_ENCDEC_SUFFIX = (
+    r"qkv|mlp\.fc1|mlp\.fc2|adaLN_modulation\.\d+|out_proj|conv_1|conv_2|"
+    r"decompress|feature_embed|downsampling_layers\.\d+|"
+    r"downsamples\.\d+\.body\.\d+|upsamples\.\d+\.body\.\d+"
+)
+
+TADPOLE_PRESETS: dict[str, str | None] = {
+    # Linear + 3x3x3 Conv3d leaves inside dft.encoder / dft.decoder (excludes the
+    # 1x1x1 convs and cpb_mlp as documented above).
+    "tadpole_encdec": rf".*dft\.(encoder|decoder)\..*\.({_TADPOLE_ENCDEC_SUFFIX})",
+    "all": None,
+}
+
 # Architecture family -> its preset table. Keyed by the base module's class name
 # so the fine-tune script needs no import of the concrete architecture class.
 _PRESETS_BY_FAMILY: dict[str, dict[str, str | None]] = {
     "P3D": P3D_PRESETS,
+    "TadpoleTimeStepper": TADPOLE_PRESETS,
 }
+
+# Families whose non-``None`` presets must be resolved to an explicit name list
+# (rather than handed to PEFT as a raw regex) because their module tree contains
+# non-adaptable modules whose names also match the preset regex. See
+# ``resolve_target_modules``.
+_RESOLVE_REGEX_TO_LIST: frozenset[str] = frozenset({"TadpoleTimeStepper"})
 
 # Module types LoRA can adapt (mirrors what peft's lora tuner dispatches on for
 # our architectures). Used to enumerate the "all" preset.
@@ -139,4 +195,15 @@ def resolve_target_modules(
     regex = table[preset]
     if regex is None:  # "all" sentinel -> enumerate
         return all_adaptable_module_names(model, exclude=exclude)
+    if family in _RESOLVE_REGEX_TO_LIST:
+        # Some module trees interleave NON-adaptable modules whose names also match
+        # the suffix regex (e.g. Tadpole's upsample ``body.1`` is a PixelShuffle3d,
+        # matched by ``body\.\d+``). PEFT applies ``target_modules`` to *every*
+        # module and raises on an unsupported one, so intersect the regex with the
+        # adaptable-leaf set (Linear / non-1x1x1, non-grouped Conv3d) up front.
+        return [
+            name
+            for name in all_adaptable_module_names(model, exclude=exclude)
+            if re.fullmatch(regex, name)
+        ]
     return regex

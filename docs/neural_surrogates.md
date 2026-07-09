@@ -1516,3 +1516,133 @@ handoff format for plan 03 and HF-style reuse), and `config.yaml` /
 | Config | [conf/neural_surrogate/pretrain_autoencoder.yaml](../conf/neural_surrogate/pretrain_autoencoder.yaml) |
 | Run script | [scripts/neural_surrogate/pretrain_autoencoder.py](../scripts/neural_surrogate/pretrain_autoencoder.py) |
 | Tests | [test_autoencoder_pretraining.py](../tests/test_autoencoder_pretraining.py) |
+
+---
+
+## Part G — Autoencoder → time-stepper (Tadpole DFT)
+
+Turn a **pre-trained** autoencoder (Part F) into a next-step ESMDA forward model
+with Tadpole's **DFT** ("Dynamic Fine-Tuning") recipe: a *frozen* encoder/decoder
+with **zero-initialised** reintroduced skip connections (the paper's γ scales) and
+a **zero-initialised** latent sub-network that together act as a trainable
+increment *around* the frozen AE reconstruction. This is plan 03 of
+[neural_surrogate_plans](neural_surrogate_plans/00_master_plan.md); it composes
+plans 01 (LoRA/PEFT) and 02 (`TadpoleAE`, `encoder.pt`/`decoder.pt` handoff) — the
+DFT stage is "just" a plan-01 fine-tune with a different architecture plus a few
+extra fully-trained modules.
+
+### 31. `TadpoleTimeStepper` — the wrapper architecture
+
+[architectures/tadpole_stepper.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_stepper.py)
+adapts the **vendored** `TadpoleDFT`
+([architectures/_tadpole/model/dft.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/model/dft.py))
+to this repo's forward contract `forward(state, params, geometry,
+geom_features=None) -> state_next` (what `Trainer._forward` and
+`NeuralSurrogateForwardModel._rollout_chunk` call). Field IO (masking, per-channel
+z-scoring, geometry+SDF channel assembly, crop-multiple padding, `set_normalization`)
+is shared with `TadpoleAE` through the
+[`_TadpoleFieldIO`](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole_field_io.py)
+mixin, so the two wrappers behave identically on the plumbing.
+
+What the wrapper adds around `TadpoleDFT`:
+
+| Concern | Behaviour |
+|---|---|
+| **Frozen enc/dec + LoRA** | Built with `encoder_ft_state="frozen"` / `decoder_ft_state="frozen"`; the pre-trained `encoder.pt`/`decoder.pt` are loaded via the DFT's own `weight_encoder`/`weight_decoder` **load-before-skip-wrap** path (so keys line up with the raw `_KLP3DEncoder`/`_P3DDecoder`). LoRA is injected **externally** through plan 01's PEFT stack (not Tadpole's bundled GIFt path), so `lora.variant` and the merged-`weights.pt` export work here too. |
+| **Latent sub-network** | `subnetwork="default"` builds a `ParamConditionedSubnetwork` wrapping a vendored `SequentialModel` (`attention_method="naive"` — the dev box has **no** triton, so the upstream `"hyper"` attention is unavailable) over the folded latent tokens, with `init_zero_proj=True` so its output is exactly `0` at init. `None` builds no sub-network (pure frozen AE). |
+| **Param conditioning** (our addition; Tadpole has none) | `param_conditioning="film"` (default): the (z-scored) params `(B, P)` drive a small MLP with a **zero-initialised** output layer producing per-channel `(scale, shift)` applied to the latent tokens as `x*(1+scale)+shift`. `"token"`: an additive (adaLN-style) zero-init param embedding. `"none"` or `n_params==0`: **no** conditioning module at all (repo no-op rule) — the module tree is byte-identical to a param-free build. |
+| **Normalization** | State stats are **inherited** from the AE (read from `<ae_dir>/weights.pt`) so the frozen encoder sees its pre-training distribution; `set_normalization` installs the fine-tune split's **param** stats (used to z-score params before conditioning). Buffers travel with the checkpoint. |
+| **Geometry** | Masked like `P3D` (`state * geometry`); with `encode_geometry=True` the mask (+SDF) channels ride through the frozen encoder exactly as in pre-training, so the latent tokens the sub-network attends over carry geometry. Output geometry channels are discarded (geometry is static). Cross-checked against the AE (must match). |
+
+**Residual convention.** Output is `state_next = dft_state * mask` — the DFT
+*directly* predicts the next state (it morphs its own reconstruction toward
+`u_{t+Δt}`); there is **no** separate `state + increment` term. `predict_residual`
+is kept for API parity but is a no-op framing here (`state + (dft_state - state) ==
+dft_state`). The trainable increment is *intrinsic*: the zero-init sub-network / γ
+skips are the learned morph around the frozen AE reconstruction.
+
+**Identity-at-init invariant.** At construction the sub-network output is `0`
+(`init_zero_proj`), the γ skip `scales` are `0` and `latent_residual_scale == 1.0`,
+so the DFT output is **identical to the plain-AE reconstruction** of the same
+working-space input. `stepper._ae_reference_recon(state, geometry)` exposes that
+pure-AE reconstruction cheaply (same encode/decode with the sub-network bypassed
+and skip residuals zeroed), and the unit test asserts `stepper(state) ==
+stepper._ae_reference_recon(state, geometry)` **exactly** (0.0 in practice) — the
+single most informative test of the DFT wiring (it proves every zero-init and the
+skip gating are correct). This is *not* `state_next == state`: that holds only for
+a perfectly-reconstructing AE, a **training** outcome, not a wiring invariant.
+
+### 32. Training path — `finetune_mode=dft`
+
+[conf/neural_surrogate/finetune_mode/dft.yaml](../conf/neural_surrogate/finetune_mode/dft.yaml)
+extends the plan-01 fine-tune config. Unlike `lora_nextstep` (which leaves the
+architecture to the pretrained config), `dft.yaml` declares the architecture
+**inline** (`TadpoleTimeStepper` + `size`/`param_conditioning`/`latent_type`/
+`subnetwork`), because `pretrained_model_dir` here is the **AE** dir, not a
+next-step model. It also sets `lora.target_preset: tadpole_encdec` and a
+`trainable_modules` list (the NEW modules trained *fully*, not via LoRA):
+`subnetwork`, `latent_residual_scale`, and the γ skip `scales`.
+
+`finetune_neural_surrogate.py` dispatches on the presence of the inline
+`cfg.architecture` node (dft.yaml sets it; `lora_nextstep` does not). In DFT mode
+it: instantiates `cfg.architecture` fresh with `n_state_channels` /`n_params` from
+the fine-tune dataset and `pretrained_ae_dir = pretrained_model_dir`;
+**cross-checks** the AE's `size` / `encode_geometry` / `sdf_features` /
+`sdf_clamp_cells` (from the AE `config.yaml`) against the stepper and **fails loud**
+on a mismatch; installs the fine-tune split's param stats via `set_normalization`
+(state stats inherited from the AE); freezes everything, injects LoRA on
+`dft.encoder`/`dft.decoder` via the `tadpole_encdec` preset, and unfreezes the
+`trainable_modules`. Everything else — the `TransitionDataset`, masked-MSE
+`Trainer`, `weights_transform=merge_to_state_dict` merged export — is identical to
+plan 01. `lora_nextstep` stays byte-identical (the DFT branch is mode-guarded).
+
+**`tadpole_encdec` LoRA preset** ([targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py)):
+a regex selecting the Linear + 3×3×3 Conv3d leaves inside `dft.encoder`/
+`dft.decoder` (`qkv`, `mlp.fc1/.fc2`, the outer adaLN, and the encoder/decoder
+convs). The 1×1×1 convs (`to_latent`, `linear_conv`) and the `cpb_mlp`
+positional-bias net are excluded for the same merge-safety / dead-capacity reasons
+as the P3D presets.
+
+### 33. ESMDA deploy + artifact layout
+
+The export is the standard plan-01 shape, so
+[§12](#12-neuralsurrogateforwardmodel) works with **zero** loader changes:
+
+```
+model_weights/<name>/
+  config.yaml   # inline TadpoleTimeStepper arch (skip_pretrained_load: true,
+                #   pretrained_ae_dir: null) + fine-tune dataset + pretrained:
+  weights.pt    # full MERGED plain state dict (enc/dec + subnetwork + γ + LoRA)
+  adapter/      # PEFT adapter (adapter_model.safetensors + adapter_config.json)
+  checkpoint.pt, metrics.csv
+```
+
+`weights.pt` is the **sole source of truth** for this mode. Unlike a pure-LoRA
+next-step fine-tune, the fully-trained NEW modules (`subnetwork`, the γ skip
+`scales`, `latent_residual_scale`) live **only** in the merged `weights.pt`, not in
+`adapter/` — which holds just the encoder/decoder LoRA deltas. So `adapter/` alone
+cannot reconstruct the trained model here; it is **provenance-only** (a portable
+record of the LoRA half). This matters for the resume-without-best-weights WARNING
+branch in the fine-tune script's step 7: if that branch fires it keeps the
+trainer's on-disk best-val `weights.pt` and a *last-epoch* `adapter/` — the two can
+disagree, and `weights.pt` (which ESMDA loads) is the one to trust.
+
+The critical detail: the saved `architecture` node is stamped with
+**`skip_pretrained_load: true`** and **`pretrained_ae_dir: null`**, so at deploy
+time the stepper is rebuilt with random enc/dec (no AE dir needed) and the merged
+`weights.pt` — which already contains every weight — overwrites them. Deployment
+therefore never depends on the original AE dir still existing. Fixed-grid like
+P3D (no `domain_flexible`); the ensemble `clone_for_member` shallow-share is
+unaffected. Deterministic rollouts use `latent_type="mode"` (the default).
+
+### 34. File map
+
+| Piece | File |
+|---|---|
+| `TadpoleTimeStepper` / `ParamConditionedSubnetwork` | [architectures/tadpole_stepper.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_stepper.py) |
+| Vendored `TadpoleDFT` + downstream sub-network | [architectures/_tadpole/model/dft.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/model/dft.py), [.../architecture/downstream/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/architecture/downstream/) |
+| Shared field IO mixin | [architectures/_tadpole_field_io.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole_field_io.py) |
+| `tadpole_encdec` LoRA preset | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
+| Config + `finetune_mode` group | [conf/neural_surrogate/finetuning.yaml](../conf/neural_surrogate/finetuning.yaml), [conf/neural_surrogate/finetune_mode/dft.yaml](../conf/neural_surrogate/finetune_mode/dft.yaml) |
+| Run script (DFT dispatch) | [scripts/neural_surrogate/finetune_neural_surrogate.py](../scripts/neural_surrogate/finetune_neural_surrogate.py) |
+| Tests | [test_ae_to_timestepper.py](../tests/test_ae_to_timestepper.py) |
