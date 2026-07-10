@@ -118,15 +118,24 @@ dataset:
 # generate_random_geometries_training_data.py) set this block: it draws every
 # batch from a single trajectory (one grid/geometry), exactly as for
 # TransitionDataset (see training.yaml for the full argument contract). The
-# shipped `pylbm_barcelona` target is single-geometry, so it stays null.
-# batch_sampler: null
-batch_sampler:
-  _target_: neural_surrogates.TrajectoryBatchSampler
-  batch_size: 2
-  cell_budget: 4194304
-  shuffle: true
-  drop_last: true
-  seed: 0
+# shipped `pylbm_barcelona` target is single-geometry, so it stays null: the
+# default below is the plain shuffled DataLoader (batch_sampler: null), which
+# honours dataloader.batch_size / shuffle / drop_last as written.
+#
+# To opt in for a multi-geometry corpus, comment out `batch_sampler: null` and
+# uncomment the TrajectoryBatchSampler block. NOTE (see docs Part G): once
+# enabled the sampler REPLACES dataloader.batch_size / shuffle / drop_last (they
+# become dead knobs, neutralised in training/data_utils.py), batches never mix
+# trajectories, and on grids >= ~2.1M cells cell_budget: 4194304 silently drops
+# the per-trajectory batch size to 1 (max(1, cell_budget // cells_per_sample)).
+batch_sampler: null
+# batch_sampler:
+#   _target_: neural_surrogates.TrajectoryBatchSampler
+#   batch_size: 2
+#   cell_budget: 4194304
+#   shuffle: true
+#   drop_last: true
+#   seed: 0
 
 dataloader:
   _target_: torch.utils.data.DataLoader

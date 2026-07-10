@@ -43,21 +43,29 @@ def _write_dataset(root: Path, *, nz=8, ny=8, nx=8, t=4) -> None:
             blank = np.zeros((nz, ny, nx), "f4")
             blank[0] = 1.0  # one solid ground row
             state = {
-                v: (("time", "z", "y", "x"),
-                    rng.standard_normal((t, nz, ny, nx)).astype("f4"))
+                v: (
+                    ("time", "z", "y", "x"),
+                    rng.standard_normal((t, nz, ny, nx)).astype("f4"),
+                )
                 for v in ("u", "v", "w")
             }
             state["blanking"] = (("z", "y", "x"), blank)
             xr.Dataset(
                 state,
-                coords=dict(time=np.arange(t) * 1.0, z=np.arange(nz),
-                            y=np.arange(ny), x=np.arange(nx)),
+                coords=dict(
+                    time=np.arange(t) * 1.0,
+                    z=np.arange(nz),
+                    y=np.arange(ny),
+                    x=np.arange(nx),
+                ),
             ).to_netcdf(root / "state" / split / f"sample_{i:04d}.nc")
             xr.Dataset(
                 {
                     "inflow_angle": (("time",), rng.standard_normal(t).astype("f4")),
                     "velocity_magnitude": (
-                        ("time",), (7 + rng.standard_normal(t)).astype("f4")),
+                        ("time",),
+                        (7 + rng.standard_normal(t)).astype("f4"),
+                    ),
                 },
                 coords=dict(time=np.arange(t) * 1.0),
             ).to_netcdf(root / "param" / split / f"sample_{i:04d}.nc")
@@ -74,13 +82,21 @@ def _shrink_dd(cfg) -> None:
     cfg.architecture.decomposition.coarsen_factor = 2
     cfg.architecture.fine_net = dict(
         _target_="neural_surrogates.UNetConvNeXt",
-        base_channels=4, channel_mults=[1, 2], depths=[1, 1],
-        kernel_size=3, expansion=2, normalize=True, residual=True,
+        base_channels=4,
+        channel_mults=[1, 2],
+        depths=[1, 1],
+        kernel_size=3,
+        expansion=2,
+        normalize=True,
+        residual=True,
     )
     cfg.architecture.coarse_net = dict(
         _target_="neural_surrogates.UNetConvNeXt",
-        base_channels=4, channel_mults=[1, 2], depths=[1, 1],
-        normalize=True, residual=True,
+        base_channels=4,
+        channel_mults=[1, 2],
+        depths=[1, 1],
+        normalize=True,
+        residual=True,
     )
     cfg.trainer.num_epochs = 1
     cfg.trainer.device = "cpu"
@@ -120,8 +136,15 @@ def test_dd_training_paths(
     data_dir = tmp_path / "data"
     _write_dataset(data_dir)
 
+    # Pin the dataset SDF mode to match the DD architecture (which has no SDF
+    # support, sdf_feature_mode="none") explicitly, rather than inheriting the
+    # mutable training.yaml default -- the train script cross-checks the two and
+    # fails loud on any mismatch, so this keeps the test robust to whatever
+    # dataset default is currently checked in (same rationale as pinning the
+    # trainer/loss above).
     cfg = _compose(
         ["neural_surrogate/architectures@architecture=domain_decomposed/small"]
+        + ["dataset.sdf_features=none"]
         + extra_overrides
     )
     OmegaConf.set_struct(cfg, False)

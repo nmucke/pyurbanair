@@ -17,10 +17,9 @@ Two layers:
   the plan-01 e2e in ``test_lora_finetuning.py`` (reuses its forward-model +
   stub-spinup scaffolding).
 
-The e2e and the finetune-script cross-check tests depend on Phase 2A
-(``finetune_mode/dft.yaml`` + the script's DFT dispatch + the ``tadpole_encdec``
-LoRA preset); they ``skipif`` cleanly until that lands so the unit tests -- which
-depend only on the Phase-1 wrapper -- stay green on their own.
+The e2e and the finetune-script cross-check tests exercise the DFT
+``finetune_mode`` (``finetune_mode/dft.yaml`` + the script's DFT dispatch + the
+``tadpole_encdec`` LoRA preset); the unit tests depend only on the wrapper.
 
 Gated with ``importorskip`` on the vendored Tadpole runtime deps
 (``diffusers`` / ``timm`` / ``einops``) + ``peft``, so envs without them skip.
@@ -50,15 +49,6 @@ from pyurbanair.base_forward_model import BaseForwardModel
 _WORKTREE = Path(__file__).resolve().parents[1]
 _CONF = _WORKTREE / "conf"
 _SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "finetune_neural_surrogate.py"
-
-# Phase 2A gate: the DFT finetune_mode group (+ its script dispatch + the
-# tadpole_encdec preset) land together. Until then the cross-check + e2e tests
-# skip cleanly (they compose this group); the unit tests never touch it.
-_DFT_MODE_CFG = _CONF / "neural_surrogate" / "finetune_mode" / "dft.yaml"
-_blocked_on_2a = pytest.mark.skipif(
-    not _DFT_MODE_CFG.exists(),
-    reason="Phase 2A not landed: conf/neural_surrogate/finetune_mode/dft.yaml absent",
-)
 
 STATE_VARS = ("u", "v", "w")
 PARAM_VARS = ("inflow_angle", "velocity_magnitude")
@@ -127,7 +117,7 @@ def test_identity_at_init_parity():
         ref = m._ae_reference_recon(state, geom)
     assert out.shape == state.shape
     assert torch.isfinite(out).all()
-    assert (out - ref).abs().max().item() < 1e-5
+    assert torch.equal(out, ref)  # exact, bitwise: the load-bearing invariant
     # obstacle cells are exactly zeroed in the physical prediction
     mask = geom.unsqueeze(1)
     assert torch.allclose(out * (1 - mask), torch.zeros_like(out))
@@ -143,7 +133,7 @@ def test_identity_at_init_parity_non_divisible_grid():
         out = m(state, params, geom)
         ref = m._ae_reference_recon(state, geom)
     assert out.shape == state.shape
-    assert (out - ref).abs().max().item() < 1e-5
+    assert torch.equal(out, ref)  # exact, bitwise
 
 
 def test_param_conditioning_none_matches_zero_params_module_tree():
@@ -263,7 +253,7 @@ def test_identity_at_init_parity_after_lora_injection():
         out = peft_model(state, params, geom)
         # the base model's reference recon is reached through the PEFT wrapper
         ref = peft_model.base_model.model._ae_reference_recon(state, geom)
-    assert (out - ref).abs().max().item() < 1e-5
+    assert torch.equal(out, ref)  # exact, bitwise: injection adds no delta at init
 
 
 def test_max_internal_batchsize_chunked_path_parity():
@@ -284,6 +274,87 @@ def test_max_internal_batchsize_chunked_path_parity():
 def test_encoder_crop_size_must_be_multiple_of_16():
     with pytest.raises(ValueError, match="multiple of 16"):
         _stepper(encoder_crop_size=8)
+
+
+def test_sdf_geom_features_precompute_matches_recompute():
+    """M6 correctness: passing precomputed ``geom_features`` yields output
+    byte-identical to letting the stepper recompute the SDF transform inside
+    ``forward`` -- the substitution the ESMDA rollout cache relies on."""
+    m = _stepper(sdf_features="sdf", encode_geometry=True, latent_type="mode").eval()
+    m.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
+    state, params, geom = _inputs(b=2)  # (n_members, ...) like a rollout chunk
+    with torch.no_grad():
+        feats = m._sdf_features(geom)  # what _rollout_chunk caches once
+        out_cached = m(state, params, geom, feats)
+        out_recompute = m(state, params, geom)  # geom_features=None -> recompute
+    assert torch.equal(out_cached, out_recompute)
+
+
+def test_rollout_computes_sdf_features_once(tmp_path):
+    """M6 optimisation: an SDF-enabled stepper computes its (static) SDF
+    features exactly once per rollout, not once per internal step; the rollout
+    still produces a finite trajectory over multiple emitted frames."""
+    from neural_surrogates import NeuralSurrogateForwardModel
+
+    stepper = _stepper(sdf_features="sdf", encode_geometry=True, latent_type="mode")
+    stepper.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
+
+    # Minimal trained-model dir: the surrogate reads state/param vars from it but
+    # every trained field is overridden below, so no real training artifacts.
+    model_dir = tmp_path / "model_weights" / "sdf_stepper"
+    model_dir.mkdir(parents=True)
+    OmegaConf.save(
+        OmegaConf.create(
+            {
+                "architecture": {"_target_": "neural_surrogates.TadpoleTimeStepper"},
+                "dataset": {
+                    "root_dir": str(tmp_path / "unused_data"),
+                    "state_vars": list(STATE_VARS),
+                    "param_vars": list(PARAM_VARS),
+                },
+            }
+        ),
+        model_dir / "config.yaml",
+    )
+    model = NeuralSurrogateForwardModel(
+        spinup_forward_model=_StubSpinup(),
+        nx=NX,
+        ny=NY,
+        nz=NZ,
+        bounds=[[0.0, NX], [0.0, NY], [0.0, NZ]],
+        simulation_time=float(T),
+        output_frequency=1.0,
+        model_dir=model_dir,
+        architecture=stepper,
+        state_vars=STATE_VARS,
+        param_vars=PARAM_VARS,
+        trained_output_frequency=1.0,
+        trained_domain={
+            "nx": NX,
+            "ny": NY,
+            "nz": NZ,
+            "bounds": [[0.0, NX], [0.0, NY], [0.0, NZ]],
+        },
+        weights_path=None,
+        allow_uninitialized_weights=True,
+    )
+
+    calls = {"n": 0}
+    original = stepper._sdf_features
+
+    def _counting(geometry):
+        calls["n"] += 1
+        return original(geometry)
+
+    stepper._sdf_features = _counting  # type: ignore[method-assign]
+
+    result = model(params=_params())
+
+    # T > 1 emitted frames => >= T internal steps, yet the SDF transform ran once.
+    assert result.sizes["time"] == T
+    assert calls["n"] == 1
+    for v in STATE_VARS:
+        assert np.isfinite(result[v].values).all()
 
 
 # --------------------------------------------------------------------------- #
@@ -379,12 +450,8 @@ def _compose_dft(pretrained_dir, data_dir, extra_overrides=None):
     return cfg
 
 
-@_blocked_on_2a
 def test_cross_check_size_mismatch_raises(tmp_path):
-    """AE config size != stepper size -> the DFT script fails loud (ValueError).
-
-    TODO(phase-2a): if 2A's message/kwarg drifts, keep the ValueError assertion
-    and loosen/adjust the ``match`` substring."""
+    """AE config size != stepper size -> the DFT script fails loud (ValueError)."""
     data_dir = tmp_path / "data"
     _write_transition_dataset(data_dir)
     # A real size-S AE dir whose config *claims* size B -> the stepper (dft.yaml
@@ -396,11 +463,8 @@ def test_cross_check_size_mismatch_raises(tmp_path):
         _load_finetune_run()(cfg)
 
 
-@_blocked_on_2a
 def test_cross_check_encode_geometry_mismatch_raises(tmp_path):
-    """AE config encode_geometry != stepper encode_geometry -> ValueError.
-
-    TODO(phase-2a): adjust the ``match`` substring if 2A's message drifts."""
+    """AE config encode_geometry != stepper encode_geometry -> ValueError."""
     data_dir = tmp_path / "data"
     _write_transition_dataset(data_dir)
     ae_dir = _make_ae_model_dir(
@@ -530,9 +594,8 @@ def _write_transition_dataset(root: Path, *, nz=NZ, ny=NY, nx=NX, t=T) -> None:
 def _shrink_dft_for_cpu(cfg) -> None:
     """CPU smoke shapes for the DFT fine-tune (mirrors the plan-01/-02 shrinkers).
 
-    TODO(phase-2a): dft.yaml owns the trainer/dataset block shape. These keys
-    match lora_nextstep.yaml (the DFT trainer reuses the same Trainer); if dft.yaml
-    diverges, the orchestrator reconciles here."""
+    dft.yaml owns the trainer/dataset block shape; these keys match
+    lora_nextstep.yaml (the DFT trainer reuses the same Trainer)."""
     cfg.dataset.pushforward_steps = 1
     cfg.dataloader.batch_size = 2
     cfg.dataloader.num_workers = 0
@@ -548,7 +611,6 @@ def _shrink_dft_for_cpu(cfg) -> None:
     cfg.trainer.resume = False
 
 
-@_blocked_on_2a
 def test_dft_finetune_end_to_end(tmp_path, monkeypatch):
     """compose finetuning.yaml (finetune_mode=dft) -> run -> exported dir loads
     into NeuralSurrogateForwardModel + rolls out a finite trajectory."""

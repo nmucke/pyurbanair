@@ -10,6 +10,12 @@
 # finetune_mode for the autoencoder -> time-stepper path.
 # Must sit AFTER `_self_` in finetuning.yaml's defaults so it overrides the
 # inline `trainer._target_` there.
+#
+# Explicit dispatch marker: the finetune script keys mode detection on this
+# scalar (see dft.yaml), so this run stays on the byte-identical LoRA next-step
+# path even if `+architecture=...` is added on the CLI.
+finetune_mode: lora_nextstep
+
 trainer:
   _target_: neural_surrogates.Trainer
 # Plain mean-squared error on the (masked) next-state prediction, same as the

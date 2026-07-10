@@ -61,7 +61,6 @@ The heavy vendored stack (``diffusers`` / ``timm``) is imported lazily inside
 
 from __future__ import annotations
 
-import numpy as np
 import torch
 from neural_surrogates.architectures._tadpole_field_io import _TadpoleFieldIO
 from neural_surrogates.sdf import n_sdf_feature_channels, normalize_sdf_mode
@@ -260,16 +259,8 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
             print("TadpoleAE(normalize=False): ignoring normalization stats")
             return
 
-        def _to(buf: torch.Tensor, value) -> torch.Tensor:
-            t = torch.as_tensor(
-                np.asarray(value), dtype=buf.dtype, device=buf.device
-            ).reshape(-1)
-            if t.numel() != buf.numel():
-                raise ValueError(f"expected {buf.numel()} values, got {t.numel()}")
-            return t
-
-        self.state_mean.copy_(_to(self.state_mean, state_mean))
-        self.state_std.copy_(_to(self.state_std, state_std).clamp_min(eps))
+        self.state_mean.copy_(self._to_buffer(self.state_mean, state_mean))
+        self.state_std.copy_(self._to_buffer(self.state_std, state_std, eps=eps))
 
     # The mask/normalise/assemble/pad helpers (``_pad_to_crop_multiple``,
     # ``_geometry_channels``, ``_sdf_features``, ``_normalize_state``,

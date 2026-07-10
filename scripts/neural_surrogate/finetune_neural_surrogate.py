@@ -21,6 +21,7 @@ weights are frozen and only LoRA trains, and the trainer persists an always-vali
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import hydra
@@ -44,6 +45,21 @@ def _as_list(value) -> list | None:
     return list(OmegaConf.to_container(value) if OmegaConf.is_config(value) else value)
 
 
+def _read_on_disk_best_val(path: Path) -> float | None:
+    """Val loss the on-disk ``weights.pt`` holds, or ``None`` if unrecorded.
+
+    Written by ``BaseTraining`` next to ``weights.pt`` on every merged-export
+    improvement (see ``_write_best_val``); used to guard the final overwrite
+    against clobbering better on-disk weights with a staler resumed best."""
+    if not path.exists():
+        return None
+    try:
+        with path.open() as f:
+            return float(json.load(f)["best_val"])
+    except (ValueError, KeyError, OSError):
+        return None
+
+
 def _check_ae_stepper_match(ae_arch: DictConfig, model) -> None:
     """Fail loud if the pre-trained AE and the stepper node disagree.
 
@@ -51,7 +67,9 @@ def _check_ae_stepper_match(ae_arch: DictConfig, model) -> None:
     state statistics, so the geometry/SDF/size contract the encoder was trained
     under must match exactly (same spirit as the SDF cross-check in the train and
     pretrain scripts). Checked: ``size``, ``encode_geometry``, ``sdf_features``
-    (normalised) and ``sdf_clamp_cells``.
+    (normalised), ``sdf_clamp_cells`` and ``normalize`` (an AE trained with
+    ``normalize: false`` must not pair with a ``normalize: true`` stepper -- the
+    frozen encoder would then see a differently-scaled distribution).
 
     ``encoder_crop_size`` is deliberately NOT cross-checked: it only controls how
     the field is tiled into crops for the (conv + windowed-attention) encoder, and
@@ -74,6 +92,13 @@ def _check_ae_stepper_match(ae_arch: DictConfig, model) -> None:
             f"encode_geometry mismatch: AE={ae_encode_geom} but "
             f"stepper={bool(model.encode_geometry)}; the geometry channel layout "
             "the frozen encoder expects must match."
+        )
+    ae_normalize = bool(ae_arch.get("normalize", True))
+    if ae_normalize != bool(model.normalize):
+        raise ValueError(
+            f"normalize mismatch: AE={ae_normalize} but "
+            f"stepper={bool(model.normalize)}; both must agree so the frozen "
+            "encoder sees the (un)standardised distribution it was trained on."
         )
     ae_sdf = normalize_sdf_mode(ae_arch.get("sdf_features", "none"))
     if ae_sdf != model.sdf_feature_mode:
@@ -134,7 +159,18 @@ def run(cfg: DictConfig) -> None:
     # fresh from cfg.architecture, with the AE dir supplying encoder/decoder
     # weights + state stats. lora_nextstep has no `architecture` node and stays on
     # the byte-identical path below.
-    is_dft = cfg.get("architecture") is not None
+    #
+    # Dispatch on the explicit `finetune_mode` marker the finetune_mode group
+    # files set (dft.yaml -> "dft", lora_nextstep.yaml -> "lora_nextstep"), NOT on
+    # the mere presence of an `architecture` node: a lora_nextstep run that adds
+    # `+architecture=...` on the CLI would otherwise silently flip into the DFT
+    # path. Fall back to the old heuristic only when the marker is absent (an
+    # older config with no `finetune_mode` key).
+    mode = cfg.get("finetune_mode")
+    if mode is not None:
+        is_dft = str(mode) == "dft"
+    else:
+        is_dft = cfg.get("architecture") is not None
 
     # --- 1. Pull the architecture + channel/param/SDF spec from the pretrained
     # config: it is the single source of truth so the fine-tuned net can never
@@ -153,14 +189,18 @@ def run(cfg: DictConfig) -> None:
 
     # Stamp the pretrained spec onto the fine-tune dataset config before building
     # it. This guarantees the dataset ships exactly the channels / SDF features
-    # the pretrained stem expects.
+    # the pretrained stem expects. Guard the dataset node's existence FIRST --
+    # the stamping below dereferences it, so a missing node must fail here with an
+    # actionable message rather than an AttributeError on the first assignment.
+    if cfg.get("dataset") is None:
+        raise ValueError("dataset config is required (the fine-tune data node).")
     cfg.dataset.state_vars = pre_state_vars
     cfg.dataset.sdf_features = pre_sdf_features
     cfg.dataset.sdf_clamp_cells = pre_sdf_clamp
     if cfg.dataset.get("param_vars") is None and pre_param_vars is not None:
         cfg.dataset.param_vars = pre_param_vars
 
-    if cfg.get("dataset") is None or cfg.dataset.get("root_dir") in (None, "???"):
+    if cfg.dataset.get("root_dir") in (None, "???"):
         raise ValueError("dataset.root_dir must point at the fine-tune data.")
 
     dtype = getattr(torch, cfg.dataset.dtype)
@@ -197,6 +237,13 @@ def run(cfg: DictConfig) -> None:
         # state stats. No base weights.pt to load -- the subnetwork / skip scales
         # start random-but-zero-gated. Then cross-check AE <-> stepper.
         cfg.architecture.pretrained_ae_dir = str(pretrained_dir)
+        # Fail loud if the AE export lacks state stats (repo convention) -- the
+        # frozen encoder would otherwise be fed out-of-distribution inputs. The
+        # only sanctioned opt-out: recompute_normalization=true installs fresh
+        # stats over the inherited ones below, so the missing stats are moot.
+        cfg.architecture.require_ae_state_stats = not cfg.get(
+            "recompute_normalization", False
+        )
         model = instantiate(
             cfg.architecture,
             n_state_channels=len(pre_state_vars),
@@ -352,16 +399,33 @@ def run(cfg: DictConfig) -> None:
     # mid-training best-val weights.pt is already on disk and must not be clobbered
     # with a worse (last-epoch) model. weights.pt stays indistinguishable from a
     # fully trained model -> zero changes to forward_model.py.
+    #
+    # Second guard against silent data loss: the trainer writes weights.pt on
+    # every val improvement but only checkpoints best_val every checkpoint_every
+    # epochs, so a resume from a stale checkpoint could hold a WORSE best than the
+    # weights.pt already on disk (recorded in best_val.json). Only overwrite when
+    # this run's best is at least as good as what is on disk.
     save_adapter(peft_model, out_dir / "adapter")
-    if trainer.restored_best_weights:
+    on_disk_best = _read_on_disk_best_val(out_dir / "best_val.json")
+    stale_best = (
+        on_disk_best is not None
+        and getattr(trainer, "best_val", float("inf")) > on_disk_best
+    )
+    if trainer.restored_best_weights and not stale_best:
         torch.save(merge_to_state_dict(peft_model), out_dir / "weights.pt")
+        # Keep the sidecar in step with the freshly-exported weights.
+        with (out_dir / "best_val.json").open("w") as f:
+            json.dump({"best_val": float(trainer.best_val)}, f)
         print(f"fine-tuned model (adapter + merged best weights) saved to {out_dir}")
     else:
+        why = (
+            "fit() could not restore the best model in memory"
+            if not trainer.restored_best_weights
+            else "the on-disk weights.pt is newer/better than this resumed run's best"
+        )
         print(
             f"WARNING: kept the trainer's on-disk best-val weights.pt in {out_dir} "
-            "(fit() could not restore the best model in memory -- e.g. a resume "
-            "with no improvement from a pre-upgrade checkpoint); the adapter/ "
-            "reflects the last epoch, not the best."
+            f"({why}); the adapter/ reflects the last epoch, not the best."
         )
 
 

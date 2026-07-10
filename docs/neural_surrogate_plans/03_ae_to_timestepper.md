@@ -9,7 +9,7 @@ env), the `TadpoleTimeStepper` + `ParamConditionedSubnetwork` wrapper
 LoRA preset (`finetuning/targets.py`), the `dft` finetune mode
 (`conf/neural_surrogate/finetune_mode/dft.yaml` + the DFT dispatch in
 `scripts/neural_surrogate/finetune_neural_surrogate.py`), and
-`tests/test_ae_to_timestepper.py`. See `docs/neural_surrogates.md` Part G. **Wiring
+`tests/test_ae_to_timestepper.py`. See `docs/neural_surrogates.md` Part H. **Wiring
 decisions baked in:** the residual is *intrinsic* — `state_next = dft_state * mask`
 (the DFT morphs its own reconstruction toward `u_{t+Δt}`; `predict_residual` is a
 no-op framing). The honest init invariant is `stepper(state) ==

@@ -488,6 +488,15 @@ default (`none`) keeps `in_channels` and the whole state dict byte-identical, so
 existing checkpoints load untouched. The EDT is **never** run inside the training
 step or a `torch.compile`'d region. Other architectures can adopt the same
 `n_geom_feature_channels` + `geom_features=` convention later.
+The autoregressive driver (`NeuralSurrogateForwardModel._rollout_chunk`) also
+computes `geom_features` **once per rollout** and passes it into every internal
+step for models that advertise `n_geom_feature_channels > 0` **and** expose the
+`_sdf_features` hook (the Tadpole field-IO mixin), so an SDF-enabled stepper that
+lacks its own identity cache (e.g. the Tadpole time-stepper) runs the EDT only
+once rather than per step. Every other model keeps the byte-identical
+`(state, params, geometry)` call: P3D with SDF features self-computes and caches
+on the geometry tensor's identity internally (as above), and `none` / UPT expose
+no feature channels.
 
 ### 8. `SimpleConv` — baseline
 
@@ -1247,7 +1256,7 @@ the inner patch nets stay non-periodic. For DD, `interior_size` must divide `Ny`
 
 ---
 
-## Part E — Parameter-efficient fine-tuning (LoRA / PEFT)
+## Part F — Parameter-efficient fine-tuning (LoRA / PEFT)
 
 Take an already-trained next-step surrogate (focus: `P3D`, but
 architecture-agnostic), inject LoRA adapters, train **only** the adapter weights
@@ -1393,7 +1402,7 @@ fine-tune data (that *is* the domain the fine-tuned model targets).
 
 ---
 
-## Part F — Autoencoder (foundation-model) pre-training (Tadpole)
+## Part G — Autoencoder (foundation-model) pre-training (Tadpole)
 
 Pre-train a **Tadpole-style (V)AE** on flow snapshots as pure representation
 learning — **no** next-step objective. This is plan 02 of
@@ -1485,6 +1494,14 @@ per-term breakdown (`recon` / `geom` / `kl`) lands in `metrics.csv` via
 `_aux_terms`. The **adversarial (GAN) loss** is a scoped optional extension
 (`architecture/_tadpole/discriminator.py` is vendored for it) — not yet wired.
 
+**Deterministic validation.** Under `latent_type: "sample"` the training loss
+samples the latent (VAE-proper), but the trainer's validation path forces the AE
+to use the **mode** latent (it temporarily sets `latent_type="mode"` for the
+duration of `_validate`, restoring after). Validation loss is therefore
+noise-free, so best-weights selection and patience-based early stopping ride on a
+stable signal rather than sampling jitter — the val curve is reproducible across
+runs at a fixed checkpoint.
+
 ### 29. Config + script + artifacts
 
 [conf/neural_surrogate/pretrain_autoencoder.yaml](../conf/neural_surrogate/pretrain_autoencoder.yaml)
@@ -1505,6 +1522,32 @@ our standard), plus `encoder.pt` / `decoder.pt` via `save_separate_weights` (the
 handoff format for plan 03 and HF-style reuse), and `config.yaml` /
 `checkpoint.pt` / `metrics.csv` as usual.
 
+**Batching default.** The shipped default is `batch_sampler: null` — the plain
+shuffled `DataLoader`, which honours `dataloader.batch_size` / `shuffle` /
+`drop_last` as written and mixes snapshots freely across trajectories. This is
+the right default for the shipped single-geometry targets (e.g.
+`pylbm_barcelona`). The config also ships a commented-out `TrajectoryBatchSampler`
+block as a ready-to-enable example for a **multi-geometry** snapshot corpus (its
+per-trajectory grids cannot be stacked by plain shuffled batching — see §6,
+"Multi-geometry splits", for the same contract on `TransitionDataset`). Enabling
+it has three
+consequences to be aware of: (1) it **replaces** `dataloader.batch_size` /
+`shuffle` / `drop_last`, which become dead knobs (neutralised in
+`training/data_utils.py`) — set batch size via the sampler's own `batch_size`;
+(2) every batch is drawn from a single trajectory, so batches never mix
+geometries within a step (they still shuffle across trajectories each epoch); and
+(3) `cell_budget` caps the total cells per batch as `max(1, cell_budget // cells)`,
+so on grids ≥ ~2.1M cells the default `cell_budget: 4194304` silently drops the
+per-trajectory batch size to 1. Size `cell_budget` from a known-good
+single-geometry run (`batch_size * cells_per_sample`).
+
+The pre-train script also **warns** when the encoder tiling wastes compute on
+padding: if `random_crop_size` is smaller than `encoder_crop_size`, or (on the
+full-field path) any grid dim is not a multiple of `encoder_crop_size`, those
+axes are zero-padded up to the next multiple every forward — wasted compute, and
+the padded tiles also inflate the logged `kl` metric. Pick `encoder_crop_size`
+(a multiple of 16) to divide the grid, or crop to a multiple of it.
+
 ### 30. File map
 
 | Piece | File |
@@ -1519,9 +1562,9 @@ handoff format for plan 03 and HF-style reuse), and `config.yaml` /
 
 ---
 
-## Part G — Autoencoder → time-stepper (Tadpole DFT)
+## Part H — Autoencoder → time-stepper (Tadpole DFT)
 
-Turn a **pre-trained** autoencoder (Part F) into a next-step ESMDA forward model
+Turn a **pre-trained** autoencoder (Part G) into a next-step ESMDA forward model
 with Tadpole's **DFT** ("Dynamic Fine-Tuning") recipe: a *frozen* encoder/decoder
 with **zero-initialised** reintroduced skip connections (the paper's γ scales) and
 a **zero-initialised** latent sub-network that together act as a trainable
@@ -1551,7 +1594,7 @@ What the wrapper adds around `TadpoleDFT`:
 | **Frozen enc/dec + LoRA** | Built with `encoder_ft_state="frozen"` / `decoder_ft_state="frozen"`; the pre-trained `encoder.pt`/`decoder.pt` are loaded via the DFT's own `weight_encoder`/`weight_decoder` **load-before-skip-wrap** path (so keys line up with the raw `_KLP3DEncoder`/`_P3DDecoder`). LoRA is injected **externally** through plan 01's PEFT stack (not Tadpole's bundled GIFt path), so `lora.variant` and the merged-`weights.pt` export work here too. |
 | **Latent sub-network** | `subnetwork="default"` builds a `ParamConditionedSubnetwork` wrapping a vendored `SequentialModel` (`attention_method="naive"` — the dev box has **no** triton, so the upstream `"hyper"` attention is unavailable) over the folded latent tokens, with `init_zero_proj=True` so its output is exactly `0` at init. `None` builds no sub-network (pure frozen AE). |
 | **Param conditioning** (our addition; Tadpole has none) | `param_conditioning="film"` (default): the (z-scored) params `(B, P)` drive a small MLP with a **zero-initialised** output layer producing per-channel `(scale, shift)` applied to the latent tokens as `x*(1+scale)+shift`. `"token"`: an additive (adaLN-style) zero-init param embedding. `"none"` or `n_params==0`: **no** conditioning module at all (repo no-op rule) — the module tree is byte-identical to a param-free build. |
-| **Normalization** | State stats are **inherited** from the AE (read from `<ae_dir>/weights.pt`) so the frozen encoder sees its pre-training distribution; `set_normalization` installs the fine-tune split's **param** stats (used to z-score params before conditioning). Buffers travel with the checkpoint. |
+| **Normalization** | State stats are **inherited** from the AE (read from `<ae_dir>/weights.pt`) so the frozen encoder sees its pre-training distribution; `set_normalization` installs the fine-tune split's **param** stats (used to z-score params before conditioning). Buffers travel with the checkpoint. **Fail-loud:** if the AE dir's `weights.pt` is missing or lacks `state_mean`/`state_std`, loading the stats now **raises** (repo convention) rather than silently continuing with identity zeros/ones — the only exception is an explicit `recompute_normalization` opt-out, which will overwrite the stats anyway. |
 | **Geometry** | Masked like `P3D` (`state * geometry`); with `encode_geometry=True` the mask (+SDF) channels ride through the frozen encoder exactly as in pre-training, so the latent tokens the sub-network attends over carry geometry. Output geometry channels are discarded (geometry is static). Cross-checked against the AE (must match). |
 
 **Residual convention.** Output is `state_next = dft_state * mask` — the DFT
@@ -1588,8 +1631,10 @@ next-step model. It also sets `lora.target_preset: tadpole_encdec` and a
 it: instantiates `cfg.architecture` fresh with `n_state_channels` /`n_params` from
 the fine-tune dataset and `pretrained_ae_dir = pretrained_model_dir`;
 **cross-checks** the AE's `size` / `encode_geometry` / `sdf_features` /
-`sdf_clamp_cells` (from the AE `config.yaml`) against the stepper and **fails loud**
-on a mismatch; installs the fine-tune split's param stats via `set_normalization`
+`sdf_clamp_cells` / `normalize` flag (from the AE `config.yaml`) against the stepper
+and **fails loud** on a mismatch — so an AE trained with `normalize: false` can no
+longer silently pair with a `normalize: true` stepper; installs the fine-tune
+split's param stats via `set_normalization`
 (state stats inherited from the AE); freezes everything, injects LoRA on
 `dft.encoder`/`dft.decoder` via the `tadpole_encdec` preset, and unfreezes the
 `trainable_modules`. Everything else — the `TransitionDataset`, masked-MSE

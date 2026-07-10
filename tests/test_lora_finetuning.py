@@ -113,6 +113,53 @@ def test_merge_round_trips_to_plain_state_dict():
         assert torch.allclose(merged[k], v, atol=1e-6), k
 
 
+def test_merge_parity_at_nonzero_lora_b():
+    """merge_to_state_dict reproduces the wrapped forward at *nonzero* LoRA B.
+
+    The init round-trip (B=0) only proves the pass-through path; it never
+    exercises peft's actual delta math -- the alpha/r scaling and the Conv3d
+    weight fold. This repo has already hit two peft-0.19 conv-merge bugs, so
+    assert the merged base weights reproduce the adapted forward end-to-end:
+    perturb the trainable ``lora_B`` matrices to nonzero, then compare the
+    wrapped model's output against a fresh base model loaded with the merged
+    state dict, on a nontrivial input. The tolerance is loosened to ~1e-5 for
+    the conv-fold arithmetic.
+    """
+    model = _p3d().eval()
+    peft_model = inject_lora(
+        copy.deepcopy(model),
+        rank=8,
+        alpha=16,
+        target_modules=resolve_target_modules(model, preset="attention+conv"),
+    )
+    # Drive the adapter off the zero fixed point: bump every trainable lora_B
+    # (zero-initialised by peft) so the merged delta is genuinely nonzero.
+    with torch.no_grad():
+        n_bumped = 0
+        for n, p in peft_model.named_parameters():
+            if "lora_B" in n and p.requires_grad:
+                p.add_(torch.randn_like(p) * 0.1)
+                n_bumped += 1
+    assert n_bumped, "no trainable lora_B parameters were perturbed"
+
+    peft_model.eval()
+    state, params, geom = _p3d_inputs()
+    merged = merge_to_state_dict(peft_model)
+    fresh = _p3d().eval()
+    fresh.load_state_dict(merged)  # strict: plain base state dict, no lora_ keys
+    with torch.no_grad():
+        base = model(state, params, geom)
+        wrapped = peft_model(state, params, geom)
+        reloaded = fresh(state, params, geom)
+
+    # sanity: nonzero B actually moved the output away from the base model
+    assert not torch.allclose(
+        wrapped, base, atol=1e-4
+    ), "perturbation did not change the output; delta math is untested"
+    # the folded base weights must reproduce the adapted (nonzero-B) forward
+    assert torch.allclose(wrapped, reloaded, atol=1e-5)
+
+
 def test_only_adapter_and_modules_to_save_train():
     """Only lora_* and the explicit modules_to_save head require grad."""
     model = _p3d().eval()

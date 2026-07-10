@@ -791,6 +791,23 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         initial = torch.stack([self._stack_state(t) for t in templates], dim=0)
         current = initial.to(self.device)
 
+        # SDF/geometry features are a pure function of the (static) geometry, so
+        # compute them once here and pass them into every internal step instead of
+        # letting the model recompute the signed-distance transform per step (a
+        # CPU round-trip). This applies only to models that (a) advertise SDF
+        # feature channels and (b) accept a precomputed ``geom_features`` as the
+        # 4th positional of their forward -- signalled by the ``_sdf_features``
+        # hook (the Tadpole field-IO mixin). It is a no-op for every other model:
+        #   * P3D with SDF features self-computes and caches on the geometry
+        #     tensor's identity internally (its 4th positional is not
+        #     geom_features), so it keeps the byte-identical 3-arg call;
+        #   * P3D ``none`` / UPT expose no ``n_geom_feature_channels``.
+        geom_features: Optional[torch.Tensor] = None
+        if getattr(self.model, "n_geom_feature_channels", 0) > 0 and hasattr(
+            self.model, "_sdf_features"
+        ):
+            geom_features = self.model._sdf_features(geom)
+
         # Per member, per emitted frame: (n_members, n_emit, C, *grid).
         member_frames: list[list[Optional[np.ndarray]]] = [
             [None] * len(emit_steps) for _ in range(n_members)
@@ -798,7 +815,10 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         with torch.no_grad():
             for k in range(n_internal):
                 param_k = schedule[:, k, :]
-                current = self.model(current, param_k, geom)
+                if geom_features is None:
+                    current = self.model(current, param_k, geom)
+                else:
+                    current = self.model(current, param_k, geom, geom_features)
                 pos = emit_at.get(k + 1)
                 if pos is not None:
                     step_np = current.cpu().numpy()

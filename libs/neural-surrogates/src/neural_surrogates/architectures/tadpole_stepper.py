@@ -212,6 +212,14 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
     subnetwork_cfg:
         Optional overrides for the subnetwork ``{n_layers, num_heads,
         hidden_size, ...}`` on top of the size defaults.
+    require_ae_state_stats:
+        When loading a pre-trained AE (``pretrained_ae_dir`` set,
+        ``skip_pretrained_load=False``), fail loud if the AE export carries no
+        ``state_mean``/``state_std`` -- running the frozen encoder with identity
+        stats feeds it out-of-distribution inputs and wastes the whole run. The
+        fine-tune script flips this to ``False`` only when
+        ``recompute_normalization=true`` will install fresh stats over the
+        inherited ones anyway.
     """
 
     def __init__(
@@ -232,6 +240,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         sdf_clamp_cells: float = 32.0,
         skip_pretrained_load: bool = False,
         subnetwork_cfg: dict | None = None,
+        require_ae_state_stats: bool = True,
     ) -> None:
         super().__init__()
 
@@ -357,42 +366,58 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             # Inherit the frozen AE's state statistics so the encoder sees the
             # distribution it was pre-trained on.
             if pretrained_ae_dir is not None and not skip_pretrained_load:
-                self._load_ae_state_stats(pretrained_ae_dir)
+                self._load_ae_state_stats(
+                    pretrained_ae_dir, require=require_ae_state_stats
+                )
 
     # -- pretrained state-stat inheritance --------------------------------- #
 
     @torch.no_grad()
-    def _load_ae_state_stats(self, pretrained_ae_dir: str) -> None:
+    def _load_ae_state_stats(
+        self, pretrained_ae_dir: str, require: bool = True
+    ) -> None:
         """Copy ``state_mean``/``state_std`` from the AE export's ``weights.pt``.
 
         The frozen encoder was pre-trained on the AE's standardised distribution,
         so missing/absent stats would leave identity normalisation (zeros/ones)
-        and feed the encoder out-of-distribution inputs -> garbage predictions.
-        That is never silent: warn loudly (the caller should install stats via
-        :meth:`set_normalization` instead).
+        and feed the encoder out-of-distribution inputs -> a full wasted training
+        run on garbage. Repo convention is fail-loud: raise unless ``require`` is
+        ``False``, which the fine-tune script sets only when
+        ``recompute_normalization=true`` will install fresh stats over these
+        anyway (in that case warn and continue -- the inherited stats are dead).
         """
         path = os.path.join(pretrained_ae_dir, "weights.pt")
         if not os.path.exists(path):
-            warnings.warn(
-                f"TadpoleTimeStepper: no weights.pt at {path!r}; state "
-                "normalisation stays at identity (zeros/ones). The frozen encoder "
-                "then sees un-standardised inputs -- install stats via "
-                "set_normalization or point pretrained_ae_dir at a real AE export.",
-                stacklevel=2,
+            msg = (
+                f"TadpoleTimeStepper: no weights.pt at {path!r}, so the frozen "
+                "encoder's state normalisation stats are unavailable. The encoder "
+                "was pre-trained on the AE's standardised distribution; running "
+                "with identity stats (zeros/ones) feeds it out-of-distribution "
+                "inputs and wastes the whole run. Point pretrained_ae_dir at a "
+                "real AE export, or set recompute_normalization=true to compute "
+                "fresh stats on the fine-tune split."
             )
+            if require:
+                raise FileNotFoundError(msg)
+            warnings.warn(msg, stacklevel=2)
             return
         sd = torch.load(path, map_location="cpu", weights_only=True)
         if isinstance(sd, dict) and "state_mean" in sd and "state_std" in sd:
             self.state_mean.copy_(sd["state_mean"].reshape(-1).to(self.state_mean))
             self.state_std.copy_(sd["state_std"].reshape(-1).to(self.state_std))
         else:
-            warnings.warn(
-                f"TadpoleTimeStepper: {path!r} has no state_mean/state_std buffers; "
-                "state normalisation stays at identity (zeros/ones). Install stats "
-                "via set_normalization so the frozen encoder sees the distribution "
-                "it was pre-trained on.",
-                stacklevel=2,
+            msg = (
+                f"TadpoleTimeStepper: {path!r} has no state_mean/state_std "
+                "buffers, so the frozen encoder's state normalisation stats are "
+                "unavailable (it was pre-trained on the AE's standardised "
+                "distribution; identity stats feed it out-of-distribution "
+                "inputs). Re-export the AE with normalization buffers, or set "
+                "recompute_normalization=true to compute fresh stats on the "
+                "fine-tune split."
             )
+            if require:
+                raise ValueError(msg)
+            warnings.warn(msg, stacklevel=2)
 
     # -- normalisation ----------------------------------------------------- #
 

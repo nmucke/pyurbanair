@@ -29,7 +29,12 @@ pytest.importorskip("diffusers")
 pytest.importorskip("timm")
 pytest.importorskip("einops")
 
-from neural_surrogates import SnapshotDataset, TadpoleAE, snapshot_collate
+from neural_surrogates import (
+    AutoencoderTrainer,
+    SnapshotDataset,
+    TadpoleAE,
+    snapshot_collate,
+)
 
 _WORKTREE = Path(__file__).resolve().parents[1]
 _CONF = _WORKTREE / "conf"
@@ -245,6 +250,116 @@ def test_snapshot_random_crop(tmp_path):
     # per-sample crops break geometry sharing -> collate stacks per-sample
     batch = snapshot_collate([ds[0], ds[1]])
     assert batch["geometry"].shape == (2, 8, 8, 8)
+
+
+def test_snapshot_random_crop_equals_full_field_slice(tmp_path):
+    """The lazy-read crop (M5) must equal the corresponding slice of the
+    full-field item for the same crop origin -- i.e. reading only the crop
+    changes I/O, not values."""
+    root = tmp_path / "data"
+    _write_dataset(root)
+    full = SnapshotDataset(root, "train", sdf_features="sdf")
+    crop = SnapshotDataset(root, "train", random_crop_size=8, sdf_features="sdf")
+
+    # Fix the origin: crop.__getitem__ draws one torch.randint per spatial dim.
+    torch.manual_seed(1234)
+    c_item = crop[0]
+    torch.manual_seed(1234)
+    sl_z, sl_y, sl_x = crop._crop_slices(tuple(full.geometry_for(0).shape))
+
+    f_item = full[0]
+    assert torch.equal(c_item["state"], f_item["state"][:, sl_z, sl_y, sl_x])
+    assert torch.equal(c_item["geometry"], f_item["geometry"][sl_z, sl_y, sl_x])
+    assert torch.equal(
+        c_item["geom_features"], f_item["geom_features"][:, sl_z, sl_y, sl_x]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# AutoencoderTrainer device-geometry cache (M4).
+# --------------------------------------------------------------------------- #
+
+
+class _StubAE(torch.nn.Module):
+    """Minimal stand-in exposing the attributes AutoencoderTrainer reads."""
+
+    n_state_channels = 3
+    encode_geometry = True
+    n_geom_feature_channels = 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.p = torch.nn.Parameter(torch.zeros(1))
+
+
+def _make_ae_trainer(model):
+    from torch.utils.data import DataLoader
+
+    dummy = DataLoader([0, 1], batch_size=1)
+    return AutoencoderTrainer(
+        model=model,
+        train_loader=dummy,
+        val_loader=dummy,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+        loss_fn=torch.nn.MSELoss(),
+        num_epochs=1,
+        device="cpu",
+    )
+
+
+def test_ae_trainer_geometry_cache_busts_on_change():
+    """A shared geometry is uploaded once and reused across content-equal
+    batches, but a genuinely different geometry refreshes the device cache; a
+    per-sample (crop) batch bypasses the cache entirely."""
+    torch.manual_seed(0)
+    trainer = _make_ae_trainer(_StubAE())
+    grid = (4, 4, 4)
+    geom_a = (torch.rand(*grid) > 0.3).float()
+    feat_a = torch.randn(1, *grid)
+    batch_a = {
+        "state": torch.randn(2, 3, *grid),
+        "geometry": geom_a.unsqueeze(0),  # shared: (1, *grid)
+        "geom_features": feat_a.unsqueeze(0),  # (1, C, *grid)
+    }
+    _, geometry, features = trainer._prepare_ae_batch(batch_a)
+    assert geometry.shape == (2, *grid)
+    assert features.shape == (2, 1, *grid)
+    cached_geom = trainer._geometry
+    torch.testing.assert_close(trainer._geometry, geom_a)
+
+    # Content-equal but distinct object (what DataLoader workers produce):
+    # revalidate without replacing the cached device tensors.
+    batch_a2 = dict(batch_a)
+    batch_a2["geometry"] = batch_a["geometry"].clone()
+    batch_a2["geom_features"] = batch_a["geom_features"].clone()
+    trainer._prepare_ae_batch(batch_a2)
+    assert trainer._geometry is cached_geom
+
+    # A different geometry busts the cache.
+    geom_b = (torch.rand(*grid) > 0.7).float()
+    assert not torch.equal(geom_a, geom_b)
+    batch_b = {
+        "state": torch.randn(2, 3, *grid),
+        "geometry": geom_b.unsqueeze(0),
+        "geom_features": torch.randn(1, *grid).unsqueeze(0),
+    }
+    trainer._prepare_ae_batch(batch_b)
+    assert trainer._geometry is not cached_geom
+    torch.testing.assert_close(trainer._geometry, geom_b)
+
+    # A per-sample (crop) batch passes through without touching the cache.
+    sentinel = trainer._geometry
+    geom_crop = (torch.rand(2, *grid) > 0.5).float()
+    batch_crop = {
+        "state": torch.randn(2, 3, *grid),
+        "geometry": geom_crop,  # (B, *grid), leading dim != 1
+        "geom_features": torch.randn(2, 1, *grid),
+    }
+    _, geom_out, feat_out = trainer._prepare_ae_batch(batch_crop)
+    assert geom_out.shape == (2, *grid)
+    assert feat_out.shape == (2, 1, *grid)
+    torch.testing.assert_close(geom_out.cpu(), geom_crop)
+    assert trainer._geometry is sentinel  # cache untouched by the crop batch
 
 
 # --------------------------------------------------------------------------- #

@@ -241,46 +241,60 @@ class SnapshotDataset(Dataset):
     def __len__(self) -> int:
         return len(self._index)
 
-    def _random_crop(
-        self, state: torch.Tensor, geometry: torch.Tensor, features: torch.Tensor | None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Random ``random_crop_size`` cube of ``(state, geometry, features)``.
+    def _crop_slices(self, grid: tuple[int, ...]) -> tuple[slice, ...]:
+        """Pick a random ``random_crop_size`` cube's per-dim slices from the
+        trajectory's ``grid`` shape ``(nz, ny, nx)``.
 
-        A dim smaller than the crop size is taken whole (no padding here -- the
-        model pads to the encoder-crop multiple)."""
+        Choosing the origin from the *shape* alone (no field read) lets
+        :meth:`__getitem__` read only the crop lazily via ``isel`` instead of
+        materialising the full snapshot and slicing after. A dim smaller than
+        the crop size is taken whole (no padding here -- the model pads to the
+        encoder-crop multiple). The per-dim ``torch.randint`` draw order matches
+        the pre-lazy implementation, so a fixed seed yields the same origin."""
         cs = self.random_crop_size
         assert cs is not None
-        grid = geometry.shape  # (nz, ny, nx)
-        starts = []
-        sizes = []
+        slices = []
         for n in grid:
             c = min(cs, n)
             start = int(torch.randint(0, n - c + 1, (1,)).item()) if n > c else 0
-            starts.append(start)
-            sizes.append(c)
-        zs, ys, xs = starts
-        zc, yc, xc = sizes
-        sl = (slice(zs, zs + zc), slice(ys, ys + yc), slice(xs, xs + xc))
-        state = state[:, sl[0], sl[1], sl[2]]
-        geometry = geometry[sl]
-        if features is not None:
-            features = features[:, sl[0], sl[1], sl[2]]
-        return (
-            state.contiguous(),
-            geometry.contiguous(),
-            (features.contiguous() if features is not None else None),
-        )
+            slices.append(slice(start, start + c))
+        return tuple(slices)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         traj, t = self._index[idx]
         ds = self._get_state_ds(traj)
-        snap = ds.isel(time=t)
-        channels = np.stack([np.asarray(snap[v].values) for v in self.state_vars], 0)
-        state = torch.from_numpy(channels).to(self.dtype)
         geometry = self.geometry_for(traj)
         features = self.geom_features_for(traj)
-        if self.random_crop_size is not None:
-            state, geometry, features = self._random_crop(state, geometry, features)
+
+        if self.random_crop_size is None:
+            # Full-field path (byte-identical to the original): read the whole
+            # snapshot and ship the shared geometry / SDF tensors unchanged.
+            snap = ds.isel(time=t)
+            channels = np.stack(
+                [np.asarray(snap[v].values) for v in self.state_vars], 0
+            )
+            state = torch.from_numpy(channels).to(self.dtype)
+            item = {"state": state, "geometry": geometry}
+            if features is not None:
+                item["geom_features"] = features
+            return item
+
+        # Random-crop path: pick the origin first, then read ONLY the crop
+        # lazily (``isel``) so a small crop of a large grid doesn't materialise
+        # the full field. The spatial dim names are read off the DataArray so the
+        # slices bind positionally to (nz, ny, nx) == geometry.shape.
+        sl_z, sl_y, sl_x = self._crop_slices(tuple(geometry.shape))
+        da0 = ds[self.state_vars[0]]
+        spatial_dims = [d for d in da0.dims if d != "time"]
+        isel_kw: dict = {"time": t}
+        isel_kw.update(dict(zip(spatial_dims, (sl_z, sl_y, sl_x))))
+        channels = np.stack(
+            [np.asarray(ds[v].isel(**isel_kw).values) for v in self.state_vars], 0
+        )
+        state = torch.from_numpy(channels).to(self.dtype).contiguous()
+        geometry = geometry[sl_z, sl_y, sl_x].contiguous()
+        if features is not None:
+            features = features[:, sl_z, sl_y, sl_x].contiguous()
         item = {"state": state, "geometry": geometry}
         if features is not None:
             item["geom_features"] = features
