@@ -4,7 +4,7 @@
 `neural_surrogates.finetuning` (`inject.py`, `targets.py`),
 `BaseTraining.weights_transform`, `conf/neural_surrogate/finetuning.yaml` +
 `finetune_mode/lora_nextstep`, `scripts/neural_surrogate/finetune_neural_surrogate.py`,
-`tests/test_lora_finetuning.py`. See `docs/neural_surrogates.md` Part E. Pre-flight
+`tests/test_lora_finetuning.py`. See `docs/neural_surrogates.md` Part F. Pre-flight
 findings baked in: peft 0.19 crashes merging a **1×1×1** Conv3d LoRA and rejects
 **grouped** convs at inject — both are excluded from the auto presets so they
 always inject *and* merge cleanly.

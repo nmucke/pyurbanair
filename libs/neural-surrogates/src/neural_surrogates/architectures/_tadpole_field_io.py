@@ -137,10 +137,19 @@ class _TadpoleFieldIO:
     ) -> torch.Tensor:
         """Build the autoencoder's working-space input
         ``[normalised state, (geometry block)]`` -> ``(B, Cin, *grid)``."""
-        if geometry.dim() == state.dim() - 1:  # (B, *grid) alongside (B, C, *grid)
-            pass
-        elif geometry.dim() == state.dim() - 2:  # unbatched (*grid,)
+        if geometry.dim() == state.dim() - 2:  # unbatched (*grid,)
             geometry = geometry.unsqueeze(0).expand(state.shape[0], *geometry.shape)
+        elif geometry.dim() == state.dim() - 1:  # (B, *grid) alongside (B, C, *grid)
+            # A single-mask (1, *grid) alongside a batched state must be expanded
+            # to B, not left to broadcast silently over the batch.
+            if geometry.shape[0] == 1 and state.shape[0] != 1:
+                geometry = geometry.expand(state.shape[0], *geometry.shape[1:])
+        else:
+            raise ValueError(
+                f"geometry shape {tuple(geometry.shape)} is not a mask for state "
+                f"shape {tuple(state.shape)}; expected (*grid,) or (B, *grid) with "
+                f"grid == {tuple(state.shape[2:])}"
+            )
         mask = geometry.unsqueeze(1).to(dtype=state.dtype)  # (B, 1, *grid)
         x = self._normalize_state(state, mask)
         if self.encode_geometry:

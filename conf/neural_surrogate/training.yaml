@@ -151,7 +151,7 @@ dataset:
   # architecture's `sdf_features` mode (the train script cross-checks this, and
   # that the two `sdf_clamp_cells` agree). `none` keeps items byte-identical to
   # the pre-feature dataset.
-  sdf_features: sdf  # none | sdf | grad | both
+  sdf_features: both  # none | sdf | grad | both
   # Clamp radius L (in cells) for the normalised SDF channel: clip(sdf, -L, L)/L.
   sdf_clamp_cells: 32
 

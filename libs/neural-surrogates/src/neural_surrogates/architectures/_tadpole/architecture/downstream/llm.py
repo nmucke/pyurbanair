@@ -256,7 +256,17 @@ class LLMLayer(nn.Module):
         if attention_method == "hyper":
             self.attn = HyperAttentionBlock(dim, dim, num_heads, causal=causal)
         else:
-            self.attn = AttentionBlock(dim, dim, num_heads, causal=causal)
+            # LOCAL MODIFICATION (review finding H2): upstream called
+            # ``AttentionBlock(dim, dim, num_heads, causal=causal)``, but the
+            # signature is ``AttentionBlock(dim, num_heads=8, qkv_bias=False, ...)``
+            # -- so the second positional ``dim`` bound to ``num_heads`` and the
+            # intended ``num_heads`` bound to ``qkv_bias``. That silently ran
+            # naive attention with ``head_dim = 1`` (``num_heads == dim``) and
+            # made the ``num_heads`` knob dead. Bind by keyword so the configured
+            # head count actually takes effect. (``causal`` is not a real
+            # AttentionBlock param -- it lands in ``**kwargs`` and is ignored by
+            # the naive path, matching upstream behaviour.)
+            self.attn = AttentionBlock(dim, num_heads=num_heads, causal=causal)
         self.input_layernorm = LlamaRMSNorm(dim, eps=1e-05)
         self.post_attention_layernorm = LlamaRMSNorm(dim, eps=1e-05)
         self.mlp = LlamaMLP(dim, inner_dim)

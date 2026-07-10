@@ -6,7 +6,7 @@
 (`datasets/snapshot.py`), `AutoencoderTrainer` (`training/autoencoder.py`),
 `conf/neural_surrogate/pretrain_autoencoder.yaml`,
 `scripts/neural_surrogate/pretrain_autoencoder.py`,
-`tests/test_autoencoder_pretraining.py`. See `docs/neural_surrogates.md` Part F.
+`tests/test_autoencoder_pretraining.py`. See `docs/neural_surrogates.md` Part G.
 **Dependency decision baked in (§1):** the upstream `tadpole` package is *not* a
 dependency — only the autoencoder subtree is vendored (like `_upt/`), because
 upstream's `requirements.txt` pulls in `torchfsm` → `vape4d` (its unused online

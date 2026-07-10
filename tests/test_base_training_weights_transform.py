@@ -14,6 +14,8 @@ scripted losses so we control exactly when improvements happen.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -27,11 +29,13 @@ def _snapshot(model: nn.Module) -> dict:
     return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
-def _make_trainer(model, weights_path, num_epochs, val_scores):
+def _make_trainer(model, weights_path, num_epochs, val_scores, checkpoint_every=1):
     """A Trainer whose train/val steps are scripted and deterministic.
 
     ``_train_epoch`` bumps every parameter by 1.0 (so each epoch's state is
-    distinct — best != last), ``_validate`` yields the next scripted loss.
+    distinct — best != last), ``_validate`` yields the next scripted loss. A
+    ``None`` in ``val_scores`` raises inside ``_validate`` to simulate a crash
+    mid-run (after that epoch's train step, before any checkpoint).
     """
     ds = TensorDataset(torch.zeros(2, 2), torch.zeros(2, 2))
     loader = DataLoader(ds, batch_size=1)
@@ -49,7 +53,7 @@ def _make_trainer(model, weights_path, num_epochs, val_scores):
         # transformed form), which is exactly the path under test.
         weights_transform=_snapshot,
         resume=True,
-        checkpoint_every=1,
+        checkpoint_every=checkpoint_every,
         patience=None,
         amp=False,
         pushforward_epochs_per_step=None,
@@ -63,8 +67,14 @@ def _make_trainer(model, weights_path, num_epochs, val_scores):
                 p.add_(1.0)
         return 0.0
 
+    def fake_validate():
+        v = next(scores)
+        if v is None:
+            raise RuntimeError("simulated crash mid-run")
+        return v
+
     trainer._train_epoch = fake_train_epoch  # type: ignore[method-assign]
-    trainer._validate = lambda: next(scores)  # type: ignore[method-assign]
+    trainer._validate = fake_validate  # type: ignore[method-assign]
     return trainer
 
 
@@ -107,3 +117,60 @@ def test_resume_exports_best_not_last(tmp_path):
         exported = t2.weights_transform(t2._eager_model)
         for k in expected_best:
             assert torch.allclose(exported[k], expected_best[k]), k
+
+
+def test_resume_does_not_clobber_newer_on_disk_weights(tmp_path):
+    """M1: a resume from a STALE checkpoint must not clobber the newer weights.pt.
+
+    weights.pt is rewritten on every val improvement, but the full checkpoint
+    (carrying best_val / best_model_state) only every ``checkpoint_every`` epochs.
+    So an improvement at a non-checkpoint epoch followed by a crash leaves an
+    on-disk weights.pt that is BETTER than the last checkpoint's best. A resume
+    that never re-beats it must neither restore the stale snapshot nor let the
+    caller export it over the better on-disk weights.
+    """
+    weights_path = tmp_path / "weights.pt"
+    best_val_path = tmp_path / "best_val.json"
+
+    torch.manual_seed(1)
+    model_a = nn.Linear(2, 2)
+
+    # Run A: improve to val=8 (weights.pt = init+1, best_val.json = 8), then
+    # plateau. checkpoint_every=1 => the checkpoint captures best_state = init+1,
+    # best_val = 8. Ends cleanly (model left at init+2).
+    ta = _make_trainer(
+        model_a, weights_path, num_epochs=2, val_scores=[8.0, 9.0], checkpoint_every=1
+    )
+    ta.fit()
+    assert json.loads(best_val_path.read_text())["best_val"] == 8.0
+
+    # Run B: RESUME, improve to val=3 at a non-checkpoint epoch (checkpoint_every
+    # huge), then crash before the next checkpoint. weights.pt + best_val.json
+    # advance to the better epoch (val=3); the checkpoint stays stale (best_val=8).
+    model_b = nn.Linear(2, 2)
+    tb = _make_trainer(
+        model_b, weights_path, num_epochs=4, val_scores=[3.0, None], checkpoint_every=99
+    )
+    with pytest.raises(RuntimeError):
+        tb.fit()
+    assert json.loads(best_val_path.read_text())["best_val"] == 3.0
+    newer = {k: v.clone() for k, v in torch.load(weights_path).items()}
+
+    # Run C: RESUME from the stale checkpoint (best_val=8, best_state=init+1) and
+    # never beat val=3. The fix reads best_val.json (=3), adopts it as the
+    # threshold and drops the stale snapshot => no restore, so the guarded caller
+    # must keep the newer on-disk weights.pt untouched.
+    model_c = nn.Linear(2, 2)
+    tc = _make_trainer(
+        model_c, weights_path, num_epochs=7, val_scores=[20.0] * 5, checkpoint_every=99
+    )
+    tc.fit()
+    assert not tc.restored_best_weights, (
+        "resumed run recovered a stale best snapshot; the guard would then export "
+        "worse weights over the newer on-disk weights.pt"
+    )
+
+    # weights.pt must still hold the NEWER (val=3) weights, not the stale best.
+    on_disk = torch.load(weights_path)
+    for k in newer:
+        assert torch.allclose(on_disk[k], newer[k]), k

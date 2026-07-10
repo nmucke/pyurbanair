@@ -79,6 +79,25 @@ def run(cfg: DictConfig) -> None:
             "reconstruction). Set random_crop_size to a multiple of "
             "encoder_crop_size."
         )
+    elif crop is None:
+        # Full-field path: the model tiles each grid into encoder_crop_size cubes
+        # and zero-pads any dim that is not a multiple of it. Padding tiles waste
+        # compute AND pollute the KL metric (their all-zero latents are counted).
+        # Warn once per distinct grid shape that is not cleanly divisible.
+        bad_shapes = {
+            tuple(g.shape)
+            for g in train_ds._geometries
+            if any(int(d) % enc_crop != 0 for d in g.shape)
+        }
+        for shape in sorted(bad_shapes):
+            offenders = [int(d) for d in shape if int(d) % enc_crop != 0]
+            print(
+                f"WARNING: full-field grid {shape} has dim(s) {offenders} not a "
+                f"multiple of architecture.encoder_crop_size={enc_crop}: those axes "
+                "are zero-padded up to the next multiple every forward (wasted "
+                "compute, and the padded tiles inflate the logged KL metric). Pick "
+                "an encoder_crop_size that divides the grid, or crop to a multiple."
+            )
 
     print(
         f"train snapshots={len(train_ds)}  val snapshots={len(val_ds)}  "

@@ -16,9 +16,13 @@
 # config), THIS mode declares the architecture inline: `pretrained_model_dir` is
 # the AE dir (a TadpoleAE, not a stepper), so the stepper node lives here and the
 # AE dir only supplies encoder.pt/decoder.pt + the state normalization stats. The
-# finetune script detects DFT mode by the presence of this `architecture` node.
+# finetune script detects DFT mode by the explicit `finetune_mode: dft` marker
+# below (NOT by the presence of this `architecture` node), so a `lora_nextstep`
+# run that adds `+architecture=...` on the CLI cannot silently flip into this path.
 # Must sit AFTER `_self_` in finetuning.yaml's defaults so it overrides the inline
 # `trainer._target_` there.
+finetune_mode: dft
+
 architecture:
   _target_: neural_surrogates.TadpoleTimeStepper
   # Encoder/decoder size -- MUST match the pre-trained AE (cross-checked against

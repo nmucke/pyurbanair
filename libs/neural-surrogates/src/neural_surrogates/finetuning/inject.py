@@ -85,9 +85,12 @@ def merge_to_state_dict(peft_model: "PeftModel") -> dict[str, torch.Tensor]:
 
     Cost: a ``deepcopy`` + merge on each call (``BaseTraining`` calls this on every
     val improvement). Cheap per epoch, non-trivial repeated allocation over a long
-    run -- acceptable for short fine-tunes. Tensors are detached to **CPU** so the
-    transient device-side deepcopy is freed on return (no GPU-memory retention via
-    the returned dict) and the saved ``weights.pt`` is device-agnostic.
+    run -- acceptable for short fine-tunes. Because the deepcopy happens on the
+    training device (right after validation), it transiently roughly doubles model
+    memory -- expect a ~1x model VRAM spike for the duration of the merge. Tensors
+    are detached to **CPU** so the transient device-side deepcopy is freed on
+    return (no GPU-memory retention via the returned dict) and the saved
+    ``weights.pt`` is device-agnostic.
     """
     merged = copy.deepcopy(peft_model).merge_and_unload()
     return {k: v.detach().cpu() for k, v in merged.state_dict().items()}
