@@ -8,6 +8,9 @@ A Python framework for urban air flow simulation and ensemble-based data assimil
 
 - **Three CFD backends:** pylbm (Lattice Boltzmann Method, wrapping Geir Evensen's LBM), pyudales (wrapping uDALES v2.2.0), and pypalm (wrapping the PALM model system)
 - **Neural surrogate backend:** train a learned one-step network on CFD ensembles and run it as a drop-in fourth forward model — several architectures (`SimpleConv`, `UNetConvNeXt`, the transformer-based `UPT`, `P3D`, and a domain-decomposed model that runs on any grid sharing its training cell spacing), full stack (data generation, training, autoregressive rollout) in [`neural-surrogates`](libs/neural-surrogates), documented in [`docs/neural_surrogates.md`](docs/neural_surrogates.md)
+- **Signed-distance geometry features** — optional SDF / ∇SDF obstacle channels (`sdf` / `grad` / `both`) shared by the dataloader and the P3D / Tadpole stems, giving the network a bounded, grid-spacing-consistent view of the building field
+- **Foundation-model pre-training + fine-tuning** — pre-train a vendored Tadpole (variational) autoencoder on urban-flow snapshots, turn it into an ESMDA time-stepper via a zero-initialised "Dynamic Fine-Tuning" (DFT) head, and adapt any architecture with parameter-efficient **LoRA (PEFT)** fine-tuning that merges back into a plain, ESMDA-loadable `weights.pt`
+- **Model comparison** — score several trained surrogates on the same rollout benchmark from one config
 - **Ensemble-based data assimilation** using ESMDA (Ensemble Smoother with Multiple Data Assimilation), implemented in JAX
 - **Sequential ensemble filtering (EnKF)** — a cycled Ensemble Kalman Filter alongside the smoothers, with pluggable analysis / localization / inflation (multiplicative, RTPS, RTPP) / parameter-evolution groups, for state, parameter, or joint estimation
 - **Parameter estimation** and **joint state-parameter estimation**
@@ -124,7 +127,10 @@ shared files):
   `esmda.num_assimilation_windows=10`). See [`conf/README.md`](conf/README.md).
 - **`neural_surrogate/`** — everything for the learned surrogate, in one folder:
   `training.yaml`, `testing.yaml`, `training_data.yaml` (a single data-generation
-  config), and `architectures/{unet_convnext,upt}/<size>.yaml`. See
+  config), `architectures/{unet_convnext,upt,p3d,domain_decomposed}/<size>.yaml`,
+  a `mode/` group (`standard` / `domain_decomposition`), and the foundation-model
+  configs — `pretrain_autoencoder.yaml`, `finetuning.yaml` with a `finetune_mode/`
+  group (`lora_nextstep` / `dft`), and `comparison.yaml`. See
   [`docs/neural_surrogates.md`](docs/neural_surrogates.md).
 
 ### Forward simulations
@@ -321,6 +327,61 @@ per-step residual; the normalization statistics are computed automatically at th
 start of training and baked into the checkpoint, so nothing extra is needed at
 inference time.
 
+#### Foundation-model pre-training & fine-tuning
+
+Beyond training an architecture from scratch, the surrogate stack supports a
+pre-train → fine-tune workflow (design records under
+[`docs/neural_surrogate_plans/`](docs/neural_surrogate_plans/)):
+
+- **Tadpole autoencoder pre-training** — `pretrain_autoencoder.py` trains a
+  vendored Tadpole (variational) autoencoder on urban-flow snapshots as pure
+  representation learning (no next-step objective); `test_autoencoder.py`
+  inspects reconstructions. The AE is *not* an ESMDA model on its own.
+- **AE → time-stepper (DFT)** — `finetune_neural_surrogate.py` with
+  `finetune_mode=dft` turns a pre-trained AE (passed as `pretrained_model_dir`)
+  into a `TadpoleTimeStepper` by training a zero-initialised "Dynamic
+  Fine-Tuning" head (skip scales + latent subnetwork) around the frozen
+  autoencoder, yielding a next-step forward model.
+- **LoRA (PEFT) fine-tuning** — the default `finetune_mode=lora_nextstep` adapts
+  an already-trained architecture (e.g. P3D) with low-rank adapters via
+  HuggingFace PEFT, then merges them back into a plain `weights.pt` that is
+  byte-indistinguishable from a fully-trained checkpoint, so
+  `NeuralSurrogateForwardModel` and ESMDA need zero changes. Requires the optional
+  extra (`pip install 'neural_surrogates[finetuning]'`; already present in the
+  pixi `dev`/`cuda` envs). `lora.variant=balora` (Bayesian LoRA, plan 04) is
+  reserved but not yet implemented.
+- **Model comparison** — `compare_surrogate_models.py` (config
+  `neural_surrogate=comparison`) scores several trained surrogates on one rollout
+  benchmark.
+
+```bash
+# Pre-train the Tadpole autoencoder on an existing training dataset
+pixi run -e dev python scripts/neural_surrogate/pretrain_autoencoder.py \
+    dataset.root_dir=training_data/pylbm_barcelona model_name=tadpole_ae_s
+
+# LoRA next-step fine-tune of an already-trained P3D onto new data
+pixi run -e dev python scripts/neural_surrogate/finetune_neural_surrogate.py \
+    pretrained_model_dir=model_weights/p3d_xie_and_castro \
+    model_name=p3d_ft_barcelona \
+    dataset.root_dir=training_data/pylbm_barcelona
+
+# AE -> DFT time-stepper from a pre-trained Tadpole autoencoder
+pixi run -e dev python scripts/neural_surrogate/finetune_neural_surrogate.py \
+    finetune_mode=dft \
+    pretrained_model_dir=model_weights/tadpole_ae_s \
+    model_name=tadpole_dft_s_barcelona \
+    dataset.root_dir=training_data/pylbm_barcelona
+
+# Compare several trained surrogates on the same rollout benchmark
+pixi run -e dev python scripts/neural_surrogate/compare_surrogate_models.py
+```
+
+Any architecture can be built with SDF geometry features
+(`dataset.sdf_features=sdf|grad|both`, default `none`) to feed the network a
+bounded signed-distance view of the obstacle field; the same channels are shared
+by the dataloader and the model stem. See
+[`docs/neural_surrogates.md`](docs/neural_surrogates.md) for the full stack.
+
 ### Running on Snellius (SLURM)
 
 The Snellius `snellius` env ships with a one-command submit wrapper that picks
@@ -432,10 +493,14 @@ pyurbanair/
 │           ├── forward_model.py           # NeuralSurrogateForwardModel
 │           ├── ensemble_forward_model.py
 │           ├── datasets/                  # TransitionDataset, PatchTransitionDataset
-│           ├── training/                  # BaseTraining, Trainer, PatchTrainer
+│           ├── training/                  # BaseTraining, Trainer, PatchTrainer, AutoencoderTrainer
+│           ├── finetuning/                # LoRA/PEFT injection, merge-to-state-dict, target presets
 │           ├── decomposition.py / dd_loss.py  # Domain-decomposition operators + Eq-9 loss
 │           ├── geometry.py                # STL → voxel geometry channel
-│           └── architectures/             # SimpleConv, UNetConvNeXt, UPT (_upt/), P3D, DomainDecomposed
+│           ├── sdf.py                     # Signed-distance-field geometry features (SDF / ∇SDF)
+│           ├── training_spinup.py         # Warm-start ESMDA from training-data trajectories
+│           └── architectures/             # SimpleConv, UNetConvNeXt, UPT (_upt/), P3D, DomainDecomposed,
+│                                          #   Tadpole AE + AE→DFT time-stepper (tadpole_ae/stepper, _tadpole/)
 │
 ├── conf/                                  # Hydra config (see Configuration)
 │   ├── run_forward_model.yaml             # Entry point — forward-model runs (self-contained)
@@ -447,7 +512,8 @@ pyurbanair/
 │   ├── params/                            # Parameter samplers (static/dynamic + *_truth)
 │   ├── esmda/                             # ESMDA smoother/localization/state_reduction groups
 │   ├── filtering/                         # EnKF analysis/localization/inflation/evolution groups
-│   └── neural_surrogate/                  # Surrogate: training.yaml, testing.yaml, training_data.yaml, architectures/
+│   └── neural_surrogate/                  # Surrogate: training/testing/training_data.yaml, architectures/, mode/,
+│                                          #   pretrain_autoencoder.yaml, finetuning.yaml + finetune_mode/, comparison.yaml
 │
 ├── scripts/                               # Main execution scripts (see docs/scripts_and_configs.md)
 │   ├── run_forward_model.py               # Forward sim (run.ensemble / run.rollout_steps / params=static|dynamic)
@@ -456,7 +522,7 @@ pyurbanair/
 │   ├── run_filtering_pipeline.sh          # Filtering: run → metrics → figures
 │   ├── esmda/                             # ESMDA pipeline: run_esmda.py, compute_esmda_metrics.py, make_esmda_figures.py, _esmda_common.py
 │   ├── filtering/                         # Filtering (EnKF) pipeline: run_filtering.py, compute_filtering_metrics.py, make_filtering_figures.py, _filtering_common.py
-│   ├── neural_surrogate/                  # Surrogate stack (generate/train/test/dataloading)
+│   ├── neural_surrogate/                  # Surrogate stack (generate/train/test, pretrain/finetune autoencoder, compare)
 │   ├── adjust_simulations/                # Ground-truth utilities (trim_spinup, 32-bit, ...)
 │   ├── figure_creation/                   # Paper/diagnostic figures (visualize_ground_truth, ...)
 │   ├── tools/                             # Case setup CLIs (prepare_case_stl, preprocess_udales_geometry)
@@ -480,6 +546,7 @@ pyurbanair/
 │   ├── neural_surrogates.md               # Neural-surrogate stack
 │   ├── scripts_and_configs.md             # conf/ + scripts/ reference
 │   ├── job_scripts.md                     # HPC job-script reference
+│   ├── neural_surrogate_plans/            # Foundation-model / fine-tuning design records (LoRA, AE, DFT, BaLoRA)
 │   ├── plans/ · temp/                     # Working notes / design records (theory + history)
 │   └── ...
 │
@@ -524,7 +591,7 @@ A wrapper for the PALM model system. It is imported lazily (compiling on first i
 
 #### neural-surrogates
 
-A learned, one-step surrogate of the CFD forward models, built with PyTorch. It provides a dataset generation/loading stack (`TransitionDataset`), architectures (`SimpleConv` baseline, `UNetConvNeXt`, the transformer-based `UPT`, `P3D`, and a domain-decomposed model), a generic `Trainer` (best-val checkpointing, patience-based early stopping, and the pushforward trick), and a `NeuralSurrogateForwardModel` that wraps a trained network as a `BaseForwardModel` so it slots into the ensemble/ESMDA machinery as a fourth backend. `UPT`/`P3D` z-score-normalize their inputs and predict the per-step residual (both required for stable rollouts on dense grids), with normalization statistics computed at training time and stored in the checkpoint. A cold start is bootstrapped by the CFD backend that generated its training data; warm starts step the network directly. See [`docs/neural_surrogates.md`](docs/neural_surrogates.md) for the full stack.
+A learned, one-step surrogate of the CFD forward models, built with PyTorch. It provides a dataset generation/loading stack (`TransitionDataset`), architectures (`SimpleConv` baseline, `UNetConvNeXt`, the transformer-based `UPT`, `P3D`, a domain-decomposed model, and a vendored Tadpole autoencoder + its AE→time-stepper), a generic `Trainer` (best-val checkpointing, patience-based early stopping, and the pushforward trick) plus an `AutoencoderTrainer` for representation pre-training, and a `NeuralSurrogateForwardModel` that wraps a trained network as a `BaseForwardModel` so it slots into the ensemble/ESMDA machinery as a fourth backend. `UPT`/`P3D` z-score-normalize their inputs and predict the per-step residual (both required for stable rollouts on dense grids), with normalization statistics computed at training time and stored in the checkpoint. Optional signed-distance-field geometry features (`sdf.py`) give the model a bounded view of the obstacle field. A `finetuning/` module adds parameter-efficient LoRA (PEFT) fine-tuning that merges back into a plain, ESMDA-loadable `weights.pt`; combined with Tadpole autoencoder pre-training and the "Dynamic Fine-Tuning" (DFT) time-stepper head, this supports a foundation-model pre-train → fine-tune workflow (design records in [`docs/neural_surrogate_plans/`](docs/neural_surrogate_plans/)). A cold start is bootstrapped by the CFD backend that generated its training data (or warm-started from saved training trajectories via `training_spinup.py`); warm starts step the network directly. See [`docs/neural_surrogates.md`](docs/neural_surrogates.md) for the full stack.
 
 ## Benchmark Geometry
 
