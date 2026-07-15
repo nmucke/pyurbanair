@@ -9,6 +9,7 @@ A Python framework for urban air flow simulation and ensemble-based data assimil
 - **Three CFD backends:** pylbm (Lattice Boltzmann Method, wrapping Geir Evensen's LBM), pyudales (wrapping uDALES v2.2.0), and pypalm (wrapping the PALM model system)
 - **Neural surrogate backend:** train a learned one-step network on CFD ensembles and run it as a drop-in fourth forward model — several architectures (`SimpleConv`, `UNetConvNeXt`, the transformer-based `UPT`, `P3D`, and a domain-decomposed model that runs on any grid sharing its training cell spacing), full stack (data generation, training, autoregressive rollout) in [`neural-surrogates`](libs/neural-surrogates), documented in [`docs/neural_surrogates.md`](docs/neural_surrogates.md)
 - **Ensemble-based data assimilation** using ESMDA (Ensemble Smoother with Multiple Data Assimilation), implemented in JAX
+- **Sequential ensemble filtering (EnKF)** — a cycled Ensemble Kalman Filter alongside the smoothers, with pluggable analysis / localization / inflation (multiplicative, RTPS, RTPP) / parameter-evolution groups, for state, parameter, or joint estimation
 - **Parameter estimation** and **joint state-parameter estimation**
 - **Localization** for ESMDA (adaptive correlation-based observation tapering, with optional "grid block" joint analysis; opt-in)
 - **Multi-step rollout simulations** with state carry-over between time windows
@@ -66,12 +67,14 @@ ulimit -s unlimited
 
 All simulation and assimilation settings live in `conf/`, composed by
 [Hydra](https://hydra.cc/). Any field can be overridden from the command line
-(`domain.nx=80`, `esmda.num_steps=4`). There are exactly two run entry points,
+(`domain.nx=80`, `esmda.num_steps=4`). There are three run entry points,
 one per script, and each is **self-contained** —
 [`run_forward_model.yaml`](conf/run_forward_model.yaml) for
-`scripts/run_forward_model.py` and [`run_esmda.yaml`](conf/run_esmda.yaml) for
-`scripts/esmda/run_esmda.py`. See [`conf/README.md`](conf/README.md) for the full
-overview.
+`scripts/run_forward_model.py`, [`run_esmda.yaml`](conf/run_esmda.yaml) for
+`scripts/esmda/run_esmda.py`, and
+[`run_filtering.yaml`](conf/run_filtering.yaml) for
+`scripts/filtering/run_filtering.py` (sequential EnKF). See
+[`conf/README.md`](conf/README.md) for the full overview.
 
 **Inlined base** (each entry point carries its own copy, rather than pulling
 shared files):
@@ -109,6 +112,12 @@ shared files):
 - **`esmda/smoother/`** — the ESMDA variant: `static` (parameter-only),
   `dynamic` (time-varying parameters), `state_and_parameter` (joint). Selected
   with `esmda/smoother=...`.
+- **`filtering/`** (run_filtering only) — the sequential-EnKF machinery, one
+  option per group: `filtering/analysis` (`stochastic`), `filtering/localization`
+  (`none` / `correlation` / `distance`), `filtering/inflation` (`none` /
+  `multiplicative` / `rtps` / `rtpp`), and `filtering/evolution` (`none` /
+  `random_walk`, the parameter forecast model). The estimation target is
+  `filtering.mode=state | parameter | joint`.
 - **compute budget** — ensemble size / parallelism / ESMDA steps / windows /
   param knots are baked into the two entry points at medium-sized defaults;
   change them with plain CLI overrides (`ensemble.ensemble_size=8`,
@@ -240,6 +249,39 @@ RMSE, assimilated- and validation-sensor RMSE/CRPS), and diagnostic figures
 observations, and an animation). All forward models also generate a `.temp`
 folder where intermediate files are stored.
 
+### Sequential filtering (EnKF)
+
+Where ESMDA re-assimilates a whole window at once, `run_filtering.py` runs a
+**cycled Ensemble Kalman Filter**: each cycle forecasts one segment of
+`time.simulation_time` seconds (set it to `obs.interval_seconds` to assimilate
+one observation interval per analysis) and applies a single full-weight analysis.
+The mode is `filtering.mode=state | parameter | joint`, and the analysis math /
+localization / inflation / parameter-evolution are picked by the `filtering/*`
+groups. The **prior must be static** (`params@prior_params=static`) — the filter
+re-tracks a scalar each cycle, so time-varying (AR(2)) priors stay with
+`run_esmda.py` — but the truth may be dynamic, in which case the filter tracks a
+drifting truth. The truth source (`run.truth_dir` / `run.truth_start_time`)
+mirrors `run_esmda.py`.
+
+```bash
+# Joint state+parameter filtering over 4 cycles
+python scripts/filtering/run_filtering.py filtering.mode=joint filtering.num_cycles=4
+
+# Parameter-only, driven by a random-walk parameter forecast (no inflation)
+python scripts/filtering/run_filtering.py filtering.mode=parameter \
+  filtering/evolution=random_walk filtering/inflation=none
+
+# State estimation with correlation localization
+python scripts/filtering/run_filtering.py filtering.mode=state \
+  filtering/localization=correlation
+```
+
+> **Note:** the parameter-updating modes (`parameter`, `joint`) require spread
+> maintenance — pair them with `filtering/evolution=random_walk` or an inflation
+> option, or the filter refuses the silently-collapsing configuration at
+> construction. `scripts/run_filtering_pipeline.sh` chains run → metrics →
+> figures, mirroring `run_esmda_pipeline.sh`.
+
 ### Neural surrogates
 
 A learned one-step network can be trained on a CFD ensemble and then used
@@ -351,10 +393,15 @@ pyurbanair/
 │   │   └── src/data_assimilation/
 │   │       ├── observation_operator.py    # Maps states to observation space
 │   │       ├── interpolation.py           # Grid interpolation utilities
+│   │       ├── augmentation.py            # State/parameter augmentation for joint analysis
+│   │       ├── inflation.py               # Covariance inflation (multiplicative, RTPS, RTPP)
+│   │       ├── reduction.py               # State-space reduction
+│   │       ├── io.py                      # NetCDF read/write helpers
 │   │       ├── localization/              # BaseLocalization + CorrelationLocalization
-│   │       └── smoothing/
-│   │           ├── base.py                # Base smoothing class
-│   │           └── esmda.py               # ESMDA implementation
+│   │       ├── smoothing/
+│   │       │   ├── base.py                # Base smoothing class
+│   │       │   └── esmda.py               # ESMDA implementation
+│   │       └── filtering/                 # Sequential EnKF: base, analysis, parameter_evolution
 │   │
 │   ├── pylbm/                             # Lattice Boltzmann Method wrapper
 │   │   ├── pyproject.toml
@@ -393,11 +440,13 @@ pyurbanair/
 ├── conf/                                  # Hydra config (see Configuration)
 │   ├── run_forward_model.yaml             # Entry point — forward-model runs (self-contained)
 │   ├── run_esmda.yaml                     # Entry point — all ESMDA runs (self-contained)
+│   ├── run_filtering.yaml                 # Entry point — sequential EnKF runs (self-contained)
 │   ├── README.md                          # Config overview — the axes + recipes
 │   ├── case/                              # Experiment bundles: domain+grid+geometry+sensors+time (xie_and_castro, barcelona)
 │   ├── model/                             # Backend wiring (pylbm, pyudales, pypalm, neural_surrogate)
 │   ├── params/                            # Parameter samplers (static/dynamic + *_truth)
 │   ├── esmda/                             # ESMDA smoother/localization/state_reduction groups
+│   ├── filtering/                         # EnKF analysis/localization/inflation/evolution groups
 │   └── neural_surrogate/                  # Surrogate: training.yaml, testing.yaml, training_data.yaml, architectures/
 │
 ├── scripts/                               # Main execution scripts (see docs/scripts_and_configs.md)
@@ -410,6 +459,7 @@ pyurbanair/
 │   ├── neural_surrogate/                  # Surrogate stack (generate/train/test/dataloading)
 │   ├── adjust_simulations/                # Ground-truth utilities (trim_spinup, 32-bit, ...)
 │   ├── figure_creation/                   # Paper/diagnostic figures (visualize_ground_truth, ...)
+│   ├── tools/                             # Case setup CLIs (prepare_case_stl, preprocess_udales_geometry)
 │   └── figspec/                           # Internal figure-styling library
 │
 ├── job_scripts/                           # HPC submission (see docs/job_scripts.md)
@@ -456,7 +506,7 @@ The base library. It contains a base forward model, base ensemble forward model,
 
 #### data-assimilation
 
-Data assimilation functionalities implemented using JAX. Contains an observation operator (for mapping simulation states to observation locations), grid interpolation utilities, a base smoothing class, ESMDA (Ensemble Smoother with Multiple Data Assimilation), and optional localization (adaptive correlation-based observation tapering, with an optional "grid block" mode that updates co-located rows jointly). Supports parameter-only, joint state-parameter, and time-varying-parameter estimation. Compatible with every simulation backend.
+Data assimilation functionalities implemented using JAX. Contains an observation operator (for mapping simulation states to observation locations), grid interpolation utilities, a base smoothing class, ESMDA (Ensemble Smoother with Multiple Data Assimilation), a sequential Ensemble Kalman Filter (`filtering/`, cycled state/parameter/joint analysis with pluggable inflation and parameter-evolution models), and optional localization (adaptive correlation-based observation tapering, with an optional "grid block" mode that updates co-located rows jointly). Supports parameter-only, joint state-parameter, and time-varying-parameter estimation. Compatible with every simulation backend.
 
 #### pylbm
 
