@@ -113,3 +113,7 @@ params.nc
 
 # Results
 results/*
+
+# manuscripts and model comparison outputs
+manuscripts/
+model_comparison/
