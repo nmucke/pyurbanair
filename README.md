@@ -1,5 +1,7 @@
 # pyurbanair
 
+[![CI](https://github.com/nmucke/pyurbanair/actions/workflows/ci.yml/badge.svg)](https://github.com/nmucke/pyurbanair/actions/workflows/ci.yml)
+
 A Python framework for urban air flow simulation and ensemble-based data assimilation. Part of the UrbanAIR project.
 
 > **Note:** This repository is under active development (v0.1.0). Things will change and some functionalities may not work as intended.
@@ -578,8 +580,6 @@ Data assimilation functionalities implemented using JAX. Contains an observation
 #### pylbm
 
 A wrapper for Geir Evensen's Lattice Boltzmann simulator. On first import, it automatically downloads the repository from GitHub and compiles the code based on the experiment specifications. Supports STL geometry input and optional CUDA acceleration (via the `cuda` environment).
-
-> **Caveat:** The STL-to-LBM geometry conversion has been implemented but may not be completely correct. Do not fully trust outputs from pylbm when using STL geometry.
 
 #### pyudales
 

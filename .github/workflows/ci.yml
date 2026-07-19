@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          run-install: false
+
+      - name: Cache pixi environment
+        uses: actions/cache@v4
+        with:
+          path: .pixi/envs
+          key: pixi-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
+
+      # setup-dev, not `pixi install -e dev`: the first install hits the known
+      # coreutils/tempest-remap bin/test clobber that the task works around.
+      - name: Install dev environment
+        run: pixi run setup-dev
+
+      - name: Run tests
+        run: pixi run -e dev py.test
