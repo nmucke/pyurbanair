@@ -1,5 +1,5 @@
-from collections.abc import Sequence
 import os
+from collections.abc import Sequence
 
 import pytest
 from hydra import compose, initialize
@@ -25,6 +25,19 @@ _SMOKE_OVERRIDES = [
 ]
 
 
+# run_esmda.yaml ships production defaults the suite must not inherit:
+# machine-specific scratch roots (/export/...) instead of the portable in-repo
+# roots (the commented-out defaults in that file), and ``case: barcelona``,
+# whose precomputed uDALES geometry bundle only matches the Barcelona grid —
+# not the smoke domain above. Re-assert the test-friendly xie_and_castro case
+# (the default of the other entry points) and the in-repo output roots.
+_ESMDA_OVERRIDES = [
+    "case=xie_and_castro",
+    "paths.results_dir=.temp/${truth_model.name}_to_${assim_model.name}",
+    "paths.experiment_dir=${oc.env:PWD}/.temp",
+]
+
+
 def _compose_test_cfg(
     overrides: Sequence[str] | None = None,
     config_name: str = "run_forward_model",
@@ -33,10 +46,11 @@ def _compose_test_cfg(
     # tests use ``run_forward_model``; ESMDA tests use ``run_esmda`` (the single
     # primary config for scripts/esmda/run_esmda.py) and pick the smoother via the
     # ``esmda/smoother`` group override.
+    esmda_overrides = _ESMDA_OVERRIDES if config_name == "run_esmda" else []
     with initialize(version_base=None, config_path="../conf"):
         return compose(
             config_name=config_name,
-            overrides=[*_SMOKE_OVERRIDES, *(overrides or [])],
+            overrides=[*_SMOKE_OVERRIDES, *esmda_overrides, *(overrides or [])],
         )
 
 

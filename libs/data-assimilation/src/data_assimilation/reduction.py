@@ -104,7 +104,17 @@ class OnlineStateReduction:
         # round-off in the cumulative sum.
         cumulative = jnp.cumsum(energy) / total
         rank = int(jnp.searchsorted(cumulative, self.energy_fraction - 1e-12)) + 1
-        nonzero = int(jnp.sum(singular_values > singular_values[0] * 1e-12))
+        # Rank cut a la numpy.linalg.matrix_rank: scaled to the dtype's machine
+        # eps so numerically-zero modes (e.g. the one removed by centering) are
+        # dropped on every BLAS — in float32 they land near sigma_0 * 1e-7, far
+        # above an absolute-style 1e-12 relative cut. Keeping them would also
+        # blow up encode(), which whitens by 1/sigma.
+        tol = (
+            singular_values[0]
+            * jnp.finfo(singular_values.dtype).eps
+            * max(anomalies.shape)
+        )
+        nonzero = int(jnp.sum(singular_values > tol))
         rank = min(rank, nonzero)
         if self.max_rank is not None:
             rank = min(rank, self.max_rank)
@@ -132,9 +142,10 @@ class OnlineStateReduction:
 
         Note:
             The whitening divides by the retained singular values, and the rank
-            rule (see :meth:`fit`) keeps modes down to ``s > s0 * 1e-12``, so with
-            ``energy_fraction = 1.0`` the smallest coefficients can be scaled by
-            up to ~1e12.  In exact arithmetic the Kalman update is invariant to
+            rule (see :meth:`fit`) keeps modes down to ``s > s0 * eps *
+            max(N_s, N_samples)``, so with ``energy_fraction = 1.0`` the
+            smallest coefficients can still be scaled by a large factor.  In
+            exact arithmetic the Kalman update is invariant to
             this diagonal scaling (``decode_increment`` multiplies it straight
             back), but under JAX's default float32 that dynamic range is
             exhausted and the tail coefficients become numerically meaningless.

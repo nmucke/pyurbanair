@@ -204,6 +204,10 @@ def test_run_esmda_distance_localization(
                 "esmda/state_reduction=svd",
                 "esmda.state_reduction.basis_source=window_snapshots",
                 "esmda.final_time_smoothing=true",
+                # final_time_smoothing needs the in-memory ensemble (the
+                # analysis returns no state in on-disk save mode, now the
+                # run_esmda.yaml default).
+                "run.ensemble_save_on_disk=false",
             ],
             id="state_tv_svd_snapshots_final_smoothing",
         ),
