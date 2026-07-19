@@ -3,8 +3,9 @@
 Mirrors tests/test_run_esmda.py: everything runs under the tiny smoke config
 (conftest ``_SMOKE_OVERRIDES``) with the global (unlocalized) update — the
 default correlation localization is degenerate at this 2-member ensemble size.
-One test per filter mode (state / parameter / joint), plus a multi-cycle run
-and distance localization (purely geometric, so meaningful at 2 members).
+One test per filter mode (state / parameter / joint), plus a multi-cycle run,
+distance localization (purely geometric, so meaningful at 2 members), and the
+mixed drift-tracking path (a dynamic truth tracked by a static prior).
 """
 
 import pathlib
@@ -23,6 +24,11 @@ def _overrides(
         "case=xie_and_castro",
         "model@truth_model=pylbm",
         "model@assim_model=pylbm",
+        # Pin a static truth so these stay deterministic static-parameter smoke
+        # tests independent of the config's default truth sampler (which is a
+        # dynamic drift-tracking truth); the mixed dynamic-truth path has its own
+        # test below.
+        "params@truth_params=static_truth",
         f"filtering.mode={mode}",
         f"filtering.num_cycles={num_cycles}",
         # The global (unlocalized) update; correlation localization is
@@ -98,6 +104,46 @@ def test_run_filtering_distance_localization(compose_test_cfg: Any) -> None:
         config_name="run_filtering",
     )
     run(cfg)
+
+
+def test_run_filtering_tracks_dynamic_truth(compose_test_cfg: Any) -> None:
+    """Mixed mode: a time-varying (dynamic) TRUTH tracked by a static prior.
+
+    The filter's scalar estimate tracks a drifting truth. The dynamic truth is
+    sampled over the full num_cycles horizon (so it varies across cycles), and
+    the static prior is analysed/evolved each cycle. Exercises the truth-sampling
+    horizon override and the parameter-block update against a time-varying truth.
+    """
+    import xarray
+
+    from scripts.filtering.run_filtering import run
+
+    cfg = compose_test_cfg(
+        _overrides(
+            "joint",
+            2,
+            [
+                # Override the pinned static truth back to the dynamic one; the
+                # prior stays static (the default), which is the mixed setup.
+                "params@truth_params=dynamic_truth",
+                "filtering/evolution=random_walk",
+            ],
+        ),
+        config_name="run_filtering",
+    )
+    run(cfg)
+
+    out_dir = pathlib.Path(cfg.paths.results_dir)
+    # The truth params are time-varying and span the full horizon (num_cycles *
+    # simulation_time), so the truth drifts across every cycle.
+    true_params = xarray.open_dataset(out_dir / "true_params.nc")
+    assert "time" in true_params["inflow_angle"].dims
+    assert (
+        float(true_params["time"].max()) >= 2 * float(cfg.time.simulation_time) - 1e-6
+    )
+    # The prior/posterior stay static scalars the filter tracks.
+    posterior = xarray.open_dataset(out_dir / "posterior_params.nc")
+    assert "time" not in posterior["inflow_angle"].dims
 
 
 def test_run_filtering_rejects_zero_cycles(compose_test_cfg: Any) -> None:

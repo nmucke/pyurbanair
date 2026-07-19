@@ -122,6 +122,32 @@ def load_analyzed_states(run_dir: pathlib.Path, ta: dict) -> xarray.Dataset:
     return posterior.expand_dims(time=[0.0])
 
 
+def load_params_history(run_dir: pathlib.Path, ta: dict) -> xarray.Dataset:
+    """The per-cycle analyzed params on a physical ``time`` axis for truth-alignment.
+
+    ``params_history.nc`` stacks the prior (its first entry) then each cycle's
+    analyzed params along ``cycle``. The parameter metric/figure code compares
+    these against ``true_params`` by interpolating the truth onto the estimate's
+    x-axis (see ``pyurbanair.plotting.compute_parameter_metrics``), so the
+    estimate needs an x-axis in the truth's units (seconds) rather than a bare
+    cycle index -- otherwise a *drifting* (time-varying) truth is sampled at the
+    wrong times. Relabel ``cycle`` -> ``time`` with physical seconds: the prior
+    sits at t=0 and cycle ``c``'s posterior at its end-of-segment time
+    ``(c+1)*sim_time``. For a static (constant) truth the axis is immaterial (the
+    truth interpolates to the same value everywhere), so this is backward
+    compatible.
+    """
+    hist = xarray.open_dataset(pathlib.Path(run_dir) / "params_history.nc")
+    n = int(hist.sizes["cycle"])
+    sim_time = float(ta["sim_time"])
+    # Entry 0 is the prior (t=0); entry i>=1 is cycle (i-1)'s posterior at its
+    # end-of-segment time i*sim_time. So times[i] = i*sim_time.
+    times = np.arange(n, dtype=float) * sim_time
+    if "time" in hist.coords:
+        hist = hist.drop_vars("time")
+    return hist.rename({"cycle": "time"}).assign_coords(time=times)
+
+
 # ---------------------------------------------------------------------------
 # Per-cycle sensor series (truth vs analyzed ensemble at fixed points)
 # ---------------------------------------------------------------------------

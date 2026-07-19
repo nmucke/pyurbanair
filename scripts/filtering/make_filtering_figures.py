@@ -51,6 +51,7 @@ from scripts.filtering._filtering_common import (
     ensemble_cycle_sensor_series,
     ensemble_velocity_mean_std,
     load_analyzed_states,
+    load_params_history,
     load_run_config,
     read_yaml,
     select_z_plane,
@@ -84,8 +85,10 @@ def make_figures(run_dir: pathlib.Path) -> None:
     if history_path.exists():
         # params_history holds the prior as its first cycle entry followed by
         # each cycle's posterior, so it reads as the full prior->posterior
-        # trajectory on its own (no separate prior overlay needed).
-        params_history = xarray.open_dataset(history_path)
+        # trajectory on its own (no separate prior overlay needed). Loaded on a
+        # physical ``time`` axis so a drifting (time-varying) truth aligns with
+        # each cycle's end-of-segment time.
+        params_history = load_params_history(run_dir, ta)
         plot_rollout_time_evolution(
             esmda_params=params_history,
             true_params=true_params,

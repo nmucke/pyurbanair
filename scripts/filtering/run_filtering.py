@@ -50,9 +50,13 @@ observation operator, and the filter consumes the resulting
 one observation interval per analysis (the plan's default cadence), set
 ``time.simulation_time`` equal to ``obs.interval_seconds``.
 
-Only static scalar parameters are supported (the filter estimates the
-parameter value *now*; time-varying/AR(2) priors stay with the ESMDA
-smoothers for the time being) — pair with ``params@prior_params=static``.
+The PRIOR must be a static scalar sampler (the filter estimates the parameter
+value *now*, re-tracked each cycle; a time-varying/AR(2) posterior stays with
+the ESMDA smoothers) — pair with ``params@prior_params=static``. The TRUTH may
+be dynamic (``params@truth_params=dynamic_truth``): the filter then tracks a
+drifting truth, its scalar estimate following the truth's per-cycle value. A
+dynamic truth is sampled over the full ``num_cycles`` horizon so it drifts
+across every cycle.
 
 Examples::
 
@@ -99,19 +103,21 @@ def run(cfg: DictConfig) -> None:
     domain_x_min = float(cfg.domain.bounds[0][0])
     rng_key = jax.random.PRNGKey(cfg.filtering.seed)
 
-    # The filter estimates static scalar parameters only (Phase 1): a
-    # time-varying (AR(2)) prior belongs to the dynamic ESMDA smoothers.
-    for name, params_cfg in (
-        ("truth_params", cfg.truth_params),
-        ("prior_params", cfg.prior_params),
-    ):
-        if "seconds_per_knot" in list(params_cfg.keys()):
-            raise ValueError(
-                f"{name} is a time-varying (dynamic) sampler, which the filter "
-                "does not support yet. Use params@prior_params=static / "
-                "params@truth_params=static_truth, or the ESMDA smoothers "
-                "(scripts/esmda/run_esmda.py) for time-varying parameters."
-            )
+    # The filter estimates a static scalar parameter that it TRACKS across
+    # cycles (re-analysed each cycle, evolved between cycles): a time-varying
+    # (AR(2)) PRIOR belongs to the dynamic ESMDA smoothers. A time-varying TRUTH
+    # is supported, and is the point of the mixed default -- the filter then
+    # tracks the drifting truth with its scalar estimate.
+    if "seconds_per_knot" in list(cfg.prior_params.keys()):
+        raise ValueError(
+            "prior_params is a time-varying (dynamic) sampler, which the filter "
+            "does not support: it estimates a scalar parameter value it tracks "
+            "per cycle. Use params@prior_params=static (a time-varying TRUTH -- "
+            "params@truth_params=dynamic_truth -- IS supported, so the filter "
+            "can track a drifting truth), or the ESMDA smoothers "
+            "(scripts/esmda/run_esmda.py) for a time-varying posterior."
+        )
+    is_dynamic_truth = "seconds_per_knot" in list(cfg.truth_params.keys())
 
     # Select which parameters the filter estimates (same contract as
     # run_esmda.py `params_to_estimate`): null -> every parameter the sampler
@@ -135,7 +141,14 @@ def run(cfg: DictConfig) -> None:
             results_dir=None,
             simulation_time=final_time,
         )
-        truth_sampler = instantiate(truth_params_cfg)
+        # A dynamic (time-varying) truth must span the FULL horizon so its
+        # parameter drifts across every cycle, not just the first: sample its
+        # knots over final_time (mirrors run_esmda.py's is_dynamic branch, which
+        # samples over sim_time * num_windows). A static truth ignores it.
+        if is_dynamic_truth:
+            truth_sampler = instantiate(truth_params_cfg, simulation_time=final_time)
+        else:
+            truth_sampler = instantiate(truth_params_cfg)
         true_params = truth_sampler.sample(1)
 
         instantiate(cfg.truth_model.prepare, forward_model=true_forward_model)

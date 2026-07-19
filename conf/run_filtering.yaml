@@ -17,8 +17,11 @@
 #
 # One cycle = one forecast segment of `time.simulation_time` seconds; set it
 # equal to `obs.interval_seconds` to assimilate one observation interval per
-# analysis. Only STATIC parameters are supported (pair with
-# params@prior_params=static); time-varying priors stay with run_esmda.py.
+# analysis. The PRIOR must be STATIC (pair with params@prior_params=static): the
+# filter estimates a scalar it re-tracks each cycle, so a time-varying (AR(2))
+# posterior stays with run_esmda.py. The TRUTH may be dynamic
+# (params@truth_params=dynamic_truth) -- the filter then tracks a drifting truth,
+# its scalar estimate following the truth's per-cycle value (the default here).
 #
 # Examples::
 #
@@ -39,7 +42,11 @@ defaults:
   - filtering/evolution: none
   - model@truth_model: pyudales
   - model@assim_model: pyudales
-  - params@truth_params: static_truth
+  # Mixed drift-tracking default: a time-varying (dynamic) TRUTH the filter
+  # tracks with a STATIC scalar prior it re-analyses each cycle. The prior MUST
+  # be static (params@prior_params=static) -- a dynamic prior belongs to the
+  # ESMDA smoothers. Set params@truth_params=static_truth for a constant truth.
+  - params@truth_params: dynamic_truth
   - params@prior_params: static
 
 # --- Output roots (everything mutable lands under .temp/). Two model mounts
@@ -62,10 +69,13 @@ time:
 # --- Which parameters the filter estimates (same contract as run_esmda.yaml
 # `params_to_estimate`: a list -> that subset of the sampler configs' params,
 # applied to BOTH prior and truth; null -> every parameter they define). ---
+# The mixed default's dynamic truth (conf/params/dynamic_truth.yaml) only varies
+# inflow_angle and velocity_magnitude, so estimate those (a parameter absent from
+# the truth would be tracked against no reference). Add others when the truth
+# sampler defines them.
 params_to_estimate:
   - inflow_angle
   - velocity_magnitude
-  - pressure_gradient_magnitude
 
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
@@ -84,18 +94,18 @@ ensemble:
 filtering:
   # One full-weight analysis per cycle; each cycle forecasts one segment of
   # `time.simulation_time` seconds.
-  num_cycles: 50
+  num_cycles: 250
   seed: 42
   obs_error_std: 0.25
   # state | parameter | joint. The parameter-updating modes (parameter and
   # joint) REQUIRE spread maintenance (filtering/evolution=random_walk or a
   # filtering/inflation option) — the filter refuses silently-collapsing
   # configurations at construction.
-  mode: joint
+  mode: parameter
   # Defaults; normally set by the filtering/* groups above.
   analysis: stochastic
-  localization: correlation
-  inflation: meultiplicative
+  localization: null
+  inflation: null
   parameter_evolution: random_walk
   filter:
     _target_: data_assimilation.filtering.EnsembleKalmanFilter
