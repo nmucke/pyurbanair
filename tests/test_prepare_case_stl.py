@@ -1,4 +1,4 @@
-"""Tests for the standalone STL preparation tool (``tools/prepare_case_stl.py``).
+"""Tests for the standalone STL preparation tool (``scripts/tools/prepare_case_stl.py``).
 
 The tool merges a raw (buildings + ground) STL pair into a single domain-frame
 STL for the forward models. "Matches the old STL files" here means the output
@@ -34,7 +34,7 @@ XIE_STL = REPO_ROOT / "examples" / "xie_and_castro" / "xie_castro_2008_STL.stl"
 
 
 def _load_tool():
-    path = REPO_ROOT / "tools" / "prepare_case_stl.py"
+    path = REPO_ROOT / "scripts" / "tools" / "prepare_case_stl.py"
     spec = importlib.util.spec_from_file_location("prepare_case_stl", path)
     mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -55,7 +55,9 @@ def assert_domain_frame(mesh: trimesh.Trimesh, tol: float = 1e-3) -> None:
     assert abs(lo[0]) < tol, f"min x should be 0, got {lo[0]}"
     assert abs(lo[1]) < tol, f"min y should be 0, got {lo[1]}"
     assert abs(lo[2]) < tol, f"min z (floor) should be 0, got {lo[2]}"
-    assert (mesh.vertices >= -tol).all(), "all vertices must be >= 0 (inside the domain)"
+    assert (
+        mesh.vertices >= -tol
+    ).all(), "all vertices must be >= 0 (inside the domain)"
 
 
 def assert_binary_stl(path: pathlib.Path, nfaces: int) -> None:
@@ -85,7 +87,9 @@ def _make_buildings() -> trimesh.Trimesh:
     b1 = trimesh.Trimesh(vertices=b1.vertices.copy(), faces=faces, process=False)
 
     b2 = trimesh.creation.box(extents=(8.0, 8.0, BUILDING_HEIGHT))
-    b2.apply_translation([OFFSET[0] + 25.0, OFFSET[1] + 5.0, GROUND_TOP + BUILDING_HEIGHT / 2])
+    b2.apply_translation(
+        [OFFSET[0] + 25.0, OFFSET[1] + 5.0, GROUND_TOP + BUILDING_HEIGHT / 2]
+    )
     return trimesh.util.concatenate([b1, b2])
 
 
@@ -201,7 +205,9 @@ def test_merged_mesh_keeps_both_buildings_and_ground(synthetic_inputs):
     # Ground sits near z=0; buildings rise to ~building height above it.
     assert zmax > BUILDING_HEIGHT * 0.8, "buildings should be present (tall geometry)"
     face_z = mesh.triangles.mean(axis=1)[:, 2]
-    assert (face_z < (GROUND_TOP - GROUND_BOTTOM) + 1.0).any(), "ground layer should be present"
+    assert (
+        face_z < (GROUND_TOP - GROUND_BOTTOM) + 1.0
+    ).any(), "ground layer should be present"
     assert (face_z > BUILDING_HEIGHT * 0.8).any(), "building tops should be present"
 
 
@@ -241,7 +247,8 @@ def _rect_building_inputs(tmp_path) -> tuple[pathlib.Path, pathlib.Path]:
 
 def _tall_body_xy_extents(mesh) -> tuple[float, float]:
     bodies = [
-        x for x in mesh.split(only_watertight=False)
+        x
+        for x in mesh.split(only_watertight=False)
         if x.bounds[1, 2] > BUILDING_HEIGHT * 0.8
     ]
     assert bodies, "no tall building body found"
@@ -265,9 +272,7 @@ def test_rotate_buildings_is_independent_of_ground(tmp_path):
     assert yb > xb * 2, "rotating the buildings should make them long in y"
 
     # rotating ONLY the ground must NOT change the building's orientation.
-    xg, yg = _tall_body_xy_extents(
-        _prepare(b_path, g_path, rotate_ground=90.0, **win)
-    )
+    xg, yg = _tall_body_xy_extents(_prepare(b_path, g_path, rotate_ground=90.0, **win))
     assert xg > yg * 2, "ground rotation must not rotate the buildings"
 
 
@@ -276,9 +281,19 @@ def test_shared_rotate_flag_rotates_both(tmp_path):
     b_path, g_path = _rect_building_inputs(tmp_path)
     examples_root = tmp_path / "examples"
     rc = tool.main(
-        [str(b_path), str(g_path), "--rotate", "90",
-         "--center", str(OFFSET[0]), str(OFFSET[1]), "--size", "90",
-         "--examples-root", str(examples_root)]
+        [
+            str(b_path),
+            str(g_path),
+            "--rotate",
+            "90",
+            "--center",
+            str(OFFSET[0]),
+            str(OFFSET[1]),
+            "--size",
+            "90",
+            "--examples-root",
+            str(examples_root),
+        ]
     )
     assert rc == 0
     mesh = trimesh.load(examples_root / "barcelona" / "buildings.stl", force="mesh")
@@ -331,7 +346,9 @@ def test_deep_basement_does_not_lift_ground_into_plateau(tmp_path):
     )
     assert mesh.bounds[0, 2] >= -1e-4, "no solid may sit below the z=0 floor"
     frac = _built_fraction(mesh)
-    assert frac < 0.4, f"streets should be open after the fix, got built fraction {frac:.2f}"
+    assert (
+        frac < 0.4
+    ), f"streets should be open after the fix, got built fraction {frac:.2f}"
 
 
 # --------------------------------------------------------------------------- #
@@ -371,7 +388,9 @@ def test_flatten_ground_makes_strippable_z0_plane(tmp_path):
     kept = _prepare(b_path, g_path, z_datum="ground", flatten_ground=False, **win)
     zk = kept.vertices[:, 2]
     kept_ground = np.all(zk[kept.faces] == 0.0, axis=1)
-    kgv = kept.vertices[np.unique(kept.faces[kept_ground])] if kept_ground.any() else None
+    kgv = (
+        kept.vertices[np.unique(kept.faces[kept_ground])] if kept_ground.any() else None
+    )
     spans = kgv is not None and (
         np.ptp(kgv[:, 0]) / np.ptp(kept.vertices[:, 0]) > 0.9
         and np.ptp(kgv[:, 1]) / np.ptp(kept.vertices[:, 1]) > 0.9
@@ -389,13 +408,19 @@ def test_crop_xy_drops_faces_outside_window():
     cropped = tool._crop_xy(ground, lo, hi)
     assert 0 < len(cropped.faces) < len(ground.faces)
     centroids = cropped.triangles.mean(axis=1)
-    assert (centroids[:, 0] >= lo[0] - 1e-6).all() and (centroids[:, 0] <= hi[0] + 1e-6).all()
-    assert (centroids[:, 1] >= lo[1] - 1e-6).all() and (centroids[:, 1] <= hi[1] + 1e-6).all()
+    assert (centroids[:, 0] >= lo[0] - 1e-6).all() and (
+        centroids[:, 0] <= hi[0] + 1e-6
+    ).all()
+    assert (centroids[:, 1] >= lo[1] - 1e-6).all() and (
+        centroids[:, 1] <= hi[1] + 1e-6
+    ).all()
 
 
 def test_repair_makes_building_winding_consistent():
     raw = _make_buildings()
-    assert not raw.is_winding_consistent, "synthetic input is intentionally inconsistent"
+    assert (
+        not raw.is_winding_consistent
+    ), "synthetic input is intentionally inconsistent"
     fixed = tool._repair_buildings(raw)
     assert fixed.is_winding_consistent, "repair should make the winding consistent"
 
@@ -412,7 +437,9 @@ def test_default_crop_keeps_all_buildings_when_centroid_is_off_center(tmp_path):
     big = trimesh.creation.box(extents=(40.0, 40.0, BUILDING_HEIGHT))
     big.apply_translation([OFFSET[0], OFFSET[1], GROUND_TOP + BUILDING_HEIGHT / 2])
     far = trimesh.creation.box(extents=(6.0, 6.0, BUILDING_HEIGHT))
-    far.apply_translation([OFFSET[0] + 120.0, OFFSET[1], GROUND_TOP + BUILDING_HEIGHT / 2])
+    far.apply_translation(
+        [OFFSET[0] + 120.0, OFFSET[1], GROUND_TOP + BUILDING_HEIGHT / 2]
+    )
     buildings = trimesh.util.concatenate([big, far])
     # Mass is dominated by the big box, so the centroid sits far from the
     # geometric (bounding-box) centre -- exactly the failure condition.
@@ -431,8 +458,11 @@ def test_default_crop_keeps_all_buildings_when_centroid_is_off_center(tmp_path):
     # big box (~40 m), so anything well past that proves the far box was kept.
     assert mesh.bounds[1, 0] - mesh.bounds[0, 0] > 100.0, "far building was clipped"
     # And both should split out as separate solid bodies (plus the ground).
-    tall = [b for b in mesh.split(only_watertight=False)
-            if b.bounds[1, 2] > BUILDING_HEIGHT * 0.8]
+    tall = [
+        b
+        for b in mesh.split(only_watertight=False)
+        if b.bounds[1, 2] > BUILDING_HEIGHT * 0.8
+    ]
     assert len(tall) >= 2, "expected both buildings to be present"
 
 
