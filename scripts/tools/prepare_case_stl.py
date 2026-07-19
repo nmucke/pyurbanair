@@ -219,14 +219,18 @@ def prepare(
     if repair_buildings:
         print("Repairing buildings mesh ...", flush=True)
         buildings = _repair_buildings(buildings)
-        print(f"  -> {len(buildings.faces):,} faces (watertight={buildings.is_watertight})")
+        print(
+            f"  -> {len(buildings.faces):,} faces (watertight={buildings.is_watertight})"
+        )
 
     print("Cropping ground ...", flush=True)
     ground = _crop_xy(ground, lo, hi)
     print(f"  -> {len(ground.faces):,} faces")
 
     if len(buildings.faces) == 0:
-        raise ValueError("No building faces left after cropping - check --center/--size.")
+        raise ValueError(
+            "No building faces left after cropping - check --center/--size."
+        )
     if len(ground.faces) == 0:
         raise ValueError("No ground faces left after cropping - check --center/--size.")
 
@@ -269,7 +273,9 @@ def prepare(
     # that no longer assumes a flat z==0 sheet. Use --no-flatten-ground to keep
     # the raw terrain in the meantime.
     if flatten_ground:
-        print(f"Flattening ground to a flat plane (z={ground_mean:.2f}) ...", flush=True)
+        print(
+            f"Flattening ground to a flat plane (z={ground_mean:.2f}) ...", flush=True
+        )
         gv = ground.vertices.copy()
         gv[:, 2] = ground_mean
         ground.vertices = gv
@@ -340,8 +346,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("buildings", type=pathlib.Path, help="Buildings STL (obstacles).")
     p.add_argument("ground", type=pathlib.Path, help="Ground/terrain (extruded) STL.")
-    p.add_argument("--case", default="barcelona", help="Case name -> examples/<backend>/<case>/.")
-    p.add_argument("--output-name", default="buildings.stl", help="Output STL filename.")
+    p.add_argument(
+        "--case", default="barcelona", help="Case name -> examples/<backend>/<case>/."
+    )
+    p.add_argument(
+        "--output-name", default="buildings.stl", help="Output STL filename."
+    )
     p.add_argument(
         "--examples-root",
         type=pathlib.Path,
@@ -365,7 +375,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Crop-window size in metres: one value (square) or two (Lx Ly). "
         "Default: full buildings footprint.",
     )
-    p.add_argument("--margin", type=float, default=0.0, help="Extra metres added around the window.")
+    p.add_argument(
+        "--margin",
+        type=float,
+        default=0.0,
+        help="Extra metres added around the window.",
+    )
     p.add_argument(
         "--rotate",
         type=float,
@@ -377,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--rotate-buildings",
         type=float,
-        default=45,
+        default=None,
         help="Yaw the buildings mesh by this many degrees about its own xy centre, "
         "before the merge (overrides --rotate for the buildings).",
     )
@@ -412,8 +427,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional triangle budget; decimates the merged mesh if exceeded.",
     )
-    p.add_argument("--no-repair", action="store_true", help="Skip buildings-mesh repair.")
-    p.add_argument("--dry-run", action="store_true", help="Report only; do not write files.")
+    p.add_argument(
+        "--no-repair", action="store_true", help="Skip buildings-mesh repair."
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="Report only; do not write files."
+    )
     args = p.parse_args(argv)
 
     for f in (args.buildings, args.ground):
@@ -433,7 +452,9 @@ def main(argv: list[str] | None = None) -> int:
     center = tuple(args.center) if args.center is not None else None
 
     # --rotate is the shared default; --rotate-buildings/-ground override per mesh.
-    rotate_buildings = args.rotate if args.rotate_buildings is None else args.rotate_buildings
+    rotate_buildings = (
+        args.rotate if args.rotate_buildings is None else args.rotate_buildings
+    )
     rotate_ground = args.rotate if args.rotate_ground is None else args.rotate_ground
 
     mesh = prepare(
@@ -456,9 +477,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  faces        = {len(mesh.faces):,}")
     print(f"  bounds min   = {np.round(lo, 2).tolist()}")
     print(f"  bounds max   = {np.round(hi, 2).tolist()}")
-    print("\nSuggested uDALES namoptions domain (round up zsize above building height):")
+    print(
+        "\nSuggested uDALES namoptions domain (round up zsize above building height):"
+    )
     print(f"  xlen = {hi[0]:.1f}    ylen = {hi[1]:.1f}    zsize >= {hi[2]:.1f}")
-    print(f"  (set itot/jtot/ktot for your target dx; then regenerate the &WALLS facet counts)\n")
+    print(
+        f"  (set itot/jtot/ktot for your target dx; then regenerate the &WALLS facet counts)\n"
+    )
 
     write_outputs(
         mesh,
