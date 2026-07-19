@@ -85,6 +85,14 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         posterior_params = xarray.open_dataset(posterior_path)
         prior_params = xarray.open_dataset(run_dir / "prior_params.nc")
         true_params = xarray.open_dataset(run_dir / "true_params.nc")
+        # The posterior is the filter's final scalar estimate (end of run). Label
+        # it with the run's end time so a drifting (time-varying) truth is
+        # compared at that time rather than at t=0 (the truth is interpolated
+        # onto the estimate's x-axis; see compute_parameter_metrics). A static
+        # truth is constant, so the label is a no-op for it.
+        if ta and "time" not in posterior_params.dims:
+            final_time = float(ta["sim_time"]) * int(ta["num_cycles"])
+            posterior_params = posterior_params.expand_dims(time=[final_time])
         summary["parameter_metrics"] = parameter_metric_summary(
             posterior_params, true_params, prior_params
         )
