@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 
 
 PALM_BINARY = PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "palm"
-COMBINE_BINARY = PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "combine_plot_fields.x"
+COMBINE_BINARY = (
+    PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "combine_plot_fields.x"
+)
 
 # Mapping from pypalm's ``INPUT/<run>_<suffix>`` files to PALM's tempdir
 # filenames (right-hand side, matching the ``in:tr`` rules in .palm.iofiles).
@@ -48,6 +50,11 @@ INPUT_FILE_MAP: dict[str, str] = {
     "_topo": "TOPOGRAPHY_DATA",
     "_dynamic": "PIDS_DYNAMIC",
     "_static": "PIDS_STATIC",
+    # Periodic nudging driver (see pypalm.utils.nudging_utils). Both are
+    # optional — absent source files are skipped by _stage_inputs, matching the
+    # ``inopt`` semantics of the palmrun .palm.iofiles entries.
+    "_nudge": "NUDGING_DATA",
+    "_lsf": "LSF_DATA",
 }
 
 # Output files we care about and how to rename them when moving to OUTPUT/.
@@ -253,7 +260,9 @@ def run_direct(
     fast_io_root.mkdir(parents=True, exist_ok=True)
 
     t_start = time.monotonic()
-    tempdir = pathlib.Path(tempfile.mkdtemp(prefix=f"{experiment_name}.", dir=fast_io_root))
+    tempdir = pathlib.Path(
+        tempfile.mkdtemp(prefix=f"{experiment_name}.", dir=fast_io_root)
+    )
     logger.info("direct_palm: tempdir = %s", tempdir)
 
     try:
@@ -295,7 +304,9 @@ def run_direct(
             **_quiet,
         )
         palm_s = time.monotonic() - t_palm
-        logger.info("direct_palm: palm wall=%.2fs rc=%s", palm_s, palm_result.returncode)
+        logger.info(
+            "direct_palm: palm wall=%.2fs rc=%s", palm_s, palm_result.returncode
+        )
         if palm_result.returncode != 0:
             if capture and palm_result.stdout:
                 tail = "\n".join(palm_result.stdout.splitlines()[-80:])

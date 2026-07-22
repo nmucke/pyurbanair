@@ -166,7 +166,16 @@ same four top-level keys: `name`, `solver_name`, `forward_model._target_`,
   `instability_check` (dt-watchdog: kills diverging runs early so the ensemble
   resamples), `precomputed_geom_dir` (IBM geometry cache).
 - **pypalm**: `compile: false` (PALM is pre-compiled; `compile` is a no-op for PALM),
-  `ncpu: 14` (must divide `domain.nx` for the multigrid solver).
+  `ncpu: 14` (must divide `domain.nx` for the multigrid solver),
+  `boundary_condition: periodic|inflow_outflow`, and `nudging_config` —
+  `enabled` (default `true`; `false` restores the old un-driven periodic
+  staging), `tnudge` (relaxation timescale in s, default 15.0),
+  `nnudge_meters` (no nudging below this height, default 4.0), and
+  `profile_config` (vertical shear shape; also used under `inflow_outflow`).
+  Under `periodic` BCs these drive PALM's nudging scheme so the domain is
+  relaxed toward the `inflow_angle`/`velocity_magnitude` wind — the same
+  physics and parameter meaning as pyudales's periodic nudging. See
+  [docs/pypalm.md §8](pypalm.md).
 - **neural_surrogate**: `model_dir` (checkpoint folder written by `train_neural_surrogate.py`),
   `spinup_source: forward_model|training_data` (cold-start source),
   `spinup_forward_model` (a nested uDALES config for the CFD cold start),

@@ -27,6 +27,7 @@ from .utils.dynamic_driver_utils import (
 )
 from .utils.inflow_utils import angle_to_velocity
 from .utils.ncpu_utils import derive_npex_npey
+from .utils.nudging_utils import apply_nudging_driver, remove_nudging_files
 from .utils.p3d_utils import P3DFile
 from .utils.vertical_profile import build_profile_shape
 from .utils.warm_start_utils import write_warmstart_driver
@@ -50,9 +51,24 @@ DEFAULT_PARAMS = xarray.Dataset(
 )
 
 
+# Nudging-driver defaults. Read via ``.get(key, default)`` so a partial
+# ``nudging_config`` (e.g. one carrying only ``profile_config``) still resolves
+# every knob — a user-supplied dict *replaces* DEFAULT_NUDGING_CONFIG rather
+# than merging with it, so the per-key defaults must live here too.
+DEFAULT_NUDGING_ENABLED = True
+DEFAULT_TNUDGE = 15.0  # s; matches pyudales
+DEFAULT_NNUDGE_METERS = 4.0  # no nudging below this height (via huge tnudge)
+
 DEFAULT_NUDGING_CONFIG: dict = {
+    "enabled": DEFAULT_NUDGING_ENABLED,
+    "tnudge": DEFAULT_TNUDGE,
+    "nnudge_meters": DEFAULT_NNUDGE_METERS,
     "profile_config": {"type": "power_law", "alpha": 0.25},
 }
+
+# The four &initialization_parameters switches PALM's nudging path requires
+# (LSF0001/0003/0005 constraint chain); toggled together.
+_NUDGING_SWITCHES = ("nudging", "large_scale_forcing", "lsf_exception", "humidity")
 
 
 def _augment_runtime_library_paths(env: dict[str, str]) -> None:
@@ -179,7 +195,9 @@ class ForwardModel(BaseForwardModel):
                 bounds=bounds,
                 dz=dz,
             )
-            self._p3d_set_string("initialization_parameters", "topography", "read_from_file")
+            self._p3d_set_string(
+                "initialization_parameters", "topography", "read_from_file"
+            )
         else:
             logger.info(
                 "nx/ny/bounds not fully specified; skipping topography generation."
@@ -251,11 +269,17 @@ class ForwardModel(BaseForwardModel):
         if self.bounds is not None:
             (xmin, xmax), (ymin, ymax), (zmin, zmax) = self.bounds
             if self.nx:
-                p3d.set_value("initialization_parameters", "dx", (xmax - xmin) / self.nx)
+                p3d.set_value(
+                    "initialization_parameters", "dx", (xmax - xmin) / self.nx
+                )
             if self.ny:
-                p3d.set_value("initialization_parameters", "dy", (ymax - ymin) / self.ny)
+                p3d.set_value(
+                    "initialization_parameters", "dy", (ymax - ymin) / self.ny
+                )
             if self.nz:
-                p3d.set_value("initialization_parameters", "dz", (zmax - zmin) / self.nz)
+                p3d.set_value(
+                    "initialization_parameters", "dz", (zmax - zmin) / self.nz
+                )
 
         effective_runtime = (
             (self.simulation_time + self.spinup_time)
@@ -338,6 +362,14 @@ class ForwardModel(BaseForwardModel):
     def dynamic_driver_path(self) -> pathlib.Path:
         return self.dirs.input_dir / f"{self.experiment_name}_dynamic"
 
+    @property
+    def nudge_driver_path(self) -> pathlib.Path:
+        return self.dirs.input_dir / f"{self.experiment_name}_nudge"
+
+    @property
+    def lsf_driver_path(self) -> pathlib.Path:
+        return self.dirs.input_dir / f"{self.experiment_name}_lsf"
+
     def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
         self.params = _merge_params(self.params, params)
 
@@ -346,7 +378,21 @@ class ForwardModel(BaseForwardModel):
         # carries an α override from ``vertical_inflow_exponent`` when estimated.
         profile_config = self._resolve_profile_config(self.params)
 
-        if _is_time_varying_params(self.params):
+        # Driver selection (see docs/plans/palm_nudging_driver_plan.md §Design):
+        #   periodic  -> nudging driver (static OR time-varying), unless the
+        #                escape hatch nudging_config.enabled=false restores
+        #                today's un-driven periodic staging;
+        #   inflow_outflow static       -> current static path;
+        #   inflow_outflow time-varying -> current dynamic-driver path.
+        # The inflow_outflow branches also run symmetric hygiene so a template
+        # (or a prior periodic run in the same experiment_dir) cannot leak the
+        # LSF/nudging apparatus into an inflow run.
+        nudging_enabled = self._nudging_config.get("enabled", DEFAULT_NUDGING_ENABLED)
+        use_nudging = self.boundary_condition == "periodic" and nudging_enabled
+
+        if use_nudging:
+            angle, speed = self._stage_nudging_driver(profile_config)
+        elif _is_time_varying_params(self.params):
             if self.bounds is None or not self.nz or not self.ny:
                 raise ValueError(
                     "Time-varying inflow requires bounds, nz, and ny to be set "
@@ -355,6 +401,7 @@ class ForwardModel(BaseForwardModel):
             # Writes <case>_dynamic NetCDF and flips on turbulent_inflow in the
             # namelist. Returns a scalar params Dataset holding the t=0 values
             # so we still populate ug_surface/u_profile for initialisation.
+            self._disable_nudging_apparatus()
             init_params = apply_time_varying_inflow(
                 params=self.params,
                 p3d_path=self.p3d_path,
@@ -369,9 +416,11 @@ class ForwardModel(BaseForwardModel):
             speed = float(init_params["velocity_magnitude"].item())
         else:
             # Static path — make sure a stale dynamic driver from a prior
-            # time-varying run in the same experiment_dir doesn't leak in.
+            # time-varying run, and any nudging apparatus from a prior periodic
+            # run, in the same experiment_dir don't leak in.
             disable_turbulent_inflow(self.p3d_path)
             remove_dynamic_driver_file(self.dynamic_driver_path)
+            self._disable_nudging_apparatus()
             angle = float(self.params["inflow_angle"].item())
             speed = float(self.params["velocity_magnitude"].item())
 
@@ -402,6 +451,95 @@ class ForwardModel(BaseForwardModel):
 
         p3d.write()
 
+    def _stage_nudging_driver(
+        self, profile_config: Optional[dict]
+    ) -> tuple[float, float]:
+        """Stage the periodic nudging driver and return the t=0 (angle, speed).
+
+        Writes ``<name>_nudge`` (NUDGING_DATA) + inert ``<name>_lsf`` (LSF_DATA),
+        turns on the four ``&initialization_parameters`` switches PALM's nudging
+        path requires, and clears the inflow_outflow apparatus (turbulent_inflow
+        + dynamic driver) so a prior inflow run can't leak into a periodic one.
+        """
+        if self.bounds is None or not self.nz:
+            raise ValueError(
+                "Periodic nudging driver requires bounds and nz to be set on "
+                "ForwardModel (needed for the NUDGING_DATA height column). "
+                "Set them, or disable the driver with nudging_config.enabled=false."
+            )
+        self._validate_no_passive_scalar()
+        init_params = apply_nudging_driver(
+            params=self.params,
+            nudge_path=self.nudge_driver_path,
+            lsf_path=self.lsf_driver_path,
+            bounds=self.bounds,
+            nz=self.nz,
+            profile_config=profile_config,
+            tnudge=self._nudging_config.get("tnudge", DEFAULT_TNUDGE),
+            nnudge_meters=self._nudging_config.get(
+                "nnudge_meters", DEFAULT_NNUDGE_METERS
+            ),
+            spinup_time=self.spinup_time,
+            simulation_time=self.simulation_time,
+        )
+        self._set_nudging_switches(True)
+        # The nudging driver drives the flow instead of turbulent_inflow; make
+        # sure neither the turbulent_inflow block nor a stale dynamic driver is
+        # active. (Runs BEFORE _apply_warmstart, so the removed dynamic driver is
+        # re-created for a warm start — see run_single's ordering note.)
+        disable_turbulent_inflow(self.p3d_path)
+        remove_dynamic_driver_file(self.dynamic_driver_path)
+        return (
+            float(init_params["inflow_angle"].item()),
+            float(init_params["velocity_magnitude"].item()),
+        )
+
+    def _set_nudging_switches(self, on: bool) -> None:
+        """Set the four nudging ``&initialization_parameters`` switches together."""
+        p3d = P3DFile(self.p3d_path)
+        for key in _NUDGING_SWITCHES:
+            p3d.set_value("initialization_parameters", key, bool(on))
+        p3d.write()
+
+    def _disable_nudging_apparatus(self) -> None:
+        """Remove staged nudging files and force the switches off — but only
+        touch namelist keys that are actually present.
+
+        Keeping this a no-op on a clean template (keys absent → left absent,
+        PALM defaults them to ``.false.``) preserves the inflow_outflow staging
+        byte-for-byte apart from the file cleanup. It only bites when a prior
+        periodic run in the same experiment_dir set the switches ``.true.``.
+        """
+        remove_nudging_files(self.nudge_driver_path, self.lsf_driver_path)
+        p3d = P3DFile(self.p3d_path)
+        present = [
+            key
+            for key in _NUDGING_SWITCHES
+            if key in p3d.sections.get("initialization_parameters", {})
+        ]
+        if not present:
+            return
+        for key in present:
+            p3d.set_value("initialization_parameters", key, False)
+        p3d.write()
+
+    def _validate_no_passive_scalar(self) -> None:
+        """Raise if the template enables ``passive_scalar`` under the nudging driver.
+
+        PALM's ``large_scale_forcing`` is incompatible with ``passive_scalar``
+        (LSF0004, fatal). Fail at staging time with an actionable message rather
+        than letting PALM abort mid-run.
+        """
+        p3d = P3DFile(self.p3d_path)
+        val = p3d.get_value("initialization_parameters", "passive_scalar")
+        if val is not None and val.strip().lower() in (".t.", ".true.", "t", "true"):
+            raise ValueError(
+                "PALM's nudging driver (large_scale_forcing) is incompatible "
+                "with passive_scalar = .T. (LSF0004). Run this case under "
+                "boundary_condition='inflow_outflow', or disable the nudging "
+                "driver with nudging_config.enabled=false."
+            )
+
     @staticmethod
     def _param_value(params: Optional[xarray.Dataset], name: str) -> Optional[float]:
         """Scalar value of ``name`` in ``params``, or ``None`` when absent."""
@@ -409,7 +547,9 @@ class ForwardModel(BaseForwardModel):
             return None
         return float(params[name].item())
 
-    def _resolve_profile_config(self, params: Optional[xarray.Dataset]) -> Optional[dict]:
+    def _resolve_profile_config(
+        self, params: Optional[xarray.Dataset]
+    ) -> Optional[dict]:
         """Return a ``profile_config`` with ``alpha`` overridden from ``params``.
 
         ``vertical_inflow_exponent`` overrides the power-law ``alpha`` so the
@@ -426,7 +566,9 @@ class ForwardModel(BaseForwardModel):
         profile_config["alpha"] = alpha
         return profile_config
 
-    def _apply_sgs_setting(self, p3d: P3DFile, params: Optional[xarray.Dataset]) -> None:
+    def _apply_sgs_setting(
+        self, p3d: P3DFile, params: Optional[xarray.Dataset]
+    ) -> None:
         """Write the per-member SGS knob via the ``km_constant`` proxy (Option A).
 
         PALM's LES TKE closure has no Smagorinsky-style namelist multiplier
@@ -660,7 +802,9 @@ class ForwardModel(BaseForwardModel):
         # keyword args ``self.args`` is empty and unpickling raises a TypeError
         # ("missing returncode and cmd"), breaking the pool instead of being
         # caught as a member failure.
-        raise subprocess.CalledProcessError(1, f"palm ({self.experiment_name})", output=msg)
+        raise subprocess.CalledProcessError(
+            1, f"palm ({self.experiment_name})", output=msg
+        )
 
     @staticmethod
     def _assert_combine_succeeded(
@@ -726,9 +870,13 @@ class ForwardModel(BaseForwardModel):
         if self.bounds is not None:
             (xmin, _), (ymin, _), (zmin, _) = self.bounds
             offsets = {
-                "x": xmin, "xu": xmin,
-                "y": ymin, "yv": ymin,
-                "z": zmin, "zw": zmin, "zs": zmin,
+                "x": xmin,
+                "xu": xmin,
+                "y": ymin,
+                "yv": ymin,
+                "z": zmin,
+                "zw": zmin,
+                "zs": zmin,
             }
             coord_updates = {
                 name: state.coords[name].values + off
@@ -779,7 +927,9 @@ class ForwardModel(BaseForwardModel):
                 # has one fewer output than requested. Pad by repeating the
                 # last frame so all ensemble members concat along `time`.
                 last = state.isel(time=-1)
-                pads = [last.expand_dims(time=1) for _ in range(expected_outputs - actual)]
+                pads = [
+                    last.expand_dims(time=1) for _ in range(expected_outputs - actual)
+                ]
                 state = xarray.concat([state, *pads], dim="time")
 
         # Store the time coordinate in seconds (0, dt, 2·dt, …) rather than bare

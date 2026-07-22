@@ -19,8 +19,15 @@ forward_model:
   ncpu: 8
   save_only_last_timestep: false
   verbose: false
-  boundary_condition: inflow_outflow
+  boundary_condition: periodic #inflow_outflow
+  # Periodic runs are driven by PALM's nudging scheme (NUDGING_DATA + an inert
+  # LSF_DATA), relaxing the domain toward the inflow_angle/velocity_magnitude
+  # wind — the counterpart of pyudales's periodic nudging path. See
+  # docs/pypalm.md §"Nudging driver for periodic runs".
   nudging_config:
+    enabled: true          # false -> today's un-driven periodic staging
+    tnudge: 15.0           # s; relaxation timescale, matches pyudales
+    nnudge_meters: 4.0     # no nudging below this height (via huge tnudge)
     profile_config:
       type: power_law
       alpha: 0.25

@@ -40,7 +40,7 @@ paths:
 # window length isn't a multiple of it, the last value is linearly extrapolated
 # onto the window end.
 time:
-  seconds_per_knot: 30.0
+  seconds_per_knot: 20.0
 
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---

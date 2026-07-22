@@ -66,7 +66,7 @@ Key constructor args (all wired from Hydra via `conf/model/pypalm.yaml`):
 | `nx, ny, nz, bounds` | Grid; written to `_p3d` at init; required for topography + warm-start |
 | `simulation_time`, `output_frequency`, `spinup_time` | Written to `_p3d` (`end_time`, `dt_data_output`, `averaging_interval`) |
 | `boundary_condition` | `"periodic"` (cyclic) or `"inflow_outflow"` (dirichlet/radiation + multigrid solver) |
-| `nudging_config` | Inflow profile shape; default `power_law` with `alpha=0.25` |
+| `nudging_config` | Periodic nudging driver + inflow profile shape: `enabled` (default `true`), `tnudge` (15.0 s), `nnudge_meters` (4.0 m), `profile_config` (default `power_law` with `alpha=0.25`). See §8. |
 | `verbose` | When `False`, stdout/stderr captured; failures surface the last 80 lines |
 
 On construction, `__init__` copies case files to `INPUT/`, writes grid+time
@@ -96,8 +96,20 @@ The single-run entry point called by `BaseForwardModel.__call__`.
 #### `_apply_inflow_settings(params)`
 
 Consumes `inflow_angle` and `velocity_magnitude` from `params`; both can be
-time-varying or static:
+time-varying or static. The driver is selected by `boundary_condition` first,
+then by whether the params carry a `time` dim:
 
+| `boundary_condition` | params | driver |
+|---|---|---|
+| `periodic` | static **or** time-varying | **nudging** — `_nudge` (NUDGING_DATA) + inert `_lsf` (LSF_DATA), see §8 |
+| `inflow_outflow` | static | static path |
+| `inflow_outflow` | time-varying | dynamic driver / `turbulent_inflow` |
+
+- **Nudging path** (periodic, default): calls `apply_nudging_driver` from
+  [`utils/nudging_utils.py`](../libs/pypalm/src/pypalm/utils/nudging_utils.py),
+  turns on the four `&initialization_parameters` switches PALM's nudging
+  requires, and clears the inflow_outflow apparatus. `nudging_config.enabled:
+  false` restores the old un-driven periodic staging.
 - **Static path**: calls `disable_turbulent_inflow` (idempotent — prevents a
   stale `&turbulent_inflow_parameters` block from leaking across runs) and
   removes any leftover `_dynamic` file.
@@ -106,9 +118,15 @@ time-varying or static:
   which writes `inflow_plane_u/v/w/e/pt(time_inflow, z, y)` into the
   `_dynamic` NetCDF and flips `&turbulent_inflow_parameters
   switch_off_module=.false.` in `_p3d`.
-- Both paths then write `ug_surface`/`vg_surface` (geostrophic-wind init) and
-  `u_profile`/`v_profile`/`uv_heights` (the vertical shear profile prepended
-  with a z=0 no-slip anchor).
+- The two `inflow_outflow` paths also run symmetric hygiene — remove stale
+  `_nudge`/`_lsf` files and force the nudging switches off *if the template
+  has them* — so a prior periodic run in the same experiment dir cannot leak
+  the LSF apparatus into an inflow run. On a clean template the switches are
+  left absent, so inflow staging is unchanged.
+- All paths then write `ug_surface`/`vg_surface` (inert with `omega = 0`;
+  initial condition only) and `u_profile`/`v_profile`/`uv_heights` (the
+  vertical shear profile prepended with a z=0 no-slip anchor), so the run
+  starts consistent with the initial nudging target.
 - Model-error knobs are applied via `_resolve_profile_config` and
   `_apply_sgs_setting` (see §5).
 
@@ -274,6 +292,7 @@ Write site: `_apply_sgs_setting` in `ForwardModel` →
 | [`inflow_utils.py`](../libs/pypalm/src/pypalm/utils/inflow_utils.py) | `angle_to_velocity(angle_deg, wind_speed) -> (u, v)`. Mirrors pyudales; duplicated deliberately so pypalm has no runtime dependency on pyudales. |
 | [`vertical_profile.py`](../libs/pypalm/src/pypalm/utils/vertical_profile.py) | `build_profile_shape(profile_config, heights, zsize)` — returns a dimensionless `s(z)` shape. Supports `"uniform"` and `"power_law"` (with `alpha`). |
 | [`dynamic_driver_utils.py`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py) | Time-varying inflow driver: `write_dynamic_driver_file`, `apply_time_varying_inflow`, `disable_turbulent_inflow`, `is_time_varying_params`. Writes the PALM PIDS_DYNAMIC NetCDF with `inflow_plane_u/v/w/e/pt`. |
+| [`nudging_utils.py`](../libs/pypalm/src/pypalm/utils/nudging_utils.py) | Periodic nudging driver: `apply_nudging_driver`, `write_nudging_data`, `write_inert_lsf_data`, `remove_nudging_files`. Writes the ASCII `NUDGING_DATA` + inert `LSF_DATA`. Shares the schedule builders with `dynamic_driver_utils`. See §8. |
 | [`warm_start_utils.py`](../libs/pypalm/src/pypalm/utils/warm_start_utils.py) | Warm-start via PALM LOD=2: `build_init_atmosphere_dataset`, `write_warmstart_driver`. Merges `init_atmosphere_*` fields into the same PIDS_DYNAMIC file as the inflow planes, using 0-based PALM-native vertical axes (required by DRV0005 value checks). |
 | [`clean_up_utils.py`](../libs/pypalm/src/pypalm/utils/clean_up_utils.py) | `clean_palm_output_dir` (wipes OUTPUT/MONITORING/RESTART, leaves INPUT). `clean_palm_input_dir` (optional, keeps `_p3d`/`_topo`). |
 | [`compile_utils.py`](../libs/pypalm/src/pypalm/utils/compile_utils.py) | `compile_palm` — shells out to `palmbuild -c <config>`. No-op when `compile=False`. |
@@ -314,7 +333,13 @@ Key field notes:
   1, 3, 5, 9, 15, 25, 45, 75, 225; 14 is not listed as Barcelona's 225 is not
   divisible by 14, so check per-case).
 - `boundary_condition: inflow_outflow` — triggers the multigrid solver +
-  npex/npey slab decomposition.
+  npex/npey slab decomposition. `periodic` instead selects the nudging driver
+  (§8).
+- `nudging_config:` — `enabled` (default `true`; `false` restores un-driven
+  periodic staging), `tnudge` (relaxation timescale, s), `nnudge_meters` (no
+  nudging below this height), `profile_config` (vertical shear shape). Only
+  `profile_config` applies under `inflow_outflow`; the rest drive the periodic
+  nudging path. See §8.
 - `compile: false` — PALM is compiled once at install time via
   `__init__.py`, not per-run.
 - `failure: ${ensemble.failure}` — pulls the shared `resample_from_successes`
@@ -330,6 +355,67 @@ python scripts/esmda/run_esmda.py model@assim_model=pypalm model@truth_model=pyl
 ---
 
 ## 8. Known gotchas
+
+### Nudging driver for periodic runs
+
+Periodic (`bc_lr = bc_ns = 'cyclic'`) runs are **driven by PALM's nudging
+scheme**, the counterpart of pyudales's periodic nudging path. Without it a
+cyclic run is un-driven and decays: `ug_surface`/`vg_surface` and
+`u_profile`/`v_profile` are written, but with `omega = 0` they are pure initial
+conditions. This is *not* geostrophic forcing.
+
+**How it works.** `apply_nudging_driver`
+([`utils/nudging_utils.py`](../libs/pypalm/src/pypalm/utils/nudging_utils.py))
+writes two ASCII files into `INPUT/`:
+
+- `<name>_nudge` → `NUDGING_DATA`. One block per time snapshot, `# <time>`
+  followed by rows `height tnudge u v w pt q`. PALM relaxes the
+  *horizontal-mean* profile toward the u/v targets on the `tnudge` timescale,
+  at every fluid grid point, interpolating the target linearly in time.
+- `<name>_lsf` → `LSF_DATA`, physically **inert**. PALM requires
+  `large_scale_forcing = .T.` whenever `nudging = .T.` (LSF0001), so this file
+  exists only to satisfy that constraint. All of its times sit past `end_time`,
+  which disables both halves via non-fatal paths — confirmed in a smoke run:
+  `LSF0012` (warning, `lsf_surf = FALSE`) and `LSF0016` (info,
+  `lsf_vert = FALSE`). The nudging term is then the only large-scale forcing.
+
+**u and v only.** The `w`/`pt`/`q` columns carry PALM's `-999999` sentinel in
+every row, which switches nudging off for those quantities — PALM confirms with
+`LSF0020: Initial profiles of u, v, from NUDGING_DATA are used`. uDALES also
+relaxes `thl`/`qt` when `ltempeq`/`lmoist` are on (both off in our neutral runs
+— no practical gap).
+
+**Near-wall cutoff.** uDALES exempts the bottom `nnudge` levels outright; PALM
+has no such switch, so `nnudge_meters` is emulated by writing a huge `tnudge`
+(1e9 s) below the cutoff height, with a paired row at `cutoff ∓ ε` so the step
+is sharp rather than linearly ramped.
+
+**The constraint chain** (all PALM-fatal if violated) forces four
+`&initialization_parameters` switches on together: `nudging`,
+`large_scale_forcing`, `lsf_exception` (required for non-flat topography —
+an upstream bypass slated for revision), and `humidity` (LSF0003).
+
+Costs and limitations:
+
+- `humidity = .T.` on all periodic runs: one extra prognostic equation,
+  physically inert at q ≡ 0 with zero fluxes.
+- **Passive scalars are unavailable** under the nudging driver — PALM forbids
+  `large_scale_forcing` with `passive_scalar` (LSF0004). Staging raises a
+  `ValueError` naming the conflict rather than letting PALM abort mid-run. If
+  PALM-side pollutant dispersion is needed, run under `inflow_outflow`.
+- `lsf_exception = .T.` disables an upstream guard; LSF-with-topography is not
+  an upstream-supported combination. Our use is benign (the LSF file is inert;
+  only the nudging term is active), but it is the feature's main external risk.
+
+**Escape hatch.** `nudging_config.enabled: false` restores the old un-driven
+periodic staging exactly.
+
+**Cross-backend meaning.** With this, periodic runs are nudging-driven in
+*both* pypalm and pyudales, with the same relaxation physics (slab-mean,
+volume-wide, same tnudge / cutoff / shear construction) and the same parameter
+interpretation: `inflow_angle`/`velocity_magnitude` are "the mean wind the
+domain is held to". Both backends also accept time-varying params under
+periodic BCs — any older note claiming PALM is asymmetric here is superseded.
 
 ### STL topography and the height-map limitation
 

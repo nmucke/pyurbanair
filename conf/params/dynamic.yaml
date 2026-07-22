@@ -11,7 +11,7 @@ external_parameters:
   inflow_angle:
     _target_: pyurbanair.static_parameters.Normal
     mean: 0.0
-    std: 6.0
+    std: 10.0
   velocity_magnitude:
     _target_: pyurbanair.static_parameters.Normal
     mean: 7.5
@@ -30,11 +30,11 @@ static_parameters:
     min: 0.05
   # Keep near/above the solver's stable threshold (uDALES xie_and_castro: cs=0.24);
   # too little SGS dissipation diverges the run.
-  sgs_constant:
-    _target_: pyurbanair.static_parameters.Normal
-    mean: 0.22
-    std: 0.03
-    min: 0.18
+  # sgs_constant:
+  #   _target_: pyurbanair.static_parameters.Normal
+  #   mean: 0.22
+  #   std: 0.03
+  #   min: 0.18
 # The parameter takes a new value every `seconds_per_knot` seconds over the
 # per-window horizon `simulation_time`. When the horizon isn't an exact multiple
 # of the spacing, a final knot at `simulation_time` is reached by linearly

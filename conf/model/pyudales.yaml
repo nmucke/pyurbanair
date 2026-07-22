@@ -15,10 +15,10 @@ forward_model:
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
-  ncpu: 1
+  ncpu: 8
   save_only_last_timestep: false
   verbose: false
-  boundary_condition: inflow_outflow
+  boundary_condition: periodic #inflow_outflow
   nudging_config:
     tnudge: 15.0
     # nnudge: number of bottom grid levels NOT nudged (raw level count).
