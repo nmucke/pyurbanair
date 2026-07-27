@@ -309,6 +309,17 @@ class ForwardModel(BaseForwardModel):
     def _apply_boundary_condition(self) -> None:
         p3d = P3DFile(self.p3d_path)
         if self.boundary_condition == "periodic":
+            # poisfft (the default solver) needs an even number of grid points
+            # along every cyclic direction. Fail here rather than letting PALM
+            # abort mid-run with PAC0071/PAC0072.
+            for axis, n in (("x", self.nx), ("y", self.ny)):
+                if n is not None and int(n) % 2 == 1:
+                    raise ValueError(
+                        f"periodic PALM runs need an even number of grid points "
+                        f"along {axis}; got domain.n{axis} = {int(n)}. PALM's "
+                        f"poisfft pressure solver rejects an odd count on a "
+                        f"cyclic boundary (PAC0071/PAC0072)."
+                    )
             p3d.set_string("initialization_parameters", "bc_lr", "cyclic")
             p3d.set_string("initialization_parameters", "bc_ns", "cyclic")
             p3d.write()

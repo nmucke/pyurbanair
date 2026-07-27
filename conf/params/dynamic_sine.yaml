@@ -1,0 +1,24 @@
+# Deterministic dynamic forcing for controlled solver comparisons. Frequency is
+# in Hz (cycles per second); phase is in radians. Every ensemble member gets
+# the same trajectory, so this is a prescribed forcing rather than a prior draw.
+_target_: pyurbanair.dynamic_parameters.harmonic.HarmonicParameterModel
+_convert_: all
+seed: 0
+simulation_time: ${time.simulation_time}
+seconds_per_knot: ${time.seconds_per_knot}
+profiles:
+  inflow_angle:
+    waveform: sine
+    offset: 0.0
+    amplitude: 15.0
+    frequency: 0.0033333333333333335  # 300 s period
+  velocity_magnitude:
+    waveform: sine
+    offset: 7.5
+    amplitude: 1.0
+    frequency: 0.004166666666666667  # 240 s period
+    min: 0.1
+static_parameters:
+  vertical_inflow_exponent:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.25

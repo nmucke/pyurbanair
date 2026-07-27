@@ -15,13 +15,15 @@ domain:
   # which deep-merge over these values, or override individual fields on the CLI
   # (`domain.nx=80`). x starts at -20 to leave an open upstream inflow region in
   # front of the Xie & Castro array (which starts at x=5).
-  nx: 200
-  ny: 160
-  nz: 128
+  # Keep nx and ny EVEN: PALM's default poisfft pressure solver rejects an odd
+  # number of grid points along a cyclic direction (PAC0071 / PAC0072).
+  nx: 40
+  ny: 80
+  nz: 16
   bounds:
-    - [-20.0, 80.0]
+    - [0.0, 40.0]
     - [0.0, 80.0]
-    - [0.0, 64.0]
+    - [0.0, 32.0]
 
 geometry:
   # All three backends share ONE STL at examples/<case>/xie_castro_2008_STL.stl.
@@ -57,13 +59,13 @@ obs:
   # scripts/esmda/run_esmda.py sensor time-series plots). Distinct from the
   # assimilation sensors above, every one sits in open space (>=5 m clear of any
   # building footprint).
-  validation_x_points: [-10.0, 20.0]
+  validation_x_points: [2.0, 20.0]
   validation_y_points: [30.0, 55.0]
   validation_z_points: [2.0, 2.0]
 
   states: [u, v]
   temporal_mode: intervals
-  interval_seconds: 10.0
+  interval_seconds: 30.0
   aggregation_mode: mean
 
 time:
@@ -71,6 +73,6 @@ time:
   # window is `simulation_time` long with a `spinup_time` constant-inflow plateau
   # in front; the state is written every `output_frequency` s. The number of
   # windows and the param-knot count are compute knobs and live in `scale/`.
-  simulation_time: 100.0
-  output_frequency: 1.0
-  spinup_time: 30.0
+  simulation_time: 300.0
+  output_frequency: 5.0
+  spinup_time: 300.0

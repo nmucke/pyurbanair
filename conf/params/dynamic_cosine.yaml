@@ -1,0 +1,23 @@
+# A second deterministic forcing scenario. Keep the same static model setting
+# as dynamic_sine so comparison differences arise from forcing, not a draw.
+_target_: pyurbanair.dynamic_parameters.harmonic.HarmonicParameterModel
+_convert_: all
+seed: 0
+simulation_time: ${time.simulation_time}
+seconds_per_knot: ${time.seconds_per_knot}
+profiles:
+  inflow_angle:
+    waveform: cosine
+    offset: 0.0
+    amplitude: 25.0
+    frequency: 0.0025  # 400 s period
+  velocity_magnitude:
+    waveform: cosine
+    offset: 7.5
+    amplitude: 0.75
+    frequency: 0.005  # 200 s period
+    min: 0.1
+static_parameters:
+  vertical_inflow_exponent:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.25

@@ -15,7 +15,7 @@ forward_model:
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
-  ncpu: 8
+  ncpu: 1
   save_only_last_timestep: false
   verbose: false
   boundary_condition: periodic #inflow_outflow
@@ -25,7 +25,7 @@ forward_model:
     # nnudge: 2
     # nnudge_meters: height (m above the floor) below which nudging is NOT
     # applied. When set, it is converted to a level count and OVERRIDES nnudge.
-    nnudge_meters: 4.0
+    nnudge_meters: 16.0
     profile_config:
       type: power_law
       alpha: 0.25

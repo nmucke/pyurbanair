@@ -315,6 +315,11 @@ def run_direct(
                     palm_result.returncode,
                     tail,
                 )
+            logger.error(
+                "direct_palm: re-run with PYPALM_KEEP_TEMPDIR=1 to retain %s "
+                "(RUN_CONTROL / DEBUG_* / PARIN) for diagnosis.",
+                tempdir,
+            )
             raise subprocess.CalledProcessError(
                 palm_result.returncode,
                 mpirun_cmd,
@@ -361,5 +366,12 @@ def run_direct(
             output_files=output_files,
         )
     finally:
-        if not keep_tempdir:
+        # A crashed run leaves its only diagnostics (RUN_CONTROL, DEBUG_*, the
+        # resolved PARIN) in the tempdir, but keeping one per failed ensemble
+        # member would fill the disk — so retention is opt-in via the env var,
+        # and the failure path points at it.
+        keep_on_failure = os.environ.get("PYPALM_KEEP_TEMPDIR", "") not in ("", "0")
+        if keep_tempdir or keep_on_failure:
+            logger.info("direct_palm: keeping tempdir %s", tempdir)
+        else:
             shutil.rmtree(tempdir, ignore_errors=True)

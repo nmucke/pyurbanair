@@ -18,6 +18,12 @@
 #   python scripts/run_forward_model.py model=pyudales run.ensemble=true
 #   python scripts/run_forward_model.py run.rollout_steps=3
 #   python scripts/run_forward_model.py model=pylbm params=dynamic run.rollout_steps=3
+#   python scripts/run_forward_model.py model=pypalm params=dynamic_sine
+#   python scripts/run_forward_model.py model=pyudales params=dynamic_cosine
+#
+# `dynamic_sine` and `dynamic_cosine` are deterministic prescribed profiles;
+# edit their amplitude/frequency (Hz) in conf/params/ or override them on the
+# CLI for a controlled forcing experiment.
 defaults:
   - case: xie_and_castro
   - params: dynamic
