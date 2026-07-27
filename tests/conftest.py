@@ -25,12 +25,12 @@ _SMOKE_OVERRIDES = [
 ]
 
 
-# run_esmda.yaml ships production defaults the suite must not inherit:
-# machine-specific scratch roots (/export/...) instead of the portable in-repo
-# roots (the commented-out defaults in that file), and ``case: barcelona``,
-# whose precomputed uDALES geometry bundle only matches the Barcelona grid —
-# not the smoke domain above. Re-assert the test-friendly xie_and_castro case
-# (the default of the other entry points) and the in-repo output roots.
+# run_esmda.yaml is the one entry point that gets retuned for whatever
+# production run is in flight — it has shipped machine-specific scratch roots
+# (/export/...) and ``case: barcelona``, whose precomputed uDALES geometry
+# bundle only matches the Barcelona grid, not the smoke domain above. Pin the
+# test-friendly xie_and_castro case (the default of the other entry points) and
+# the in-repo output roots so the suite never inherits either.
 _ESMDA_OVERRIDES = [
     "case=xie_and_castro",
     "paths.results_dir=.temp/${truth_model.name}_to_${assim_model.name}",
