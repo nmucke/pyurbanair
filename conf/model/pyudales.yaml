@@ -18,7 +18,20 @@ forward_model:
   ncpu: 1
   save_only_last_timestep: false
   verbose: false
-  boundary_condition: periodic #inflow_outflow
+  boundary_condition: inflow_outflow # periodic #
+  # Sub-grid-scale closure, written to &NAMSUBGRID as a mutually exclusive switch
+  # set (the chosen one .true., the others .false.), so the closure comes from
+  # this config rather than from whatever the case's namoptions template ships.
+  #   vreman      -> lvreman=.true.;      constant c_vreman (Fortran default 0.07)
+  #   smagorinsky -> lsmagorinsky=.true.; constant cs       (default -1 -> ~0.17)
+  #   oneeqn      -> REJECTED: the one-equation closure needs a nonzero prof.inp
+  #                  'tke' column, which the wrapper's preprocessing writes as 0,
+  #                  and its constants (cm/ce1/ce2) are not in the namelist.
+  # The `sgs_constant` parameter follows the closure automatically: it is written
+  # to cs under smagorinsky and to c_vreman under vreman. The two are NOT on the
+  # same scale (~0.17 vs 0.07) — retune the priors in conf/params/ when switching.
+  # Set to null to leave the case template's switches untouched.
+  closure: vreman
   nudging_config:
     tnudge: 15.0
     # nnudge: number of bottom grid levels NOT nudged (raw level count).

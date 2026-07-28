@@ -32,7 +32,8 @@ local modifications survive submodule re-initialisation.
 **Known build constraint.** The uDALES build implements only the `cd2` (second-
 order centred differencing) momentum advection scheme. Setting `iadv_mom=1` in
 namoptions causes a crash at startup. SGS momentum dissipation is the only knob
-available (`&NAMSUBGRID cs` under `lsmagorinsky=.true.`).
+available — `&NAMSUBGRID cs` under `lsmagorinsky=.true.`, `c_vreman` under
+`lvreman=.true.` (see §4).
 
 ---
 
@@ -55,6 +56,7 @@ Key constructor arguments (all wired from
 | `spinup_time` | Prepended spin-up in seconds; effective runtime = `simulation_time + spinup_time` |
 | `nx/ny/nz`, `bounds` | Domain overrides → `itot/jtot/ktot`, `xlen/ylen/zsize` in namoptions |
 | `boundary_condition` | `"periodic"` or `"inflow_outflow"` (sets `BCxm`, `BCym`, `BCtopm`) |
+| `closure` | SGS closure: `"smagorinsky"` / `"vreman"` → exclusive `&NAMSUBGRID` switches; `None` (default) keeps the template's. `"oneeqn"` is rejected — see §4 |
 | `nudging_config` | Nudging tunables dict; see §6 |
 | `instability_check` | dt-watchdog config dict; see §7 |
 | `precomputed_geom_dir` | Skip STL→IBM Fortran step by reusing prior geometry bundle |
@@ -165,7 +167,51 @@ by the wrapper:
 | `&INPS` | `xlen`, `ylen`, `zsize`, `u0`, `v0`, `dpdx`, `dpdy`, `stl_file`, `gen_geom`, `geom_path` |
 | `&BC` | `BCxm`, `BCym`, `BCtopm` |
 | `&PHYSICS` | `lnudge`, `nnudge`, `tnudge`, `ltimedepnudge`, `ntimedepnudge` |
-| `&NAMSUBGRID` | `cs` (Smagorinsky constant, only under `lsmagorinsky=.true.`) |
+| `&NAMSUBGRID` | `lsmagorinsky`/`lvreman`/`loneeqn` (closure switches) and `cs` **or** `c_vreman` — whichever the active closure reads (see below) |
+
+**SGS closure — selected by config, constant follows automatically.**
+`&NAMSUBGRID` carries one constant per closure and uDALES reads only the one
+belonging to the closure that is on (`u-dales/src/modsubgrid.f90`, subroutine
+`closure`):
+
+| Closure | Switch | Constant | Where it enters |
+|---|---|---|---|
+| Smagorinsky | `lsmagorinsky=.true.` | `cs` | seeds `csz`, hence the mixing length |
+| Vreman (2004) | `lvreman=.true.` | `c_vreman` | `ekm = c_vreman*sqrt(max(bb/aa, 0.))` |
+| One-equation | `loneeqn=.true.` | `cm`/`ce1`/`ce2` — **not** in the namelist | prognostic SGS TKE |
+
+The closure itself is chosen by the `closure` constructor arg
+(`conf/model/pyudales.yaml`). `_apply_closure` writes **all three** switches — the
+chosen one `.true.`, the others `.false.` — so the active closure is fully
+determined by the config rather than by whatever the case template shipped. Only
+the keys uDALES declares in the NAMSUBGRID namelist may ever be written: an
+undeclared key aborts the namelist read with `stop 1`. `closure: null` (the
+Python default) skips the write entirely, so a run that doesn't ask for a closure
+is byte-identical.
+
+`"oneeqn"` is **recognised but rejected** with an explanatory `ValueError`. It
+initialises (and injects at the inlet) prognostic SGS TKE from the `tke` column of
+`prof.inp`, which the wrapper's preprocessing hardcodes to zero
+(`python_udgeom/preprocessing.py`, `obj.tke = 0`); uDALES then merely warns and
+clamps it to `e12min = 5e-5`, silently producing a degenerate SGS field. Its
+constants are not namelist-reachable either, so `sgs_constant` would be inert.
+
+`_apply_sgs_setting` then reads both switches back from the member's namoptions
+(via `NamoptionsFile.get_value_as_bool`, which parses `.true.`/`.t.`/`true`/`T`
+and the false forms case-insensitively) and writes `sgs_constant` to the matching
+key. An **absent** switch falls back to the Fortran defaults in
+`modsubgriddata.f90` — `lsmagorinsky=.false.`, `lvreman=.true.`, i.e. Vreman —
+because a missing key means the compiled-in default applies, not `.false.`. If
+both switches are `.true.` Smagorinsky wins, matching the
+`if(lsmagorinsky) … elseif(lvreman) …` branch order in `closure`. If neither is
+active the write is skipped with a warning (nothing would read the value). The
+key and value actually written are logged, so a diverging run can be diagnosed
+from `run.<expnr>.log`'s companion Python log.
+
+> **The two constants are not on the same scale.** uDALES defaults are `cs = -1.`
+> (→ the derived `(cm³/ceps)^0.25 ≈ 0.17`) for Smagorinsky and `c_vreman = 0.07`
+> for Vreman. A prior tuned for `cs` is roughly 2–3× too large for `c_vreman`;
+> retune `conf/params/*.yaml` when switching a case's closure.
 
 **Initial inflow speed.** Static runs write `u0`/`v0` (and `dpdx`/`dpdy`) directly
 into namoptions `&INPS` and the `prof.inp`/`lscale.inp` files via
@@ -301,7 +347,9 @@ from a random successful donor without waiting for the slow dt-collapse crash.
 
 **Known gotchas:**
 - Xie & Castro "divergence" is typically marginal dt-collapse near end-of-window,
-  not a genuine flow instability. It is fixed by `cs 0.20 → 0.24` in `&NAMSUBGRID`.
+  not a genuine flow instability. It is fixed by raising the SGS constant — under
+  Smagorinsky `cs 0.20 → 0.24`; under Vreman the equivalent lever is `c_vreman`,
+  where the 0.07 default diverges and ~0.25 runs clean on this case.
 - Stale fielddumps on the first worker batch give NaN-padded duplicate z-coords.
   `clean_output_dir` is called before preprocessing; pre-run, clean all per-member
   worker output dirs.
@@ -331,7 +379,7 @@ INFLOW_PARAM_NAMES = (
 | `velocity_magnitude` | `u0`/`v0` in namoptions + nudging profiles | m/s reference speed |
 | `pressure_gradient_magnitude` | `dpdx`/`dpdy` in namoptions | Pa/m; decomposed by angle. uDALES-only parameter. |
 | `vertical_inflow_exponent` (α) | Overrides `profile_config["alpha"]` in `_resolve_nudging_config` | Estimated by ESMDA; per-member shear |
-| `sgs_constant` | `&NAMSUBGRID cs` via `_apply_sgs_setting` | Dimensionless Smagorinsky constant; only takes effect under `lsmagorinsky=.true.` |
+| `sgs_constant` | `&NAMSUBGRID cs` (Smagorinsky) or `c_vreman` (Vreman) via `_apply_sgs_setting` | Dimensionless SGS constant; the target key is picked from the case's `lsmagorinsky`/`lvreman` switches (§4). Note the two constants have different natural magnitudes (~0.17 vs 0.07). |
 
 **`pressure_gradient_magnitude`** is the third parameter unique to pyudales.
 `resolve_parameter_schema` in `hydra_helpers.py` adds it to the uDALES parameter
@@ -357,7 +405,7 @@ compensation knobs".
 | [`forward_model_utils.py`](../libs/pyudales/src/pyudales/utils/forward_model_utils.py) | `create_new_forward_model` — deep-copy template into per-member directory |
 | [`grid_utils.py`](../libs/pyudales/src/pyudales/utils/grid_utils.py) | `interpolate_grid` — staggered → cell-centred collocation (see §3) |
 | [`inflow_utils.py`](../libs/pyudales/src/pyudales/utils/inflow_utils.py) | `angle_to_velocity`, `angle_to_pressure_gradient` — decompose angle+magnitude into u/v and dpdx/dpdy components |
-| [`namoptions_utils.py`](../libs/pyudales/src/pyudales/utils/namoptions_utils.py) | `NamoptionsFile` editor (see §4), `rename_namoptions_file` |
+| [`namoptions_utils.py`](../libs/pyudales/src/pyudales/utils/namoptions_utils.py) | `NamoptionsFile` editor (see §4), `parse_fortran_logical`, `rename_namoptions_file` |
 | [`ncpu_utils.py`](../libs/pyudales/src/pyudales/utils/ncpu_utils.py) | `validate_and_sync_ncpu` — sets `nprocx=ncpu, nprocy=1` and checks divisibility |
 | [`nudging_utils.py`](../libs/pyudales/src/pyudales/utils/nudging_utils.py) | `apply_time_varying_inflow`, `compute_nudging_profiles`, `write_timedepnudge_file`, `enable_nudging_in_namoptions` (see §6) |
 | [`params_utils.py`](../libs/pyudales/src/pyudales/utils/params_utils.py) | `INFLOW_PARAM_NAMES` whitelist, `extract_inflow_params`, `merge_params`, `apply_inflow_settings`, `get_param_value`, `is_time_varying_params` |
@@ -388,6 +436,7 @@ forward_model:
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab  # unused when python_or_matlab: python
   ncpu: 25
   boundary_condition: inflow_outflow
+  closure: vreman             # smagorinsky | vreman | null (keep template)
   nudging_config:
     tnudge: 15.0
     nnudge_meters: 4.0          # skip nudging below 4 m (near-wall cells)
@@ -479,7 +528,8 @@ ceiling on the development box is ~4–8 parallel processes (see
 | You want to… | Look here |
 |---|---|
 | Change the advection scheme | Not possible — only `cd2` (`iadv_mom` hardcoded by the build) |
-| Change SGS Smagorinsky constant | `&NAMSUBGRID cs` in namoptions, or pass `sgs_constant` in params |
+| Switch the SGS closure | `model.forward_model.closure=smagorinsky\|vreman` (writes the exclusive `&NAMSUBGRID` switches; §4) |
+| Change the SGS constant | `&NAMSUBGRID cs` (Smagorinsky) / `c_vreman` (Vreman) in namoptions, or pass `sgs_constant` in params — it targets the active closure automatically (§4) |
 | Add a new inflow parameter | Add to `INFLOW_PARAM_NAMES` in `params_utils.py` first |
 | Skip expensive preprocessing | Set `precomputed_geom_dir` / `geometry.udales_precomputed_geom_dir` |
 | Debug a silent crash | Set `verbose: true` on the forward model (or `model.forward_model.verbose=true` CLI) |

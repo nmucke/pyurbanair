@@ -6,6 +6,37 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Accepted spellings of the Fortran logical literals. The standard form is
+# ``.true.``/``.false.``, but gfortran also reads ``.t.``/``.f.`` and the bare
+# ``true``/``false``/``t``/``f``, all case-insensitively.
+_FORTRAN_TRUE = frozenset({".true.", ".t.", "true", "t"})
+_FORTRAN_FALSE = frozenset({".false.", ".f.", "false", "f"})
+
+
+def parse_fortran_logical(value: Optional[str]) -> Optional[bool]:
+    """
+    Parse a Fortran logical literal into a Python bool.
+
+    Handles the ``.true.``/``.t.``/``true``/``T`` family and the matching false
+    forms, case-insensitively, and tolerates a trailing ``!`` comment or comma
+    (namelist entries are often written ``lvreman = .true.,  ! Vreman``).
+
+    Args:
+        value: Raw value string from the namoptions file, or None.
+
+    Returns:
+        True/False, or None if the value is absent or unrecognised.
+    """
+    if value is None:
+        return None
+    # Strip inline comment, trailing separators, and surrounding whitespace.
+    token = value.split("!")[0].strip().rstrip(",").strip().lower()
+    if token in _FORTRAN_TRUE:
+        return True
+    if token in _FORTRAN_FALSE:
+        return False
+    return None
+
 
 class NamoptionsFile:
     """
@@ -135,6 +166,22 @@ class NamoptionsFile:
             return int(cleaned)
         except ValueError:
             return None
+
+    def get_value_as_bool(self, section: str, key: str) -> Optional[bool]:
+        """
+        Get a value from a section as a bool, parsing Fortran logical literals.
+
+        Args:
+            section: Section name (without & prefix).
+            key: Key name.
+
+        Returns:
+            The value as a bool, or None if not found or not a Fortran logical.
+            Callers must supply the Fortran default themselves when None is
+            returned — an absent key means "the compiled-in default applies",
+            which is not the same as False.
+        """
+        return parse_fortran_logical(self.get_value(section, key))
 
     def set_value(self, section: str, key: str, value: str | float | int) -> None:
         """
