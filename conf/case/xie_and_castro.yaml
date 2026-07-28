@@ -17,11 +17,11 @@ domain:
   # front of the Xie & Castro array (which starts at x=5).
   # Keep nx and ny EVEN: PALM's default poisfft pressure solver rejects an odd
   # number of grid points along a cyclic direction (PAC0071 / PAC0072).
-  nx: 40
-  ny: 80
-  nz: 16
+  nx: 75
+  ny: 60
+  nz: 24
   bounds:
-    - [0.0, 40.0]
+    - [-20.0, 80.0]
     - [0.0, 80.0]
     - [0.0, 32.0]
 
@@ -65,7 +65,7 @@ obs:
 
   states: [u, v]
   temporal_mode: intervals
-  interval_seconds: 30.0
+  interval_seconds: 60.0
   aggregation_mode: mean
 
 time:

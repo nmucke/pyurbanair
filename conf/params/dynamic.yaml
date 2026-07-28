@@ -31,10 +31,8 @@ static_parameters:
   # Keep near/above the solver's stable threshold (uDALES xie_and_castro: cs=0.24);
   # too little SGS dissipation diverges the run.
   sgs_constant:
-    _target_: pyurbanair.static_parameters.Normal
-    mean: 0.22
-    std: 0.03
-    min: 0.18
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.24
 # The parameter takes a new value every `seconds_per_knot` seconds over the
 # per-window horizon `simulation_time`. When the horizon isn't an exact multiple
 # of the spacing, a final knot at `simulation_time` is reached by linearly
