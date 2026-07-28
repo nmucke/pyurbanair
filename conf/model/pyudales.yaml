@@ -39,6 +39,19 @@ forward_model:
     # nnudge_meters: height (m above the floor) below which nudging is NOT
     # applied. When set, it is converted to a level count and OVERRIDES nnudge.
     nnudge_meters: 16.0
+    # interior_nudging: whether the domain INTERIOR is relaxed toward the
+    # nudging profile (&PHYSICS lnudge -> modforces.f90::nudge, over
+    # k = kb+nnudge .. ke). This is independent of the time-varying inflow
+    # itself: ltimedepnudge stays on either way, and under
+    # boundary_condition=inflow_outflow it is what drives the west inlet face
+    # (modboundary.f90::xmi_profile reads uprof/vprof).
+    #   true  (default) -> inlet face AND interior relaxation, as today.
+    #   false           -> inflow applied at the boundary ONLY, matching pypalm,
+    #                      which disables nudging entirely under inflow_outflow.
+    # Only set false with inflow_outflow: under periodic BCs the interior
+    # nudging is the only momentum source, so disabling it leaves an un-driven
+    # domain (the dpdx/dpdy body force is written as zero).
+    interior_nudging: true
     profile_config:
       type: power_law
       alpha: 0.25
