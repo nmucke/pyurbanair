@@ -36,11 +36,15 @@ _INFLOW_OUTFLOW = [
     "model.forward_model.ncpu=4",
 ]
 
-_ON = "model.forward_model.inlet_turbulence.enabled=true"
+_SEED_ON = "model.forward_model.inlet_turbulence.initial_seed=true"
+_SEED_OFF = "model.forward_model.inlet_turbulence.initial_seed=false"
+# Pin BOTH sub-switches everywhere: conf/model/pypalm.yaml tracks the active
+# sweep, so inheriting either one silently changes what these tests assert.
+_ON = ["model.forward_model.inlet_turbulence.enabled=true", _SEED_ON]
 # Pin the knob rather than inheriting conf/model/pypalm.yaml's value: that is a
 # sweep setting, not a contract, so a test that relies on it silently flips
 # meaning when the config is re-pointed.
-_OFF = "model.forward_model.inlet_turbulence.enabled=false"
+_OFF = ["model.forward_model.inlet_turbulence.enabled=false", _SEED_ON]
 
 
 def _make_model(tmp_path: pathlib.Path, *extra_overrides: str) -> Any:
@@ -123,7 +127,7 @@ _DISTURBANCE_KEYS = (
 
 def test_default_config_writes_no_disturbance_keys(tmp_path: pathlib.Path) -> None:
     """`enabled: false` writes only create_disturbances (per initial_seed)."""
-    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, _OFF)
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, *_OFF)
     assert not fm.inlet_turbulence_enabled
 
     fm._apply_inflow_settings(_static_params())
@@ -160,7 +164,7 @@ def test_disabled_with_seed_true_reclaims_create_disturbances(
     a `.false.` left by an earlier `initial_seed: false` run in the same
     experiment dir must not leak into this one.
     """
-    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, _OFF)
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, *_OFF)
     fm._apply_inflow_settings(_static_params())
 
     fm._p3d_set_value("runtime_parameters", "create_disturbances", False)
@@ -175,8 +179,8 @@ def test_disabled_with_seed_false_turns_it_fully_off(
     fm = _make_model(
         tmp_path,
         *_INFLOW_OUTFLOW,
-        _OFF,
-        "model.forward_model.inlet_turbulence.initial_seed=false",
+        *_OFF[:1],
+        _SEED_OFF,
     )
     fm._apply_inflow_settings(_static_params())
     fm._reset_cold_init()  # writes create_disturbances=.true.
@@ -188,7 +192,7 @@ def test_disabled_with_seed_false_turns_it_fully_off(
 
 
 def test_enabled_writes_disturbance_namelist(tmp_path: pathlib.Path) -> None:
-    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, _ON)
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, *_ON)
     assert fm.inlet_turbulence_enabled
 
     fm._apply_inflow_settings(_static_params())
@@ -209,7 +213,7 @@ def test_enabled_tunables_are_written(tmp_path: pathlib.Path) -> None:
     fm = _make_model(
         tmp_path,
         *_INFLOW_OUTFLOW,
-        _ON,
+        *_ON,
         "model.forward_model.inlet_turbulence.dt_disturb=2.5",
         "model.forward_model.inlet_turbulence.amplitude=0.4",
         "model.forward_model.inlet_turbulence.begin=3",
@@ -235,7 +239,7 @@ def test_enabled_warm_start_suppresses_initial_kick(tmp_path: pathlib.Path) -> N
     ``create_disturbances .AND. disturbance_energy_limit /= 0.0``; the in-run
     branch at time_integration.f90:976 fires precisely when the limit is 0.0.
     """
-    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, _ON)
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, *_ON)
     fm._apply_inflow_settings(_static_params())
     # Mirror _apply_warmstart, which disables disturbances outright.
     fm._p3d_set_value("runtime_parameters", "create_disturbances", False)
@@ -248,7 +252,7 @@ def test_enabled_warm_start_suppresses_initial_kick(tmp_path: pathlib.Path) -> N
 
 def test_enabled_then_disabled_restores_palm_defaults(tmp_path: pathlib.Path) -> None:
     """A prior enabled run in the same experiment dir cannot leak its settings."""
-    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, _ON)
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, *_ON)
     fm._apply_inflow_settings(_static_params())
     fm._apply_inlet_turbulence(warm_start=False)
 
@@ -273,7 +277,7 @@ def test_enabled_does_not_disturb_the_dynamic_driver(tmp_path: pathlib.Path) -> 
     the ``_dynamic`` driver carrying inflow_angle/velocity_magnitude. The knob
     must never interfere with it in either direction.
     """
-    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, _ON)
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, *_ON)
     fm._apply_inflow_settings(
         _time_varying_params([0.0, 50.0, 100.0], [0.0, 30.0, 60.0])
     )
@@ -328,7 +332,7 @@ def test_non_positive_dt_disturb_raises(tmp_path: pathlib.Path) -> None:
     fm = _make_model(
         tmp_path,
         *_INFLOW_OUTFLOW,
-        _ON,
+        *_ON,
         "model.forward_model.inlet_turbulence.dt_disturb=0.0",
     )
     fm._apply_inflow_settings(_static_params())

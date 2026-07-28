@@ -71,8 +71,8 @@ forward_model:
     # setting disturbance_energy_limit=0.0, which suppresses only the kick — so
     # all four combinations are usable. A warm start always suppresses the kick
     # regardless, so as not to shock the injected field.
-    enabled: true
-    initial_seed: true
+    enabled: false
+    initial_seed: false
     dt_disturb: 5.0        # s; interval between perturbation injections
     amplitude: 0.25        # m/s; PALM's disturbance_amplitude
     begin: null            # inflow_disturbance_begin, grid pts; null -> PALM auto (min(10, nx/2))

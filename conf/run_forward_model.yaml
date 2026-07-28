@@ -27,7 +27,7 @@
 defaults:
   - case: xie_and_castro
   - params: dynamic
-  - model@model: pyudales
+  - model@model: pypalm
   - _self_
 
 # --- Output roots (everything mutable lands under .temp/) ---
