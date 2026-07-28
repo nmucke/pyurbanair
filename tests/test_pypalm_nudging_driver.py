@@ -36,6 +36,15 @@ _INFLOW_OUTFLOW = [
     "model.forward_model.ncpu=4",
 ]
 
+# The periodic cases must pin the BC too rather than inherit conf's default:
+# conf/model/pypalm.yaml's `boundary_condition` tracks whatever sweep is being
+# run, so relying on it silently re-points these tests at the other branch (a
+# periodic test that actually exercises inflow_outflow still "passes" the parts
+# that don't assert on the nudging apparatus).
+_PERIODIC = [
+    "model.forward_model.boundary_condition=periodic",
+]
+
 BOUNDS = ((0.0, 20.0), (0.0, 20.0), (0.0, 10.0))
 NX = NY = 20
 NZ = 4
@@ -108,7 +117,7 @@ def _nudge_block_count(fm: Any) -> int:
 
 
 def test_periodic_static_stages_nudging_driver(tmp_path: pathlib.Path) -> None:
-    fm = _make_model(tmp_path)
+    fm = _make_model(tmp_path, *_PERIODIC)
     fm._apply_inflow_settings(_static_params())
 
     assert fm.nudge_driver_path.exists() and fm.lsf_driver_path.exists()
@@ -119,7 +128,7 @@ def test_periodic_static_stages_nudging_driver(tmp_path: pathlib.Path) -> None:
 
 
 def test_periodic_time_varying_block_count(tmp_path: pathlib.Path) -> None:
-    fm = _make_model(tmp_path)  # spinup_time=3.0 in the smoke shape
+    fm = _make_model(tmp_path, *_PERIODIC)  # spinup_time=3.0 in the smoke shape
     times = [0.0, 50.0, 100.0]
     fm._apply_inflow_settings(_time_varying_params(times, [0.0, 30.0, 60.0]))
 
@@ -166,7 +175,9 @@ def test_inflow_outflow_time_varying_uses_dynamic_driver(
 def test_enabled_false_restores_undriven_periodic_static(
     tmp_path: pathlib.Path,
 ) -> None:
-    fm = _make_model(tmp_path, "model.forward_model.nudging_config.enabled=false")
+    fm = _make_model(
+        tmp_path, *_PERIODIC, "model.forward_model.nudging_config.enabled=false"
+    )
     fm._apply_inflow_settings(_static_params())
 
     # Old un-driven static periodic path: no nudging apparatus, no dynamic driver.
@@ -204,7 +215,7 @@ def test_periodic_nudging_requires_bounds_and_nz(tmp_path: pathlib.Path) -> None
 def test_passive_scalar_with_nudging_raises(tmp_path: pathlib.Path) -> None:
     from pypalm.utils.p3d_utils import P3DFile
 
-    fm = _make_model(tmp_path)
+    fm = _make_model(tmp_path, *_PERIODIC)
     # Template enables passive_scalar -> incompatible with large_scale_forcing.
     p3d = P3DFile(fm.p3d_path)
     p3d.set_value("initialization_parameters", "passive_scalar", True)
@@ -249,7 +260,7 @@ def test_warmstart_periodic_nudging_ordering(tmp_path: pathlib.Path) -> None:
     the warm-start field would be clobbered. Replicate run_single's ordering and
     assert the final staged state.
     """
-    fm = _make_model(tmp_path)
+    fm = _make_model(tmp_path, *_PERIODIC)
     # run_single disables spinup on a warm window before applying inflow settings.
     fm.disable_spinup()
     fm._apply_inflow_settings(_static_params())
