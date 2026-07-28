@@ -4,7 +4,7 @@ runtime      = 20.
 trestart     = 7200.
 dtmax        = 1.
 ladaptive    = .true.
-courant      = 1.0
+courant      = 0.7
 nprocx       = 1
 nprocy       = 1
 /
@@ -43,15 +43,14 @@ nfctsecs_c   = 189696
 zsize        = 40.
 u0           = 2.1213
 v0           = -2.1213
-dpdx         = 0.0029343
-dpdy         = -0.0029343
+dpdx         = 0.0
+dpdy         = 0.0
 stl_file     = xie_castro_2008_STL.stl
 /
 
 &NAMSUBGRID
-lsmagorinsky = .true.
-lvreman      = .false.
-cs           = 0.24
+lsmagorinsky = .false.
+lvreman      = .true.
 /
 
 &DYNAMICS

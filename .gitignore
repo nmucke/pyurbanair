@@ -109,6 +109,10 @@ params.nc
 .temp_pyudales/*
 .temp_pypalm/*
 .temp_pylbm/*
+.temp_pypalm_draw_a/*
+.temp_pypalm_draw_b/*
+.temp_pyudales_draw_a/*
+.temp_pyudales_draw_b/*
 
 
 # Results

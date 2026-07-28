@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import pathlib
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,7 +36,7 @@ def resolve_results_dir(cfg: DictConfig) -> pathlib.Path | None:
 
 
 def visualize_forward_state(
-    state,
+    state: Any,
     model_name: str,
     out_dir: pathlib.Path,
     title_prefix: str,
@@ -77,7 +78,7 @@ def visualize_forward_state(
     print(f"Saved visualization outputs in {out_dir}")
 
 
-def plot_derived_inflow_angle(state, params, out_dir: pathlib.Path) -> None:
+def plot_derived_inflow_angle(state: Any, params: Any, out_dir: pathlib.Path) -> None:
     """Plot the inflow angle derived from the simulated field vs. the prescribed.
 
     Compares the angle recovered from (u, v) at three probes near the inlet
@@ -86,7 +87,7 @@ def plot_derived_inflow_angle(state, params, out_dir: pathlib.Path) -> None:
     resolved per-variable.
     """
 
-    def _pick_dim(da, candidates):
+    def _pick_dim(da: Any, candidates: tuple[str, ...]) -> str:
         return next(d for d in candidates if d in da.dims)
 
     x_cands = ("x", "xt", "xm", "xu")
@@ -134,7 +135,9 @@ def plot_derived_inflow_angle(state, params, out_dir: pathlib.Path) -> None:
     plt.close()
 
 
-def plot_derived_velocity_magnitude(state, params, out_dir: pathlib.Path) -> None:
+def plot_derived_velocity_magnitude(
+    state: Any, params: Any, out_dir: pathlib.Path
+) -> None:
     """Plot the speed derived from the simulated field vs. the prescribed.
 
     Mirrors :func:`plot_derived_inflow_angle`: recovers the horizontal speed
@@ -142,7 +145,7 @@ def plot_derived_velocity_magnitude(state, params, out_dir: pathlib.Path) -> Non
     the prescribed time-varying ``velocity_magnitude``.
     """
 
-    def _pick_dim(da, candidates):
+    def _pick_dim(da: Any, candidates: tuple[str, ...]) -> str:
         return next(d for d in candidates if d in da.dims)
 
     x_cands = ("x", "xt", "xm", "xu")

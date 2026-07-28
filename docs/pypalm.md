@@ -63,7 +63,7 @@ Key constructor args (all wired from Hydra via `conf/model/pypalm.yaml`):
 | `stl_path` | STL geometry; rasterized to `_topo` via `stl_to_palm_topography` |
 | `experiment_name` | PALM job identifier (default `urban_run`) |
 | `ncpu` | MPI ranks; `npex=ncpu, npey=1` for inflow-outflow slab decomp |
-| `nx, ny, nz, bounds` | Grid; written to `_p3d` at init; required for topography + warm-start |
+| `nx, ny, nz, bounds` | Grid; written to `_p3d` at init; required for topography + warm-start. **`nx`/`ny` must be even for `periodic` runs** — the default `poisfft` solver rejects an odd grid-point count on a cyclic boundary (PALM `PAC0071`/`PAC0072`); pypalm raises at staging instead. |
 | `simulation_time`, `output_frequency`, `spinup_time` | Written to `_p3d` (`end_time`, `dt_data_output`, `averaging_interval`) |
 | `boundary_condition` | `"periodic"` (cyclic) or `"inflow_outflow"` (dirichlet/radiation + multigrid solver) |
 | `nudging_config` | Periodic nudging driver + inflow profile shape: `enabled` (default `true`), `tnudge` (15.0 s), `nnudge_meters` (4.0 m), `profile_config` (default `power_law` with `alpha=0.25`). See §8. |

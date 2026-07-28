@@ -1,5 +1,5 @@
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import pytest
 from hydra import compose, initialize
@@ -25,12 +25,12 @@ _SMOKE_OVERRIDES = [
 ]
 
 
-# run_esmda.yaml ships production defaults the suite must not inherit:
-# machine-specific scratch roots (/export/...) instead of the portable in-repo
-# roots (the commented-out defaults in that file), and ``case: barcelona``,
-# whose precomputed uDALES geometry bundle only matches the Barcelona grid —
-# not the smoke domain above. Re-assert the test-friendly xie_and_castro case
-# (the default of the other entry points) and the in-repo output roots.
+# run_esmda.yaml is the one entry point that gets retuned for whatever
+# production run is in flight — it has shipped machine-specific scratch roots
+# (/export/...) and ``case: barcelona``, whose precomputed uDALES geometry
+# bundle only matches the Barcelona grid, not the smoke domain above. Pin the
+# test-friendly xie_and_castro case (the default of the other entry points) and
+# the in-repo output roots so the suite never inherits either.
 _ESMDA_OVERRIDES = [
     "case=xie_and_castro",
     "paths.results_dir=.temp/${truth_model.name}_to_${assim_model.name}",
@@ -48,10 +48,49 @@ def _compose_test_cfg(
     # ``esmda/smoother`` group override.
     esmda_overrides = _ESMDA_OVERRIDES if config_name == "run_esmda" else []
     with initialize(version_base=None, config_path="../conf"):
-        return compose(
+        cfg = compose(
             config_name=config_name,
             overrides=[*_SMOKE_OVERRIDES, *esmda_overrides, *(overrides or [])],
         )
+    _fit_nudging_to_smoke_domain(cfg)
+    return cfg
+
+
+# `nnudge_meters` is the height below which nudging is NOT applied, so it has to
+# leave at least one nudged level above it. The backends set it for a real
+# domain (tens of metres); the smoke shape above is 10 m tall, and anything at
+# or above its top cell center makes the solver raise. Scale it down instead of
+# holding the production configs to the test domain's height.
+_SMOKE_NNUDGE_METERS = 4.0
+
+
+def _fit_nudging_to_smoke_domain(cfg: DictConfig) -> None:
+    # Only the mounts that actually carry a nudging_config — pylbm has none, and
+    # run_esmda/run_filtering mount two models rather than one.
+    for mount in ("model", "truth_model", "assim_model"):
+        nudging = cfg.get(mount, {}).get("forward_model", {}).get("nudging_config")
+        if nudging is not None and "nnudge_meters" in nudging:
+            nudging.nnudge_meters = _SMOKE_NNUDGE_METERS
+
+
+@pytest.fixture(autouse=True)  # type: ignore[misc]
+def _restore_hydra_config_singleton() -> Iterator[None]:
+    """Keep ``HydraConfig`` from leaking a composed config across test files.
+
+    ``HydraConfig`` is a process-wide singleton, so a test that primes it with
+    ``HydraConfig.instance().set_config(cfg)`` leaves it populated for the rest
+    of the session. A config from bare ``compose()`` has no
+    ``hydra.runtime.output_dir`` (it is ``???``), so any later test that reaches
+    ``resolve_output_dir`` takes its ``HydraConfig.initialized()`` branch and
+    dies on MissingMandatoryValue instead of falling back to
+    ``paths.base_results_dir``. Whether that happens comes down to file
+    collection order, which makes it a nasty failure to place.
+    """
+    from hydra.core.hydra_config import HydraConfig
+
+    previous = HydraConfig.instance().cfg
+    yield
+    HydraConfig.instance().cfg = previous
 
 
 @pytest.fixture

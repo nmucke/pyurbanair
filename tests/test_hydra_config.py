@@ -51,8 +51,12 @@ def test_entrypoint_composes_with_model_override() -> None:
     cfg = _compose(["model=pyudales"])
 
     assert cfg.model.name == "pyudales"
-    # Physics comes from the default case (xie_and_castro).
-    assert cfg.domain.nx == 30
+    # Physics comes from the default case (xie_and_castro). Assert on the
+    # case's identity and the shape of its domain block, not on a grid count:
+    # nx/ny/nz are compute knobs that get retuned per experiment, and pinning
+    # one here only records whatever the case happened to say that week.
+    assert "xie_and_castro" in cfg.geometry.udales_case_dir
+    assert {"nx", "ny", "nz", "bounds"} <= set(cfg.domain)
     assert cfg.obs.mode in {"points", "grid"}
 
 
@@ -63,7 +67,7 @@ def test_default_compute_is_medium() -> None:
 
     assert cfg.ensemble.ensemble_size == 64
     assert cfg.ensemble.num_parallel_processes == 1
-    assert cfg.time.seconds_per_knot == 30.0
+    assert cfg.time.seconds_per_knot == 20.0
 
 
 def test_palm_target_does_not_import_for_non_palm_composition() -> None:

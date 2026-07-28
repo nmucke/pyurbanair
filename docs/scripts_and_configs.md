@@ -12,7 +12,7 @@ orientation, then return here for field-level detail.
 
 ### Overview
 
-The configuration tree has exactly **three primary run entry points**, each
+The configuration tree has exactly **four primary run entry points**, each
 self-contained (they inline the shared base rather than pulling separate
 `paths.yaml`/`time.yaml`/`ensemble.yaml` files):
 
@@ -21,12 +21,25 @@ self-contained (they inline the shared base rather than pulling separate
 | [`conf/run_forward_model.yaml`](../conf/run_forward_model.yaml) | `run_forward_model.py` | `case` + single `model@model` mount + single `params` mount |
 | [`conf/run_esmda.yaml`](../conf/run_esmda.yaml) | `run_esmda.py` | same base + `esmda:` scalars + double model mount (`@truth_model`/`@assim_model`) + double params mount (`@truth_params`/`@prior_params`) |
 | [`conf/run_filtering.yaml`](../conf/run_filtering.yaml) | `run_filtering.py` | same base + `filtering:` scalars + the `filtering/*` groups + the same double model/params mounts (static params only) |
+| [`conf/compare_models.yaml`](../conf/compare_models.yaml) | `compare_models.py` | same base as `run_forward_model` + `compare:` scalars + an *N-way* model mount (`model@models.<name>`) and named parameter-scenario mounts (`params@parameter_scenarios.<name>`) |
 
 A third entry point, [`conf/neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml),
 extends `run_forward_model` with dataset-shape fields for surrogate data
 generation. The surrogate train/test scripts use
 [`conf/neural_surrogate/training.yaml`](../conf/neural_surrogate/training.yaml)
 and [`conf/neural_surrogate/testing.yaml`](../conf/neural_surrogate/testing.yaml).
+
+### `compare_models` diagnostics
+
+[`scripts/compare_models.py`](../scripts/compare_models.py) deliberately treats
+instantaneous LES-field error as a qualitative diagnostic, rather than the sole
+cross-model score. In addition to snapshots and sensor series it writes
+time-windowed fluid-cell mean/spread maps, STL-derived upstream/canopy/wake
+profiles, PDFs/CDFs, sensor spectra/autocorrelations, and wake-recovery metrics.
+`compare.analysis` controls the statistical window, compact full-height grid,
+wall-cell exclusion, distribution sampling, and wake-recovery threshold. Its
+regions are inferred from the selected STL and assume the dominant flow is in
+the +x direction.
 
 The **mode** of a run is the cross product of its config groups — no separate
 mode file is required. `run_esmda.py` handles every former assimilation script
@@ -203,6 +216,8 @@ static sampler (`ParameterSampler`) or a time-varying sampler
 | [`params/static_truth.yaml`](../conf/params/static_truth.yaml) | `pyurbanair.static_parameters.ParameterSampler` | **Truth** generator: all `Constant` distributions (exact fixed values). Avoids inverse crime. |
 | [`params/dynamic.yaml`](../conf/params/dynamic.yaml) | `pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel` | Time-varying **prior**: AR(2) relaxation for `inflow_angle` + `velocity_magnitude` (both get a `time` dim), plus static `vertical_inflow_exponent`/`sgs_constant` entries estimated jointly. |
 | [`params/dynamic_truth.yaml`](../conf/params/dynamic_truth.yaml) | `AR2RelaxationModel` | Time-varying **truth**: same AR(2) structure but different seed to avoid inverse crime. |
+| [`params/dynamic_sine.yaml`](../conf/params/dynamic_sine.yaml) | `pyurbanair.dynamic_parameters.harmonic.HarmonicParameterModel` | Deterministic sine forcing for controlled forward comparisons. |
+| [`params/dynamic_cosine.yaml`](../conf/params/dynamic_cosine.yaml) | `HarmonicParameterModel` | A second deterministic cosine forcing scenario. |
 
 **Key fields in `dynamic.yaml`:**
 - `correlation_length: 100.0` — AR(2) decay length (seconds).
@@ -212,6 +227,13 @@ static sampler (`ParameterSampler`) or a time-varying sampler
 - `static_parameters` — model-error knobs (`vertical_inflow_exponent`, `sgs_constant`)
   that ride in the same Dataset but carry no `time` dim; drawn once (window 0)
   and refined across windows.
+
+**Deterministic profiles.** `dynamic_sine` and `dynamic_cosine` use
+`HarmonicParameterModel`. Each entry in `profiles` has `waveform` (`sine` or
+`cosine`), `offset`, `amplitude`, `frequency` in Hz, optional `phase` in radians,
+and optional `min` / `max` clips. The series is identical for every ensemble
+member and continues on a global clock through rollouts, making it suitable for
+a controlled solver comparison rather than stochastic parameter inference.
 
 **Mounting in ESMDA.** `run_esmda.yaml` mounts this group twice:
 `params@truth_params=static_truth|dynamic_truth` and
@@ -398,6 +420,83 @@ time clock onto a global monotonic axis.
 
 **Produces:** field snapshot PNG, velocity-magnitude animation, derived
 inflow-angle vs prescribed plot (when `params=dynamic`).
+
+#### [`compare_models.py`](../scripts/compare_models.py)
+**Hydra** — config: [`compare_models.yaml`](../conf/compare_models.yaml)
+
+Runs several backends over each selected parameter scenario and draws the
+cross-model comparison figures. Every backend is mounted under `models.<name>`;
+`compare.models` (default `[pypalm, pyudales]`) selects which ones run and
+`compare.reference` (default: the first) is the baseline for the difference
+figures. Parameter configs are mounted under `parameter_scenarios.<name>` and
+selected by `compare.parameter_scenarios`; the defaults `draw_a` and `draw_b`
+are independent AR(2) draws and therefore produce four runs. Replace either
+mount with `dynamic_sine` or `dynamic_cosine` for prescribed harmonic forcing.
+The general knobs mirror `run_forward_model.yaml`, so `case`, `time`, `ensemble`
+and `run.{ensemble,rollout_steps,skip_viz}` behave identically.
+
+The default `compare.within_model_parameter_comparisons=true` also compares
+`draw_a` against `draw_b` separately for PALM and uDALES. Those diagnostics live
+under `comparison/within_model/<solver>/`; choose a different baseline with
+`compare.parameter_reference=<scenario>`.
+
+For another stochastic draw, add a named mount and assign its seed, for example:
+
+```bash
+python scripts/compare_models.py \
+  +params@parameter_scenarios.draw_c=dynamic \
+  parameter_scenarios.draw_c.seed=71 \
+  'compare.parameter_scenarios=[draw_a,draw_c]'
+```
+
+For the two deterministic profiles, replace the default mounts with
+`params@parameter_scenarios.draw_a=dynamic_sine` and
+`params@parameter_scenarios.draw_b=dynamic_cosine`. Amplitude and frequency
+can then be overridden independently at
+`parameter_scenarios.draw_a.profiles.<parameter>.<field>`.
+
+What makes it a controlled comparison:
+
+- The params are sampled **once per scenario** (including each rollout window's
+  `extrapolate`) and replayed for every backend.
+- Each solver/scenario case gets its own scratch dir — the script rewrites the
+  global `paths.experiment_dir` to `${paths.experiment_root}_<model>_<scenario>`
+  before instantiating, since the model configs all interpolate that one key.
+- Field figures are drawn after interpolating every model onto one common
+  cell-centred grid (`compare.grid`, deliberately coarser than the solver grids)
+  and one common time axis; each velocity component is interpolated on *its own*
+  staggered axes, so staggering is undone in the same pass. Note that xarray's
+  multi-dim `interp` returns NaN outside the source coords (`fill_value=None`
+  does **not** extrapolate on that path), so targets are clamped per component.
+- Sensor series use `_sensor_component_timeseries` at the physical sensor points
+  on each model's own grid, so they carry no regridding bias. They are drawn
+  twice: raw per-frame, and smoothed by a *sliding* window of the observation
+  operator's `obs.interval_seconds` length reduced by `obs.aggregation_mode` —
+  the same suppression of sub-interval fluctuation `TemporalObservationOperator`
+  applies, without the arbitrary phase of its disjoint bin grid. Skipped when
+  `obs.interval_seconds` is unset. The window is centred and rounded to an *odd*
+  frame count (an even centred window sits half a frame left of centre, and since
+  the count comes from each model's own cadence that would put a spurious
+  relative phase shift between the compared curves). Aggregating the sensor
+  series rather than the state field is exact for `mean` (linear interpolation
+  commutes with the time average) and approximate for median/max/min.
+
+**Produces:** `scenario_parameters.png`, `scenario_error_summary.png`, and
+`scenario_summary.csv` at the root, plus one directory per scenario containing
+`parameters.png` (prescribed vs each model's realised inlet inflow),
+`state_snapshots_z<h>.png`, `state_difference_z<h>.png`,
+`field_rmse.png`, `state_animation.mp4`, `sensor_timeseries_{assimilation,
+validation}.png` (u/v/w/|U|, one line per model),
+`sensor_rolling_{assimilation,validation}.png` (the same sensors smoothed over
+the observation operator's window length), `sensor_metrics.csv` plus one
+metric heatmap per sensor set, windowed `field_{mean,std}_z<h>.png` maps,
+regional vertical-profile and velocity-distribution figures,
+sensor spectra/autocorrelations, `measurement_overview.png` (the spatial
+footprints and heights of every diagnostic), `wake_profiles.png`,
+`wake_metrics.csv`, and `summary.csv`. The statistical diagnostics are controlled by
+`compare.analysis`. When enabled, `within_model/<solver>/` contains the same
+core field, statistical, wake, and sensor diagnostics with parameter scenarios
+as the series and `within_model_summary.csv` aggregates their scalars.
 
 #### [`run_esmda.py`](../scripts/esmda/run_esmda.py)
 **Hydra** — config: [`run_esmda.yaml`](../conf/run_esmda.yaml)

@@ -28,6 +28,14 @@ _SMOKE = [
     "model=pypalm",
 ]
 
+# inflow_outflow selects PALM's multigrid pressure solver, which needs uniform
+# slab subdomains — ncpu must divide the grid's x point count. conf's production
+# default (8) does not divide the smoke grid, so pin one that does.
+_INFLOW_OUTFLOW = [
+    "model.forward_model.boundary_condition=inflow_outflow",
+    "model.forward_model.ncpu=4",
+]
+
 BOUNDS = ((0.0, 20.0), (0.0, 20.0), (0.0, 10.0))
 NX = NY = 20
 NZ = 4
@@ -126,7 +134,7 @@ def test_periodic_time_varying_block_count(tmp_path: pathlib.Path) -> None:
 
 
 def test_inflow_outflow_static_no_nudging_apparatus(tmp_path: pathlib.Path) -> None:
-    fm = _make_model(tmp_path, "model.forward_model.boundary_condition=inflow_outflow")
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW)
     fm._apply_inflow_settings(_static_params())
 
     assert not fm.nudge_driver_path.exists()
@@ -140,7 +148,7 @@ def test_inflow_outflow_static_no_nudging_apparatus(tmp_path: pathlib.Path) -> N
 def test_inflow_outflow_time_varying_uses_dynamic_driver(
     tmp_path: pathlib.Path,
 ) -> None:
-    fm = _make_model(tmp_path, "model.forward_model.boundary_condition=inflow_outflow")
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW)
     fm._apply_inflow_settings(
         _time_varying_params([0.0, 50.0, 100.0], [0.0, 30.0, 60.0])
     )

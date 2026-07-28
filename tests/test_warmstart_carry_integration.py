@@ -12,11 +12,10 @@ import pytest
 from hydra import compose, initialize
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
+from pyudales.utils.warm_start_utils import _carry_dir, fetch_carry
 from scipy.io import FortranFile
 
 from pyurbanair.config.hydra_helpers import clean_outputs
-from pyudales.utils.warm_start_utils import _carry_dir, fetch_carry
-
 
 # Record layout of a uDALES restart (see update_warmstart_file_from_xarray):
 # 0=mindist 1=wall 2=u0 3=v0 4=w0 5=pres0 6=thl0 7=e120 8=ekm ...
@@ -57,6 +56,11 @@ def test_warm_start_reuses_carry_subgrid_fields():
                 "model=pyudales",
                 "params=static",
                 "time.spinup_time=2.0",
+                # The config's nudging height is set for the real 32 m domain
+                # and leaves no nudged level in the 10 m shape above (see
+                # conftest's _fit_nudging_to_smoke_domain, which does this for
+                # the tests that compose through the shared helper).
+                "model.forward_model.nudging_config.nnudge_meters=4.0",
             ],
             return_hydra_config=True,
         )
@@ -73,9 +77,7 @@ def test_warm_start_reuses_carry_subgrid_fields():
         assert cold_state is not None
         carry_dir = _carry_dir(fm.dirs)
         assert carry_dir.exists(), "cold start did not persist a warmstart carry"
-        carry_files = list(
-            carry_dir.glob(f"initd*_000_000.{fm.dirs.experiment_name}")
-        )
+        carry_files = list(carry_dir.glob(f"initd*_000_000.{fm.dirs.experiment_name}"))
         assert carry_files, "carry directory has no restart file"
 
         # The cold-start tiny template (barely-evolved subgrid state) vs the

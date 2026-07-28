@@ -27,7 +27,7 @@ forward_model:
   nudging_config:
     enabled: true          # false -> today's un-driven periodic staging
     tnudge: 15.0           # s; relaxation timescale, matches pyudales
-    nnudge_meters: 4.0     # no nudging below this height (via huge tnudge)
+    nnudge_meters: 16.0     # no nudging below this height (via huge tnudge)
     profile_config:
       type: power_law
       alpha: 0.25
