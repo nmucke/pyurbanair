@@ -57,6 +57,11 @@ def test_warm_start_reuses_carry_subgrid_fields():
                 "model=pyudales",
                 "params=static",
                 "time.spinup_time=2.0",
+                # The config's nudging height is set for the real 32 m domain
+                # and leaves no nudged level in the 10 m shape above (see
+                # conftest's _fit_nudging_to_smoke_domain, which does this for
+                # the tests that compose through the shared helper).
+                "model.forward_model.nudging_config.nnudge_meters=4.0",
             ],
             return_hydra_config=True,
         )
