@@ -68,6 +68,13 @@ logger = logging.getLogger(__name__)
 
 # --- pypalm-side defaults for the enabled path -------------------------------
 DEFAULT_INLET_TURBULENCE_ENABLED = False
+
+# The one-off random perturbation PALM imposes at cold-start init
+# (init_3d_model.f90:1488). Defaults True because it is what breaks symmetry so
+# turbulence can develop from PALM's smooth analytic initial profile -- turning
+# it off is legitimate but leaves transition to be tripped by the topography
+# alone. Independent of `enabled`, which governs the in-run perturbations.
+DEFAULT_INLET_TURBULENCE_INITIAL_SEED = True
 # PALM's own dt_disturb default is effectively infinite (see below), so the
 # disturbance loop never fires today. A finite value is what actually turns the
 # mechanism on; 5 s is short relative to any of our windows.
@@ -106,6 +113,19 @@ _RESTORE_ON_DISABLE: tuple[tuple[str, str, float], ...] = (
     (_INIT, "inflow_disturbance_begin", PALM_AUTO_INFLOW_DISTURBANCE),
     (_INIT, "inflow_disturbance_end", PALM_AUTO_INFLOW_DISTURBANCE),
 )
+
+
+def is_initial_seed_enabled(config: Optional[dict]) -> bool:
+    """True when the cold-start seeding perturbation should be applied.
+
+    Absent config keeps PALM's (and this wrapper's) historical behaviour: the
+    seed is ON. It is deliberately independent of ``enabled`` -- the seed is a
+    single kick at t=0, whereas ``enabled`` governs perturbations re-injected
+    near the inflow for the whole run.
+    """
+    if not config:
+        return DEFAULT_INLET_TURBULENCE_INITIAL_SEED
+    return bool(config.get("initial_seed", DEFAULT_INLET_TURBULENCE_INITIAL_SEED))
 
 
 def is_inlet_turbulence_enabled(config: Optional[dict]) -> bool:
@@ -171,10 +191,31 @@ def apply_inlet_turbulence(
       warm-started field" intent.
     """
     p3d = P3DFile(p3d_path)
+    seed = is_initial_seed_enabled(config)
 
     if not is_inlet_turbulence_enabled(config):
         _restore_defaults(p3d)
+        # `create_disturbances` is written unconditionally by the cold-start init
+        # path, so leaving it alone here means "no inlet turbulence" still fires
+        # the t=0 kick. Honour `initial_seed` — but only WRITE when the value
+        # must change, so a clean template stays byte-identical (PALM's own
+        # default is .TRUE., matching initial_seed's default):
+        #   * seed false -> always write .false., adding the key if absent.
+        #   * seed true  -> only rewrite a key that is already present, so a
+        #     previous `initial_seed: false` run in the same experiment dir
+        #     cannot leak its .false. into this one.
+        # dt_disturb is left at PALM's huge default by _restore_defaults, so the
+        # in-run loop never fires either way.
+        if not seed:
+            p3d.set_value(_RUNTIME, "create_disturbances", False)
+        elif "create_disturbances" in p3d.sections.get(_RUNTIME, {}):
+            p3d.set_value(_RUNTIME, "create_disturbances", True)
         p3d.write()
+        logger.info(
+            "PALM inlet turbulence OFF (initial_seed=%s -> create_disturbances=%s)",
+            seed,
+            ".true." if seed else ".false.",
+        )
         return False
 
     cfg = config or {}
@@ -193,10 +234,17 @@ def apply_inlet_turbulence(
     p3d.set_value(_RUNTIME, "create_disturbances", True)
     p3d.set_value(_RUNTIME, "dt_disturb", dt_disturb)
     p3d.set_value(_RUNTIME, "disturbance_amplitude", amplitude)
+    # `disturbance_energy_limit = 0.0` is how the initial kick is suppressed
+    # while the in-run perturbations stay alive: init_3d_model.f90:1488 requires
+    # `energy_limit /= 0`, whereas time_integration.f90:976 falls through to the
+    # non-cyclic "keep perturbing near the inflow" ELSEIF, which does not. So
+    # `enabled: true` + `initial_seed: false` is representable, and a warm start
+    # forces the same suppression so the injected field is not shocked.
+    suppress_initial_kick = warm_start or not seed
     p3d.set_value(
         _RUNTIME,
         "disturbance_energy_limit",
-        0.0 if warm_start else PALM_DEFAULT_ENERGY_LIMIT,
+        0.0 if suppress_initial_kick else PALM_DEFAULT_ENERGY_LIMIT,
     )
 
     _set_optional(p3d, _INIT, "inflow_disturbance_begin", cfg.get("begin"), int)
@@ -205,11 +253,17 @@ def apply_inlet_turbulence(
     _set_optional(p3d, _RUNTIME, "disturbance_level_t", cfg.get("level_t"), float)
 
     p3d.write()
+    if warm_start:
+        why = " (warm start: initial kick suppressed)"
+    elif not seed:
+        why = " (initial_seed=false: initial kick suppressed)"
+    else:
+        why = ""
     logger.info(
         "PALM inlet turbulence ON: dt_disturb=%.3f s, amplitude=%.3f m/s%s",
         dt_disturb,
         amplitude,
-        " (warm start: initial kick suppressed)" if warm_start else "",
+        why,
     )
     return True
 

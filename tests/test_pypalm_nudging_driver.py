@@ -43,6 +43,10 @@ _INFLOW_OUTFLOW = [
 # that don't assert on the nudging apparatus).
 _PERIODIC = [
     "model.forward_model.boundary_condition=periodic",
+    # Inlet turbulence is rejected under cyclic BCs (there is no inflow strip),
+    # so pin it off here too rather than inheriting whatever the config is set
+    # to for the current sweep.
+    "model.forward_model.inlet_turbulence.enabled=false",
 ]
 
 BOUNDS = ((0.0, 20.0), (0.0, 20.0), (0.0, 10.0))

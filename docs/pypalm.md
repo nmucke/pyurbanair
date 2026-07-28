@@ -380,6 +380,39 @@ python scripts/esmda/run_esmda.py model@assim_model=pypalm model@truth_model=pyl
 
 ---
 
+
+### `inlet_turbulence`: two independent switches
+
+PALM has two distinct disturbance mechanisms, and both are gated by the single
+`&runtime_parameters create_disturbances` flag:
+
+| Sub-key | Mechanism | PALM site |
+|---|---|---|
+| `initial_seed` | one-off random kick on u/v at cold-start init | `init_3d_model.f90:1488` |
+| `enabled` | perturbations re-injected near the inflow all run, paced by `dt_disturb` | `time_integration.f90:966-989` |
+
+`create_disturbances` is written unconditionally by the cold-start init path
+(`_reset_cold_init`), so before this split `enabled: false` **still fired the
+t=0 kick** — the knob only ever controlled the in-run perturbations. All four
+combinations are now expressible:
+
+| `initial_seed` | `enabled` | `create_disturbances` | `disturbance_energy_limit` | `dt_disturb` |
+|---|---|---|---|---|
+| true | false | `.true.` | default | default (huge) → no in-run |
+| true | true | `.true.` | 0.01 | set |
+| false | false | `.false.` | — | — |
+| false | true | `.true.` | **0.0** | set |
+
+The last row works because the initial kick requires `energy_limit /= 0`
+(`init_3d_model.f90:1488`) while the in-run non-cyclic branch does not
+(`time_integration.f90:976`) — so zeroing the limit suppresses only the kick. A
+warm start forces the same suppression regardless of `initial_seed`, so the
+injected field is not shocked.
+
+`initial_seed` defaults to **true**: it is what breaks symmetry so turbulence can
+develop from PALM's smooth analytic initial profile. With it false, transition
+has to be tripped by the topography alone and develops later.
+
 ## 8. Known gotchas
 
 ### Nudging driver for periodic runs

@@ -37,6 +37,10 @@ _INFLOW_OUTFLOW = [
 ]
 
 _ON = "model.forward_model.inlet_turbulence.enabled=true"
+# Pin the knob rather than inheriting conf/model/pypalm.yaml's value: that is a
+# sweep setting, not a contract, so a test that relies on it silently flips
+# meaning when the config is re-pointed.
+_OFF = "model.forward_model.inlet_turbulence.enabled=false"
 
 
 def _make_model(tmp_path: pathlib.Path, *extra_overrides: str) -> Any:
@@ -118,8 +122,8 @@ _DISTURBANCE_KEYS = (
 
 
 def test_default_config_writes_no_disturbance_keys(tmp_path: pathlib.Path) -> None:
-    """The shipped default (`enabled: false`) leaves the namelist untouched."""
-    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW)
+    """`enabled: false` writes only create_disturbances (per initial_seed)."""
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, _OFF)
     assert not fm.inlet_turbulence_enabled
 
     fm._apply_inflow_settings(_static_params())
@@ -146,13 +150,37 @@ def test_absent_config_is_a_no_op(tmp_path: pathlib.Path) -> None:
     assert fm.p3d_path.read_text() == before
 
 
-def test_disabled_does_not_touch_create_disturbances(tmp_path: pathlib.Path) -> None:
-    """`create_disturbances` stays owned by the warm/cold init path when off."""
-    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW)
+def test_disabled_with_seed_true_reclaims_create_disturbances(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`initial_seed` now owns create_disturbances, so a stale .false. is fixed.
+
+    Previously this key was left to the warm/cold init path, which is why
+    `enabled: false` still fired PALM's t=0 kick. Now the knob is authoritative:
+    a `.false.` left by an earlier `initial_seed: false` run in the same
+    experiment dir must not leak into this one.
+    """
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW, _OFF)
     fm._apply_inflow_settings(_static_params())
 
     fm._p3d_set_value("runtime_parameters", "create_disturbances", False)
-    fm._apply_inlet_turbulence(warm_start=True)
+    fm._apply_inlet_turbulence(warm_start=False)
+    assert _rt(fm, "create_disturbances") == ".true."
+
+
+def test_disabled_with_seed_false_turns_it_fully_off(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`enabled: false` + `initial_seed: false` = no disturbances at all."""
+    fm = _make_model(
+        tmp_path,
+        *_INFLOW_OUTFLOW,
+        _OFF,
+        "model.forward_model.inlet_turbulence.initial_seed=false",
+    )
+    fm._apply_inflow_settings(_static_params())
+    fm._reset_cold_init()  # writes create_disturbances=.true.
+    fm._apply_inlet_turbulence(warm_start=False)
     assert _rt(fm, "create_disturbances") == ".false."
 
 
@@ -306,3 +334,85 @@ def test_non_positive_dt_disturb_raises(tmp_path: pathlib.Path) -> None:
     fm._apply_inflow_settings(_static_params())
     with pytest.raises(ValueError, match="dt_disturb"):
         fm._apply_inlet_turbulence(warm_start=False)
+
+
+# ---------------------------------------------------------------------------
+# initial_seed is independent of enabled: the cold-start init path writes
+# create_disturbances=.true. unconditionally, so `enabled: false` alone used to
+# leave PALM's t=0 random kick firing (init_3d_model.f90:1488).
+# ---------------------------------------------------------------------------
+
+
+def _apply(tmp_path: pathlib.Path, block, warm_start: bool = False) -> dict:
+    """Stage a template, mimic the cold-start init write, apply the knob."""
+    import shutil
+
+    from pypalm.utils.inlet_turbulence_utils import apply_inlet_turbulence
+    from pypalm.utils.p3d_utils import P3DFile
+
+    p = tmp_path / "urban_run_p3d"
+    shutil.copy2(pathlib.Path("examples/palm/xie_and_castro/_p3d"), p)
+    # _reset_cold_init() does this on EVERY cold start, before the knob runs.
+    f = P3DFile(p)
+    f.set_value("runtime_parameters", "create_disturbances", True)
+    f.write()
+
+    apply_inlet_turbulence(p, block, warm_start=warm_start)
+    f = P3DFile(p)
+    return {
+        k: f.get_value("runtime_parameters", k)
+        for k in ("create_disturbances", "dt_disturb", "disturbance_energy_limit")
+    }
+
+
+def _kick_fires(v: dict) -> bool:
+    """init_3d_model.f90:1488 — create_disturbances AND energy_limit /= 0."""
+    if v["create_disturbances"] != ".true.":
+        return False
+    lim = v["disturbance_energy_limit"]
+    return lim is None or float(lim) != 0.0
+
+
+def _in_run_fires(v: dict) -> bool:
+    """time_integration.f90:966 — create_disturbances AND dt_disturb reachable."""
+    if v["create_disturbances"] != ".true.":
+        return False
+    dt = v["dt_disturb"]
+    return dt is not None and float(dt) < 1.0e6
+
+
+@pytest.mark.parametrize(
+    "seed,enabled,want_kick,want_in_run",
+    [
+        (True, False, True, False),  # historical default: seed only
+        (True, True, True, True),  # both
+        (False, False, False, False),  # genuinely off
+        (False, True, False, True),  # continuous forcing, no initial shock
+    ],
+)
+def test_seed_and_enabled_are_independent(
+    tmp_path: pathlib.Path,
+    seed: bool,
+    enabled: bool,
+    want_kick: bool,
+    want_in_run: bool,
+) -> None:
+    vals = _apply(tmp_path, {"enabled": enabled, "initial_seed": seed})
+    assert _kick_fires(vals) is want_kick
+    assert _in_run_fires(vals) is want_in_run
+
+
+def test_absent_config_keeps_the_historical_seed(tmp_path: pathlib.Path) -> None:
+    """A config that never mentions inlet_turbulence must not change physics."""
+    vals = _apply(tmp_path, None)
+    assert _kick_fires(vals) is True
+    assert _in_run_fires(vals) is False
+
+
+def test_warm_start_suppresses_the_kick_even_with_seed_true(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Warm starts must not shock the injected field, whatever initial_seed says."""
+    vals = _apply(tmp_path, {"enabled": True, "initial_seed": True}, warm_start=True)
+    assert _kick_fires(vals) is False
+    assert _in_run_fires(vals) is True
