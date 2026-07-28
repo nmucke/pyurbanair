@@ -48,10 +48,29 @@ def _compose_test_cfg(
     # ``esmda/smoother`` group override.
     esmda_overrides = _ESMDA_OVERRIDES if config_name == "run_esmda" else []
     with initialize(version_base=None, config_path="../conf"):
-        return compose(
+        cfg = compose(
             config_name=config_name,
             overrides=[*_SMOKE_OVERRIDES, *esmda_overrides, *(overrides or [])],
         )
+    _fit_nudging_to_smoke_domain(cfg)
+    return cfg
+
+
+# `nnudge_meters` is the height below which nudging is NOT applied, so it has to
+# leave at least one nudged level above it. The backends set it for a real
+# domain (tens of metres); the smoke shape above is 10 m tall, and anything at
+# or above its top cell center makes the solver raise. Scale it down instead of
+# holding the production configs to the test domain's height.
+_SMOKE_NNUDGE_METERS = 4.0
+
+
+def _fit_nudging_to_smoke_domain(cfg: DictConfig) -> None:
+    # Only the mounts that actually carry a nudging_config — pylbm has none, and
+    # run_esmda/run_filtering mount two models rather than one.
+    for mount in ("model", "truth_model", "assim_model"):
+        nudging = cfg.get(mount, {}).get("forward_model", {}).get("nudging_config")
+        if nudging is not None and "nnudge_meters" in nudging:
+            nudging.nnudge_meters = _SMOKE_NNUDGE_METERS
 
 
 @pytest.fixture(autouse=True)  # type: ignore[misc]
