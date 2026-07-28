@@ -40,6 +40,12 @@ from .utils.warm_start_utils import write_warmstart_driver
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# How many missing 3D outputs may be padded by repeating the last frame.
+# PALM's adaptive timestep can land one dump short of the requested count;
+# more than that means the run stopped early (PALM exits 0 on divergence),
+# and padding would fabricate the window instead of reporting the failure.
+MAX_PADDED_OUTPUTS = 1
+
 
 DomainBounds = tuple[
     tuple[float, float],
@@ -815,6 +821,67 @@ class ForwardModel(BaseForwardModel):
             result.palm_rc,
         )
 
+    def _fit_output_window(self, state: xarray.Dataset) -> xarray.Dataset:
+        """Trim/pad the 3D output onto the expected window.
+
+        Drops the spin-up frames, trims a surplus from the front, and pads at
+        most :data:`MAX_PADDED_OUTPUTS` missing frames. A larger shortfall
+        raises ``CalledProcessError`` — see the comment inline.
+        """
+        if self.spinup_time > 0 and self.output_frequency:
+            spinup_outputs = int(self.spinup_time / self.output_frequency)
+            if state.sizes.get("time", 0) > spinup_outputs:
+                state = state.isel(time=slice(spinup_outputs, None))
+
+        if (
+            self.simulation_time is not None
+            and self.output_frequency
+            and state.sizes.get("time", 0) > 0
+        ):
+            expected_outputs = int(self.simulation_time / self.output_frequency)
+            actual = state.sizes["time"]
+            if actual > expected_outputs:
+                state = state.isel(time=slice(-expected_outputs, None))
+            elif actual < expected_outputs:
+                missing = expected_outputs - actual
+                # PALM's timestep is adaptive, so the 3D file occasionally has
+                # ONE fewer output than requested. Padding that single frame
+                # keeps ensemble members concat-able along `time`.
+                #
+                # Anything more means PALM stopped early -- and PALM signals its
+                # own numerical divergence by terminating with exit 0 (see
+                # `_locate_3d_output`), so a short 3D file is the only evidence
+                # left. Padding it would fabricate most of the window from a
+                # repeated frame and report success, which reads downstream as a
+                # flow that "runs a few steps and then stays constant". Raise
+                # instead, matching the divergence path so the ensemble's
+                # resample-from-successes policy replaces the member.
+                if missing > MAX_PADDED_OUTPUTS:
+                    msg = (
+                        f"PALM produced only {actual} of {expected_outputs} "
+                        f"expected 3D outputs ({missing} missing). PALM "
+                        "terminates with exit 0 on its own numerical "
+                        "divergence, so this most likely means the run "
+                        "diverged and stopped early. Refusing to pad "
+                        f"{missing} frames by repeating the last one."
+                    )
+                    logger.error(msg)
+                    raise subprocess.CalledProcessError(
+                        1, f"palm ({self.experiment_name})", output=msg
+                    )
+                logger.warning(
+                    "PALM wrote %d of %d expected 3D outputs; padding %d frame(s) "
+                    "by repeating the last (adaptive-timestep rounding).",
+                    actual,
+                    expected_outputs,
+                    missing,
+                )
+                last = state.isel(time=-1)
+                pads = [last.expand_dims(time=1) for _ in range(missing)]
+                state = xarray.concat([state, *pads], dim="time")
+
+        return state
+
     def _locate_3d_output(self) -> pathlib.Path:
         """Find the ``<name>_3d.nc`` output file palmrun wrote."""
         primary = self.dirs.output_dir / f"{self.experiment_name}_3d.nc"
@@ -949,29 +1016,7 @@ class ForwardModel(BaseForwardModel):
             w_on_z = w_on_z.rename({"zw": "z"}).assign_coords(z=state["z"].values)
             state = state.drop_vars("w").assign(w=w_on_z).drop_dims("zw")
 
-        if self.spinup_time > 0 and self.output_frequency:
-            spinup_outputs = int(self.spinup_time / self.output_frequency)
-            if state.sizes.get("time", 0) > spinup_outputs:
-                state = state.isel(time=slice(spinup_outputs, None))
-
-        if (
-            self.simulation_time is not None
-            and self.output_frequency
-            and state.sizes.get("time", 0) > 0
-        ):
-            expected_outputs = int(self.simulation_time / self.output_frequency)
-            actual = state.sizes["time"]
-            if actual > expected_outputs:
-                state = state.isel(time=slice(-expected_outputs, None))
-            elif actual < expected_outputs:
-                # PALM's timestep is adaptive, so the 3D file occasionally
-                # has one fewer output than requested. Pad by repeating the
-                # last frame so all ensemble members concat along `time`.
-                last = state.isel(time=-1)
-                pads = [
-                    last.expand_dims(time=1) for _ in range(expected_outputs - actual)
-                ]
-                state = xarray.concat([state, *pads], dim="time")
+        state = self._fit_output_window(state)
 
         # Store the time coordinate in seconds (0, dt, 2·dt, …) rather than bare
         # frame indices, matching pylbm/pyudales. Without this the rollout
