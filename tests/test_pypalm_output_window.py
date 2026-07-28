@@ -70,3 +70,39 @@ def test_spinup_frames_are_dropped_before_the_check() -> None:
     """spinup frames are stripped first, so the count is of the window only."""
     out = _fit(_state(70), sim=300.0, freq=5.0, spinup=50.0)
     assert out.sizes["time"] == 60
+
+
+# ---------------------------------------------------------------------------
+# Multigrid coarsening predictor — 1 level means PALM cannot coarsen at all,
+# which is what crippled the pressure solver on the 75x60x25 grid.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "nx,ny,nz,npex,expect_degenerate",
+    [
+        (75, 60, 25, 5, True),  # odd nx -> PALM reported "number of grid levels: 1"
+        (75, 60, 64, 5, True),  # finer dz does NOT rescue an odd nx
+        (64, 64, 32, 1, False),
+        (64, 64, 32, 4, False),
+        (64, 64, 64, 4, False),  # the verified-good recipe
+    ],
+)
+def test_multigrid_levels_flags_uncoarsenable_grids(
+    nx: int, ny: int, nz: int, npex: int, expect_degenerate: bool
+) -> None:
+    from pypalm.utils.ncpu_utils import multigrid_levels
+
+    assert (multigrid_levels(nx, ny, nz, npex=npex) <= 1) is expect_degenerate
+
+
+def test_multigrid_levels_accounts_for_the_x_subdomain() -> None:
+    """Coarsening happens on the decomposed grid, so npex matters."""
+    from pypalm.utils.ncpu_utils import multigrid_levels
+
+    # 80 points coarsens fine undecomposed (80 = 16*5), and still does at 5
+    # ranks (16 per rank) -- but 16 ranks leave 5 points per rank, which is odd,
+    # so x cannot be halved even once.
+    assert multigrid_levels(80, 64, 64, npex=1) > 1
+    assert multigrid_levels(80, 64, 64, npex=5) > 1
+    assert multigrid_levels(80, 64, 64, npex=16) <= 1

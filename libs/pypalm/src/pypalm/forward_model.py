@@ -31,7 +31,7 @@ from .utils.inlet_turbulence_utils import (
     is_inlet_turbulence_enabled,
     validate_inlet_turbulence,
 )
-from .utils.ncpu_utils import derive_npex_npey
+from .utils.ncpu_utils import derive_npex_npey, multigrid_levels
 from .utils.nudging_utils import apply_nudging_driver, remove_nudging_files
 from .utils.p3d_utils import P3DFile
 from .utils.vertical_profile import build_profile_shape
@@ -378,6 +378,28 @@ class ForwardModel(BaseForwardModel):
         p3d.set_value("runtime_parameters", "npey", npey)
         p3d.write()
         logger.info("Pinned PALM processor topology: npex=%d, npey=%d", npex, npey)
+
+        # A grid the multigrid solver cannot coarsen is the difference between a
+        # run that completes and one that blows up, and PALM only says so via a
+        # WARNING (PAC0242) buried in stdout -- which is suppressed unless
+        # verbose=True. Surface it here, where the grid is chosen.
+        if self.ny is not None and self.nz is not None:
+            levels = multigrid_levels(
+                int(self.nx), int(self.ny), int(self.nz), npex=npex
+            )
+            if levels <= 1:
+                logger.warning(
+                    "PALM multigrid cannot coarsen this grid (nx=%d/npex=%d, ny=%d, "
+                    "nz=%d): every direction must be divisible by 2, including the "
+                    "per-rank x subdomain. The solver degenerates to a few "
+                    "Gauss-Seidel sweeps (PALM warns PAC0242), leaves the velocity "
+                    "field divergent, and the run will most likely blow up. Use "
+                    "power-of-two point counts, e.g. domain.nx=64 ny=64 nz=64.",
+                    int(self.nx),
+                    npex,
+                    int(self.ny),
+                    int(self.nz),
+                )
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         super().set_results_dir(results_dir)
