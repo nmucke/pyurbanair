@@ -58,6 +58,7 @@ Key constructor arguments (all wired from
 | `boundary_condition` | `"periodic"` or `"inflow_outflow"` (sets `BCxm`, `BCym`, `BCtopm`) |
 | `closure` | SGS closure: `"smagorinsky"` / `"vreman"` → exclusive `&NAMSUBGRID` switches; `None` (default) keeps the template's. `"oneeqn"` is rejected — see §4 |
 | `nudging_config` | Nudging tunables dict; see §6 |
+| `inlet_turbulence` | Turbulent-inlet-generator block (`{"enabled": bool}`). `None`/`false` (default) is a strict no-op; `true` **raises** — uDALES v2.2.0 cannot do it. See §6.1 |
 | `instability_check` | dt-watchdog config dict; see §7 |
 | `precomputed_geom_dir` | Skip STL→IBM Fortran step by reusing prior geometry bundle |
 | `verbose` | `False` (default) suppresses all subprocess stdout/stderr |
@@ -166,6 +167,7 @@ by the wrapper:
 | `&DOMAIN` | `itot`, `jtot`, `ktot` |
 | `&INPS` | `xlen`, `ylen`, `zsize`, `u0`, `v0`, `dpdx`, `dpdy`, `stl_file`, `gen_geom`, `geom_path` |
 | `&BC` | `BCxm`, `BCym`, `BCtopm` |
+| `&INLET` | **nothing** — the wrapper never writes this section. `iinletgen` is *not* a declared key and writing it aborts the run (§6.1) |
 | `&PHYSICS` | `lnudge`, `nnudge`, `tnudge`, `ltimedepnudge`, `ntimedepnudge` |
 | `&NAMSUBGRID` | `lsmagorinsky`/`lvreman`/`loneeqn` (closure switches) and `cs` **or** `c_vreman` — whichever the active closure reads (see below) |
 
@@ -313,6 +315,72 @@ over the raw `nnudge` key. Config default: `nnudge_meters: 4.0`.
 failure; it was resolved by raising the Smagorinsky constant from cs 0.20 → 0.24
 (see §8).
 
+### 6.1 Turbulent inlet generator — **not available in uDALES v2.2.0**
+
+The model config carries an `inlet_turbulence:` block for schema parity with the
+other backends:
+
+```yaml
+  inlet_turbulence:
+    enabled: false      # must stay false — see below
+```
+
+It is wired through the `inlet_turbulence: Optional[dict]` constructor arg and
+validated by `validate_inlet_turbulence` in
+[`forward_model.py`](../libs/pyudales/src/pyudales/forward_model.py). **Absent,
+`{}`, or `enabled: false` writes nothing at all** — verified byte-identical
+namoptions against a run with the key removed entirely. Unknown keys are warned
+about and ignored.
+
+**`enabled: true` raises a `ValueError`.** uDALES ships the Lund (1998)
+recycling/rescaling inlet generator (`iinletgen=1`, `modinlet.f90`) but never
+connects it. Three independent facts, each on its own decisive:
+
+| # | Finding | Evidence |
+|---|---|---|
+| 1 | `iinletgen` is **not a member of any namelist**, and is never assigned anywhere in the source — it keeps its `modglobal.f90:167` default of `0` and is not even `MPI_BCAST` to the other ranks | Namelist blocks are `modstartup.f90:108-173`; `&INLET` (`:141-144`) declares only `Uinf, Vinf, di, dti, inletav, linletRA, lstoreplane, lreadminl, lfixinlet, lfixutauin, lwallfunc` |
+| 2 | `call initinlet` — which allocates the generator's arrays — is **commented out** | `program.f90:77`, `modstartup.f90:627` |
+| 3 | `inletgen`/`inletgennotemp` have **no call site anywhere**, and `modboundary.f90` never reads the generator's output `u0inletbc` | `modinlet.f90:204`, `:952`; `modboundary.f90` has zero `iinletgen` references |
+
+Writing the key is not a silent no-op — uDALES namelist reads are strict, so it
+aborts at startup:
+
+```
+ ERROR: Problem in namoptions INLET
+ iostat error:         5010
+STOP 1
+```
+
+(reproduced directly against `build/release/u-dales`; the same file with `Uinf`
+instead of `iinletgen` gets past the `&INLET` read.) Hence the validator raises
+at construction rather than producing a run that dies on the first line.
+
+**`iinletgen` vs `BCxm`.** They do not interact at all in v2.2.0. The inlet face
+is set purely by `select case(BCxm)` in `modboundary.f90` — `xmi`/`bcpup`
+(`:255-262`, `:1204-1262`) branch over `BCxm_periodic` / `BCxm_profile` /
+`BCxm_driver` only. Under the wrapper's `BCxm=2` (`BCxm_profile`,
+`_apply_boundary_condition`) the inlet is `uprof(k)`; the generator's
+`u0inletbc` array has no consumer. So even a patched-in `iinletgen=1` would
+produce nothing at the inlet without also adding a `BCxm` case for it.
+
+**Consequence for the nudging / ESMDA path.** Because the generator is inert,
+nothing changes for `apply_time_varying_inflow`: `timedepnudge.inp` still drives
+`uprof`/`vprof`, which under `BCxm=2` *is* the inlet face (`xmi_profile`), so
+the ESMDA-estimated `inflow_angle` / `velocity_magnitude` keep reaching the
+solver. Had the generator been live it would have *replaced* the inlet face and
+disconnected those parameters — which is the main reason enabling it is a
+`ValueError` rather than a best-effort write.
+
+**What would work instead.** The one implemented turbulent-inflow path in v2.2.0
+is the precursor/driver route: `BCxm=3` (`BCxm_driver`, `modboundary.f90:1239`)
+fed by `&DRIVER idriver` / `moddriver.f90`. That is a genuinely wired code path
+but a different feature (it needs a precursor run and its own inflow-parameter
+story), and this wrapper does not implement it.
+
+Guard: `enabled: true` combined with `boundary_condition: periodic` raises a
+*separate*, more specific `ValueError` — with `BCxm=1` the x boundaries wrap, so
+there is no inlet face for a turbulent inlet to act on at all.
+
 ---
 
 ## 7. Instability watchdog
@@ -449,6 +517,8 @@ forward_model:
     patience: 20
     warmup_steps: 20
     poll_interval_s: 2.0
+  inlet_turbulence:
+    enabled: false            # must stay false in uDALES v2.2.0 — see §6.1
   nx/ny/nz: ${domain.nx/ny/nz}
   bounds: ${domain.bounds}
   simulation_time: ${time.simulation_time}
@@ -529,6 +599,7 @@ ceiling on the development box is ~4–8 parallel processes (see
 |---|---|
 | Change the advection scheme | Not possible — only `cd2` (`iadv_mom` hardcoded by the build) |
 | Switch the SGS closure | `model.forward_model.closure=smagorinsky\|vreman` (writes the exclusive `&NAMSUBGRID` switches; §4) |
+| Turn on a turbulent inlet generator | Not possible in uDALES v2.2.0 — `iinletgen` is unreachable dead code; `inlet_turbulence.enabled=true` raises (§6.1) |
 | Change the SGS constant | `&NAMSUBGRID cs` (Smagorinsky) / `c_vreman` (Vreman) in namoptions, or pass `sgs_constant` in params — it targets the active closure automatically (§4) |
 | Add a new inflow parameter | Add to `INFLOW_PARAM_NAMES` in `params_utils.py` first |
 | Skip expensive preprocessing | Set `precomputed_geom_dir` / `geometry.udales_precomputed_geom_dir` |

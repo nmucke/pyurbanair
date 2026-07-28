@@ -31,6 +31,25 @@ forward_model:
     profile_config:
       type: power_law
       alpha: 0.25
+  # Switchable inlet turbulence. For PALM this is the built-in random
+  # inflow-disturbance machinery (create_disturbances + dt_disturb), the only
+  # inlet-turbulence generator that is independently toggleable on our staging:
+  # turbulence *recycling* needs a cyclic_fill/restart precursor run (TUI0006)
+  # and the synthetic turbulence generator needs an STG_PROFILES file and is
+  # mutually exclusive with turbulent_inflow (STG0009). Requires
+  # boundary_condition: inflow_outflow — staging raises otherwise.
+  # NOTE: `enabled: false` does NOT disable PALM's `turbulent_inflow` module.
+  # On the time-varying-params path that module is the *reader* for the
+  # `_dynamic` driver carrying inflow_angle/velocity_magnitude; switching it off
+  # would silently disconnect ESMDA from the solver. See docs/pypalm.md §8.
+  inlet_turbulence:
+    enabled: false
+    dt_disturb: 5.0        # s; interval between perturbation injections
+    amplitude: 0.25        # m/s; PALM's disturbance_amplitude
+    begin: null            # inflow_disturbance_begin, grid pts; null -> PALM auto (min(10, nx/2))
+    end: null              # inflow_disturbance_end, grid pts; null -> PALM auto (min(100, 3nx/4))
+    level_b: null          # disturbance_level_b, m; null -> PALM auto (zu(3))
+    level_t: null          # disturbance_level_t, m; null -> PALM auto (zu(nzt/3))
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

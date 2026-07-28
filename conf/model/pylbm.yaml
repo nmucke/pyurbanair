@@ -16,6 +16,14 @@ forward_model:
   profile_config:
     type: power_law
     alpha: 0.25
+  # Pseudo-random inflow perturbations (m_inflow_turbulence_*.F90), written to
+  # the three-value `lturb` line of infile.in. Defaults mirror the solver's own
+  # infile template, so `enabled: false` leaves infile.in untouched. Requires
+  # boundary_condition: inflow_outflow.
+  inlet_turbulence:
+    enabled: false
+    amplitude: 5.0e-05
+    update_interval: 100  # timesteps between turbulence updates (nrturb)
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

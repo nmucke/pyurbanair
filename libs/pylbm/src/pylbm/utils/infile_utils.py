@@ -6,7 +6,7 @@ import pathlib
 import re
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Sequence, Union
 
 if TYPE_CHECKING:
     from .dir_utils import DirectoryPaths
@@ -140,6 +140,27 @@ class Infile:
         except ValueError:
             return None
 
+    def get_value_tokens(self, key: str) -> Optional[list[str]]:
+        """
+        Get the whitespace-separated tokens of a multi-value line.
+
+        Several ``infile.in`` lines carry more than one value because the
+        Fortran reads them with a single list-directed ``read`` (e.g.
+        ``read(10,*) inflowturbulence, turbulence_ampl, nrturb`` for the
+        ``lturb`` line). Those values must be read and written together;
+        ``get_value``/``set_value`` treat the whole field as one opaque string.
+
+        Args:
+            key: Key name (e.g. "lturb", "iprt1", "ivreman").
+
+        Returns:
+            The tokens in file order, or None if the key is absent.
+        """
+        value = self.get_value(key)
+        if value is None:
+            return None
+        return value.split()
+
     def get_value_as_bool(self, key: str) -> Optional[bool]:
         """Interpret T/F as True/False."""
         value = self.get_value(key)
@@ -152,6 +173,37 @@ class Infile:
             return False
         return None
 
+    @staticmethod
+    def _format_token(value: Union[str, float, int, bool]) -> str:
+        """Render a single value the way the Fortran list-directed read expects."""
+        if isinstance(value, bool):
+            return "T" if value else "F"
+        return str(value)
+
+    def set_value_tokens(
+        self, key: str, tokens: Sequence[Union[str, float, int, bool]]
+    ) -> None:
+        """
+        Set all values of a multi-value line at once.
+
+        The infile is positional: the Fortran reads a whole line with one
+        list-directed ``read``, so every value on that line must be rewritten
+        together. Writing only part of the field (or splitting it across lines)
+        shifts every subsequent line and silently corrupts the whole file.
+
+        Args:
+            key: Key name (e.g. "lturb").
+            tokens: Values in file order; bools become T/F.
+
+        Raises:
+            ValueError: If no tokens are given.
+        """
+        if not tokens:
+            raise ValueError(
+                f"set_value_tokens requires at least one token for '{key}'"
+            )
+        self.set_value(key, " ".join(self._format_token(t) for t in tokens))
+
     def set_value(self, key: str, value: Union[str, float, int, bool]) -> None:
         """
         Set the value for a key. Replaces the value part before "!" on that line.
@@ -161,10 +213,7 @@ class Infile:
             key: Key name.
             value: Value (converted to string; T/F for bool).
         """
-        if isinstance(value, bool):
-            value_str = "T" if value else "F"
-        else:
-            value_str = str(value)
+        value_str = self._format_token(value)
 
         if key in self._key_to_line_index:
             idx = self._key_to_line_index[key]

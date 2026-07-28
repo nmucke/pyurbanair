@@ -26,6 +26,11 @@ from .utils.dynamic_driver_utils import (
     remove_dynamic_driver_file,
 )
 from .utils.inflow_utils import angle_to_velocity
+from .utils.inlet_turbulence_utils import (
+    apply_inlet_turbulence,
+    is_inlet_turbulence_enabled,
+    validate_inlet_turbulence,
+)
 from .utils.ncpu_utils import derive_npex_npey
 from .utils.nudging_utils import apply_nudging_driver, remove_nudging_files
 from .utils.p3d_utils import P3DFile
@@ -139,6 +144,7 @@ class ForwardModel(BaseForwardModel):
         spinup_time: float = 0.0,
         boundary_condition: str = "periodic",
         nudging_config: Optional[dict] = None,
+        inlet_turbulence: Optional[dict] = None,
         save_only_last_timestep: bool = False,
         results_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
@@ -170,6 +176,13 @@ class ForwardModel(BaseForwardModel):
         self.save_only_last_timestep = save_only_last_timestep
 
         self._nudging_config = nudging_config or DEFAULT_NUDGING_CONFIG
+        # Inlet turbulence: absent (None) is a strict no-op, identical to
+        # ``enabled: false``. See utils/inlet_turbulence_utils.py for why this
+        # maps onto PALM's random inflow-disturbance machinery rather than onto
+        # ``turbulent_inflow`` (which is our *time-varying inflow reader*, not a
+        # turbulence generator).
+        self._inlet_turbulence = inlet_turbulence
+        validate_inlet_turbulence(inlet_turbulence, boundary_condition)
 
         self.dirs = get_palm_directory_paths(
             case_dir=pathlib.Path(case_dir),
@@ -993,6 +1006,12 @@ class ForwardModel(BaseForwardModel):
         else:
             self._reset_cold_init()
 
+        # Must run AFTER the warm/cold init block: both write
+        # ``create_disturbances``, which also gates the in-run inflow
+        # perturbations. The explicit knob takes precedence over that implicit
+        # write (and suppresses only the *initial* kick on a warm start).
+        self._apply_inlet_turbulence(warm_start=warm_start)
+
         self._clean_output()
         self.run()
         return self._load_and_postprocess_state()
@@ -1025,6 +1044,34 @@ class ForwardModel(BaseForwardModel):
         # divergence-removing pressure solve still runs (it is also gated on
         # non-flat topography), so the injected field is still made solenoidal.
         self._p3d_set_value("runtime_parameters", "create_disturbances", False)
+
+    def _apply_inlet_turbulence(self, warm_start: bool = False) -> bool:
+        """Stage (or clear) the switchable inlet-turbulence knob.
+
+        Delegates to :func:`.utils.inlet_turbulence_utils.apply_inlet_turbulence`.
+        Kept as a thin method so staging tests can drive it without running PALM.
+
+        Precedence, in one place:
+
+        1. ``inlet_turbulence`` absent / ``enabled: false`` → nothing is written
+           on a clean template. Today's behaviour is preserved exactly,
+           *including* the implicit "time-varying params on the inflow_outflow
+           path switch ``turbulent_inflow`` on" coupling — that coupling is the
+           dynamic-driver reader, not a turbulence generator, and disabling it
+           would sever the ESMDA-estimated inflow signal from the solver.
+        2. ``enabled: true`` → PALM's random inflow disturbances are turned on
+           on top of whatever inflow driver the params selected. The two are
+           orthogonal in PALM, so this composes with both the static and the
+           time-varying inflow paths.
+        """
+        return apply_inlet_turbulence(
+            self.p3d_path, self._inlet_turbulence, warm_start=warm_start
+        )
+
+    @property
+    def inlet_turbulence_enabled(self) -> bool:
+        """Whether the inlet-turbulence knob is on for this model."""
+        return is_inlet_turbulence_enabled(self._inlet_turbulence)
 
     def _reset_cold_init(self) -> None:
         """Restore the cold-start initialization mode.

@@ -64,6 +64,24 @@ forward_model:
     patience: 20        # consecutive sub-floor steps before killing
     warmup_steps: 20    # ignore small startup dt for the first N steps
     poll_interval_s: 2.0
+  # Turbulent inlet generator. Schema is shared across all three backends
+  # (`enabled` plus backend-specific tunables); uDALES contributes no tunables
+  # because the feature is NOT REACHABLE in the vendored uDALES v2.2.0:
+  #   * `iinletgen` (the Lund (1998) recycling/rescaling generator) is not
+  #     declared in any namelist — u-dales/src/modstartup.f90:108-173, with
+  #     &INLET at :141-144 declaring only Uinf/Vinf/di/dti/inletav/linletRA/
+  #     lstoreplane/lreadminl/lfixinlet/lfixutauin/lwallfunc. Writing the key
+  #     aborts the solver: "ERROR: Problem in namoptions INLET".
+  #   * `call initinlet` is commented out (program.f90:77, modstartup.f90:627)
+  #     and `inletgen` (modinlet.f90:204) has no call site at all.
+  #   * modboundary.f90 never reads the generator's `u0inletbc`; the west inlet
+  #     face comes only from `select case(BCxm)` (:1204-1262).
+  # Setting enabled=true therefore raises a ValueError at construction rather
+  # than producing a run that crashes at startup. Turbulent inflow in this
+  # uDALES version would need the precursor/driver path (BCxm=3, &DRIVER
+  # idriver), which this wrapper does not implement. See docs/pyudales.md §6.1.
+  inlet_turbulence:
+    enabled: false
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

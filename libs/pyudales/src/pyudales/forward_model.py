@@ -110,6 +110,90 @@ def validate_closure(closure: Optional[str]) -> None:
         )
 
 
+# Keys the ``inlet_turbulence`` block may carry. The schema is shared across the
+# three backends; uDALES contributes no tunables of its own because the feature
+# it would tune is not reachable in this solver version (see below).
+INLET_TURBULENCE_KEYS = frozenset({"enabled"})
+
+# uDALES v2.2.0 ships the Lund (1998) recycling/rescaling turbulent inlet
+# generator (``iinletgen=1``) but never wires it up. Three independent facts,
+# each on its own sufficient to make the switch unreachable:
+#
+#   1. ``iinletgen`` is not a member of ANY namelist. The namelist declarations
+#      live in ``u-dales/src/modstartup.f90:108-173``; ``&INLET`` (lines 141-144)
+#      declares only Uinf, Vinf, di, dti, inletav, linletRA, lstoreplane,
+#      lreadminl, lfixinlet, lfixutauin, lwallfunc. It is never assigned in the
+#      source either, so it keeps its ``modglobal.f90:167`` default of 0 and is
+#      not even MPI_BCAST to the other ranks. Writing the key aborts the run at
+#      startup: ``ERROR: Problem in namoptions INLET / iostat error: 5010``.
+#   2. ``call initinlet`` is commented out (``program.f90:77`` and
+#      ``modstartup.f90:627``), so the generator's arrays are never allocated.
+#   3. ``inletgen``/``inletgennotemp`` (``modinlet.f90:204`` and ``:952``) have no
+#      call sites anywhere in the source, and ``modboundary.f90`` never reads the
+#      generator's output array ``u0inletbc`` — the west inlet face is set purely
+#      by ``select case(BCxm)`` (``modboundary.f90:255-262``, ``1204-1262``).
+#
+# So there is no wrapper-level write that could turn this on: it would need a
+# Fortran port (namelist entry + BCAST, re-enabling initinlet, adding the missing
+# inletgen call site, and a new BCxm case consuming u0inletbc). Enabling the knob
+# therefore raises rather than silently writing a key that crashes the solver.
+UDALES_INLET_GENERATOR_UNAVAILABLE = (
+    "uDALES v2.2.0 does not expose the Lund (1998) turbulent inlet generator. "
+    "`iinletgen` is not declared in any namelist (u-dales/src/modstartup.f90:"
+    "108-173; &INLET at :141-144 declares only Uinf/Vinf/di/dti/inletav/"
+    "linletRA/lstoreplane/lreadminl/lfixinlet/lfixutauin/lwallfunc), so writing "
+    "it aborts the run with 'ERROR: Problem in namoptions INLET'. The generator "
+    "is dead code besides: `call initinlet` is commented out (program.f90:77, "
+    "modstartup.f90:627), `inletgen` (modinlet.f90:204) has no call site, and "
+    "modboundary.f90 never reads its output `u0inletbc` — the inlet face comes "
+    "only from `select case(BCxm)`. Turbulent inflow in this uDALES version "
+    "requires the precursor/driver path (BCxm=3, &DRIVER idriver), which this "
+    "wrapper does not implement. Leave inlet_turbulence.enabled=false."
+)
+
+
+def validate_inlet_turbulence(
+    inlet_turbulence: Optional[dict],
+    boundary_condition: str,
+) -> None:
+    """Validate the ``inlet_turbulence`` block.
+
+    Absent, empty, or ``enabled: false`` is a strict no-op — nothing is written
+    to namoptions, so a default run stays byte-identical.
+
+    ``enabled: true`` always raises: under ``periodic`` boundary conditions there
+    is no inlet face for a turbulent inlet to act on, and under
+    ``inflow_outflow`` the generator itself is unreachable in this uDALES version
+    (see :data:`UDALES_INLET_GENERATOR_UNAVAILABLE`).
+    """
+    if not inlet_turbulence:
+        return
+
+    unknown = set(inlet_turbulence) - INLET_TURBULENCE_KEYS
+    if unknown:
+        logger.warning(
+            "Ignoring unknown inlet_turbulence keys: %s (supported: %s)",
+            ", ".join(sorted(unknown)),
+            ", ".join(sorted(INLET_TURBULENCE_KEYS)),
+        )
+
+    if not inlet_turbulence.get("enabled", False):
+        return
+
+    if boundary_condition == "periodic":
+        raise ValueError(
+            "inlet_turbulence.enabled=true requires "
+            "boundary_condition='inflow_outflow': under 'periodic' the x "
+            "boundaries wrap (BCxm=1) so there is no inlet face for a turbulent "
+            "inlet to be imposed on."
+        )
+
+    raise ValueError(
+        f"inlet_turbulence.enabled=true is not supported by pyudales: "
+        f"{UDALES_INLET_GENERATOR_UNAVAILABLE}"
+    )
+
+
 def save_precomputed_geometry(
     experiment_dir: pathlib.Path,
     dest_dir: pathlib.Path,
@@ -264,6 +348,7 @@ class ForwardModel(BaseForwardModel):
         nudging_config: Optional[dict] = None,
         precomputed_geom_dir: Optional[str] = None,
         instability_check: Optional[dict] = None,
+        inlet_turbulence: Optional[dict] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -324,6 +409,14 @@ class ForwardModel(BaseForwardModel):
                 (default 20), ``poll_interval_s`` (default 2.0). When the
                 timestep collapses the run is killed early and reported as a
                 failure, so the ensemble resamples it from a successful donor.
+            inlet_turbulence: Optional dict selecting a turbulent inlet
+                generator, sharing the ``{"enabled": bool, ...}`` schema used by
+                the other backends. ``None``/``{}``/``{"enabled": False}`` (the
+                default) is a strict no-op — nothing is written to namoptions.
+                ``{"enabled": True}`` raises: uDALES v2.2.0 does not expose its
+                Lund (1998) generator (see
+                :data:`UDALES_INLET_GENERATOR_UNAVAILABLE`), and under
+                ``boundary_condition='periodic'`` there is no inlet face at all.
         """
         super().__init__(results_dir=results_dir)
 
@@ -390,6 +483,13 @@ class ForwardModel(BaseForwardModel):
             )
         self.boundary_condition = boundary_condition
         self._apply_boundary_condition()
+
+        # Turbulent inlet generator. Validation only: the disabled path writes
+        # nothing (byte-identical namoptions) and the enabled path cannot be
+        # honoured by this uDALES version, so it fails loudly here rather than
+        # writing a namelist key that aborts the solver at startup.
+        validate_inlet_turbulence(inlet_turbulence, boundary_condition)
+        self.inlet_turbulence = dict(inlet_turbulence or {})
 
         # SGS closure. ``None`` keeps whatever the case template sets, so runs
         # that don't ask for a closure stay byte-identical.
