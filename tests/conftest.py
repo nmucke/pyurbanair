@@ -1,5 +1,5 @@
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import pytest
 from hydra import compose, initialize
@@ -52,6 +52,26 @@ def _compose_test_cfg(
             config_name=config_name,
             overrides=[*_SMOKE_OVERRIDES, *esmda_overrides, *(overrides or [])],
         )
+
+
+@pytest.fixture(autouse=True)  # type: ignore[misc]
+def _restore_hydra_config_singleton() -> Iterator[None]:
+    """Keep ``HydraConfig`` from leaking a composed config across test files.
+
+    ``HydraConfig`` is a process-wide singleton, so a test that primes it with
+    ``HydraConfig.instance().set_config(cfg)`` leaves it populated for the rest
+    of the session. A config from bare ``compose()`` has no
+    ``hydra.runtime.output_dir`` (it is ``???``), so any later test that reaches
+    ``resolve_output_dir`` takes its ``HydraConfig.initialized()`` branch and
+    dies on MissingMandatoryValue instead of falling back to
+    ``paths.base_results_dir``. Whether that happens comes down to file
+    collection order, which makes it a nasty failure to place.
+    """
+    from hydra.core.hydra_config import HydraConfig
+
+    previous = HydraConfig.instance().cfg
+    yield
+    HydraConfig.instance().cfg = previous
 
 
 @pytest.fixture
