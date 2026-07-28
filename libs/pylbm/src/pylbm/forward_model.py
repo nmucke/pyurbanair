@@ -69,6 +69,7 @@ class ForwardModel(BaseForwardModel):
         cuda: bool = False,
         enable_netcdf: Optional[bool] = None,
         boundary_condition: str = "periodic",
+        sgs_constant: Optional[float] = None,
         spinup_time: float = 0.0,
         profile_config: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
@@ -84,6 +85,10 @@ class ForwardModel(BaseForwardModel):
                 f"got '{boundary_condition}'"
             )
         self.boundary_condition = boundary_condition
+        # Per-backend default for the SGS constant, overridden by a `sgs_constant`
+        # in the params Dataset when one is supplied. None leaves the infile
+        # template's value alone. See `apply_sgs_setting`.
+        self.sgs_constant = float(sgs_constant) if sgs_constant is not None else None
 
         # Inflow-turbulence forcing (m_inflow_turbulence_*.F90). Validated here
         # so a bad config fails before geometry voxelisation and compilation;
@@ -375,7 +380,7 @@ class ForwardModel(BaseForwardModel):
                 zsize=self._zsize,
                 profile_config=override_cfg,
             )
-        apply_sgs_setting(params, self.dirs)
+        apply_sgs_setting(params, self.dirs, default=self.sgs_constant)
 
         if is_time_varying_params(params):
             # The LBM matches the schedule against its absolute clock

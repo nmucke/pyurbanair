@@ -32,6 +32,18 @@ forward_model:
   # same scale (~0.17 vs 0.07) — retune the priors in conf/params/ when switching.
   # Set to null to leave the case template's switches untouched.
   closure: vreman
+  # Per-backend SGS constant, written to whichever key `closure` selects
+  # (cs under smagorinsky, c_vreman under vreman). This is the DEFAULT: a
+  # `sgs_constant` in the params sampler (conf/params/*.yaml) overrides it, so
+  # ESMDA can still estimate it. null -> leave the case template's value.
+  #
+  # NOTE the three backends' sgs_constant are NOT the same physical quantity, so
+  # each config carries its own value: uDALES/pylbm take a dimensionless
+  # Smagorinsky-family constant, PALM takes an eddy diffusivity in m^2/s.
+  # 0.24 is the verified-stable c_vreman for this domain (0.07 and 0.15 diverge;
+  # see the closure-fix commit) -- it sits near the stability floor, not at a
+  # physical central estimate.
+  sgs_constant: 0.24
   nudging_config:
     tnudge: 15.0
     # nnudge: number of bottom grid levels NOT nudged (raw level count).

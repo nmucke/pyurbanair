@@ -13,6 +13,16 @@ forward_model:
   cuda: true
   verbose: false
   boundary_condition: inflow_outflow
+  # Per-backend SGS constant -> the `ivreman smagor` infile line, where the LBM
+  # forms const = 2.5*smagorinsky**2 (m_vreman.F90). This is the DEFAULT: a
+  # `sgs_constant` in the params sampler (conf/params/*.yaml) overrides it, so
+  # ESMDA can still estimate it. null -> leave the infile template's value.
+  #
+  # NOTE the three backends' sgs_constant are NOT the same physical quantity, so
+  # each config carries its own value: uDALES/pylbm take a dimensionless
+  # Smagorinsky-family constant, PALM takes an eddy diffusivity in m^2/s.
+  # 0.15 matches the LBM's own generated infile default (m_mkinfile.F90:16).
+  sgs_constant: 0.15
   profile_config:
     type: power_law
     alpha: 0.25

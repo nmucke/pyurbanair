@@ -77,23 +77,34 @@ def resolve_profile_config(
 def apply_sgs_setting(
     params: Optional[xarray.Dataset],
     dirs: "DirectoryPaths",
+    default: Optional[float] = None,
 ) -> None:
     """Write the per-member sub-grid-scale constant into ``infile.in``.
 
     The ``ivreman smagor`` line carries ``"<ivreman> <smagorinsky>"``; the
     Smagorinsky constant becomes ``const = 2.5*smagorinsky**2`` in
-    ``m_vreman.F90``. No-op when ``sgs_constant`` is absent so the template value
-    is preserved (docs/esmda_model_error_parameters.md §2.2).
+    ``m_vreman.F90``.
+
+    Precedence: a ``sgs_constant`` in ``params`` (estimated or sampled) wins;
+    ``default`` is the model config's per-backend fallback; when both are absent
+    this is a no-op and the template value is preserved
+    (docs/esmda_model_error_parameters.md §2.2).
     """
-    if params is None:
-        return
-    sgs = get_param_value(params, "sgs_constant")
+    sgs = get_param_value(params, "sgs_constant") if params is not None else None
+    source = "params"
+    if sgs is None:
+        sgs = default
+        source = "model config"
     if sgs is None:
         return
     infile = Infile(dirs.infile_path)
     infile.set_value("ivreman", f"1 {float(sgs):.4f}")
     infile.write()
-    logger.info("Set LBM Smagorinsky constant (sgs_constant) to %.4f", float(sgs))
+    logger.info(
+        "Set LBM Smagorinsky constant to %.4f (sgs_constant from %s)",
+        float(sgs),
+        source,
+    )
 
 
 def apply_inflow_settings(

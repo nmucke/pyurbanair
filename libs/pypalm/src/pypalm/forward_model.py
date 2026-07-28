@@ -143,6 +143,7 @@ class ForwardModel(BaseForwardModel):
         output_frequency: Optional[float] = None,
         spinup_time: float = 0.0,
         boundary_condition: str = "periodic",
+        sgs_constant: Optional[float] = None,
         nudging_config: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
         save_only_last_timestep: bool = False,
@@ -159,6 +160,12 @@ class ForwardModel(BaseForwardModel):
                 f"got '{boundary_condition}'"
             )
         self.boundary_condition = boundary_condition
+        # Per-backend default for the SGS knob, overridden by a `sgs_constant` in
+        # the params Dataset when one is supplied. None leaves PALM's prognostic
+        # SGS-TKE closure (and its surface flux layer) untouched — which is the
+        # right default here, since PALM's proxy is `km_constant` in m^2/s, not a
+        # dimensionless Smagorinsky constant. See `_apply_sgs_setting`.
+        self.sgs_constant = float(sgs_constant) if sgs_constant is not None else None
 
         self.verbose = verbose
         self.stdout = None if verbose else subprocess.DEVNULL
@@ -609,14 +616,24 @@ class ForwardModel(BaseForwardModel):
         switch. No-op when ``sgs_constant`` is absent, leaving PALM's prognostic
         SGS-TKE closure and default surface flux layer untouched.
         """
+        # Precedence: an estimated/sampled `sgs_constant` in ``params`` wins; the
+        # model config's ``sgs_constant`` is the per-backend fallback; absent in
+        # both leaves PALM's prognostic SGS-TKE closure untouched.
         sgs = self._param_value(params, "sgs_constant")
+        source = "params"
+        if sgs is None:
+            sgs = self.sgs_constant
+            source = "model config"
         if sgs is None:
             return
         p3d.set_value("initialization_parameters", "km_constant", float(sgs))
         # Required by PALM whenever km is fixed (PAC0149).
         p3d.set_value("initialization_parameters", "constant_flux_layer", False)
         logger.info(
-            "Set PALM km_constant (sgs_constant proxy, Option A) to %.4f m^2/s", sgs
+            "Set PALM km_constant (sgs_constant proxy, Option A) to %.4f m^2/s "
+            "(from %s)",
+            float(sgs),
+            source,
         )
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:

@@ -210,6 +210,20 @@ active the write is skipped with a warning (nothing would read the value). The
 key and value actually written are logged, so a diverging run can be diagnosed
 from `run.<expnr>.log`'s companion Python log.
 
+**Where `sgs_constant` comes from.** Two sources, in precedence order:
+
+1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+   used when ESMDA estimates or pins it.
+2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+   per-backend default.
+
+Absent from both is a strict no-op: the solver's own closure/template value
+stands. The per-backend default exists because the three backends' `sgs_constant`
+are **different physical quantities** (uDALES/pylbm take a dimensionless
+Smagorinsky-family constant; PALM takes an eddy diffusivity in m²/s), so a single
+value in the shared params sampler cannot be correct for all three at once.
+
+
 > **The two constants are not on the same scale.** uDALES defaults are `cs = -1.`
 > (→ the derived `(cm³/ceps)^0.25 ≈ 0.17`) for Smagorinsky and `c_vreman = 0.07`
 > for Vreman. A prior tuned for `cs` is roughly 2–3× too large for `c_vreman`;

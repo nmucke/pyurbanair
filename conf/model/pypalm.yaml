@@ -20,6 +20,18 @@ forward_model:
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow # periodic #
+  # Per-backend SGS knob. This is the DEFAULT: a `sgs_constant` in the params
+  # sampler (conf/params/*.yaml) overrides it, so ESMDA can still estimate it.
+  #
+  # Deliberately null for PALM. PALM has no Smagorinsky-style multiplier (c_0 is
+  # hardcoded), so `sgs_constant` maps to `km_constant` — a CONSTANT EDDY
+  # DIFFUSIVITY in m^2/s, not a dimensionless constant like uDALES/pylbm take.
+  # Setting it is a regime switch: it replaces PALM's prognostic SGS-TKE closure
+  # with constant-Km and forces constant_flux_layer=.false. (PAC0149), disabling
+  # the wall model. The dimensionless ~0.24 used by the other backends is far too
+  # little dissipation as m^2/s and diverges. null keeps PALM's own closure.
+  # Only set this to a PALM-appropriate m^2/s value chosen for PALM.
+  sgs_constant: null
   # Periodic runs are driven by PALM's nudging scheme (NUDGING_DATA + an inert
   # LSF_DATA), relaxing the domain toward the inflow_angle/velocity_magnitude
   # wind — the counterpart of pyudales's periodic nudging path. See

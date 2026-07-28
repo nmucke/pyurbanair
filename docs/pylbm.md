@@ -332,6 +332,20 @@ no-op when `sgs_constant` is absent from `params`. Note: the LBM Smagorinsky
 constant is dimensionless and physically distinct from pypalm's `km_constant`
 (m²/s) — prior ranges in YAML should not be shared between backends.
 
+**Where `sgs_constant` comes from.** Two sources, in precedence order:
+
+1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+   used when ESMDA estimates or pins it.
+2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+   per-backend default.
+
+Absent from both is a strict no-op: the solver's own closure/template value
+stands. The per-backend default exists because the three backends' `sgs_constant`
+are **different physical quantities** (uDALES/pylbm take a dimensionless
+Smagorinsky-family constant; PALM takes an eddy diffusivity in m²/s), so a single
+value in the shared params sampler cannot be correct for all three at once.
+
+
 ### Inflow turbulence — `lturb amp nrtu` in `infile.in`
 
 The Fortran ships a full inflow-turbulence subsystem

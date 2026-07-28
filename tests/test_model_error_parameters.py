@@ -132,9 +132,14 @@ def _write_namoptions(tmp_path: pathlib.Path, namsubgrid_body: str) -> pathlib.P
 
 
 def _apply_udales_sgs(
-    tmp_path: pathlib.Path, params: xarray.Dataset
+    tmp_path: pathlib.Path,
+    params: xarray.Dataset,
+    model_default: float | None = None,
 ) -> tuple[float | None, float | None]:
     """Run the real ``_apply_sgs_setting`` against a staged namoptions.300.
+
+    ``model_default`` stands in for the model config's ``sgs_constant``; a value
+    in ``params`` must take precedence over it.
 
     Returns ``(cs, c_vreman)``; None means the key is absent from the file.
     """
@@ -142,7 +147,8 @@ def _apply_udales_sgs(
     from pyudales.utils.namoptions_utils import NamoptionsFile
 
     stub = types.SimpleNamespace(
-        dirs=types.SimpleNamespace(experiment_dir=tmp_path, experiment_name="300")
+        dirs=types.SimpleNamespace(experiment_dir=tmp_path, experiment_name="300"),
+        sgs_constant=model_default,
     )
     ForwardModel._apply_sgs_setting(stub, params)  # type: ignore[arg-type]
     reread = NamoptionsFile(tmp_path / "namoptions.300")
@@ -461,6 +467,9 @@ def test_pypalm_sgs_setting_disables_constant_flux_layer(
 
     class _Stub:
         _param_value = staticmethod(ForwardModel._param_value)
+        # Stands in for the model config's sgs_constant; None is pypalm's
+        # default, so `params` is the only source in this test.
+        sgs_constant = None
 
     # Absent -> neither key is written (default prognostic SGS-TKE regime).
     p3d = P3DFile(staged)
@@ -498,3 +507,122 @@ def test_ar2_without_static_parameters_is_unchanged() -> None:
     )
     ds = model.sample(8)
     assert set(ds.data_vars) == {"inflow_angle"}
+
+
+# ---------------------------------------------------------------------------
+# sgs_constant precedence: params overrides the model config; absent in both
+# leaves the solver's own closure untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_udales_sgs_model_config_default_is_used_when_params_absent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """No sgs_constant in params -> fall back to the model config's value."""
+    _write_namoptions(tmp_path, "lsmagorinsky = .false.\nlvreman      = .true.\n")
+    cs, c_vreman = _apply_udales_sgs(tmp_path, xarray.Dataset(), model_default=0.24)
+    assert cs is None
+    assert c_vreman == pytest.approx(0.24)
+
+
+def test_udales_sgs_params_overrides_model_config(tmp_path: pathlib.Path) -> None:
+    """An estimated/sampled value in params wins over the model config default."""
+    _write_namoptions(tmp_path, "lsmagorinsky = .false.\nlvreman      = .true.\n")
+    cs, c_vreman = _apply_udales_sgs(
+        tmp_path, xarray.Dataset({"sgs_constant": 0.31}), model_default=0.24
+    )
+    assert cs is None
+    assert c_vreman == pytest.approx(0.31)
+
+
+def test_udales_sgs_absent_in_both_leaves_template_untouched(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Neither source supplies a value -> no write at all (byte-identical)."""
+    path = _write_namoptions(
+        tmp_path, "lsmagorinsky = .false.\nlvreman      = .true.\n"
+    )
+    before = path.read_bytes()
+    cs, c_vreman = _apply_udales_sgs(tmp_path, xarray.Dataset(), model_default=None)
+    assert cs is None and c_vreman is None
+    assert path.read_bytes() == before
+
+
+def test_pylbm_sgs_precedence(tmp_path: pathlib.Path) -> None:
+    """Same precedence chain for the LBM's `ivreman smagor` infile line."""
+    from pylbm.utils.infile_utils import Infile
+    from pylbm.utils.params_utils import apply_sgs_setting
+
+    def _stage() -> types.SimpleNamespace:
+        p = tmp_path / "infile.in"
+        p.write_text(" 1 0.15           ! ivreman smagor  : Vreman subgridscale\n")
+        return types.SimpleNamespace(infile_path=p)
+
+    # model config only
+    dirs = _stage()
+    apply_sgs_setting(xarray.Dataset(), dirs, default=0.15)
+    assert Infile(dirs.infile_path).get_value("ivreman") == "1 0.1500"
+
+    # params overrides the model config
+    dirs = _stage()
+    apply_sgs_setting(xarray.Dataset({"sgs_constant": 0.22}), dirs, default=0.15)
+    assert Infile(dirs.infile_path).get_value("ivreman") == "1 0.2200"
+
+    # absent in both -> untouched
+    dirs = _stage()
+    before = dirs.infile_path.read_bytes()
+    apply_sgs_setting(xarray.Dataset(), dirs, default=None)
+    assert dirs.infile_path.read_bytes() == before
+
+
+def test_pypalm_sgs_model_config_default_is_used_when_params_absent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """PALM's model-config default feeds km_constant when params carry nothing.
+
+    pypalm ships ``sgs_constant: null`` precisely so this does NOT fire by
+    default — a fixed km is a regime switch, not a tuning knob.
+    """
+    import shutil
+
+    from pypalm.forward_model import ForwardModel
+    from pypalm.utils.p3d_utils import P3DFile
+
+    staged = tmp_path / "urban_run_p3d"
+    shutil.copy2(pathlib.Path("examples/palm/xie_and_castro/_p3d"), staged)
+
+    class _Stub:
+        _param_value = staticmethod(ForwardModel._param_value)
+        sgs_constant = 0.5
+
+    p3d = P3DFile(staged)
+    ForwardModel._apply_sgs_setting(_Stub(), p3d, xarray.Dataset())
+    p3d.write()
+    reread = P3DFile(staged)
+    assert float(reread.get_value("initialization_parameters", "km_constant")) == 0.5
+    assert (
+        reread.get_value("initialization_parameters", "constant_flux_layer")
+        == ".false."
+    )
+
+
+def test_pypalm_sgs_params_overrides_model_config(tmp_path: pathlib.Path) -> None:
+    import shutil
+
+    from pypalm.forward_model import ForwardModel
+    from pypalm.utils.p3d_utils import P3DFile
+
+    staged = tmp_path / "urban_run_p3d"
+    shutil.copy2(pathlib.Path("examples/palm/xie_and_castro/_p3d"), staged)
+
+    class _Stub:
+        _param_value = staticmethod(ForwardModel._param_value)
+        sgs_constant = 0.5
+
+    p3d = P3DFile(staged)
+    ForwardModel._apply_sgs_setting(
+        _Stub(), p3d, xarray.Dataset({"sgs_constant": 1.25})
+    )
+    p3d.write()
+    reread = P3DFile(staged)
+    assert float(reread.get_value("initialization_parameters", "km_constant")) == 1.25

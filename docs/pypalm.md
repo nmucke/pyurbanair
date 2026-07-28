@@ -265,6 +265,20 @@ and, for time-varying inflow, into the `inflow_plane_u/v` arrays in the
 
 #### `sgs_constant` → `km_constant` (Option A proxy)
 
+**Where `sgs_constant` comes from.** Two sources, in precedence order:
+
+1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+   used when ESMDA estimates or pins it.
+2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+   per-backend default.
+
+Absent from both is a strict no-op: the solver's own closure/template value
+stands. The per-backend default exists because the three backends' `sgs_constant`
+are **different physical quantities** (uDALES/pylbm take a dimensionless
+Smagorinsky-family constant; PALM takes an eddy diffusivity in m²/s), so a single
+value in the shared params sampler cannot be correct for all three at once.
+
+
 PALM's LES TKE closure has no Smagorinsky-style namelist multiplier (`c_0` is
 hardcoded), so `sgs_constant` is mapped to `km_constant` — a **constant eddy
 diffusivity in m²/s**. This replaces the prognostic SGS-TKE closure with a

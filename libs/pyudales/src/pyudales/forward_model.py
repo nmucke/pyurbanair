@@ -344,6 +344,7 @@ class ForwardModel(BaseForwardModel):
         random_initial_condition_args: Optional[dict] = None,
         boundary_condition: str = "periodic",
         closure: Optional[str] = None,
+        sgs_constant: Optional[float] = None,
         spinup_time: float = 0.0,
         nudging_config: Optional[dict] = None,
         precomputed_geom_dir: Optional[str] = None,
@@ -496,6 +497,12 @@ class ForwardModel(BaseForwardModel):
         validate_closure(closure)
         self.closure = closure
         self._apply_closure()
+
+        # Per-backend default for the SGS constant, overridden by a `sgs_constant`
+        # in the params Dataset when one is supplied. None leaves the case
+        # template's value alone. Applied in `_apply_sgs_setting`, not here, so it
+        # follows the same per-call path as an estimated value.
+        self.sgs_constant = float(sgs_constant) if sgs_constant is not None else None
 
         # Optionally reuse precomputed IBM geometry instead of re-running the
         # (expensive) STL->IBM preprocessing. Runs after the domain overrides so
@@ -794,7 +801,14 @@ class ForwardModel(BaseForwardModel):
         No-op when ``sgs_constant`` is absent, preserving the template value
         (docs/esmda_model_error_parameters.md §2.2).
         """
+        # Precedence: an estimated/sampled `sgs_constant` in ``params`` wins; the
+        # model config's ``sgs_constant`` is the per-backend fallback; absent in
+        # both leaves the case template's value untouched.
         sgs = get_param_value(params, "sgs_constant")
+        source = "params"
+        if sgs is None:
+            sgs = self.sgs_constant
+            source = "model config"
         if sgs is None:
             return
         namoptions_path = (
@@ -827,10 +841,11 @@ class ForwardModel(BaseForwardModel):
         namoptions.set_value("NAMSUBGRID", key, f"{float(sgs):.4f}")
         namoptions.write()
         logger.info(
-            "Set uDALES %s constant &NAMSUBGRID %s = %.4f (from sgs_constant)",
+            "Set uDALES %s constant &NAMSUBGRID %s = %.4f (sgs_constant from %s)",
             closure_name,
             key,
             float(sgs),
+            source,
         )
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
