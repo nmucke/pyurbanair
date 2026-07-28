@@ -20,10 +20,10 @@ parameters:
   vertical_inflow_exponent:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.25
-  # Truth-model value at the case's stable SGS setting (uDALES cs=0.24).
-  sgs_constant:
-    _target_: pyurbanair.static_parameters.Constant
-    value: 0.24
+  # sgs_constant is NOT set here on purpose: it now defaults per-backend in
+  # conf/model/*.yaml, because the three solvers' SGS constants are different
+  # physical quantities (uDALES/pylbm dimensionless; PALM m^2/s). Re-add it here
+  # ONLY to have ESMDA estimate it, and only for a single-backend run.
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.0041912

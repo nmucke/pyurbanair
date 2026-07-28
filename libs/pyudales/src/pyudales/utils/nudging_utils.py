@@ -120,20 +120,44 @@ def enable_nudging_in_namoptions(
     n_time_snapshots: int,
     nnudge: int,
     tnudge: float = 10.0,
+    interior_nudging: bool = True,
 ) -> None:
     """Enable time-dependent velocity nudging in namoptions.
 
     Sets the &PHYSICS section flags required for uDALES to read the
     timedepnudge.inp file and apply nudging.
 
+    The two halves of "nudging" are separate switches in uDALES and are wired
+    independently here:
+
+    * ``ltimedepnudge`` makes ``modtimedep.f90::timedepnudge`` refresh
+      ``uprof``/``vprof`` from timedepnudge.inp every step. Under
+      ``BCxm=2`` those profiles ARE the west inlet face
+      (``modboundary.f90::xmi_profile``), so this is what drives a
+      time-varying *inflow boundary*.
+    * ``lnudge`` gates ``modforces.f90::nudge``, the interior relaxation of the
+      slab mean toward ``uprof``/``vprof`` over ``k = kb+nnudge .. ke``. It is
+      the ONLY consumer of ``lnudge`` in the solver.
+
+    Setting ``interior_nudging=False`` therefore keeps the time-varying inflow
+    at the boundary while removing the domain-interior forcing — the setup
+    pypalm already uses under ``inflow_outflow``, where nudging is disabled
+    outright and the inflow comes from the driver alone.
+
     Args:
         namoptions_path: Path to the namoptions file.
         n_time_snapshots: Number of time-dependent nudging profiles.
         nnudge: Number of vertical levels from the bottom that are NOT nudged.
         tnudge: Nudging relaxation timescale in seconds.
+        interior_nudging: Write ``lnudge=.true.`` (default, current behaviour).
+            When False, ``lnudge=.false.`` leaves the interior unforced; under
+            periodic BCs that removes the only momentum source, so it is only
+            meaningful under ``inflow_outflow``.
     """
     namoptions = NamoptionsFile(namoptions_path)
-    namoptions.set_value("PHYSICS", "lnudge", ".true.")
+    namoptions.set_value(
+        "PHYSICS", "lnudge", ".true." if interior_nudging else ".false."
+    )
     namoptions.set_value("PHYSICS", "nnudge", nnudge)
     namoptions.set_value("PHYSICS", "tnudge", f"{tnudge:.1f}")
     namoptions.set_value("PHYSICS", "ltimedepnudge", ".true.")
@@ -141,8 +165,10 @@ def enable_nudging_in_namoptions(
     namoptions.write()
 
     logger.info(
-        "Enabled nudging in %s: nnudge=%d, tnudge=%.1f, ntimedepnudge=%d",
+        "Enabled nudging in %s: lnudge=%s (interior), nnudge=%d, tnudge=%.1f, "
+        "ntimedepnudge=%d",
         namoptions_path.name,
+        ".true." if interior_nudging else ".false.",
         nnudge,
         tnudge,
         n_time_snapshots,
@@ -159,6 +185,7 @@ def apply_time_varying_inflow(
     simulation_time: float = 0.0,
     boundary_condition: str = "periodic",
     profile_config: Optional[dict[str, Any]] = None,
+    interior_nudging: bool = True,
 ) -> None:
     """Apply inflow settings via nudging files.
 
@@ -306,6 +333,7 @@ def apply_time_varying_inflow(
         len(time_seconds),
         nnudge,
         tnudge,
+        interior_nudging=interior_nudging,
     )
 
     # Under inflow_outflow BCs the west inlet face (plus nudging) drives the

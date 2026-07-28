@@ -136,3 +136,46 @@ class TestStaticPath:
         np.testing.assert_allclose(
             nf.get_value_as_float("INPS", "dpdy"), 0.0, atol=1e-7
         )
+
+
+class TestInteriorNudgingSwitch:
+    """``interior_nudging`` splits the boundary drive from the interior forcing.
+
+    uDALES gates the two halves on different switches: ``ltimedepnudge`` keeps
+    ``uprof``/``vprof`` (and hence the ``BCxm=2`` inlet face) time-varying, while
+    ``lnudge`` alone gates the interior relaxation in ``modforces.f90::nudge``.
+    Disabling the interior must therefore leave the inflow apparatus intact.
+    """
+
+    def test_default_enables_interior_nudging(self, tmp_path: pathlib.Path) -> None:
+        dirs = _make_experiment(tmp_path)
+        apply_time_varying_inflow(
+            _scalar_params(),
+            dirs,
+            boundary_condition="inflow_outflow",
+            tnudge=10.0,
+            nnudge=0,
+        )
+
+        nf = NamoptionsFile(tmp_path / "namoptions.999")
+        assert nf.get_value("PHYSICS", "lnudge") == ".true."
+        assert nf.get_value("PHYSICS", "ltimedepnudge") == ".true."
+
+    def test_disabled_keeps_boundary_drive(self, tmp_path: pathlib.Path) -> None:
+        dirs = _make_experiment(tmp_path)
+        apply_time_varying_inflow(
+            _scalar_params(),
+            dirs,
+            boundary_condition="inflow_outflow",
+            tnudge=10.0,
+            nnudge=0,
+            interior_nudging=False,
+        )
+
+        nf = NamoptionsFile(tmp_path / "namoptions.999")
+        # Interior relaxation off ...
+        assert nf.get_value("PHYSICS", "lnudge") == ".false."
+        # ... but the time-varying inlet profile is still driven.
+        assert nf.get_value("PHYSICS", "ltimedepnudge") == ".true."
+        assert nf.get_value_as_int("PHYSICS", "ntimedepnudge") == 2
+        assert (tmp_path / "timedepnudge.inp.999").exists()

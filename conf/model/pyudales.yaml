@@ -18,7 +18,32 @@ forward_model:
   ncpu: 1
   save_only_last_timestep: false
   verbose: false
-  boundary_condition: periodic #inflow_outflow
+  boundary_condition: inflow_outflow # periodic #
+  # Sub-grid-scale closure, written to &NAMSUBGRID as a mutually exclusive switch
+  # set (the chosen one .true., the others .false.), so the closure comes from
+  # this config rather than from whatever the case's namoptions template ships.
+  #   vreman      -> lvreman=.true.;      constant c_vreman (Fortran default 0.07)
+  #   smagorinsky -> lsmagorinsky=.true.; constant cs       (default -1 -> ~0.17)
+  #   oneeqn      -> REJECTED: the one-equation closure needs a nonzero prof.inp
+  #                  'tke' column, which the wrapper's preprocessing writes as 0,
+  #                  and its constants (cm/ce1/ce2) are not in the namelist.
+  # The `sgs_constant` parameter follows the closure automatically: it is written
+  # to cs under smagorinsky and to c_vreman under vreman. The two are NOT on the
+  # same scale (~0.17 vs 0.07) — retune the priors in conf/params/ when switching.
+  # Set to null to leave the case template's switches untouched.
+  closure: vreman
+  # Per-backend SGS constant, written to whichever key `closure` selects
+  # (cs under smagorinsky, c_vreman under vreman). This is the DEFAULT: a
+  # `sgs_constant` in the params sampler (conf/params/*.yaml) overrides it, so
+  # ESMDA can still estimate it. null -> leave the case template's value.
+  #
+  # NOTE the three backends' sgs_constant are NOT the same physical quantity, so
+  # each config carries its own value: uDALES/pylbm take a dimensionless
+  # Smagorinsky-family constant, PALM takes an eddy diffusivity in m^2/s.
+  # 0.24 is the verified-stable c_vreman for this domain (0.07 and 0.15 diverge;
+  # see the closure-fix commit) -- it sits near the stability floor, not at a
+  # physical central estimate.
+  sgs_constant: 0.24
   nudging_config:
     tnudge: 15.0
     # nnudge: number of bottom grid levels NOT nudged (raw level count).
@@ -26,6 +51,19 @@ forward_model:
     # nnudge_meters: height (m above the floor) below which nudging is NOT
     # applied. When set, it is converted to a level count and OVERRIDES nnudge.
     nnudge_meters: 16.0
+    # interior_nudging: whether the domain INTERIOR is relaxed toward the
+    # nudging profile (&PHYSICS lnudge -> modforces.f90::nudge, over
+    # k = kb+nnudge .. ke). This is independent of the time-varying inflow
+    # itself: ltimedepnudge stays on either way, and under
+    # boundary_condition=inflow_outflow it is what drives the west inlet face
+    # (modboundary.f90::xmi_profile reads uprof/vprof).
+    #   true  (default) -> inlet face AND interior relaxation, as today.
+    #   false           -> inflow applied at the boundary ONLY, matching pypalm,
+    #                      which disables nudging entirely under inflow_outflow.
+    # Only set false with inflow_outflow: under periodic BCs the interior
+    # nudging is the only momentum source, so disabling it leaves an un-driven
+    # domain (the dpdx/dpdy body force is written as zero).
+    interior_nudging: true
     profile_config:
       type: power_law
       alpha: 0.25
@@ -38,6 +76,24 @@ forward_model:
     patience: 20        # consecutive sub-floor steps before killing
     warmup_steps: 20    # ignore small startup dt for the first N steps
     poll_interval_s: 2.0
+  # Turbulent inlet generator. Schema is shared across all three backends
+  # (`enabled` plus backend-specific tunables); uDALES contributes no tunables
+  # because the feature is NOT REACHABLE in the vendored uDALES v2.2.0:
+  #   * `iinletgen` (the Lund (1998) recycling/rescaling generator) is not
+  #     declared in any namelist — u-dales/src/modstartup.f90:108-173, with
+  #     &INLET at :141-144 declaring only Uinf/Vinf/di/dti/inletav/linletRA/
+  #     lstoreplane/lreadminl/lfixinlet/lfixutauin/lwallfunc. Writing the key
+  #     aborts the solver: "ERROR: Problem in namoptions INLET".
+  #   * `call initinlet` is commented out (program.f90:77, modstartup.f90:627)
+  #     and `inletgen` (modinlet.f90:204) has no call site at all.
+  #   * modboundary.f90 never reads the generator's `u0inletbc`; the west inlet
+  #     face comes only from `select case(BCxm)` (:1204-1262).
+  # Setting enabled=true therefore raises a ValueError at construction rather
+  # than producing a run that crashes at startup. Turbulent inflow in this
+  # uDALES version would need the precursor/driver path (BCxm=3, &DRIVER
+  # idriver), which this wrapper does not implement. See docs/pyudales.md §6.1.
+  inlet_turbulence:
+    enabled: false
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

@@ -18,7 +18,14 @@ from pylbm.utils import get_lbm_directory_paths
 from pyurbanair.base_forward_model import BaseForwardModel
 
 from .stl_to_lbm import stl_to_lbm_geometry
-from .utils import Infile, apply_inflow_settings, compile_lbm, create_infile
+from .utils import (
+    Infile,
+    apply_inflow_settings,
+    apply_inlet_turbulence,
+    compile_lbm,
+    create_infile,
+    validate_inlet_turbulence,
+)
 from .utils.environment_utils import identify_environment
 from .utils.infile_utils import _augment_runtime_library_paths
 from .utils.mod_dimensions_utils import set_experiment
@@ -62,8 +69,10 @@ class ForwardModel(BaseForwardModel):
         cuda: bool = False,
         enable_netcdf: Optional[bool] = None,
         boundary_condition: str = "periodic",
+        sgs_constant: Optional[float] = None,
         spinup_time: float = 0.0,
         profile_config: Optional[dict] = None,
+        inlet_turbulence: Optional[dict] = None,
     ) -> None:
         super().__init__(results_dir=results_dir)
 
@@ -76,6 +85,17 @@ class ForwardModel(BaseForwardModel):
                 f"got '{boundary_condition}'"
             )
         self.boundary_condition = boundary_condition
+        # Per-backend default for the SGS constant, overridden by a `sgs_constant`
+        # in the params Dataset when one is supplied. None leaves the infile
+        # template's value alone. See `apply_sgs_setting`.
+        self.sgs_constant = float(sgs_constant) if sgs_constant is not None else None
+
+        # Inflow-turbulence forcing (m_inflow_turbulence_*.F90). Validated here
+        # so a bad config fails before geometry voxelisation and compilation;
+        # None keeps infile.in byte-identical to a run without the knob.
+        self.inlet_turbulence = validate_inlet_turbulence(
+            inlet_turbulence, boundary_condition
+        )
 
         # Verbosity
         self.verbose = verbose
@@ -87,7 +107,9 @@ class ForwardModel(BaseForwardModel):
 
         self.dirs = get_lbm_directory_paths(
             temp_dir=(
-                pathlib.Path(temp_dir) if temp_dir is not None else pathlib.Path(".temp")
+                pathlib.Path(temp_dir)
+                if temp_dir is not None
+                else pathlib.Path(".temp")
             ),
             case_dir=pathlib.Path("examples/lbm"),
             experiment_name=experiment_name,
@@ -201,6 +223,11 @@ class ForwardModel(BaseForwardModel):
         ibnd = 0 if self.boundary_condition == "periodic" else 1
         self._set_infile_value("ibnd", ibnd)
         self._set_infile_value("jbnd", 0)
+
+        # Inflow turbulence is static per model, so it is written once here and
+        # inherited by ensemble members when experiment_dir is cloned. No-op
+        # unless explicitly enabled.
+        apply_inlet_turbulence(self.inlet_turbulence, self.dirs)
 
     def _set_scaling_factors(self, params: Optional[xarray.Dataset] = None) -> None:
         """Set the scaling factors for the LBM."""
@@ -353,7 +380,7 @@ class ForwardModel(BaseForwardModel):
                 zsize=self._zsize,
                 profile_config=override_cfg,
             )
-        apply_sgs_setting(params, self.dirs)
+        apply_sgs_setting(params, self.dirs, default=self.sgs_constant)
 
         if is_time_varying_params(params):
             # The LBM matches the schedule against its absolute clock

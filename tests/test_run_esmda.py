@@ -145,6 +145,23 @@ def test_run_esmda_with_model_error_parameters(
         "params_to_estimate=[inflow_angle,velocity_magnitude,"
         "sgs_constant,vertical_inflow_exponent]"
     )
+    # Supply the prior for the knob under test rather than inheriting it. The
+    # dynamic sampler no longer defines `sgs_constant`: the three backends' SGS
+    # constants are different physical quantities, so each defaults it in its
+    # own conf/model/*.yaml instead. A params-level entry is what makes it
+    # ESMDA-estimable, so a test asserting it lands in the posterior must add
+    # it. The two samplers nest differently — ParameterSampler keeps its knobs
+    # under `parameters`, AR2RelaxationModel splits `external_parameters`
+    # (time-varying) from `static_parameters` (constant-in-time). `++` so this
+    # works whether or not the sampler already defines one.
+    node = "parameters" if prior == "static" else "static_parameters"
+    overrides += [
+        f"++prior_params.{node}.sgs_constant._target_"
+        "=pyurbanair.static_parameters.Normal",
+        f"++prior_params.{node}.sgs_constant.mean=0.24",
+        f"++prior_params.{node}.sgs_constant.std=0.02",
+        f"++prior_params.{node}.sgs_constant.min=0.18",
+    ]
     cfg = compose_test_cfg(overrides, config_name="run_esmda")
     run(cfg)
 

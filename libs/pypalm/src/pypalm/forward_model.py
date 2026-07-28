@@ -26,7 +26,12 @@ from .utils.dynamic_driver_utils import (
     remove_dynamic_driver_file,
 )
 from .utils.inflow_utils import angle_to_velocity
-from .utils.ncpu_utils import derive_npex_npey
+from .utils.inlet_turbulence_utils import (
+    apply_inlet_turbulence,
+    is_inlet_turbulence_enabled,
+    validate_inlet_turbulence,
+)
+from .utils.ncpu_utils import derive_npex_npey, multigrid_levels
 from .utils.nudging_utils import apply_nudging_driver, remove_nudging_files
 from .utils.p3d_utils import P3DFile
 from .utils.vertical_profile import build_profile_shape
@@ -34,6 +39,12 @@ from .utils.warm_start_utils import write_warmstart_driver
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# How many missing 3D outputs may be padded by repeating the last frame.
+# PALM's adaptive timestep can land one dump short of the requested count;
+# more than that means the run stopped early (PALM exits 0 on divergence),
+# and padding would fabricate the window instead of reporting the failure.
+MAX_PADDED_OUTPUTS = 1
 
 
 DomainBounds = tuple[
@@ -138,7 +149,9 @@ class ForwardModel(BaseForwardModel):
         output_frequency: Optional[float] = None,
         spinup_time: float = 0.0,
         boundary_condition: str = "periodic",
+        sgs_constant: Optional[float] = None,
         nudging_config: Optional[dict] = None,
+        inlet_turbulence: Optional[dict] = None,
         save_only_last_timestep: bool = False,
         results_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
@@ -153,6 +166,12 @@ class ForwardModel(BaseForwardModel):
                 f"got '{boundary_condition}'"
             )
         self.boundary_condition = boundary_condition
+        # Per-backend default for the SGS knob, overridden by a `sgs_constant` in
+        # the params Dataset when one is supplied. None leaves PALM's prognostic
+        # SGS-TKE closure (and its surface flux layer) untouched — which is the
+        # right default here, since PALM's proxy is `km_constant` in m^2/s, not a
+        # dimensionless Smagorinsky constant. See `_apply_sgs_setting`.
+        self.sgs_constant = float(sgs_constant) if sgs_constant is not None else None
 
         self.verbose = verbose
         self.stdout = None if verbose else subprocess.DEVNULL
@@ -170,6 +189,13 @@ class ForwardModel(BaseForwardModel):
         self.save_only_last_timestep = save_only_last_timestep
 
         self._nudging_config = nudging_config or DEFAULT_NUDGING_CONFIG
+        # Inlet turbulence: absent (None) is a strict no-op, identical to
+        # ``enabled: false``. See utils/inlet_turbulence_utils.py for why this
+        # maps onto PALM's random inflow-disturbance machinery rather than onto
+        # ``turbulent_inflow`` (which is our *time-varying inflow reader*, not a
+        # turbulence generator).
+        self._inlet_turbulence = inlet_turbulence
+        validate_inlet_turbulence(inlet_turbulence, boundary_condition)
 
         self.dirs = get_palm_directory_paths(
             case_dir=pathlib.Path(case_dir),
@@ -352,6 +378,28 @@ class ForwardModel(BaseForwardModel):
         p3d.set_value("runtime_parameters", "npey", npey)
         p3d.write()
         logger.info("Pinned PALM processor topology: npex=%d, npey=%d", npex, npey)
+
+        # A grid the multigrid solver cannot coarsen is the difference between a
+        # run that completes and one that blows up, and PALM only says so via a
+        # WARNING (PAC0242) buried in stdout -- which is suppressed unless
+        # verbose=True. Surface it here, where the grid is chosen.
+        if self.ny is not None and self.nz is not None:
+            levels = multigrid_levels(
+                int(self.nx), int(self.ny), int(self.nz), npex=npex
+            )
+            if levels <= 1:
+                logger.warning(
+                    "PALM multigrid cannot coarsen this grid (nx=%d/npex=%d, ny=%d, "
+                    "nz=%d): every direction must be divisible by 2, including the "
+                    "per-rank x subdomain. The solver degenerates to a few "
+                    "Gauss-Seidel sweeps (PALM warns PAC0242), leaves the velocity "
+                    "field divergent, and the run will most likely blow up. Use "
+                    "power-of-two point counts, e.g. domain.nx=64 ny=64 nz=64.",
+                    int(self.nx),
+                    npex,
+                    int(self.ny),
+                    int(self.nz),
+                )
 
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         super().set_results_dir(results_dir)
@@ -596,14 +644,24 @@ class ForwardModel(BaseForwardModel):
         switch. No-op when ``sgs_constant`` is absent, leaving PALM's prognostic
         SGS-TKE closure and default surface flux layer untouched.
         """
+        # Precedence: an estimated/sampled `sgs_constant` in ``params`` wins; the
+        # model config's ``sgs_constant`` is the per-backend fallback; absent in
+        # both leaves PALM's prognostic SGS-TKE closure untouched.
         sgs = self._param_value(params, "sgs_constant")
+        source = "params"
+        if sgs is None:
+            sgs = self.sgs_constant
+            source = "model config"
         if sgs is None:
             return
         p3d.set_value("initialization_parameters", "km_constant", float(sgs))
         # Required by PALM whenever km is fixed (PAC0149).
         p3d.set_value("initialization_parameters", "constant_flux_layer", False)
         logger.info(
-            "Set PALM km_constant (sgs_constant proxy, Option A) to %.4f m^2/s", sgs
+            "Set PALM km_constant (sgs_constant proxy, Option A) to %.4f m^2/s "
+            "(from %s)",
+            float(sgs),
+            source,
         )
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
@@ -785,6 +843,67 @@ class ForwardModel(BaseForwardModel):
             result.palm_rc,
         )
 
+    def _fit_output_window(self, state: xarray.Dataset) -> xarray.Dataset:
+        """Trim/pad the 3D output onto the expected window.
+
+        Drops the spin-up frames, trims a surplus from the front, and pads at
+        most :data:`MAX_PADDED_OUTPUTS` missing frames. A larger shortfall
+        raises ``CalledProcessError`` — see the comment inline.
+        """
+        if self.spinup_time > 0 and self.output_frequency:
+            spinup_outputs = int(self.spinup_time / self.output_frequency)
+            if state.sizes.get("time", 0) > spinup_outputs:
+                state = state.isel(time=slice(spinup_outputs, None))
+
+        if (
+            self.simulation_time is not None
+            and self.output_frequency
+            and state.sizes.get("time", 0) > 0
+        ):
+            expected_outputs = int(self.simulation_time / self.output_frequency)
+            actual = state.sizes["time"]
+            if actual > expected_outputs:
+                state = state.isel(time=slice(-expected_outputs, None))
+            elif actual < expected_outputs:
+                missing = expected_outputs - actual
+                # PALM's timestep is adaptive, so the 3D file occasionally has
+                # ONE fewer output than requested. Padding that single frame
+                # keeps ensemble members concat-able along `time`.
+                #
+                # Anything more means PALM stopped early -- and PALM signals its
+                # own numerical divergence by terminating with exit 0 (see
+                # `_locate_3d_output`), so a short 3D file is the only evidence
+                # left. Padding it would fabricate most of the window from a
+                # repeated frame and report success, which reads downstream as a
+                # flow that "runs a few steps and then stays constant". Raise
+                # instead, matching the divergence path so the ensemble's
+                # resample-from-successes policy replaces the member.
+                if missing > MAX_PADDED_OUTPUTS:
+                    msg = (
+                        f"PALM produced only {actual} of {expected_outputs} "
+                        f"expected 3D outputs ({missing} missing). PALM "
+                        "terminates with exit 0 on its own numerical "
+                        "divergence, so this most likely means the run "
+                        "diverged and stopped early. Refusing to pad "
+                        f"{missing} frames by repeating the last one."
+                    )
+                    logger.error(msg)
+                    raise subprocess.CalledProcessError(
+                        1, f"palm ({self.experiment_name})", output=msg
+                    )
+                logger.warning(
+                    "PALM wrote %d of %d expected 3D outputs; padding %d frame(s) "
+                    "by repeating the last (adaptive-timestep rounding).",
+                    actual,
+                    expected_outputs,
+                    missing,
+                )
+                last = state.isel(time=-1)
+                pads = [last.expand_dims(time=1) for _ in range(missing)]
+                state = xarray.concat([state, *pads], dim="time")
+
+        return state
+
     def _locate_3d_output(self) -> pathlib.Path:
         """Find the ``<name>_3d.nc`` output file palmrun wrote."""
         primary = self.dirs.output_dir / f"{self.experiment_name}_3d.nc"
@@ -919,29 +1038,7 @@ class ForwardModel(BaseForwardModel):
             w_on_z = w_on_z.rename({"zw": "z"}).assign_coords(z=state["z"].values)
             state = state.drop_vars("w").assign(w=w_on_z).drop_dims("zw")
 
-        if self.spinup_time > 0 and self.output_frequency:
-            spinup_outputs = int(self.spinup_time / self.output_frequency)
-            if state.sizes.get("time", 0) > spinup_outputs:
-                state = state.isel(time=slice(spinup_outputs, None))
-
-        if (
-            self.simulation_time is not None
-            and self.output_frequency
-            and state.sizes.get("time", 0) > 0
-        ):
-            expected_outputs = int(self.simulation_time / self.output_frequency)
-            actual = state.sizes["time"]
-            if actual > expected_outputs:
-                state = state.isel(time=slice(-expected_outputs, None))
-            elif actual < expected_outputs:
-                # PALM's timestep is adaptive, so the 3D file occasionally
-                # has one fewer output than requested. Pad by repeating the
-                # last frame so all ensemble members concat along `time`.
-                last = state.isel(time=-1)
-                pads = [
-                    last.expand_dims(time=1) for _ in range(expected_outputs - actual)
-                ]
-                state = xarray.concat([state, *pads], dim="time")
+        state = self._fit_output_window(state)
 
         # Store the time coordinate in seconds (0, dt, 2·dt, …) rather than bare
         # frame indices, matching pylbm/pyudales. Without this the rollout
@@ -993,6 +1090,12 @@ class ForwardModel(BaseForwardModel):
         else:
             self._reset_cold_init()
 
+        # Must run AFTER the warm/cold init block: both write
+        # ``create_disturbances``, which also gates the in-run inflow
+        # perturbations. The explicit knob takes precedence over that implicit
+        # write (and suppresses only the *initial* kick on a warm start).
+        self._apply_inlet_turbulence(warm_start=warm_start)
+
         self._clean_output()
         self.run()
         return self._load_and_postprocess_state()
@@ -1025,6 +1128,34 @@ class ForwardModel(BaseForwardModel):
         # divergence-removing pressure solve still runs (it is also gated on
         # non-flat topography), so the injected field is still made solenoidal.
         self._p3d_set_value("runtime_parameters", "create_disturbances", False)
+
+    def _apply_inlet_turbulence(self, warm_start: bool = False) -> bool:
+        """Stage (or clear) the switchable inlet-turbulence knob.
+
+        Delegates to :func:`.utils.inlet_turbulence_utils.apply_inlet_turbulence`.
+        Kept as a thin method so staging tests can drive it without running PALM.
+
+        Precedence, in one place:
+
+        1. ``inlet_turbulence`` absent / ``enabled: false`` → nothing is written
+           on a clean template. Today's behaviour is preserved exactly,
+           *including* the implicit "time-varying params on the inflow_outflow
+           path switch ``turbulent_inflow`` on" coupling — that coupling is the
+           dynamic-driver reader, not a turbulence generator, and disabling it
+           would sever the ESMDA-estimated inflow signal from the solver.
+        2. ``enabled: true`` → PALM's random inflow disturbances are turned on
+           on top of whatever inflow driver the params selected. The two are
+           orthogonal in PALM, so this composes with both the static and the
+           time-varying inflow paths.
+        """
+        return apply_inlet_turbulence(
+            self.p3d_path, self._inlet_turbulence, warm_start=warm_start
+        )
+
+    @property
+    def inlet_turbulence_enabled(self) -> bool:
+        """Whether the inlet-turbulence knob is on for this model."""
+        return is_inlet_turbulence_enabled(self._inlet_turbulence)
 
     def _reset_cold_init(self) -> None:
         """Restore the cold-start initialization mode.

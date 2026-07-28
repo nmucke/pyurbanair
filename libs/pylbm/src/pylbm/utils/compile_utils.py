@@ -273,8 +273,11 @@ def compile_lbm(
 
     # Change to LBM src directory and run make
     original_cwd = pathlib.Path.cwd()
-    stdout = sys.stdout if verbose else subprocess.DEVNULL
-    stderr = sys.stderr if verbose else subprocess.DEVNULL
+    # Capture rather than discard when quiet: a failed build otherwise raises
+    # "See output above for details" with no output anywhere, which is exactly
+    # what a CI log shows. Captured text is replayed into the exception below.
+    stdout = sys.stdout if verbose else subprocess.PIPE
+    stderr = sys.stderr if verbose else subprocess.STDOUT
 
     try:
         # Update makefile HOME path to pixi environment
@@ -355,9 +358,15 @@ def compile_lbm(
         )
 
         if result.returncode != 0:
+            captured = (result.stdout or "").strip()
+            if captured:
+                tail = "\n".join(captured.splitlines()[-40:])
+                detail = f" Last 40 lines of build output:\n{tail}"
+            else:
+                detail = " See output above for details."
             raise RuntimeError(
-                f"LBM compilation failed with exit code {result.returncode}. "
-                f"See output above for details."
+                f"LBM compilation failed with exit code {result.returncode}."
+                f"{detail}"
             )
 
         if verbose:

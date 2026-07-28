@@ -68,6 +68,7 @@ Key constructor parameters:
 | `verbose` | True | `False` → `stderr=DEVNULL` (see §7) |
 | `boundary_condition` | `"periodic"` | `"inflow_outflow"` for real cases |
 | `profile_config` | None | Vertical shear profile dict, e.g. `{"type":"power_law","alpha":0.25}` |
+| `inlet_turbulence` | None | Inflow-turbulence forcing dict, e.g. `{"enabled":True,"amplitude":5e-5,"update_interval":100}` (see §7) |
 | `results_dir` | None | `None` → in-memory mode; path → on-disk mode |
 
 The default in [`conf/model/pylbm.yaml`](../conf/model/pylbm.yaml) sets
@@ -85,6 +86,8 @@ Triggered via the Hydra `prepare` step (see §8). Does:
 3. Runs the binary once with no arguments to generate `infile.in` if it does
    not already exist (`create_infile`).
 4. Sets boundary condition, `tecout`, and `experiment` name in `infile.in`.
+5. Applies `inlet_turbulence` (`apply_inlet_turbulence`, §7) — a no-op unless
+   the knob is present *and* enabled.
 
 #### `run_single(state, params, sim_name)`
 
@@ -189,6 +192,15 @@ API: `Infile(path)`, `.get_value(key)`, `.set_value(key, value)`, `.write()`.
 Keys are the first word after `!`; multi-token values (e.g. `uini, udir`) use
 the comma-inclusive first token as the key (`uini,`).
 
+**The file is positional.** `m_readinfile.F90` reads the value lines strictly in
+order, so a line that is dropped, split, or reordered shifts every subsequent
+read and is misparsed silently rather than raising. Several lines are consumed by
+a *single* list-directed `read` and therefore carry several values that must be
+written together (`iprt1 iprt2 x`, `ivreman smagor`, `lturb amp nrtu`). Use
+`.get_value_tokens(key)` / `.set_value_tokens(key, [...])` for those — they split
+and rejoin the whole value field, leaving the `! key : description` comment and
+the surrounding lines untouched.
+
 Key fields set by the wrapper:
 
 | `infile.in` key | Meaning |
@@ -203,6 +215,7 @@ Key fields set by the wrapper:
 | `ibnd`, `jbnd` | x/y boundary conditions (0 = periodic, 1 = inflow-outflow) |
 | `tecout` | Output format (3 = NetCDF) |
 | `ivreman` | SGS model; second token is the Smagorinsky constant (see §7) |
+| `lturb` | Inflow turbulence: `"<on> <amplitude> <update_interval>"` — all three read at once (see §7) |
 
 **Output filenames.** Each saved snapshot is `output/out_0000_F<iter:09d>.nc`
 where `iter` is the absolute LBM timestep. Files are collected by
@@ -263,6 +276,7 @@ approach (`generate_fortran_code`, `process_stl_to_fortran`) is still present in
 | [`dir_utils.py`](../libs/pylbm/src/pylbm/utils/dir_utils.py) | `DirectoryPaths` dataclass; `get_lbm_directory_paths` factory that reads `LBM_PATH` and constructs all experiment paths |
 | [`infile_utils.py`](../libs/pylbm/src/pylbm/utils/infile_utils.py) | `Infile` editor; `create_infile` (runs binary to generate the file); `_augment_runtime_library_paths` (prepends NVHPC/conda libs to `LD_LIBRARY_PATH` at launch) |
 | [`params_utils.py`](../libs/pylbm/src/pylbm/utils/params_utils.py) | `is_time_varying_params`, `apply_inflow_settings` (writes `uini, udir` to `infile.in`), `write_uvel_time_file`, `write_uvel_shear_file`, `apply_sgs_setting`, `resolve_profile_config`, and `remove_*` helpers |
+| [`inlet_turbulence_utils.py`](../libs/pylbm/src/pylbm/utils/inlet_turbulence_utils.py) | `validate_inlet_turbulence` (config checks, incl. the periodic guard), `apply_inlet_turbulence` (writes the 3-value `lturb` line) |
 | [`compile_utils.py`](../libs/pylbm/src/pylbm/utils/compile_utils.py) | `compile_lbm`; GPU arch detection; CUDA netcdf-fortran bootstrap |
 | [`mod_dimensions_utils.py`](../libs/pylbm/src/pylbm/utils/mod_dimensions_utils.py) | Parses and writes `mod_dimensions.F90`; `set_experiment` adds/updates the `nx/ny/nz` parameter block for the named experiment |
 | [`forward_model_utils.py`](../libs/pylbm/src/pylbm/utils/forward_model_utils.py) | `create_new_forward_model` — deep-copies template model into a per-member directory (used by `EnsembleForwardModel._create_new_forward_model`) |
@@ -318,6 +332,52 @@ no-op when `sgs_constant` is absent from `params`. Note: the LBM Smagorinsky
 constant is dimensionless and physically distinct from pypalm's `km_constant`
 (m²/s) — prior ranges in YAML should not be shared between backends.
 
+**Where `sgs_constant` comes from.** Two sources, in precedence order:
+
+1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+   used when ESMDA estimates or pins it.
+2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+   per-backend default.
+
+Absent from both is a strict no-op: the solver's own closure/template value
+stands. The per-backend default exists because the three backends' `sgs_constant`
+are **different physical quantities** (uDALES/pylbm take a dimensionless
+Smagorinsky-family constant; PALM takes an eddy diffusivity in m²/s), so a single
+value in the shared params sampler cannot be correct for all three at once.
+
+
+### Inflow turbulence — `lturb amp nrtu` in `infile.in`
+
+The Fortran ships a full inflow-turbulence subsystem
+(`m_inflow_turbulence_{init,compute,apply,update,forcing}.F90`) that
+superimposes smooth pseudo-random perturbations on the inlet plane. It is not a
+per-member ESMDA parameter — it is a static model setting, applied once in
+`compile()` and inherited by ensemble members when `experiment_dir` is cloned.
+
+```yaml
+inlet_turbulence:
+  enabled: false
+  amplitude: 5.0e-05      # turbulence_ampl
+  update_interval: 100    # nrturb — timesteps between turbulence updates
+```
+
+The three values are read by one Fortran statement
+(`read(10,*) inflowturbulence, turbulence_ampl, nrturb`), so
+`apply_inlet_turbulence` rewrites the whole `lturb` line via
+`Infile.set_value_tokens`. Semantics:
+
+- **Absent (`None`) or `enabled: false` → strict no-op.** The line the solver
+  generated for itself is left byte-identical, so default runs are unchanged.
+- Values omitted while enabled fall back to whatever is already in `infile.in`
+  rather than to hardcoded defaults. The solver's own template (`m_mkinfile.F90`)
+  writes ` F 0.00005  100`, which is where the YAML defaults come from.
+- `update_interval` must be ≥ 1: `inflow_turbulence_init` aborts on `nrturb <= 0`
+  and `main.F90` uses it as `mod(it, nrturb)`. It also sizes the precomputed
+  `uu/vv/ww/rr(ny,nz,0:nrturb)` buffers, so large values cost memory.
+- **Requires `boundary_condition: inflow_outflow`.** `main.F90` gates the
+  turbulence refresh on `ibnd == 1`, so `enabled: true` with `periodic` raises a
+  `ValueError` at construction instead of silently doing nothing.
+
 ### `C_u` scaling
 
 `C_u = int(velocity_magnitude * 15)`. All output velocities in the NetCDF are
@@ -344,6 +404,7 @@ forward_model:
   verbose: false
   boundary_condition: inflow_outflow
   profile_config: {type: power_law, alpha: 0.25}
+  inlet_turbulence: {enabled: false, amplitude: 5.0e-05, update_interval: 100}
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}
@@ -380,6 +441,11 @@ model.forward_model.cuda=false
 
 # Skip recompile (binary already up to date)
 model.compile=false
+
+# Turn on inflow turbulence (needs boundary_condition=inflow_outflow)
+model.forward_model.inlet_turbulence.enabled=true
+model.forward_model.inlet_turbulence.amplitude=2.0e-04
+model.forward_model.inlet_turbulence.update_interval=50
 ```
 
 ---
@@ -438,6 +504,25 @@ built with a different `RANDOM_SEED` size, the new binary fails on startup with
 a Fortran I/O read-past-end error. The wipe in `compile()` prevents this, but
 it only runs when `cfg.model.compile=true` — a manual binary swap without
 recompiling through the Python layer can leave stale seeds.
+
+### `infile.in` edits fail silently, not loudly
+
+`infile.in` is positional, not a namelist: `m_readinfile.F90` walks the value
+lines in order. If an edit inserts, removes, or splits a line, every later read
+lands on the wrong line and the solver runs happily with garbage settings — the
+`err=100` branch only fires when a line is not even type-compatible. When adding
+a knob, always write a whole line at once (`Infile.set_value_tokens` for the
+multi-value ones) and verify against the solver's own echo: `m_readinfile.F90`
+prints every parsed value at startup, so a run with
+`model.forward_model.verbose=true` shows exactly what the Fortran understood
+(e.g. `inflowturbulence  =        T    0.20000E-03     50`). Unit tests on the
+generated text are not sufficient on their own.
+
+Note also that `_set_scaling_factors` writes `uini` while the generated file's
+key is `uini,` (the comma is part of the first token after `!`). `Infile`
+therefore appends a separate trailing `uini` line instead of editing the inflow
+line; it lands past everything `m_readinfile.F90` reads, so it is harmless, but
+do not copy the pattern — `apply_inflow_settings` uses the correct `uini,` key.
 
 ### Warm-start C_u sequencing
 

@@ -43,3 +43,32 @@ def derive_npex_npey(ncpu: int, nx_points: int) -> tuple[int, int]:
             f"subdomains. Valid NCPU values for this grid: {valid}."
         )
     return ncpu, 1
+
+
+def multigrid_levels(nx: int, ny: int, nz: int, npex: int = 1) -> int:
+    """Number of grid levels PALM's multigrid solver can coarsen to.
+
+    PALM halves the grid until any direction becomes odd, so the usable level
+    count is set by how many times 2 divides *every* direction — including the
+    per-rank subdomain in x, since coarsening happens on the decomposed grid.
+    One level means no coarsening at all: the solver degenerates to a handful
+    of Gauss-Seidel sweeps (PALM warns PAC0242) and never properly solves the
+    perturbation pressure, so the velocity field stays divergent and the run
+    blows up.
+
+    ``nx``/``ny``/``nz`` are POINT counts (pyurbanair's ``domain.*``), not
+    PALM's ``nx = points - 1`` namelist convention.
+    """
+
+    def _pow2(n: int) -> int:
+        levels = 0
+        while n > 1 and n % 2 == 0:
+            n //= 2
+            levels += 1
+        return levels
+
+    if npex > 0 and nx % npex == 0:
+        nx_sub = nx // npex
+    else:
+        nx_sub = nx
+    return 1 + min(_pow2(nx_sub), _pow2(ny), _pow2(nz))

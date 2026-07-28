@@ -16,10 +16,22 @@ forward_model:
   # needs uniform subdomains, so ncpu must divide nx (=domain.nx grid points).
   # For barcelona nx=225 the valid choices are {1,3,5,9,15,25,45,75,225};
   # 15 is the largest that fits a 16-core box.
-  ncpu: 8
+  ncpu: 5
   save_only_last_timestep: false
   verbose: false
-  boundary_condition: periodic #inflow_outflow
+  boundary_condition: inflow_outflow # periodic #
+  # Per-backend SGS knob. This is the DEFAULT: a `sgs_constant` in the params
+  # sampler (conf/params/*.yaml) overrides it, so ESMDA can still estimate it.
+  #
+  # Deliberately null for PALM. PALM has no Smagorinsky-style multiplier (c_0 is
+  # hardcoded), so `sgs_constant` maps to `km_constant` — a CONSTANT EDDY
+  # DIFFUSIVITY in m^2/s, not a dimensionless constant like uDALES/pylbm take.
+  # Setting it is a regime switch: it replaces PALM's prognostic SGS-TKE closure
+  # with constant-Km and forces constant_flux_layer=.false. (PAC0149), disabling
+  # the wall model. The dimensionless ~0.24 used by the other backends is far too
+  # little dissipation as m^2/s and diverges. null keeps PALM's own closure.
+  # Only set this to a PALM-appropriate m^2/s value chosen for PALM.
+  sgs_constant: null
   # Periodic runs are driven by PALM's nudging scheme (NUDGING_DATA + an inert
   # LSF_DATA), relaxing the domain toward the inflow_angle/velocity_magnitude
   # wind — the counterpart of pyudales's periodic nudging path. See
@@ -27,10 +39,46 @@ forward_model:
   nudging_config:
     enabled: true          # false -> today's un-driven periodic staging
     tnudge: 15.0           # s; relaxation timescale, matches pyudales
-    nnudge_meters: 16.0     # no nudging below this height (via huge tnudge)
+    nnudge_meters: 4.0     # no nudging below this height (via huge tnudge)
     profile_config:
       type: power_law
       alpha: 0.25
+  # Switchable inlet turbulence. For PALM this is the built-in random
+  # inflow-disturbance machinery (create_disturbances + dt_disturb), the only
+  # inlet-turbulence generator that is independently toggleable on our staging:
+  # turbulence *recycling* needs a cyclic_fill/restart precursor run (TUI0006)
+  # and the synthetic turbulence generator needs an STG_PROFILES file and is
+  # mutually exclusive with turbulent_inflow (STG0009). Requires
+  # boundary_condition: inflow_outflow — staging raises otherwise.
+  # NOTE: `enabled: false` does NOT disable PALM's `turbulent_inflow` module.
+  # On the time-varying-params path that module is the *reader* for the
+  # `_dynamic` driver carrying inflow_angle/velocity_magnitude; switching it off
+  # would silently disconnect ESMDA from the solver. See docs/pypalm.md §8.
+  inlet_turbulence:
+    # Two INDEPENDENT switches — PALM has two distinct disturbance mechanisms:
+    #
+    #   initial_seed  one-off random kick on u/v at cold-start init
+    #                 (init_3d_model.f90:1488). This is what breaks symmetry so
+    #                 turbulence can develop from PALM's smooth analytic initial
+    #                 profile. ON by default; set false and transition has to be
+    #                 tripped by the topography alone, so it develops later.
+    #   enabled       perturbations RE-INJECTED near the inflow for the whole
+    #                 run (time_integration.f90:966-989), paced by dt_disturb.
+    #
+    # Both are gated by &runtime_parameters create_disturbances, so previously
+    # `enabled: false` still left the t=0 kick on. `initial_seed: false` with
+    # `enabled: true` is expressed by keeping create_disturbances=.true. and
+    # setting disturbance_energy_limit=0.0, which suppresses only the kick — so
+    # all four combinations are usable. A warm start always suppresses the kick
+    # regardless, so as not to shock the injected field.
+    enabled: false
+    initial_seed: false
+    dt_disturb: 5.0        # s; interval between perturbation injections
+    amplitude: 0.25        # m/s; PALM's disturbance_amplitude
+    begin: null            # inflow_disturbance_begin, grid pts; null -> PALM auto (min(10, nx/2))
+    end: null              # inflow_disturbance_end, grid pts; null -> PALM auto (min(100, 3nx/4))
+    level_b: null          # disturbance_level_b, m; null -> PALM auto (zu(3))
+    level_t: null          # disturbance_level_t, m; null -> PALM auto (zu(nzt/3))
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

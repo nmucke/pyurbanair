@@ -45,8 +45,8 @@ defaults:
   - esmda/localization: none
   - esmda/state_reduction: none
   - esmda/smoother: dynamic
-  - model@truth_model: pyudales
-  - model@assim_model: pyudales
+  - model@truth_model: pypalm
+  - model@assim_model: pypalm
   - params@truth_params: dynamic_truth
   - params@prior_params: dynamic
 
@@ -67,7 +67,7 @@ paths:
 # onto the window end. The dynamic smoother's `num_time_points` is derived from
 # the resulting knot count by run_esmda.py.
 time:
-  seconds_per_knot: 30.0
+  seconds_per_knot: 60.0
 
 # --- Which parameters ESMDA estimates -------------------------------------------
 # Select which of the parameters defined in the params sampler configs
@@ -89,7 +89,6 @@ time:
 params_to_estimate:
   - inflow_angle
   - velocity_magnitude
-  - pressure_gradient_magnitude
 
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
@@ -111,7 +110,7 @@ ensemble:
 esmda:
   num_steps: 3
   alpha: ${.num_steps}
-  num_assimilation_windows: 4
+  num_assimilation_windows: 2
   seed: 42
   obs_error_std: 0.25
   # Defaults; normally set by the esmda/localization and esmda/state_reduction

@@ -57,6 +57,142 @@ PRECOMPUTED_GEOM_PATTERNS = (
     "facet_sections_*.txt",
 )
 
+# Compiled-in &NAMSUBGRID closure switches from u-dales/src/modsubgriddata.f90.
+# Used when the key is absent from a case's namoptions, where the Fortran default
+# — not False — is what the solver actually runs with.
+UDALES_DEFAULT_LSMAGORINSKY = False
+UDALES_DEFAULT_LVREMAN = True
+
+# SGS closure name -> the mutually exclusive &NAMSUBGRID switch set it implies.
+# These are exactly the three closure switches uDALES declares in the NAMSUBGRID
+# namelist (u-dales/src/modsubgrid.f90); writing any *undeclared* key makes the
+# namelist read abort with `stop 1`, so this map must not grow invented keys.
+# All three are always written so the result never depends on what the case
+# template happened to contain.
+CLOSURE_SWITCHES: dict[str, dict[str, bool]] = {
+    "smagorinsky": {"lsmagorinsky": True, "lvreman": False, "loneeqn": False},
+    "vreman": {"lsmagorinsky": False, "lvreman": True, "loneeqn": False},
+    "oneeqn": {"lsmagorinsky": False, "lvreman": False, "loneeqn": True},
+}
+
+# ``oneeqn`` is a real uDALES closure but is not usable through this wrapper; the
+# name is kept in CLOSURE_SWITCHES so the rejection can explain *why* rather than
+# reading as a typo.
+UNSUPPORTED_CLOSURES = {
+    "oneeqn": (
+        "the one-equation closure carries prognostic SGS TKE, initialised (and "
+        "used for the inflow ghost cells) from the 'tke' column of prof.inp. The "
+        "wrapper's preprocessing writes that column as zero "
+        "(python_udgeom/preprocessing.py: obj.tke = 0), so uDALES clamps it to "
+        "e12min=5e-5 and the run starts from a degenerate SGS field. Its "
+        "constants (cm/ce1/ce2) are also not in the NAMSUBGRID namelist, so "
+        "sgs_constant would have no target"
+    ),
+}
+
+
+def validate_closure(closure: Optional[str]) -> None:
+    """Reject SGS closure names this wrapper cannot honour.
+
+    ``None`` is always valid — it means "keep the case template's switches".
+    """
+    if closure is None:
+        return
+    if closure not in CLOSURE_SWITCHES:
+        raise ValueError(
+            f"closure must be one of {sorted(CLOSURE_SWITCHES)} or None "
+            f"(keep the case template's switches), got '{closure}'"
+        )
+    if closure in UNSUPPORTED_CLOSURES:
+        raise ValueError(
+            f"closure='{closure}' is not supported by pyudales: "
+            f"{UNSUPPORTED_CLOSURES[closure]}. Use 'smagorinsky' or 'vreman'."
+        )
+
+
+# Keys the ``inlet_turbulence`` block may carry. The schema is shared across the
+# three backends; uDALES contributes no tunables of its own because the feature
+# it would tune is not reachable in this solver version (see below).
+INLET_TURBULENCE_KEYS = frozenset({"enabled"})
+
+# uDALES v2.2.0 ships the Lund (1998) recycling/rescaling turbulent inlet
+# generator (``iinletgen=1``) but never wires it up. Three independent facts,
+# each on its own sufficient to make the switch unreachable:
+#
+#   1. ``iinletgen`` is not a member of ANY namelist. The namelist declarations
+#      live in ``u-dales/src/modstartup.f90:108-173``; ``&INLET`` (lines 141-144)
+#      declares only Uinf, Vinf, di, dti, inletav, linletRA, lstoreplane,
+#      lreadminl, lfixinlet, lfixutauin, lwallfunc. It is never assigned in the
+#      source either, so it keeps its ``modglobal.f90:167`` default of 0 and is
+#      not even MPI_BCAST to the other ranks. Writing the key aborts the run at
+#      startup: ``ERROR: Problem in namoptions INLET / iostat error: 5010``.
+#   2. ``call initinlet`` is commented out (``program.f90:77`` and
+#      ``modstartup.f90:627``), so the generator's arrays are never allocated.
+#   3. ``inletgen``/``inletgennotemp`` (``modinlet.f90:204`` and ``:952``) have no
+#      call sites anywhere in the source, and ``modboundary.f90`` never reads the
+#      generator's output array ``u0inletbc`` — the west inlet face is set purely
+#      by ``select case(BCxm)`` (``modboundary.f90:255-262``, ``1204-1262``).
+#
+# So there is no wrapper-level write that could turn this on: it would need a
+# Fortran port (namelist entry + BCAST, re-enabling initinlet, adding the missing
+# inletgen call site, and a new BCxm case consuming u0inletbc). Enabling the knob
+# therefore raises rather than silently writing a key that crashes the solver.
+UDALES_INLET_GENERATOR_UNAVAILABLE = (
+    "uDALES v2.2.0 does not expose the Lund (1998) turbulent inlet generator. "
+    "`iinletgen` is not declared in any namelist (u-dales/src/modstartup.f90:"
+    "108-173; &INLET at :141-144 declares only Uinf/Vinf/di/dti/inletav/"
+    "linletRA/lstoreplane/lreadminl/lfixinlet/lfixutauin/lwallfunc), so writing "
+    "it aborts the run with 'ERROR: Problem in namoptions INLET'. The generator "
+    "is dead code besides: `call initinlet` is commented out (program.f90:77, "
+    "modstartup.f90:627), `inletgen` (modinlet.f90:204) has no call site, and "
+    "modboundary.f90 never reads its output `u0inletbc` — the inlet face comes "
+    "only from `select case(BCxm)`. Turbulent inflow in this uDALES version "
+    "requires the precursor/driver path (BCxm=3, &DRIVER idriver), which this "
+    "wrapper does not implement. Leave inlet_turbulence.enabled=false."
+)
+
+
+def validate_inlet_turbulence(
+    inlet_turbulence: Optional[dict],
+    boundary_condition: str,
+) -> None:
+    """Validate the ``inlet_turbulence`` block.
+
+    Absent, empty, or ``enabled: false`` is a strict no-op — nothing is written
+    to namoptions, so a default run stays byte-identical.
+
+    ``enabled: true`` always raises: under ``periodic`` boundary conditions there
+    is no inlet face for a turbulent inlet to act on, and under
+    ``inflow_outflow`` the generator itself is unreachable in this uDALES version
+    (see :data:`UDALES_INLET_GENERATOR_UNAVAILABLE`).
+    """
+    if not inlet_turbulence:
+        return
+
+    unknown = set(inlet_turbulence) - INLET_TURBULENCE_KEYS
+    if unknown:
+        logger.warning(
+            "Ignoring unknown inlet_turbulence keys: %s (supported: %s)",
+            ", ".join(sorted(unknown)),
+            ", ".join(sorted(INLET_TURBULENCE_KEYS)),
+        )
+
+    if not inlet_turbulence.get("enabled", False):
+        return
+
+    if boundary_condition == "periodic":
+        raise ValueError(
+            "inlet_turbulence.enabled=true requires "
+            "boundary_condition='inflow_outflow': under 'periodic' the x "
+            "boundaries wrap (BCxm=1) so there is no inlet face for a turbulent "
+            "inlet to be imposed on."
+        )
+
+    raise ValueError(
+        f"inlet_turbulence.enabled=true is not supported by pyudales: "
+        f"{UDALES_INLET_GENERATOR_UNAVAILABLE}"
+    )
+
 
 def save_precomputed_geometry(
     experiment_dir: pathlib.Path,
@@ -111,8 +247,11 @@ def save_precomputed_geometry(
     }
     with open(dest_dir / "geom_meta.json", "w") as f:
         json.dump(meta, f, indent=2)
-    logger.info("Saved precomputed geometry bundle (%d files) to %s", len(copied), dest_dir)
+    logger.info(
+        "Saved precomputed geometry bundle (%d files) to %s", len(copied), dest_dir
+    )
     return dest_dir
+
 
 DEFAULT_TEMP_DIR = lambda cwd: pathlib.Path(f"{cwd}/.temp")
 
@@ -204,10 +343,13 @@ class ForwardModel(BaseForwardModel):
         output_dir: Optional[pathlib.Path] = None,
         random_initial_condition_args: Optional[dict] = None,
         boundary_condition: str = "periodic",
+        closure: Optional[str] = None,
+        sgs_constant: Optional[float] = None,
         spinup_time: float = 0.0,
         nudging_config: Optional[dict] = None,
         precomputed_geom_dir: Optional[str] = None,
         instability_check: Optional[dict] = None,
+        inlet_turbulence: Optional[dict] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -232,6 +374,14 @@ class ForwardModel(BaseForwardModel):
                 - inflow_angle: The angle of the inflow wind speed in degrees (measured from positive x-axis).
                 - velocity_magnitude: The magnitude of the inflow wind speed (m/s).
                 - pressure_gradient_magnitude: The magnitude of the inflow pressure gradient (Pa/m).
+            closure: SGS closure to force in ``&NAMSUBGRID`` — ``"smagorinsky"``
+                (constant ``cs``) or ``"vreman"`` (constant ``c_vreman``). The
+                chosen switch is set ``.true.`` and the other two ``.false.``, so
+                the closure no longer depends on the case template.
+                ``sgs_constant`` follows automatically (see
+                :meth:`_apply_sgs_setting`). ``"oneeqn"`` is recognised but
+                rejected — see :data:`UNSUPPORTED_CLOSURES`. Default ``None``
+                leaves the template's switches untouched.
             results_dir: The directory where the results will be saved.
             verbose: If True, print output from Fortran code execution. If False, suppress all output.
             temp_dir: The base temp directory (defaults to {cwd}/.temp).
@@ -260,6 +410,14 @@ class ForwardModel(BaseForwardModel):
                 (default 20), ``poll_interval_s`` (default 2.0). When the
                 timestep collapses the run is killed early and reported as a
                 failure, so the ensemble resamples it from a successful donor.
+            inlet_turbulence: Optional dict selecting a turbulent inlet
+                generator, sharing the ``{"enabled": bool, ...}`` schema used by
+                the other backends. ``None``/``{}``/``{"enabled": False}`` (the
+                default) is a strict no-op — nothing is written to namoptions.
+                ``{"enabled": True}`` raises: uDALES v2.2.0 does not expose its
+                Lund (1998) generator (see
+                :data:`UDALES_INLET_GENERATOR_UNAVAILABLE`), and under
+                ``boundary_condition='periodic'`` there is no inlet face at all.
         """
         super().__init__(results_dir=results_dir)
 
@@ -326,6 +484,25 @@ class ForwardModel(BaseForwardModel):
             )
         self.boundary_condition = boundary_condition
         self._apply_boundary_condition()
+
+        # Turbulent inlet generator. Validation only: the disabled path writes
+        # nothing (byte-identical namoptions) and the enabled path cannot be
+        # honoured by this uDALES version, so it fails loudly here rather than
+        # writing a namelist key that aborts the solver at startup.
+        validate_inlet_turbulence(inlet_turbulence, boundary_condition)
+        self.inlet_turbulence = dict(inlet_turbulence or {})
+
+        # SGS closure. ``None`` keeps whatever the case template sets, so runs
+        # that don't ask for a closure stay byte-identical.
+        validate_closure(closure)
+        self.closure = closure
+        self._apply_closure()
+
+        # Per-backend default for the SGS constant, overridden by a `sgs_constant`
+        # in the params Dataset when one is supplied. None leaves the case
+        # template's value alone. Applied in `_apply_sgs_setting`, not here, so it
+        # follows the same per-call path as an estimated value.
+        self.sgs_constant = float(sgs_constant) if sgs_constant is not None else None
 
         # Optionally reuse precomputed IBM geometry instead of re-running the
         # (expensive) STL->IBM preprocessing. Runs after the domain overrides so
@@ -502,6 +679,34 @@ class ForwardModel(BaseForwardModel):
             namoptions.set_value("BC", "BCtopm", 3)
         namoptions.write()
 
+    def _apply_closure(self) -> None:
+        """Force the SGS closure by writing the &NAMSUBGRID switches exclusively.
+
+        No-op when ``closure`` is None — the case template's own switches stand,
+        keeping default runs byte-identical. Otherwise all three closure switches
+        are written (chosen one ``.true.``, the rest ``.false.``) so the active
+        closure is fully determined by the config and not by whatever the
+        template shipped. ``_apply_sgs_setting`` then reads these back and routes
+        ``sgs_constant`` to the matching constant (``cs`` / ``c_vreman``).
+        """
+        if self.closure is None:
+            return
+        namoptions_path = (
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
+        )
+        namoptions = NamoptionsFile(namoptions_path)
+        switches = CLOSURE_SWITCHES[self.closure]
+        for key, enabled in switches.items():
+            namoptions.set_value("NAMSUBGRID", key, ".true." if enabled else ".false.")
+        namoptions.write()
+        logger.info(
+            "Set uDALES SGS closure to '%s' (&NAMSUBGRID %s)",
+            self.closure,
+            ", ".join(
+                f"{k}={'.true.' if v else '.false.'}" for k, v in switches.items()
+            ),
+        )
+
     def set_results_dir(self, results_dir: pathlib.Path | None) -> None:
         """Change results directory, updating both base and dirs dataclass."""
         super().set_results_dir(results_dir)
@@ -518,7 +723,8 @@ class ForwardModel(BaseForwardModel):
         # Model-error knobs apply identically to both inflow branches, so resolve
         # them here, outside the branch (docs/esmda_model_error_parameters.md §6.2).
         # When ``vertical_inflow_exponent`` (α) is estimated it overrides the
-        # construction-time shear; ``sgs_constant`` is written to &NAMSUBGRID cs.
+        # construction-time shear; ``sgs_constant`` is written to the &NAMSUBGRID
+        # key of whichever closure is active (``cs`` or ``c_vreman``).
         # Each is a no-op when its parameter is absent, keeping default runs
         # byte-identical.
         nudging_config = self._resolve_nudging_config(self.params)
@@ -575,22 +781,72 @@ class ForwardModel(BaseForwardModel):
         return nudging_config
 
     def _apply_sgs_setting(self, params: xarray.Dataset) -> None:
-        """Write the per-member sub-grid-scale constant to ``&NAMSUBGRID cs``.
+        """Write the per-member sub-grid-scale constant to the *active* closure's key.
+
+        uDALES exposes one constant per SGS closure and reads only the one
+        belonging to the closure that is switched on (``u-dales/src/modsubgrid.f90``,
+        subroutine ``closure``):
+
+        - Smagorinsky (``lsmagorinsky=.true.``) -> ``&NAMSUBGRID cs``, which seeds
+          ``csz`` and hence the mixing length.
+        - Vreman (``lvreman=.true.``) -> ``&NAMSUBGRID c_vreman``, the prefactor in
+          ``ekm = c_vreman*sqrt(max(bb/aa, 0.))``.
+
+        Writing ``cs`` under Vreman is completely inert, so the target key is
+        chosen from the member's own switches. Absent switches fall back to the
+        Fortran defaults in ``modsubgriddata.f90`` (``lsmagorinsky=.false.``,
+        ``lvreman=.true.``) — an absent key means the compiled-in default applies,
+        not False.
 
         No-op when ``sgs_constant`` is absent, preserving the template value
-        (docs/esmda_model_error_parameters.md §2.2). Takes effect only under the
-        Smagorinsky closure (``lsmagorinsky=.true.``).
+        (docs/esmda_model_error_parameters.md §2.2).
         """
+        # Precedence: an estimated/sampled `sgs_constant` in ``params`` wins; the
+        # model config's ``sgs_constant`` is the per-backend fallback; absent in
+        # both leaves the case template's value untouched.
         sgs = get_param_value(params, "sgs_constant")
+        source = "params"
+        if sgs is None:
+            sgs = self.sgs_constant
+            source = "model config"
         if sgs is None:
             return
         namoptions_path = (
             self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}"
         )
         namoptions = NamoptionsFile(namoptions_path)
-        namoptions.set_value("NAMSUBGRID", "cs", f"{float(sgs):.4f}")
+
+        lsmagorinsky = namoptions.get_value_as_bool("NAMSUBGRID", "lsmagorinsky")
+        if lsmagorinsky is None:
+            lsmagorinsky = UDALES_DEFAULT_LSMAGORINSKY
+        lvreman = namoptions.get_value_as_bool("NAMSUBGRID", "lvreman")
+        if lvreman is None:
+            lvreman = UDALES_DEFAULT_LVREMAN
+
+        # ``closure`` branches ``if(lsmagorinsky) ... elseif(lvreman) ...
+        # elseif(loneeqn)``, so Smagorinsky wins if both switches are true.
+        if lsmagorinsky:
+            key, closure_name = "cs", "Smagorinsky"
+        elif lvreman:
+            key, closure_name = "c_vreman", "Vreman"
+        else:
+            logger.warning(
+                "sgs_constant=%.4f ignored: neither lsmagorinsky nor lvreman is "
+                "active in %s, so no eddy-viscosity constant is read by uDALES.",
+                float(sgs),
+                namoptions_path,
+            )
+            return
+
+        namoptions.set_value("NAMSUBGRID", key, f"{float(sgs):.4f}")
         namoptions.write()
-        logger.info("Set uDALES Smagorinsky constant (sgs_constant) to %.4f", float(sgs))
+        logger.info(
+            "Set uDALES %s constant &NAMSUBGRID %s = %.4f (sgs_constant from %s)",
+            closure_name,
+            key,
+            float(sgs),
+            source,
+        )
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
         """Save simulation results to disk."""
@@ -662,7 +918,11 @@ class ForwardModel(BaseForwardModel):
         for key in ("itot", "jtot", "ktot"):
             expected = grid.get(key)
             actual = namoptions.get_value_as_int("DOMAIN", key)
-            if expected is not None and actual is not None and int(expected) != int(actual):
+            if (
+                expected is not None
+                and actual is not None
+                and int(expected) != int(actual)
+            ):
                 mismatches.append(f"{key}: bundle={expected} vs current={actual}")
         if mismatches:
             raise ValueError(
@@ -879,8 +1139,10 @@ class ForwardModel(BaseForwardModel):
                         compat="override",
                     )
                 )
-        combined = parts[0] if len(parts) == 1 else xarray.merge(
-            parts, compat="override", combine_attrs="override"
+        combined = (
+            parts[0]
+            if len(parts) == 1
+            else xarray.merge(parts, compat="override", combine_attrs="override")
         )
         return combined
 
@@ -997,9 +1259,7 @@ class ForwardModel(BaseForwardModel):
             self.dirs,
             warmstart_file=template_file,
         )
-        dest = (
-            self.dirs.output_dir / self.dirs.experiment_name / template_file.name
-        )
+        dest = self.dirs.output_dir / self.dirs.experiment_name / template_file.name
         if template_file.resolve() != dest.resolve():
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(template_file, dest)
