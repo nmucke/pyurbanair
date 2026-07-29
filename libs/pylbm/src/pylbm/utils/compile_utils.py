@@ -7,12 +7,101 @@ import os
 import pathlib
 import subprocess
 import sys
-from typing import Optional
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
+from .build_tree_utils import compute_build_signature, write_build_stamp
 from .dir_utils import DirectoryPaths
 from .makefile_utils import Makefile
+
+
+def find_nvfortran(build_env_path: pathlib.Path) -> Optional[pathlib.Path]:
+    """
+    Locate the NVHPC ``nvfortran`` this build would use, or None.
+
+    Only the NVHPC installation the pixi cuda environment bootstraps under
+    ``<env>/.nvhpc`` counts: that is the one the CUDA branch of ``compile_lbm``
+    puts on PATH, so anything else on PATH would not actually be used.
+    """
+    candidates = sorted(
+        (build_env_path / ".nvhpc").glob("Linux_x86_64/*/compilers/bin/nvfortran")
+    )
+    return candidates[-1] if candidates else None
+
+
+_CUDA_AUTO_TOKENS = ("auto", "")
+_CUDA_TRUE_TOKENS = ("true", "1", "yes", "on")
+_CUDA_FALSE_TOKENS = ("false", "0", "no", "off")
+
+
+def validate_cuda_setting(requested: Union[bool, str]) -> Union[bool, str]:
+    """
+    Reject an unusable ``cuda`` setting at construction instead of at compile time.
+
+    Args:
+        requested: The configured value.
+
+    Returns:
+        ``requested`` unchanged.
+
+    Raises:
+        ValueError: If it is a string other than auto/true/false.
+    """
+    if isinstance(requested, str):
+        token = requested.strip().lower()
+        if token not in (
+            *_CUDA_AUTO_TOKENS,
+            *_CUDA_TRUE_TOKENS,
+            *_CUDA_FALSE_TOKENS,
+        ):
+            raise ValueError(
+                f"cuda must be true, false, or 'auto'; got {requested!r}. "
+                "'auto' uses CUDA when NVHPC is installed and gfortran otherwise."
+            )
+    return requested
+
+
+def resolve_cuda(
+    requested: Union[bool, str],
+    build_env_path: pathlib.Path,
+) -> bool:
+    """
+    Turn the configured ``cuda`` setting into a concrete build mode.
+
+    ``"auto"`` (the shipped default) builds with CUDA where NVHPC is actually
+    installed and falls back to gfortran everywhere else, so the same committed
+    config runs on a GPU box and on a laptop. ``True`` still *demands* CUDA and
+    lets ``compile_lbm`` raise when it is missing, which is what a GPU batch job
+    wants -- silently dropping to a ~100x slower CPU build there would be worse
+    than failing.
+
+    Args:
+        requested: ``True``, ``False``, or ``"auto"`` (case-insensitive).
+        build_env_path: Environment prefix searched for NVHPC.
+
+    Returns:
+        True to build with CUDA/NVFORTRAN, False to build with gfortran.
+
+    Raises:
+        ValueError: If ``requested`` is a string other than auto/true/false.
+    """
+    validate_cuda_setting(requested)
+    if isinstance(requested, str):
+        token = requested.strip().lower()
+        if token in _CUDA_AUTO_TOKENS:
+            nvfortran = find_nvfortran(build_env_path)
+            if nvfortran is not None:
+                logger.info("cuda=auto: building with CUDA (found %s)", nvfortran)
+                return True
+            logger.info(
+                "cuda=auto: no NVHPC toolchain under %s, building with gfortran "
+                "(CPU). Set cuda=true to require a CUDA build instead.",
+                build_env_path / ".nvhpc",
+            )
+            return False
+        return token in _CUDA_TRUE_TOKENS
+    return bool(requested)
 
 
 def _resolve_build_environment(
@@ -180,7 +269,7 @@ def compile_lbm(
     dirs: DirectoryPaths,
     verbose: bool = True,
     enable_netcdf: bool = True,
-    enable_cuda: bool = False,
+    enable_cuda: Union[bool, str] = False,
 ) -> None:
     """
     Compile the LBM program.
@@ -207,8 +296,18 @@ def compile_lbm(
     if not dirs.lbm_src_path.exists():
         raise FileNotFoundError(f"LBM src directory not found at {dirs.lbm_src_path}")
 
+    # Resolve "auto" before anything else: the rest of the build (environment
+    # selection, netcdf-fortran flavour, make flags) all branch on the concrete mode.
+    #
+    # This probes the *active* env, while _resolve_build_environment below may pick
+    # a different one. They agree today -- that function returns the active env
+    # unchanged whenever CUDA is on, and only diverges on the non-CUDA netcdf.mod
+    # fallback, where the NVHPC probe is irrelevant. Keep that invariant in mind if
+    # its selection logic grows: the two must not disagree about where NVHPC lives.
+    cuda = resolve_cuda(enable_cuda, pathlib.Path(dirs.pixi_env_path))
+
     build_env_path = _resolve_build_environment(
-        dirs=dirs, enable_netcdf=enable_netcdf, enable_cuda=enable_cuda
+        dirs=dirs, enable_netcdf=enable_netcdf, enable_cuda=cuda
     )
 
     # Set up environment variables
@@ -218,19 +317,18 @@ def compile_lbm(
         env["PIXI_ENVIRONMENT"] = str(build_env_path)
     env_lib_dir = build_env_path / "lib"
 
-    if enable_cuda:
+    if cuda:
         nvhpc_install_base = build_env_path / ".nvhpc"
-        nvfortran_candidates = sorted(
-            nvhpc_install_base.glob("Linux_x86_64/*/compilers/bin/nvfortran")
-        )
-        if not nvfortran_candidates:
+        nvfortran = find_nvfortran(build_env_path)
+        if nvfortran is None:
             raise RuntimeError(
                 "CUDA build requested but NVFORTRAN was not found in "
                 f"{nvhpc_install_base}. Activate the cuda Pixi environment first "
-                "so NVHPC is installed."
+                "so NVHPC is installed, or set cuda=auto to fall back to a "
+                "gfortran (CPU) build on hosts without NVHPC."
             )
 
-        nvfortran_bin_dir = nvfortran_candidates[-1].parent
+        nvfortran_bin_dir = nvfortran.parent
         nvhpc_root = nvfortran_bin_dir.parents[1]
         path_parts = [str(nvfortran_bin_dir)]
 
@@ -264,7 +362,7 @@ def compile_lbm(
         )
 
     netcdf_root = build_env_path
-    if enable_cuda and enable_netcdf:
+    if cuda and enable_netcdf:
         netcdf_root = _ensure_cuda_netcdf_fortran(
             dirs=dirs,
             build_env_path=build_env_path,
@@ -291,7 +389,7 @@ def compile_lbm(
         # Retarget the GPU build to the host's compute capability. The upstream
         # makefile hardcodes a single arch (e.g. cc120) which produces a binary
         # whose device kernels are missing at run time on a different GPU.
-        if enable_cuda:
+        if cuda:
             cc = _detect_gpu_compute_capability()
             if cc is not None:
                 if makefile.set_gpu_arch(cc) and verbose:
@@ -333,24 +431,72 @@ def compile_lbm(
         bindir = dirs.lbm_src_path.parent / "bin"
         make_args = [
             "make",
-            "-B",
             f"HOME={build_env_path}",
             f"BINDIR={bindir}",
             f"LIBDIR={' '.join(link_dirs)}",
         ]
-        if enable_cuda:
+        if cuda:
             make_args.append("CUDA=1")
         else:
             make_args.append("GFORTRAN=1")
         if enable_netcdf:
             make_args.extend(["NETCDF=1", f"NCFDIR={netcdf_root}"])
-            if enable_cuda:
+            if cuda:
                 # netcdf-fortran is static in CUDA mode; it depends on libnetcdf.
                 # Keep order so dependent C library appears after netcdff.
                 make_args.append("LIBS=-lfftw3f -lnetcdff -lnetcdf")
 
+        # Regenerate source.files / depends.file first, on their own.
+        #
+        # The makefile derives both by scanning src/ (`ls *.F90` and a `use`-statement
+        # crawl in bin/mkdepend.pl), and its depends.file rule deliberately *fails*
+        # whenever the result changed, with ">>> Dependencies updated - please rerun
+        # make". Since this wrapper rewrites m_solid_objects_init.F90's use-statements
+        # per experiment, that fires on the first build in any fresh tree and aborts
+        # the whole compile. Priming them in a separate throwaway invocation absorbs
+        # the intended failure so the real build below starts with them up to date.
+        prime = subprocess.run(
+            [*make_args, "depends.file"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if prime.returncode != 0:
+            prime_output = f"{prime.stdout or ''}{prime.stderr or ''}"
+            # Only the rule's own "I regenerated them, run me again" failure is
+            # expected. Anything else (no perl, unreadable mkdepend.pl, a broken
+            # sed) would otherwise be swallowed here and resurface as a confusing
+            # error from the real build.
+            expected = any(
+                marker in prime_output
+                for marker in (
+                    "Dependencies updated",
+                    "First-time dependency generation",
+                )
+            )
+            if expected:
+                logger.debug(
+                    "Dependency priming regenerated source.files/depends.file "
+                    "(exit %s, as designed).",
+                    prime.returncode,
+                )
+            else:
+                logger.warning(
+                    "Dependency priming pass failed unexpectedly (exit %s). The "
+                    "build below may fail with a confusing error. Output:\n%s",
+                    prime.returncode,
+                    prime_output.strip()[-2000:],
+                )
+
+        # -B (unconditional full rebuild) is deliberate, not leftover. The
+        # dependency graph is regenerated from a `use`-statement crawl that does
+        # not model Fortran .mod staleness, and `mod_dimensions.F90` is a
+        # compile-time input to essentially every object, so an incremental build
+        # here risks linking objects from two different grids -- exactly the silent
+        # wrong-output failure this module exists to prevent. Correctness over
+        # build time; drop it only with real dependency tracking in the makefile.
         result = subprocess.run(  # type: ignore[call-overload]
-            make_args,
+            [*make_args, "-B"],
             env=env,
             stdout=stdout,
             stderr=stderr,
@@ -368,6 +514,20 @@ def compile_lbm(
                 f"LBM compilation failed with exit code {result.returncode}."
                 f"{detail}"
             )
+
+        # Record what this binary was built from, so a later run with
+        # compile=false can tell whether it still matches the current experiment.
+        # mod_dimensions.F90 is compiled in, so a binary from another grid does
+        # not fail -- it silently produces wrong-shaped or all-NaN output.
+        write_build_stamp(
+            build_root=dirs.lbm_src_path.parent,
+            signature=compute_build_signature(
+                src_path=dirs.lbm_src_path,
+                experiment_name=dirs.experiment_name,
+                enable_cuda=cuda,
+                enable_netcdf=enable_netcdf,
+            ),
+        )
 
         if verbose:
             logger.info("LBM compilation completed successfully")

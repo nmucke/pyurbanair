@@ -26,6 +26,8 @@ from .utils import (
     create_infile,
     validate_inlet_turbulence,
 )
+from .utils.build_tree_utils import compute_build_signature, read_build_stamp
+from .utils.compile_utils import validate_cuda_setting
 from .utils.environment_utils import identify_environment
 from .utils.infile_utils import _augment_runtime_library_paths
 from .utils.mod_dimensions_utils import set_experiment
@@ -66,7 +68,7 @@ class ForwardModel(BaseForwardModel):
         temp_dir: Optional[pathlib.Path] = None,
         verbose: bool = True,
         experiment_name: str = "runcase",
-        cuda: bool = False,
+        cuda: Union[bool, str] = "auto",
         enable_netcdf: Optional[bool] = None,
         boundary_condition: str = "periodic",
         sgs_constant: Optional[float] = None,
@@ -99,7 +101,9 @@ class ForwardModel(BaseForwardModel):
 
         # Verbosity
         self.verbose = verbose
-        self.cuda = cuda
+        # "auto" -> CUDA where NVHPC exists, gfortran otherwise (resolved in
+        # compile_lbm). Validated here so a typo fails before voxelisation.
+        self.cuda = validate_cuda_setting(cuda)
         # Keep NETCDF enabled by default for both CPU and CUDA paths.
         self.enable_netcdf = True if enable_netcdf is None else enable_netcdf
         self.stdout = None if self.verbose else subprocess.DEVNULL
@@ -189,6 +193,62 @@ class ForwardModel(BaseForwardModel):
             raise ValueError("C_u in infile.in must be > 0.")
         return c_l / c_u
 
+    def _verify_prebuilt_binary(self) -> None:
+        """
+        Refuse to reuse a binary that was not built from the current sources.
+
+        The solver bakes ``mod_dimensions.F90`` (the grid) and the geometry case in
+        ``m_solid_objects_init.F90`` in at compile time, so a binary left over from
+        a different experiment or grid does not fail loudly -- it produces
+        wrong-shaped or all-NaN output. ``compile()`` writes a stamp of those
+        sources after every successful build; with ``compile=false`` this compares
+        the stamp against what would be compiled now.
+
+        Raises:
+            RuntimeError: If the binary is missing, unstamped, or stale.
+        """
+        build_root = self.dirs.lbm_src_path.parent
+        remedy = "Rerun with model.compile=true to rebuild (a full rebuild)."
+
+        if not self.dirs.executable_path.exists():
+            raise RuntimeError(
+                f"model.compile=false but no LBM binary exists at "
+                f"{self.dirs.executable_path}. {remedy}"
+            )
+
+        expected = compute_build_signature(
+            src_path=self.dirs.lbm_src_path,
+            experiment_name=self.dirs.experiment_name,
+            enable_cuda=self.cuda,
+            enable_netcdf=self.enable_netcdf,
+        )
+        recorded = read_build_stamp(build_root)
+        if recorded is None:
+            raise RuntimeError(
+                f"model.compile=false but the binary at {self.dirs.executable_path} "
+                "carries no build stamp, so it cannot be checked against the "
+                f"current grid and geometry. {remedy}"
+            )
+
+        # 'cuda' is excluded: it does not change the solver's numerics or array
+        # shapes, and cuda=auto legitimately resolves differently per host.
+        stale = [
+            key
+            for key in ("experiment", "netcdf", "sources")
+            if recorded.get(key) != expected[key]
+        ]
+        if stale:
+            raise RuntimeError(
+                f"The LBM binary at {self.dirs.executable_path} is stale: "
+                f"{', '.join(stale)} changed since it was built. Running it would "
+                f"silently produce output for the wrong grid or geometry. {remedy}"
+            )
+
+        logger.info(
+            "Reusing LBM binary at %s (build stamp matches current sources)",
+            self.dirs.executable_path,
+        )
+
     def compile(self, compile: bool = True) -> None:
         """Compile the LBM program."""
         # Compile program
@@ -205,6 +265,8 @@ class ForwardModel(BaseForwardModel):
             for pattern in ("seed_*.dat", "seed_*.orig"):
                 for seed_file in self.dirs.experiment_dir.glob(pattern):
                     seed_file.unlink(missing_ok=True)
+        else:
+            self._verify_prebuilt_binary()
 
         # Create infile.in by running the executable (only if it doesn't exist)
         if not self.dirs.infile_path.exists():
