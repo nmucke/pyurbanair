@@ -590,7 +590,12 @@ These three scripts form the standard single-run pipeline, orchestrated by
 
 Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
-- `parameter_metrics` — per-parameter RMSE/CRPS summary + reduction vs prior.
+- `metrics_version: 2` — fair finite-ensemble CRPS/energy-score and corrected
+  spread semantics (absent/1 denotes the older estimators).
+- `parameter_metrics` — per-parameter RMSE/CRPS summary + RMSE reduction and
+  CRPSS vs prior.
+- `ensemble_health` — exact posterior-member uniqueness, per-window unique
+  counts, and the minimum/median pairwise-distance ratio.
 - `state_metrics` — `|U|` field RMSE summary (streamed z-slice by z-slice).
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set
   (assimilation + validation).
@@ -634,7 +639,8 @@ cycle's end-of-segment frame).
 **Plain argparse CLI** — usage: `python scripts/filtering/compute_filtering_metrics.py --run-dir <dir>`
 
 Stage 2. Reads the artifacts saved by `run_filtering.py` and writes
-`run_summary.yaml` — the `run_info` metadata augmented with:
+`run_summary.yaml` — the `run_info` metadata augmented with
+`metrics_version: 2` and:
 - `filter_diagnostics` — summary stats of the per-cycle innovation χ² and
   observation-space prior/posterior RMSE (always available; every mode).
 - `parameter_metrics` — per-parameter RMSE/CRPS of the final analyzed ensemble
