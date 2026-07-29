@@ -24,6 +24,7 @@ from pyurbanair.utils.ensemble_scores import (
     fair_energy_score,
     pit_rank,
     rank_histogram,
+    rank_histogram_weights,
     spread_skill_ratio,
     zscore,
 )
@@ -265,6 +266,51 @@ def test_rank_histogram_is_flat_for_a_calibrated_ensemble() -> None:
     assert counts.shape == (10,)
     assert counts.sum() == 20_000
     assert np.max(np.abs(counts - 2_000)) < 5.0 * np.sqrt(2_000 * 0.9)
+    # The M above is the special case where the bins are equal; the general
+    # reference is the weights, which here are all 2.
+    assert rank_histogram_weights(n_members, n_bins=10).tolist() == [2] * 10
+
+
+def test_rank_histogram_weights_expose_the_uneven_binning() -> None:
+    """The production ensemble size does NOT divide evenly into 10 bins."""
+    weights = rank_histogram_weights(32, n_bins=10)
+
+    # 33 rank values over 10 bins: a fixed three-bin comb, +21% / -9% about a
+    # flat 3.3. A consumer plotting counts against a flat line would read a
+    # perfectly calibrated ensemble as structured.
+    assert weights.tolist() == [4, 3, 3, 4, 3, 3, 4, 3, 3, 3]
+    assert weights.sum() == 33
+    # And below n_bins members some bins are unreachable, not merely uneven.
+    assert rank_histogram_weights(8, n_bins=10).tolist() == [1] * 9 + [0]
+
+
+def test_rank_histogram_of_a_calibrated_m32_ensemble_matches_the_weights() -> None:
+    """At M = 32 calibration means matching the weights, not a flat line."""
+    rng = np.random.default_rng(32)
+    n_members = 32
+    n_samples = 60_000
+    members = rng.normal(size=(n_members, n_samples))
+    truth = rng.normal(size=n_samples)
+
+    counts = rank_histogram(pit_rank(members, truth, rng=0), n_members, n_bins=10)
+    weights = rank_histogram_weights(n_members, n_bins=10)
+    expected = n_samples * weights / (n_members + 1)
+
+    assert counts.sum() == n_samples
+    # Multinomial std per bin is <= sqrt(n p) ~ 85; 5 sigma never flakes.
+    assert np.max(np.abs(counts - expected)) < 5.0 * np.sqrt(expected.max())
+    # The same data is NOT flat against n_samples / n_bins -- the artifact this
+    # reference exists to prevent is real and far outside sampling noise.
+    # (measured: the tall bins sit ~1270 counts above flat, ~15 sigma)
+    assert np.max(np.abs(counts - n_samples / 10)) > 10.0 * np.sqrt(expected.max())
+
+
+@pytest.mark.parametrize("bad", [0, -1])  # type: ignore[misc]
+def test_rank_histogram_weights_reject_nonsense_shapes(bad: int) -> None:
+    with pytest.raises(ValueError):
+        rank_histogram_weights(bad, n_bins=10)
+    with pytest.raises(ValueError):
+        rank_histogram_weights(10, n_bins=bad)
 
 
 # ---------------------------------------------------------------------------

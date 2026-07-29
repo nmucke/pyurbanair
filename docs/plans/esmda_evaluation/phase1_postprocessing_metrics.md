@@ -359,7 +359,7 @@ encoded there and in `docs/archive/figure_specs.md`.
   invertible rescaling of the parameter vector, so the mixed units (degrees vs
   m/s) of the joint vector are harmless.
 
-- **WP1.1 — full correlation matrices are capped at K ≤ 16
+- **WP1.1 — full correlation matrices are capped at K ≤ 8
   (`JOINT_CORR_MAX_K`).** `write_yaml` uses `default_flow_style=False`, i.e. one
   number per line, so the K = 42 of a routine run would add ~3.5k lines to a
   ~100-line `run_summary.yaml`, and production cases are larger. Above the cap
@@ -367,6 +367,13 @@ encoded there and in `docs/archive/figure_specs.md`.
   why, and `corr_summary` (off-diagonal `|corr|` mean and max, both matrices)
   carries the signal instead. `generalized_eigenvalues` is capped the same way at
   r ≤ 64, with `eigenvalue_quantiles` always emitted.
+  *(Revised in review from K ≤ 16.* Measured YAML cost of the two matrices:
+  K = 6 → 74 lines, K = 8 → 130, K = 16 → **514**, K = 42 → 3530. The cap's own
+  justification is a ~100-line summary, which K = 16 misses by ~5×. K = 8 keeps
+  the matrices for the small joint vectors where a human can actually read them
+  and still roughly doubles the file; a sidecar was considered and rejected —
+  nothing consumes the full matrices yet, and when something does, the sanctioned
+  handoff is WP1.3's `eval_fields.nc`, not a second new artifact.)*
 
 - **WP1.1 — M < 3 nulls the whole calibration bundle.** Per the master plan's
   degenerate-shape rule (`null` + a log line, never special-cased math), the
@@ -398,6 +405,89 @@ encoded there and in `docs/archive/figure_specs.md`.
   `_ensemble_health`) rather than a second copy in `_esmda_common`. The label
   helper `parameter_vector_labels` mirrors that flattening's ordering and is
   pinned to it by a test.
+
+- **WP1.0/1.1 (review round 1) — `metrics_level` is written to the summary
+  (addition).** `compute_metrics` logged the resolved level but persisted
+  nothing, so a consumer seeing no `parameter_metrics.joint` could not tell a
+  pre-phase-1 run dir from one processed at `basic` from a layer that no-op'd on
+  missing inputs — and `--metrics-level` makes mixed-depth reprocessing of one
+  sweep easy, which is exactly the version-mixing hazard the master plan's
+  invariant #1 exists to prevent. `summary["metrics_level"]` is emitted at every
+  level, next to `metrics_version`; **no `metrics_version` bump**, since the
+  estimator semantics are unchanged — it records how much of the suite ran, not
+  how it was computed. Documented in `docs/scripts_and_configs.md`.
+
+- **WP1.0 (review round 1) — the numeric `run.metrics` knobs are validated
+  (addition).** `resolve_metrics_settings` rejected an unknown `level` but
+  accepted `n_z_slices: 0`, `mean_field_stride: 0`, `bootstrap_blocks: -5`; the
+  config comments stated the constraints and nothing enforced them, so a typo
+  would surface as a crash (or an empty result) deep inside a WP1.3 streaming
+  pass that had already read GBs. All three are now `>= 1`-checked beside the
+  level check, same failure mode, same place.
+
+- **WP1.1 (review round 1) — `pit.ranks_per_bin` (addition).** `rank_histogram`
+  maps `bin = rank * n_bins // (M + 1)`, which is only uniform when `n_bins`
+  divides `M + 1`. At the production M = 32 the 33 rank values split
+  `[4, 3, 3, 4, 3, 3, 4, 3, 3, 3]`, so a *perfectly calibrated* ensemble shows a
+  fixed three-bin comb of +21% / −9% against a flat `len(ranks)/n_bins`
+  reference; at M < `n_bins` some bins are unreachable entirely. WP1.4 plots
+  these counts, so the reference has to travel with them: the new
+  `ensemble_scores.rank_histogram_weights` computes the per-bin rank-value
+  counts and `_pit_block` emits them as `pit.ranks_per_bin`. Purely additive —
+  the binning itself is unchanged, and the M = 19 (exactly-divisible) unit test
+  is kept alongside the new M = 32 one.
+
+- **WP1.1 (review round 1) — `joint.posterior_variance_retained` (addition).**
+  The rank truncation onto the *prior's* eigenbasis (the departure logged above,
+  endorsed in review and unchanged) is lossless only when the posterior lives in
+  the prior's span. That holds within one ESMDA update, but `posterior_params.nc`
+  is a multi-window **concatenation** and each window block carries its own M × M
+  transform, so the joint row space is not contained in the prior's. Measured on
+  a 3-window / M = 32 / K = 42 construction: ~98.5% of posterior variance
+  retained (1.00 for the single-window case), dropping to ~80% when the posterior
+  grows a direction the prior never had. `rank_deficient` cannot see any of this.
+  The ratio `tr(Qᵀ C_post Q) / tr(C_post)` is therefore emitted next to it, so
+  `n_constrained_directions` can be read as covering a stated fraction of the
+  posterior spread. Computed pre-ridge; `null` on every degraded path.
+
+- **WP1.1 (review round 1) — the WP1.1 integration criterion is met on a
+  synthetic run dir, not the smoke case.** The acceptance text asks for "new keys
+  present and finite at `level: standard` on the smoke case". That is
+  structurally unmeetable: the smoke shape is a 2-member ensemble, so every
+  numeric key takes the `MIN_MEMBERS_CALIBRATION` null path and the bundle's math
+  never runs — the pipeline test would assert only that nulls appear. The
+  intent (does the *wiring* work end to end?) is met instead by
+  `tests/test_esmda_metrics_wiring.py`, which drives `compute_metrics` on a
+  synthetic run dir at M = 8 with a multi-window parameter artifact. It is cheap
+  and needs no solver because the WP1.1 block sits before the `skip_viz` early
+  return, and it covers precisely what unit tests could not: that
+  `ta.get("num_windows")` is spelled the way the run stage writes it (a typo
+  would silently null `n_knots_effective` for every static parameter), that
+  `_flatten_parameter_members` agrees in shape between prior and posterior on
+  concatenated artifacts, and the emitted key **set** — not merely finiteness —
+  at both `basic` and `standard`.
+
+- **WP1.1 (review round 1) — `_aligned_parameter_arrays` re-implements the
+  alignment rather than calling `compute_parameter_metrics` (departure).** The
+  plan says to reuse that helper. It returns *scores* and never exposes the
+  aligned members the bundle needs, so the two `np.interp` lines are repeated
+  instead. To keep that from growing a private-import surface, the two pieces
+  actually shared — `plotting.param_members_and_x` and
+  `plotting.plotted_param_names` — were promoted to public API (old `_`-prefixed
+  names kept as aliases). They define a parameter's x-axis, its dynamic/static
+  discriminator and the parameter iteration order; figures and metrics disagreeing
+  about any of those would be a silent error, so one public definition is the
+  point.
+
+- **WP1.1 (review round 1) — `_n_constant_segments` tolerance is scaled to the
+  parameter's own spread.** It used `np.isclose` defaults, i.e. `rtol = 1e-5`
+  *relative to the magnitude*: 2.7e-3° against an `inflow_angle` near 270 but
+  1e-7 against an `sgs_constant` near 0.01 — a threshold set by where the
+  parameter's origin happens to be, which could clamp a genuinely time-varying
+  parameter's effective sample size. The step test is now
+  `|Δ| > 1e-6 · std(members)`. The two cases it must separate are decades apart
+  (a broadcast static parameter repeats bitwise-identical values, Δ = 0 exactly;
+  a time-varying one steps by O(spread)), so the fraction is not delicate.
 
 - **WP1.1 — per-key schema documentation deferred.** `run_summary.yaml`'s key
   list lives in `docs/scripts_and_configs.md` (the

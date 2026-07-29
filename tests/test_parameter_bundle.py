@@ -356,6 +356,41 @@ def test_static_parameter_broadcast_onto_a_time_axis_counts_windows() -> None:
     assert pit["n_knots_effective"] == n_windows
 
 
+def test_segment_counting_tolerance_scales_with_the_parameter_spread() -> None:
+    """A parameter's offset must not set the "is this knot a step?" threshold.
+
+    `inflow_angle` sits near 270 with an ensemble spread of ~1 degree, so a
+    magnitude-relative tolerance (`np.isclose`'s rtol=1e-5) would call any knot
+    step below 2.7e-3 degrees constant -- i.e. would clamp a genuinely
+    time-varying parameter's effective sample size on the strength of where its
+    origin happens to be.
+    """
+    rng = np.random.default_rng(101)
+    n_members, n_knots = 12, 20
+    walk = np.cumsum(rng.normal(0.0, 5e-4, size=(n_members, n_knots)), axis=1)
+    members = 270.0 + walk  # steps ~5e-4 << np.isclose's 2.7e-3 at this offset
+
+    pit = _bundle(
+        _dynamic_dataset(members),
+        _truth_dataset(np.full(n_knots, 270.0)),
+        num_windows=3,
+    )["inflow_angle"]["pit"]
+
+    # Every knot differs, so the segment clamp must not bind; what remains is
+    # the GP formula, ceil(20 * 30 / 200) = 3.
+    assert pit["n_knots_effective"] == 3
+
+    # The broadcast-static case still resolves to its window count: those knots
+    # repeat bitwise-identical values, which no tolerance can confuse.
+    levels = 270.0 + rng.normal(0.0, 1.0, size=(n_members, 4))
+    broadcast = _bundle(
+        _dynamic_dataset(np.repeat(levels, 5, axis=1)),
+        _truth_dataset(np.full(20, 270.0)),
+        num_windows=4,
+    )["inflow_angle"]["pit"]
+    assert broadcast["n_knots_effective"] == 3  # min(segments=4, GP bound=3)
+
+
 def test_missing_knot_correlation_config_emits_null() -> None:
     """No `correlation_length` in the saved config -> null, never a guess."""
     members, truth = _calibrated(n_members=10, n_knots=15, seed=11)
@@ -485,6 +520,59 @@ def test_joint_handles_a_rank_deficient_ensemble() -> None:
     # Every retained direction was contracted by the same factor.
     assert np.allclose(eigenvalues, 0.3**2)
     assert joint["n_constrained_directions"] == n_members - 1
+
+
+def test_variance_retained_is_one_when_the_posterior_lives_in_the_prior_span() -> None:
+    """One ESMDA update: posterior members are combinations of prior members."""
+    rng = np.random.default_rng(140)
+    n_members, k = 32, 42
+    prior = rng.normal(size=(n_members, k))
+    # An ensemble-space transform is exactly what a single ESMDA update applies.
+    transform = np.eye(n_members) + 0.3 * rng.normal(size=(n_members, n_members)) / (
+        np.sqrt(n_members)
+    )
+
+    joint = joint_parameter_directions(transform @ prior, prior)
+
+    assert joint["rank_deficient"] is True  # M - 1 = 31 < K = 42
+    assert joint["posterior_variance_retained"] == pytest.approx(1.0, abs=0.01)
+
+
+def test_variance_retained_exposes_a_posterior_direction_the_prior_lacks() -> None:
+    """The multi-window concatenation is NOT one update, so the projection can lose."""
+    rng = np.random.default_rng(141)
+    n_members, n_windows, knots_per_window = 32, 3, 14
+    k = n_windows * knots_per_window
+    prior = rng.normal(size=(n_members, k))
+
+    # Each window block carries its own M x M transform, exactly as
+    # `posterior_params.nc` (a concatenation of per-window updates) does.
+    posterior = np.empty_like(prior)
+    for w in range(n_windows):
+        block = slice(w * knots_per_window, (w + 1) * knots_per_window)
+        transform = np.eye(n_members) + 0.3 * rng.normal(
+            size=(n_members, n_members)
+        ) / np.sqrt(n_members)
+        posterior[:, block] = transform @ prior[:, block]
+
+    multi_window = joint_parameter_directions(posterior, prior)
+    # Measured ~0.985 on this construction: a small but real loss, invisible
+    # from `rank_deficient` alone.
+    assert 0.9 < multi_window["posterior_variance_retained"] < 1.0
+
+    # A genuinely new direction (inflation, a re-sampled window) is dropped
+    # wholesale, and only this key says so.
+    new_direction = rng.normal(size=(n_members, 1)) @ rng.normal(size=(1, k))
+    grown = joint_parameter_directions(prior + 2.0 * new_direction, prior)
+    assert grown["posterior_variance_retained"] < 0.9
+    assert grown["rank_deficient"] is True  # unchanged -- it cannot see this
+
+
+def test_variance_retained_is_null_on_every_degraded_path() -> None:
+    rng = np.random.default_rng(142)
+    joint = joint_parameter_directions(rng.normal(size=(2, 5)), rng.normal(size=(2, 5)))
+
+    assert joint["posterior_variance_retained"] is None
 
 
 def test_joint_correlation_matrices_are_capped() -> None:
@@ -644,6 +732,21 @@ def test_pit_counts_have_the_documented_shape() -> None:
     assert len(counts) == PIT_BINS
     assert all(isinstance(c, int) for c in counts)
     assert sum(counts) == entry["pit"]["n_samples"] == 40
+
+
+def test_pit_metadata_carries_the_per_bin_reference() -> None:
+    """The counts are meaningless without the uneven bin widths that produced them."""
+    members, truth = _calibrated(n_members=32, n_knots=40, seed=25)
+    pit = _bundle(_dynamic_dataset(members), _truth_dataset(truth))["inflow_angle"][
+        "pit"
+    ]
+
+    # M = 32: 33 rank values over 10 bins is a +21% / -9% comb, so a consumer
+    # normalizing by a flat len(ranks)/n_bins would call this calibrated
+    # ensemble structured. `ranks_per_bin` is that reference.
+    assert pit["ranks_per_bin"] == [4, 3, 3, 4, 3, 3, 4, 3, 3, 3]
+    assert sum(pit["ranks_per_bin"]) == 32 + 1
+    assert len(pit["ranks_per_bin"]) == pit["n_bins"] == PIT_BINS
 
 
 def test_coverage_reports_the_attainable_nominal_ceiling() -> None:

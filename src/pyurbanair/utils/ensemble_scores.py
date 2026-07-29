@@ -39,6 +39,7 @@ __all__ = [
     "fair_energy_score",
     "pit_rank",
     "rank_histogram",
+    "rank_histogram_weights",
     "spread_skill_ratio",
     "zscore",
 ]
@@ -99,8 +100,17 @@ def fair_energy_score(members: np.ndarray, truth: np.ndarray) -> np.ndarray:
     Unlike :func:`fair_crps` there is no sorting identity for vector norms, so
     the pairwise term is materialized -- but only one slab at a time. The
     leading batch axis (time, for the sensor callers) is looped over, so peak
-    memory is ``(M, M, *batch[1:])`` rather than ``(M, M, *batch)``. Keep it
-    that way: at production scale a whole-run pairwise tensor does not fit.
+    memory is one slab rather than the whole-run pairwise tensor. Keep it that
+    way: at production scale the latter does not fit.
+
+    Memory bound, stated exactly because WP1.3 will point this at fields rather
+    than sensors: everything is up-cast to float64, and peak allocation is
+    ``max(M * prod(batch) * C, M**2 * prod(batch[1:]) * C) * 8`` bytes -- the
+    ``term1`` difference over the *whole* batch, and the per-slab ``diff``
+    tensor, which carries the ``C`` components (the norm is only taken
+    afterwards). Negligible at sensor scale (M=32, ~1e3 times, 3 sensors, C=3:
+    a few MB) but ``M**2 * C`` per grid point, so a field caller must chunk the
+    grid into the leading batch axis rather than passing a whole slab.
 
     Args:
         members: ``(n_members, *batch, n_components)`` member vectors, with
@@ -246,15 +256,46 @@ def pit_rank(
     return np.asarray(below + jitter, dtype=int)
 
 
+def rank_histogram_weights(n_members: int, n_bins: int = 10) -> np.ndarray:
+    """How many of the ``n_members + 1`` rank values land in each bin.
+
+    This is the **expected shape of a perfectly calibrated histogram**, up to
+    the sample size: a calibrated ensemble draws uniformly over the ranks, so
+    bin ``i`` gets ``len(ranks) * weights[i] / (n_members + 1)`` counts, not
+    ``len(ranks) / n_bins``. Consumers that plot :func:`rank_histogram` against
+    a reference must use this, or a calibrated ensemble reads as structured
+    (see the note in :func:`rank_histogram`).
+
+    Args:
+        n_members: Ensemble size the ranks were computed from.
+        n_bins: Number of histogram bins.
+
+    Returns:
+        ``(n_bins,)`` integer weights summing to ``n_members + 1``.
+    """
+    if n_members < 1:
+        raise ValueError(f"n_members must be positive, got {n_members}")
+    if n_bins < 1:
+        raise ValueError(f"n_bins must be positive, got {n_bins}")
+    ranks = np.arange(n_members + 1)
+    return np.bincount((ranks * n_bins) // (n_members + 1), minlength=n_bins)[:n_bins]
+
+
 def rank_histogram(ranks: np.ndarray, n_members: int, n_bins: int = 10) -> np.ndarray:
     """Bin PIT ranks into a rank (Talagrand) histogram.
 
     Ranks from :func:`pit_rank` take ``n_members + 1`` values, which rarely
     divides evenly into ``n_bins``; the mapping ``bin = rank * n_bins //
-    (n_members + 1)`` spreads them as evenly as the arithmetic allows and is
-    exactly uniform whenever ``n_bins`` divides ``n_members + 1``. Bin counts
-    are therefore comparable to a flat ``len(ranks) / n_bins`` reference to
-    within the usual rounding of the last bin.
+    (n_members + 1)`` is exactly uniform only when ``n_bins`` divides
+    ``n_members + 1``.
+
+    **Otherwise the bins are genuinely unequal, and a flat reference is the
+    wrong one.** At ``M = 32`` and ``n_bins = 10`` the rank values split
+    ``[4, 3, 3, 4, 3, 3, 4, 3, 3, 3]``, so a perfectly calibrated ensemble
+    produces a fixed three-bin comb of +21% / -9% about ``len(ranks)/n_bins``;
+    at ``M < n_bins`` some bins cannot be reached at all. Compare against
+    :func:`rank_histogram_weights` (rescaled by ``len(ranks)/(n_members + 1)``),
+    never against a flat line.
 
     Args:
         ranks: Any-shaped integer ranks in ``[0, n_members]`` (flattened).

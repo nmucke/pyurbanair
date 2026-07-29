@@ -157,9 +157,13 @@ run:
   metrics:
     # How much of the evaluation suite stage 2 computes:
     #   basic    -- the pre-phase-1 set only (parameter/state/sensor RMSE, CRPS,
-    #               energy score). Byte-for-byte the summary older runs got, so
-    #               this is the level to use when a comparison has to line up
-    #               with runs processed before the evaluation layers existed.
+    #               energy score). Key-identical to the summary older runs got
+    #               EXCEPT for the phase-0 additions and the level marker, which
+    #               are emitted at every level (`metrics_version`,
+    #               `metrics_level`, `ensemble_health`,
+    #               `crps_reduction_vs_prior`). Use this when a comparison has to
+    #               line up with runs processed before the evaluation layers
+    #               existed.
     #   standard -- adds the calibration bundle (z-score/PIT/coverage/
     #               contraction), statistics-space sensor scoring and the
     #               mean-field / Reynolds-stress layer. The intended default for
@@ -170,7 +174,9 @@ run:
     #               resolves to the same work as `standard`.
     # An unrecognized value is rejected loudly instead of silently degrading, so
     # a typo here fails the metrics stage rather than quietly writing a summary
-    # with half the keys missing.
+    # with half the keys missing. The same goes for the three counts below: each
+    # must be >= 1 and is validated when the block is resolved, not when the
+    # layer that reads it finally runs.
     level: standard
     # Evenly-spaced z-levels the mean-field layer accumulates statistics on.
     # A relief valve, not a tuning knob: raising it scales the arithmetic of the

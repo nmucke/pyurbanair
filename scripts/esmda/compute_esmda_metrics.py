@@ -14,6 +14,7 @@ Second stage of the three-script single-run ESMDA pipeline (see
 run_esmda.py, augmented with:
 
   * ``metrics_version``    -- estimator-semantics marker (2 = fair scores).
+  * ``metrics_level``      -- which layers below were actually computed.
   * ``parameter_metrics``  -- per-parameter RMSE/CRPS summary (+ skill vs prior).
   * ``ensemble_health``    -- exact duplicate counts and pairwise-distance ratio.
   * ``state_metrics``      -- |U| field RMSE summary (streamed over a few z-slices).
@@ -123,6 +124,12 @@ def resolve_metrics_settings(
     missing key. ``level_override`` (the ``--metrics-level`` CLI flag) wins over
     the config so one run dir can be re-processed at another depth without
     editing its saved config.
+
+    Every knob is validated here -- an unknown level, or a count below 1 --
+    because this is the last point at which a bad value is cheap to report.
+
+    Raises:
+        ValueError: On an unknown ``level`` or a non-positive count.
     """
     container = cfg if isinstance(cfg, DictConfig) else OmegaConf.create(dict(cfg))
 
@@ -137,6 +144,18 @@ def resolve_metrics_settings(
             f"{', '.join(METRICS_LEVELS)}"
         )
 
+    # The counts are all "how many of X", so zero or negative is never a
+    # meaningful request -- it is a typo or a misunderstood knob. Rejected here,
+    # next to the level check and for the same reason: the alternative is a
+    # crash (or, worse, an empty result) deep inside a streaming pass that has
+    # already spent minutes reading window state files.
+    counts = {}
+    for key in ("n_z_slices", "mean_field_stride", "bootstrap_blocks"):
+        value = int(_get(key))
+        if value < 1:
+            raise ValueError(f"run.metrics.{key} must be >= 1, got {value}")
+        counts[key] = value
+
     stations = _get("stations")
     if stations is not None:
         stations = [
@@ -144,13 +163,7 @@ def resolve_metrics_settings(
             for station in OmegaConf.to_container(OmegaConf.create(stations))
         ]
 
-    return MetricsSettings(
-        level=level,
-        n_z_slices=int(_get("n_z_slices")),
-        mean_field_stride=int(_get("mean_field_stride")),
-        bootstrap_blocks=int(_get("bootstrap_blocks")),
-        stations=stations,
-    )
+    return MetricsSettings(level=level, stations=stations, **counts)
 
 
 def _flatten_parameter_members(params: xarray.Dataset) -> np.ndarray:
@@ -231,6 +244,13 @@ def compute_metrics(run_dir: pathlib.Path, metrics_level: str | None = None) -> 
     # Seed the summary from the run metadata/timing saved by run_esmda.py.
     summary = read_yaml(run_dir / "run_info.yaml")
     summary["metrics_version"] = 2
+    # Which layers this summary actually contains. Without it an absent
+    # `parameter_metrics.joint` is ambiguous three ways -- a run dir processed
+    # before phase 1, one processed at `basic`, or a layer that no-op'd on
+    # missing inputs -- and `--metrics-level` makes mixed-depth reprocessing of
+    # the same sweep easy. Not a `metrics_version` bump: the estimator semantics
+    # are unchanged, only how much of the suite was run.
+    summary["metrics_level"] = metrics.level
 
     # --- Parameters (always available) --------------------------------------
     posterior_params = xarray.open_dataset(run_dir / "posterior_params.nc")
@@ -327,8 +347,6 @@ def compute_metrics(run_dir: pathlib.Path, metrics_level: str | None = None) -> 
     # series already extracted above) and WP1.3's `mean_field_metrics` +
     # `eval_fields.nc`, which shares the single per-member read pass over the
     # window state files with the sensor extraction above.
-    if metrics.at_least("standard"):
-        logger.debug("standard-level sensor/field layers pending (WP1.2, WP1.3)")
 
     write_yaml(summary, run_dir / "run_summary.yaml")
     print(f"Saved run summary in {run_dir / 'run_summary.yaml'}")

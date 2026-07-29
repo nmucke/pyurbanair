@@ -133,6 +133,10 @@ block existed simply fall back to the defaults below.
 | `bootstrap_blocks` | `20` | Blocks for the block-bootstrap sampling-error bars. |
 | `stations` | `null` | `[[x, y], ...]` columns for the profile figures; `null` = the obs config's sensor x/y. |
 
+`n_z_slices`, `mean_field_stride` and `bootstrap_blocks` must each be `>= 1`:
+like an unknown `level`, a smaller value raises when the block is resolved,
+rather than surfacing as an empty slice deep inside the layer that reads it.
+
 ---
 
 ### 1.2 Config group: `case/`
@@ -608,6 +612,12 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
 - `metrics_version: 2` — fair finite-ensemble CRPS/energy-score and corrected
   spread semantics (absent/1 denotes the older estimators).
+- `metrics_level` — the resolved [`run.metrics.level`](#runmetrics-esmda-only)
+  this summary was produced at, so *which layers were computed* is recorded
+  rather than inferred. Without it an absent key is ambiguous three ways: a run
+  dir processed before phase 1, one processed at `basic`, and a layer that
+  no-op'd on missing inputs. Read it before comparing runs — `--metrics-level`
+  makes mixed-depth reprocessing of one sweep easy. Absent = pre-phase-1.
 - `parameter_metrics` — per-parameter RMSE/CRPS summary + RMSE reduction and
   CRPSS vs prior.
 - `ensemble_health` — exact posterior-member uniqueness, per-window unique

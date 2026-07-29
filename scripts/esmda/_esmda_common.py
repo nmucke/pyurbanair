@@ -35,16 +35,17 @@ from pyurbanair.config.hydra_helpers import (
     create_validation_points,
 )
 from pyurbanair.plotting import (
-    _param_members_and_x,
-    _plotted_param_names,
     compute_parameter_metrics,
     compute_sensor_metrics,
+    param_members_and_x,
+    plotted_param_names,
 )
 from pyurbanair.utils.ensemble_scores import (
     coverage,
     fair_energy_score,
     pit_rank,
     rank_histogram,
+    rank_histogram_weights,
     zscore,
 )
 
@@ -502,10 +503,15 @@ MIN_MEMBERS_JOINT = 3
 
 # Full K x K correlation matrices are written to run_summary.yaml only below
 # this size. `yaml.safe_dump(default_flow_style=False)` puts one number per
-# line, so the K = 42 of a routine 2-parameter/21-knot run would add ~3.5k lines
-# to a ~100-line summary, and production cases are larger still. Above the cap
-# the matrices are omitted and `corr_summary` carries the off-diagonal scalars.
-JOINT_CORR_MAX_K = 16
+# line, so two K x K matrices cost ~2*K*(K+1) lines: measured on a real summary,
+# K = 8 adds 130 lines to a 99-line file and K = 16 adds ~514 -- i.e. the
+# summary stops being a file a human reads at a glance well before the K = 42 of
+# a routine 2-parameter/21-knot run (~3.5k lines). The cap keeps the matrices for
+# the small joint vectors where they are genuinely readable; above it they are
+# omitted and `corr_summary` carries the off-diagonal scalars. Nothing consumes
+# the full matrices yet -- when something does, the place for them is WP1.3's
+# `eval_fields.nc`-style sidecar, not this file.
+JOINT_CORR_MAX_K = 8
 
 # Same reasoning for the eigenvalue list, which is only `r` long.
 JOINT_EIGENVALUE_MAX = 64
@@ -557,7 +563,7 @@ def _aligned_parameter_arrays(posterior_params, true_params, prior_params=None):
     """Per parameter: members, truth on the members' x-axis, and prior members.
 
     The alignment is the one :func:`pyurbanair.plotting.compute_parameter_metrics`
-    performs (``_param_members_and_x`` + ``np.interp`` onto the posterior
+    performs (``param_members_and_x`` + ``np.interp`` onto the posterior
     x-axis), reused rather than re-derived: it already handles a static truth
     (one point -> constant) and a time-varying truth sampled on a different
     knot grid (the routine case -- e.g. 19 truth knots against 21 posterior
@@ -567,31 +573,37 @@ def _aligned_parameter_arrays(posterior_params, true_params, prior_params=None):
     ``members`` is ``(n_members, n_x)`` and ``prior_members`` is ``None`` unless
     the prior exists on the same x-axis.
 
+    This re-implements ``compute_parameter_metrics``'s two alignment lines
+    rather than calling it, because that helper returns *scores* and never
+    exposes the aligned members this bundle needs. The shared piece is the pair
+    of public helpers below, so there is still exactly one definition of a
+    parameter's x-axis and of the parameter order.
+
     ``x_is_time`` is the per-parameter dynamic/static discriminator -- there is
     no run-level split, because a single ``conf/params/dynamic.yaml`` run mounts
     time-varying ``external_parameters`` AND a ``static_parameters`` block into
     one Dataset, so both PIT branches fire in the same run. The test is
-    ``_param_members_and_x``'s own, repeated here because that helper returns
+    ``param_members_and_x``'s own, repeated here because that helper returns
     the axis but not the reason for it: a **``time`` coordinate**, not merely a
     ``time`` dimension. The dimension alone is not enough -- ``_concat_windows``
     stacks per-window parameter files along ``time``, so in a purely static run
     every parameter comes out with a length-``num_windows`` ``time`` dimension
     and no ``time`` coordinate, and its x-axis is the window index.
     """
-    for name in _plotted_param_names(posterior_params, true_params):
+    for name in plotted_param_names(posterior_params, true_params):
         posterior_da = posterior_params[name]
-        x_est, members = _param_members_and_x(posterior_da)
+        x_est, members = param_members_and_x(posterior_da)
 
         true_da = true_params[name]
         if "ensemble" in true_da.dims:
             true_da = true_da.isel(ensemble=0)
-        x_true, true_members = _param_members_and_x(true_da.expand_dims("ensemble"))
+        x_true, true_members = param_members_and_x(true_da.expand_dims("ensemble"))
         order = np.argsort(x_true)
         truth = np.interp(x_est, np.asarray(x_true)[order], true_members[0][order])
 
         prior_members = None
         if prior_params is not None and name in prior_params.data_vars:
-            _, candidate = _param_members_and_x(prior_params[name])
+            _, candidate = param_members_and_x(prior_params[name])
             if candidate.shape == members.shape:
                 prior_members = np.asarray(candidate, dtype=float)
 
@@ -633,6 +645,18 @@ def _knot_correlation_config(cfg):
     return _select("correlation_length"), _select("seconds_per_knot")
 
 
+# A knot-to-knot step counts as a real step once it exceeds this fraction of the
+# parameter's own ensemble spread. Scaled to the spread, not to the values: the
+# `np.isclose` default (rtol = 1e-5) is relative to the *magnitude*, which is
+# 2.7e-3 degrees against an inflow angle near 270 but 1e-7 against an SGS
+# constant near 0.01 -- i.e. a tolerance set by where the parameter's origin
+# happens to be. A broadcast static parameter repeats bitwise-identical values
+# (difference exactly 0) and a genuinely time-varying one steps by O(spread),
+# so the two are separated by many orders of magnitude and the exact fraction
+# below is not delicate.
+_SEGMENT_STEP_FRACTION = 1e-6
+
+
 def _n_constant_segments(members):
     """Number of piecewise-constant runs along the x-axis of ``(M, n_x)`` members.
 
@@ -640,12 +664,15 @@ def _n_constant_segments(members):
     ``static_parameters`` block of ``conf/params/dynamic.yaml`` is broadcast to
     every knot by ``_concat_windows``) is piecewise constant with one step per
     assimilation window. Counting the steps recovers that window count without
-    needing to know which block the parameter came from, and is a no-op for a
-    genuinely time-varying parameter, whose every knot differs.
+    needing to know which block the parameter came from, and returns ``n_knots``
+    (i.e. no clamp) for a genuinely time-varying parameter, whose every knot
+    differs by O(ensemble spread) -- far above ``_SEGMENT_STEP_FRACTION``.
     """
     if members.shape[1] < 2:
         return int(members.shape[1])
-    steps = ~np.isclose(members[:, 1:], members[:, :-1])
+    scale = float(np.nanstd(members)) if np.any(np.isfinite(members)) else 0.0
+    tolerance = _SEGMENT_STEP_FRACTION * scale if np.isfinite(scale) else 0.0
+    steps = np.abs(members[:, 1:] - members[:, :-1]) > tolerance
     return int(np.sum(np.any(steps, axis=0))) + 1
 
 
@@ -731,6 +758,16 @@ def _pit_block(
         "n_knots_effective": n_effective,
         "pooling": pooling,
         "tie_seed": PIT_TIE_SEED,
+        # The reference a plot must divide by. Ranks take M + 1 values, which
+        # only divides evenly into PIT_BINS for particular M, so a calibrated
+        # ensemble is flat in `count / ranks_per_bin`, NOT in `count`: at
+        # M = 32 the bins hold [4, 3, 3, 4, ...] rank values and a perfectly
+        # calibrated ensemble shows a +21%/-9% three-bin comb against a flat
+        # line. Emitted per parameter because M is a run property but the
+        # consumer (WP1.4) sees only the counts.
+        "ranks_per_bin": [
+            int(w) for w in rank_histogram_weights(members.shape[0], n_bins=PIT_BINS)
+        ],
     }
     return [int(c) for c in counts], meta
 
@@ -830,6 +867,12 @@ def joint_parameter_directions(posterior_flat, prior_flat, labels=None):
     * The eps ridge ``C + eps * tr(C)/K * I`` is then applied inside that
       subspace, where it only guards an exactly-degenerate posterior direction.
 
+    The truncation is onto the *prior's* basis, which is lossless only when the
+    posterior lives in the prior's span -- true within one ESMDA update, not
+    across the concatenated windows of ``posterior_params.nc``. What the
+    projection kept is therefore reported as ``posterior_variance_retained``
+    (``tr(Q' C_post Q) / tr(C_post)``) rather than assumed.
+
     Returns a mapping with ``null`` leaves (plus a ``reason``) whenever the
     decomposition is not defined.
     """
@@ -843,6 +886,7 @@ def joint_parameter_directions(posterior_flat, prior_flat, labels=None):
             "n_parameters": int(n_parameters),
             "n_sample_directions": None,
             "rank_deficient": None,
+            "posterior_variance_retained": None,
             "n_constrained_directions": None,
             "generalized_eigenvalues": None,
             "eigenvalue_quantiles": None,
@@ -893,6 +937,25 @@ def joint_parameter_directions(posterior_flat, prior_flat, labels=None):
 
     reduced_post = basis.T @ cov_post @ basis
     reduced_prior = basis.T @ cov_prior @ basis
+
+    # How much posterior variance the prior-eigenbasis projection keeps.
+    # For a SINGLE-window ESMDA update the posterior anomalies are linear
+    # combinations of the prior anomalies, so the projection is lossless (1.0)
+    # by construction. `posterior_params.nc` is a multi-window CONCATENATION,
+    # though, and each window block applies its own M x M transform, so the
+    # joint row space is NOT contained in the prior's span: a posterior
+    # direction the prior never had (inflation, a re-sampled window, a
+    # cross-window carry-over) is silently dropped by the truncation. This
+    # ratio is the only place that loss is visible -- read `n_constrained_
+    # directions` as covering this fraction of the posterior spread, not all
+    # of it. Computed pre-ridge, so the regularizer does not flatter it.
+    trace_post = float(np.trace(cov_post))
+    variance_retained = (
+        _finite_or_none(float(np.trace(reduced_post)) / trace_post)
+        if np.isfinite(trace_post) and trace_post > 0
+        else None
+    )
+
     eps = np.finfo(float).eps * max(n_members, rank)
     identity = np.eye(rank)
     reduced_post = reduced_post + eps * np.trace(reduced_post) / rank * identity
@@ -916,6 +979,7 @@ def joint_parameter_directions(posterior_flat, prior_flat, labels=None):
         # K - r carry no ensemble information and are dropped, not scored.
         "n_sample_directions": rank,
         "rank_deficient": bool(rank < n_parameters),
+        "posterior_variance_retained": variance_retained,
         "n_constrained_directions": int(np.sum(eigenvalues < 0.5)),
         "generalized_eigenvalues": (
             [_finite_or_none(v) for v in eigenvalues]

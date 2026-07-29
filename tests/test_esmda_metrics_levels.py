@@ -72,6 +72,44 @@ def test_unknown_level_is_rejected_loudly(
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
+    "key",
+    ["n_z_slices", "mean_field_stride", "bootstrap_blocks"],
+)
+@pytest.mark.parametrize("bad", [0, -5])  # type: ignore[misc]
+def test_non_positive_counts_are_rejected_loudly(key: str, bad: int) -> None:
+    """Same reasoning as the level check: a typo must fail here, not mid-stream.
+
+    Every one of these is a "how many of X" count, so zero or negative is never
+    a request anyone can mean; left unchecked it surfaces as an empty slice or a
+    divide-by-zero deep inside a streaming pass that has already read GBs.
+    """
+    cfg = OmegaConf.create({"run": {"metrics": {key: bad}}})
+
+    with pytest.raises(ValueError, match=f"run.metrics.{key} must be >= 1"):
+        resolve_metrics_settings(cfg)
+
+
+def test_the_smallest_meaningful_counts_are_accepted() -> None:
+    """1 is a legitimate value for all three -- the guard is `>= 1`, not `> 1`."""
+    cfg = OmegaConf.create(
+        {
+            "run": {
+                "metrics": {
+                    "n_z_slices": 1,
+                    "mean_field_stride": 1,
+                    "bootstrap_blocks": 1,
+                }
+            }
+        }
+    )
+
+    settings = resolve_metrics_settings(cfg)
+
+    assert (settings.n_z_slices, settings.mean_field_stride) == (1, 1)
+    assert settings.bootstrap_blocks == 1
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
     "cfg",
     [
         # Old run dirs: their saved config predates the `run.metrics` block.
