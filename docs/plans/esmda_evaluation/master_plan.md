@@ -57,9 +57,9 @@ orchestration glue. Figures reuse `scripts/figspec/style.py` conventions.
 
 | WP | Content | Plan | Size | Status | PR |
 |---|---|---|---|---|---|
-| 0.1 | Fair CRPS / energy-score estimators + CRPSS vs prior + `metrics_version` | [phase0](phase0_correctness_fixes.md) | S | implemented (pending PR) | — |
-| 0.2 | Spread–skill: RMS-of-variances + Fortin factor (callers updated) | [phase0](phase0_correctness_fixes.md) | S | implemented (pending PR) | — |
-| 0.3 | Duplicate-member guard (`ensemble_health`) | [phase0](phase0_correctness_fixes.md) | S | implemented (pending PR) | — |
+| 0.1 | Fair CRPS / energy-score estimators + CRPSS vs prior + `metrics_version` | [phase0](phase0_correctness_fixes.md) | S | in review | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
+| 0.2 | Spread–skill: RMS-of-variances + Fortin factor (callers updated) | [phase0](phase0_correctness_fixes.md) | S | in review | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
+| 0.3 | Duplicate-member guard (`ensemble_health`) | [phase0](phase0_correctness_fixes.md) | S | in review | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
 | 1.0 | `run.metrics` config block + module skeletons | [phase1](phase1_postprocessing_metrics.md) | S | not started | — |
 | 1.1 | Parameter bundle: z-scores, PIT, coverage, contraction, joint directions | [phase1](phase1_postprocessing_metrics.md) | S | not started | — |
 | 1.2 | Statistics-space sensor scoring + Wasserstein w/ self-distance floor | [phase1](phase1_postprocessing_metrics.md) | M | not started | — |
