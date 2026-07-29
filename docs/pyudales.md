@@ -58,7 +58,7 @@ Key constructor arguments (all wired from
 | `boundary_condition` | `"periodic"` or `"inflow_outflow"` (sets `BCxm`, `BCym`, `BCtopm`) |
 | `closure` | SGS closure: `"smagorinsky"` / `"vreman"` → exclusive `&NAMSUBGRID` switches; `None` (default) keeps the template's. `"oneeqn"` is rejected — see §4 |
 | `nudging_config` | Nudging tunables dict; see §6 |
-| `inlet_turbulence` | Turbulent-inlet-generator block (`{"enabled": bool}`). `None`/`false` (default) is a strict no-op; `true` **raises** — uDALES v2.2.0 cannot do it. See §6.1 |
+| `inlet_turbulence` | Turbulent-inlet block. `None`/`false` (default) is a strict no-op; `true` switches the inlet to synthetic driver planes (`BCxm=3`) and turns nudging off. See §6.1 |
 | `instability_check` | dt-watchdog config dict; see §7 |
 | `precomputed_geom_dir` | Skip STL→IBM Fortran step by reusing prior geometry bundle |
 | `verbose` | `False` (default) suppresses all subprocess stdout/stderr |
@@ -76,7 +76,7 @@ otherwise wipe generated files) and with the final per-call parameters.
 | Method | What it does |
 |---|---|
 | `run_single(state, params, sim_name)` | Applies inflow, runs uDALES, loads/postprocesses output |
-| `_apply_inflow_settings(params)` | Merges params, writes nudging files, sets SGS and α |
+| `_apply_inflow_settings(params, warm_start)` | Merges params, writes nudging files **or** driver planes, sets SGS and α |
 | `save_results(state, sim_name)` | Calls `_save_results` from base class |
 | `_clean_output()` | Deletes the output directory (calls `clean_output_dir`) |
 
@@ -284,8 +284,10 @@ for pyudales geometry detection — use only the `solid_c.txt`-sourced blanking.
 
 ## 6. Inflow / nudging
 
-pyudales always applies inflow via **nudging** (`use_nudging=True` is hardcoded in
-`_apply_inflow_settings`). The nudging generates a
+pyudales applies inflow via **nudging** (`use_nudging=True` is hardcoded in
+`_apply_inflow_settings`) unless `inlet_turbulence.enabled` is set, which
+replaces both the nudged inlet face and the interior relaxation with synthetic
+driver planes (§6.1). The nudging generates a
 `timedepnudge.inp.<expnr>` file and enables `&PHYSICS lnudge=.true.`,
 `ltimedepnudge=.true.` in namoptions.
 
@@ -329,26 +331,155 @@ over the raw `nnudge` key. Config default: `nnudge_meters: 4.0`.
 failure; it was resolved by raising the Smagorinsky constant from cs 0.20 → 0.24
 (see §8).
 
-### 6.1 Turbulent inlet generator — **not available in uDALES v2.2.0**
+### 6.1 Turbulent inlet — synthetic driver planes
 
-The model config carries an `inlet_turbulence:` block for schema parity with the
-other backends:
+uDALES v2.2.0 has two inlet-turbulence routes. The Lund (1998) recycling
+generator is dead code (documented below, and still asserted against the Fortran
+source by `tests/test_udales_inlet_turbulence.py`). The **precursor/driver**
+route — `BCxm=3` → `idriver=2`, `moddriver.f90` — is wired end to end, and that
+is what `inlet_turbulence.enabled: true` drives, fed by driver planes
+**synthesised in Python** rather than by a precursor run.
 
 ```yaml
   inlet_turbulence:
-    enabled: false      # must stay false — see below
+    enabled: false        # default: strict no-op, byte-identical namoptions
+    intensity: 0.1        # u'_rms / |U_mean(z)|; v' and w' get 0.7x this
+    length_scale_y: 25.0  # m — spanwise integral length scale
+    length_scale_z: 25.0  # m — vertical
+    length_scale_x: 50.0  # m — streamwise; sets the AR(1) time scale (Taylor)
+    time_step: 0.5        # s — &DRIVER dtdriver
+    driverjobnr: 998      # 3-digit file suffix; must differ from the expnr
+    seed: null            # null -> derived from the member's experiment name
+    # lchunkread: true / chunkread_size: 100   (large cases only)
 ```
 
-It is wired through the `inlet_turbulence: Optional[dict]` constructor arg and
-validated by `validate_inlet_turbulence` in
-[`forward_model.py`](../libs/pyudales/src/pyudales/forward_model.py). **Absent,
-`{}`, or `enabled: false` writes nothing at all** — verified byte-identical
-namoptions against a run with the key removed entirely. Unknown keys are warned
-about and ignored.
+The block is wired through the `inlet_turbulence: Optional[dict]` constructor
+arg, validated by `validate_inlet_turbulence` and implemented by
+[`utils/inlet_turbulence_utils.py`](../libs/pyudales/src/pyudales/utils/inlet_turbulence_utils.py)
+(physics + orchestration) on top of
+[`utils/driver_file_utils.py`](../libs/pyudales/src/pyudales/utils/driver_file_utils.py)
+(binary I/O). **Absent, `{}`, or `enabled: false` writes nothing at all** —
+byte-identical namoptions and no driver files. Unknown keys are warned about and
+ignored. `enabled: true` requires `boundary_condition: inflow_outflow`; under
+`periodic` there is no inlet face and it raises.
 
-**`enabled: true` raises a `ValueError`.** uDALES ships the Lund (1998)
-recycling/rescaling inlet generator (`iinletgen=1`, `modinlet.f90`) but never
-connects it. Three independent facts, each on its own decisive:
+**What is generated.** Per `run_single`, the whole record sequence for the
+window is regenerated and the files overwritten in place (so stale planes from a
+previous window — or from a failure-substitution donor — cannot leak):
+
+- **Mean profile** from the *same* ESMDA parameters the nudging path uses:
+  `build_profile_shape` with the resolved `profile_config` (α from
+  `vertical_inflow_exponent`), scaled by `velocity_magnitude` and decomposed by
+  `inflow_angle`. Time-varying params are interpolated onto the driver time grid
+  with the same spinup plateau `apply_time_varying_inflow` builds. The angle is
+  baked into the planes, so `iangledeg` is left at its default 0.
+- **Fluctuations** from a Xie & Castro (2008) digital filter: white noise
+  correlated in y (periodic FFT-free circular convolution, matching `BCym=1`),
+  in z (truncated at the ground and the top, renormalised per level), and in
+  time by an AR(1) recursion with `a = exp(-pi*dtdriver/(2T))`,
+  `T = length_scale_x / U_ref`. Uncorrelated noise would be annihilated by the
+  pressure projection within a couple of cells; correlated structures survive.
+  The plane mean of `u'` is zeroed per record so the instantaneous bulk inflow
+  equals the mean-profile bulk.
+
+**Namoptions written on the enabled path:** `&BC BCxm=3`; `&DRIVER idriver`,
+`driverjobnr`, `driverstore`, `dtdriver`, `tdriverstart` (plus
+`lchunkread`/`chunkread_size` only when configured — `NamoptionsFile.set_value`
+creates the missing section, so templates need no `&DRIVER` block); `&PHYSICS
+lnudge=.false.`, `ltimedepnudge=.false.`; `&INPS u0`, `v0`, `dpdx=0`, `dpdy=0`.
+
+**Nudging is turned off deliberately.** Under `BCxm=3` the inlet no longer comes
+from `uprof`, so `ltimedepnudge` has nothing left to drive, and interior nudging
+would damp the injected fluctuations on the `tnudge=15 s` scale. Time-varying
+inflow is instead encoded in the plane sequence itself, which is time-resolved.
+
+**Driver-file format** (`moddriver.f90:786-872`, unit-tested in
+`driver_file_utils`): four files `tdriver_000.NNN`, `udriver_000.NNN`,
+`vdriver_000.NNN`, `wdriver_000.NNN`, where `NNN` is `driverjobnr` (i3.3) and
+`000` is `driverid = mod(myidy, nprocy)` — always 0 because the wrapper pins
+`nprocy=1`. They are `unformatted`+`access='direct'`, i.e. a **raw little-endian
+float64 stream with no record markers** (the build uses `-fdefault-real-8`), so
+record *n* starts at exactly `(n-1)*record_bytes`. Each velocity record is one
+inlet plane `(ktot+2) x (jtot+2)` with **j fastest**; `tdriver` records are one
+float64 each, ascending. The halos are `jh = kh = 1` under this build's cd2
+advection (`modglobal.f90:575-582`); the j halo columns are the periodic wrap
+and the k halo rows are an edge copy (`xmi_driver` reads `k = kb..ke` for u/v
+and `kb..ke+1` for w). `local_execute.sh` copies the experiment dir into the
+output dir before `mpiexec`, so bare relative names resolve.
+
+**Window continuity.** `_prepare_warmstart` writes `timee = 0` into every
+restart (uDALES otherwise dies with `timee >= runtime`), so the solver clock —
+and `btime` — restart at 0 each window. `ForwardModel._elapsed_time` therefore
+tracks the member's *physical* time and selects which slice of its turbulence
+history the window gets: the AR(1) recursion is replayed from a fixed
+name-derived seed up to that point, making window *n*'s planes the continuation
+of window *n-1*'s with no persisted filter state.
+
+That clock is **persisted to `<experiment_dir>/inlet_turbulence_clock.json`**,
+not merely held on the object. `BaseEnsembleForwardModel._run_parallel` submits
+`model.__call__` to a `ProcessPoolExecutor`, so under
+`ensemble.num_parallel_processes > 1` the member is pickled into a forkserver
+worker and every attribute it mutates dies with that process — an in-memory
+counter would silently reset to 0 each window and restart the turbulence
+history. `run_single` reloads it at the top and writes it back after a
+successful run; `EnsembleForwardModel.run_ensemble` copies a donor's clock to a
+substituted member alongside its warmstart carry, and refreshes the parent's
+in-memory copies.
+
+Replay cost is bounded: the AR(1) recursion forgets its history geometrically,
+so only `log(eps)/log(a)` records before the window are replayed
+(`ar1_burn_in_records`). Each record's white noise comes from a counter-based
+Philox stream keyed on `(seed, record index)` — with a sequential generator the
+draw order *is* the state, so truncating the prefix would change every
+subsequent record. Without this bound a 20-window rollout would cost
+O(windows²).
+
+Coverage is a hard constraint — `drivergen` stops the run outright once `timee`
+exceeds the last record — so the grid overshoots by two records, or by `dtmax`
+where that is larger (uDALES' final step can overrun `runtime` by up to
+`dtmax`). `time_step` must divide the window length, or the record grid would
+slip against physical time every window; `apply_inlet_turbulence` raises rather
+than let that accumulate silently.
+
+**Consequence for the ESMDA path.** The estimated `inflow_angle` /
+`velocity_magnitude` / `vertical_inflow_exponent` still reach the solver, now
+through the plane *means* rather than through `uprof`. This is why a real
+per-member precursor was rejected: it would have replaced the inlet face and
+disconnected those parameters (the same objection that made `iinletgen` a
+`ValueError`). A "precursor library" — record one periodic run, replay and
+rescale — remains a future option behind the identical file interface.
+
+**Spin-up is longer than on the nudging path.** `prof.inp`/`lscale.inp` are
+written as zeros (start from rest) *and* `lnudge=.false.`, so the interior fills
+from the inlet face alone with no relaxation pulling it toward the target
+profile. A `spinup_time` sized from nudging-path experience will be too short.
+Measure it during calibration.
+
+**Calibration is still open.** The shipped `intensity` and length scales are
+starting points (≈ building height), not tuned values. Three things bias the
+realised turbulence below its nominal value, all of which calibration should
+account for before reaching for more amplitude:
+
+- *Too-short correlation lengths* are the classic failure mode — the
+  fluctuations decay before reaching the buildings, and the fix is longer
+  scales, not larger `intensity`.
+- *Plane-mean removal* costs ~2% of the target rms at length scales small
+  against the inlet plane, but **40–50%** once `length_scale_y/z` approach the
+  plane's own dimensions (which the shipped 25 m defaults do on this domain).
+  The generator logs a warning past 30% of the plane extent.
+- *Near-wall rms* is low by construction: `sigma(z) = intensity * |U_mean(z)|`
+  with a power-law shape sends `sigma → 0` at the ground, whereas a real ABL has
+  its largest `u'_rms/U` there. A z-dependent intensity profile is the phase-2
+  refinement if the canyon flow turns out to care.
+
+See §8 of
+[docs/plans/udales_inlet_turbulence.md](plans/udales_inlet_turbulence.md).
+
+#### Why not the Lund generator
+
+uDALES ships the Lund (1998) recycling/rescaling inlet generator (`iinletgen=1`,
+`modinlet.f90`) but never connects it. Three independent facts, each on its own
+decisive:
 
 | # | Finding | Evidence |
 |---|---|---|
@@ -366,34 +497,18 @@ STOP 1
 ```
 
 (reproduced directly against `build/release/u-dales`; the same file with `Uinf`
-instead of `iinletgen` gets past the `&INLET` read.) Hence the validator raises
-at construction rather than producing a run that dies on the first line.
+instead of `iinletgen` gets past the `&INLET` read.) The wrapper therefore never
+writes the key on any path — `test_wrapper_never_writes_iinletgen` enforces it.
 
 **`iinletgen` vs `BCxm`.** They do not interact at all in v2.2.0. The inlet face
 is set purely by `select case(BCxm)` in `modboundary.f90` — `xmi`/`bcpup`
 (`:255-262`, `:1204-1262`) branch over `BCxm_periodic` / `BCxm_profile` /
-`BCxm_driver` only. Under the wrapper's `BCxm=2` (`BCxm_profile`,
-`_apply_boundary_condition`) the inlet is `uprof(k)`; the generator's
-`u0inletbc` array has no consumer. So even a patched-in `iinletgen=1` would
-produce nothing at the inlet without also adding a `BCxm` case for it.
-
-**Consequence for the nudging / ESMDA path.** Because the generator is inert,
-nothing changes for `apply_time_varying_inflow`: `timedepnudge.inp` still drives
-`uprof`/`vprof`, which under `BCxm=2` *is* the inlet face (`xmi_profile`), so
-the ESMDA-estimated `inflow_angle` / `velocity_magnitude` keep reaching the
-solver. Had the generator been live it would have *replaced* the inlet face and
-disconnected those parameters — which is the main reason enabling it is a
-`ValueError` rather than a best-effort write.
-
-**What would work instead.** The one implemented turbulent-inflow path in v2.2.0
-is the precursor/driver route: `BCxm=3` (`BCxm_driver`, `modboundary.f90:1239`)
-fed by `&DRIVER idriver` / `moddriver.f90`. That is a genuinely wired code path
-but a different feature (it needs a precursor run and its own inflow-parameter
-story), and this wrapper does not implement it.
-
-Guard: `enabled: true` combined with `boundary_condition: periodic` raises a
-*separate*, more specific `ValueError` — with `BCxm=1` the x boundaries wrap, so
-there is no inlet face for a turbulent inlet to act on at all.
+`BCxm_driver` only. Under `BCxm=2` (`BCxm_profile`) the inlet is `uprof(k)` and
+under `BCxm=3` it is the driver planes; the generator's `u0inletbc` array has no
+consumer in either case. So even a patched-in `iinletgen=1` would produce
+nothing at the inlet without also adding a `BCxm` case for it. That is why the
+synthetic-plane route above rides on `BCxm=3` instead of trying to revive the
+generator: it needs no Fortran changes at all.
 
 ---
 
@@ -486,7 +601,9 @@ compensation knobs".
 | [`file_utils.py`](../libs/pyudales/src/pyudales/utils/file_utils.py) | `copy_files`, `change_file_extensions` (rename experiment-suffix files) |
 | [`forward_model_utils.py`](../libs/pyudales/src/pyudales/utils/forward_model_utils.py) | `create_new_forward_model` — deep-copy template into per-member directory |
 | [`grid_utils.py`](../libs/pyudales/src/pyudales/utils/grid_utils.py) | `interpolate_grid` — staggered → cell-centred collocation (see §3) |
+| [`driver_file_utils.py`](../libs/pyudales/src/pyudales/utils/driver_file_utils.py) | `write_driver_files`/`read_driver_files` — raw float64 `*driver_000.NNN` inlet planes for `idriver=2` (see §6.1) |
 | [`inflow_utils.py`](../libs/pyudales/src/pyudales/utils/inflow_utils.py) | `angle_to_velocity`, `angle_to_pressure_gradient` — decompose angle+magnitude into u/v and dpdx/dpdy components |
+| [`inlet_turbulence_utils.py`](../libs/pyudales/src/pyudales/utils/inlet_turbulence_utils.py) | `validate_inlet_turbulence`, `apply_inlet_turbulence` — synthetic turbulent inlet on the `BCxm=3` driver route (see §6.1) |
 | [`namoptions_utils.py`](../libs/pyudales/src/pyudales/utils/namoptions_utils.py) | `NamoptionsFile` editor (see §4), `parse_fortran_logical`, `rename_namoptions_file` |
 | [`ncpu_utils.py`](../libs/pyudales/src/pyudales/utils/ncpu_utils.py) | `validate_and_sync_ncpu` — sets `nprocx=ncpu, nprocy=1` and checks divisibility |
 | [`nudging_utils.py`](../libs/pyudales/src/pyudales/utils/nudging_utils.py) | `apply_time_varying_inflow`, `compute_nudging_profiles`, `write_timedepnudge_file`, `enable_nudging_in_namoptions` (see §6) |
@@ -532,7 +649,11 @@ forward_model:
     warmup_steps: 20
     poll_interval_s: 2.0
   inlet_turbulence:
-    enabled: false            # must stay false in uDALES v2.2.0 — see §6.1
+    enabled: false            # true -> synthetic driver planes, BCxm=3 (§6.1)
+    intensity: 0.1            # u'_rms / |U_mean(z)|
+    length_scale_x/y/z: 50/25/25   # m, digital-filter integral length scales
+    time_step: 0.5            # s, &DRIVER dtdriver
+    driverjobnr: 998
   nx/ny/nz: ${domain.nx/ny/nz}
   bounds: ${domain.bounds}
   simulation_time: ${time.simulation_time}
@@ -613,7 +734,7 @@ ceiling on the development box is ~4–8 parallel processes (see
 |---|---|
 | Change the advection scheme | Not possible — only `cd2` (`iadv_mom` hardcoded by the build) |
 | Switch the SGS closure | `model.forward_model.closure=smagorinsky\|vreman` (writes the exclusive `&NAMSUBGRID` switches; §4) |
-| Turn on a turbulent inlet generator | Not possible in uDALES v2.2.0 — `iinletgen` is unreachable dead code; `inlet_turbulence.enabled=true` raises (§6.1) |
+| Turn on a turbulent inlet | `model.forward_model.inlet_turbulence.enabled=true` — synthetic driver planes on the `BCxm=3` route (needs `inflow_outflow`; turns nudging off). uDALES' own `iinletgen` stays unreachable dead code (§6.1) |
 | Change the SGS constant | `&NAMSUBGRID cs` (Smagorinsky) / `c_vreman` (Vreman) in namoptions, or pass `sgs_constant` in params — it targets the active closure automatically (§4) |
 | Add a new inflow parameter | Add to `INFLOW_PARAM_NAMES` in `params_utils.py` first |
 | Skip expensive preprocessing | Set `precomputed_geom_dir` / `geometry.udales_precomputed_geom_dir` |

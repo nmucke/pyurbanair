@@ -9,6 +9,7 @@ from ..forward_model import ForwardModel
 from .config_utils import create_config_sh
 from .dir_utils import DirectoryPaths, create_dir
 from .file_utils import change_file_extensions, copy_files
+from .inlet_turbulence_utils import reset_elapsed_time
 from .namoptions_utils import rename_namoptions_file
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,13 @@ def create_new_forward_model(
 
     # Update namoptions file to reflect new experiment name
     rename_namoptions_file(new_forward_model.dirs.experiment_dir, experiment_name)
+
+    # `copy_files` above is unfiltered, so a clock left in the template dir
+    # would be inherited by every member — one member's turbulence history
+    # silently becoming everyone's. The deep copy carries the in-memory value
+    # across too. Both are reset: a new member starts its own history at 0.
+    reset_elapsed_time(new_forward_model.dirs)
+    new_forward_model._elapsed_time = 0.0
 
     # Update config.sh file to reflect new directories
     create_config_sh(
