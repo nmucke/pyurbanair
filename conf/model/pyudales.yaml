@@ -76,24 +76,40 @@ forward_model:
     patience: 20        # consecutive sub-floor steps before killing
     warmup_steps: 20    # ignore small startup dt for the first N steps
     poll_interval_s: 2.0
-  # Turbulent inlet generator. Schema is shared across all three backends
-  # (`enabled` plus backend-specific tunables); uDALES contributes no tunables
-  # because the feature is NOT REACHABLE in the vendored uDALES v2.2.0:
-  #   * `iinletgen` (the Lund (1998) recycling/rescaling generator) is not
-  #     declared in any namelist — u-dales/src/modstartup.f90:108-173, with
-  #     &INLET at :141-144 declaring only Uinf/Vinf/di/dti/inletav/linletRA/
-  #     lstoreplane/lreadminl/lfixinlet/lfixutauin/lwallfunc. Writing the key
-  #     aborts the solver: "ERROR: Problem in namoptions INLET".
-  #   * `call initinlet` is commented out (program.f90:77, modstartup.f90:627)
-  #     and `inletgen` (modinlet.f90:204) has no call site at all.
-  #   * modboundary.f90 never reads the generator's `u0inletbc`; the west inlet
-  #     face comes only from `select case(BCxm)` (:1204-1262).
-  # Setting enabled=true therefore raises a ValueError at construction rather
-  # than producing a run that crashes at startup. Turbulent inflow in this
-  # uDALES version would need the precursor/driver path (BCxm=3, &DRIVER
-  # idriver), which this wrapper does not implement. See docs/pyudales.md §6.1.
+  # Turbulent inlet. Schema is shared across all three backends (`enabled` plus
+  # backend-specific tunables); `intensity` here plays the role of pylbm's
+  # `amplitude` and pypalm's `disturbance_amplitude`.
+  #
+  # uDALES' own Lund (1998) recycling generator (`iinletgen`) is unreachable
+  # dead code in v2.2.0 (see docs/pyudales.md §6.1), so `enabled: true` drives
+  # the *precursor/driver* route instead: BCxm=3 -> idriver=2, fed by driver
+  # planes SYNTHESISED IN PYTHON — a mean profile from the same ESMDA
+  # parameters the nudging path uses (velocity_magnitude / inflow_angle /
+  # vertical_inflow_exponent) plus digital-filter turbulent fluctuations
+  # (Xie & Castro 2008). No precursor run, no Fortran changes.
+  #
+  # Turning it on ALSO turns volume nudging off (lnudge/ltimedepnudge=.false.):
+  # under BCxm=3 the inlet no longer comes from uprof, and relaxing the interior
+  # toward a smooth mean would damp the injected fluctuations. It requires
+  # boundary_condition=inflow_outflow.
+  #
+  # `enabled: false` (the default) is a strict no-op — namoptions stays
+  # byte-identical and no driver files are written.
   inlet_turbulence:
     enabled: false
+    intensity: 0.1        # u'_rms / |U_mean(z)|; v' and w' get 0.7x this
+    length_scale_y: 25.0  # m — spanwise integral length scale of the eddies
+    length_scale_z: 25.0  # m — vertical (defaults ~ building height; calibrate)
+    length_scale_x: 50.0  # m — streamwise; sets the AR(1) time scale via Taylor
+    time_step: 0.5        # s — &DRIVER dtdriver. Injected turbulence is
+                          #     band-limited to ~1/(2*dtdriver) because the
+                          #     solver interpolates linearly between records.
+    driverjobnr: 998      # 3-digit driver-file suffix; must differ from expnr
+    seed: null            # null -> derived from the member's experiment name
+    # Large cases only: bound the resident driver arrays
+    # ((jtot+2)*(ktot+2)*driverstore*8 B each) by reading the files in chunks.
+    # lchunkread: true
+    # chunkread_size: 100
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

@@ -17,6 +17,12 @@ from .utils.clean_up_utils import clean_output_dir, clean_temp_dir
 from .utils.config_utils import create_config_sh
 from .utils.dir_utils import get_project_root, get_udales_directory_paths
 from .utils.file_utils import copy_files
+from .utils.inlet_turbulence_utils import (
+    INLET_TURBULENCE_KEYS,
+    apply_inlet_turbulence,
+    is_inlet_turbulence_enabled,
+    validate_inlet_turbulence,
+)
 from .utils.namoptions_utils import NamoptionsFile, rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
 from .utils.nudging_utils import apply_time_varying_inflow
@@ -110,88 +116,28 @@ def validate_closure(closure: Optional[str]) -> None:
         )
 
 
-# Keys the ``inlet_turbulence`` block may carry. The schema is shared across the
-# three backends; uDALES contributes no tunables of its own because the feature
-# it would tune is not reachable in this solver version (see below).
-INLET_TURBULENCE_KEYS = frozenset({"enabled"})
-
-# uDALES v2.2.0 ships the Lund (1998) recycling/rescaling turbulent inlet
-# generator (``iinletgen=1``) but never wires it up. Three independent facts,
-# each on its own sufficient to make the switch unreachable:
+# Turbulent inlet. The schema and the generator live in
+# ``utils.inlet_turbulence_utils`` (each backend's module owns its own schema, as
+# in pylbm/pypalm); this module only re-exports the validator so callers and
+# tests have one obvious entry point.
 #
-#   1. ``iinletgen`` is not a member of ANY namelist. The namelist declarations
-#      live in ``u-dales/src/modstartup.f90:108-173``; ``&INLET`` (lines 141-144)
-#      declares only Uinf, Vinf, di, dti, inletav, linletRA, lstoreplane,
-#      lreadminl, lfixinlet, lfixutauin, lwallfunc. It is never assigned in the
-#      source either, so it keeps its ``modglobal.f90:167`` default of 0 and is
-#      not even MPI_BCAST to the other ranks. Writing the key aborts the run at
-#      startup: ``ERROR: Problem in namoptions INLET / iostat error: 5010``.
-#   2. ``call initinlet`` is commented out (``program.f90:77`` and
-#      ``modstartup.f90:627``), so the generator's arrays are never allocated.
-#   3. ``inletgen``/``inletgennotemp`` (``modinlet.f90:204`` and ``:952``) have no
-#      call sites anywhere in the source, and ``modboundary.f90`` never reads the
-#      generator's output array ``u0inletbc`` — the west inlet face is set purely
-#      by ``select case(BCxm)`` (``modboundary.f90:255-262``, ``1204-1262``).
+# Note which of uDALES' two inlet-turbulence routes this drives. The Lund (1998)
+# recycling generator (``iinletgen``) remains unreachable dead code — it is in no
+# namelist, ``call initinlet`` is commented out (``program.f90:77``), ``inletgen``
+# (``modinlet.f90:204``) has no call site, and ``modboundary.f90`` never reads its
+# output ``u0inletbc``. The wrapper drives the *precursor/driver* route instead
+# (``BCxm=3`` -> ``idriver=2``), feeding it planes synthesised in Python. See
+# ``docs/pyudales.md`` §6.1.
 #
-# So there is no wrapper-level write that could turn this on: it would need a
-# Fortran port (namelist entry + BCAST, re-enabling initinlet, adding the missing
-# inletgen call site, and a new BCxm case consuming u0inletbc). Enabling the knob
-# therefore raises rather than silently writing a key that crashes the solver.
-UDALES_INLET_GENERATOR_UNAVAILABLE = (
-    "uDALES v2.2.0 does not expose the Lund (1998) turbulent inlet generator. "
-    "`iinletgen` is not declared in any namelist (u-dales/src/modstartup.f90:"
-    "108-173; &INLET at :141-144 declares only Uinf/Vinf/di/dti/inletav/"
-    "linletRA/lstoreplane/lreadminl/lfixinlet/lfixutauin/lwallfunc), so writing "
-    "it aborts the run with 'ERROR: Problem in namoptions INLET'. The generator "
-    "is dead code besides: `call initinlet` is commented out (program.f90:77, "
-    "modstartup.f90:627), `inletgen` (modinlet.f90:204) has no call site, and "
-    "modboundary.f90 never reads its output `u0inletbc` — the inlet face comes "
-    "only from `select case(BCxm)`. Turbulent inflow in this uDALES version "
-    "requires the precursor/driver path (BCxm=3, &DRIVER idriver), which this "
-    "wrapper does not implement. Leave inlet_turbulence.enabled=false."
-)
-
-
-def validate_inlet_turbulence(
-    inlet_turbulence: Optional[dict],
-    boundary_condition: str,
-) -> None:
-    """Validate the ``inlet_turbulence`` block.
-
-    Absent, empty, or ``enabled: false`` is a strict no-op — nothing is written
-    to namoptions, so a default run stays byte-identical.
-
-    ``enabled: true`` always raises: under ``periodic`` boundary conditions there
-    is no inlet face for a turbulent inlet to act on, and under
-    ``inflow_outflow`` the generator itself is unreachable in this uDALES version
-    (see :data:`UDALES_INLET_GENERATOR_UNAVAILABLE`).
-    """
-    if not inlet_turbulence:
-        return
-
-    unknown = set(inlet_turbulence) - INLET_TURBULENCE_KEYS
-    if unknown:
-        logger.warning(
-            "Ignoring unknown inlet_turbulence keys: %s (supported: %s)",
-            ", ".join(sorted(unknown)),
-            ", ".join(sorted(INLET_TURBULENCE_KEYS)),
-        )
-
-    if not inlet_turbulence.get("enabled", False):
-        return
-
-    if boundary_condition == "periodic":
-        raise ValueError(
-            "inlet_turbulence.enabled=true requires "
-            "boundary_condition='inflow_outflow': under 'periodic' the x "
-            "boundaries wrap (BCxm=1) so there is no inlet face for a turbulent "
-            "inlet to be imposed on."
-        )
-
-    raise ValueError(
-        f"inlet_turbulence.enabled=true is not supported by pyudales: "
-        f"{UDALES_INLET_GENERATOR_UNAVAILABLE}"
-    )
+# ``validate_inlet_turbulence`` / ``INLET_TURBULENCE_KEYS`` are imported above
+# and re-exported here for callers that already reach for them on this module.
+__all__ = [
+    "ForwardModel",
+    "INLET_TURBULENCE_KEYS",
+    "save_precomputed_geometry",
+    "validate_closure",
+    "validate_inlet_turbulence",
+]
 
 
 def save_precomputed_geometry(
@@ -410,14 +356,18 @@ class ForwardModel(BaseForwardModel):
                 (default 20), ``poll_interval_s`` (default 2.0). When the
                 timestep collapses the run is killed early and reported as a
                 failure, so the ensemble resamples it from a successful donor.
-            inlet_turbulence: Optional dict selecting a turbulent inlet
-                generator, sharing the ``{"enabled": bool, ...}`` schema used by
-                the other backends. ``None``/``{}``/``{"enabled": False}`` (the
-                default) is a strict no-op — nothing is written to namoptions.
-                ``{"enabled": True}`` raises: uDALES v2.2.0 does not expose its
-                Lund (1998) generator (see
-                :data:`UDALES_INLET_GENERATOR_UNAVAILABLE`), and under
-                ``boundary_condition='periodic'`` there is no inlet face at all.
+            inlet_turbulence: Optional dict enabling the turbulent inlet,
+                sharing the ``{"enabled": bool, ...}`` schema used by the other
+                backends. ``None``/``{}``/``{"enabled": False}`` (the default) is
+                a strict no-op — nothing is written to namoptions and no driver
+                files appear. ``{"enabled": True}`` switches the inlet to
+                uDALES' precursor/driver route (``BCxm=3``) fed by driver planes
+                synthesised in Python from the same inflow parameters, and turns
+                volume nudging off. Requires
+                ``boundary_condition='inflow_outflow'``. Tunables:
+                ``intensity``, ``length_scale_x/y/z``, ``time_step``,
+                ``driverjobnr``, ``seed``, ``lchunkread``, ``chunkread_size`` —
+                see :mod:`.utils.inlet_turbulence_utils`.
         """
         super().__init__(results_dir=results_dir)
 
@@ -485,12 +435,22 @@ class ForwardModel(BaseForwardModel):
         self.boundary_condition = boundary_condition
         self._apply_boundary_condition()
 
-        # Turbulent inlet generator. Validation only: the disabled path writes
-        # nothing (byte-identical namoptions) and the enabled path cannot be
-        # honoured by this uDALES version, so it fails loudly here rather than
-        # writing a namelist key that aborts the solver at startup.
-        validate_inlet_turbulence(inlet_turbulence, boundary_condition)
+        # Turbulent inlet. Validation only at construction; the planes and the
+        # &DRIVER keys are written per call in `_apply_inflow_settings`, because
+        # they depend on the run-time parameters and on how far this member has
+        # already been advanced. The disabled path writes nothing at all, so a
+        # default run stays byte-identical.
+        validate_inlet_turbulence(
+            inlet_turbulence, boundary_condition, self.dirs.experiment_name
+        )
         self.inlet_turbulence = dict(inlet_turbulence or {})
+
+        # Physical seconds this member has already simulated, used to pick the
+        # slice of its synthetic inlet-turbulence history each window gets (see
+        # utils.inlet_turbulence_utils). It cannot be read back from `state`:
+        # `_prepare_warmstart` writes timee=0 into every restart, so the solver
+        # clock — and the state's own time coordinate — restart each window.
+        self._elapsed_time = 0.0
 
         # SGS closure. ``None`` keeps whatever the case template sets, so runs
         # that don't ask for a closure stay byte-identical.
@@ -712,7 +672,19 @@ class ForwardModel(BaseForwardModel):
         super().set_results_dir(results_dir)
         self.dirs.results_dir = results_dir
 
-    def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
+    def _window_runtime(self, warm_start: bool) -> float:
+        """Seconds of physical time this call will simulate.
+
+        A warm window drops the spinup (``run_single`` zeroes ``spinup_time``
+        after the inflow settings are written, so the value cannot be read off
+        ``self`` at that point).
+        """
+        simulation_time = self._simulation_time or 0.0
+        return simulation_time if warm_start else simulation_time + self.spinup_time
+
+    def _apply_inflow_settings(
+        self, params: xarray.Dataset, warm_start: bool = False
+    ) -> None:
         """Apply the inflow settings to the forward model."""
         if params is not None:
             self.params = merge_params(self.params, params)
@@ -736,7 +708,31 @@ class ForwardModel(BaseForwardModel):
         )
         use_nudging = True
 
-        if use_nudging:
+        if is_inlet_turbulence_enabled(self.inlet_turbulence):
+            # Synthetic driver planes replace BOTH the nudged inlet face and the
+            # interior relaxation: under BCxm=3 the west face reads the planes,
+            # not uprof, and nudging toward a smooth mean would damp the injected
+            # fluctuations (see utils.inlet_turbulence_utils).
+            spinup_time = 0.0 if warm_start else self.spinup_time
+            logger.info(
+                "Applying inflow via synthetic driver planes "
+                "(warm_start=%s, elapsed=%.1f s, time_varying=%s)",
+                warm_start,
+                self._elapsed_time,
+                is_time_varying_params(self.params),
+            )
+            apply_inlet_turbulence(
+                params=self.params,
+                dirs=self.dirs,
+                config=self.inlet_turbulence,
+                profile_config=nudging_config.get("profile_config"),
+                spinup_time=spinup_time,
+                simulation_time=(
+                    self._simulation_time if self._simulation_time is not None else 0.0
+                ),
+                window_start_time=self._elapsed_time,
+            )
+        elif use_nudging:
             logger.info(
                 "Applying inflow via nudging (time_varying=%s, BC=%s, nudging_config=%s)",
                 is_time_varying_params(self.params),
@@ -1012,7 +1008,11 @@ class ForwardModel(BaseForwardModel):
         Either way the run emits a fresh carry for the next warm start. The
         subgrid fields stay on disk in the carry and never enter ``result``.
         """
-        self._apply_inflow_settings(params=params)
+        warm_start = state is not None
+        # Runs BEFORE the namoptions snapshot on purpose: the &DRIVER / nudging
+        # keys it writes must survive the post-run `_restore_namoptions`.
+        self._apply_inflow_settings(params=params, warm_start=warm_start)
+        window_runtime = self._window_runtime(warm_start)
 
         saved_spinup_time = self.spinup_time
         saved_namoptions = self._snapshot_namoptions()
@@ -1044,6 +1044,10 @@ class ForwardModel(BaseForwardModel):
                 clean_output_except_warmstart_files(self.dirs)
                 remove_old_warmstart_files(self.dirs)
 
+            # Advance the member's physical clock only on success. A failed run
+            # simulated nothing, and the ensemble resamples it from a donor, so
+            # its next window legitimately regenerates the same driver slice.
+            self._elapsed_time += window_runtime
             return result
         finally:
             self.spinup_time = saved_spinup_time
