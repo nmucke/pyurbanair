@@ -647,6 +647,41 @@ def test_disabled_path_writes_nothing(tmp_path: pathlib.Path) -> None:
     assert "iinletgen" not in NamoptionsFile(namoptions_path).get_section_keys("INLET")
 
 
+def test_e2e_disabled_run_leaves_no_inlet_turbulence_artefacts(
+    tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
+) -> None:
+    """The no-op guarantee, asserted against a REAL run rather than the util.
+
+    ``test_disabled_path_writes_nothing`` only exercises the validator, so it
+    could not see ``run_single`` unconditionally persisting the clock — a file
+    dropped into the experiment dir of every default pyudales run.
+    """
+    from hydra.utils import instantiate
+    from pyudales.utils.inlet_turbulence_utils import elapsed_time_path
+    from pyudales.utils.namoptions_utils import NamoptionsFile
+
+    cfg = compose_test_cfg(
+        [
+            *_smoke_overrides(tmp_path),
+            "model.forward_model.inlet_turbulence.enabled=false",
+        ]
+    )
+    fm = instantiate(cfg.model.forward_model)
+    instantiate(cfg.model.prepare, forward_model=fm)
+    fm.run_single()
+
+    assert not elapsed_time_path(fm.dirs).exists()
+    assert not list(fm.dirs.experiment_dir.glob("*driver_*"))
+
+    namoptions = NamoptionsFile(
+        fm.dirs.experiment_dir / f"namoptions.{fm.dirs.experiment_name}"
+    )
+    # The nudging path owns the inlet, and no &DRIVER section was invented.
+    assert namoptions.get_value_as_int("BC", "BCxm") == 2
+    assert not namoptions.has_section("DRIVER")
+    assert namoptions.get_value_as_bool("PHYSICS", "lnudge") is True
+
+
 def test_wrapper_never_writes_iinletgen() -> None:
     """No code path may emit `iinletgen` — the solver aborts on the key."""
     forward_model = pathlib.Path(
@@ -916,6 +951,73 @@ def test_clock_round_trips_through_disk(tmp_path: pathlib.Path) -> None:
     assert read_elapsed_time(dirs) == 42.5
 
 
+def test_a_clock_belonging_to_another_member_is_ignored(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``create_new_forward_model`` mirrors the template dir with an unfiltered
+    ``copy_files``, so a stray clock could otherwise become every member's."""
+    from pyudales.utils.inlet_turbulence_utils import (
+        elapsed_time_path,
+        read_elapsed_time,
+        write_elapsed_time,
+    )
+
+    template = _make_dirs(tmp_path / "template", "999")
+    member = _make_dirs(tmp_path / "member", "003")
+    write_elapsed_time(template, 600.0)
+    # Simulate the unfiltered copy.
+    elapsed_time_path(member).write_text(elapsed_time_path(template).read_text())
+
+    with caplog.at_level("WARNING"):
+        assert read_elapsed_time(member) == 0.0
+    assert "belongs to member '999'" in caplog.text
+
+
+def test_reset_clears_a_persisted_clock(tmp_path: pathlib.Path) -> None:
+    """A freshly built model starts at 0 however dirty the experiment dir is."""
+    from pyudales.utils.inlet_turbulence_utils import (
+        elapsed_time_path,
+        read_elapsed_time,
+        reset_elapsed_time,
+        write_elapsed_time,
+    )
+
+    dirs = _make_dirs(tmp_path)
+    write_elapsed_time(dirs, 900.0)
+    reset_elapsed_time(dirs)
+    assert not elapsed_time_path(dirs).exists()
+    assert read_elapsed_time(dirs) == 0.0
+    reset_elapsed_time(dirs)  # idempotent
+
+
+def test_new_ensemble_members_do_not_inherit_the_template_clock(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The real path: deep-copied member + unfiltered dir copy."""
+    from pyudales.utils.inlet_turbulence_utils import (
+        elapsed_time_path,
+        write_elapsed_time,
+    )
+
+    template = _make_dirs(tmp_path / "t", "999")
+    write_elapsed_time(template, 600.0)
+    assert elapsed_time_path(template).exists()
+
+    # `create_new_forward_model` needs a real ForwardModel; assert the two
+    # mechanisms it relies on instead, which is what the member inherits.
+    member = _make_dirs(tmp_path / "m", "000")
+    elapsed_time_path(member).write_text(elapsed_time_path(template).read_text())
+
+    from pyudales.utils.inlet_turbulence_utils import (
+        read_elapsed_time,
+        reset_elapsed_time,
+    )
+
+    reset_elapsed_time(member)
+    assert not elapsed_time_path(member).exists()
+    assert read_elapsed_time(member) == 0.0
+
+
 def test_clock_is_copied_on_failure_substitution(tmp_path: pathlib.Path) -> None:
     """A substituted member inherits the donor's clock, not just its carry.
 
@@ -1040,14 +1142,57 @@ def test_large_length_scales_warn_about_the_discarded_energy(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Calibration must not chase amplitude the plane-mean removal discards."""
+    from pyudales.utils.inlet_turbulence_utils import (
+        _WARNED_LENGTH_SCALES,
+        _warn_if_length_scales_exceed_the_plane,
+    )
+
+    _WARNED_LENGTH_SCALES.clear()
     with caplog.at_level("WARNING"):
-        _generate(n_records=4, length_scale_y=0.5 * YLEN, length_scale_z=1.0)
+        _warn_if_length_scales_exceed_the_plane(
+            length_scale_y=0.5 * YLEN, length_scale_z=1.0, ylen=YLEN, zsize=ZSIZE
+        )
     assert "length_scale_y" in caplog.text
+
+    # Deduplicated per process: a 32-member, 20-window rollout must not emit the
+    # same line 640 times.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        _warn_if_length_scales_exceed_the_plane(
+            length_scale_y=0.5 * YLEN, length_scale_z=1.0, ylen=YLEN, zsize=ZSIZE
+        )
+    assert caplog.text == ""
 
     caplog.clear()
     with caplog.at_level("WARNING"):
-        _generate(n_records=4, length_scale_y=1.0, length_scale_z=1.0)
-    assert "length_scale_y" not in caplog.text
+        _warn_if_length_scales_exceed_the_plane(
+            length_scale_y=1.0, length_scale_z=1.0, ylen=YLEN, zsize=ZSIZE
+        )
+    assert caplog.text == ""
+    _WARNED_LENGTH_SCALES.clear()
+
+
+def test_shipped_default_length_scales_warn_on_this_domain(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Wired into the real entry point, not just callable in isolation.
+
+    The shipped 25 m defaults exceed 30% of this plane, which is precisely the
+    case the warning exists for.
+    """
+    from pyudales.utils.inlet_turbulence_utils import (
+        _WARNED_LENGTH_SCALES,
+        apply_inlet_turbulence,
+    )
+
+    _WARNED_LENGTH_SCALES.clear()
+    dirs = _make_dirs(tmp_path)
+    with caplog.at_level("WARNING"):
+        apply_inlet_turbulence(
+            params=_params(), dirs=dirs, config=ENABLED, simulation_time=5.0
+        )
+    assert "length_scale_y" in caplog.text
+    _WARNED_LENGTH_SCALES.clear()
 
 
 def test_large_driverstore_warns_about_solver_memory(

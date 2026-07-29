@@ -98,7 +98,14 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             donor_model = self.ensemble_forward_models[donor]
             failed_model = self.ensemble_forward_models[failed]
             copy_carry(donor_model.dirs, failed_model.dirs)
-            copy_elapsed_time(donor_model.dirs, failed_model.dirs)
+            if not copy_elapsed_time(donor_model.dirs, failed_model.dirs):
+                logger.info(
+                    "Donor %s had no inlet-turbulence clock to pass to member "
+                    "%s; its turbulence history restarts from its own clock. "
+                    "Expected when inlet_turbulence is off.",
+                    donor_model.dirs.experiment_name,
+                    failed_model.dirs.experiment_name,
+                )
         for model in self.ensemble_forward_models:
             model._elapsed_time = read_elapsed_time(model.dirs, model._elapsed_time)
         return result

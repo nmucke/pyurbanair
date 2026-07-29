@@ -128,12 +128,34 @@ def elapsed_time_path(dirs: DirectoryPaths) -> pathlib.Path:
 
 
 def read_elapsed_time(dirs: DirectoryPaths, default: float = 0.0) -> float:
-    """Physical seconds this member has already simulated (0 if never run)."""
+    """Seconds of turbulence history this member has already consumed.
+
+    Not strictly "physical time simulated". Every successful ``run_single``
+    advances it, and ESMDA re-forecasts the *same* window ``num_steps`` times
+    with updated parameters (``smoothing/esmda.py:313-316`` keeps
+    ``initial_state`` fixed), so after an assimilation window the clock reads
+    ``num_steps * window_runtime``. Nothing breaks — the offset only has to
+    advance monotonically to index a stationary, effectively infinite history —
+    but it does mean each ESMDA iteration sees a *different* inlet realisation
+    for the same physical interval. Whether iterations should instead share one
+    realisation (so the Kalman update is not confounded by a changing noise
+    draw) is a DA-behaviour question, not a plumbing one; it would need a signal
+    from the assimilation layer, which the wrapper cannot infer locally.
+
+    The stored ``experiment_name`` is checked, not decorative: ensemble members
+    are built by ``create_new_forward_model``, which mirrors the template's
+    experiment dir with an unfiltered ``copy_files``. A clock left in the
+    template would otherwise be inherited by every member — one member's history
+    silently becoming everyone's. ``reset_elapsed_time`` is the primary defence;
+    this is the backstop for any other copy route.
+    """
     path = elapsed_time_path(dirs)
     if not path.exists():
         return default
     try:
-        return float(json.loads(path.read_text())["elapsed_time"])
+        payload = json.loads(path.read_text())
+        elapsed_time = float(payload["elapsed_time"])
+        owner = payload.get("experiment_name")
     except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
         logger.warning(
             "Could not read %s; restarting the inlet-turbulence clock at %.1f s. "
@@ -142,6 +164,33 @@ def read_elapsed_time(dirs: DirectoryPaths, default: float = 0.0) -> float:
             default,
         )
         return default
+
+    if owner is not None and owner != dirs.experiment_name:
+        logger.warning(
+            "Ignoring inlet-turbulence clock in %s: it belongs to member '%s', "
+            "not '%s' (a stale file copied from another experiment dir). "
+            "Restarting this member's clock at %.1f s.",
+            path,
+            owner,
+            dirs.experiment_name,
+            default,
+        )
+        return default
+    return elapsed_time
+
+
+def reset_elapsed_time(dirs: DirectoryPaths) -> None:
+    """Discard any persisted clock so a freshly built model starts at t=0.
+
+    The clock is scoped to a ``ForwardModel``'s lifetime — it is persisted only
+    so forkserver workers can see it *within* a run, never to resume a later
+    one. Without this reset, a run reusing ``paths.experiment_dir`` (or an
+    ensemble whose template dir happens to hold a clock) would start mid-history
+    and produce a different inlet realisation from an identical config and seed.
+    The turbulence is stationary, so that is statistically harmless — and
+    exactly the kind of irreproducibility that is expensive to track down.
+    """
+    elapsed_time_path(dirs).unlink(missing_ok=True)
 
 
 def write_elapsed_time(dirs: DirectoryPaths, elapsed_time: float) -> None:
@@ -354,6 +403,12 @@ def _filter_bounded(field: np.ndarray, b: np.ndarray) -> np.ndarray:
 # The recursion forgets its history geometrically (a**n), so replaying only the
 # last `log(eps)/log(a)` records before the window is indistinguishable from
 # replaying all of them -- and turns an O(windows**2) rollout into O(windows).
+#
+# 1e-12 costs ~2900 records at the production shape (L_x=50 m, U=3 m/s,
+# dtdriver=0.1 s), which is bounded but not free. Relaxing to 1e-6 halves it at
+# no physical cost -- the AR(1) state is a random draw, not a measurement, so
+# reproducing it to 6 digits is already far beyond what matters. Worth doing if
+# the calibration runs feel slow.
 AR1_BURN_IN_EPSILON = 1e-12
 
 
@@ -466,6 +521,14 @@ def validate_time_step_divides_window(runtime_total: float, time_step: float) ->
     of ``time_step`` the record grid slips against physical time by up to half a
     record per window and the error accumulates over a rollout — silently. Fail
     loudly instead, which is cheaper than a drifting inlet nobody notices.
+
+    Deliberately a *runtime* check rather than part of
+    :func:`validate_inlet_turbulence`: the window length is
+    ``spinup_time + simulation_time`` for a cold window and ``simulation_time``
+    for a warm one, so it is not known until the call. That means a bad
+    ``time_step`` surfaces on the first ``run_single`` rather than at
+    construction — after the ensemble has been built, but still before any
+    solver time is spent.
     """
     if time_step <= 0.0 or runtime_total <= 0.0:
         return
@@ -548,13 +611,6 @@ def build_driver_planes(
     # condition there would be wrong rather than merely conservative.
     sigma_w[:, 0] = 0.0
 
-    _warn_if_length_scales_exceed_the_plane(
-        length_scale_y=length_scale_y,
-        length_scale_z=length_scale_z,
-        ylen=ylen,
-        zsize=zsize,
-    )
-
     # Taylor's hypothesis turns the streamwise length scale into a time scale.
     u_ref_scalar = float(np.mean(np.abs(speed)))
     if u_ref_scalar <= 0.0:
@@ -606,6 +662,13 @@ def build_driver_planes(
 LENGTH_SCALE_PLANE_FRACTION_WARN = 0.3
 
 
+# Warnings below fire from a per-member, per-window code path: a 32-member
+# 20-window rollout would otherwise emit 640 identical lines. Deduplicated per
+# process, which is per worker under a parallel ensemble -- still a handful
+# rather than hundreds, and the message is about config, not about a run.
+_WARNED_LENGTH_SCALES: set[tuple[str, float, float]] = set()
+
+
 def _warn_if_length_scales_exceed_the_plane(
     *,
     length_scale_y: float,
@@ -627,6 +690,10 @@ def _warn_if_length_scales_exceed_the_plane(
         ("length_scale_z", length_scale_z, zsize),
     ):
         if extent > 0 and scale / extent > LENGTH_SCALE_PLANE_FRACTION_WARN:
+            key = (axis, scale, extent)
+            if key in _WARNED_LENGTH_SCALES:
+                continue
+            _WARNED_LENGTH_SCALES.add(key)
             logger.warning(
                 "inlet_turbulence.%s=%.1f m is %.0f%% of the inlet plane's %.1f m "
                 "extent. Zeroing the plane mean of u' will discard a large part "
@@ -764,6 +831,12 @@ def apply_inlet_turbulence(
     validate_time_step_divides_window(runtime_total, time_step)
     times = driver_time_grid(
         runtime_total, time_step, dtmax=namoptions.get_value_as_float("RUN", "dtmax")
+    )
+    _warn_if_length_scales_exceed_the_plane(
+        length_scale_y=float(resolved["length_scale_y"]),
+        length_scale_z=float(resolved["length_scale_z"]),
+        ylen=ylen,
+        zsize=zsize,
     )
     _warn_if_driver_arrays_are_large(
         jtot=jtot,

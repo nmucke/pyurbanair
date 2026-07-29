@@ -22,6 +22,7 @@ from .utils.inlet_turbulence_utils import (
     apply_inlet_turbulence,
     is_inlet_turbulence_enabled,
     read_elapsed_time,
+    reset_elapsed_time,
     validate_inlet_turbulence,
     write_elapsed_time,
 )
@@ -447,9 +448,11 @@ class ForwardModel(BaseForwardModel):
         )
         self.inlet_turbulence = dict(inlet_turbulence or {})
 
-        # Physical seconds this member has already simulated, used to pick the
-        # slice of its synthetic inlet-turbulence history each window gets (see
-        # utils.inlet_turbulence_utils). It cannot be read back from `state`:
+        # Seconds of synthetic turbulence history this member has consumed,
+        # used to pick the slice each window gets (see
+        # utils.inlet_turbulence_utils.read_elapsed_time, which documents why
+        # this is not exactly physical time under ESMDA). It cannot be read back
+        # from `state`:
         # `_prepare_warmstart` writes timee=0 into every restart, so the solver
         # clock — and the state's own time coordinate — restart each window.
         #
@@ -457,7 +460,13 @@ class ForwardModel(BaseForwardModel):
         # parallel ensembles run each member in a forkserver worker that
         # discards attribute mutations; this is a cache of it, refreshed at the
         # top of every `run_single`.
-        self._elapsed_time = read_elapsed_time(self.dirs)
+        #
+        # A freshly constructed model always starts at 0: the file exists to
+        # cross the worker-process boundary *within* a run, not to resume a
+        # previous one. Reusing `paths.experiment_dir` must not silently change
+        # the inlet realisation for an identical config and seed.
+        reset_elapsed_time(self.dirs)
+        self._elapsed_time = 0.0
 
         # SGS closure. ``None`` keeps whatever the case template sets, so runs
         # that don't ask for a closure stay byte-identical.
@@ -1074,7 +1083,11 @@ class ForwardModel(BaseForwardModel):
             # the two stay in step (without that the substituted member would be
             # permanently offset from the state it is carrying).
             self._elapsed_time += window_runtime
-            write_elapsed_time(self.dirs, self._elapsed_time)
+            if is_inlet_turbulence_enabled(self.inlet_turbulence):
+                # Guarded: with the knob off nothing reads the clock, and the
+                # disabled path must not drop a file into the experiment dir
+                # (CLAUDE.md strict no-op rule).
+                write_elapsed_time(self.dirs, self._elapsed_time)
             return result
         finally:
             self.spinup_time = saved_spinup_time
