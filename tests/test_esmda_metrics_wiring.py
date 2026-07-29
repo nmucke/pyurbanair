@@ -45,7 +45,14 @@ BASE_PARAM_KEYS = {
     "prior_crps_mean",
     "crps_reduction_vs_prior",
 }
-BUNDLE_PARAM_KEYS = {"zscore", "pit_counts", "pit", "coverage", "contraction_ratio"}
+BUNDLE_PARAM_KEYS = {
+    "zscore",
+    "pit_counts",
+    "pit",
+    "sampling",
+    "coverage",
+    "contraction_ratio",
+}
 JOINT_KEYS = {
     "n_members",
     "n_parameters",
@@ -60,7 +67,12 @@ JOINT_KEYS = {
     "posterior_corr",
     "prior_corr",
     "corr_summary",
+    "prior_reference",
+    "vs_initial_prior",
 }
+
+# The per-window spread ratio the fixture below builds in exactly.
+WINDOW_RATIO = 0.6
 
 
 def _write_run_dir(
@@ -101,6 +113,49 @@ def _write_run_dir(
     truth.to_netcdf(run_dir / "true_params.nc")
 
 
+def _unit_spread(rng: np.random.Generator, shape: tuple[int, int]) -> np.ndarray:
+    """Anomalies whose per-column sample spread is exactly 1 (ddof=1).
+
+    Exact rather than sampled, so the spread ratios asserted below are
+    closed-form; independent per call, so the stacked blocks stay full rank
+    (a *scalar* multiple of one block would collapse the joint covariance's
+    rank and make the joint assertions measure the fixture instead).
+    """
+    raw = rng.normal(size=shape)
+    raw = raw - raw.mean(axis=0, keepdims=True)
+    return raw / raw.std(axis=0, ddof=1, keepdims=True)
+
+
+def _chained_blocks(
+    rng: np.random.Generator, n_per_window: int, initial_spread: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Prior/posterior anomaly blocks with a real multi-window prior chain.
+
+    This is the structure that makes `contraction_ratio` ambiguous, and the one
+    a real run always has: `run_esmda.py` seeds window `w`'s prior from window
+    `w - 1`'s posterior, so **only block 0 of `prior_params.nc` is a genuine
+    prior** and the spread ratchets down window by window:
+
+        prior spread[w] = initial * WINDOW_RATIO**w
+        posterior spread[w] = initial * WINDOW_RATIO**(w + 1)
+
+    A prior that is uniformly wider than the posterior at every knot -- what
+    this fixture used to build -- is the one shape a multi-window run never
+    produces, and it makes the per-window and cumulative ratios coincide, so
+    `0 < contraction_ratio["mean"] < 1` passes whichever one is reported.
+    """
+    prior_blocks, posterior_blocks = [], []
+    spread = initial_spread
+    for _ in range(N_WINDOWS):
+        prior_blocks.append(_unit_spread(rng, (N_MEMBERS, n_per_window)) * spread)
+        spread *= WINDOW_RATIO
+        posterior_blocks.append(_unit_spread(rng, (N_MEMBERS, n_per_window)) * spread)
+    return (
+        np.concatenate(prior_blocks, axis=1),
+        np.concatenate(posterior_blocks, axis=1),
+    )
+
+
 def _dynamic_run_artifacts() -> tuple[xarray.Dataset, xarray.Dataset, xarray.Dataset]:
     """A dynamic run: knots concatenated across windows, plus a broadcast static.
 
@@ -108,21 +163,24 @@ def _dynamic_run_artifacts() -> tuple[xarray.Dataset, xarray.Dataset, xarray.Dat
     `inflow_angle` on a `time` coordinate, and the `static_parameters` block
     (`vertical_inflow_exponent`) broadcast to every knot, i.e. piecewise
     constant with one step per window. Both PIT branches of the bundle fire on
-    one dataset, and the joint vector spans both parameters.
+    one dataset, and the joint vector spans both parameters. The prior carries
+    the real window chain (see `_chained_blocks`).
     """
     rng = np.random.default_rng(7)
     n_knots = N_WINDOWS * KNOTS_PER_WINDOW
     times = np.arange(n_knots) * SECONDS_PER_KNOT
 
     centre = 270.0 + np.cumsum(rng.normal(0.0, 0.5, size=n_knots))
-    angle_post = centre[None, :] + rng.normal(0.0, 1.0, size=(N_MEMBERS, n_knots))
-    angle_prior = centre[None, :] + rng.normal(0.0, 3.0, size=(N_MEMBERS, n_knots))
+    angle_prior_a, angle_post_a = _chained_blocks(rng, KNOTS_PER_WINDOW, 3.0)
+    angle_post = centre[None, :] + angle_post_a
+    angle_prior = centre[None, :] + angle_prior_a
     angle_truth = centre + rng.normal(0.0, 1.0, size=n_knots)
 
-    levels_post = 0.3 + rng.normal(0.0, 0.02, size=(N_MEMBERS, N_WINDOWS))
-    levels_prior = 0.3 + rng.normal(0.0, 0.08, size=(N_MEMBERS, N_WINDOWS))
-    exp_post = np.repeat(levels_post, KNOTS_PER_WINDOW, axis=1)
-    exp_prior = np.repeat(levels_prior, KNOTS_PER_WINDOW, axis=1)
+    # One level per window, then broadcast to that window's knots -- so the
+    # static parameter's chain lives on the window axis, not the knot axis.
+    levels_prior, levels_post = _chained_blocks(rng, 1, 0.08)
+    exp_prior = 0.3 + np.repeat(levels_prior, KNOTS_PER_WINDOW, axis=1)
+    exp_post = 0.3 + np.repeat(levels_post, KNOTS_PER_WINDOW, axis=1)
 
     coords = {"ensemble": np.arange(N_MEMBERS), "time": times}
     posterior = xarray.Dataset(
@@ -181,9 +239,52 @@ def test_standard_level_wiring_emits_the_whole_bundle(tmp_path: pathlib.Path) ->
         # The key SET, not just presence: a renamed or dropped key is as much a
         # regression as a wrong number, and figure code indexes these by name.
         assert set(entry) == BASE_PARAM_KEYS | BUNDLE_PARAM_KEYS, name
-        assert set(entry["zscore"]) == {"mean", "std", "max_abs", "overconfident"}
-        assert set(entry["coverage"]) == {"alpha_50", "alpha_90", "max_nominal_alpha"}
-        assert set(entry["contraction_ratio"]) == {"mean", "min"}
+        assert set(entry["zscore"]) == {
+            "mean",
+            "std",
+            "max_abs",
+            "max_abs_calibrated_median",
+            "exceedance",
+            "overconfident",
+            "overconfident_rule",
+        }
+        # Every calibration number travels with the reference it must be read
+        # against: the z-score null is a scaled t, not a normal, and an
+        # order-statistic band cannot hit an arbitrary alpha.
+        assert set(entry["zscore"]["exceedance"]) == {
+            "n_samples",
+            "df",
+            "null_scale",
+            "thresholds",
+            "counts",
+            "observed",
+            "nominal",
+            "nominal_normal",
+        }
+        assert entry["zscore"]["exceedance"]["df"] == N_MEMBERS - 1
+        assert set(entry["coverage"]) == {
+            "alpha_50",
+            "nominal_alpha_50",
+            "alpha_90",
+            "nominal_alpha_90",
+            "max_nominal_alpha",
+        }
+        # M = 8 -> bands are multiples of 1/9, so neither request is attainable
+        # and comparing `alpha_50` against 0.5 would read discretization as
+        # miscalibration.
+        assert entry["coverage"]["nominal_alpha_50"] == pytest.approx(4.0 / 9.0)
+        assert entry["coverage"]["nominal_alpha_90"] == pytest.approx(7.0 / 9.0)
+        assert set(entry["sampling"]) == {
+            "n_samples",
+            "n_knots_effective",
+            "pooling",
+        }
+        assert set(entry["contraction_ratio"]) == {
+            "mean",
+            "min",
+            "vs_window_prior",
+            "vs_initial_prior",
+        }
         assert set(entry["pit"]) == {
             "n_bins",
             "n_samples",
@@ -197,8 +298,33 @@ def test_standard_level_wiring_emits_the_whole_bundle(tmp_path: pathlib.Path) ->
         # M = 8: 9 rank values over 10 bins, so the last bin is unreachable --
         # a flat reference would read as a hole in a calibrated histogram.
         assert entry["pit"]["ranks_per_bin"] == [1] * 9 + [0]
-        # The update shrank the spread, so the ratio is a real number below 1.
-        assert 0.0 < entry["contraction_ratio"]["mean"] < 1.0
+        # The `sampling` block mirrors what `pit` carries -- one computation,
+        # hoisted because zscore and coverage pool over the same knots.
+        assert entry["sampling"] == {
+            key: entry["pit"][key]
+            for key in ("n_samples", "n_knots_effective", "pooling")
+        }
+
+        # Finding 3: the two contraction readings must NOT coincide. The prior
+        # chains window to window, so the elementwise ratio measures only the
+        # last update while the run as a whole contracted WINDOW_RATIO**w.
+        contraction = entry["contraction_ratio"]
+        assert contraction["vs_window_prior"]["mean"] == pytest.approx(WINDOW_RATIO)
+        assert contraction["vs_window_prior"]["min"] == pytest.approx(WINDOW_RATIO)
+        # Cumulative: window w sits at WINDOW_RATIO**(w + 1) against block 0.
+        cumulative = [WINDOW_RATIO ** (w + 1) for w in range(N_WINDOWS)]
+        assert contraction["vs_initial_prior"]["mean"] == pytest.approx(
+            float(np.mean(cumulative))
+        )
+        assert contraction["vs_initial_prior"]["min"] == pytest.approx(
+            WINDOW_RATIO**N_WINDOWS
+        )
+        assert contraction["vs_initial_prior"]["reason"] is None
+        # A run that cut spread by 78% must not report 40%.
+        assert contraction["vs_initial_prior"]["mean"] < contraction["mean"]
+        # `mean`/`min` stay aliases of the per-window block (schema stability).
+        assert contraction["mean"] == contraction["vs_window_prior"]["mean"]
+        assert contraction["min"] == contraction["vs_window_prior"]["min"]
 
     # The `truth_access.yaml` key name is load-bearing for the static branch and
     # the GP config for the dynamic one; both must have resolved to a number.
@@ -227,6 +353,47 @@ def test_standard_level_wiring_emits_the_whole_bundle(tmp_path: pathlib.Path) ->
     assert joint["rank_deficient"] is True
     assert 0.0 < joint["posterior_variance_retained"] <= 1.0
     assert len(joint["generalized_eigenvalues"]) == N_MEMBERS - 1
+    # The same per-window/cumulative split as `contraction_ratio`, said out loud
+    # rather than left to the reader: the concatenated prior is a per-window
+    # reference, so the parent block cannot answer "what did the run constrain".
+    assert joint["prior_reference"] == "per_window_prior"
+
+    cumulative_joint = joint["vs_initial_prior"]
+    assert set(cumulative_joint) == {
+        "n_members",
+        "n_parameters",
+        "n_sample_directions",
+        "rank_deficient",
+        "posterior_variance_retained",
+        "n_constrained_directions",
+        "eigenvalue_quantiles",
+        "reason",
+    }
+    assert cumulative_joint["reason"] is None
+    # One window wide: both parameters' knots for a single window.
+    assert cumulative_joint["n_parameters"] == 2 * KNOTS_PER_WINDOW
+    assert cumulative_joint["n_members"] == N_MEMBERS
+    # Rank, and the reason for it, pins that the block was sliced along the
+    # window axis and not somewhere else: one window's block holds
+    # KNOTS_PER_WINDOW independent `inflow_angle` knots plus a SINGLE
+    # `vertical_inflow_exponent` level (broadcast across that window's knots, so
+    # its 5 columns are one direction). 5 + 1 = 6, below the M - 1 = 7 the
+    # ensemble could otherwise support -- a mis-slice spanning two windows would
+    # show 7.
+    assert cumulative_joint["n_sample_directions"] == KNOTS_PER_WINDOW + 1
+    # Three windows of contraction, so the cumulative spectrum sits below the
+    # per-window one (~WINDOW_RATIO**6 against ~WINDOW_RATIO**2 in expectation).
+    # The ordering is the regression; the exact spectrum is two independent
+    # sample covariances at M = 8, which is noisy, so the count is only bounded.
+    assert (
+        cumulative_joint["eigenvalue_quantiles"]["median"]
+        < joint["eigenvalue_quantiles"]["median"]
+    )
+    assert (
+        1
+        <= cumulative_joint["n_constrained_directions"]
+        <= cumulative_joint["n_sample_directions"]
+    )
 
     for path, value in _iter_numbers(parameters):
         assert np.isfinite(value), f"non-finite value at parameter_metrics{path}"

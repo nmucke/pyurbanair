@@ -13,6 +13,7 @@ from pyurbanair.plotting import _crps_ensemble, compute_parameter_metrics
 from pyurbanair.utils.da_metrics import (
     ensemble_uniqueness,
     per_knot_crps,
+    spread_skill_ratio,
     summary_scalars,
 )
 from scripts.esmda._esmda_common import (
@@ -109,6 +110,34 @@ def test_spread_skill_fortin_factor_calibrates_exchangeable_ensemble() -> None:
     assert uncorrected == pytest.approx(
         math.sqrt(n_members / (n_members + 1)), abs=1e-2
     )
+
+
+def test_spread_skill_delegates_to_the_shared_ratio() -> None:
+    """``figspec.spread_skill`` is an adapter, not a second implementation.
+
+    It must equal ``spread_skill_ratio`` on the squared inputs exactly -- for
+    ordinary series, for masked (NaN) ones, and on the degenerate inputs the
+    shared function guards.
+    """
+    rng = np.random.default_rng(4711)
+    for shape in [(7,), (100,), (12, 31), (4, 6, 9)]:
+        for n_members in (1, 2, 10, 512):
+            spread = np.abs(rng.normal(size=shape))
+            error = rng.normal(size=shape)
+            assert spread_skill(spread, error, n_members) == spread_skill_ratio(
+                spread**2, error**2, n_members
+            )
+
+            masked_spread = np.where(rng.random(shape) < 0.3, np.nan, spread)
+            assert spread_skill(masked_spread, error, n_members) == spread_skill_ratio(
+                masked_spread**2, error**2, n_members
+            )
+
+    assert np.isnan(spread_skill(np.ones(4), np.zeros(4), 5))  # zero error norm
+    assert np.isnan(spread_skill(np.full(4, np.nan), np.ones(4), 5))  # fully masked
+    assert np.isnan(spread_skill(np.ones(4), np.full(4, np.nan), 5))
+    with pytest.raises(ValueError, match="n_members must be positive"):
+        spread_skill(np.ones(4), np.ones(4), 0)
 
 
 def test_ensemble_uniqueness_detects_exact_clone() -> None:

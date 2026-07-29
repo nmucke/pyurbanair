@@ -24,16 +24,25 @@ import pytest
 import xarray
 from omegaconf import DictConfig, OmegaConf
 
+from pyurbanair.utils.ensemble_scores import (
+    coverage_nominal_alpha,
+    max_nominal_alpha,
+    zscore_nominal_exceedance,
+)
 from scripts.esmda._esmda_common import (
     JOINT_CORR_MAX_K,
     MIN_MEMBERS_CALIBRATION,
+    OVERCONFIDENT_MULTIPLIER,
     PIT_BINS,
     _knot_correlation_config,
     joint_parameter_directions,
     parameter_bundle_summary,
     parameter_vector_labels,
 )
-from scripts.esmda.compute_esmda_metrics import _flatten_parameter_members
+from scripts.esmda.compute_esmda_metrics import (
+    _flatten_parameter_members,
+    _window_block_flat,
+)
 
 SECONDS_PER_KNOT = 30.0
 CORRELATION_LENGTH = 200.0
@@ -102,6 +111,12 @@ def _bundle(
         prior,
         posterior_flat=_flatten_parameter_members(posterior),
         prior_flat=None if prior is None else _flatten_parameter_members(prior),
+        # Sliced exactly as `compute_metrics` does, so the unit tests drive the
+        # same code path as the pipeline rather than a shortcut past it.
+        final_posterior_window_flat=_window_block_flat(posterior, num_windows, -1),
+        initial_prior_window_flat=(
+            None if prior is None else _window_block_flat(prior, num_windows, 0)
+        ),
         cfg=_cfg() if cfg is None else cfg,
         num_windows=num_windows,
     )
@@ -195,6 +210,127 @@ def test_zscore_reads_off_a_constructed_offset(
     assert entry["zscore"]["overconfident"] is expected_flag
 
 
+def test_overconfident_flag_does_not_fire_on_a_bigger_calibrated_ensemble() -> None:
+    """The finding-1 regression: the flag must measure calibration, not sample size.
+
+    A fixed cut on ``max |z|`` flags a *perfectly calibrated* M = 32 ensemble
+    ~12% of the time at 21 pooled knots and ~85% at 315, because the maximum of
+    ``n`` draws grows with ``n``. The routine 2-parameter / 21-knot / 3-window
+    shape lands in the worst part of that curve, so the old flag was very nearly
+    a constant `true` on real runs.
+
+    Here the SAME calibrated process is scored at four pooling depths. A
+    sample-size-driven flag lights up as the knot count grows; an exceedance
+    *fraction* has a sample-size-independent expectation, so it must not.
+    """
+    for n_knots in (21, 63, 105, 315):
+        members, truth = _calibrated(n_members=32, n_knots=n_knots, seed=n_knots)
+        entry = _bundle(_dynamic_dataset(members), _truth_dataset(truth))[
+            "inflow_angle"
+        ]
+        assert entry["zscore"]["overconfident"] is False, n_knots
+        # `max_abs` itself is kept (it is informative) but must arrive with the
+        # reference that makes it readable -- which grows with the knot count.
+        assert entry["zscore"]["max_abs_calibrated_median"] > 0.0
+
+    # And the reference does grow, which is exactly why a fixed cut cannot work.
+    references = [
+        _bundle(
+            _dynamic_dataset(_calibrated(32, n, seed=n)[0]),
+            _truth_dataset(_calibrated(32, n, seed=n)[1]),
+        )["inflow_angle"]["zscore"]["max_abs_calibrated_median"]
+        for n in (21, 315)
+    ]
+    assert references[0] < references[1]
+
+
+def test_overconfident_flag_still_fires_on_real_underdispersion() -> None:
+    """Sample-size-robust must not mean blind: a too-narrow ensemble still trips."""
+    members, truth = _calibrated(
+        n_members=32, n_knots=105, seed=203, spread=1.0, truth_spread=2.0
+    )
+    entry = _bundle(_dynamic_dataset(members), _truth_dataset(truth))["inflow_angle"]
+
+    assert entry["zscore"]["overconfident"] is True
+    # The verdict is reproducible from the emitted keys alone.
+    exceedance = entry["zscore"]["exceedance"]
+    assert (
+        exceedance["observed"][0] > OVERCONFIDENT_MULTIPLIER * exceedance["nominal"][0]
+    )
+
+
+def test_zscore_exceedance_carries_the_scaled_t_reference_not_a_normal_one() -> None:
+    """The null is ``sqrt((M+1)/M) * t(M-1)``; a normal table is ~2x too tight.
+
+    WP1.4 plots `observed` against `nominal` from this block, so the reference
+    has to travel with the numbers -- and it must be the finite-ensemble one:
+    both the mean and the spread come from the same M members.
+    """
+    members, truth = _calibrated(n_members=32, n_knots=200, seed=204)
+    zscore_block = _bundle(_dynamic_dataset(members), _truth_dataset(truth))[
+        "inflow_angle"
+    ]["zscore"]
+    exceedance = zscore_block["exceedance"]
+
+    assert exceedance["df"] == 31
+    assert exceedance["null_scale"] == pytest.approx(np.sqrt(33.0 / 32.0))
+    assert exceedance["n_samples"] == 200
+    for threshold, nominal in zip(exceedance["thresholds"], exceedance["nominal"]):
+        assert nominal == pytest.approx(zscore_nominal_exceedance(32, threshold))
+    # At M = 32 the 3-sigma tail is 0.59%, 2.2x the normal table's 0.27%.
+    assert exceedance["nominal"][1] > 2.0 * exceedance["nominal_normal"][1]
+    # The rule string names the keys it is computed from, so the boolean is
+    # reproducible from the summary without reading this module.
+    assert "exceedance.observed[0]" in zscore_block["overconfident_rule"]
+    assert "exceedance.nominal[0]" in zscore_block["overconfident_rule"]
+
+
+def test_coverage_reports_the_realizable_level_next_to_the_empirical_one() -> None:
+    """Finding 2: comparing an empirical fraction against the REQUESTED alpha lies.
+
+    At M = 32 an ``alpha = 0.5`` request is the band ``[x_(9), x_(25)]``, whose
+    nominal level is 16/33 = 0.4848. A calibrated ensemble scores that, not 0.5,
+    so a consumer holding the number up against 0.5 sees ~13 sampling sigma of
+    pure discretization.
+    """
+    members, truth = _calibrated(n_members=32, n_knots=4000, seed=205)
+    block = _bundle(_dynamic_dataset(members), _truth_dataset(truth))["inflow_angle"][
+        "coverage"
+    ]
+
+    assert block["nominal_alpha_50"] == pytest.approx(16.0 / 33.0)
+    assert block["nominal_alpha_90"] == pytest.approx(30.0 / 33.0)
+    assert block["nominal_alpha_50"] != pytest.approx(0.5)
+    # Both come from `ensemble_scores`, so the metrics layer holds no second
+    # copy of the band-edge convention that could drift from `_band_indices`.
+    assert block["nominal_alpha_50"] == coverage_nominal_alpha(32, 0.5)
+    assert block["max_nominal_alpha"] == max_nominal_alpha(32)
+    # The empirical fractions track the realizable levels, not the requested
+    # ones (4000 knots: sampling error ~0.008).
+    assert block["alpha_50"] == pytest.approx(block["nominal_alpha_50"], abs=0.03)
+    assert block["alpha_90"] == pytest.approx(block["nominal_alpha_90"], abs=0.03)
+
+
+def test_sampling_caveat_sits_on_the_parameter_entry() -> None:
+    """`zscore` and `coverage` pool over the same correlated knots `pit` does.
+
+    The effective-sample-size caveat used to live only inside `pit`, which reads
+    as though PIT alone needed it. It qualifies all three, so it is hoisted --
+    and mirrored under `pit` from the same computation, so the two cannot drift.
+    """
+    members, truth = _calibrated(n_members=10, n_knots=20, seed=206)
+    entry = _bundle(_dynamic_dataset(members), _truth_dataset(truth))["inflow_angle"]
+
+    assert entry["sampling"] == {
+        "n_samples": entry["pit"]["n_samples"],
+        "n_knots_effective": entry["pit"]["n_knots_effective"],
+        "pooling": entry["pit"]["pooling"],
+    }
+    # ceil(20 * 30 / 200) = 3 independent knots behind 20 pooled ones.
+    assert entry["sampling"]["n_knots_effective"] == 3
+    assert entry["sampling"]["n_samples"] == 20
+
+
 # ---------------------------------------------------------------------------
 # Contraction ratio
 # ---------------------------------------------------------------------------
@@ -215,6 +351,140 @@ def test_contraction_ratio_recovers_a_known_spread_ratio() -> None:
     contraction = summary["inflow_angle"]["contraction_ratio"]
     assert contraction["mean"] == pytest.approx(factor)
     assert contraction["min"] == pytest.approx(factor)
+
+
+def _chained_prior_posterior(
+    n_members: int, n_windows: int, knots_per_window: int, ratio: float, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """The prior structure a real multi-window run actually writes.
+
+    `run_esmda.py` seeds window `w`'s prior from window `w - 1`'s posterior
+    (GP-extrapolated when dynamic, assigned bitwise when static), so in the
+    concatenated `prior_params.nc` **only block 0 is a genuine prior** and the
+    spread ratchets down:
+
+        prior spread[w]     = initial * ratio**w
+        posterior spread[w] = initial * ratio**(w + 1)
+
+    Each block gets independent anomalies normalized to an exact sample spread,
+    so the per-knot ratios are closed-form while the blocks stay full rank.
+    """
+    rng = np.random.default_rng(seed)
+
+    def _unit(shape: tuple[int, int]) -> np.ndarray:
+        raw = rng.normal(size=shape)
+        raw = raw - raw.mean(axis=0, keepdims=True)
+        return raw / raw.std(axis=0, ddof=1, keepdims=True)
+
+    prior_blocks, posterior_blocks = [], []
+    spread = 1.0
+    for _ in range(n_windows):
+        prior_blocks.append(_unit((n_members, knots_per_window)) * spread)
+        spread *= ratio
+        posterior_blocks.append(_unit((n_members, knots_per_window)) * spread)
+    return (
+        np.concatenate(prior_blocks, axis=1),
+        np.concatenate(posterior_blocks, axis=1),
+    )
+
+
+def test_contraction_separates_per_window_from_cumulative_contraction() -> None:
+    """The headline finding: the elementwise ratio measures only the LAST update.
+
+    On a prior with the real window chain the two answers differ by the window
+    count, and the elementwise one -- the number the schema called
+    `contraction_ratio` -- is the smaller claim. A run that cut spread by 78%
+    reports 40% if only that number is read.
+    """
+    n_windows, knots_per_window, ratio = 3, 7, 0.6
+    prior, posterior = _chained_prior_posterior(
+        n_members=32,
+        n_windows=n_windows,
+        knots_per_window=knots_per_window,
+        ratio=ratio,
+        seed=200,
+    )
+    n_knots = n_windows * knots_per_window
+
+    contraction = _bundle(
+        _dynamic_dataset(posterior),
+        _truth_dataset(np.zeros(n_knots)),
+        _dynamic_dataset(prior),
+        num_windows=n_windows,
+    )["inflow_angle"]["contraction_ratio"]
+
+    # Per window the update contracts by exactly `ratio`, everywhere.
+    assert contraction["vs_window_prior"]["mean"] == pytest.approx(ratio)
+    assert contraction["vs_window_prior"]["min"] == pytest.approx(ratio)
+
+    # Against the only genuine prior in the file, window w sits at ratio**(w+1).
+    expected = [ratio ** (w + 1) for w in range(n_windows)]
+    assert contraction["vs_initial_prior"]["mean"] == pytest.approx(np.mean(expected))
+    assert contraction["vs_initial_prior"]["min"] == pytest.approx(ratio**n_windows)
+    assert contraction["vs_initial_prior"]["reason"] is None
+
+    # The regression a uniformly-wider prior cannot catch: the two disagree.
+    assert (
+        contraction["vs_initial_prior"]["mean"] < contraction["vs_window_prior"]["mean"]
+    )
+    # ... and the legacy top-level keys still alias the per-window block.
+    assert contraction["mean"] == contraction["vs_window_prior"]["mean"]
+    assert contraction["min"] == contraction["vs_window_prior"]["min"]
+
+
+def test_cumulative_contraction_handles_a_static_parameter_window_axis() -> None:
+    """A static parameter's x-axis IS the window index, so block 0 is column 0.
+
+    Same slice expression as the dynamic case (knots_per_window comes out 1);
+    this pins that no separate branch is needed and none was added.
+    """
+    n_windows, ratio = 4, 0.5
+    prior, posterior = _chained_prior_posterior(
+        n_members=16, n_windows=n_windows, knots_per_window=1, ratio=ratio, seed=201
+    )
+    posterior_ds = xarray.Dataset(
+        {"sgs_constant": (("ensemble", "time"), 0.15 + posterior)},
+        coords={"ensemble": np.arange(16)},  # no `time` coord: the static branch
+    )
+    prior_ds = xarray.Dataset(
+        {"sgs_constant": (("ensemble", "time"), 0.15 + prior)},
+        coords={"ensemble": np.arange(16)},
+    )
+    truth = xarray.Dataset(
+        {"sgs_constant": (("ensemble",), np.array([0.15]))}, coords={"ensemble": [0]}
+    )
+
+    contraction = _bundle(posterior_ds, truth, prior_ds, num_windows=n_windows)[
+        "sgs_constant"
+    ]["contraction_ratio"]
+
+    assert contraction["vs_window_prior"]["mean"] == pytest.approx(ratio)
+    assert contraction["vs_initial_prior"]["min"] == pytest.approx(ratio**n_windows)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("num_windows", "n_knots", "expected_in_reason"),
+    [(None, 12, "num_windows is unknown"), (5, 12, "do not divide")],
+)
+def test_cumulative_contraction_degrades_to_null_with_a_reason(
+    num_windows: int | None, n_knots: int, expected_in_reason: str
+) -> None:
+    """An unsplittable artifact emits null + a reason, never a silent mis-slice."""
+    rng = np.random.default_rng(202)
+    prior_members = rng.normal(0.0, 2.0, size=(10, n_knots))
+
+    contraction = _bundle(
+        _dynamic_dataset(prior_members * 0.5),
+        _truth_dataset(np.zeros(n_knots)),
+        _dynamic_dataset(prior_members),
+        num_windows=num_windows,
+    )["inflow_angle"]["contraction_ratio"]
+
+    # The per-window number is unaffected -- it needs no window structure.
+    assert contraction["vs_window_prior"]["mean"] == pytest.approx(0.5)
+    assert contraction["vs_initial_prior"]["mean"] is None
+    assert contraction["vs_initial_prior"]["min"] is None
+    assert expected_in_reason in contraction["vs_initial_prior"]["reason"]
 
 
 def test_contraction_ratio_is_null_without_a_prior() -> None:
@@ -593,6 +863,77 @@ def test_joint_correlation_matrices_are_capped() -> None:
     assert big["prior_corr"] is None
     assert "corr_matrices_omitted" in big
     assert 0.0 <= big["corr_summary"]["posterior_offdiag_abs_mean"] <= 1.0
+
+
+def test_joint_names_its_prior_reference_and_answers_both_questions() -> None:
+    """`n_constrained_directions` is per-window; the cumulative one says so.
+
+    The concatenated prior is a per-window reference (block `w` is posterior
+    `w - 1`), so the parent pencil cannot answer "what did the run constrain".
+    The cumulative block scores the final posterior window against window 0's
+    prior, and both are labelled rather than one standing in for the other.
+    """
+    n_windows, knots_per_window, ratio = 3, 6, 0.6
+    prior, posterior = _chained_prior_posterior(
+        n_members=32,
+        n_windows=n_windows,
+        knots_per_window=knots_per_window,
+        ratio=ratio,
+        seed=207,
+    )
+    joint = _bundle(
+        _dynamic_dataset(posterior),
+        _truth_dataset(np.zeros(n_windows * knots_per_window)),
+        _dynamic_dataset(prior),
+        num_windows=n_windows,
+    )["joint"]
+
+    assert joint["prior_reference"] == "per_window_prior"
+    cumulative = joint["vs_initial_prior"]
+    assert cumulative["reason"] is None
+    # One window wide, against the parent's K = n_windows * knots_per_window.
+    assert cumulative["n_parameters"] == knots_per_window
+    assert joint["n_parameters"] == n_windows * knots_per_window
+    assert cumulative["rank_deficient"] is False
+    # Three windows of contraction sit far below one window's.
+    assert cumulative["eigenvalue_quantiles"]["median"] < ratio**4
+    assert joint["eigenvalue_quantiles"]["median"] > ratio**4
+
+
+def test_joint_cumulative_block_is_null_when_the_blocks_cannot_be_sliced() -> None:
+    """Same degenerate-shape rule as everywhere else: null plus a reason."""
+    members, truth = _calibrated(n_members=10, n_knots=13, seed=208)
+    # 13 knots do not divide into 3 windows, so `_window_block_flat` declines.
+    joint = _bundle(
+        _dynamic_dataset(members),
+        _truth_dataset(truth),
+        _dynamic_dataset(members * 4.0),
+        num_windows=3,
+    )["joint"]
+
+    cumulative = joint["vs_initial_prior"]
+    assert cumulative["n_constrained_directions"] is None
+    assert cumulative["eigenvalue_quantiles"] is None
+    assert "could not be sliced" in cumulative["reason"]
+    # The per-window block is unaffected -- it needs no window structure.
+    assert joint["n_constrained_directions"] is not None
+
+
+def test_window_block_flat_slices_the_requested_window() -> None:
+    """The block helper reuses the one flattener on a `time`-sliced Dataset."""
+    n_members, n_windows, knots_per_window = 6, 3, 4
+    n_knots = n_windows * knots_per_window
+    values = np.arange(n_members * n_knots, dtype=float).reshape(n_members, n_knots)
+    params = _dynamic_dataset(values)
+
+    first = _window_block_flat(params, n_windows, 0)
+    last = _window_block_flat(params, n_windows, -1)
+
+    assert np.array_equal(first, values[:, :knots_per_window])
+    assert np.array_equal(last, values[:, -knots_per_window:])
+    # Unsplittable or unknown shapes decline rather than mis-slicing.
+    assert _window_block_flat(params, None, 0) is None
+    assert _window_block_flat(params, 5, 0) is None
 
 
 def test_joint_is_null_for_non_finite_members() -> None:

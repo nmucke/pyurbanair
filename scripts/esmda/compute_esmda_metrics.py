@@ -190,6 +190,58 @@ def _flatten_parameter_members(params: xarray.Dataset) -> np.ndarray:
     return np.concatenate(arrays, axis=1)
 
 
+def _window_block_flat(
+    params: xarray.Dataset, num_windows: object, window: int
+) -> np.ndarray | None:
+    """One window's block of a concatenated parameter artifact, flattened.
+
+    ``posterior_params.nc`` / ``prior_params.nc`` are ``_concat_windows`` output
+    -- the per-window files stacked along ``time`` -- so window ``w`` is a
+    contiguous slice of ``time`` and every variable shares that axis. Slicing
+    there and re-running :func:`_flatten_parameter_members` keeps the pipeline's
+    one-flattener rule: same variable order, same transpose, same reshape, just
+    fewer columns.
+
+    Only the metrics stage can do this, which is why it is here and not in the
+    bundle: ``num_windows`` comes from ``truth_access.yaml`` and the flattener
+    lives next to its other caller.
+
+    Args:
+        params: A concatenated parameter Dataset.
+        num_windows: The run's window count (``truth_access.yaml``), possibly
+            ``None`` on a run dir predating the key.
+        window: ``0`` for the first window, ``-1`` for the last.
+
+    Returns:
+        The ``(M, K/W)`` block, or ``None`` (with a log line) whenever the
+        artifact cannot be split unambiguously -- never a mis-slice.
+    """
+    if num_windows is None:
+        return None
+    try:
+        n_windows = int(num_windows)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        logger.info(
+            "num_windows %r is not an integer; skipping window blocks", num_windows
+        )
+        return None
+    if n_windows < 1 or "time" not in params.dims:
+        return None
+    n_knots = int(params.sizes["time"])
+    if n_knots % n_windows:
+        logger.info(
+            "Parameter artifact has %d knots over %d windows; the per-window "
+            "blocks are ambiguous, so the cumulative joint block is skipped",
+            n_knots,
+            n_windows,
+        )
+        return None
+    per_window = n_knots // n_windows
+    start = ((n_windows + window) % n_windows) * per_window
+    block = params.isel(time=slice(start, start + per_window))
+    return _flatten_parameter_members(block)
+
+
 def _ensemble_health(
     run_dir: pathlib.Path, posterior_params: xarray.Dataset
 ) -> dict[str, object]:
@@ -277,6 +329,16 @@ def compute_metrics(run_dir: pathlib.Path, metrics_level: str | None = None) -> 
             # exactly one (M, K) flattener, shared with `_ensemble_health`.
             posterior_flat=_flatten_parameter_members(posterior_params),
             prior_flat=_flatten_parameter_members(prior_params),
+            # The cumulative pencil: only block 0 of prior_params.nc is a
+            # genuine prior (run_esmda.py seeds window w's prior from window
+            # w-1's posterior), so "what did the run constrain" needs the last
+            # posterior block against the first prior block.
+            final_posterior_window_flat=_window_block_flat(
+                posterior_params, ta.get("num_windows"), -1
+            ),
+            initial_prior_window_flat=_window_block_flat(
+                prior_params, ta.get("num_windows"), 0
+            ),
             cfg=cfg,
             num_windows=ta.get("num_windows"),
         )

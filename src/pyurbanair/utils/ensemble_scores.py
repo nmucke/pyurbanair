@@ -18,6 +18,15 @@ Conventions, applied without exception:
   value -- ``nan`` where the score is undefined -- rather than raising or
   silently returning an infinity. The two-member smoke shape used by the
   test suite is a real, supported case.
+* **A calibration diagnostic ships with its own reference.** At production
+  ``M`` almost none of them have the textbook large-sample reference: PIT
+  bins are unequal (:func:`rank_histogram_weights`), the z-score null is a
+  scaled ``t`` rather than a normal (:func:`zscore_nominal_exceedance`), and
+  an order-statistic band cannot hit an arbitrary ``alpha``
+  (:func:`coverage_nominal_alpha`). Every one of those is a function here, so
+  the plotting and metrics layers read the reference instead of re-deriving
+  it -- a re-derived reference drifts, and each of these drifts *toward*
+  reporting a perfectly calibrated ensemble as broken.
 
 See ``docs/plans/esmda_evaluation/phase1_postprocessing_metrics.md`` (WP1.0)
 for how these are wired into the metrics schema.
@@ -25,23 +34,39 @@ for how these are wired into the metrics schema.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
+from scipy import stats
 
 # Tie-breaking in ``pit_rank`` must not depend on OS entropy: re-running the
 # metrics stage on the same run directory has to reproduce the same numbers.
 _DEFAULT_TIE_SEED = 0
 
+# Thresholds the z-score exceedance reference is reported at by default. Two
+# levels, not one: |z| > 2 has enough expected counts to be estimable from a
+# few hundred pooled knots, while |z| > 3 is the tail a reader actually cares
+# about but is nearly unpopulated at that sample size.
+DEFAULT_ZSCORE_THRESHOLDS: tuple[float, ...] = (2.0, 3.0)
+
 __all__ = [
+    "DEFAULT_ZSCORE_THRESHOLDS",
     "coverage",
     "coverage_indicator",
+    "coverage_nominal_alpha",
     "crpss",
     "fair_crps",
     "fair_energy_score",
+    "max_abs_zscore_reference",
+    "max_nominal_alpha",
     "pit_rank",
     "rank_histogram",
     "rank_histogram_weights",
     "spread_skill_ratio",
     "zscore",
+    "zscore_exceedance",
+    "zscore_nominal_exceedance",
 ]
 
 
@@ -187,8 +212,16 @@ def crpss(post_score: float, prior_score: float) -> float | None:
 def zscore(ens: np.ndarray, truth: np.ndarray) -> np.ndarray:
     """Standardized truth-vs-ensemble error ``(truth - mean) / std(ddof=1)``.
 
-    A calibrated ensemble gives z-scores that look like standard normal draws;
-    ``|z| > 3`` flags overconfidence.
+    **A calibrated ensemble does not give standard normal z-scores**, and the
+    difference is not academic at production ``M``. Both the mean and the
+    spread are estimated from the same ``M`` members, so under exchangeability
+    the null is ``sqrt((M + 1)/M) * t(M - 1)``: the ``t`` from the ``ddof=1``
+    denominator, the Fortin factor from ``truth - mean_m`` having variance
+    ``sigma**2 (1 + 1/M)``. At ``M = 32`` that puts ``P(|z| > 3)`` at 0.59%,
+    2.2x the normal 0.27% (measured over 4e5 trials: 0.583%). Compare against
+    :func:`zscore_nominal_exceedance` / :func:`zscore_exceedance`, never
+    against a normal table, and never against a fixed cut on ``max |z|``
+    (see :func:`max_abs_zscore_reference` for why).
 
     Undefined cases return ``nan`` without raising or warning: a one-member
     ensemble (no spread estimate exists) and any batch element whose spread is
@@ -211,6 +244,172 @@ def zscore(ens: np.ndarray, truth: np.ndarray) -> np.ndarray:
     out = np.full(truth.shape, np.nan)
     np.divide(truth - mean, std, out=out, where=valid)
     return out
+
+
+def _zscore_null_scale(n_members: int) -> float:
+    """Fortin-style inflation of the z-score null: ``sqrt((M + 1)/M)``."""
+    return float(np.sqrt((n_members + 1) / n_members))
+
+
+def zscore_nominal_exceedance(n_members: int, threshold: float) -> float:
+    """``P(|z| > threshold)`` for a perfectly calibrated ``M``-member ensemble.
+
+    The reference level a measured exceedance fraction must be read against.
+    Under exchangeability the null of :func:`zscore` is
+    ``sqrt((M + 1)/M) * t(M - 1)`` (see that docstring), so
+
+        P(|z| > c) = 2 * sf_t(c / sqrt((M + 1)/M); M - 1).
+
+    Measured against 4e5 synthetic calibrated draws, both corrections earn
+    their place -- the normal reference is wrong by a factor, and dropping the
+    Fortin scale is wrong by ~10-25%:
+
+    ======  ====  =========  =========  =========  =======
+    M       c     empirical  this fn    plain t    normal
+    ======  ====  =========  =========  =========  =======
+    32      3.0   0.00583    0.00594    0.00529    0.00270
+    32      2.0   0.05789    0.05789    0.05433    0.04550
+    4       2.0   0.17156    0.17159    0.13933    0.04550
+    ======  ====  =========  =========  =========  =======
+
+    Args:
+        n_members: Ensemble size the z-scores were computed from (``>= 2``).
+        threshold: Positive cut on ``|z|``.
+
+    Returns:
+        The two-sided nominal exceedance probability, in ``(0, 1)``.
+    """
+    if n_members < 2:
+        raise ValueError(f"n_members must be at least 2, got {n_members}")
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError(f"threshold must be positive and finite, got {threshold}")
+    scaled = float(threshold) / _zscore_null_scale(n_members)
+    return float(2.0 * stats.t.sf(scaled, df=n_members - 1))
+
+
+def zscore_exceedance(
+    z: np.ndarray,
+    n_members: int,
+    thresholds: Sequence[float] = DEFAULT_ZSCORE_THRESHOLDS,
+) -> dict[str, Any]:
+    """Observed ``|z|`` exceedance fractions **next to their nominal levels**.
+
+    This is the sample-size-aware replacement for a fixed cut on ``max |z|``.
+    A tail *fraction* has a sample-size-independent expectation, so pooling
+    more knots sharpens it instead of inflating it -- the failure mode of
+    ``max |z| > 3``, whose false-positive rate on a perfectly calibrated
+    ensemble is 12% at 21 pooled knots and **82% at 315** (M = 32, 400 trials
+    each; 315 knots is the routine 2-parameter/21-knot/3-window shape).
+
+    The nominal levels are emitted alongside the observed ones for the same
+    reason :func:`rank_histogram_weights` is emitted alongside the PIT counts:
+    the reference depends on ``M``, the consumer (WP1.4) sees only the numbers,
+    and a reference the plot layer has to re-derive is a reference that will
+    drift. Both are reported -- ``nominal`` (the correct
+    ``sqrt((M + 1)/M) * t(M - 1)`` null) and ``nominal_normal`` (the large-``M``
+    limit), because the gap between them is itself the diagnostic for whether
+    the ensemble is big enough for a normal reading.
+
+    Note on independence: the fractions are *unbiased* however correlated the
+    pooled knots are, but their sampling error is not ``sqrt(p(1-p)/n)`` when
+    knots share members. This function deliberately emits no p-value or
+    boolean; deciding "is this miscalibrated" needs an effective sample size
+    the caller owns (``n_knots_effective``, itself an upper bound).
+
+    Args:
+        z: Any-shaped z-scores from :func:`zscore` (flattened; non-finite
+            entries are dropped, matching the ``nan`` contract there).
+        n_members: Ensemble size the z-scores were computed from (``>= 2``).
+        thresholds: Positive cuts on ``|z|``, ascending by convention.
+
+    Returns:
+        A plain-Python mapping, YAML-safe apart from a ``nan`` ``observed``
+        when nothing is finite:
+
+        * ``n_samples`` (``int``) -- finite z-scores actually used.
+        * ``df`` (``int``) -- ``n_members - 1``, the t degrees of freedom.
+        * ``null_scale`` (``float``) -- ``sqrt((M + 1)/M)``.
+        * ``thresholds`` (``list[float]``) -- echoed, so the four parallel
+          lists below are self-describing in a summary file.
+        * ``counts`` (``list[int]``) -- ``#{|z| > threshold}``.
+        * ``observed`` (``list[float]``) -- ``counts / n_samples``; ``nan``
+          when ``n_samples == 0``.
+        * ``nominal`` (``list[float]``) -- :func:`zscore_nominal_exceedance`,
+          **the level to compare ``observed`` against**.
+        * ``nominal_normal`` (``list[float]``) -- ``2 * sf_norm(threshold)``,
+          for context only.
+    """
+    if n_members < 2:
+        raise ValueError(f"n_members must be at least 2, got {n_members}")
+    cuts = [float(t) for t in thresholds]
+    if not cuts:
+        raise ValueError("thresholds must not be empty")
+
+    flat = np.asarray(z, dtype=float).ravel()
+    finite = flat[np.isfinite(flat)]
+    n_samples = int(finite.size)
+    abs_z = np.abs(finite)
+
+    counts = [int(np.count_nonzero(abs_z > cut)) for cut in cuts]
+    observed = [float(c) / n_samples if n_samples > 0 else float("nan") for c in counts]
+    return {
+        "n_samples": n_samples,
+        "df": int(n_members - 1),
+        "null_scale": _zscore_null_scale(n_members),
+        "thresholds": cuts,
+        "counts": counts,
+        "observed": observed,
+        "nominal": [zscore_nominal_exceedance(n_members, cut) for cut in cuts],
+        "nominal_normal": [float(2.0 * stats.norm.sf(cut)) for cut in cuts],
+    }
+
+
+def max_abs_zscore_reference(
+    n_members: int, n_samples: int, quantile: float = 0.5
+) -> float:
+    """Where ``max |z|`` sits for a *calibrated* ensemble of this size.
+
+    Secondary to :func:`zscore_exceedance`, and offered only so the reported
+    ``max_abs`` -- an informative number worth keeping -- can be read at all.
+    The maximum of ``n`` draws is an order statistic whose distribution grows
+    with ``n``, so the answer is a quantile, closed form: with
+    ``F(c) = P(|z| <= c)`` under the ``sqrt((M + 1)/M) * t(M - 1)`` null,
+    ``P(max |z| <= c) = F(c)**n``, hence
+
+        c_q = sqrt((M + 1)/M) * ppf_t((1 + q**(1/n)) / 2; M - 1).
+
+    At ``M = 32`` the median calibrated ``max |z|`` is 2.27 over 21 knots,
+    2.96 over 105 and 3.39 over 315 -- so a fixed cut at 3 sits above the
+    median at 21 knots, on it at 105 and below it at 315, matching the
+    measured false-positive rates of that cut (12% / 45% / 82%) to within
+    simulation noise.
+
+    **Use with care, and prefer the fractions.** This is keyed on an exact
+    independent ``n``, and the only ``n`` the metrics stage has
+    (``n_knots_effective``) is a *stated upper bound* on independence, not a
+    count -- pass a bound and you get a bound, biased toward calling a
+    calibrated ensemble overconfident. The exceedance fractions need no such
+    number to be unbiased.
+
+    Args:
+        n_members: Ensemble size (``>= 2``).
+        n_samples: Number of (assumed independent) z-scores the max is over.
+        quantile: Which quantile of ``max |z|`` to return; ``0.5`` is the
+            typical value, ``0.95`` a one-sided calibrated ceiling.
+
+    Returns:
+        The ``quantile``-quantile of ``max |z|`` under the calibrated null.
+    """
+    if n_members < 2:
+        raise ValueError(f"n_members must be at least 2, got {n_members}")
+    if n_samples < 1:
+        raise ValueError(f"n_samples must be positive, got {n_samples}")
+    if not 0.0 < quantile < 1.0:
+        raise ValueError(f"quantile must lie in (0, 1), got {quantile}")
+    per_draw = 0.5 * (1.0 + quantile ** (1.0 / n_samples))
+    return _zscore_null_scale(n_members) * float(
+        stats.t.ppf(per_draw, df=n_members - 1)
+    )
 
 
 def pit_rank(
@@ -364,13 +563,81 @@ def coverage_indicator(
 def coverage(ens: np.ndarray, truth: np.ndarray, alpha: float = 0.9) -> float:
     """Fraction of the batch covered by the central ``alpha`` band.
 
-    Thin reduction over :func:`coverage_indicator`; a calibrated ensemble
-    scores ``~alpha``. Returns ``nan`` for an empty batch.
+    Thin reduction over :func:`coverage_indicator`. A calibrated ensemble
+    scores ``coverage_nominal_alpha(M, alpha)`` -- **not** ``alpha``, which the
+    order-statistic edges can only hit when ``alpha (M + 1)/2`` lands on a
+    half-integer. Report :func:`coverage_nominal_alpha` next to this number.
+    Returns ``nan`` for an empty batch.
     """
     inside = coverage_indicator(ens, truth, alpha=alpha)
     if inside.size == 0:
         return float("nan")
     return float(np.mean(inside))
+
+
+def coverage_nominal_alpha(n_members: int, alpha: float = 0.9) -> float:
+    """The level :func:`coverage` at this ``(M, alpha)`` is actually targeting.
+
+    **Emit this next to every coverage number.** The band edges are member
+    order statistics, so the attainable nominal levels are the ``M + 1``
+    multiples of ``1/(M + 1)`` and the requested ``alpha`` is rounded to one of
+    them; the realized target is ``(k_hi - k_lo)/(M + 1)`` for the same edges
+    :func:`coverage_indicator` uses. A consumer comparing an empirical coverage
+    against the *requested* ``alpha`` reads pure discretization as
+    miscalibration -- measured on calibrated ensembles (2e5 samples):
+
+    ======  =====  ==================  =======  =========
+    M       alpha  band                nominal  empirical
+    ======  =====  ==================  =======  =========
+    32      0.5    ``[x_(9), x_(25)]``  0.4848   0.4841
+    32      0.9    ``[x_(2), x_(32)]``  0.9091   0.9088
+    8       0.5    ``[x_(3), x_(7)]``   0.4444   0.4440
+    4       0.5    ``[x_(2), x_(4)]``   0.4000   0.4014
+    ======  =====  ==================  =======  =========
+
+    The empirical column tracks ``nominal``, never ``alpha``. This exists so
+    the metrics layer never grows a second copy of the edge convention:
+    ``_band_indices`` stays private and this is its one public consequence.
+
+    :func:`max_nominal_alpha` answers a different question (the *widest* band
+    this ``M`` can offer, i.e. the ceiling a large ``alpha`` clamps to) and is
+    unaffected by ``alpha``; both are worth reporting.
+
+    **A return of exactly 0.0 is possible and is not an error**: when
+    ``alpha < 1/(M + 1)`` both edges round to the same order statistic, so the
+    "band" is a single member and only an exact tie is inside it. The caller
+    should treat a zero nominal level as "this ``alpha`` is unresolvable at
+    this ``M``" rather than dividing by it. Out of reach for the levels the
+    metrics stage uses (``alpha >= 0.5`` needs ``M < 1``), reachable for a
+    2-member ensemble at ``alpha = 0.1``.
+
+    Args:
+        n_members: Ensemble size.
+        alpha: The nominal level as *requested* by the caller.
+
+    Returns:
+        The realized nominal level, a multiple of ``1/(n_members + 1)``, in
+        ``[0, (M - 1)/(M + 1)]``.
+    """
+    lo, hi = _band_indices(n_members, alpha)
+    return float(hi - lo) / float(n_members + 1)
+
+
+def max_nominal_alpha(n_members: int) -> float:
+    """Widest nominal level an order-statistic band can reach: ``(M-1)/(M+1)``.
+
+    The band ``[x_(1), x_(M)]`` leaves the two outer gaps of the ``M + 1``
+    uncovered, so a request above this clamps silently -- 0.94 at ``M = 32``,
+    0.6 at ``M = 4``, 1/3 at ``M = 2``. Reporting it stops a clamped
+    ``alpha_90`` from reading as a calibration failure. It bounds the
+    **nominal** level only; a realized fraction can sit above it by chance.
+
+    Equal to ``max(coverage_nominal_alpha(M, a) for a in (0, 1))``, and pinned
+    to that by a test -- the two must never disagree.
+    """
+    if n_members < 1:
+        raise ValueError(f"n_members must be positive, got {n_members}")
+    return float(n_members - 1) / float(n_members + 1)
 
 
 # ---------------------------------------------------------------------------
@@ -385,10 +652,10 @@ def spread_skill_ratio(
 
     ``sqrt((M + 1)/M) * sqrt(mean(variances)) / sqrt(mean(sq_errors))``.
 
-    Two conventions matter and are shared with the phase-0 implementation in
-    ``scripts/figspec/metrics.spread_skill`` (that function takes the standard
-    deviation and error series instead of their squares; the two agree
-    element-for-element):
+    This is the **only** implementation: ``scripts/figspec/metrics.spread_skill``
+    is a thin adapter over it, keeping the figspec vocabulary of a
+    standard-deviation series and an RMSE series and squaring them at the call
+    site. Two conventions matter:
 
     * the average is over **variances**, not standard deviations -- an RMS
       spread, which is what the spread/skill relation is derived for;
@@ -396,8 +663,16 @@ def spread_skill_ratio(
       finite-ensemble bias, without which a perfectly calibrated ensemble of
       ``M`` members scores ``sqrt(M/(M + 1)) < 1``.
 
-    NaNs are ignored (``nanmean``) so masked cells/sensors can be passed
-    through unfiltered.
+    Non-finite handling, stated because it is now the shared contract rather
+    than one caller's convention: ``nan`` entries are ignored (``nanmean``) so
+    masked cells/sensors can be passed through unfiltered, and an input with no
+    finite entries at all short-circuits to ``nan``. That guard keys on
+    ``isfinite``, so an ``inf``-valued spread series is treated as **masked and
+    returns ``nan``**, not propagated to an ``inf`` ratio -- deliberate: an
+    infinite spread makes the diagnostic undefined, not "infinitely
+    over-dispersed", and a ``nan`` is what the rest of this module returns for
+    an undefined score. (This is the one case where the phase-0 figspec body
+    differed; it returned ``+inf``.)
 
     Args:
         variances: Per-element ensemble variance (``ddof=1``).

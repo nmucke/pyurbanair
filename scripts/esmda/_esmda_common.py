@@ -42,11 +42,16 @@ from pyurbanair.plotting import (
 )
 from pyurbanair.utils.ensemble_scores import (
     coverage,
+    coverage_nominal_alpha,
+    crpss,
     fair_energy_score,
+    max_abs_zscore_reference,
+    max_nominal_alpha,
     pit_rank,
     rank_histogram,
     rank_histogram_weights,
     zscore,
+    zscore_exceedance,
 )
 
 logger = logging.getLogger(__name__)
@@ -355,10 +360,23 @@ def _energy_score(members, truth):
     :func:`pyurbanair.utils.ensemble_scores.fair_energy_score` (the
     multivariate CRPS; see there for the estimator). The only work done here
     is the axis convention: the sensor series carry the component axis first,
-    the shared score wants ensemble first and components last. The shared
-    implementation keeps the same memory bound -- it loops over the leading
-    batch axis, which after the move is time, so the pairwise term never
-    materializes more than ``(ensemble, ensemble, sensor)`` at once.
+    the shared score wants ensemble first and components last.
+
+    Memory, stated exactly because it is *not* identical to the hand-rolled
+    loop this replaced. The **pairwise** term is unchanged: the shared
+    implementation loops over the leading batch axis, which after the move is
+    time, so it holds one ``(E, E, S, C)`` slab -- the same element count as
+    the old ``(C, E, E, S)``. The **distance-to-truth** term is not: the shared
+    implementation takes it over the whole batch in one ``(E, T, S, C)``
+    allocation, where the old code held ``(C, E, S)`` inside the time loop.
+    That is a factor ``n_time`` on that term.
+
+    Accepted rather than chunked, because it does not change what binds: peak
+    is ``max(E*T*S*C, E*E*S*C)``, so the pairwise slab still dominates whenever
+    ``M > n_time``, and where it does not the term1 array is a plain dense
+    float64 buffer (M=32, T=1e3, S=3, C=3: ~7 MB). A **field**-shaped caller
+    has neither property and must chunk the grid into the leading batch axis --
+    see the memory bound in :func:`fair_energy_score`.
 
     Args:
         members: ``(component, ensemble, time, sensor)`` aligned member vectors.
@@ -453,24 +471,42 @@ def series_stats(arr):
 
 
 def parameter_metric_summary(posterior_params, true_params, prior_params):
-    """Per-parameter RMSE/CRPS summary stats (posterior, with a prior reference)."""
+    """Per-parameter RMSE/CRPS summary stats (posterior, with a prior reference).
+
+    Both ``*_reduction_vs_prior`` ratios are :func:`ensemble_scores.crpss`
+    (``1 - post/prior``), not a local copy: the shared function was written
+    against this code's guard and evaluates the identical expression on
+    identical inputs. Verified bit-identical over 2e5 random positive
+    ``(post, prior)`` pairs -- 0 differing.
+
+    Only the **non-finite** corners move, and every one of them moves from a
+    number that was wrong to a ``null``, because the old guard tested the
+    denominator alone (``prior_mean > 0``) while ``crpss`` tests both operands:
+
+    ======================  =========  ======
+    case                    was        now
+    ======================  =========  ======
+    post ``nan``, prior 4   ``nan``    ``null``
+    post ``inf``, prior 4   ``-inf``   ``null``
+    post 2, prior ``inf``   ``1.0``    ``null``
+    ======================  =========  ======
+
+    The last is the substantive one: an infinite reference score was reported as
+    a 100% reduction. The first two are the convention every other float in this
+    section already follows (:func:`_finite_or_none`) -- a bare ``nan``/``inf``
+    reaches ``compare_sweep_results.py`` as a number and poisons the aggregate.
+    """
     metrics = compute_parameter_metrics(posterior_params, true_params, prior_params)
     summary = {}
     for name, m in metrics.items():
         entry = {"rmse": series_stats(m["rmse"]), "crps": series_stats(m["crps"])}
-        if "prior_rmse" in m:
-            prior_mean = float(np.nanmean(m["prior_rmse"]))
-            post_mean = float(np.nanmean(m["rmse"]))
-            entry["prior_rmse_mean"] = prior_mean
-            entry["rmse_reduction_vs_prior"] = (
-                float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
-            )
-        if "prior_crps" in m:
-            prior_mean = float(np.nanmean(m["prior_crps"]))
-            post_mean = float(np.nanmean(m["crps"]))
-            entry["prior_crps_mean"] = prior_mean
-            entry["crps_reduction_vs_prior"] = (
-                float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
+        for score in ("rmse", "crps"):
+            if f"prior_{score}" not in m:
+                continue
+            prior_mean = float(np.nanmean(m[f"prior_{score}"]))
+            entry[f"prior_{score}_mean"] = prior_mean
+            entry[f"{score}_reduction_vs_prior"] = crpss(
+                float(np.nanmean(m[score])), prior_mean
             )
         summary[name] = entry
     return summary
@@ -522,6 +558,34 @@ JOINT_LOADINGS = 5
 # Tie-breaking seed for `pit_rank`, recorded in the summary so a reader can
 # reproduce the counts.
 PIT_TIE_SEED = 0
+
+# Which of `ensemble_scores.DEFAULT_ZSCORE_THRESHOLDS` the `overconfident` flag
+# is read off, and by how much the observed exceedance fraction must beat its
+# nominal level. Index 0 is |z| > 2, NOT the |z| > 3 tail: at the pooled sample
+# sizes this stage actually has (tens to a few hundred knots) the 3-sigma tail
+# holds O(1) expected counts, so any rule on it is a coin flip on a single knot.
+# Measured false-positive rate on a PERFECTLY CALIBRATED M = 32 ensemble
+# (4000 trials, independent knots), against the rule this replaces:
+#
+#   pooled knots        21     63    105    315
+#   max|z| > 3        0.118  0.316  0.451  0.852   <- the old flag
+#   |z|>3, x2         0.118  0.316  0.124  0.122
+#   |z|>2, x2         0.114  0.029  0.007  0.000   <- this rule
+#   |z|>2, x3         0.031  0.001  0.000  0.000
+#
+# Only the last two shrink with sample size, which is the whole point: pooling
+# more knots must sharpen a calibration verdict, not manufacture one. Between
+# them the multiplier is a power trade, measured at M = 32 / 315 knots on an
+# ensemble whose spread is a factor `s` too small:
+#
+#   s                  1.0    0.8    0.7    0.5
+#   |z|>2, x2         0.000  0.649  0.998  1.000   <- this rule
+#   |z|>2, x3         0.000  0.003  0.521  1.000
+#
+# x3 cannot see a 20%-too-narrow ensemble at all, so x2 it is: ~0 false alarms
+# at the routine shape and it still catches the miscalibration that matters.
+OVERCONFIDENT_THRESHOLD_INDEX = 0
+OVERCONFIDENT_MULTIPLIER = 2.0
 
 
 def _finite_or_none(value):
@@ -720,18 +784,75 @@ def _effective_knot_count(
 
 
 def _zscore_block(members, truth):
-    """``{mean, std, max_abs, overconfident}`` of the per-knot z-scores."""
+    """Pooled per-knot z-score summary, **each number next to its reference**.
+
+    ``mean`` / ``std`` / ``max_abs`` are the raw pooled moments, unchanged. What
+    is new is that nothing here may be read against a standard normal:
+
+    * ``exceedance`` -- :func:`ensemble_scores.zscore_exceedance`, the observed
+      ``|z|`` tail fractions **with the calibrated levels they must be compared
+      against**. A calibrated ensemble's z-scores are not N(0,1) but
+      ``sqrt((M + 1)/M) * t(M - 1)`` (mean and spread come from the same M
+      members), which at M = 32 puts ``P(|z| > 3)`` at 0.59% -- 2.2x the normal
+      table. WP1.4 plots ``observed`` against ``nominal`` from this block and
+      must not re-derive either.
+    * ``max_abs_calibrated_median`` -- where ``max |z|`` sits for a *calibrated*
+      ensemble of this size over this many knots
+      (:func:`ensemble_scores.max_abs_zscore_reference`). Without it ``max_abs``
+      is unreadable: the max of ``n`` draws grows with ``n``, so the same 3.0
+      means "high" at 21 knots and "low" at 315. Deliberately evaluated at the
+      RAW knot count rather than ``sampling.n_knots_effective``: the effective
+      count is a stated upper bound, and passing a bound would *shrink* the
+      reference and bias it toward calling a calibrated ensemble broken. The raw
+      count errs the safe way.
+
+    ``overconfident`` is the one boolean, and it is read off the exceedance
+    fractions rather than ``max_abs``, because a fixed cut on a maximum flags
+    SAMPLE SIZE: at M = 32 a perfectly calibrated ensemble trips ``max|z| > 3``
+    12% of the time at 21 pooled knots and 85% at 315 -- and 315 is the routine
+    2-parameter/21-knot/3-window shape, so the old flag was very nearly a
+    constant `true` on real runs. A tail *fraction* has a sample-size-independent
+    expectation, so more knots sharpen it instead of inflating it (measured rates
+    at ``OVERCONFIDENT_MULTIPLIER`` above).
+
+    The rule is emitted as ``overconfident_rule``, a string naming the exact
+    keys it is computed from, so the verdict is reproducible from the summary
+    alone and no consumer has to guess the basis.
+
+    Caveat, and the reason this is the only boolean here: the pooled knots are
+    NOT independent (see the ``sampling`` block on the parameter entry). The
+    fractions stay unbiased under correlation, but their sampling error does not
+    follow ``sqrt(p(1-p)/n)``, so correlation degrades this flag toward its
+    small-``n`` behaviour (~11% false alarms) rather than toward the ~0% of the
+    nominal 315-knot shape. Treat it as a screen, not a test.
+    """
     z = zscore(members, truth)
     finite = z[np.isfinite(z)]
     if finite.size == 0:
         return None
-    max_abs = float(np.max(np.abs(finite)))
+    n_members = int(np.asarray(members).shape[0])
+    exceedance = zscore_exceedance(z, n_members)
+
+    index = OVERCONFIDENT_THRESHOLD_INDEX
+    threshold = exceedance["thresholds"][index]
+    observed = exceedance["observed"][index]
+    nominal = exceedance["nominal"][index]
     return {
         "mean": _finite_or_none(finite.mean()),
         # ddof=1 over knots: one knot gives no spread estimate, not a zero one.
         "std": _finite_or_none(finite.std(ddof=1)) if finite.size > 1 else None,
-        "max_abs": _finite_or_none(max_abs),
-        "overconfident": bool(max_abs > 3.0),
+        "max_abs": _finite_or_none(np.max(np.abs(finite))),
+        "max_abs_calibrated_median": _finite_or_none(
+            max_abs_zscore_reference(n_members, int(finite.size))
+        ),
+        "exceedance": exceedance,
+        "overconfident": bool(
+            np.isfinite(observed) and observed > OVERCONFIDENT_MULTIPLIER * nominal
+        ),
+        "overconfident_rule": (
+            f"exceedance.observed[{index}] > {OVERCONFIDENT_MULTIPLIER} * "
+            f"exceedance.nominal[{index}]  (|z| > {threshold})"
+        ),
     }
 
 
@@ -773,33 +894,48 @@ def _pit_block(
 
 
 def _coverage_block(members, truth):
-    """Order-statistic coverage at each ``COVERAGE_ALPHAS`` level."""
+    """Order-statistic coverage at each ``COVERAGE_ALPHAS`` level, **with the
+    level it is actually targeting**.
+
+    ``alpha_50`` / ``alpha_90`` are empirical fractions; ``nominal_alpha_50`` /
+    ``nominal_alpha_90`` are what a *perfectly calibrated* ensemble of this size
+    scores, and they are **not** 0.5 and 0.9. The band edges are member order
+    statistics, so the attainable nominal levels are the ``M + 1`` multiples of
+    ``1/(M + 1)`` and the requested alpha is rounded to one of them: at M = 32,
+    ``alpha = 0.5`` is the band ``[x_(9), x_(25)]``, nominal 0.4848. A consumer
+    comparing the empirical 0.4841 measured there against the *requested* 0.5
+    reads ~13 sampling sigma of pure discretization as miscalibration.
+
+    Compare ``alpha_X`` against ``nominal_alpha_X``, never against ``X/100``.
+
+    ``max_nominal_alpha`` answers a different question -- the widest band this
+    ``M`` can offer at all, i.e. the ceiling a large alpha clamps to -- and is
+    :func:`ensemble_scores.max_nominal_alpha` rather than a local
+    ``(M - 1)/(M + 1)``, so the two definitions cannot drift apart.
+
+    The band-edge convention itself is not repeated here: ``_band_indices``
+    stays private to ``ensemble_scores`` and these two functions are its only
+    public consequence.
+    """
     valid = np.isfinite(truth) & np.all(np.isfinite(members), axis=0)
     if not np.any(valid):
         return None
-    n_members = members.shape[0]
-    block = {
-        f"alpha_{int(round(alpha * 100))}": _finite_or_none(
+    n_members = int(members.shape[0])
+    block = {}
+    for alpha in COVERAGE_ALPHAS:
+        key = f"alpha_{int(round(alpha * 100))}"
+        block[key] = _finite_or_none(
             coverage(members[:, valid], truth[valid], alpha=alpha)
         )
-        for alpha in COVERAGE_ALPHAS
-    }
-    # The band edges are member order statistics, so with M members the widest
-    # band available is [x_(1), x_(M)], whose nominal level is (M-1)/(M+1) --
-    # 0.94 at M = 32, 0.6 at M = 4. Requesting alpha above that silently clamps,
-    # so the ceiling is reported next to the numbers rather than letting a
-    # capped `alpha_90` read as a calibration failure. It bounds the NOMINAL
-    # level, not the realized fraction, which can sit above it by chance.
-    block["max_nominal_alpha"] = _finite_or_none((n_members - 1) / (n_members + 1))
+        block[f"nominal_{key}"] = _finite_or_none(
+            coverage_nominal_alpha(n_members, alpha)
+        )
+    block["max_nominal_alpha"] = _finite_or_none(max_nominal_alpha(n_members))
     return block
 
 
-def _contraction_block(members, prior_members):
-    """``{mean, min}`` of the per-knot posterior/prior spread ratio."""
-    if prior_members is None:
-        return None
-    post_std = members.std(axis=0, ddof=1)
-    prior_std = prior_members.std(axis=0, ddof=1)
+def _spread_ratio_stats(post_std, prior_std):
+    """``{mean, min}`` of ``post_std/prior_std``, skipping collapsed prior knots."""
     ratio = np.full(post_std.shape, np.nan)
     valid = np.isfinite(post_std) & np.isfinite(prior_std) & (prior_std > 0)
     np.divide(post_std, prior_std, out=ratio, where=valid)
@@ -809,6 +945,104 @@ def _contraction_block(members, prior_members):
     return {
         "mean": _finite_or_none(finite.mean()),
         "min": _finite_or_none(finite.min()),
+    }
+
+
+def _initial_prior_std(prior_std, num_windows, name):
+    """Window 0's prior spread, tiled across the windows -- or ``(None, reason)``.
+
+    ``prior_params.nc`` is a per-window CONCATENATION and only its first block is
+    a genuine prior (see :func:`_contraction_block`), so the run-long reference
+    is block 0 repeated. One slice covers both artifact layouts, which is why
+    there is no branch on the parameter's x-axis:
+
+    * a **dynamic** parameter has ``n_knots = num_windows * knots_per_window``
+      columns, so block 0 is the first ``knots_per_window`` of them and knot
+      ``j`` of window ``w`` lines up with knot ``j % knots_per_window`` of
+      window 0 (the per-window knot grid is the prior sampler's own, shifted);
+    * a **static** parameter's x-axis IS the window index -- one column per
+      window -- so ``knots_per_window`` comes out 1 and the tile degenerates to
+      "column 0, repeated". Same expression, no special case.
+
+    Returns ``(tiled_std, None)`` or ``(None, reason)``; an unusable shape is a
+    logged ``null``, never a silent mis-slice.
+    """
+    if num_windows is None:
+        return None, "num_windows is unknown (truth_access.yaml predates the key)"
+    n_windows = int(num_windows)
+    if n_windows < 1:
+        return None, f"num_windows = {n_windows} is not a window count"
+    n_knots = int(prior_std.shape[0])
+    if n_knots % n_windows:
+        reason = (
+            f"{n_knots} knots do not divide into {n_windows} windows, so window "
+            "0's prior block cannot be identified"
+        )
+        logger.info(
+            "Parameter %r: %s; reporting contraction_ratio.vs_initial_prior as null",
+            name,
+            reason,
+        )
+        return None, reason
+    knots_per_window = n_knots // n_windows
+    return np.tile(prior_std[:knots_per_window], n_windows), None
+
+
+def _contraction_block(members, prior_members, num_windows, name):
+    """Posterior/prior spread ratio against **both** priors that exist.
+
+    The distinction is the whole point of this block, and it is not visible from
+    the artifact: ``run_esmda.py`` sets each window's prior to the previous
+    window's posterior (GP-extrapolated when the parameter is dynamic, assigned
+    bitwise when it is static), so in the concatenated ``prior_params.nc`` block
+    ``w`` IS posterior ``w - 1`` and only block 0 is a genuine prior. A ratio
+    taken elementwise against that file therefore measures what the LAST update
+    did, not what the run did:
+
+    * ``vs_window_prior`` -- ``std_post/std_prior`` knot by knot. Per-window
+      contraction. This is the pre-existing number, unchanged.
+    * ``vs_initial_prior`` -- the same posterior against window 0's prior block,
+      tiled (:func:`_initial_prior_std`). Cumulative contraction, i.e. the
+      "how much did assimilation shrink the uncertainty" reading that the name
+      ``contraction_ratio`` invites.
+
+    They differ by the window count and the gap is not cosmetic: on a 3-window
+    M = 32 construction with a true per-window ratio of 0.6, the per-window
+    number reports ``{mean: 0.600, min: 0.600}`` while the cumulative one
+    reports ``{mean: 0.392, min: 0.216}`` -- a run that cut spread by 78%
+    reading as 40%.
+
+    ``mean`` / ``min`` remain at the top level as aliases of ``vs_window_prior``
+    (the plan's schema sketch and any existing consumer index them directly);
+    they are assigned from the same mapping, so the two cannot drift.
+    ``vs_initial_prior`` always has the same three keys, with ``reason``
+    non-null exactly when its numbers are null.
+    """
+    if prior_members is None:
+        return None
+    post_std = members.std(axis=0, ddof=1)
+    prior_std = prior_members.std(axis=0, ddof=1)
+
+    per_window = _spread_ratio_stats(post_std, prior_std)
+    if per_window is None:
+        return None
+
+    initial_std, reason = _initial_prior_std(prior_std, num_windows, name)
+    cumulative = (
+        None if initial_std is None else _spread_ratio_stats(post_std, initial_std)
+    )
+    if cumulative is None and reason is None:
+        reason = "window 0's prior block has no knot with a positive spread"
+
+    return {
+        "mean": per_window["mean"],
+        "min": per_window["min"],
+        "vs_window_prior": per_window,
+        "vs_initial_prior": {
+            "mean": None if cumulative is None else cumulative["mean"],
+            "min": None if cumulative is None else cumulative["min"],
+            "reason": reason,
+        },
     }
 
 
@@ -852,6 +1086,18 @@ def joint_parameter_directions(posterior_flat, prior_flat, labels=None):
     ``lambda < 0.5`` marks a direction whose spread the update at least halved --
     and are invariant to any rescaling of the parameters, so the mixed units of
     the joint vector do not matter.
+
+    **Which update, though.** ``prior_flat`` spans every window of the
+    concatenated ``prior_params.nc``, and all but its first block are previous
+    windows' posteriors (``run_esmda.py`` chains them). So ``C_prior`` here is a
+    per-window reference and ``n_constrained_directions`` counts directions the
+    *per-window* updates halved -- the same shift ``_contraction_block``
+    documents, applied to the pencil. The callers' answer to the cumulative
+    question is a second, smaller pencil built from the final posterior window
+    against the window-0 prior block; see
+    :func:`joint_directions_vs_initial_prior`. The two are emitted side by side
+    (``prior_reference`` names which is which) rather than one silently
+    standing in for the other.
 
     Two deliberate departures from a naive ``scipy.linalg.eigh(C_a, C_b)``:
 
@@ -1024,6 +1270,70 @@ def joint_parameter_directions(posterior_flat, prior_flat, labels=None):
     return joint
 
 
+# Which keys of a `joint_parameter_directions` result the cumulative pencil
+# re-reports. A strict subset: the full block already costs ~40 YAML lines, the
+# question this one answers is a scalar count, and the loadings/matrices would
+# be near-duplicates of the per-window ones. `reason` travels so a degraded
+# path is self-explaining, exactly as in the parent block.
+JOINT_VS_INITIAL_KEYS = (
+    "n_members",
+    "n_parameters",
+    "n_sample_directions",
+    "rank_deficient",
+    "posterior_variance_retained",
+    "n_constrained_directions",
+    "eigenvalue_quantiles",
+    "reason",
+)
+
+
+def joint_directions_vs_initial_prior(final_posterior_flat, initial_prior_flat):
+    """The joint pencil answering the CUMULATIVE question, summarized.
+
+    :func:`joint_parameter_directions` scores the concatenated posterior against
+    the concatenated prior, which -- because ``run_esmda.py`` seeds each window's
+    prior from the previous window's posterior -- is a per-window reference.
+    This scores the **final window's posterior block** against the **first
+    window's prior block**, the only genuine prior in the artifact, so
+    ``n_constrained_directions`` means "directions the run as a whole at least
+    halved".
+
+    Both blocks are one window wide, so the pencil is dimensionally consistent
+    without inventing anything: the two blocks carry the same parameters on the
+    same per-window knot grid (the prior sampler reuses its own grid, shifted).
+    Comparing different *time* intervals is sound because the knot prior is the
+    stationary GP -- window 0's prior covariance is the prior covariance for any
+    window's knots -- and that stationarity is the same assumption the run stage
+    makes when it extrapolates.
+
+    A side benefit worth stating, since it is why this is cheap: the blocks are
+    ``K/num_windows`` wide, so at the routine M = 32 / K = 42 / 3-window shape
+    the pencil is 14-dimensional against 31 sample directions -- **full rank**,
+    where the parent block is rank-truncated. No new math: this is the same
+    function on smaller inputs, reduced to ``JOINT_VS_INITIAL_KEYS``.
+
+    Args:
+        final_posterior_flat: ``(M, K/W)`` last window's posterior block, or
+            ``None`` when the caller could not slice one.
+        initial_prior_flat: ``(M, K/W)`` window 0's prior block, or ``None``.
+
+    Returns:
+        A mapping over :data:`JOINT_VS_INITIAL_KEYS`, all-``null`` with a
+        ``reason`` when the blocks are unavailable or the pencil degrades.
+    """
+    if final_posterior_flat is None or initial_prior_flat is None:
+        reason = (
+            "the per-window blocks could not be sliced from the concatenated "
+            "parameter artifacts (see the log for which guard fired)"
+        )
+        logger.info("Joint cumulative directions unavailable: %s", reason)
+        return dict.fromkeys(JOINT_VS_INITIAL_KEYS) | {"reason": reason}
+    # Labels are omitted deliberately: this block reports no loadings, so the
+    # parent's K-long label list would only be wrong for a K/W-wide vector.
+    full = joint_parameter_directions(final_posterior_flat, initial_prior_flat)
+    return {key: full.get(key) for key in JOINT_VS_INITIAL_KEYS}
+
+
 def parameter_bundle_summary(
     base_summary,
     posterior_params,
@@ -1032,6 +1342,8 @@ def parameter_bundle_summary(
     *,
     posterior_flat,
     prior_flat,
+    final_posterior_window_flat=None,
+    initial_prior_window_flat=None,
     cfg=None,
     num_windows=None,
 ):
@@ -1040,12 +1352,21 @@ def parameter_bundle_summary(
     Purely additive: every key :func:`parameter_metric_summary` wrote is copied
     through untouched (their paths are hard-coded in
     ``scripts/figure_creation/``), each per-parameter entry gains ``zscore``,
-    ``pit_counts``/``pit``, ``coverage`` and ``contraction_ratio``, and a
-    sibling ``joint`` entry is added.
+    ``pit_counts``/``pit``, ``sampling``, ``coverage`` and ``contraction_ratio``,
+    and a sibling ``joint`` entry is added.
+
+    ``sampling`` sits on the parameter entry rather than inside ``pit`` because
+    the caveat it carries is not PIT's. ``pit``, ``zscore.exceedance`` and
+    ``coverage.alpha_*`` all pool over the *same* correlated knots, so
+    ``n_knots_effective`` bounds the information behind every one of them; the
+    same three numbers stay mirrored under ``pit`` for schema stability, copied
+    from this one computation so they cannot drift.
 
     ``posterior_flat`` / ``prior_flat`` are the ``(M, K)`` matrices from
     ``compute_esmda_metrics._flatten_parameter_members``; they are passed in
-    rather than recomputed so the pipeline keeps exactly one flattener.
+    rather than recomputed so the pipeline keeps exactly one flattener. The two
+    per-window blocks are that same flattener applied to a ``time``-sliced
+    Dataset, for the same reason.
 
     Args:
         base_summary: The mapping returned by :func:`parameter_metric_summary`.
@@ -1054,9 +1375,14 @@ def parameter_bundle_summary(
         prior_params: Prior parameter Dataset, or ``None``.
         posterior_flat: ``(M, K)`` flattened posterior members.
         prior_flat: ``(M, K)`` flattened prior members, or ``None``.
+        final_posterior_window_flat: ``(M, K/W)`` last window's posterior block,
+            or ``None`` when it could not be sliced.
+        initial_prior_window_flat: ``(M, K/W)`` window 0's prior block, or
+            ``None``. See :func:`joint_directions_vs_initial_prior`.
         cfg: The run's saved config, read for the GP knot correlation.
-        num_windows: Assimilation window count, the pooling depth for
-            parameters without a ``time`` dimension.
+        num_windows: Assimilation window count. Two uses: the pooling depth for
+            parameters without a ``time`` dimension, and the width of window 0's
+            prior block in ``contraction_ratio.vs_initial_prior``.
 
     Returns:
         A new mapping; ``base_summary`` is not mutated.
@@ -1076,9 +1402,11 @@ def parameter_bundle_summary(
             PIT_BINS,
         )
 
+    scored = set()
     for name, members, truth, prior_members, x_is_time in _aligned_parameter_arrays(
         posterior_params, true_params, prior_params
     ):
+        scored.add(name)
         entry = summary.setdefault(name, {})
         if degenerate:
             entry.update(
@@ -1086,6 +1414,7 @@ def parameter_bundle_summary(
                     "zscore": None,
                     "pit_counts": None,
                     "pit": None,
+                    "sampling": None,
                     "coverage": None,
                     "contraction_ratio": None,
                 }
@@ -1105,12 +1434,50 @@ def parameter_bundle_summary(
                 "zscore": _zscore_block(members, truth),
                 "pit_counts": pit_counts,
                 "pit": pit_meta,
+                # The pooling caveat applies to zscore and coverage just as much
+                # as to PIT; hoisted so it is read once per parameter instead of
+                # being found under one of the three blocks it qualifies.
+                "sampling": (
+                    None
+                    if pit_meta is None
+                    else {
+                        key: pit_meta[key]
+                        for key in ("n_samples", "n_knots_effective", "pooling")
+                    }
+                ),
                 "coverage": _coverage_block(members, truth),
-                "contraction_ratio": _contraction_block(members, prior_members),
+                "contraction_ratio": _contraction_block(
+                    members, prior_members, num_windows, name
+                ),
             }
         )
 
-    summary["joint"] = joint_parameter_directions(
+    # The joint vector spans every variable carrying an `ensemble` dim, but the
+    # per-parameter bundle iterates `plotted_param_names`, a fixed tuple. They
+    # agree today. A future estimated parameter missing from that tuple would
+    # enter `joint` while silently getting no calibration entry, so say so the
+    # first time it happens rather than leaving it to be noticed in a figure.
+    skipped = sorted(
+        name
+        for name in posterior_params.data_vars
+        if "ensemble" in posterior_params[name].dims and name not in scored
+    )
+    if skipped:
+        logger.info(
+            "Parameters %s carry an ensemble dimension and are in the joint "
+            "vector, but are not in plotting.plotted_param_names, so they get "
+            "no per-parameter calibration entry",
+            ", ".join(repr(name) for name in skipped),
+        )
+
+    joint = joint_parameter_directions(
         posterior_flat, prior_flat, parameter_vector_labels(posterior_params)
     )
+    # Names the reference the block above is scored against, so the per-window
+    # reading is explicit rather than inferred from the plan text.
+    joint["prior_reference"] = "per_window_prior"
+    joint["vs_initial_prior"] = joint_directions_vs_initial_prior(
+        final_posterior_window_flat, initial_prior_window_flat
+    )
+    summary["joint"] = joint
     return summary
