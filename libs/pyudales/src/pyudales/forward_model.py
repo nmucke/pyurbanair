@@ -1031,6 +1031,16 @@ class ForwardModel(BaseForwardModel):
         Either way the run emits a fresh carry for the next warm start. The
         subgrid fields stay on disk in the carry and never enter ``result``.
         """
+        # Start each attempt from an empty per-member execution directory. A
+        # failed uDALES process bypasses BaseForwardModel.__call__'s post-run
+        # cleanup, so its partial fielddumps (possibly from a different grid)
+        # would otherwise be picked up by the next ESMDA forecast.
+        #
+        # This must happen here, before fetch_carry/_prepare_warmstart stage a
+        # restart in the execution directory. Moving it into _run_executable
+        # would delete that staged restart and break warm starts.
+        clean_output_dir(self.dirs)
+
         warm_start = state is not None
         # Refresh the physical clock from disk before anything reads it: in a
         # parallel ensemble this object was just unpickled into a fresh worker,
