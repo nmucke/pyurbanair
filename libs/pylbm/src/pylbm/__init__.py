@@ -109,15 +109,16 @@ def _verify_submodule_pin(repo_root: pathlib.Path, lbm_path: pathlib.Path) -> No
     not exist at that commit surfaces as a bare
     ``make: *** No rule to make target 'm_read_bathymetry.o'``.
 
-    Policy: self-heal only when it is provably safe. A clean working copy at the
-    wrong commit is checked out onto the pin; a *dirty* one is left completely
-    alone (it may hold real work in progress) and reported loudly instead.
+    Policy: **report, do not touch.** This runs at import time, in every
+    forkserver child as well as the parent, and a checkout there would silently
+    detach a branch somebody deliberately checked out. Set
+    ``PYLBM_AUTOSYNC_SUBMODULE=1`` to opt into self-healing; even then a *dirty*
+    working copy is never touched, since it may hold work in progress.
     """
-    recorded = _git(["rev-parse", f"HEAD:{lbm_path.name}"], cwd=lbm_path.parent)
-    if recorded is None:
-        # Try the path as recorded from the repo root (submodule path may nest).
-        rel = lbm_path.relative_to(repo_root).as_posix()
-        recorded = _git(["rev-parse", f"HEAD:{rel}"], cwd=repo_root)
+    # `<rev>:<path>` resolves from the repo root, so the path must be given
+    # relative to it (git itself hints `HEAD:./LBM` for the repo-relative form).
+    rel = lbm_path.relative_to(repo_root).as_posix()
+    recorded = _git(["rev-parse", f"HEAD:{rel}"], cwd=repo_root)
     actual = _git(["rev-parse", "HEAD"], cwd=lbm_path)
 
     if recorded is None or actual is None:
@@ -135,22 +136,37 @@ def _verify_submodule_pin(repo_root: pathlib.Path, lbm_path: pathlib.Path) -> No
         return
 
     dirty = _git(["status", "--porcelain", "--untracked-files=no"], cwd=lbm_path)
-    if dirty:
+    autosync = os.environ.get("PYLBM_AUTOSYNC_SUBMODULE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+    if dirty or not autosync:
         logger.warning(
-            "LBM submodule is at %s but the parent repo records %s, and it has "
-            "uncommitted changes -- leaving it untouched. The build uses the "
-            "checked-out sources, which may not match this wrapper. Resolve with:\n"
-            "    cd %s && git stash && cd - && git submodule update --checkout %s",
+            "LBM submodule is at %s but the parent repo records %s%s. The build "
+            "will use the checked-out sources, which may not match this wrapper "
+            "(a source it injects a `use` for may not exist at that commit, which "
+            "surfaces as a bare 'No rule to make target'). Resolve with:\n"
+            "    git submodule update --checkout %s\n"
+            "%s",
             actual[:12],
             recorded[:12],
+            " and has uncommitted changes" if dirty else "",
             lbm_path,
-            lbm_path,
+            (
+                "    (stash the submodule's local changes first)"
+                if dirty
+                else "    (or set PYLBM_AUTOSYNC_SUBMODULE=1 to do this automatically)"
+            ),
         )
         return
 
     logger.warning(
         "LBM submodule is at %s but the parent repo records %s; the working copy "
-        "is clean, so checking it out onto the recorded commit.",
+        "is clean and PYLBM_AUTOSYNC_SUBMODULE is set, so checking it out onto "
+        "the recorded commit.",
         actual[:12],
         recorded[:12],
     )

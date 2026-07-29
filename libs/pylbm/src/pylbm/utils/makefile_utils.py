@@ -10,6 +10,46 @@ logger = logging.getLogger(__name__)
 # Only these variables at the top of the makefile are edited by this class.
 MAKEFILE_PATH_VARS = ("SRC_DIR", "BUILD", "VPATH", "HOME", "BINDIR", "NCFDIR")
 
+# "VAR := value" or "VAR = value"
+_ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::?=)\s*(.*)$")
+_CONDITIONAL_OPEN = re.compile(r"^\s*(ifdef|ifndef|ifeq|ifneq)\b")
+_CONDITIONAL_CLOSE = re.compile(r"^\s*endif\b")
+
+
+def _unconditional_assignments(lines: list[str]) -> list[tuple[int, str, str]]:
+    """
+    Find managed variable assignments at the makefile's top level.
+
+    Assignments inside ``ifdef``/``ifeq`` blocks are skipped deliberately. This
+    class rewrites a variable by replacing its line and deleting every other
+    assignment of it; applied to a conditional override (say a ``BINDIR`` set only
+    under ``ifdef MPI``) that would silently delete a branch that was never meant
+    to be collapsed. Today's upstream makefile declares all six on lines 1-6 with
+    no conditionals, so this changes nothing -- it bounds the blast radius if that
+    ever stops being true.
+
+    Args:
+        lines: The makefile's raw lines.
+
+    Returns:
+        ``(line_index, name, value)`` for each top-level managed assignment.
+    """
+    found: list[tuple[int, str, str]] = []
+    depth = 0
+    for i, line in enumerate(lines):
+        if _CONDITIONAL_OPEN.match(line):
+            depth += 1
+            continue
+        if _CONDITIONAL_CLOSE.match(line):
+            depth = max(0, depth - 1)
+            continue
+        if depth:
+            continue
+        m = _ASSIGNMENT.match(line.strip())
+        if m and m.group(1) in MAKEFILE_PATH_VARS:
+            found.append((i, m.group(1), m.group(2).strip()))
+    return found
+
 
 class Makefile:
     """
@@ -51,17 +91,14 @@ class Makefile:
         with open(self.file_path, "r") as f:
             self.raw_lines = f.readlines()
 
-        # Match "VAR := value" or "VAR = value" (with optional spaces)
-        pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::?=)\s*(.*)$")
+        self._reindex()
 
-        for i, line in enumerate(self.raw_lines):
-            m = pattern.match(line.strip())
-            if not m:
-                continue
-            name, value = m.group(1), m.group(2).strip()
-            if name not in MAKEFILE_PATH_VARS:
-                continue
-            # First assignment wins; later ones are duplicates that set_path drops.
+    def _reindex(self) -> None:
+        """Rebuild the variable index from ``raw_lines`` (first assignment wins)."""
+        self._path_vars = {}
+        self._var_to_line_index = {}
+        self._path_section_end = 0
+        for i, name, value in _unconditional_assignments(self.raw_lines):
             if name not in self._var_to_line_index:
                 self._path_vars[name] = value
                 self._var_to_line_index[name] = i
@@ -116,36 +153,28 @@ class Makefile:
             self.raw_lines.insert(self._path_section_end, f"{var} := {value_str}\n")
             self._path_section_end += 1
 
-        # Drop any duplicate assignment of this variable left by an earlier
-        # (non-idempotent) write, so repeated edits converge on a single line.
-        duplicate = re.compile(rf"^\s*{re.escape(var)}\s*:?=")
-        kept = False
-        deduped: list[str] = []
-        for line in self.raw_lines:
-            if duplicate.match(line):
-                if kept:
-                    continue
-                kept = True
-            deduped.append(line)
-        if len(deduped) != len(self.raw_lines):
+        # Drop any duplicate top-level assignment of this variable left by an
+        # earlier (non-idempotent) write, so repeated edits converge on one line.
+        # Conditional overrides are not candidates -- see _unconditional_assignments.
+        duplicate_lines = [
+            i
+            for i, name, _ in _unconditional_assignments(self.raw_lines)
+            if name == var
+        ][1:]
+        if duplicate_lines:
             logger.info(
                 "Removed %d duplicate '%s' assignment(s) from %s",
-                len(self.raw_lines) - len(deduped),
+                len(duplicate_lines),
                 var,
                 self.file_path,
             )
-            self.raw_lines = deduped
+            drop = set(duplicate_lines)
+            self.raw_lines = [
+                line for i, line in enumerate(self.raw_lines) if i not in drop
+            ]
 
         # Re-index: line numbers shift on insert and on dedup.
-        self._var_to_line_index = {}
-        self._path_section_end = 0
-        for i, line in enumerate(self.raw_lines):
-            for v in MAKEFILE_PATH_VARS:
-                if re.match(rf"^\s*{re.escape(v)}\s*(?::?=)", line.strip()):
-                    self._var_to_line_index.setdefault(v, i)
-                    self._path_section_end = max(self._path_section_end, i + 1)
-                    break
-
+        self._reindex()
         self._path_vars[var] = value_str
 
     def set_paths(

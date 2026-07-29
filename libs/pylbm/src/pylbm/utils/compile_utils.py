@@ -298,6 +298,12 @@ def compile_lbm(
 
     # Resolve "auto" before anything else: the rest of the build (environment
     # selection, netcdf-fortran flavour, make flags) all branch on the concrete mode.
+    #
+    # This probes the *active* env, while _resolve_build_environment below may pick
+    # a different one. They agree today -- that function returns the active env
+    # unchanged whenever CUDA is on, and only diverges on the non-CUDA netcdf.mod
+    # fallback, where the NVHPC probe is irrelevant. Keep that invariant in mind if
+    # its selection logic grows: the two must not disagree about where NVHPC lives.
     cuda = resolve_cuda(enable_cuda, pathlib.Path(dirs.pixi_env_path))
 
     build_env_path = _resolve_build_environment(
@@ -456,13 +462,39 @@ def compile_lbm(
             text=True,
         )
         if prime.returncode != 0:
-            logger.debug(
-                "Dependency priming pass exited %s (expected when the generated "
-                "depends.file changed): %s",
-                prime.returncode,
-                (prime.stdout or "").strip()[-500:],
+            prime_output = f"{prime.stdout or ''}{prime.stderr or ''}"
+            # Only the rule's own "I regenerated them, run me again" failure is
+            # expected. Anything else (no perl, unreadable mkdepend.pl, a broken
+            # sed) would otherwise be swallowed here and resurface as a confusing
+            # error from the real build.
+            expected = any(
+                marker in prime_output
+                for marker in (
+                    "Dependencies updated",
+                    "First-time dependency generation",
+                )
             )
+            if expected:
+                logger.debug(
+                    "Dependency priming regenerated source.files/depends.file "
+                    "(exit %s, as designed).",
+                    prime.returncode,
+                )
+            else:
+                logger.warning(
+                    "Dependency priming pass failed unexpectedly (exit %s). The "
+                    "build below may fail with a confusing error. Output:\n%s",
+                    prime.returncode,
+                    prime_output.strip()[-2000:],
+                )
 
+        # -B (unconditional full rebuild) is deliberate, not leftover. The
+        # dependency graph is regenerated from a `use`-statement crawl that does
+        # not model Fortran .mod staleness, and `mod_dimensions.F90` is a
+        # compile-time input to essentially every object, so an incremental build
+        # here risks linking objects from two different grids -- exactly the silent
+        # wrong-output failure this module exists to prevent. Correctness over
+        # build time; drop it only with real dependency tracking in the makefile.
         result = subprocess.run(  # type: ignore[call-overload]
             [*make_args, "-B"],
             env=env,

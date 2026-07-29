@@ -208,10 +208,7 @@ class ForwardModel(BaseForwardModel):
             RuntimeError: If the binary is missing, unstamped, or stale.
         """
         build_root = self.dirs.lbm_src_path.parent
-        remedy = (
-            "Rerun with model.compile=true (the build is incremental at the "
-            "makefile level, so this is cheap when nothing changed)."
-        )
+        remedy = "Rerun with model.compile=true to rebuild (a full rebuild)."
 
         if not self.dirs.executable_path.exists():
             raise RuntimeError(
