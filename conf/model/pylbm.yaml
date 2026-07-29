@@ -10,7 +10,12 @@ forward_model:
   # Base scratch dir shared across models; pylbm nests <temp_dir>/experiment/runcase.
   temp_dir: ${paths.experiment_dir}
   experiment_name: runcase
-  cuda: true
+  # auto -> build with CUDA/NVFORTRAN where NVHPC is installed (GPU nodes) and
+  # fall back to a gfortran CPU build otherwise, so this same config runs on a
+  # laptop. Use `cuda: true` to *require* CUDA (a GPU batch job should fail
+  # rather than silently drop to a far slower CPU build); `cuda: false` forces
+  # gfortran.
+  cuda: auto
   verbose: false
   boundary_condition: inflow_outflow
   # Per-backend SGS constant -> the `ivreman smagor` infile line, where the LBM

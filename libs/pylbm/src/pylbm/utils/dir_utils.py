@@ -3,7 +3,8 @@ import pathlib
 from dataclasses import dataclass
 from typing import Optional
 
-from pylbm import LBM_PATH
+from pylbm import LBM_PATH, LBM_PATH_IS_ISOLATED
+from pylbm.utils.build_tree_utils import resolve_build_root
 from pylbm.utils.environment_utils import identify_environment
 
 
@@ -65,7 +66,18 @@ def get_lbm_directory_paths(
     Returns:
         DirectoryPaths with all paths set (infile, makefile, mod_dimensions, executable, etc.).
     """
-    lbm_src_path = LBM_PATH / "src"  # type: ignore[operator]
+    # Build in a private copy of the LBM tree under this run's scratch dir. The
+    # compile step rewrites tracked submodule sources (mod_dimensions.F90 bakes
+    # the grid in at compile time), so building in the submodule itself leaves the
+    # parent repo permanently dirty and lets concurrent runs corrupt each other.
+    # See build_tree_utils. PYLBM_LBM_PATH keeps its in-place semantics.
+    build_root = resolve_build_root(
+        lbm_path=pathlib.Path(LBM_PATH),  # type: ignore[arg-type]
+        temp_dir=pathlib.Path(temp_dir),
+        isolated=LBM_PATH_IS_ISOLATED,
+    )
+
+    lbm_src_path = build_root / "src"
     main_f90_path = lbm_src_path / "main.F90"
     mod_dimensions_path = lbm_src_path / "mod_dimensions.F90"
     makefile_path = lbm_src_path / "makefile"

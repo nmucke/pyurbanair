@@ -22,18 +22,49 @@ runs at import time and ensures the Fortran sources are present:
 2. If the directory is empty or missing, it runs
    `git submodule update --init --recursive libs/pylbm/LBM`, falling back to
    `git clone` from the URL if the submodule command fails.
-3. No network access at all → the submodule init silently fails and
+3. `_verify_submodule_pin` then compares the submodule's `HEAD` against the
+   commit the parent repo records, and **logs which commit is about to be
+   built**. On mismatch:
+   - working copy clean → it is checked out onto the recorded commit;
+   - working copy dirty → left completely alone (it may hold real WIP) and
+     reported as a loud `WARNING` with the exact remediation command.
+   This exists because a bare `git clone` fallback lands on the default-branch
+   tip rather than the pin, and a manual `git checkout` inside the submodule is
+   invisible to the parent repo. See §9 for why a wrong commit surfaces as an
+   unrelated-looking `make` error.
+4. No network access at all → the submodule init silently fails and
    `LBM_PATH` stays as the (empty) on-disk path. Nothing raises; later
    steps fail when the binary is missing.
 
-**Per-job isolation.** The Fortran build mutates its own source tree
-(`mod_dimensions.F90`, generated Fortran, object files, the `boltzmann` binary).
-Two concurrent builds on the shared submodule corrupt each other. For HPC / CI
-use, set `PYLBM_LBM_PATH` to a private copy of the tree and `__init__.py` uses
-that path directly, skipping all submodule logic.
+**The submodule is read-only; every run builds in its own tree.** The Fortran
+build mutates its source tree — `mod_dimensions.F90` bakes the grid in at compile
+time, `m_solid_objects_init.F90` gets the geometry case wired in, and the makefile
+regenerates `depends.file` / `source.files` — and all of those are files *tracked*
+by the submodule. So `dir_utils` no longer points the build at the submodule:
+[`utils/build_tree_utils.py`](../libs/pylbm/src/pylbm/utils/build_tree_utils.py)
+mirrors `src/` and the `bin/` helper scripts into
+`<paths.experiment_dir>/lbm_build/` and the build happens there.
 
-The compiled binary lands at `LBM/bin/boltzmann` (not in the shared pixi
-`bin/`), so isolating the LBM tree per run also isolates the binary.
+- The submodule stays byte-identical to its checked-out commit, so `git status`
+  no longer shows a permanently dirty `M libs/pylbm/LBM` gitlink (which had been
+  swept into unrelated commits and broke CI).
+- The mirror is incremental — only files differing in size or mtime are copied —
+  and prunes sources that vanished upstream, which matters because the makefile
+  rebuilds `source.files` from `ls *.F90` and would otherwise compile a stale
+  module back in.
+- Override the location with `PYLBM_BUILD_ROOT` (e.g. node-local scratch).
+
+**Per-job isolation.** `PYLBM_LBM_PATH` keeps its original meaning: point it at a
+private copy of the whole LBM tree and `__init__.py` uses that path directly,
+skipping submodule discovery *and* the mirroring above (the caller owns that tree
+and it is built in place).
+
+The compiled binary lands at `<build tree>/bin/boltzmann` (not in the shared pixi
+`bin/`), alongside a `.pylbm_build_stamp.json` recording the experiment, the
+netcdf/cuda mode, and hashes of the two compiled-in sources. With
+`model.compile=false`, `ForwardModel._verify_prebuilt_binary` checks that stamp
+and raises rather than reusing a binary built for a different grid or geometry —
+which does not fail loudly, it just produces wrong-shaped or all-NaN output.
 
 ---
 
@@ -64,7 +95,7 @@ Key constructor parameters:
 | `simulation_time` | 53.8 | Seconds of output to collect after spin-up |
 | `output_frequency` | 0.0538 | Seconds between output snapshots |
 | `spinup_time` | 0.0 | Warm-up seconds prepended (outputs discarded) |
-| `cuda` | False | Use NVFORTRAN/CUDA build |
+| `cuda` | `"auto"` | `"auto"` → CUDA if NVHPC is installed, else gfortran; `True` requires CUDA; `False` forces gfortran |
 | `verbose` | True | `False` → `stderr=DEVNULL` (see §7) |
 | `boundary_condition` | `"periodic"` | `"inflow_outflow"` for real cases |
 | `profile_config` | None | Vertical shear profile dict, e.g. `{"type":"power_law","alpha":0.25}` |
@@ -72,7 +103,7 @@ Key constructor parameters:
 | `results_dir` | None | `None` → in-memory mode; path → on-disk mode |
 
 The default in [`conf/model/pylbm.yaml`](../conf/model/pylbm.yaml) sets
-`cuda: true`, `verbose: false`, and `boundary_condition: inflow_outflow`.
+`cuda: auto`, `verbose: false`, and `boundary_condition: inflow_outflow`.
 
 #### `compile(compile=True)`
 
@@ -161,6 +192,13 @@ in `BaseEnsembleForwardModel` (see codebase_guide.md §3).
 [`utils/compile_utils.py`](../libs/pylbm/src/pylbm/utils/compile_utils.py)
 handles the full build chain:
 
+0. **CUDA mode resolution** (`resolve_cuda`) — turns the configured `cuda`
+   setting into a concrete toolchain. `"auto"` (the shipped default) builds with
+   CUDA where `find_nvfortran` locates an NVHPC install under `<env>/.nvhpc` and
+   falls back to gfortran otherwise, logging which it picked; `true` *requires*
+   CUDA and raises without it (a GPU batch job should fail rather than silently
+   drop to a ~100× slower CPU build); `false` forces gfortran. A bad string is
+   rejected in `ForwardModel.__init__` via `validate_cuda_setting`.
 1. **Environment resolution** (`_resolve_build_environment`) — prefers the
    active Pixi environment if it has `include/netcdf.mod`; falls back to
    `delftblue`/`dev`/`default` envs in `.pixi/envs/` if not.
@@ -173,9 +211,26 @@ handles the full build chain:
    NVHPC-compatible netcdf-fortran installation under
    `.pixi/envs/<env>/.nvhpc/netcdf-fortran/`. Override root with
    `NETCDF_FORTRAN_ROOT`.
-4. **Make invocation** — always `make -B` (full rebuild); passes
-   `CUDA=1` or `GFORTRAN=1`, `NETCDF=1`, `NCFDIR`, `BINDIR=LBM/bin`,
+4. **Dependency priming** — a throwaway `make depends.file` runs *before* the
+   real build. The makefile derives `source.files` (`ls *.F90`) and
+   `depends.file` (a `use`-statement crawl in `bin/mkdepend.pl`) by scanning
+   `src/`, and its `depends.file` rule deliberately **fails** whenever the
+   result changed (`>>> Dependencies updated — please rerun make`). Since this
+   wrapper rewrites `m_solid_objects_init.F90`'s `use` statements per experiment,
+   that fires on the first build in any fresh tree; priming absorbs the intended
+   failure so the real build starts with both files up to date.
+5. **Make invocation** — always `make -B` (full rebuild); passes
+   `CUDA=1` or `GFORTRAN=1`, `NETCDF=1`, `NCFDIR`, `BINDIR=<build tree>/bin`,
    `LIBDIR`. Compilation failure raises `RuntimeError`.
+6. **Build stamp** — on success, `write_build_stamp` records the experiment, the
+   cuda/netcdf mode, and hashes of the compiled-in sources next to the binary
+   (see §1).
+
+`Makefile.set_path` (`makefile_utils.py`) is idempotent: it scans the whole file
+rather than stopping at the first blank line, consumes the line's own newline
+when substituting, and collapses duplicate assignments. Before that it appended a
+fresh `NCFDIR` line and an extra blank line on *every* construction — the
+checked-out submodule makefile had grown from 240 to 1518 lines that way.
 
 Compilation is gated by `cfg.model.compile` (a bool). The `prepare` step
 is `pyurbanair.config.hydra_helpers.prepare_compile`, which calls
@@ -400,7 +455,7 @@ forward_model:
   stl_path: ${geometry.stl_path}
   temp_dir: ${paths.experiment_dir}
   experiment_name: runcase
-  cuda: true
+  cuda: auto
   verbose: false
   boundary_condition: inflow_outflow
   profile_config: {type: power_law, alpha: 0.25}
@@ -451,6 +506,31 @@ model.forward_model.inlet_turbulence.update_interval=50
 ---
 
 ## 9. Known gotchas
+
+### `No rule to make target 'm_read_bathymetry.o'` — a submodule at the wrong commit
+
+The makefile **regenerates `depends.file` at build time** from `bin/mkdepend.pl`,
+which scans `src/*.F90` for `use` statements — the checked-in `depends.file` is
+not authoritative. `stl_to_lbm.update_solid_objects_init` injects
+`use m_read_bathymetry` into `m_solid_objects_init.F90` on every
+`ForwardModel` construction, so the generated dependency
+`m_solid_objects_init.o: m_read_bathymetry.o` always exists. If the submodule is
+checked out at a commit *predating* `m_read_bathymetry.F90` (added upstream in
+`2635d44`), make has no rule for that object and dies — with an error that names
+a file nobody edited and that `git grep` cannot even find at that commit.
+
+The tell is that the error is about a *missing source*, not a compile failure.
+Check `git -C libs/pylbm/LBM rev-parse HEAD` against
+`git rev-parse HEAD:libs/pylbm/LBM`; `_verify_submodule_pin` now logs both at
+import time and reconciles them when it safely can (§1).
+
+### Stale `boltzmann` binaries produce silent garbage
+
+`mod_dimensions.F90` is compiled in, so a binary built for another grid does not
+error — it returns wrong-shaped or all-NaN output. Builds are per-run and out of
+tree (§1) and `make -B` always rebuilds, so this cannot happen with
+`model.compile=true`; with `model.compile=false`, `_verify_prebuilt_binary`
+compares the build stamp and raises instead of running.
 
 ### Silent CUDA failures (`verbose=false`)
 

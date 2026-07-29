@@ -36,7 +36,15 @@ class Makefile:
             self._parse_file()
 
     def _parse_file(self) -> None:
-        """Parse the makefile and extract path variable assignments (only top section)."""
+        """
+        Parse the makefile and index every managed path-variable assignment.
+
+        The whole file is scanned rather than stopping at the first blank line.
+        Stopping early made the class non-idempotent: any variable that fell below
+        the cut was reported as absent and re-appended by ``set_path`` on every
+        construction, which is how a 240-line makefile grew 1275 duplicate
+        ``NCFDIR`` lines in the checked-out submodule.
+        """
         if not self.file_path.exists():
             return
 
@@ -47,28 +55,17 @@ class Makefile:
         pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::?=)\s*(.*)$")
 
         for i, line in enumerate(self.raw_lines):
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                if not self._path_vars:
-                    continue
-                # First non-assignment after we saw vars ends the path section
-                if self._path_vars and i not in self._var_to_line_index.values():
-                    self._path_section_end = i
-                    break
+            m = pattern.match(line.strip())
+            if not m:
                 continue
-
-            m = pattern.match(stripped)
-            if m:
-                name, value = m.group(1), m.group(2).strip()
-                if name in MAKEFILE_PATH_VARS:
-                    self._path_vars[name] = value
-                    self._var_to_line_index[name] = i
-                    self._path_section_end = i + 1
-            else:
-                # Non-assignment line: if we already have path vars, stop
-                if self._path_vars:
-                    self._path_section_end = i
-                    break
+            name, value = m.group(1), m.group(2).strip()
+            if name not in MAKEFILE_PATH_VARS:
+                continue
+            # First assignment wins; later ones are duplicates that set_path drops.
+            if name not in self._var_to_line_index:
+                self._path_vars[name] = value
+                self._var_to_line_index[name] = i
+            self._path_section_end = max(self._path_section_end, i + 1)
 
     def get_path(self, var: str) -> Optional[str]:
         """
@@ -103,32 +100,51 @@ class Makefile:
         if var in self._var_to_line_index:
             idx = self._var_to_line_index[var]
             line = self.raw_lines[idx]
-            # Preserve "VAR := " or "VAR = " style
-            if ":=" in line:
-                self.raw_lines[idx] = re.sub(
-                    r"^(\s*[A-Za-z_][A-Za-z0-9_]*\s*:=).*",
-                    r"\g<1> " + value_str + "\n",
-                    line,
-                    count=1,
-                )
-            else:
-                self.raw_lines[idx] = re.sub(
-                    r"^(\s*[A-Za-z_][A-Za-z0-9_]*\s*=).*",
-                    r"\g<1> " + value_str + "\n",
-                    line,
-                    count=1,
-                )
+            # Preserve "VAR := " or "VAR = " style. The assignment operator is
+            # kept and everything after it replaced; `.*\n?` must consume the
+            # line's own newline, otherwise the replacement's newline is appended
+            # to it and each write injects a blank line into the makefile.
+            operator = ":=" if ":=" in line else "="
+            self.raw_lines[idx] = re.sub(
+                rf"^(\s*[A-Za-z_][A-Za-z0-9_]*\s*{re.escape(operator)}).*\n?",
+                r"\g<1> " + value_str.replace("\\", r"\\") + "\n",
+                line,
+                count=1,
+            )
         else:
             # Append new line at end of path section
             self.raw_lines.insert(self._path_section_end, f"{var} := {value_str}\n")
             self._path_section_end += 1
-            # Re-index
-            self._var_to_line_index = {}
-            for i, line in enumerate(self.raw_lines):
-                for v in MAKEFILE_PATH_VARS:
-                    if re.match(rf"^\s*{re.escape(v)}\s*(?::?=)", line.strip()):
-                        self._var_to_line_index[v] = i
-                        break
+
+        # Drop any duplicate assignment of this variable left by an earlier
+        # (non-idempotent) write, so repeated edits converge on a single line.
+        duplicate = re.compile(rf"^\s*{re.escape(var)}\s*:?=")
+        kept = False
+        deduped: list[str] = []
+        for line in self.raw_lines:
+            if duplicate.match(line):
+                if kept:
+                    continue
+                kept = True
+            deduped.append(line)
+        if len(deduped) != len(self.raw_lines):
+            logger.info(
+                "Removed %d duplicate '%s' assignment(s) from %s",
+                len(self.raw_lines) - len(deduped),
+                var,
+                self.file_path,
+            )
+            self.raw_lines = deduped
+
+        # Re-index: line numbers shift on insert and on dedup.
+        self._var_to_line_index = {}
+        self._path_section_end = 0
+        for i, line in enumerate(self.raw_lines):
+            for v in MAKEFILE_PATH_VARS:
+                if re.match(rf"^\s*{re.escape(v)}\s*(?::?=)", line.strip()):
+                    self._var_to_line_index.setdefault(v, i)
+                    self._path_section_end = max(self._path_section_end, i + 1)
+                    break
 
         self._path_vars[var] = value_str
 
