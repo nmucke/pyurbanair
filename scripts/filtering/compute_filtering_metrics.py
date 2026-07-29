@@ -15,6 +15,7 @@ Second stage of the three-script single-run filtering pipeline (see
 ``run_summary.yaml`` is the run_info (configuration + timing) saved by
 run_filtering.py, augmented with:
 
+  * ``metrics_version``     -- estimator-semantics marker (2 = fair scores).
   * ``parameter_metrics``   -- per-parameter RMSE/CRPS of the final analyzed
                                ensemble vs truth (+ reduction vs prior). Absent
                                in ``mode='state'`` (no parameters estimated).
@@ -69,6 +70,7 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
 
     # Seed the summary from the run metadata/timing saved by run_filtering.py.
     summary = read_yaml(run_dir / "run_info.yaml")
+    summary["metrics_version"] = 2
 
     # --- Filter health diagnostics (always available) -----------------------
     # Summarize the per-cycle innovation chi2 and observation-space RMSE that the

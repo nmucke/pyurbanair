@@ -3,21 +3,23 @@ import pathlib
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 
 # --- Shared figure style ----------------------------------------------------
 # Semantic colours used consistently across every figure.
-_COLOR_TRUTH = "#222222"        # near-black, drawn dashed
-_COLOR_PRIOR = "#ff7f0e"        # orange
-_COLOR_POSTERIOR = "#1f77b4"    # blue
-_COLOR_OBS = "#e6194b"          # crimson markers
+_COLOR_TRUTH = "#222222"  # near-black, drawn dashed
+_COLOR_PRIOR = "#ff7f0e"  # orange
+_COLOR_POSTERIOR = "#1f77b4"  # blue
+_COLOR_OBS = "#e6194b"  # crimson markers
 
 # Colourmaps by physical meaning.
-_CMAP_FIELD = "viridis"         # velocity magnitude
-_CMAP_STD = "magma"             # ensemble spread
-_CMAP_ERROR = "Reds"            # absolute error
+_CMAP_FIELD = "viridis"  # velocity magnitude
+_CMAP_STD = "magma"  # ensemble spread
+_CMAP_ERROR = "Reds"  # absolute error
 
 # rcParams applied (locally, via rc_context) inside each plotting function so we
 # never mutate global matplotlib state.
@@ -71,14 +73,14 @@ def _plotted_param_names(
     return names
 
 
-def _save(fig, output_path: str | pathlib.Path) -> None:
+def _save(fig: Figure, output_path: str | pathlib.Path) -> None:
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path)
     plt.close(fig)
 
 
-def _shade_windows(ax, edges) -> None:
+def _shade_windows(ax: Axes, edges: list[float] | None) -> None:
     """Lightly shade alternating assimilation windows with dotted dividers."""
     if edges is None or len(edges) < 2:
         return
@@ -94,17 +96,28 @@ def _param_legend_handles(has_prior: bool) -> list[Line2D]:
     if has_prior:
         handles += [
             Line2D([0], [0], color=_COLOR_PRIOR, lw=2.5, label="Prior mean"),
-            Line2D([0], [0], color=_COLOR_PRIOR, lw=0.9, alpha=0.5, label="Prior members"),
+            Line2D(
+                [0], [0], color=_COLOR_PRIOR, lw=0.9, alpha=0.5, label="Prior members"
+            ),
         ]
     handles += [
         Line2D([0], [0], color=_COLOR_POSTERIOR, lw=2.5, label="Posterior mean"),
-        Line2D([0], [0], color=_COLOR_POSTERIOR, lw=0.9, alpha=0.5, label="Posterior members"),
+        Line2D(
+            [0],
+            [0],
+            color=_COLOR_POSTERIOR,
+            lw=0.9,
+            alpha=0.5,
+            label="Posterior members",
+        ),
         Line2D([0], [0], color=_COLOR_TRUTH, lw=2.0, ls="--", label="Truth"),
     ]
     return handles
 
 
-def _param_members_and_x(da: xarray.DataArray):
+def _param_members_and_x(
+    da: xarray.DataArray,
+) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(x, members)`` for a parameter, members shaped ``(n_ensemble, n_x)``.
 
     ``x`` is the ``time`` coordinate when the parameter is time-varying and
@@ -122,18 +135,26 @@ def _param_members_and_x(da: xarray.DataArray):
 
 
 def _crps_ensemble(members: np.ndarray, obs: np.ndarray) -> np.ndarray:
-    """Empirical CRPS of an ensemble against a deterministic truth.
+    """Fair empirical CRPS of an ensemble against a deterministic truth.
 
     ``members`` is ``(n_ensemble, n_x)`` and ``obs`` is ``(n_x,)``. Uses the
     energy form ``CRPS = E|X - y| - 0.5 E|X - X'|`` estimated from the ensemble,
-    returning one score per ``x`` location (lower is better, units of the
-    parameter).
+    with the pairwise term divided by ``N(N - 1)`` after excluding the zero
+    diagonal. Returns one score per ``x`` location (lower is better, units of
+    the parameter).
     """
     members = np.asarray(members, dtype=float)
     obs = np.asarray(obs, dtype=float)
+    n_members = members.shape[0]
     mae = np.mean(np.abs(members - obs[None, :]), axis=0)
-    spread = np.abs(members[:, None, :] - members[None, :, :]).mean(axis=(0, 1))
-    return mae - 0.5 * spread
+    if n_members < 2:
+        return mae
+    sorted_members = np.sort(members, axis=0)
+    weights = (2 * np.arange(n_members) - n_members + 1)[:, None]
+    pairwise_half = np.sum(weights * sorted_members, axis=0) / (
+        n_members * (n_members - 1)
+    )
+    return mae - pairwise_half
 
 
 def _extract_2d_slice_with_extent(
@@ -605,7 +626,9 @@ def plot_rollout_time_evolution(
     """
     from pyurbanair.utils.state_utils import get_velocity_magnitude_field
 
-    def _plot_ensemble(ax, ds, param_name, color):
+    def _plot_ensemble(
+        ax: Axes, ds: xarray.Dataset, param_name: str, color: str
+    ) -> None:
         x, members = _param_members_and_x(ds[param_name])
         ax.plot(x, members.T, color=color, alpha=0.35, linewidth=0.9)
         ax.plot(x, members.mean(axis=0), color=color, alpha=1.0, linewidth=2.5)
@@ -614,13 +637,30 @@ def plot_rollout_time_evolution(
         # Fallback: whole-domain RMSE between the ensemble-mean state and the
         # truth. This materialises the full velocity fields; callers handling a
         # large truth should precompute a streamed ``rmse`` and pass it in.
-        true_state_mean = true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
-        esmda_state_mean = esmda_state.mean(dim="ensemble") if "ensemble" in esmda_state.dims else esmda_state
+        if true_state is None or esmda_state is None:
+            raise ValueError(
+                "true_state and esmda_state are required when rmse is not supplied"
+            )
+        true_state_mean = (
+            true_state.mean(dim="ensemble")
+            if "ensemble" in true_state.dims
+            else true_state
+        )
+        esmda_state_mean = (
+            esmda_state.mean(dim="ensemble")
+            if "ensemble" in esmda_state.dims
+            else esmda_state
+        )
 
         true_vel = np.asarray(get_velocity_magnitude_field(true_state_mean))
         esmda_vel = np.asarray(get_velocity_magnitude_field(esmda_state_mean))
         min_t = min(true_vel.shape[0], esmda_vel.shape[0])
-        rmse = np.sqrt(np.mean((true_vel[:min_t] - esmda_vel[:min_t]) ** 2, axis=tuple(range(1, true_vel.ndim))))
+        rmse = np.sqrt(
+            np.mean(
+                (true_vel[:min_t] - esmda_vel[:min_t]) ** 2,
+                axis=tuple(range(1, true_vel.ndim)),
+            )
+        )
     else:
         rmse = np.asarray(rmse)
 
@@ -637,27 +677,36 @@ def plot_rollout_time_evolution(
         for i, param_name in enumerate(param_names):
             ax = axes[i]
             _shade_windows(ax, window_edges)
-            if has_prior and param_name in prior_params.data_vars:
+            if prior_params is not None and param_name in prior_params.data_vars:
                 _plot_ensemble(ax, prior_params, param_name, _COLOR_PRIOR)
             _plot_ensemble(ax, esmda_params, param_name, _COLOR_POSTERIOR)
             if param_name in true_params.data_vars:
                 true_da = true_params[param_name]
                 if "ensemble" in true_da.dims:
                     true_da = true_da.isel(ensemble=0)
-                x_true, true_members = _param_members_and_x(true_da.expand_dims("ensemble"))
+                x_true, true_members = _param_members_and_x(
+                    true_da.expand_dims("ensemble")
+                )
                 truth = true_members[0]
                 # A constant-in-time (static) parameter has a single truth value;
                 # draw it as a horizontal line spanning the panel rather than a
                 # lone point so it reads against the posterior trajectory.
                 if truth.size == 1 or np.allclose(truth, truth[0]):
                     ax.axhline(
-                        float(truth[0]), color=_COLOR_TRUTH, linewidth=2.0,
-                        linestyle="--", zorder=5,
+                        float(truth[0]),
+                        color=_COLOR_TRUTH,
+                        linewidth=2.0,
+                        linestyle="--",
+                        zorder=5,
                     )
                 else:
                     ax.plot(
-                        x_true, truth, color=_COLOR_TRUTH, linewidth=2.0,
-                        linestyle="--", zorder=5,
+                        x_true,
+                        truth,
+                        color=_COLOR_TRUTH,
+                        linewidth=2.0,
+                        linestyle="--",
+                        zorder=5,
                     )
             ax.set_ylabel(_PARAM_LABELS.get(param_name, param_name))
             ax.set_xlabel("Time")
@@ -666,15 +715,23 @@ def plot_rollout_time_evolution(
 
         ax_rmse = axes[n_params]
         ax_rmse.plot(
-            np.arange(len(rmse)), rmse, color=_COLOR_POSTERIOR, linewidth=2.0,
-            marker="o", markersize=4,
+            np.arange(len(rmse)),
+            rmse,
+            color=_COLOR_POSTERIOR,
+            linewidth=2.0,
+            marker="o",
+            markersize=4,
         )
         ax_rmse.set_xlabel("Time step")
         ax_rmse.set_ylabel("RMSE  |U|")
         ax_rmse.set_title("State error")
         ax_rmse.margins(x=0.01)
 
-        fig.suptitle("Parameter evolution over assimilation windows", fontsize=15, fontweight="bold")
+        fig.suptitle(
+            "Parameter evolution over assimilation windows",
+            fontsize=15,
+            fontweight="bold",
+        )
         _save(fig, output_path)
 
 
@@ -685,9 +742,10 @@ def compute_parameter_metrics(
 ) -> dict[str, dict[str, np.ndarray]]:
     """Per-parameter posterior error series (RMSE & CRPS) of the ensemble vs truth.
 
-    Returns ``{param: {"x", "rmse", "crps", ["prior_rmse"]}}`` with one value per
-    posterior x-location (``time`` for a time-varying parameter, else one per
-    assimilation window). Both measures reduce over the ensemble:
+    Returns
+    ``{param: {"x", "rmse", "crps", ["prior_rmse", "prior_crps"]}}`` with one
+    value per posterior x-location (``time`` for a time-varying parameter, else
+    one per assimilation window). Both measures reduce over the ensemble:
 
       * **RMSE** -- ``sqrt(mean_i (x_i - y)**2)`` over members ``x_i`` about the
         truth ``y`` (deterministic accuracy; captures bias and spread together).
@@ -698,8 +756,8 @@ def compute_parameter_metrics(
     The truth is interpolated onto the posterior's x-axis when the two are
     sampled differently, so static (single-value) and time-varying parameters
     are handled uniformly. ``prior_params`` (if given and sampled on the same
-    x-grid) adds the prior's RMSE for an improvement reference. These are the
-    same numbers :func:`plot_parameter_error` draws.
+    x-grid) adds the prior's RMSE and CRPS for improvement references. These
+    are the same posterior numbers :func:`plot_parameter_error` draws.
     """
     metrics: dict[str, dict[str, np.ndarray]] = {}
     for param_name in _plotted_param_names(esmda_params, true_params):
@@ -728,6 +786,7 @@ def compute_parameter_metrics(
                 entry["prior_rmse"] = np.sqrt(
                     np.mean((prior_members - truth_on_est[None, :]) ** 2, axis=0)
                 )
+                entry["prior_crps"] = _crps_ensemble(prior_members, truth_on_est)
         metrics[param_name] = entry
     return metrics
 
@@ -753,7 +812,8 @@ def plot_parameter_error(
 
     with plt.rc_context(_RC):
         fig, axes = plt.subplots(
-            len(param_names), 1,
+            len(param_names),
+            1,
             figsize=(11, 3.2 * len(param_names)),
             constrained_layout=True,
         )
@@ -766,12 +826,22 @@ def plot_parameter_error(
 
             _shade_windows(ax, window_edges)
             ax.plot(
-                x_est, rmse, color=_COLOR_POSTERIOR, linewidth=2.0, marker="o",
-                markersize=4, label=f"RMSE (mean {np.mean(rmse):.3g})",
+                x_est,
+                rmse,
+                color=_COLOR_POSTERIOR,
+                linewidth=2.0,
+                marker="o",
+                markersize=4,
+                label=f"RMSE (mean {np.mean(rmse):.3g})",
             )
             ax.plot(
-                x_est, crps, color=_COLOR_PRIOR, linewidth=2.0, marker="s",
-                markersize=4, label=f"CRPS (mean {np.mean(crps):.3g})",
+                x_est,
+                crps,
+                color=_COLOR_PRIOR,
+                linewidth=2.0,
+                marker="s",
+                markersize=4,
+                label=f"CRPS (mean {np.mean(crps):.3g})",
             )
             ax.set_ylabel(f"{_PARAM_LABELS.get(param_name, param_name)} error")
             ax.set_xlabel("Time" if x_is_time else "Assimilation window")
@@ -823,12 +893,19 @@ def compute_sensor_metrics(
     n_time = ens_mean.shape[0]
     rmse = np.sqrt(np.mean((ens_mean - truth) ** 2, axis=1))  # (T,)
     crps = np.array(
-        [float(np.mean(_crps_ensemble(members[:, t, :], truth[t, :]))) for t in range(n_time)]
+        [
+            float(np.mean(_crps_ensemble(members[:, t, :], truth[t, :])))
+            for t in range(n_time)
+        ]
     )  # (T,)
 
     return {
-        "time": t_ens, "members": members, "ens_mean": ens_mean,
-        "truth": truth, "rmse": rmse, "crps": crps,
+        "time": t_ens,
+        "members": members,
+        "ens_mean": ens_mean,
+        "truth": truth,
+        "rmse": rmse,
+        "crps": crps,
     }
 
 
@@ -867,14 +944,22 @@ def plot_sensor_timeseries(
         return f"Sensor {i}"
 
     handles = [
-        Line2D([0], [0], color=_COLOR_POSTERIOR, lw=0.9, alpha=0.5, label="Ensemble members"),
+        Line2D(
+            [0],
+            [0],
+            color=_COLOR_POSTERIOR,
+            lw=0.9,
+            alpha=0.5,
+            label="Ensemble members",
+        ),
         Line2D([0], [0], color=_COLOR_POSTERIOR, lw=2.5, label="Ensemble mean"),
         Line2D([0], [0], color=_COLOR_TRUTH, lw=2.0, ls="--", label="Truth"),
     ]
 
     with plt.rc_context(_RC):
         fig, axes = plt.subplots(
-            n_sensors + 1, 1,
+            n_sensors + 1,
+            1,
             figsize=(11, 2.6 * (n_sensors + 1)),
             constrained_layout=True,
         )
@@ -882,9 +967,24 @@ def plot_sensor_timeseries(
 
         for i in range(n_sensors):
             ax = axes[i]
-            ax.plot(t_ens, members[:, :, i].T, color=_COLOR_POSTERIOR, alpha=0.35, linewidth=0.9)
-            ax.plot(t_ens, ens_mean[:, i], color=_COLOR_POSTERIOR, alpha=1.0, linewidth=2.5)
-            ax.plot(t_ens, truth[:, i], color=_COLOR_TRUTH, linewidth=2.0, linestyle="--", zorder=5)
+            ax.plot(
+                t_ens,
+                members[:, :, i].T,
+                color=_COLOR_POSTERIOR,
+                alpha=0.35,
+                linewidth=0.9,
+            )
+            ax.plot(
+                t_ens, ens_mean[:, i], color=_COLOR_POSTERIOR, alpha=1.0, linewidth=2.5
+            )
+            ax.plot(
+                t_ens,
+                truth[:, i],
+                color=_COLOR_TRUTH,
+                linewidth=2.0,
+                linestyle="--",
+                zorder=5,
+            )
             ax.set_ylabel("|U|")
             ax.set_title(_sensor_label(i), loc="left")
             ax.margins(x=0.01)
@@ -893,12 +993,22 @@ def plot_sensor_timeseries(
 
         ax_err = axes[n_sensors]
         ax_err.plot(
-            t_ens, rmse, color=_COLOR_POSTERIOR, linewidth=2.0, marker="o",
-            markersize=4, label=f"RMSE (mean {np.mean(rmse):.3g})",
+            t_ens,
+            rmse,
+            color=_COLOR_POSTERIOR,
+            linewidth=2.0,
+            marker="o",
+            markersize=4,
+            label=f"RMSE (mean {np.mean(rmse):.3g})",
         )
         ax_err.plot(
-            t_ens, crps, color=_COLOR_PRIOR, linewidth=2.0, marker="s",
-            markersize=4, label=f"CRPS (mean {np.mean(crps):.3g})",
+            t_ens,
+            crps,
+            color=_COLOR_PRIOR,
+            linewidth=2.0,
+            marker="s",
+            markersize=4,
+            label=f"CRPS (mean {np.mean(crps):.3g})",
         )
         ax_err.set_ylabel("|U| error")
         ax_err.set_xlabel("Time")
@@ -947,8 +1057,13 @@ def plot_final_state_with_obs(
         col = 0
         if true_2d is not None:
             im_true = axes[col].imshow(
-                true_2d, origin="lower", cmap=_CMAP_FIELD, extent=true_extent,
-                aspect="equal", vmin=vmin, vmax=vmax,
+                true_2d,
+                origin="lower",
+                cmap=_CMAP_FIELD,
+                extent=true_extent,
+                aspect="equal",
+                vmin=vmin,
+                vmax=vmax,
             )
             axes[col].set_title("Truth  |U|")
             cb = fig.colorbar(im_true, ax=axes[col], fraction=0.046, pad=0.04)
@@ -956,8 +1071,13 @@ def plot_final_state_with_obs(
             col += 1
 
         im_mean = axes[col].imshow(
-            mean_2d, origin="lower", cmap=_CMAP_FIELD, extent=mean_extent,
-            aspect="equal", vmin=vmin, vmax=vmax,
+            mean_2d,
+            origin="lower",
+            cmap=_CMAP_FIELD,
+            extent=mean_extent,
+            aspect="equal",
+            vmin=vmin,
+            vmax=vmax,
         )
         axes[col].set_title("Posterior mean  |U|")
         cb0 = fig.colorbar(im_mean, ax=axes[col], fraction=0.046, pad=0.04)
@@ -979,8 +1099,15 @@ def plot_final_state_with_obs(
         if obs_x is not None and obs_y is not None:
             for ax in axes:
                 ax.scatter(
-                    obs_x, obs_y, s=40, marker="o", facecolor=_COLOR_OBS,
-                    edgecolor="white", linewidth=0.8, zorder=5, label="Observations",
+                    obs_x,
+                    obs_y,
+                    s=40,
+                    marker="o",
+                    facecolor=_COLOR_OBS,
+                    edgecolor="white",
+                    linewidth=0.8,
+                    zorder=5,
+                    label="Observations",
                 )
             axes[0].legend(loc="upper right", framealpha=0.9)
 
