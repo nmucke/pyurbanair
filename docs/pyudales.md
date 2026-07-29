@@ -139,10 +139,12 @@ fields. The stitch instead iterates over `("xt", "xm")` and concatenates each
 group of variables along the single x-dimension it actually carries, then merges
 the two groups. See `ForwardModel._stitch_x_decomposition`.
 
-**Stale fielddump padding.** The first worker batch in an ensemble can read NaN-
-padded duplicate z-coordinates from fielddumps left over from a previous run.
-Mitigation: `clean_output_dir` is called before preprocessing; after reading, slice
-the state to the clean grid shape before passing it downstream.
+**Stale fielddump padding.** A failed worker can leave partial fielddumps (including
+files from an older grid) because the normal post-run cleanup is not reached.
+`run_single` therefore calls `clean_output_dir` at the start of every attempt,
+before any warmstart carry is restored into the execution directory. This keeps
+retries from mixing stale and current output without deleting the authoritative
+carry stored under the member's experiment directory.
 
 ---
 
@@ -547,9 +549,9 @@ from a random successful donor without waiting for the slow dt-collapse crash.
   not a genuine flow instability. It is fixed by raising the SGS constant — under
   Smagorinsky `cs 0.20 → 0.24`; under Vreman the equivalent lever is `c_vreman`,
   where the 0.07 default diverges and ~0.25 runs clean on this case.
-- Stale fielddumps on the first worker batch give NaN-padded duplicate z-coords.
-  `clean_output_dir` is called before preprocessing; pre-run, clean all per-member
-  worker output dirs.
+- Stale fielddumps can give NaN-padded or duplicate z-coordinates after a failed
+  worker is retried. `run_single` automatically cleans the member output directory
+  before restoring/staging any warmstart files for each attempt.
 
 ---
 
