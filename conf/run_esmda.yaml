@@ -147,6 +147,49 @@ run:
   # spin-up): keep state + params from this time onward and rebase the time axis
   # so this time becomes t=0. null/0 -> start from the truth's first frame.
   truth_start_time: null
+  # --- Post-processing depth. Read only by stage 2/3 of the pipeline
+  # (compute_esmda_metrics.py, make_esmda_figures.py); the run stage ignores it,
+  # so changing anything here never changes the assimilation itself. The block is
+  # saved with the run, and re-processing an OLD run dir (whose saved config
+  # predates this block) falls back to exactly the defaults below; pass
+  # `--metrics-level` to compute_esmda_metrics.py to re-process one run dir at a
+  # different depth without editing its saved config.
+  metrics:
+    # How much of the evaluation suite stage 2 computes:
+    #   basic    -- the pre-phase-1 set only (parameter/state/sensor RMSE, CRPS,
+    #               energy score). Byte-for-byte the summary older runs got, so
+    #               this is the level to use when a comparison has to line up
+    #               with runs processed before the evaluation layers existed.
+    #   standard -- adds the calibration bundle (z-score/PIT/coverage/
+    #               contraction), statistics-space sensor scoring and the
+    #               mean-field / Reynolds-stress layer. The intended default for
+    #               production runs: the added cost is arithmetic layered onto
+    #               reads stage 2 already performs, not a second pass over the
+    #               multi-GB window state files.
+    #   full     -- reserved for the phase-3 spectra / two-point layers; today it
+    #               resolves to the same work as `standard`.
+    # An unrecognized value is rejected loudly instead of silently degrading, so
+    # a typo here fails the metrics stage rather than quietly writing a summary
+    # with half the keys missing.
+    level: standard
+    # Evenly-spaced z-levels the mean-field layer accumulates statistics on.
+    # A relief valve, not a tuning knob: raising it scales the arithmetic of the
+    # streaming pass (not its I/O), while dropping below ~2 leaves no vertical
+    # variation to interpret in the field metrics.
+    n_z_slices: 4
+    # Spatial stride for the hit-rate / NMSE maps (1 = every cell). >1 buys speed
+    # on very large grids by shrinking the metric's sample size — scores are only
+    # comparable between runs that used the SAME stride.
+    mean_field_stride: 1
+    # Blocks for the block-bootstrap sampling-error bars (identifiability ratios,
+    # hit-rate allowance W). Too few blocks and the error bar is itself noise;
+    # too many and each block is shorter than the flow's correlation time, which
+    # understates the sampling error it is supposed to expose.
+    bootstrap_blocks: 20
+    # [[x, y], ...] station columns for the vertical-profile figures. null -> the
+    # sensor x/y from the obs config, so the profiles sit where the assimilation
+    # actually had information.
+    stations: null
 
 hydra:
   job:

@@ -22,18 +22,28 @@ run_esmda.py, augmented with:
                               per-component sweep series are computed separately by
                               scripts/figure_creation/compute_sweep_metrics.py.
 
+How much of that is computed is gated by ``run.metrics.level`` in the run dir's
+saved config (``basic`` = exactly the keys above, ``standard`` additionally
+computes the evaluation layers, ``full`` is reserved for later phases); run dirs
+saved before that config block existed fall back to the shipped defaults. See
+``resolve_metrics_settings`` below.
+
 Usage::
 
-    python scripts/esmda/compute_esmda_metrics.py --run-dir <esmda output dir>
+    python scripts/esmda/compute_esmda_metrics.py --run-dir <esmda output dir> \
+        [--metrics-level basic|standard|full]
 """
 
 import argparse
+import dataclasses
 import logging
 import pathlib
 import sys
+from typing import Any
 
 import numpy as np
 import xarray
+from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise)
 
@@ -46,6 +56,7 @@ from scripts.esmda._esmda_common import (
     ensemble_sensor_series,
     load_run_config,
     open_truth,
+    parameter_bundle_summary,
     parameter_metric_summary,
     read_yaml,
     series_stats,
@@ -56,6 +67,90 @@ from scripts.esmda._esmda_common import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Metrics level / settings resolution
+# ---------------------------------------------------------------------------
+
+# Ordered cheapest-first; `at_least` compares by position, so the order is the
+# semantics (each level is a superset of the ones before it).
+METRICS_LEVELS = ("basic", "standard", "full")
+
+# Defaults, kept in sync with the `run.metrics` block of conf/run_esmda.yaml.
+# They are also the fallback for run dirs saved BEFORE that block existed: the
+# phase-0/1 metric layers are meant to apply retroactively to old runs, and each
+# individual layer is separately required to no-op when its inputs are missing,
+# so defaulting an absent block to `standard` degrades gracefully rather than
+# silently pinning old runs to a reduced metric set.
+DEFAULT_METRICS = {
+    "level": "standard",
+    "n_z_slices": 4,
+    "mean_field_stride": 1,
+    "bootstrap_blocks": 20,
+    "stations": None,
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class MetricsSettings:
+    """Resolved ``run.metrics`` knobs for one metrics-stage invocation.
+
+    Constructed once per run in :func:`compute_metrics` and handed to the metric
+    sections, so the gating decision is made in exactly one place and the
+    sections stay independently testable.
+    """
+
+    level: str
+    n_z_slices: int
+    mean_field_stride: int
+    bootstrap_blocks: int
+    stations: list[list[float]] | None
+
+    def at_least(self, level: str) -> bool:
+        """Whether the resolved level includes the layers gated at ``level``."""
+        return METRICS_LEVELS.index(self.level) >= METRICS_LEVELS.index(level)
+
+
+def resolve_metrics_settings(
+    cfg: DictConfig | dict, level_override: str | None = None
+) -> MetricsSettings:
+    """Resolve ``run.metrics`` from a run dir's saved config.
+
+    Every setting is read with a default: configs saved before the
+    ``run.metrics`` block existed have no ``run.metrics`` key at all, and
+    re-processing those old run dirs must keep working rather than dying on a
+    missing key. ``level_override`` (the ``--metrics-level`` CLI flag) wins over
+    the config so one run dir can be re-processed at another depth without
+    editing its saved config.
+    """
+    container = cfg if isinstance(cfg, DictConfig) else OmegaConf.create(dict(cfg))
+
+    def _get(key: str) -> Any:
+        value = OmegaConf.select(container, f"run.metrics.{key}", default=None)
+        return DEFAULT_METRICS[key] if value is None else value
+
+    level = str(level_override if level_override is not None else _get("level"))
+    if level not in METRICS_LEVELS:
+        raise ValueError(
+            f"unknown run.metrics.level {level!r}; expected one of "
+            f"{', '.join(METRICS_LEVELS)}"
+        )
+
+    stations = _get("stations")
+    if stations is not None:
+        stations = [
+            [float(v) for v in station]
+            for station in OmegaConf.to_container(OmegaConf.create(stations))
+        ]
+
+    return MetricsSettings(
+        level=level,
+        n_z_slices=int(_get("n_z_slices")),
+        mean_field_stride=int(_get("mean_field_stride")),
+        bootstrap_blocks=int(_get("bootstrap_blocks")),
+        stations=stations,
+    )
 
 
 def _flatten_parameter_members(params: xarray.Dataset) -> np.ndarray:
@@ -126,9 +221,11 @@ def _ensemble_health(
     }
 
 
-def compute_metrics(run_dir: pathlib.Path) -> None:
+def compute_metrics(run_dir: pathlib.Path, metrics_level: str | None = None) -> None:
     """Compute every run metric from the saved artifacts and write run_summary.yaml."""
     cfg = load_run_config(run_dir)
+    metrics = resolve_metrics_settings(cfg, metrics_level)
+    logger.info("Computing metrics at level %r for %s", metrics.level, run_dir)
     ta = read_yaml(run_dir / "truth_access.yaml")
 
     # Seed the summary from the run metadata/timing saved by run_esmda.py.
@@ -143,6 +240,26 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         posterior_params, true_params, prior_params
     )
     summary["ensemble_health"] = _ensemble_health(run_dir, posterior_params)
+
+    # Standard-level parameter layers attach HERE (WP1.1: per-parameter z-score /
+    # PIT counts / coverage / contraction ratio under the existing
+    # `parameter_metrics.<name>` mapping, plus `parameter_metrics.joint`). They
+    # deliberately sit BEFORE the skip_viz early return below: they read only the
+    # already-open prior/posterior/true parameter datasets, never the truth
+    # state, so they are cheap enough to run on the fast sweep path too.
+    if metrics.at_least("standard"):
+        summary["parameter_metrics"] = parameter_bundle_summary(
+            summary["parameter_metrics"],
+            posterior_params,
+            true_params,
+            prior_params,
+            # Flattened here rather than inside the bundle so the pipeline keeps
+            # exactly one (M, K) flattener, shared with `_ensemble_health`.
+            posterior_flat=_flatten_parameter_members(posterior_params),
+            prior_flat=_flatten_parameter_members(prior_params),
+            cfg=cfg,
+            num_windows=ta.get("num_windows"),
+        )
 
     # The parameter metrics are always available. The state and sensor metrics
     # both open the (potentially multi-GB) truth, so -- matching run_esmda.py's
@@ -205,6 +322,14 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         }
     summary["sensor_metrics"] = sensor_metrics
 
+    # Standard-level truth-consuming layers attach HERE: WP1.2's
+    # `sensor_statistics` (window statistics scored against truth, reusing the
+    # series already extracted above) and WP1.3's `mean_field_metrics` +
+    # `eval_fields.nc`, which shares the single per-member read pass over the
+    # window state files with the sensor extraction above.
+    if metrics.at_least("standard"):
+        logger.debug("standard-level sensor/field layers pending (WP1.2, WP1.3)")
+
     write_yaml(summary, run_dir / "run_summary.yaml")
     print(f"Saved run summary in {run_dir / 'run_summary.yaml'}")
 
@@ -220,10 +345,21 @@ def main() -> None:
         required=True,
         help="The ESMDA run output directory written by scripts/esmda/run_esmda.py.",
     )
+    ap.add_argument(
+        "--metrics-level",
+        choices=METRICS_LEVELS,
+        default=None,
+        help=(
+            "Override run.metrics.level from the run dir's saved config, so an "
+            "existing run can be re-processed at another depth without editing "
+            "that config. Default: whatever the saved config says (or "
+            f"{DEFAULT_METRICS['level']!r} for run dirs predating the block)."
+        ),
+    )
     args = ap.parse_args()
     if not args.run_dir.exists():
         raise SystemExit(f"run dir not found: {args.run_dir}")
-    compute_metrics(args.run_dir)
+    compute_metrics(args.run_dir, args.metrics_level)
 
 
 if __name__ == "__main__":

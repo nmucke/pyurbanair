@@ -19,9 +19,11 @@ in memory in full.
 
 from __future__ import annotations
 
+import logging
 import pathlib
 
 import numpy as np
+import scipy.linalg
 import xarray
 import yaml
 from data_assimilation.interpolation import interpolate_dataarray_at_points
@@ -32,7 +34,21 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_validation_points,
 )
-from pyurbanair.plotting import compute_parameter_metrics, compute_sensor_metrics
+from pyurbanair.plotting import (
+    _param_members_and_x,
+    _plotted_param_names,
+    compute_parameter_metrics,
+    compute_sensor_metrics,
+)
+from pyurbanair.utils.ensemble_scores import (
+    coverage,
+    fair_energy_score,
+    pit_rank,
+    rank_histogram,
+    zscore,
+)
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Run-directory loaders (config + persisted truth-access view + sensor sets)
@@ -334,15 +350,14 @@ def truth_sensor_series(
 def _energy_score(members, truth):
     """Per-timestep energy score, averaged over sensors.
 
-    The energy score is the multivariate generalization of the CRPS (Gneiting &
-    Raftery 2007): for a vector forecast ensemble ``{v_m}`` and truth ``v``,
-
-        ES = mean_m ||v_m - v||
-             - 0.5 / (M(M-1)) * sum_{m != m'} ||v_m - v_{m'}||,
-
-    which reduces to the CRPS in 1-D. It rewards both accuracy (term 1) and a
-    calibrated spread (term 2), in the same |U| units as the velocity. The
-    off-diagonal pairwise normalization is the fair finite-ensemble estimator.
+    Sensor-shaped adapter around
+    :func:`pyurbanair.utils.ensemble_scores.fair_energy_score` (the
+    multivariate CRPS; see there for the estimator). The only work done here
+    is the axis convention: the sensor series carry the component axis first,
+    the shared score wants ensemble first and components last. The shared
+    implementation keeps the same memory bound -- it loops over the leading
+    batch axis, which after the move is time, so the pairwise term never
+    materializes more than ``(ensemble, ensemble, sensor)`` at once.
 
     Args:
         members: ``(component, ensemble, time, sensor)`` aligned member vectors.
@@ -352,24 +367,11 @@ def _energy_score(members, truth):
         ``(time,)`` energy score, averaged over the sensors (matching the
         per-time, over-sensors reduction of ``compute_sensor_metrics``).
     """
-    n_time = members.shape[2]
-    n_members = members.shape[1]
-    es = np.empty(n_time)
-    # Loop over time so the pairwise term never materializes more than
-    # ``(component, ensemble, ensemble, sensor)`` at once.
-    for t in range(n_time):
-        m = members[:, :, t, :]  # (C, E, S)
-        v = truth[:, t, :]  # (C, S)
-        d_truth = np.sqrt(np.sum((m - v[:, None, :]) ** 2, axis=0))  # (E, S)
-        term1 = d_truth.mean(axis=0)  # (S,)
-        if n_members < 2:
-            es[t] = float(term1.mean())
-            continue
-        diff = m[:, :, None, :] - m[:, None, :, :]  # (C, E, E, S)
-        d_pair = np.sqrt(np.sum(diff**2, axis=0))  # (E, E, S)
-        term2 = 0.5 * d_pair.sum(axis=(0, 1)) / (n_members * (n_members - 1))  # (S,)
-        es[t] = float((term1 - term2).mean())  # average over sensors
-    return es
+    per_sensor = fair_energy_score(
+        np.moveaxis(np.asarray(members), 0, -1),  # (E, T, S, C)
+        np.moveaxis(np.asarray(truth), 0, -1),  # (T, S, C)
+    )
+    return per_sensor.mean(axis=-1)  # average over sensors -> (T,)
 
 
 def vector_sensor_metrics(truth_comp, ensemble_comp):
@@ -470,4 +472,581 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
                 float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
             )
         summary[name] = entry
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Parameter calibration bundle (WP1.1)
+# ---------------------------------------------------------------------------
+
+# Number of PIT/rank-histogram bins. Fixed rather than configurable so counts
+# from different runs stack in one figure.
+PIT_BINS = 10
+
+# Central credible levels scored by the coverage block.
+COVERAGE_ALPHAS = (0.5, 0.9)
+
+# Below this ensemble size every calibration diagnostic in the bundle measures
+# the ensemble SIZE rather than the ensemble: a ddof=1 spread has a single
+# degree of freedom, the widest available order-statistic band is [x_(1), x_(M)]
+# (nominal (M-1)/(M+1) = 1/3 at M = 2, so a "90%" coverage cannot be attained),
+# and PIT ranks take M + 1 = 3 values spread over 10 bins. The two-member smoke
+# shape hits exactly this. Per the master plan's rule for degenerate shapes the
+# answer is a logged `null`, never a special-cased formula.
+MIN_MEMBERS_CALIBRATION = 3
+
+# The joint block additionally needs a covariance with more than one degree of
+# freedom; at M = 2 every sample correlation is exactly +/-1 and the generalized
+# spectrum is an artifact of the regularizer.
+MIN_MEMBERS_JOINT = 3
+
+# Full K x K correlation matrices are written to run_summary.yaml only below
+# this size. `yaml.safe_dump(default_flow_style=False)` puts one number per
+# line, so the K = 42 of a routine 2-parameter/21-knot run would add ~3.5k lines
+# to a ~100-line summary, and production cases are larger still. Above the cap
+# the matrices are omitted and `corr_summary` carries the off-diagonal scalars.
+JOINT_CORR_MAX_K = 16
+
+# Same reasoning for the eigenvalue list, which is only `r` long.
+JOINT_EIGENVALUE_MAX = 64
+
+# How many parameter-vector entries to report per eigenvector direction.
+JOINT_LOADINGS = 5
+
+# Tie-breaking seed for `pit_rank`, recorded in the summary so a reader can
+# reproduce the counts.
+PIT_TIE_SEED = 0
+
+
+def _finite_or_none(value):
+    """Plain float, or ``None`` when the value is nan/inf.
+
+    ``write_yaml`` round-trips numpy scalars fine but not ``nan``/``inf``
+    (``.nan``/``.inf`` are not read back as floats by every YAML consumer), so
+    every float leaving this section goes through here -- matching how
+    ``parameter_metric_summary`` and ``ensemble_scores.crpss`` already guard.
+    """
+    number = float(value)
+    return number if np.isfinite(number) else None
+
+
+def parameter_vector_labels(params) -> list[str]:
+    """``["inflow_angle[0]", ...]`` naming each column of the flattened members.
+
+    Mirrors ``compute_esmda_metrics._flatten_parameter_members`` exactly --
+    same variable order (sorted), same ensemble-first transpose, same row-major
+    reshape -- so label ``i`` names column ``i`` of that flattening. The two
+    live in different modules only because the flattener sits next to its other
+    caller; ``tests/test_parameter_bundle.py`` pins them together.
+    """
+    labels: list[str] = []
+    for name in sorted(params.data_vars):
+        variable = params[name]
+        if "ensemble" not in variable.dims:
+            continue
+        values = variable.transpose("ensemble", ...)
+        n_entries = int(np.prod(values.shape[1:], dtype=int)) if values.ndim > 1 else 1
+        if n_entries == 1:
+            labels.append(str(name))
+        else:
+            labels.extend(f"{name}[{i}]" for i in range(n_entries))
+    return labels
+
+
+def _aligned_parameter_arrays(posterior_params, true_params, prior_params=None):
+    """Per parameter: members, truth on the members' x-axis, and prior members.
+
+    The alignment is the one :func:`pyurbanair.plotting.compute_parameter_metrics`
+    performs (``_param_members_and_x`` + ``np.interp`` onto the posterior
+    x-axis), reused rather than re-derived: it already handles a static truth
+    (one point -> constant) and a time-varying truth sampled on a different
+    knot grid (the routine case -- e.g. 19 truth knots against 21 posterior
+    knots) with the same two lines.
+
+    Yields ``(name, members, truth, prior_members, x_is_time)`` where
+    ``members`` is ``(n_members, n_x)`` and ``prior_members`` is ``None`` unless
+    the prior exists on the same x-axis.
+
+    ``x_is_time`` is the per-parameter dynamic/static discriminator -- there is
+    no run-level split, because a single ``conf/params/dynamic.yaml`` run mounts
+    time-varying ``external_parameters`` AND a ``static_parameters`` block into
+    one Dataset, so both PIT branches fire in the same run. The test is
+    ``_param_members_and_x``'s own, repeated here because that helper returns
+    the axis but not the reason for it: a **``time`` coordinate**, not merely a
+    ``time`` dimension. The dimension alone is not enough -- ``_concat_windows``
+    stacks per-window parameter files along ``time``, so in a purely static run
+    every parameter comes out with a length-``num_windows`` ``time`` dimension
+    and no ``time`` coordinate, and its x-axis is the window index.
+    """
+    for name in _plotted_param_names(posterior_params, true_params):
+        posterior_da = posterior_params[name]
+        x_est, members = _param_members_and_x(posterior_da)
+
+        true_da = true_params[name]
+        if "ensemble" in true_da.dims:
+            true_da = true_da.isel(ensemble=0)
+        x_true, true_members = _param_members_and_x(true_da.expand_dims("ensemble"))
+        order = np.argsort(x_true)
+        truth = np.interp(x_est, np.asarray(x_true)[order], true_members[0][order])
+
+        prior_members = None
+        if prior_params is not None and name in prior_params.data_vars:
+            _, candidate = _param_members_and_x(prior_params[name])
+            if candidate.shape == members.shape:
+                prior_members = np.asarray(candidate, dtype=float)
+
+        non_ensemble_dims = [d for d in posterior_da.dims if d != "ensemble"]
+        yield (
+            name,
+            np.asarray(members, dtype=float),
+            np.asarray(truth, dtype=float),
+            prior_members,
+            non_ensemble_dims == ["time"] and "time" in posterior_da.coords,
+        )
+
+
+def _knot_correlation_config(cfg):
+    """``(correlation_length, seconds_per_knot)`` from a run's saved config.
+
+    Both live at the top level of the ``prior_params`` block (as
+    interpolations, e.g. ``seconds_per_knot: ${time.seconds_per_knot}``, hence
+    ``OmegaConf.select`` rather than a raw YAML read). Either may be absent --
+    a run whose parameters are all static never sets them -- and an absent
+    value is reported as ``null``, never guessed.
+    """
+    if cfg is None:
+        return None, None
+
+    def _select(key):
+        try:
+            value = OmegaConf.select(cfg, f"prior_params.{key}", default=None)
+        except Exception:  # unresolvable interpolation in a partial config
+            return None
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if np.isfinite(number) and number > 0 else None
+
+    return _select("correlation_length"), _select("seconds_per_knot")
+
+
+def _n_constant_segments(members):
+    """Number of piecewise-constant runs along the x-axis of ``(M, n_x)`` members.
+
+    A parameter that is static but rides on a dynamic run's time axis (the
+    ``static_parameters`` block of ``conf/params/dynamic.yaml`` is broadcast to
+    every knot by ``_concat_windows``) is piecewise constant with one step per
+    assimilation window. Counting the steps recovers that window count without
+    needing to know which block the parameter came from, and is a no-op for a
+    genuinely time-varying parameter, whose every knot differs.
+    """
+    if members.shape[1] < 2:
+        return int(members.shape[1])
+    steps = ~np.isclose(members[:, 1:], members[:, :-1])
+    return int(np.sum(np.any(steps, axis=0))) + 1
+
+
+def _effective_knot_count(
+    members, x_is_time, correlation_length, seconds_per_knot, num_windows, name
+):
+    """``(n_knots_effective, pooling)`` -- the caveat attached to the PIT counts.
+
+    Pooled PIT ranks are only as informative as the number of *independent*
+    samples behind them, which is never the raw knot count:
+
+    * time-varying parameters are a GP with correlation length ``L``, so
+      ``n_knots * seconds_per_knot / L`` knots are independent -- clamped at
+      ``n_knots`` because a sub-knot correlation length cannot manufacture more
+      independent samples than there are knots, and at the number of distinct
+      piecewise-constant segments, which is what actually bounds a static
+      parameter broadcast onto a time axis;
+    * a parameter whose x-axis is the window index gets one value per
+      assimilation window, so the pool is ``num_windows`` deep -- and the
+      windows are linked by the cross-window carry-over, making even that an
+      upper bound (``pooling: windows_correlated``).
+    """
+    n_knots = int(members.shape[1])
+    if not x_is_time:
+        if num_windows is None:
+            logger.info(
+                "Parameter %r has no time dimension and num_windows is unknown; "
+                "reporting n_knots_effective as null",
+                name,
+            )
+            return None, "windows_correlated"
+        return int(num_windows), "windows_correlated"
+
+    if correlation_length is None or seconds_per_knot is None:
+        logger.info(
+            "Parameter %r is time-varying but the saved config has no "
+            "correlation_length/seconds_per_knot; reporting n_knots_effective "
+            "as null rather than assuming one",
+            name,
+        )
+        return None, "knots_correlated"
+    independent = int(np.ceil(n_knots * seconds_per_knot / correlation_length))
+    segments = _n_constant_segments(members)
+    return int(max(1, min(n_knots, segments, independent))), "knots_correlated"
+
+
+def _zscore_block(members, truth):
+    """``{mean, std, max_abs, overconfident}`` of the per-knot z-scores."""
+    z = zscore(members, truth)
+    finite = z[np.isfinite(z)]
+    if finite.size == 0:
+        return None
+    max_abs = float(np.max(np.abs(finite)))
+    return {
+        "mean": _finite_or_none(finite.mean()),
+        # ddof=1 over knots: one knot gives no spread estimate, not a zero one.
+        "std": _finite_or_none(finite.std(ddof=1)) if finite.size > 1 else None,
+        "max_abs": _finite_or_none(max_abs),
+        "overconfident": bool(max_abs > 3.0),
+    }
+
+
+def _pit_block(
+    members, truth, x_is_time, correlation_length, seconds_per_knot, num_windows, name
+):
+    """``(counts, metadata)`` -- pooled rank histogram plus its sample-size caveat."""
+    valid = np.isfinite(truth) & np.all(np.isfinite(members), axis=0)
+    if not np.any(valid):
+        return None, None
+    ranks = pit_rank(members[:, valid], truth[valid], rng=PIT_TIE_SEED)
+    counts = rank_histogram(ranks, members.shape[0], n_bins=PIT_BINS)
+    n_effective, pooling = _effective_knot_count(
+        members[:, valid],
+        x_is_time,
+        correlation_length,
+        seconds_per_knot,
+        num_windows,
+        name,
+    )
+    meta = {
+        "n_bins": PIT_BINS,
+        "n_samples": int(valid.sum()),
+        "n_knots_effective": n_effective,
+        "pooling": pooling,
+        "tie_seed": PIT_TIE_SEED,
+    }
+    return [int(c) for c in counts], meta
+
+
+def _coverage_block(members, truth):
+    """Order-statistic coverage at each ``COVERAGE_ALPHAS`` level."""
+    valid = np.isfinite(truth) & np.all(np.isfinite(members), axis=0)
+    if not np.any(valid):
+        return None
+    n_members = members.shape[0]
+    block = {
+        f"alpha_{int(round(alpha * 100))}": _finite_or_none(
+            coverage(members[:, valid], truth[valid], alpha=alpha)
+        )
+        for alpha in COVERAGE_ALPHAS
+    }
+    # The band edges are member order statistics, so with M members the widest
+    # band available is [x_(1), x_(M)], whose nominal level is (M-1)/(M+1) --
+    # 0.94 at M = 32, 0.6 at M = 4. Requesting alpha above that silently clamps,
+    # so the ceiling is reported next to the numbers rather than letting a
+    # capped `alpha_90` read as a calibration failure. It bounds the NOMINAL
+    # level, not the realized fraction, which can sit above it by chance.
+    block["max_nominal_alpha"] = _finite_or_none((n_members - 1) / (n_members + 1))
+    return block
+
+
+def _contraction_block(members, prior_members):
+    """``{mean, min}`` of the per-knot posterior/prior spread ratio."""
+    if prior_members is None:
+        return None
+    post_std = members.std(axis=0, ddof=1)
+    prior_std = prior_members.std(axis=0, ddof=1)
+    ratio = np.full(post_std.shape, np.nan)
+    valid = np.isfinite(post_std) & np.isfinite(prior_std) & (prior_std > 0)
+    np.divide(post_std, prior_std, out=ratio, where=valid)
+    finite = ratio[np.isfinite(ratio)]
+    if finite.size == 0:
+        return None
+    return {
+        "mean": _finite_or_none(finite.mean()),
+        "min": _finite_or_none(finite.min()),
+    }
+
+
+def _correlation_matrix(cov):
+    """Correlation matrix of a covariance, with zero-variance rows left as nan."""
+    scale = np.sqrt(np.diag(cov))
+    outer = scale[:, None] * scale[None, :]
+    corr = np.full(cov.shape, np.nan)
+    np.divide(cov, outer, out=corr, where=np.isfinite(outer) & (outer > 0))
+    return np.clip(corr, -1.0, 1.0)
+
+
+def _offdiag_abs_stats(corr):
+    """``(mean, max)`` of ``|corr|`` off the diagonal, nan-safe."""
+    off = corr[~np.eye(corr.shape[0], dtype=bool)]
+    finite = np.abs(off[np.isfinite(off)])
+    if finite.size == 0:
+        return None, None
+    return _finite_or_none(finite.mean()), _finite_or_none(finite.max())
+
+
+def _loadings(vector, labels, eigenvalue):
+    """The ``JOINT_LOADINGS`` largest-magnitude entries of one direction."""
+    norm = float(np.linalg.norm(vector))
+    unit = vector / norm if norm > 0 else vector
+    order = np.argsort(-np.abs(unit))[:JOINT_LOADINGS]
+    return {
+        "eigenvalue": _finite_or_none(eigenvalue),
+        "loadings": [
+            {"parameter": labels[i], "loading": _finite_or_none(unit[i])} for i in order
+        ],
+    }
+
+
+def joint_parameter_directions(posterior_flat, prior_flat, labels=None):
+    """Generalized posterior/prior spread directions over the joint parameter vector.
+
+    ``posterior_flat`` / ``prior_flat`` are the ``(M, K)`` member matrices from
+    ``compute_esmda_metrics._flatten_parameter_members``. The generalized
+    eigenvalues of ``(C_post, C_prior)`` are per-direction variance ratios --
+    ``lambda < 0.5`` marks a direction whose spread the update at least halved --
+    and are invariant to any rescaling of the parameters, so the mixed units of
+    the joint vector do not matter.
+
+    Two deliberate departures from a naive ``scipy.linalg.eigh(C_a, C_b)``:
+
+    * **Rank truncation first.** Ensembles are routinely smaller than the joint
+      parameter vector (M = 32 against K = 42 on a 2-parameter, 21-knot run), so
+      both covariances are singular with *different* null spaces and the raw
+      pencil is meaningless: on real run data an eps-ridged pair returns a
+      negative eigenvalue and an 11-order-of-magnitude spread. The problem is
+      therefore projected onto the prior's retained eigenbasis (rank cut
+      ``lambda_max * finfo.eps * max(shape)``, the ``numpy.linalg.matrix_rank``
+      convention that ``data_assimilation.reduction`` also uses), leaving the
+      ``r = min(M - 1, K)`` directions the sample actually resolves.
+    * The eps ridge ``C + eps * tr(C)/K * I`` is then applied inside that
+      subspace, where it only guards an exactly-degenerate posterior direction.
+
+    Returns a mapping with ``null`` leaves (plus a ``reason``) whenever the
+    decomposition is not defined.
+    """
+    posterior_flat = np.asarray(posterior_flat, dtype=float)
+    n_members, n_parameters = posterior_flat.shape
+
+    def _unavailable(reason):
+        logger.info("Joint parameter directions unavailable: %s", reason)
+        return {
+            "n_members": int(n_members),
+            "n_parameters": int(n_parameters),
+            "n_sample_directions": None,
+            "rank_deficient": None,
+            "n_constrained_directions": None,
+            "generalized_eigenvalues": None,
+            "eigenvalue_quantiles": None,
+            "most_constrained": None,
+            "least_constrained": None,
+            "posterior_corr": None,
+            "prior_corr": None,
+            "corr_summary": None,
+            "reason": reason,
+        }
+
+    if prior_flat is None:
+        return _unavailable("no prior parameter ensemble was saved")
+    prior_flat = np.asarray(prior_flat, dtype=float)
+    if prior_flat.shape != posterior_flat.shape:
+        return _unavailable(
+            f"prior members {prior_flat.shape} do not match the posterior "
+            f"{posterior_flat.shape}"
+        )
+    if n_members < MIN_MEMBERS_JOINT:
+        return _unavailable(
+            f"{n_members} members is below the {MIN_MEMBERS_JOINT} needed for a "
+            "covariance with more than one degree of freedom"
+        )
+    if n_parameters < 2:
+        return _unavailable("the joint parameter vector has fewer than 2 entries")
+    if not (np.all(np.isfinite(posterior_flat)) and np.all(np.isfinite(prior_flat))):
+        return _unavailable("the flattened parameter members contain non-finite values")
+
+    if labels is None or len(labels) != n_parameters:
+        labels = [f"param[{i}]" for i in range(n_parameters)]
+
+    cov_post = np.cov(posterior_flat, rowvar=False)
+    cov_prior = np.cov(prior_flat, rowvar=False)
+    corr_post = _correlation_matrix(cov_post)
+    corr_prior = _correlation_matrix(cov_prior)
+
+    prior_eigenvalues, prior_vectors = np.linalg.eigh(cov_prior)
+    largest = float(prior_eigenvalues.max())
+    if not np.isfinite(largest) or largest <= 0:
+        return _unavailable("the prior covariance has no positive eigenvalue")
+    tol = largest * np.finfo(float).eps * max(n_members, n_parameters)
+    retained = prior_eigenvalues > tol
+    rank = int(retained.sum())
+    if rank < 1:
+        return _unavailable("the prior covariance has no numerically nonzero direction")
+    basis = prior_vectors[:, retained]
+
+    reduced_post = basis.T @ cov_post @ basis
+    reduced_prior = basis.T @ cov_prior @ basis
+    eps = np.finfo(float).eps * max(n_members, rank)
+    identity = np.eye(rank)
+    reduced_post = reduced_post + eps * np.trace(reduced_post) / rank * identity
+    reduced_prior = reduced_prior + eps * np.trace(reduced_prior) / rank * identity
+
+    try:
+        eigenvalues, eigenvectors = scipy.linalg.eigh(reduced_post, reduced_prior)
+    except (np.linalg.LinAlgError, scipy.linalg.LinAlgError, ValueError) as exc:
+        return _unavailable(f"the generalized eigendecomposition failed ({exc})")
+
+    order = np.argsort(eigenvalues)
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+    posterior_offdiag = _offdiag_abs_stats(corr_post)
+    prior_offdiag = _offdiag_abs_stats(corr_prior)
+
+    joint = {
+        "n_members": int(n_members),
+        "n_parameters": int(n_parameters),
+        # Only the first r directions are sample-resolved; the remaining
+        # K - r carry no ensemble information and are dropped, not scored.
+        "n_sample_directions": rank,
+        "rank_deficient": bool(rank < n_parameters),
+        "n_constrained_directions": int(np.sum(eigenvalues < 0.5)),
+        "generalized_eigenvalues": (
+            [_finite_or_none(v) for v in eigenvalues]
+            if rank <= JOINT_EIGENVALUE_MAX
+            else None
+        ),
+        "eigenvalue_quantiles": {
+            key: _finite_or_none(np.quantile(eigenvalues, q))
+            for key, q in (
+                ("min", 0.0),
+                ("p10", 0.1),
+                ("median", 0.5),
+                ("p90", 0.9),
+                ("max", 1.0),
+            )
+        },
+        "most_constrained": _loadings(
+            basis @ eigenvectors[:, 0], labels, eigenvalues[0]
+        ),
+        "least_constrained": _loadings(
+            basis @ eigenvectors[:, -1], labels, eigenvalues[-1]
+        ),
+        "corr_summary": {
+            "posterior_offdiag_abs_mean": posterior_offdiag[0],
+            "posterior_offdiag_abs_max": posterior_offdiag[1],
+            "prior_offdiag_abs_mean": prior_offdiag[0],
+            "prior_offdiag_abs_max": prior_offdiag[1],
+        },
+    }
+    if n_parameters <= JOINT_CORR_MAX_K:
+        joint["posterior_corr"] = [
+            [_finite_or_none(v) for v in row] for row in corr_post
+        ]
+        joint["prior_corr"] = [[_finite_or_none(v) for v in row] for row in corr_prior]
+    else:
+        joint["posterior_corr"] = None
+        joint["prior_corr"] = None
+        joint["corr_matrices_omitted"] = (
+            f"K = {n_parameters} exceeds JOINT_CORR_MAX_K = {JOINT_CORR_MAX_K}; "
+            "see corr_summary"
+        )
+    return joint
+
+
+def parameter_bundle_summary(
+    base_summary,
+    posterior_params,
+    true_params,
+    prior_params,
+    *,
+    posterior_flat,
+    prior_flat,
+    cfg=None,
+    num_windows=None,
+):
+    """Add the WP1.1 calibration bundle to an existing ``parameter_metrics`` mapping.
+
+    Purely additive: every key :func:`parameter_metric_summary` wrote is copied
+    through untouched (their paths are hard-coded in
+    ``scripts/figure_creation/``), each per-parameter entry gains ``zscore``,
+    ``pit_counts``/``pit``, ``coverage`` and ``contraction_ratio``, and a
+    sibling ``joint`` entry is added.
+
+    ``posterior_flat`` / ``prior_flat`` are the ``(M, K)`` matrices from
+    ``compute_esmda_metrics._flatten_parameter_members``; they are passed in
+    rather than recomputed so the pipeline keeps exactly one flattener.
+
+    Args:
+        base_summary: The mapping returned by :func:`parameter_metric_summary`.
+        posterior_params: Posterior parameter Dataset.
+        true_params: Truth parameter Dataset (any knot grid).
+        prior_params: Prior parameter Dataset, or ``None``.
+        posterior_flat: ``(M, K)`` flattened posterior members.
+        prior_flat: ``(M, K)`` flattened prior members, or ``None``.
+        cfg: The run's saved config, read for the GP knot correlation.
+        num_windows: Assimilation window count, the pooling depth for
+            parameters without a ``time`` dimension.
+
+    Returns:
+        A new mapping; ``base_summary`` is not mutated.
+    """
+    summary = {name: dict(entry) for name, entry in base_summary.items()}
+    correlation_length, seconds_per_knot = _knot_correlation_config(cfg)
+    n_members = int(np.asarray(posterior_flat).shape[0])
+
+    degenerate = n_members < MIN_MEMBERS_CALIBRATION
+    if degenerate:
+        logger.info(
+            "Ensemble of %d members is below the %d needed for the parameter "
+            "calibration bundle (ddof=1 spreads, order-statistic bands and "
+            "%d-bin PIT all degenerate); emitting nulls",
+            n_members,
+            MIN_MEMBERS_CALIBRATION,
+            PIT_BINS,
+        )
+
+    for name, members, truth, prior_members, x_is_time in _aligned_parameter_arrays(
+        posterior_params, true_params, prior_params
+    ):
+        entry = summary.setdefault(name, {})
+        if degenerate:
+            entry.update(
+                {
+                    "zscore": None,
+                    "pit_counts": None,
+                    "pit": None,
+                    "coverage": None,
+                    "contraction_ratio": None,
+                }
+            )
+            continue
+        pit_counts, pit_meta = _pit_block(
+            members,
+            truth,
+            x_is_time,
+            correlation_length,
+            seconds_per_knot,
+            num_windows,
+            name,
+        )
+        entry.update(
+            {
+                "zscore": _zscore_block(members, truth),
+                "pit_counts": pit_counts,
+                "pit": pit_meta,
+                "coverage": _coverage_block(members, truth),
+                "contraction_ratio": _contraction_block(members, prior_members),
+            }
+        )
+
+    summary["joint"] = joint_parameter_directions(
+        posterior_flat, prior_flat, parameter_vector_labels(posterior_params)
+    )
     return summary

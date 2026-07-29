@@ -302,4 +302,107 @@ encoded there and in `docs/archive/figure_specs.md`.
 
 ## Deviations
 
-_(record here as they occur)_
+- **WP1.0 — `--metrics-level` CLI flag (addition).** `compute_esmda_metrics.py`
+  gained a `--metrics-level basic|standard|full` argparse flag that overrides
+  `run.metrics.level` from the run dir's saved config for one invocation. Not in
+  the plan text: without it, re-processing an existing run dir at another depth
+  means editing that dir's saved `config.yaml`, which is the record of how the
+  run was executed. The resolution order is CLI override → saved config →
+  shipped defaults (`resolve_metrics_settings`), and configs predating the
+  `run.metrics` block resolve every key to the shipped default (`standard`),
+  since phases 0–1 are meant to apply retroactively.
+
+- **WP1.1 — dynamic/static is per *parameter*, and the discriminator is the
+  `time` *coordinate* (correction to the plan text).** The plan describes
+  dynamic params as "the only ones carrying `correlation_length` /
+  `seconds_per_knot` — `conf/params/dynamic*.yaml`", which reads as a run-level
+  split. It is not: `conf/params/dynamic.yaml` mounts time-varying
+  `external_parameters` *and* a `static_parameters` block
+  (`vertical_inflow_exponent`) into the same Dataset, so both PIT branches fire
+  in one run. The implemented test is `_param_members_and_x`'s own
+  (`dims == ["time"]` **and** a `time` coordinate exists), not `"time" in dims`:
+  `run_esmda._concat_windows` stacks per-window parameter files along `time`, so
+  in a purely static run every parameter comes out with a length-`num_windows`
+  `time` *dimension* and no `time` coordinate, and its x-axis is the window
+  index. Keying on the dimension alone would misroute that run into the GP
+  branch and apply a `seconds_per_knot` formula to a window axis.
+
+- **WP1.1 — `n_knots_effective` is additionally clamped by the number of
+  piecewise-constant segments (addition).** A static parameter in a *dynamic*
+  run is broadcast by `_concat_windows` to every knot, so it reaches the
+  time-coordinate branch with `n_knots` knots but only `num_windows` distinct
+  values. `min(n_knots, n_segments, ceil(n_knots·seconds_per_knot/L))` recovers
+  the window count without needing to know which config block the parameter came
+  from, and is a no-op for a genuinely time-varying parameter.
+
+- **WP1.1 — the joint eigenproblem is rank-truncated before
+  `scipy.linalg.eigh` (departure).** The plan prescribes
+  `eigh(C_post, C_prior)` on eps-regularized matrices. Applied literally to real
+  run data this is numerically meaningless: ensembles are routinely *smaller*
+  than the joint parameter vector (M = 32 against K = 42 on a routine
+  2-parameter/21-knot run), so both covariances have rank M−1 = 31 with
+  *different* null spaces. Measured on `.temp/pyudales_to_pyudales`, the literal
+  recipe returns a **negative** eigenvalue from a positive-definite pair and a
+  spread of 1e−6 … 1e+11 (cond(B) = 2.6e15). The implementation therefore
+  projects both covariances onto the prior's retained eigenbasis first — rank cut
+  `λ_max · finfo.eps · max(shape)`, the `numpy.linalg.matrix_rank` convention
+  `data_assimilation.reduction` also uses — and runs the prescribed eps-ridged
+  `eigh` inside that r = min(M−1, K) subspace, where it is well-posed (same run:
+  r = 31, cond = 2.9e6, all λ > 0, spread 0 … 124). `n_sample_directions` and
+  `rank_deficient` are emitted so a reader can see the truncation happened.
+
+- **WP1.1 — generalized eigenvalues come from *covariances*, the reported
+  matrices are *correlations* (plan ambiguity resolved).** The plan lists both in
+  one bullet. Only the covariance pencil makes `λ < 0.5` mean "this direction's
+  spread at least halved" — correlation matrices both have trace K, which
+  destroys the variance-contraction reading. The λ are invariant under any
+  invertible rescaling of the parameter vector, so the mixed units (degrees vs
+  m/s) of the joint vector are harmless.
+
+- **WP1.1 — full correlation matrices are capped at K ≤ 16
+  (`JOINT_CORR_MAX_K`).** `write_yaml` uses `default_flow_style=False`, i.e. one
+  number per line, so the K = 42 of a routine run would add ~3.5k lines to a
+  ~100-line `run_summary.yaml`, and production cases are larger. Above the cap
+  `posterior_corr` / `prior_corr` are `null`, a `corr_matrices_omitted` note says
+  why, and `corr_summary` (off-diagonal `|corr|` mean and max, both matrices)
+  carries the signal instead. `generalized_eigenvalues` is capped the same way at
+  r ≤ 64, with `eigenvalue_quantiles` always emitted.
+
+- **WP1.1 — M < 3 nulls the whole calibration bundle.** Per the master plan's
+  degenerate-shape rule (`null` + a log line, never special-cased math), the
+  2-member smoke shape emits every key with a `null` value rather than a number:
+  a ddof=1 spread has one degree of freedom, the widest order-statistic band is
+  `[x_(1), x_(2)]` (nominal 1/3, so a "90%" coverage is unattainable), a 10-bin
+  PIT has 3 possible ranks, and every sample correlation is exactly ±1. The
+  threshold is one constant (`MIN_MEMBERS_CALIBRATION` / `MIN_MEMBERS_JOINT`)
+  rather than a per-metric rule.
+
+- **WP1.1 — keys emitted beyond the plan's schema sketch (additive).** The
+  sketch shows `zscore`, `pit_counts`, `coverage`, `contraction_ratio` and a
+  small `joint`. Also emitted: a sibling `pit` mapping holding the PIT metadata
+  the plan asks for in prose (`n_bins`, `n_samples`, `n_knots_effective`,
+  `pooling`, `tie_seed` — the seed so the tie-broken counts are reproducible);
+  `coverage.max_nominal_alpha = (M−1)/(M+1)`, the highest nominal level an
+  order-statistic band can offer at this M, so a clamped `alpha_90` does not read
+  as a calibration failure (it bounds the *nominal* level, not the realized
+  fraction); and in `joint`: `n_members`, `n_parameters`, `n_sample_directions`,
+  `rank_deficient`, `eigenvalue_quantiles`, `most_constrained` /
+  `least_constrained` (eigenvalue + the 5 largest-magnitude parameter-space
+  loadings, named via `parameter_vector_labels`, instead of raw length-K
+  vectors), `corr_summary`, and a `reason` string on every degraded path.
+
+- **WP1.1 — the `(M, K)` flattening is passed in, not recomputed.**
+  `parameter_bundle_summary` takes `posterior_flat` / `prior_flat` as arguments
+  so the pipeline keeps exactly one flattener
+  (`compute_esmda_metrics._flatten_parameter_members`, shared with
+  `_ensemble_health`) rather than a second copy in `_esmda_common`. The label
+  helper `parameter_vector_labels` mirrors that flattening's ordering and is
+  pinned to it by a test.
+
+- **WP1.1 — per-key schema documentation deferred.** `run_summary.yaml`'s key
+  list lives in `docs/scripts_and_configs.md` (the
+  `compute_esmda_metrics.py` section), which is outside this WP's file scope;
+  WP1.0 already documented there that levels above `basic` "add keys on top
+  (never change existing ones)", so that file is not left incorrect. The exact
+  WP1.1 key set is the list in the two entries above; fold it into
+  `docs/scripts_and_configs.md` together with WP1.2/1.3's schemas.

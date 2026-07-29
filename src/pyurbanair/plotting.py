@@ -7,6 +7,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
+from pyurbanair.utils.ensemble_scores import fair_crps
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 
 # --- Shared figure style ----------------------------------------------------
@@ -142,19 +143,11 @@ def _crps_ensemble(members: np.ndarray, obs: np.ndarray) -> np.ndarray:
     with the pairwise term divided by ``N(N - 1)`` after excluding the zero
     diagonal. Returns one score per ``x`` location (lower is better, units of
     the parameter).
+
+    Plotting-side alias of :func:`ensemble_scores.fair_crps`; the float cast
+    stays here because figure inputs arrive as whatever dtype the NetCDF held.
     """
-    members = np.asarray(members, dtype=float)
-    obs = np.asarray(obs, dtype=float)
-    n_members = members.shape[0]
-    mae = np.mean(np.abs(members - obs[None, :]), axis=0)
-    if n_members < 2:
-        return mae
-    sorted_members = np.sort(members, axis=0)
-    weights = (2 * np.arange(n_members) - n_members + 1)[:, None]
-    pairwise_half = np.sum(weights * sorted_members, axis=0) / (
-        n_members * (n_members - 1)
-    )
-    return mae - pairwise_half
+    return fair_crps(np.asarray(members, dtype=float), np.asarray(obs, dtype=float))
 
 
 def _extract_2d_slice_with_extent(

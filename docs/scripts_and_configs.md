@@ -116,6 +116,22 @@ rather than pulling them from separate files. The table below summarises each.
 | `truth_dir` | `null` | Path to a saved `state.nc`/`params.nc` truth artifact; `null` = simulate inline. |
 | `truth_start_time` | `null` | Drop truth frames before this time (seconds) and rebase. |
 | `save_prior_state` | `false` (esmda only) | Persist the per-window prior ensemble state (large; off by default). |
+| `metrics` | (block, esmda only) | Post-processing depth for stages 2–3; see below. Ignored by the run stage. |
+
+##### `run.metrics:` (esmda only)
+
+Read by [`compute_esmda_metrics.py`](#compute_esmda_metricspy) and
+`make_esmda_figures.py`, never by the run stage. Saved with the run, so
+re-processing a run dir reuses its own settings; run dirs written before this
+block existed simply fall back to the defaults below.
+
+| Field | Default | Purpose |
+|---|---|---|
+| `level` | `standard` | `basic` = the pre-phase-1 summary only; `standard` adds the evaluation layers (parameter calibration bundle, statistics-space sensor scoring, mean-field/Reynolds-stress); `full` is reserved for later phases and currently equals `standard`. Unknown values raise. |
+| `n_z_slices` | `4` | Evenly-spaced z-levels the mean-field layer accumulates on. |
+| `mean_field_stride` | `1` | Spatial stride for the hit-rate / NMSE maps (scores only comparable at equal stride). |
+| `bootstrap_blocks` | `20` | Blocks for the block-bootstrap sampling-error bars. |
+| `stations` | `null` | `[[x, y], ...]` columns for the profile figures; `null` = the obs config's sensor x/y. |
 
 ---
 
@@ -586,7 +602,7 @@ These three scripts form the standard single-run pipeline, orchestrated by
 [`run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh).
 
 #### [`compute_esmda_metrics.py`](../scripts/esmda/compute_esmda_metrics.py)
-**Plain argparse CLI** — usage: `python scripts/esmda/compute_esmda_metrics.py --run-dir <dir>`
+**Plain argparse CLI** — usage: `python scripts/esmda/compute_esmda_metrics.py --run-dir <dir> [--metrics-level basic|standard|full]`
 
 Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
@@ -599,6 +615,14 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 - `state_metrics` — `|U|` field RMSE summary (streamed z-slice by z-slice).
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set
   (assimilation + validation).
+
+Which of those layers run is gated by [`run.metrics.level`](#runmetrics-esmda-only)
+from the saved config: `basic` writes exactly the keys above, higher levels add
+keys on top (never change existing ones). `--metrics-level` overrides the saved
+config for one invocation, so an existing run dir can be re-processed at another
+depth (e.g. `basic` to line up with runs post-processed before the evaluation
+layers existed) without editing its `config.yaml`. Run dirs saved before the
+`run.metrics` block existed resolve to the shipped defaults.
 
 #### [`make_esmda_figures.py`](../scripts/esmda/make_esmda_figures.py)
 **Plain argparse CLI** — usage: `python scripts/esmda/make_esmda_figures.py --run-dir <dir>`
