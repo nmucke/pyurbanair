@@ -747,6 +747,11 @@ and writes small artifacts to `pyurbanair/sweep_metrics/<run>/`:
   no full fields).
 - Copies of `posterior_params.nc`, `prior_params.nc`, `true_params.nc`.
 
+For legacy runs without `truth_access.yaml`, the stage still recomputes the
+parameter bundle with version-2 estimators but omits sensor metrics: copying the
+source summary's version-1 sensor scores would create a mixed-semantics
+`metrics.yaml`.
+
 #### [`figure_creation/compare_sweep_results.py`](../scripts/figure_creation/compare_sweep_results.py)
 
 Final stage of the sweep pipeline. Reads `pyurbanair/sweep_metrics/` and draws

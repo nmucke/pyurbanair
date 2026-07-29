@@ -369,13 +369,13 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
                 )
             sensor_metrics[name] = entry
 
-    if not sensor_metrics:
-        # No truth_access (pre-update run): fall back to the base |U| summary.
-        sensor_metrics = summary.get("sensor_metrics", {})
-        status["note"] = (
-            "no truth_access.yaml -> base |U| sensor metrics only (re-run ESMDA)"
-        )
-    metrics["sensor_metrics"] = sensor_metrics
+    if sensor_metrics:
+        metrics["sensor_metrics"] = sensor_metrics
+    else:
+        # No truth_access (pre-update run): the source summary's sensor scores
+        # use the legacy estimator and cannot live under this stage's version-2
+        # marker. Omit them rather than producing a mixed-semantics artifact.
+        status["note"] = "no truth_access.yaml -> sensor metrics omitted (re-run ESMDA)"
 
     _write_yaml(metrics, out_run / "metrics.yaml")
     return status

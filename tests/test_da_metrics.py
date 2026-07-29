@@ -238,3 +238,57 @@ def test_sweep_comparison_warns_on_mixed_metric_versions(
         runs = load_runs(tmp_path, models=None)
 
     assert set(runs["metrics_version"]) == {1, 2}
+
+
+def test_sweep_metrics_omit_legacy_sensor_scores_without_truth_access(
+    tmp_path: pathlib.Path,
+) -> None:
+    from scripts.figure_creation.compute_sweep_metrics import process_run
+
+    run_dir = tmp_path / "legacy_run"
+    out_dir = tmp_path / "sweep_metrics"
+    run_dir.mkdir()
+    write_yaml(
+        {
+            "configuration": {"assimilation_model": "pylbm"},
+            "sensor_metrics": {
+                "assimilation": {
+                    "vel_magnitude_crps": {"mean": 123.0},
+                }
+            },
+        },
+        run_dir / "run_summary.yaml",
+    )
+    write_yaml(
+        {
+            "obs": {
+                "mode": "points",
+                "x_points": [0.0],
+                "y_points": [0.0],
+                "z_points": [0.0],
+            }
+        },
+        run_dir / "config.yaml",
+    )
+
+    coords = {"ensemble": [0, 1]}
+    posterior = xarray.Dataset(
+        {"inflow_angle": (("ensemble",), [0.0, 1.0])}, coords=coords
+    )
+    prior = xarray.Dataset(
+        {"inflow_angle": (("ensemble",), [-1.0, 2.0])}, coords=coords
+    )
+    truth = xarray.Dataset({"inflow_angle": 0.5})
+    posterior.to_netcdf(run_dir / "posterior_params.nc")
+    prior.to_netcdf(run_dir / "prior_params.nc")
+    truth.to_netcdf(run_dir / "true_params.nc")
+
+    status = process_run(run_dir, out_dir)
+    metrics = read_yaml(out_dir / "metrics.yaml")
+
+    assert metrics["metrics_version"] == 2
+    assert "parameter_metrics" in metrics
+    assert "sensor_metrics" not in metrics
+    assert status["note"] == (
+        "no truth_access.yaml -> sensor metrics omitted (re-run ESMDA)"
+    )
