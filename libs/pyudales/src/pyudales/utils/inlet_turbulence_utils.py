@@ -49,11 +49,16 @@ restart file (uDALES otherwise dies with ``timee >= runtime``), so every window
 starts the solver clock at 0 and ``btime`` is always 0. The *physical* elapsed
 time is therefore tracked by the wrapper and passed in as ``window_start_time``:
 the AR(1) recursion is replayed from a fixed per-member seed up to that point and
-only the current window's records are written, so window *n*'s planes are the
-exact continuation of window *n-1*'s without persisting any filter state.
+only the current window's records are written, so window *n*'s planes continue
+window *n-1*'s without any filter state having to be serialised. The *clock*
+itself is persisted (see :data:`ELAPSED_TIME_FILENAME`) because parallel
+ensembles run each member in a worker process that discards attribute
+mutations, and the replay is bounded by :func:`ar1_burn_in_records` so a long
+rollout stays linear rather than quadratic.
 """
 
 import hashlib
+import json
 import logging
 import math
 import pathlib
@@ -67,6 +72,7 @@ from .driver_file_utils import write_driver_files
 from .file_update_utils import update_lscale_file_profile, update_prof_file_profile
 from .inflow_utils import angle_to_velocity
 from .namoptions_utils import NamoptionsFile
+from .nudging_utils import build_inflow_schedule
 from .vertical_profile import build_profile_shape
 
 logger = logging.getLogger(__name__)
@@ -102,6 +108,64 @@ CROSS_COMPONENT_ANISOTROPY = 0.7
 # simulation when `timee` exceeds the last record time (moddriver.f90:236-241),
 # so the coverage margin is not cosmetic.
 DRIVER_TIME_MARGIN_RECORDS = 2
+
+
+# The member's physical clock lives on disk, NOT just on the ForwardModel.
+# `BaseEnsembleForwardModel._run_parallel` submits `model.__call__` to a
+# ProcessPoolExecutor (forkserver): the member is pickled into a worker, so any
+# attribute the worker mutates is discarded when it exits. An in-memory counter
+# would therefore silently reset to 0 every window under
+# `num_parallel_processes > 1` -- restarting the AR(1) history each window,
+# which is exactly what the counter exists to prevent, with no error to show
+# for it. The file sits in experiment_dir (shared disk, per member) rather than
+# inside warmstart_carry/, which `store_carry` wipes with rmtree on every run.
+ELAPSED_TIME_FILENAME = "inlet_turbulence_clock.json"
+
+
+def elapsed_time_path(dirs: DirectoryPaths) -> pathlib.Path:
+    """Path of the member's persisted physical clock."""
+    return dirs.experiment_dir / ELAPSED_TIME_FILENAME
+
+
+def read_elapsed_time(dirs: DirectoryPaths, default: float = 0.0) -> float:
+    """Physical seconds this member has already simulated (0 if never run)."""
+    path = elapsed_time_path(dirs)
+    if not path.exists():
+        return default
+    try:
+        return float(json.loads(path.read_text())["elapsed_time"])
+    except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
+        logger.warning(
+            "Could not read %s; restarting the inlet-turbulence clock at %.1f s. "
+            "The injected turbulence will be discontinuous across this window.",
+            path,
+            default,
+        )
+        return default
+
+
+def write_elapsed_time(dirs: DirectoryPaths, elapsed_time: float) -> None:
+    """Persist the member's physical clock (see :data:`ELAPSED_TIME_FILENAME`)."""
+    payload = {
+        "elapsed_time": float(elapsed_time),
+        "experiment_name": dirs.experiment_name,
+    }
+    elapsed_time_path(dirs).write_text(json.dumps(payload, indent=2))
+
+
+def copy_elapsed_time(src_dirs: DirectoryPaths, dst_dirs: DirectoryPaths) -> bool:
+    """Copy the donor's clock to a member that was substituted after failing.
+
+    The failed member inherits the donor's *state* (and its warmstart carry), so
+    it must inherit the donor's clock too — otherwise it would sit permanently
+    offset from the flow it is now carrying, and its inlet turbulence would jump
+    at the substitution and stay out of step for the rest of the rollout.
+    Returns ``True`` if a clock was copied.
+    """
+    if not elapsed_time_path(src_dirs).exists():
+        return False
+    write_elapsed_time(dst_dirs, read_elapsed_time(src_dirs))
+    return True
 
 
 def is_inlet_turbulence_enabled(config: Optional[dict]) -> bool:
@@ -239,7 +303,9 @@ def _filter_periodic(field: np.ndarray, b: np.ndarray) -> np.ndarray:
     y is periodic in every uDALES run this wrapper produces (``BCym=1`` is
     hardcoded in ``_apply_boundary_condition``), so wrapping is not an
     approximation — it is what makes the j ghost columns the natural periodic
-    image of the interior.
+    image of the interior. Periodicity is also what lets this be an FFT product
+    rather than ``ny`` full-array ``np.roll`` passes, which matters once the
+    calibration runs use production-sized planes.
 
     When the filter support is wider than the domain the wrapped coefficients
     add, and their 2-norm is no longer 1; renormalising by the *wrapped* norm
@@ -250,12 +316,12 @@ def _filter_periodic(field: np.ndarray, b: np.ndarray) -> np.ndarray:
     wrapped = np.zeros(ny)
     for index, coeff in enumerate(b):
         wrapped[(index - half) % ny] += coeff
+    wrapped /= np.linalg.norm(wrapped)
 
-    out = np.zeros_like(field)
-    for shift, coeff in enumerate(wrapped):
-        if coeff != 0.0:
-            out += coeff * np.roll(field, shift, axis=-1)
-    return out / np.linalg.norm(wrapped)
+    # out[j] = sum_s wrapped[s] * field[j-s] -- a circular convolution, so a
+    # plain product in Fourier space.
+    spectrum = np.fft.rfft(field, axis=-1) * np.fft.rfft(wrapped)
+    return np.fft.irfft(spectrum, n=ny, axis=-1)
 
 
 def _filter_bounded(field: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -284,6 +350,44 @@ def _filter_bounded(field: np.ndarray, b: np.ndarray) -> np.ndarray:
     return out / np.sqrt(norm)[:, None]
 
 
+# Relative precision the bounded burn-in reproduces the exact AR(1) state to.
+# The recursion forgets its history geometrically (a**n), so replaying only the
+# last `log(eps)/log(a)` records before the window is indistinguishable from
+# replaying all of them -- and turns an O(windows**2) rollout into O(windows).
+AR1_BURN_IN_EPSILON = 1e-12
+
+
+def ar1_burn_in_records(ar1_coefficient: float) -> int:
+    """How many pre-window records must be replayed to forget the initial state."""
+    if ar1_coefficient <= 0.0:
+        return 0
+    if ar1_coefficient >= 1.0:  # pragma: no cover - guarded by validation
+        raise ValueError(f"ar1_coefficient must be < 1, got {ar1_coefficient}")
+    return int(math.ceil(math.log(AR1_BURN_IN_EPSILON) / math.log(ar1_coefficient)))
+
+
+def _record_noise(
+    seed: int, index: int, shapes: dict[str, tuple[int, int]]
+) -> dict[str, np.ndarray]:
+    """Draw record ``index``'s white noise from a counter-based stream.
+
+    Philox is indexed by ``counter``, so record *n*'s noise depends only on
+    ``(seed, n)`` — never on how many records were drawn before it. That is what
+    lets the burn-in above start at an arbitrary offset and still reproduce the
+    same history bit-for-bit; with a sequential ``default_rng`` the draw order
+    *is* the state, so any truncation would change every subsequent record.
+
+    The ``<< 64`` stride is not cosmetic. A Philox stream advances its *own*
+    counter as it draws, so seeding consecutive records at ``counter = n`` makes
+    record *n* walk straight into record *n+1*'s block after a few hundred
+    values — the two share noise, and the resulting spurious correlation shows
+    up as a lag-2 autocorrelation well above the AR(1) prediction. Giving each
+    record 2**64 blocks of its own makes the streams genuinely independent.
+    """
+    rng = np.random.Generator(np.random.Philox(key=seed, counter=index << 64))
+    return {name: rng.standard_normal(shape) for name, shape in shapes.items()}
+
+
 def generate_fluctuation_fields(
     *,
     seed: int,
@@ -294,11 +398,12 @@ def generate_fluctuation_fields(
 ) -> dict[str, np.ndarray]:
     """Return unit-variance, time-correlated *white* fields per component.
 
-    The AR(1) recursion ``b_n = a*b_{n-1} + sqrt(1-a**2)*eta_n`` is run from
-    global record 0 (``b_0 = eta_0``, which is already the stationary
-    distribution) and only the last ``n_records`` states are kept. Replaying the
-    skipped prefix is what makes window *n* continue window *n-1* — and it is
-    cheap because the spatial filter is linear and time-invariant, so it commutes
+    The AR(1) recursion ``b_n = a*b_{n-1} + sqrt(1-a**2)*eta_n`` is seeded at a
+    bounded burn-in offset before ``start_index`` (``b = eta``, already the
+    stationary distribution) and only the last ``n_records`` states are kept.
+    Replaying that prefix is what makes window *n* continue window *n-1*; the
+    burn-in bound keeps the cost per window constant instead of growing with the
+    rollout. The spatial filter is linear and time-invariant, so it commutes
     with the recursion and is applied afterwards, to the kept records only.
 
     Args:
@@ -311,20 +416,20 @@ def generate_fluctuation_fields(
     Returns:
         ``{component: array of shape (n_records, nz, ny)}``, unit variance.
     """
-    rng = np.random.default_rng(seed)
     root = math.sqrt(max(0.0, 1.0 - ar1_coefficient**2))
-    total = start_index + n_records
+    burn_in = min(start_index, ar1_burn_in_records(ar1_coefficient))
+    first = start_index - burn_in
 
-    state = {name: np.zeros(shape) for name, shape in shapes.items()}
+    state: dict[str, np.ndarray] = {}
     kept: dict[str, list[np.ndarray]] = {name: [] for name in shapes}
 
-    for index in range(total):
-        for name, shape in shapes.items():
-            eta = rng.standard_normal(shape)
-            if index == 0:
-                state[name] = eta
+    for index in range(first, start_index + n_records):
+        noise = _record_noise(seed, index, shapes)
+        for name in shapes:
+            if index == first:
+                state[name] = noise[name]
             else:
-                state[name] = ar1_coefficient * state[name] + root * eta
+                state[name] = ar1_coefficient * state[name] + root * noise[name]
             if index >= start_index:
                 kept[name].append(state[name])
 
@@ -334,21 +439,56 @@ def generate_fluctuation_fields(
 # --- Plane assembly ----------------------------------------------------------
 
 
-def driver_time_grid(runtime_total: float, time_step: float) -> np.ndarray:
+def driver_time_grid(
+    runtime_total: float, time_step: float, dtmax: Optional[float] = None
+) -> np.ndarray:
     """Record times covering ``[0, runtime_total]`` plus a safety margin.
 
     ``drivergen`` stops the whole simulation the moment ``timee`` exceeds the
-    last record (``moddriver.f90:236-241``), so the grid deliberately overshoots
-    by :data:`DRIVER_TIME_MARGIN_RECORDS` records.
+    last record (``moddriver.f90:236-241``), and uDALES' final step can overshoot
+    ``runtime`` by up to ``dtmax``, so the grid overshoots by whichever is larger:
+    :data:`DRIVER_TIME_MARGIN_RECORDS`, or enough records to cover ``dtmax``.
     """
     if time_step <= 0.0:
         raise ValueError(f"time_step must be > 0, got {time_step}")
-    n_records = (
-        int(math.ceil(runtime_total / time_step - 1e-9))
-        + 1
-        + DRIVER_TIME_MARGIN_RECORDS
-    )
+    margin = DRIVER_TIME_MARGIN_RECORDS
+    if dtmax is not None and dtmax > 0.0:
+        margin = max(margin, int(math.ceil(dtmax / time_step)) + 1)
+    n_records = int(math.ceil(runtime_total / time_step - 1e-9)) + 1 + margin
     return np.arange(max(n_records, 2), dtype=float) * time_step
+
+
+def validate_time_step_divides_window(runtime_total: float, time_step: float) -> None:
+    """Require the window to be a whole number of driver records.
+
+    ``start_index = round(window_start_time / time_step)`` is how a window picks
+    its slice of the turbulence history. If the window length is not a multiple
+    of ``time_step`` the record grid slips against physical time by up to half a
+    record per window and the error accumulates over a rollout — silently. Fail
+    loudly instead, which is cheaper than a drifting inlet nobody notices.
+    """
+    if time_step <= 0.0 or runtime_total <= 0.0:
+        return
+    records = runtime_total / time_step
+    if abs(records - round(records)) > 1e-6:
+        suggestions = [
+            step
+            for step in (0.1, 0.2, 0.25, 0.5, 1.0)
+            if abs(runtime_total / step - round(runtime_total / step)) <= 1e-6
+        ]
+        hint = (
+            f" Divisors of {runtime_total} s include: "
+            + ", ".join(f"{s}" for s in suggestions)
+            + "."
+            if suggestions
+            else ""
+        )
+        raise ValueError(
+            f"inlet_turbulence.time_step={time_step} s does not divide the window "
+            f"length {runtime_total} s ({records:.4f} records). The driver record "
+            "grid would slip against physical time by up to half a record per "
+            f"window and accumulate over a rollout.{hint}"
+        )
 
 
 def build_driver_planes(
@@ -402,7 +542,18 @@ def build_driver_planes(
     sigma_v = CROSS_COMPONENT_ANISOTROPY * sigma_u
     sigma_w = CROSS_COMPONENT_ANISOTROPY * intensity * speed * shape_m[None, :]
     # The ground face carries no vertical velocity, whatever the profile shape.
+    # The TOP face (k = ke+1) is deliberately NOT zeroed: BCxm=3 forces
+    # BCtopm=3 (`BCtopm_pressure`, modstartup.f90:866-869), which exists
+    # precisely to "allow vertical velocity at top", so a no-through-flow
+    # condition there would be wrong rather than merely conservative.
     sigma_w[:, 0] = 0.0
+
+    _warn_if_length_scales_exceed_the_plane(
+        length_scale_y=length_scale_y,
+        length_scale_z=length_scale_z,
+        ylen=ylen,
+        zsize=zsize,
+    )
 
     # Taylor's hypothesis turns the streamwise length scale into a time scale.
     u_ref_scalar = float(np.mean(np.abs(speed)))
@@ -449,6 +600,47 @@ def build_driver_planes(
     return u_plane, v_plane, w_plane
 
 
+# Above this length-scale-to-plane-dimension ratio the filtered field is nearly
+# uniform across the inlet, so the plane-mean removal below eats most of the
+# fluctuation energy and the realised rms falls far short of `intensity`.
+LENGTH_SCALE_PLANE_FRACTION_WARN = 0.3
+
+
+def _warn_if_length_scales_exceed_the_plane(
+    *,
+    length_scale_y: float,
+    length_scale_z: float,
+    ylen: float,
+    zsize: float,
+) -> None:
+    """Warn when the requested eddies barely fit on the inlet plane.
+
+    Zeroing the plane mean of ``u'`` is required (it keeps the instantaneous
+    bulk inflow equal to the mean-profile bulk), but the removed bulk mode is
+    itself part of the filtered field. That costs ~2% of the target rms at
+    length scales small against the plane and 40-50% once they approach its
+    dimensions — so calibration can otherwise spend a long time raising
+    `intensity` to chase amplitude the code has already discarded.
+    """
+    for axis, scale, extent in (
+        ("length_scale_y", length_scale_y, ylen),
+        ("length_scale_z", length_scale_z, zsize),
+    ):
+        if extent > 0 and scale / extent > LENGTH_SCALE_PLANE_FRACTION_WARN:
+            logger.warning(
+                "inlet_turbulence.%s=%.1f m is %.0f%% of the inlet plane's %.1f m "
+                "extent. Zeroing the plane mean of u' will discard a large part "
+                "of the fluctuation energy (up to ~50%%), so the realised rms "
+                "will fall well short of intensity*|U(z)|. Reduce the length "
+                "scale, or calibrate against the realised rms rather than the "
+                "nominal one.",
+                axis,
+                scale,
+                100.0 * scale / extent,
+                extent,
+            )
+
+
 def _wrap_j_halo(plane: np.ndarray, jtot: int) -> np.ndarray:
     """Fill the j ghost columns with the periodic image of the interior."""
     plane[:, :, 0] = plane[:, :, jtot]
@@ -491,34 +683,15 @@ def resolve_inflow_schedule(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return ``(time_seconds, inflow_angle, velocity_magnitude)`` knots.
 
-    Mirrors :func:`.nudging_utils.apply_time_varying_inflow` exactly, so the
-    driver path and the nudging path see the same inflow signal: scalar params
-    become a constant 2-knot schedule spanning the window, and a ``spinup_time``
-    plateau at the initial values is prepended when there is one.
+    Delegates to :func:`.nudging_utils.build_inflow_schedule`, the single
+    implementation shared with the nudging path, so the driver planes and
+    ``timedepnudge.inp`` can never encode different inflow signals.
     """
-    if "time" not in params.dims:
-        time_seconds = np.linspace(0.0, max(simulation_time, 0.0), 2)
-        inflow_angle = np.full(2, float(params["inflow_angle"].values))
-        velocity_magnitude = np.full(2, float(params["velocity_magnitude"].values))
-    else:
-        time_seconds = params["time"].values.astype(float)
-        inflow_angle = np.asarray(params["inflow_angle"].values, dtype=float)
-        velocity_magnitude = np.asarray(
-            params["velocity_magnitude"].values, dtype=float
-        )
-        if inflow_angle.ndim == 0:
-            inflow_angle = np.full_like(time_seconds, float(inflow_angle))
-        if velocity_magnitude.ndim == 0:
-            velocity_magnitude = np.full_like(time_seconds, float(velocity_magnitude))
-
-    if spinup_time > 0:
-        time_seconds = np.concatenate([[0.0], time_seconds + spinup_time])
-        inflow_angle = np.concatenate([[inflow_angle[0]], inflow_angle])
-        velocity_magnitude = np.concatenate(
-            [[velocity_magnitude[0]], velocity_magnitude]
-        )
-
-    return time_seconds, inflow_angle, velocity_magnitude
+    return build_inflow_schedule(
+        params,
+        spinup_time=spinup_time,
+        simulation_time=simulation_time,
+    )
 
 
 def _sample_schedule(
@@ -572,6 +745,8 @@ def apply_inlet_turbulence(
     """
     resolved = resolve_inlet_turbulence_config(config)
     namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
+    # One read / modify / write for the whole call: the driver keys, the nudging
+    # switches and the &INPS reference scalars all land in this one object.
     namoptions = NamoptionsFile(namoptions_path)
 
     jtot = namoptions.get_value_as_int("DOMAIN", "jtot")
@@ -586,7 +761,16 @@ def apply_inlet_turbulence(
 
     time_step = float(resolved["time_step"])
     runtime_total = float(spinup_time) + float(simulation_time)
-    times = driver_time_grid(runtime_total, time_step)
+    validate_time_step_divides_window(runtime_total, time_step)
+    times = driver_time_grid(
+        runtime_total, time_step, dtmax=namoptions.get_value_as_float("RUN", "dtmax")
+    )
+    _warn_if_driver_arrays_are_large(
+        jtot=jtot,
+        ktot=ktot,
+        driverstore=times.size,
+        lchunkread=resolved["lchunkread"],
+    )
 
     knot_times, knot_angle, knot_speed = resolve_inflow_schedule(
         params, spinup_time, simulation_time
@@ -620,20 +804,21 @@ def apply_inlet_turbulence(
         dirs.experiment_dir, driverjobnr, times, u_plane, v_plane, w_plane
     )
 
-    _write_driver_namoptions(
-        namoptions_path,
+    _apply_driver_namoptions(
+        namoptions,
         driverjobnr=driverjobnr,
         driverstore=times.size,
         dtdriver=time_step,
         lchunkread=resolved["lchunkread"],
         chunkread_size=resolved["chunkread_size"],
     )
-    _write_mean_inflow_settings(
-        dirs,
+    _apply_mean_inflow_settings(
+        namoptions,
         inflow_angle=float(inflow_angle[0]),
         velocity_magnitude=float(velocity_magnitude[0]),
-        ktot=ktot,
     )
+    namoptions.write()
+    _write_initial_condition_files(dirs, ktot=ktot)
 
     logger.info(
         "uDALES inlet turbulence ON: %d driver records at dt=%.3f s covering "
@@ -654,8 +839,8 @@ def apply_inlet_turbulence(
     )
 
 
-def _write_driver_namoptions(
-    namoptions_path: pathlib.Path,
+def _apply_driver_namoptions(
+    namoptions: NamoptionsFile,
     *,
     driverjobnr: int,
     driverstore: int,
@@ -664,6 +849,8 @@ def _write_driver_namoptions(
     chunkread_size: Optional[int],
 ) -> None:
     """Switch the inlet to the driver route and disable nudging.
+
+    Mutates ``namoptions`` in place; the caller writes once.
 
     ``BCxm=3`` is what actually turns the driver on — it forces ``idriver=2``
     and ``linoutflow`` in ``modstartup.f90:831-835``. ``idriver`` is written too
@@ -674,8 +861,6 @@ def _write_driver_namoptions(
     ``NamoptionsFile.set_value`` creates a missing section, so case templates
     without a ``&DRIVER`` block need no changes.
     """
-    namoptions = NamoptionsFile(namoptions_path)
-
     namoptions.set_value("BC", "BCxm", 3)
 
     namoptions.set_value("DRIVER", "idriver", 2)
@@ -696,34 +881,37 @@ def _write_driver_namoptions(
     namoptions.set_value("PHYSICS", "lnudge", ".false.")
     namoptions.set_value("PHYSICS", "ltimedepnudge", ".false.")
 
-    namoptions.write()
 
-
-def _write_mean_inflow_settings(
-    dirs: DirectoryPaths,
+def _apply_mean_inflow_settings(
+    namoptions: NamoptionsFile,
     *,
     inflow_angle: float,
     velocity_magnitude: float,
-    ktot: int,
 ) -> None:
-    """Write the reference scalars and the initial condition.
+    """Set the &INPS reference scalars; mutates ``namoptions`` in place.
 
-    Mirrors the inflow-outflow handling of the nudging path: ``dpdx``/``dpdy``
-    are zeroed so the inlet face is the sole streamwise driver, and
-    ``prof.inp``/``lscale.inp`` start the flow from rest — writing a full-speed
-    profile stagnates it against the building walls before the pressure solver
-    has settled. ``u0``/``v0`` are uDALES reference scalars, independent of the
-    initial condition.
+    ``dpdx``/``dpdy`` are zeroed so the inlet face is the sole streamwise
+    driver, matching the inflow-outflow handling of the nudging path.
+    ``u0``/``v0`` are uDALES reference scalars, independent of the initial
+    condition written by :func:`_write_initial_condition_files`.
     """
-    namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
     u0, v0 = angle_to_velocity(inflow_angle, velocity_magnitude)
-    namoptions = NamoptionsFile(namoptions_path)
     namoptions.set_value("INPS", "u0", f"{float(u0):.7f}")
     namoptions.set_value("INPS", "v0", f"{float(v0):.7f}")
     namoptions.set_value("INPS", "dpdx", "0.0")
     namoptions.set_value("INPS", "dpdy", "0.0")
-    namoptions.write()
 
+
+def _write_initial_condition_files(dirs: DirectoryPaths, *, ktot: int) -> None:
+    """Start the interior from rest, as the inflow-outflow nudging path does.
+
+    Writing a full-speed profile here stagnates the flow against the building
+    walls before the pressure solver has settled. Note the consequence, which
+    differs from the nudging path: under the driver route there is no interior
+    relaxation either (`lnudge=.false.`), so the domain fills from the inlet
+    face alone and the effective spin-up is LONGER than nudging-path experience
+    would suggest. Size `spinup_time` accordingly (docs/pyudales.md 6.1).
+    """
     zeros = np.zeros(ktot)
     update_prof_file_profile(
         dirs.experiment_dir / f"prof.inp.{dirs.experiment_name}",
@@ -736,4 +924,38 @@ def _write_mean_inflow_settings(
         v_profile=zeros,
         dpdx_profile=zeros,
         dpdy_profile=zeros,
+    )
+
+
+# initdriver allocates ~6 full-history plane arrays when lchunkread is off
+# (moddriver.f90:89-130), resident for the whole run on the inlet rank.
+DRIVER_ARRAY_COUNT = 6
+DRIVER_MEMORY_WARN_BYTES = 512 * 1024 * 1024
+
+
+def _warn_if_driver_arrays_are_large(
+    *,
+    jtot: int,
+    ktot: int,
+    driverstore: int,
+    lchunkread: Optional[bool],
+) -> None:
+    """Warn before uDALES silently allocates hundreds of MB per member."""
+    if lchunkread:
+        return
+    plane_values = (jtot + 2) * (ktot + 2)
+    total = DRIVER_ARRAY_COUNT * plane_values * driverstore * 8
+    if total < DRIVER_MEMORY_WARN_BYTES:
+        return
+    logger.warning(
+        "Driver planes will make uDALES allocate ~%.0f MB per member "
+        "(%d arrays x %d records x %dx%d x 8 B, moddriver.f90:89-130), resident "
+        "for the whole run and multiplied by ensemble.num_parallel_processes. "
+        "Set inlet_turbulence.lchunkread=true (with chunkread_size) to bound it, "
+        "or increase inlet_turbulence.time_step.",
+        total / 1e6,
+        DRIVER_ARRAY_COUNT,
+        driverstore,
+        ktot + 2,
+        jtot + 2,
     )

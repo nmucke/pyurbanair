@@ -412,10 +412,34 @@ restart (uDALES otherwise dies with `timee >= runtime`), so the solver clock —
 and `btime` — restart at 0 each window. `ForwardModel._elapsed_time` therefore
 tracks the member's *physical* time and selects which slice of its turbulence
 history the window gets: the AR(1) recursion is replayed from a fixed
-name-derived seed up to that point, making window *n*'s planes the exact
-continuation of window *n-1*'s with no persisted filter state. Coverage is a
-hard constraint — `drivergen` stops the run outright once `timee` exceeds the
-last record — so the grid overshoots by two records.
+name-derived seed up to that point, making window *n*'s planes the continuation
+of window *n-1*'s with no persisted filter state.
+
+That clock is **persisted to `<experiment_dir>/inlet_turbulence_clock.json`**,
+not merely held on the object. `BaseEnsembleForwardModel._run_parallel` submits
+`model.__call__` to a `ProcessPoolExecutor`, so under
+`ensemble.num_parallel_processes > 1` the member is pickled into a forkserver
+worker and every attribute it mutates dies with that process — an in-memory
+counter would silently reset to 0 each window and restart the turbulence
+history. `run_single` reloads it at the top and writes it back after a
+successful run; `EnsembleForwardModel.run_ensemble` copies a donor's clock to a
+substituted member alongside its warmstart carry, and refreshes the parent's
+in-memory copies.
+
+Replay cost is bounded: the AR(1) recursion forgets its history geometrically,
+so only `log(eps)/log(a)` records before the window are replayed
+(`ar1_burn_in_records`). Each record's white noise comes from a counter-based
+Philox stream keyed on `(seed, record index)` — with a sequential generator the
+draw order *is* the state, so truncating the prefix would change every
+subsequent record. Without this bound a 20-window rollout would cost
+O(windows²).
+
+Coverage is a hard constraint — `drivergen` stops the run outright once `timee`
+exceeds the last record — so the grid overshoots by two records, or by `dtmax`
+where that is larger (uDALES' final step can overrun `runtime` by up to
+`dtmax`). `time_step` must divide the window length, or the record grid would
+slip against physical time every window; `apply_inlet_turbulence` raises rather
+than let that accumulate silently.
 
 **Consequence for the ESMDA path.** The estimated `inflow_angle` /
 `velocity_magnitude` / `vertical_inflow_exponent` still reach the solver, now
@@ -425,13 +449,30 @@ disconnected those parameters (the same objection that made `iinletgen` a
 `ValueError`). A "precursor library" — record one periodic run, replay and
 rescale — remains a future option behind the identical file interface.
 
+**Spin-up is longer than on the nudging path.** `prof.inp`/`lscale.inp` are
+written as zeros (start from rest) *and* `lnudge=.false.`, so the interior fills
+from the inlet face alone with no relaxation pulling it toward the target
+profile. A `spinup_time` sized from nudging-path experience will be too short.
+Measure it during calibration.
+
 **Calibration is still open.** The shipped `intensity` and length scales are
-starting points (≈ building height), not tuned values; the classic failure mode
-is too-short correlation lengths, where the fluctuations decay before reaching
-the buildings, and the fix is longer scales rather than more amplitude. Note
-also that zeroing the plane mean of `u'` costs ~2% of the variance at length
-scales small against the inlet plane but 40–50% once they approach the plane's
-own dimensions. See §8 of
+starting points (≈ building height), not tuned values. Three things bias the
+realised turbulence below its nominal value, all of which calibration should
+account for before reaching for more amplitude:
+
+- *Too-short correlation lengths* are the classic failure mode — the
+  fluctuations decay before reaching the buildings, and the fix is longer
+  scales, not larger `intensity`.
+- *Plane-mean removal* costs ~2% of the target rms at length scales small
+  against the inlet plane, but **40–50%** once `length_scale_y/z` approach the
+  plane's own dimensions (which the shipped 25 m defaults do on this domain).
+  The generator logs a warning past 30% of the plane extent.
+- *Near-wall rms* is low by construction: `sigma(z) = intensity * |U_mean(z)|`
+  with a power-law shape sends `sigma → 0` at the ground, whereas a real ABL has
+  its largest `u'_rms/U` there. A z-dependent intensity profile is the phase-2
+  refinement if the canyon flow turns out to care.
+
+See §8 of
 [docs/plans/udales_inlet_turbulence.md](plans/udales_inlet_turbulence.md).
 
 #### Why not the Lund generator

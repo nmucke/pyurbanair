@@ -21,7 +21,9 @@ from .utils.inlet_turbulence_utils import (
     INLET_TURBULENCE_KEYS,
     apply_inlet_turbulence,
     is_inlet_turbulence_enabled,
+    read_elapsed_time,
     validate_inlet_turbulence,
+    write_elapsed_time,
 )
 from .utils.namoptions_utils import NamoptionsFile, rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
@@ -450,7 +452,12 @@ class ForwardModel(BaseForwardModel):
         # utils.inlet_turbulence_utils). It cannot be read back from `state`:
         # `_prepare_warmstart` writes timee=0 into every restart, so the solver
         # clock — and the state's own time coordinate — restart each window.
-        self._elapsed_time = 0.0
+        #
+        # The authoritative copy lives on disk (`read_elapsed_time`), because
+        # parallel ensembles run each member in a forkserver worker that
+        # discards attribute mutations; this is a cache of it, refreshed at the
+        # top of every `run_single`.
+        self._elapsed_time = read_elapsed_time(self.dirs)
 
         # SGS closure. ``None`` keeps whatever the case template sets, so runs
         # that don't ask for a closure stay byte-identical.
@@ -702,6 +709,13 @@ class ForwardModel(BaseForwardModel):
         nudging_config = self._resolve_nudging_config(self.params)
         self._apply_sgs_setting(self.params)
 
+        # NOTE (pre-existing): the computed value is immediately overwritten with
+        # True, so pyudales always nudges when inlet turbulence is off and the
+        # `else` branch below (static/periodic `apply_inflow_settings`) is dead
+        # code. Documented in docs/pyudales.md §6 as "nudging is hardcoded".
+        # Left as-is deliberately — untangling it is a behaviour change to the
+        # periodic path and does not belong in the inlet-turbulence commit — but
+        # flagged here because a third branch now sits in front of it.
         use_nudging = (
             is_time_varying_params(self.params)
             or self.boundary_condition == "inflow_outflow"
@@ -1009,6 +1023,10 @@ class ForwardModel(BaseForwardModel):
         subgrid fields stay on disk in the carry and never enter ``result``.
         """
         warm_start = state is not None
+        # Refresh the physical clock from disk before anything reads it: in a
+        # parallel ensemble this object was just unpickled into a fresh worker,
+        # so the in-memory value is whatever was captured at submit time.
+        self._elapsed_time = read_elapsed_time(self.dirs, self._elapsed_time)
         # Runs BEFORE the namoptions snapshot on purpose: the &DRIVER / nudging
         # keys it writes must survive the post-run `_restore_namoptions`.
         self._apply_inflow_settings(params=params, warm_start=warm_start)
@@ -1044,10 +1062,19 @@ class ForwardModel(BaseForwardModel):
                 clean_output_except_warmstart_files(self.dirs)
                 remove_old_warmstart_files(self.dirs)
 
-            # Advance the member's physical clock only on success. A failed run
-            # simulated nothing, and the ensemble resamples it from a donor, so
-            # its next window legitimately regenerates the same driver slice.
+            # Advance the member's physical clock only on success, and persist
+            # it: a parallel ensemble runs this in a forkserver worker whose
+            # attribute mutations die with the process, so the file is the only
+            # copy that reaches the next window.
+            #
+            # A failed run simulated nothing, so its clock is deliberately left
+            # where it was. Note that the member is then resampled from a donor
+            # whose flow is one window ahead — `EnsembleForwardModel.run_ensemble`
+            # copies the donor's clock across alongside its warmstart carry, so
+            # the two stay in step (without that the substituted member would be
+            # permanently offset from the state it is carrying).
             self._elapsed_time += window_runtime
+            write_elapsed_time(self.dirs, self._elapsed_time)
             return result
         finally:
             self.spinup_time = saved_spinup_time

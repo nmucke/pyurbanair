@@ -773,6 +773,12 @@ def test_bcxm_driver_is_wired_to_the_inlet_face() -> None:
 def _smoke_overrides(tmp_path: pathlib.Path) -> list[str]:
     return [
         "model=pyudales",
+        # Pin ncpu: the model config's value is tuned for production runs, and
+        # decomposing the 20-cell smoke domain into that many x-strips is its
+        # own source of instability. These tests are about the inlet, so keep
+        # the decomposition out of the picture (conftest pins the domain for the
+        # same reason).
+        "model.forward_model.ncpu=1",
         "model.forward_model.inlet_turbulence.enabled=true",
         # The shipped length scales (~building height) exceed the 20x20x10 m
         # smoke domain, where the filter would wrap onto itself; scale them to
@@ -891,3 +897,246 @@ def test_e2e_two_window_rollout_continues_the_turbulence(
     assert np.allclose(u1[offset : offset + overlap], u2[:overlap])
 
     assert window2.sizes["time"] == int(simulation / cfg.time.output_frequency)
+
+
+# ---------------------------------------------------------------------------
+# The physical clock must survive the process boundary
+# ---------------------------------------------------------------------------
+
+
+def test_clock_round_trips_through_disk(tmp_path: pathlib.Path) -> None:
+    from pyudales.utils.inlet_turbulence_utils import (
+        read_elapsed_time,
+        write_elapsed_time,
+    )
+
+    dirs = _make_dirs(tmp_path)
+    assert read_elapsed_time(dirs) == 0.0
+    write_elapsed_time(dirs, 42.5)
+    assert read_elapsed_time(dirs) == 42.5
+
+
+def test_clock_is_copied_on_failure_substitution(tmp_path: pathlib.Path) -> None:
+    """A substituted member inherits the donor's clock, not just its carry.
+
+    Without this the failed member's clock stays a window behind the state it
+    was just handed, and the offset persists for the rest of the rollout.
+    """
+    from pyudales.utils.inlet_turbulence_utils import (
+        copy_elapsed_time,
+        read_elapsed_time,
+        write_elapsed_time,
+    )
+
+    donor = _make_dirs(tmp_path / "donor", "001")
+    failed = _make_dirs(tmp_path / "failed", "002")
+    write_elapsed_time(donor, 600.0)
+    write_elapsed_time(failed, 300.0)
+
+    assert copy_elapsed_time(donor, failed) is True
+    assert read_elapsed_time(failed) == 600.0
+
+    # A donor that never ran leaves the destination alone rather than zeroing it.
+    virgin = _make_dirs(tmp_path / "virgin", "003")
+    assert copy_elapsed_time(virgin, failed) is False
+    assert read_elapsed_time(failed) == 600.0
+
+
+def test_e2e_parallel_ensemble_keeps_each_member_continuous(
+    tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
+) -> None:
+    """Continuity must hold when members run in forkserver worker processes.
+
+    ``BaseEnsembleForwardModel._run_parallel`` submits ``model.__call__`` to a
+    ProcessPoolExecutor, so the member is pickled into a worker and any
+    attribute it mutates is discarded on exit. An in-memory clock therefore
+    resets to 0 every window under ``num_parallel_processes > 1`` and the AR(1)
+    history silently restarts — which is exactly what the clock exists to
+    prevent. Single-model tests cannot see this; only a real parallel run can.
+    """
+    from hydra.utils import instantiate
+    from pyudales.utils.driver_file_utils import read_driver_files
+
+    cfg = compose_test_cfg(
+        [
+            *_smoke_overrides(tmp_path),
+            "ensemble.ensemble_size=2",
+            "ensemble.num_parallel_processes=2",
+        ]
+    )
+    template = instantiate(cfg.model.forward_model)
+    instantiate(cfg.model.prepare, forward_model=template)
+    ensemble = instantiate(cfg.model.ensemble_model, forward_model=template)
+
+    jtot, ktot = cfg.domain.ny, cfg.domain.nz
+    time_step = cfg.model.forward_model.inlet_turbulence.time_step
+    spinup, simulation = cfg.time.spinup_time, cfg.time.simulation_time
+
+    states = ensemble.run_ensemble(state=None, sim_name="state")
+    window1 = {
+        i: read_driver_files(model.dirs.experiment_dir, 998, jtot, ktot)[1]
+        for i, model in enumerate(ensemble.ensemble_forward_models)
+    }
+    for model in ensemble.ensemble_forward_models:
+        assert model._elapsed_time == pytest.approx(
+            spinup + simulation
+        ), "clock did not survive the worker process"
+
+    ensemble.run_ensemble(state=states, sim_name="state")
+
+    offset = int(round((spinup + simulation) / time_step))
+    for i, model in enumerate(ensemble.ensemble_forward_models):
+        _, u2, _, _ = read_driver_files(model.dirs.experiment_dir, 998, jtot, ktot)
+        u1 = window1[i]
+        overlap = min(u1.shape[0] - offset, u2.shape[0])
+        assert overlap > 0
+        assert np.allclose(
+            u1[offset : offset + overlap], u2[:overlap]
+        ), f"member {i}'s window-2 planes do not continue its window-1 planes"
+
+    # And the members must not all share one realisation.
+    assert not np.allclose(window1[0], window1[1])
+
+
+# ---------------------------------------------------------------------------
+# Silent-failure guards
+# ---------------------------------------------------------------------------
+
+
+def test_time_step_must_divide_the_window(tmp_path: pathlib.Path) -> None:
+    """A non-dividing time_step would slip the record grid a little every window."""
+    from pyudales.utils.inlet_turbulence_utils import (
+        apply_inlet_turbulence,
+        validate_time_step_divides_window,
+    )
+
+    validate_time_step_divides_window(300.0, 0.5)
+    validate_time_step_divides_window(0.0, 0.5)  # nothing to divide yet
+
+    with pytest.raises(ValueError, match="does not divide the window"):
+        validate_time_step_divides_window(100.0, 0.3)
+
+    dirs = _make_dirs(tmp_path)
+    with pytest.raises(ValueError, match="does not divide the window"):
+        apply_inlet_turbulence(
+            params=_params(),
+            dirs=dirs,
+            config={**ENABLED, "time_step": 0.3},
+            simulation_time=100.0,
+        )
+
+
+def test_coverage_margin_absorbs_a_full_dtmax_overshoot() -> None:
+    """uDALES' last step can overrun ``runtime`` by up to ``dtmax``."""
+    from pyudales.utils.inlet_turbulence_utils import driver_time_grid
+
+    # dtmax smaller than the default margin -> the default (2 records) stands.
+    assert driver_time_grid(10.0, 0.5, dtmax=0.4)[-1] == pytest.approx(11.0)
+    # dtmax larger than the margin -> the grid grows to cover it.
+    assert driver_time_grid(10.0, 0.5, dtmax=3.0)[-1] >= 10.0 + 3.0
+
+
+def test_large_length_scales_warn_about_the_discarded_energy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Calibration must not chase amplitude the plane-mean removal discards."""
+    with caplog.at_level("WARNING"):
+        _generate(n_records=4, length_scale_y=0.5 * YLEN, length_scale_z=1.0)
+    assert "length_scale_y" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        _generate(n_records=4, length_scale_y=1.0, length_scale_z=1.0)
+    assert "length_scale_y" not in caplog.text
+
+
+def test_large_driverstore_warns_about_solver_memory(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``initdriver`` allocates ~6 full-history plane arrays with lchunkread off."""
+    from pyudales.utils.inlet_turbulence_utils import _warn_if_driver_arrays_are_large
+
+    with caplog.at_level("WARNING"):
+        _warn_if_driver_arrays_are_large(
+            jtot=64, ktot=64, driverstore=3000, lchunkread=None
+        )
+    assert "lchunkread" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        _warn_if_driver_arrays_are_large(
+            jtot=64, ktot=64, driverstore=3000, lchunkread=True
+        )
+        _warn_if_driver_arrays_are_large(
+            jtot=24, ktot=16, driverstore=20, lchunkread=None
+        )
+    assert caplog.text == ""
+
+
+def test_vertical_correlation_survives_the_edge_renormalisation() -> None:
+    """The per-level renormalisation must not flatten near-ground z-correlation.
+
+    ``_filter_bounded`` divides each level by the norm of the coefficients that
+    actually reached it, which restores unit *variance* at the edges but leaves
+    the *correlation* there to be checked separately — the rms test would pass
+    even if it had collapsed entirely.
+    """
+    from pyudales.utils.inlet_turbulence_utils import (
+        _filter_bounded,
+        filter_coefficients,
+    )
+
+    dz = ZSIZE / KTOT
+    length_scale_z = 4.0
+    rng = np.random.default_rng(0)
+    field = _filter_bounded(
+        rng.standard_normal((4000, KTOT, JTOT)),
+        filter_coefficients(length_scale_z / dz),
+    )
+
+    expected = np.exp(-np.pi * dz / (2.0 * length_scale_z))
+    for level in (0, 1, KTOT // 2, KTOT - 2):
+        pair = np.corrcoef(field[:, level, :].ravel(), field[:, level + 1, :].ravel())
+        # Edge levels lose some correlation to truncation; require most of it.
+        assert pair[0, 1] > 0.6 * expected, f"z-correlation collapsed at level {level}"
+
+
+def test_burn_in_truncation_reproduces_the_full_replay() -> None:
+    """Late windows replay a bounded prefix, not the whole history.
+
+    ``test_windows_continue_each_other`` only covers offsets the burn-in still
+    spans entirely (where the match is bit-exact). This covers the regime that
+    actually keeps a long rollout linear: a start index far beyond the burn-in,
+    where the prefix IS truncated and the guarantee is numerical rather than
+    exact.
+    """
+    from pyudales.utils.inlet_turbulence_utils import (
+        ar1_burn_in_records,
+        generate_fluctuation_fields,
+    )
+
+    a = 0.6
+    burn_in = ar1_burn_in_records(a)
+    start = burn_in * 3
+    shapes = {"u": (4, 4)}
+
+    full = generate_fluctuation_fields(
+        seed=99, ar1_coefficient=a, shapes=shapes, n_records=start + 5, start_index=0
+    )["u"]
+    truncated = generate_fluctuation_fields(
+        seed=99, ar1_coefficient=a, shapes=shapes, n_records=5, start_index=start
+    )["u"]
+
+    assert np.allclose(full[start:], truncated, rtol=0, atol=1e-9)
+    # The bound must be real work, not a no-op that replays everything anyway.
+    assert burn_in < start
+
+
+def test_burn_in_is_bounded_and_grows_with_the_correlation_time() -> None:
+    from pyudales.utils.inlet_turbulence_utils import ar1_burn_in_records
+
+    assert ar1_burn_in_records(0.0) == 0
+    assert ar1_burn_in_records(0.5) < ar1_burn_in_records(0.99)
+    # Production-ish: dtdriver=0.1, length_scale_x=50 m, U=3 m/s.
+    a = float(np.exp(-np.pi * 0.1 / (2 * 50 / 3.0)))
+    assert ar1_burn_in_records(a) < 5000

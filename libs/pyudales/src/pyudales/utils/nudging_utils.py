@@ -175,6 +175,57 @@ def enable_nudging_in_namoptions(
     )
 
 
+def build_inflow_schedule(
+    params: xarray.Dataset,
+    spinup_time: float = 0.0,
+    simulation_time: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build the ``(time_seconds, inflow_angle, velocity_magnitude)`` knots.
+
+    The single source of truth for how an inflow schedule is derived from
+    ``params``, shared by the nudging path (:func:`apply_time_varying_inflow`)
+    and the driver-plane path
+    (:mod:`.inlet_turbulence_utils`) so the two cannot drift apart.
+
+    * **Scalar / constant params** (no ``time`` dim) become a synthetic 2-knot
+      constant schedule spanning ``[0, simulation_time]``, which is what holds
+      the values fixed under inflow-outflow BCs.
+    * **Time-varying params** use their own time array; a mixed Dataset (one
+      variable scalar, the other time-varying) broadcasts the scalar.
+    * When ``spinup_time > 0`` a constant plateau at the initial values is
+      prepended and the user times are shifted past the spinup.
+    """
+    if "time" not in params.dims:
+        time_seconds = np.linspace(0.0, simulation_time, 2)
+        inflow_angle = np.linspace(
+            params["inflow_angle"].values, params["inflow_angle"].values, 2
+        )
+        velocity_magnitude = np.linspace(
+            params["velocity_magnitude"].values, params["velocity_magnitude"].values, 2
+        )
+    else:
+        time_seconds = params["time"].values.astype(float)
+        inflow_angle = params["inflow_angle"].values
+        velocity_magnitude = params["velocity_magnitude"].values
+
+        # Handle mixed scalar + time-varying: broadcast to same shape
+        if inflow_angle.ndim == 0:
+            inflow_angle = np.full_like(time_seconds, float(inflow_angle))
+        if velocity_magnitude.ndim == 0:
+            velocity_magnitude = np.full_like(time_seconds, float(velocity_magnitude))
+
+    # Handle spinup: prepend a constant plateau at initial values and shift
+    # user times so that the time-varying schedule starts after spinup.
+    if spinup_time > 0:
+        time_seconds = np.concatenate([[0.0], time_seconds + spinup_time])
+        inflow_angle = np.concatenate([[inflow_angle[0]], inflow_angle])
+        velocity_magnitude = np.concatenate(
+            [[velocity_magnitude[0]], velocity_magnitude]
+        )
+
+    return time_seconds, inflow_angle, velocity_magnitude
+
+
 def apply_time_varying_inflow(
     params: xarray.Dataset,
     dirs: DirectoryPaths,
@@ -267,44 +318,20 @@ def apply_time_varying_inflow(
             )
         )
 
-    # Extract arrays from params.  When params has no ``time`` dimension
-    # (scalar / constant params), create a synthetic constant schedule
-    # spanning the full runtime so that nudging holds constant values.
+    # Extract the schedule knots. Shared with the driver-plane inlet so the two
+    # inflow routes cannot drift apart (see build_inflow_schedule).
     if "time" not in params.dims:
-        time_seconds = np.linspace(0.0, simulation_time, 2)
-
-        inflow_angle = np.linspace(
-            params["inflow_angle"].values, params["inflow_angle"].values, 2
-        )
-        velocity_mag = np.linspace(
-            params["velocity_magnitude"].values, params["velocity_magnitude"].values, 2
-        )
-
         logger.info(
-            "Scalar-params nudging schedule: t=%s, angle=%.2f, vel=%.2f",
-            time_seconds,
+            "Scalar-params nudging schedule: angle=%.2f, vel=%.2f over [0, %s]",
             params["inflow_angle"].values,
             params["velocity_magnitude"].values,
+            simulation_time,
         )
-    else:
-        time_seconds = params["time"].values.astype(float)
-
-        inflow_angle = params["inflow_angle"].values
-        velocity_mag = params["velocity_magnitude"].values
-
-        # Handle mixed scalar + time-varying: broadcast to same shape
-        if inflow_angle.ndim == 0:
-            inflow_angle = np.full_like(time_seconds, float(inflow_angle))
-        if velocity_mag.ndim == 0:
-            velocity_mag = np.full_like(time_seconds, float(velocity_mag))
-
-    # Handle spinup: prepend a constant plateau at initial values and shift
-    # user times so that the time-varying schedule starts after spinup.
-    if spinup_time > 0:
-        # Prepend t=0 with initial values (constant during spinup)
-        time_seconds = np.concatenate([[0.0], time_seconds + spinup_time])
-        inflow_angle = np.concatenate([[inflow_angle[0]], inflow_angle])
-        velocity_mag = np.concatenate([[velocity_mag[0]], velocity_mag])
+    time_seconds, inflow_angle, velocity_mag = build_inflow_schedule(
+        params,
+        spinup_time=spinup_time,
+        simulation_time=simulation_time,
+    )
 
     # Compute profiles
     thl_profs, qt_profs, u_profs, v_profs = compute_nudging_profiles(
