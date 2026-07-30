@@ -27,6 +27,12 @@ run_esmda.py, augmented with:
                               TKE / |U| mean, plus the Wasserstein distribution
                               distance and an identifiability guard
                               (``standard`` and above only).
+  * ``mean_field_metrics`` -- the time-mean velocity field and the resolved
+                              Reynolds stresses scored against the truth with
+                              the urban-CFD standards (hit rate, FAC2, FB,
+                              NMSE + split, TKE / <u'w'> RMSE), plus the
+                              reduced fields themselves in a sidecar
+                              ``eval_fields.nc`` (``standard`` and above only).
 
 How much of that is computed is gated by ``run.metrics.level`` in the run dir's
 saved config (``basic`` = exactly the keys above, ``standard`` additionally
@@ -58,15 +64,19 @@ if __package__ is None or __package__ == "":
 
 from pyurbanair.utils.da_metrics import ensemble_uniqueness
 from scripts.esmda._esmda_common import (
+    MeanFieldAccumulator,
+    SensorSeriesAccumulator,
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
+    mean_field_scores,
     open_truth,
     parameter_bundle_summary,
     parameter_metric_summary,
     read_yaml,
     sensor_statistic_scores,
     series_stats,
+    stream_window_members,
     streaming_state_rmse,
     truth_sensor_series,
     vector_sensor_metrics,
@@ -164,10 +174,20 @@ def resolve_metrics_settings(
 
     stations = _get("stations")
     if stations is not None:
+        # Shape-checked here for the same reason as the counts above: a station
+        # is an (x, y) pair, and `[[5.0]]` otherwise validates cleanly and then
+        # raises `IndexError` deep inside `_station_points`, several minutes of
+        # streaming reads later, with nothing in the traceback naming the knob.
         stations = [
             [float(v) for v in station]
             for station in OmegaConf.to_container(OmegaConf.create(stations))
         ]
+        bad = [station for station in stations if len(station) != 2]
+        if bad:
+            raise ValueError(
+                "run.metrics.stations must be a list of [x, y] pairs; got "
+                f"{bad[0]!r} with {len(bad[0])} coordinate(s)"
+            )
 
     return MetricsSettings(level=level, stations=stations, **counts)
 
@@ -330,6 +350,42 @@ def _prior_sensor_series(
     return series
 
 
+def _station_points(
+    metrics: MetricsSettings, sensor_sets: dict[str, Any]
+) -> tuple[np.ndarray, np.ndarray]:
+    """The (x, y) columns the mean-field layer profiles, ``run.metrics.stations``.
+
+    Defaults to the sensor positions: a station is a horizontal location, so
+    several sensors stacked at different heights (the usual mast layout) are
+    one column, and a column costs a few hundred cells. Configured stations
+    *replace* that default rather than adding to it -- they are the case's own
+    reference locations (wind-tunnel probes, say), which need not coincide with
+    the assimilated sensors at all.
+
+    Either way the points are then deduplicated, configured ones included: two
+    identical columns would be two identical profile panels, and every
+    downstream `station` index shifts if one of them is silently dropped later.
+    """
+    if metrics.stations is not None:
+        points = [
+            (float(station[0]), float(station[1])) for station in metrics.stations
+        ]
+    else:
+        points = []
+        for sx, sy, _ in sensor_sets.values():
+            points.extend(
+                (float(x), float(y))
+                for x, y in zip(np.asarray(sx).ravel(), np.asarray(sy).ravel())
+            )
+    unique: list[tuple[float, float]] = []
+    for point in points:
+        if point not in unique:
+            unique.append(point)
+    if not unique:
+        return np.zeros(0), np.zeros(0)
+    return np.array([p[0] for p in unique]), np.array([p[1] for p in unique])
+
+
 def compute_metrics(run_dir: pathlib.Path, metrics_level: str | None = None) -> None:
     """Compute every run metric from the saved artifacts and write run_summary.yaml."""
     cfg = load_run_config(run_dir)
@@ -431,12 +487,46 @@ def compute_metrics(run_dir: pathlib.Path, metrics_level: str | None = None) -> 
         run_dir / "windows" / f"window_{w}_posterior_state.nc"
         for w in range(num_windows)
     ]
-    ensemble_series = ensemble_sensor_series(
-        state_paths,
-        sensor_sets,
-        ta["assim_solver_name"],
-        float(ta["sim_time"]),
+
+    # --- The single shared read pass over the window state files -------------
+    # Every consumer of the full-ensemble window states is fed from ONE
+    # `stream_window_members` pass: the sensor-series extraction (which
+    # `ensemble_sensor_series` used to drive on its own) and WP1.3's per-member
+    # moment accumulators. At Barcelona scale these files total tens of GB and
+    # this stage is IO-bound, so a second full pass is not affordable. The
+    # yielded member is materialised (see `stream_window_members`), so both
+    # consumers read the same bytes rather than each re-reading the slice, and
+    # the mean-field layer adds no per-member read at all: measured on a
+    # 3-window / 8-member run dir, `u/v/w` are read exactly 23,040 elements per
+    # window at `basic` and at `standard` alike. What it does add is one
+    # geometry frame per window (`blanking`, static -- read by the accumulator
+    # off `isel(ensemble=0, time=0)`, not per member); asking the shared pass
+    # for `blanking` instead cost a second full ensemble-sized read, +33% on
+    # the window-state bytes for one 3-D frame's worth of information.
+    sensor_accumulator = SensorSeriesAccumulator(
+        sensor_sets, ta["assim_solver_name"], float(ta["sim_time"])
     )
+    station_x, station_y = _station_points(metrics, sensor_sets)
+    mean_field = (
+        MeanFieldAccumulator(
+            ta["assim_solver_name"],
+            metrics.n_z_slices,
+            metrics.mean_field_stride,
+            station_x,
+            station_y,
+            state_paths=state_paths,
+        )
+        if metrics.at_least("standard")
+        else None
+    )
+    for w, m, member_state in stream_window_members(state_paths):
+        sensor_accumulator.add_member(w, m, member_state)
+        if mean_field is not None:
+            # Never allowed to take the sensor pass down with it: the
+            # accumulator swallows its own failures into `reason`, and the
+            # layer degrades to a null block.
+            mean_field.add_member(w, m, member_state)
+    ensemble_series = sensor_accumulator.result()
 
     sensor_metrics = {}
     for name, (sx, sy, sz) in sensor_sets.items():
@@ -466,6 +556,27 @@ def compute_metrics(run_dir: pathlib.Path, metrics_level: str | None = None) -> 
             bootstrap_blocks=metrics.bootstrap_blocks,
             prior_series=_prior_sensor_series(run_dir, sensor_sets, ta, num_windows),
         )
+
+        # WP1.3: the ensemble half already happened in the shared pass above,
+        # so all that is left is the truth pass (its own grid, its own cadence)
+        # and the reduction. `eval_fields.nc` is the sanctioned handoff to the
+        # figure stage, which otherwise re-derives these fields from the raw
+        # artifacts.
+        mean_field_block, eval_fields = mean_field_scores(
+            mean_field,
+            ta["true_state_path"],
+            ta["n_total"],
+            ta["x_offset"],
+            ta["start_idx"],
+            ta["t_offset"],
+            ta["truth_solver_name"],
+            stride=metrics.mean_field_stride,
+            bootstrap_blocks=metrics.bootstrap_blocks,
+        )
+        if eval_fields is not None:
+            eval_fields.to_netcdf(run_dir / "eval_fields.nc")
+            print(f"Saved evaluation fields in {run_dir / 'eval_fields.nc'}")
+        summary["mean_field_metrics"] = mean_field_block
 
     write_yaml(summary, run_dir / "run_summary.yaml")
     print(f"Saved run summary in {run_dir / 'run_summary.yaml'}")

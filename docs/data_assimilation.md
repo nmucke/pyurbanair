@@ -604,6 +604,98 @@ case's `obs_x/y/z_points`. `create_C_D` produces the diagonal
 (never assimilated; scored as held-out check) and handles inline vs. on-disk
 truth; see `codebase_guide.md §6` and the script's docstring.
 
+### Run-directory artifacts
+
+What a run leaves behind, and which stage of the pipeline
+(`run_esmda_pipeline.sh`: run → metrics → figures) writes it. Everything the
+metric and figure stages consume is in this table — they read the run
+directory and nothing else, which is what makes them re-runnable on an old run
+dir.
+
+| Artifact | Written by | Contents / who reads it |
+|---|---|---|
+| `config.yaml`, `run_info.yaml` | stage 1 | The composed Hydra config as executed, and run metadata/timings. Stages 2–3 re-load the config to recover `run.metrics`, the case and the solver names. |
+| `truth_access.yaml` | stage 1 | The lazy-truth contract: `true_state_path`, `n_total`, `x_offset`, `start_idx`, `t_offset`, `sim_time`, `n_per_window`, `num_windows`, `assim_solver_name`, `truth_solver_name`. Every truth read in stages 2–3 goes through `open_truth` with these, so a multi-GB truth is never loaded whole. |
+| `posterior_params.nc`, `prior_params.nc`, `true_params.nc` | stage 1 | Windows concatenated along the parameter x-axis. **`prior_params.nc` block `w` is window `w−1`'s posterior** — only block 0 is a genuine prior. |
+| `posterior_state_mean.nc` | stage 1 | Ensemble-mean state over the run; the cheap field artifact. |
+| `windows/window_{w}_{prior,posterior}_params.nc` | stage 1 | Per-window parameter ensembles. |
+| `windows/window_{w}_posterior_state.nc` | stage 1 | **Full-ensemble** rollout state per window — ~1 GB at smoke scale, tens of GB at Barcelona scale. Never `.load()`ed: `_esmda_common.stream_window_members` is the sanctioned reader and yields one member at a time. |
+| `windows/window_{w}_prior_state.nc` | stage 1, only when `run.save_prior_state: true` (**off by default**) | The step-0 forecast. Its absence is why `sensor_statistics.<stat>.crpss_vs_prior` is `null` on nearly every run. |
+| `run_summary.yaml` | stage 2 | Every scalar metric, gated by `run.metrics.level`; keys are additive-only across phases and `metrics_version` / `metrics_level` record which estimators and which layers produced it. Key-by-key documentation lives in `docs/scripts_and_configs.md`. |
+| `eval_fields.nc` | stage 2, `level: standard` and above | The reduced mean-field / Reynolds-stress fields and station profiles — see below. Grows with the grid (~11 kB at smoke, 9.1 MB at 4×128×128, ~150 MB at 4×512×512), unlike the other post-processing artifacts. |
+| Figures (`*.png`, `*.mp4`) | stage 3 | Honors `run.skip_viz`. |
+
+#### `eval_fields.nc`
+
+The **sanctioned handoff from the metrics stage to the figure stage**, and the
+only one. Stage 3 otherwise re-derives its inputs from the raw artifacts, which
+here would mean repeating a streaming pass over every window state file —
+precisely the cost the shared read pass exists to pay once. Written by
+`compute_esmda_metrics.py` from `_esmda_common.mean_field_scores`; consumed by
+WP1.4's F1 (`plot_mean_field_comparison`), F2 (`plot_spread_maps`) and S1
+(`plot_station_profiles`). Absent on `level: basic`, on run dirs processed
+before phase 1, and on any run where the mean-field layer degraded — in which
+case `run_summary.yaml`'s `mean_field_metrics.reason` says why, and
+`mean_field_metrics.eval_fields` (the file name) is `null`.
+
+It holds **time-mean** quantities only, averaged over every frame of every
+window, on two grids that are deliberately given different vertical dims:
+
+- `zlev` — the `run.metrics.n_z_slices` scored planes (the same evenly-spaced
+  level selection `state_metrics`' `|U|` RMSE slices use), on the assimilation
+  grid's `y`/`x`. Variables: `truth_mean` / `ensemble_mean` / `ensemble_std`
+  per velocity `component`, and `truth_*` / `ensemble_*` / `ensemble_*_std`
+  triples for `velmag`, `tke` and `uw` (the resolved `⟨u′w′⟩` stress).
+- `z` — the **full** assimilation column, carried only at the `station` points
+  (`run.metrics.stations`, defaulting to the deduplicated sensor x/y). A
+  4-plane sampling is not a vertical profile, and S1 needs one. Variables are
+  the `station_*` family plus `station_x` / `station_y`, and four
+  `station_ensemble_{mean,rms,tke,uw}_quantile` variables carrying the
+  across-member 5/25/50/75/95 percentiles on a leading `quantile` dim — so a
+  profile band is the **empirical** fan rather than `mean ± kσ`, which is only
+  the same thing for a Gaussian ensemble. That is the last reason the figure
+  stage would have had to re-read the window states.
+
+**It is not a small file at production scale.** ~11 kB on the smoke shape, but
+9.1 MB at 4×128×128 and therefore ~150 MB at 4×512×512 — it scales with
+`n_z_slices × ny × nx`, not with the ensemble or the run length. Budget for it
+in a sweep, and reach for `run.metrics.mean_field_stride` if it matters.
+
+Three things a consumer must not re-derive, and one trap.
+
+**The fluid mask travels with the file.** `fluid_mask` and `station_fluid_mask`
+(1 = fluid) are the assimilation-side solid-cell indicator, so a figure can
+`set_bad` buildings without knowing how the mask was obtained — which is not
+obvious, since only pylbm writes one (`blanking`); pypalm fills PALM's NaN with
+0.0 and uDALES ships no mask at all, and the `mask_source` /
+`truth_mask_source` attributes record which side supplied it.
+
+> **Trap, and it matters for WP1.4.** `fluid_mask` is **not** the scored set.
+> Every other exclusion the summary applied — the truth's own buildings, the
+> perimeter the cross-grid interpolation erodes, a diverged member's footprint —
+> is baked into the `truth_*` variables as NaN, so **`isfinite(truth_velmag)`
+> *is* the scored set, and `fluid_mask` is a superset of it (`≥`, not `>`)**.
+> Measured: **equal** on a matched-grid run where both sides carry the same mask
+> (104 == 104), and strictly larger when the truth's mask or grid differs
+> (16 against 8 at `mean_field_stride: 3`). Sometimes-equal is exactly why a
+> consumer must not rely on it: a figure masking on `fluid_mask` while quoting a
+> metric computed on the pairs would be showing cells the number never saw, on
+> the cross-grid runs and silently agree on the matched ones. Use `fluid_mask`
+> for `set_bad` on the *posterior* panels, and `isfinite(truth_velmag)` wherever
+> the panel has to agree with `run_summary.yaml`.
+
+**`n_members_scored` is an attribute, and it is not always `n_members`.** A
+member whose time-mean field came out non-finite (a diverged CFD member) is
+excluded from every reduction in this file; a band captioned `M = n_members`
+would be captioning a lie. `run_summary.yaml`'s
+`mean_field_metrics.averaging.n_members_scored` carries the same number, with a
+`reason` naming the excluded indices.
+
+**`ensemble_velmag` is `|mean of the member means|`** — the scored quantity —
+while `ensemble_velmag_std` is the across-member std of each member's *own*
+`|U|`. Both carry a `long_name` saying so, because they are different
+reductions and not a quantity and its moment.
+
 ---
 
 ## 11. Extension recipes

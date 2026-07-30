@@ -593,7 +593,60 @@ Provides:
   from the obs config.
 - `open_truth(cfg, ta)` — lazy truth access (multi-GB `state.nc` never fully loaded).
 - `ensemble_sensor_series(...)` / `truth_sensor_series(...)` — interpolate ensemble
-  and truth states at sensor locations.
+  and truth states at sensor locations. `ensemble_sensor_series` **streams
+  member-at-a-time** rather than loading each window file whole (it used to do
+  `xarray.open_dataset(path).load()` on a file holding the entire ensemble); its
+  return value is unchanged and bit-identical, memory layout included, since
+  WP1.2's calibration numbers are pinned to it. It now raises on a window file
+  with no `ensemble` dimension instead of silently returning an axis-less series.
+- `stream_window_members(state_paths, variables=("u","v","w"))` — **the
+  sanctioned reader for `windows/window_*_state.nc`**, and the one pass every
+  consumer of those files hangs off. Yields `(window_index, member_index,
+  member_state)`; opens each file lazily, slices `.isel(ensemble=m)`, and
+  materialises **one member** (`variables=None` reads every data variable). The
+  member is materialised on purpose: xarray does not cache reads taken through
+  `.isel`, so a lazy yield would make `N` consumers cost `N×` the bytes and
+  defeat the shared pass. That is a `.load()` at member granularity, which is
+  what the never-load-a-window-file rule prescribes — the docstring says so
+  rather than hiding behind the spelling.
+- `member_sensor_series(...)` / `SensorSeriesAccumulator` — the per-member unit
+  of `ensemble_sensor_series` and the accumulator that reassembles it, exposed
+  so a caller driving its own `stream_window_members` pass can attach the sensor
+  extraction to it. The window-local → global time rebasing
+  (`(t − t[0]) + w·sim_time`) lives in `member_sensor_series`.
+- `MeanFieldAccumulator(solver_name, n_z_slices, stride, station_x, station_y,
+  state_paths=None)` — the WP1.3 ensemble half: two
+  `turbulence_stats.StreamingMoments` per member (z-slabs, full-z station
+  columns), fed from the same shared pass. Per-cell state only, so it is
+  independent of the frame count — but **not** of `M` or the grid: the slab
+  accumulators are 0.62 GB at `M = 32` / 4×256×256 and **10 GB** at the plan's
+  `M = 128` / 4×512×512 target, held for the whole pass, which is what
+  `mean_field_stride` is for. `state_paths` is how it reads the solid-cell mask:
+  once per window from `isel(ensemble=0, time=0)`, because `blanking` is static
+  geometry that the run stage writes replicated over `(ensemble, time)` — asking
+  `stream_window_members` for it instead cost a second full ensemble-sized read
+  (+33% on the window-state bytes at Barcelona scale) for one frame's worth of
+  information. Omit it and the mask falls back to the member, for an in-memory
+  caller. A member whose time-mean slab is non-finite anywhere is excluded from
+  every reduction, with a warning and an `n_members_scored` count; other failures
+  set `reason` and null the layer rather than taking the sensor pass down.
+- `truth_mean_field_stats(..., stride=1, bootstrap_blocks=20)` — the WP1.3 truth
+  half, on the truth's own grid and cadence: time-mean fields, Reynolds stresses,
+  station columns, and the moving-block sampling floors (hit-rate allowance, TKE
+  and `⟨u′w′⟩` RMSE floors). Read chunk-wise; nothing is interpolated here,
+  because averaging precedes interpolation. `stride` is not cosmetic — the floors
+  are bootstrapped over the truth's fluid cells **at the scored stride**, so that
+  they describe the same sample the scores do.
+- `STATION_QUANTILES` — the across-member percentiles (5/25/50/75/95) persisted
+  per station column in `eval_fields.nc`, so WP1.4's profile band is empirical
+  rather than `mean ± kσ` and needs no recomputation.
+- `mean_field_summary(...)` / `mean_field_scores(...)` — the reduction and the
+  WP1.3 entry point. `mean_field_scores` returns
+  `(mean_field_metrics block, eval_fields Dataset)`, the Dataset being `None` on
+  every degraded path.
+- `evenly_spaced_levels(n_levels, n_slices)` — `_vel_field_4z`'s z-level
+  selection rule, shared rather than re-derived, so the mean-field slabs land on
+  the same planes as the `state_metrics` `|U|` RMSE slices.
 - `streaming_state_rmse(...)` — streamed z-slice RMSE without loading the full field.
 - `parameter_metric_summary(...)` / `vector_sensor_metrics(...)` — scalar summaries
   written to `run_summary.yaml`.
@@ -650,6 +703,18 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   Wasserstein distribution distance, and an identifiability guard.
   `standard` and above only, and it sits *after* the `run.skip_viz` early
   return because it consumes the truth.
+- `mean_field_metrics` — the time-mean velocity field and the resolved Reynolds
+  stresses scored against the truth with the urban-CFD standards (hit rate,
+  FAC2, fractional bias, NMSE with its systematic/unsystematic split), plus TKE
+  and `⟨u′w′⟩` RMSEs beside the truth's own sampling floors. `standard` and
+  above only, and likewise after the `skip_viz` return.
+
+It also writes one NetCDF at `standard` and above: **`eval_fields.nc`**, the
+reduced mean-field / station-column arrays the stage-3 figures need. It is the
+sanctioned handoff — stage 3 otherwise re-derives its inputs from the raw
+artifacts, which here would mean repeating the streaming pass over every window
+state file. Its variables and the mask it carries are documented in
+[`data_assimilation.md`](data_assimilation.md#run-directory-artifacts).
 
 Which of those layers run is gated by [`run.metrics.level`](#runmetrics-esmda-only)
 from the saved config: `basic` writes exactly the keys above, higher levels add
@@ -885,6 +950,127 @@ expect a trending truth to push the *score* below its reference, and read a scor
 well below its reference as "the floor ate it" rather than as "better than
 perfect". Either way, the pair is not a trend test in either direction.
 
+##### `standard`: the mean-field / Reynolds-stress layer (WP1.3)
+
+At `level: standard` a top-level `mean_field_metrics` mapping appears, and
+`eval_fields.nc` is written beside it. Like `sensor_statistics` it attaches
+*after* the `run.skip_viz` early return (it consumes the truth), so a
+`skip_viz` run has neither.
+
+What it scores: each ensemble member's **time-mean** velocity field over the
+whole assimilation horizon, reduced to the ensemble mean of those means, against
+the truth's time mean on the same grid — with the urban-CFD standard metrics of
+[`docs/plans/esmda_turbulence_evaluation.md`](plans/esmda_turbulence_evaluation.md)
+§4.1. The ensemble half comes off the **single shared per-member read pass**
+that also feeds the sensor extraction (`stream_window_members`), so its
+incremental cost is arithmetic, not IO; the truth half is a separate pass over
+the truth's own grid and cadence, and averaging always precedes interpolation.
+
+Two rules for reading any of it, both inherited from the layers above.
+**A calibration number ships with its reference** — here the references are the
+truth's own sampling floors, and an RMSE below its floor is not skill, it is the
+truth's window length. And **every key is `null`, not absent, on a degraded
+path**: an old run dir, an absent truth, a solver whose staggering cannot be
+colocated, or a level at which the layer never ran all produce the same key set.
+`reason` is non-null on every one of those — and, unlike the other blocks here,
+also on a block that still carries perfectly good numbers, because this layer
+has degradations that are partial (a diverged member excluded, an extrapolated
+level that could not be dropped) and those should be legible rather than
+invisible.
+
+| Key | Meaning |
+|---|---|
+| `hit_rate.{u,v,w}` | VDI 3783/9 hit rate `q` per signed velocity component: the fraction of scored cells agreeing within `relative_tolerance` **or** within `allowance`. The `or` is the design — a velocity component passes through zero, where a relative test is meaningless. Metrics-doc acceptance is `q >= 0.66`. Like every aggregate here it is reduced over the **non-extrapolated** z-levels only (see `averaging.z_levels_extrapolated`). |
+| `hit_rate.per_z` | The same `q` per scored plane, as `[{z, u, v, w, fac2_velmag, extrapolated}, ...]` — **every** plane, including the extrapolated one the aggregates leave out. Read it before the pooled numbers: a run can pass in the free stream and fail in the canopy, and the pooled `q` averages that away. |
+| `hit_rate.per_z[*].extrapolated` | `true` on a plane whose colocation was extrapolated rather than interpolated — the top level of a staggered backend's `w`, which an evenly spaced selection always lands on. Its second moments are inflated (5× against an interior cell for face-to-face white noise, ~1.2× for a well-resolved field), so it is reported here but kept out of every aggregate — unless excluding it would leave nothing (`nz == 1`), where it is kept and `reason` says so. |
+| `hit_rate.allowance.{u,v,w}` | `W`, the absolute error allowed regardless of relative error, **in m/s** — the truth's own sampling uncertainty, a moving-block bootstrap of the per-cell time mean reduced over cells by the *median* (forced: `hit_rate` takes one scalar, and the median is robust across a wake). This is what turns `q` into "indistinguishable within the truth's sampling error" rather than an arbitrary threshold. Bootstrapped over the truth's **fluid** cells at the scored **stride** (see `averaging.n_bootstrap_cells`) — over the raw slab it would be a floor for a sample the scores never touch. |
+| `hit_rate.allowance.reason` | Non-null when *no* component has a finite allowance, naming the degradation. `null` allowances are the sanctioned path, not a fault: the absolute clause is then skipped and `q` degrades to the pure relative test, which can only be **lower** — a missing floor never flatters a run. It fires at the **smoke shape** (3 frames against `bootstrap_blocks: 20` leaves a block length below 2) and on all three of the `.temp` run dirs. |
+| `hit_rate.relative_tolerance` | `D`, `0.25` by default. Configuration, so it keeps its value on the null path — a `q` is unreadable without the two tolerances it was computed with. |
+| `fac2_velmag` | Fraction of scored cells with `0.5 <= pred/obs <= 2` on `\|U\|`. Acceptance `>= 0.5` for dispersion, `>= 0.3` in practice for urban-LES velocity. `\|U\|` only, never a signed component: `fac2` **raises** on a negative value rather than returning a meaningless ratio test. |
+| `fb.{u,v,w,velmag}` | `FB = (ō − p̄)/(0.5(ō + p̄))`; acceptance `\|FB\| <= 0.3`. **Positive means the prediction is too small.** Bounded in `[−2, 2]` for `velmag`; **not bounded at all** for a signed component, whose denominator can pass through zero while both fields are ordinary — a large per-component `\|FB\|` is then a statement about the denominator, not about the run. `fb.velmag` is the one to quote. |
+| `nmse.{u,v,w,velmag}.total` | `⟨(o − p)²⟩/(ō·p̄)`; acceptance `NMSE <= 4`. `null` whenever `ō·p̄ <= 0`, which is **routine** for a signed component and unreachable for `velmag`. |
+| `nmse.<q>.{systematic,unsystematic}` | `NMSE_s = 4FB²/(4 − FB²)` and the remainder. Exact algebra, not an approximation, so `NMSE_s <= NMSE` is an identity. **This split is the conceptual payoff of the layer**: assimilation should collapse `NMSE_s` (a bias is a parameter error) while `NMSE_u` is chaotic decorrelation and is irreducible — a run that lowers only the total may have done nothing to the estimable part. Both `null` at `\|FB\| >= 2`, where the formula divides by zero. |
+| `tke_rmse.value` / `uw_stress_rmse.value` | RMSE of the ensemble-mean **resolved** TKE and `⟨u′w′⟩` maps against the truth's, over the scored cells. Resolved only — no subgrid contribution, which is also stated in `eval_fields.nc`'s `stress_kind` attribute. |
+| `tke_rmse.sampling_floor` / `uw_stress_rmse.sampling_floor` | The reference the line above is meaningless without: the truth's own sampling error at this window length, a moving-block bootstrap of the per-timestep integrands (Bessel factor on the integrand, so the resampled statistic is exactly the reported `ddof=1` moment and matches WP1.2's TKE definition), reduced over cells by **RMS** — the RMS of the per-cell sampling errors is the RMSE a perfect model would still score. `value <= sampling_floor` means "at the noise floor", not "skillful". Computed on the same fluid, strided, capped cell sample as the allowance above; over the unmasked slab these come out ~13% low, which is the anti-conservative direction for a number whose whole job is to say "this RMSE is not skill". `null` wherever the bootstrap is undefined, including the smoke shape. |
+| `averaging.n_time` / `n_time_truth` | Frames averaged per member, and frames averaged on the truth side. They routinely differ — the truth is saved on its own cadence — and both are time means, so that is not a misalignment. `n_time` is the **smallest** member's count when members carry different frame counts (a `logger.info` says so); the moments weight every frame equally, so a longer member is simply better sampled. |
+| `averaging.{n_windows,n_members,n_stations,stride}` | The accumulation's shape, as **configured**. `stride` is `run.metrics.mean_field_stride`: hit rate, FAC2, FB and NMSE are cell-count-weighted, so **scores are only comparable across runs at equal stride**. For what actually contributed, read the two keys below. |
+| `averaging.n_members_scored` | Members that entered the mean field. It is `< n_members` when a member's time-mean slab came out non-finite anywhere — a diverged CFD member — in which case that member is dropped from **every** reduction here, `reason` names the excluded indices and a `logger.warning` fires. The exclusion is whole-member on purpose: an ensemble mean and a `ddof=1` spread taken over different member sets at neighbouring cells are not a field, and the spread is what `eval_fields.nc` publishes. `eval_fields.nc` carries the same number as an attr, so a figure captioning a band with `M` reads the right one. |
+| `averaging.n_stations_with_truth` | Stations that have a truth column at all. Routinely `< n_stations`: a station whose 2×2 horizontal stencil touches a solid cell loses its **entire** truth column (the all-fluid stencil rule is strict on purpose — the alternative is profiling against a building interior), and stations default to sensor x/y, which in an urban case sit on facades and roofs. A `logger.warning` names the affected stations and their coordinates. **Check this before reading an S1 profile panel**: without it, a panel with a posterior band and no truth line looks like a plotting bug. |
+| `averaging.{z_levels,z_indices}` | The scored planes on the assimilation grid, and their indices. The selection is `evenly_spaced_levels`, the same rule `state_metrics`' `\|U\|` RMSE slices use, so the two layers describe the same planes. |
+| `averaging.z_levels_extrapolated` | The subset of those planes whose colocation was **extrapolated**, not interpolated. Each solver stores one face per cell, so the last centre of a staggered axis is filled from outside the data with weights (1.5, −0.5) — and `np.linspace(0, nz−1, k)` always includes `nz−1`, so on uDALES/PALM `w` this is not bad luck, it is guaranteed (1 of 4 levels at the shipped `n_z_slices`). It is a fact about the **grid**, reported whatever the aggregate then does with it: normally these levels are excluded from every aggregate and still reported in `per_z`, but at `nz == 1` the only scored level *is* the extrapolated one, and there every level is kept with a `reason` and a warning rather than nulling every score. Empty on pylbm — nothing is staggered. Only the z axis is tracked: the last x-row and y-column carry the same edge and stay in every aggregate, a known limitation left to WP1.4 or later. |
+| `averaging.{truth_z_levels,z_offset_max}` | The truth levels actually used, and the largest residual `\|z_truth − z_assim\|`. Vertical alignment for the slabs is **nearest level, not interpolated** — a post-averaging z-interpolation would require carrying the bracketing levels through the streaming pass, i.e. the full 3-D truth moments. `z_offset_max` is how far that compromise moved things (0.0 on all three `.temp` run dirs); a non-trivial value means the slab scores are comparing slightly different heights. The **station columns** have no such constraint and *are* z-interpolated after averaging. |
+| `averaging.{n_cells,n_scored_cells}` | Cells in the slab region, and cells that carried a **scoreable pair** — finite on both sides, which is the mask *and* everything else that came out non-finite. Their ratio is `masking.scored_fraction`, and `n_scored_cells` is derived from the retained pairs themselves, so the reported sample is the scored sample by construction rather than by coincidence. |
+| `averaging.n_aggregate_cells` | The subset of `n_scored_cells` on the levels the **aggregate** scores reduce over, i.e. excluding any extrapolated plane. It differs from `n_scored_cells` exactly when `z_levels_extrapolated` is non-empty *and* the exclusion was applied; the per-z rows still cover all of them. |
+| `averaging.n_stress_cells` | The sample **the two RMSEs** were computed on — a subset of `n_aggregate_cells`, and the only key that describes `tke_rmse` / `uw_stress_rmse` rather than the four urban-CFD scores. It is smaller because those are `ddof=1` moments: a cell needs **two** frames where a mean needs one, so a member that lost all but one frame over a sub-region, or a one-frame window, drops that cell from the stresses while its mean field stays perfectly finite (measured 76 against 104 on a partial-divergence fixture). The base sample is deliberately *not* widened to include this rule — that would let a short window empty the hit rate's sample too — so the count travels instead. `tke` and `⟨u′w′⟩` share one sample by construction (same `StreamingMoments` per-cell count, same mask), so one leaf covers both exactly; it is computed as an intersection regardless, and can therefore only understate. |
+| `averaging.n_bootstrap_cells` | Cells actually used for the sampling floors. The floors need the truth *series* per cell (a moving-block bootstrap resamples a series, not a moment), which is the one array here that grows with the frame count — so the series is taken over the truth's **fluid** cells at the **scored stride**, then subsampled by a seeded random draw. Fluid and strided because the floors have to describe the same sample the scores do; **random** rather than a fixed stride because a raveled stride phase-locks (at 4×512×512 the implied stride is 68, `gcd(68, 512) = 4`, so only `x ≡ 0 (mod 4)` is retained — on a regular building array that is one geometric phase). At `stride > 1` this can exceed `n_scored_cells`: the truth-side stride lands on the truth's own cells while the erosion happens on the assimilation grid, and the floors are a property of the truth's sampling *at the same density*, not a cell-for-cell alignment. |
+| `averaging.n_bootstrap_cells_max` | The cap (`_TRUTH_BOOTSTRAP_MAX_CELLS = 4096`). A time bound, not a memory bound — see the runtime paragraph below for what it costs. |
+| `averaging.bootstrap_seed` | The seed of that draw. Fixed rather than configurable, so the floors are reproducible: a floor that moved between two re-runs of the metrics stage would be indistinguishable from a floor that moved because the run changed. |
+| `masking.source` | `blanking` if either side supplied a solid-cell mask, else `"none"`. |
+| `masking.{truth_source,ensemble_source}` | Which side supplied it, separately — a cross-model run routinely has one and not the other. |
+| `masking.note` | Non-null **exactly when nothing masked**, and it is the caveat that matters most in this block. See the paragraph below. |
+| `masking.fluid_fraction` | **The mask's own number**: fluid on the assimilation side **and** resolvable on the interpolated truth side. The second half is not only the truth's buildings — a truth grid that does not cover the whole assimilation domain leaves NaN at the edges too. This describes the *mask*, not the scores. |
+| `masking.scored_fraction` | **The scores' number**: the fraction that carried a scoreable pair, i.e. the sample every number in this block was computed on. `= n_scored_cells / n_cells` by construction, and always `<= fluid_fraction`. The two names exist because giving one name to two samples is the failure mode this layer keeps having to defend against; today they are equal on every reachable path (the only non-finiteness sources are the mask and diverged members, and the latter are excluded member-wise), so **a gap between them is a signal**, not noise. |
+| `masking.ensemble_fluid_fraction` | The assimilation side's own fluid fraction, before the truth's resolvability is intersected in. The gap between this and `fluid_fraction` is the cross-grid cost quantified below. |
+| `masking.truth_finite_fraction` | Fraction of target cells where the interpolated truth is finite. |
+| `eval_fields` | File name of the companion NetCDF (`eval_fields.nc`), or `null` when the layer degraded and wrote none. |
+| `reason` | Names whatever degraded, and — unlike the other blocks in this file — **it can be non-null on a block that still carries numbers**. Partial degradation is legible on purpose: excluded members and a kept-but-extrapolated aggregate level both produce real scores plus a `reason` describing what they were computed despite. A null block always has one; a block with numbers may. |
+
+**The masking caveat, because it is the one number-moving limitation in this
+layer.** The plan assumed solid cells arrive as NaN. They do not, on any
+backend: the measured NaN fraction of `u`/`v`/`w` is 0.0 in every state artifact
+inspected. Only **pylbm** writes a mask (`blanking`, 1 = solid); **pypalm**
+`fillna(0.0)`s PALM's NaN before returning state, so a PALM mask is not
+recoverable from the artifact at all; **uDALES** fielddumps carry small non-zero
+junk inside buildings and ship no mask (the training-data scripts attach one
+from `solid_c.txt` afterwards, which needs case-dir paths this stage does not
+have). So on a uDALES or PALM run — `masking.source: none`, and a
+`logger.warning` fires — **the scores include building interiors and are
+optimistic by roughly the building fraction**. FAC2 is the worst affected: a
+cell that is zero on both sides counts as a hit, which is right for a stagnation
+point and wrong for a solid cell. Read a `masking.source: none` run's FAC2 and
+hit rate as upper bounds, and compare them only against other unmasked runs.
+Parsing `solid_c.txt` and preserving PALM's NaN are both out of phase 1.
+
+**The cross-grid cost: small in count, biased in direction.** When truth and
+assimilation grids differ, the truth is NaN-masked *before* `.interp`, so any
+target cell whose interpolation stencil touched a building drops out. That is
+the conservative threshold and it comes for free — but it erodes the perimeter
+of every building. Measured on `pylbm_to_pylbm` (truth half-cell-shifted by
+`x_offset: -0.5`), 164 of 1200 ensemble-fluid cells are lost, of which **120 are
+genuinely solid in the truth's own shifted geometry** and correctly excluded;
+only **44 — 3.7% of the fluid set — are erosion**. The count is therefore small.
+The *bias* is not: those 44 cells carry **2.65× the mean shear** of the retained
+set and the run scores materially worse on them (`q(u)` 0.682 against 0.804,
+NMSE(`|U|`) 0.0680 against 0.0128), so dropping them **flatters `q` by
++0.005…+0.010 and understates NMSE(`|U|`) by 6%** at this shape. The effect
+scales with perimeter/area, so it is *larger* on a dense array like Barcelona
+than on this fixture. The alternative — interpolating field and mask separately
+— keeps those cells but scores them partly against building interiors, which is
+a wrong number instead of a missing one; the trade stands, but read a cross-grid
+run's `q` and NMSE as slightly optimistic and check the gap between
+`masking.ensemble_fluid_fraction` and `masking.fluid_fraction` to see how much
+perimeter this case has.
+
+**Runtime, and why the smoke number was meaningless.** This layer's dominant
+cost is the truth's bootstrap, and `block_bootstrap_std_batch` returns all-`nan`
+before doing any work below 4 frames — the smoke truth has 3. So the smoke-scale
+benchmark (2.06–2.28× against `basic`, ~90 ms absolute) measured this layer at
+the one shape where its expensive half does not run, which is also why dropping
+`n_z_slices` to 2 appeared to change nothing. Measured `_truth_sampling_floors`
+at 36 frames / 20 blocks: 1600 cells 157.5 ms, 4096 cells 448 ms, 16384 cells
+1.9 s, **65536 cells (4×128×128) 13.2 s**. `_TRUTH_SERIES_MAX_BYTES` bounds
+memory, not time, and at that shape the stride it implies is 1.
+The bootstrap row count is therefore capped at `_TRUTH_BOOTSTRAP_MAX_CELLS =
+4096`. End to end at 4×128×128 × 36 frames, `M = 8`, 3 windows: **`basic` 0.35 s
+against `standard` 1.62 s**, where uncapped the truth pass alone would add the
+13.2 s. **The cap does not materially move the floors:** over 8 seeds at that
+shape, capped against all-cell is rms 0.50% (allowance), 0.39% (tke), 0.64%
+(uw), worst case 1.29% — against a number that is an order-of-magnitude
+statement about the truth's window length. `averaging.n_bootstrap_cells` /
+`n_bootstrap_cells_max` / `bootstrap_seed` make the realised sample
+reproducible. `n_z_slices` and `mean_field_stride` remain the relief valves for
+the *rest* of the stage, whose cost is per cell.
+
 #### [`make_esmda_figures.py`](../scripts/esmda/make_esmda_figures.py)
 **Plain argparse CLI** — usage: `python scripts/esmda/make_esmda_figures.py --run-dir <dir>`
 
@@ -919,6 +1105,20 @@ figure stages reuse the ESMDA truth-access / sensor-series helpers via
 [`_filtering_common.py`](../scripts/filtering/_filtering_common.py), which adapts
 them to the filter's per-**cycle** time axis (the truth is compared at each
 cycle's end-of-segment frame).
+
+**Known remaining full-ensemble `.load()`, deliberately not fixed.** The ESMDA
+evaluation effort's phase-1 acceptance criterion is "no `.load()` of window
+state files anywhere (grep)", and as of WP1.3 that holds — but the grep is not
+the same thing as "no full-ensemble state file is ever loaded". One hit remains:
+`_filtering_common.ensemble_cycle_sensor_series` does `analyzed_states.load()`
+on `state_history.nc`, which **is** a `(cycle, ensemble, …)` full-ensemble
+state. It is out of scope because it is not a `windows/window_*_state.nc` and it
+is much smaller — one analyzed frame per cycle rather than a whole rollout — but
+it will grow with `filtering.num_cycles × ensemble size`, and the fix when it
+matters is the same one the ESMDA stage took: drive it from a
+member-at-a-time generator and accumulate. Recorded here so a reader running the
+acceptance grep is not misled into thinking the tree is clean of full-ensemble
+loads everywhere.
 
 #### [`compute_filtering_metrics.py`](../scripts/filtering/compute_filtering_metrics.py)
 **Plain argparse CLI** — usage: `python scripts/filtering/compute_filtering_metrics.py --run-dir <dir>`
@@ -1036,6 +1236,45 @@ For legacy runs without `truth_access.yaml`, the stage still recomputes the
 parameter bundle with version-2 estimators but omits sensor metrics: copying the
 source summary's version-1 sensor scores would create a mixed-semantics
 `metrics.yaml`.
+
+Both sensor series are read through the ESMDA stage's helpers
+(`_esmda_common.ensemble_sensor_series` / `truth_sensor_series` / `open_truth`)
+rather than through this file's own copies, which were deleted. The ensemble
+path used to `xr.open_dataset(path).load()` a whole-ensemble window file, the
+one thing phase 1 forbids materialising; the truth path was already
+window-at-a-time but was character-for-character the ESMDA copy, so keeping it
+only created somewhere for the two stages to disagree about what a sensor series
+is. Both are bit-identical to what they replaced, **memory layout included** —
+which is load-bearing rather than fussy: consumers reduce over these axes, numpy
+walks a reduction in memory order and float addition is not associative, so a
+re-laid-out buffer moves `metrics.yaml` in the last ULP (measured: forcing
+C-contiguity moves 16 of 92 leaves, all sensor CRPS entries, by up to 2.1e-15).
+Sweep comparisons are cross-run, and `metrics_version` exists so historical
+numbers only move deliberately. `_split_quantities` — the `{u, v, w, vel}`
+reshaping — is all that remains specific to this stage, and it deliberately
+returns `.sel` **views** of the shared buffer for that reason; `vel` is
+`_esmda_common.sensor_magnitude`, the same definition the ESMDA stage uses. It
+is loudly three-component (`_COMPONENTS`, and a `ValueError` naming the actual
+component set otherwise) rather than silently so: the `metrics.yaml` key names
+and the three-term `|U|` sum are per-component anyway, so a "general" splitter
+would have moved a silent drop one layer down instead of removing it.
+
+A run whose sensor series cannot be read (a legacy window file with no
+`ensemble` dimension; sensor points outside the domain) no longer disappears
+from the sweep: `process_run` catches the `ValueError`, logs a warning naming
+the run and the cause, records it in `status["note"]`, and still writes
+`metrics.yaml` with the parameter/state metrics and the `num_sensors` skeleton
+— the same degradation as the missing-`truth_access` branch above.
+
+**Known stale invocations (pre-existing, not fixed here).**
+`job_scripts/local/eval_sweep.sh:85`,
+`job_scripts/snellius/eval_sweep.slurm:66` and
+`job_scripts/delftblue/eval_sweep.slurm:69` all call
+`scripts/compute_sweep_metrics.py`, which no longer exists — the script lives at
+`scripts/figure_creation/compute_sweep_metrics.py`. The comment headers in those
+files and `job_scripts/local/README.md` name the old path too. Unrelated to the
+evaluation effort and deliberately left for its own change; a sweep launched
+from any of the three will fail at stage 1 until it is corrected.
 
 #### [`figure_creation/compare_sweep_results.py`](../scripts/figure_creation/compare_sweep_results.py)
 

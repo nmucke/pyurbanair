@@ -147,6 +147,27 @@ def test_stations_are_normalized_to_float_pairs() -> None:
     assert all(isinstance(v, float) for station in settings.stations for v in station)
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "stations",
+    [[[5.0]], [[5.0, 6.0, 7.0]], [[1.0, 2.0], [3.0]]],
+    ids=["too_short", "too_long", "one_bad_entry"],
+)
+def test_stations_that_are_not_xy_pairs_are_rejected_loudly(
+    stations: list[list[float]],
+) -> None:
+    """A station is an (x, y) pair, and the shape check belongs here.
+
+    Same failure mode and same place as the count checks above: `[[5.0]]` used
+    to validate cleanly and then raise a bare `IndexError` inside
+    `_station_points`, after the metrics stage had already streamed every window
+    state file, with nothing in the traceback naming the knob that was wrong.
+    """
+    cfg = OmegaConf.create({"run": {"metrics": {"stations": stations}}})
+
+    with pytest.raises(ValueError, match=r"run.metrics.stations must be a list"):
+        resolve_metrics_settings(cfg)
+
+
 def test_at_least_orders_the_levels() -> None:
     def level(name: str) -> MetricsSettings:
         return resolve_metrics_settings(OmegaConf.create({}), name)

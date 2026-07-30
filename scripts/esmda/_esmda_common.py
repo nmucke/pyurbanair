@@ -58,7 +58,18 @@ from pyurbanair.utils.ensemble_scores import (
     zscore,
     zscore_exceedance,
 )
-from pyurbanair.utils.turbulence_stats import block_bootstrap_std_batch
+from pyurbanair.utils.turbulence_stats import (
+    DEFAULT_HIT_RATE_TOLERANCE,
+    StreamingMoments,
+    block_bootstrap_std_batch,
+    colocate_components,
+    extrapolated_centre_dims,
+    fac2,
+    fractional_bias,
+    hit_rate,
+    nmse,
+    nmse_split,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +255,115 @@ def streaming_state_rmse(true_state, esmda_state, n_z_slices=4):
 
 
 # ---------------------------------------------------------------------------
+# Per-member streaming reads of the full-ensemble window state files
+# ---------------------------------------------------------------------------
+
+# What the window state files are read for. Restricting the per-member read to
+# the velocity triple is not tidiness: ``run_esmda._stream_concat_members``
+# copies *every* data variable the solver wrote into the window file, so a
+# solver carrying pressure or scalars would otherwise have its extra fields
+# paid for in full by post-processing that reads none of them.
+_STATE_VELOCITY_VARS = ("u", "v", "w")
+
+
+def stream_window_members(state_paths, variables=_STATE_VELOCITY_VARS):
+    """Yield ``(window_index, member_index, member_state)``, one member at a time.
+
+    The sanctioned reader for ``windows/window_*_{posterior,prior}_state.nc``.
+    Those files hold the whole ensemble -- ~1 GB at smoke scale, tens of GB at
+    Barcelona scale -- so they are opened lazily and sliced ``.isel(ensemble=m)``;
+    nothing here ever holds more than one member. Reading is sequential (one
+    reader), which is under the two-reader cap by construction.
+
+    **Every** consumer that needs the window states is fed from this one pass:
+    at production scale a second full pass over tens of GB is not affordable, so
+    the pass is shared rather than duplicated. Two properties of the yielded
+    member follow from that, and both are deliberate:
+
+    *It is materialised* (in memory, one member's fields), because xarray does
+    not cache reads taken through ``.isel``: two consumers slicing the same
+    *lazy* member read the same bytes twice. Measured by counting
+    ``NetCDF4ArrayWrapper._getitem`` calls on a fabricated
+    ``(ensemble 8, time 8, z 6, y 7, x 9)`` window file, in elements read, where
+    one full ensemble is 72576 elements:
+
+    ==============================================  =====  ========
+    shape                                           reads  elements
+    ==============================================  =====  ========
+    full-ensemble ``.load()`` (what this replaced)      3     72576
+    lazy member, one consumer                          24     72576
+    lazy member, two consumers                         48    145152
+    materialised member, two consumers                 24     72576
+    ==============================================  =====  ========
+
+    So a materialised member reads each member's bytes exactly once however many
+    consumers are attached, at a peak of one member's velocity fields instead of
+    the ensemble's. It also lets a consumer keep the yielded object past its loop
+    iteration without reading through a closed file handle.
+
+    *It is not co-located onto cell centres*, although the WP1.3 plan text has
+    this generator applying ``colocate_components``. The consumers need
+    different things from the same bytes: :func:`member_sensor_series`
+    trilinearly interpolates each component on its *own* staggered grid (which
+    is what makes the sensor series grid- and solver-independent), while the
+    ``turbulence_stats.StreamingMoments`` accumulators need co-located arrays.
+    Co-locating here would destroy the former and charge its cost to every
+    consumer, so deriving stays with the consumer.
+
+    Args:
+        state_paths: Per-window state file paths in window order. The position
+            in the sequence *is* the ``window_index`` yielded, which is what the
+            time rebasing ``(t - t[0]) + w*sim_time`` is keyed on.
+        variables: Data variables to read per member; ``None`` reads every data
+            variable in the file. Defaults to ``("u", "v", "w")``, all any
+            current consumer uses.
+
+    Yields:
+        ``(window_index, member_index, member_state)`` with ``member_state`` an
+        in-memory ``Dataset`` on the file's own (possibly staggered) dims. Its
+        scalar ``ensemble`` coordinate is present only when the file has one --
+        the disk-backed run path writes the ``ensemble`` *dimension* with no
+        coordinate variable, the in-memory path writes both.
+
+    Raises:
+        KeyError: a requested variable is missing from a window file.
+        ValueError: a window file has no ``ensemble`` dimension, i.e. it is not
+            a full-ensemble state file.
+    """
+    for window_index, path in enumerate(state_paths):
+        # A context manager rather than a trailing close(): the handle has to go
+        # away when a consumer raises and when the generator is abandoned
+        # part-way through a window (GeneratorExit is thrown at the yield below
+        # and unwinds through here), not only on the happy path.
+        with xarray.open_dataset(path) as ds:
+            names = list(ds.data_vars) if variables is None else list(variables)
+            missing = [name for name in names if name not in ds.data_vars]
+            if missing:
+                raise KeyError(
+                    f"{path} is missing data variable(s) {missing}; it carries "
+                    f"{tuple(ds.data_vars)}"
+                )
+            if "ensemble" not in ds.dims:
+                raise ValueError(
+                    f"{path} has no 'ensemble' dimension (dims {tuple(ds.dims)}); "
+                    "stream_window_members reads full-ensemble window state files"
+                )
+            subset = ds[names]
+            for member_index in range(ds.sizes["ensemble"]):
+                # `.compute()` is `.load()` on a shallow copy, so state this
+                # plainly: this *is* a read into memory -- of one member, which
+                # is the granularity the never-`.load()`-a-window-file rule
+                # prescribes. `subset` itself stays lazy, so the next member is
+                # still a fresh slab read rather than a slice of something
+                # already resident.
+                yield (
+                    window_index,
+                    member_index,
+                    subset.isel(ensemble=member_index).compute(),
+                )
+
+
+# ---------------------------------------------------------------------------
 # Sensor time-series extraction (truth vs ensemble at fixed points)
 # ---------------------------------------------------------------------------
 
@@ -301,26 +421,203 @@ def _concat_sensor_pieces(pieces):
     }
 
 
+def member_sensor_series(
+    member_state, sensor_sets, solver_name, window_index=0, sim_time=0.0
+):
+    """Per-component sensor series for **one** already-open member of one window.
+
+    The per-member unit of :func:`ensemble_sensor_series`, exposed so the WP1.3
+    mean-field pass can extract the sensor series from the same
+    :func:`stream_window_members` read that feeds its moment accumulators,
+    instead of re-reading the window files.
+
+    The window-local -> global time rebasing lives here and is load-bearing:
+    window ``w``'s frames are placed on ``[w*sim_time, (w+1)*sim_time)``, which
+    is the rule :func:`sensor_statistic_scores` slices the ensemble by (by time
+    *value*, against the truth's by-index slicing). Rebasing only happens when
+    the state carries a ``time`` coordinate, exactly as before -- a file without
+    one keeps its positional axis.
+
+    Args:
+        member_state: One member's state, e.g. a ``stream_window_members`` yield.
+            Components stay on their own staggered dims; this function needs
+            them raw, since that is what the interpolation resolves against.
+        sensor_sets: ``{name: (x, y, z)}`` from :func:`build_sensor_sets`.
+        solver_name: Solver whose staggered dim mapping the state follows.
+        window_index: Which rollout window this member came from.
+        sim_time: Seconds per window; the rebasing stride.
+
+    Returns:
+        ``{name: DataArray(component, time, sensor)}``, carrying the member's
+        scalar ``ensemble`` coordinate when the state had one.
+    """
+    t = (
+        np.asarray(member_state["time"].values, dtype=float)
+        if "time" in member_state.coords
+        else None
+    )
+    # `interpolate_dataarray_at_points` rebuilds its output coords from the
+    # output *dims* only, so the member label is dropped on the way through.
+    # Re-attaching it here is what lets the ensemble concat in
+    # `SensorSeriesAccumulator.result` rebuild the `ensemble` coordinate the
+    # old full-ensemble read got straight off the file.
+    member_id = member_state["ensemble"] if "ensemble" in member_state.coords else None
+    series = {}
+    for name, (ox, oy, oz) in sensor_sets.items():
+        vel = _sensor_component_timeseries(member_state, ox, oy, oz, solver_name)
+        if t is not None and "time" in vel.dims:
+            vel = vel.assign_coords(time=(t - t[0]) + window_index * sim_time)
+        if member_id is not None:
+            vel = vel.assign_coords(ensemble=member_id)
+        series[name] = vel
+    return series
+
+
+_MEMBER_SERIES_DIMS = ("component", "time", "sensor")
+_WINDOW_SERIES_DIMS = ("component", "ensemble", "time", "sensor")
+
+
+def _stack_window_members(members):
+    """One window's per-member sensor series -> ``(component, ensemble, time, sensor)``.
+
+    The dims and the values are the easy part: any stacking gives those. The
+    *memory layout* is the hard part, and it is not cosmetic. Every consumer of
+    this series reduces over some of its axes (``fair_energy_score`` over
+    components, the WP1.2 statistics over time and sensors), numpy's pairwise
+    summation walks a reduction in memory order, and floating-point addition is
+    not associative -- so two arrays with identical contents in different layouts
+    give answers that differ in the last ULP. That is visible in
+    ``run_summary.yaml``, whose numbers WP1.2's calibration references were
+    measured against, so this function reproduces the layout the pre-WP1.3
+    full-ensemble read produced. Measured by diffing every leaf of the summary
+    computed on the WP1.2 wiring fixture (587 leaves, 260 of them floats)
+    against the same summary from the old code path:
+
+    ==========================================================  ==============
+    how the window's members are stacked                        leaves changed
+    ==========================================================  ==============
+    ``concat(dim="ensemble")`` then ``transpose``                            4
+    ...then forced C-contiguous                                             20
+    this function                                                            0
+    ==========================================================  ==============
+
+    All the differences were 1-2 ULP (the largest relative move, 2e-14, was
+    ``crpss_vs_prior``, a ratio of near-equal CRPS values). They are not a
+    change to any estimator -- but "the metric is unchanged to 15 digits" is a
+    much weaker claim to hand a reviewer than "the summary is byte-identical",
+    and the four lines below buy the stronger one.
+
+    The layout being matched is ``(component, sensor, ensemble, time)``, which
+    is where the old path landed for a reason worth recording: for a
+    full-ensemble read ``interpolate_dataarray_at_points`` gathers the eight
+    trilinear corners with ``arr[..., z0, y0, x0]``, and numpy's advanced
+    indexing lays that result out with the sensor axis outermost; xarray's
+    concatenations then preserve it. Nothing documents that, so the guard below
+    checks the shapes rather than trusting them: if the member series are not
+    exactly ``(component, time, sensor)`` -- a window file with no time axis,
+    say -- the plain concatenation is returned and the layout match is silently
+    given up, which costs those last ULPs and nothing else.
+
+    Args:
+        members: One window's :func:`member_sensor_series` outputs for one sensor
+            set, in member order.
+
+    Returns:
+        ``DataArray(component, ensemble, time, sensor)``.
+    """
+    stacked = xarray.concat(
+        [
+            xarray.concat(
+                [member.isel(component=i) for member in members], dim="ensemble"
+            )
+            for i in range(members[0].sizes["component"])
+        ],
+        dim="component",
+    )
+    if any(member.dims != _MEMBER_SERIES_DIMS for member in members):
+        return stacked
+    # (component, time, sensor) per member -> a C-contiguous
+    # (component, sensor, ensemble, time) buffer -> a view of it in the dim order
+    # every consumer expects.
+    buffer = np.ascontiguousarray(
+        np.stack([member.values.transpose(0, 2, 1) for member in members], axis=2)
+    ).transpose(0, 2, 3, 1)
+    if stacked.dims != _WINDOW_SERIES_DIMS or stacked.shape != buffer.shape:
+        return stacked
+    return stacked.copy(data=buffer)
+
+
+class SensorSeriesAccumulator:
+    """Collects per-member sensor series from a :func:`stream_window_members` pass.
+
+    Holds one :func:`member_sensor_series` result per ``(window, member, sensor
+    set)`` and assembles them into the same
+    ``{name: DataArray(component, ensemble, time, sensor)}``
+    :func:`ensemble_sensor_series` has always returned. What it accumulates is
+    tiny -- ``components x members x frames x sensors`` -- so the memory bound of
+    a streaming pass is set by the yielded member, never by this.
+
+    Members may be fed in any order: pieces are keyed by ``(window, member)``
+    and sorted in :meth:`result`, so a caller is free to reorder its own pass.
+    """
+
+    def __init__(self, sensor_sets, solver_name, sim_time):
+        self.sensor_sets = sensor_sets
+        self.solver_name = solver_name
+        self.sim_time = sim_time
+        # {window_index: {set_name: {member_index: DataArray}}}
+        self._pieces = {}
+
+    def add_member(self, window_index, member_index, member_state):
+        """Extract and stash one member's sensor series for every sensor set."""
+        series = member_sensor_series(
+            member_state,
+            self.sensor_sets,
+            self.solver_name,
+            window_index=window_index,
+            sim_time=self.sim_time,
+        )
+        by_set = self._pieces.setdefault(window_index, {})
+        for name, vel in series.items():
+            by_set.setdefault(name, {})[member_index] = vel
+
+    def result(self):
+        """``{name: DataArray(component, ensemble, time, sensor)}`` over all windows.
+
+        Members within a window, then windows along the (already rebased, hence
+        global) ``time`` axis -- the same two concatenations, in the same order,
+        the full-ensemble read did.
+        """
+        pieces = {name: [] for name in self.sensor_sets}
+        for window_index in sorted(self._pieces):
+            for name, by_member in self._pieces[window_index].items():
+                members = [by_member[m] for m in sorted(by_member)]
+                pieces[name].append(_stack_window_members(members))
+        return _concat_sensor_pieces(pieces)
+
+
 def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
     """Ensemble per-component ``(u, v, w)`` sensor series across rollout windows.
 
-    Opens each window's full-ensemble state file once and interpolates u/v/w at
-    every sensor set's points (keeping ``component`` + ``ensemble`` + ``time``),
-    rebasing each window's local time onto a single global axis (window ``w``
-    starts at ``w*sim_time``) so it lines up with the truth. Returns
+    Streams each window's full-ensemble state file **member at a time**
+    (:func:`stream_window_members`) and interpolates u/v/w at every sensor set's
+    points (keeping ``component`` + ``ensemble`` + ``time``), rebasing each
+    window's local time onto a single global axis (window ``w`` starts at
+    ``w*sim_time``) so it lines up with the truth. Returns
     ``{name: DataArray(component, ensemble, time, sensor)}``.
+
+    The return value is unchanged from the full-ensemble ``.load()`` this
+    replaced -- bit-identical, pinned by
+    ``tests/test_esmda_stream_members.py`` against a verbatim copy of the old
+    implementation, because WP1.2's ``sensor_statistic_scores`` numbers are
+    calibrated on it. What changed is the memory bound: one member's velocity
+    fields rather than the ensemble's, which is what the ~1 GB (smoke) to
+    tens-of-GB (Barcelona) window files require.
     """
-    pieces = {name: [] for name in sensor_sets}
-    for w, path in enumerate(state_paths):
-        ds = xarray.open_dataset(path).load()
-        t = np.asarray(ds["time"].values, dtype=float) if "time" in ds.coords else None
-        for name, (ox, oy, oz) in sensor_sets.items():
-            vel = _sensor_component_timeseries(ds, ox, oy, oz, solver_name)
-            if t is not None and "time" in vel.dims:
-                vel = vel.assign_coords(time=(t - t[0]) + w * sim_time)
-            pieces[name].append(vel)
-        ds.close()
-    return _concat_sensor_pieces(pieces)
+    accumulator = SensorSeriesAccumulator(sensor_sets, solver_name, sim_time)
+    for window_index, member_index, member_state in stream_window_members(state_paths):
+        accumulator.add_member(window_index, member_index, member_state)
+    return accumulator.result()
 
 
 def truth_sensor_series(
@@ -2558,3 +2855,1825 @@ def sensor_statistic_scores(
         scores[set_name] = entry
 
     return scores
+
+
+# ---------------------------------------------------------------------------
+# Mean-field / Reynolds-stress layer (WP1.3)
+# ---------------------------------------------------------------------------
+
+# Cell-centre axis names, in the order `turbulence_stats.colocate_components`
+# leaves them: pylbm/PALM write `z/y/x`, uDALES `zt/yt/xt` (its staggered
+# `xm/ym/zm` are renamed onto the centre axes on the way through). Read off the
+# colocated array rather than passed in, so this layer cannot disagree with
+# `turbulence_stats._STAGGERED_TO_CENTRE` about where the data landed.
+_CENTRE_Z_DIMS = ("z", "zt")
+_CENTRE_Y_DIMS = ("y", "yt")
+_CENTRE_X_DIMS = ("x", "xt")
+
+# The velocity triple, in the order every quantity below indexes it.
+MEAN_FIELD_COMPONENTS = ("u", "v", "w")
+
+# Per region, the per-member quantities the reduction actually forms. They are
+# deliberately different: the z-slabs are what the summary scores (mean field,
+# TKE, <u'w'>) and the station columns are what WP1.4's S1 profile draws (the
+# component means and their RMS fluctuation). Each entry costs one region-sized
+# array PER MEMBER, so a quantity nobody consumes is not a stray dict key, it
+# is work at member scale.
+_SLAB_QUANTITIES = ("mean", "velmag", "tke", "uw")
+_STATION_QUANTITIES = ("mean", "rms", "tke", "uw")
+
+# Quantities carried for their across-member SPREAD only. The mean of the
+# members' speeds is not a quantity this layer reports -- the scored magnitude
+# is |ensemble-mean vector| (`velmag_of_mean`), which is a different number --
+# but `ensemble_velmag_std` needs each member's own speed to spread over.
+_SPREAD_ONLY_QUANTITIES = ("velmag",)
+
+# The across-member quantiles persisted per station in `eval_fields.nc`. Enough
+# for a 5-95 fan with a 25-75 box and the median, which is what an ensemble
+# profile panel wants; mean +- k*sigma is not that band unless the ensemble is
+# Gaussian, and the alternative to persisting them is re-reading the window
+# state files in the figure stage, which is exactly what this file prevents.
+STATION_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
+
+# The one solid-cell mask any shipped backend actually writes. pylbm emits it
+# (1 = solid) into both its truth state and its window state files; pypalm
+# `fillna(0.0)`s PALM's NaN before returning state, so a PALM mask is not
+# recoverable from the artifact; uDALES fielddumps carry small non-zero junk
+# inside buildings and no mask at all. Measured NaN fraction of `u`/`v`/`w` in
+# every state artifact under `.temp`: 0.0 -- i.e. the plan's "fluid cells only
+# (`~np.isnan` after masking)" premise does not hold and this variable is the
+# whole of the mask story. See :func:`_fluid_indicator`.
+BLANKING_VAR = "blanking"
+
+# Byte ceiling on one truth time chunk's colocated components. The truth is
+# opened lazily and read chunk-wise because a Barcelona-scale truth is tens of
+# GB; `StreamingMoments` makes the chunk length a free parameter (the
+# accumulators are per cell, not per frame), so this is a pure memory knob and
+# moves no number -- pinned by `tests/test_turbulence_stats.py`'s chunking
+# tests on the class itself.
+#
+# It bounds the chunk, NOT the layer's floor, and the difference matters at
+# production scale: `colocate_components` refuses to run on an axis-subset
+# dataset (a pre-colocation z selection is exactly what its face/centre check
+# catches), so every chunk is colocated at the truth's **full 3-D** resolution
+# before the z-slabs are taken. One frame is therefore the smallest chunk
+# possible, and at a 512 x 512 x 128 truth that single frame is ~0.8 GB for the
+# velocity triple plus the interpolation's own temporaries. That is the same
+# order as the member `stream_window_members` already materialises, so it is
+# the accepted shape of this stage rather than a regression -- but a truth
+# grown past it needs colocation to gain a level-wise mode, not a smaller
+# number here.
+_TRUTH_CHUNK_BYTES = 64 << 20
+
+# Byte ceiling on the retained per-cell truth *series* -- the one array in this
+# layer whose size grows with the number of frames, because a moving-block
+# bootstrap needs the series and not a moment of it. Above the ceiling the
+# bootstrap cells are subsampled (never the frames: the blocking is what the
+# estimator is about). The consequence is only Monte-Carlo noise on the
+# reductions below, since every bootstrap output here is reduced over cells to
+# a single scalar anyway.
+_TRUTH_SERIES_MAX_BYTES = 128 << 20
+
+# Cap on the number of truth cells the moving-block bootstrap is run over, and
+# the ONLY bound on this layer's dominant cost. `_TRUTH_SERIES_MAX_BYTES`
+# bounds *memory*, which at 4 x 128 x 128 x 36 is not binding at all (the cell
+# stride it implies is 1), while the bootstrap is O(cells x frames x
+# resamples). The cost was invisible until now for a specific reason:
+# `block_bootstrap_std_batch` returns all-`nan` immediately below 4 frames and
+# the smoke truth has 3, so the shape this layer was benchmarked at is the one
+# shape where its dominant cost is identically zero. Measured
+# `_truth_sampling_floors`, 3 components, 20 blocks:
+#
+# =================  ==========  ==========================================
+# cells              wall time   note
+# =================  ==========  ==========================================
+# 1600, 3 frames        0.1 ms   the smoke shape: `nan` before any work
+# 1600, 36 frames     157.5 ms
+# 4096, 36 frames     448.0 ms   the cap
+# 16384, 36 frames      1.9 s
+# 65536, 36 frames     13.2 s    4 x 128 x 128 uncapped
+# =================  ==========  ==========================================
+#
+# 4096 cells (12288 bootstrap rows) holds the whole `standard` stage at
+# 4 x 128 x 128 x 36 to 1.6 s against 0.35 s at `basic`; uncapped, the truth
+# pass alone would add the 13.2 s above. It does not materially move the
+# floors it bounds: over 8 seeds at that shape the capped values sit within
+# 0.5% (rms; 1.3% worst case) of the all-cell ones, against a floor that is an
+# order-of-magnitude statement about the truth's window length. The realised
+# count and the seed are both reported (`averaging.n_bootstrap_cells`,
+# `averaging.n_bootstrap_cells_max`, `averaging.bootstrap_seed`), so the number
+# is reproducible rather than merely stable.
+_TRUTH_BOOTSTRAP_MAX_CELLS = 4096
+
+# Seed for that subsample. Fixed rather than configurable: a floor that moved
+# between two re-runs of the same metrics stage would be indistinguishable from
+# a floor that moved because the run changed, and the cells are drawn once per
+# run from a Generator of this seed alone.
+_TRUTH_BOOTSTRAP_SEED = 0
+
+# How close an interpolated fluid indicator must sit to 1 for the target cell
+# to count as fluid. The indicator is 1 in fluid and 0 in solid, so a linear
+# interpolation returns exactly 1 only when *every* source cell in the stencil
+# was fluid: this is the conservative-threshold rule, expressed as a tolerance
+# rather than an equality only to absorb float rounding.
+_FLUID_INTERP_TOLERANCE = 1e-9
+
+
+def _null_mean_field_block(reason):
+    """The WP1.3 block with every measured leaf ``null``.
+
+    Same contract as :func:`_null_statistic_block`: the nesting is identical to
+    the healthy block so a consumer can index
+    ``mean_field_metrics.nmse.u.systematic`` on a degraded run exactly as on a
+    production one, and only the genuine constants (the hit rate's relative
+    tolerance) keep their values, because they are configuration rather than
+    measurement.
+    """
+    per_component = dict.fromkeys(MEAN_FIELD_COMPONENTS)
+    return {
+        "hit_rate": {
+            **per_component,
+            "per_z": None,
+            "allowance": {**per_component, "reason": reason},
+            "relative_tolerance": DEFAULT_HIT_RATE_TOLERANCE,
+        },
+        "fac2_velmag": None,
+        "fb": {**per_component, "velmag": None},
+        "nmse": {
+            name: {"total": None, "systematic": None, "unsystematic": None}
+            for name in (*MEAN_FIELD_COMPONENTS, "velmag")
+        },
+        "tke_rmse": {"value": None, "sampling_floor": None},
+        "uw_stress_rmse": {"value": None, "sampling_floor": None},
+        "averaging": {
+            "n_time": None,
+            "n_time_truth": None,
+            "n_windows": None,
+            "n_members": None,
+            "n_members_scored": None,
+            "n_stations": None,
+            "n_stations_with_truth": None,
+            "stride": None,
+            "z_levels": None,
+            "z_indices": None,
+            "z_levels_extrapolated": None,
+            "truth_z_levels": None,
+            "z_offset_max": None,
+            "n_cells": None,
+            "n_scored_cells": None,
+            "n_aggregate_cells": None,
+            "n_stress_cells": None,
+            "n_bootstrap_cells": None,
+            "n_bootstrap_cells_max": None,
+            "bootstrap_seed": None,
+        },
+        "masking": {
+            "source": "none",
+            "truth_source": "none",
+            "ensemble_source": "none",
+            "fluid_fraction": None,
+            "scored_fraction": None,
+            "ensemble_fluid_fraction": None,
+            "truth_finite_fraction": None,
+            "note": None,
+        },
+        "eval_fields": None,
+        "reason": reason,
+    }
+
+
+def _centre_dims(field):
+    """``(z, y, x)`` dim names of an already-colocated component.
+
+    Raises:
+        ValueError: If any of the three is missing, which is what a state
+            without a spatial axis (or a solver whose centre axes are named
+            something this repo has never written) looks like from here.
+    """
+    dims = []
+    for candidates in (_CENTRE_Z_DIMS, _CENTRE_Y_DIMS, _CENTRE_X_DIMS):
+        name = next((dim for dim in candidates if dim in field.dims), None)
+        if name is None:
+            raise ValueError(
+                f"colocated field has no {candidates[0]!r}-like axis (dims "
+                f"{tuple(field.dims)}); the mean-field layer needs all three "
+                "cell-centre axes"
+            )
+        dims.append(name)
+    return tuple(dims)
+
+
+def evenly_spaced_levels(n_levels, n_slices):
+    """``_vel_field_4z``'s z-level selection, shared rather than re-derived.
+
+    The plan asks for this layer's z-slabs to line up with the existing |U|
+    RMSE slices, which is a property of the *selection rule* and not of the
+    count: ``np.linspace(0, n-1, k).round()`` is not the same set of levels as
+    an evenly-strided one whenever ``k`` does not divide ``n``. Duplicates are
+    dropped (``k > n`` asks for more levels than exist), so the returned array
+    can be shorter than ``n_slices``.
+    """
+    if n_levels < 1:
+        raise ValueError(f"n_levels must be positive, got {n_levels}")
+    return np.unique(np.linspace(0, n_levels - 1, n_slices).round().astype(int))
+
+
+def _slab(field, dims, z_index, stride):
+    """The ``(time, zlev, y, x)`` z-slab region of one colocated component."""
+    zdim, ydim, xdim = dims
+    selected = field.isel(
+        {
+            zdim: z_index,
+            ydim: slice(None, None, stride),
+            xdim: slice(None, None, stride),
+        }
+    )
+    return selected.transpose("time", zdim, ydim, xdim)
+
+
+def _columns(field, dims, station_x, station_y):
+    """The ``(time, z, station)`` full-z station columns of one component.
+
+    Pointwise (advanced) interpolation: the station coordinates share one
+    ``station`` dim, so the result is one column per station rather than the
+    outer product of the two coordinate lists. Stations outside the grid come
+    back as ``nan`` rather than extrapolated -- an invented profile at a
+    mis-specified station is worse than a missing one.
+    """
+    zdim, ydim, xdim = dims
+    columns = field.interp(
+        {
+            xdim: xarray.DataArray(np.asarray(station_x, dtype=float), dims="station"),
+            ydim: xarray.DataArray(np.asarray(station_y, dtype=float), dims="station"),
+        },
+        method="linear",
+    )
+    return columns.transpose("time", zdim, "station")
+
+
+def _fluid_indicator(state, dims):
+    """``(z, y, x)`` float indicator, 1 in fluid and 0 in solid, or ``None``.
+
+    Built from :data:`BLANKING_VAR` when the state carries it and from nothing
+    otherwise -- there is no second source. A cell counts as solid if it is
+    blanked in **any** frame: the geometry is static in every shipped case, so
+    an ``any`` and an ``all`` agree, and where they would not the conservative
+    reading is the one that never scores a building interior.
+
+    Float rather than boolean because the station columns need it interpolated,
+    and a linear interpolation of the indicator is exactly the conservative
+    threshold this layer wants (see :data:`_FLUID_INTERP_TOLERANCE`).
+    """
+    if BLANKING_VAR not in state:
+        return None
+    blanking = state[BLANKING_VAR]
+    solid = blanking > 0.5
+    for dim in ("time", "ensemble"):
+        if dim in solid.dims:
+            solid = solid.any(dim)
+    zdim, ydim, xdim = dims
+    return (~solid).astype(float).transpose(zdim, ydim, xdim)
+
+
+def _fluctuation_covariance(slab, axis, i, j):
+    """``n/(n-1) * (u_i - <u_i>)(u_j - <u_j>)``, the per-timestep covariance integrand.
+
+    The ``<u'w'>`` sibling of :func:`_fluctuation_energy`, and built the same
+    way for the same reason: a moving-block bootstrap resamples a *series*, so
+    the reported second moment has to be expressible as the plain mean of one.
+    The Bessel factor sits on the integrand so that mean is exactly the
+    ``ddof=1`` covariance ``StreamingMoments.reynolds_stress`` reports, rather
+    than a ``ddof=0`` cousin of it. (``_fluctuation_energy`` is
+    ``0.5 * sum_c`` of this at ``i = j = c``; it is reused rather than
+    re-expressed here, so the two cannot drift.)
+    """
+    n_time = slab.shape[axis]
+    scale = n_time / (n_time - 1) if n_time > 1 else np.nan
+    fluctuation = slab - slab.mean(axis=axis, keepdims=True)
+    return scale * fluctuation[i] * fluctuation[j]
+
+
+class MeanFieldAccumulator:
+    """Per-member mean fields and Reynolds stresses from the shared read pass.
+
+    The ensemble half of WP1.3, shaped exactly like
+    :class:`SensorSeriesAccumulator` so both hang off the *one*
+    :func:`stream_window_members` pass over the window state files: at
+    Barcelona scale those files total tens of GB and a second full read pass is
+    not affordable, which is why this class takes an already-open member rather
+    than a path.
+
+    **What it holds, and why that is affordable.** Two
+    :class:`turbulence_stats.StreamingMoments` per member -- one for the
+    ``n_z_slices`` z-slabs, one for the full-z station columns -- each holding
+    ``C`` running means and ``C(C+1)/2`` co-moments *per cell*, independent of
+    how many frames go through them. At the shipped ``C = 3`` that is 10 arrays
+    of the slab shape per member, and the ensemble total is what to watch:
+
+    ==============================  ==============  ==========
+    ensemble x slab shape           per member      total
+    ==============================  ==============  ==========
+    M = 8, 4 x 64 x 64              1.3 MB          10 MB
+    M = 32, 4 x 256 x 256           21 MB           0.62 GB
+    M = 128, 4 x 512 x 512          84 MB           **10 GB**
+    ==============================  ==============  ==========
+
+    The last row is the plan's own Barcelona target, and it is held for the
+    whole pass on top of the materialised member and colocation's float64
+    temporaries -- so that shape needs ``run.metrics.mean_field_stride`` (2
+    quarters it, 4 divides it by 16) rather than more memory. ``n_z_slices`` is
+    the other relief valve. The station columns are free at every shape.
+
+    **Accumulation spans windows.** ``StreamingMoments`` has no notion of a
+    window, so member ``m``'s statistics cover every frame of every window it
+    was fed -- which is what makes them comparable to a truth pass over the same
+    time range. The window count is recorded so that range is reported rather
+    than assumed.
+
+    **Failures degrade the layer, they do not break the pass.** The sensor
+    extraction shares this loop and must not be taken down by, say, a solver
+    whose staggering ``colocate_components`` refuses; so a failure here sets
+    :attr:`reason`, stops accumulating and logs a warning, and :meth:`result`
+    returns ``None``. The driver turns that into a null ``mean_field_metrics``
+    block per the master plan's degenerate-shape rule.
+
+    Args:
+        solver_name: ``assim_solver_name``, the staggering the window files
+            follow.
+        n_z_slices: ``run.metrics.n_z_slices``; the level *selection* follows
+            :func:`evenly_spaced_levels` so the slabs coincide with the |U|
+            RMSE slices ``streaming_state_rmse`` already reports.
+        stride: ``run.metrics.mean_field_stride``, applied to the two
+            horizontal axes of the slabs only -- never to the station columns
+            (they are already a handful of cells) and never to time.
+        station_x: Station x coordinates, in domain coordinates.
+        station_y: Station y coordinates, same length.
+        state_paths: The window state files being streamed, in window order, so
+            the *static* solid-cell geometry can be read once per window
+            instead of once per member (see :meth:`_record_mask`). ``None``
+            falls back to reading it out of the member handed to
+            :meth:`add_member`, which is what a caller with no paths (a unit
+            test, an in-memory ensemble) has.
+    """
+
+    def __init__(
+        self, solver_name, n_z_slices, stride, station_x, station_y, state_paths=None
+    ):
+        self.solver_name = solver_name
+        self.n_z_slices = int(n_z_slices)
+        self.stride = int(stride)
+        self.station_x = np.asarray(station_x, dtype=float)
+        self.station_y = np.asarray(station_y, dtype=float)
+        self.state_paths = None if state_paths is None else list(state_paths)
+        self.reason = None
+        self._failed = False
+        self._geometry = None
+        self._moments = {}
+        self._frames = {}
+        self._windows = set()
+        self._masked_windows = set()
+        self._fluid_slab = None
+        self._fluid_station = None
+        self._mask_source = "none"
+        self._z_edge_extrapolated = False
+
+    def add_member(self, window_index, member_index, member_state):
+        """Fold one member's window into that member's two accumulators."""
+        if self._failed:
+            return
+        try:
+            self._add_member(window_index, member_index, member_state)
+        except (ValueError, KeyError) as error:
+            self._failed = True
+            self.reason = f"mean-field accumulation failed: {error}"
+            logger.warning(
+                "Mean-field layer disabled after window %d member %d: %s",
+                window_index,
+                member_index,
+                error,
+            )
+
+    def _add_member(self, window_index, member_index, member_state):
+        components = colocate_components(member_state, self.solver_name)
+        dims = _centre_dims(components[0])
+        if "time" not in components[0].dims:
+            raise ValueError(
+                "window state has no 'time' axis, so there is nothing to "
+                "average over"
+            )
+        if self._geometry is None:
+            self._initialise(components[0], dims)
+            # Whether the TOP z-level of the returned grid was filled by
+            # colocation's edge extrapolation rather than interpolated between
+            # two faces. Read off the raw member, because it is a property of
+            # the staggering and the file's dims -- the colocated array carries
+            # no trace of it (that is the whole point of keeping the grid the
+            # same length). `evenly_spaced_levels` always includes the top
+            # index, so on a staggered backend this is always a scored level.
+            self._z_edge_extrapolated = dims[0] in extrapolated_centre_dims(
+                member_state, self.solver_name
+            )
+        zdim, _, _ = dims
+        z_index, _, _, _ = self._geometry
+
+        moments = self._moments.setdefault(
+            member_index, {"slab": StreamingMoments(), "station": StreamingMoments()}
+        )
+        moments["slab"].update(
+            *(
+                np.asarray(_slab(field, dims, z_index, self.stride).values)
+                for field in components
+            )
+        )
+        moments["station"].update(
+            *(
+                np.asarray(_columns(field, dims, self.station_x, self.station_y).values)
+                for field in components
+            )
+        )
+
+        self._record_mask(window_index, member_state, dims, z_index)
+        self._frames[member_index] = self._frames.get(member_index, 0) + int(
+            components[0].sizes["time"]
+        )
+        self._windows.add(int(window_index))
+
+    def _initialise(self, field, dims):
+        """Fix the scored cells from the first member's colocated grid."""
+        zdim, ydim, xdim = dims
+        z_index = evenly_spaced_levels(int(field.sizes[zdim]), self.n_z_slices)
+        self._geometry = (
+            z_index,
+            np.asarray(field[zdim].values, dtype=float),
+            np.asarray(field[ydim].values, dtype=float)[:: self.stride],
+            np.asarray(field[xdim].values, dtype=float)[:: self.stride],
+        )
+
+    def _record_mask(self, window_index, member_state, dims, z_index):
+        """Fold one window's fluid indicator into the run's, reading it ONCE.
+
+        The solid-cell geometry is static -- ``run_esmda`` writes
+        :data:`BLANKING_VAR` replicated over ``(ensemble, time)``, and every
+        shipped case's buildings stand still -- so reading it per member costs
+        a second full ensemble-sized read of the window file for one 3-D
+        frame's worth of information (measured on a 3-window / 8-member run
+        dir: 7,680 blanking elements per window against 23,040 for ``u/v/w``,
+        i.e. +33% on the window-state bytes, plus re-deriving and
+        re-interpolating the indicator M times). So: one read per window, off
+        ``isel(ensemble=0, time=0)`` of a separate open, and
+        :func:`stream_window_members` keeps reading only ``u/v/w``.
+
+        Where a member's own state carries the variable anyway (no
+        ``state_paths``, e.g. an in-memory caller), it is taken from there
+        instead -- same indicator, no extra read.
+        """
+        if int(window_index) in self._masked_windows:
+            return
+        self._masked_windows.add(int(window_index))
+        indicator = self._window_indicator(window_index, member_state, dims)
+        if indicator is None:
+            return
+        slab = np.asarray(
+            _slab_indicator(indicator, dims, z_index, self.stride), dtype=float
+        )
+        columns = np.asarray(
+            _column_indicator(indicator, dims, self.station_x, self.station_y),
+            dtype=float,
+        )
+        # Conservative in both directions: a cell is fluid only if it is fluid
+        # in every window (the geometry is static, so this is a no-op that would
+        # catch a window whose blanking disagreed) and only if no solid cell
+        # entered its interpolation stencil.
+        slab_fluid = slab >= 1.0 - _FLUID_INTERP_TOLERANCE
+        station_fluid = columns >= 1.0 - _FLUID_INTERP_TOLERANCE
+        self._fluid_slab = (
+            slab_fluid if self._fluid_slab is None else self._fluid_slab & slab_fluid
+        )
+        self._fluid_station = (
+            station_fluid
+            if self._fluid_station is None
+            else self._fluid_station & station_fluid
+        )
+        self._mask_source = BLANKING_VAR
+
+    def _window_indicator(self, window_index, member_state, dims):
+        """One window's fluid indicator, from its file or from the member."""
+        if self.state_paths is None or window_index >= len(self.state_paths):
+            return _fluid_indicator(member_state, dims)
+        with xarray.open_dataset(self.state_paths[window_index]) as state:
+            if BLANKING_VAR not in state.data_vars:
+                return None
+            # One geometry frame, materialised before the handle closes. The
+            # `isel` is written defensively over the dims the variable actually
+            # has: `run_esmda` replicates it over `(ensemble, time)`, but a file
+            # written with the bare 3-D geometry is equally valid input.
+            frame = state[[BLANKING_VAR]]
+            selection = {
+                dim: 0
+                for dim in ("ensemble", "time")
+                if dim in frame[BLANKING_VAR].dims
+            }
+            return _fluid_indicator(frame.isel(selection).compute(), dims)
+
+    def result(self):
+        """Ensemble mean/std maps and station columns, or ``None`` if degraded.
+
+        The reduction order is the plan's: each member's time-mean field first
+        (that is what the accumulators hold), then the ensemble mean and the
+        ``ddof=1`` ensemble std across members. Reversing it -- averaging the
+        ensemble before averaging in time -- would report the mean field of the
+        ensemble-mean *state*, which is a different quantity and is already
+        covered by ``state_metrics``.
+
+        **A non-finite member is excluded, not averaged in.** A diverged CFD
+        member -- NaN over the whole domain or over the sub-region it blew up
+        in -- is routine, and a plain ``mean`` over members propagates its NaN
+        to every cell it touches: one member takes the whole layer down while
+        ``n_members`` still says M. Members whose slab mean field is not finite
+        everywhere are therefore dropped from *every* reduction here, the
+        surviving count travels as ``n_members_scored`` and the excluded
+        indices are logged. Dropping the member wholesale (rather than per
+        cell) is the same casewise rule ``StreamingMoments`` applies in time
+        and for the same reason: an ensemble mean and an ensemble ``ddof=1``
+        spread computed over different member sets at neighbouring cells are
+        not a field, and the spread is what ``eval_fields.nc`` publishes.
+        Finiteness is judged on the **slab** mean alone: the station columns
+        are legitimately NaN at a station outside the domain or inside a
+        building, which is a station's problem and never a member's.
+
+        Returns:
+            A mapping of numpy arrays plus the grid the driver scores on, or
+            ``None`` when nothing was accumulated, every member was non-finite,
+            or the pass was disabled.
+        """
+        if self._failed or self._geometry is None or not self._moments:
+            if self.reason is None:
+                self.reason = "no ensemble member was accumulated"
+            return None
+        z_index, z_all, y, x = self._geometry
+        accumulated = sorted(self._moments)
+        members = [m for m in accumulated if self._member_is_finite(m)]
+        excluded = [m for m in accumulated if m not in members]
+        if excluded:
+            logger.warning(
+                "Mean-field layer: excluding ensemble member(s) %s from the "
+                "mean field -- their time-mean slab is not finite everywhere "
+                "(a diverged member); %d of %d members scored",
+                ", ".join(str(m) for m in excluded),
+                len(members),
+                len(accumulated),
+            )
+        if not members:
+            self.reason = (
+                f"every one of the {len(accumulated)} ensemble members has a "
+                "non-finite time-mean field, so there is nothing to score"
+            )
+            return None
+
+        slab, station = {}, {}
+        for key, stacks, quantities in (
+            ("slab", slab, _SLAB_QUANTITIES),
+            ("station", station, _STATION_QUANTITIES),
+        ):
+            per_member = {name: [] for name in quantities}
+            for member in members:
+                for name, value in self._member_quantities(member, key, quantities):
+                    per_member[name].append(value)
+            for name, values in per_member.items():
+                stacked = np.stack(values)
+                if name not in _SPREAD_ONLY_QUANTITIES:
+                    stacks[name] = stacked.mean(axis=0)
+                stacks[f"{name}_std"] = (
+                    stacked.std(axis=0, ddof=1)
+                    if len(members) > 1
+                    else np.full(stacked.shape[1:], np.nan)
+                )
+                if key == "station":
+                    # The empirical across-member fan WP1.4's S1 draws. Stations
+                    # are a handful of columns, so persisting the quantiles
+                    # costs nothing and removes the only reason stage 3 would
+                    # have to re-read the window states: mean +- k*sigma is not
+                    # a 5-95 band unless the ensemble happens to be Gaussian.
+                    stacks[f"{name}_quantile"] = np.quantile(
+                        stacked, STATION_QUANTILES, axis=0
+                    )
+            # Scored against the truth: the magnitude of the ENSEMBLE-MEAN mean
+            # vector, not the ensemble mean of the members' magnitudes. The two
+            # differ by the ensemble spread of the direction, and it is the
+            # former the plan's "ensemble-mean-of-means vs truth" names.
+            if key == "slab":
+                stacks["velmag_of_mean"] = np.sqrt((stacks["mean"] ** 2).sum(axis=0))
+
+        frames = sorted(self._frames[member] for member in members)
+        return {
+            "n_members": len(accumulated),
+            "n_members_scored": len(members),
+            "excluded_members": excluded,
+            "n_windows": len(self._windows),
+            "n_time": int(frames[0]),
+            "n_time_ragged": frames[0] != frames[-1],
+            "z_index": z_index,
+            "z_levels": z_all[z_index],
+            "z_all": z_all,
+            "z_edge_extrapolated": self._z_edge_extrapolated,
+            "y": y,
+            "x": x,
+            "station_x": self.station_x,
+            "station_y": self.station_y,
+            "slab": slab,
+            "station": station,
+            "fluid_slab": self._fluid_slab,
+            "fluid_station": self._fluid_station,
+            "mask_source": self._mask_source,
+        }
+
+    def _member_quantities(self, member, key, quantities):
+        """One member's reduced fields for one region, computing only what is used.
+
+        Yields ``(name, array)`` for the names in ``quantities`` and nothing
+        else: every entry here is an array the size of the region *per member*,
+        so a quantity nobody reads is real work at member scale rather than a
+        stray dict key.
+        """
+        moments = self._moments[member][key]
+        mean = moments.mean()
+        stress = moments.reynolds_stress()
+        for name in quantities:
+            if name == "mean":
+                yield name, mean
+            elif name == "velmag":
+                yield name, np.sqrt((mean**2).sum(axis=0))
+            elif name == "tke":
+                yield name, moments.tke()
+            elif name == "uw":
+                yield name, stress[0, 2]
+            elif name == "rms":
+                yield name, np.sqrt(np.stack([stress[i, i] for i in range(len(mean))]))
+            else:  # pragma: no cover -- the tuples above are the whole domain
+                raise ValueError(f"unknown mean-field quantity {name!r}")
+
+    def _member_is_finite(self, member):
+        """Whether this member's time-mean slab field is finite at every SCORED cell.
+
+        Masked before the test, not after: a member that is NaN only inside
+        buildings has not diverged, it has marked its solid cells -- which is
+        exactly what the WP1.3 plan text assumes every backend does (no shipped
+        one currently does; pypalm zero-fills PALM's NaN). Testing the raw slab
+        would read that as a diverged member and drop it, and a backend where
+        *every* member marks its solid cells would null the whole layer.
+        """
+        mean = self._moments[member]["slab"].mean()
+        if self._fluid_slab is not None:
+            mean = mean[:, self._fluid_slab]
+        return bool(np.all(np.isfinite(mean)))
+
+
+def _truth_chunk_length(n_time, cell_count):
+    """Frames per truth read chunk under :data:`_TRUTH_CHUNK_BYTES`."""
+    per_frame = max(int(cell_count), 1) * len(MEAN_FIELD_COMPONENTS) * 8
+    return int(np.clip(_TRUTH_CHUNK_BYTES // per_frame, 1, max(int(n_time), 1)))
+
+
+def _bootstrap_cells(candidates, n_time, seed=_TRUTH_BOOTSTRAP_SEED):
+    """Which truth cells the sampling-floor bootstrap runs over.
+
+    A **seeded random subsample without replacement** of the cells offered,
+    bounded by both a time cap (:data:`_TRUTH_BOOTSTRAP_MAX_CELLS`, the only
+    thing standing between this layer and a tens-of-seconds truth pass) and the
+    memory ceiling (:data:`_TRUTH_SERIES_MAX_BYTES`, which the retained series
+    has to fit under).
+
+    Random rather than strided, which is what this used to be. A uniform stride
+    over a **raveled** ``(zlev, y, x)`` index is not a uniform sample of the
+    domain: at 4 x 512 x 512 over 360 frames the stride works out at 68, and
+    ``gcd(68, 512) = 4``, so every retained cell sits at ``x = 0 (mod 4)``. On a
+    regular building array -- which is what an urban case is -- that locks the
+    sample onto one geometric phase (all street, or all facade), and the floors
+    it produces describe that phase rather than the domain. A random subsample
+    of the same size costs the same and cannot phase-lock; the seed is fixed
+    and reported so it stays reproducible.
+
+    Args:
+        candidates: Flat indices of the cells eligible to be sampled -- the
+            **fluid, strided** ones, i.e. the cells the scores are computed on.
+        n_time: Frames per cell, which is what the memory bound scales with.
+        seed: Seed of the ``Generator`` that draws the subsample.
+
+    Returns:
+        A sorted array of the retained flat indices (sorted so the gather is a
+        forward pass over memory and the result does not depend on draw order).
+    """
+    candidates = np.asarray(candidates)
+    per_cell = max(int(n_time), 1) * len(MEAN_FIELD_COMPONENTS) * 8
+    affordable = max(int(_TRUTH_SERIES_MAX_BYTES // per_cell), 1)
+    keep = min(_TRUTH_BOOTSTRAP_MAX_CELLS, affordable)
+    if candidates.size <= keep:
+        return candidates
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.choice(candidates, size=keep, replace=False))
+
+
+def truth_mean_field_stats(
+    true_state_path,
+    n_total,
+    x_offset,
+    start_idx,
+    t_offset,
+    solver_name,
+    z_levels,
+    station_x,
+    station_y,
+    stride=1,
+    bootstrap_blocks=DEFAULT_BOOTSTRAP_BLOCKS,
+):
+    """The truth's own time-mean fields, stresses and sampling floors (WP1.3).
+
+    Runs on the **truth's own grid and its own cadence** -- nothing is
+    interpolated here. The plan's alignment rule for fields is "average in time
+    first, then ``.interp`` the truth onto the assim grid", and every
+    interpolation this layer performs therefore happens in
+    :func:`mean_field_summary`, after this function has reduced the time axis
+    away. Interpolating first would smear the truth's fluctuations before their
+    second moments are taken, which is precisely the quantity the layer scores.
+
+    **Vertical alignment is by nearest level, not by interpolation.** The
+    scored z-levels are the assimilation grid's (``z_levels``), and the truth's
+    slab is accumulated at the truth levels nearest to them. A vertical
+    interpolation would be the more faithful thing to do, but it cannot be done
+    *after* averaging without keeping the bracketing levels through the whole
+    streaming pass -- i.e. paying for the full 3-D truth moments -- so the
+    nearest level is taken and the residual offset is reported
+    (``averaging.z_offset_max``) rather than hidden. The station columns have
+    no such constraint: they are a handful of cells, so they keep the truth's
+    **full** z axis and are interpolated in z after averaging.
+
+    **Sampling floors.** ``hit_rate``'s absolute allowance ``W`` and the
+    TKE / ``<u'w'>`` RMSE floors are all the truth's own sampling uncertainty,
+    which needs the truth *series* at each cell and not a moment of it -- hence
+    the retained ``(component, cell, time)`` array. Each is a moving-block
+    bootstrap of a plain mean:
+
+    * ``W_c`` bootstraps ``mean(u_c)`` per cell and reduces over cells by the
+      **median**. The reduction is forced by ``hit_rate``'s signature -- its
+      ``allowance`` is one scalar for the whole comparison -- and the median is
+      the robust choice for a quantity whose per-cell values span a wake.
+    * the TKE and ``<u'w'>`` floors bootstrap the per-timestep integrands
+      (:func:`_fluctuation_energy`, :func:`_fluctuation_covariance`, both
+      carrying the Bessel factor so their means are exactly the ``ddof=1``
+      moments reported) and reduce over cells by the **RMS**, because the
+      number they sit beside is an RMSE: the RMS of the per-cell sampling
+      errors is the RMSE a perfect model would still score.
+
+    **The floors describe the cells the scores are computed on.** The bootstrap
+    runs over the truth's **fluid** cells at the scored **stride**, subsampled
+    by :func:`_bootstrap_cells`, and not over the raw slab. The distinction is
+    not cosmetic: a floor computed over building interiors as well as fluid is
+    pulled down by the near-zero, near-constant series inside the buildings
+    (measured on a 25%-solid truth with pylbm-like interiors: allowance 0.918x,
+    TKE floor 0.866x, ``<u'w'>`` floor 0.866x of the fluid-only values), and a
+    floor that is too low is **anti-conservative for its stated purpose** -- an
+    RMSE genuinely inside the truth's sampling noise gets reported as though it
+    were above the floor. The bias grows with the solid fraction. The stride is
+    applied on the truth's own axes, which is a sample of the same *density* as
+    the scores rather than a cell-for-cell alignment with them; the truth grid
+    need not be the assimilation grid at all, and the floors are a property of
+    the truth's own sampling.
+
+    Args:
+        true_state_path, n_total, x_offset, start_idx, t_offset: As for
+            :func:`open_truth`, straight out of ``truth_access.yaml``.
+        solver_name: ``truth_solver_name``; the truth's staggering, which is
+            generally *not* the assimilation model's.
+        z_levels: The assimilation grid's scored z coordinates.
+        station_x, station_y: Station coordinates, in domain coordinates.
+        stride: ``run.metrics.mean_field_stride``. Applied to the bootstrap
+            sample only -- the moments themselves stay at the truth's full
+            horizontal resolution, because they are interpolated onto the
+            (already strided) assimilation grid afterwards.
+        bootstrap_blocks: ``run.metrics.bootstrap_blocks``.
+
+    Returns:
+        A mapping of numpy arrays on the truth grid plus that grid's
+        coordinates and the three sampling floors. Floors are ``nan`` whenever
+        the bootstrap is undefined -- fewer than four frames, or a block length
+        below 2, which **is** the smoke shape (3 frames against 20 blocks) --
+        and ``hit_rate`` documents ``nan`` as its sanctioned "no floor
+        available" value, so no special case is needed downstream.
+
+    Raises:
+        ValueError: If the truth cannot be colocated or has no time axis. The
+            driver catches this and nulls the layer.
+    """
+    dataset = open_truth(true_state_path, n_total, x_offset, start_idx, t_offset)
+    try:
+        if "time" not in dataset.dims:
+            raise ValueError("truth state has no 'time' axis to average over")
+        n_time = int(dataset.sizes["time"])
+        slab_moments, station_moments = StreamingMoments(), StreamingMoments()
+        series_pieces = []
+        geometry = None
+        fluid = None
+        station_fluid = None
+        # Both budgets are sized from the file's own dims, before anything is
+        # read: a component's non-time shape is the same cell count colocation
+        # returns (colocation moves samples between axes, it does not add
+        # cells), so no probe read is needed to bound the chunk.
+        cells_per_frame = int(np.prod(dataset["u"].isel(time=0).shape))
+        chunk_length = _truth_chunk_length(n_time, cells_per_frame)
+
+        for start in range(0, n_time, chunk_length):
+            piece = dataset.isel(time=slice(start, start + chunk_length))
+            components = colocate_components(piece, solver_name)
+            dims = _centre_dims(components[0])
+            if geometry is None:
+                geometry = _truth_geometry(components[0], dims, z_levels)
+                # The solid-cell geometry is static, so it is read ONCE, off
+                # the first frame of the first chunk, rather than re-read and
+                # re-interpolated for every chunk of a multi-GB truth.
+                fluid, station_fluid = _truth_fluid_masks(
+                    piece, dims, geometry[0], station_x, station_y
+                )
+                bootstrap_cells = _bootstrap_cells(
+                    _bootstrap_candidates(fluid, geometry, components, dims, stride),
+                    n_time,
+                )
+            z_index = geometry[0]
+
+            slabs = [
+                np.asarray(_slab(field, dims, z_index, 1).values)
+                for field in components
+            ]
+            slab_moments.update(*slabs)
+            station_moments.update(
+                *(
+                    np.asarray(_columns(field, dims, station_x, station_y).values)
+                    for field in components
+                )
+            )
+            # (component, cell, time): time last, which is what the batched
+            # bootstrap's row contract wants. Strided and subsampled to the
+            # cells the SCORES see -- see this function's "sampling floors"
+            # docstring section for why that is not optional.
+            stacked = np.stack(slabs)[:, :, :, ::stride, ::stride]
+            series_pieces.append(
+                stacked.reshape(len(slabs), stacked.shape[1], -1)[:, :, bootstrap_cells]
+                .transpose(0, 2, 1)
+                .copy()
+            )
+    finally:
+        dataset.close()
+
+    if geometry is None:
+        raise ValueError("truth state carries no frames to average")
+    z_index, truth_z, y, x, z_all = geometry
+    series = np.concatenate(series_pieces, axis=2)
+
+    mean = slab_moments.mean()
+    stress = slab_moments.reynolds_stress()
+    station_mean = station_moments.mean()
+    station_stress = station_moments.reynolds_stress()
+    return {
+        "n_time": n_time,
+        "z_index": z_index,
+        "z_levels": truth_z,
+        "z_all": z_all,
+        "y": y,
+        "x": x,
+        "mean": mean,
+        "velmag": np.sqrt((mean**2).sum(axis=0)),
+        "tke": slab_moments.tke(),
+        "uw": stress[0, 2],
+        # Masked here rather than in the reduction, so the z-interpolation onto
+        # the assimilation levels propagates the NaN exactly as the horizontal
+        # one does for the slabs -- one conservative rule, applied once.
+        "station_mean": _masked(station_mean, station_fluid),
+        "station_rms": _masked(
+            np.sqrt(np.stack([station_stress[i, i] for i in range(len(station_mean))])),
+            station_fluid,
+        ),
+        "station_tke": _masked(station_moments.tke(), station_fluid),
+        "station_uw": _masked(station_stress[0, 2], station_fluid),
+        "fluid_slab": fluid,
+        "mask_source": BLANKING_VAR if fluid is not None else "none",
+        "bootstrap_seed": _TRUTH_BOOTSTRAP_SEED,
+        "n_bootstrap_cells_max": _TRUTH_BOOTSTRAP_MAX_CELLS,
+        **_truth_sampling_floors(series, bootstrap_blocks),
+    }
+
+
+def _truth_fluid_masks(piece, dims, z_index, station_x, station_y):
+    """``(slab, station)`` fluid masks of the truth, from ONE geometry frame.
+
+    :func:`_fluid_indicator`'s ``any``-over-time reduction is what a caller
+    handing it a whole chunk gets; here the first frame is selected instead, so
+    a multi-GB truth pays one 3-D frame for its static geometry rather than one
+    per chunk. The two agree wherever the geometry does not move, which is
+    every shipped case (see :func:`_fluid_indicator`).
+
+    The slab mask is at the truth's **full** horizontal resolution: it masks
+    the moments, which are interpolated onto the assimilation grid afterwards.
+    Only the bootstrap sample is strided.
+    """
+    frame = piece.isel(time=0) if "time" in piece.dims else piece
+    indicator = _fluid_indicator(frame, dims)
+    if indicator is None:
+        return None, None
+    slab = (
+        np.asarray(_slab_indicator(indicator, dims, z_index, 1))
+        >= 1.0 - _FLUID_INTERP_TOLERANCE
+    )
+    station = (
+        np.asarray(_column_indicator(indicator, dims, station_x, station_y))
+        >= 1.0 - _FLUID_INTERP_TOLERANCE
+    )
+    return slab, station
+
+
+def _bootstrap_candidates(fluid, geometry, components, dims, stride):
+    """Flat indices of the strided slab cells the sampling floors may use.
+
+    The fluid cells of the strided slab, i.e. the sample the scores are
+    computed on, flattened in the same ``(zlev, y, x)`` order the series is
+    reshaped into. With no mask on the truth every cell is a candidate --
+    unmasked floors are then wrong in the same way the unmasked scores beside
+    them are, which ``masking.source`` already says out loud.
+    """
+    shape = (
+        int(np.asarray(geometry[0]).size),
+        len(range(0, int(components[0].sizes[dims[1]]), stride)),
+        len(range(0, int(components[0].sizes[dims[2]]), stride)),
+    )
+    if fluid is None:
+        return np.arange(int(np.prod(shape)))
+    return np.flatnonzero(fluid[:, ::stride, ::stride].reshape(-1))
+
+
+def _slab_indicator(indicator, dims, z_index, stride):
+    """The z-slab region of a ``(z, y, x)`` fluid indicator."""
+    zdim, ydim, xdim = dims
+    return indicator.isel(
+        {
+            zdim: z_index,
+            ydim: slice(None, None, stride),
+            xdim: slice(None, None, stride),
+        }
+    ).values
+
+
+def _column_indicator(indicator, dims, station_x, station_y):
+    """The ``(z, station)`` station columns of a ``(z, y, x)`` fluid indicator."""
+    zdim, ydim, xdim = dims
+    return (
+        indicator.interp(
+            {
+                xdim: xarray.DataArray(
+                    np.asarray(station_x, dtype=float), dims="station"
+                ),
+                ydim: xarray.DataArray(
+                    np.asarray(station_y, dtype=float), dims="station"
+                ),
+            },
+            method="linear",
+        )
+        .transpose(zdim, "station")
+        .values
+    )
+
+
+def _truth_geometry(field, dims, z_levels):
+    """``(z_index, z_selected, y, x, z_all)`` for the truth's own grid.
+
+    The z levels are the truth levels **nearest** the assimilation grid's; see
+    :func:`truth_mean_field_stats` for why nearest rather than interpolated.
+    Duplicates are kept deliberately -- a truth coarser in z than the
+    assimilation grid legitimately maps two scored levels onto one truth level,
+    and silently deduplicating would leave the two sides with different level
+    counts.
+    """
+    zdim, ydim, xdim = dims
+    truth_z = np.asarray(field[zdim].values, dtype=float)
+    targets = np.asarray(z_levels, dtype=float)
+    z_index = np.abs(truth_z[:, None] - targets[None, :]).argmin(axis=0)
+    return (
+        z_index,
+        truth_z[z_index],
+        np.asarray(field[ydim].values, dtype=float),
+        np.asarray(field[xdim].values, dtype=float),
+        truth_z,
+    )
+
+
+def _truth_sampling_floors(series, bootstrap_blocks):
+    """The hit-rate allowance and the two RMSE floors from the truth series.
+
+    Args:
+        series: ``(component, cell, time)`` truth samples at the scored,
+            strided, fluid cells (see :func:`_bootstrap_cells`).
+        bootstrap_blocks: ``run.metrics.bootstrap_blocks``.
+
+    Returns:
+        ``{"allowance": {u, v, w}, "tke_floor": float, "uw_floor": float,
+        "n_bootstrap_cells": int}``, every float ``nan`` where the bootstrap is
+        undefined at this window length -- or where the mask left no fluid cell
+        to run it over, which is a truth entirely inside a building and so a
+        degenerate shape rather than a failure.
+    """
+    n_components, n_cells, n_time = series.shape
+    if n_cells == 0:
+        return {
+            "allowance": dict.fromkeys(MEAN_FIELD_COMPONENTS, float("nan")),
+            "tke_floor": float("nan"),
+            "uw_floor": float("nan"),
+            "n_bootstrap_cells": 0,
+        }
+    rows = series.reshape(n_components * n_cells, n_time)
+    per_cell = block_bootstrap_std_batch(
+        rows, statistic=np.mean, n_blocks=bootstrap_blocks
+    ).reshape(n_components, n_cells)
+    allowance = {
+        name: _column_median(per_cell[i])
+        for i, name in enumerate(MEAN_FIELD_COMPONENTS)
+    }
+
+    energy = _fluctuation_energy(series, axis=2)
+    covariance = _fluctuation_covariance(series, 2, 0, 2)
+    return {
+        "allowance": allowance,
+        "tke_floor": _rms(
+            block_bootstrap_std_batch(
+                energy, statistic=np.mean, n_blocks=bootstrap_blocks
+            )
+        ),
+        "uw_floor": _rms(
+            block_bootstrap_std_batch(
+                covariance, statistic=np.mean, n_blocks=bootstrap_blocks
+            )
+        ),
+        "n_bootstrap_cells": int(n_cells),
+    }
+
+
+def _column_median(values):
+    """Median over the finite entries, ``nan`` when there are none."""
+    finite = np.asarray(values, dtype=float).ravel()
+    finite = finite[np.isfinite(finite)]
+    return float(np.median(finite)) if finite.size else float("nan")
+
+
+def _rms(values):
+    """Root mean square over the finite entries, ``nan`` when there are none."""
+    finite = np.asarray(values, dtype=float).ravel()
+    finite = finite[np.isfinite(finite)]
+    return float(np.sqrt(np.mean(finite**2))) if finite.size else float("nan")
+
+
+def _same_axis(left, right):
+    """Whether two coordinate axes are the same grid (length and values)."""
+    left = np.asarray(left, dtype=float)
+    right = np.asarray(right, dtype=float)
+    return left.size == right.size and bool(np.allclose(left, right))
+
+
+def _interp_axes(array, dims, coords, targets):
+    """``array`` linearly interpolated onto ``targets`` along named axes.
+
+    A thin xarray wrapper, used for the *only* interpolations this layer
+    performs -- the truth's already-time-averaged fields onto the assimilation
+    grid. Kept in one place because the alignment rule ("average in time first,
+    then interp") is a correctness property, and a second call site is a second
+    chance to interpolate something that has not been averaged yet.
+
+    NaN propagation is load-bearing rather than incidental: a truth field
+    NaN-masked at its solid cells comes back NaN at **every** target cell whose
+    interpolation stencil touched a building, which is exactly the conservative
+    combination rule this layer wants -- a building's velocity can never bleed
+    into a scored fluid cell. The cost is that the fluid cells immediately
+    downstream of a wall are dropped from the score along with the wall itself,
+    so the scored set shrinks by roughly the building *perimeter* (reported as
+    ``masking.truth_finite_fraction``). The alternative -- interpolating the
+    field unmasked and the mask separately -- keeps those cells but scores them
+    against a value that is partly the inside of a building, which is a wrong
+    number rather than a missing one.
+    """
+    field = xarray.DataArray(np.asarray(array, dtype=float), dims=dims, coords=coords)
+    return np.asarray(field.interp(**targets).values)
+
+
+def _masked(field, fluid):
+    """``field`` with the non-fluid cells set to ``nan``, or unchanged if unmasked."""
+    if fluid is None:
+        return np.asarray(field, dtype=float)
+    return np.where(fluid, np.asarray(field, dtype=float), np.nan)
+
+
+def _masked_rmse(pred, obs):
+    """RMSE over the cells where both fields are finite, ``nan`` if none are."""
+    predicted = np.asarray(pred, dtype=float)
+    observed = np.asarray(obs, dtype=float)
+    keep = np.isfinite(predicted) & np.isfinite(observed)
+    if not bool(keep.any()):
+        return float("nan")
+    return float(np.sqrt(np.mean((predicted[keep] - observed[keep]) ** 2)))
+
+
+def _nmse_entry(pred, obs):
+    """``{total, systematic, unsystematic}`` for one field pair.
+
+    ``nmse`` is ``nan`` whenever the mean product is not positive and
+    ``nmse_split`` is ``(nan, nan)`` at ``|FB| >= 2``; both are **routine** for
+    a signed velocity component whose mean passes through zero, not a sign that
+    anything failed. They arrive in the summary as ``null``.
+    """
+    total = nmse(pred, obs)
+    systematic, unsystematic = nmse_split(fractional_bias(pred, obs), total)
+    return {
+        "total": _finite_or_none(total),
+        "systematic": _finite_or_none(systematic),
+        "unsystematic": _finite_or_none(unsystematic),
+    }
+
+
+def mean_field_summary(ensemble, truth, stride, eval_fields_name="eval_fields.nc"):
+    """Score the ensemble's mean field against the truth's (WP1.3 step 4).
+
+    The reduction the two streaming passes exist for. In order: the truth's
+    time-mean fields are interpolated onto the assimilation grid (**after**
+    averaging -- see :func:`_interp_axes`), the fluid mask is assembled from
+    whatever the two sides actually carry, and the ensemble-mean-of-means is
+    scored against the truth with the urban-CFD standards of
+    ``docs/plans/esmda_turbulence_evaluation.md`` section 4.1: hit rate per
+    signed component, FAC2 on ``|U|`` only, fractional bias, and NMSE with its
+    systematic/unsystematic split. TKE and ``<u'w'>`` are reported as RMSE maps
+    reduced to a scalar, each beside the truth's own sampling floor -- an RMSE
+    below its floor is not skill, it is the truth's window length.
+
+    **Masking, stated because the plan's premise is false.** The plan says to
+    take fluid cells as the non-NaN ones. No backend marks solid cells with NaN
+    (measured NaN fraction 0.0 in every ``.temp`` artifact), so the mask comes
+    from :data:`BLANKING_VAR` where a side writes it and from nowhere
+    otherwise. When neither side does, the scores include building interiors
+    and are optimistic by roughly the building fraction -- a ``logger.warning``
+    says so and ``masking.source`` records it, but nothing is invented.
+
+    **The reported sample is the scored sample, by construction.** Every *cell
+    count* under ``averaging`` and ``masking.scored_fraction`` come from
+    :func:`_fluid_pairs` -- the cells that survived everything, not from the
+    mask alone, which keeps its own ``masking.fluid_fraction`` -- and the
+    aggregate scores exclude the extrapolated edge level
+    (:func:`_aggregated_levels`) while ``hit_rate.per_z`` still reports it.
+    All of it is one rule: every number in this block names the sample it was
+    computed on, and where a name and a sample would drift apart the sample
+    wins and the name changes.
+
+    Args:
+        ensemble: :meth:`MeanFieldAccumulator.result` output.
+        truth: :func:`truth_mean_field_stats` output.
+        stride: ``run.metrics.mean_field_stride``, reported under ``averaging``.
+        eval_fields_name: File name recorded in the summary; the driver writes
+            the returned Dataset there.
+
+    Returns:
+        ``(block, dataset)`` -- the ``mean_field_metrics`` mapping and the
+        ``eval_fields.nc`` Dataset (truth mean, ensemble mean and ensemble std
+        per quantity, the full-z station columns and the fluid mask).
+    """
+    y, x = ensemble["y"], ensemble["x"]
+    grids_match = _same_axis(truth["y"], y) and _same_axis(truth["x"], x)
+
+    def _to_assim(array, leading):
+        masked = _masked(array, truth["fluid_slab"])
+        if grids_match:
+            return masked
+        return _interp_axes(
+            masked,
+            (*leading, "y", "x"),
+            {"y": truth["y"], "x": truth["x"]},
+            {"y": y, "x": x},
+        )
+
+    truth_slab = {
+        "mean": _to_assim(truth["mean"], ("component", "zlev")),
+        "velmag": _to_assim(truth["velmag"], ("zlev",)),
+        "tke": _to_assim(truth["tke"], ("zlev",)),
+        "uw": _to_assim(truth["uw"], ("zlev",)),
+    }
+
+    # The scored mask: fluid on the assimilation side AND resolvable on the
+    # truth side. The second half is not only the truth's own buildings -- a
+    # truth grid that does not cover the whole assimilation domain leaves NaN
+    # at the edge cells too, and neither is a cell this layer can score.
+    fluid = ensemble["fluid_slab"]
+    truth_finite = np.isfinite(truth_slab["velmag"])
+    scored = truth_finite if fluid is None else (fluid & truth_finite)
+    for key in ("mean", "velmag", "tke", "uw"):
+        truth_slab[key] = _masked(truth_slab[key], scored)
+
+    slab = ensemble["slab"]
+    predicted = {
+        "mean": _masked(slab["mean"], scored),
+        "velmag": _masked(slab["velmag_of_mean"], scored),
+        "tke": _masked(slab["tke"], scored),
+        "uw": _masked(slab["uw"], scored),
+    }
+    # The cells that actually carry a scoreable pair, which is what the counts
+    # below report. `scored` is the MASK; the pairs are the mask minus whatever
+    # else came out non-finite (a member that diverged over part of the domain,
+    # a cell the truth interpolation could not reach). Reporting the mask as
+    # though it were the sample is how a summary ends up claiming 104 scored
+    # cells for a comparison that scored none.
+    retained = _fluid_pairs(predicted, truth_slab)
+    for key in ("mean", "velmag", "tke", "uw"):
+        truth_slab[key] = _masked(truth_slab[key], retained)
+        predicted[key] = _masked(predicted[key], retained)
+
+    # Levels whose values came out of colocation's edge extrapolation. They are
+    # reported per z but kept out of the aggregates: `evenly_spaced_levels`
+    # always includes the top index, so on a staggered backend the extrapolated
+    # level is ALWAYS one of the scored ones (1 of 4 at the shipped
+    # `n_z_slices`), and its second moments are inflated by up to 5x. At
+    # `nz == 1` the two indices coincide and excluding would leave nothing, so
+    # `_aggregated_levels` keeps everything and this says so out loud.
+    aggregated, is_extrapolated = _aggregated_levels(ensemble)
+    extrapolated = [
+        float(level)
+        for level, edge in zip(ensemble["z_levels"], is_extrapolated)
+        if edge
+    ]
+    notes = []
+    if is_extrapolated.any() and bool(np.all(aggregated)):
+        notes.append(
+            f"the only scored z-level ({extrapolated[0]:g}) is the one "
+            "colocation extrapolated, so it could not be excluded from the "
+            "aggregate scores; their second moments carry that edge"
+        )
+        logger.warning("Mean-field layer: %s", notes[-1])
+
+    block = _score_mean_fields(predicted, truth_slab, truth, ensemble, aggregated)
+    block["averaging"] = {
+        "n_time": int(ensemble["n_time"]),
+        "n_time_truth": int(truth["n_time"]),
+        "n_windows": int(ensemble["n_windows"]),
+        "n_members": int(ensemble["n_members"]),
+        "n_members_scored": int(ensemble["n_members_scored"]),
+        "n_stations": int(ensemble["station_x"].size),
+        "n_stations_with_truth": _n_stations_with_truth(ensemble, truth),
+        "stride": int(stride),
+        "z_levels": [float(v) for v in ensemble["z_levels"]],
+        "z_indices": [int(v) for v in ensemble["z_index"]],
+        "z_levels_extrapolated": extrapolated,
+        "truth_z_levels": [float(v) for v in truth["z_levels"]],
+        "z_offset_max": float(
+            np.max(np.abs(np.asarray(truth["z_levels"]) - ensemble["z_levels"]))
+        ),
+        "n_cells": int(scored.size),
+        # Three counts, because three samples exist: `n_scored_cells` is every
+        # cell carrying a pair (the sample `hit_rate.per_z` and `masking`
+        # describe), `n_aggregate_cells` is the subset on the levels the
+        # top-level scores reduce over (they differ exactly when a level was
+        # extrapolated), and `n_stress_cells` is the subset of THAT which the
+        # two RMSEs could use -- a `ddof=1` moment needs two frames per cell
+        # where a mean needs one, so the stresses legitimately see fewer cells
+        # (76 of 104 on the divergence fixture). Each number sits with the
+        # sample it was computed on; see :func:`_stress_pairs`.
+        "n_scored_cells": int(np.count_nonzero(retained)),
+        "n_aggregate_cells": int(np.count_nonzero(retained[aggregated])),
+        "n_stress_cells": int(
+            np.count_nonzero(_stress_pairs(predicted, truth_slab)[aggregated])
+        ),
+        "n_bootstrap_cells": int(truth["n_bootstrap_cells"]),
+        "n_bootstrap_cells_max": int(truth["n_bootstrap_cells_max"]),
+        "bootstrap_seed": int(truth["bootstrap_seed"]),
+    }
+    block["masking"] = _masking_block(
+        ensemble, truth, fluid, truth_finite, scored, retained
+    )
+    block["eval_fields"] = eval_fields_name
+    block["reason"] = _degraded_reason(ensemble, notes)
+    return block, _eval_fields_dataset(ensemble, truth, truth_slab, fluid, grids_match)
+
+
+def _fluid_pairs(predicted, observed):
+    """The cells where every mean-field score has a finite pair to score.
+
+    One retained set for all of them, rather than each score dropping its own
+    non-finite cells: ``nmse_split``'s identity and the per-component hit rates
+    are only comparable across components if they are computed on the same
+    sample, and the summary reports **one** ``n_scored_cells``. The stress
+    RMSEs keep their own pairwise finiteness on top of this (their inputs can
+    be ``nan`` from a one-frame window while the mean field is perfectly
+    finite), so this is the base sample and never a widening of it.
+    """
+    keep = np.ones(np.asarray(observed["velmag"]).shape, dtype=bool)
+    for fields in (predicted, observed):
+        keep &= np.isfinite(fields["velmag"])
+        keep &= np.all(np.isfinite(fields["mean"]), axis=0)
+    return keep
+
+
+def _aggregated_levels(ensemble):
+    """``(aggregated, extrapolated)``, two boolean masks over the scored z-levels.
+
+    ``extrapolated`` is a fact about the grid -- which scored levels are the top
+    index of an axis colocation had to extrapolate -- and is reported whatever
+    happens next. ``aggregated`` is the decision: normally its complement, so
+    the inflated edge stays out of the aggregate scores.
+
+    **Except when that would leave nothing.** At ``nz == 1`` the only scored
+    level *is* the extrapolated one (index 0 and ``nz - 1`` are the same level),
+    and a udales-staggered state with a 2-level ``zm`` and a 1-level ``zt``
+    colocates cleanly, so this is reachable rather than hypothetical. Excluding
+    there would null every aggregate score with no ``reason`` -- precisely the
+    signature this layer has already been rewritten once to remove. So every
+    level is kept instead and the caller says so in ``reason``: a contaminated
+    number that announces its contamination beats a silent null.
+    """
+    z_index = np.asarray(ensemble["z_index"])
+    extrapolated = np.zeros(z_index.shape, dtype=bool)
+    if ensemble["z_edge_extrapolated"]:
+        extrapolated = z_index == int(ensemble["z_all"].size) - 1
+    aggregated = ~extrapolated
+    if not aggregated.any():
+        aggregated = np.ones_like(extrapolated)
+    return aggregated, extrapolated
+
+
+def _stress_pairs(predicted, observed):
+    """The cells the two stress RMSEs are computed on.
+
+    Deliberately not :func:`_fluid_pairs`: ``tke`` and ``<u'w'>`` are ``ddof=1``
+    moments, so they are ``nan`` wherever a cell's per-cell sample count is
+    below 2 -- a member that lost all but one frame over a sub-region, a
+    one-frame window -- while the mean field there is perfectly finite. Folding
+    that into the base sample would let a short window empty the hit rate's
+    sample too, so the RMSEs keep their own pairwise rule and this is the count
+    that travels with them.
+
+    ``tke`` and ``<u'w'>`` share one sample by construction rather than by
+    luck: both come from the same :class:`StreamingMoments` per-cell count and
+    the same mask, so they are ``nan`` in exactly the same cells (measured
+    equal on the divergence fixture, 76 of 104). The intersection is taken
+    anyway, so the count can only ever understate, never overstate.
+    """
+    keep = np.ones(np.asarray(observed["tke"]).shape, dtype=bool)
+    for fields in (predicted, observed):
+        keep &= np.isfinite(fields["tke"]) & np.isfinite(fields["uw"])
+    return keep
+
+
+def _n_stations_with_truth(ensemble, truth):
+    """How many stations have a truth column at all, warning about those that do not.
+
+    ``_column_indicator``'s all-fluid stencil rule is strict on purpose -- a
+    station whose 2x2 horizontal stencil touches a solid cell loses its whole
+    truth column rather than being profiled against a building interior -- and
+    stations default to the sensor x/y, which in an urban case sit on facades
+    and roofs. So an empty truth column is the common case, not the corner, and
+    the one thing it must not be is silent: WP1.4's profile panels would draw a
+    posterior band with no truth line and nothing would say why.
+    """
+    columns = np.asarray(truth["station_mean"], dtype=float)
+    has_truth = np.isfinite(columns).any(axis=tuple(range(columns.ndim - 1)))
+    missing = np.flatnonzero(~has_truth)
+    if missing.size:
+        logger.warning(
+            "Mean-field layer: %d of %d station(s) have no truth column -- "
+            "their horizontal stencil touches a solid cell, so the truth "
+            "profile is empty at station(s) %s (x, y): %s",
+            missing.size,
+            has_truth.size,
+            ", ".join(str(int(i)) for i in missing),
+            ", ".join(
+                f"({ensemble['station_x'][i]:g}, {ensemble['station_y'][i]:g})"
+                for i in missing
+            ),
+        )
+    return int(has_truth.sum())
+
+
+def _degraded_reason(ensemble, extra=()):
+    """``None`` on a healthy layer; what was dropped or kept anyway when not.
+
+    The block still carries numbers here -- the alternative, nulling every
+    score because one member of eight diverged, throws away a perfectly good
+    7-member answer -- so the ``reason`` is what tells a reader that
+    ``n_members`` and ``n_members_scored`` differ on purpose, or that a level
+    the layer would normally exclude had to be scored anyway.
+
+    Args:
+        ensemble: :meth:`MeanFieldAccumulator.result` output.
+        extra: Further clauses from the reduction, already phrased.
+    """
+    causes = []
+    excluded = ensemble["excluded_members"]
+    if excluded:
+        causes.append(
+            f"{len(excluded)} of {ensemble['n_members']} ensemble members "
+            f"({', '.join(str(m) for m in excluded)}) have a non-finite "
+            "time-mean field and were excluded; every score here is over the "
+            f"remaining {ensemble['n_members_scored']}"
+        )
+    causes.extend(extra)
+    return "; ".join(causes) if causes else None
+
+
+def _score_mean_fields(predicted, observed, truth, ensemble, aggregated):
+    """The four urban-CFD scores plus the two stress RMSEs, per component and z.
+
+    ``aggregated`` selects the z-levels the **top-level** numbers reduce over
+    (see :func:`_aggregated_levels`); ``per_z`` always reports every scored
+    level, so an excluded level is visible rather than missing.
+    """
+    allowance = truth["allowance"]
+    aggregate = {
+        name: np.asarray(field)[..., aggregated, :, :]
+        for name, field in predicted.items()
+    }
+    observed_aggregate = {
+        name: np.asarray(field)[..., aggregated, :, :]
+        for name, field in observed.items()
+    }
+    hit = {}
+    for i, name in enumerate(MEAN_FIELD_COMPONENTS):
+        hit[name] = _finite_or_none(
+            hit_rate(
+                aggregate["mean"][i],
+                observed_aggregate["mean"][i],
+                allowance=allowance[name],
+            )
+        )
+    per_z = []
+    for level in range(observed["velmag"].shape[0]):
+        entry = {"z": float(ensemble["z_levels"][level])}
+        for i, name in enumerate(MEAN_FIELD_COMPONENTS):
+            entry[name] = _finite_or_none(
+                hit_rate(
+                    predicted["mean"][i, level],
+                    observed["mean"][i, level],
+                    allowance=allowance[name],
+                )
+            )
+        entry["fac2_velmag"] = _finite_or_none(
+            fac2(predicted["velmag"][level], observed["velmag"][level])
+        )
+        # Named on the entry itself, not only in `averaging`: a per-z table is
+        # read row by row, and this row's second moments carry colocation's
+        # edge extrapolation (up to 5x the interior variance).
+        entry["extrapolated"] = not bool(aggregated[level])
+        per_z.append(entry)
+
+    fb = {
+        name: _finite_or_none(
+            fractional_bias(aggregate["mean"][i], observed_aggregate["mean"][i])
+        )
+        for i, name in enumerate(MEAN_FIELD_COMPONENTS)
+    }
+    fb["velmag"] = _finite_or_none(
+        fractional_bias(aggregate["velmag"], observed_aggregate["velmag"])
+    )
+    nmse_block = {
+        name: _nmse_entry(aggregate["mean"][i], observed_aggregate["mean"][i])
+        for i, name in enumerate(MEAN_FIELD_COMPONENTS)
+    }
+    nmse_block["velmag"] = _nmse_entry(
+        aggregate["velmag"], observed_aggregate["velmag"]
+    )
+
+    unavailable = None
+    if not any(np.isfinite(allowance[name]) for name in MEAN_FIELD_COMPONENTS):
+        unavailable = (
+            "the truth's block bootstrap is undefined at this window length, so "
+            "the hit rate is the pure relative test (which can only be lower)"
+        )
+    return {
+        "hit_rate": {
+            **hit,
+            "per_z": per_z,
+            "allowance": {
+                **{
+                    name: _finite_or_none(allowance[name])
+                    for name in MEAN_FIELD_COMPONENTS
+                },
+                "reason": unavailable,
+            },
+            "relative_tolerance": DEFAULT_HIT_RATE_TOLERANCE,
+        },
+        "fac2_velmag": _finite_or_none(
+            fac2(aggregate["velmag"], observed_aggregate["velmag"])
+        ),
+        "fb": fb,
+        "nmse": nmse_block,
+        "tke_rmse": {
+            "value": _finite_or_none(
+                _masked_rmse(aggregate["tke"], observed_aggregate["tke"])
+            ),
+            "sampling_floor": _finite_or_none(truth["tke_floor"]),
+        },
+        "uw_stress_rmse": {
+            "value": _finite_or_none(
+                _masked_rmse(aggregate["uw"], observed_aggregate["uw"])
+            ),
+            "sampling_floor": _finite_or_none(truth["uw_floor"]),
+        },
+    }
+
+
+def _masking_block(ensemble, truth, fluid, truth_finite, scored, retained):
+    """What masked the scores, and how much of the domain survived it.
+
+    Two fractions, because there are two samples and giving them one name is
+    the whole failure mode this layer keeps having to defend against:
+
+    * ``fluid_fraction`` is the **mask's** own number -- the combined mask,
+      fluid on the assimilation side and resolvable on the truth side -- which
+      is what its name says and what the sibling ``ensemble_fluid_fraction`` /
+      ``truth_finite_fraction`` entries report for each side separately.
+    * ``scored_fraction`` is the fraction that carried a scoreable pair
+      (:func:`_fluid_pairs`), i.e. the sample the numbers in this block were
+      actually computed on. It equals ``n_scored_cells / n_cells`` by
+      construction, and it is at most ``fluid_fraction``.
+
+    The two are **currently equal on every reachable path**, and that is a
+    result rather than a redundancy: the only sources of non-finiteness left
+    are the mask itself and a diverged member, and members are excluded whole
+    (:meth:`MeanFieldAccumulator.result`), so the scored sample comes back to
+    the mask. They are separate keys so that a future third source shows up in
+    the summary as a gap between them instead of quietly redefining one number.
+    """
+    sources = {
+        "ensemble_source": ensemble["mask_source"],
+        "truth_source": truth["mask_source"],
+    }
+    source = (
+        BLANKING_VAR if BLANKING_VAR in sources.values() else "none"  # noqa: SIM300
+    )
+    note = None
+    if source == "none":
+        note = (
+            "no backend on either side writes a solid-cell mask (pyudales ships "
+            "none and pypalm fills PALM's NaN with 0.0), so these scores include "
+            "building interiors and are optimistic by roughly the building "
+            "fraction; parsing uDALES solid_c.txt and preserving PALM's NaN are "
+            "both out of phase 1"
+        )
+        logger.warning(
+            "Mean-field layer is UNMASKED: neither the truth (%s) nor the "
+            "assimilation state (%s) carries a %r variable, so FAC2 and the hit "
+            "rate are computed over building interiors as well as fluid",
+            truth["mask_source"],
+            ensemble["mask_source"],
+            BLANKING_VAR,
+        )
+    return {
+        "source": source,
+        **sources,
+        "fluid_fraction": _finite_or_none(np.mean(scored)),
+        "scored_fraction": _finite_or_none(np.mean(retained)),
+        "ensemble_fluid_fraction": (
+            None if fluid is None else _finite_or_none(np.mean(fluid))
+        ),
+        "truth_finite_fraction": _finite_or_none(np.mean(truth_finite)),
+        "note": note,
+    }
+
+
+def _eval_fields_dataset(ensemble, truth, truth_slab, fluid, grids_match):
+    """Build ``eval_fields.nc``: the reduced fields WP1.4's figures need.
+
+    The sanctioned handoff between the metrics stage and the figure stage.
+    Stage 3 currently re-derives its inputs from the raw artifacts; everything
+    here costs a streaming pass over the window state files, so recomputing it
+    per figure is exactly what this file exists to prevent.
+
+    Two grids in one file, which is why the vertical dims are named
+    differently. ``zlev`` is the ``n_z_slices`` scored planes (F1's mean-field
+    comparison and F2's spread maps); ``z`` is the **full** assimilation column,
+    carried only at the station points, because a 4-plane sampling is not a
+    vertical profile and S1 needs one.
+
+    ``fluid_mask`` is the **assimilation-side** indicator (1 = fluid), which is
+    what a figure needs for ``set_bad`` on the posterior panels; every other
+    exclusion the summary applied (the truth's own buildings, the perimeter the
+    cross-grid interpolation erodes, a diverged member's footprint) is already
+    baked into the ``truth_*`` variables as NaN, so ``isfinite(truth_velmag)``
+    is exactly the set of cells the summary scored -- and ``fluid_mask`` alone
+    is a **superset** of it, equal on a matched-grid run where both sides carry
+    the same mask (measured 104 == 104 on the wiring fixture) and strictly
+    larger as soon as the truth's mask or grid differs (16 vs 8 at stride 3).
+    Use ``isfinite(truth_velmag)`` when the question is "what was scored".
+
+    ``station_*_quantile`` carries the across-member 5/25/50/75/95 percentiles
+    of each station column, so a profile panel can draw the **empirical** fan
+    rather than mean +- k*sigma, which is only the same band for a Gaussian
+    ensemble. Stations are a handful of columns, so this costs nothing and
+    removes the last reason for the figure stage to re-read the window states.
+    """
+    slab, station = ensemble["slab"], ensemble["station"]
+    z_all = ensemble["z_all"]
+    station_dims = ("component", "z", "station")
+    truth_z = truth["z_all"]
+
+    def _to_assim_z(array, dims):
+        """Truth station columns onto the assimilation levels, after averaging."""
+        if _same_axis(truth_z, z_all):
+            return np.asarray(array, dtype=float)
+        return _interp_axes(array, dims, {"z": truth_z}, {"z": z_all})
+
+    slab_dims = ("component", "zlev", "y", "x")
+    plane_dims = ("zlev", "y", "x")
+    column_dims = ("z", "station")
+    variables = {
+        "truth_mean": (slab_dims, truth_slab["mean"]),
+        "ensemble_mean": (slab_dims, slab["mean"]),
+        "ensemble_std": (slab_dims, slab["mean_std"]),
+        "truth_velmag": (plane_dims, truth_slab["velmag"]),
+        "ensemble_velmag": (plane_dims, slab["velmag_of_mean"]),
+        "ensemble_velmag_std": (plane_dims, slab["velmag_std"]),
+        "truth_tke": (plane_dims, truth_slab["tke"]),
+        "ensemble_tke": (plane_dims, slab["tke"]),
+        "ensemble_tke_std": (plane_dims, slab["tke_std"]),
+        "truth_uw": (plane_dims, truth_slab["uw"]),
+        "ensemble_uw": (plane_dims, slab["uw"]),
+        "ensemble_uw_std": (plane_dims, slab["uw_std"]),
+        "fluid_mask": (
+            plane_dims,
+            (
+                np.ones(slab["tke"].shape, dtype=np.int8)
+                if fluid is None
+                else fluid.astype(np.int8)
+            ),
+        ),
+        "station_truth_mean": (
+            station_dims,
+            _to_assim_z(truth["station_mean"], station_dims),
+        ),
+        "station_ensemble_mean": (station_dims, station["mean"]),
+        "station_ensemble_std": (station_dims, station["mean_std"]),
+        "station_truth_rms": (
+            station_dims,
+            _to_assim_z(truth["station_rms"], station_dims),
+        ),
+        "station_ensemble_rms": (station_dims, station["rms"]),
+        "station_ensemble_rms_std": (station_dims, station["rms_std"]),
+        "station_truth_tke": (
+            column_dims,
+            _to_assim_z(truth["station_tke"], column_dims),
+        ),
+        "station_ensemble_tke": (column_dims, station["tke"]),
+        "station_ensemble_tke_std": (column_dims, station["tke_std"]),
+        "station_truth_uw": (
+            column_dims,
+            _to_assim_z(truth["station_uw"], column_dims),
+        ),
+        "station_ensemble_uw": (column_dims, station["uw"]),
+        "station_ensemble_uw_std": (column_dims, station["uw_std"]),
+        "station_fluid_mask": (
+            column_dims,
+            (
+                np.ones(station["tke"].shape, dtype=np.int8)
+                if ensemble["fluid_station"] is None
+                else ensemble["fluid_station"].astype(np.int8)
+            ),
+        ),
+        "station_x": (("station",), ensemble["station_x"]),
+        "station_y": (("station",), ensemble["station_y"]),
+    }
+    # The empirical across-member fan, one variable per profile row S1 draws.
+    # `quantile` leads the dims so a figure can `.sel(quantile=0.05)` and get
+    # the column back in the same layout as its `station_ensemble_*` sibling.
+    for name, dims in (
+        ("mean", station_dims),
+        ("rms", station_dims),
+        ("tke", column_dims),
+        ("uw", column_dims),
+    ):
+        variables[f"station_ensemble_{name}_quantile"] = (
+            ("quantile", *dims),
+            station[f"{name}_quantile"],
+        )
+    dataset = xarray.Dataset(
+        {
+            name: (dims, np.asarray(values))
+            for name, (dims, values) in variables.items()
+        },
+        coords={
+            "component": list(MEAN_FIELD_COMPONENTS),
+            "zlev": np.asarray(ensemble["z_levels"], dtype=float),
+            "y": np.asarray(ensemble["y"], dtype=float),
+            "x": np.asarray(ensemble["x"], dtype=float),
+            "z": np.asarray(z_all, dtype=float),
+            "station": np.arange(int(ensemble["station_x"].size)),
+            "quantile": np.asarray(STATION_QUANTILES, dtype=float),
+        },
+        attrs={
+            "description": (
+                "WP1.3 mean-field / Reynolds-stress fields: time-mean over the "
+                "whole assimilation horizon, per quantity, for the truth and "
+                "for the posterior ensemble"
+            ),
+            "n_members": int(ensemble["n_members"]),
+            # The ensemble every field here was reduced over, which is not
+            # `n_members` when a member diverged (see
+            # `MeanFieldAccumulator.result`) -- a figure labelling a band "M =
+            # 8" off the wrong one of these would be captioning a lie.
+            "n_members_scored": int(ensemble["n_members_scored"]),
+            "n_windows": int(ensemble["n_windows"]),
+            "n_time": int(ensemble["n_time"]),
+            "n_time_truth": int(truth["n_time"]),
+            "mask_source": ensemble["mask_source"],
+            "truth_mask_source": truth["mask_source"],
+            "truth_regridded": int(not grids_match),
+            "stress_kind": "resolved only (no subgrid contribution)",
+        },
+    )
+    dataset["ensemble_velmag"].attrs["long_name"] = (
+        "magnitude of the ensemble-mean time-mean velocity vector (the scored "
+        "prediction), NOT the ensemble mean of the members' speeds"
+    )
+    dataset["ensemble_velmag_std"].attrs[
+        "long_name"
+    ] = "across-member std of each member's own |time-mean velocity|"
+    dataset["fluid_mask"].attrs["source"] = ensemble["mask_source"]
+    dataset["station_fluid_mask"].attrs["source"] = ensemble["mask_source"]
+    return dataset
+
+
+def mean_field_scores(
+    accumulator,
+    true_state_path,
+    n_total,
+    x_offset,
+    start_idx,
+    t_offset,
+    truth_solver_name,
+    stride=1,
+    bootstrap_blocks=DEFAULT_BOOTSTRAP_BLOCKS,
+    eval_fields_name="eval_fields.nc",
+):
+    """The WP1.3 entry point: run the truth pass and reduce against the ensemble.
+
+    The ensemble half has already happened by the time this is called -- its
+    accumulators were filled from the *shared* :func:`stream_window_members`
+    pass that also feeds the sensor extraction, which is the production-scale
+    requirement the plan states as a review-blocker, not an optimization. So
+    the only IO here is the truth's, on its own grid and its own cadence.
+
+    Every failure path returns the full schema with ``null`` leaves and a
+    non-null ``reason`` plus one log line, per the master plan's
+    degenerate-shape rule: an old run dir, an absent truth, a solver whose
+    staggering cannot be colocated, or a level at which the layer never ran.
+
+    Args:
+        accumulator: A filled :class:`MeanFieldAccumulator`, or ``None`` when
+            the layer was not enabled for this run.
+        true_state_path, n_total, x_offset, start_idx, t_offset: As for
+            :func:`open_truth`, straight out of ``truth_access.yaml``.
+        truth_solver_name: ``truth_solver_name`` -- generally not the
+            assimilation model's.
+        stride: ``run.metrics.mean_field_stride``. Reported, already applied by
+            the accumulator, and passed on to the truth pass -- the sampling
+            floors have to describe the same sample density as the scores they
+            gate, and a stride-blind floor is a floor for a run that was not
+            performed.
+        bootstrap_blocks: ``run.metrics.bootstrap_blocks``.
+        eval_fields_name: File name recorded in the summary.
+
+    Returns:
+        ``(block, dataset)``; ``dataset`` is ``None`` on every degraded path,
+        and the caller writes it when it is not.
+    """
+    if accumulator is None:
+        return _null_mean_field_block("the mean-field layer did not run"), None
+    ensemble = accumulator.result()
+    if ensemble is None:
+        logger.info("Mean-field layer: %s; reporting nulls", accumulator.reason)
+        return _null_mean_field_block(accumulator.reason), None
+
+    try:
+        truth = truth_mean_field_stats(
+            true_state_path,
+            n_total,
+            x_offset,
+            start_idx,
+            t_offset,
+            truth_solver_name,
+            ensemble["z_levels"],
+            ensemble["station_x"],
+            ensemble["station_y"],
+            stride=stride,
+            bootstrap_blocks=bootstrap_blocks,
+        )
+    except (ValueError, KeyError, OSError) as error:
+        reason = f"truth mean-field pass failed: {error}"
+        logger.warning("Mean-field layer disabled: %s", reason)
+        return _null_mean_field_block(reason), None
+
+    if ensemble["n_time_ragged"]:
+        # Not fatal -- the moments are per cell and weight every frame equally,
+        # so a member with more frames is simply better sampled -- but it means
+        # `averaging.n_time` is the shortest member's count rather than a shared
+        # one, and a reader comparing two members' spreads should know.
+        logger.info(
+            "Mean-field layer: ensemble members carry different frame counts; "
+            "averaging.n_time reports the smallest"
+        )
+    return mean_field_summary(ensemble, truth, stride, eval_fields_name)

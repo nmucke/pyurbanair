@@ -1,4 +1,4 @@
-"""End-to-end wiring of the WP1.1 and WP1.2 bundles through ``compute_metrics``.
+"""End-to-end wiring of the WP1.1-1.3 bundles through ``compute_metrics``.
 
 ``tests/test_parameter_bundle.py`` covers the bundle's math on synthetic arrays
 and the ESMDA pipeline test covers the run stage, but neither exercises the
@@ -27,6 +27,14 @@ load-bearing rather than incidental: the truth and the ensemble are saved at
 window-slicing rules exist for, and the window files carry **window-local**
 time coordinates, so ``ensemble_sensor_series``' rebasing onto
 ``[w*sim_time, (w+1)*sim_time)`` is genuinely exercised rather than assumed.
+
+WP1.3's ``mean_field_metrics`` reads the same artifacts through the *same*
+per-member pass as WP1.2 (one shared read of the window state files, which is a
+production-scale requirement rather than an optimization), so it needs no new
+fixture -- only two extensions. ``_with_blanking`` adds pylbm's solid-cell mask,
+because it is the one mask any shipped backend writes and the unmasked branch
+flatters a run rather than breaking it; and ``run.metrics.stations`` is exercised
+explicitly, since nothing else in the pipeline reads that knob.
 """
 
 from __future__ import annotations
@@ -37,7 +45,14 @@ import numpy as np
 import pytest
 import xarray
 
-from scripts.esmda._esmda_common import PIT_BINS, read_yaml, write_yaml
+from scripts.esmda._esmda_common import (
+    PIT_BINS,
+    MeanFieldAccumulator,
+    mean_field_scores,
+    mean_field_summary,
+    read_yaml,
+    write_yaml,
+)
 from scripts.esmda.compute_esmda_metrics import compute_metrics
 
 N_MEMBERS = 8
@@ -162,6 +177,124 @@ WASSERSTEIN_KEYS = {
     "reason",
 }
 
+# --- WP1.3: the mean-field layer's key sets, pinned for the same reason ------
+MEAN_FIELD_KEYS = frozenset(
+    {
+        "hit_rate",
+        "fac2_velmag",
+        "fb",
+        "nmse",
+        "tke_rmse",
+        "uw_stress_rmse",
+        "averaging",
+        "masking",
+        "eval_fields",
+        "reason",
+    }
+)
+HIT_RATE_KEYS = frozenset({"u", "v", "w", "per_z", "allowance", "relative_tolerance"})
+NMSE_KEYS = frozenset({"total", "systematic", "unsystematic"})
+AVERAGING_KEYS = frozenset(
+    {
+        "n_time",
+        "n_time_truth",
+        "n_windows",
+        "n_members",
+        "n_members_scored",
+        "n_stations",
+        "n_stations_with_truth",
+        "stride",
+        "z_levels",
+        "z_indices",
+        "z_levels_extrapolated",
+        "truth_z_levels",
+        "z_offset_max",
+        "n_cells",
+        "n_scored_cells",
+        "n_aggregate_cells",
+        "n_stress_cells",
+        "n_bootstrap_cells",
+        "n_bootstrap_cells_max",
+        "bootstrap_seed",
+    }
+)
+MASKING_KEYS = frozenset(
+    {
+        "source",
+        "truth_source",
+        "ensemble_source",
+        "fluid_fraction",
+        "scored_fraction",
+        "ensemble_fluid_fraction",
+        "truth_finite_fraction",
+        "note",
+    }
+)
+EVAL_FIELD_VARS = frozenset(
+    {
+        "truth_mean",
+        "ensemble_mean",
+        "ensemble_std",
+        "truth_velmag",
+        "ensemble_velmag",
+        "ensemble_velmag_std",
+        "truth_tke",
+        "ensemble_tke",
+        "ensemble_tke_std",
+        "truth_uw",
+        "ensemble_uw",
+        "ensemble_uw_std",
+        "fluid_mask",
+        "station_truth_mean",
+        "station_ensemble_mean",
+        "station_ensemble_std",
+        "station_truth_rms",
+        "station_ensemble_rms",
+        "station_ensemble_rms_std",
+        "station_truth_tke",
+        "station_ensemble_tke",
+        "station_ensemble_tke_std",
+        "station_truth_uw",
+        "station_ensemble_uw",
+        "station_ensemble_uw_std",
+        "station_ensemble_mean_quantile",
+        "station_ensemble_rms_quantile",
+        "station_ensemble_tke_quantile",
+        "station_ensemble_uw_quantile",
+        "station_fluid_mask",
+        "station_x",
+        "station_y",
+    }
+)
+
+# The TOP-LEVEL summary keys a `level: basic` run must have, and only those.
+# `run_summary.yaml` key paths are hard-coded across `scripts/figure_creation/`,
+# so `basic` reproducing the pre-phase-1 set exactly is the invariant that lets
+# an old run dir keep processing -- and the one a "compute it, then drop it"
+# gate would silently break.
+BASIC_SUMMARY_KEYS = frozenset(
+    {
+        "configuration",  # the fixture's run_info.yaml payload
+        "metrics_version",
+        "metrics_level",
+        "parameter_metrics",
+        "ensemble_health",
+        "state_metrics",
+        "sensor_metrics",
+    }
+)
+STANDARD_SUMMARY_KEYS = BASIC_SUMMARY_KEYS | {
+    "sensor_statistics",
+    "mean_field_metrics",
+}
+
+# The synthetic building the masking test blanks out: x indices {2, 3} and y
+# indices {1, 2}, every z. 4 of the 30 cells in a plane, so the fluid fraction
+# is exactly 26/30 -- a closed-form assertion rather than a measured one.
+BLANK_X = (2, 3)
+BLANK_Y = (1, 2)
+BLANK_FLUID_FRACTION = 1.0 - (len(BLANK_X) * len(BLANK_Y)) / (GRID_X.size * GRID_Y.size)
+
 
 def _write_run_dir(
     run_dir: pathlib.Path,
@@ -174,6 +307,8 @@ def _write_run_dir(
     skip_viz: bool = True,
     extra_config: dict | None = None,
     truth_access: dict | None = None,
+    stations: list[list[float]] | None = None,
+    stride: int = 1,
 ) -> None:
     """A run dir carrying exactly what the WP1.1 block reads, and nothing else.
 
@@ -181,6 +316,10 @@ def _write_run_dir(
     parameter-only shape above. The WP1.2 tests flip ``skip_viz`` and supply the
     obs block and the truth-access keys the truth-consuming layers read; see
     :func:`_write_state_artifacts`, which writes the files they point at.
+    ``stations`` is WP1.3's ``run.metrics.stations``; ``None`` (the shipped
+    default) means the mean-field layer profiles the sensor positions.
+    ``stride`` is ``run.metrics.mean_field_stride``, which both the accumulator
+    and the truth's sampling floors have to honour.
     """
     windows_dir = run_dir / "windows"
     windows_dir.mkdir(parents=True, exist_ok=True)
@@ -190,7 +329,12 @@ def _write_run_dir(
             # which is why the WP1.1 tests need no solver and no truth file.
             "run": {
                 "skip_viz": skip_viz,
-                "metrics": {"level": level, "bootstrap_blocks": BOOTSTRAP_BLOCKS},
+                "metrics": {
+                    "level": level,
+                    "bootstrap_blocks": BOOTSTRAP_BLOCKS,
+                    "stations": stations,
+                    "mean_field_stride": stride,
+                },
             },
             # Where the GP knot spacing actually lives in a saved config.
             "prior_params": {
@@ -354,6 +498,24 @@ def _velocity_arrays(
     return fields
 
 
+def _with_blanking(fields: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Add pylbm's ``blanking`` variable (1 = solid) for one synthetic building.
+
+    The only solid-cell mask any shipped backend writes, and the reason the
+    WP1.3 masking block exists: pyudales ships none and pypalm fills PALM's NaN
+    with 0.0, so a fixture that never carries it would only ever exercise the
+    unmasked branch. The velocities inside the building are left as they are
+    rather than zeroed -- pylbm writes near-zeros there, but the *point* is
+    that nothing about the velocity field identifies a solid cell, so the mask
+    has to come from this variable alone.
+    """
+    blanking = np.zeros_like(next(iter(fields.values())))
+    for i in BLANK_X:
+        for j in BLANK_Y:
+            blanking[..., j, i] = 1.0
+    return {**fields, "blanking": blanking}
+
+
 def _state_dataset(
     fields: dict[str, np.ndarray], times: np.ndarray, x: np.ndarray
 ) -> xarray.Dataset:
@@ -372,7 +534,11 @@ def _state_dataset(
 
 
 def _write_state_artifacts(
-    run_dir: pathlib.Path, rng: np.random.Generator, *, with_prior: bool = False
+    run_dir: pathlib.Path,
+    rng: np.random.Generator,
+    *,
+    with_prior: bool = False,
+    with_blanking: bool = False,
 ) -> tuple[dict, dict]:
     """Fabricate the truth + ensemble state files WP1.2 reads, no solver involved.
 
@@ -395,6 +561,8 @@ def _write_state_artifacts(
     n_truth = N_WINDOWS * TRUTH_FRAMES_PER_WINDOW
     file_times = np.arange(TRUTH_SPINUP_FRAMES + n_truth) * TRUTH_DT
     truth_fields = _velocity_arrays(file_times, np.array([1.0]), np.array([0.0]), rng)
+    if with_blanking:
+        truth_fields = _with_blanking(truth_fields)
     truth_path = run_dir / "true_state.nc"
     _state_dataset(truth_fields, file_times, GRID_X - TRUTH_X_OFFSET).isel(
         ensemble=0, drop=True
@@ -416,6 +584,8 @@ def _write_state_artifacts(
     for window in range(N_WINDOWS):
         global_times = window_times + window * SIM_TIME
         posterior = _velocity_arrays(global_times, gains, phases, rng)
+        if with_blanking:
+            posterior = _with_blanking(posterior)
         _state_dataset(posterior, window_times, GRID_X).to_netcdf(
             windows_dir / f"window_{window}_posterior_state.nc"
         )
@@ -459,11 +629,17 @@ def _full_run_dir(
     *,
     level: str = "standard",
     with_prior: bool = False,
+    with_blanking: bool = False,
+    stations: list[list[float]] | None = None,
+    stride: int = 1,
     seed: int = 11,
 ) -> None:
     """The WP1.1 parameter artifacts plus everything the WP1.2 layer reads."""
     obs_config, truth_access = _write_state_artifacts(
-        run_dir, np.random.default_rng(seed), with_prior=with_prior
+        run_dir,
+        np.random.default_rng(seed),
+        with_prior=with_prior,
+        with_blanking=with_blanking,
     )
     _write_run_dir(
         run_dir,
@@ -472,6 +648,8 @@ def _full_run_dir(
         skip_viz=False,
         extra_config=obs_config,
         truth_access=truth_access,
+        stations=stations,
+        stride=stride,
     )
 
 
@@ -945,6 +1123,11 @@ def test_basic_level_omits_sensor_statistics_entirely(tmp_path: pathlib.Path) ->
     computed -- which is what makes this a test of the level gate rather than of
     the early return. A gate written as "compute it, then drop it" would pass a
     key-presence check while still paying for the bootstrap.
+
+    The top-level key SET is asserted, not merely the absence of the two phase-1
+    blocks: `run_summary.yaml` key paths are hard-coded across
+    `scripts/figure_creation/`, so "additive only" means `basic` has to stay
+    byte-for-byte the same shape a pre-phase-1 consumer indexes.
     """
     run_dir = tmp_path / "run"
     _full_run_dir(run_dir, level="basic")
@@ -953,6 +1136,726 @@ def test_basic_level_omits_sensor_statistics_entirely(tmp_path: pathlib.Path) ->
     summary = read_yaml(run_dir / "run_summary.yaml")
 
     assert summary["metrics_level"] == "basic"
+    assert set(summary) == BASIC_SUMMARY_KEYS
     assert "sensor_statistics" not in summary
+    assert "mean_field_metrics" not in summary
     assert "sensor_metrics" in summary and "state_metrics" in summary
-    assert summary["metrics_version"] == 2  # unchanged: WP1.2 is additive
+    assert summary["metrics_version"] == 2  # unchanged: WP1.3 is additive
+    # The layer's sidecar is not written either -- a gate that computed the
+    # fields and then dropped the summary block would leave this behind.
+    assert not (run_dir / "eval_fields.nc").exists()
+
+
+def test_standard_level_wiring_emits_the_mean_field_layer(
+    tmp_path: pathlib.Path,
+) -> None:
+    """WP1.3's schema, its `eval_fields.nc` sidecar and its bookkeeping.
+
+    What is only checkable here (and not in `tests/test_turbulence_stats.py`,
+    which covers the estimators on synthetic arrays) is the *wiring*: that the
+    mean-field accumulators are driven off the same `stream_window_members`
+    pass as the sensor extraction, that the truth-access keys are read under
+    the names the run stage writes, and that the averaging bookkeeping reports
+    the fixture's actual shape rather than a plausible-looking one. A swapped
+    `n_total` / `n_per_window` would produce a summary that looks fine.
+
+    The fixture's cadence is what makes the sampling floors real here: 18 truth
+    frames against `bootstrap_blocks = 4` gives a block length of 5, so the
+    hit-rate allowance and the two RMSE floors are numbers rather than the
+    smoke shape's nulls (3 frames against the shipped 20 blocks).
+    """
+    run_dir = tmp_path / "run"
+    _full_run_dir(run_dir)
+
+    compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+
+    assert set(summary) == STANDARD_SUMMARY_KEYS
+    block = summary["mean_field_metrics"]
+    assert set(block) == MEAN_FIELD_KEYS
+    assert block["reason"] is None
+
+    hit = block["hit_rate"]
+    assert set(hit) == HIT_RATE_KEYS
+    assert hit["relative_tolerance"] == pytest.approx(0.25)
+    # One entry per selected z-level, each naming the level it scored.
+    assert len(hit["per_z"]) == GRID_Z.size
+    assert [entry["z"] for entry in hit["per_z"]] == [pytest.approx(v) for v in GRID_Z]
+    for name in ("u", "v", "w"):
+        assert 0.0 <= hit[name] <= 1.0, name
+        # A real floor, not the `nan` degradation: `hit_rate` documents `nan`
+        # as "no allowance available", and on this cadence one IS available.
+        assert hit["allowance"][name] > 0.0, name
+    assert hit["allowance"]["reason"] is None
+    assert 0.0 <= block["fac2_velmag"] <= 1.0
+
+    for name in ("u", "v", "w", "velmag"):
+        assert set(block["nmse"][name]) == NMSE_KEYS, name
+        assert name in block["fb"], name
+    # The split is an identity when both parts exist, and `velmag` is the one
+    # component where NMSE is always well posed (positive by construction), so
+    # it is the entry that must never be null.
+    velmag = block["nmse"]["velmag"]
+    assert velmag["total"] is not None
+    assert velmag["systematic"] <= velmag["total"] + 1e-12
+    assert velmag["systematic"] + velmag["unsystematic"] == pytest.approx(
+        velmag["total"]
+    )
+
+    for key in ("tke_rmse", "uw_stress_rmse"):
+        assert set(block[key]) == {"value", "sampling_floor"}
+        assert block[key]["value"] >= 0.0, key
+        # The floor is what makes the RMSE readable: an error below the truth's
+        # own sampling spread is the window length, not skill.
+        assert block[key]["sampling_floor"] > 0.0, key
+
+    averaging = block["averaging"]
+    assert set(averaging) == AVERAGING_KEYS
+    assert averaging["n_members"] == N_MEMBERS
+    assert averaging["n_windows"] == N_WINDOWS
+    # Accumulated across ALL windows, per member -- not one window's worth.
+    assert averaging["n_time"] == N_WINDOWS * ENSEMBLE_FRAMES_PER_WINDOW
+    assert averaging["n_time_truth"] == N_WINDOWS * TRUTH_FRAMES_PER_WINDOW
+    assert averaging["z_levels"] == [pytest.approx(v) for v in GRID_Z]
+    # Truth and assimilation grids coincide here, so the nearest-level pairing
+    # is exact; a non-zero offset on this fixture would mean a mis-selection.
+    assert averaging["z_offset_max"] == pytest.approx(0.0)
+    assert averaging["n_cells"] == GRID_Z.size * GRID_Y.size * GRID_X.size
+    assert averaging["n_scored_cells"] == averaging["n_cells"]
+    # Default stations are the sensor x/y of BOTH sets, deduplicated.
+    assert averaging["n_stations"] == len(ASSIM_POINTS[0]) + len(VALIDATION_POINTS[0])
+
+    # This fixture is a pylbm grid with no `blanking`, i.e. the unmasked branch:
+    # the scores cover building interiors and the block has to say so rather
+    # than quietly reporting a fluid fraction of 1 as if it were meaningful.
+    masking = block["masking"]
+    assert set(masking) == MASKING_KEYS
+    assert masking["source"] == "none"
+    assert masking["ensemble_fluid_fraction"] is None
+    assert masking["note"] is not None
+
+    for path, value in _iter_numbers(block):
+        assert np.isfinite(value), f"non-finite value at mean_field_metrics{path}"
+
+
+def test_standard_level_writes_eval_fields_with_the_expected_variables(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`eval_fields.nc` is the sanctioned handoff to the figure stage.
+
+    Stage 3 re-derives its inputs from the raw artifacts today; every field
+    here costs a streaming pass over the window state files, so the variable
+    NAMES are as much a contract as the summary's key paths -- WP1.4's F1/F2/S1
+    index them directly.
+    """
+    run_dir = tmp_path / "run"
+    _full_run_dir(run_dir)
+
+    compute_metrics(run_dir)
+
+    path = run_dir / "eval_fields.nc"
+    assert path.exists()
+    assert (
+        read_yaml(run_dir / "run_summary.yaml")["mean_field_metrics"]["eval_fields"]
+        == path.name
+    )
+    with xarray.open_dataset(path) as fields:
+        assert set(fields.data_vars) == EVAL_FIELD_VARS
+        # Two vertical grids in one file, and the distinction is the point:
+        # `zlev` is the scored planes, `z` is the FULL column carried only at
+        # the stations, because four planes are not a vertical profile.
+        assert fields["ensemble_mean"].dims == ("component", "zlev", "y", "x")
+        assert fields["station_ensemble_mean"].dims == ("component", "z", "station")
+        assert fields.sizes["z"] == GRID_Z.size
+        assert fields.sizes["station"] == len(ASSIM_POINTS[0]) + len(
+            VALIDATION_POINTS[0]
+        )
+        assert list(fields["component"].values) == ["u", "v", "w"]
+        # M = 8, so the across-member spread exists everywhere.
+        assert bool(np.all(np.isfinite(fields["ensemble_std"].values)))
+        assert bool(np.all(fields["ensemble_std"].values >= 0.0))
+        assert fields.attrs["n_members"] == N_MEMBERS
+        assert fields.attrs["mask_source"] == "none"
+
+
+def test_blanking_supplies_the_fluid_mask_on_both_sides(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The one mask that exists is used, on the truth and on the ensemble.
+
+    The plan's premise -- "solid cells are the NaN cells" -- does not hold for
+    any shipped backend (measured NaN fraction 0.0 in every `.temp` artifact),
+    so `blanking` is the whole of the mask story and this is the branch that
+    must not silently stop firing: an unmasked FAC2 counts building interiors,
+    where both fields are near zero and every ratio test passes, so losing the
+    mask makes a run look BETTER. The fluid fraction is asserted in closed form
+    against the synthetic building rather than measured.
+    """
+    run_dir = tmp_path / "run"
+    _full_run_dir(run_dir, with_blanking=True)
+
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["mean_field_metrics"]
+
+    masking = block["masking"]
+    assert masking["source"] == "blanking"
+    assert masking["truth_source"] == "blanking"
+    assert masking["ensemble_source"] == "blanking"
+    # Truth and assimilation grids coincide on this fixture, so no interpolation
+    # erodes the mask and all three fractions are the building's complement
+    # exactly. On a cross-grid run the truth-side number is strictly smaller --
+    # interpolating a NaN-masked truth drops every cell whose stencil touched a
+    # building, which is the conservative combination rule.
+    assert masking["fluid_fraction"] == pytest.approx(BLANK_FLUID_FRACTION)
+    assert masking["ensemble_fluid_fraction"] == pytest.approx(BLANK_FLUID_FRACTION)
+    assert masking["truth_finite_fraction"] == pytest.approx(BLANK_FLUID_FRACTION)
+    assert masking["note"] is None
+    # Nothing beyond the mask went non-finite on a healthy run, so the mask's
+    # fraction and the scored sample's coincide here. They are separate keys
+    # because they are separate samples, not because they usually differ.
+    assert masking["scored_fraction"] == pytest.approx(masking["fluid_fraction"])
+
+    averaging = block["averaging"]
+    assert averaging["n_scored_cells"] == round(
+        BLANK_FLUID_FRACTION * averaging["n_cells"]
+    )
+    assert masking["scored_fraction"] == pytest.approx(
+        averaging["n_scored_cells"] / averaging["n_cells"]
+    )
+
+    with xarray.open_dataset(run_dir / "eval_fields.nc") as fields:
+        mask = fields["fluid_mask"].values
+        assert mask.dtype == np.int8
+        assert set(np.unique(mask)) == {0, 1}
+        assert float(mask.mean()) == pytest.approx(BLANK_FLUID_FRACTION)
+        # WP1.4 greys buildings with `set_bad`, so the mask has to line up with
+        # the NaN the truth fields already carry there.
+        assert not np.any(np.isfinite(fields["truth_velmag"].values[mask == 0]))
+        assert fields["fluid_mask"].attrs["source"] == "blanking"
+        # A station inside the building (25, 20) is blanked out, so the column
+        # mask is exercised rather than trivially all-ones.
+        assert int(fields["station_fluid_mask"].values.min()) == 0
+
+
+def test_configured_stations_replace_the_default_sensor_columns(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`run.metrics.stations` is a real knob, not a documented one.
+
+    Nothing else in the pipeline reads it, so without this test the config
+    block could ship, validate, and be silently ignored. Configured stations
+    win outright rather than being added to the sensor positions: they are the
+    case's own reference locations (wind-tunnel probes), which need not
+    coincide with the assimilated sensors at all.
+    """
+    run_dir = tmp_path / "run"
+    stations = [[10.0, 10.0], [30.0, 30.0]]
+    _full_run_dir(run_dir, stations=stations)
+
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["mean_field_metrics"]
+
+    assert block["averaging"]["n_stations"] == len(stations)
+    with xarray.open_dataset(run_dir / "eval_fields.nc") as fields:
+        assert fields.sizes["station"] == len(stations)
+        assert list(fields["station_x"].values) == [s[0] for s in stations]
+        assert list(fields["station_y"].values) == [s[1] for s in stations]
+
+
+def _staggered_member(rng: np.random.Generator, gain: float) -> xarray.Dataset:
+    """One uDALES-staggered member: ``u`` on ``xm``, ``v`` on ``ym``, ``w`` on ``zm``.
+
+    The whole fixture above is pylbm, which writes one unstaggered grid — so it
+    can never exercise colocation's edge extrapolation, and the aggregate
+    exclusion that exists because of it would never run. This is the smallest
+    state that does: ``w`` lives on ``zm``, so the top ``zt`` level is filled by
+    extrapolation from the last two faces and is not a normal cell.
+    """
+    zt, yt, xt = np.arange(4) + 0.5, np.arange(5) + 0.5, np.arange(6) + 0.5
+    zm, ym, xm = zt - 0.5, yt - 0.5, xt - 0.5
+    times = np.arange(6.0)
+
+    def field(z: np.ndarray, y: np.ndarray, x: np.ndarray, scale: float) -> np.ndarray:
+        base = (
+            2.0 * x[None, None, None, :]
+            + 3.0 * y[None, None, :, None]
+            + 5.0 * z[None, :, None, None]
+        )
+        wave = np.sin(times)[:, None, None, None]
+        noise = rng.normal(0.0, 0.05, size=(times.size, z.size, y.size, x.size))
+        return np.asarray(scale * gain * (base + wave) + noise, dtype=float)
+
+    return xarray.Dataset(
+        {
+            "u": (("time", "zt", "yt", "xm"), field(zt, yt, xm, 1.0)),
+            "v": (("time", "zt", "ym", "xt"), field(zt, ym, xt, 0.5)),
+            "w": (("time", "zm", "yt", "xt"), field(zm, yt, xt, 0.2)),
+        },
+        coords={
+            "zt": zt,
+            "yt": yt,
+            "xt": xt,
+            "zm": zm,
+            "ym": ym,
+            "xm": xm,
+            "time": times,
+        },
+    )
+
+
+def _truth_matching(ensemble: dict, *, top_level_error: float) -> dict:
+    """A truth mapping that matches the ensemble exactly except on the TOP level.
+
+    Built from the ensemble's own reduced fields so "matches" is exact rather
+    than approximate, then poisoned on the extrapolated level alone. That makes
+    every aggregate score a clean statement about whether that level was
+    excluded: with the exclusion the layer sees a perfect run, without it the
+    contamination is the only thing it sees.
+    """
+    slab = ensemble["slab"]
+    mean = np.array(slab["mean"], dtype=float)
+    mean[:, -1] += top_level_error
+    tke = np.array(slab["tke"], dtype=float)
+    # +10 on one of four levels is an RMSE of 0 when that level is excluded and
+    # exactly sqrt(100/4) = 5 when it is not.
+    tke[-1] += 10.0
+    station = ensemble["station"]
+    return {
+        "n_time": 6,
+        "y": ensemble["y"],
+        "x": ensemble["x"],
+        "z_levels": ensemble["z_levels"],
+        "z_all": ensemble["z_all"],
+        "mean": mean,
+        "velmag": np.sqrt((mean**2).sum(axis=0)),
+        "tke": tke,
+        "uw": np.array(slab["uw"], dtype=float),
+        "station_mean": np.array(station["mean"], dtype=float),
+        "station_rms": np.array(station["rms"], dtype=float),
+        "station_tke": np.array(station["tke"], dtype=float),
+        "station_uw": np.array(station["uw"], dtype=float),
+        "fluid_slab": None,
+        "mask_source": "none",
+        "allowance": dict.fromkeys(("u", "v", "w"), 0.01),
+        "tke_floor": 0.001,
+        "uw_floor": 0.001,
+        "n_bootstrap_cells": 120,
+        "n_bootstrap_cells_max": 4096,
+        "bootstrap_seed": 0,
+    }
+
+
+def test_the_extrapolated_top_level_is_reported_per_z_and_kept_out_of_aggregates(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A7: the exclusion has to actually fire, on a genuinely staggered state.
+
+    `evenly_spaced_levels` uses `np.linspace(0, nz-1, k)`, which ALWAYS includes
+    `nz-1` — and for uDALES/PALM `w` that is exactly the level colocation had to
+    extrapolate, whose second moments are inflated by up to 5x. So the edge is
+    not an unlikely corner: it is 1 of the 4 shipped z-levels on every staggered
+    backend, and it silently biased `hit_rate`, `tke_rmse` and `uw_stress_rmse`
+    until it was excluded.
+
+    The contrast is the assertion. The truth here matches the ensemble exactly
+    on the three interior levels and is wrong only on the extrapolated one, so:
+    with the exclusion the aggregates say "perfect" (`hit_rate.u = 1.0`,
+    `tke_rmse = 0`) while `per_z` still shows the bad level; without it they say
+    `0.75` and `5`. Nothing is hidden and nothing is silently biased.
+    """
+    rng = np.random.default_rng(5)
+    accumulator = MeanFieldAccumulator(
+        "udales", 4, 1, np.array([2.5, 4.0]), np.array([2.0, 3.0])
+    )
+    for member in range(3):
+        accumulator.add_member(0, member, _staggered_member(rng, 1.0 + 0.05 * member))
+    ensemble = accumulator.result()
+
+    # The wiring half: the flag comes off the real staggering, not a fixture
+    # constant, and the level selection really does land on the edge.
+    assert ensemble["z_edge_extrapolated"] is True
+    assert list(ensemble["z_index"]) == [0, 1, 2, 3]
+
+    truth = _truth_matching(ensemble, top_level_error=100.0)
+    block, fields = mean_field_summary(ensemble, truth, 1)
+
+    top = float(ensemble["z_levels"][-1])
+    assert block["averaging"]["z_levels_extrapolated"] == [pytest.approx(top)]
+    # Reported per z -- the bad level is visible, flagged, and not dropped.
+    per_z = block["hit_rate"]["per_z"]
+    assert [entry["u"] for entry in per_z] == [1.0, 1.0, 1.0, 0.0]
+    assert [entry["extrapolated"] for entry in per_z] == [False, False, False, True]
+    # ... and kept out of every aggregate.
+    assert block["hit_rate"]["u"] == pytest.approx(1.0)
+    assert block["fac2_velmag"] == pytest.approx(1.0)
+    assert block["tke_rmse"]["value"] == pytest.approx(0.0)
+    # The aggregate sample is three levels of the four the layer scored.
+    averaging = block["averaging"]
+    assert averaging["n_scored_cells"] == 4 * averaging["n_aggregate_cells"] / 3
+    assert fields.sizes["zlev"] == 4  # the sidecar still carries every level
+
+    # The same inputs with the exclusion off: this is what the layer reported
+    # before A7, and the numbers the reviewer measured by hand.
+    unexcluded = dict(ensemble, z_edge_extrapolated=False)
+    before, _ = mean_field_summary(
+        unexcluded, _truth_matching(ensemble, top_level_error=100.0), 1
+    )
+    assert before["averaging"]["z_levels_extrapolated"] == []
+    assert before["hit_rate"]["u"] == pytest.approx(0.75)
+    assert before["tke_rmse"]["value"] == pytest.approx(5.0)
+    assert before["averaging"]["n_aggregate_cells"] == averaging["n_scored_cells"]
+
+
+def test_a_single_extrapolated_level_is_scored_rather_than_nulled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """N2: when the exclusion would empty the aggregate, say so and score anyway.
+
+    At `nz == 1` the only scored level IS `nz - 1`, so excluding it leaves the
+    aggregates with no cells at all — `null` for every score, with no `reason`
+    and no log line, which is exactly the signature B1 was blocked for. A
+    contaminated number that announces its contamination beats a silent null,
+    so every level is kept and `reason` carries why.
+    """
+    zt, yt, xt = np.array([0.5]), np.arange(3) + 0.5, np.arange(3) + 0.5
+    zm = np.array([0.0, 1.0])
+    times = np.arange(6.0)
+    rng = np.random.default_rng(7)
+
+    def one_level(z: np.ndarray, y: np.ndarray, x: np.ndarray) -> np.ndarray:
+        shape = (times.size, z.size, y.size, x.size)
+        wave = np.sin(times)[:, None, None, None]
+        return np.asarray(5.0 + wave + rng.normal(0, 0.1, shape), dtype=float)
+
+    state = xarray.Dataset(
+        {
+            "u": (("time", "zt", "yt", "xm"), one_level(zt, yt, xt - 0.5)),
+            "v": (("time", "zt", "ym", "xt"), one_level(zt, yt - 0.5, xt)),
+            "w": (("time", "zm", "yt", "xt"), one_level(zm, yt, xt)),
+        },
+        coords={
+            "zt": zt,
+            "yt": yt,
+            "xt": xt,
+            "zm": zm,
+            "ym": yt - 0.5,
+            "xm": xt - 0.5,
+            "time": times,
+        },
+    )
+    accumulator = MeanFieldAccumulator("udales", 4, 1, np.array([1.5]), np.array([1.5]))
+    for member in range(2):
+        accumulator.add_member(0, member, state * (1.0 + 0.01 * member))
+    ensemble = accumulator.result()
+    assert ensemble["z_edge_extrapolated"] is True
+    assert list(ensemble["z_index"]) == [0]  # index 0 and nz-1 are the same level
+
+    block, _ = mean_field_summary(
+        ensemble, _truth_matching(ensemble, top_level_error=0.0), 1
+    )
+
+    # Still reported as extrapolated -- that is a fact about the grid...
+    assert len(block["averaging"]["z_levels_extrapolated"]) == 1
+    # ... but scored rather than nulled, with the aggregate sample intact.
+    assert block["hit_rate"]["u"] is not None
+    assert block["averaging"]["n_aggregate_cells"] == (
+        block["averaging"]["n_scored_cells"]
+    )
+    assert block["averaging"]["n_aggregate_cells"] > 0
+    # And the summary says why, per the degenerate-shape rule.
+    assert block["reason"] is not None
+    assert "extrapolated" in block["reason"]
+
+
+def _diverge_member(
+    run_dir: pathlib.Path,
+    member: int,
+    *,
+    region: tuple[slice, slice] | None = None,
+) -> None:
+    """NaN out one member's velocities in every window, wholly or in a region.
+
+    What a diverged CFD member looks like on disk. ``region`` is a ``(y, x)``
+    slice pair: a member that blew up over part of the domain and stayed finite
+    elsewhere, which is the harder of the two cases to notice, because the
+    ensemble mean then goes NaN over exactly those cells while every count in
+    the summary keeps describing the whole slab.
+    """
+    for path in sorted((run_dir / "windows").glob("window_*_posterior_state.nc")):
+        with xarray.open_dataset(path) as opened:
+            state = opened.load()
+        for name in ("u", "v", "w"):
+            if region is None:
+                state[name][{"ensemble": member}] = np.nan
+            else:
+                ys, xs = region
+                state[name][{"ensemble": member, "y": ys, "x": xs}] = np.nan
+        state.to_netcdf(path.with_suffix(".rewritten.nc"))
+        path.unlink()
+        path.with_suffix(".rewritten.nc").rename(path)
+
+
+def test_a_diverged_member_is_excluded_instead_of_nulling_the_layer(
+    tmp_path: pathlib.Path,
+) -> None:
+    """One NaN member must not take the whole mean-field block down with it.
+
+    A diverged member is routine, and `np.stack(...).mean(axis=0)` propagates
+    its NaN to every cell: before this was fixed the layer reported `null` for
+    every score with **no** `reason` and no log line, while `averaging` happily
+    said `n_members: 8` and `n_scored_cells: 104` for a comparison that scored
+    nothing. Both halves are pinned here -- the scores survive on the members
+    that are fine, and the summary says which ensemble they came from.
+    """
+    run_dir = tmp_path / "run"
+    _full_run_dir(run_dir, with_blanking=True)
+    _diverge_member(run_dir, 0)
+
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["mean_field_metrics"]
+
+    averaging = block["averaging"]
+    assert averaging["n_members"] == N_MEMBERS
+    assert averaging["n_members_scored"] == N_MEMBERS - 1
+    # Not silent: the block says what was dropped, and names it.
+    assert block["reason"] is not None
+    assert "0" in block["reason"]
+    # And the layer still reports real numbers for the 7 members that are fine.
+    for name in ("u", "v", "w"):
+        assert block["hit_rate"][name] is not None, name
+    assert block["fac2_velmag"] is not None
+    assert block["tke_rmse"]["value"] is not None
+
+    with xarray.open_dataset(run_dir / "eval_fields.nc") as fields:
+        # The band a figure draws is the SCORED ensemble's, so the attribute a
+        # caption would read has to be too.
+        assert fields.attrs["n_members_scored"] == N_MEMBERS - 1
+        assert fields.attrs["n_members"] == N_MEMBERS
+        assert bool(np.all(np.isfinite(fields["ensemble_velmag"].values)))
+
+
+def test_a_partially_diverged_member_is_excluded_and_the_counts_follow(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The sub-region case: the reported sample must be the scored sample.
+
+    A member that goes NaN over part of the domain silently removes those cells
+    from every score. Excluding the member wholesale is the same casewise rule
+    `StreamingMoments` applies in time -- an ensemble mean and an ensemble
+    spread taken over different member sets at neighbouring cells are not a
+    field -- and `n_scored_cells` is derived from the pairs that survived, so it
+    cannot drift away from what was scored whichever way the NaN falls.
+    """
+    run_dir = tmp_path / "run"
+    _full_run_dir(run_dir, with_blanking=True)
+    _diverge_member(run_dir, 3, region=(slice(0, 2), slice(0, 2)))
+
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["mean_field_metrics"]
+
+    averaging = block["averaging"]
+    assert averaging["n_members_scored"] == N_MEMBERS - 1
+    assert "3" in block["reason"]
+    # The partially-NaN member is gone, so the scored set is the mask's again
+    # -- the count and `scored_fraction` agree with each other by construction,
+    # not by coincidence, and `scored_fraction` is the key that describes the
+    # SCORES (`fluid_fraction` describes the mask, and the two are separate
+    # names precisely so neither can quietly stand in for the other).
+    assert averaging["n_scored_cells"] == round(
+        BLANK_FLUID_FRACTION * averaging["n_cells"]
+    )
+    assert block["masking"]["scored_fraction"] == pytest.approx(
+        averaging["n_scored_cells"] / averaging["n_cells"]
+    )
+    assert block["masking"]["scored_fraction"] <= block["masking"]["fluid_fraction"]
+    with xarray.open_dataset(run_dir / "eval_fields.nc") as fields:
+        # `isfinite(truth_velmag)` IS the scored set, which is what a figure
+        # needs to grey out the cells no number was computed on.
+        scored = np.isfinite(fields["truth_velmag"].values)
+        assert int(scored.sum()) == averaging["n_scored_cells"]
+
+
+def test_every_member_diverged_nulls_the_layer_with_a_reason(
+    tmp_path: pathlib.Path,
+) -> None:
+    """All members non-finite is the degenerate shape, and it degrades properly."""
+    run_dir = tmp_path / "run"
+    _full_run_dir(run_dir, with_blanking=True)
+    for member in range(N_MEMBERS):
+        _diverge_member(run_dir, member)
+
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["mean_field_metrics"]
+
+    assert block["reason"] is not None
+    assert block["hit_rate"]["u"] is None
+    assert block["fac2_velmag"] is None
+    assert block["averaging"]["n_members_scored"] is None
+    # No sidecar for a layer that scored nothing.
+    assert not (run_dir / "eval_fields.nc").exists()
+    assert block["eval_fields"] is None
+
+
+def test_the_sampling_floors_are_computed_on_the_cells_the_scores_are(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The floors must see the fluid mask and the stride, or they gate nothing.
+
+    `hit_rate`'s allowance and the two RMSE floors are the truth's own sampling
+    uncertainty *at the cells being scored*. Bootstrapping the raw slab instead
+    pulls them down with the near-constant near-zero series inside buildings,
+    and a floor that is too low is anti-conservative for its stated purpose: an
+    RMSE genuinely inside the truth's sampling noise gets reported as above its
+    floor. The regression this catches is precise -- the floors used to come
+    out **byte-identical** with and without `blanking`.
+    """
+    masked_dir = tmp_path / "masked"
+    unmasked_dir = tmp_path / "unmasked"
+    _full_run_dir(masked_dir, with_blanking=True)
+    _full_run_dir(unmasked_dir, with_blanking=False)
+
+    compute_metrics(masked_dir)
+    compute_metrics(unmasked_dir)
+    masked = read_yaml(masked_dir / "run_summary.yaml")["mean_field_metrics"]
+    unmasked = read_yaml(unmasked_dir / "run_summary.yaml")["mean_field_metrics"]
+
+    for name in ("u", "v", "w"):
+        assert masked["hit_rate"]["allowance"][name] != (
+            unmasked["hit_rate"]["allowance"][name]
+        ), name
+    assert masked["tke_rmse"]["sampling_floor"] != (
+        unmasked["tke_rmse"]["sampling_floor"]
+    )
+    assert masked["uw_stress_rmse"]["sampling_floor"] != (
+        unmasked["uw_stress_rmse"]["sampling_floor"]
+    )
+    # The bootstrap ran over the truth's fluid cells and nothing else. The truth
+    # grid here is the assimilation grid, so that count is exactly the
+    # building's complement.
+    cells = GRID_Z.size * GRID_Y.size * GRID_X.size
+    assert masked["averaging"]["n_bootstrap_cells"] == round(
+        BLANK_FLUID_FRACTION * cells
+    )
+    assert unmasked["averaging"]["n_bootstrap_cells"] == cells
+    # The cap and the seed travel with the number, so it is reproducible rather
+    # than merely stable.
+    assert masked["averaging"]["n_bootstrap_cells_max"] >= (
+        masked["averaging"]["n_bootstrap_cells"]
+    )
+    assert masked["averaging"]["bootstrap_seed"] is not None
+
+
+def test_the_sampling_floors_follow_the_mean_field_stride(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A strided run scores fewer cells, so its floors describe fewer cells too.
+
+    Same defect as the mask half: the floors used to be identical at
+    `mean_field_stride=3` and at 1, i.e. they described a run that was not
+    performed.
+    """
+    strided_dir = tmp_path / "strided"
+    plain_dir = tmp_path / "plain"
+    _full_run_dir(strided_dir, with_blanking=True, stride=3)
+    _full_run_dir(plain_dir, with_blanking=True)
+
+    compute_metrics(strided_dir)
+    compute_metrics(plain_dir)
+    strided = read_yaml(strided_dir / "run_summary.yaml")["mean_field_metrics"]
+    plain = read_yaml(plain_dir / "run_summary.yaml")["mean_field_metrics"]
+
+    assert strided["averaging"]["stride"] == 3
+    assert strided["averaging"]["n_bootstrap_cells"] < (
+        plain["averaging"]["n_bootstrap_cells"]
+    )
+    assert strided["hit_rate"]["allowance"]["u"] != plain["hit_rate"]["allowance"]["u"]
+
+
+def test_stations_without_a_truth_column_are_counted_and_quantiles_persisted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S3: the strict all-fluid stencil rule stays, but stops being silent.
+
+    `_column_indicator` drops a station's ENTIRE truth column when its 2x2
+    horizontal stencil touches a solid cell -- the right trade, since the
+    alternative contaminates a profile with building values -- and stations
+    default to the sensor x/y, which in an urban case sit on facades and roofs.
+    So an empty truth column is the common case and WP1.4 would otherwise draw
+    a posterior band with no truth line and no explanation.
+
+    The quantiles are the other half: a "posterior band" can only be mean +-
+    k*sigma unless the empirical fan is persisted, and recomputing it means
+    re-reading the window states, which is what `eval_fields.nc` exists to
+    prevent.
+    """
+    run_dir = tmp_path / "run"
+    _full_run_dir(run_dir, with_blanking=True)
+
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["mean_field_metrics"]
+
+    averaging = block["averaging"]
+    n_stations = len(ASSIM_POINTS[0]) + len(VALIDATION_POINTS[0])
+    assert averaging["n_stations"] == n_stations
+    # The fixture's building swallows three of the five default stations, so
+    # this is a real count rather than a copy of `n_stations`.
+    assert 0 < averaging["n_stations_with_truth"] < n_stations
+
+    with xarray.open_dataset(run_dir / "eval_fields.nc") as fields:
+        assert list(fields["quantile"].values) == [
+            pytest.approx(q) for q in (0.05, 0.25, 0.5, 0.75, 0.95)
+        ]
+        columns = fields["station_ensemble_mean_quantile"]
+        assert columns.dims == ("quantile", "component", "z", "station")
+        values = columns.values
+        # Monotone across the quantile axis, and the median is not the mean.
+        assert bool(np.all(np.diff(values, axis=0) >= -1e-12))
+        assert bool(
+            np.any(np.abs(values[2] - fields["station_ensemble_mean"].values) > 1e-12)
+        )
+        # The station count in `averaging` is the one this file carries.
+        finite = np.isfinite(fields["station_truth_tke"].values).any(axis=0)
+        assert int(finite.sum()) == averaging["n_stations_with_truth"]
+
+
+def test_mean_field_layer_nulls_every_key_when_it_never_ran(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The degraded path emits the same key TREE, not a single `null`.
+
+    The master plan's rule is that a degenerate shape produces `null` plus a log
+    line, never special-cased math -- and the whole value of that rule is that a
+    consumer can index `mean_field_metrics.nmse.u.systematic` on an old run dir
+    exactly as on a production one. Driven through `mean_field_scores(None, ...)`
+    rather than through a broken run dir because every *other* reachable failure
+    (a missing truth, an unknown solver name) already raises in WP1.2's sensor
+    layer, several hundred lines earlier: this is the branch that survives.
+    """
+    healthy_dir = tmp_path / "run"
+    _full_run_dir(healthy_dir)
+    compute_metrics(healthy_dir)
+    healthy = read_yaml(healthy_dir / "run_summary.yaml")["mean_field_metrics"]
+
+    block, dataset = mean_field_scores(None, "unused.nc", None, 0.0, 0, 0.0, "pylbm")
+
+    assert dataset is None  # nothing to persist, so no `eval_fields.nc`
+    assert block["reason"] is not None
+    assert block["eval_fields"] is None
+    assert _key_tree(block) == _key_tree(healthy)
+    for path, value in _iter_numbers(block):
+        # The only numbers that survive are configuration, not measurement:
+        # the hit rate's relative tolerance, which nulling would hide.
+        assert path.endswith("relative_tolerance"), path
+
+
+def _key_tree(obj: object) -> object:
+    """The nested key structure of a summary block, with the values dropped.
+
+    Leaves collapse to ``None`` whatever they hold, lists included: the whole
+    point of the degraded block is that a *value* becomes ``null`` while the
+    key path stays indexable, so `hit_rate.per_z` being a list of z-levels on
+    one side and ``null`` on the other is the contract, not a difference.
+    """
+    if isinstance(obj, dict):
+        return {key: _key_tree(value) for key, value in obj.items()}
+    return None

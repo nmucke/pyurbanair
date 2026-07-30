@@ -2,7 +2,7 @@
 
 > Part of the ESMDA-evaluation effort. Master plan:
 > [master_plan.md](master_plan.md). Rationale: §3, §4.1–4.2, §4.5, §7 of
-> [../esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md).
+> [docs/plans/esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md).
 > Requires phase 0. Four PRs (WP1.0+1.1, WP1.2, WP1.3, WP1.4).
 >
 > **Implementer: update the master_plan.md status table per WP as each PR
@@ -1118,3 +1118,1055 @@ semantics still holds.
   synthetic fixture, so a reference that silently stops being emitted (or starts
   coming out `nan` on a case that scores fine) fails loudly instead of quietly
   removing the only thing that makes `w1_over_floor` readable.
+
+### WP1.3
+
+Common thread, and worth stating once because it is the same shape three times:
+**three of the premises this WP's plan text rests on turned out to be false
+against the actual backends and the actual tree**, and each was found by
+measuring rather than by reading. (a) "fluid cells only (`~np.isnan` after
+masking; solid cells are the NaN/blocked cells)" — **no shipped backend marks
+solid cells that way**; measured NaN fraction of `u`/`v`/`w` is 0.0 in every
+state artifact inspected. (b) "**Do not** reuse the by-index `|U|` shortcut —
+fine for magnitude summaries, wrong for stresses" — the conclusion is right and
+the mechanism is not the one that wording implies: colocation does not recover
+grid-scale stress *amplitude* at all, it makes the tensor *self-consistent*.
+(c) "if the mean-field pass busts [the runtime budget], drop smoke `n_z_slices`
+to 2 via `_SMOKE_OVERRIDES`" — measured, that changes nothing, because at the
+smoke shape's 1600 cells this layer's cost is entirely fixed. A fourth,
+smaller one belongs beside them: §Acceptance's "no `.load()` of window state
+files anywhere (grep)" **was not true of the tree before this WP** —
+`ensemble_sensor_series` loaded them whole — so step 3's shared read is a repair
+as much as an optimization.
+
+Only (a) moves a number, and it moves it in the flattering direction, which is
+why it is the one carrying a `logger.warning` and a `masking` block rather than
+a docstring. `metrics_version` stays **2**: WP1.3 is purely additive — one new
+top-level `mean_field_metrics` mapping plus one new artifact — and the WP1.2
+keys' byte-identity across the streaming refactor is measured, not assumed (see
+below), so no existing key changed value or semantics.
+
+#### The math module (`src/pyurbanair/utils/turbulence_stats.py`)
+
+- **WP1.3 — `hit_rate(pred, obs, *, allowance, relative_tolerance=0.25)`
+  (signature reshaped).** The plan writes `hit_rate(pred, obs, D=0.25, W)`,
+  which is not valid Python — a positional parameter cannot follow a defaulted
+  one. `W` became `allowance`, **keyword-only and required with no default**,
+  because there is no universal value for it: it is the truth's own bootstrap
+  sampling floor `σ_u/√N_eff`, which makes `q` an "indistinguishable within
+  sampling error" test rather than an arbitrary threshold, and a default would
+  invite scoring against a number nobody chose. `D` became
+  `relative_tolerance` (`DEFAULT_HIT_RATE_TOLERANCE = 0.25`). `allowance=nan`
+  is a **documented legal value** meaning "floor unavailable" — the smoke
+  shape, where `block_bootstrap_std` is undefined at 3 frames against 20 blocks
+  — and it skips the absolute clause entirely, degrading `q` to the pure
+  relative test, which can only be *lower*: a missing floor never flatters a
+  run. A **negative** allowance raises, since it admits no points and is always
+  a bug, unlike `nan`.
+
+- **WP1.3 — the plan's "solid cells are the NaN/blocked cells" premise is false
+  for every backend (the substantive finding).** Verified in the backend code
+  and on the `.temp` artifacts: measured NaN fraction of `u`/`v`/`w` = **0.0**
+  in all five state files inspected, independently re-verified by the lead on
+  three of them. What each backend actually does: **pylbm** writes a `blanking`
+  variable (1 = solid) into the same Dataset as the velocities, in both its
+  truth state and its window state files; **pypalm** explicitly `fillna(0.0)`s
+  PALM's NaN (`libs/pypalm/src/pypalm/forward_model.py:1019-1026`) and keeps no
+  mask, so a PALM mask is **not recoverable from the artifact at all**;
+  **uDALES** fielddumps carry small non-zero junk inside buildings and ship no
+  mask (the training-data scripts attach `blanking` from `solid_c.txt` after the
+  fact, which needs case-dir paths this stage does not have). Two consequences,
+  both load-bearing: masking is the **driver's** job and not the math layer's
+  (`hit_rate`'s docstring says so — it drops non-finite pairs and states that
+  the caller must have masked already), and an unmasked `fac2` scores the
+  zero-vs-zero pair inside a building as a hit, so it is optimistic by roughly
+  the building fraction. What the driver does with this is the `masking` entry
+  below.
+
+- **WP1.3 — `StreamingMoments` does not accumulate `Σu_i u_j` literally
+  (departure from the plan's wording, on measurement).** The plan specifies
+  `n`, `Σu_i`, `Σu_i u_j`; the class uses the chunk-wise Chan/Welford combine
+  instead (per-chunk co-moment about the chunk mean, plus `δᵢδⱼ·nm/(n+m)`).
+  Relative error of the `ddof=1` variance against an exact (longdouble
+  two-pass) reference, `n = 360` in 10 chunks of 36, naive `Σuu − (Σu)²/n`
+  against this class, as the mean/fluctuation ratio grows:
+
+  | mean / fluctuation | naive sums | this class |
+  |---|---|---|
+  | 25× | 8.0e-14 | 1.7e-16 |
+  | 2500× | 1.6e-09 | 4.4e-15 |
+  | 1e7× | 3.9e-02 | 7.1e-11 |
+
+  The cross moment follows the same pattern (1.1e-02 vs 7.7e-11 at 1e7×), and
+  the class is within ~2× of a whole-series two-pass — i.e. chunking costs
+  nothing numerically, which is what makes the chunk length a free memory knob.
+  This is not a hypothetical regime: **the layer's regime *is* a small
+  fluctuation on a large mean** (urban flow, 5 m/s mean against 0.2 m/s
+  fluctuation), which is exactly where a literal sum of squares loses its
+  digits.
+
+- **WP1.3 — NaN policy: per-cell `int64` count, casewise deletion (plan
+  silent).** A frame contributes to a cell only if **all** components are finite
+  there. Per cell rather than one scalar count because a blocked cell and the
+  NaN edge of an interpolated truth field are per-cell facts, not per-frame
+  ones. Casewise rather than per-pair because available-case counts mix sample
+  sets *within one matrix*: the entries of `R` are then computed on different
+  frame subsets, which can make `R` indefinite and `tke` negative. A test
+  asserts a PSD matrix on an adversarial mask, so the choice is pinned rather
+  than assumed.
+
+- **WP1.3 — Bessel: `ddof=1` by default, applied to the reduced moment
+  (cross-WP consistency, resolved deliberately).** `tke()` is then exactly
+  `0.5·Σᵢ var_ddof1(uᵢ)`, i.e. WP1.2's sensor TKE estimator, to the last digit
+  rather than approximately. WP1.2 put the `n/(n−1)` on the *integrand* only so
+  that the moving-block bootstrap resampled the reported estimator; nothing is
+  resampled inside this class, so the factor belongs on the reduced value and
+  the two definitions coincide. `ddof=0` is exposed for a caller who wants the
+  biased moment.
+
+- **WP1.3 — `colocate_components` returns `xarray.DataArray`s, not bare arrays
+  (plan ambiguity resolved).** The plan says "arrays/DataArrays". DataArrays,
+  because they carry the **centre coordinates**, which is what the driver needs
+  for the cross-grid truth `.interp` — handing back bare arrays would force the
+  caller to re-derive the axes the function just constructed. Output dims are
+  `(…, zt, yt, xt)` for udales and `(…, z, y, x)` for palm/pylbm; `ensemble` and
+  `time` pass through untouched.
+
+- **WP1.3 — domain edge: linear extrapolation, not column-dropping
+  (departure; the plan does not say).** The staggered axes are *lower* faces
+  with the **same length** as the centres (measured `xm − xt = −dx/2`), so the
+  last centre has no upper face and is extrapolated with weights (1.5, −0.5).
+  That is the same choice pypalm's own `zw→z` postprocessing makes, it is exact
+  for a linear field, and it keeps the returned grid identical to the centre
+  axes so nothing downstream has to special-case a short axis. The costs are
+  documented rather than hidden: variance amplification **2.5×** in the last
+  column, and a periodic domain would prefer wrapping — but the boundary
+  condition is not recoverable from the state file, so wrapping cannot be
+  chosen here.
+
+- **WP1.3 — new guard `_check_face_centre_alignment` (addition).**
+  `colocate_components` raises unless `centre[i] == ½(face[i] + face[i+1])`
+  within 1e-3 of the local spacing. It exists for one specific
+  silent-wrong-number case: a caller who selects z-levels **before** colocating
+  leaves both axes uniformly spaced, so a spacing check would pass while the
+  interpolation blends cells five apart. It also raises on a single-level
+  staggered axis, where one point defines no interpolant. This guard is what
+  sets the driver's memory floor (see the `_TRUTH_CHUNK_BYTES` entry below) —
+  it is the reason a truth chunk cannot be colocated one z-level at a time.
+
+- **WP1.3 — the plan's "by-index is wrong for stresses" is right, but not for
+  the reason the wording implies (correction, measured, and the docstring says
+  so).** On a homogeneous synthetic field (Gaussian correlation length `L`,
+  6000 frames), colocation does **not** recover grid-scale stress amplitude —
+  `⟨u'w'⟩` error is −22.1% by index against −22.2% colocated at `L = dx` — and
+  it *adds* a −19.7% loss on the diagonal, where by-index was unbiased. What it
+  buys is tensor **consistency**: the anisotropy ratio `⟨u'w'⟩/k` goes
+  −22.1% → **−3.1%** at `L = dx` and −6.0% → **−0.2%** at `L = 2dx`, because the
+  interpolation filter is identical for every entry of the tensor while the
+  by-index lag is not. Plus the unambiguous half of the claim: a linear mean
+  profile is displaced by exactly `0.5·dx·dU/dx` (0.05 measured) by index and is
+  exact to 2e-16 colocated. Recording this matters because a reader told only
+  "by-index is wrong for stresses" will expect the colocated stress
+  *magnitudes* to be right, and at `L ≈ dx` they are ~20% low either way — the
+  layer resolves what its grid resolves.
+
+- **WP1.3 — `nmse` is `nan` when `ō·p̄ ≤ 0`, `nmse_split` is `(nan, nan)` for
+  `|FB| ≥ 2` (documentation of a routine regime, not an error path).** Those
+  are exactly the arguments where the formulas divide by zero or return a
+  negative systematic part. Both are unreachable for a positive field and
+  **routine** for a signed velocity component whose mean passes through zero —
+  which is why it matters here specifically: the schema emits per-component
+  `nmse`. On `pylbm_to_pylbm` it fires in practice (`nmse.v` → `null`,
+  `nmse.w` = 382), and `nmse.velmag` / `fb.velmag` were added (below) so the
+  layer always carries one well-posed number regardless.
+
+- **WP1.3 — `fac2` raises `ValueError` on any negative paired value
+  (enforcement, not documentation).** The plan says "positive quantities only —
+  apply to `|U|`, never to signed components". Once the number is in
+  `run_summary.yaml` that instruction is unenforceable and unfalsifiable, so it
+  is enforced at the call instead: the error names how many of the fluid points
+  were negative and points the caller at `hit_rate`'s absolute allowance, which
+  is the metric built for a sign-changing quantity.
+
+- **WP1.3 — descoped: optional skewness/kurtosis, and any accumulator
+  `merge()` / `__iadd__`.** The metrics doc offers the higher moments
+  "optionally" and the WP1.3 bullet list does not ask for them. A merge
+  operation has no consumer either: windows are simply more `update` calls on
+  the same instance, which is what makes the statistics span the run. A
+  parallel-member reduce would need one — that is the shape to add it for, not
+  this one.
+
+- **WP1.3 — the metrics doc's path was checked rather than corrected blind
+  (documentation).** The real file is
+  `docs/plans/esmda_turbulence_evaluation.md`, and the new docstrings cite it in
+  full. The `docs/esmda_turbulence_evaluation.md` spelling that prompted this
+  item does **not** appear anywhere in the tree — `grep -rn
+  'docs/esmda_turbulence_evaluation'` over `docs/ scripts/ src/ tests/` returns
+  nothing; this plan file and `master_plan.md` both reference it as the relative
+  link `../esmda_turbulence_evaluation.md`, which resolves correctly from
+  `docs/plans/esmda_evaluation/`. What *was* wrong is that the rendered link
+  **text** showed a bare `../` path, so a reader (or an agent) copying it out of
+  the prose produced the non-existent root-level path. Both files now spell the
+  repo-root path in the link text and keep the relative target.
+
+#### The shared streaming pass (`scripts/esmda/_esmda_common.py`)
+
+- **WP1.3 — the shared pass repairs a pre-existing violation of invariant #2;
+  it does not merely avoid creating one (context, and the reason this refactor
+  is in scope at all).** `ensemble_sensor_series` did
+  `xarray.open_dataset(path).load()` on `windows/window_*_posterior_state.nc` —
+  ~1 GB at smoke scale, tens of GB at Barcelona scale. So §Acceptance's "no
+  `.load()` of window state files anywhere (grep)" did **not** hold before this
+  WP, in the one place phase 1 reads those files most. The plan's step 3 reads
+  as an optimization for the new layer; it is also the fix for the old one, and
+  the two consumers now hang off one `stream_window_members` pass.
+
+- **WP1.3 — the yielded member is materialised, not lazy (departure from the
+  lead's own pinned design, accepted on measurement).** xarray does **not**
+  cache reads taken through `.isel`, so a lazy yield makes `N` consumers cost
+  `N×` the bytes — which defeats the single-shared-read requirement the shape
+  exists to satisfy. Measured by counting `NetCDF4ArrayWrapper._getitem` on a
+  fabricated `(ensemble 8, time 8, z 6, y 7, x 9)` window file, where one full
+  ensemble is 72576 elements:
+
+  | shape | reads | elements |
+  |---|---|---|
+  | HEAD's full-ensemble `.load()` + 2 sensor sets | 3 | 72576 |
+  | lazy member, 1 consumer | 24 | 72576 |
+  | lazy member, **2 consumers** | 48 | **145152** |
+  | materialised member, 2 consumers | 24 | 72576 |
+
+  Materialising bounds the read at once-per-member for **any** number of
+  consumers, at a peak of one member's velocity fields instead of the
+  ensemble's. **Stated plainly rather than hidden behind the acceptance grep:**
+  `Dataset.compute()` is `.load()` on a shallow copy, so this *is* a load — of
+  a member, which is precisely the granularity invariant #2 prescribes ("stream
+  member-at-a-time"). The generator's docstring says this in as many words, so
+  a future reader auditing the grep result is not misled by the spelling.
+
+- **WP1.3 — the generator does *not* colocate (departure from the plan's
+  wording, directed by the lead).** The plan has `stream_window_members`
+  applying `colocate_components`. It does not, because the two consumers need
+  different things from the same bytes: the sensor extraction interpolates each
+  component **on its own staggered grid** (which is what makes the sensor series
+  grid- and solver-independent) and needs the raw staggered dims, while the
+  moment accumulators need cell-centre arrays. Colocating in the generator would
+  destroy the former and charge its cost to every consumer. Confirmed necessary
+  by test rather than argued: a staggered uDALES fixture (u on `xm`, v on `ym`,
+  w on `zm`) round-trips bit-identically only because the member arrives raw.
+
+- **WP1.3 — `_stack_window_members` reproduces the old path's *memory layout*,
+  not just its values (the surprise).** Every consumer of the window series
+  reduces over some of its axes, numpy's pairwise summation walks a reduction in
+  memory order, and floating-point addition is not associative — so identical
+  contents in a different layout move `run_summary.yaml` in the 16th digit.
+  Measured by diffing all 587 leaves (260 floats) of the summary computed on the
+  WP1.2 wiring fixture against the old code path:
+
+  | how the window's members are stacked | leaves changed |
+  |---|---|
+  | `concat(dim="ensemble")` then `transpose` | 4 (`sensor_metrics.*.velocity_vector_energy_score`) |
+  | …then forced C-contiguous | 20 (incl. `sensor_statistics.*.crps`, `zscore.*`, `identifiability.*`, `crpss_vs_prior`) |
+  | reproducing the old `(component, sensor, ensemble, time)` layout | **0** |
+
+  All the moves were 1–2 ULP (largest relative 2e-14, on `crpss_vs_prior`, a
+  ratio of near-equal CRPS values) and no estimator changed — but WP1.2's
+  deviation log pins its calibration numbers to the last digit, so byte-identity
+  was judged worth the ~4 lines. The layout being matched comes from numpy's
+  advanced indexing inside `interpolate_dataarray_at_points` (which lays the
+  gathered trilinear corners out with the sensor axis outermost), and **nothing
+  documents that**, so the code guards on the member dims and falls back to a
+  plain concat — giving up only those last ULPs — when they are not exactly
+  `(component, time, sensor)`.
+
+- **WP1.3 — `stream_window_members` reads only `u, v, w` by default
+  (narrowing; `variables=None` widens).** Window files carry every variable the
+  solver wrote; the old full-ensemble `.load()` read them all and used three.
+  Output is unaffected, and the driver asks for `blanking` explicitly — after a
+  **header-only** open of one window file to check it exists there, since the
+  generator raises on a missing variable and pypalm/uDALES states have none.
+
+- **WP1.3 — `ensemble_sensor_series` now requires an `ensemble` dimension
+  (behaviour narrowing).** It raises `ValueError` on a window file without one,
+  where previously it would silently return a series with no ensemble axis and
+  let a downstream reduction produce a plausible wrong number. No current caller
+  can hit this; it is recorded because it *is* a behaviour change.
+
+- **WP1.3 — bit-identity of the sensor series was verified, not assumed.**
+  Reference = `git show HEAD:scripts/esmda/_esmda_common.py` loaded as a module
+  and run side by side. Five shapes (the WP1.2 wiring fixture; per-window
+  cadences of 5/9/4 frames with offset local time axes; no `time` coord; no
+  `ensemble` coord variable; an extra data variable in the file): all `dims`
+  equal, `np.array_equal(..., equal_nan=True)` True, raw-bit `view("u8")` equal,
+  `.identical()` True. End to end, `compute_metrics` run twice on one synthetic
+  run dir with HEAD's `ensemble_sensor_series` monkeypatched in gives **587
+  `run_summary.yaml` leaves (260 floats) equal bit for bit**, with a null
+  experiment confirming the harness was actually sensitive to a change.
+
+#### The mean-field driver (`compute_esmda_metrics.py` + `_esmda_common.py`)
+
+- **WP1.3 — masking is `blanking`-only, and what that leaves unmasked is
+  reported rather than papered over (the lead's ruling, resolving the false
+  premise above).** The `masking` block emits `source` / `truth_source` /
+  `ensemble_source` / `fluid_fraction` / `ensemble_fluid_fraction` /
+  `truth_finite_fraction` / `note`, and a `logger.warning` fires when neither
+  side carries a mask. Parsing uDALES `solid_c.txt` (it needs case-dir paths
+  this stage does not have) and preserving pypalm's NaN (backend-touching, which
+  phase 1 forbids) are both **descoped**, recorded in the `note` string and in
+  `BLANKING_VAR`'s comment. The honest consequence, stated in the docs where a
+  reader of the number will meet it: on an unmasked case — **uDALES and PALM
+  today** — FAC2 and the hit rate include building interiors and are optimistic
+  by roughly the building fraction.
+
+- **WP1.3 — cross-grid masking NaN-masks the truth *before* `.interp`
+  (substantive tradeoff).** Linear interpolation propagates NaN, so any target
+  cell whose stencil touched a building drops out. That is the conservative
+  threshold, obtained for free and with no second mask interpolation to keep in
+  sync. **Measured cost:** on `pylbm_to_pylbm`, whose truth is half-cell-shifted
+  by `x_offset: -0.5`, the fluid fraction goes 0.75 → 0.6475 — i.e. **13.7% of
+  genuine fluid cells lost to perimeter erosion**, and the number is reported
+  (`masking.fluid_fraction`, `averaging.n_scored_cells`) rather than absorbed.
+  **Rejected alternative:** interpolate the field and the mask separately, which
+  keeps those cells but scores them partly against building interiors — a wrong
+  number instead of a missing one.
+  *(Corrected in review round 1: the 13.7% is the total drop, not the erosion.
+  Only 44 of the 164 lost cells — 3.7% — are eroded; the other 120 are genuinely
+  solid in the truth's own shifted geometry and are correctly excluded. The
+  erosion is also **not** neutral. See the round-1 entry below; the design and
+  the rejected alternative both stand.)*
+
+- **WP1.3 — vertical alignment for the slabs is nearest-level, not
+  interpolated (departure).** Post-averaging z-interpolation would need the
+  bracketing truth levels carried through the whole streaming pass, i.e. the
+  full 3-D truth moments, which is exactly the cost the streaming shape exists
+  to avoid. The truth slab is therefore accumulated at the truth levels nearest
+  the assimilation grid's, and the residual is reported as
+  `averaging.z_offset_max` (**0.0 on all three real run dirs**) rather than
+  hidden. The station columns have no such constraint — they are a handful of
+  cells — so they keep the truth's full z axis and **are** z-interpolated after
+  averaging.
+
+- **WP1.3 — `hit_rate`'s `W` is a per-cell bootstrap reduced by *median*; the
+  TKE / `⟨u′w′⟩` floors reduce by *RMS* (forced by the signature, not a free
+  choice).** `hit_rate(allowance=...)` takes one scalar for the whole
+  comparison, so the per-cell bootstrap has to be reduced: the median is the
+  robust choice for a quantity whose per-cell values span a wake. The two stress
+  floors sit beside RMSEs, and the RMS of the per-cell sampling errors is the
+  RMSE a perfect model would still score, so RMS is the matching reduction.
+  Both bootstrap per-timestep **integrands** (`_fluctuation_energy` and its new
+  sibling `_fluctuation_covariance`, both Bessel-on-the-integrand) so that the
+  statistic being resampled is a plain mean — the only shape
+  `block_bootstrap_std_batch`'s row contract admits — and this reuses WP1.2's
+  existing helper rather than introducing a second TKE definition.
+
+- **WP1.3 — the truth pass runs *after* the ensemble pass (plan orders them 2
+  then 3).** Reversed so the scored z-levels come off the **actual** colocated
+  assimilation grid rather than a re-derived probe of it: `mean_field_scores`
+  takes the filled accumulator and reads `z_levels` / `station_x` / `station_y`
+  off it. The metric is unaffected; the ordering removes a way for the two
+  passes to disagree about which levels were scored.
+
+- **WP1.3 — keys emitted beyond the plan's schema sketch (additive).**
+  `hit_rate.per_z` is a list of `{z, u, v, w, fac2_velmag}` mappings (the sketch
+  says only `per_z: [...]`); `hit_rate.allowance` with its own `reason`, and
+  `hit_rate.relative_tolerance`, so the two constants a `q` was computed with
+  travel with it; `fb.velmag` and `nmse.velmag`, so the layer always carries a
+  well-posed bias and NMSE even when every signed component takes the `nan`
+  path above; `averaging` gains `n_time_truth` / `n_members` / `n_stations` /
+  `stride` / `z_indices` / `truth_z_levels` / `z_offset_max` / `n_cells` /
+  `n_scored_cells` / `n_bootstrap_cells`; plus the whole `masking` block,
+  `eval_fields` (the artifact's file name) and `reason`. All of it is present as
+  `null` on the degraded path too, so the key set is stable — the same contract
+  `_null_statistic_block` set in WP1.2.
+
+- **WP1.3 — `ensemble_velmag` and `ensemble_velmag_std` are different
+  reductions, and both say so in their `long_name` (disambiguation).**
+  `ensemble_velmag` is `|mean of the member means|` — the quantity actually
+  scored, and what the plan's "ensemble-mean-of-means vs truth" names — while
+  `ensemble_velmag_std` is the across-member std of each member's **own** `|U|`.
+  They differ by the ensemble spread of the *direction*, so a consumer that
+  assumed one was the moment of the other would be wrong by exactly the
+  quantity F2 is drawn to show.
+
+- **WP1.3 — the memory floor is stated rather than optimized away.** Because
+  `colocate_components` refuses axis-subset input (the alignment guard above),
+  every truth chunk is colocated at **full 3-D resolution** before the z-slabs
+  are taken, so one frame is the smallest possible chunk: **~0.8 GB at
+  512×512×128** for the velocity triple plus the interpolation's temporaries.
+  That is the same order as the member `stream_window_members` already
+  materialises, so it is the accepted shape of this stage rather than a
+  regression — but it is a floor, not a knob. Documented at
+  `_TRUTH_CHUNK_BYTES`; a truth grown past it needs colocation to gain a
+  **level-wise mode**, not a smaller constant.
+
+- **WP1.3 — validated on the three real run dirs, including that WP1.2's
+  numbers did not move.** Byte-identity of the accumulator-produced
+  `ensemble_series` (with the widened `variables`) against
+  `ensemble_sensor_series`: **True on all three**, and `sensor_statistics`
+  recomputed through the old dedicated-pass path is **identical** to what the
+  shared pass produces.
+
+  | run dir | `q` (u/v/w) | FAC2 `\|U\|` | NMSE `\|U\|` | masking | scored cells |
+  |---|---|---|---|---|---|
+  | `pylbm_to_pylbm` | .723/.149/.347 | 0.954 | 0.0282 | `blanking` both sides | 1036/1600 |
+  | `pyudales_to_pyudales` | .944/.821/.798 | 0.999 | 0.0102 | **none** (warned) | 1600/1600 |
+  | `pylbm_to_pyudales` (cross-grid) | .731/.167/.144 | 0.943 | 0.0400 | truth `blanking`, ensemble none | 1036/1600 |
+
+  The sampling floors and the hit-rate allowance are `null` on all three (3
+  frames against 20 blocks → `nan`, the sanctioned path), and are real numbers
+  on the `M = 8` synthetic fixture (18 truth frames, 4 blocks) where a test
+  asserts them `> 0`. Read the `pyudales_to_pyudales` row against its `masking:
+  none` — 1600/1600 scored cells is the unmasked-backend gap, not a cleaner run.
+
+- **WP1.3 — the runtime budget is overshot, and the plan's stated relief valve
+  does not work (accepted and documented, per the lead's ruling).** Stage 2,
+  best of 3–5 runs, on the three real smoke-shaped dirs (M = 2, 3 frames,
+  20×20×4): `pylbm_to_pylbm` 39 → 83 ms (**2.12×**), `pyudales_to_pyudales`
+  46 → 95 ms (**2.06×**), `pylbm_to_pyudales` 38 → 87 ms (**2.28×**), against
+  the plan's "≤ ~2× the `basic` runtime". Attribution: standard-without-WP1.3 is
+  already 1.08–1.21×, so this WP is 43–48% of the standard stage — shared pass
+  +10.7–15.4 ms, truth pass and reduction +12.9–14.9 ms, **`eval_fields.nc`
+  write +11.2–34.3 ms**. The plan's remedy is to drop smoke `n_z_slices` to 2
+  via `_SMOKE_OVERRIDES`; **measured, that changes nothing** (2.07× / 2.10× /
+  2.26×), because at 1600 cells the cost is entirely fixed — file opens, the
+  netCDF write, xarray overhead — and not per cell. So the remedy is ineffective
+  *for the stated reason*, which is why `_SMOKE_OVERRIDES` was left alone rather
+  than given a knob that buys nothing. **Lead's ruling: accept and document.**
+  The ratio was a proxy for "does this layer blow up the test suite"; 90 ms
+  absolute answers that question, the overshoot is fixed cost at a shape 1600
+  cells wide, and the per-cell scaling the budget was really about is not
+  exercised at smoke scale at all.
+  *(Superseded in review round 1, and the last sentence was closer to right than
+  the ruling it was attached to: the benchmark measured this layer at the one
+  shape where its dominant cost is **identically zero**, so "fixed cost" was an
+  artefact of the measurement, not a property of the layer. The truth pass is a
+  13.2 s operation at 4×128×128 × 36 frames and was capped in response — see the
+  round-1 entry below for the measured scaling and the cap.)*
+
+#### The sweep-pipeline port and the acceptance grep
+
+- **WP1.3 — the sweep port was widened to `_truth_series` (scope change).** The
+  task assigned only `_ensemble_series`, whose `.load()` is the invariant-#2
+  violation. The truth path was deduped in the same pass, deleting `_open_truth`,
+  `_sensor_components`, `_concat` and the `_X_COORDS` constant: `_open_truth` was
+  **character-for-character** `_esmda_common.open_truth` — including the
+  offset/slicing rules that are the contract with `truth_access.yaml` — and
+  `_sensor_components` was `_sensor_component_timeseries` in dict form. Keeping
+  both copies only created somewhere for the two stages to disagree about what a
+  sensor series is. This half is **not** a `.load()` fix: that path was already
+  window-at-a-time. Bit-identity is pinned by a dedicated test.
+
+- **WP1.3 — new helper `_split_quantities(components)` (addition).** The one
+  structural difference between the two copies: ESMDA carries
+  `(component, ensemble, time, sensor)` on a `component` dim, while the sweep
+  stage wants `{q: DataArray}` over `QUANTITIES = ("u", "v", "w", "vel")`. It
+  uses `.sel(component=q, drop=True).rename(q)` — deliberately a **view** (see
+  the layout entry below) — and builds `vel` with the verbatim old elementwise
+  `sqrt(u² + v² + w²)`.
+
+- **WP1.3 — `compute_sweep_metrics.py` gained the repo's standard `sys.path`
+  shim (addition).** The file had none and the new cross-package import needs
+  one; it matches `compute_esmda_metrics.py` and `visualize_ground_truth.py`
+  exactly. Verified by running `--help` (exit 0), since an import-time shim is
+  the kind of thing a unit test can miss.
+
+- **WP1.3 — the memory-layout hazard is real at this call site too, and the
+  view is load-bearing.** Measured by diffing every leaf of `metrics.yaml`: the
+  shipped `.sel` view changes **0 of 92** leaves; forcing
+  `np.ascontiguousarray` per quantity changes **16 of 92**, largest relative
+  move **2.079e-15**, all of them sensor CRPS entries. So preserving the view of
+  `_stack_window_members`' `(component, sensor, ensemble, time)` buffer is a
+  requirement, not a defensive habit — sweep comparisons are cross-run, and
+  `metrics_version` exists so historical numbers only move deliberately. One
+  benign stride note, recorded so it is not mistaken for a difference: on a
+  single-sensor fixture the view reports strides `(40, 8, 160)` where the old
+  path reported `(40, 8, 8)` — numpy normalizes the stride of a size-1 axis;
+  values, bytes and every reduction are identical.
+
+- **WP1.3 — a claim the implementing agent retracted after measuring it (kept,
+  because it is the house rule in action).** The first draft asserted that
+  `_esmda_common.sensor_magnitude`'s `sqrt((x**2).sum("component"))` would
+  re-lay-out the buffer and so could not be shared. Measured, it does **not** —
+  0 of 92 leaves change, and the bytes *and* strides are identical on every
+  fixture, because the reduction is over three elements in the same order. The
+  actual and only reason the shared helper is not called is that its result
+  inherits the stacked array's `name` (`"u"`), which the old `vel` did not carry
+  and `DataArray.rename` cannot clear. The docstring records the measurement,
+  not the guess.
+
+- **WP1.3 — the no-`.load()` regression test whitelists receivers by name
+  rather than banning `.load()` outright.** `OmegaConf.load` legitimately reads
+  `config.yaml`, so a blanket ban would fail on correct code. The AST-based
+  check keeps failing on `xr.open_dataset(...).load()` **however it is spelled**,
+  which a "`.load()` on an `xr` call" rule would not, and it parses rather than
+  greps so the modules' own docstring mentions of `.load()` do not trip it.
+
+- **WP1.3 — the acceptance grep passes, with one known remaining hit that is
+  deliberately not fixed.** `grep -rn --include='*.py' '\.load()' scripts/ src/
+  libs/` (excluding vendored `palm_model_system/`, `LBM/`, `_tadpole/`) returns
+  **26 hits, 0 in scope**: every hit under `scripts/esmda/` is prose in a
+  docstring or comment, and the rest load a single member's solver output, one
+  time frame, one z-plane, an already-reduced file, or a small parameter
+  artifact. The exception is `scripts/filtering/_filtering_common.py:180`, where
+  `ensemble_cycle_sensor_series` does `analyzed_states.load()` on
+  `state_history.nc` — which **is** a `(cycle, ensemble, …)` full-ensemble state
+  file. It is not a `windows/window_*_state.nc`, so it falls outside the letter
+  of phase 1's acceptance criterion, and it is much smaller (one analyzed frame
+  per cycle rather than a whole rollout). **Lead's ruling: out of scope for
+  WP1.3** — it belongs to the EnKF/filtering pipeline. It is recorded in
+  `docs/scripts_and_configs.md` beside the filtering pipeline so the next person
+  running that grep is not misled into thinking the tree is clean of
+  full-ensemble loads everywhere.
+
+#### Not a deviation: pre-existing breakage found while validating
+
+The three `.temp/` run dirs are **not processable as-is**, for reasons predating
+this WP, and this is recorded because the validation numbers above were
+therefore taken on scratchpad copies. `pylbm_to_pylbm/truth_access.yaml` points
+`true_state_path` at a deleted pytest tmpdir, and **all three** saved configs
+carry `validation_*_points` at y = 30/55 on a 20-unit domain, which makes
+`build_sensor_sets` → `interpolate_dataarray_at_points` raise in the *sensor*
+stage — before WP1.3's layer is reached at all. Both were repaired in scratchpad
+copies only; the user's `.temp` is untouched (verified: `run_summary.yaml` mtime
+unchanged, no `eval_fields.nc` written there).
+*(Review round 1 unexpectedly rescued this: the sweep stage now degrades on a
+`ValueError` from the sensor series instead of losing the run — see below.)*
+
+#### Review round 1
+
+An adversarial review returned **REQUEST CHANGES**. The entries above stand
+except where a bullet below supersedes them (the erosion magnitude, and the
+runtime budget). Common thread, and it is worth naming because it is now three
+rounds running: **every round-1 blocker was a number reported next to a
+description of a different sample.** `n_scored_cells` counted cells that were
+never scored (B1); the sampling floors were bootstrapped over building interiors
+while the scores they anchor were fluid-only (B2); and the fix itself very nearly
+shipped a `fluid_fraction` that had quietly become a *scored* fraction, which is
+why the rename below happened before anything merged. That is exactly WP1.2's
+round-1 thread ("two references computed off a different sample than the number
+they normalize") and WP1.1's round-2 thread pointed at samples instead of at
+sample *sizes* — the recurring failure mode of this whole phase is a name that
+describes one set attached to a number computed on another.
+
+The reviewer also independently **confirmed** a great deal, none of which is
+reopened: WP1.2's numbers are byte-identical (587 shared leaves, 0 differing,
+with a 1-ULP `np.nextafter` null experiment proving the harness sensitive); the
+keys are additive-only with `metrics_version` still 2 and all four
+`scripts/figure_creation/` consumers resolving unchanged; graceful degradation
+holds across nine degenerate shapes; and the Chan/Welford precision, the Bessel
+consistency with WP1.2's TKE, the colocation-vs-by-index measurement, the `nmse`
+`nan` regime and the `eval_fields.nc` round-trip all check out.
+`metrics_version` stays **2** throughout: every WP1.3 key was introduced on this
+unmerged branch, so nothing here changes an estimator's semantics on a key any
+shipped run has persisted.
+
+- **WP1.3 (review round 1) — one diverged member nulled the whole layer with no
+  `reason`, no log line, and an `n_scored_cells` that counted cells nobody
+  scored (blocker).** Reproduced on the wiring fixture at `M = 8` with member 0's
+  `u/v/w` set to NaN in every window — a diverged CFD member is routine, not
+  exotic. `MeanFieldAccumulator.result` took a plain `np.stack(values).mean(axis=0)`
+  over members, so one NaN member made the ensemble mean NaN *everywhere*, while
+  `scored` was built only from `blanking` and the truth's finiteness and knew
+  nothing about it. Before: `hit_rate u/v/w = None/None/None`, `fac2 = None`,
+  both RMSEs `None`, **`reason = None`** — a silent null block, in direct
+  violation of invariant #3 — with `n_members: 8` and `n_scored_cells: 104` on a
+  run where **zero** pairs were scored. The partial case was worse than the total
+  one: a member blowing up over a sub-region silently removed those cells from
+  every score while `n_scored_cells` kept counting them.
+  Three separate changes, per the lead's ruling, because they are not one fix.
+  (1) `result()` now drops members whose time-mean **slab** is non-finite
+  anywhere and reports `averaging.n_members_scored` beside `n_members`, a
+  non-null block `reason` naming the excluded members, a `logger.warning`, and an
+  `n_members_scored` attr in `eval_fields.nc`; all members non-finite → `None` →
+  null block plus reason. The exclusion is **whole-member and casewise**, the
+  same rule `StreamingMoments` already applies in time and for the same reason:
+  an ensemble mean and a `ddof=1` spread taken over *different member sets at
+  neighbouring cells* are not a field, and the spread is what `eval_fields.nc`
+  publishes. Finiteness is judged on the slab alone — a station column is
+  legitimately NaN outside the domain or inside a building, which is a station's
+  problem and never a member's. (2) `n_scored_cells` and every fraction that
+  describes the *scores* now come from a new `_fluid_pairs` (one retained set,
+  cells with a finite pair on both sides), so the reported sample **is** the
+  scored sample by construction rather than by coincidence; one shared set rather
+  than per-score dropping, because `nmse_split`'s identity and the per-component
+  hit rates are only comparable if they are computed on the same cells and the
+  summary reports one `n_scored_cells`. (3) Both the all-NaN and the
+  partial-region cases are pinned by test. After: `reason = "1 of 8 ensemble
+  members (0) have a non-finite time-mean field and were excluded…"`,
+  `n_members: 8`, `n_members_scored: 7`, every score real.
+
+- **WP1.3 (review round 1) — the sampling floors and the hit-rate allowance were
+  bootstrapped over the *unmasked, unstrided* truth slab (blocker).**
+  `truth_mean_field_stats` built its retained series from `_slab(..., stride=1)`
+  with no fluid mask, and computed `fluid` three lines later without ever
+  applying it. Measured: the allowance was **byte-identical with and without
+  `blanking`** — which is precisely the regression a test now catches. On a truth
+  with pylbm-like near-zero building interiors at 25% solid fraction:
+
+  | | allowance `u` | `tke_floor` | `uw_floor` |
+  |---|---|---|---|
+  | shipped (all cells) | 0.04581 | 0.012873 | 0.010462 |
+  | fluid cells only | 0.04990 | 0.014865 | 0.012080 |
+  | ratio | **0.918** | **0.866** | **0.866** |
+
+  **The direction is what makes this a blocker.** A low allowance is
+  conservative for `q`, but floors 13.4% low are **anti-conservative for their
+  stated purpose** — the docs say "an RMSE below its floor is not skill, it is
+  the truth's window length", and an RMSE genuinely inside sampling noise was
+  being reported as above the floor. The bias scales with the solid fraction,
+  which near the ground at Barcelona is larger than this 25%. It was stride-blind
+  too: at `mean_field_stride: 3` the run reported `n_cells: 16`,
+  `n_scored_cells: 8`, `n_bootstrap_cells: 120` with an allowance identical to
+  the stride-1 run.
+  The series is now built from the truth's **fluid** cells at the scored
+  **stride** (new `stride` argument on `truth_mean_field_stats`). Measured after:
+  allowance `u/v/w` `0.11269 / 0.09605 / 0.10668` masked against
+  `0.11284 / 0.10145 / 0.11218` unmasked; stride-3 allowance `0.09446` against
+  stride-1 `0.11269`; `n_bootstrap_cells` 104 fluid against 120 unmasked.
+  **The cell subsample was replaced as well**, on a hazard the reviewer flagged
+  without measuring: `_bootstrap_cell_stride` strided a *raveled* `(zlev, y, x)`
+  index, so at 4×512×512 / 360 frames the stride is 68 and `gcd(68, 512) = 4` —
+  the retained cells sit on a sub-lattice hitting only `x ≡ 0 (mod 4)`, which on
+  a regular building array can lock onto one geometric phase. `_bootstrap_cells`
+  now takes a **seeded random draw** of the fluid cells instead: it costs
+  nothing, cannot phase-lock, and the seed and realised count both travel
+  (`averaging.bootstrap_seed`, `n_bootstrap_cells`, `n_bootstrap_cells_max`).
+  **Known consequence, documented rather than fixed:** at `stride > 1`
+  `n_bootstrap_cells` can *exceed* `n_scored_cells` (16 against 8 on the
+  fixture), because the truth-side stride lands on the truth's own cells while
+  the erosion happens on the assimilation grid. The floors are a property of the
+  truth's sampling **at the same density**, not a cell-for-cell alignment; said
+  so in `truth_mean_field_stats`.
+
+- **WP1.3 (review round 1) — `blanking` was costing a second full
+  ensemble-sized read, and the "arithmetic, not reads" claim was false at
+  `standard`.** Instrumented `NetCDF4ArrayWrapper._getitem` on a 3-window /
+  8-member run dir (one member's `u+v+w` = 2880 elements, a full ensemble =
+  23,040):
+
+  | | `window_0` elements | truth elements |
+  |---|---|---|
+  | `basic` | 23,071 (`u/v/w` = 23,040 exactly — one read per member) | 19,580 |
+  | `standard` + `blanking` (before) | **30,782** (`blanking` = 7,680, another full ensemble) | **34,735** (+77%) |
+  | `standard` + `blanking` (after) | **23,222** (`blanking` = 120, one frame) | 32,695 |
+
+  §WP1.3 step 3's actual requirement **held all along** — `u/v/w` are read
+  exactly once per member, so the materialisation design works and the truth pass
+  is legitimately a separate file. What was false was the sentence attached to
+  it. `blanking` is *static geometry* that `run_esmda` writes replicated over
+  `(ensemble, time)` (confirmed on `.temp/pylbm_to_pylbm`:
+  `blanking ('ensemble','time','z','y','x') float32`), and the code's own
+  `_fluid_indicator` docstring already said "the geometry is static in every
+  shipped case" — so at Barcelona scale with pylbm this was **+33% on the
+  window-state bytes for one 3-D frame's worth of information**, plus
+  `_record_mask` re-deriving and re-interpolating the indicator `M × W` times.
+  The accumulator now takes `state_paths` and reads the mask from
+  `isel(ensemble=0, time=0)` on its own open; `stream_window_members` is back to
+  `u/v/w` only and `_state_read_variables` is deleted. The claim is now true
+  rather than aspirational, and the comment says the measured thing.
+
+- **WP1.3 (review round 1) — the cross-grid erosion figure was overstated ~3.7×,
+  and the erosion is *not* neutral (documentation; the design stands).**
+  Measured on the real `.temp/pylbm_to_pylbm` artifacts, scoring the retained set
+  `R` and the dropped-but-fluid set `D` against the same unmasked-interp truth
+  (ensemble-fluid 1200, truth-fluid by majority rule 1080, `R` = 1036, `D` = 44):
+
+  | set | `q(u)` | `q(v)` | `q(w)` | FAC2 | NMSE(`\|U\|`) | mean `\|∇\|U\|\|` |
+  |---|---|---|---|---|---|---|
+  | `R` retained | 0.804 | 0.277 | 0.444 | 0.968 | 0.0128 | 2.323 |
+  | `D` eroded | 0.682 | 0.136 | 0.205 | 1.000 | 0.0680 | 6.165 |
+
+  (a) **The correction.** Only **44 of the 164 lost cells — 3.7% of the
+  ensemble-fluid set — are lost to erosion**; the other 120 are genuinely solid
+  in the truth's own half-cell-shifted geometry and are correctly excluded. The
+  13.7% recorded above is the total `0.75 → 0.6475` drop, which is not all
+  erosion. It was the lead's figure and it was wrong.
+  (b) **The original worry was justified anyway.** `D` carries **2.65× the mean
+  shear** of `R` and the run scores materially worse there, so dropping it is not
+  a neutral thinning of the sample: it **flatters `q` by +0.005…+0.010 and
+  understates NMSE(`|U|`) by 6%** at this shape, and the bias grows with
+  perimeter/area — a dense Barcelona array has far more perimeter per fluid cell
+  than this fixture, so the effect is *larger* on the case that matters.
+  The design is unchanged and the **rejected alternative stays rejected**: a
+  missing number still beats a wrong one, and interpolating field and mask
+  separately would score those same high-shear cells partly against building
+  interiors. What changed is that the corrected magnitude, the measured direction
+  and the perimeter/area scaling are now in the log and in
+  `docs/scripts_and_configs.md` instead of a single overstated percentage.
+
+- **WP1.3 (review round 1) — station truth columns were silently empty at
+  stations near buildings.** On the blanking fixture with stations defaulting to
+  sensor x/y, `station_truth_tke` had finite values at **2 of 5** stations
+  (`[4 0 4 0 0]`) while `station_ensemble_tke` was finite at all five
+  (`[4 4 4 4 4]`) — drawn straight through the building. `_column_indicator`
+  requires the interpolated indicator `>= 1 − 1e-9`, so a station whose 2×2
+  horizontal stencil touches any solid cell loses its **entire** truth column;
+  stations default to sensor x/y and urban sensors sit on facades and roofs, so
+  this is the common case, not the corner. Nothing in `run_summary.yaml` said so
+  — `masking` carries slab fractions only and `averaging.n_stations` counted all
+  five — and WP1.4's S1 would have rendered three panels with a posterior band
+  and no truth line, silently.
+  **The strict all-fluid stencil rule is retained deliberately** (relaxing it
+  would contaminate profiles with building values, which is the wrong trade); it
+  is made *visible* instead: a `logger.warning` naming the stations and their
+  coordinates, and `averaging.n_stations_with_truth` beside `n_stations`.
+  The same finding surfaced a second gap: the file round-trips exactly and
+  satisfies S1's layout, but with only mean and std persisted the "posterior
+  band" could only ever be `mean ± kσ`, so an empirical 5–95 fan would have
+  forced exactly the recomputation `eval_fields.nc` exists to prevent. Four
+  `station_ensemble_*_quantile` variables (`STATION_QUANTILES` = 5/25/50/75/95,
+  with a `quantile` coord) are now persisted — stations are a handful of columns,
+  so the cost is trivial.
+
+- **WP1.3 (review round 1) — the runtime budget measured nothing, because it was
+  taken at the one shape where this layer's dominant cost is identically zero
+  (supersedes the accepted-overshoot entry above).** `block_bootstrap_std_batch`
+  returns all-`nan` immediately below 4 frames and the smoke truth has 3, so
+  `_truth_sampling_floors` — the layer's expensive part — never ran at all in the
+  benchmark. "`n_z_slices: 2` changes nothing" was itself the tell. Measured
+  `_truth_sampling_floors`, 3 components, 20 blocks:
+
+  | cells | frames | wall time |
+  |---|---|---|
+  | 1600 | 3 | 0.1 ms (the smoke shape: `nan` before any work) |
+  | 1600 | 36 | 157.5 ms |
+  | 4096 | 36 | 448 ms (the cap) |
+  | 16384 | 36 | 1.9 s |
+  | 65536 (4×128×128) | 36 | **13.2 s** |
+
+  `_TRUTH_SERIES_MAX_BYTES` bounds *memory*, not time — at 4×128×128 the cell
+  stride it implies is 1 — so the truth pass is a tens-of-seconds operation at
+  production shapes and had never been exercised. Per the lead's ruling it was
+  measured at one realistic shape and then **bounded explicitly**:
+  `_TRUTH_BOOTSTRAP_MAX_CELLS = 4096`, in the same spirit as
+  `_TRUTH_SERIES_MAX_BYTES` bounding memory. End to end at 4×128×128 × 36 frames,
+  `M = 8`, 3 windows: **`basic` 0.35 s against `standard` 1.62 s**, where
+  uncapped the truth pass alone would have added the 13.2 s.
+  **The cap does not materially move what it bounds**, and that was measured
+  rather than assumed: over 8 seeds at that shape, capped-against-full is rms
+  **0.50%** (allowance), **0.39%** (tke), **0.64%** (uw), worst case 1.29% —
+  against a floor that is an order-of-magnitude statement about the truth's
+  window length. The realised count, the maximum and the seed all travel
+  (`averaging.n_bootstrap_cells`, `n_bootstrap_cells_max`, `bootstrap_seed`), so
+  the number is reproducible rather than merely stable.
+  The same measurement corrected a second smoke-scale illusion: `eval_fields.nc`
+  is ~11 kB at smoke but **9.1 MB at 4×128×128**, implying **~150 MB at
+  4×512×512**. The file's size grows with the grid, the 11–34 ms write does not
+  stay fixed, and the artifact table now says so.
+
+- **WP1.3 (review round 1) — the accumulator memory table stopped 15× short of
+  the plan's own target (documentation).** The read-side ruling is confirmed
+  (exactly one read per member for `u/v/w`, within invariant #2's letter), but
+  the arithmetic the docstring published stopped at the wrong shape:
+  `StreamingMoments` slab accumulators are 10 arrays × 8 B × cells × M, i.e.
+  **0.62 GB at `M = 32` / 4×256×256** — the largest number stated — against
+  **10.00 GB at `M = 128` / 4×512×512**, which is the plan's actual Barcelona
+  target, held for the whole pass on top of the materialised member and its
+  float64 colocation temporaries (`colocate_components` promotes float32 →
+  float64). The `M = 128` row is now in both `MeanFieldAccumulator`'s and
+  `StreamingMoments`' tables so a reader reaches for `mean_field_stride` before
+  discovering it the hard way.
+
+- **WP1.3 (review round 1) — the extrapolated edge level always lands on a
+  scored plane, and it is now excluded from the aggregates rather than
+  documented at.** The earlier entry recorded a "2.5× variance amplification" in
+  the last column; that was measured against the *unfiltered* variance, and the
+  number that matters is against the **interior colocated** estimate:
+  `(2.5 − 1.5ρ)/(0.5 + 0.5ρ)` = **5.06× at ρ = 0**, 2.33× at ρ = 0.5, 1.21× at
+  ρ = 0.9 — so ~20% for a well-resolved field, not 5×, and the docstring figure
+  was wrong in both directions depending on the field. The consequential half is
+  that it is **not avoidable by luck**: `evenly_spaced_levels` uses
+  `np.linspace(0, nz−1, k)`, which always includes `nz−1`, and for uDALES/PALM
+  `w` that is exactly the extrapolated `zm→zt` level (verified on
+  `.temp/pyudales_to_pyudales`: `zt = [1.25, 3.75, 6.25, 8.75]`,
+  `zm = [0, 2.5, 5, 7.5]`, `evenly_spaced_levels(4, 4) = [0, 1, 2, 3]`). That is
+  **1 of 4 scored z-levels** contaminating `hit_rate.per_z[-1]`, `tke_rmse` and
+  `uw_stress_rmse`, and the docstring's own mitigation ("a caller that cares
+  should drop the last index") was not applied by any caller.
+  New public `turbulence_stats.extrapolated_centre_dims` reports which centre
+  axes carry the edge (dims only, never values); `averaging.z_levels_extrapolated`
+  and a per-row `extrapolated` flag in `hit_rate.per_z` report which levels were
+  affected; and extrapolated levels are **excluded from every aggregate** (hit
+  rate, FAC2, FB, NMSE, both RMSEs) while still being reported per z — so nothing
+  is hidden and nothing is silently biased. `averaging.n_aggregate_cells` sits
+  beside `n_scored_cells` for the two samples. The amplification figure is
+  corrected in the docstring and pinned by a Monte-Carlo test.
+  *(One claim in this entry was false and is corrected in review round 2: "the
+  aggregate can never empty, because `linspace(0, n−1, k)` always includes index
+  0" — at `nz == 1`, index 0 **is** `nz−1`, and the exclusion emptied every
+  aggregate score with no `reason`. See the round-2 entry below. The exclusion
+  itself, and its scope, stand.)*
+
+- **WP1.3 (review round 1) — `masking` gained `scored_fraction` rather than
+  letting `fluid_fraction` change meaning (schema freeze; the fix agent's
+  proposed deviation is withdrawn).** B1's repair initially left
+  `masking.fluid_fraction` meaning "the fraction that survived into the scored
+  pairs" while its siblings `ensemble_fluid_fraction` / `truth_finite_fraction`
+  still meant mask fractions — the round's own thread reappearing as a *naming*
+  choice instead of as arithmetic. The lead's ruling was to split them, and since
+  nothing has shipped the rename is free. Final: **`fluid_fraction`** is the
+  *mask's* number (assimilation-side fluid ∧ truth-side resolvable), unchanged
+  from before the fix and consistent with its siblings; **`scored_fraction`** is
+  the fraction carrying a scoreable pair, i.e. the sample this block's numbers
+  were computed on, equal to `n_scored_cells / n_cells` by construction and
+  `≤ fluid_fraction`. The change is therefore **purely additive** — one new leaf
+  — and the fix agent's proposed "deviation 1" (an existing key changing meaning)
+  is **withdrawn**.
+  Worth recording, because it looks like redundancy and is not: with B1's
+  whole-member exclusion in place the two fractions are **equal on every
+  currently reachable path** (measured 0.8667 on both a healthy run and a
+  partial-divergence run). That is the correct outcome — the only remaining
+  sources of non-finiteness are the mask and diverged members, and the latter are
+  now removed member-wise. The two names exist so that a *future* source shows up
+  as a divergence between them instead of one number standing in for the other,
+  and the tests pin the `≤` relation and the `n_scored_cells` identity rather
+  than equality, so they catch that case rather than lock it out.
+
+- **WP1.3 (review round 1) — keys, names and signatures the fixes added (all
+  additive or internal).** New keys: `averaging.{n_members_scored,
+  n_stations_with_truth, z_levels_extrapolated, n_aggregate_cells,
+  n_bootstrap_cells_max, bootstrap_seed}`, `hit_rate.per_z[*].extrapolated`,
+  `masking.scored_fraction`. New public names:
+  `turbulence_stats.extrapolated_centre_dims` and
+  `_esmda_common.STATION_QUANTILES`. `eval_fields.nc` gains four
+  `station_ensemble_*_quantile` variables, a `quantile` coord and an
+  `n_members_scored` attr, **and its `truth_*` variables are now NaN outside the
+  scored set** — so `isfinite(truth_velmag)` *is* the scored set while
+  `fluid_mask` alone is strictly larger *(corrected in round 2: it is a superset,
+  `≥` not `>`, measured equal on a matched-grid run and strictly larger only
+  when the truth's mask or grid differs)*. That point is called out in
+  `docs/data_assimilation.md` because it is a WP1.4 trap: a figure masking on
+  `fluid_mask` and a metric scored on the pairs would disagree.
+  Signature changes: `truth_mean_field_stats(..., stride=1, ...)`;
+  `MeanFieldAccumulator(..., state_paths=None)` (falling back to reading the mask
+  from the member when absent, so an in-memory caller still works);
+  `_bootstrap_cell_stride` → `_bootstrap_cells`; `_state_read_variables` deleted.
+  One behavioural note the lead endorsed: **`block["reason"]` can now be non-null
+  on a block that still carries numbers** (a partial degradation, e.g. some
+  members excluded). The key set is unchanged; partial degradation should be
+  legible rather than either silent or fatal.
+
+- **WP1.3 (review round 1) — the sweep stage: D5's stated blocker was false, and
+  it is retracted in code rather than only in prose.** The earlier entry recorded
+  that `sensor_magnitude` could not be shared because its result inherits the
+  stacked array's `name` and "`DataArray.rename` cannot clear it". Measured on
+  this env (xarray 2025.12.0): `sensor_magnitude(components).name == "u"` but
+  `sensor_magnitude(components).rename().name is None` — the impossibility was
+  invented. The sweep stage now calls the shared `sensor_magnitude` instead of
+  duplicating the `|U|` formula, so there is one definition across both stages as
+  the master plan intends; the docstring records the measured fact, and the
+  "0 of 92 vs 16 of 92 leaves" layout table is retained, since that finding was
+  real and independent of this one.
+
+- **WP1.3 (review round 1) — `_split_quantities` is loudly three-component
+  rather than silently so, and the sweep stage degrades instead of vanishing.**
+  It hard-coded `("u","v","w")` and would have dropped a fourth component
+  without a word; it now derives `QUANTITIES = _COMPONENTS + ("vel",)` from one
+  constant and raises a `ValueError` naming the actual component set otherwise.
+  **Loud was chosen over general deliberately** — `_Q_KEY`, the `metrics.yaml`
+  key names and the three-term `|U|` sum are all per-component, so a "general"
+  splitter would have moved the silent drop one layer down rather than removing
+  it. Implementation note worth keeping: `components.coords.get("component")` on
+  a dim with no coordinate returns a *virtual* `0..n−1` range in this xarray, so
+  the guard tests `"component" in components.coords`.
+  Separately, `ensemble_sensor_series`'s new `ValueError` (the behaviour
+  narrowing logged above) would have become **no `metrics.yaml` at all** inside
+  `compute_sweep_metrics.main()`'s per-run `except: continue` — unreachable via
+  `run_esmda`, reachable for legacy files. `process_run` now wraps the three
+  series calls in a targeted `except ValueError`, logs a warning naming the run
+  and the cause, sets `status["note"]`, and still writes `metrics.yaml` with the
+  parameter/state metrics and the `num_sensors` skeleton, degrading exactly like
+  the existing missing-`truth_access` branch. `main()`'s per-run handler is
+  unchanged in scope but now does `logger.exception(...)`, and `main()` calls
+  `logging.basicConfig`. **Unplanned benefit:** this also rescues the `.temp`
+  breakage recorded above — an out-of-domain sensor point raises `ValueError`, so
+  such a run now yields a `metrics.yaml` plus a warning naming the cause instead
+  of disappearing from the sweep.
+
+- **WP1.3 (review round 1) — minors, fixed where cheap.**
+  `resolve_metrics_settings` accepted `stations: [[5.0]]` and `_station_points`
+  then raised an uncaught `IndexError` that killed the metrics stage; the station
+  *shape* is now validated where the other `run.metrics` knobs are, same failure
+  mode, same place — which is the WP1.0 round-1 rule ("a bad knob is reported
+  cheaply instead of crashing deep inside a pass that has already read GBs")
+  applied to the one knob that had escaped it. Configured stations *are* deduped
+  despite the comment claiming they "win outright"; the comment now matches the
+  code. Dead per-member work removed (the station `velmag` and the slab `rms`
+  were computed for every member and never read; the slab `velmag` is kept
+  because its across-member spread is published). Three stale
+  `scripts/compute_sweep_metrics.py` / `compare_sweep_results.py` paths in the
+  sweep module's own docstring corrected to `scripts/figure_creation/`.
+
+- **WP1.3 (review round 1) — verification after the fixes.** **131 passed, 0
+  failed** across the five targeted suites (`test_esmda_metrics_wiring` 20,
+  `test_turbulence_stats` 37, `test_esmda_stream_members` 20,
+  `test_esmda_metrics_levels` 21, `test_sensor_statistics` 33), plus
+  `test_da_metrics` 20 on the sweep side. WP1.2 byte-identity re-verified with
+  `blanking` both on and off: **587 shared leaves, 0 differing, 0 old-only**, 90
+  new-only and all of them under `mean_field_metrics`, with an `np.nextafter`
+  null experiment detecting exactly 1 differing leaf so the harness is proven
+  sensitive. That last point is not ceremony — **both fix agents independently
+  wrote, and caught, a false-negative null experiment** (`*= 1 + 1e-16` is a
+  float no-op, and `reshape(-1)` on a non-contiguous view silently returns a
+  copy), so a byte-identity claim made without a working null is worth nothing.
+  Degradation: 11 shapes same-keys. A missing truth and a corrupt window file
+  still abort `compute_metrics` — both **pre-existing at HEAD** in the earlier
+  state/sensor stage, not WP1.3 regressions, and not fixed here. black/isort
+  clean; no new mypy errors (the 13 reported under a 4-file invocation are
+  pre-existing and verified identical against `HEAD`; each file alone
+  type-checks clean).
+
+- **WP1.3 (review round 1) — out of scope, reported not fixed.**
+  `job_scripts/local/eval_sweep.sh:85`, `job_scripts/snellius/eval_sweep.slurm:66`
+  and `job_scripts/delftblue/eval_sweep.slurm:69` all invoke
+  `scripts/compute_sweep_metrics.py`, a path that no longer exists (the review
+  found two; there are three, plus matching comment lines in each file and in
+  `job_scripts/local/README.md`). Pre-existing breakage unrelated to this WP,
+  deliberately left for its own one-line change rather than widening an already
+  large diff. Recorded in `docs/scripts_and_configs.md` beside the script so the
+  next person to run a sweep on HPC finds it.
+
+#### Review round 2
+
+Round-2 verdict: **APPROVE**. Every round-1 finding was verified closed by
+independent re-measurement rather than by reading the transcript — B1, B2, S1,
+S3 and A7 all confirmed, the masking rename confirmed honest-but-currently-
+redundant, the `state_paths=None` fallback confirmed bit-identical, the
+stride-corrected floor confirmed both the right scale *and* biased in the
+conservative direction, and the sweep port confirmed byte-identical after the
+`sensor_magnitude` swap. Standing invariants intact throughout (WP1.2 587 shared
+leaves / 0 differing with `blanking` on and off, `metrics_version` 2, all four
+`figure_creation/` consumers resolving, 11 degenerate shapes same-keys). The
+reviewer classified the follow-ups as non-blocking; **the lead's ruling was to
+fix them all in this PR anyway**, on the grounds that each is a one-line change
+or a test and a follow-up list attached to a merged PR is how these become
+permanent.
+
+The round's character is different from round 1's, and the difference is the
+lesson. Round 1 found *numbers* reported against the wrong sample. Round 2 found
+**three false or stale claims in comments and docstrings** — "the aggregate can
+never empty", "`fluid_mask` alone is strictly larger", and an illustrative cause
+that B1 had already made unreachable — plus one branch with no CI coverage at
+all. None of the three was a wrong number today; two of them were *load-bearing*
+anyway, because **a comment asserting an invariant is what stops the next person
+checking it**. That is precisely what happened at `nz == 1`: the "can never
+empty" sentence had been written, reviewed and carried through a round-1 fix
+without anyone testing the one shape where it is false. Where round 1's rule was
+"the sample a number describes must be the sample it was computed on", round 2's
+is "an invariant asserted in prose is a claim, and claims get tested".
+`metrics_version` stays **2**: one new leaf, no estimator touched.
+
+- **WP1.3 (review round 2) — A7's aggregate exclusion had no CI coverage; it now
+  has the contrast pinned rather than the key set (the priority finding, a test
+  gap and not a defect).** `test_esmda_metrics_wiring.py` asserted only that
+  `z_levels_extrapolated` and `n_aggregate_cells` were *present*, and the wiring
+  fixture is **pylbm**, where `z_edge_extrapolated` is always `False` — so the
+  exclusion branch never executed in CI at all. B1, B2 and S3 each got a proper
+  pin in round 1; A7's correctness rested on the reviewer's hand-check. Two new
+  tests now drive a genuinely uDALES-staggered state (`u` on `xm`, `v` on `ym`,
+  `w` on `zm`) through a real `MeanFieldAccumulator`, so the flag comes off the
+  real `extrapolated_centre_dims` path rather than a fixture constant. The
+  fixture is built so the *contrast* is the assertion: the truth matches the
+  ensemble exactly on the three interior levels and is wrong only on the
+  extrapolated one, giving aggregate `hit_rate.u` **1.0** with the exclusion on
+  against **0.75** with it off, `tke_rmse` **0.0** against **5.0**, with
+  `per_z u = [1.0, 1.0, 1.0, 0.0]` and `extrapolated = [F, F, F, T]`. Pinning
+  the contrast rather than the key set is the point: a regression that silently
+  stopped excluding would leave every key present and every value plausible.
+
+- **WP1.3 (review round 2) — the two stress RMSEs were reported beside a cell
+  count that overstates their sample; `averaging.n_stress_cells` added.** The
+  round-1 thread surviving in exactly two numbers: `_fluid_pairs` builds the
+  retained set from `mean` and `velmag` only, while `tke` and `⟨u′w′⟩` keep
+  their own pairwise finiteness inside `_masked_rmse` — they are `ddof=1`
+  moments, so they are `nan` wherever a cell's own sample count is below 2.
+  Measured with member 2 losing all but one finite frame over a 3×3 region for
+  the whole run (a blow-up confined to a sub-region): its slab *mean* stays
+  finite so B1 correctly keeps the member, but the summary read
+  `n_scored_cells: 104`, `n_aggregate_cells: 104`, `reason: None`,
+  `n_members_scored: 8` while the two RMSEs were computed on **76** cells.
+  **The finiteness design is deliberately unchanged** — folding `tke`/`uw` into
+  the base sample would let a one-frame window empty the hit rate's sample too,
+  which is the wrong trade and is disclosed in `_fluid_pairs`' docstring. Only
+  the count was missing, and only the count was added: the RMSE values are
+  byte-identical across the change (`tke 0.022994175913767668`,
+  `uw 0.019789352691558938`). `n_stress_cells` comes from a new `_stress_pairs`
+  and is the subset of `n_aggregate_cells`, not of `n_scored_cells`. One leaf
+  rather than two is exact rather than a compromise here — `tke` and `⟨u′w′⟩`
+  come from the same `StreamingMoments` per-cell count and the same mask, so
+  they are `nan` in identical cells (measured equal on the divergence fixture)
+  — and the helper intersects the two anyway, so the number can only ever
+  understate, never overstate.
+
+- **WP1.3 (review round 2) — "the exclusion cannot empty the aggregate" was
+  false, and where it emptied it reproduced B1's exact signature one layer
+  down.** `_aggregated_levels` dropped `z_index == nz−1`, and round 1's own
+  entry argued the aggregate survives because `linspace(0, n−1, k)` always
+  includes 0. **At `nz == 1`, index 0 *is* `nz−1`.** Reachable rather than
+  hypothetical: `_check_face_centre_alignment` uses
+  `n_check = min(face.size−1, centre.size)`, so a uDALES-staggered state with a
+  2-level `zm` and a 1-level `zt` colocates cleanly. Built and pushed through
+  `mean_field_summary`, it produced `hit u/v/w = None/None/None`, `fac2 = None`,
+  `tke_rmse.value = None`, `n_aggregate_cells: 0`, **`reason: None`, no log
+  line** — the null-without-a-reason that B1 was blocked for.
+  The ruling offered two repairs and **the lead confirmed the first**: keep every
+  level, and say so, rather than nulling. A contaminated number that announces
+  its contamination beats a silent null, and nulling would have reintroduced
+  B1's signature at a different address instead of removing it. Now:
+  `hit 1.0/1.0/1.0`, `n_aggregate_cells: 9` (`== n_scored_cells`),
+  `z_levels_extrapolated: [0.5]`, a `logger.warning`, and a `reason` stating that
+  the only scored z-level is the extrapolated one, that it could not be excluded,
+  and that the second moments carry that edge. `_aggregated_levels` now returns
+  `(aggregated, extrapolated)` — **the grid fact is reported whatever the
+  aggregate decides**, which is the structural half of the fix: the previous
+  shape let one boolean stand for both "which levels are extrapolated" and
+  "which levels are aggregated", and those are different questions. The false
+  "can never" sentence is gone from the comment; it is the sentence that stopped
+  anyone checking.
+
+- **WP1.3 (review round 2) — a member NaN only *inside buildings* was excluded
+  as a diverged member.** `_member_is_finite` tested the raw slab mean even
+  though `self._fluid_slab` is populated by the time `result()` runs. Measured
+  with NaN in member 3's `u/v/w` only where `blanking == 1`: `n_members_scored:
+  7` and a "diverged member" `reason`, despite every *scored* cell of that
+  member being finite; with all eight members doing it, the whole layer nulls and
+  no `eval_fields.nc` is written. Not reachable today — no shipped backend
+  NaN-marks solid cells, which is this WP's own headline finding — but **the
+  WP1.3 plan text assumes exactly that convention**, so this was one pypalm
+  change away from nulling the layer on the backend whose native output the plan
+  expects. The test now masks first: `n_members_scored: 8`, `reason: None`. It
+  fails loud rather than quiet either way, which is why it was a follow-up and
+  not a blocker.
+
+- **WP1.3 (review round 2) — three documentation corrections, and one scope
+  statement.** (a) `_masking_block`'s docstring cited "a member that diverged
+  over part of the domain" as the case where `fluid_fraction` and
+  `scored_fraction` differ — B1 removes exactly that case member-wise, so the
+  illustrative cause was unreachable; the names and the `≤` relation are
+  unaffected and the stale example is gone. (b) `_eval_fields_dataset` said
+  `fluid_mask` "alone is **strictly larger**" than `isfinite(truth_velmag)`.
+  Measured **equal** (104 == 104) on the healthy matched-grid fixture, and
+  strictly larger only when the truth's mask or grid differs (16 against 8 at
+  stride 3). It is a **superset (`≥`)**, not a strict one; corrected here and in
+  `docs/data_assimilation.md`. The WP1.4 hand-off warning is unaffected — a
+  figure masking on `fluid_mask` still risks showing cells the metric never
+  scored, and `≥` is precisely why "sometimes equal" is not something a consumer
+  may rely on. (c) `extrapolated_centre_dims` returns all three centre axes
+  (`('xt','yt','zt')` for uDALES) while the driver reads only the z entry, so
+  the last x-row and y-column carry the same edge extrapolation and **remain in
+  every aggregate**. A7's ruling was z-scoped and stays z-scoped: the docstring
+  is now scoped to what the caller actually does and the x/y residual is stated
+  as a **known limitation** rather than implied away. Widening the exclusion is
+  a WP1.4-or-later decision and was deliberately not taken here. Also
+  `extrapolated_centre_dims` is now in `turbulence_stats.__all__` (11 names) —
+  it was public and imported by name while being absent from the export list.
+
+- **WP1.3 (review round 2) — verification.** **133 passed, 0 failed** (wiring 22,
+  up 2 for N7). WP1.2 byte-identity re-run: **587 shared leaves, 0 differing, 0
+  old-only**, new-only 90 → **91** — exactly the one new leaf, confirmed against
+  the key set rather than assumed from the count. 11 degenerate shapes
+  same-keys. black/isort clean. mypy back to the pre-existing 13: the two new
+  `no-any-return` errors the round introduced were **fixed properly rather than
+  suppressed or left for the commit hook**, which is worth recording because a
+  `# type: ignore` here would have been invisible in the diff and permanent in
+  the file.
