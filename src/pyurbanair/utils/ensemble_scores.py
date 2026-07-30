@@ -21,12 +21,14 @@ Conventions, applied without exception:
 * **A calibration diagnostic ships with its own reference.** At production
   ``M`` almost none of them have the textbook large-sample reference: PIT
   bins are unequal (:func:`rank_histogram_weights`), the z-score null is a
-  scaled ``t`` rather than a normal (:func:`zscore_nominal_exceedance`), and
-  an order-statistic band cannot hit an arbitrary ``alpha``
-  (:func:`coverage_nominal_alpha`). Every one of those is a function here, so
-  the plotting and metrics layers read the reference instead of re-deriving
-  it -- a re-derived reference drifts, and each of these drifts *toward*
-  reporting a perfectly calibrated ensemble as broken.
+  scaled ``t`` rather than a normal (:func:`zscore_nominal_exceedance`), an
+  order-statistic band cannot hit an arbitrary ``alpha``
+  (:func:`coverage_nominal_alpha`), and the Wasserstein-over-floor ratio is
+  not calibrated at 1 (:func:`wasserstein_over_floor_reference`). Every one of
+  those is a function here, so the plotting and metrics layers read the
+  reference instead of re-deriving it -- a re-derived reference drifts, and
+  each of these drifts *toward* reporting a perfectly calibrated ensemble as
+  broken.
 
 See ``docs/plans/esmda_evaluation/phase1_postprocessing_metrics.md`` (WP1.0)
 for how these are wired into the metrics schema.
@@ -39,6 +41,16 @@ from typing import Any
 
 import numpy as np
 from scipy import stats
+
+# The block resampler is shared rather than reimplemented: WP1.3's bootstrap
+# already owns the moving-block draw (and its scalar/batch pair is pinned to
+# agree because both call it), so the perfect-model reference below draws its
+# synthetic members from the same place. ``turbulence_stats`` imports nothing
+# from this module, so the dependency is one-way.
+from pyurbanair.utils.turbulence_stats import (
+    _block_resample_indices,
+    _resolve_generator,
+)
 
 # Tie-breaking in ``pit_rank`` must not depend on OS entropy: re-running the
 # metrics stage on the same run directory has to reproduce the same numbers.
@@ -71,6 +83,7 @@ __all__ = [
     "rank_histogram_weights",
     "spread_skill_ratio",
     "wasserstein_over_floor",
+    "wasserstein_over_floor_reference",
     "wasserstein_over_sigma",
     "wasserstein_self_floor",
     "zscore",
@@ -774,9 +787,12 @@ def wasserstein_over_sigma(samples: np.ndarray, truth_samples: np.ndarray) -> fl
     sigma doubled                   0.888   0.804
     ==============================  ======  =======
 
-    So at a 36-frame window a raw 0.3 is *indistinguishable from perfect*.
-    Report it against :func:`wasserstein_self_floor` via
-    :func:`wasserstein_over_floor`, never against 0.
+    So at a 36-frame window a raw 0.3 is where a *perfect* model sits. Report it
+    against :func:`wasserstein_self_floor` via :func:`wasserstein_over_floor` --
+    never against 0 -- and read *that* ratio against
+    :func:`wasserstein_over_floor_reference` at the same sample count, because it
+    is not calibrated at 1 either (a perfect model scores ~0.55 of the floor, and
+    the value moves with ``n``, ``M`` and the series' autocorrelation).
 
     Note for callers pooling an ensemble: ``W1`` is convex in its first
     argument, so pooling all members into one sample set can only *lower* the
@@ -859,11 +875,24 @@ def wasserstein_self_floor(truth_samples: np.ndarray) -> float:
 
     Read the last row. On the shipped default truth (``params@truth_params:
     dynamic_cosine`` -- a 400 s inflow-angle cosine and a 200 s magnitude
-    cosine) a *clearly wrong* model scores ``w1_over_floor ~ 1.9``, inside the
-    band :func:`wasserstein_over_floor` calls indistinguishable from perfect.
-    The floor has absorbed the forcing, and good and bad models are then both
-    divided by it. Unlike the two conservatisms above this is not a small
-    factor: it is the difference between 18 and 2.
+    cosine) a *clearly wrong* model scores ``w1_over_floor ~ 1.9``, which a reader
+    comparing against 1 would call marginal. The floor has absorbed the forcing,
+    and good and bad models are then both divided by it. Unlike the two
+    conservatisms above this is not a small factor: it is the difference between
+    18 and 2.
+
+    :func:`wasserstein_over_floor_reference` softens the *reading* of that but
+    does not fix the floor, and it is worth knowing which. Its stand-in windows
+    are block resamples, which scramble a trend the way the rejected random split
+    does, so the reference barely moves when the floor triples -- measured on the
+    108-frame probe above (``M = 32``, 60 windows): floor 0.210 stationary /
+    0.733 forced, perfect model 0.55 / 0.12, bad model 9.5 / 1.66, reference 0.52
+    / 0.51. Reading against the reference, the bad model is 18x it stationary and
+    still 3.3x it forced -- recognizably bad rather than marginal. But the
+    *perfect* model reads 0.24x the reference on the forced window, i.e. the
+    reference now over-states what perfect is, so a mediocre model can hide below
+    it. Windowing is still the mitigation; the reference restores the bad-model
+    signal, not the floor.
 
     **Mitigation, and its limit.** Callers must take the split over a window
     short enough to be *locally* stationary. WP1.2 does this: every Wasserstein
@@ -906,13 +935,30 @@ def wasserstein_self_floor(truth_samples: np.ndarray) -> float:
 
 
 def wasserstein_over_floor(w1: float, floor: float) -> float:
-    """The headline ratio: ``w1 / max(floor, tiny)``, calibrated at 1.
+    """The headline ratio: ``w1 / max(floor, tiny)``. **Not calibrated at 1.**
 
     A distance read against the only reference that means anything at these
-    window lengths (see the table in :func:`wasserstein_over_sigma`): ~1 says
-    the model's distribution is as close to the truth as the truth is to
-    itself, and only a ratio comfortably above 1 is a real distributional
-    mismatch rather than sampling noise.
+    window lengths (see the table in :func:`wasserstein_over_sigma`) -- but the
+    quotient is *not* 1 for a perfect model, and reading it that way is a factor
+    of ~2 wrong. The numerator compares ``M * n`` pooled member samples against
+    ``n`` truth samples while the denominator compares ``n/2`` truth samples
+    against ``n/2``, so the two sides are not like-for-like on sample count:
+
+    * a perfect model scores **~0.55, roughly flat in ``n``** (numerator and
+      floor both fall as ``1/sqrt(n)``), so a model reading exactly 1.0 is
+      already about twice as far from the truth as a perfect one;
+    * a *genuine* bias has a numerator that does not shrink with ``n``, so its
+      ratio **grows as ``sqrt(n)``** -- which also means the number is not
+      comparable across windows of different length.
+
+    Both statements are numbers, not intuitions: see the n-scaling table in
+    :func:`wasserstein_over_floor_reference`, which computes the perfect-model
+    value for the series and ``M`` at hand (~0.55 is one ``phi`` and one ``M``;
+    it moves with both). **Interpret this ratio only against that reference,
+    evaluated at the same sample count** -- WP1.2 emits the pair as
+    ``w1_over_floor`` and ``w1_over_floor_calibrated_median``. With the reference
+    in hand, whether the ratio was computed per window or over the pooled run
+    stops mattering for interpretation.
 
     Both arguments must come from the *same* normalization --
     :func:`wasserstein_over_sigma` and :func:`wasserstein_self_floor` divide by
@@ -949,3 +995,207 @@ def wasserstein_over_floor(w1: float, floor: float) -> float:
     if not np.isfinite(numerator) or not np.isfinite(denominator):
         return float("nan")
     return numerator / max(denominator, _WASSERSTEIN_FLOOR_EPS)
+
+
+def wasserstein_over_floor_reference(
+    truth_samples: np.ndarray,
+    n_members: int,
+    *,
+    n_resamples: int = 64,
+    n_blocks: int = 20,
+    rng: np.random.Generator | int | None = None,
+) -> float:
+    """Median ``w1_over_floor`` a PERFECT model of this series would score.
+
+    **The reference :func:`wasserstein_over_floor` has to be read against.**
+    That ratio is *not* calibrated at 1: its numerator compares ``M * n`` pooled
+    member samples against ``n`` truth samples while its denominator compares
+    ``n/2`` truth samples against ``n/2``, so the two sides are not like-for-like
+    on sample count and the quotient lands well below 1 for a perfect model.
+    Both sides fall as ``1/sqrt(n)``, so the perfect-model value is roughly flat
+    in the window length while a *genuine* bias -- whose numerator does not
+    shrink with ``n`` -- makes the ratio grow as ``sqrt(n)``. A single number
+    therefore cannot be interpreted without knowing ``n`` and ``M``, which is
+    what this function supplies. Measured on AR(1) (``phi = 0.6``, stationary
+    mean, ``M = 32``, median over 200 trials):
+
+    ========  =============  ==========  ===========
+    n scored  perfect model  +0.5 sigma  sigma x 0.5
+    ========  =============  ==========  ===========
+    18        0.77           0.93        0.75
+    36        0.56           0.99        0.80
+    108       0.53           1.48        1.25
+    216       0.50           2.02        1.72
+    432       0.54           3.00        2.47
+    ========  =============  ==========  ===========
+
+    A model reading exactly 1.0 is already ~2x worse than perfect at these
+    window lengths. Emit this beside the ratio (WP1.2 does, as
+    ``w1_over_floor_calibrated_median``) and compare the two element for
+    element; do not compare against 1, and do not carry a prose constant --
+    0.55 is the value at *one* ``phi`` and *one* ``M``, and it moves with both.
+
+    **Method: a two-sample block bootstrap.** Each of ``n_resamples`` replicates
+    draws ``n_members + 1`` series of ``n`` samples each from the truth by
+    moving-block resampling -- block length ``ceil(n / n_blocks)``, drawn by the
+    same ``turbulence_stats._block_resample_indices`` the WP1.3 bootstraps use,
+    so the synthetic series inherit the truth's marginal distribution *and* (up to
+    the block length) its autocorrelation. ``n_members`` of them are pooled into
+    a synthetic perfect model exactly as the real caller pools its members; the
+    remaining one is a **stand-in truth window**, and the replicate's ratio is
+    ``wasserstein_over_sigma(pooled, stand_in) / wasserstein_self_floor(stand_in)``.
+    The answer is the median over replicates.
+
+    **Why the stand-in, and not the truth itself.** Scoring the pooled synthetic
+    model against the real truth array -- the obvious construction, since the
+    floor is deterministic given the truth -- is wrong by a factor of 4-6 and
+    gets worse as ``M`` grows. The pooled sample is ``M * n`` draws *from the
+    truth's own empirical distribution*, so its ECDF converges to that ECDF and
+    ``W1(pooled, truth) -> 0``: it measures the model's sampling noise, which
+    pooling averages away, and misses the term that actually dominates -- the
+    truth window's own deviation from the law it was drawn from. Measured at
+    ``M = 32``, that construction returns 0.05-0.13 where the answer is ~0.55.
+    Resampling both sides restores the real comparison (two independent samples
+    of ``M * n`` and ``n`` from one law) at the cost of conditioning: the median
+    is over the sampling variability of the truth window as well as the model's,
+    which is unavoidable -- the dominant term *is* the window's own sampling
+    error, and no estimator conditioned on that one window can see it. So this is
+    "the ratio a perfect model of this series and this length typically scores",
+    not "the ratio conditional on this exact window".
+
+    **The bootstrap caveat, stated plainly.** A resample reuses the truth's own
+    values, so neither side is a fully independent realization of the same law --
+    the two synthetic sides share the truth's ties and extremes, and nothing here
+    guarantees the estimate is unbiased. This is the same device
+    :func:`wasserstein_self_floor` rests on and the standard bootstrap argument for
+    sampling variability, but it has to be measured rather than asserted, and it is
+    (by ``test_wasserstein_reference_matches_a_directly_simulated_perfect_model``).
+    Median ratio of this function to a directly
+    simulated independent perfect model, paired per truth window (AR(1),
+    ``M = 32``, 120 windows each, 5 independent model realizations per window):
+
+    ======  ======  ======  ======
+    n       phi 0   phi .6  phi .9
+    ======  ======  ======  ======
+    36      1.02    1.05    0.55
+    108     0.99    0.91    0.88
+    432     0.98    1.06    1.08
+    ======  ======  ======  ======
+
+    Within 12% at eight of the nine points, and the exception is low, not high.
+    It has a clean mechanism: at ``phi = 0.9`` with ``n = 36`` the block length is
+    2, which cannot reproduce a correlation spanning ten frames, so the resampled
+    sides under-inherit the slow excursions that make a short strongly-correlated
+    window a poor sample of its own law. **Note the direction.** Unlike the floor's
+    conservatisms this one is *not* in the safe direction -- an under-stated
+    reference makes a good model look bad -- so on a strongly autocorrelated probe
+    scored over a short window, read a ratio moderately above the reference as
+    inconclusive rather than as a failure. Longer windows and weakly correlated
+    series do not have the problem.
+
+    **Cost, and what ``n_resamples`` buys.** Per call: ``n_resamples`` Wasserstein
+    evaluations on ``M * n``-sample arrays, ``n_resamples`` floors on ``n/2``-sample
+    halves, and one ``(n_resamples * (M + 1), n)`` index draw (0.6 MB of ``int64``
+    at the shipped shape, 26 MB at ``M = 128`` / ``n = 400``). Measured on this
+    hardware at ``M = 32``, ``n = 36`` -- the shipped shape, where WP1.2 makes 24
+    ``(sensor, window)`` calls -- with the seed-to-seed spread of the returned
+    median over 200 seeds:
+
+    ===========  ===========  ==========  ===========
+    n_resamples  ms per call  24 calls    MC spread
+    ===========  ===========  ==========  ===========
+    16           1.9          0.05 s      0.100 (19%)
+    64           7.3          0.18 s      0.061 (12%)
+    128          14.4         0.35 s      0.041 (8%)
+    ===========  ===========  ==========  ===========
+
+    The default 64 keeps the addition an order of magnitude inside the ~1 s budget
+    round-1's vectorization bought (0.37 s per call at ``M = 128`` / ``n = 400``).
+    Its 12% per-element Monte-Carlo error is well below the ~2x effect being
+    diagnosed, and WP1.2's ``{median, max}`` reduction over 24 elements averages
+    the median's down by ``~sqrt(24)``; raise ``n_resamples`` if a *per-element*
+    number is being plotted, since the error falls as ``1/sqrt(n_resamples)``
+    while the cost rises linearly.
+
+    Args:
+        truth_samples: The truth series for one element, flattened **in time
+            order** (non-finite entries dropped first, as everywhere else in
+            this family) -- the same array handed to
+            :func:`wasserstein_self_floor`, or the answer describes a different
+            series than the floor does.
+        n_members: Ensemble size the real ``w1_over_floor`` pooled, so the
+            synthetic model is pooled from as many samples.
+        n_resamples: Bootstrap replicates the median is taken over.
+        n_blocks: Target block count, as in
+            :func:`~pyurbanair.utils.turbulence_stats.block_bootstrap_std`; the
+            block length is derived from the series length so one call site
+            serves windows of different lengths. Two degenerate ends, both
+            reachable from a config knob: fewer samples than blocks gives a block
+            length of 1 -- an iid resample, which carries none of the series'
+            correlation (unreachable at the shipped 36-frame window, where
+            ``L = 2``, but not on a shorter one) -- and ``n_blocks=1`` makes the
+            block the whole series, so there is one legal start, every replicate
+            *is* the truth, and the answer is exactly ``0.0``. That zero is
+            measured rather than undefined, the same way
+            :func:`~pyurbanair.utils.turbulence_stats.block_bootstrap_std`
+            returns ``0.0`` there.
+        rng: ``numpy`` generator, or a seed for one. ``None`` means the fixed
+            default seed -- never OS entropy, so re-running the metrics stage on
+            a run directory reproduces the number.
+
+    Returns:
+        The median perfect-model ratio (``>= 0``; exactly ``0.0`` only in the
+        degenerate ``n_blocks=1`` case above), or ``nan`` when
+        :func:`wasserstein_self_floor` is ``nan`` for the real truth (fewer than
+        four finite samples -- the smoke shape -- or a spread that is only float
+        rounding), when that floor is zero (there is no perfect-model *ratio* to
+        report against a floor :func:`wasserstein_over_floor` can only clamp), or
+        when no replicate produced a usable stand-in floor.
+
+    Raises:
+        ValueError: If ``n_members < 1``, ``n_resamples < 1`` or ``n_blocks < 1``.
+    """
+    if n_members < 1:
+        raise ValueError(f"n_members must be positive, got {n_members}")
+    if n_resamples < 1:
+        raise ValueError(f"n_resamples must be positive, got {n_resamples}")
+    if n_blocks < 1:
+        raise ValueError(f"n_blocks must be positive, got {n_blocks}")
+
+    truth = _finite_samples(truth_samples)
+    # The real floor is not used as the divisor (see the docstring), but it is
+    # the gate: this function exists to calibrate ``w1_over_floor``, and where
+    # that ratio is undefined (``nan`` floor) or only clamped (zero floor) there
+    # is nothing to calibrate.
+    real_floor = wasserstein_self_floor(truth)
+    if not np.isfinite(real_floor) or real_floor <= 0.0:
+        return float("nan")
+    n_samples = int(truth.size)
+    block_len = min(max(int(np.ceil(n_samples / n_blocks)), 1), n_samples)
+    generator = _resolve_generator(rng)
+    # ``n_members + 1`` rows per replicate: the pooled synthetic model, then the
+    # stand-in truth window it is scored against. One draw for all of them --
+    # rows come off the generator in the order a per-row loop would consume them.
+    index = _block_resample_indices(
+        n_samples, block_len, n_resamples * (n_members + 1), generator
+    ).reshape(n_resamples, n_members + 1, n_samples)
+
+    ratios = np.empty(n_resamples, dtype=float)
+    for i in range(n_resamples):
+        stand_in = truth[index[i, n_members]]
+        stand_in_floor = wasserstein_self_floor(stand_in)
+        # A replicate can degenerate where the truth cannot: a stand-in drawn
+        # from one repeated block has no spread (``nan``) or two identical halves
+        # (``0.0``). Those replicates drop out of the median rather than being
+        # clamped -- the clamp would put ~1e12 in it and move the median off the
+        # surviving replicates entirely.
+        if not np.isfinite(stand_in_floor) or stand_in_floor <= 0.0:
+            ratios[i] = float("nan")
+            continue
+        pooled = truth[index[i, :n_members]].ravel()
+        ratios[i] = wasserstein_over_sigma(pooled, stand_in) / stand_in_floor
+
+    usable = ratios[np.isfinite(ratios)]
+    if usable.size == 0:
+        return float("nan")
+    return float(np.median(usable))

@@ -100,6 +100,7 @@ WASSERSTEIN_KEYS = frozenset(
         "w1_over_sigma_member_mean",
         "self_floor",
         "w1_over_floor",
+        "w1_over_floor_calibrated_median",
         "reason",
     }
 )
@@ -812,6 +813,80 @@ def test_a_shifted_ensemble_distribution_is_far_above_its_own_self_floor() -> No
     assert shifted["w1_over_sigma_pooled"]["median"] > 3.0
 
 
+def test_w1_over_floor_is_read_against_its_calibrated_reference_not_against_one() -> (
+    None
+):
+    """A real bias reads *below* 1 at the shipped window length. The reference sees it.
+
+    The finding this key exists for: ``w1_over_floor`` is not calibrated at 1.
+    Its floor compares ``n/2`` truth samples against ``n/2`` while its numerator
+    compares ``M*n`` model samples against ``n``, so a perfect model lands near
+    0.5 rather than 1, and a genuine bias -- whose numerator does not shrink with
+    ``n`` -- has to grow to ``sqrt(n)`` scale before it crosses 1. At the shipped
+    36-frame window that leaves a band in which a wrong model scores under 1 and
+    a reader anchored at 1 calls it perfect.
+
+    Three ensembles over ONE truth (36 frames x 3 windows x 4 sensors, M = 32,
+    ``|U|`` carried by a single component so the samples are exactly the drawn
+    series), and the numbers this construction produces:
+
+    ======================  =============  =========  =========
+    ensemble                w1_over_floor  reference  raw / ref
+    ======================  =============  =========  =========
+    perfect (same law)      0.490          0.527      0.93
+    +0.25 sigma mean bias   0.733          0.527      1.39
+    +0.5 sigma mean bias    1.322          0.527      2.51
+    ======================  =============  =========  =========
+
+    Read against 1, the +0.25 sigma model is *better* than "indistinguishable
+    from perfect" and the +0.5 sigma one is barely outside it. Read against the
+    reference -- which is a property of the truth and the member count, so it is
+    the same number in all three columns -- both are plainly worse than perfect.
+    That equality across the three ensembles is asserted too: a reference that
+    moved with the model being scored could not calibrate anything.
+    """
+    rng = np.random.default_rng(31)
+    frames, n_sensors, n_members = 36, 4, 32
+    n_time = NUM_WINDOWS * frames
+    truth_values = np.zeros((len(COMPONENTS), n_time, n_sensors))
+    truth_values[0] = 10.0 + rng.normal(size=(n_time, n_sensors))
+    truth = {SET: _truth_da(truth_values, np.arange(n_time, dtype=float))}
+
+    def _wasserstein(bias: float) -> dict:
+        members = np.zeros((len(COMPONENTS), n_members, n_time, n_sensors))
+        members[0] = 10.0 + bias + rng.normal(size=(n_members, n_time, n_sensors))
+        block: dict = _score(
+            truth,
+            {SET: _ensemble_da(members, _rebased_times(frames))},
+            # Blocks finer than the 36-frame window null the identifiability
+            # bootstrap, which this test does not read -- see the note above.
+            bootstrap_blocks=500,
+        )[SET]["wasserstein"]
+        return block
+
+    perfect = _wasserstein(0.0)
+    mild = _wasserstein(0.25)
+    biased = _wasserstein(0.5)
+
+    reference = perfect["w1_over_floor_calibrated_median"]["median"]
+    assert reference > 0.0
+    for block in (mild, biased):
+        assert block["w1_over_floor_calibrated_median"]["median"] == reference
+
+    # A perfect model scores its reference, and nothing like 1.
+    assert perfect["w1_over_floor"]["median"] == pytest.approx(reference, rel=0.25)
+    assert perfect["w1_over_floor"]["median"] < 0.75
+
+    # Both biased models are above it -- including the one whose raw ratio is
+    # under 1, which is the whole point of emitting the reference.
+    assert mild["w1_over_floor"]["median"] < 1.0
+    assert mild["w1_over_floor"]["median"] > 1.25 * reference
+    assert biased["w1_over_floor"]["median"] > 2.0 * reference
+    # ... and even the larger bias stays inside the band a reader anchored at 1
+    # would have forgiven.
+    assert biased["w1_over_floor"]["median"] < 1.5
+
+
 def test_a_straddling_ensemble_separates_the_pooled_and_per_member_wasserstein() -> (
     None
 ):
@@ -877,8 +952,8 @@ def test_the_wasserstein_floor_is_taken_per_window_not_over_the_whole_run() -> N
     series' own sampling variability. Over a whole run that includes the run's
     slowest forcing: on the shipped default truth (a 400 s inflow-angle cosine
     and a 200 s magnitude cosine) the measured floor rises 0.168 -> 0.575 and a
-    clearly-wrong model falls from ``w1_over_floor`` 18.2 to 1.9, inside the
-    band the docs call indistinguishable from perfect.
+    clearly-wrong model falls from ``w1_over_floor`` 18.2 to 1.9 -- within a
+    factor of ~3 of what a perfect model scores.
 
     Here the drift is a step between windows -- the same effect at its crudest.
     The assertion is the comparison against the whole-run floor computed
@@ -913,9 +988,9 @@ def test_the_wasserstein_floor_is_null_at_the_smoke_window_length() -> None:
 
     ``wasserstein_self_floor`` needs four finite samples (two per half), which
     the smoke shape does not have once the layer is computed per window. The
-    floor and the ratio that divides by it go ``null`` with a reason; the two
-    raw distances need only two samples and survive, so the layer degrades in
-    part rather than vanishing.
+    floor, the ratio that divides by it and the calibrated reference for that
+    ratio all go ``null`` with a reason; the two raw distances need only two
+    samples and survive, so the layer degrades in part rather than vanishing.
     """
     truth, ensemble = _exchangeable_series(6, 4, 3, seed=26)
 
@@ -926,7 +1001,12 @@ def test_the_wasserstein_floor_is_null_at_the_smoke_window_length() -> None:
     assert block["w1_over_sigma_member_mean"]["median"] > 0.0
     assert block["self_floor"] is None
     assert block["w1_over_floor"] is None
+    # The reference is a ratio against that same absent floor, so it cannot
+    # survive where the floor does not -- and it must not be reported as a
+    # number produced from a clamped denominator.
+    assert block["w1_over_floor_calibrated_median"] is None
     assert "self_floor" in block["reason"]
+    assert "w1_over_floor_calibrated_median" in block["reason"]
 
 
 def test_a_dead_truth_sensor_nulls_the_wasserstein_layer_with_a_reason() -> None:
@@ -954,7 +1034,12 @@ def test_a_dead_truth_sensor_nulls_the_wasserstein_layer_with_a_reason() -> None
     )[SET]["wasserstein"]
 
     assert set(block) == WASSERSTEIN_KEYS
-    for key in ("w1_over_sigma_pooled", "w1_over_sigma_member_mean", "self_floor"):
+    for key in (
+        "w1_over_sigma_pooled",
+        "w1_over_sigma_member_mean",
+        "self_floor",
+        "w1_over_floor_calibrated_median",
+    ):
         assert block[key] is None, key
     assert block["reason"] is not None
 
@@ -1042,7 +1127,12 @@ def _assert_schema(entry: dict) -> None:
         assert set(block["identifiability"]) == IDENTIFIABILITY_KEYS, name
         assert block["pit"]["n_bins"] == PIT_BINS, name
     assert set(entry["wasserstein"]) == WASSERSTEIN_KEYS
-    for key in ("w1_over_sigma_pooled", "self_floor", "w1_over_floor"):
+    for key in (
+        "w1_over_sigma_pooled",
+        "self_floor",
+        "w1_over_floor",
+        "w1_over_floor_calibrated_median",
+    ):
         value = entry["wasserstein"][key]
         assert value is None or set(value) == {"median", "max"}, key
 

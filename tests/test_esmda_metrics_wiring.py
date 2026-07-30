@@ -158,6 +158,7 @@ WASSERSTEIN_KEYS = {
     "w1_over_sigma_member_mean",
     "self_floor",
     "w1_over_floor",
+    "w1_over_floor_calibrated_median",
     "reason",
 }
 
@@ -834,8 +835,25 @@ def test_standard_level_wiring_emits_the_sensor_statistics_for_every_set(
         wasserstein = entry["wasserstein"]
         assert set(wasserstein) == WASSERSTEIN_KEYS
         assert wasserstein["reason"] is None
-        for key in ("w1_over_sigma_pooled", "self_floor", "w1_over_floor"):
+        for key in (
+            "w1_over_sigma_pooled",
+            "self_floor",
+            "w1_over_floor",
+            "w1_over_floor_calibrated_median",
+        ):
             assert set(wasserstein[key]) == {"median", "max"}
+        # `w1_over_floor` is not calibrated at 1 -- a perfect model of this
+        # series scores ~0.55 at the shipped shape and a real error grows as
+        # sqrt(n) -- so the ratio is only readable against this reference.
+        # Asserted present *and* finite here (8 frames per window clears
+        # `wasserstein_self_floor`'s four-sample minimum) so a reference that
+        # stops being emitted, or starts coming out nan on a case that otherwise
+        # scores fine, fails loudly instead of quietly removing the only thing
+        # that makes the headline ratio interpretable.
+        for reduction in ("median", "max"):
+            reference = wasserstein["w1_over_floor_calibrated_median"][reduction]
+            assert reference is not None, reduction
+            assert np.isfinite(reference) and reference > 0.0, reduction
         # W1 is convex in its first argument, so pooling the members can only
         # help. This holds for any ensemble, which is exactly why it is a wiring
         # assertion: it fails if the two are computed off different samples.

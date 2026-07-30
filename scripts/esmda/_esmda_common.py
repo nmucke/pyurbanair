@@ -52,6 +52,7 @@ from pyurbanair.utils.ensemble_scores import (
     rank_histogram,
     rank_histogram_weights,
     wasserstein_over_floor,
+    wasserstein_over_floor_reference,
     wasserstein_over_sigma,
     wasserstein_self_floor,
     zscore,
@@ -1544,6 +1545,15 @@ IDENTIFIABILITY_MIN_RATIO = 3.0
 # stage has a name for it; a caller that passes `bootstrap_blocks` overrides it.
 DEFAULT_BOOTSTRAP_BLOCKS = 20
 
+# Base entropy for the Monte-Carlo `w1_over_floor` reference
+# (`ensemble_scores.wasserstein_over_floor_reference`, which synthesizes perfect
+# models by block-resampling the truth). Spelled as one seed per (window,
+# sensor) rather than one shared generator threaded through the loop so an
+# element's reference depends on nothing but its own truth samples and the
+# member count: the same sensor scores the same number whichever position it
+# holds in the set and whether or not its neighbours were scorable at all.
+WASSERSTEIN_REFERENCE_SEED = 0
+
 
 def _finite_mean(values):
     """Mean over the finite entries of an array, ``nan`` when there are none."""
@@ -1621,6 +1631,7 @@ def _null_wasserstein_block(reason):
         "w1_over_sigma_member_mean": None,
         "self_floor": None,
         "w1_over_floor": None,
+        "w1_over_floor_calibrated_median": None,
         "reason": reason,
     }
 
@@ -2215,11 +2226,11 @@ def _wasserstein_block(
     inflow-angle cosine and a 200 s magnitude cosine) the measured floor rises
     from 0.168 on a stationary series to 0.575, and a clearly-wrong model (+20%
     ``|U|``, half the turbulence) falls from ``w1_over_floor`` 18.2 to 1.9 --
-    inside the band the docs call indistinguishable from perfect. Windowing
-    removes the cross-window part of that; a trend whose period is comparable to
-    ONE window still inflates the floor, and no reduction here can fix that.
+    within a factor of ~3 of what a perfect model scores. Windowing removes the
+    cross-window part of that; a trend whose period is comparable to ONE window
+    still inflates the floor, and no reduction here can fix that.
 
-    Four numbers per (sensor, window), then reduced by median and max:
+    Five numbers per (sensor, window), then reduced by median and max:
 
       * ``w1_over_sigma_pooled`` -- every member's samples pooled into one
         empirical distribution against the truth's. This is the ensemble's
@@ -2244,15 +2255,45 @@ def _wasserstein_block(
         ``w1_over_sigma_pooled.median / self_floor.median``: the floor is a
         property of one sensor in one window (its sample count and its
         autocorrelation), so dividing a median by a median would read one
-        sensor's distance against another's floor. ~1 is indistinguishable from
-        perfect at this sample size.
+        sensor's distance against another's floor.
+      * ``w1_over_floor_calibrated_median`` -- what a PERFECT model of this
+        element's truth would score on ``w1_over_floor``
+        (:func:`ensemble_scores.wasserstein_over_floor_reference`, evaluated on
+        the very same truth samples and the same member count, so it is
+        comparable to ``w1_over_floor`` element for element and under the same
+        median/max reduction).
+
+    That reference is not decoration: ``w1_over_floor`` is **not** calibrated at
+    1. The floor compares ``n/2`` truth samples against ``n/2`` while the
+    numerator compares ``M*n`` model samples against ``n``, so the two are still
+    not like-for-like on sample count. A perfect model measures ~0.55 and is
+    *flat* in ``n`` (numerator and floor both shrink as ``1/sqrt(n)``), whereas a
+    genuine bias has an ``n``-independent numerator and so grows as ``sqrt(n)``.
+    Two consequences a reader has to have: a model reading exactly 1.0 is already
+    ~2x worse than perfect, and at a short window a real error can read *below*
+    1. Read the ratio against this key, never against 1. The reference is a
+    Monte-Carlo median, seeded per (window, sensor) from
+    ``WASSERSTEIN_REFERENCE_SEED`` so a re-run reproduces it; its resampling
+    block count is the estimator's own default and is deliberately NOT tied to
+    this stage's ``bootstrap_blocks``, which callers set to defeat the
+    identifiability bootstrap and which would silently strip the synthetic
+    model's autocorrelation here.
+
+    One reading caveat, and it applies to the shipped default truth: the same
+    within-window trend that inflates ``self_floor`` does *not* survive the
+    reference's block resampling, so on a forced window the ratio is pushed down
+    while its reference is not. Measured on a cosine of period ~2x the window, a
+    perfect model reads ~0.12 against a reference of ~0.51 while a clearly-wrong
+    one still reads ~1.66, i.e. 3.3x the reference. The comparison keeps its
+    sign and still separates bad from good; it is the equality "perfect scores
+    its reference" that holds only on a stationary window.
 
     Elements whose distance or floor is undefined drop out of the reduction --
     the four-finite-sample minimum of ``wasserstein_self_floor`` is routine at
     smoke scale, where a window holds 3 frames and ``self_floor`` is ``null``
     while the two distances survive.
 
-    ``reason`` is non-null whenever any of the four reduces to ``null``, naming
+    ``reason`` is non-null whenever any of the five reduces to ``null``, naming
     which -- a constant truth series has no ``sigma`` to divide by and no floor,
     and that is a property of the sensor, not a bug to hide.
     """
@@ -2279,6 +2320,7 @@ def _wasserstein_block(
     member_mean = np.full(shape, np.nan)
     floor = np.full(shape, np.nan)
     over_floor = np.full(shape, np.nan)
+    calibrated = np.full(shape, np.nan)
     for window in range(n_windows):
         indices = np.asarray(ensemble_windows[window])
         window_truth = truth_magnitude[truth_windows[window], :]
@@ -2301,12 +2343,20 @@ def _wasserstein_block(
             over_floor[window, sensor] = wasserstein_over_floor(
                 pooled[window, sensor], floor[window, sensor]
             )
+            # Same `truth_samples` the floor and the distances were taken on --
+            # the window slices are the caller's and are never re-derived here.
+            calibrated[window, sensor] = wasserstein_over_floor_reference(
+                truth_samples,
+                n_members,
+                rng=np.random.default_rng([WASSERSTEIN_REFERENCE_SEED, window, sensor]),
+            )
 
     block = {
         "w1_over_sigma_pooled": _median_max(pooled),
         "w1_over_sigma_member_mean": _median_max(member_mean),
         "self_floor": _median_max(floor),
         "w1_over_floor": _median_max(over_floor),
+        "w1_over_floor_calibrated_median": _median_max(calibrated),
     }
     missing = sorted(key for key, value in block.items() if value is None)
     reason = None
@@ -2314,7 +2364,8 @@ def _wasserstein_block(
         reason = (
             f"no (sensor, window) element has a finite {', '.join(missing)} (a "
             "window truth series with fewer than two finite samples or zero "
-            "spread has no scale to normalize by, and the self floor needs four)"
+            "spread has no scale to normalize by, and the self floor -- with "
+            "the calibrated reference that divides by it -- needs four)"
         )
         logger.info(
             "Sensor set %r: %s; reporting those entries as null and keeping the rest",

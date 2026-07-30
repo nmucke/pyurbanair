@@ -953,3 +953,168 @@ entry).
   check covered the local `.temp/` tree only and cannot see HPC scratch; a run dir
   reprocessed at `standard` on Snellius or DelftBlue between those two timestamps
   would not have been found by it.
+
+#### Review round 2
+
+Round 1's entries stand — the reviewer re-verified all seven against the code
+(56-case scalar/batch equivalence with 0 mismatches, bit-identical output from
+4 KB to 1 GB chunk budgets, the isolated `crpss` case returning exactly `0.0`,
+`n_windows_scored`, 4.6 s → 0.15 s) and none is reopened here. The round-2 thread
+is again this layer's recurring one, now pointed at the reference that round 1
+introduced rather than at the one it fixed: **`w1_over_floor` was documented as
+being calibrated at 1, and it is not.** Round 1 made the floor and the distance
+like-for-like on *sample count* per element; it did not make the ratio's *value*
+comparable to 1, because the floor is still `n/2` truth samples against `n/2`
+while the numerator is `M·n` pooled member samples against `n`. So the one round-1
+sentence that reads as a calibration claim — "~1 is indistinguishable from
+perfect" — was wrong by ~2×, in the flattering direction, on the number WP1.4 is
+about to plot. `metrics_version` stays **2**: `w1_over_floor`'s definition and
+ordering are unchanged, the round-2 work only *adds* a key beside it, and the
+round-1 audit establishing that no persisted `standard` summary carries the older
+semantics still holds.
+
+- **WP1.2 (review round 2) — `w1_over_floor` is not calibrated at 1; a computed
+  perfect-model reference now ships beside it (the substantive finding).**
+  Measured on `ensemble_scores` directly, no windowing involved (AR(1) φ = 0.6,
+  stationary mean, M = 32, median of 200 trials):
+
+  | `n` scored | perfect model | +0.5σ bias | σ × 0.5 |
+  |---|---|---|---|
+  | 18 | 0.77 | 0.93 | 0.75 |
+  | 36 | 0.56 | 0.99 | 0.80 |
+  | 108 | 0.53 | 1.48 | 1.25 |
+  | 216 | 0.50 | 2.02 | 1.72 |
+  | 432 | 0.54 | 3.00 | 2.47 |
+
+  A perfect model sits at **~0.55 and is flat in `n`** (numerator and floor both
+  go as `1/√n`); a genuine error has an `n`-independent numerator, so its score
+  **grows as `√n`**. Two things follow. (a) A model reading exactly `1.0` is
+  already ~2× worse than perfect, so the old wording invited reading a real error
+  as a clean pass — and at the *shipped* 36-frame window the raw ratio separates a
+  +0.5σ bias (0.99) from a perfect model (0.56) by so little that it is unreadable
+  without a reference. (b) The reference has to be *computed*, not stated:
+  **the lead's ruling was a computed reference over a prose constant**, because
+  0.55 was measured at one φ and one `M`, the real value moves with the series'
+  autocorrelation and the ensemble size, and a prose constant cannot travel with a
+  number that WP1.4 plots. This is also exactly the device the rest of this module
+  already uses for every nominal-vs-calibrated trap — `coverage.nominal_alpha_*`,
+  `zscore.max_abs_calibrated_median`, `zscore_nominal_exceedance` — and WP1.1's
+  round 2 states the rule as "a calibration number ships with its reference".
+  `_esmda_common` emits it as `wasserstein.w1_over_floor_calibrated_median`, per
+  `(sensor, window)` on the truth arrays `_wasserstein_block` already extracts and
+  reduced by the same `{median, max}`, so it is comparable to `w1_over_floor`
+  element for element; it is in `_null_wasserstein_block` too, so the key set is
+  stable.
+
+- **WP1.2 (review round 2) — the reference is a *two-sample* block bootstrap, not
+  the one-sided construction the implementation contract sketched (departure, and
+  the reason the code reads differently from the plan).** The obvious estimator —
+  the floor is deterministic given the truth, so resample only the model side and
+  score the pooled `M·n` samples against the truth array itself — is **wrong by
+  4–6× and gets worse as `M` grows**, returning 0.05–0.13 at `M = 32` where the
+  answer is ~0.55. The pooled sample is `M·n` draws from the truth's *own
+  empirical distribution*, so its ECDF converges to that ECDF and
+  `W1(pooled, truth) → 0`: it measures the model's sampling noise, which pooling
+  averages away, and misses the term that actually dominates — the truth window's
+  own deviation from the law it was drawn from. What shipped instead draws
+  `n_members + 1` moving-block resamples per replicate, pools `n_members` of them
+  as the synthetic model and scores them against the remaining one as a **stand-in
+  truth window**, dividing by *that stand-in's* floor. Both sides are then samples
+  of one law, which is the comparison the number is supposed to make.
+  Resampling still reuses `turbulence_stats._block_resample_indices` rather than
+  adding a second block-resampler — the single-source rule round 1 established for
+  the scalar and batch bootstraps.
+  **The price is conditioning, and it changes what the key means:** the median now
+  runs over the sampling variability of the truth *window* as well as the model's,
+  so it is "the ratio a perfect model of a series like this, at this length and
+  `M`, typically scores", **not** "the ratio conditional on this exact window".
+  That is unavoidable rather than a shortcut — the dominant term *is* the window's
+  own sampling error, and no estimator conditioned on that one window can see it.
+  The docs row is worded accordingly.
+  **Validated, not asserted** (the bootstrap reuses the truth's values, so neither
+  synthetic side is a fully independent realization). Ratio of the reference to a
+  directly simulated independent perfect model, paired per truth window (AR(1),
+  `M = 32`, 120 windows, 5 model realizations each): 1.02 / 0.99 / 0.98 at φ = 0,
+  1.05 / 0.91 / 1.06 at φ = 0.6, 0.55 / 0.88 / 1.08 at φ = 0.9, for
+  `n = 36 / 108 / 432`. Within 12% at eight of nine. The exception has a clean
+  mechanism — at φ = 0.9, `n = 36` the block length is 2 and cannot carry a
+  correlation spanning ten frames, so the resampled sides under-inherit the slow
+  excursions that make a short strongly-correlated window a poor sample of its own
+  law — and **it errs low, which is *not* the safe direction**: an understated
+  reference makes a good model look bad, unlike the floor's own conservatisms. The
+  docs therefore tell a reader to treat a score moderately above its reference on
+  a short strongly-correlated probe as inconclusive rather than as a failure.
+  Cost stayed inside the budget round 1's vectorization bought: at the shipped
+  shape (`M = 32`, `n = 36`, 24 elements) the default `n_resamples = 64` is 7.3 ms
+  per call / **0.18 s** for the layer, against 0.05 s at 16 and 0.35 s at 128, with
+  per-element Monte-Carlo spread on the returned median of 19% / 12% / 8%
+  respectively. 64 keeps a 12% per-element error well under the ~2× effect being
+  diagnosed, and the `{median, max}` reduction over 24 elements averages the
+  median's down further; a consumer plotting a *per-element* reference should raise
+  it, since the error falls as `1/√n_resamples` while the cost rises linearly. No
+  silent cap was added.
+
+- **WP1.2 (review round 2) — per-window is retained, and the interpretation
+  question it raised is now answered by the reference rather than by the pooling
+  axis.** Round 1's change divided every *real* error's score by ~`√W` (108 frames
+  → 36 at the shipped cadence, ~1.7×) while leaving a perfect model's score flat,
+  which cost sensitivity: the reviewer measured a +20% mean bias reading **2.02
+  whole-run → 0.85 per-window**, a perfect model **0.44 → 0.27**, i.e. bad/perfect
+  separation **4.6× → 3.1×**. **Provenance caveat, load-bearing:** those
+  end-to-end numbers come from a *synthetic stand-in for a probe series*, not from
+  a real run, so the magnitude is indicative; the `√n` mechanism producing it is
+  structural and applies to any run. Per-window still stands on round 1's
+  argument (a) — floor and distance like-for-like on sample count, and the
+  cross-window trend term removed — and reverting would reintroduce the
+  `n`-frame-floor-under-a-`W·n`-frame-distance mismatch. What changes is that the
+  choice now **matters less for interpretation**: score and reference are computed
+  on the same elements at the same sample count, so either pooling axis is
+  readable, and the residual sensitivity cost is visible in the gap between the
+  two numbers instead of being silent. The reference does **not** rescue the
+  round-1 residual (a within-window deterministic trend), and it calibrates sample
+  count rather than stationarity: its stand-in window is moving-block resampled (a
+  2-frame block at the shipped shape), so it cannot inherit a trend spanning the
+  window, and the reference is effectively computed on a de-trended series while
+  the score itself still divides by the inflated floor. Reasoning from the
+  construction rather than from a measurement, that points the *score* below its
+  reference on a trending truth — so the docs say to read a score well below its
+  reference as "the floor ate it" rather than "better than perfect", and note that
+  the pair is not a trend test in either direction.
+
+- **WP1.2 (review round 2) — the whole-run trend table is relabelled as the
+  pre-change baseline it actually is (documentation).** The "Reading the
+  Wasserstein rows" table (floors 0.168 / 0.366 / 0.575; bad-model ratios
+  18.2 / 5.8 / 1.9) is a **whole-run** measurement taken *before* round 1 made
+  every Wasserstein key per `(sensor, window)`, but it sat inside a section that
+  now describes the per-window metric, so a reader would take those numbers as
+  current output. They are now explicitly labelled the pre-change whole-run
+  baseline **that motivated windowing** — their real role — rather than
+  re-measured, the table header carries the label too, and the surrounding prose
+  no longer implies any of them is comparable to a key in a current
+  `run_summary.yaml`. The round-1 entry above describes that same table as a
+  clearly-wrong model "reading as indistinguishable from perfect"; with the
+  calibration finding in hand the accurate statement is narrower — 1.9 is ~3.5× a
+  ~0.55 perfect-model reference, and the perfect model of that same trending truth
+  read 0.12, so the pair still separated. What the trend destroyed was the
+  *absolute* readability of the number (against the wrong 1.0 anchor it looks like
+  a pass), which is what both round 1's fix and round 2's reference address from
+  their two different sides.
+
+- **WP1.2 (review round 2) — `crpss_vs_prior` is documented as not recoverable
+  from the reported keys (documentation).** Round 1 made the posterior keep its
+  **full** window list and its own finiteness filter while `crpss_vs_prior` is
+  computed on the **intersection** under a **joint** filter (truth and every
+  posterior member and every prior member finite) — both halves of that are
+  deliberate and unchanged. The consequence was left implicit: the two CRPS values
+  inside the skill score are means over a different element set than the reported
+  `<stat>.crps`, so `crpss_vs_prior` is **not** reproducible as
+  `1 − crps/prior_crps` from the summary, and the prior's CRPS cannot be backed
+  out of it either. Now said in the key table, so nobody derives a prior CRPS that
+  never existed.
+
+- **WP1.2 (review round 2) — the wiring test's `WASSERSTEIN_KEYS` frozenset gains
+  the new key.** Same role as round 1's `STATISTIC_KEYS` addition: the key set is
+  pinned in the wiring layer and asserted present *and finite* on the healthy
+  synthetic fixture, so a reference that silently stops being emitted (or starts
+  coming out `nan` on a case that scores fine) fails loudly instead of quietly
+  removing the only thing that makes `w1_over_floor` readable.

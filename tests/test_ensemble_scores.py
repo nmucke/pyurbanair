@@ -30,6 +30,7 @@ from pyurbanair.utils.ensemble_scores import (
     rank_histogram_weights,
     spread_skill_ratio,
     wasserstein_over_floor,
+    wasserstein_over_floor_reference,
     wasserstein_over_sigma,
     wasserstein_self_floor,
     zscore,
@@ -1051,6 +1052,235 @@ def test_pooling_an_ensemble_can_only_lower_the_wasserstein_distance() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The perfect-model reference for w1_over_floor
+# ---------------------------------------------------------------------------
+
+
+def _ar1_ensemble(
+    n_members: int, n_samples: int, phi: float, rng: np.random.Generator
+) -> np.ndarray:
+    """``(n_members, n_samples)`` independent AR(1) rows: a *perfect* model.
+
+    The same recursion and marginal as :func:`_ar1`, drawn in parallel -- these
+    tests need a 32-member ensemble of genuinely independent realizations of the
+    truth's own law, which is the one thing a bootstrap resample of the truth is
+    not, and the scalar helper would spend 14k Python iterations per window.
+    """
+    noise = rng.normal(scale=np.sqrt(1.0 - phi**2), size=(n_members, n_samples))
+    series = np.empty((n_members, n_samples))
+    series[:, 0] = rng.normal(size=n_members)
+    for i in range(1, n_samples):
+        series[:, i] = phi * series[:, i - 1] + noise[:, i]
+    return series
+
+
+def test_wasserstein_reference_is_flat_in_n_where_a_real_bias_grows() -> None:
+    """The structural finding the reference exists for.
+
+    ``w1_over_floor`` is not calibrated at 1. Its numerator and its floor both
+    fall as ``1/sqrt(n)``, so a perfect model's ratio is roughly *flat* in the
+    window length, while a genuine bias -- whose numerator does not shrink with
+    ``n`` at all -- grows as ``sqrt(n)``. No fixed threshold can serve both, and
+    the reference has to reproduce the flat branch to be worth emitting.
+    """
+    n_members = 32
+    reference: dict[int, float] = {}
+    biased: dict[int, float] = {}
+    paired: dict[int, float] = {}
+    for n_samples in (36, 108, 432):
+        rng = np.random.default_rng(101 + n_samples)
+        refs, bias = [], []
+        # 40 windows: the biased ratio's own window-to-window scatter is wide
+        # (its denominator is one noisy floor), and a 12-window median of it moved
+        # by 50% between seeds -- not a base to assert a factor against. The
+        # reference itself is far steadier, 0.52 +/- 0.01 at every count tried.
+        for _ in range(40):
+            truth = _ar1(n_samples, 0.6, rng)
+            floor = wasserstein_self_floor(truth)
+            refs.append(wasserstein_over_floor_reference(truth, n_members, rng=rng))
+            shifted = _ar1_ensemble(n_members, n_samples, 0.6, rng) + 0.5
+            bias.append(
+                wasserstein_over_floor(
+                    wasserstein_over_sigma(shifted.ravel(), truth), floor
+                )
+            )
+        reference[n_samples] = float(np.median(refs))
+        biased[n_samples] = float(np.median(bias))
+        # Paired per window, which cancels most of that shared-floor scatter.
+        paired[n_samples] = float(np.median(np.asarray(bias) / np.asarray(refs)))
+
+    # Measured here: reference 0.518 / 0.514 / 0.517 across n = 36 / 108 / 432 --
+    # flat to 0.6%, and it tracks a directly simulated perfect model, which is
+    # flat with it -- against a +0.5-sigma bias of 0.84 / 1.89 / 2.53, i.e. the
+    # reviewer's sqrt(n) growth (their table reads 0.99 / 1.48 / 3.00 at 200
+    # trials). Paired, the bias sits 1.7 / 3.8 / 5.1 times its reference. The
+    # assertions are that qualitative scaling with room for a 40-window median's
+    # scatter (the bias column moved by ~0.4 between seeds; the reference column
+    # by 0.01), not these decimals -- the reviewer's table is at one phi and one
+    # M, and so is this.
+    assert max(reference.values()) / min(reference.values()) < 1.3
+    assert biased[432] > 1.7 * biased[36]
+    # And the consequence for a reader: a bias reading ~1 at n = 36 -- which the
+    # pre-round-2 docs called indistinguishable from perfect -- already sits
+    # comfortably above the perfect-model reference at that n, and the gap widens
+    # with the window length instead of staying put.
+    assert paired[36] > 1.3
+    assert paired[432] > 2.0 * paired[36]
+
+
+def test_wasserstein_reference_matches_a_directly_simulated_perfect_model() -> None:
+    """The bootstrap device, validated against genuinely independent draws.
+
+    A resample reuses the truth's own values, so it is not an independent
+    realization of the same law; this is the test that says what that costs. The
+    comparison is paired *per truth window*: for each window, the conditional
+    median ``w1_over_floor`` of three independent AR(1) ensembles of the same law
+    against the reference computed from that window alone.
+    """
+    n_members = 32
+    measured: dict[tuple[float, int], float] = {}
+    # The paired ratio needs this many windows to settle: the *simulated* side is
+    # heavy-tailed (its denominator is one window's floor, which is occasionally
+    # tiny), and 20-window medians of it swung by 2x between seeds. The reference
+    # itself is steady to ~0.01, so the trial count is all on the simulation's
+    # account. Windows at n = 36 are cheap, so the sweep is deep there and one
+    # longer window is added to show the n = 36 deficiency below closing.
+    for phi, n_samples, n_windows in (
+        (0.0, 36, 120),
+        (0.6, 36, 120),
+        (0.9, 36, 120),
+        (0.6, 108, 60),
+    ):
+        rng = np.random.default_rng(211 + int(10 * phi) + n_samples)
+        ratios = []
+        for _ in range(n_windows):
+            truth = _ar1(n_samples, phi, rng)
+            floor = wasserstein_self_floor(truth)
+            direct = float(
+                np.median(
+                    [
+                        wasserstein_over_floor(
+                            wasserstein_over_sigma(
+                                _ar1_ensemble(n_members, n_samples, phi, rng).ravel(),
+                                truth,
+                            ),
+                            floor,
+                        )
+                        for _ in range(5)
+                    ]
+                )
+            )
+            ratios.append(
+                wasserstein_over_floor_reference(truth, n_members, rng=rng) / direct
+            )
+        measured[(phi, n_samples)] = float(np.median(ratios))
+
+    # Agreement on a wider sweep than this test can afford (120 windows, 5
+    # independent realizations each), as reference/simulated:
+    #
+    #        n = 36   n = 108   n = 432
+    #   0.0    1.02      0.99      0.98
+    #   0.6    1.05      0.91      1.06
+    #   0.9    0.55      0.88      1.08
+    #
+    # Within 12% at eight of the nine points. Two things are being pinned here.
+    #
+    # First, no *collapse*: scoring the pooled synthetic model against the truth
+    # array itself -- the natural-looking construction this function deliberately
+    # does not use -- returns ~0.2 of the simulated value and gets worse with M,
+    # because the pooled ECDF converges to the truth's own. Every point must clear
+    # that by a wide margin.
+    for key, ratio in measured.items():
+        assert ratio > 0.4, f"{key}: {ratio}"
+
+    # Second, near-agreement wherever the block length can carry the series'
+    # correlation. Measured here: 0.93 / 0.86 / 1.07 for (0, 36) / (0.6, 36) /
+    # (0.6, 108); the band is the wide sweep's 12% loosened to the ~0.1 these
+    # points still move by between seeds at this trial count.
+    for key in ((0.0, 36), (0.6, 36), (0.6, 108)):
+        assert 0.75 < measured[key] < 1.3, f"{key}: {measured[key]}"
+
+    # The one documented exception, pinned rather than hidden: at phi = 0.9 the
+    # correlation spans ~10 frames while a 36-sample window gives a block length
+    # of 2, so the resampled sides cannot inherit the slow excursions that make
+    # such a window a poor sample of its own law, and the reference comes out
+    # ~half the simulated value (0.55 on the wide sweep, 0.68 here; the point is
+    # noisy enough that only a loose bound is honest). It closes at n = 108. The
+    # direction matters: an under-stated reference makes a good model look bad, so
+    # a short strongly-correlated window is the case to read as inconclusive.
+    assert measured[(0.9, 36)] < 1.0
+
+
+def test_wasserstein_reference_is_nan_wherever_the_ratio_it_calibrates_is() -> None:
+    """It reports ``nan`` on exactly the inputs the floor reports ``nan`` on.
+
+    A reference that survived where its ratio did not would be a number with
+    nothing to compare against -- and the smoke shape (three frames per window)
+    hits this on every element.
+    """
+    rng = np.random.default_rng(48)
+    smoke = rng.normal(size=3)
+    assert np.isnan(wasserstein_self_floor(smoke))
+    assert np.isnan(wasserstein_over_floor_reference(smoke, 32))
+
+    # A spread that is only float rounding: undefined there too, for the same
+    # reason ``wasserstein_over_sigma`` refuses to divide by it.
+    assert np.isnan(wasserstein_over_floor_reference(np.full(20, 2.0), 32))
+
+    # An exactly periodic series has a bitwise-zero floor, which
+    # ``wasserstein_over_floor`` reports as a huge clamped ratio. There is no
+    # perfect-model *ratio* to put beside that: every replicate would divide by
+    # the same clamp, so the honest answer is ``nan``.
+    periodic = np.array([1.0, 2.0] * 4)
+    assert wasserstein_self_floor(periodic) == 0.0
+    assert np.isnan(wasserstein_over_floor_reference(periodic, 32))
+
+    # Non-finite samples are dropped first, exactly as the floor drops them, so a
+    # gappy window is served whenever four samples survive.
+    gappy = np.array([0.0, np.nan, 1.0, 4.0, np.nan, 5.0, 2.0, 3.0])
+    assert np.isfinite(wasserstein_over_floor_reference(gappy, 4))
+
+
+def test_wasserstein_reference_is_reproducible_under_a_fixed_seed() -> None:
+    """Re-running the metrics stage on a run directory must not move the number."""
+    truth = _ar1(60, 0.6, np.random.default_rng(49))
+
+    assert wasserstein_over_floor_reference(
+        truth, 8, rng=7
+    ) == wasserstein_over_floor_reference(truth, 8, rng=7)
+    # Including the default path: ``rng=None`` is a fixed seed, never OS entropy.
+    assert wasserstein_over_floor_reference(truth, 8) == (
+        wasserstein_over_floor_reference(truth, 8)
+    )
+    # A different seed really is a different draw (else the seed is decorative).
+    assert wasserstein_over_floor_reference(
+        truth, 8, rng=8
+    ) != wasserstein_over_floor_reference(truth, 8, rng=7)
+    # A caller's generator is used and advanced, so a per-element loop sharing
+    # one generator does not evaluate the same replicates on every element.
+    generator = np.random.default_rng(11)
+    first = wasserstein_over_floor_reference(truth, 8, rng=generator)
+    assert first != wasserstein_over_floor_reference(truth, 8, rng=generator)
+
+
+def test_wasserstein_reference_rejects_nonsense_shapes() -> None:
+    truth = np.arange(20.0)
+    with pytest.raises(ValueError, match="n_members"):
+        wasserstein_over_floor_reference(truth, 0)
+    with pytest.raises(ValueError, match="n_resamples"):
+        wasserstein_over_floor_reference(truth, 8, n_resamples=0)
+    with pytest.raises(ValueError, match="n_blocks"):
+        wasserstein_over_floor_reference(truth, 8, n_blocks=0)
+
+    # ``n_blocks=1`` is a legal config knob and returns a *measured* exactly-zero
+    # rather than raising: one block spans the whole series, there is a single
+    # legal start position, so every replicate is the truth itself and the
+    # perfect-model distance in that degenerate bootstrap really is zero. Same
+    # convention as ``block_bootstrap_std``.
+    assert wasserstein_over_floor_reference(truth, 8, n_blocks=1) == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Degenerate shapes: the two-member smoke ensemble must work everywhere
 # ---------------------------------------------------------------------------
 
@@ -1088,3 +1318,8 @@ def test_two_member_smoke_ensemble_works_for_every_score() -> None:
     assert block["df"] == 1
     assert block["nominal"][1] > 0.15
     assert np.isfinite(max_abs_zscore_reference(2, 6))
+    # The Wasserstein reference is finite at M = 2 as well: six frames is enough
+    # for the floor, so the ratio exists and so does its calibration. (Three
+    # frames per window -- the smoke ESMDA shape -- is not; that is nan, see
+    # test_wasserstein_reference_is_nan_wherever_the_ratio_it_calibrates_is.)
+    assert np.isfinite(wasserstein_over_floor_reference(truth, 2))
