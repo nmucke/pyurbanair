@@ -73,7 +73,7 @@ streaming pass.
 | 1.0 | `run.metrics` config block + module skeletons | [phase1](phase1_postprocessing_metrics.md) | S | merged | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
 | 1.1 | Parameter bundle: z-scores, PIT, coverage, contraction, joint directions | [phase1](phase1_postprocessing_metrics.md) | S | merged | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
 | 1.2 | Statistics-space sensor scoring + Wasserstein w/ self-distance floor | [phase1](phase1_postprocessing_metrics.md) | M | merged | [#100](https://github.com/nmucke/pyurbanair/pull/100) |
-| 1.3 | Shared-pass mean-field / Reynolds-stress layer + station columns + hit rate/FAC2/FB/NMSE + `eval_fields.nc` | [phase1](phase1_postprocessing_metrics.md) | M–L | in review | — |
+| 1.3 | Shared-pass mean-field / Reynolds-stress layer + station columns + hit rate/FAC2/FB/NMSE + `eval_fields.nc` | [phase1](phase1_postprocessing_metrics.md) | M–L | in review | [#101](https://github.com/nmucke/pyurbanair/pull/101) |
 | 1.4 | Figures: P1, S1, S5, F1, F2, S2/S3 | [phase1](phase1_postprocessing_metrics.md) | M | not started | — |
 | 2.1 | Persist obs / per-iteration + posterior pred-obs / per-iteration params | [phase2](phase2_obs_persistence.md) | M | not started | — |
 | 2.2 | Diagnostics: `O_N` vs ½, innovations, contraction-vs-achievable, SNR/DFS, obs-space scores | [phase2](phase2_obs_persistence.md) | M | not started | — |
