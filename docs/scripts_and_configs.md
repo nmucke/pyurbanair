@@ -116,6 +116,26 @@ rather than pulling them from separate files. The table below summarises each.
 | `truth_dir` | `null` | Path to a saved `state.nc`/`params.nc` truth artifact; `null` = simulate inline. |
 | `truth_start_time` | `null` | Drop truth frames before this time (seconds) and rebase. |
 | `save_prior_state` | `false` (esmda only) | Persist the per-window prior ensemble state (large; off by default). |
+| `metrics` | (block, esmda only) | Post-processing depth for stages 2–3; see below. Ignored by the run stage. |
+
+##### `run.metrics:` (esmda only)
+
+Read by [`compute_esmda_metrics.py`](#compute_esmda_metricspy) and
+`make_esmda_figures.py`, never by the run stage. Saved with the run, so
+re-processing a run dir reuses its own settings; run dirs written before this
+block existed simply fall back to the defaults below.
+
+| Field | Default | Purpose |
+|---|---|---|
+| `level` | `standard` | `basic` = the pre-phase-1 summary only; `standard` adds the evaluation layers (parameter calibration bundle, statistics-space sensor scoring, mean-field/Reynolds-stress); `full` is reserved for later phases and currently equals `standard`. Unknown values raise. |
+| `n_z_slices` | `4` | Evenly-spaced z-levels the mean-field layer accumulates on. |
+| `mean_field_stride` | `1` | Spatial stride for the hit-rate / NMSE maps (scores only comparable at equal stride). |
+| `bootstrap_blocks` | `20` | Blocks for the block-bootstrap sampling-error bars. |
+| `stations` | `null` | `[[x, y], ...]` columns for the profile figures; `null` = the obs config's sensor x/y. |
+
+`n_z_slices`, `mean_field_stride` and `bootstrap_blocks` must each be `>= 1`:
+like an unknown `level`, a smaller value raises when the block is resolved,
+rather than surfacing as an empty slice deep inside the layer that reads it.
 
 ---
 
@@ -577,6 +597,12 @@ Provides:
 - `streaming_state_rmse(...)` — streamed z-slice RMSE without loading the full field.
 - `parameter_metric_summary(...)` / `vector_sensor_metrics(...)` — scalar summaries
   written to `run_summary.yaml`.
+- `parameter_bundle_summary(...)` — the WP1.1 calibration bundle (z-score /
+  PIT / coverage / contraction / joint directions) layered additively onto the
+  above. The scoring math itself lives in
+  [`ensemble_scores.py`](../src/pyurbanair/utils/ensemble_scores.py); this
+  module is orchestration, and it reads every calibration *reference* from
+  there rather than re-deriving it.
 
 ---
 
@@ -586,12 +612,18 @@ These three scripts form the standard single-run pipeline, orchestrated by
 [`run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh).
 
 #### [`compute_esmda_metrics.py`](../scripts/esmda/compute_esmda_metrics.py)
-**Plain argparse CLI** — usage: `python scripts/esmda/compute_esmda_metrics.py --run-dir <dir>`
+**Plain argparse CLI** — usage: `python scripts/esmda/compute_esmda_metrics.py --run-dir <dir> [--metrics-level basic|standard|full]`
 
 Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
 - `metrics_version: 2` — fair finite-ensemble CRPS/energy-score and corrected
   spread semantics (absent/1 denotes the older estimators).
+- `metrics_level` — the resolved [`run.metrics.level`](#runmetrics-esmda-only)
+  this summary was produced at, so *which layers were computed* is recorded
+  rather than inferred. Without it an absent key is ambiguous three ways: a run
+  dir processed before phase 1, one processed at `basic`, and a layer that
+  no-op'd on missing inputs. Read it before comparing runs — `--metrics-level`
+  makes mixed-depth reprocessing of one sweep easy. Absent = pre-phase-1.
 - `parameter_metrics` — per-parameter RMSE/CRPS summary + RMSE reduction and
   CRPSS vs prior.
 - `ensemble_health` — exact posterior-member uniqueness, per-window unique
@@ -599,6 +631,62 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 - `state_metrics` — `|U|` field RMSE summary (streamed z-slice by z-slice).
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set
   (assimilation + validation).
+
+Which of those layers run is gated by [`run.metrics.level`](#runmetrics-esmda-only)
+from the saved config: `basic` writes exactly the keys above, higher levels add
+keys on top (never change existing ones). `--metrics-level` overrides the saved
+config for one invocation, so an existing run dir can be re-processed at another
+depth (e.g. `basic` to line up with runs post-processed before the evaluation
+layers existed) without editing its `config.yaml`. Run dirs saved before the
+`run.metrics` block existed resolve to the shipped defaults.
+
+##### `standard`: the parameter calibration bundle (WP1.1)
+
+At `level: standard` each `parameter_metrics.<name>` entry additionally carries
+the keys below, and a sibling `parameter_metrics.joint` appears. All of it is
+computed before the `run.skip_viz` early return (it reads only the parameter
+artifacts), so the fast sweep path gets it too. **Every key is `null` — not
+absent — when `M < 3`**, where a `ddof=1` spread, an order-statistic band and a
+10-bin PIT are all artifacts of the ensemble size.
+
+The one rule that matters when reading any of it: **a calibration number at
+production `M` is meaningless without the reference emitted next to it.** None
+of the textbook large-sample references apply, and every one of them errs toward
+calling a perfectly calibrated ensemble broken.
+
+| Key | Meaning |
+|---|---|
+| `zscore.{mean,std,max_abs}` | Pooled per-knot `(truth − mean_m)/std_m`. |
+| `zscore.max_abs_calibrated_median` | Where `max\|z\|` sits for a *calibrated* ensemble of this `M` over this many knots. `max_abs` is unreadable without it — the max of `n` draws grows with `n`. |
+| `zscore.exceedance` | Observed `\|z\|` tail fractions (`observed`) **beside the levels a calibrated ensemble scores** (`nominal`). The null is `sqrt((M+1)/M)·t(M−1)`, *not* normal: at `M = 32`, `P(\|z\| > 3) = 0.59%`, 2.2× the normal table's 0.27%. `nominal_normal` is the large-`M` limit, for context only. Compare `observed` against `nominal`. |
+| `zscore.overconfident` | Screening boolean: `observed[0] > 2 × nominal[0]` (the `\|z\| > 2` cut). Not a test — the pooled knots are correlated. |
+| `zscore.overconfident_rule` | The rule as a string, naming the keys it is computed from. |
+| `pit_counts` / `pit` | 10-bin rank histogram + metadata. **Divide by `pit.ranks_per_bin`, never by a flat `n/n_bins`**: ranks take `M + 1` values, which rarely divides into 10, so at `M = 32` a calibrated ensemble shows a fixed +21%/−9% three-bin comb. |
+| `sampling.{n_samples,n_knots_effective,pooling}` | The pooling caveat, on the entry because it qualifies `pit`, `zscore.exceedance` **and** `coverage` alike — all three pool over the same correlated knots. `n_knots_effective` is a stated *upper bound* on independence. Mirrored under `pit` for schema stability. |
+| `coverage.alpha_{50,90}` | Empirical coverage of the central order-statistic band. |
+| `coverage.nominal_alpha_{50,90}` | **What a calibrated ensemble actually scores** — compare against this, never against 0.5/0.9. Band edges are order statistics, so attainable levels are multiples of `1/(M+1)`: at `M = 32`, `alpha = 0.5` is nominal 0.4848. |
+| `coverage.max_nominal_alpha` | `(M−1)/(M+1)`, the widest band this `M` offers, so a clamped `alpha_90` does not read as a failure. |
+| `contraction_ratio.vs_window_prior` | `{mean, min}` of `std_post/std_prior` knot by knot. **Per-window** contraction: `run_esmda.py` seeds window `w`'s prior from window `w−1`'s posterior, so only block 0 of `prior_params.nc` is a genuine prior. |
+| `contraction_ratio.vs_initial_prior` | `{mean, min, reason}` against window 0's prior block — the **cumulative** contraction, i.e. what "how much did assimilation shrink the uncertainty" means. The two differ by the window count: a 3-window run with a true per-window ratio of 0.6 reports 0.600 per window and 0.392/0.216 cumulatively. `reason` is non-null exactly when the numbers are null. |
+| `contraction_ratio.{mean,min}` | Aliases of `vs_window_prior`, retained for existing consumers. |
+
+`parameter_metrics.joint` scores the flattened `(M, K)` parameter vector:
+`n_constrained_directions` (generalized eigenvalues `λ < 0.5`, i.e. directions
+whose spread at least halved), `generalized_eigenvalues` /
+`eigenvalue_quantiles`, `most_constrained` / `least_constrained` (eigenvalue +
+top parameter-space loadings), `n_sample_directions` / `rank_deficient` /
+`posterior_variance_retained` (the pencil is rank-truncated onto the prior's
+eigenbasis — ensembles are routinely smaller than `K`), `corr_summary`, and
+`posterior_corr` / `prior_corr` only when `K ≤ 8` (`corr_matrices_omitted` says
+so otherwise). Two keys name *which* question it answers:
+
+- `joint.prior_reference: per_window_prior` — as with `contraction_ratio`, the
+  concatenated prior is a per-window reference, so the top-level
+  `n_constrained_directions` counts what the per-window updates constrained.
+- `joint.vs_initial_prior` — the same decomposition for the **final posterior
+  window against the window-0 prior block**, i.e. what the run as a whole
+  constrained. A scalar summary only (no loadings or matrices), with `reason`
+  non-null when the artifact could not be split into windows.
 
 #### [`make_esmda_figures.py`](../scripts/esmda/make_esmda_figures.py)
 **Plain argparse CLI** — usage: `python scripts/esmda/make_esmda_figures.py --run-dir <dir>`

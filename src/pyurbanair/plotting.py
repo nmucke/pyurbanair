@@ -7,6 +7,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
+from pyurbanair.utils.ensemble_scores import fair_crps
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 
 # --- Shared figure style ----------------------------------------------------
@@ -62,11 +63,16 @@ _PLOTTED_PARAMS = (
 )
 
 
-def _plotted_param_names(
+def plotted_param_names(
     esmda_params: xarray.Dataset,
     true_params: xarray.Dataset | None = None,
 ) -> list[str]:
-    """Ordered estimable parameters present in ``esmda_params`` (and the truth)."""
+    """Ordered estimable parameters present in ``esmda_params`` (and the truth).
+
+    Public because the metrics stage iterates parameters in exactly this order
+    (``scripts/esmda/_esmda_common._aligned_parameter_arrays``); the two must
+    not drift, so it is API rather than a plotting internal.
+    """
     names = [p for p in _PLOTTED_PARAMS if p in esmda_params.data_vars]
     if true_params is not None:
         names = [p for p in names if p in true_params.data_vars]
@@ -115,7 +121,7 @@ def _param_legend_handles(has_prior: bool) -> list[Line2D]:
     return handles
 
 
-def _param_members_and_x(
+def param_members_and_x(
     da: xarray.DataArray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(x, members)`` for a parameter, members shaped ``(n_ensemble, n_x)``.
@@ -123,6 +129,12 @@ def _param_members_and_x(
     ``x`` is the ``time`` coordinate when the parameter is time-varying and
     carries one, otherwise a plain index (e.g. one point per assimilation window
     for a static parameter stacked across windows).
+
+    Public because the metrics stage aligns truth onto exactly this x-axis and
+    keys its dynamic/static branch on exactly this ``time``-coordinate test
+    (``scripts/esmda/_esmda_common._aligned_parameter_arrays``). Figures and
+    metrics disagreeing about a parameter's axis would be a silent error, so the
+    single definition is API rather than a plotting internal.
     """
     da = da.transpose("ensemble", ...)
     members = np.asarray(da.values).reshape(da.sizes["ensemble"], -1)
@@ -134,6 +146,12 @@ def _param_members_and_x(
     return x, members
 
 
+# Pre-WP1.1 private names. Kept as aliases so nothing that already imports them
+# breaks; new code uses the public spellings above.
+_plotted_param_names = plotted_param_names
+_param_members_and_x = param_members_and_x
+
+
 def _crps_ensemble(members: np.ndarray, obs: np.ndarray) -> np.ndarray:
     """Fair empirical CRPS of an ensemble against a deterministic truth.
 
@@ -142,19 +160,11 @@ def _crps_ensemble(members: np.ndarray, obs: np.ndarray) -> np.ndarray:
     with the pairwise term divided by ``N(N - 1)`` after excluding the zero
     diagonal. Returns one score per ``x`` location (lower is better, units of
     the parameter).
+
+    Plotting-side alias of :func:`ensemble_scores.fair_crps`; the float cast
+    stays here because figure inputs arrive as whatever dtype the NetCDF held.
     """
-    members = np.asarray(members, dtype=float)
-    obs = np.asarray(obs, dtype=float)
-    n_members = members.shape[0]
-    mae = np.mean(np.abs(members - obs[None, :]), axis=0)
-    if n_members < 2:
-        return mae
-    sorted_members = np.sort(members, axis=0)
-    weights = (2 * np.arange(n_members) - n_members + 1)[:, None]
-    pairwise_half = np.sum(weights * sorted_members, axis=0) / (
-        n_members * (n_members - 1)
-    )
-    return mae - pairwise_half
+    return fair_crps(np.asarray(members, dtype=float), np.asarray(obs, dtype=float))
 
 
 def _extract_2d_slice_with_extent(
@@ -629,7 +639,7 @@ def plot_rollout_time_evolution(
     def _plot_ensemble(
         ax: Axes, ds: xarray.Dataset, param_name: str, color: str
     ) -> None:
-        x, members = _param_members_and_x(ds[param_name])
+        x, members = param_members_and_x(ds[param_name])
         ax.plot(x, members.T, color=color, alpha=0.35, linewidth=0.9)
         ax.plot(x, members.mean(axis=0), color=color, alpha=1.0, linewidth=2.5)
 
@@ -664,7 +674,7 @@ def plot_rollout_time_evolution(
     else:
         rmse = np.asarray(rmse)
 
-    param_names = _plotted_param_names(esmda_params)
+    param_names = plotted_param_names(esmda_params)
     n_params = len(param_names)
     has_prior = prior_params is not None
 
@@ -684,7 +694,7 @@ def plot_rollout_time_evolution(
                 true_da = true_params[param_name]
                 if "ensemble" in true_da.dims:
                     true_da = true_da.isel(ensemble=0)
-                x_true, true_members = _param_members_and_x(
+                x_true, true_members = param_members_and_x(
                     true_da.expand_dims("ensemble")
                 )
                 truth = true_members[0]
@@ -760,13 +770,13 @@ def compute_parameter_metrics(
     are the same posterior numbers :func:`plot_parameter_error` draws.
     """
     metrics: dict[str, dict[str, np.ndarray]] = {}
-    for param_name in _plotted_param_names(esmda_params, true_params):
-        x_est, members = _param_members_and_x(esmda_params[param_name])
+    for param_name in plotted_param_names(esmda_params, true_params):
+        x_est, members = param_members_and_x(esmda_params[param_name])
 
         true_da = true_params[param_name]
         if "ensemble" in true_da.dims:
             true_da = true_da.isel(ensemble=0)
-        x_true, true_members = _param_members_and_x(true_da.expand_dims("ensemble"))
+        x_true, true_members = param_members_and_x(true_da.expand_dims("ensemble"))
         truth = true_members[0]
 
         # Align the truth onto the posterior's x-axis: a static truth (single
@@ -781,7 +791,7 @@ def compute_parameter_metrics(
             "crps": _crps_ensemble(members, truth_on_est),
         }
         if prior_params is not None and param_name in prior_params.data_vars:
-            _, prior_members = _param_members_and_x(prior_params[param_name])
+            _, prior_members = param_members_and_x(prior_params[param_name])
             if prior_members.shape[1] == truth_on_est.shape[0]:
                 entry["prior_rmse"] = np.sqrt(
                     np.mean((prior_members - truth_on_est[None, :]) ** 2, axis=0)

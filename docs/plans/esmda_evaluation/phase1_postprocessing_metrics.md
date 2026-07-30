@@ -302,4 +302,341 @@ encoded there and in `docs/archive/figure_specs.md`.
 
 ## Deviations
 
-_(record here as they occur)_
+- **WP1.0 — `--metrics-level` CLI flag (addition).** `compute_esmda_metrics.py`
+  gained a `--metrics-level basic|standard|full` argparse flag that overrides
+  `run.metrics.level` from the run dir's saved config for one invocation. Not in
+  the plan text: without it, re-processing an existing run dir at another depth
+  means editing that dir's saved `config.yaml`, which is the record of how the
+  run was executed. The resolution order is CLI override → saved config →
+  shipped defaults (`resolve_metrics_settings`), and configs predating the
+  `run.metrics` block resolve every key to the shipped default (`standard`),
+  since phases 0–1 are meant to apply retroactively.
+
+- **WP1.1 — dynamic/static is per *parameter*, and the discriminator is the
+  `time` *coordinate* (correction to the plan text).** The plan describes
+  dynamic params as "the only ones carrying `correlation_length` /
+  `seconds_per_knot` — `conf/params/dynamic*.yaml`", which reads as a run-level
+  split. It is not: `conf/params/dynamic.yaml` mounts time-varying
+  `external_parameters` *and* a `static_parameters` block
+  (`vertical_inflow_exponent`) into the same Dataset, so both PIT branches fire
+  in one run. The implemented test is `_param_members_and_x`'s own
+  (`dims == ["time"]` **and** a `time` coordinate exists), not `"time" in dims`:
+  `run_esmda._concat_windows` stacks per-window parameter files along `time`, so
+  in a purely static run every parameter comes out with a length-`num_windows`
+  `time` *dimension* and no `time` coordinate, and its x-axis is the window
+  index. Keying on the dimension alone would misroute that run into the GP
+  branch and apply a `seconds_per_knot` formula to a window axis.
+
+- **WP1.1 — `n_knots_effective` is additionally clamped by the number of
+  piecewise-constant segments (addition).** A static parameter in a *dynamic*
+  run is broadcast by `_concat_windows` to every knot, so it reaches the
+  time-coordinate branch with `n_knots` knots but only `num_windows` distinct
+  values. `min(n_knots, n_segments, ceil(n_knots·seconds_per_knot/L))` recovers
+  the window count without needing to know which config block the parameter came
+  from, and is a no-op for a genuinely time-varying parameter.
+
+- **WP1.1 — the joint eigenproblem is rank-truncated before
+  `scipy.linalg.eigh` (departure).** The plan prescribes
+  `eigh(C_post, C_prior)` on eps-regularized matrices. Applied literally to real
+  run data this is numerically meaningless: ensembles are routinely *smaller*
+  than the joint parameter vector (M = 32 against K = 42 on a routine
+  2-parameter/21-knot run), so both covariances have rank M−1 = 31 with
+  *different* null spaces. Measured on `.temp/pyudales_to_pyudales`, the literal
+  recipe returns a **negative** eigenvalue from a positive-definite pair and a
+  spread of 1e−6 … 1e+11 (cond(B) = 2.6e15). The implementation therefore
+  projects both covariances onto the prior's retained eigenbasis first — rank cut
+  `λ_max · finfo.eps · max(shape)`, the `numpy.linalg.matrix_rank` convention
+  `data_assimilation.reduction` also uses — and runs the prescribed eps-ridged
+  `eigh` inside that r = min(M−1, K) subspace, where it is well-posed (same run:
+  r = 31, cond = 2.9e6, all λ > 0, spread 0 … 124). `n_sample_directions` and
+  `rank_deficient` are emitted so a reader can see the truncation happened.
+
+- **WP1.1 — generalized eigenvalues come from *covariances*, the reported
+  matrices are *correlations* (plan ambiguity resolved).** The plan lists both in
+  one bullet. Only the covariance pencil makes `λ < 0.5` mean "this direction's
+  spread at least halved" — correlation matrices both have trace K, which
+  destroys the variance-contraction reading. The λ are invariant under any
+  invertible rescaling of the parameter vector, so the mixed units (degrees vs
+  m/s) of the joint vector are harmless.
+
+- **WP1.1 — full correlation matrices are capped at K ≤ 8
+  (`JOINT_CORR_MAX_K`).** `write_yaml` uses `default_flow_style=False`, i.e. one
+  number per line, so the K = 42 of a routine run would add ~3.5k lines to a
+  ~100-line `run_summary.yaml`, and production cases are larger. Above the cap
+  `posterior_corr` / `prior_corr` are `null`, a `corr_matrices_omitted` note says
+  why, and `corr_summary` (off-diagonal `|corr|` mean and max, both matrices)
+  carries the signal instead. `generalized_eigenvalues` is capped the same way at
+  r ≤ 64, with `eigenvalue_quantiles` always emitted.
+  *(Revised in review from K ≤ 16.* Measured YAML cost of the two matrices:
+  K = 6 → 74 lines, K = 8 → 130, K = 16 → **514**, K = 42 → 3530. The cap's own
+  justification is a ~100-line summary, which K = 16 misses by ~5×. K = 8 keeps
+  the matrices for the small joint vectors where a human can actually read them
+  and still roughly doubles the file; a sidecar was considered and rejected —
+  nothing consumes the full matrices yet, and when something does, the sanctioned
+  handoff is WP1.3's `eval_fields.nc`, not a second new artifact.)*
+
+- **WP1.1 — M < 3 nulls the whole calibration bundle.** Per the master plan's
+  degenerate-shape rule (`null` + a log line, never special-cased math), the
+  2-member smoke shape emits every key with a `null` value rather than a number:
+  a ddof=1 spread has one degree of freedom, the widest order-statistic band is
+  `[x_(1), x_(2)]` (nominal 1/3, so a "90%" coverage is unattainable), a 10-bin
+  PIT has 3 possible ranks, and every sample correlation is exactly ±1. The
+  threshold is one constant (`MIN_MEMBERS_CALIBRATION` / `MIN_MEMBERS_JOINT`)
+  rather than a per-metric rule.
+
+- **WP1.1 — keys emitted beyond the plan's schema sketch (additive).** The
+  sketch shows `zscore`, `pit_counts`, `coverage`, `contraction_ratio` and a
+  small `joint`. Also emitted: a sibling `pit` mapping holding the PIT metadata
+  the plan asks for in prose (`n_bins`, `n_samples`, `n_knots_effective`,
+  `pooling`, `tie_seed` — the seed so the tie-broken counts are reproducible);
+  `coverage.max_nominal_alpha = (M−1)/(M+1)`, the highest nominal level an
+  order-statistic band can offer at this M, so a clamped `alpha_90` does not read
+  as a calibration failure (it bounds the *nominal* level, not the realized
+  fraction); and in `joint`: `n_members`, `n_parameters`, `n_sample_directions`,
+  `rank_deficient`, `eigenvalue_quantiles`, `most_constrained` /
+  `least_constrained` (eigenvalue + the 5 largest-magnitude parameter-space
+  loadings, named via `parameter_vector_labels`, instead of raw length-K
+  vectors), `corr_summary`, and a `reason` string on every degraded path.
+
+- **WP1.1 — the `(M, K)` flattening is passed in, not recomputed.**
+  `parameter_bundle_summary` takes `posterior_flat` / `prior_flat` as arguments
+  so the pipeline keeps exactly one flattener
+  (`compute_esmda_metrics._flatten_parameter_members`, shared with
+  `_ensemble_health`) rather than a second copy in `_esmda_common`. The label
+  helper `parameter_vector_labels` mirrors that flattening's ordering and is
+  pinned to it by a test.
+
+- **WP1.0/1.1 (review round 1) — `metrics_level` is written to the summary
+  (addition).** `compute_metrics` logged the resolved level but persisted
+  nothing, so a consumer seeing no `parameter_metrics.joint` could not tell a
+  pre-phase-1 run dir from one processed at `basic` from a layer that no-op'd on
+  missing inputs — and `--metrics-level` makes mixed-depth reprocessing of one
+  sweep easy, which is exactly the version-mixing hazard the master plan's
+  invariant #1 exists to prevent. `summary["metrics_level"]` is emitted at every
+  level, next to `metrics_version`; **no `metrics_version` bump**, since the
+  estimator semantics are unchanged — it records how much of the suite ran, not
+  how it was computed. Documented in `docs/scripts_and_configs.md`.
+
+- **WP1.0 (review round 1) — the numeric `run.metrics` knobs are validated
+  (addition).** `resolve_metrics_settings` rejected an unknown `level` but
+  accepted `n_z_slices: 0`, `mean_field_stride: 0`, `bootstrap_blocks: -5`; the
+  config comments stated the constraints and nothing enforced them, so a typo
+  would surface as a crash (or an empty result) deep inside a WP1.3 streaming
+  pass that had already read GBs. All three are now `>= 1`-checked beside the
+  level check, same failure mode, same place.
+
+- **WP1.1 (review round 1) — `pit.ranks_per_bin` (addition).** `rank_histogram`
+  maps `bin = rank * n_bins // (M + 1)`, which is only uniform when `n_bins`
+  divides `M + 1`. At the production M = 32 the 33 rank values split
+  `[4, 3, 3, 4, 3, 3, 4, 3, 3, 3]`, so a *perfectly calibrated* ensemble shows a
+  fixed three-bin comb of +21% / −9% against a flat `len(ranks)/n_bins`
+  reference; at M < `n_bins` some bins are unreachable entirely. WP1.4 plots
+  these counts, so the reference has to travel with them: the new
+  `ensemble_scores.rank_histogram_weights` computes the per-bin rank-value
+  counts and `_pit_block` emits them as `pit.ranks_per_bin`. Purely additive —
+  the binning itself is unchanged, and the M = 19 (exactly-divisible) unit test
+  is kept alongside the new M = 32 one.
+
+- **WP1.1 (review round 1) — `joint.posterior_variance_retained` (addition).**
+  The rank truncation onto the *prior's* eigenbasis (the departure logged above,
+  endorsed in review and unchanged) is lossless only when the posterior lives in
+  the prior's span. That holds within one ESMDA update, but `posterior_params.nc`
+  is a multi-window **concatenation** and each window block carries its own M × M
+  transform, so the joint row space is not contained in the prior's. Measured on
+  a 3-window / M = 32 / K = 42 construction: ~98.5% of posterior variance
+  retained (1.00 for the single-window case), dropping to ~80% when the posterior
+  grows a direction the prior never had. `rank_deficient` cannot see any of this.
+  The ratio `tr(Qᵀ C_post Q) / tr(C_post)` is therefore emitted next to it, so
+  `n_constrained_directions` can be read as covering a stated fraction of the
+  posterior spread. Computed pre-ridge; `null` on every degraded path.
+
+- **WP1.1 (review round 1) — the WP1.1 integration criterion is met on a
+  synthetic run dir, not the smoke case.** The acceptance text asks for "new keys
+  present and finite at `level: standard` on the smoke case". That is
+  structurally unmeetable: the smoke shape is a 2-member ensemble, so every
+  numeric key takes the `MIN_MEMBERS_CALIBRATION` null path and the bundle's math
+  never runs — the pipeline test would assert only that nulls appear. The
+  intent (does the *wiring* work end to end?) is met instead by
+  `tests/test_esmda_metrics_wiring.py`, which drives `compute_metrics` on a
+  synthetic run dir at M = 8 with a multi-window parameter artifact. It is cheap
+  and needs no solver because the WP1.1 block sits before the `skip_viz` early
+  return, and it covers precisely what unit tests could not: that
+  `ta.get("num_windows")` is spelled the way the run stage writes it (a typo
+  would silently null `n_knots_effective` for every static parameter), that
+  `_flatten_parameter_members` agrees in shape between prior and posterior on
+  concatenated artifacts, and the emitted key **set** — not merely finiteness —
+  at both `basic` and `standard`.
+
+- **WP1.1 (review round 1) — `_aligned_parameter_arrays` re-implements the
+  alignment rather than calling `compute_parameter_metrics` (departure).** The
+  plan says to reuse that helper. It returns *scores* and never exposes the
+  aligned members the bundle needs, so the two `np.interp` lines are repeated
+  instead. To keep that from growing a private-import surface, the two pieces
+  actually shared — `plotting.param_members_and_x` and
+  `plotting.plotted_param_names` — were promoted to public API (old `_`-prefixed
+  names kept as aliases). They define a parameter's x-axis, its dynamic/static
+  discriminator and the parameter iteration order; figures and metrics disagreeing
+  about any of those would be a silent error, so one public definition is the
+  point.
+
+- **WP1.1 (review round 1) — `_n_constant_segments` tolerance is scaled to the
+  parameter's own spread.** It used `np.isclose` defaults, i.e. `rtol = 1e-5`
+  *relative to the magnitude*: 2.7e-3° against an `inflow_angle` near 270 but
+  1e-7 against an `sgs_constant` near 0.01 — a threshold set by where the
+  parameter's origin happens to be, which could clamp a genuinely time-varying
+  parameter's effective sample size. The step test is now
+  `|Δ| > 1e-6 · std(members)`. The two cases it must separate are decades apart
+  (a broadcast static parameter repeats bitwise-identical values, Δ = 0 exactly;
+  a time-varying one steps by O(spread)), so the fraction is not delicate.
+
+- **WP1.1 — per-key schema documentation deferred.** `run_summary.yaml`'s key
+  list lives in `docs/scripts_and_configs.md` (the
+  `compute_esmda_metrics.py` section), which is outside this WP's file scope;
+  WP1.0 already documented there that levels above `basic` "add keys on top
+  (never change existing ones)", so that file is not left incorrect. The exact
+  WP1.1 key set is the list in the two entries above; fold it into
+  `docs/scripts_and_configs.md` together with WP1.2/1.3's schemas.
+  *(Done in review round 2 — the WP1.1 key set is now written out there.)*
+
+### Review round 2
+
+The round-1 entries above stand; these five record what round 2 changed.
+Common thread, and worth stating once because it is the same bug three times:
+**every calibration diagnostic in this bundle was being compared against a
+large-sample reference that does not hold at production `M`**, and each of
+those errors pointed the same way — toward reporting a perfectly calibrated
+ensemble as broken. `metrics_version` stays 2 throughout: no estimator
+changed, only what each number is reported next to.
+
+- **WP1.0 (review round 2) — `ensemble_scores` gained two reference functions
+  (addition; logged here because that module has no plan doc of its own).**
+  `zscore_exceedance` / `zscore_nominal_exceedance` / `max_abs_zscore_reference`
+  and `coverage_nominal_alpha` / `max_nominal_alpha`. The first family exists
+  because **the z-score null is not standard normal**: `zscore` estimates both
+  the mean and the spread from the same `M` members, so under exchangeability
+  the null is `sqrt((M+1)/M) · t(M−1)` — the `t` from the `ddof=1` denominator,
+  the Fortin factor from `truth − mean_m` having variance `σ²(1 + 1/M)`.
+  Measured over 4e5 calibrated draws at `M = 32, c = 3`: empirical 0.00579,
+  scaled `t` 0.00594, plain `t` 0.00529, normal 0.00270 — so dropping the
+  Fortin scale is wrong by ~10% at `M = 32` and by 22% at `M = 4`, and reading
+  a normal table is wrong by a factor 2.2. The second family exists because an
+  order-statistic band cannot hit an arbitrary `alpha` (see the coverage entry
+  below). Both are *functions* rather than inline arithmetic so the metrics and
+  figure layers read one definition instead of re-deriving it.
+
+- **WP1.1 (review round 2) — `zscore.overconfident` no longer flags sample
+  size; `zscore.exceedance` and `zscore.max_abs_calibrated_median` added.**
+  The flag was `max |z| > 3`. The maximum of `n` draws is an order statistic
+  that grows with `n`, so this measured **how many knots were pooled**, not
+  calibration: on a perfectly calibrated `M = 32` ensemble it fires 11.8% /
+  31.6% / 45.1% / 85.2% of the time at 21 / 63 / 105 / 315 pooled knots
+  (4000 trials each), and 315 is the routine 2-parameter/21-knot/3-window
+  shape — i.e. the flag was very nearly a constant `true` on real runs.
+  It is now `exceedance.observed[0] > 2 × exceedance.nominal[0]` (the `|z| > 2`
+  cut), whose false-positive rate on the same ensembles is 11.4% / 2.9% / 0.7%
+  / 0.0% — **decreasing** with sample size, which is the property that was
+  missing. `|z| > 3` was rejected as the cut: at these `n` its expected count is
+  O(1), so the rule reduces to "did any single knot exceed 3" and the rate
+  stays flat at ~12%. The ×2 multiplier rather than ×3 is a measured power
+  trade at `M = 32` / 315 knots against an ensemble whose spread is a factor
+  `s` too small — ×2 detects `s = 0.8` 65% of the time and `s = 0.7` 99.8%,
+  ×3 detects `s = 0.8` 0.3% of the time, i.e. not at all.
+  Kept, per the "reference travels with the number" rule that `ranks_per_bin`
+  set: `mean` / `std` / `max_abs` are unchanged, `exceedance` carries the
+  observed tail fractions **with their nominal levels** (this is what WP1.4
+  plots; it must not re-derive them), `max_abs_calibrated_median` says where
+  `max |z|` sits for a *calibrated* ensemble of this size over this many knots
+  so the retained `max_abs` is readable at all, and `overconfident_rule` names
+  the exact keys the boolean is computed from so the verdict is reproducible
+  from the summary alone. The boolean is deliberately computed *here* and not
+  in `ensemble_scores`: the shared layer emits no verdict because deciding
+  "is this miscalibrated" needs an effective sample size only this layer has,
+  and even here it is a screen, not a test — correlated knots degrade it toward
+  its ~11% small-`n` behaviour, which is why `sampling` sits next to it.
+
+- **WP1.1 (review round 2) — coverage is scored against the *realizable* level:
+  `coverage.nominal_alpha_50` / `nominal_alpha_90` (addition).** Band edges are
+  member order statistics, so the attainable nominal levels are the `M + 1`
+  multiples of `1/(M+1)` and the requested `alpha` is rounded to one of them. At
+  `M = 32`, `alpha = 0.5` is the band `[x_(9), x_(25)]` with nominal level
+  0.4848 and measured empirical coverage 0.4841 (2e5 samples) — so a consumer
+  holding that against the requested 0.5 reads ~13 sampling sigma of **pure
+  discretization** as miscalibration. The realized level is now emitted beside
+  every coverage number. `max_nominal_alpha` answers the different question it
+  always did (the widest band this `M` offers) but is now the imported
+  `ensemble_scores.max_nominal_alpha` rather than an inline `(M−1)/(M+1)`, so
+  the two references cannot drift; `_band_indices` stays private and these two
+  functions remain its only public consequence.
+
+- **WP1.1 (review round 2) — contraction and the joint pencil now report
+  per-window *and* cumulative contraction (the substantive finding).**
+  `run_esmda.py:772-786` sets each window's prior to the previous window's
+  posterior — GP-extrapolated when the parameter is dynamic, `prior_params =
+  posterior_params` bitwise when it is static. So in the concatenated
+  `prior_params.nc`, **block `w` is posterior `w−1` and only block 0 is a
+  genuine prior**, and an elementwise `std_post/std_prior` measures what the
+  *last* update did while its name and this plan's schema read as "how much did
+  assimilation shrink the uncertainty". Measured on a 3-window / `M = 32`
+  construction with a true per-window ratio of 0.6: the reported number is
+  `{mean: 0.600, min: 0.600}`, the cumulative truth `{mean: 0.392, min: 0.216}`
+  — a run that cut spread by 78% reporting 40%.
+  Both are now emitted. `contraction_ratio.vs_window_prior` is the existing
+  number, unchanged; `contraction_ratio.vs_initial_prior` is the same posterior
+  against window 0's prior block, tiled across the windows, with a `reason` that
+  is non-null exactly when its numbers are. `mean` / `min` stay at the top level
+  as aliases of `vs_window_prior`, assigned from the same mapping so they cannot
+  drift — the schema sketch above indexes them directly. One slice expression
+  covers both artifact layouts (a dynamic parameter's `n_knots =
+  num_windows · knots_per_window`; a static parameter's x-axis *is* the window
+  index, so `knots_per_window` comes out 1 and the tile degenerates to "column
+  0, repeated"), so there is no branch on the parameter's kind; a knot count
+  that does not divide by `num_windows` emits `null` plus a log line rather than
+  mis-slicing.
+  **`joint` gets the same treatment rather than the ambiguity it was left with.**
+  The shift applies to the generalized pencil too — `prior_flat` spans every
+  window, so `n_constrained_directions` counts directions the *per-window*
+  updates halved. That is now stated in `joint.prior_reference`, and the
+  cumulative question is answered by `joint.vs_initial_prior`: the same
+  `joint_parameter_directions` on the **final posterior window block** against
+  the **window-0 prior block**, reduced to a scalar summary (no loadings, no
+  matrices — ~12 YAML lines). It was worth doing rather than documenting away
+  because it is free: the blocks are one window wide, so at the routine `M = 32`
+  / `K = 42` / 3-window shape the pencil is 14-dimensional against 31 sample
+  directions — **full rank**, where the parent block is rank-truncated. Its
+  soundness rests on the knot prior being the stationary GP (window 0's prior
+  covariance is the prior covariance for any window's knots), which is the same
+  assumption the run stage already makes when it extrapolates. Both per-window
+  blocks are the pipeline's one flattener applied to a `time`-sliced Dataset
+  (`compute_esmda_metrics._window_block_flat`), not a second flattener.
+  The regression is pinned in *both* test layers, because the old fixture could
+  not have caught it: `tests/test_esmda_metrics_wiring.py::_dynamic_run_artifacts`
+  built a prior uniformly wider than the posterior at every knot — the one shape
+  a real multi-window run never produces, and the shape that makes the two
+  ratios coincide, so its `assert 0.0 < contraction_ratio["mean"] < 1.0` passed
+  whichever number was reported. It now builds the real chain.
+
+- **WP1.1 (review round 2) — minors: `crpss` wiring, `sampling`, and two
+  corrected claims.** (a) `parameter_metric_summary` computed
+  `rmse_reduction_vs_prior` / `crps_reduction_vs_prior` by hand, duplicating
+  `ensemble_scores.crpss`; now wired to it. Verified bit-identical over 2e5
+  random positive `(post, prior)` pairs. Only the non-finite corners move, each
+  from a wrong number to a `null`, because the old guard tested the denominator
+  alone: `post = nan` gave a bare `nan`, `post = inf` gave `-inf`, and
+  `prior = inf` reported a **100% reduction**. (b) The effective-sample-size
+  caveat was attached only to `pit`, which reads as though PIT alone needed it —
+  `zscore.exceedance` and `coverage.alpha_*` pool over the identical correlated
+  knots. It is hoisted to a per-parameter `sampling` block (`n_samples`,
+  `n_knots_effective`, `pooling`) and mirrored under `pit` from the same
+  computation for schema stability. (c) `_flatten_parameter_members` spans every
+  var with an `ensemble` dim while the per-parameter bundle iterates the fixed
+  `_PLOTTED_PARAMS` tuple; they coincide today, but a future estimated parameter
+  missing from that tuple would enter `joint` while silently getting no
+  calibration entry, so such vars are now named in a `logger.info`. (d)
+  `_energy_score`'s docstring claimed the shared implementation "keeps the same
+  memory bound". Half true, and not in the way previously written: the
+  **pairwise** term is unchanged (one `(E, E, S, C)` slab, same element count as
+  the old `(C, E, E, S)`), but the distance-to-truth term is now taken over the
+  whole `(E, T, S, C)` batch where the old code held `(C, E, S)` inside a time
+  loop — a factor `n_time`, not `n_components`, on that term. Corrected, with
+  the peak stated as `max(E·T·S·C, E²·S·C)` so a future field-shaped caller can
+  see it must chunk.
