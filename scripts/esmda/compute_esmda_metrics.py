@@ -22,6 +22,11 @@ run_esmda.py, augmented with:
                               energy score (multivariate CRPS). The comprehensive
                               per-component sweep series are computed separately by
                               scripts/figure_creation/compute_sweep_metrics.py.
+  * ``sensor_statistics``  -- per sensor set, the same series scored in
+                              *statistics* space: per-window mean / variance /
+                              TKE / |U| mean, plus the Wasserstein distribution
+                              distance and an identifiability guard
+                              (``standard`` and above only).
 
 How much of that is computed is gated by ``run.metrics.level`` in the run dir's
 saved config (``basic`` = exactly the keys above, ``standard`` additionally
@@ -60,6 +65,7 @@ from scripts.esmda._esmda_common import (
     parameter_bundle_summary,
     parameter_metric_summary,
     read_yaml,
+    sensor_statistic_scores,
     series_stats,
     streaming_state_rmse,
     truth_sensor_series,
@@ -286,6 +292,44 @@ def _ensemble_health(
     }
 
 
+def _prior_sensor_series(
+    run_dir: pathlib.Path,
+    sensor_sets: dict[str, Any],
+    ta: dict[str, Any],
+    num_windows: int,
+) -> dict[str, xarray.DataArray] | None:
+    """The prior ensemble's sensor series, or ``None`` when it was not saved.
+
+    ``sensor_statistics.*.crpss_vs_prior`` needs the prior rolled out at the same
+    sensors, which only exists when the run was configured to keep it:
+    ``conf/run_esmda.yaml`` ships ``run.save_prior_state: false``, so **absent is
+    the common case, not a fault** -- hence one ``logger.info`` and a ``None``
+    rather than a warning. The all-or-nothing existence check is the same guard
+    ``compute_sweep_metrics._ensemble_series`` uses, and it is required rather
+    than defensive: :func:`ensemble_sensor_series` opens each path
+    unconditionally and would raise ``FileNotFoundError`` on a partial set.
+    """
+    prior_paths = [
+        run_dir / "windows" / f"window_{w}_prior_state.nc" for w in range(num_windows)
+    ]
+    if not all(path.exists() for path in prior_paths):
+        logger.info(
+            "No complete prior state rollout in %s (run.save_prior_state defaults "
+            "to false); reporting sensor_statistics.*.crpss_vs_prior as null",
+            run_dir / "windows",
+        )
+        return None
+    # Annotated rather than returned directly: `_esmda_common` is untyped by
+    # convention, so its return is `Any` and mypy rejects it as a return value.
+    series: dict[str, xarray.DataArray] = ensemble_sensor_series(
+        prior_paths,
+        sensor_sets,
+        ta["assim_solver_name"],
+        float(ta["sim_time"]),
+    )
+    return series
+
+
 def compute_metrics(run_dir: pathlib.Path, metrics_level: str | None = None) -> None:
     """Compute every run metric from the saved artifacts and write run_summary.yaml."""
     cfg = load_run_config(run_dir)
@@ -409,6 +453,19 @@ def compute_metrics(run_dir: pathlib.Path, metrics_level: str | None = None) -> 
     # series already extracted above) and WP1.3's `mean_field_metrics` +
     # `eval_fields.nc`, which shares the single per-member read pass over the
     # window state files with the sensor extraction above.
+    if metrics.at_least("standard"):
+        summary["sensor_statistics"] = sensor_statistic_scores(
+            truth_series,
+            ensemble_series,
+            num_windows=num_windows,
+            # The two series are windowed by DIFFERENT rules -- the ensemble by
+            # time value (each window is rebased onto [w*sim_time, ...) above),
+            # the truth by frame index -- so both keys travel, not one edge list.
+            n_per_window=int(ta["n_per_window"]),
+            sim_time=float(ta["sim_time"]),
+            bootstrap_blocks=metrics.bootstrap_blocks,
+            prior_series=_prior_sensor_series(run_dir, sensor_sets, ta, num_windows),
+        )
 
     write_yaml(summary, run_dir / "run_summary.yaml")
     print(f"Saved run summary in {run_dir / 'run_summary.yaml'}")
