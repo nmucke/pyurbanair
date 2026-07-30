@@ -29,6 +29,9 @@ from pyurbanair.utils.ensemble_scores import (
     rank_histogram,
     rank_histogram_weights,
     spread_skill_ratio,
+    wasserstein_over_floor,
+    wasserstein_over_sigma,
+    wasserstein_self_floor,
     zscore,
     zscore_exceedance,
     zscore_nominal_exceedance,
@@ -712,6 +715,249 @@ def test_spread_skill_ratio_treats_an_infinite_spread_as_masked() -> None:
 def test_spread_skill_ratio_is_nan_for_a_zero_error_norm() -> None:
     assert np.isnan(spread_skill_ratio(np.ones(4), np.zeros(4), 5))
     assert np.isnan(spread_skill_ratio(np.ones(4), np.full(4, np.nan), 5))
+
+
+# ---------------------------------------------------------------------------
+# Wasserstein family
+# ---------------------------------------------------------------------------
+
+
+def _ar1(n_samples: int, phi: float, rng: np.random.Generator) -> np.ndarray:
+    """AR(1) with unit marginal variance: a series with a correlation time."""
+    noise = rng.normal(scale=np.sqrt(1.0 - phi**2), size=n_samples)
+    series = np.empty(n_samples)
+    series[0] = rng.normal()
+    for i in range(1, n_samples):
+        series[i] = phi * series[i - 1] + noise[i]
+    return series
+
+
+def test_wasserstein_over_sigma_is_the_scipy_distance_in_truth_sigmas() -> None:
+    """The definition, against a direct scipy call on differently sized sets."""
+    from scipy import stats
+
+    rng = np.random.default_rng(41)
+    samples = rng.normal(loc=0.4, size=57)
+    truth = rng.normal(scale=1.7, size=33)  # deliberately a different length
+
+    observed = wasserstein_over_sigma(samples, truth)
+
+    assert observed == pytest.approx(
+        float(stats.wasserstein_distance(samples, truth)) / float(np.std(truth, ddof=1))
+    )
+    # The normalization is the TRUTH spread, not the sample or pooled spread:
+    # the truth is the one thing shared by every member being scored, so it is
+    # the only divisor that leaves member scores comparable with each other.
+    assert observed != pytest.approx(
+        float(stats.wasserstein_distance(samples, truth))
+        / float(np.std(samples, ddof=1))
+    )
+
+
+def test_wasserstein_over_sigma_is_zero_for_the_same_sample_set() -> None:
+    rng = np.random.default_rng(42)
+    truth = rng.normal(size=40)
+
+    assert wasserstein_over_sigma(truth, truth) == pytest.approx(0.0, abs=1e-12)
+    # It compares distributions, not time series, so a shuffled copy is the
+    # same input -- which is exactly why it can score an ensemble window
+    # against a truth window sampled at a different cadence.
+    assert wasserstein_over_sigma(rng.permutation(truth), truth) == pytest.approx(
+        0.0, abs=1e-12
+    )
+
+
+def test_wasserstein_self_floor_is_small_beside_a_real_distribution_shift() -> None:
+    """Zero is the wrong reference; the floor is small enough to be a useful one.
+
+    Two independent draws from the *same* distribution sit a finite distance
+    apart at finite ``n``, so comparing a raw distance against 0 calls every
+    model a failure at these window lengths. The floor has to sit well below a
+    genuine mismatch to be worth dividing by, and it does.
+    """
+    rng = np.random.default_rng(43)
+    floors, perfect, shifted = [], [], []
+    for _ in range(200):
+        truth = rng.normal(size=36)
+        floors.append(wasserstein_self_floor(truth))
+        perfect.append(wasserstein_over_sigma(rng.normal(size=36), truth))
+        shifted.append(wasserstein_over_sigma(rng.normal(loc=1.0, size=36), truth))
+
+    # measured medians: floor 0.36, perfect model 0.27, 1-sigma shift 0.99.
+    assert np.median(floors) < 0.5 * np.median(shifted)
+    assert np.median(perfect) < np.median(floors)
+    # And the floor is emphatically not negligible at a 36-frame window: a raw
+    # distance of 0.3 there is indistinguishable from a perfect model.
+    assert np.median(floors) > 0.25
+
+
+def test_wasserstein_over_floor_separates_a_perfect_model_from_a_biased_one() -> None:
+    """The headline ratio sits near 1 for a perfect model and far above for a bad one."""
+    rng = np.random.default_rng(45)
+    perfect, shifted = [], []
+    for _ in range(200):
+        truth = rng.normal(size=36)
+        floor = wasserstein_self_floor(truth)
+        perfect.append(
+            wasserstein_over_floor(
+                wasserstein_over_sigma(rng.normal(size=36), truth), floor
+            )
+        )
+        shifted.append(
+            wasserstein_over_floor(
+                wasserstein_over_sigma(rng.normal(loc=1.0, size=36), truth), floor
+            )
+        )
+
+    # measured medians: 0.70 perfect, 2.61 for a 1-sigma mean shift. The
+    # perfect median sits below 1 rather than on it -- the floor's halves have
+    # n/2 samples against the compared sets' n, the documented conservatism.
+    assert 0.4 < float(np.median(perfect)) < 1.2
+    assert float(np.median(shifted)) > 2.0
+
+
+def test_wasserstein_self_floor_splits_contiguously_so_it_sees_the_correlation() -> (
+    None
+):
+    """The one design choice in the floor, and the naive alternative it rejects.
+
+    A random split interleaves the halves through the same slow excursions, so
+    both inherit the series' full range and agree far better than two genuinely
+    independent stretches of the flow would. It reports the white-noise floor
+    whatever the series does -- on a correlated probe that understates the
+    floor severalfold, and a perfectly good model then reads as several times
+    worse than the floor.
+    """
+    rng = np.random.default_rng(44)
+    contiguous, shuffled, white = [], [], []
+    for _ in range(100):
+        series = _ar1(200, 0.9, rng)
+        contiguous.append(wasserstein_self_floor(series))
+        shuffled.append(wasserstein_self_floor(rng.permutation(series)))
+        white.append(wasserstein_self_floor(_ar1(200, 0.0, rng)))
+
+    # measured medians: 0.44 contiguous, 0.17 shuffled -- a 2.7x understatement.
+    assert float(np.median(contiguous)) > 2.0 * float(np.median(shuffled))
+    # ... and the shuffled value is blind to phi: it is the white-noise floor.
+    assert float(np.median(shuffled)) == pytest.approx(
+        float(np.median(white)), rel=0.25
+    )
+
+
+def test_wasserstein_self_floor_drops_the_middle_sample_of_an_odd_count() -> None:
+    """Equal halves, so both carry the same sample-size dependence.
+
+    Keeping the odd sample would make the floor depend on which half it landed
+    in, which is a coin flip the caller cannot see. Here the dropped sample is
+    a huge outlier, so the two conventions are orders of magnitude apart.
+    """
+    from scipy import stats
+
+    series = np.array([0.0, 1.0, 100.0, 4.0, 5.0])
+    expected = float(stats.wasserstein_distance([0.0, 1.0], [4.0, 5.0])) / float(
+        np.std(series, ddof=1)
+    )
+
+    assert wasserstein_self_floor(series) == pytest.approx(expected)
+    # The outlier still sets the normalizing sigma -- only the distance drops it.
+    assert wasserstein_self_floor(series) < 0.2
+
+
+def test_wasserstein_family_returns_nan_rather_than_raising_when_undefined() -> None:
+    """Degenerate sample sets are a supported input, not an error."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a RuntimeWarning would fail the test
+        # Fewer than two finite samples on either side: no distribution.
+        assert np.isnan(wasserstein_over_sigma(np.array([1.0]), np.arange(5.0)))
+        assert np.isnan(wasserstein_over_sigma(np.arange(5.0), np.array([1.0])))
+        assert np.isnan(wasserstein_over_sigma(np.full(4, np.nan), np.arange(5.0)))
+        # Zero truth spread: the normalization does not exist.
+        assert np.isnan(wasserstein_over_sigma(np.arange(5.0), np.full(5, 2.0)))
+        assert np.isnan(wasserstein_self_floor(np.full(8, 2.0)))
+        # The floor needs FOUR samples, not two -- a half of one sample is not
+        # a distribution, so the three-frame smoke window is undefined here.
+        assert np.isnan(wasserstein_self_floor(np.arange(3.0)))
+        assert np.isfinite(wasserstein_self_floor(np.arange(4.0)))
+        # Non-finite entries are dropped before the split, not after.
+        assert wasserstein_self_floor(
+            np.array([0.0, 1.0, np.nan, 4.0, 5.0])
+        ) == pytest.approx(wasserstein_self_floor(np.array([0.0, 1.0, 4.0, 5.0])))
+
+
+def test_wasserstein_is_nan_when_the_truth_spread_is_only_float_rounding() -> None:
+    """``std > 0`` is the wrong guard; ``std`` above float64 noise is the right one.
+
+    A physically constant sensor is not bitwise constant once it has been
+    through ``sqrt(sum_c u_c**2)``: the magnitude of a constant vector comes
+    back with a spread of order 1e-16. Dividing by that turns a zero distance
+    into ~1e15, which is *finite* -- so it survives the metrics layer's
+    finite-or-null filter and is written to the summary as a headline number.
+    """
+    truth = 1.0 + np.arange(20, dtype=float) * 1e-16
+    assert 0.0 < float(np.std(truth, ddof=1)) < 1e-15  # not exactly constant
+
+    assert np.isnan(wasserstein_over_sigma(truth, truth))
+    assert np.isnan(wasserstein_self_floor(truth))
+    # The guard is relative, so a genuinely tiny but real signal survives it --
+    # an absolute epsilon would silently discard a low-speed sensor.
+    assert np.isfinite(wasserstein_self_floor(1e-9 * np.arange(20, dtype=float)))
+
+
+def test_wasserstein_over_floor_clamps_a_zero_floor_instead_of_dividing_by_it() -> None:
+    """A zero floor is reachable, and neither ``inf`` nor ``nan`` is the answer.
+
+    An exactly periodic probe signal whose period divides the record in half
+    has bitwise-identical halves and a perfectly good spread. ``write_yaml``
+    cannot emit the ``inf`` that a bare division gives, and a ``nan`` would
+    silently drop the sensor from the median over sensors; a large finite
+    number reads as "the perfect-model distance is unresolvable here".
+    """
+    periodic = np.array([1.0, 2.0] * 4)
+    assert wasserstein_self_floor(periodic) == 0.0
+    assert float(np.std(periodic, ddof=1)) > 0.0  # the spread is fine; the floor is not
+
+    assert wasserstein_over_floor(0.6, 0.0) == pytest.approx(0.6e12)
+    assert wasserstein_over_floor(0.6, 0.3) == pytest.approx(2.0)
+    assert wasserstein_over_floor(0.0, 0.3) == 0.0
+
+
+def test_wasserstein_over_floor_is_nan_on_nan_but_raises_on_a_negative_distance() -> (
+    None
+):
+    # nan is how both producers report "undefined", so it must pass through.
+    assert np.isnan(wasserstein_over_floor(float("nan"), 0.3))
+    assert np.isnan(wasserstein_over_floor(0.3, float("nan")))
+    assert np.isnan(wasserstein_over_floor(float("inf"), 0.3))
+    # A negative distance is a caller bug, not a degenerate sample.
+    for w1, floor in [(-0.1, 0.3), (0.3, -0.1)]:
+        with pytest.raises(ValueError):
+            wasserstein_over_floor(w1, floor)
+
+
+def test_pooling_an_ensemble_can_only_lower_the_wasserstein_distance() -> None:
+    """W1 is convex in its first argument, so the two pooling conventions differ.
+
+    ``W1(pooled, truth) <= mean_m W1(member_m, truth)``, always -- the naive
+    reading (that pooling spreads the samples out and so inflates the distance)
+    is backwards. The gap is the ensemble spread, so both numbers are worth
+    reporting: members straddling the truth cancel when pooled, members sharing
+    a bias do not.
+    """
+    rng = np.random.default_rng(46)
+    truth = rng.normal(size=400)
+    straddling = [rng.normal(loc=mu, size=400) for mu in (-1.0, 1.0)]
+    biased = [rng.normal(loc=1.0, size=400) for _ in range(2)]
+
+    ratios = []
+    for members in (straddling, biased):
+        pooled = wasserstein_over_sigma(np.concatenate(members), truth)
+        per_member = float(np.mean([wasserstein_over_sigma(m, truth) for m in members]))
+        assert pooled <= per_member + 1e-12
+        ratios.append(pooled / per_member)
+
+    # measured: 0.51 straddling, 1.00 sharing a bias.
+    assert ratios[0] < 0.7
+    assert ratios[1] > 0.95
 
 
 # ---------------------------------------------------------------------------

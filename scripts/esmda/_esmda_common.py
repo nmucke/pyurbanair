@@ -44,15 +44,20 @@ from pyurbanair.utils.ensemble_scores import (
     coverage,
     coverage_nominal_alpha,
     crpss,
+    fair_crps,
     fair_energy_score,
     max_abs_zscore_reference,
     max_nominal_alpha,
     pit_rank,
     rank_histogram,
     rank_histogram_weights,
+    wasserstein_over_floor,
+    wasserstein_over_sigma,
+    wasserstein_self_floor,
     zscore,
     zscore_exceedance,
 )
+from pyurbanair.utils.turbulence_stats import block_bootstrap_std
 
 logger = logging.getLogger(__name__)
 
@@ -1481,3 +1486,746 @@ def parameter_bundle_summary(
     )
     summary["joint"] = joint
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Statistics-space sensor scoring (WP1.2)
+# ---------------------------------------------------------------------------
+
+# The four window statistics scored against the truth, in the order they are
+# written to the summary. Named once so the schema, the null path and the
+# scoring loop cannot drift apart.
+SENSOR_STATISTIC_NAMES = ("window_mean", "window_variance", "tke", "velmag_mean")
+
+# Which keys of a `_zscore_block` result the statistics-space blocks re-report.
+# A strict subset, and the omission is deliberate rather than cosmetic:
+# `exceedance` / `overconfident` / `overconfident_rule` are calibrated in
+# `_zscore_block` against POOLED INDEPENDENT knots (the measured false-alarm
+# table there assumes it), and nothing pooled here is independent -- the same
+# window's sensors see one realization of one flow, so the C x S x W elements
+# behind these z-scores are strongly cross-correlated and the multiplier rule's
+# measured operating point does not transfer. The raw moments and the
+# size-aware `max_abs` reference survive that correlation (they stay unbiased;
+# only their sampling error inflates), so those are what is emitted.
+STAT_ZSCORE_KEYS = ("mean", "std", "max_abs", "max_abs_calibrated_median")
+
+
+def _coverage_block_keys():
+    """The exact key set (and order) :func:`_coverage_block` emits.
+
+    Derived from ``COVERAGE_ALPHAS`` by the same expression the block uses, so
+    adding a credible level cannot leave the degraded path emitting a stale key
+    set -- the whole point of the "every key present, as ``null``" rule is that
+    a consumer can index the same paths on a degraded run.
+    """
+    keys = []
+    for alpha in COVERAGE_ALPHAS:
+        key = f"alpha_{int(round(alpha * 100))}"
+        keys.extend((key, f"nominal_{key}"))
+    keys.append("max_nominal_alpha")
+    return tuple(keys)
+
+
+_COVERAGE_KEYS = _coverage_block_keys()
+
+# An ensemble is identifiable in a statistic when the spread ACROSS members is
+# large next to the sampling noise WITHIN one member's finite averaging window.
+# Below this ratio the spread being scored is a property of the window length,
+# not of the parameters, and every calibration number above it is measuring the
+# averaging rather than the assimilation: at a ratio r the within-member
+# sampling variance is 1/r**2 of the across-member variance, so r = 3 is the
+# point where sampling noise stops contributing more than ~11% of the spread a
+# CRPS / coverage / PIT reads. The plan writes the cut as "~< 3"; it is a screen
+# on how to read the block, never a gate -- the numbers are always reported.
+IDENTIFIABILITY_MIN_RATIO = 3.0
+
+# Block count handed to `turbulence_stats.block_bootstrap_std` when the caller
+# does not choose one. Mirrors that function's own default so the metrics stage
+# has a name for it; a caller that passes `bootstrap_blocks` overrides it.
+DEFAULT_BOOTSTRAP_BLOCKS = 20
+
+
+def _finite_mean(values):
+    """Mean over the finite entries of an array, ``nan`` when there are none."""
+    array = np.asarray(values, dtype=float).ravel()
+    finite = array[np.isfinite(array)]
+    return float(finite.mean()) if finite.size else float("nan")
+
+
+def _var_ddof1(values, axis=-1):
+    """``ddof=1`` variance that returns ``nan`` -- not a warning -- at n < 2.
+
+    Doubles as the per-member reducer handed to ``block_bootstrap_std``, which
+    calls it on a bare 1-D resample, hence the ``axis=-1`` default.
+    """
+    array = np.asarray(values, dtype=float)
+    if array.shape[axis] < 2:
+        return np.full(np.delete(np.asarray(array.shape), axis), np.nan)
+    return np.var(array, axis=axis, ddof=1)
+
+
+def _median_max(values):
+    """``{median, max}`` over the finite entries, or ``None`` when there are none."""
+    array = np.asarray(values, dtype=float).ravel()
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        return None
+    return {
+        "median": _finite_or_none(np.median(finite)),
+        "max": _finite_or_none(finite.max()),
+    }
+
+
+def _null_statistic_block(reason, n_samples=0):
+    """One statistic's entry with every measured leaf ``null``.
+
+    The nesting is identical to the healthy block, not collapsed to a single
+    ``null``, so a consumer indexes ``...window_mean.coverage.alpha_90`` on a
+    smoke run exactly as on a production one. Only the three genuine constants
+    (``pit.n_bins``, ``pit.tie_seed``, ``identifiability.threshold``) keep their
+    values: they are configuration, not measurement, and nulling them would hide
+    which settings the (absent) numbers would have been produced under.
+    """
+    return {
+        "crps": None,
+        "crpss_vs_prior": None,
+        "zscore": dict.fromkeys(STAT_ZSCORE_KEYS),
+        "coverage": dict.fromkeys(_COVERAGE_KEYS),
+        "pit_counts": None,
+        "pit": {
+            "n_bins": PIT_BINS,
+            "n_samples": int(n_samples),
+            "ranks_per_bin": None,
+            "tie_seed": PIT_TIE_SEED,
+        },
+        "identifiability": {
+            "ratio_median": None,
+            "ratio_min": None,
+            "sampling_noise_dominated": None,
+            "threshold": IDENTIFIABILITY_MIN_RATIO,
+        },
+        "n_samples": int(n_samples),
+        "reason": reason,
+    }
+
+
+def _null_wasserstein_block(reason):
+    """The Wasserstein layer with every sensor-reduced entry ``null``."""
+    return {
+        "w1_over_sigma_pooled": None,
+        "w1_over_sigma_member_mean": None,
+        "self_floor": None,
+        "w1_over_floor": None,
+        "reason": reason,
+    }
+
+
+def _ensemble_window_indices(ensemble_da, num_windows, sim_time, set_name):
+    """Per-window integer indices into the ensemble series' ``time`` axis.
+
+    The ensemble and the truth are windowed by **different rules** and this is
+    the ensemble's: ``ensemble_sensor_series`` rebases window ``w`` onto
+    ``[w*sim_time, (w+1)*sim_time)``, so the window is recovered from the time
+    *values*, never from a frame count. The two series generally have different
+    lengths and cadences (the truth is saved on its own schedule), so there is
+    no shared index to slice and no attempt is made to build one -- each series
+    is sliced by its own rule and reduced independently.
+
+    The final window's upper bound is dropped: a solver that writes its
+    end-of-window frame at exactly ``num_windows*sim_time`` would otherwise have
+    it fall outside every half-open interval and be silently discarded.
+
+    Falls back to contiguous equal blocks (with one log line) when the series
+    carries no ``time`` coordinate -- ``ensemble_sensor_series`` only rebases
+    when the window file has one -- or when ``sim_time`` is not a positive
+    number, in which case the interval rule is undefined.
+    """
+    n_time = int(ensemble_da.sizes["time"])
+
+    def _contiguous(why):
+        logger.info(
+            "Sensor set %r: %s; falling back to %d contiguous equal blocks of "
+            "the %d ensemble frames for the WP1.2 window statistics",
+            set_name,
+            why,
+            num_windows,
+            n_time,
+        )
+        edges = np.linspace(0, n_time, num_windows + 1).round().astype(int)
+        return [np.arange(edges[w], edges[w + 1]) for w in range(num_windows)]
+
+    if "time" not in ensemble_da.coords:
+        return _contiguous("the ensemble series carries no time coordinate")
+    if sim_time is None or not np.isfinite(float(sim_time)) or float(sim_time) <= 0:
+        return _contiguous(f"sim_time = {sim_time!r} is not a positive duration")
+
+    times = np.asarray(ensemble_da["time"].values, dtype=float)
+    span = float(sim_time)
+    indices = []
+    for w in range(num_windows):
+        inside = times >= w * span
+        if w < num_windows - 1:
+            inside &= times < (w + 1) * span
+        indices.append(np.flatnonzero(inside))
+    return indices
+
+
+def _statistic_window_series(name, ensemble_window, truth_window):
+    """``(member_series, truth_series, reducer)`` for one statistic in one window.
+
+    Every one of the four statistics is expressed as **one reducer applied to a
+    1-D per-element time series**, which is what makes the identifiability
+    bootstrap possible at all: ``block_bootstrap_std`` resamples blocks of a
+    serially correlated series and re-applies the statistic, so the statistic
+    has to be a function of a resampleable series rather than of the raw
+    ``(component, time)`` slab.
+
+      * ``window_mean`` / ``window_variance`` -- the component series itself,
+        reduced by ``mean`` / ``_var_ddof1``, pooled over component x sensor.
+      * ``tke`` -- the *instantaneous* fluctuation energy
+        ``0.5 * n/(n-1) * sum_c (u_c(t) - <u_c>)**2``, reduced by ``mean``.
+        The ``n/(n-1)`` factor is not cosmetic: it makes the time-mean of this
+        series **exactly** ``0.5 * sum_c var_ddof1(u_c)``, i.e. the tabulated
+        TKE, so the bootstrap is resampling the same estimator that is reported
+        rather than a ``ddof=0`` cousin of it. The component means are held at
+        their full-window values while the series is resampled, which is the
+        usual convention -- the fluctuation field is a property of the window,
+        not of the resample.
+      * ``velmag_mean`` -- ``|U|(t)``, reduced by ``mean``, pooled over sensor.
+
+    Args:
+        ensemble_window: ``(component, ensemble, time, sensor)`` window slab.
+        truth_window: ``(component, time, sensor)`` window slab.
+
+    Returns:
+        ``member_series`` ``(n_members, n_elements, n_time)``, ``truth_series``
+        ``(n_elements, n_time_truth)`` and the shared reducer. ``n_elements`` is
+        ``n_components * n_sensors`` for the two per-component statistics and
+        ``n_sensors`` for the two pooled ones; the element order is row-major
+        ``(component, sensor)`` on both sides so the two line up.
+    """
+    if name in ("window_mean", "window_variance"):
+        n_components, n_members, n_time, n_sensors = ensemble_window.shape
+        member = np.transpose(ensemble_window, (1, 0, 3, 2)).reshape(
+            n_members, n_components * n_sensors, n_time
+        )
+        truth = np.transpose(truth_window, (0, 2, 1)).reshape(
+            n_components * n_sensors, truth_window.shape[1]
+        )
+        reducer = np.mean if name == "window_mean" else _var_ddof1
+        return member, truth, reducer
+
+    if name == "tke":
+        member = np.transpose(_fluctuation_energy(ensemble_window, axis=2), (0, 2, 1))
+        truth = _fluctuation_energy(truth_window, axis=1).T
+        return member, truth, np.mean
+
+    if name == "velmag_mean":
+        member = np.transpose(np.sqrt((ensemble_window**2).sum(axis=0)), (0, 2, 1))
+        truth = np.sqrt((truth_window**2).sum(axis=0)).T
+        return member, truth, np.mean
+
+    raise ValueError(f"unknown sensor statistic {name!r}")
+
+
+def _fluctuation_energy(slab, axis):
+    """``0.5 * n/(n-1) * sum_c (u_c - <u_c>)**2``, the per-timestep TKE integrand.
+
+    ``slab`` has ``component`` first and its time axis at ``axis``; the
+    component axis is summed out, so the result drops it. See
+    :func:`_statistic_window_series` for why the Bessel factor is applied to the
+    integrand rather than to the reduced value.
+    """
+    n_time = slab.shape[axis]
+    scale = n_time / (n_time - 1) if n_time > 1 else np.nan
+    fluctuation = slab - slab.mean(axis=axis, keepdims=True)
+    return 0.5 * scale * (fluctuation**2).sum(axis=0)
+
+
+def _within_member_std(member_series, reducer, bootstrap_blocks):
+    """Block-bootstrap sampling std of ``reducer`` for every (member, element).
+
+    One ``block_bootstrap_std`` call per member per pooled element. The blocking
+    is the point: a window's frames are serially correlated, so the iid
+    ``std/sqrt(n)`` would understate the sampling noise of a window mean and the
+    identifiability ratio would come out flatteringly large.
+
+    Non-finite entries are left as ``nan`` and handled by the caller rather than
+    guarded here -- at the smoke shape (3 frames against 20 blocks) *every*
+    entry is ``nan``, which is the degenerate case the caller must report as a
+    ``null`` identifiability block, not repair.
+    """
+    n_members, n_elements, _ = member_series.shape
+    out = np.full((n_members, n_elements), np.nan)
+    for member in range(n_members):
+        for element in range(n_elements):
+            out[member, element] = block_bootstrap_std(
+                member_series[member, element],
+                statistic=reducer,
+                n_blocks=bootstrap_blocks,
+            )
+    return out
+
+
+def _pooled_statistic(
+    name,
+    ensemble,
+    truth,
+    ensemble_windows,
+    truth_windows,
+    bootstrap_blocks,
+    with_bootstrap=True,
+):
+    """Pool one statistic over every window into ``(members, truth, within_std)``.
+
+    Windows with no ensemble frames or no truth frames are dropped rather than
+    contributing an empty reduction; a run where that leaves nothing returns
+    ``(None, None, None)`` and the caller nulls the block.
+
+    ``with_bootstrap=False`` skips the (M x N) bootstrap entirely -- used for the
+    prior ensemble, whose only contribution is a CRPS reference.
+    """
+    member_parts, truth_parts, within_parts = [], [], []
+    for indices, window_slice in zip(ensemble_windows, truth_windows):
+        if np.asarray(indices).size == 0:
+            continue
+        ensemble_window = ensemble[:, :, np.asarray(indices), :]
+        truth_window = truth[:, window_slice, :]
+        if truth_window.shape[1] == 0:
+            continue
+        member_series, truth_series, reducer = _statistic_window_series(
+            name, ensemble_window, truth_window
+        )
+        member_parts.append(np.asarray(reducer(member_series, axis=-1), dtype=float))
+        truth_parts.append(np.asarray(reducer(truth_series, axis=-1), dtype=float))
+        within_parts.append(
+            _within_member_std(member_series, reducer, bootstrap_blocks)
+            if with_bootstrap
+            else np.full(member_parts[-1].shape, np.nan)
+        )
+    if not member_parts:
+        return None, None, None
+    return (
+        np.concatenate(member_parts, axis=1),
+        np.concatenate(truth_parts, axis=0),
+        np.concatenate(within_parts, axis=1),
+    )
+
+
+def _column_medians(values):
+    """Per-column median over the finite entries, ``nan`` for an all-nan column.
+
+    ``np.nanmedian`` would do this but warns on an all-nan slice, and an all-nan
+    column is the *expected* smoke-scale outcome here, not an anomaly.
+    """
+    out = np.full(values.shape[1], np.nan)
+    for column in range(values.shape[1]):
+        finite = values[:, column][np.isfinite(values[:, column])]
+        if finite.size:
+            out[column] = np.median(finite)
+    return out
+
+
+def _identifiability_block(members, within_std, name, set_name):
+    """Across-member spread measured in units of within-member sampling noise.
+
+    ``ratio = std_across_members / median_over_members(within-member bootstrap
+    std)``, per pooled element, then reduced over elements by median and min.
+    A ratio near 1 means the members differ by no more than one member's own
+    finite-window sampling noise, so the CRPS / coverage / PIT sitting next to
+    it are scoring the averaging window rather than the assimilation.
+
+    Reported, never enforced: ``sampling_noise_dominated`` is a flag on the
+    median ratio and the numbers are emitted whether or not it fires.
+
+    Degrades to all-``null`` (the flag included, since an unknown ratio is not
+    a "not dominated") when the bootstrap could not run -- the smoke
+    shape puts 3 frames in a window against 20 requested blocks, which is below
+    ``block_bootstrap_std``'s resolution and yields ``nan`` everywhere.
+    """
+    block = {
+        "ratio_median": None,
+        "ratio_min": None,
+        "sampling_noise_dominated": None,
+        "threshold": IDENTIFIABILITY_MIN_RATIO,
+    }
+    if within_std is None or not np.any(np.isfinite(within_std)):
+        logger.info(
+            "Sensor set %r, statistic %r: the within-member block bootstrap "
+            "returned no finite sampling std (too few frames per window for the "
+            "requested block count); reporting identifiability as null and "
+            "leaving the calibration numbers as they are",
+            set_name,
+            name,
+        )
+        return block
+
+    across = np.asarray(members, dtype=float).std(axis=0, ddof=1)
+    within = _column_medians(np.asarray(within_std, dtype=float))
+    ratio = np.full(across.shape, np.nan)
+    usable = np.isfinite(across) & np.isfinite(within) & (within > 0)
+    np.divide(across, within, out=ratio, where=usable)
+    finite = ratio[np.isfinite(ratio)]
+    if finite.size == 0:
+        return block
+
+    median = float(np.median(finite))
+    block["ratio_median"] = _finite_or_none(median)
+    block["ratio_min"] = _finite_or_none(finite.min())
+    block["sampling_noise_dominated"] = bool(median < IDENTIFIABILITY_MIN_RATIO)
+    return block
+
+
+def _statistic_block(
+    name, members, truth, within_std, prior_members, prior_truth, set_name
+):
+    """Score one pooled statistic: CRPS, z-score, coverage, PIT, identifiability.
+
+    The pooled elements are the columns of ``members``; the ensemble axis is
+    axis 0, which is the convention every ``ensemble_scores`` function takes.
+    Elements whose truth or members are non-finite are dropped once, here, so
+    each score sees the same sample.
+    """
+    if members is None:
+        reason = (
+            "no assimilation window has both ensemble and truth frames, so the "
+            f"{name} statistic has nothing to pool"
+        )
+        logger.info("Sensor set %r: %s; emitting nulls", set_name, reason)
+        return _null_statistic_block(reason)
+
+    valid = np.isfinite(truth) & np.all(np.isfinite(members), axis=0)
+    if not np.any(valid):
+        reason = (
+            f"every pooled {name} element is non-finite (a window with a single "
+            "frame has no ddof=1 variance, and a masked sensor has no series)"
+        )
+        logger.info("Sensor set %r: %s; emitting nulls", set_name, reason)
+        return _null_statistic_block(reason)
+
+    scored = np.asarray(members, dtype=float)[:, valid]
+    scored_truth = np.asarray(truth, dtype=float)[valid]
+    n_members = int(scored.shape[0])
+
+    crps_mean = _finite_mean(fair_crps(scored, scored_truth))
+    skill = None
+    if prior_members is not None:
+        if prior_members.shape == members.shape:
+            skill = crpss(
+                crps_mean,
+                _finite_mean(
+                    fair_crps(
+                        np.asarray(prior_members, dtype=float)[:, valid],
+                        np.asarray(prior_truth, dtype=float)[valid],
+                    )
+                ),
+            )
+        else:
+            logger.info(
+                "Sensor set %r: the prior %s pool is %s against the posterior's "
+                "%s; reporting crpss_vs_prior as null",
+                set_name,
+                name,
+                prior_members.shape,
+                members.shape,
+            )
+
+    z_block = _zscore_block(scored, scored_truth)
+    ranks = pit_rank(scored, scored_truth, rng=PIT_TIE_SEED)
+    counts = rank_histogram(ranks, n_members, n_bins=PIT_BINS)
+
+    return {
+        "crps": _finite_or_none(crps_mean),
+        "crpss_vs_prior": None if skill is None else _finite_or_none(skill),
+        "zscore": (
+            dict.fromkeys(STAT_ZSCORE_KEYS)
+            if z_block is None
+            else {key: z_block[key] for key in STAT_ZSCORE_KEYS}
+        ),
+        "coverage": _coverage_block(scored, scored_truth)
+        or dict.fromkeys(_COVERAGE_KEYS),
+        "pit_counts": [int(c) for c in counts],
+        "pit": {
+            "n_bins": PIT_BINS,
+            "n_samples": int(valid.sum()),
+            # Ranks take M + 1 values, which divides evenly into PIT_BINS only
+            # for particular M, so a calibrated ensemble is flat in
+            # `count / ranks_per_bin`, NOT in `count`. Same reference the WP1.1
+            # bundle carries, for the same reason.
+            "ranks_per_bin": [
+                int(w) for w in rank_histogram_weights(n_members, n_bins=PIT_BINS)
+            ],
+            "tie_seed": PIT_TIE_SEED,
+        },
+        "identifiability": _identifiability_block(
+            scored,
+            None if within_std is None else np.asarray(within_std)[:, valid],
+            name,
+            set_name,
+        ),
+        "n_samples": int(valid.sum()),
+        "reason": None,
+    }
+
+
+def _wasserstein_block(ensemble_da, truth_da, set_name):
+    """Distribution distance between the modelled and observed ``|U|``, per sensor.
+
+    The layer the window statistics cannot provide: a window mean can match
+    while the *distribution* of the probe signal is wrong, and it is the
+    distribution the plan's probe figures compare. Scored on ``|U|`` -- positive
+    and directly the probe quantity -- over the **whole run**, not per window,
+    because a window holds too few frames for a distance between empirical
+    distributions to mean anything.
+
+    Four numbers per sensor, then reduced over sensors by median and max:
+
+      * ``w1_over_sigma_pooled`` -- every member's samples pooled into one
+        empirical distribution against the truth's. This is the ensemble's
+        *predictive* distribution.
+      * ``w1_over_sigma_member_mean`` -- each member scored on its own, then
+        averaged: the typical single-member error.
+
+    The pair is emitted because of the inequality between them, which holds
+    always and in one direction: ``W1`` is convex in its first argument, so
+    ``W1(pooled, truth) <= mean_m W1(member_m, truth)``. They therefore
+    **coincide** when every member is wrong the same way (a shared bias, which
+    pooling cannot cancel) and **separate** when the members straddle the truth
+    -- spread that brackets the observed distribution. A single number cannot
+    tell those apart: the pooled distance alone credits a wide ensemble for
+    covering the truth, the member mean alone refuses to.
+      * ``self_floor`` -- what a *perfect* model scores at this sample count and
+        autocorrelation (``wasserstein_self_floor``: contiguous halves of the
+        truth against each other). Without it the raw distance is unreadable.
+      * ``w1_over_floor`` -- the pooled distance in units of that floor. ~1 is
+        indistinguishable from perfect at this sample size.
+
+    ``reason`` is non-null whenever any of the four reduces to ``null``, naming
+    which -- a constant truth series has no ``sigma`` to divide by and no floor,
+    and that is a property of the sensor, not a bug to hide.
+    """
+    ensemble_magnitude = np.asarray(
+        sensor_magnitude(
+            ensemble_da.transpose("component", "ensemble", "time", "sensor")
+        ).values,
+        dtype=float,
+    )  # (ensemble, time, sensor)
+    truth_magnitude = np.asarray(
+        sensor_magnitude(truth_da.transpose("component", "time", "sensor")).values,
+        dtype=float,
+    )  # (time, sensor)
+
+    n_members, _, n_sensors = ensemble_magnitude.shape
+    if n_sensors == 0 or truth_magnitude.shape[0] == 0:
+        reason = "the sensor set has no sensor or no truth frame"
+        logger.info("Sensor set %r: %s; emitting Wasserstein nulls", set_name, reason)
+        return _null_wasserstein_block(reason)
+
+    pooled = np.full(n_sensors, np.nan)
+    member_mean = np.full(n_sensors, np.nan)
+    floor = np.full(n_sensors, np.nan)
+    over_floor = np.full(n_sensors, np.nan)
+    for sensor in range(n_sensors):
+        truth_samples = truth_magnitude[:, sensor]
+        pooled[sensor] = wasserstein_over_sigma(
+            ensemble_magnitude[:, :, sensor].ravel(), truth_samples
+        )
+        per_member = np.array(
+            [
+                wasserstein_over_sigma(ensemble_magnitude[m, :, sensor], truth_samples)
+                for m in range(n_members)
+            ]
+        )
+        member_mean[sensor] = _finite_mean(per_member)
+        floor[sensor] = wasserstein_self_floor(truth_samples)
+        over_floor[sensor] = wasserstein_over_floor(pooled[sensor], floor[sensor])
+
+    block = {
+        "w1_over_sigma_pooled": _median_max(pooled),
+        "w1_over_sigma_member_mean": _median_max(member_mean),
+        "self_floor": _median_max(floor),
+        "w1_over_floor": _median_max(over_floor),
+    }
+    missing = sorted(key for key, value in block.items() if value is None)
+    reason = None
+    if missing:
+        reason = (
+            f"no sensor has a finite {', '.join(missing)} (a truth series with "
+            "fewer than two finite samples or zero spread has no scale to "
+            "normalize by)"
+        )
+        logger.info(
+            "Sensor set %r: %s; reporting those entries as null and keeping the rest",
+            set_name,
+            reason,
+        )
+    block["reason"] = reason
+    return block
+
+
+def sensor_statistic_scores(
+    truth_series,
+    ensemble_series,
+    *,
+    num_windows,
+    n_per_window,
+    sim_time,
+    bootstrap_blocks=DEFAULT_BOOTSTRAP_BLOCKS,
+    prior_series=None,
+):
+    """Score the ensemble in STATISTICS space rather than pointwise (WP1.2).
+
+    The pointwise sensor metrics (:func:`vector_sensor_metrics`) ask whether the
+    ensemble reproduces the truth *at each instant*, which a turbulent flow
+    cannot be expected to do: two realizations of the same statistics decorrelate
+    within a few eddy turnover times and the pointwise score then measures phase,
+    not physics. This function reduces each assimilation window to statistics
+    that ARE reproducible -- window mean, window variance, TKE, mean ``|U|`` --
+    scores those against the truth's own window statistics, and adds a
+    distribution-distance layer on the raw ``|U|`` samples.
+
+    Windowing is the trap. The two series are sliced by **different rules**,
+    because they are produced by different code paths:
+
+      * the ensemble by **time value** -- ``ensemble_sensor_series`` rebases
+        window ``w`` onto ``[w*sim_time, (w+1)*sim_time)``;
+      * the truth by **index** -- ``truth_sensor_series`` concatenates
+        ``slice(w*n_per_window, (w+1)*n_per_window)`` of a globally-timed series.
+
+    They generally differ in both length and cadence, so nothing here aligns
+    them pointwise; each is sliced by its own rule and reduced independently,
+    which is exactly what makes a statistics-space comparison possible in the
+    first place.
+
+    Does no file IO: the caller passes the series it already extracted. That
+    keeps WP1.3's streaming refactor of the extraction from touching this
+    function at all.
+
+    Degradation follows the section's rule -- every key present with a ``null``
+    value plus a non-null ``reason``, one ``logger.info``, never a warning. The
+    paths that fire in practice are ``M < MIN_MEMBERS_CALIBRATION`` (the
+    two-member smoke shape, which nulls the whole set) and the identifiability
+    bootstrap at a window length below its block resolution (3 frames against
+    20 blocks), which nulls only that sub-block.
+
+    Args:
+        truth_series: ``{set_name: DataArray(component, time, sensor)}`` from
+            :func:`truth_sensor_series`.
+        ensemble_series: ``{set_name: DataArray(component, ensemble, time,
+            sensor)}`` from :func:`ensemble_sensor_series`.
+        num_windows: Assimilation window count.
+        n_per_window: Truth frames per window -- the truth's slicing rule.
+        sim_time: Seconds per window -- the ensemble's slicing rule.
+        bootstrap_blocks: Block count for the identifiability bootstrap
+            (:func:`turbulence_stats.block_bootstrap_std`).
+        prior_series: The same mapping for the prior ensemble, or ``None``.
+            ``None`` is the common case (``run.save_prior_state`` defaults to
+            false), and it makes ``crpss_vs_prior`` ``null`` -- not an error.
+
+    Returns:
+        ``{set_name: {n_members, n_windows, n_sensors, window_mean,
+        window_variance, tke, velmag_mean, wasserstein}}``, ready to assign to
+        ``summary["sensor_statistics"]``.
+    """
+    scores = {}
+    windows = 0 if num_windows is None else int(num_windows)
+    frames_per_window = 0 if n_per_window is None else int(n_per_window)
+
+    for set_name, ensemble_da in ensemble_series.items():
+        if set_name not in truth_series:
+            logger.info(
+                "Sensor set %r has an ensemble series but no truth series; "
+                "skipping it in the WP1.2 statistics",
+                set_name,
+            )
+            continue
+        ensemble_da = ensemble_da.transpose("component", "ensemble", "time", "sensor")
+        truth_da = truth_series[set_name].transpose("component", "time", "sensor")
+        n_members = int(ensemble_da.sizes["ensemble"])
+        entry = {
+            "n_members": n_members,
+            "n_windows": windows,
+            "n_sensors": int(ensemble_da.sizes["sensor"]),
+        }
+
+        # Same floor, and the same reasoning, as the WP1.1 parameter bundle: a
+        # ddof=1 spread with one degree of freedom, an order-statistic band that
+        # cannot reach 90%, and a 10-bin PIT over M + 1 = 3 rank values are all
+        # measuring the ensemble SIZE. Nulling the Wasserstein layer alongside
+        # them is the contract's call rather than a mathematical necessity --
+        # W1 is defined at M = 2 -- and is noted as such.
+        if n_members < MIN_MEMBERS_CALIBRATION or windows < 1:
+            if n_members < MIN_MEMBERS_CALIBRATION:
+                reason = (
+                    f"{n_members} members is below the "
+                    f"{MIN_MEMBERS_CALIBRATION} needed for a spread, an "
+                    f"order-statistic band and a {PIT_BINS}-bin PIT to mean "
+                    "anything"
+                )
+            else:
+                reason = f"num_windows = {num_windows!r} is not a window count"
+            logger.info(
+                "Sensor set %r: %s; emitting nulls for every WP1.2 statistic "
+                "and for the Wasserstein layer",
+                set_name,
+                reason,
+            )
+            for name in SENSOR_STATISTIC_NAMES:
+                entry[name] = _null_statistic_block(reason)
+            entry["wasserstein"] = _null_wasserstein_block(reason)
+            scores[set_name] = entry
+            continue
+
+        ensemble = np.asarray(ensemble_da.values, dtype=float)
+        truth = np.asarray(truth_da.values, dtype=float)
+        ensemble_windows = _ensemble_window_indices(
+            ensemble_da, windows, sim_time, set_name
+        )
+        truth_windows = [
+            slice(w * frames_per_window, (w + 1) * frames_per_window)
+            for w in range(windows)
+        ]
+
+        prior_da = None if prior_series is None else prior_series.get(set_name)
+        prior, prior_windows = None, None
+        if prior_da is not None:
+            prior_da = prior_da.transpose("component", "ensemble", "time", "sensor")
+            prior = np.asarray(prior_da.values, dtype=float)
+            prior_windows = _ensemble_window_indices(
+                prior_da, windows, sim_time, set_name
+            )
+
+        for name in SENSOR_STATISTIC_NAMES:
+            members, statistic_truth, within_std = _pooled_statistic(
+                name,
+                ensemble,
+                truth,
+                ensemble_windows,
+                truth_windows,
+                bootstrap_blocks,
+            )
+            prior_members, prior_truth = None, None
+            if prior is not None:
+                prior_members, prior_truth, _ = _pooled_statistic(
+                    name,
+                    prior,
+                    truth,
+                    prior_windows,
+                    truth_windows,
+                    bootstrap_blocks,
+                    with_bootstrap=False,
+                )
+            entry[name] = _statistic_block(
+                name,
+                members,
+                statistic_truth,
+                within_std,
+                prior_members,
+                prior_truth,
+                set_name,
+            )
+
+        entry["wasserstein"] = _wasserstein_block(ensemble_da, truth_da, set_name)
+        scores[set_name] = entry
+
+    return scores

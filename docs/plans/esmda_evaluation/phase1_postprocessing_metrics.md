@@ -640,3 +640,95 @@ changed, only what each number is reported next to.
   loop — a factor `n_time`, not `n_components`, on that term. Corrected, with
   the peak stated as `max(E·T·S·C, E²·S·C)` so a future field-shaped caller can
   see it must chunk.
+
+### WP1.2
+
+- **WP1.2 — `block_bootstrap_std` landed in `turbulence_stats.py` under WP1.2,
+  not WP1.3.** The module was a skeleton whose docstring already advertised that
+  exact name, and WP1.2's identifiability guard (step 4) is the first consumer:
+  the within-member sampling std of a window statistic has to come from a
+  *moving-block* bootstrap, because a window's frames are serially correlated and
+  the iid `std/sqrt(n)` understates it — which would inflate the identifiability
+  ratio in the flattering direction, i.e. exactly the direction the guard exists
+  to catch. Only that one function shipped (plus `__all__`); the rest of the
+  module stays WP1.3's. It returns `nan` rather than raising when `n < 4` or the
+  block length collapses to `L < 2`, which **fires at smoke scale** (20 requested
+  blocks against 3 frames per window) and is the reason `identifiability` has its
+  own null path independent of the block around it.
+
+- **WP1.2 — `sensor_statistic_scores` takes `num_windows` / `n_per_window` /
+  `sim_time`, not the plan's `window_edges` / `n_members` (departure).** The two
+  series are windowed by *different rules* and neither is recoverable from a
+  single edge list: `ensemble_sensor_series` rebases window `w` onto
+  `[w·sim_time, (w+1)·sim_time)`, so the ensemble is sliced by **time value**,
+  while `truth_sensor_series` concatenates `slice(w·n_per_window,
+  (w+1)·n_per_window)` of a globally-timed series, so the truth is sliced by
+  **frame index**. They routinely differ in both length and cadence (the truth is
+  saved on its own schedule), so a shared edge list would either mis-slice one
+  side or force a pointwise alignment the statistics-space comparison exists to
+  avoid. `n_members` is dropped because it is `ensemble_da.sizes["ensemble"]` —
+  passing it in would create a second source of truth for a number already on the
+  data. The ensemble falls back to contiguous equal blocks (with one
+  `logger.info`) when the series carries no `time` coordinate or `sim_time` is
+  not a positive duration.
+
+- **WP1.2 — the Wasserstein layer scores `|U|`, pooled over the whole run
+  (resolution of a plan ambiguity).** The plan does not say which quantity the
+  distribution distance is taken over. `|U|` is used: it is positive (so a
+  distance normalized by its own `sigma` is readable), it is the quantity the
+  plan's S2/S3 probe figures compare, and a per-component distance would need
+  three times the numbers to say the same thing. It is taken over the **whole
+  run** rather than per window — a window holds too few frames for a distance
+  between empirical distributions to mean anything. Two reductions are emitted,
+  not one: `w1_over_sigma_pooled` (all members pooled into one predictive
+  distribution) and `w1_over_sigma_member_mean` (each member scored alone, then
+  averaged). `W1` is convex in its first argument, so pooled ≤ member-mean
+  always; they coincide under a shared bias and separate when the ensemble
+  spread brackets the truth, which is a distinction neither number makes alone.
+
+- **WP1.2 — `velmag_mean` added to the plan's three statistics (addition).** The
+  plan lists window mean, window variance and TKE. `⟨|U|⟩ ≥ |⟨U⟩|`, with the gap
+  being exactly the fluctuation a directionally-wandering flow carries, so a run
+  can match `window_mean` component by component and still get the scalar wind
+  speed wrong — and the scalar speed is what the sensor figures and the case
+  references actually report. It is also the statistic whose raw samples the
+  Wasserstein layer scores, so emitting its mean keeps the two layers reading the
+  same quantity.
+
+- **WP1.2 — the statistics-space z-score block is a strict subset of WP1.1's
+  (departure).** Only `mean` / `std` / `max_abs` / `max_abs_calibrated_median`
+  are emitted; `exceedance` / `overconfident` / `overconfident_rule` are not. The
+  measured false-alarm table behind that multiplier rule (round-2 entry above)
+  was calibrated on pooled **independent** knots, and nothing pooled here is
+  independent — one window's sensors see a single realization of a single flow,
+  so the `component × sensor × window` elements are strongly cross-correlated and
+  the rule's operating point does not transfer. The raw moments and the
+  size-aware `max_abs` reference survive that correlation (they stay unbiased;
+  only their sampling error inflates), so those are what ships.
+
+- **WP1.2 — `crpss_vs_prior` is `null` on nearly every run, by configuration.**
+  It needs the prior ensemble rolled out at the same sensors, i.e.
+  `windows/window_{w}_prior_state.nc` for *every* window, and
+  `conf/run_esmda.yaml` ships `run.save_prior_state: false`.
+  `compute_esmda_metrics._prior_sensor_series` therefore checks all paths exist
+  before calling `ensemble_sensor_series` (which opens each path unconditionally
+  and would raise `FileNotFoundError` on a partial set) and emits one
+  `logger.info`, never a warning — absent is the default, not a fault. `null`
+  there means "not saved", never "no skill", and the docs say so.
+
+- **WP1.2 — the integration criterion is met on the same synthetic run dir as
+  WP1.1, extended past the `skip_viz` early return.** WP1.2 consumes the truth,
+  so unlike the WP1.1 bundle it cannot be driven by parameter artifacts alone.
+  Rather than add a solver-backed test, `tests/test_esmda_metrics_wiring.py`
+  fabricates the remaining NetCDF artifacts by hand (`posterior_state_mean.nc`,
+  a truth state, per-window ensemble state files, an obs config with both
+  assimilation and `validation_*_points`) on a `pylbm` identity grid — the only
+  solver name a hand-written fixture can use, since udales/palm need staggered
+  coordinates and `neural_surrogate` is rejected by `ObservationOperator`. Two
+  fixture properties are load-bearing: the truth and ensemble are saved at
+  **different cadences** (6 vs 8 frames per window), which is the case the two
+  slicing rules exist for, and the window files carry **window-local** time
+  coordinates, so the rebasing is exercised rather than assumed. The run also
+  sets `run.metrics.bootstrap_blocks: 4` against 8 frames per window, so the
+  identifiability bootstrap resolves (`L = 2`) instead of taking its
+  smoke-scale null path.

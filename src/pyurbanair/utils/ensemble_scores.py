@@ -50,6 +50,12 @@ _DEFAULT_TIE_SEED = 0
 # about but is nearly unpopulated at that sample size.
 DEFAULT_ZSCORE_THRESHOLDS: tuple[float, ...] = (2.0, 3.0)
 
+# Division guard for :func:`wasserstein_over_floor`. A floor of exactly zero
+# needs two bit-identical halves, which a nonzero-spread series can produce
+# (a perfectly periodic probe signal); clamping keeps the ratio a large finite
+# number instead of an ``inf`` that ``write_yaml`` cannot emit.
+_WASSERSTEIN_FLOOR_EPS = 1e-12
+
 __all__ = [
     "DEFAULT_ZSCORE_THRESHOLDS",
     "coverage",
@@ -64,6 +70,9 @@ __all__ = [
     "rank_histogram",
     "rank_histogram_weights",
     "spread_skill_ratio",
+    "wasserstein_over_floor",
+    "wasserstein_over_sigma",
+    "wasserstein_self_floor",
     "zscore",
     "zscore_exceedance",
     "zscore_nominal_exceedance",
@@ -695,3 +704,210 @@ def spread_skill_ratio(
     if den <= 0 or not np.isfinite(den):
         return float("nan")
     return float(np.sqrt((n_members + 1) / n_members)) * num / den
+
+
+# ---------------------------------------------------------------------------
+# Distributional distance
+# ---------------------------------------------------------------------------
+
+
+def _finite_samples(values: np.ndarray) -> np.ndarray:
+    """Flattened finite entries, **in the order they were given**.
+
+    Order is load-bearing for :func:`wasserstein_self_floor`, which splits the
+    result in time; the Wasserstein distance itself is order-blind.
+    """
+    flat = np.asarray(values, dtype=float).ravel()
+    finite: np.ndarray = flat[np.isfinite(flat)]
+    return finite
+
+
+def _sigma_or_nan(samples: np.ndarray) -> float:
+    """``std(ddof=1)``, or ``nan`` when it is not meaningfully positive.
+
+    The test is relative, not ``sigma > 0``. A sensor series that is physically
+    constant is rarely *bitwise* constant by the time it reaches here: the
+    magnitude ``sqrt(sum_c u_c**2)`` of a constant unit vector comes back with a
+    spread of ~4.5e-16, and dividing by that turns a zero distance into ~1e15 --
+    finite, so it survives the ``_finite_or_none`` filter and lands in
+    ``run_summary.yaml`` as a headline number. Anything below ``1e-12`` times
+    the series' own magnitude is float64 rounding, not spread, so it is
+    ``nan`` -- undefined, which is the truth.
+    """
+    if samples.size < 2:
+        return float("nan")
+    sigma = float(np.std(samples, ddof=1))
+    scale = float(np.max(np.abs(samples)))
+    if not np.isfinite(sigma) or sigma <= 0.0:
+        return float("nan")
+    if sigma < 1e-12 * scale:
+        return float("nan")
+    return sigma
+
+
+def wasserstein_over_sigma(samples: np.ndarray, truth_samples: np.ndarray) -> float:
+    """1-Wasserstein distance between two sample sets, in truth sigmas.
+
+    ``W1(samples, truth_samples) / std(truth_samples, ddof=1)``. ``W1`` is the
+    L1 area between the two empirical CDFs, so it is in the units of the
+    quantity and responds to the *whole* distribution -- a shifted mean, a
+    widened tail and a changed shape all register, where a moment-by-moment
+    comparison sees only what it was asked for. Dividing by the truth spread
+    makes it dimensionless and comparable across sensors and components.
+
+    Neither series has to be sampled at the same cadence or length as the
+    other, and neither is aligned in time: this compares *distributions*, which
+    is the whole reason it is used on probe series whose ensemble and truth
+    time axes do not line up.
+
+    **A distance of zero is not the calibrated value.** Two independent draws
+    from the *same* distribution sit a finite distance apart at finite sample
+    size, and that offset is large at the window lengths this stack has.
+    Measured on white noise, 400 trials, median:
+
+    ==============================  ======  =======
+    comparison                      n = 36  n = 400
+    ==============================  ======  =======
+    same distribution, independent  0.269   0.085
+    :func:`wasserstein_self_floor`  0.356   0.117
+    mean shifted by 1 sigma         0.994   1.002
+    sigma doubled                   0.888   0.804
+    ==============================  ======  =======
+
+    So at a 36-frame window a raw 0.3 is *indistinguishable from perfect*.
+    Report it against :func:`wasserstein_self_floor` via
+    :func:`wasserstein_over_floor`, never against 0.
+
+    Note for callers pooling an ensemble: ``W1`` is convex in its first
+    argument, so pooling all members into one sample set can only *lower* the
+    distance relative to scoring members separately and averaging
+    (``W1(mean of F_m, G) <= mean_m W1(F_m, G)``), with equality only when the
+    members agree. The two numbers answer different questions -- pooled asks
+    whether the ensemble *as a distribution* matches, per-member whether a
+    typical member does -- and the gap between them is the ensemble spread.
+
+    Args:
+        samples: Any-shaped sample set (flattened; non-finite entries dropped).
+        truth_samples: The reference sample set, likewise flattened.
+
+    Returns:
+        The normalized distance (>= 0, lower is better), or ``nan`` when either
+        set has fewer than two finite samples or the truth spread is not
+        meaningfully positive.
+    """
+    sample = _finite_samples(samples)
+    truth = _finite_samples(truth_samples)
+    if sample.size < 2 or truth.size < 2:
+        return float("nan")
+    sigma = _sigma_or_nan(truth)
+    if not np.isfinite(sigma):
+        return float("nan")
+    return float(stats.wasserstein_distance(sample, truth)) / sigma
+
+
+def wasserstein_self_floor(truth_samples: np.ndarray) -> float:
+    """The distance a *perfect* model scores against this series.
+
+    ``W1(first half, second half) / std(truth, ddof=1)`` -- the truth compared
+    against itself, which is the finite-sample, finite-correlation-time offset
+    that :func:`wasserstein_over_sigma` cannot go below no matter how good the
+    model is.
+
+    **The split is contiguous (halves in time order), not random.** A random
+    split interleaves the two halves through the same slow excursions, so each
+    half inherits the series' full range and the two empirical CDFs agree far
+    better than two genuinely independent stretches of the flow would. It
+    reports the white-noise floor whatever the series actually does. Median
+    over 400 AR(1) series of unit marginal variance:
+
+    ======  ======  ==========  ======  =====
+    n       phi     contiguous  random  ratio
+    ======  ======  ==========  ======  =====
+    36      0.0     0.382       0.368   1.04
+    36      0.7     0.588       0.356   1.65
+    36      0.95    1.024       0.346   2.96
+    400     0.7     0.199       0.114   1.75
+    400     0.95    0.506       0.110   4.61
+    ======  ======  ==========  ======  =====
+
+    The random column is flat in ``phi`` -- it does not see the correlation at
+    all -- so on a strongly correlated probe it understates the floor by 3-5x,
+    and a perfectly good model then reads as 3-5x worse than the floor.
+
+    Two known conservatisms, both in the safe direction (they inflate the floor,
+    i.e. they make a bad model look acceptable rather than the reverse): the
+    halves have ``n/2`` samples where the compared sample sets have ``n``, worth
+    a factor ~``sqrt(2)`` (0.356 vs 0.269 on white noise at ``n = 36``), and a
+    single split is one draw of a noisy quantity rather than an expectation.
+
+    An odd sample count drops the **middle** sample so the halves are equal
+    length; equal halves keep the ``n``-dependence of the distance the same on
+    both sides.
+
+    Args:
+        truth_samples: Any-shaped truth series, flattened **in time order**
+            (non-finite entries are dropped first, then the split is taken).
+
+    Returns:
+        The normalized self-distance (>= 0), or ``nan`` when fewer than four
+        finite samples remain (each half needs two to be a distribution) or the
+        spread is not meaningfully positive.
+    """
+    truth = _finite_samples(truth_samples)
+    n_samples = truth.size
+    if n_samples < 4:
+        return float("nan")
+    sigma = _sigma_or_nan(truth)
+    if not np.isfinite(sigma):
+        return float("nan")
+    half = n_samples // 2
+    # ``n - half`` skips the middle sample when the count is odd.
+    first = truth[:half]
+    second = truth[n_samples - half :]
+    return float(stats.wasserstein_distance(first, second)) / sigma
+
+
+def wasserstein_over_floor(w1: float, floor: float) -> float:
+    """The headline ratio: ``w1 / max(floor, tiny)``, calibrated at 1.
+
+    A distance read against the only reference that means anything at these
+    window lengths (see the table in :func:`wasserstein_over_sigma`): ~1 says
+    the model's distribution is as close to the truth as the truth is to
+    itself, and only a ratio comfortably above 1 is a real distributional
+    mismatch rather than sampling noise.
+
+    Both arguments must come from the *same* normalization --
+    :func:`wasserstein_over_sigma` and :func:`wasserstein_self_floor` divide by
+    the same truth sigma, so it cancels and the ratio is a pure
+    distance-over-distance. Passing an un-normalized ``w1`` silently rescales
+    the answer by that sigma.
+
+    A floor of exactly zero needs two bit-identical halves, which a
+    nonzero-spread series can produce (an exactly periodic probe signal whose
+    period divides the window). The denominator is clamped rather than nulled:
+    the honest reading of that case is "the perfect-model distance is
+    unresolvable here, so the ratio is enormous", and a large finite number
+    says that where an ``inf`` would be dropped by the YAML writer.
+
+    Args:
+        w1: Normalized distance, typically from :func:`wasserstein_over_sigma`.
+        floor: Normalized self-distance from :func:`wasserstein_self_floor`.
+
+    Returns:
+        The ratio, or ``nan`` when either input is non-finite (which is how
+        both producers report an undefined distance).
+
+    Raises:
+        ValueError: If either argument is negative -- ``W1`` is a distance, so
+            a negative one is a caller bug, not a degenerate sample.
+    """
+    numerator = float(w1)
+    denominator = float(floor)
+    if numerator < 0.0 or denominator < 0.0:
+        raise ValueError(
+            "w1 and floor are distances and must be non-negative; got "
+            f"w1={numerator}, floor={denominator}"
+        )
+    if not np.isfinite(numerator) or not np.isfinite(denominator):
+        return float("nan")
+    return numerator / max(denominator, _WASSERSTEIN_FLOOR_EPS)

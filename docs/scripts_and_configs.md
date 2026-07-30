@@ -603,6 +603,17 @@ Provides:
   [`ensemble_scores.py`](../src/pyurbanair/utils/ensemble_scores.py); this
   module is orchestration, and it reads every calibration *reference* from
   there rather than re-deriving it.
+- `sensor_statistic_scores(truth_series, ensemble_series, *, num_windows,
+  n_per_window, sim_time, bootstrap_blocks, prior_series=None)` — the WP1.2
+  statistics-space sensor bundle. Takes the series the caller already extracted
+  and **does no file IO**, so the extraction can be restreamed later without
+  touching the scoring. Both windowing rules are arguments because the two
+  series are sliced differently: the ensemble by *time value*
+  (`[w·sim_time, (w+1)·sim_time)`, the rebasing `ensemble_sensor_series`
+  applies), the truth by *frame index* (`slice(w·n_per_window, …)`). Sampling
+  noise comes from
+  [`turbulence_stats.block_bootstrap_std`](../src/pyurbanair/utils/turbulence_stats.py)
+  and the distances from `ensemble_scores`' Wasserstein family.
 
 ---
 
@@ -631,6 +642,11 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 - `state_metrics` — `|U|` field RMSE summary (streamed z-slice by z-slice).
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set
   (assimilation + validation).
+- `sensor_statistics` — the same sensor series scored in *statistics* space
+  rather than pointwise: per-window mean / variance / TKE / mean `|U|`, a
+  Wasserstein distribution distance, and an identifiability guard.
+  `standard` and above only, and it sits *after* the `run.skip_viz` early
+  return because it consumes the truth.
 
 Which of those layers run is gated by [`run.metrics.level`](#runmetrics-esmda-only)
 from the saved config: `basic` writes exactly the keys above, higher levels add
@@ -687,6 +703,55 @@ so otherwise). Two keys name *which* question it answers:
   window against the window-0 prior block**, i.e. what the run as a whole
   constrained. A scalar summary only (no loadings or matrices), with `reason`
   non-null when the artifact could not be split into windows.
+
+##### `standard`: statistics-space sensor scoring (WP1.2)
+
+At `level: standard` a top-level `sensor_statistics` mapping appears, keyed by
+sensor set (`assimilation`, plus `validation` when the case defines held-out
+sensors) exactly as `sensor_metrics` is. Unlike the WP1.1 parameter bundle it
+attaches *after* the `run.skip_viz` early return — it reuses the truth and
+ensemble sensor series `sensor_metrics` already extracted, so a `skip_viz` run
+has no `sensor_statistics` at all.
+
+Why it exists next to `sensor_metrics`: the pointwise scores ask whether the
+ensemble matches the truth **at each instant**, which a turbulent flow cannot be
+expected to do — two realizations of identical statistics decorrelate within a
+few turnover times, after which the pointwise number measures phase rather than
+physics. These score quantities that *are* reproducible.
+
+**Every key is `null` — not absent — when `M < 3` or the window count is not
+usable**, with a non-null `reason` on that block and a `logger.info` naming what
+was skipped. The identifiability sub-block degrades on its own (see below) while
+the calibration numbers around it stay real, so a `null` there is not a null run.
+
+Each of `window_mean`, `window_variance`, `tke` and `velmag_mean` carries the
+same key set; `<stat>` below stands for any of the four.
+
+| Key | Meaning |
+|---|---|
+| `<set>.{n_members,n_windows,n_sensors}` | Shape of what was scored. `n_windows` is the *requested* window count from `truth_access.yaml`, not the number that contributed — a window with no ensemble or no truth frames is dropped silently and only shrinks `<stat>.n_samples`. |
+| `<stat>` = `window_mean` | Per-window time-mean of each velocity component, pooled over component × sensor × window. The one statistic a biased-inflow run moves; also the one a *long* window can match while every higher moment is wrong. |
+| `<stat>` = `window_variance` | Per-window `ddof=1` time-variance of each component, pooled the same way. `null` for any window holding a single frame — one frame has no `ddof=1` variance, and at the smoke shape that is the whole run. |
+| `<stat>` = `tke` | `0.5·Σ_c var(u_c)` per sensor per window. Computed as the time-mean of the *instantaneous* `0.5·n/(n−1)·Σ_c(u_c−⟨u_c⟩)²`, which makes it exactly the tabulated `ddof=1` TKE — the Bessel factor is on the integrand so the bootstrap resamples the reported estimator, not a `ddof=0` cousin. |
+| `<stat>` = `velmag_mean` | Per-window time-mean of `\|U\|`, per sensor. Not implied by `window_mean`: `⟨\|U\|⟩ ≥ \|⟨U⟩\|`, and the gap is exactly the fluctuation a directionally-wandering flow carries. |
+| `<stat>.crps` | Fair (finite-`M` debiased) CRPS of the ensemble's statistic against the truth's, averaged over pooled elements. **In the statistic's own units** — variance and TKE are in m²/s², so the four are not comparable to each other. |
+| `<stat>.crpss_vs_prior` | Skill against the prior ensemble's same statistic. **`null` on nearly every run**: it needs `windows/window_*_prior_state.nc` for *every* window, and `conf/run_esmda.yaml` ships `run.save_prior_state: false`. `null` here means "not saved", never "no skill". |
+| `<stat>.zscore.{mean,std,max_abs}` | Pooled `(truth − mean_m)/std_m` over the pooled elements. A calibrated ensemble has `std ≈ 1`, but only in expectation — the pooled elements here are **not** independent (one window's sensors see one realization of one flow), so the sampling error on these is larger than `n_samples` suggests. |
+| `<stat>.zscore.max_abs_calibrated_median` | Where `max\|z\|` sits for a *calibrated* ensemble of this `M` over this many pooled elements. `max_abs` is unreadable without it — the max of `n` draws grows with `n`, so a bigger sensor set alone raises it. |
+| `<stat>.coverage.alpha_{50,90}` | Empirical coverage of the central order-statistic band over the pooled elements. |
+| `<stat>.coverage.nominal_alpha_{50,90}` | **What a calibrated ensemble of this `M` actually scores** — compare against this, never against 0.5/0.9. Band edges are member order statistics, so attainable levels are multiples of `1/(M+1)`. |
+| `<stat>.coverage.max_nominal_alpha` | `(M−1)/(M+1)`, the widest band this `M` offers, so a clamped `alpha_90` does not read as a failure. |
+| `<stat>.pit_counts` / `<stat>.pit` | 10-bin rank histogram plus its metadata (`n_bins`, `n_samples`, `ranks_per_bin`, `tie_seed`). **Divide by `pit.ranks_per_bin`, never by a flat `n/n_bins`** — ranks take `M+1` values, which rarely divides into 10, so a calibrated ensemble shows a fixed comb against a flat reference. `tie_seed` is emitted so the tie-broken counts are reproducible. |
+| `<stat>.identifiability.{ratio_median,ratio_min}` | Across-member spread ÷ median within-member block-bootstrap sampling std, per pooled element, reduced by median and min. **This is the number that says whether the calibration keys above mean anything**: at a ratio near 1 the members differ by no more than one member's own finite-window sampling noise, so CRPS/coverage/PIT are scoring the averaging window rather than the assimilation. |
+| `<stat>.identifiability.sampling_noise_dominated` | `ratio_median < threshold`. A screen on *how to read the block*, never a gate — the numbers are reported either way. `null` (not `false`) when the ratio is unknown. |
+| `<stat>.identifiability.threshold` | `IDENTIFIABILITY_MIN_RATIO = 3.0`; at `r` the within-member sampling variance is `1/r²` of the across-member variance, so 3 is where sampling noise stops contributing more than ~11% of the scored spread. A constant, so it survives the null path. |
+| `<stat>.n_samples` | Pooled elements that actually scored (non-finite truth or members dropped once, before every score, so all of them see the same sample). **Not** an effective sample size: these elements are correlated. |
+| `<stat>.reason` | Non-null exactly when the statistic's numbers are null, naming which degradation fired. |
+| `wasserstein.w1_over_sigma_pooled` | `{median, max}` over sensors of `W1(all members' \|U\| samples pooled, truth \|U\|)/σ_truth`, over the **whole run** — a window holds too few frames for a distance between empirical distributions to mean anything. This is the ensemble's *predictive* distribution. |
+| `wasserstein.w1_over_sigma_member_mean` | The same distance with each member scored alone, then averaged. Read it **with** the pooled number, never instead of it: `W1` is convex in its first argument, so pooled ≤ member-mean always. They coincide under a shared bias (pooling cannot cancel it) and separate when the spread brackets the truth. |
+| `wasserstein.self_floor` | `W1(first half, second half of the truth)/σ_truth` — what a *perfect* model scores at this sample count and autocorrelation. Halves are contiguous, not random, so each keeps its serial correlation; the raw distance is unreadable without this. |
+| `wasserstein.w1_over_floor` | The pooled distance in units of that floor. **~1 is indistinguishable from perfect at this sample size** — this is the headline ratio, not `w1_over_sigma_pooled`. |
+| `wasserstein.reason` | Non-null when any of the four reduced to `null`, naming which. A constant truth series has no `σ` and no floor; that is a property of the sensor, not a bug. |
 
 #### [`make_esmda_figures.py`](../scripts/esmda/make_esmda_figures.py)
 **Plain argparse CLI** — usage: `python scripts/esmda/make_esmda_figures.py --run-dir <dir>`
