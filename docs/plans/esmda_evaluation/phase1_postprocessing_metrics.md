@@ -732,3 +732,224 @@ changed, only what each number is reported next to.
   sets `run.metrics.bootstrap_blocks: 4` against 8 frames per window, so the
   identifiability bootstrap resolves (`L = 2`) instead of taking its
   smoke-scale null path.
+
+#### Review round 1
+
+The WP1.2 entries above stand except where a bullet below supersedes them (the
+Wasserstein layer's pooling axis, and `crpss_vs_prior`'s window alignment). The
+common thread across the two substantive findings is the same one WP1.1's round 2
+had, pointed the other way: **every number in this layer is a comparison against
+a reference, and two of those references were being computed off a different
+sample than the number they normalize** — a whole-run distance against a
+half-window floor, and a posterior pool against a prior pool built from a
+different window subset. Both read as *flattering* results (a deflated
+`w1_over_floor`, a spurious non-zero `crpss_vs_prior`), which is why neither
+showed up as an obviously broken number. `metrics_version` stays 2 (see the last
+entry).
+
+- **WP1.2 (review round 1) — the Wasserstein layer is computed per
+  `(sensor, window)` and then reduced, superseding the whole-run pooling logged
+  above (the substantive finding).** `wasserstein_self_floor` splits the truth
+  into two *contiguous* halves, which is right for a stationary series (that
+  choice is unchanged, and was endorsed) but makes the floor absorb any
+  deterministic trend inside the split window: the halves are then drawn from
+  different parts of the trend and the split measures the trend, not the series'
+  own sampling variability. Measured by the reviewer on a 108-frame `|U|` at
+  σ_turb = 0.5, with "perfect" an independent realization of the same law and
+  "bad" a +20% `|U|` carrying half the turbulence — floor 0.168 → 0.366 → 0.575
+  and the bad model's `w1_over_floor` 18.2 → 5.8 → **1.9** as the truth goes
+  stationary → magnitude-cosine-only → both cosines. The last row is the shipped
+  default (`params@truth_params: dynamic_cosine`, a 400 s inflow-angle cosine and
+  a 200 s magnitude cosine over the 540 s run), i.e. **a clearly-wrong model was
+  reading as indistinguishable from perfect on the configuration we actually
+  ship.**
+  The fix is to compute both the distance and the floor per `(sensor, window)`
+  and reduce `{median, max}` over the `S × W` elements instead of over `S`.
+  Reasons, in the lead's order: (a) it is the only option that keeps the floor and
+  the distance **like-for-like on sample count** — a per-window floor against a
+  whole-run pooled distance would put a 36-frame floor under a 108-frame distance
+  and deflate `w1_over_floor` *further*, the opposite of the fix; (b) it removes
+  the cross-window component of the deterministic forcing, which is the dominant
+  term in the table above; (c) the schema does not change — the reduction is
+  still `{median, max}`, only over more elements. **Detrending was rejected** as
+  the primary fix: it needs a trend model the metrics layer has no business
+  choosing, and it would silently change what the number means. **Demotion**
+  (shipping the ratio as diagnostic-only) **was rejected** because per-window is a
+  real fix and WP1.4 wants a usable headline. The reduction now reuses the window
+  index lists `sensor_statistic_scores` already computes rather than re-deriving
+  the windowing, and elements whose floor or distance is `nan` — a window with
+  fewer than the four finite samples `wasserstein_self_floor` needs, which **is
+  the smoke shape** at 3 frames — drop out of the reduction rather than nulling
+  the block.
+  **Residual, documented rather than fixed:** a 180 s window against a 200 s
+  magnitude cosine is still not stationary *within* the window, so on the shipped
+  default the floor remains somewhat inflated. Per-window shrinks the effect; it
+  does not eliminate it. A follow-up measurement sharpens *why*, and the sharper
+  statement is what the docs carry: what inflates the floor is the split interval
+  containing a **net excursion** of the trend, so the criterion is the forcing's
+  period against the split length and not the split length as such. A cosine of
+  period ≈ 2× the interval inflates the floor ~3× at *both* 108 frames
+  (0.223 → 0.724) and 36 frames (0.369 → 1.426), while a cosine cycling several
+  times inside the interval does not inflate it at all (0.294 against a
+  stationary 0.369). "Use a shorter window" is therefore **not** a universal
+  remedy — a window landing near half the forcing period is the worst case, and
+  the shipped 180 s window sits at 0.9× the 200 s magnitude cosine and 0.45× the
+  400 s inflow-angle cosine. The per-window change is still the right one on
+  argument (a) above (floor and distance like-for-like on sample count) and it
+  does remove the cross-window term; it is not a general fix for a trending
+  truth, and the docs say so rather than implying that a shorter window would be.
+  Both the failure mode and the reviewer's table are now in
+  `docs/scripts_and_configs.md` next to the Wasserstein rows, and in
+  `wasserstein_self_floor`'s docstring as a second, separately-labelled failure
+  mode beside its (correct, retained) AR(1) validation table.
+
+- **WP1.2 (review round 1) — `crpss_vs_prior` could compare two different window
+  subsets; alignment is now explicit.** `_pooled_statistic` drops an unusable
+  window independently per series, so the posterior and the prior could each
+  arrive at an equal-sized pool built from *different* windows and the
+  `prior_members.shape == members.shape` guard would pass. Reproduced by the
+  reviewer with identical member values and the prior shifted by one window: the
+  correct answer is `0.0` and the reported skill was **−0.26 / −0.07 / −0.61 /
+  −0.10** across the four statistics. Fixed by making the alignment explicit
+  rather than by tightening the shape guard — which would only have converted a
+  wrong number into a vanished one: `_pooled_statistic` now also returns the
+  ordered list of window indices it used and accepts an explicit `windows=` subset,
+  and the caller intersects the two lists. Equal lists score as before; a strict
+  subset **re-pools both sides on the intersection** so the metric survives; an
+  empty intersection gives `crpss_vs_prior = None` plus one `logger.info`. The
+  re-pooled comparison additionally uses a **joint** finiteness filter (truth and
+  every posterior member and every prior member finite), so the two CRPS values
+  in the ratio are means over exactly the same elements and not merely over the
+  same windows. The posterior's own keys (`crps`, `zscore`, `coverage`, `pit`,
+  `identifiability`, `n_samples`, `n_windows_scored`) keep using the posterior's
+  full window list — a short prior must never degrade the posterior's own
+  numbers.
+
+- **WP1.2 (review round 1) — `crpss_vs_prior` is named as one-window-ahead
+  skill (documentation).** `windows/window_{w}_prior_state.nc` is window `w`'s
+  ESMDA step-0 forecast, and `run_esmda.py` seeds window `w`'s prior from window
+  `w−1`'s posterior — the same chaining WP1.1's round 2 found under
+  `contraction_ratio`. So pooling all windows makes this **one-window-ahead**
+  skill, not skill against the run's initial prior, and it is therefore a
+  different quantity from the `crps_reduction_vs_prior` sitting in the parameter
+  bundle of the *same* summary file. WP1.1 built its whole
+  `vs_window_prior` / `vs_initial_prior` split around exactly this distinction
+  (`compute_esmda_metrics.py:376-385`), so leaving it implicit here would have
+  invited a cross-bundle comparison that is not meaningful. Stated in the
+  `sensor_statistic_scores` docstring and in the key table. No
+  `vs_initial_prior` counterpart is added: it would need the initial prior rolled
+  out at the sensors for every window, which no run saves.
+
+- **WP1.2 (review round 1) — `n_windows_scored` per statistic (addition).**
+  `_pooled_statistic`'s bare `continue` was the one degradation path in this
+  layer with neither a `reason` nor a log line: with only window 0 of 3
+  contributing, the summary read `n_windows: 3`, `reason: null`, and the sole
+  trace was `n_samples` quietly dropping 18 → 6 — a number a reader has no
+  independent expectation for. The count now travels with the block. It is
+  attached **per statistic, not per sensor set** (the review suggested the set),
+  because windows drop per statistic: a 1-frame window kills `window_variance`
+  and `tke` while `window_mean` survives it, so one per-set number would be wrong
+  for at least one block. It is emitted on `_null_statistic_block`'s degraded path
+  too — as `0`, not `null`, breaking this layer's "every key null when degraded"
+  rule deliberately: it is a *count of what contributed*, nothing did, and a
+  consumer dividing by it must see the zero rather than an absent key. Each
+  statistic also emits one `logger.info` naming the dropped window indices when
+  any drop. `n_windows` is correspondingly documented as the *configured* count
+  and points at the new key for the contributing one, and the wiring test's
+  `STATISTIC_KEYS` frozenset pins the addition alongside an
+  `n_windows_scored == n_windows` assertion on the healthy synthetic fixture, so
+  a future silent drop fails loudly instead of moving `n_samples` to another
+  plausible number.
+
+- **WP1.2 (review round 1) — the within-member bootstrap is vectorized
+  (`block_bootstrap_std_batch`).** `_within_member_std` was a Python double loop
+  over `(member, element)` at ~1.0 ms per `block_bootstrap_std` call: ~4.6 s at
+  the shipped shape (M = 32, C = 3, S = 8, W = 3) but **~3.4 min** at
+  M = 128 / S = 20 / W = 10 — on the shipped default `level: standard`, i.e. a
+  cost paid by every production run and growing with exactly the knobs a real
+  campaign turns up. A batched sibling in `turbulence_stats.py` builds the
+  resample index matrix once and applies it to every element, so the cost is one
+  `statistic(..., axis=-1)` call on `(n_resamples, n_elements, n_time)`. The
+  scalar `block_bootstrap_std` is kept **unchanged** (WP1.3 wants it, and it is
+  already documented and tested), and both are built on one shared private
+  index-matrix helper so the two cannot drift; a single-element batch is pinned
+  by test to equal the scalar function **exactly**, which is what lets a reader
+  trust that the fast path and the documented path are the same estimator. The
+  batched statistic is called as `statistic(x, axis=-1)` rather than the scalar
+  form's `statistic(1-D) -> float` — that contract is what makes the
+  vectorization possible and is documented as such. `np.mean` and the `ddof=1`
+  variance are re-expressed as axis-taking reducers; the TKE Bessel-factor-on-the-
+  integrand construction (endorsed in review) survives the refactor bit-for-bit,
+  asserted by test rather than assumed — a new test pins `_within_member_std`
+  against the scalar double loop with `np.array_equal(..., equal_nan=True)` for
+  both reducers, and the identifiability numbers are bit-identical across the
+  change (`window_mean` `ratio_median` 1.0421934131499127 before and after, all
+  four statistics unchanged to the last digit). Measured end to end at the
+  shipped shape (36 frames per window, 20 blocks, 200 resamples): the
+  identifiability pass **3.709 s → 0.146 s, 25.4×** — 6144 scalar
+  `block_bootstrap_std` calls replaced by 12 batched ones (4 statistics × 3
+  windows) — and the whole of `sensor_statistic_scores` 3.733 s → 0.171 s, i.e.
+  the bootstrap was ~99% of this layer's runtime and is no longer its dominant
+  cost. On the bootstrap alone,
+  with exact equality against the scalar function asserted at every shape: at 288
+  rows `np.mean` 0.100 s → 0.006 s (**17.7×**) and the `ddof=1` variance
+  0.245 s → 0.007 s (**35.7×**); at 768 rows 18.5×, and at 7680 rows — the
+  M = 128 / S = 20 scale that motivated this — 2.94 s → 0.183 s, 16.0×.
+  Non-finite rows are the one behavioural difference and it is deliberate: a row
+  containing any non-finite sample returns `nan` outright rather than falling back
+  to the scalar path, because the scalar form drops non-finite samples *before*
+  blocking, so a gappy row has a different finite count, a different block length
+  and a different index matrix — and one shared index matrix is the entire
+  speedup. WP1.2's rows are fully finite or absent (a masked sensor is dropped
+  upstream, never passed as a row of gaps), so the `nan` reports an input this
+  path does not serve rather than silently approximating it; other rows in the
+  same batch are unaffected, pinned by test.
+
+- **WP1.2 (review round 1) — `bootstrap_blocks: 1` yields a measured `0.0`;
+  documented, not raised — but the zero had to be made real first.** With
+  `n_blocks = 1` the block length is the whole series, so every bootstrap
+  replicate is the identical series and the spread is zero by construction, not
+  the `nan` the Returns section documented for `L < 2`. The lead's ruling is to
+  **document the zero and not raise**: `bootstrap_blocks: 1` passes
+  `resolve_metrics_settings`'s `>= 1` validation, and WP1.0's round-1 entry above
+  says in as many words that the validator exists so a bad knob is reported
+  cheaply *instead of* crashing deep inside a streaming pass that has already read
+  GBs; raising from `block_bootstrap_std` would reintroduce precisely that failure
+  mode one layer down.
+  **The ruling's stated consequence did not actually hold as shipped, which is the
+  finding here.** `np.std(..., ddof=1)` over 200 *bit-identical* replicates does
+  not return `0.0` — the mean subtraction leaves float rounding, measured
+  **2.78e-17** at `n = 60` with `np.mean` and up to ~1.3e-15 for a `ddof=1`
+  variance. That is strictly positive, so it **passes** `_identifiability_block`'s
+  `within > 0` filter and `identifiability` would have come out at ~1e16–1e17
+  rather than the clean `null` the ruling relies on: the degradation path the lead
+  reasoned from was reachable only in principle. The shared reduction step now
+  collapses the identical-replicate case to a true `0.0` before calling `np.std`
+  (a point-mass bootstrap distribution has zero spread by construction, not by
+  measurement), which restores the ruling's outcome without a raise. Verified
+  against `git show HEAD` that this is the *only* behaviour change to the scalar
+  function: over `n ∈ {21, 36, 50, 108, 400}` × `n_blocks ∈ {1, 3, 7, 20, 60}` ×
+  {mean, `ddof=1` variance, median} × seeds {default, 0, 7}, every combination is
+  bit-identical except `n_blocks = 1`, which moved from ~1e-16 to exactly `0.0`;
+  the gappy and explicit-generator paths are bit-identical too. Pinned by a test
+  asserting `== 0.0` exactly, for both the scalar and the batch function.
+
+- **WP1.2 (review round 1) — `w1_over_floor`'s ordering was correct and its
+  documentation was not; `metrics_version` stays 2.** The ratio was already
+  computed per element and then reduced, which is the right ordering — the review
+  endorsed it — but the key table called it "the pooled distance in units of that
+  floor", which invites reading it as `w1_over_sigma_pooled.median /
+  self_floor.median`. That ratio-of-medians would pair one element's distance with
+  another element's floor, and the two medians need not even be attained at the
+  same sensor. The row now says both what the number is and what it is not.
+  On the version question: **nothing was reprocessed at `standard` between #99
+  merging (2026-07-30T05:55Z) and this PR**, so no artifact carries the old
+  semantics under the new number. The only `run_summary.yaml` on this machine is
+  `.temp/pyudales_to_pyudales/run_summary.yaml` from 2026-07-29 18:42 — *before*
+  the merge — and it carries `metrics_version: 2` with **no `metrics_level` key
+  at all**, which makes it a phase-0 artifact rather than a phase-1 one. So
+  `metrics_version` correctly stays 2: the WP1.2 keys have never been written to
+  a persisted summary under semantics different from the ones shipping here. The
+  check covered the local `.temp/` tree only and cannot see HPC scratch; a run dir
+  reprocessed at `standard` on Snellius or DelftBlue between those two timestamps
+  would not have been found by it.

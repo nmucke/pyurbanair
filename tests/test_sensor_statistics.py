@@ -28,14 +28,19 @@ import numpy as np
 import pytest
 import xarray
 
+from pyurbanair.utils.ensemble_scores import wasserstein_self_floor
+from pyurbanair.utils.turbulence_stats import block_bootstrap_std
 from scripts.esmda._esmda_common import (
     IDENTIFIABILITY_MIN_RATIO,
     MIN_MEMBERS_CALIBRATION,
     PIT_BINS,
     SENSOR_STATISTIC_NAMES,
+    _crpss_from_pools,
     _ensemble_window_indices,
+    _pooled_statistic,
     _statistic_window_series,
     _var_ddof1,
+    _within_member_std,
     read_yaml,
     sensor_statistic_scores,
     write_yaml,
@@ -71,6 +76,7 @@ STATISTIC_KEYS = frozenset(
         "pit",
         "identifiability",
         "n_samples",
+        "n_windows_scored",
         "reason",
     }
 )
@@ -486,6 +492,167 @@ def test_crpss_vs_prior_is_null_without_a_prior_and_positive_against_a_worse_one
     )
 
 
+def _repeated_window_series(
+    seed: int,
+    post_windows: tuple[int, ...],
+    prior_windows: tuple[int, ...],
+    frames: int = 8,
+    n_members: int = 5,
+    n_sensors: int = 2,
+) -> tuple[dict, dict, dict]:
+    """A posterior and a prior holding the SAME values in DIFFERENT windows.
+
+    The member block is repeated verbatim in every window each series occupies,
+    so the only thing a window index changes is which truth slice the block is
+    scored against. That isolates the alignment: two pools of equal shape whose
+    columns come from different windows.
+    """
+    rng = np.random.default_rng(seed)
+    block = rng.normal(size=(len(COMPONENTS), n_members, frames, n_sensors))
+    within = np.arange(frames) * (SIM_TIME / frames)
+
+    def _series(window_ids: tuple[int, ...]) -> dict:
+        values = np.concatenate([block] * len(window_ids), axis=2)
+        times = np.concatenate([w * SIM_TIME + within for w in window_ids])
+        return {SET: _ensemble_da(values, times)}
+
+    truth = {
+        SET: _truth_da(
+            rng.normal(size=(len(COMPONENTS), NUM_WINDOWS * frames, n_sensors)),
+            np.arange(NUM_WINDOWS * frames, dtype=float),
+        )
+    }
+    return truth, _series(post_windows), _series(prior_windows)
+
+
+def test_a_prior_shifted_by_one_window_scores_zero_skill_not_noise() -> None:
+    """Equal pool SHAPES are not alignment; equal pool WINDOWS are.
+
+    The posterior occupies windows (0, 1) and the prior windows (1, 2) with
+    bit-identical member values, so the honest skill is exactly 0: on any window
+    both ensembles predict the same thing. Comparing the two full pools instead
+    -- which is all an ``a.shape == b.shape`` guard can do -- scores window 0's
+    posterior against window 1's prior and reports the truth's window-to-window
+    difference as skill. Measured on this construction: -0.05, -0.14, +0.06 and
+    -0.45 for the four statistics, from an ensemble that is its own prior. The
+    sign is a property of the truth realization; the fabrication is not.
+    """
+    truth, ensemble, prior = _repeated_window_series(3, (0, 1), (1, 2))
+
+    entry = _score(truth, ensemble, prior_series=prior)[SET]
+
+    for name in SENSOR_STATISTIC_NAMES:
+        assert entry[name]["crpss_vs_prior"] == pytest.approx(0.0, abs=1e-12), name
+        # The posterior keeps its OWN two windows: a prior that resolves a
+        # different subset must not shrink the numbers being scored.
+        assert entry[name]["n_windows_scored"] == 2, name
+
+    # The bug itself, pinned: the two full pools are the same shape and are not
+    # the same windows, so the guard that was there could not have caught it.
+    naive = {}
+    for name in SENSOR_STATISTIC_NAMES:
+        pools = [
+            _pooled_statistic(
+                name,
+                np.asarray(
+                    series[SET]
+                    .transpose("component", "ensemble", "time", "sensor")
+                    .values
+                ),
+                np.asarray(truth[SET].transpose("component", "time", "sensor").values),
+                _ensemble_window_indices(series[SET], NUM_WINDOWS, SIM_TIME, SET),
+                [slice(w * 8, (w + 1) * 8) for w in range(NUM_WINDOWS)],
+                20,
+                with_bootstrap=False,
+            )
+            for series in (ensemble, prior)
+        ]
+        assert pools[0][0].shape == pools[1][0].shape, name
+        naive[name] = _crpss_from_pools(pools[0][:2], pools[1][:2], name, SET)
+    assert abs(naive["velmag_mean"]) > 0.2
+    assert abs(naive["window_variance"]) > 0.05
+
+
+def test_a_prior_sharing_no_window_with_the_posterior_nulls_only_the_skill() -> None:
+    """No shared window -> ``crpss_vs_prior`` is ``null``; everything else stands.
+
+    There is no pool the two ensembles can both be scored on, and inventing one
+    would mean comparing different windows -- the exact failure the alignment
+    exists to prevent. The posterior's own keys are untouched, because they
+    never needed the prior.
+    """
+    truth, ensemble, prior = _repeated_window_series(4, (0,), (2,))
+
+    entry = _score(truth, ensemble, prior_series=prior)[SET]
+
+    for name in SENSOR_STATISTIC_NAMES:
+        assert entry[name]["crpss_vs_prior"] is None, name
+        assert entry[name]["crps"] is not None, name
+        assert entry[name]["reason"] is None, name
+        assert entry[name]["n_windows_scored"] == 1, name
+
+
+# ---------------------------------------------------------------------------
+# Which windows actually contributed
+# ---------------------------------------------------------------------------
+
+
+def test_n_windows_scored_counts_windows_per_statistic_not_per_set() -> None:
+    """A one-frame window kills the variance and the TKE but not the mean.
+
+    ``n_windows`` is the CONFIGURED count and says nothing about what
+    contributed: a window can be lost by holding no ensemble frame at all, or by
+    holding too few for the statistic in question (a single frame has no ddof=1
+    variance, so its columns are ``nan`` and are filtered out). The two paths
+    are both counted here, and the count has to be per statistic -- window 1
+    below contributes to ``window_mean`` and to nothing else.
+    """
+    frames_per_window = [6, 1, 6]
+    n_sensors = 2
+    rng = np.random.default_rng(23)
+
+    times, blocks = [], []
+    for w, n_frames in enumerate(frames_per_window):
+        times.append(w * SIM_TIME + np.arange(n_frames) * (SIM_TIME / n_frames))
+        blocks.append(rng.normal(size=(len(COMPONENTS), 6, n_frames, n_sensors)))
+    ensemble = {
+        SET: _ensemble_da(np.concatenate(blocks, axis=2), np.concatenate(times))
+    }
+    truth = {
+        SET: _truth_da(
+            rng.normal(size=(len(COMPONENTS), NUM_WINDOWS * 6, n_sensors)),
+            np.arange(NUM_WINDOWS * 6, dtype=float),
+        )
+    }
+
+    entry = _score(truth, ensemble, n_per_window=6)[SET]
+
+    assert entry["n_windows"] == NUM_WINDOWS
+    assert entry["window_mean"]["n_windows_scored"] == 3
+    assert entry["velmag_mean"]["n_windows_scored"] == 3
+    for name in ("window_variance", "tke"):
+        assert entry[name]["n_windows_scored"] == 2, name
+        # And the drop is visible in the sample count it explains.
+        assert entry[name]["n_samples"] < entry["window_mean"]["n_samples"], name
+
+
+def test_a_window_with_no_ensemble_frame_lowers_n_windows_scored_everywhere() -> None:
+    """The other drop path: a window the ensemble never wrote a frame into.
+
+    Before this count the summary reported ``n_windows: 3`` with a ``null``
+    reason while only two windows contributed, and the only trace was
+    ``n_samples`` quietly falling by a third.
+    """
+    truth, ensemble, _ = _repeated_window_series(24, (0, 2), (0, 2))
+
+    entry = _score(truth, ensemble)[SET]
+
+    assert entry["n_windows"] == NUM_WINDOWS
+    for name in SENSOR_STATISTIC_NAMES:
+        assert entry[name]["n_windows_scored"] == 2, name
+        assert entry[name]["reason"] is None, name
+
+
 # ---------------------------------------------------------------------------
 # Identifiability
 # ---------------------------------------------------------------------------
@@ -515,6 +682,35 @@ def test_the_identifiability_bootstrap_is_null_at_the_smoke_window_length() -> N
     assert entry["window_mean"]["crps"] is not None
     assert entry["window_mean"]["coverage"]["alpha_90"] is not None
     assert entry["window_mean"]["reason"] is None
+
+
+def test_the_within_member_bootstrap_matches_the_scalar_reference_exactly() -> None:
+    """Batching the bootstrap is a speed change, not a numerical one.
+
+    ``_within_member_std`` used to be a Python double loop of scalar
+    ``block_bootstrap_std`` calls -- 6144 of them at the shipped shape (M = 32,
+    C = 3, S = 8, W = 3), 3.7 s, growing to minutes at production shapes. It is
+    now one batched call. Asserted **bit-for-bit** against the loop it replaced,
+    for both reducers, rather than trusting the two implementations to agree:
+    the identifiability ratio is read against a fixed threshold, so a
+    reformulation that shifted it slightly would quietly move which runs are
+    flagged as sampling-noise dominated.
+    """
+    rng = np.random.default_rng(27)
+    series = rng.normal(size=(4, 5, 40))
+
+    for reducer in (np.mean, _var_ddof1):
+        batched = _within_member_std(series, reducer, 8)
+        reference = np.array(
+            [
+                [
+                    block_bootstrap_std(series[m, e], statistic=reducer, n_blocks=8)
+                    for e in range(series.shape[1])
+                ]
+                for m in range(series.shape[0])
+            ]
+        )
+        assert np.array_equal(batched, reference, equal_nan=True), reducer
 
 
 def test_identifiability_separates_a_real_spread_from_sampling_noise() -> None:
@@ -671,6 +867,66 @@ def test_a_straddling_ensemble_separates_the_pooled_and_per_member_wasserstein()
     # Measured on this construction: 0.511 straddling, 1.000 biased.
     assert _ratio(straddling) < 0.7
     assert _ratio(biased) > 0.95
+
+
+def test_the_wasserstein_floor_is_taken_per_window_not_over_the_whole_run() -> None:
+    """A truth that drifts between windows inflates a WHOLE-RUN self floor.
+
+    ``wasserstein_self_floor`` splits the series into two contiguous halves, so
+    anything deterministic that moves across that split is counted as the
+    series' own sampling variability. Over a whole run that includes the run's
+    slowest forcing: on the shipped default truth (a 400 s inflow-angle cosine
+    and a 200 s magnitude cosine) the measured floor rises 0.168 -> 0.575 and a
+    clearly-wrong model falls from ``w1_over_floor`` 18.2 to 1.9, inside the
+    band the docs call indistinguishable from perfect.
+
+    Here the drift is a step between windows -- the same effect at its crudest.
+    The assertion is the comparison against the whole-run floor computed
+    directly from the same samples, so it pins *which* series is being split
+    rather than a value.
+    """
+    frames = 120
+    rng = np.random.default_rng(25)
+    drift = np.array([0.0, 6.0, 12.0])
+    truth_values = np.zeros((len(COMPONENTS), NUM_WINDOWS * frames, 1))
+    for w, step in enumerate(drift):
+        window = slice(w * frames, (w + 1) * frames)
+        truth_values[0, window, 0] = 10.0 + step + rng.normal(size=frames)
+    truth = {SET: _truth_da(truth_values, np.arange(NUM_WINDOWS * frames, dtype=float))}
+
+    members = np.zeros((len(COMPONENTS), 5, NUM_WINDOWS * frames, 1))
+    members[0] = truth_values[0] + rng.normal(size=(5, NUM_WINDOWS * frames, 1))
+    ensemble = {SET: _ensemble_da(members, _rebased_times(frames))}
+
+    block = _score(truth, ensemble, bootstrap_blocks=500)[SET]["wasserstein"]
+
+    whole_run = wasserstein_self_floor(np.abs(truth_values[0, :, 0]))
+    assert whole_run > 1.0  # the drift dominates the split
+    assert block["self_floor"]["median"] < whole_run / 4.0
+    # ... and the headline ratio is the per-element ratio, reduced afterwards:
+    # a whole-run floor would have divided every sensor by that same 1-plus.
+    assert block["w1_over_floor"]["median"] > block["w1_over_sigma_pooled"]["median"]
+
+
+def test_the_wasserstein_floor_is_null_at_the_smoke_window_length() -> None:
+    """3 frames in a window cannot be split into two distributions.
+
+    ``wasserstein_self_floor`` needs four finite samples (two per half), which
+    the smoke shape does not have once the layer is computed per window. The
+    floor and the ratio that divides by it go ``null`` with a reason; the two
+    raw distances need only two samples and survive, so the layer degrades in
+    part rather than vanishing.
+    """
+    truth, ensemble = _exchangeable_series(6, 4, 3, seed=26)
+
+    block = _score(truth, ensemble)[SET]["wasserstein"]
+
+    assert set(block) == WASSERSTEIN_KEYS
+    assert block["w1_over_sigma_pooled"]["median"] > 0.0
+    assert block["w1_over_sigma_member_mean"]["median"] > 0.0
+    assert block["self_floor"] is None
+    assert block["w1_over_floor"] is None
+    assert "self_floor" in block["reason"]
 
 
 def test_a_dead_truth_sensor_nulls_the_wasserstein_layer_with_a_reason() -> None:

@@ -135,6 +135,7 @@ STATISTIC_KEYS = {
     "pit",
     "identifiability",
     "n_samples",
+    "n_windows_scored",
     "reason",
 }
 STATISTIC_ZSCORE_KEYS = {"mean", "std", "max_abs", "max_abs_calibrated_median"}
@@ -810,6 +811,14 @@ def test_standard_level_wiring_emits_the_sensor_statistics_for_every_set(
             assert len(block["pit_counts"]) == PIT_BINS
             assert sum(block["pit_counts"]) == block["pit"]["n_samples"]
             assert block["pit"]["n_samples"] == block["n_samples"]
+            # Nothing dropped: this fixture gives every window both ensemble
+            # and truth frames, and 8 frames per window is enough for every
+            # statistic including the ddof=1 ones. The assertion is here so a
+            # future silent drop -- the failure mode `n_windows_scored` was
+            # added for, where the summary still says `n_windows: 3` and
+            # `reason: null` while only `n_samples` shrinks -- fails loudly
+            # rather than moving `n_samples` to another plausible number.
+            assert block["n_windows_scored"] == N_WINDOWS, (name, statistic)
 
         # The pooling axes, which are the one thing a wrong reduction changes
         # silently: the per-component statistics pool component x sensor x

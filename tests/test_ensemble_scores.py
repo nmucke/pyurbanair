@@ -844,6 +844,96 @@ def test_wasserstein_self_floor_splits_contiguously_so_it_sees_the_correlation()
     )
 
 
+def _forced_probe(
+    n_samples: int, period: float | None, rng: np.random.Generator, gain: float = 1.0
+) -> tuple[np.ndarray, np.ndarray]:
+    """A ``|U|`` probe series: deterministic forcing plus turbulence.
+
+    ``period`` in frames; ``None`` is the stationary case. ``gain`` scales the
+    *deterministic* part only, which is how a biased model differs from the
+    truth here. Returns the series and the deterministic part, so a test can
+    subtract the forcing it put in.
+    """
+    signal = gain * 5.0 * np.ones(n_samples)
+    if period is not None:
+        signal = signal + gain * np.cos(2.0 * np.pi * np.arange(n_samples) / period)
+    return signal + rng.normal(scale=0.5, size=n_samples), signal
+
+
+def test_wasserstein_self_floor_is_inflated_by_a_trend_inside_the_window() -> None:
+    """The floor's second failure mode: it is a *stationary*-window quantity.
+
+    A contiguous split of a forced window draws its two halves from different
+    parts of the forcing, so it measures the trend rather than the series' own
+    sampling variability -- and the ratio then divides a bad model by a floor
+    that has already absorbed the thing making it look bad. This is not a
+    ``sqrt(2)``-sized conservatism like the documented two: it is the difference
+    between "18x the floor" and "2x the floor" on the shipped default truth.
+    """
+    rng = np.random.default_rng(46)
+    stationary_floor: list[float] = []
+    stationary_bad: list[float] = []
+    forced_floor: list[float] = []
+    forced_bad: list[float] = []
+    detrended_floor: list[float] = []
+    for _ in range(200):
+        for period, floors, bads in (
+            (None, stationary_floor, stationary_bad),
+            (80.0, forced_floor, forced_bad),
+        ):
+            truth, forcing = _forced_probe(108, period, rng)
+            # A clearly wrong model: +20% in |U| with half the turbulence.
+            wrong = 1.2 * forcing + rng.normal(scale=0.25, size=108)
+            floor = wasserstein_self_floor(truth)
+            floors.append(floor)
+            bads.append(
+                wasserstein_over_floor(wasserstein_over_sigma(wrong, truth), floor)
+            )
+            if period is not None:
+                detrended_floor.append(wasserstein_self_floor(truth - forcing))
+
+    # measured medians: floor 0.223 stationary vs 0.724 with a cosine of period
+    # ~2x the window -- and the bad model goes from 8.9x the floor to 1.7x, i.e.
+    # from obviously broken to inside the band the docs call indistinguishable
+    # from perfect.
+    assert float(np.median(forced_floor)) > 2.5 * float(np.median(stationary_floor))
+    assert float(np.median(stationary_bad)) > 5.0
+    assert float(np.median(forced_bad)) < 2.5
+    # And the inflation IS the trend, not the trend's effect on the turbulence:
+    # subtracting the forcing that was put in returns the floor to its
+    # stationary value (0.223).
+    assert float(np.median(detrended_floor)) == pytest.approx(
+        float(np.median(stationary_floor)), rel=0.15
+    )
+
+
+def test_wasserstein_self_floor_inflation_is_set_by_period_over_window_length() -> None:
+    """Why a shorter window mitigates it, and exactly when it stops helping.
+
+    What the split cannot tolerate is a *net excursion across the window*. A
+    forcing that cycles several times inside the window puts the same range in
+    both halves and costs nothing; one whose period is comparable to the window
+    leaves a ramp, and shortening the window does not help while the period
+    stays longer than it. That is the documented residual on the shipped
+    default: WP1.2's 180 s assimilation window against a 200 s magnitude cosine.
+    """
+    rng = np.random.default_rng(47)
+    baseline: list[float] = []
+    comparable: list[float] = []
+    fast: list[float] = []
+    for _ in range(200):
+        for period, values in ((None, baseline), (80.0, comparable), (12.0, fast)):
+            truth, _ = _forced_probe(36, period, rng)
+            values.append(wasserstein_self_floor(truth))
+
+    # measured medians at a 36-frame window: 0.369 stationary, 1.426 for a
+    # period-80 cosine (still ~3.9x, as at 108 frames -- shortening the window
+    # did not fix it), 0.294 for a period-12 cosine (three cycles inside the
+    # window: no inflation at all).
+    assert float(np.median(comparable)) > 2.0 * float(np.median(baseline))
+    assert float(np.median(fast)) < 1.2 * float(np.median(baseline))
+
+
 def test_wasserstein_self_floor_drops_the_middle_sample_of_an_odd_count() -> None:
     """Equal halves, so both carry the same sample-size dependence.
 

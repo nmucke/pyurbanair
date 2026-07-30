@@ -729,13 +729,13 @@ same key set; `<stat>` below stands for any of the four.
 
 | Key | Meaning |
 |---|---|
-| `<set>.{n_members,n_windows,n_sensors}` | Shape of what was scored. `n_windows` is the *requested* window count from `truth_access.yaml`, not the number that contributed — a window with no ensemble or no truth frames is dropped silently and only shrinks `<stat>.n_samples`. |
+| `<set>.{n_members,n_windows,n_sensors}` | Shape of what was *configured*. `n_windows` is the requested window count read from `truth_access.yaml`, **not** the number that contributed — for that, read `<stat>.n_windows_scored`, which is per statistic because windows drop per statistic. |
 | `<stat>` = `window_mean` | Per-window time-mean of each velocity component, pooled over component × sensor × window. The one statistic a biased-inflow run moves; also the one a *long* window can match while every higher moment is wrong. |
 | `<stat>` = `window_variance` | Per-window `ddof=1` time-variance of each component, pooled the same way. `null` for any window holding a single frame — one frame has no `ddof=1` variance, and at the smoke shape that is the whole run. |
 | `<stat>` = `tke` | `0.5·Σ_c var(u_c)` per sensor per window. Computed as the time-mean of the *instantaneous* `0.5·n/(n−1)·Σ_c(u_c−⟨u_c⟩)²`, which makes it exactly the tabulated `ddof=1` TKE — the Bessel factor is on the integrand so the bootstrap resamples the reported estimator, not a `ddof=0` cousin. |
 | `<stat>` = `velmag_mean` | Per-window time-mean of `\|U\|`, per sensor. Not implied by `window_mean`: `⟨\|U\|⟩ ≥ \|⟨U⟩\|`, and the gap is exactly the fluctuation a directionally-wandering flow carries. |
 | `<stat>.crps` | Fair (finite-`M` debiased) CRPS of the ensemble's statistic against the truth's, averaged over pooled elements. **In the statistic's own units** — variance and TKE are in m²/s², so the four are not comparable to each other. |
-| `<stat>.crpss_vs_prior` | Skill against the prior ensemble's same statistic. **`null` on nearly every run**: it needs `windows/window_*_prior_state.nc` for *every* window, and `conf/run_esmda.yaml` ships `run.save_prior_state: false`. `null` here means "not saved", never "no skill". |
+| `<stat>.crpss_vs_prior` | **One-window-ahead** skill against the prior ensemble's same statistic. `windows/window_{w}_prior_state.nc` is window `w`'s ESMDA step-0 forecast and `run_esmda.py` seeds window `w`'s prior from window `w−1`'s posterior, so pooling all windows scores each posterior against **the previous window's posterior propagated forward**, not against the run's initial prior. It is therefore *not* the same quantity as `parameter_metrics.<p>.crps_reduction_vs_prior` in the same file, and the distinction is the one WP1.1 makes explicit in `contraction_ratio.vs_window_prior` / `vs_initial_prior` (there is no `vs_initial_prior` here — the initial prior was never rolled out at the sensors). **`null` on nearly every run**: it needs `windows/window_*_prior_state.nc` for *every* window, and `conf/run_esmda.yaml` ships `run.save_prior_state: false`. `null` here means "not saved", never "no skill". Scored on the **windows both ensembles have in common** — if the prior and the posterior drop different windows the pool is rebuilt on the intersection (and is `null` only when that is empty), so the number is never a comparison of two different window subsets. |
 | `<stat>.zscore.{mean,std,max_abs}` | Pooled `(truth − mean_m)/std_m` over the pooled elements. A calibrated ensemble has `std ≈ 1`, but only in expectation — the pooled elements here are **not** independent (one window's sensors see one realization of one flow), so the sampling error on these is larger than `n_samples` suggests. |
 | `<stat>.zscore.max_abs_calibrated_median` | Where `max\|z\|` sits for a *calibrated* ensemble of this `M` over this many pooled elements. `max_abs` is unreadable without it — the max of `n` draws grows with `n`, so a bigger sensor set alone raises it. |
 | `<stat>.coverage.alpha_{50,90}` | Empirical coverage of the central order-statistic band over the pooled elements. |
@@ -746,12 +746,54 @@ same key set; `<stat>` below stands for any of the four.
 | `<stat>.identifiability.sampling_noise_dominated` | `ratio_median < threshold`. A screen on *how to read the block*, never a gate — the numbers are reported either way. `null` (not `false`) when the ratio is unknown. |
 | `<stat>.identifiability.threshold` | `IDENTIFIABILITY_MIN_RATIO = 3.0`; at `r` the within-member sampling variance is `1/r²` of the across-member variance, so 3 is where sampling noise stops contributing more than ~11% of the scored spread. A constant, so it survives the null path. |
 | `<stat>.n_samples` | Pooled elements that actually scored (non-finite truth or members dropped once, before every score, so all of them see the same sample). **Not** an effective sample size: these elements are correlated. |
+| `<stat>.n_windows_scored` | How many of the `<set>.n_windows` configured windows contributed a finite element to **this** statistic. Per statistic rather than per set because windows drop per statistic: a single-frame window has no `ddof=1` variance, so it kills `window_variance` and `tke` while `window_mean` survives it. `< n_windows` is not an error and does not set `reason` — but it is the difference between `n_samples` being small because the sensor set is small and being small because two thirds of the run silently fell out, so check it before comparing `n_samples` across runs. `0`, not `null`, on the null path (nothing contributed is a measurement). |
 | `<stat>.reason` | Non-null exactly when the statistic's numbers are null, naming which degradation fired. |
-| `wasserstein.w1_over_sigma_pooled` | `{median, max}` over sensors of `W1(all members' \|U\| samples pooled, truth \|U\|)/σ_truth`, over the **whole run** — a window holds too few frames for a distance between empirical distributions to mean anything. This is the ensemble's *predictive* distribution. |
-| `wasserstein.w1_over_sigma_member_mean` | The same distance with each member scored alone, then averaged. Read it **with** the pooled number, never instead of it: `W1` is convex in its first argument, so pooled ≤ member-mean always. They coincide under a shared bias (pooling cannot cancel it) and separate when the spread brackets the truth. |
-| `wasserstein.self_floor` | `W1(first half, second half of the truth)/σ_truth` — what a *perfect* model scores at this sample count and autocorrelation. Halves are contiguous, not random, so each keeps its serial correlation; the raw distance is unreadable without this. |
-| `wasserstein.w1_over_floor` | The pooled distance in units of that floor. **~1 is indistinguishable from perfect at this sample size** — this is the headline ratio, not `w1_over_sigma_pooled`. |
-| `wasserstein.reason` | Non-null when any of the four reduced to `null`, naming which. A constant truth series has no `σ` and no floor; that is a property of the sensor, not a bug. |
+| `wasserstein.w1_over_sigma_pooled` | `{median, max}` over **(sensor, window)** of `W1(that window's members' \|U\| samples pooled, that window's truth \|U\|)/σ_truth`. Every Wasserstein number below is computed per assimilation window and then reduced over the `n_sensors × n_windows` elements — **not** pooled over the whole run (see the stationarity note below for why). This one is the ensemble's *predictive* distribution. |
+| `wasserstein.w1_over_sigma_member_mean` | The same per-(sensor, window) distance with each member scored alone, then averaged over members before the reduction. Read it **with** the pooled number, never instead of it: `W1` is convex in its first argument, so pooled ≤ member-mean always. They coincide under a shared bias (pooling cannot cancel it) and separate when the spread brackets the truth. |
+| `wasserstein.self_floor` | `W1(first half, second half of that window's truth)/σ_truth` — what a *perfect* model scores at this sample count and autocorrelation. Halves are contiguous, not random, so each keeps its serial correlation; the raw distance is unreadable without this. Computed on the same (sensor, window) elements as the distance above, so floor and distance are like-for-like on sample count — a per-window floor against a whole-run distance would compare an `n`-frame floor to a `W·n`-frame distance. |
+| `wasserstein.w1_over_floor` | The `{median, max}` of the **per-(sensor, window) ratios** — each element's own distance divided by its own floor, then reduced. Deliberately **not** `w1_over_sigma_pooled.median / self_floor.median`: a ratio of medians pairs one element's distance with another element's floor, and the two medians need not even be attained at the same sensor. **~1 is indistinguishable from perfect at this sample size** — this is the headline ratio, not `w1_over_sigma_pooled`. |
+| `wasserstein.reason` | Non-null when any of the four reduced to `null`, naming which. Individual (sensor, window) elements drop out of the reduction rather than nulling the block: a constant truth series has no `σ` and no floor (a property of the sensor, not a bug), and a window with fewer than four finite frames cannot be split in half for a floor at all. Each entry is `null` only when no element survives *for that entry*, so the four can degrade separately — at the **smoke shape** (3 frames per window) `self_floor` and `w1_over_floor` are `null` with a reason while the two distances are still numbers, because a floor needs four samples per window and a distance needs two. |
+
+**Reading the Wasserstein rows: what the floor does and does not absorb.**
+`self_floor` is calibrated on *stationary* series — its AR(1) validation table in
+`ensemble_scores.wasserstein_self_floor` is correct as far as it goes. A
+**deterministic trend inside the split window** is a separate failure mode: the
+two contiguous halves are then drawn from different parts of the trend, so the
+split measures the trend rather than the series' own sampling variability and the
+floor inflates. Measured on a 108-frame `|U|` at σ_turb = 0.5, with "perfect" an
+independent realization of the same law and "bad" a +20% `|U|` with half the
+turbulence:
+
+| truth | `self_floor` | perfect `w1_over_floor` | bad `w1_over_floor` |
+|---|---|---|---|
+| stationary | 0.168 | 0.75 | 18.2 |
+| magnitude cosine only | 0.366 | 0.38 | 5.8 |
+| both cosines (shipped default) | 0.575 | 0.12 | 1.9 |
+
+On the shipped default truth (`params@truth_params: dynamic_cosine` — a 400 s
+inflow-angle cosine and a 200 s magnitude cosine) a clearly-wrong model reads at
+`w1_over_floor ≈ 1.9`, i.e. inside the band this table calls indistinguishable
+from perfect. Computing per assimilation window (as WP1.2 now does) removes the
+**cross-window** part of that inflation, which is the dominant term. It does not
+remove all of it: a 180 s window against a 200 s magnitude cosine is still not
+stationary within the window, so on the shipped default the floor stays somewhat
+inflated and `w1_over_floor` correspondingly deflated.
+
+**What decides it is the forcing's period against the split length, not the
+split length itself.** The floor inflates when the two contiguous halves have
+different means, i.e. when the split interval contains a *net excursion* of the
+trend — which is worst near `period ≈ 2 × interval` and vanishes once the
+interval holds several full cycles. Measured on the same synthetic probe: a
+cosine of period ≈ 2× the interval inflates the floor ~3× at *both* 108 frames
+(0.223 → 0.724) and 36 frames (0.369 → 1.426), while a cosine cycling several
+times inside the interval does not inflate it at all (0.294 against a stationary
+0.369). So "use a shorter window" is not a universal remedy: shortening helps
+only while it moves the interval away from half the forcing period, and a window
+that lands *on* that ratio is the worst case. On the shipped default the 180 s
+window sits at 0.9× the 200 s magnitude cosine and 0.45× the 400 s inflow-angle
+cosine, so some inflation survives windowing. WP1.4 plots these numbers: on a
+truth with a deterministic trend of period comparable to one window, read a low
+`w1_over_floor` as "the floor ate it", not as "the ensemble is perfect".
 
 #### [`make_esmda_figures.py`](../scripts/esmda/make_esmda_figures.py)
 **Plain argparse CLI** — usage: `python scripts/esmda/make_esmda_figures.py --run-dir <dir>`

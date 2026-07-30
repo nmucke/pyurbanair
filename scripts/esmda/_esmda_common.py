@@ -57,7 +57,7 @@ from pyurbanair.utils.ensemble_scores import (
     zscore,
     zscore_exceedance,
 )
-from pyurbanair.utils.turbulence_stats import block_bootstrap_std
+from pyurbanair.utils.turbulence_stats import block_bootstrap_std_batch
 
 logger = logging.getLogger(__name__)
 
@@ -1539,9 +1539,9 @@ _COVERAGE_KEYS = _coverage_block_keys()
 # on how to read the block, never a gate -- the numbers are always reported.
 IDENTIFIABILITY_MIN_RATIO = 3.0
 
-# Block count handed to `turbulence_stats.block_bootstrap_std` when the caller
-# does not choose one. Mirrors that function's own default so the metrics stage
-# has a name for it; a caller that passes `bootstrap_blocks` overrides it.
+# Block count handed to `turbulence_stats.block_bootstrap_std_batch` when the
+# caller does not choose one. Mirrors that function's own default so the metrics
+# stage has a name for it; a caller that passes `bootstrap_blocks` overrides it.
 DEFAULT_BOOTSTRAP_BLOCKS = 20
 
 
@@ -1585,6 +1585,10 @@ def _null_statistic_block(reason, n_samples=0):
     (``pit.n_bins``, ``pit.tie_seed``, ``identifiability.threshold``) keep their
     values: they are configuration, not measurement, and nulling them would hide
     which settings the (absent) numbers would have been produced under.
+
+    ``n_windows_scored`` is ``0`` rather than ``null``: it is a count of what
+    contributed, and on this path nothing did. That is a measurement, and a
+    consumer dividing by it must see the zero rather than an absent key.
     """
     return {
         "crps": None,
@@ -1605,6 +1609,7 @@ def _null_statistic_block(reason, n_samples=0):
             "threshold": IDENTIFIABILITY_MIN_RATIO,
         },
         "n_samples": int(n_samples),
+        "n_windows_scored": 0,
         "reason": reason,
     }
 
@@ -1745,26 +1750,42 @@ def _fluctuation_energy(slab, axis):
 def _within_member_std(member_series, reducer, bootstrap_blocks):
     """Block-bootstrap sampling std of ``reducer`` for every (member, element).
 
-    One ``block_bootstrap_std`` call per member per pooled element. The blocking
-    is the point: a window's frames are serially correlated, so the iid
-    ``std/sqrt(n)`` would understate the sampling noise of a window mean and the
-    identifiability ratio would come out flatteringly large.
+    The blocking is the point: a window's frames are serially correlated, so the
+    iid ``std/sqrt(n)`` would understate the sampling noise of a window mean and
+    the identifiability ratio would come out flatteringly large.
 
-    Non-finite entries are left as ``nan`` and handled by the caller rather than
-    guarded here -- at the smoke shape (3 frames against 20 blocks) *every*
-    entry is ``nan``, which is the degenerate case the caller must report as a
-    ``null`` identifiability block, not repair.
+    One **batched** call over the flattened ``(member x element, time)`` rows.
+    The per-row Python loop this replaces ran one ``block_bootstrap_std`` per
+    (member, element) -- 6144 calls at the shipped shape (M = 32, C = 3, S = 8,
+    W = 3), measured at 3.7 s, and growing with M x S x W to minutes at
+    production shapes for a number that is a footnote in the summary.
+    ``block_bootstrap_std_batch`` builds one resample index matrix and applies
+    it to every row, and is exact against the scalar function on the same seed,
+    so this is a speed change and not a numerical one.
+
+    Both reducers are handed over as axis-taking callables, which is the batch
+    function's contract (``statistic(x, axis=-1)`` on a 3-D array): ``np.mean``
+    already is one and ``_var_ddof1`` was written as one for this reason.
+
+    Two ``nan`` paths, both left for the caller rather than repaired here. A row
+    shorter than the blocking can resolve -- the smoke shape, 3 frames against
+    20 blocks -- makes *every* entry ``nan``, which is the degenerate case the
+    caller reports as a ``null`` identifiability block. A row holding any
+    non-finite sample is ``nan`` too: the batch cannot drop gaps per row the way
+    the scalar function does, so a masked sensor loses its identifiability
+    element instead of having it estimated from a shortened series. That is the
+    conservative direction (a dropped element, not a silently different sample
+    count) and the elements are dropped by the caller's finiteness filter
+    anyway.
     """
-    n_members, n_elements, _ = member_series.shape
-    out = np.full((n_members, n_elements), np.nan)
-    for member in range(n_members):
-        for element in range(n_elements):
-            out[member, element] = block_bootstrap_std(
-                member_series[member, element],
-                statistic=reducer,
-                n_blocks=bootstrap_blocks,
-            )
-    return out
+    n_members, n_elements, n_time = member_series.shape
+    flat = np.asarray(member_series, dtype=float).reshape(
+        n_members * n_elements, n_time
+    )
+    within = block_bootstrap_std_batch(
+        flat, statistic=reducer, n_blocks=bootstrap_blocks
+    )
+    return np.asarray(within, dtype=float).reshape(n_members, n_elements)
 
 
 def _pooled_statistic(
@@ -1775,22 +1796,38 @@ def _pooled_statistic(
     truth_windows,
     bootstrap_blocks,
     with_bootstrap=True,
+    windows=None,
 ):
-    """Pool one statistic over every window into ``(members, truth, within_std)``.
+    """Pool one statistic over windows into ``(members, truth, within_std, cols)``.
 
     Windows with no ensemble frames or no truth frames are dropped rather than
     contributing an empty reduction; a run where that leaves nothing returns
-    ``(None, None, None)`` and the caller nulls the block.
+    ``(None, None, None, None)`` and the caller nulls the block.
 
-    ``with_bootstrap=False`` skips the (M x N) bootstrap entirely -- used for the
-    prior ensemble, whose only contribution is a CRPS reference.
+    ``cols`` is the window index each pooled COLUMN came from, which is what
+    makes both of the drop paths visible downstream. Two callers need it and
+    neither can reconstruct it: ``_statistic_block`` reports
+    ``n_windows_scored`` (a window can also vanish later, when every one of its
+    elements fails the finiteness filter -- a single-frame window has no ddof=1
+    variance), and the CRPSS path has to know which windows a pool actually
+    holds, because the posterior and the prior drop windows INDEPENDENTLY and an
+    equal column count is not evidence that they dropped the same ones.
+
+    Args:
+        windows: Optional explicit window indices to pool, in order. ``None``
+            pools every window. Used to rebuild a pool on the subset the
+            posterior and the prior share -- see :func:`sensor_statistic_scores`.
+        with_bootstrap: ``False`` skips the (M x N) bootstrap entirely -- used
+            for the prior ensemble, whose only contribution is a CRPS reference.
     """
-    member_parts, truth_parts, within_parts = [], [], []
-    for indices, window_slice in zip(ensemble_windows, truth_windows):
-        if np.asarray(indices).size == 0:
+    selected = range(len(ensemble_windows)) if windows is None else list(windows)
+    member_parts, truth_parts, within_parts, column_windows = [], [], [], []
+    for window in selected:
+        indices = np.asarray(ensemble_windows[window])
+        if indices.size == 0:
             continue
-        ensemble_window = ensemble[:, :, np.asarray(indices), :]
-        truth_window = truth[:, window_slice, :]
+        ensemble_window = ensemble[:, :, indices, :]
+        truth_window = truth[:, truth_windows[window], :]
         if truth_window.shape[1] == 0:
             continue
         member_series, truth_series, reducer = _statistic_window_series(
@@ -1803,13 +1840,26 @@ def _pooled_statistic(
             if with_bootstrap
             else np.full(member_parts[-1].shape, np.nan)
         )
+        column_windows.append(np.full(member_parts[-1].shape[1], int(window)))
     if not member_parts:
-        return None, None, None
+        return None, None, None, None
     return (
         np.concatenate(member_parts, axis=1),
         np.concatenate(truth_parts, axis=0),
         np.concatenate(within_parts, axis=1),
+        np.concatenate(column_windows),
     )
+
+
+def _pooled_windows(column_windows):
+    """The ordered, de-duplicated window indices behind a pool's columns."""
+    if column_windows is None:
+        return []
+    seen = []
+    for window in np.asarray(column_windows).tolist():
+        if window not in seen:
+            seen.append(int(window))
+    return seen
 
 
 def _column_medians(values):
@@ -1876,8 +1926,177 @@ def _identifiability_block(members, within_std, name, set_name):
     return block
 
 
+def _pool_crps(members, truth, valid):
+    """Mean fair CRPS over the elements ``valid`` selects."""
+    return _finite_mean(
+        fair_crps(
+            np.asarray(members, dtype=float)[:, valid],
+            np.asarray(truth, dtype=float)[valid],
+        )
+    )
+
+
+def _crpss_from_pools(posterior, prior, name, set_name):
+    """CRPSS of one pooled statistic against a prior pool of the SAME elements.
+
+    Both pools must already be built on the same window list -- the caller
+    guarantees that (see :func:`sensor_statistic_scores`), and the shape guard
+    here is only a backstop for a pooling bug, not the alignment mechanism.
+    Element selection is a JOINT filter: an element is scored only when the
+    truth, every posterior member and every prior member are finite there, so
+    the two CRPS values in the ratio are means over exactly the same sample. A
+    per-pool filter would divide a mean over one element set by a mean over
+    another and call the difference skill.
+
+    Returns ``None`` (with one ``logger.info``) when nothing survives.
+    """
+    post_members, post_truth = posterior
+    prior_members, prior_truth = prior
+    if post_members is None or prior_members is None:
+        return None
+    if prior_members.shape != post_members.shape:
+        logger.info(
+            "Sensor set %r: the prior %s pool is %s against the posterior's %s; "
+            "reporting crpss_vs_prior as null",
+            set_name,
+            name,
+            prior_members.shape,
+            post_members.shape,
+        )
+        return None
+
+    valid = (
+        np.isfinite(post_truth)
+        & np.all(np.isfinite(post_members), axis=0)
+        & np.isfinite(prior_truth)
+        & np.all(np.isfinite(prior_members), axis=0)
+    )
+    if not np.any(valid):
+        logger.info(
+            "Sensor set %r, statistic %r: no element is finite in both the "
+            "posterior and the prior pool; reporting crpss_vs_prior as null",
+            set_name,
+            name,
+        )
+        return None
+    return _finite_or_none(
+        crpss(
+            _pool_crps(post_members, post_truth, valid),
+            _pool_crps(prior_members, prior_truth, valid),
+        )
+    )
+
+
+def _aligned_crpss(
+    name,
+    posterior_pool,
+    posterior_source,
+    prior_source,
+    truth,
+    truth_windows,
+    bootstrap_blocks,
+    set_name,
+):
+    """``crpss_vs_prior`` for one statistic, on the windows BOTH pools resolve.
+
+    The posterior and the prior are windowed independently -- they are different
+    ensembles with different time axes, and ``_pooled_statistic`` drops a window
+    from whichever pool lacks frames for it. Two pools can therefore hold the
+    same NUMBER of columns while holding different windows, and an equal-shape
+    check then compares window 0's posterior against window 1's prior and
+    reports the mismatch as skill. Measured on identical member values with the
+    prior shifted by one window, that produced a ``crpss_vs_prior`` of -0.26
+    where the honest answer is exactly 0.
+
+    So the window lists are intersected explicitly:
+
+      * identical lists -- score the pools as they are;
+      * a strict subset -- rebuild BOTH pools on the intersection and score
+        those, so the metric survives a partly-missing prior instead of
+        vanishing;
+      * an empty intersection -- ``None`` plus one ``logger.info``.
+
+    Only ``crpss_vs_prior`` is affected. The posterior's own keys keep their
+    full window list: a short prior must never degrade the posterior's numbers,
+    which is why this returns a scalar instead of re-pooling in place.
+    """
+    members, statistic_truth, column_windows = posterior_pool
+    ensemble, ensemble_windows = posterior_source
+    prior, prior_windows = prior_source
+
+    prior_members, prior_truth, _, prior_columns = _pooled_statistic(
+        name,
+        prior,
+        truth,
+        prior_windows,
+        truth_windows,
+        bootstrap_blocks,
+        with_bootstrap=False,
+    )
+    if prior_members is None:
+        logger.info(
+            "Sensor set %r, statistic %r: no window has both prior and truth "
+            "frames; reporting crpss_vs_prior as null",
+            set_name,
+            name,
+        )
+        return None
+
+    used = _pooled_windows(column_windows)
+    prior_used = _pooled_windows(prior_columns)
+    shared = [window for window in used if window in prior_used]
+    if not shared:
+        logger.info(
+            "Sensor set %r, statistic %r: the posterior pooled windows %s and "
+            "the prior pooled %s, which share none; reporting crpss_vs_prior "
+            "as null",
+            set_name,
+            name,
+            used,
+            prior_used,
+        )
+        return None
+    if shared == used == prior_used:
+        return _crpss_from_pools(
+            (members, statistic_truth), (prior_members, prior_truth), name, set_name
+        )
+
+    logger.info(
+        "Sensor set %r, statistic %r: the posterior pooled windows %s and the "
+        "prior pooled %s; rebuilding both pools on the shared %s so "
+        "crpss_vs_prior compares like with like (the posterior's own keys keep "
+        "the full window list)",
+        set_name,
+        name,
+        used,
+        prior_used,
+        shared,
+    )
+    posterior_shared = _pooled_statistic(
+        name,
+        ensemble,
+        truth,
+        ensemble_windows,
+        truth_windows,
+        bootstrap_blocks,
+        with_bootstrap=False,
+        windows=shared,
+    )
+    prior_shared = _pooled_statistic(
+        name,
+        prior,
+        truth,
+        prior_windows,
+        truth_windows,
+        bootstrap_blocks,
+        with_bootstrap=False,
+        windows=shared,
+    )
+    return _crpss_from_pools(posterior_shared[:2], prior_shared[:2], name, set_name)
+
+
 def _statistic_block(
-    name, members, truth, within_std, prior_members, prior_truth, set_name
+    name, members, truth, within_std, column_windows, n_windows, skill, set_name
 ):
     """Score one pooled statistic: CRPS, z-score, coverage, PIT, identifiability.
 
@@ -1885,6 +2104,18 @@ def _statistic_block(
     axis 0, which is the convention every ``ensemble_scores`` function takes.
     Elements whose truth or members are non-finite are dropped once, here, so
     each score sees the same sample.
+
+    ``skill`` is ``crpss_vs_prior``, computed by the caller because it needs the
+    prior pool rebuilt on the shared windows; it is passed in rather than
+    derived here so this function scores exactly one pool.
+
+    ``n_windows_scored`` counts the windows that survive to the reported
+    numbers, which is NOT the configured ``n_windows``: a window is lost either
+    by contributing no columns (no ensemble or no truth frame) or by having
+    every one of its columns fail the finiteness filter (a single-frame window
+    has no ddof=1 variance, so it kills ``window_variance`` and ``tke`` while
+    ``window_mean`` survives -- which is why this count is per statistic and not
+    per sensor set).
     """
     if members is None:
         reason = (
@@ -1907,29 +2138,22 @@ def _statistic_block(
     scored_truth = np.asarray(truth, dtype=float)[valid]
     n_members = int(scored.shape[0])
 
-    crps_mean = _finite_mean(fair_crps(scored, scored_truth))
-    skill = None
-    if prior_members is not None:
-        if prior_members.shape == members.shape:
-            skill = crpss(
-                crps_mean,
-                _finite_mean(
-                    fair_crps(
-                        np.asarray(prior_members, dtype=float)[:, valid],
-                        np.asarray(prior_truth, dtype=float)[valid],
-                    )
-                ),
-            )
-        else:
-            logger.info(
-                "Sensor set %r: the prior %s pool is %s against the posterior's "
-                "%s; reporting crpss_vs_prior as null",
-                set_name,
-                name,
-                prior_members.shape,
-                members.shape,
-            )
+    scored_windows = _pooled_windows(np.asarray(column_windows)[valid])
+    dropped = [w for w in range(int(n_windows)) if w not in scored_windows]
+    if dropped:
+        logger.info(
+            "Sensor set %r, statistic %r: windows %s contribute no finite "
+            "element (no ensemble or truth frame in the window, or too few "
+            "frames for this statistic); scoring %d of the %d configured "
+            "windows -- n_windows_scored records this",
+            set_name,
+            name,
+            dropped,
+            len(scored_windows),
+            int(n_windows),
+        )
 
+    crps_mean = _finite_mean(fair_crps(scored, scored_truth))
     z_block = _zscore_block(scored, scored_truth)
     ranks = pit_rank(scored, scored_truth, rng=PIT_TIE_SEED)
     counts = rank_histogram(ranks, n_members, n_bins=PIT_BINS)
@@ -1964,21 +2188,38 @@ def _statistic_block(
             set_name,
         ),
         "n_samples": int(valid.sum()),
+        "n_windows_scored": len(scored_windows),
         "reason": None,
     }
 
 
-def _wasserstein_block(ensemble_da, truth_da, set_name):
-    """Distribution distance between the modelled and observed ``|U|``, per sensor.
+def _wasserstein_block(
+    ensemble_da, truth_da, ensemble_windows, truth_windows, set_name
+):
+    """Distribution distance between modelled and observed ``|U|``, per sensor-window.
 
     The layer the window statistics cannot provide: a window mean can match
     while the *distribution* of the probe signal is wrong, and it is the
     distribution the plan's probe figures compare. Scored on ``|U|`` -- positive
-    and directly the probe quantity -- over the **whole run**, not per window,
-    because a window holds too few frames for a distance between empirical
-    distributions to mean anything.
+    and directly the probe quantity -- **within each assimilation window**, over
+    the same window slices the four statistics use (the ensemble by time value,
+    the truth by frame index), then reduced over the ``S x W`` sensor-window
+    elements.
 
-    Four numbers per sensor, then reduced over sensors by median and max:
+    Per window rather than over the whole run because of ``self_floor``. That
+    floor splits the truth series in two contiguous halves, so it absorbs
+    everything that makes the two halves differ -- including any *deterministic*
+    drift across the split, which is not sampling variability at all. Pooling
+    the whole run puts the run's slowest forcing inside the split: on the
+    shipped default truth (``params@truth_params: dynamic_cosine``, a 400 s
+    inflow-angle cosine and a 200 s magnitude cosine) the measured floor rises
+    from 0.168 on a stationary series to 0.575, and a clearly-wrong model (+20%
+    ``|U|``, half the turbulence) falls from ``w1_over_floor`` 18.2 to 1.9 --
+    inside the band the docs call indistinguishable from perfect. Windowing
+    removes the cross-window part of that; a trend whose period is comparable to
+    ONE window still inflates the floor, and no reduction here can fix that.
+
+    Four numbers per (sensor, window), then reduced by median and max:
 
       * ``w1_over_sigma_pooled`` -- every member's samples pooled into one
         empirical distribution against the truth's. This is the ensemble's
@@ -1996,9 +2237,20 @@ def _wasserstein_block(ensemble_da, truth_da, set_name):
     covering the truth, the member mean alone refuses to.
       * ``self_floor`` -- what a *perfect* model scores at this sample count and
         autocorrelation (``wasserstein_self_floor``: contiguous halves of the
-        truth against each other). Without it the raw distance is unreadable.
-      * ``w1_over_floor`` -- the pooled distance in units of that floor. ~1 is
-        indistinguishable from perfect at this sample size.
+        window's truth against each other). Without it the raw distance is
+        unreadable.
+      * ``w1_over_floor`` -- each element's OWN distance over its OWN floor,
+        reduced afterwards. Deliberately not
+        ``w1_over_sigma_pooled.median / self_floor.median``: the floor is a
+        property of one sensor in one window (its sample count and its
+        autocorrelation), so dividing a median by a median would read one
+        sensor's distance against another's floor. ~1 is indistinguishable from
+        perfect at this sample size.
+
+    Elements whose distance or floor is undefined drop out of the reduction --
+    the four-finite-sample minimum of ``wasserstein_self_floor`` is routine at
+    smoke scale, where a window holds 3 frames and ``self_floor`` is ``null``
+    while the two distances survive.
 
     ``reason`` is non-null whenever any of the four reduces to ``null``, naming
     which -- a constant truth series has no ``sigma`` to divide by and no floor,
@@ -2016,29 +2268,39 @@ def _wasserstein_block(ensemble_da, truth_da, set_name):
     )  # (time, sensor)
 
     n_members, _, n_sensors = ensemble_magnitude.shape
+    n_windows = len(ensemble_windows)
     if n_sensors == 0 or truth_magnitude.shape[0] == 0:
         reason = "the sensor set has no sensor or no truth frame"
         logger.info("Sensor set %r: %s; emitting Wasserstein nulls", set_name, reason)
         return _null_wasserstein_block(reason)
 
-    pooled = np.full(n_sensors, np.nan)
-    member_mean = np.full(n_sensors, np.nan)
-    floor = np.full(n_sensors, np.nan)
-    over_floor = np.full(n_sensors, np.nan)
-    for sensor in range(n_sensors):
-        truth_samples = truth_magnitude[:, sensor]
-        pooled[sensor] = wasserstein_over_sigma(
-            ensemble_magnitude[:, :, sensor].ravel(), truth_samples
-        )
-        per_member = np.array(
-            [
-                wasserstein_over_sigma(ensemble_magnitude[m, :, sensor], truth_samples)
-                for m in range(n_members)
-            ]
-        )
-        member_mean[sensor] = _finite_mean(per_member)
-        floor[sensor] = wasserstein_self_floor(truth_samples)
-        over_floor[sensor] = wasserstein_over_floor(pooled[sensor], floor[sensor])
+    shape = (n_windows, n_sensors)
+    pooled = np.full(shape, np.nan)
+    member_mean = np.full(shape, np.nan)
+    floor = np.full(shape, np.nan)
+    over_floor = np.full(shape, np.nan)
+    for window in range(n_windows):
+        indices = np.asarray(ensemble_windows[window])
+        window_truth = truth_magnitude[truth_windows[window], :]
+        if indices.size == 0 or window_truth.shape[0] == 0:
+            continue
+        window_members = ensemble_magnitude[:, indices, :]
+        for sensor in range(n_sensors):
+            truth_samples = window_truth[:, sensor]
+            pooled[window, sensor] = wasserstein_over_sigma(
+                window_members[:, :, sensor].ravel(), truth_samples
+            )
+            per_member = np.array(
+                [
+                    wasserstein_over_sigma(window_members[m, :, sensor], truth_samples)
+                    for m in range(n_members)
+                ]
+            )
+            member_mean[window, sensor] = _finite_mean(per_member)
+            floor[window, sensor] = wasserstein_self_floor(truth_samples)
+            over_floor[window, sensor] = wasserstein_over_floor(
+                pooled[window, sensor], floor[window, sensor]
+            )
 
     block = {
         "w1_over_sigma_pooled": _median_max(pooled),
@@ -2050,9 +2312,9 @@ def _wasserstein_block(ensemble_da, truth_da, set_name):
     reason = None
     if missing:
         reason = (
-            f"no sensor has a finite {', '.join(missing)} (a truth series with "
-            "fewer than two finite samples or zero spread has no scale to "
-            "normalize by)"
+            f"no (sensor, window) element has a finite {', '.join(missing)} (a "
+            "window truth series with fewer than two finite samples or zero "
+            "spread has no scale to normalize by, and the self floor needs four)"
         )
         logger.info(
             "Sensor set %r: %s; reporting those entries as null and keeping the rest",
@@ -2097,6 +2359,18 @@ def sensor_statistic_scores(
     which is exactly what makes a statistics-space comparison possible in the
     first place.
 
+    **What ``crpss_vs_prior`` measures.** ``window_{w}_prior_state.nc`` is window
+    ``w``'s ESMDA step-0 forecast, and ``run_esmda.py`` seeds window ``w``'s
+    prior from window ``w-1``'s posterior. Pooling every window therefore makes
+    this **one-window-ahead** skill -- how much the update improved on the state
+    it started that window from -- and NOT skill against the run's initial
+    prior. Those are different quantities, and the same ``run_summary.yaml``
+    carries the other one: WP1.1's parameter bundle splits exactly this
+    distinction into ``crpss.vs_window_prior`` and ``crpss.vs_initial_prior``
+    (``compute_esmda_metrics.py:376-385``). Read the sensor number as the
+    former; there is no statistics-space analogue of the latter, because the
+    initial prior's sensor series is not saved.
+
     Does no file IO: the caller passes the series it already extracted. That
     keeps WP1.3's streaming refactor of the extraction from touching this
     function at all.
@@ -2117,7 +2391,7 @@ def sensor_statistic_scores(
         n_per_window: Truth frames per window -- the truth's slicing rule.
         sim_time: Seconds per window -- the ensemble's slicing rule.
         bootstrap_blocks: Block count for the identifiability bootstrap
-            (:func:`turbulence_stats.block_bootstrap_std`).
+            (:func:`turbulence_stats.block_bootstrap_std_batch`).
         prior_series: The same mapping for the prior ensemble, or ``None``.
             ``None`` is the common case (``run.save_prior_state`` defaults to
             false), and it makes ``crpss_vs_prior`` ``null`` -- not an error.
@@ -2196,7 +2470,7 @@ def sensor_statistic_scores(
             )
 
         for name in SENSOR_STATISTIC_NAMES:
-            members, statistic_truth, within_std = _pooled_statistic(
+            members, statistic_truth, within_std, column_windows = _pooled_statistic(
                 name,
                 ensemble,
                 truth,
@@ -2204,28 +2478,32 @@ def sensor_statistic_scores(
                 truth_windows,
                 bootstrap_blocks,
             )
-            prior_members, prior_truth = None, None
-            if prior is not None:
-                prior_members, prior_truth, _ = _pooled_statistic(
+            skill = None
+            if members is not None and prior is not None:
+                skill = _aligned_crpss(
                     name,
-                    prior,
+                    (members, statistic_truth, column_windows),
+                    (ensemble, ensemble_windows),
+                    (prior, prior_windows),
                     truth,
-                    prior_windows,
                     truth_windows,
                     bootstrap_blocks,
-                    with_bootstrap=False,
+                    set_name,
                 )
             entry[name] = _statistic_block(
                 name,
                 members,
                 statistic_truth,
                 within_std,
-                prior_members,
-                prior_truth,
+                column_windows,
+                windows,
+                skill,
                 set_name,
             )
 
-        entry["wasserstein"] = _wasserstein_block(ensemble_da, truth_da, set_name)
+        entry["wasserstein"] = _wasserstein_block(
+            ensemble_da, truth_da, ensemble_windows, truth_windows, set_name
+        )
         scores[set_name] = entry
 
     return scores

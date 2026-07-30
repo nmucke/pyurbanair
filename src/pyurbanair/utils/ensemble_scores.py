@@ -840,6 +840,44 @@ def wasserstein_self_floor(truth_samples: np.ndarray) -> float:
     a factor ~``sqrt(2)`` (0.356 vs 0.269 on white noise at ``n = 36``), and a
     single split is one draw of a noisy quantity rather than an expectation.
 
+    **A third, larger one: the window must be stationary.** The table above is
+    measured on stationary AR(1) series, where the contiguous split reports the
+    series' own sampling variability -- which is the quantity a model should be
+    read against. Put a *deterministic* trend inside the window and the two
+    halves are drawn from different parts of that trend, so the split measures
+    the trend instead. Measured on a 108-frame ``|U|`` series with
+    ``sigma_turb = 0.5``; perfect model = an independent realization of the same
+    law, bad model = ``+20%`` in ``|U|`` with half the turbulence:
+
+    ==============================  ==========  =============  =========
+    truth                           self_floor  perfect ratio  bad ratio
+    ==============================  ==========  =============  =========
+    stationary                      0.168       0.75           18.2
+    magnitude cosine only           0.366       0.38           5.8
+    both cosines (shipped default)  0.575       0.12           1.9
+    ==============================  ==========  =============  =========
+
+    Read the last row. On the shipped default truth (``params@truth_params:
+    dynamic_cosine`` -- a 400 s inflow-angle cosine and a 200 s magnitude
+    cosine) a *clearly wrong* model scores ``w1_over_floor ~ 1.9``, inside the
+    band :func:`wasserstein_over_floor` calls indistinguishable from perfect.
+    The floor has absorbed the forcing, and good and bad models are then both
+    divided by it. Unlike the two conservatisms above this is not a small
+    factor: it is the difference between 18 and 2.
+
+    **Mitigation, and its limit.** Callers must take the split over a window
+    short enough to be *locally* stationary. WP1.2 does this: every Wasserstein
+    quantity is computed per assimilation window and then reduced, rather than
+    over the pooled run, which removes the cross-window part of the forcing --
+    the dominant term in the table (0.168 stationary vs 0.575 with both cosines,
+    over the full 540 s run). It does **not** remove a trend whose period is
+    comparable to one window: a 180 s window against a 200 s magnitude cosine
+    still contains most of a cycle. Measured on the same synthetic, a cosine of
+    period ~2x the window inflates the floor ~3x whether the window is 108 or 36
+    frames, while a cosine cycling several times *within* the window does not
+    inflate it at all. So a ratio near 1 on a strongly forced truth means "the
+    floor may be doing the work", not "the model passed".
+
     An odd sample count drops the **middle** sample so the halves are equal
     length; equal halves keep the ``n``-dependence of the distance the same on
     both sides.
