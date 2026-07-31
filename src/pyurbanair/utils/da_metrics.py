@@ -3,12 +3,6 @@
 Helpers operate on numpy arrays of shape ``(ensemble, time)`` and a truth
 array of shape ``(time,)``. They are intentionally pure-numpy (no JAX) so
 they can be applied to ``xarray.Dataset`` outputs after an ESMDA run.
-
-The general-purpose scoring math now lives in
-:mod:`pyurbanair.utils.ensemble_scores` (ensemble axis first, no parameter
-vocabulary); what remains here is the per-knot parameter framing plus the
-ensemble-collapse diagnostic. The shared scores are re-exported so existing
-``from pyurbanair.utils.da_metrics import ...`` imports keep working.
 """
 
 from __future__ import annotations
@@ -16,37 +10,6 @@ from __future__ import annotations
 from typing import TypedDict
 
 import numpy as np
-
-from pyurbanair.utils.ensemble_scores import (
-    coverage,
-    coverage_indicator,
-    crpss,
-    fair_crps,
-    fair_energy_score,
-    pit_rank,
-    rank_histogram,
-    spread_skill_ratio,
-    zscore,
-)
-
-__all__ = [
-    "EnsembleUniqueness",
-    "coverage",
-    "coverage_indicator",
-    "crpss",
-    "ensemble_uniqueness",
-    "fair_crps",
-    "fair_energy_score",
-    "per_knot_crps",
-    "per_knot_error",
-    "per_knot_in_band",
-    "per_knot_spread",
-    "pit_rank",
-    "rank_histogram",
-    "spread_skill_ratio",
-    "summary_scalars",
-    "zscore",
-]
 
 
 class EnsembleUniqueness(TypedDict):
@@ -73,11 +36,24 @@ def per_knot_spread(ens: np.ndarray) -> np.ndarray:
 def per_knot_crps(ens: np.ndarray, truth: np.ndarray) -> np.ndarray:
     """Per-knot fair sample CRPS using the energy-form estimator.
 
-    Thin parameter-space alias of :func:`ensemble_scores.fair_crps` -- see
-    there for the estimator and the sorted-sample identity it uses. ``ens`` is
-    ``(n_ensemble, n_knots)`` and ``truth`` is ``(n_knots,)``.
+    ``CRPS(F, y) = E|X - y| - 0.5 * E|X - X'|`` where ``X, X'`` are
+    independent draws from ``F``. With a finite ensemble of size ``N`` the
+    pairwise term excludes the zero diagonal and divides by ``N(N - 1)``.
+    This is the fair estimator: unlike the all-pairs ``N**2`` form, it does
+    not reward under-dispersion at finite ensemble size.
     """
-    return fair_crps(ens, truth)
+    n = ens.shape[0]
+    term1 = np.mean(np.abs(ens - truth[None, :]), axis=0)
+    if n < 2:
+        return term1
+    # For sorted scalar samples x_(i),
+    #   sum_{i,j} |x_i - x_j| = 2 sum_i (2i - n + 1) x_(i).
+    # This is algebraically identical to forming the full pairwise-difference
+    # tensor, but avoids its O(N**2) memory cost.
+    sorted_ens = np.sort(ens, axis=0)
+    weights = (2 * np.arange(n) - n + 1).reshape((n,) + (1,) * (sorted_ens.ndim - 1))
+    term2 = np.sum(weights * sorted_ens, axis=0) / (n * (n - 1))
+    return term1 - term2
 
 
 def per_knot_in_band(

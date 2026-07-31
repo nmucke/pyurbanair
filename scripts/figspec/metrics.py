@@ -10,8 +10,6 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
-from pyurbanair.utils.ensemble_scores import spread_skill_ratio
-
 
 # ---------------------------------------------------------------------------
 # Field metrics
@@ -104,15 +102,11 @@ def sensor_rmse(model_ts: np.ndarray, truth_ts: np.ndarray) -> float:
 
 
 def spread_skill(spread_ts: np.ndarray, rmse_ts: np.ndarray, n_members: int) -> float:
-    """Finite-ensemble-corrected RMS spread / RMS error (calibration ~ 1).
-
-    Figspec-side alias of :func:`ensemble_scores.spread_skill_ratio` -- see
-    there for the Fortin et al. (2014) factor and the NaN handling. The shared
-    function is phrased in variances and squared errors; this one keeps the
-    figspec vocabulary of a standard-deviation series and an RMSE series, so
-    the squaring happens here.
-    """
-    spread = np.asarray(spread_ts, dtype=float)
-    rmse = np.asarray(rmse_ts, dtype=float)
-    # The float cast keeps mypy happy: figspec sees ``pyurbanair`` as untyped.
-    return float(spread_skill_ratio(spread**2, rmse**2, n_members))
+    """Finite-ensemble-corrected RMS spread / RMS error (calibration ~ 1)."""
+    if n_members < 1:
+        raise ValueError(f"n_members must be positive, got {n_members}")
+    num = float(np.sqrt(np.nanmean(np.asarray(spread_ts, dtype=float) ** 2)))
+    den = float(np.sqrt(np.nanmean(np.asarray(rmse_ts, dtype=float) ** 2)))
+    if den <= 0 or not np.isfinite(den):
+        return float("nan")
+    return float(np.sqrt((n_members + 1) / n_members)) * num / den
