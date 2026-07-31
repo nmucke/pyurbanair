@@ -1,6 +1,12 @@
 # Master plan: turbulence-aware evaluation in the ESMDA pipeline
 
-> **Status: living implementation plan.** Companion to the research document
+> **Status: ON HOLD — implementation rolled back, plan under review.** The
+> WP0.1–1.2 code was reverted from `main` (see [Rollback](#rollback) below);
+> the plan files are kept as-is so the design can be reviewed once more before
+> anything is rebuilt. Do not start a work package from this file until the
+> hold is lifted.
+>
+> **Companion to** the research document
 > [../esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md)
 > (the *what and why* — metric definitions, formulas, figure conventions,
 > literature). This file is the index and status board; the per-phase plans
@@ -57,13 +63,13 @@ orchestration glue. Figures reuse `scripts/figspec/style.py` conventions.
 
 | WP | Content | Plan | Size | Status | PR |
 |---|---|---|---|---|---|
-| 0.1 | Fair CRPS / energy-score estimators + CRPSS vs prior + `metrics_version` | [phase0](phase0_correctness_fixes.md) | S | not started | — |
-| 0.2 | Spread–skill: RMS-of-variances + Fortin factor (callers updated) | [phase0](phase0_correctness_fixes.md) | S | not started | — |
-| 0.3 | Duplicate-member guard (`ensemble_health`) | [phase0](phase0_correctness_fixes.md) | S | not started | — |
-| 1.0 | `run.metrics` config block + module skeletons | [phase1](phase1_postprocessing_metrics.md) | S | not started | — |
-| 1.1 | Parameter bundle: z-scores, PIT, coverage, contraction, joint directions | [phase1](phase1_postprocessing_metrics.md) | S | not started | — |
-| 1.2 | Statistics-space sensor scoring + Wasserstein w/ self-distance floor | [phase1](phase1_postprocessing_metrics.md) | M | not started | — |
-| 1.3 | Shared-pass mean-field / Reynolds-stress layer + station columns + hit rate/FAC2/FB/NMSE + `eval_fields.nc` | [phase1](phase1_postprocessing_metrics.md) | M–L | not started | — |
+| 0.1 | Fair CRPS / energy-score estimators + CRPSS vs prior + `metrics_version` | [phase0](phase0_correctness_fixes.md) | S | reverted | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
+| 0.2 | Spread–skill: RMS-of-variances + Fortin factor (callers updated) | [phase0](phase0_correctness_fixes.md) | S | reverted | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
+| 0.3 | Duplicate-member guard (`ensemble_health`) | [phase0](phase0_correctness_fixes.md) | S | reverted | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
+| 1.0 | `run.metrics` config block + module skeletons | [phase1](phase1_postprocessing_metrics.md) | S | reverted | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
+| 1.1 | Parameter bundle: z-scores, PIT, coverage, contraction, joint directions | [phase1](phase1_postprocessing_metrics.md) | S | reverted | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
+| 1.2 | Statistics-space sensor scoring + Wasserstein w/ self-distance floor | [phase1](phase1_postprocessing_metrics.md) | M | reverted | [#100](https://github.com/nmucke/pyurbanair/pull/100) |
+| 1.3 | Shared-pass mean-field / Reynolds-stress layer + station columns + hit rate/FAC2/FB/NMSE + `eval_fields.nc` | [phase1](phase1_postprocessing_metrics.md) | M–L | closed unmerged | [#101](https://github.com/nmucke/pyurbanair/pull/101) |
 | 1.4 | Figures: P1, S1, S5, F1, F2, S2/S3 | [phase1](phase1_postprocessing_metrics.md) | M | not started | — |
 | 2.1 | Persist obs / per-iteration + posterior pred-obs / per-iteration params | [phase2](phase2_obs_persistence.md) | M | not started | — |
 | 2.2 | Diagnostics: `O_N` vs ½, innovations, contraction-vs-achievable, SNR/DFS, obs-space scores | [phase2](phase2_obs_persistence.md) | M | not started | — |
@@ -90,3 +96,44 @@ Cross-cutting cautions:
   special-case.
 - ~28 pre-existing test failures are baseline (see auto-memory) —
   stash-verify before blaming new changes.
+
+## Rollback
+
+On 2026-07-31 the merged implementation (WP0.1–1.2, PRs #97/#99/#100) was
+reverted from `main`, and WP1.3 (#101) was closed unmerged. The reason was
+scope, not correctness: the delivered code was far more involved than the
+value it returned — ~11.3k lines across 24 files, of which `_esmda_common.py`
+alone grew by ~2.2k, for three work packages out of fourteen. The plan is on
+hold pending a re-read of the design with an eye to cutting it down.
+
+What the revert did and did not touch:
+
+- **Reverted:** all WP0.1–1.2 code and config — `conf/run_esmda.yaml`'s
+  `run.metrics` block, `scripts/esmda/`, `scripts/figspec/metrics.py`,
+  `scripts/figure_creation/`, `src/pyurbanair/plotting.py`,
+  `utils/da_metrics.py`, the new `utils/ensemble_scores.py` and
+  `utils/turbulence_stats.py`, their test files, and the
+  `docs/scripts_and_configs.md` sections describing them. The tree is
+  byte-identical to `97fa04e` (the merge of #98) apart from the exceptions
+  below.
+- **Kept:** the plan documents in this directory, at their post-#100 state —
+  including the phase-1 body as it grew during implementation and the phase-0
+  deviation log. They are the material for the review, so they were
+  deliberately not reset to their pristine `d3cf323` form.
+- **Kept:** the test-output isolation in `tests/conftest.py` (originally
+  `ea5f507`, carried in #99 but independent of the metrics work) — it stops
+  the suite from overwriting production run directories under `.temp/`.
+
+Nothing is lost: the reverted work survives on `origin/agent/esmda-phase0-correctness`,
+`origin/agent/esmda-phase1-metrics-foundation`,
+`origin/agent/esmda-wp12-sensor-statistics` and
+`origin/agent/esmda-wp13-mean-field-metrics`. If a slimmed-down plan reuses
+a piece, cherry-pick it from there rather than rewriting it.
+
+Note for whoever restarts this: `metrics_version` no longer exists anywhere,
+so the version-mixing caution above is moot until it is reintroduced. Run
+directories produced while #97–#100 were on `main` carry
+`metrics_version: 2` and fair-estimator scores in their `run_summary.yaml`;
+current code writes neither, and its CRPS/energy-score numbers are the
+biased-estimator values again. Those run dirs are not comparable with new
+ones.

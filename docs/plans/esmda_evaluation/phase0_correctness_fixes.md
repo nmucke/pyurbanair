@@ -145,4 +145,14 @@ the effective `M` in fair corrections; for this phase, reporting is enough.
 
 ## Deviations
 
-_(record here as they occur)_
+- The two scalar CRPS sites use the algebraically equivalent sorted-sample
+  pairwise-sum identity instead of materializing an `M × M` difference tensor.
+  This keeps the specified `M=10⁴` Gaussian test linear-memory.
+- `metrics_version: 2` is also emitted by the filtering metric stage because it
+  reuses the corrected parameter CRPS and energy-score code. Sweep metrics are
+  always marked version 2 when recomputed by the updated stage, even if the raw
+  run's older summary had no marker. When such a run lacks
+  `truth_access.yaml`, its unrecomputed version-1 sensor scores are omitted from
+  the sweep artifact rather than copied under the version-2 marker.
+- No existing production caller of `figspec.metrics.spread_skill` was present,
+  so there were no call sites to update when making `n_members` required.
