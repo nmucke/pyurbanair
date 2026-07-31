@@ -60,9 +60,9 @@ orchestration glue. Figures reuse `scripts/figspec/style.py` conventions.
 | 0.1 | Fair CRPS / energy-score estimators + CRPSS vs prior + `metrics_version` | [phase0](phase0_correctness_fixes.md) | S | merged | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
 | 0.2 | Spread–skill: RMS-of-variances + Fortin factor (callers updated) | [phase0](phase0_correctness_fixes.md) | S | merged | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
 | 0.3 | Duplicate-member guard (`ensemble_health`) | [phase0](phase0_correctness_fixes.md) | S | merged | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
-| 1.0 | `run.metrics` config block + module skeletons | [phase1](phase1_postprocessing_metrics.md) | S | merged | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
-| 1.1 | Parameter bundle: z-scores, PIT, coverage, contraction, joint directions | [phase1](phase1_postprocessing_metrics.md) | S | merged | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
-| 1.2 | Statistics-space sensor scoring + Wasserstein w/ self-distance floor | [phase1](phase1_postprocessing_metrics.md) | M | in review | [#100](https://github.com/nmucke/pyurbanair/pull/100) |
+| 1.0 | `run.metrics` config block + module skeletons | [phase1](phase1_postprocessing_metrics.md) | S | in review | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
+| 1.1 | Parameter bundle: z-scores, PIT, coverage, contraction, joint directions | [phase1](phase1_postprocessing_metrics.md) | S | in review | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
+| 1.2 | Statistics-space sensor scoring + Wasserstein w/ self-distance floor | [phase1](phase1_postprocessing_metrics.md) | M | not started | — |
 | 1.3 | Shared-pass mean-field / Reynolds-stress layer + station columns + hit rate/FAC2/FB/NMSE + `eval_fields.nc` | [phase1](phase1_postprocessing_metrics.md) | M–L | not started | — |
 | 1.4 | Figures: P1, S1, S5, F1, F2, S2/S3 | [phase1](phase1_postprocessing_metrics.md) | M | not started | — |
 | 2.1 | Persist obs / per-iteration + posterior pred-obs / per-iteration params | [phase2](phase2_obs_persistence.md) | M | not started | — |
