@@ -17,12 +17,12 @@ Middle stage of the three-script sweep pipeline:
 
 Per run it writes ``pyurbanair/sweep_metrics/<run>/``:
 
-  * ``metrics.yaml``                -- estimator version + configuration + parameter /
-                                       state / sensor metrics. Sensor metrics now
-                                       cover |U| AND each velocity component (u/v/w),
-                                       per sensor set (assimilation + validation).
-                                       Same schema as run_summary.yaml so the
-                                       comparison script parses it unchanged.
+  * ``metrics.yaml``                -- configuration + parameter / state / sensor
+                                       metrics. Sensor metrics now cover |U| AND
+                                       each velocity component (u/v/w), per sensor
+                                       set (assimilation + validation). Same schema
+                                       as run_summary.yaml so the comparison script
+                                       parses it unchanged.
   * ``sensor_timeseries_<set>.nc``  -- per sensor set: truth, prior ensemble and
                                        posterior ensemble |U|/u/v/w time series at
                                        each sensor (small; no full fields).
@@ -41,10 +41,6 @@ Usage::
         --root /projects/prjs2075/urbanair/assim_from_ground_truth \
         --out  pyurbanair/sweep_metrics --models pyudales pylbm
 """
-
-# mypy: ignore-errors
-# Legacy untyped CLI module. Keep the waiver local until its existing helpers
-# are annotated; runtime behavior remains covered by the metric tests.
 
 from __future__ import annotations
 
@@ -227,7 +223,7 @@ def _write_yaml(data, path) -> None:
 
 
 def _parameter_metrics(post, true, prior):
-    """Per-parameter RMSE/CRPS summary + skill vs prior (library compute)."""
+    """Per-parameter RMSE/CRPS summary + reduction vs prior (library compute)."""
     metrics = compute_parameter_metrics(post, true, prior)
     out = {}
     for name, m in metrics.items():
@@ -237,13 +233,6 @@ def _parameter_metrics(post, true, prior):
             post_mean = float(np.nanmean(m["rmse"]))
             entry["prior_rmse_mean"] = prior_mean
             entry["rmse_reduction_vs_prior"] = (
-                float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
-            )
-        if "prior_crps" in m:
-            prior_mean = float(np.nanmean(m["prior_crps"]))
-            post_mean = float(np.nanmean(m["crps"]))
-            entry["prior_crps_mean"] = prior_mean
-            entry["crps_reduction_vs_prior"] = (
                 float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
             )
         out[name] = entry
@@ -305,9 +294,6 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     cfg = OmegaConf.load(run_dir / "config.yaml")
 
     metrics: dict = {
-        # This stage recomputes every CRPS with the current fair estimator, even
-        # when processing a raw run whose older run_summary has no version key.
-        "metrics_version": 2,
         "configuration": summary.get("configuration", {}),
         "timing": summary.get("timing", {}),
     }
@@ -369,13 +355,13 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
                 )
             sensor_metrics[name] = entry
 
-    if sensor_metrics:
-        metrics["sensor_metrics"] = sensor_metrics
-    else:
-        # No truth_access (pre-update run): the source summary's sensor scores
-        # use the legacy estimator and cannot live under this stage's version-2
-        # marker. Omit them rather than producing a mixed-semantics artifact.
-        status["note"] = "no truth_access.yaml -> sensor metrics omitted (re-run ESMDA)"
+    if not sensor_metrics:
+        # No truth_access (pre-update run): fall back to the base |U| summary.
+        sensor_metrics = summary.get("sensor_metrics", {})
+        status["note"] = (
+            "no truth_access.yaml -> base |U| sensor metrics only (re-run ESMDA)"
+        )
+    metrics["sensor_metrics"] = sensor_metrics
 
     _write_yaml(metrics, out_run / "metrics.yaml")
     return status

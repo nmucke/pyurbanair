@@ -337,12 +337,10 @@ def _energy_score(members, truth):
     The energy score is the multivariate generalization of the CRPS (Gneiting &
     Raftery 2007): for a vector forecast ensemble ``{v_m}`` and truth ``v``,
 
-        ES = mean_m ||v_m - v||
-             - 0.5 / (M(M-1)) * sum_{m != m'} ||v_m - v_{m'}||,
+        ES = mean_m ||v_m - v|| - 0.5 * mean_{m,m'} ||v_m - v_{m'}||,
 
     which reduces to the CRPS in 1-D. It rewards both accuracy (term 1) and a
-    calibrated spread (term 2), in the same |U| units as the velocity. The
-    off-diagonal pairwise normalization is the fair finite-ensemble estimator.
+    calibrated spread (term 2), in the same |U| units as the velocity.
 
     Args:
         members: ``(component, ensemble, time, sensor)`` aligned member vectors.
@@ -353,7 +351,6 @@ def _energy_score(members, truth):
         per-time, over-sensors reduction of ``compute_sensor_metrics``).
     """
     n_time = members.shape[2]
-    n_members = members.shape[1]
     es = np.empty(n_time)
     # Loop over time so the pairwise term never materializes more than
     # ``(component, ensemble, ensemble, sensor)`` at once.
@@ -362,12 +359,9 @@ def _energy_score(members, truth):
         v = truth[:, t, :]  # (C, S)
         d_truth = np.sqrt(np.sum((m - v[:, None, :]) ** 2, axis=0))  # (E, S)
         term1 = d_truth.mean(axis=0)  # (S,)
-        if n_members < 2:
-            es[t] = float(term1.mean())
-            continue
         diff = m[:, :, None, :] - m[:, None, :, :]  # (C, E, E, S)
         d_pair = np.sqrt(np.sum(diff**2, axis=0))  # (E, E, S)
-        term2 = 0.5 * d_pair.sum(axis=(0, 1)) / (n_members * (n_members - 1))  # (S,)
+        term2 = 0.5 * d_pair.mean(axis=(0, 1))  # (S,)
         es[t] = float((term1 - term2).mean())  # average over sensors
     return es
 
@@ -460,13 +454,6 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
             post_mean = float(np.nanmean(m["rmse"]))
             entry["prior_rmse_mean"] = prior_mean
             entry["rmse_reduction_vs_prior"] = (
-                float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
-            )
-        if "prior_crps" in m:
-            prior_mean = float(np.nanmean(m["prior_crps"]))
-            post_mean = float(np.nanmean(m["crps"]))
-            entry["prior_crps_mean"] = prior_mean
-            entry["crps_reduction_vs_prior"] = (
                 float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
             )
         summary[name] = entry

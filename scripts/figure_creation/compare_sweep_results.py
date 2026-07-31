@@ -46,17 +46,12 @@ Usage::
         --root pyurbanair/sweep_metrics --out pyurbanair/comparison --models pyudales pylbm
 """
 
-# mypy: ignore-errors
-# Legacy untyped plotting CLI. Keep the waiver local until the module receives
-# a dedicated typing pass.
-
 from __future__ import annotations
 
 import argparse
 import math
 import pathlib
 import re
-import warnings
 from collections import Counter
 
 import matplotlib
@@ -108,7 +103,6 @@ def param_metrics() -> list[tuple[str, str, bool]]:
         out.append(
             (f"param_{p}_rmse_reduction", f"{pretty} RMSE reduction vs prior", False)
         )
-        out.append((f"param_{p}_crps_reduction", f"{pretty} CRPSS vs prior", False))
     return out
 
 
@@ -160,11 +154,7 @@ def _flatten_summary(run_dir: pathlib.Path, summary: dict) -> dict:
     sm = summary.get("state_metrics", {}) or {}
     sen = summary.get("sensor_metrics", {}) or {}
 
-    rec: dict = {
-        "run_dir": str(run_dir),
-        "name": run_dir.name,
-        "metrics_version": int(summary.get("metrics_version", 1)),
-    }
+    rec: dict = {"run_dir": str(run_dir), "name": run_dir.name}
 
     # Axes: prefer the dir-name tag (carries nx/ny/nz, not in the summary);
     # fall back to the summary configuration for the rest.
@@ -200,7 +190,6 @@ def _flatten_summary(run_dir: pathlib.Path, summary: dict) -> dict:
         rec[f"param_{p}_rmse_final"] = _safe(pm, p, "rmse", "final")
         rec[f"param_{p}_crps_mean"] = _safe(pm, p, "crps", "mean")
         rec[f"param_{p}_rmse_reduction"] = _safe(pm, p, "rmse_reduction_vs_prior")
-        rec[f"param_{p}_crps_reduction"] = _safe(pm, p, "crps_reduction_vs_prior")
 
     # State metrics.
     rec["state_vel_rmse_mean"] = _safe(sm, "vel_magnitude_rmse", "mean")
@@ -241,15 +230,6 @@ def load_runs(root: pathlib.Path, models: list[str] | None) -> pd.DataFrame:
         df = df.sort_values(
             ["assim_model", "grid_cells", "ensemble_size", "num_esmda_steps"]
         )
-        versions = sorted(df["metrics_version"].dropna().astype(int).unique())
-        if len(versions) > 1:
-            warnings.warn(
-                "Comparing summaries with mismatched metrics versions "
-                f"{versions}; CRPS, energy-score, and spread values are not "
-                "comparable across the version-1/version-2 boundary.",
-                UserWarning,
-                stacklevel=2,
-            )
     return df
 
 
