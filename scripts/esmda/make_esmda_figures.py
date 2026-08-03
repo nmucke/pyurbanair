@@ -36,13 +36,16 @@ import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise)
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from pyurbanair.config.hydra_helpers import create_observation_points
-from pyurbanair.plotting import (
+from evaluation.figures import (
     plot_final_state_with_obs,
     plot_parameter_error,
     plot_rollout_time_evolution,
     plot_sensor_timeseries,
 )
+from evaluation.sensors import sensor_magnitude
+from evaluation.turbulence import select_z_plane, streaming_state_rmse
+
+from pyurbanair.config.hydra_helpers import create_observation_points
 from pyurbanair.utils.animation_utils import animate_rollout_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 from scripts.esmda._esmda_common import (
@@ -51,9 +54,6 @@ from scripts.esmda._esmda_common import (
     load_run_config,
     open_truth,
     read_yaml,
-    select_z_plane,
-    sensor_magnitude,
-    streaming_state_rmse,
     truth_sensor_series,
 )
 

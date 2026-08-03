@@ -14,10 +14,9 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+from evaluation import style as S
 
 from . import dataio, mask
-from . import style as S
-
 
 # ---------------------------------------------------------------------------
 # Field slice helpers (common evaluation grid = truth grid)

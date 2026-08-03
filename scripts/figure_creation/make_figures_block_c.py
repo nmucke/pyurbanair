@@ -24,9 +24,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 import numpy as np
-
-from figspec import dataio, figcommon as FC, mask
-from figspec import style as S
+from evaluation import style as S
+from figspec import dataio
+from figspec import figcommon as FC
+from figspec import mask
 
 HORIZON_S = 300.0  # Block C overlapping horizon [s] (10 windows x 30 s)
 

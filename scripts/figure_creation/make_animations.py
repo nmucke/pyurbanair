@@ -35,10 +35,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from evaluation import style as S
+from figspec import dataio
+from figspec import figcommon as FC
+from figspec import mask
 from matplotlib.animation import FFMpegWriter, FuncAnimation
-
-from figspec import dataio, figcommon as FC, mask
-from figspec import style as S
 
 HORIZON_B_S = 300.0  # Block B overlapping horizon [s] (10 windows x 30 s)
 

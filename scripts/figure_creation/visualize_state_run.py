@@ -62,6 +62,10 @@ if __package__ is None or __package__ == "":
 # Reuse the parameter + light-state figures (and IO helpers) from the
 # parameter-only visualizer so the two stay in lockstep.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from evaluation.figures import (  # noqa: E402
+    plot_final_state_with_obs,
+    plot_parameter_error,
+)
 from visualize_run import (  # noqa: E402
     _load_truth_final_vel,
     _load_yaml,
@@ -72,11 +76,6 @@ from visualize_run import (  # noqa: E402
     plot_parameter_metric_bars,
     plot_state_montage,
 )
-
-from pyurbanair.plotting import (
-    plot_final_state_with_obs,
-    plot_parameter_error,
-)  # noqa: E402
 
 _COLOR_PRIOR = "#ff7f0e"
 _COLOR_POSTERIOR = "#1f77b4"

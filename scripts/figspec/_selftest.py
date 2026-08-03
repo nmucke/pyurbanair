@@ -8,8 +8,8 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import numpy as np
-
-from figspec import dataio, mask, metrics
+from evaluation import scores
+from figspec import dataio, mask
 
 
 def main() -> None:
@@ -35,7 +35,7 @@ def main() -> None:
     true = dataio.load_params(ud, "true")
     prior = dataio.load_params(ud, "prior")
     for p in dataio.PARAMS:
-        print(f"  {p}: {metrics.param_metrics(post, true, p, prior)}")
+        print(f"  {p}: {scores.param_metrics(post, true, p, prior)}")
 
     print("\n== field interp + rmse (single time) ==")
     sm = dataio.load_state_mean(ud)
@@ -46,7 +46,7 @@ def main() -> None:
     # single-slab rmse (no time dim): expand dims
     import xarray as xr
 
-    rmse = metrics.field_rmse(mvg.expand_dims("time"), tv.expand_dims("time"))
+    rmse = scores.field_rmse(mvg.expand_dims("time"), tv.expand_dims("time"))
     print("  udales field |U| RMSE (final frame, all cells):", rmse)
 
     print("\n== palm interp 33->16 z ==")

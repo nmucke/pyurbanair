@@ -26,9 +26,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-
-from figspec import dataio, figcommon as FC, mask, metrics
-from figspec import style as S
+from evaluation import scores
+from evaluation import style as S
+from figspec import dataio
+from figspec import figcommon as FC
+from figspec import mask
 
 
 def _teal_shades(n):
@@ -227,7 +229,7 @@ def table_param_accuracy(runs, outdir):
         post = dataio.load_params(r, "posterior")
         true = dataio.load_params(r, "true")
         prior = dataio.load_params(r, "prior")
-        cov = {p: metrics.param_metrics(post, true, p, prior) for p in dataio.PARAMS}
+        cov = {p: scores.param_metrics(post, true, p, prior) for p in dataio.PARAMS}
         rows.append(
             [
                 S.MODEL_LABELS[r.model],
@@ -275,13 +277,13 @@ def compute_field_metrics(run, solid_mask, val_xy):
         return None
     model = dataio.interp_to_truth(dataio.velmag_field(sm))  # (time,z,y,x)
     truth = dataio.align_truth_time(dataio.truth_velmag(), model)
-    rmse = metrics.field_rmse(model, truth, solid_mask)
-    nrmse = metrics.normalized_field_rmse(model, truth, solid_mask)
+    rmse = scores.field_rmse(model, truth, solid_mask)
+    nrmse = scores.normalized_field_rmse(model, truth, solid_mask)
     out = {"field_rmse": rmse, "norm_rmse": nrmse}
     if val_xy is not None:
         mts = dataio.sensor_timeseries(model, val_xy)
         tts = dataio.sensor_timeseries(truth, val_xy)
-        out["valsensor_rmse"] = metrics.sensor_rmse(mts, tts)
+        out["valsensor_rmse"] = scores.sensor_rmse(mts, tts)
     sm.close()
     return out
 

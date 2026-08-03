@@ -439,7 +439,6 @@ pyurbanair/
 │       ├── base_rollout_forward_model.py  # Legacy multi-step rollout base (file-only, unused)
 │       ├── quiet_jax.py                    # Import before jax to silence CPU-fallback noise
 │       ├── animation.py                   # Animation utilities
-│       ├── plotting.py                    # Plotting + DA metrics (RMSE/CRPS, sensor series)
 │       ├── static_parameters/             # ParameterSampler + Normal/Uniform/Constant
 │       ├── dynamic_parameters/            # AR2RelaxationModel time-varying prior
 │       ├── training_data/                 # Sampler skeletons for surrogate data generation
@@ -451,6 +450,15 @@ pyurbanair/
 │           └── animation_utils.py         # Animation generation helpers
 │
 ├── libs/                                  # Sub-libraries
+│   ├── evaluation/                        # Metrics + figures for DA runs (leaf lib; no JAX,
+│   │   ├── pyproject.toml                 #   no pyurbanair/backend imports)
+│   │   └── src/evaluation/
+│   │       ├── scores.py                  # Ensemble scores (CRPS, energy score) + metric bundles
+│   │       ├── turbulence.py              # z-plane selection, streamed |U| state RMSE
+│   │       ├── sensors.py                 # Reductions of pre-extracted sensor series
+│   │       ├── style.py                   # Figure palette/rcParams/save + STL solid masks
+│   │       └── figures.py                 # plot_* for parameters, sensors and state
+│   │
 │   ├── data-assimilation/                 # Data assimilation library (JAX)
 │   │   ├── pyproject.toml
 │   │   └── src/data_assimilation/
@@ -528,7 +536,7 @@ pyurbanair/
 │   ├── adjust_simulations/                # Ground-truth utilities (trim_spinup, 32-bit, ...)
 │   ├── figure_creation/                   # Paper/diagnostic figures (visualize_ground_truth, ...)
 │   ├── tools/                             # Case setup CLIs (prepare_case_stl, preprocess_udales_geometry)
-│   └── figspec/                           # Internal figure-styling library
+│   └── figspec/                           # Figure data-IO + masking helpers for figure_creation/
 │
 ├── job_scripts/                           # HPC submission (see docs/job_scripts.md)
 │   ├── snellius/                          # Snellius SLURM wrapper + sweeps

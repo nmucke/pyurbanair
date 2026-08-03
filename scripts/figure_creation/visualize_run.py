@@ -47,7 +47,8 @@ import yaml
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
-from pyurbanair.plotting import plot_final_state_with_obs, plot_parameter_error
+from evaluation.figures import plot_final_state_with_obs, plot_parameter_error
+
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
 
 _PARAMS = ("inflow_angle", "velocity_magnitude")

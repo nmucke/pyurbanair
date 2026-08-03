@@ -37,11 +37,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.lines import Line2D
-
+from evaluation import style as S
 from figspec import dataio
-from figspec import style as S
-
+from matplotlib.lines import Line2D
 
 # ---------------------------------------------------------------------------
 # Record assembly

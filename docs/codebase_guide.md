@@ -68,7 +68,7 @@ src/pyurbanair/                    # Top-level package: base classes + glue
   utils/
     cpu_pinning.py                 # Worker → CPU pinning for parallel ensembles
     run_utils.py, state_utils.py, animation_utils.py
-  plotting.py, animation.py
+  animation.py
 
 conf/                              # Hydra config (see §5 Configuration system)
   README.md                        # Config overview (axes + recipes)
@@ -97,11 +97,12 @@ libs/data-assimilation/src/data_assimilation/
                                    #   StateAndTimeVaryingParameter ESMDA
 
 libs/evaluation/src/evaluation/    # Metrics + figures for DA runs (leaf lib: no jax, no
-                                   #   pyurbanair/backends). scores, turbulence, sensors,
-                                   #   style, figures. NOTE: skeleton only until WP0.2 --
-                                   #   the code still lives in src/pyurbanair/plotting.py,
-                                   #   utils/da_metrics.py, scripts/figspec/ and
-                                   #   scripts/esmda/_esmda_common.py.
+  scores.py                        #   pyurbanair/backends). Ensemble scores (CRPS, energy
+                                   #   score, per-knot skill) + the parameter/sensor bundles
+  turbulence.py                    # z-plane selection, streaming |U| state RMSE
+  sensors.py                       # Reductions of pre-extracted sensor series
+  style.py                         # Talk-figure palette/rcParams/save + STL solid masks
+  figures.py                       # plot_* for DA runs (parameters, sensors, state)
 
 libs/pylbm/src/pylbm/              # LBM wrapper. __init__ git-clones the LBM Fortran code.
   forward_model.py                 # ForwardModel(BaseForwardModel)
@@ -928,7 +929,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 | Reduced SVD/KL state update / final trajectory smoothing | [reduction.py](../libs/data-assimilation/src/data_assimilation/reduction.py), the `esmda/state_reduction` group [conf/esmda/state_reduction/](../conf/esmda/state_reduction/), [docs/reduced_state_da.md](temp/reduced_state_da.md) |
 | Neural-surrogate architectures (UPT etc.) | [architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/), [conf/neural_surrogate/architectures/](../conf/neural_surrogate/architectures/) |
 | uDALES instability / dt-collapse handling | [libs/pyudales/src/pyudales/utils/run_monitor.py](../libs/pyudales/src/pyudales/utils/run_monitor.py) (`instability_check`) |
-| DA metrics + diagnostic plots (RMSE/CRPS, sensor series) | [src/pyurbanair/plotting.py](../src/pyurbanair/plotting.py) (`compute_parameter_metrics`, `plot_parameter_error`, `compute_sensor_metrics`, `plot_sensor_timeseries`) |
+| DA metrics + diagnostic plots (RMSE/CRPS, sensor series) | [libs/evaluation/src/evaluation/scores.py](../libs/evaluation/src/evaluation/scores.py) (`compute_parameter_metrics`, `compute_sensor_metrics`) + [figures.py](../libs/evaluation/src/evaluation/figures.py) (`plot_parameter_error`, `plot_sensor_timeseries`) |
 | Validation (held-out) sensors | `validation_{x,y,z}_points` in [conf/case/](../conf/case/) `obs.yaml` + `create_validation_points` |
 | Test fixture composition | [tests/conftest.py](../tests/conftest.py) (`compose_test_cfg`, `compose_module_cfg`) |
 | Dynamic multi-window ESMDA theory / config | [docs/esmda_dynamic_multiwindow.md](temp/esmda_dynamic_multiwindow.md) |

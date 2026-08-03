@@ -30,9 +30,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-
-from figspec import dataio, figcommon as FC, mask, metrics
-from figspec import style as S
+from evaluation import scores
+from evaluation import style as S
+from figspec import dataio
+from figspec import figcommon as FC
+from figspec import mask
 
 HORIZON_S = 300.0  # Block B overlapping horizon [s] (10 windows x 30 s)
 
@@ -191,13 +193,13 @@ def compute_field_metrics(run, solid_mask, val_xy):
     model, truth, sm = _model_truth_fields(run)
     if model is None:
         return None
-    rmse = metrics.field_rmse(model, truth, solid_mask)
-    nrmse = metrics.normalized_field_rmse(model, truth, solid_mask)
+    rmse = scores.field_rmse(model, truth, solid_mask)
+    nrmse = scores.normalized_field_rmse(model, truth, solid_mask)
     out = {"field_rmse": rmse, "norm_rmse": nrmse}
     if val_xy is not None:
         mts = dataio.sensor_timeseries(model, val_xy)
         tts = dataio.sensor_timeseries(truth, val_xy)
-        out["valsensor_rmse"] = metrics.sensor_rmse(mts, tts)
+        out["valsensor_rmse"] = scores.sensor_rmse(mts, tts)
     sm.close()
     return out
 
@@ -217,7 +219,7 @@ def b2_state_err_vs_time(series, solid_mask, outdir):
         if model is None:
             continue
         t = np.asarray(model["time"].values, dtype=float)
-        y = metrics.field_rmse_timeseries(model, truth, solid_mask)
+        y = scores.field_rmse_timeseries(model, truth, solid_mask)
         lines.append(
             {
                 "time": t,
@@ -367,7 +369,7 @@ def b5_window_prior_post(series, baseline, solid_mask, outdir):
         bmodel, btruth, bsm = _model_truth_fields(baseline)
         if bmodel is not None:
             bt = np.asarray(bmodel["time"].values, dtype=float)
-            by = metrics.field_rmse_timeseries(bmodel, btruth, solid_mask)
+            by = scores.field_rmse_timeseries(bmodel, btruth, solid_mask)
             base_rmse_at = lambda te: float(np.interp(te, bt, by))
             bsm.close()
 
@@ -394,7 +396,7 @@ def b5_window_prior_post(series, baseline, solid_mask, outdir):
         if model is None:
             continue
         t = np.asarray(model["time"].values, dtype=float)
-        y = metrics.field_rmse_timeseries(model, truth, solid_mask)
+        y = scores.field_rmse_timeseries(model, truth, solid_mask)
         after = [float(np.interp(te, t, y)) for te in win_ends]
         ax.bar(
             xw + (k - (len(methods) - 1) / 2) * width,
@@ -459,8 +461,8 @@ def table_method_comparison(series, field_metrics, baseline, outdir):
         cov = None
         if post is not None and true is not None:
             post300 = _restrict_time(post)
-            cov_d = metrics.param_metrics(post300, true, "inflow_angle", prior)
-            mu_d = metrics.param_metrics(post300, true, "velocity_magnitude", prior)
+            cov_d = scores.param_metrics(post300, true, "inflow_angle", prior)
+            mu_d = scores.param_metrics(post300, true, "velocity_magnitude", prior)
             rmse_a = cov_d.get("rmse")
             rmse_u = mu_d.get("rmse")
             cov = cov_d.get("coverage1")

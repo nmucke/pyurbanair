@@ -147,3 +147,52 @@ Moved verbatim, that makes importing `evaluation.style` mutate global
 matplotlib state as a side effect — a leaf library reaching out into the
 process. Moving the backend choice to the scripts is the alternative, and is
 *not* inert. Nothing in the suite currently catches either way.
+
+**WP0.2**
+
+- **CRPS merge, dtype.** `da_metrics.per_knot_crps` and
+  `plotting._crps_ensemble` are the same formula but were *not* numerically
+  equivalent as invoked: `_crps_ensemble` cast its inputs to float64 first,
+  `per_knot_crps` did not, and the parameter artifacts on disk are float32
+  (measured difference ~4.4e-07 on the pairwise term). They are merged into
+  one `evaluation.scores.crps_ensemble` carrying `per_knot_crps`'s body — no
+  internal cast, `n < 2` early return kept — and the one call site that
+  relied on the implicit upcast (`compute_parameter_metrics`) now casts
+  explicitly. Dtype is documented as the caller's policy at the function.
+- **`matplotlib.use("Agg")`** (the WP0.1 carry-over above) moved **verbatim**
+  into `evaluation/style.py`. Removing it is not inert, so it stays; it
+  remains a known wart of a leaf library mutating global process state.
+- **`stl_solid_mask`** takes the STL path and grid as mandatory arguments and
+  loses its `@lru_cache` (numpy grids are unhashable). Its shape check now
+  compares against the grid argument instead of `dataio.truth_grid()`, with
+  the same `None`-returning behaviour. Inert: the only caller,
+  `figspec.mask.truth_solid_mask`, keeps its own `@lru_cache(maxsize=1)`.
+- **`pyurbanair` helpers inlined.** `figures.py` carries private copies of
+  `run_utils.add_velocity_magnitude` and
+  `state_utils.get_velocity_magnitude_field` (identical arithmetic, `_`
+  prefix); the originals stay put for their non-evaluation callers.
+- **`scores.py` imports xarray twice** (`import xarray` and
+  `import xarray as xr`) because the moved sources disagreed on the alias and
+  every moved signature is kept verbatim. Collapse in a later cleanup.
+- **`figspec.metrics` was renamed at the call sites**, not aliased: the block
+  drivers now `from evaluation import scores` and call `scores.field_rmse(…)`
+  rather than keeping a `metrics` alias for a module that no longer exists.
+  `figspec.style` keeps its `S` alias (`from evaluation import style as S`).
+- **`_filtering_common.py`'s re-export block** lost the six moved names
+  (`parameter_metric_summary`, `select_z_plane`, `sensor_magnitude`,
+  `series_stats`, `streaming_state_rmse`, `vector_sensor_metrics`); its two
+  consumers import them from `evaluation.*` directly (no-shims rule).
+- **Black reformatted the moved code.** `scripts/figspec/style.py` and
+  `metrics.py` were never black-clean, and pre-commit formats staged files.
+  Every purely-moved function was verified byte-identical to `black`-formatted
+  HEAD source, so the reformat is the only whitespace delta.
+- **mypy still fails on the touched scripts.** `scripts/figure_creation/*`,
+  `figspec/figcommon.py`, `figspec/dataio.py` and
+  `tests/test_model_error_parameters.py` are unannotated and only get checked
+  when staged. The failure is pre-existing: the same file set on HEAD reports
+  112 errors, this branch 98 (a strict subset — `figspec/style.py`'s 11 and
+  three `no-any-return`s are gone because that code is now behind a waiver).
+  Annotating them is out of scope for a move; black and isort pass.
+- Inertness verified by re-running `compute_esmda_metrics.py` +
+  `make_esmda_figures.py` on a smoke run dir: `run_summary.yaml` and all six
+  figure artifacts byte-identical to a baseline captured before the move.

@@ -39,13 +39,7 @@ from scripts.esmda._esmda_common import (  # noqa: F401  (re-exported)
     build_sensor_sets,
     load_run_config,
     open_truth,
-    parameter_metric_summary,
     read_yaml,
-    select_z_plane,
-    sensor_magnitude,
-    series_stats,
-    streaming_state_rmse,
-    vector_sensor_metrics,
     write_yaml,
 )
 
@@ -128,7 +122,7 @@ def load_params_history(run_dir: pathlib.Path, ta: dict) -> xarray.Dataset:
     ``params_history.nc`` stacks the prior (its first entry) then each cycle's
     analyzed params along ``cycle``. The parameter metric/figure code compares
     these against ``true_params`` by interpolating the truth onto the estimate's
-    x-axis (see ``pyurbanair.plotting.compute_parameter_metrics``), so the
+    x-axis (see ``evaluation.scores.compute_parameter_metrics``), so the
     estimate needs an x-axis in the truth's units (seconds) rather than a bare
     cycle index -- otherwise a *drifting* (time-varying) truth is sampled at the
     wrong times. Relabel ``cycle`` -> ``time`` with physical seconds: the prior
@@ -220,7 +214,7 @@ def cycle_diagnostics_series(run_dir: pathlib.Path) -> dict:
     """Read ``cycle_diagnostics.yaml`` into ``{field: np.ndarray}`` over cycles.
 
     Missing/``None`` entries (e.g. the parameter spreads in ``mode='state'``)
-    become NaN so :func:`series_stats` skips them. ``{}`` if the file is absent.
+    become NaN so :func:`evaluation.scores.series_stats` skips them. ``{}`` if the file is absent.
     """
     rows = read_yaml(pathlib.Path(run_dir) / "cycle_diagnostics.yaml")
     if not rows:
