@@ -15,6 +15,7 @@ and the field columns of the method table) load the posterior-mean rollouts +
 truth and only run with ``--heavy`` (use SLURM). Per-run field metrics are
 cached to ``<out>/_cache/block_b_metrics.json`` for the summary script.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -90,8 +91,13 @@ def b1_param_traj(by_method, baseline, outdir):
     if edges is not None:
         edges = edges[edges <= HORIZON_S + 1e-6]
 
-    fig, axes = plt.subplots(len(params), 1, figsize=(8.4, 2.8 * len(params)),
-                             constrained_layout=True, squeeze=False)
+    fig, axes = plt.subplots(
+        len(params),
+        1,
+        figsize=(8.4, 2.8 * len(params)),
+        constrained_layout=True,
+        squeeze=False,
+    )
     axes = axes[:, 0]
 
     # series = (method_key, run); param_only baseline first if present
@@ -118,20 +124,40 @@ def b1_param_traj(by_method, baseline, outdir):
             t = np.asarray(post["time"].values, dtype=float)
             keep = t <= HORIZON_S + 1e-6
             pm = np.asarray(post[p].transpose("ensemble", "time").values)
-            ax.plot(t[keep], pm.mean(0)[keep], color=S.METHOD_COLORS.get(m),
-                    lw=2.0, label=S.METHOD_LABELS.get(m, m))
+            ax.plot(
+                t[keep],
+                pm.mean(0)[keep],
+                color=S.METHOD_COLORS.get(m),
+                lw=2.0,
+                label=S.METHOD_LABELS.get(m, m),
+            )
             post.close()
         if true_ds is not None and p in true_ds.data_vars:
-            tt = (np.asarray(true_ds["time"].values, dtype=float)
-                  if "time" in true_ds.dims else None)
+            tt = (
+                np.asarray(true_ds["time"].values, dtype=float)
+                if "time" in true_ds.dims
+                else None
+            )
             tv = np.asarray(true_ds[p].values, dtype=float)
             if tt is not None:
                 keep = tt <= HORIZON_S + 1e-6
-                ax.plot(tt[keep], tv[keep], color=S.COLORS["truth"], lw=2.0,
-                        label="truth", zorder=6)
+                ax.plot(
+                    tt[keep],
+                    tv[keep],
+                    color=S.COLORS["truth"],
+                    lw=2.0,
+                    label="truth",
+                    zorder=6,
+                )
             else:
-                ax.plot([0, HORIZON_S], [tv, tv], color=S.COLORS["truth"],
-                        lw=2.0, label="truth", zorder=6)
+                ax.plot(
+                    [0, HORIZON_S],
+                    [tv, tv],
+                    color=S.COLORS["truth"],
+                    lw=2.0,
+                    label="truth",
+                    zorder=6,
+                )
         S.mark_windows(ax, edges, annotate=False)
         ax.set_ylabel(S.PARAM_LABELS.get(p, p))
         ax.set_xlim(0.0, HORIZON_S)
@@ -192,13 +218,23 @@ def b2_state_err_vs_time(series, solid_mask, outdir):
             continue
         t = np.asarray(model["time"].values, dtype=float)
         y = metrics.field_rmse_timeseries(model, truth, solid_mask)
-        lines.append({"time": t, "y": y, "color": S.METHOD_COLORS.get(m),
-                      "label": S.METHOD_LABELS.get(m, m)})
+        lines.append(
+            {
+                "time": t,
+                "y": y,
+                "color": S.METHOD_COLORS.get(m),
+                "label": S.METHOD_LABELS.get(m, m),
+            }
+        )
         sm.close()
     if not lines:
         return
-    FC.plot_lines_vs_time(outdir / "B2_state_err_vs_time_methods.pdf", lines,
-                          edges=edges, ylabel=r"$|U|$ field RMSE [m/s]")
+    FC.plot_lines_vs_time(
+        outdir / "B2_state_err_vs_time_methods.pdf",
+        lines,
+        edges=edges,
+        ylabel=r"$|U|$ field RMSE [m/s]",
+    )
 
 
 def b2b_valsensor_err_vs_time(series, val_xy, outdir):
@@ -216,17 +252,26 @@ def b2b_valsensor_err_vs_time(series, val_xy, outdir):
         if model is None:
             continue
         t = np.asarray(model["time"].values, dtype=float)
-        mts = dataio.sensor_timeseries(model, val_xy)   # (n_sensor, n_time)
+        mts = dataio.sensor_timeseries(model, val_xy)  # (n_sensor, n_time)
         tts = dataio.sensor_timeseries(truth, val_xy)
         y = np.sqrt(np.nanmean((mts - tts) ** 2, axis=0))  # RMSE across sensors
-        lines.append({"time": t, "y": y, "color": S.METHOD_COLORS.get(m),
-                      "label": S.METHOD_LABELS.get(m, m)})
+        lines.append(
+            {
+                "time": t,
+                "y": y,
+                "color": S.METHOD_COLORS.get(m),
+                "label": S.METHOD_LABELS.get(m, m),
+            }
+        )
         sm.close()
     if not lines:
         return
-    FC.plot_lines_vs_time(outdir / "B2b_valsensor_err_vs_time_methods.pdf",
-                          lines, edges=edges,
-                          ylabel=r"val-sensor $|U|$ RMSE [m/s]")
+    FC.plot_lines_vs_time(
+        outdir / "B2b_valsensor_err_vs_time_methods.pdf",
+        lines,
+        edges=edges,
+        ylabel=r"val-sensor $|U|$ RMSE [m/s]",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -241,9 +286,14 @@ def b3_state_fields(series, outdir, *, time_s, solid2d, assim_xy, val_xy):
         if res is not None:
             cols.append((S.METHOD_LABELS.get(m, m), res[0]))
     FC.plot_field_error_grid(
-        outdir / "B3_state_fields_methods.png", columns=cols,
-        truth_field=truth_field, extent=extent, mask2d=solid2d,
-        assim_xy=assim_xy, val_xy=val_xy)
+        outdir / "B3_state_fields_methods.png",
+        columns=cols,
+        truth_field=truth_field,
+        extent=extent,
+        mask2d=solid2d,
+        assim_xy=assim_xy,
+        val_xy=val_xy,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -270,14 +320,24 @@ def b4_valsensors(series, val_xy, outdir):
             time = np.asarray(model["time"].values, dtype=float)
             truth_ts = dataio.sensor_timeseries(truth, val_xy)
         mts = dataio.sensor_timeseries(model, val_xy)
-        method_series.append({"label": S.METHOD_LABELS.get(m, m),
-                              "color": S.METHOD_COLORS.get(m), "ts": mts})
+        method_series.append(
+            {
+                "label": S.METHOD_LABELS.get(m, m),
+                "color": S.METHOD_COLORS.get(m),
+                "ts": mts,
+            }
+        )
         sm.close()
     if truth_ts is None:
         return
     FC.plot_sensor_timeseries(
-        outdir / "B4_valsensors_methods.pdf", time=time, truth_ts=truth_ts,
-        series=method_series, sensor_xyz=val_xy, edges=edges)
+        outdir / "B4_valsensors_methods.pdf",
+        time=time,
+        truth_ts=truth_ts,
+        series=method_series,
+        sensor_xyz=val_xy,
+        edges=edges,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +379,14 @@ def b5_window_prior_post(series, baseline, solid_mask, outdir):
 
     if base_rmse_at is not None:
         before = [base_rmse_at(te) for te in win_ends]
-        ax.plot(xw, before, "o--", color=S.METHOD_COLORS["param_only"],
-                label="before (param-only)", zorder=5)
+        ax.plot(
+            xw,
+            before,
+            "o--",
+            color=S.METHOD_COLORS["param_only"],
+            label="before (param-only)",
+            zorder=5,
+        )
 
     for k, m in enumerate(methods):
         run = dict(series)[m]
@@ -330,9 +396,14 @@ def b5_window_prior_post(series, baseline, solid_mask, outdir):
         t = np.asarray(model["time"].values, dtype=float)
         y = metrics.field_rmse_timeseries(model, truth, solid_mask)
         after = [float(np.interp(te, t, y)) for te in win_ends]
-        ax.bar(xw + (k - (len(methods) - 1) / 2) * width, after, width,
-               color=S.METHOD_COLORS.get(m), label=f"after: {S.METHOD_LABELS.get(m, m)}",
-               alpha=0.85)
+        ax.bar(
+            xw + (k - (len(methods) - 1) / 2) * width,
+            after,
+            width,
+            color=S.METHOD_COLORS.get(m),
+            label=f"after: {S.METHOD_LABELS.get(m, m)}",
+            alpha=0.85,
+        )
         sm.close()
 
     ax.set_xticks(xw)
@@ -406,36 +477,62 @@ def table_method_comparison(series, field_metrics, baseline, outdir):
         n_e = cfg_s.get("ensemble_size") or r.ens
         wtw = timing.get("mean_window_seconds")
 
-        rows.append([
-            S.METHOD_LABELS.get(m, m),
-            _r(rmse_a, 2), _r(rmse_u, 3),
-            _r(fm.get("field_rmse")), _r(fm.get("valsensor_rmse")),
-            _state_dim_label(r), int(n_e),
-            _r(wtw, 1),
-            _r(cov, 2),
-        ])
+        rows.append(
+            [
+                S.METHOD_LABELS.get(m, m),
+                _r(rmse_a, 2),
+                _r(rmse_u, 3),
+                _r(fm.get("field_rmse")),
+                _r(fm.get("valsensor_rmse")),
+                _state_dim_label(r),
+                int(n_e),
+                _r(wtw, 1),
+                _r(cov, 2),
+            ]
+        )
     S.write_table(
         outdir / "tables" / "B_method_comparison",
-        ["Method", "RMSE alpha [deg]", "RMSE |U| [m/s]", "|U| field RMSE",
-         "val-sensor |U| RMSE", "updated state dim", "N_e",
-         "wall-time/window [s]", "alpha cov +/-1sig"], rows,
-        bold_min_cols=(1, 2, 3, 4))
+        [
+            "Method",
+            "RMSE alpha [deg]",
+            "RMSE |U| [m/s]",
+            "|U| field RMSE",
+            "val-sensor |U| RMSE",
+            "updated state dim",
+            "N_e",
+            "wall-time/window [s]",
+            "alpha cov +/-1sig",
+        ],
+        rows,
+        bold_min_cols=(1, 2, 3, 4),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", type=pathlib.Path,
-                    default=pathlib.Path(__file__).resolve().parent.parent / "figures")
-    ap.add_argument("--heavy", action="store_true",
-                    help="also produce field-based figures (B2/B2b/B3/B4/B5 + "
-                         "field table columns); use SLURM")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=pathlib.Path(__file__).resolve().parent.parent / "figures",
+    )
+    ap.add_argument(
+        "--heavy",
+        action="store_true",
+        help="also produce field-based figures (B2/B2b/B3/B4/B5 + "
+        "field table columns); use SLURM",
+    )
     ap.add_argument("--no-mask", action="store_true", help="do not mask building cells")
-    ap.add_argument("--snapshot-time", type=float, default=None,
-                    help="time [s] for B3 field grid (default: near end of last window)")
+    ap.add_argument(
+        "--snapshot-time",
+        type=float,
+        default=None,
+        help="time [s] for B3 field grid (default: near end of last window)",
+    )
     args = ap.parse_args()
 
     S.apply_style()
@@ -448,9 +545,11 @@ def main():
     by_method = block_b_by_method(runs)
     baseline = param_only_baseline()
     methods = _ordered_methods(by_method)
-    print(f"Block B: {len(by_method)} method runs "
-          f"({[m for m in methods]}); baseline="
-          f"{baseline.name if baseline else 'MISSING'}")
+    print(
+        f"Block B: {len(by_method)} method runs "
+        f"({[m for m in methods]}); baseline="
+        f"{baseline.name if baseline else 'MISSING'}"
+    )
 
     # ordered (method, run) series including the param-only baseline first
     series = []
@@ -506,8 +605,9 @@ def main():
 
     b2_state_err_vs_time(series, solid, outdir)
     b2b_valsensor_err_vs_time(series, val_xy, outdir)
-    b3_state_fields(series, outdir, time_s=snap, solid2d=solid2d,
-                    assim_xy=assim_xy, val_xy=val_xy)
+    b3_state_fields(
+        series, outdir, time_s=snap, solid2d=solid2d, assim_xy=assim_xy, val_xy=val_xy
+    )
     b4_valsensors(series, val_xy, outdir)
     b5_window_prior_post(series, baseline, solid, outdir)
     table_method_comparison(series, field_metrics, baseline, outdir)

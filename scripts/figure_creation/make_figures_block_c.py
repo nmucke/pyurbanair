@@ -11,6 +11,7 @@ This is a field-based (heavy) figure: it loads the posterior-mean rollout +
 truth and only runs with ``--heavy`` (use SLURM). The animation ``anim_C_full``
 is produced by the separate animations script -- not here.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -73,25 +74,43 @@ def c1_state_fields(run, outdir, *, times, solid2d, assim_xy, val_xy):
     sm.close()
 
     FC.plot_field_time_montage(
-        outdir / "C1_state_fields_full.png", times=times,
-        truth_fields=truth_fields, est_fields=est_fields, extent=extent,
-        est_label="full-joint", mask2d=solid2d,
-        assim_xy=assim_xy, val_xy=val_xy)
+        outdir / "C1_state_fields_full.png",
+        times=times,
+        truth_fields=truth_fields,
+        est_fields=est_fields,
+        extent=extent,
+        est_label="full-joint",
+        mask2d=solid2d,
+        assim_xy=assim_xy,
+        val_xy=val_xy,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", type=pathlib.Path,
-                    default=pathlib.Path(__file__).resolve().parent.parent / "figures")
-    ap.add_argument("--heavy", action="store_true",
-                    help="produce the field-based C1 figure; use SLURM")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=pathlib.Path(__file__).resolve().parent.parent / "figures",
+    )
+    ap.add_argument(
+        "--heavy",
+        action="store_true",
+        help="produce the field-based C1 figure; use SLURM",
+    )
     ap.add_argument("--no-mask", action="store_true", help="do not mask building cells")
-    ap.add_argument("--snapshot-time", type=float, nargs="*", default=None,
-                    help="time(s) [s] for the C1 grid (default: window start/mid/end)")
+    ap.add_argument(
+        "--snapshot-time",
+        type=float,
+        nargs="*",
+        default=None,
+        help="time(s) [s] for the C1 grid (default: window start/mid/end)",
+    )
     args = ap.parse_args()
 
     S.apply_style()
@@ -100,7 +119,9 @@ def main():
 
     run = full_joint_run()
     if run is None:
-        print("Block C: full-joint (icstate_red) run not found / incomplete; nothing to do.")
+        print(
+            "Block C: full-joint (icstate_red) run not found / incomplete; nothing to do."
+        )
         return
     print(f"Block C: full-joint run = {run.name}")
 
@@ -118,8 +139,9 @@ def main():
 
     times = _snapshot_times(run, args.snapshot_time)
     print(f"  C1 snapshot times: {[round(t, 1) for t in times]} s")
-    c1_state_fields(run, outdir, times=times, solid2d=solid2d,
-                    assim_xy=assim_xy, val_xy=val_xy)
+    c1_state_fields(
+        run, outdir, times=times, solid2d=solid2d, assim_xy=assim_xy, val_xy=val_xy
+    )
     print("Block C heavy figures done.")
 
 

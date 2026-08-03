@@ -11,6 +11,7 @@ state-accuracy table) load the posterior-mean rollouts + truth and only run with
 ``--heavy`` (use SLURM). Per-run field metrics are cached to
 ``<out>/_cache/block_a_metrics.json`` for the summary script.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,6 +33,7 @@ from figspec import style as S
 
 def _teal_shades(n):
     import matplotlib
+
     if n == 1:
         return [S.COLORS["posterior"]]
     cmap = matplotlib.colormaps["winter"]
@@ -54,12 +56,19 @@ def finest(runs):
 # ---------------------------------------------------------------------------
 def a1_per_model(runs_by_model, outdir):
     for model, runs in runs_by_model.items():
-        runs = sorted([r for r in runs if r.has("posterior_params.nc")], key=lambda r: r.nx)
+        runs = sorted(
+            [r for r in runs if r.has("posterior_params.nc")], key=lambda r: r.nx
+        )
         if not runs:
             continue
         params = dataio.PARAMS
-        fig, axes = plt.subplots(len(params), 1, figsize=(8.4, 2.8 * len(params)),
-                                 constrained_layout=True, squeeze=False)
+        fig, axes = plt.subplots(
+            len(params),
+            1,
+            figsize=(8.4, 2.8 * len(params)),
+            constrained_layout=True,
+            squeeze=False,
+        )
         axes = axes[:, 0]
         shades = _teal_shades(len(runs))
         finest_run = runs[-1]
@@ -67,25 +76,50 @@ def a1_per_model(runs_by_model, outdir):
         true = dataio.load_params(finest_run, "true")
         edges = dataio.param_window_edges(
             dataio.load_params(finest_run, "posterior")["time"].values,
-            (dataio.load_summary(finest_run).get("configuration", {}) or {}).get("num_assimilation_windows"))
+            (dataio.load_summary(finest_run).get("configuration", {}) or {}).get(
+                "num_assimilation_windows"
+            ),
+        )
         for ax, p in zip(axes, params):
             S.shade_windows(ax, edges)
             if prior is not None and p in prior.data_vars:
                 prm = np.asarray(prior[p].transpose("ensemble", "time").values)
-                S.band(ax, prior["time"].values, prm.mean(0), prm.std(0),
-                       S.COLORS["prior"], alpha=0.15, label="prior", lw=1.4, ls="--")
+                S.band(
+                    ax,
+                    prior["time"].values,
+                    prm.mean(0),
+                    prm.std(0),
+                    S.COLORS["prior"],
+                    alpha=0.15,
+                    label="prior",
+                    lw=1.4,
+                    ls="--",
+                )
             for r, col in zip(runs, shades):
                 post = dataio.load_params(r, "posterior")
                 if post is None or p not in post.data_vars:
                     continue
                 pm = np.asarray(post[p].transpose("ensemble", "time").values)
-                ax.plot(post["time"].values, pm.mean(0), color=col, lw=2.0,
-                        label=f"post {r.res_label_dx}")
+                ax.plot(
+                    post["time"].values,
+                    pm.mean(0),
+                    color=col,
+                    lw=2.0,
+                    label=f"post {r.res_label_dx}",
+                )
                 post.close()
             if true is not None and p in true.data_vars:
-                tr_t = true["time"].values if "time" in true.dims else post["time"].values
-                ax.plot(tr_t, np.asarray(true[p].values), color=S.COLORS["truth"],
-                        lw=2.0, label="truth", zorder=6)
+                tr_t = (
+                    true["time"].values if "time" in true.dims else post["time"].values
+                )
+                ax.plot(
+                    tr_t,
+                    np.asarray(true[p].values),
+                    color=S.COLORS["truth"],
+                    lw=2.0,
+                    label="truth",
+                    zorder=6,
+                )
             S.mark_windows(ax, edges, annotate=False)
             ax.set_ylabel(S.PARAM_LABELS.get(p, p))
             ax.legend(loc="upper right", ncol=2, fontsize=7)
@@ -101,27 +135,43 @@ def a1_grid(rep_by_model, outdir):
     """rows = {alpha, |U|}, cols = {palm, udales, lbm} at representative res."""
     models = [m for m in ("palm", "udales", "lbm") if m in rep_by_model]
     params = dataio.PARAMS
-    fig, axes = plt.subplots(len(params), len(models),
-                             figsize=(4.0 * len(models), 2.8 * len(params)),
-                             constrained_layout=True, squeeze=False, sharey="row")
+    fig, axes = plt.subplots(
+        len(params),
+        len(models),
+        figsize=(4.0 * len(models), 2.8 * len(params)),
+        constrained_layout=True,
+        squeeze=False,
+        sharey="row",
+    )
     for j, model in enumerate(models):
         r = rep_by_model[model]
         prior = dataio.load_params(r, "prior")
         post = dataio.load_params(r, "posterior")
         true = dataio.load_params(r, "true")
-        nwin = (dataio.load_summary(r).get("configuration", {}) or {}).get("num_assimilation_windows")
+        nwin = (dataio.load_summary(r).get("configuration", {}) or {}).get(
+            "num_assimilation_windows"
+        )
         edges = dataio.param_window_edges(post["time"].values, nwin)
         for i, p in enumerate(params):
             ax = axes[i, j]
-            prm = np.asarray(prior[p].transpose("ensemble", "time").values) if prior is not None and p in prior.data_vars else None
+            prm = (
+                np.asarray(prior[p].transpose("ensemble", "time").values)
+                if prior is not None and p in prior.data_vars
+                else None
+            )
             pm = np.asarray(post[p].transpose("ensemble", "time").values)
             tr_t = true["time"].values if "time" in true.dims else post["time"].values
-            FC.param_panel(ax, time=post["time"].values, post_mean=pm.mean(0),
-                           post_std=pm.std(0),
-                           prior_mean=None if prm is None else prm.mean(0),
-                           prior_std=None if prm is None else prm.std(0),
-                           truth_t=tr_t, truth=np.asarray(true[p].values) if p in true else None,
-                           edges=edges)
+            FC.param_panel(
+                ax,
+                time=post["time"].values,
+                post_mean=pm.mean(0),
+                post_std=pm.std(0),
+                prior_mean=None if prm is None else prm.mean(0),
+                prior_std=None if prm is None else prm.std(0),
+                truth_t=tr_t,
+                truth=np.asarray(true[p].values) if p in true else None,
+                edges=edges,
+            )
             if i == 0:
                 ax.set_title(f"{S.MODEL_LABELS[model]} ({r.res_label_dx})")
             if j == 0:
@@ -151,10 +201,16 @@ def a2_param_err_vs_res(runs, outdir):
                 by[p][r.model][0].append(r.dx)
                 by[p][r.model][1].append(pm[p].get("rmse", {}).get("mean"))
     panels = [
-        {"title": "Inflow angle", "ylabel": r"RMSE $\alpha$ [deg]",
-         "by_model": by["inflow_angle"]},
-        {"title": "Velocity magnitude", "ylabel": r"RMSE $|U|$ [m/s]",
-         "by_model": by["velocity_magnitude"]},
+        {
+            "title": "Inflow angle",
+            "ylabel": r"RMSE $\alpha$ [deg]",
+            "by_model": by["inflow_angle"],
+        },
+        {
+            "title": "Velocity magnitude",
+            "ylabel": r"RMSE $|U|$ [m/s]",
+            "by_model": by["velocity_magnitude"],
+        },
     ]
     FC.plot_vs_resolution(outdir / "A2_param_err_vs_res.pdf", panels, truth_dx=1.0)
 
@@ -172,24 +228,37 @@ def table_param_accuracy(runs, outdir):
         true = dataio.load_params(r, "true")
         prior = dataio.load_params(r, "prior")
         cov = {p: metrics.param_metrics(post, true, p, prior) for p in dataio.PARAMS}
-        rows.append([
-            S.MODEL_LABELS[r.model], r.res_label_dx,
-            pm.get("inflow_angle", {}).get("rmse", {}).get("mean"),
-            pm.get("velocity_magnitude", {}).get("rmse", {}).get("mean"),
-            _pct(pm.get("inflow_angle", {}).get("rmse_reduction_vs_prior")),
-            _pct(pm.get("velocity_magnitude", {}).get("rmse_reduction_vs_prior")),
-            round(cov["inflow_angle"].get("coverage1", float("nan")), 2),
-            round(cov["velocity_magnitude"].get("coverage1", float("nan")), 2),
-        ])
+        rows.append(
+            [
+                S.MODEL_LABELS[r.model],
+                r.res_label_dx,
+                pm.get("inflow_angle", {}).get("rmse", {}).get("mean"),
+                pm.get("velocity_magnitude", {}).get("rmse", {}).get("mean"),
+                _pct(pm.get("inflow_angle", {}).get("rmse_reduction_vs_prior")),
+                _pct(pm.get("velocity_magnitude", {}).get("rmse_reduction_vs_prior")),
+                round(cov["inflow_angle"].get("coverage1", float("nan")), 2),
+                round(cov["velocity_magnitude"].get("coverage1", float("nan")), 2),
+            ]
+        )
         for ds in (post, true, prior):
             if ds is not None:
                 ds.close()
     S.write_table(
         outdir / "tables" / "A_param_accuracy",
-        ["Model", "Resolution", "RMSE alpha [deg]", "RMSE |U| [m/s]",
-         "alpha reduction [%]", "|U| reduction [%]", "alpha cov +/-1sig",
-         "|U| cov +/-1sig"], rows,
-        bold_min_cols=(2, 3), bold_max_cols=(4, 5))
+        [
+            "Model",
+            "Resolution",
+            "RMSE alpha [deg]",
+            "RMSE |U| [m/s]",
+            "alpha reduction [%]",
+            "|U| reduction [%]",
+            "alpha cov +/-1sig",
+            "|U| cov +/-1sig",
+        ],
+        rows,
+        bold_min_cols=(2, 3),
+        bold_max_cols=(4, 5),
+    )
 
 
 def _pct(v):
@@ -204,7 +273,7 @@ def compute_field_metrics(run, solid_mask, val_xy):
     sm = dataio.load_state_mean(run)
     if sm is None:
         return None
-    model = dataio.interp_to_truth(dataio.velmag_field(sm))      # (time,z,y,x)
+    model = dataio.interp_to_truth(dataio.velmag_field(sm))  # (time,z,y,x)
     truth = dataio.align_truth_time(dataio.truth_velmag(), model)
     rmse = metrics.field_rmse(model, truth, solid_mask)
     nrmse = metrics.normalized_field_rmse(model, truth, solid_mask)
@@ -224,11 +293,21 @@ def a3_state_fields(rep_by_model, outdir, *, time_s, solid2d, assim_xy, val_xy):
         if model in rep_by_model:
             res = FC.model_slice(rep_by_model[model], time_s)
             if res is not None:
-                cols.append((f"{S.MODEL_LABELS[model]} ({rep_by_model[model].res_label_dx})", res[0]))
+                cols.append(
+                    (
+                        f"{S.MODEL_LABELS[model]} ({rep_by_model[model].res_label_dx})",
+                        res[0],
+                    )
+                )
     FC.plot_field_error_grid(
-        outdir / "A3_state_fields_truth_vs_models.png", columns=cols,
-        truth_field=cols[0][1], extent=extent, mask2d=solid2d,
-        assim_xy=assim_xy, val_xy=val_xy)
+        outdir / "A3_state_fields_truth_vs_models.png",
+        columns=cols,
+        truth_field=cols[0][1],
+        extent=extent,
+        mask2d=solid2d,
+        assim_xy=assim_xy,
+        val_xy=val_xy,
+    )
 
 
 def a4_valsensors(rep_by_model, outdir):
@@ -246,10 +325,19 @@ def a4_valsensors(rep_by_model, outdir):
         # prior reconstruction unavailable as a field; show posterior vs truth.
         edges = dataio.window_edges(r)
         FC.plot_sensor_timeseries(
-            outdir / f"A4_valsensors_{model}.pdf", time=t, truth_ts=tts,
-            series=[{"label": f"{S.MODEL_LABELS[model]} posterior",
-                     "color": S.COLORS["posterior"], "ts": mts}],
-            sensor_xyz=val_xy, edges=edges)
+            outdir / f"A4_valsensors_{model}.pdf",
+            time=t,
+            truth_ts=tts,
+            series=[
+                {
+                    "label": f"{S.MODEL_LABELS[model]} posterior",
+                    "color": S.COLORS["posterior"],
+                    "ts": mts,
+                }
+            ],
+            sensor_xyz=val_xy,
+            edges=edges,
+        )
         sm.close()
 
 
@@ -262,8 +350,13 @@ def a5_state_err_vs_res(field_metrics, outdir):
         by.setdefault(model, ([], []))
         by[model][0].append(dx)
         by[model][1].append(m["field_rmse"])
-    panels = [{"title": "State reconstruction",
-               "ylabel": r"$|U|$ field RMSE [m/s]", "by_model": by}]
+    panels = [
+        {
+            "title": "State reconstruction",
+            "ylabel": r"$|U|$ field RMSE [m/s]",
+            "by_model": by,
+        }
+    ]
     # optional second panel: validation-sensor RMSE
     byv = {}
     for key, m in field_metrics.items():
@@ -273,24 +366,36 @@ def a5_state_err_vs_res(field_metrics, outdir):
         byv[m["model"]][0].append(m["dx"])
         byv[m["model"]][1].append(m["valsensor_rmse"])
     if any(byv.values()):
-        panels.append({"title": "Validation sensors",
-                       "ylabel": r"val-sensor $|U|$ RMSE [m/s]", "by_model": byv})
+        panels.append(
+            {
+                "title": "Validation sensors",
+                "ylabel": r"val-sensor $|U|$ RMSE [m/s]",
+                "by_model": byv,
+            }
+        )
     FC.plot_vs_resolution(outdir / "A5_state_err_vs_res.pdf", panels, truth_dx=1.0)
 
 
 def table_state_accuracy(field_metrics, outdir):
     rows = []
-    for key, m in sorted(field_metrics.items(), key=lambda kv: (kv[1]["model"], -kv[1]["dx"])):
-        rows.append([
-            S.MODEL_LABELS[m["model"]], m["res_label_dx"],
-            _r(m.get("field_rmse")), _r(m.get("norm_rmse")),
-            _r(m.get("valsensor_rmse")),
-        ])
+    for key, m in sorted(
+        field_metrics.items(), key=lambda kv: (kv[1]["model"], -kv[1]["dx"])
+    ):
+        rows.append(
+            [
+                S.MODEL_LABELS[m["model"]],
+                m["res_label_dx"],
+                _r(m.get("field_rmse")),
+                _r(m.get("norm_rmse")),
+                _r(m.get("valsensor_rmse")),
+            ]
+        )
     S.write_table(
         outdir / "tables" / "A_state_accuracy",
-        ["Model", "Resolution", "|U| field RMSE", "norm. RMSE",
-         "val-sensor |U| RMSE"], rows,
-        bold_min_cols=(2, 3, 4))
+        ["Model", "Resolution", "|U| field RMSE", "norm. RMSE", "val-sensor |U| RMSE"],
+        rows,
+        bold_min_cols=(2, 3, 4),
+    )
 
 
 def _r(v, nd=3):
@@ -303,15 +408,26 @@ def a6_window_prior_post(run, outdir):
     if not wdir.is_dir():
         return
     import re
-    wins = sorted({int(re.match(r"window_(\d+)_", p.name).group(1))
-                   for p in wdir.glob("window_*_posterior_params.nc")})
+
+    wins = sorted(
+        {
+            int(re.match(r"window_(\d+)_", p.name).group(1))
+            for p in wdir.glob("window_*_posterior_params.nc")
+        }
+    )
     if not wins:
         return
     params = dataio.PARAMS
-    fig, axes = plt.subplots(len(params), 1, figsize=(8.4, 2.8 * len(params)),
-                             constrained_layout=True, squeeze=False)
+    fig, axes = plt.subplots(
+        len(params),
+        1,
+        figsize=(8.4, 2.8 * len(params)),
+        constrained_layout=True,
+        squeeze=False,
+    )
     axes = axes[:, 0]
     import xarray as xr
+
     for ax, p in zip(axes, params):
         prm_means, prm_lo, prm_hi, post_means, post_lo, post_hi = ([] for _ in range(6))
         for w in wins:
@@ -319,16 +435,36 @@ def a6_window_prior_post(run, outdir):
             po = xr.open_dataset(wdir / f"window_{w}_posterior_params.nc")
             if p in pr.data_vars:
                 a = np.asarray(pr[p].values).ravel()
-                prm_means.append(a.mean()); prm_lo.append(a.mean()-a.std()); prm_hi.append(a.mean()+a.std())
+                prm_means.append(a.mean())
+                prm_lo.append(a.mean() - a.std())
+                prm_hi.append(a.mean() + a.std())
             b = np.asarray(po[p].values).ravel()
-            post_means.append(b.mean()); post_lo.append(b.mean()-b.std()); post_hi.append(b.mean()+b.std())
-            pr.close(); po.close()
+            post_means.append(b.mean())
+            post_lo.append(b.mean() - b.std())
+            post_hi.append(b.mean() + b.std())
+            pr.close()
+            po.close()
         xw = np.arange(len(wins))
-        ax.errorbar(xw - 0.08, prm_means, yerr=[np.array(prm_means)-prm_lo, np.array(prm_hi)-prm_means],
-                    fmt="o", color=S.COLORS["prior"], label="prior", capsize=3)
-        ax.errorbar(xw + 0.08, post_means, yerr=[np.array(post_means)-post_lo, np.array(post_hi)-post_means],
-                    fmt="s", color=S.COLORS["posterior"], label="posterior", capsize=3)
-        ax.set_xticks(xw); ax.set_xticklabels([f"W{w}" for w in wins])
+        ax.errorbar(
+            xw - 0.08,
+            prm_means,
+            yerr=[np.array(prm_means) - prm_lo, np.array(prm_hi) - prm_means],
+            fmt="o",
+            color=S.COLORS["prior"],
+            label="prior",
+            capsize=3,
+        )
+        ax.errorbar(
+            xw + 0.08,
+            post_means,
+            yerr=[np.array(post_means) - post_lo, np.array(post_hi) - post_means],
+            fmt="s",
+            color=S.COLORS["posterior"],
+            label="posterior",
+            capsize=3,
+        )
+        ax.set_xticks(xw)
+        ax.set_xticklabels([f"W{w}" for w in wins])
         ax.set_ylabel(S.PARAM_LABELS.get(p, p))
         ax.legend(loc="best")
     axes[-1].set_xlabel("Assimilation window")
@@ -339,15 +475,26 @@ def a6_window_prior_post(run, outdir):
 # Driver
 # ---------------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", type=pathlib.Path,
-                    default=pathlib.Path(__file__).resolve().parent.parent / "figures")
-    ap.add_argument("--heavy", action="store_true",
-                    help="also produce field-based figures (A3/A4/A5 + state table); use SLURM")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=pathlib.Path(__file__).resolve().parent.parent / "figures",
+    )
+    ap.add_argument(
+        "--heavy",
+        action="store_true",
+        help="also produce field-based figures (A3/A4/A5 + state table); use SLURM",
+    )
     ap.add_argument("--no-mask", action="store_true", help="do not mask building cells")
-    ap.add_argument("--snapshot-time", type=float, default=None,
-                    help="time [s] for A3 field grid (default: mid of last window)")
+    ap.add_argument(
+        "--snapshot-time",
+        type=float,
+        default=None,
+        help="time [s] for A3 field grid (default: mid of last window)",
+    )
     args = ap.parse_args()
 
     S.apply_style()
@@ -361,8 +508,10 @@ def main():
     for r in runs:
         runs_by_model.setdefault(r.model, []).append(r)
     rep = finest(runs)
-    print(f"Block A: {sum(r.complete for r in runs)}/{len(runs)} complete runs; "
-          f"representative: {[f'{m}:{r.res_label}' for m,r in rep.items()]}")
+    print(
+        f"Block A: {sum(r.complete for r in runs)}/{len(runs)} complete runs; "
+        f"representative: {[f'{m}:{r.res_label}' for m,r in rep.items()]}"
+    )
 
     # --- cheap param figures ------------------------------------------------
     a1_per_model(runs_by_model, outdir)
@@ -402,11 +551,16 @@ def main():
     if snap is None:
         edges = dataio.window_edges(rep.get("udales", runs[0]))
         snap = float(0.5 * (edges[-2] + edges[-1])) if edges is not None else 900.0
-    cfg = dataio.load_config(rep["udales"]) if "udales" in rep else dataio.load_config(runs[0])
+    cfg = (
+        dataio.load_config(rep["udales"])
+        if "udales" in rep
+        else dataio.load_config(runs[0])
+    )
     assim_xy = dataio.sensor_coords(cfg, "assimilation")
     val_xy = dataio.sensor_coords(cfg, "validation")
-    a3_state_fields(rep, outdir, time_s=snap, solid2d=solid2d,
-                    assim_xy=assim_xy, val_xy=val_xy)
+    a3_state_fields(
+        rep, outdir, time_s=snap, solid2d=solid2d, assim_xy=assim_xy, val_xy=val_xy
+    )
     a4_valsensors(rep, outdir)
     a5_state_err_vs_res(field_metrics, outdir)
     table_state_accuracy(field_metrics, outdir)
