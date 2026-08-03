@@ -579,8 +579,9 @@ Provides:
 
 The metric functions themselves (`streaming_state_rmse`, `select_z_plane`,
 `sensor_magnitude`, `parameter_metric_summary`, `series_stats`,
-`vector_sensor_metrics`) live in the `evaluation` library (§2.3); this module
-keeps only the run-dir-aware extraction they consume.
+`vector_sensor_metrics`) live in the
+[`evaluation`](../libs/evaluation/src/evaluation/) library; this module keeps
+only the run-dir-aware extraction they consume.
 
 ---
 

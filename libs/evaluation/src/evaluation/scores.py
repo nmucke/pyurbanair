@@ -1,8 +1,9 @@
 """Probabilistic ensemble scores and the metric bundles built on them.
 
-Fair CRPS/CRPSS, energy score, z-scores, ranks, spread--skill, the hit rate
-``q``, and the parameter / sensor bundles that assemble them for
-``run_summary.yaml``.
+Here today (moved in WP0.2): the CRPS and energy-score estimators, per-knot
+skill metrics, the sweep-figure field/parameter/sensor metrics, and the
+parameter / sensor bundles that assemble them for ``run_summary.yaml``.
+Phase 1 adds CRPSS, z-scores, ranks, spread--skill and the hit rate ``q``.
 
 From WP1.1 the pairwise estimators divide by ``M(M-1)`` rather than ``M**2``,
 because the biased form's optimum is a collapsed ensemble -- the exact failure
@@ -24,11 +25,6 @@ Populated in WP0.2 (move), extended in phase 1.
 from __future__ import annotations
 
 import numpy as np
-
-# Both spellings: the moved sources disagreed (``figspec.metrics`` used ``xr``,
-# ``plotting``/``_esmda_common`` used ``xarray``) and WP0.2 keeps every moved
-# signature verbatim. Collapse to one alias in a later cleanup.
-import xarray
 import xarray as xr
 
 # ---------------------------------------------------------------------------
@@ -225,8 +221,8 @@ _PLOTTED_PARAMS = (
 
 
 def _plotted_param_names(
-    esmda_params: xarray.Dataset,
-    true_params: xarray.Dataset | None = None,
+    esmda_params: xr.Dataset,
+    true_params: xr.Dataset | None = None,
 ) -> list[str]:
     """Ordered estimable parameters present in ``esmda_params`` (and the truth)."""
     names = [p for p in _PLOTTED_PARAMS if p in esmda_params.data_vars]
@@ -235,7 +231,7 @@ def _plotted_param_names(
     return names
 
 
-def _param_members_and_x(da: xarray.DataArray):
+def _param_members_and_x(da: xr.DataArray):
     """Return ``(x, members)`` for a parameter, members shaped ``(n_ensemble, n_x)``.
 
     ``x`` is the ``time`` coordinate when the parameter is time-varying and
@@ -253,9 +249,9 @@ def _param_members_and_x(da: xarray.DataArray):
 
 
 def compute_parameter_metrics(
-    esmda_params: xarray.Dataset,
-    true_params: xarray.Dataset,
-    prior_params: xarray.Dataset | None = None,
+    esmda_params: xr.Dataset,
+    true_params: xr.Dataset,
+    prior_params: xr.Dataset | None = None,
 ) -> dict[str, dict[str, np.ndarray]]:
     """Per-parameter posterior error series (RMSE & CRPS) of the ensemble vs truth.
 
@@ -310,8 +306,8 @@ def compute_parameter_metrics(
 
 
 def compute_sensor_metrics(
-    true_sensor: xarray.DataArray,
-    ensemble_sensor: xarray.DataArray,
+    true_sensor: xr.DataArray,
+    ensemble_sensor: xr.DataArray,
 ) -> dict[str, np.ndarray]:
     """True vs ensemble |U| at sensors plus per-time RMSE/CRPS over the sensors.
 

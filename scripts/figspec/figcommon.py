@@ -1,6 +1,6 @@
 """Reusable plotting primitives shared by the block drivers.
 
-These build directly on :mod:`figspec.dataio` / :mod:`figspec.style` and produce
+These build directly on :mod:`figspec.dataio` / :mod:`evaluation.style` and produce
 the recurring figure shapes from ``docs/figure_specs.md``: parameter-trajectory
 panels, error-vs-time / error-vs-resolution line plots, validation-sensor panels,
 and the field + difference heatmap grids.

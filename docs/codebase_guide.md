@@ -96,9 +96,10 @@ libs/data-assimilation/src/data_assimilation/
     esmda.py                       # Parameter/StateAndParameter/TimeVaryingParameter/
                                    #   StateAndTimeVaryingParameter ESMDA
 
-libs/evaluation/src/evaluation/    # Metrics + figures for DA runs (leaf lib: no jax, no
-  scores.py                        #   pyurbanair/backends). Ensemble scores (CRPS, energy
-                                   #   score, per-knot skill) + the parameter/sensor bundles
+libs/evaluation/src/evaluation/    # Metrics + figures for DA runs. Leaf lib: no jax, no
+                                   #   pyurbanair, no backends (see its __init__).
+  scores.py                        # Ensemble scores (CRPS, energy score, per-knot skill)
+                                   #   + the parameter/sensor metric bundles
   turbulence.py                    # z-plane selection, streaming |U| state RMSE
   sensors.py                       # Reductions of pre-extracted sensor series
   style.py                         # Talk-figure palette/rcParams/save + STL solid masks

@@ -189,10 +189,64 @@ process. Moving the backend choice to the scripts is the alternative, and is
 - **mypy still fails on the touched scripts.** `scripts/figure_creation/*`,
   `figspec/figcommon.py`, `figspec/dataio.py` and
   `tests/test_model_error_parameters.py` are unannotated and only get checked
-  when staged. The failure is pre-existing: the same file set on HEAD reports
-  112 errors, this branch 98 (a strict subset — `figspec/style.py`'s 11 and
-  three `no-any-return`s are gone because that code is now behind a waiver).
-  Annotating them is out of scope for a move; black and isort pass.
+  when staged. The failure is pre-existing and this branch strictly reduces
+  it. Reproduce with pre-commit's own mypy hook over the files the move
+  commit modifies:
+
+  ```
+  git diff --cached --name-only --diff-filter=M | grep '\.py$' > /tmp/f.txt
+  pre-commit run mypy --files $(tr '\n' ' ' < /tmp/f.txt)
+  ```
+
+  On this branch: **98 errors in 10 files** (26 checked). Running the same
+  file list against an `esmda-evaluation` worktree: **112 errors in 11
+  files** (21 checked — the five `libs/evaluation` modules do not exist
+  there, and contribute 0 here because of the waivers). A subset, not a
+  different set: `figspec/style.py`'s 11 errors and three `no-any-return`s
+  are gone because that code now sits behind a module waiver. Absolute
+  counts differ under a bare `mypy --ignore-missing-imports` in the dev env
+  (more type info available, so more errors) — the pre-commit hook is the
+  gate, so it is the number quoted. Annotating these files is out of scope
+  for a move; black and isort pass, and CI runs pytest, not mypy.
+- **The library now does file I/O and prints to stdout**, which sits badly
+  with invariant 5 ("arrays/datasets in → numbers/dicts/figures out") and
+  with "scripts own I/O". `evaluation.style`'s `save_pdf` / `save_png`
+  write a figure and `print()` the path; `write_table` writes a `.csv` *and*
+  a `.tex`. `evaluation.figures` is the same story — every `plot_*` takes an
+  `output_path` and saves through `_save` rather than returning a `Figure`.
+  Both are plan-sanctioned (the table moves `figspec/style.py` and the
+  `plot_*` set wholesale) and changing either is not inert, so WP0.2 keeps
+  them. Recording it so the tension is a known debt rather than a
+  rediscovery: `write_table` in particular is table *output*, not a figure
+  convention, and belongs back in `scripts/figure_creation/`.
+- **`scripts/figspec/mask.py` gains an import-time `matplotlib.use("Agg")`**
+  it never had, via `from evaluation.style import stl_solid_mask`. This is
+  the concrete blast radius of keeping the `Agg` call in the library (see
+  the WP0.1 note above). Inert today — all six modules that import `mask`
+  already set the backend themselves before importing pyplot — but it is a
+  library reaching out and changing global process state, and the set of
+  importers is no longer the set that opted in.
 - Inertness verified by re-running `compute_esmda_metrics.py` +
   `make_esmda_figures.py` on a smoke run dir: `run_summary.yaml` and all six
   figure artifacts byte-identical to a baseline captured before the move.
+  Stronger check in review: every moved top-level definition is AST-identical
+  (docstrings stripped) to its pre-move original, with exactly five intended
+  deltas — the `crps_ensemble` rename, the explicit cast in
+  `compute_parameter_metrics`, the two inlined `pyurbanair.utils` helpers,
+  and `stl_solid_mask`'s signature.
+- **Acceptance grep: no live references remain**, but it is not literally
+  empty. Three stale anchors outside `libs/evaluation` were updated rather
+  than waived, because two are instructions aimed at the next work package:
+  the `per_knot_crps` and `figspec/style.py` references in
+  `esmda_turbulence_evaluation.md` §6/§7 (WP1.1's first task is that very
+  function) and `_PLOTTED_PARAMS` in `srst_sgs_parameterization.md`. What
+  still matches the grep is provenance — this plan's own move table and
+  deviations, the "formerly …" note left at the §6 anchor, and the history
+  paragraph in `tests/test_evaluation_scores.py`. Those are deliberate: the
+  grep's purpose is to catch code still pointing at deleted modules, and no
+  import, call or path reference does.
+- **`scores.py` collapsed the duplicate xarray import.** The moved sources
+  disagreed on the alias (`xr` vs `xarray`); keeping both was recorded as a
+  deferred cleanup, but `xr is xarray` and the module carries
+  `from __future__ import annotations`, so unifying on `xr` is provably
+  inert and was done here instead.

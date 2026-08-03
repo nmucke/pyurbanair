@@ -10,10 +10,12 @@ The filter's time axis is the **cycle**: one full-weight analysis per forecast
 segment, updating the end-of-segment state. So the per-cycle quantities here
 (one analyzed state / parameter vector per cycle) play the role the per-window
 rollout quantities play in the ESMDA pipeline, and the truth is compared at the
-end-of-cycle frames. The heavy lifting (lazy truth access, sensor interpolation,
-the sensor/parameter/state metrics) is reused verbatim from the ESMDA pipeline's
-``scripts.esmda._esmda_common`` -- only the filter-specific reshaping (cycles ->
-a time axis, selecting the truth's end-of-cycle frames) lives here.
+end-of-cycle frames. Lazy truth access and sensor interpolation are reused
+verbatim from the ESMDA pipeline's ``scripts.esmda._esmda_common``, and the
+sensor/parameter/state metrics come from ``evaluation.scores`` /
+``evaluation.turbulence`` / ``evaluation.sensors`` -- only the filter-specific
+reshaping (cycles -> a time axis, selecting the truth's end-of-cycle frames)
+lives here.
 """
 
 # mypy: ignore-errors

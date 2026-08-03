@@ -147,9 +147,11 @@ policy can duplicate members. Report `n_unique/M` per window in
 
 ## 6. Correctness fixes to existing code (do first, regardless)
 
-1. **Biased CRPS / energy-score estimators.** `per_knot_crps`
-  (`src/pyurbanair/utils/da_metrics.py`) and `_energy_score`
-   (`scripts/esmda/_esmda_common.py`) average over all `M²` pairs including
+1. **Biased CRPS / energy-score estimators.** `crps_ensemble` and
+  `_energy_score` (both now in `libs/evaluation/src/evaluation/scores.py`
+   after WP0.2; formerly `da_metrics.per_knot_crps` /
+   `plotting._crps_ensemble` and `_esmda_common._energy_score`)
+   average over all `M²` pairs including
    the zero diagonal; the fair estimator divides the pairwise sum by
    `M(M−1)` (Ferro 2014). The biased form's optimum is a collapsed
    ensemble — using it to certify an ESMDA posterior is circular.
@@ -162,7 +164,8 @@ policy can duplicate members. Report `n_unique/M` per window in
 
 ## 7. Figures
 
-Conventions (already encoded in `scripts/figspec/style.py` — reuse): truth
+Conventions (already encoded in `libs/evaluation/src/evaluation/style.py`
+— reuse): truth
 black, prior grey, posterior teal; ensemble bands as nested quantiles
 (5–95 % + 25–75 %); **shared axis limits and one shared color** `Normalize`
 **across every prior/posterior pair**; lengths `z/H`, velocities `u/U_ref`.
@@ -246,4 +249,3 @@ be replaced by distributions.
 spread–skill factor; Hamill (2001) — rank-histogram interpretation.
 - Emerick & Reynolds (2013) — ES-MDA; Evensen (2019) — iterative-smoother
 convergence practice and the `O_N` target.
-
