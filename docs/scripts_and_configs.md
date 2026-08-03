@@ -585,6 +585,15 @@ Provides:
 These three scripts form the standard single-run pipeline, orchestrated by
 [`run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh).
 
+> The metric and figure *computation* is being moved into the editable leaf
+> library [`libs/evaluation`](../libs/evaluation/src/evaluation/) (`scores`,
+> `turbulence`, `sensors`, `style`, `figures`), leaving the stages below as
+> thin orchestration: resolve run dirs, open artifacts, call `evaluation`,
+> write YAML/PNGs. The library takes arrays and datasets and returns
+> numbers, dicts and figures — it knows nothing about Hydra or the run-dir
+> layout, and imports neither jax nor `pyurbanair`. See
+> [docs/plans/esmda_evaluation/master_plan.md](plans/esmda_evaluation/master_plan.md).
+
 #### [`compute_esmda_metrics.py`](../scripts/esmda/compute_esmda_metrics.py)
 **Plain argparse CLI** — usage: `python scripts/esmda/compute_esmda_metrics.py --run-dir <dir>`
 

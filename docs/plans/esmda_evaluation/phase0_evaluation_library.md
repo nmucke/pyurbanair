@@ -118,4 +118,21 @@ Verification that the refactor is inert:
 
 ## Deviations
 
-_(record here as they occur)_
+**WP0.1**
+
+- The lib's own `[tool.pixi.pypi-dependencies]` self-reference uses
+  `path = "."` (the `libs/pylbm` / `libs/pypalm` shape), not
+  `libs/data-assimilation`'s `path = "libs/data-assimilation"` — that value
+  is root-relative and does not resolve from inside the lib directory. The
+  root `pyproject.toml` feature block is root-relative as the plan specifies.
+- `libs/data-assimilation/pyproject.toml` also lists `pyurbanair` as a pixi
+  pypi-dependency; `libs/evaluation` deliberately does not (invariant 5).
+- `src/evaluation/__init__.py` re-exports nothing (unlike
+  `data_assimilation`'s root re-export). `style`/`figures` import matplotlib,
+  so a root re-export would pull it into every consumer of a metric function.
+  Callers import from the module: `from evaluation.scores import ...`.
+- The plan's smoke check is a shell one-liner; it landed as
+  `tests/test_evaluation_library.py` instead, which additionally asserts
+  invariant 5 (no jax / `pyurbanair` / backend / Hydra behind any module) and
+  the matplotlib split, each in a subprocess so a shared `sys.modules` cannot
+  mask a violation. The one-liner remains valid.
