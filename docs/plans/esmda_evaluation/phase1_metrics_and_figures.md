@@ -148,4 +148,32 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
 
 ## Deviations
 
-_(record here as they occur)_
+**WP1.1**
+
+- `METRICS_VERSION` lives in `evaluation.scores`, not in the metric script.
+  It marks the *estimator* semantics, which is the library's property, and
+  three writers need it (ESMDA, filtering, `compute_sweep_metrics.py`);
+  keeping it in one script would have meant importing across script
+  packages.
+- `compute_filtering_metrics.py` also emits `metrics_version`. It was not in
+  the WP's scope, but it writes a `run_summary.yaml` using the same
+  estimators, so leaving it unmarked would have made unmarked mean two
+  different things.
+- `compute_sweep_metrics.py` carried byte-identical private copies of
+  `series_stats` and `parameter_metric_summary` (a WP0.2 dedup miss). They
+  are deleted in favour of the library functions, so `metrics.yaml` gets the
+  CRPSS as well. That file also *downgrades* its own `metrics_version` when
+  it falls back to copying an old run's sensor scores instead of recomputing
+  them.
+- `crps_ensemble` computes the pairwise term from sorted samples
+  (`sum_{i,j}|x_i - x_j| = 2 sum_i (2i - n + 1) x_(i)`) rather than from the
+  `(M, M, K)` difference tensor. Algebraically identical and asserted as
+  such in the tests; needed because the analytic-Gaussian test runs at
+  `M = 10^4`, where the tensor is 800 MB.
+- `ensemble_health` also reports `min_over_median_pairwise` (from the
+  rollback branch): exact row matching cannot see a *near*-duplicate, and
+  the ratio is what flags one.
+- **Deferred:** scores still divide by the nominal `M`, not `n_unique`. The
+  plan's "later scores use `n_unique`" is read as forward-looking — the
+  count is reported and warned on now, and no metric consumes it until a WP
+  that has an actual duplicated-ensemble run to validate against.

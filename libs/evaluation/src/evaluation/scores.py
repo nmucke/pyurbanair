@@ -5,10 +5,11 @@ skill metrics, the sweep-figure field/parameter/sensor metrics, and the
 parameter / sensor bundles that assemble them for ``run_summary.yaml``.
 Phase 1 adds CRPSS, z-scores, ranks, spread--skill and the hit rate ``q``.
 
-From WP1.1 the pairwise estimators divide by ``M(M-1)`` rather than ``M**2``,
+Since WP1.1 the pairwise estimators divide by ``M(M-1)`` rather than ``M**2``,
 because the biased form's optimum is a collapsed ensemble -- the exact failure
-these scores exist to detect. WP0.2 moves the biased forms in unchanged, so
-until WP1.1 lands what is here is the old estimator. Formulas in
+these scores exist to detect. Numbers produced before that change are ~O(1/M)
+larger and are **not** comparable with current ones; ``metrics_version: 2`` in
+``run_summary.yaml`` marks the boundary. Formulas in
 ``docs/plans/esmda_turbulence_evaluation.md`` §3--§6; rollout in
 ``phase1_metrics_and_figures.md``.
 
@@ -26,6 +27,14 @@ from __future__ import annotations
 
 import numpy as np
 import xarray as xr
+
+# Estimator-semantics marker written to ``run_summary.yaml`` by the metric
+# stages. Bump it whenever an existing summary key changes meaning (the keys
+# themselves are additive only), so numbers from either side of the change are
+# never silently compared. 1 (or an absent marker) = the pre-WP1.1 biased
+# ``M**2`` pairwise scores and mean-of-stds spread; 2 = the fair ``M(M-1)``
+# estimators and root-mean-variance spread in this module.
+METRICS_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Per-knot diagnostic skill metrics for time-varying parameter assimilation.
@@ -49,14 +58,21 @@ def per_knot_spread(ens: np.ndarray) -> np.ndarray:
 
 
 def crps_ensemble(ens: np.ndarray, truth: np.ndarray) -> np.ndarray:
-    """Per-knot sample CRPS using the energy-form estimator.
+    """Per-knot *fair* sample CRPS using the energy-form estimator.
 
     ``CRPS(F, y) = E|X - y| - 0.5 * E|X - X'|`` where ``X, X'`` are
     independent draws from ``F``. With a finite ensemble of size ``N`` the
-    pairwise term is computed as the mean of ``|x_i - x_j|`` over all
-    ``(i, j)`` pairs. ``ens`` is ``(n_ensemble, n_x)`` and ``truth`` is
-    ``(n_x,)``; one score is returned per ``x`` location (lower is better, in
-    the units of the scored quantity).
+    pairwise term averages ``|x_i - x_j|`` over the ``N(N - 1)`` *ordered
+    off-diagonal* pairs (Ferro 2014), not over all ``N**2`` pairs: the
+    ``N**2`` form silently includes the ``N`` zero diagonal entries, which
+    shrinks the spread term and so rewards an under-dispersed ensemble --
+    the exact failure this score is used to detect. ``ens`` is
+    ``(n_ensemble, n_x)`` and ``truth`` is ``(n_x,)``; one score is returned
+    per ``x`` location (lower is better, in the units of the scored
+    quantity).
+
+    A single member has no pairwise term and the score degenerates to the
+    absolute error.
 
     Dtype is the *caller's* policy: nothing here casts, so a float32 ensemble
     is scored in float32 (the pairwise term then differs from the float64
@@ -69,8 +85,18 @@ def crps_ensemble(ens: np.ndarray, truth: np.ndarray) -> np.ndarray:
     term1 = np.mean(np.abs(ens - truth[None, :]), axis=0)
     if n < 2:
         return term1
-    diffs = np.abs(ens[:, None, :] - ens[None, :, :])
-    term2 = 0.5 * diffs.mean(axis=(0, 1))
+    # For sorted scalar samples x_(0) <= ... <= x_(n-1),
+    #     sum_{i,j} |x_i - x_j| = 2 * sum_i (2i - n + 1) * x_(i),
+    # so the half-sum below is exactly ``0.5 * sum_{i != j} |x_i - x_j|``
+    # divided by ``n(n-1)`` -- the diagonal contributes nothing to either form.
+    # Algebraically identical to averaging the pairwise-difference tensor, but
+    # O(n log n) instead of allocating an ``(n, n, n_x)`` array (this is called
+    # per timestep on sensor ensembles).
+    ordered = np.sort(ens, axis=0)
+    weights = (2 * np.arange(n) - n + 1).reshape((n,) + (1,) * (ordered.ndim - 1))
+    term2 = np.sum(weights.astype(ordered.dtype, copy=False) * ordered, axis=0) / (
+        n * (n - 1)
+    )
     return term1 - term2
 
 
@@ -86,16 +112,70 @@ def per_knot_in_band(
 def summary_scalars(
     ens: np.ndarray, truth: np.ndarray, alpha: float = 0.9
 ) -> dict[str, float]:
-    """Time-averaged skill scalars for one parameter at one ESMDA step."""
+    """Time-averaged skill scalars for one parameter at one ESMDA step.
+
+    ``time_avg_spread`` is the root of the *mean variance*, not the mean of the
+    per-knot standard deviations: averaging stds is biased low by Jensen, so
+    the old form made every ensemble look more confident than it was and is not
+    comparable with ``time_avg_error`` (which is already an RMS).
+    """
     err = per_knot_error(ens, truth)
     spr = per_knot_spread(ens)
     crps = crps_ensemble(ens, truth)
     band = per_knot_in_band(ens, truth, alpha=alpha)
     return {
         "time_avg_error": float(np.sqrt(np.mean(err**2))),
-        "time_avg_spread": float(np.mean(spr)),
+        "time_avg_spread": float(np.sqrt(np.mean(spr**2))),
         "mean_crps": float(np.mean(crps)),
         "coverage": float(np.mean(band)),
+    }
+
+
+def ensemble_uniqueness(members: np.ndarray) -> dict:
+    """Duplicate-member diagnostics for one ensemble.
+
+    A resampling policy that replaces a diverged member with a copy of a
+    surviving one (pypalm does this) leaves an ensemble whose nominal size ``M``
+    overstates its degrees of freedom: the pairwise ``M(M-1)`` corrections in
+    the fair scores above are then too generous. Counting the duplicates is
+    near-free, so it is reported per run and per window.
+
+    Args:
+        members: ``(n_members, n_features)`` flattened member vectors.
+
+    Returns:
+        ``{"n_members", "n_unique", "min_pairwise", "median_pairwise"}``.
+        ``n_unique`` is an **exact** row count -- resampled clones are
+        bit-identical, while legitimately close members must stay distinct;
+        judging "how close is too close" is what the pairwise L2 distances
+        (``None`` below two members) are for.
+    """
+    values = np.asarray(members)
+    if values.ndim != 2:
+        raise ValueError(
+            "members must have shape (n_members, n_features); "
+            f"got array with shape {values.shape}"
+        )
+
+    n_members = int(values.shape[0])
+    n_unique = int(np.unique(values, axis=0).shape[0])
+    if n_members < 2:
+        return {
+            "n_members": n_members,
+            "n_unique": n_unique,
+            "min_pairwise": None,
+            "median_pairwise": None,
+        }
+
+    distances = np.linalg.norm(
+        values[:, None, :].astype(float) - values[None, :, :].astype(float), axis=-1
+    )
+    pairwise = distances[np.triu_indices(n_members, k=1)]
+    return {
+        "n_members": n_members,
+        "n_unique": n_unique,
+        "min_pairwise": float(np.min(pairwise)),
+        "median_pairwise": float(np.median(pairwise)),
     }
 
 
@@ -193,11 +273,27 @@ def sensor_rmse(model_ts: np.ndarray, truth_ts: np.ndarray) -> float:
     return float(np.sqrt(np.nanmean((model_ts - truth_ts) ** 2)))
 
 
-def spread_skill(spread_ts: np.ndarray, rmse_ts: np.ndarray) -> float:
-    """Mean spread / mean RMSE (calibration ~ 1)."""
-    num = float(np.nanmean(spread_ts))
-    den = float(np.nanmean(rmse_ts))
-    return num / den if den > 0 else float("nan")
+def spread_skill(spread_ts: np.ndarray, rmse_ts: np.ndarray, n_members: int) -> float:
+    """Finite-ensemble-corrected spread--skill ratio (calibration ~ 1).
+
+    ``SSR = sqrt((M + 1) / M) * RMS(spread) / RMS(rmse)`` (Fortin et al. 2014).
+    Both series are reduced as roots of mean *squares*, since spread and error
+    combine in variance; the factor corrects for the ensemble mean being
+    estimated from the same ``M`` members whose spread is measured. Without it
+    a perfectly calibrated ensemble scores ``sqrt(M / (M + 1)) < 1`` and reads
+    as over-confident. ``SSR < 1`` is over-confident, ``> 1`` over-dispersive.
+
+    ``n_members`` is required rather than defaulted: there is no ensemble size
+    for which omitting the correction is right, and a silent default would
+    reintroduce the bias it exists to remove.
+    """
+    if n_members < 1:
+        raise ValueError(f"n_members must be positive, got {n_members}")
+    num = float(np.sqrt(np.nanmean(np.asarray(spread_ts, dtype=float) ** 2)))
+    den = float(np.sqrt(np.nanmean(np.asarray(rmse_ts, dtype=float) ** 2)))
+    if not np.isfinite(den) or den <= 0:
+        return float("nan")
+    return float(np.sqrt((n_members + 1) / n_members)) * num / den
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +397,11 @@ def compute_parameter_metrics(
                 entry["prior_rmse"] = np.sqrt(
                     np.mean((prior_members - truth_on_est[None, :]) ** 2, axis=0)
                 )
+                # Same float64 cast as the posterior CRPS above, so the two are
+                # scored identically and their ratio (the CRPSS) is meaningful.
+                entry["prior_crps"] = crps_ensemble(
+                    np.asarray(prior_members, dtype=float), truth_on_est
+                )
         metrics[param_name] = entry
     return metrics
 
@@ -369,15 +470,18 @@ def compute_sensor_metrics(
 
 
 def _energy_score(members, truth):
-    """Per-timestep energy score, averaged over sensors.
+    """Per-timestep *fair* energy score, averaged over sensors.
 
     The energy score is the multivariate generalization of the CRPS (Gneiting &
     Raftery 2007): for a vector forecast ensemble ``{v_m}`` and truth ``v``,
 
-        ES = mean_m ||v_m - v|| - 0.5 * mean_{m,m'} ||v_m - v_{m'}||,
+        ES = mean_m ||v_m - v|| - 0.5 * sum_{m != m'} ||v_m - v_m'|| / (M(M-1)),
 
     which reduces to the CRPS in 1-D. It rewards both accuracy (term 1) and a
-    calibrated spread (term 2), in the same |U| units as the velocity.
+    calibrated spread (term 2), in the same |U| units as the velocity. Like
+    :func:`crps_ensemble` the pairwise term excludes the zero diagonal
+    (Ferro 2014); with a single member it vanishes and the score degenerates to
+    the Euclidean error.
 
     Args:
         members: ``(component, ensemble, time, sensor)`` aligned member vectors.
@@ -387,6 +491,7 @@ def _energy_score(members, truth):
         ``(time,)`` energy score, averaged over the sensors (matching the
         per-time, over-sensors reduction of ``compute_sensor_metrics``).
     """
+    n_ens = members.shape[1]
     n_time = members.shape[2]
     es = np.empty(n_time)
     # Loop over time so the pairwise term never materializes more than
@@ -396,9 +501,13 @@ def _energy_score(members, truth):
         v = truth[:, t, :]  # (C, S)
         d_truth = np.sqrt(np.sum((m - v[:, None, :]) ** 2, axis=0))  # (E, S)
         term1 = d_truth.mean(axis=0)  # (S,)
+        if n_ens < 2:
+            es[t] = float(term1.mean())
+            continue
         diff = m[:, :, None, :] - m[:, None, :, :]  # (C, E, E, S)
         d_pair = np.sqrt(np.sum(diff**2, axis=0))  # (E, E, S)
-        term2 = 0.5 * d_pair.mean(axis=(0, 1))  # (S,)
+        # Zero diagonal, so the full sum over n(n-1) is the off-diagonal mean.
+        term2 = 0.5 * d_pair.sum(axis=(0, 1)) / (n_ens * (n_ens - 1))  # (S,)
         es[t] = float((term1 - term2).mean())  # average over sensors
     return es
 
@@ -462,18 +571,34 @@ def series_stats(arr):
     }
 
 
+def _skill_score(post: np.ndarray, prior: np.ndarray) -> tuple[float, float | None]:
+    """``(mean prior score, 1 - mean post / mean prior)``; ``None`` skill if prior is 0."""
+    prior_mean = float(np.nanmean(prior))
+    post_mean = float(np.nanmean(post))
+    skill = float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
+    return prior_mean, skill
+
+
 def parameter_metric_summary(posterior_params, true_params, prior_params):
-    """Per-parameter RMSE/CRPS summary stats (posterior, with a prior reference)."""
+    """Per-parameter RMSE/CRPS summary stats (posterior, with a prior reference).
+
+    The prior-relative entries are skill scores: ``1 - post/prior``, positive
+    when assimilation helped. The CRPS one (``crps_reduction_vs_prior``, the
+    CRPSS of the metrics doc §3) is the probabilistic counterpart of the RMSE
+    reduction -- it also penalizes a posterior that got closer to the truth by
+    collapsing, which the RMSE of the ensemble members cannot see.
+    """
     metrics = compute_parameter_metrics(posterior_params, true_params, prior_params)
     summary = {}
     for name, m in metrics.items():
         entry = {"rmse": series_stats(m["rmse"]), "crps": series_stats(m["crps"])}
         if "prior_rmse" in m:
-            prior_mean = float(np.nanmean(m["prior_rmse"]))
-            post_mean = float(np.nanmean(m["rmse"]))
+            prior_mean, skill = _skill_score(m["rmse"], m["prior_rmse"])
             entry["prior_rmse_mean"] = prior_mean
-            entry["rmse_reduction_vs_prior"] = (
-                float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
-            )
+            entry["rmse_reduction_vs_prior"] = skill
+        if "prior_crps" in m:
+            prior_mean, skill = _skill_score(m["crps"], m["prior_crps"])
+            entry["prior_crps_mean"] = prior_mean
+            entry["crps_reduction_vs_prior"] = skill
         summary[name] = entry
     return summary

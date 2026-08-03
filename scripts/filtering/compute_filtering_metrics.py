@@ -15,8 +15,11 @@ Second stage of the three-script single-run filtering pipeline (see
 ``run_summary.yaml`` is the run_info (configuration + timing) saved by
 run_filtering.py, augmented with:
 
+  * ``metrics_version``     -- estimator-semantics marker shared with the ESMDA
+                               pipeline; 2 = fair (``M(M-1)``) pairwise scores
+                               (see scripts/esmda/compute_esmda_metrics.py).
   * ``parameter_metrics``   -- per-parameter RMSE/CRPS of the final analyzed
-                               ensemble vs truth (+ reduction vs prior). Absent
+                               ensemble vs truth (+ skill vs prior). Absent
                                in ``mode='state'`` (no parameters estimated).
   * ``filter_diagnostics``  -- summary stats of the per-cycle innovation chi2 and
                                observation-space prior/posterior RMSE.
@@ -46,6 +49,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from evaluation.scores import (
+    METRICS_VERSION,
     parameter_metric_summary,
     series_stats,
     vector_sensor_metrics,
@@ -72,6 +76,7 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
 
     # Seed the summary from the run metadata/timing saved by run_filtering.py.
     summary = read_yaml(run_dir / "run_info.yaml")
+    summary["metrics_version"] = METRICS_VERSION
 
     # --- Filter health diagnostics (always available) -----------------------
     # Summarize the per-cycle innovation chi2 and observation-space RMSE that the

@@ -13,7 +13,13 @@ Second stage of the three-script single-run ESMDA pipeline (see
 ``run_summary.yaml`` is the run_info (configuration + timing) saved by
 run_esmda.py, augmented with:
 
-  * ``parameter_metrics``  -- per-parameter RMSE/CRPS summary (+ reduction vs prior).
+  * ``metrics_version``    -- estimator-semantics marker; 2 = fair (``M(M-1)``)
+                              pairwise scores. Absent or 1 means the older
+                              biased estimators, whose CRPS / energy-score
+                              numbers sit ~O(1/M) higher and must not be
+                              compared with version-2 ones.
+  * ``parameter_metrics``  -- per-parameter RMSE/CRPS summary (+ skill vs prior).
+  * ``ensemble_health``    -- duplicate-member counts, run-wide and per window.
   * ``state_metrics``      -- |U| field RMSE summary (streamed over a few z-slices).
   * ``sensor_metrics``     -- per sensor set, the full-vector (u, v, w) RMSE and
                               energy score (multivariate CRPS). The comprehensive
@@ -26,6 +32,7 @@ Usage::
 """
 
 import argparse
+import logging
 import pathlib
 import sys
 
@@ -38,6 +45,8 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from evaluation.scores import (
+    METRICS_VERSION,
+    ensemble_uniqueness,
     parameter_metric_summary,
     series_stats,
     vector_sensor_metrics,
@@ -54,6 +63,82 @@ from scripts.esmda._esmda_common import (
     write_yaml,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _flatten_parameter_members(params: xarray.Dataset) -> np.ndarray:
+    """Flatten every ensemble parameter variable into one row per member."""
+    arrays: list[np.ndarray] = []
+    n_members: int | None = None
+    for name in sorted(params.data_vars):
+        variable = params[name]
+        if "ensemble" not in variable.dims:
+            continue
+        values = np.asarray(variable.transpose("ensemble", ...).values)
+        if n_members is None:
+            n_members = values.shape[0]
+        elif values.shape[0] != n_members:
+            raise ValueError(
+                f"parameter {name!r} has {values.shape[0]} ensemble members; "
+                f"expected {n_members}"
+            )
+        arrays.append(values.reshape(values.shape[0], -1))
+    if not arrays:
+        raise ValueError(
+            "parameter dataset has no variables with an ensemble dimension"
+        )
+    return np.concatenate(arrays, axis=1)
+
+
+def _ensemble_health(
+    run_dir: pathlib.Path, posterior_params: xarray.Dataset
+) -> dict[str, object]:
+    """Duplicate-member counts for the assembled posterior and each window.
+
+    The assembled posterior concatenates the windows, so two members that were
+    cloned in one window but diverge in another are distinct there and only the
+    per-window counts see it -- hence both.
+    """
+    health = ensemble_uniqueness(_flatten_parameter_members(posterior_params))
+    if health["n_unique"] < health["n_members"]:
+        logger.warning(
+            "Duplicate posterior parameter members: %s/%s unique -- the fair "
+            "scores' M(M-1) corrections overstate the ensemble's spread",
+            health["n_unique"],
+            health["n_members"],
+        )
+
+    per_window: list[int] = []
+    window_paths = sorted(
+        (run_dir / "windows").glob("window_*_posterior_params.nc"),
+        key=lambda path: int(path.stem.split("_")[1]),
+    )
+    for path in window_paths:
+        with xarray.open_dataset(path) as params:
+            window_health = ensemble_uniqueness(_flatten_parameter_members(params))
+        per_window.append(int(window_health["n_unique"]))
+        if window_health["n_unique"] < window_health["n_members"]:
+            logger.warning(
+                "Duplicate posterior parameter members in %s: %s/%s unique",
+                path.name,
+                window_health["n_unique"],
+                window_health["n_members"],
+            )
+
+    minimum, median = health["min_pairwise"], health["median_pairwise"]
+    return {
+        "n_members": int(health["n_members"]),
+        "n_unique": int(health["n_unique"]),
+        "n_unique_per_window": per_window,
+        # Near-duplicates that exact matching misses: a ratio near 0 means two
+        # members are far closer to each other than the ensemble typically is.
+        "min_over_median_pairwise": (
+            float(minimum / median)
+            if minimum is not None and median is not None and median > 0
+            else None
+        ),
+    }
+
 
 def compute_metrics(run_dir: pathlib.Path) -> None:
     """Compute every run metric from the saved artifacts and write run_summary.yaml."""
@@ -62,6 +147,7 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
 
     # Seed the summary from the run metadata/timing saved by run_esmda.py.
     summary = read_yaml(run_dir / "run_info.yaml")
+    summary["metrics_version"] = METRICS_VERSION
 
     # --- Parameters (always available) --------------------------------------
     posterior_params = xarray.open_dataset(run_dir / "posterior_params.nc")
@@ -70,6 +156,7 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     summary["parameter_metrics"] = parameter_metric_summary(
         posterior_params, true_params, prior_params
     )
+    summary["ensemble_health"] = _ensemble_health(run_dir, posterior_params)
 
     # The parameter metrics are always available. The state and sensor metrics
     # both open the (potentially multi-GB) truth, so -- matching run_esmda.py's
