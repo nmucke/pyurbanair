@@ -1,13 +1,9 @@
-"""Reductions of pre-extracted sensor and probe series.
+"""Reductions of pre-extracted sensor and probe series to window statistics.
 
-Consumes ``(ensemble, time, sensor)`` arrays that a script has already pulled
-out of the state files and turns them into the per-window statistics that
-phase 1 scores: means, variances / TKE, velocity magnitudes.
+Consumes ``(ensemble, time, sensor)`` arrays a script has already pulled out of
+the state files. Extraction itself stays in ``scripts/esmda/_esmda_common.py``:
+it needs ``data_assimilation``'s observation operator (jax) and the run-dir
+layout, both forbidden here.
 
-Extraction deliberately stays in ``scripts/esmda/_esmda_common.py``: it needs
-``data_assimilation``'s ``ObservationOperator`` and interpolation helpers,
-which pull in jax, and it has to know the run-directory layout. Both are
-forbidden here (leaf-library rule).
-
-Populated in WP0.2 (move) and extended in WP1.3.
+Populated in WP0.2 (move), extended in WP1.3.
 """

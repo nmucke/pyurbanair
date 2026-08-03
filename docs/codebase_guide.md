@@ -98,7 +98,9 @@ libs/data-assimilation/src/data_assimilation/
 
 libs/evaluation/src/evaluation/    # Metrics + figures for DA runs (leaf lib: no jax, no
                                    #   pyurbanair/backends). scores, turbulence, sensors,
-                                   #   style, figures. Scripts orchestrate; this computes.
+                                   #   style, figures. NOTE: skeleton only until WP0.2 --
+                                   #   the code still lives in src/pyurbanair/plotting.py,
+                                   #   utils/da_metrics.py and scripts/figspec/.
 
 libs/pylbm/src/pylbm/              # LBM wrapper. __init__ git-clones the LBM Fortran code.
   forward_model.py                 # ForwardModel(BaseForwardModel)

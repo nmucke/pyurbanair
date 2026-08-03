@@ -20,6 +20,7 @@ import pytest
 FORBIDDEN = (
     "jax",
     "jaxlib",
+    "torch",
     "pyurbanair",
     "data_assimilation",
     "pylbm",
@@ -55,12 +56,8 @@ def _import_and_report(modules: tuple[str, ...]) -> set[str]:
     return set(completed.stdout.split())
 
 
-def test_package_and_all_modules_import() -> None:
-    loaded = _import_and_report(("evaluation",) + NUMERIC_MODULES + PLOTTING_MODULES)
-    assert "evaluation" in loaded
-
-
-# pytest ships no stubs in this env, so its decorators read as untyped to mypy.
+# pre-commit runs mypy in an isolated env without pytest installed, so its
+# decorators read as untyped there. Same ignore as tests/conftest.py et al.
 @pytest.mark.parametrize(  # type: ignore[misc]
     "module", ("evaluation",) + NUMERIC_MODULES + PLOTTING_MODULES
 )
@@ -72,8 +69,9 @@ def test_no_application_stack_behind_the_library(module: str) -> None:
     )
 
 
-def test_numeric_modules_do_not_import_matplotlib() -> None:
-    loaded = _import_and_report(NUMERIC_MODULES)
+@pytest.mark.parametrize("module", NUMERIC_MODULES)  # type: ignore[misc]
+def test_numeric_modules_do_not_import_matplotlib(module: str) -> None:
+    loaded = _import_and_report((module,))
     assert (
         "matplotlib" not in loaded
-    ), "matplotlib must be imported by evaluation.style/figures only"
+    ), f"{module} imported matplotlib; it belongs to evaluation.style/figures only"

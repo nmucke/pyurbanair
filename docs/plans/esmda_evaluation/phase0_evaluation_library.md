@@ -131,8 +131,19 @@ Verification that the refactor is inert:
   `data_assimilation`'s root re-export). `style`/`figures` import matplotlib,
   so a root re-export would pull it into every consumer of a metric function.
   Callers import from the module: `from evaluation.scores import ...`.
+- `[tool.pixi.workspace] platforms` lists `osx-arm64` **and** `linux-64`
+  (`libs/data-assimilation` lists only the former). This is a pure-Python lib
+  and `delftblue` / `snellius` / CI are Linux; it only affects standalone
+  `pixi` use inside the lib directory, but there is no reason to exclude them.
 - The plan's smoke check is a shell one-liner; it landed as
   `tests/test_evaluation_library.py` instead, which additionally asserts
   invariant 5 (no jax / `pyurbanair` / backend / Hydra behind any module) and
   the matplotlib split, each in a subprocess so a shared `sys.modules` cannot
   mask a violation. The one-liner remains valid.
+
+Carried into WP0.2 (decide there, recorded here so it is not lost):
+`scripts/figspec/style.py:13` calls `matplotlib.use("Agg")` at module import.
+Moved verbatim, that makes importing `evaluation.style` mutate global
+matplotlib state as a side effect — a leaf library reaching out into the
+process. Moving the backend choice to the scripts is the alternative, and is
+*not* inert. Nothing in the suite currently catches either way.
