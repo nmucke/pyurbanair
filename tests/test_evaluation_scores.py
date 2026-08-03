@@ -54,13 +54,20 @@ def test_crps_ensemble_does_not_upcast() -> None:
 
 
 def test_crps_ensemble_float32_and_float64_actually_differ() -> None:
-    # Guards the premise of the whole split. If these ever agree bitwise, the
-    # explicit cast below is pointless and this file can go.
+    # Guards the premise of the whole split: if the two accumulation dtypes ever
+    # agree bitwise, the explicit cast at the caller is pointless and this file
+    # can go.
+    #
+    # Both calls must see the SAME numbers -- only the dtype they are summed in
+    # may vary. Rounding the truth to float32 for one call and not the other
+    # would make the assertion pass on the data difference alone, which is
+    # exactly the situation compute_parameter_metrics is NOT in: it upcasts
+    # members that are already float32-valued.
     ens = np.random.default_rng(3).standard_normal((16, 12)).astype(np.float32)
-    truth = np.random.default_rng(4).standard_normal(12).astype(np.float64)
+    truth = np.random.default_rng(4).standard_normal(12).astype(np.float32)
 
-    in_float32 = crps_ensemble(ens, truth.astype(np.float32))
-    in_float64 = crps_ensemble(np.asarray(ens, dtype=float), truth)
+    in_float32 = crps_ensemble(ens, truth)
+    in_float64 = crps_ensemble(ens.astype(float), truth.astype(float))
 
     assert not np.array_equal(in_float32, in_float64)
 
@@ -73,8 +80,10 @@ def test_compute_parameter_metrics_scores_crps_in_float64() -> None:
     metrics = compute_parameter_metrics(posterior, true)
     crps = metrics["inflow_angle"]["crps"]
 
-    assert crps.dtype == np.float64
-
+    # Deliberately no dtype assertion: the truth comes back from np.interp as
+    # float64, so the first CRPS term is float64 with or without the cast and
+    # only the pairwise term moves. The array comparison below is the only
+    # thing that discriminates -- do not "simplify" it away.
     members = np.asarray(posterior["inflow_angle"].transpose("ensemble", "time").values)
     truth = np.asarray(true["inflow_angle"].values, dtype=float)
     expected = crps_ensemble(np.asarray(members, dtype=float), truth)

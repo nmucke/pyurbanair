@@ -216,7 +216,8 @@ def cycle_diagnostics_series(run_dir: pathlib.Path) -> dict:
     """Read ``cycle_diagnostics.yaml`` into ``{field: np.ndarray}`` over cycles.
 
     Missing/``None`` entries (e.g. the parameter spreads in ``mode='state'``)
-    become NaN so :func:`evaluation.scores.series_stats` skips them. ``{}`` if the file is absent.
+    become NaN so :func:`evaluation.scores.series_stats` skips them. ``{}`` if
+    the file is absent.
     """
     rows = read_yaml(pathlib.Path(run_dir) / "cycle_diagnostics.yaml")
     if not rows:

@@ -171,9 +171,14 @@ process. Moving the backend choice to the scripts is the alternative, and is
   `run_utils.add_velocity_magnitude` and
   `state_utils.get_velocity_magnitude_field` (identical arithmetic, `_`
   prefix); the originals stay put for their non-evaluation callers.
-- **`scores.py` imports xarray twice** (`import xarray` and
-  `import xarray as xr`) because the moved sources disagreed on the alias and
-  every moved signature is kept verbatim. Collapse in a later cleanup.
+  Duplicates drift silently, so `tests/test_evaluation_library.py` compares
+  each copy's AST body against its original and fails if they diverge.
+- **`figures.py` imports two underscore-private names from `scores.py`**
+  (`_param_members_and_x`, `_plotted_param_names`). They were intra-module
+  helpers in `plotting.py`; the split makes the leading underscore
+  understate their scope. Accepted rather than renamed, because promoting
+  them is API surface this WP has no mandate to design — phase 1 should
+  decide when it touches the parameter bundle.
 - **`figspec.metrics` was renamed at the call sites**, not aliased: the block
   drivers now `from evaluation import scores` and call `scores.field_rmse(…)`
   rather than keeping a `metrics` alias for a module that no longer exists.
@@ -230,10 +235,12 @@ process. Moving the backend choice to the scripts is the alternative, and is
   `make_esmda_figures.py` on a smoke run dir: `run_summary.yaml` and all six
   figure artifacts byte-identical to a baseline captured before the move.
   Stronger check in review: every moved top-level definition is AST-identical
-  (docstrings stripped) to its pre-move original, with exactly five intended
+  (docstrings stripped) to its pre-move original, with exactly six intended
   deltas — the `crps_ensemble` rename, the explicit cast in
   `compute_parameter_metrics`, the two inlined `pyurbanair.utils` helpers,
-  and `stl_solid_mask`'s signature.
+  `stl_solid_mask`'s signature, and the `xarray.` → `xr.` annotation rewrite
+  in `scores.py` (8 annotation nodes; inert under lazy annotations, and
+  `xr is xarray` regardless).
 - **Acceptance grep: no live references remain**, but it is not literally
   empty. Three stale anchors outside `libs/evaluation` were updated rather
   than waived, because two are instructions aimed at the next work package:

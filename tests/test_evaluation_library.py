@@ -79,3 +79,51 @@ def test_numeric_modules_do_not_import_matplotlib(module: str) -> None:
     assert (
         "matplotlib" not in loaded
     ), f"{module} imported matplotlib; it belongs to evaluation.style/figures only"
+
+
+# WP0.2 could not import these from pyurbanair.utils (leaf rule) and could not
+# drop them (the originals serve non-evaluation flows), so the two velocity
+# helpers are duplicated into evaluation.figures. Duplicates drift silently;
+# this is the only thing that would notice.
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "copy_name,original_module,original_name",
+    [
+        (
+            "_add_velocity_magnitude",
+            "pyurbanair.utils.run_utils",
+            "add_velocity_magnitude",
+        ),
+        (
+            "_get_velocity_magnitude_field",
+            "pyurbanair.utils.state_utils",
+            "get_velocity_magnitude_field",
+        ),
+    ],
+)
+def test_inlined_velocity_helpers_match_their_originals(
+    copy_name: str, original_module: str, original_name: str
+) -> None:
+    import ast
+    import importlib
+    import inspect
+
+    from evaluation import figures
+
+    copy = ast.parse(inspect.getsource(getattr(figures, copy_name))).body[0]
+    original_fn = getattr(importlib.import_module(original_module), original_name)
+    original = ast.parse(inspect.getsource(original_fn)).body[0]
+
+    # Compare bodies only: the copy is renamed (leading underscore) and may
+    # carry a different docstring, but the arithmetic must not diverge.
+    assert [ast.dump(n) for n in copy.body if not _is_docstring(n)] == [
+        ast.dump(n) for n in original.body if not _is_docstring(n)
+    ], (
+        f"evaluation.figures.{copy_name} has drifted from "
+        f"{original_module}.{original_name}; reconcile them deliberately"
+    )
+
+
+def _is_docstring(node: object) -> bool:
+    import ast
+
+    return isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
