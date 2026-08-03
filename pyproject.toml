@@ -100,6 +100,11 @@ pypalm = { path = "libs/pypalm", editable = true }
 [tool.pixi.feature.data-assimilation.pypi-dependencies]
 data-assimilation = { path = "libs/data-assimilation", editable = true }
 
+# Evaluation metrics and figures. Leaf library -- numpy/scipy/xarray/matplotlib
+# only, no jax and no dependency on pyurbanair or a backend.
+[tool.pixi.feature.evaluation.pypi-dependencies]
+evaluation = { path = "libs/evaluation", editable = true }
+
 # torch comes from PyPI, not conda-forge: conda pytorch >=2.6 hard-depends
 # on conda triton, whose nvcc toolchain caps gcc <13 and conflicts with the
 # gcc 15.2 the CFD features pin. The generic requirement lives in the
@@ -291,9 +296,9 @@ torchvision = { version = "==0.27.0+cpu", index = "https://download.pytorch.org/
 
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "neural-surrogates", "lbm", "palm", "benchmark_geometry", "cpu"] }
-delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "neural-surrogates", "lbm", "palm"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm", "benchmark_geometry", "cpu"] }
+delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm"] }
 # Snellius is CPU-only for now, so it pulls in the shared `cpu` feature
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
-snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "neural-surrogates", "lbm", "palm"] }
-cuda = { features = ["dev", "py312", "udales", "data-assimilation", "neural-surrogates", "lbm", "palm", "cuda"] }
+snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm"] }
+cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm", "cuda"] }

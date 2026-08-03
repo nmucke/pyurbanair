@@ -96,6 +96,13 @@ libs/data-assimilation/src/data_assimilation/
     esmda.py                       # Parameter/StateAndParameter/TimeVaryingParameter/
                                    #   StateAndTimeVaryingParameter ESMDA
 
+libs/evaluation/src/evaluation/    # Metrics + figures for DA runs (leaf lib: no jax, no
+                                   #   pyurbanair/backends). scores, turbulence, sensors,
+                                   #   style, figures. NOTE: skeleton only until WP0.2 --
+                                   #   the code still lives in src/pyurbanair/plotting.py,
+                                   #   utils/da_metrics.py, scripts/figspec/ and
+                                   #   scripts/esmda/_esmda_common.py.
+
 libs/pylbm/src/pylbm/              # LBM wrapper. __init__ git-clones the LBM Fortran code.
   forward_model.py                 # ForwardModel(BaseForwardModel)
   ensemble_forward_model.py        # EnsembleForwardModel(BaseEnsembleForwardModel)
