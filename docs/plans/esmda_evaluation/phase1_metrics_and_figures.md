@@ -168,8 +168,39 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
 - `crps_ensemble` computes the pairwise term from sorted samples
   (`sum_{i,j}|x_i - x_j| = 2 sum_i (2i - n + 1) x_(i)`) rather than from the
   `(M, M, K)` difference tensor. Algebraically identical and asserted as
-  such in the tests; needed because the analytic-Gaussian test runs at
-  `M = 10^4`, where the tensor is 800 MB.
+  such in the tests, and O(n log n) rather than O(M²K) in a function called
+  per timestep. Two consequences of the rewrite are handled explicitly and
+  pinned by tests: the weights sum to zero, so the sum is centred on the
+  median before accumulating (without it float32 data offset from the origin
+  — an inflow angle near 270° — loses ~4 orders of magnitude), and both
+  terms accumulate in a signed floating dtype (the raw form wrapped on
+  unsigned input).
+- `ensemble_uniqueness` counts unique rows **bitwise** rather than by value,
+  so two identical all-NaN rows (a diverged member cloned by the resampling
+  policy — the case the guard exists for) count as one; and it reduces only
+  over finite pairwise distances, so a NaN member cannot blank out
+  `min_pairwise` / `median_pairwise` for the whole ensemble. It also
+  computes distances row-by-row instead of via an `(M, M, K)` tensor, which
+  reached hundreds of MB on long runs.
+- `_ensemble_health` degrades instead of aborting (invariant 3): an
+  unreadable window costs its own count and a log line, and an assembled
+  posterior it cannot read omits the block entirely.
+- `_skill_score` logs when its reference is zero. At `M = 2` — the CI smoke
+  shape — the fair CRPS is *identically* zero whenever the truth is
+  bracketed by the two members, so `crps_reduction_vs_prior` is routinely
+  `null` there; per the master plan that is guarded with null + a log, not
+  special-cased.
+- `compute_sweep_metrics.py` **omits** the sensor block when it cannot
+  recompute it (no `truth_access.yaml`) rather than copying the run's own
+  scores forward. A single `metrics_version` cannot describe a file whose
+  parameter block is fair and whose sensor block may not be — the mixing
+  guard would then either stay silent across the boundary or warn about runs
+  that are in fact comparable.
+- The three `scripts/figure_creation/` scripts touched here carry 26
+  pre-existing strict-mypy errors that pre-commit only surfaces once a
+  commit stages them; they get the repo's standard blanket
+  `# mypy: ignore-errors` waiver (as `scripts/esmda/_esmda_common.py`
+  already does) rather than an unrelated annotation pass.
 - `ensemble_health` also reports `min_over_median_pairwise` (from the
   rollback branch): exact row matching cannot see a *near*-duplicate, and
   the ratio is what flags one.

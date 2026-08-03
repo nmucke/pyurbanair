@@ -108,7 +108,7 @@ copy-paste.
 |---|---|---|---|---|---|
 | 0.1 | `libs/evaluation` skeleton + pixi wiring | [phase0](phase0_evaluation_library.md) | XS | done | #103 |
 | 0.2 | Move existing metric/plot code into it (pure refactor) | [phase0](phase0_evaluation_library.md) | M | done | #104 |
-| 1.1 | Correctness: fair CRPS/energy + CRPSS, spread–skill, `n_unique`, `metrics_version` | [phase1](phase1_metrics_and_figures.md) | S | done | #105 |
+| 1.1 | Correctness: fair CRPS/energy + CRPSS, spread–skill, `n_unique`, `metrics_version` | [phase1](phase1_metrics_and_figures.md) | S | in review | — |
 | 1.2 | Parameter bundle: z-score, contraction ratio, fair CRPS/CRPSS | [phase1](phase1_metrics_and_figures.md) | S | not started | — |
 | 1.3 | Sensor-statistics scoring (assimilated + held-out) | [phase1](phase1_metrics_and_figures.md) | S–M | not started | — |
 | 1.4 | Streaming mean fields + TKE + hit rate `q` | [phase1](phase1_metrics_and_figures.md) | M | not started | — |

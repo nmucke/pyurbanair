@@ -25,8 +25,12 @@ Populated in WP0.2 (move), extended in phase 1.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import xarray as xr
+
+logger = logging.getLogger(__name__)
 
 # Estimator-semantics marker written to ``run_summary.yaml`` by the metric
 # stages. Bump it whenever an existing summary key changes meaning (the keys
@@ -82,6 +86,15 @@ def crps_ensemble(ens: np.ndarray, truth: np.ndarray) -> np.ndarray:
     need the upcast now do it explicitly.
     """
     n = ens.shape[0]
+    # Both terms are differences, so they are formed in a signed floating dtype
+    # -- never in the inputs' own dtype, which for an unsigned or narrow integer
+    # ensemble would wrap or overflow silently. Floating inputs are unaffected:
+    # float32 in stays float32 (see the dtype contract above), and a float32
+    # ensemble against a float64 truth still promotes as it always did.
+    acc = np.result_type(ens.dtype, np.asarray(truth).dtype, np.float32)
+    ens = ens.astype(acc, copy=False)
+    truth = np.asarray(truth).astype(acc, copy=False)
+
     term1 = np.mean(np.abs(ens - truth[None, :]), axis=0)
     if n < 2:
         return term1
@@ -93,10 +106,14 @@ def crps_ensemble(ens: np.ndarray, truth: np.ndarray) -> np.ndarray:
     # O(n log n) instead of allocating an ``(n, n, n_x)`` array (this is called
     # per timestep on sensor ensembles).
     ordered = np.sort(ens, axis=0)
-    weights = (2 * np.arange(n) - n + 1).reshape((n,) + (1,) * (ordered.ndim - 1))
-    term2 = np.sum(weights.astype(ordered.dtype, copy=False) * ordered, axis=0) / (
-        n * (n - 1)
-    )
+    # The weights sum to zero, so subtracting any per-column constant leaves the
+    # result unchanged in exact arithmetic -- but not in floating point: without
+    # it the sum cancels catastrophically for data far from the origin (e.g. an
+    # inflow angle near 270 deg in float32, where the error grows ~1e4x).
+    # Centering on the median restores the accuracy of the pairwise form.
+    centered = ordered - ordered[n // 2]
+    weights = (2 * np.arange(n) - n + 1).reshape((n,) + (1,) * (centered.ndim - 1))
+    term2 = np.sum(weights.astype(acc, copy=False) * centered, axis=0) / (n * (n - 1))
     return term1 - term2
 
 
@@ -145,10 +162,12 @@ def ensemble_uniqueness(members: np.ndarray) -> dict:
 
     Returns:
         ``{"n_members", "n_unique", "min_pairwise", "median_pairwise"}``.
-        ``n_unique`` is an **exact** row count -- resampled clones are
+        ``n_unique`` is an **exact**, bitwise row count -- resampled clones are
         bit-identical, while legitimately close members must stay distinct;
-        judging "how close is too close" is what the pairwise L2 distances
-        (``None`` below two members) are for.
+        judging "how close is too close" is what the pairwise L2 distances are
+        for. The distances are ``None`` below two members and whenever every
+        pair is non-finite; pairs involving a diverged (NaN) member are dropped
+        rather than poisoning the reduction.
     """
     values = np.asarray(members)
     if values.ndim != 2:
@@ -158,7 +177,13 @@ def ensemble_uniqueness(members: np.ndarray) -> dict:
         )
 
     n_members = int(values.shape[0])
-    n_unique = int(np.unique(values, axis=0).shape[0])
+    # Compare raw bytes, not values: a diverged member is a row of NaNs, and
+    # ``np.unique`` would call two identical such rows distinct (NaN != NaN) --
+    # losing the signal for exactly the ensemble that most needs flagging.
+    rows = np.ascontiguousarray(values)
+    n_unique = int(
+        np.unique(rows.view(np.void(rows.dtype.itemsize * rows.shape[1]))).size
+    )
     if n_members < 2:
         return {
             "n_members": n_members,
@@ -167,15 +192,22 @@ def ensemble_uniqueness(members: np.ndarray) -> dict:
             "median_pairwise": None,
         }
 
-    distances = np.linalg.norm(
-        values[:, None, :].astype(float) - values[None, :, :].astype(float), axis=-1
+    # Row-by-row rather than an (M, M, K) difference tensor: M is the ensemble
+    # size (tens), K is every parameter knot of every window concatenated, and
+    # the tensor reaches hundreds of MB on a long run.
+    pairwise = np.array(
+        [
+            np.linalg.norm(values[i].astype(float) - values[j].astype(float))
+            for i in range(n_members)
+            for j in range(i + 1, n_members)
+        ]
     )
-    pairwise = distances[np.triu_indices(n_members, k=1)]
+    finite = pairwise[np.isfinite(pairwise)]
     return {
         "n_members": n_members,
         "n_unique": n_unique,
-        "min_pairwise": float(np.min(pairwise)),
-        "median_pairwise": float(np.median(pairwise)),
+        "min_pairwise": float(finite.min()) if finite.size else None,
+        "median_pairwise": float(np.median(finite)) if finite.size else None,
     }
 
 
@@ -571,12 +603,30 @@ def series_stats(arr):
     }
 
 
-def _skill_score(post: np.ndarray, prior: np.ndarray) -> tuple[float, float | None]:
-    """``(mean prior score, 1 - mean post / mean prior)``; ``None`` skill if prior is 0."""
+def _skill_score(
+    post: np.ndarray, prior: np.ndarray, name: str, what: str
+) -> tuple[float, float | None]:
+    """``(mean prior score, 1 - mean post / mean prior)``; ``None`` skill if prior is 0.
+
+    A zero reference is not an error: the fair CRPS is *identically* zero at
+    ``M = 2`` whenever the truth falls between the two members (term1 and the
+    pairwise term coincide), which is the CI smoke shape. The skill is genuinely
+    undefined there, so it is emitted as ``None`` and logged rather than
+    special-cased away.
+    """
     prior_mean = float(np.nanmean(prior))
     post_mean = float(np.nanmean(post))
-    skill = float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
-    return prior_mean, skill
+    if not prior_mean > 0:
+        logger.warning(
+            "%s: prior %s is %.3g, so its skill score is undefined (null). At "
+            "M=2 the fair CRPS is exactly 0 whenever the truth is bracketed by "
+            "the two members.",
+            name,
+            what,
+            prior_mean,
+        )
+        return prior_mean, None
+    return prior_mean, float(1.0 - post_mean / prior_mean)
 
 
 def parameter_metric_summary(posterior_params, true_params, prior_params):
@@ -593,11 +643,11 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
     for name, m in metrics.items():
         entry = {"rmse": series_stats(m["rmse"]), "crps": series_stats(m["crps"])}
         if "prior_rmse" in m:
-            prior_mean, skill = _skill_score(m["rmse"], m["prior_rmse"])
+            prior_mean, skill = _skill_score(m["rmse"], m["prior_rmse"], name, "RMSE")
             entry["prior_rmse_mean"] = prior_mean
             entry["rmse_reduction_vs_prior"] = skill
         if "prior_crps" in m:
-            prior_mean, skill = _skill_score(m["crps"], m["prior_crps"])
+            prior_mean, skill = _skill_score(m["crps"], m["prior_crps"], name, "CRPS")
             entry["prior_crps_mean"] = prior_mean
             entry["crps_reduction_vs_prior"] = skill
         summary[name] = entry

@@ -92,14 +92,31 @@ def _flatten_parameter_members(params: xarray.Dataset) -> np.ndarray:
 
 def _ensemble_health(
     run_dir: pathlib.Path, posterior_params: xarray.Dataset
-) -> dict[str, object]:
+) -> dict[str, object] | None:
     """Duplicate-member counts for the assembled posterior and each window.
 
     The assembled posterior concatenates the windows, so two members that were
     cloned in one window but diverge in another are distinct there and only the
     per-window counts see it -- hence both.
+
+    This is a diagnostic, not a metric: a parameter file it cannot read (an old
+    layout, a window truncated by a killed job) costs its own count and a log
+    line, never the whole metric stage. Returns ``None`` when even the assembled
+    posterior is unreadable.
+
+    ``min_over_median_pairwise`` is the near-duplicate detector exact row
+    matching cannot be: a ratio near 0 means two members sit far closer to each
+    other than the ensemble typically does. It is an unweighted L2 over all
+    parameters concatenated, so a parameter with a much larger numerical range
+    (an inflow angle in degrees against an SGS constant) dominates it; read it
+    as a coarse flag, not a calibrated distance.
     """
-    health = ensemble_uniqueness(_flatten_parameter_members(posterior_params))
+    try:
+        health = ensemble_uniqueness(_flatten_parameter_members(posterior_params))
+    except (ValueError, KeyError) as exc:
+        logger.warning("Cannot assess ensemble health: %s", exc)
+        return None
+
     if health["n_unique"] < health["n_members"]:
         logger.warning(
             "Duplicate posterior parameter members: %s/%s unique -- the fair "
@@ -114,8 +131,12 @@ def _ensemble_health(
         key=lambda path: int(path.stem.split("_")[1]),
     )
     for path in window_paths:
-        with xarray.open_dataset(path) as params:
-            window_health = ensemble_uniqueness(_flatten_parameter_members(params))
+        try:
+            with xarray.open_dataset(path) as params:
+                window_health = ensemble_uniqueness(_flatten_parameter_members(params))
+        except (OSError, ValueError, KeyError) as exc:
+            logger.warning("Skipping ensemble health for %s: %s", path.name, exc)
+            continue
         per_window.append(int(window_health["n_unique"]))
         if window_health["n_unique"] < window_health["n_members"]:
             logger.warning(
@@ -130,8 +151,6 @@ def _ensemble_health(
         "n_members": int(health["n_members"]),
         "n_unique": int(health["n_unique"]),
         "n_unique_per_window": per_window,
-        # Near-duplicates that exact matching misses: a ratio near 0 means two
-        # members are far closer to each other than the ensemble typically is.
         "min_over_median_pairwise": (
             float(minimum / median)
             if minimum is not None and median is not None and median > 0
@@ -156,7 +175,9 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     summary["parameter_metrics"] = parameter_metric_summary(
         posterior_params, true_params, prior_params
     )
-    summary["ensemble_health"] = _ensemble_health(run_dir, posterior_params)
+    health = _ensemble_health(run_dir, posterior_params)
+    if health is not None:
+        summary["ensemble_health"] = health
 
     # The parameter metrics are always available. The state and sensor metrics
     # both open the (potentially multi-GB) truth, so -- matching run_esmda.py's

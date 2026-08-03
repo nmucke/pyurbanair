@@ -274,9 +274,10 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     cfg = OmegaConf.load(run_dir / "config.yaml")
 
     metrics: dict = {
-        # Everything below is recomputed by the current (fair-estimator) code,
-        # so the file is version 2 -- except when the sensor block falls back to
-        # copying run_summary.yaml's scores, which downgrades it again.
+        # Every ensemble score in this file is recomputed below by the current
+        # (fair-estimator) library code; the only block copied from the run's
+        # own summary is the state RMSE, which no estimator change touches. So
+        # the marker is unconditionally the current version.
         "metrics_version": METRICS_VERSION,
         "configuration": summary.get("configuration", {}),
         "timing": summary.get("timing", {}),
@@ -339,16 +340,18 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
                 )
             sensor_metrics[name] = entry
 
-    if not sensor_metrics:
-        # No truth_access (pre-update run): fall back to the base |U| summary.
-        sensor_metrics = summary.get("sensor_metrics", {})
-        if sensor_metrics:
-            # Copied, not recomputed: the file is only as new as its source.
-            metrics["metrics_version"] = int(summary.get("metrics_version", 1))
-        status["note"] = (
-            "no truth_access.yaml -> base |U| sensor metrics only (re-run ESMDA)"
-        )
-    metrics["sensor_metrics"] = sensor_metrics
+    if sensor_metrics:
+        metrics["sensor_metrics"] = sensor_metrics
+    else:
+        # No truth_access (pre-update run), so the sensor scores cannot be
+        # recomputed. This used to copy them out of run_summary.yaml, but a
+        # single ``metrics_version`` cannot describe a file whose parameter
+        # block is fair and whose sensor block may not be: the comparison
+        # script would then either compare across the estimator boundary in
+        # silence or warn about runs that are in fact comparable. Omitting the
+        # block instead makes the gap visible -- the panels skip a missing
+        # metric, and the note says how to fill it.
+        status["note"] = "no truth_access.yaml -> sensor metrics omitted (re-run ESMDA)"
 
     _write_yaml(metrics, out_run / "metrics.yaml")
     return status

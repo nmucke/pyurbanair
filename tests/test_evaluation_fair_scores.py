@@ -6,8 +6,10 @@ optimum is a collapsed ensemble makes the certification circular. The biased
 enough to look like noise, large enough to reorder a sweep at M=50. Nothing in
 the pipeline notices the difference, so it is pinned here:
 
-  * the fair CRPS converges to the analytic Gaussian CRPS, the biased one does
-    not (``..._matches_analytic_gaussian`` / ``..._upward_bias``);
+  * the fair CRPS converges to the analytic Gaussian CRPS at an ensemble size
+    the pipeline actually uses, where the biased one is outside the band
+    (``..._matches_analytic_gaussian``), and its finite-ensemble bias is gone
+    (``..._upward_bias``);
   * every pairwise site excludes the zero diagonal (``..._zero_diagonal``);
   * the spread reductions are roots of mean *variances*, with the Fortin
     finite-ensemble factor, so a calibrated ensemble scores 1 and not
@@ -73,15 +75,28 @@ def test_fair_crps_matches_the_pairwise_definition() -> None:
 
 
 def test_fair_crps_matches_analytic_gaussian() -> None:
-    # A large sample from a known distribution: the fair estimator is unbiased
-    # for the population CRPS, so it must land on the closed form.
+    # The fair estimator is unbiased for the population CRPS at *any* ensemble
+    # size, so averaging many independent M=50 ensembles (the size the sweeps
+    # actually run) must land on the closed form.
+    #
+    # M matters here. At M=10**4 the biased form's error is E|X-X'|/(2M) ~ 6e-5
+    # and it would pass any tolerance loose enough for the Monte-Carlo noise --
+    # such a test cannot tell the two estimators apart. At M=50 that same bias
+    # is 0.0113, comfortably outside the band asserted below.
     rng = np.random.default_rng(42)
-    ens = rng.normal(size=(10_000, 1))
-    truth = np.array([0.7])
+    n_members, n_trials = 50, 20_000
+    ens = rng.normal(size=(n_members, n_trials))
+    truth = np.full(n_trials, 0.7)
+    analytic = _analytic_normal_crps(0.7)
 
-    assert crps_ensemble(ens, truth)[0] == pytest.approx(
-        _analytic_normal_crps(0.7), abs=1e-2
-    )
+    fair = float(crps_ensemble(ens, truth).mean())
+    # E|X - X'| = 2 sigma / sqrt(pi) for independent standard normals; the M**2
+    # form keeps the M zero diagonal entries, shrinking its pairwise term by
+    # exactly 1/M and inflating the score by that much.
+    biased = fair + (2.0 / math.sqrt(math.pi)) / (2 * n_members)
+
+    assert fair == pytest.approx(analytic, abs=5e-3)
+    assert abs(biased - analytic) > 1e-2
 
 
 def test_fair_crps_removes_the_small_ensemble_upward_bias() -> None:
@@ -129,6 +144,55 @@ def test_single_member_scores_degenerate_to_the_absolute_error() -> None:
         assert _energy_score(ens.T[:, :, None, None], truth[:, None, None])[
             0
         ] == pytest.approx(1.5)
+
+
+def test_fair_energy_score_matches_its_definition_on_a_realistic_shape() -> None:
+    # The M=2 case above pins the diagonal; this pins the estimator itself on a
+    # full (component, ensemble, time, sensor) block against a literal
+    # transcription of the formula.
+    rng = np.random.default_rng(19)
+    members = rng.standard_normal((3, 6, 4, 5))  # C, E, T, S
+    truth = rng.standard_normal((3, 4, 5))
+    n_ens = members.shape[1]
+
+    expected = []
+    for t in range(members.shape[2]):
+        m, v = members[:, :, t, :], truth[:, t, :]
+        term1 = np.sqrt(np.sum((m - v[:, None, :]) ** 2, axis=0)).mean(axis=0)
+        pair = np.sqrt(np.sum((m[:, :, None, :] - m[:, None, :, :]) ** 2, axis=0))
+        term2 = 0.5 * pair.sum(axis=(0, 1)) / (n_ens * (n_ens - 1))
+        expected.append(float((term1 - term2).mean()))
+
+    np.testing.assert_allclose(_energy_score(members, truth), expected, rtol=1e-12)
+
+
+def test_fair_crps_is_accurate_in_float32_far_from_the_origin() -> None:
+    # The sorted-sample form sums terms whose weights cancel to zero, so without
+    # centering it loses ~4 orders of magnitude on data offset from zero -- and
+    # the parameters scored here include an inflow angle near 270 degrees, held
+    # as float32 on disk. Pins the dtype contract's "~1e-7" accuracy claim.
+    rng = np.random.default_rng(5)
+    ens32 = (rng.normal(scale=0.1, size=(50, 200)) + 270.0).astype(np.float32)
+    truth32 = (rng.normal(scale=0.1, size=200) + 270.0).astype(np.float32)
+
+    scored = crps_ensemble(ens32, truth32)
+    exact = crps_ensemble(ens32.astype(float), truth32.astype(float))
+
+    assert scored.dtype == np.float32
+    assert float(np.max(np.abs(scored.astype(float) - exact))) < 1e-6
+
+
+def test_fair_crps_does_not_wrap_on_integer_ensembles() -> None:
+    # Signed weights and a signed centering, so nothing may be accumulated in
+    # the samples' own dtype: an unsigned ensemble would wrap silently.
+    truth = np.array([3])
+    expected = crps_ensemble(np.array([[1.0], [5.0], [9.0]]), truth.astype(float))[0]
+
+    for dtype in (np.uint8, np.int8, np.int32):
+        ens = np.array([[1], [5], [9]], dtype=dtype)
+        assert crps_ensemble(ens, truth.astype(dtype))[0] == pytest.approx(
+            expected, rel=1e-6
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -206,12 +270,36 @@ def test_ensemble_uniqueness_keeps_near_duplicates_distinct() -> None:
 def test_ensemble_uniqueness_has_no_distances_below_two_members() -> None:
     health = ensemble_uniqueness(np.array([[1.0, 2.0]]))
 
-    assert health == {
-        "n_members": 1,
-        "n_unique": 1,
-        "min_pairwise": None,
-        "median_pairwise": None,
-    }
+    assert health["n_members"] == 1
+    assert health["n_unique"] == 1
+    assert health["min_pairwise"] is None
+    assert health["median_pairwise"] is None
+
+
+def test_ensemble_uniqueness_matches_diverged_nan_members() -> None:
+    # The case the guard exists for: a solver blew up and the resampling policy
+    # cloned the failed member. Value comparison calls two all-NaN rows distinct
+    # (NaN != NaN) and would report a healthy ensemble; the counts are bitwise.
+    members = np.array([[np.nan, 1.0], [np.nan, 1.0], [0.0, 1.0]])
+
+    health = ensemble_uniqueness(members)
+
+    assert health["n_members"] == 3
+    assert health["n_unique"] == 2
+    # Every pair involves a NaN row here, so there is no finite distance to
+    # report -- but that must be None, not NaN leaking into the YAML.
+    assert health["min_pairwise"] is None
+    assert health["median_pairwise"] is None
+
+
+def test_ensemble_uniqueness_ignores_nan_pairs_when_finite_ones_exist() -> None:
+    members = np.array([[np.nan], [0.0], [0.0], [4.0]])
+
+    health = ensemble_uniqueness(members)
+
+    assert health["n_unique"] == 3
+    assert health["min_pairwise"] == 0.0
+    assert health["median_pairwise"] == pytest.approx(4.0)
 
 
 def test_ensemble_uniqueness_rejects_a_non_matrix() -> None:
@@ -262,6 +350,31 @@ def test_crps_skill_is_negative_when_the_posterior_over_contracts() -> None:
     summary = parameter_metric_summary(posterior, truth, prior)["inflow_angle"]
 
     assert summary["crps_reduction_vs_prior"] < 0.0
+
+
+def test_crps_skill_is_null_and_logged_at_the_smoke_shape(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The 2-member CI smoke shape. The fair CRPS is *identically* zero whenever
+    # the truth is bracketed (term1 and the pairwise term coincide), so the
+    # skill score divides by zero. The master plan calls for null + a log line,
+    # not a special case -- and WP1.2 builds on this key, so the null must be
+    # explained somewhere.
+    posterior = _param_dataset([[-1.0, -1.0], [1.0, 1.0]])
+    prior = _param_dataset([[-3.0, -3.0], [3.0, 3.0]])
+    truth = xarray.Dataset(
+        {"inflow_angle": (("time",), [0.0, 0.0])}, coords={"time": [0.0, 1.0]}
+    )
+
+    with caplog.at_level("WARNING", logger="evaluation.scores"):
+        summary = parameter_metric_summary(posterior, truth, prior)["inflow_angle"]
+
+    assert summary["crps"]["mean"] == 0.0
+    assert summary["prior_crps_mean"] == 0.0
+    assert summary["crps_reduction_vs_prior"] is None
+    assert "skill score is undefined" in caplog.text
+    # The RMSE reduction is unaffected -- it is not a pairwise score.
+    assert summary["rmse_reduction_vs_prior"] > 0.0
 
 
 def test_parameter_summary_omits_prior_keys_without_a_prior() -> None:
@@ -317,13 +430,48 @@ def test_run_summary_carries_the_version_marker_and_ensemble_health(
     summary = read_yaml(run_dir / "run_summary.yaml")
 
     assert summary["metrics_version"] == 2
-    assert summary["ensemble_health"] == {
-        "n_members": 4,
-        "n_unique": 3,
-        "n_unique_per_window": [3],
-        "min_over_median_pairwise": 0.0,
-    }
+    health = summary["ensemble_health"]
+    # Subset, not equality: invariant 1 permits new keys here.
+    assert health["n_members"] == 4
+    assert health["n_unique"] == 3
+    assert health["n_unique_per_window"] == [3]
+    assert health["min_over_median_pairwise"] == 0.0
     assert summary["parameter_metrics"]["inflow_angle"]["crps_reduction_vs_prior"] > 0.0
+
+
+def test_ensemble_health_survives_a_run_dir_with_no_windows(
+    tmp_path: pathlib.Path,
+) -> None:
+    # Invariant 3: an old or partial run dir degrades, it does not abort the
+    # metric stage.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = tmp_path / "run"
+    _write_run_dir(run_dir)
+    (run_dir / "windows" / "window_0_posterior_params.nc").unlink()
+
+    compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+
+    assert summary["ensemble_health"]["n_unique_per_window"] == []
+    assert summary["ensemble_health"]["n_unique"] == 3
+
+
+def test_ensemble_health_skips_an_unreadable_window(tmp_path: pathlib.Path) -> None:
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = tmp_path / "run"
+    _write_run_dir(run_dir)
+    # A window truncated by a killed job must cost its own count, not the run's
+    # metrics.
+    (run_dir / "windows" / "window_1_posterior_params.nc").write_bytes(b"not netcdf")
+
+    compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+
+    assert summary["ensemble_health"]["n_unique_per_window"] == [3]
 
 
 def test_sweep_comparison_warns_on_mixed_metric_versions(
@@ -368,6 +516,55 @@ def test_state_run_comparison_warns_on_mixed_metric_versions(
         rows = collect_runs(tmp_path, mode_filter="both")
 
     assert {r["metrics_version"] for r in rows} == {1, 2}
+
+
+def test_sweep_metrics_omit_sensor_scores_it_cannot_recompute(
+    tmp_path: pathlib.Path,
+) -> None:
+    # Without truth_access.yaml the sensor scores cannot be recomputed. Copying
+    # the run's own (possibly biased) ones forward would make a single
+    # metrics_version describe a file whose parameter block is fair and whose
+    # sensor block is not, defeating the mixing guard; the block is dropped.
+    from scripts.esmda._esmda_common import read_yaml, write_yaml
+    from scripts.figure_creation.compute_sweep_metrics import process_run
+
+    run_dir = tmp_path / "legacy_run"
+    out_dir = tmp_path / "sweep_metrics" / "legacy_run"
+    run_dir.mkdir()
+    write_yaml(
+        {
+            "configuration": {"assimilation_model": "pylbm"},
+            "sensor_metrics": {"assimilation": {"vel_magnitude_crps": {"mean": 123.0}}},
+        },
+        run_dir / "run_summary.yaml",
+    )
+    write_yaml(
+        {
+            "obs": {
+                "mode": "points",
+                "x_points": [0.0],
+                "y_points": [0.0],
+                "z_points": [0.0],
+            }
+        },
+        run_dir / "config.yaml",
+    )
+    coords = {"ensemble": [0, 1]}
+    xarray.Dataset(
+        {"inflow_angle": (("ensemble",), [0.0, 1.0])}, coords=coords
+    ).to_netcdf(run_dir / "posterior_params.nc")
+    xarray.Dataset(
+        {"inflow_angle": (("ensemble",), [-1.0, 2.0])}, coords=coords
+    ).to_netcdf(run_dir / "prior_params.nc")
+    xarray.Dataset({"inflow_angle": 0.5}).to_netcdf(run_dir / "true_params.nc")
+
+    status = process_run(run_dir, out_dir)
+    metrics = read_yaml(out_dir / "metrics.yaml")
+
+    assert metrics["metrics_version"] == 2
+    assert "parameter_metrics" in metrics
+    assert "sensor_metrics" not in metrics
+    assert "sensor metrics omitted" in status["note"]
 
 
 def test_comparisons_are_silent_when_every_run_shares_a_version(
