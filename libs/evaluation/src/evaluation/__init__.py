@@ -7,7 +7,9 @@ layout, or the forward-model backends, and it never imports ``pyurbanair``,
 (``scripts/esmda/``, ``scripts/filtering/``, ``scripts/figure_creation/``)
 own I/O and orchestration and call in here.
 
-Five flat modules, no subpackages:
+Five flat modules, no subpackages. This is the *target* shape from the master
+plan, not an inventory -- phases 1--3 fill it in, and each module's own
+docstring says what has actually landed there:
 
 - :mod:`evaluation.scores` -- probabilistic ensemble scores (fair CRPS/CRPSS,
   energy score, z-score, rank, spread--skill, hit rate) and the parameter /
@@ -22,9 +24,10 @@ Five flat modules, no subpackages:
 - :mod:`evaluation.figures` -- one function per figure ID plus the general
   state / parameter plots.
 
-Design rules (deliberate -- keep them): no base classes, no registries; the
-only class is the streaming moment accumulator, which is genuinely stateful.
-Add abstraction only when a third caller would otherwise copy-paste.
+Design rules (deliberate -- keep them): no base classes, no registries. The
+only class the library may grow is the streaming moment accumulator (WP1.4),
+which is genuinely stateful; there is none today. Add abstraction only when a
+third caller would otherwise copy-paste.
 
 Nothing is re-exported here on purpose: ``style`` and ``figures`` import
 matplotlib, and a root re-export would drag it into every consumer. Import

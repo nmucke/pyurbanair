@@ -53,13 +53,13 @@ import xarray as xr
 import yaml
 from data_assimilation.interpolation import interpolate_dataarray_at_points
 from data_assimilation.observation_operator import ObservationOperator
+from evaluation.scores import compute_parameter_metrics, compute_sensor_metrics
 from omegaconf import OmegaConf
 
 from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_validation_points,
 )
-from pyurbanair.plotting import compute_parameter_metrics, compute_sensor_metrics
 
 # Velocity components plus magnitude; ``vel`` keeps the historical summary key.
 QUANTITIES = ("u", "v", "w", "vel")

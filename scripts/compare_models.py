@@ -75,6 +75,7 @@ import hydra
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray
+from evaluation.sensors import sensor_magnitude
 from hydra.utils import instantiate
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
@@ -89,11 +90,7 @@ from scripts._common import resolve_results_dir
 # _sensor_component_timeseries is private but is the canonical grid-independent
 # sensor extraction (it resolves each backend's staggered dim mapping); the
 # alternative is duplicating it here.
-from scripts.esmda._esmda_common import (
-    _sensor_component_timeseries,
-    build_sensor_sets,
-    sensor_magnitude,
-)
+from scripts.esmda._esmda_common import _sensor_component_timeseries, build_sensor_sets
 
 # Candidate spatial dim names across the backends: pylbm/the surrogate are
 # cell-centred (x/y/z), uDALES and PALM stagger each component on its own axis.

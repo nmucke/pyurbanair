@@ -409,10 +409,8 @@ def test_parameter_metrics_and_plotting_cover_static_knobs(
     ``(ensemble,)`` truth) yields metrics for all three, and the rollout figure
     renders without error (constant truth drawn as a horizontal line).
     """
-    from pyurbanair.plotting import (
-        compute_parameter_metrics,
-        plot_rollout_time_evolution,
-    )
+    from evaluation.figures import plot_rollout_time_evolution
+    from evaluation.scores import compute_parameter_metrics
 
     ens = 5
     rng = np.random.RandomState(0)

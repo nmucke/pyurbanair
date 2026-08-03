@@ -62,6 +62,10 @@ if __package__ is None or __package__ == "":
 # Reuse the parameter + light-state figures (and IO helpers) from the
 # parameter-only visualizer so the two stay in lockstep.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from evaluation.figures import (  # noqa: E402
+    plot_final_state_with_obs,
+    plot_parameter_error,
+)
 from visualize_run import (  # noqa: E402
     _load_truth_final_vel,
     _load_yaml,
@@ -73,8 +77,6 @@ from visualize_run import (  # noqa: E402
     plot_state_montage,
 )
 
-from pyurbanair.plotting import plot_final_state_with_obs, plot_parameter_error  # noqa: E402
-
 _COLOR_PRIOR = "#ff7f0e"
 _COLOR_POSTERIOR = "#1f77b4"
 
@@ -82,6 +84,7 @@ _COLOR_POSTERIOR = "#1f77b4"
 # ---------------------------------------------------------------------------
 # Mode / method detection (shared with the comparison script)
 # ---------------------------------------------------------------------------
+
 
 def detect_mode_and_method(run_dir: pathlib.Path) -> dict:
     """Classify a run's state-estimation mode and method.
@@ -99,7 +102,11 @@ def detect_mode_and_method(run_dir: pathlib.Path) -> dict:
     fts = esmda.get("final_time_smoothing")
     name = run_dir.name
     if fts is None:
-        mode = "all" if name.endswith("_all") else ("ic" if name.endswith("_ic") else "unknown")
+        mode = (
+            "all"
+            if name.endswith("_all")
+            else ("ic" if name.endswith("_ic") else "unknown")
+        )
     else:
         mode = "all" if fts else "ic"
 
@@ -124,6 +131,7 @@ def detect_mode_and_method(run_dir: pathlib.Path) -> dict:
 # Per-window state helpers (lazy hyperslab reads)
 # ---------------------------------------------------------------------------
 
+
 def _available_windows(run_dir: pathlib.Path) -> list[int]:
     """Window indices that have BOTH a prior and posterior state file present."""
     wdir = run_dir / "windows"
@@ -137,7 +145,9 @@ def _available_windows(run_dir: pathlib.Path) -> list[int]:
     return sorted(w for w, kinds in have.items() if {"prior", "posterior"} <= kinds)
 
 
-def _velmag_slice(path: pathlib.Path, z_level: int, time_idx: int = -1) -> np.ndarray | None:
+def _velmag_slice(
+    path: pathlib.Path, z_level: int, time_idx: int = -1
+) -> np.ndarray | None:
     """Ensemble |U| at one z-level and one time as ``(ensemble, ny, nx)``.
 
     Reads only the requested hyperslab from disk (the per-window ensemble state
@@ -180,14 +190,18 @@ def plot_state_spread_reduction(
     prior_spread, post_spread, prior_mean_err, kept = [], [], [], []
     for w in windows:
         pr = _velmag_slice(run_dir / "windows" / f"window_{w}_prior_state.nc", z_level)
-        po = _velmag_slice(run_dir / "windows" / f"window_{w}_posterior_state.nc", z_level)
+        po = _velmag_slice(
+            run_dir / "windows" / f"window_{w}_posterior_state.nc", z_level
+        )
         if pr is None or po is None:
             continue
         kept.append(w)
         prior_spread.append(float(np.nanmean(np.nanstd(pr, axis=0))))
         post_spread.append(float(np.nanmean(np.nanstd(po, axis=0))))
         # RMS magnitude of the mean update (how much the state actually moved).
-        prior_mean_err.append(float(np.sqrt(np.nanmean((po.mean(0) - pr.mean(0)) ** 2))))
+        prior_mean_err.append(
+            float(np.sqrt(np.nanmean((po.mean(0) - pr.mean(0)) ** 2)))
+        )
     if not kept:
         return
 
@@ -216,7 +230,9 @@ def plot_window_increment(
 ) -> None:
     """Prior mean / posterior mean / increment / posterior std maps for a window."""
     pr = _velmag_slice(run_dir / "windows" / f"window_{window}_prior_state.nc", z_level)
-    po = _velmag_slice(run_dir / "windows" / f"window_{window}_posterior_state.nc", z_level)
+    po = _velmag_slice(
+        run_dir / "windows" / f"window_{window}_posterior_state.nc", z_level
+    )
     if pr is None or po is None:
         return
     prior_mean, post_mean = pr.mean(0), po.mean(0)
@@ -241,7 +257,8 @@ def plot_window_increment(
         fig.colorbar(im, ax=ax, shrink=0.82)
     fig.suptitle(
         f"State update at window {window} (final frame, z-level {z_level})",
-        fontsize=15, fontweight="bold",
+        fontsize=15,
+        fontweight="bold",
     )
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -251,18 +268,29 @@ def plot_window_increment(
 # Driver
 # ---------------------------------------------------------------------------
 
-def visualize(run_dir: pathlib.Path, out_dir: pathlib.Path, *,
-              z_level: int, want_truth: bool, want_window_state: bool,
-              window: int | None) -> None:
+
+def visualize(
+    run_dir: pathlib.Path,
+    out_dir: pathlib.Path,
+    *,
+    z_level: int,
+    want_truth: bool,
+    want_window_state: bool,
+    window: int | None,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = _load_yaml(run_dir / "run_summary.yaml")
     cfg = _load_yaml(run_dir / "config.yaml")
-    num_windows = (summary.get("configuration", {}) or {}).get("num_assimilation_windows")
+    num_windows = (summary.get("configuration", {}) or {}).get(
+        "num_assimilation_windows"
+    )
     info = detect_mode_and_method(run_dir)
 
     print(f"Run:    {run_dir}")
     print(f"Output: {out_dir}")
-    print(f"Mode:   {info['mode']}  ({'state throughout window' if info['mode']=='all' else 'initial condition only'})")
+    print(
+        f"Mode:   {info['mode']}  ({'state throughout window' if info['mode']=='all' else 'initial condition only'})"
+    )
     print(f"Method: {info['method']}")
 
     # --- Parameter figures (reused; the run still estimates parameters) -------
@@ -275,11 +303,14 @@ def visualize(run_dir: pathlib.Path, out_dir: pathlib.Path, *,
         print(f"  ! parameter NetCDFs missing ({e}); skipping parameter figures")
 
     if post is not None and truth is not None:
-        plot_param_trajectories(prior, post, truth, out_dir / "parameter_trajectories.png", num_windows)
+        plot_param_trajectories(
+            prior, post, truth, out_dir / "parameter_trajectories.png", num_windows
+        )
         print("  + parameter_trajectories.png")
         edges = _window_edges(np.asarray(post["time"].values), num_windows)
         plot_parameter_error(
-            esmda_params=post, true_params=truth,
+            esmda_params=post,
+            true_params=truth,
             output_path=out_dir / "parameter_error.png",
             window_edges=list(edges) if edges is not None else None,
         )
@@ -296,9 +327,13 @@ def visualize(run_dir: pathlib.Path, out_dir: pathlib.Path, *,
             true_vel = _load_truth_final_vel(run_dir) if want_truth else None
             obs_x, obs_y = _obs_points(cfg)
             plot_final_state_with_obs(
-                mean_vel=psm["vel_mean"], std_vel=psm["vel_std"],
+                mean_vel=psm["vel_mean"],
+                std_vel=psm["vel_std"],
                 output_path=out_dir / "final_state.png",
-                true_vel=true_vel, obs_x=obs_x, obs_y=obs_y, z_level=z_level,
+                true_vel=true_vel,
+                obs_x=obs_x,
+                obs_y=obs_y,
+                z_level=z_level,
             )
             print("  + final_state.png")
             plot_state_montage(psm["vel_mean"], out_dir / "state_montage.png", z_level)
@@ -311,12 +346,18 @@ def visualize(run_dir: pathlib.Path, out_dir: pathlib.Path, *,
     if want_window_state:
         windows = _available_windows(run_dir)
         if not windows:
-            print("  ! no complete per-window state files; skipping state-update figures")
+            print(
+                "  ! no complete per-window state files; skipping state-update figures"
+            )
         else:
-            plot_state_spread_reduction(run_dir, windows, out_dir / "state_spread_reduction.png", z_level)
+            plot_state_spread_reduction(
+                run_dir, windows, out_dir / "state_spread_reduction.png", z_level
+            )
             print(f"  + state_spread_reduction.png ({len(windows)} windows)")
             sel = window if window is not None and window in windows else windows[-1]
-            plot_window_increment(run_dir, sel, out_dir / "state_window_increment.png", z_level)
+            plot_window_increment(
+                run_dir, sel, out_dir / "state_window_increment.png", z_level
+            )
             print(f"  + state_window_increment.png (window {sel})")
     else:
         print("  (skipping per-window state figures: --no-window-state)")
@@ -338,17 +379,36 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("run", type=pathlib.Path, help="state-estimation run output folder")
-    ap.add_argument("--out", type=pathlib.Path, default=None,
-                    help="output dir (default: <repo>/result_figures/<case>)")
-    ap.add_argument("--case", default=None,
-                    help="case name for result_figures/<case> (default: run folder name)")
-    ap.add_argument("--z-level", type=int, default=2, help="z-plane index for field plots")
-    ap.add_argument("--window", type=int, default=None,
-                    help="window index for the increment map (default: last available)")
-    ap.add_argument("--no-truth", action="store_true",
-                    help="skip loading the ground truth for the final-state panel")
-    ap.add_argument("--no-window-state", action="store_true",
-                    help="skip the heavy per-window ensemble-state figures")
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=None,
+        help="output dir (default: <repo>/result_figures/<case>)",
+    )
+    ap.add_argument(
+        "--case",
+        default=None,
+        help="case name for result_figures/<case> (default: run folder name)",
+    )
+    ap.add_argument(
+        "--z-level", type=int, default=2, help="z-plane index for field plots"
+    )
+    ap.add_argument(
+        "--window",
+        type=int,
+        default=None,
+        help="window index for the increment map (default: last available)",
+    )
+    ap.add_argument(
+        "--no-truth",
+        action="store_true",
+        help="skip loading the ground truth for the final-state panel",
+    )
+    ap.add_argument(
+        "--no-window-state",
+        action="store_true",
+        help="skip the heavy per-window ensemble-state figures",
+    )
     args = ap.parse_args()
 
     run_dir = args.run.resolve()
@@ -359,7 +419,8 @@ def main() -> None:
     out_dir = args.out or (repo_root / "result_figures" / case)
 
     visualize(
-        run_dir, out_dir,
+        run_dir,
+        out_dir,
         z_level=args.z_level,
         want_truth=not args.no_truth,
         want_window_state=not args.no_window_state,

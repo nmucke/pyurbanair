@@ -559,7 +559,8 @@ Not a Hydra script; imported directly. Provides:
   a common grid before display.
 - `plot_derived_inflow_angle(...)` / `plot_derived_velocity_magnitude(...)` —
   derived-vs-prescribed inflow diagnostics.
-- DA metric utilities (CRPS, per-knot error/spread/in-band, summary scalars).
+- Per-parameter skill panels built on `evaluation.scores` (CRPS, per-knot
+  error/spread/in-band, summary scalars).
 
 #### [`_esmda_common.py`](../scripts/esmda/_esmda_common.py)
 
@@ -574,9 +575,13 @@ Provides:
 - `open_truth(cfg, ta)` — lazy truth access (multi-GB `state.nc` never fully loaded).
 - `ensemble_sensor_series(...)` / `truth_sensor_series(...)` — interpolate ensemble
   and truth states at sensor locations.
-- `streaming_state_rmse(...)` — streamed z-slice RMSE without loading the full field.
-- `parameter_metric_summary(...)` / `vector_sensor_metrics(...)` — scalar summaries
-  written to `run_summary.yaml`.
+- `read_yaml(...)` / `write_yaml(...)` / `_to_native(...)` — small YAML helpers.
+
+The metric functions themselves (`streaming_state_rmse`, `select_z_plane`,
+`sensor_magnitude`, `parameter_metric_summary`, `series_stats`,
+`vector_sensor_metrics`) live in the
+[`evaluation`](../libs/evaluation/src/evaluation/) library; this module keeps
+only the run-dir-aware extraction they consume.
 
 ---
 
@@ -585,8 +590,8 @@ Provides:
 These three scripts form the standard single-run pipeline, orchestrated by
 [`run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh).
 
-> The metric and figure *computation* is being moved into the editable leaf
-> library [`libs/evaluation`](../libs/evaluation/src/evaluation/) (`scores`,
+> The metric and figure *computation* lives in the editable leaf library
+> [`libs/evaluation`](../libs/evaluation/src/evaluation/) (`scores`,
 > `turbulence`, `sensors`, `style`, `figures`), leaving the two metric/figure
 > stages below — and their filtering counterparts in §2.4 — as thin
 > orchestration: resolve run dirs, open artifacts, call `evaluation`,
@@ -806,10 +811,13 @@ imported by the block drivers in `figure_creation/`.
 |---|---|
 | [`figspec/dataio.py`](../scripts/figspec/dataio.py) | I/O helpers: lazy truth dataset access, loading parameter/state artifacts, grid metadata. |
 | [`figspec/figcommon.py`](../scripts/figspec/figcommon.py) | Reusable plotting primitives (parameter-trajectory panels, error-vs-time lines, field + difference heatmap grids). |
-| [`figspec/style.py`](../scripts/figspec/style.py) | Matplotlib style constants (colors, line styles, fonts) shared across all block drivers. |
-| [`figspec/mask.py`](../scripts/figspec/mask.py) | Building-mask utilities for field plots (fluid/obstacle masking). |
-| [`figspec/metrics.py`](../scripts/figspec/metrics.py) | Metric computation helpers used by the block drivers. |
+| [`figspec/mask.py`](../scripts/figspec/mask.py) | Building-mask utilities for field plots (fluid/obstacle masking); binds `evaluation.style`'s STL geometry to this repo's data locations. |
 | [`figspec/_selftest.py`](../scripts/figspec/_selftest.py) | Quick smoke test for the figspec library. |
+
+The Matplotlib style constants and the metric definitions the block drivers use
+live in the `evaluation` library instead:
+[`evaluation.style`](../libs/evaluation/src/evaluation/style.py) and
+[`evaluation.scores`](../libs/evaluation/src/evaluation/scores.py).
 
 ---
 
