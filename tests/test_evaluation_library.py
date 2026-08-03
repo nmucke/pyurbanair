@@ -53,7 +53,11 @@ def _import_and_report(modules: tuple[str, ...]) -> set[str]:
         timeout=300,
     )
     assert completed.returncode == 0, f"importing {modules} failed:\n{completed.stderr}"
-    return set(completed.stdout.split())
+    loaded = set(completed.stdout.split())
+    # Every check below is of the form "X not in loaded", which an empty or
+    # garbled report would satisfy. Anchor it on the import that must be there.
+    assert modules[0].split(".")[0] in loaded, f"no module report for {modules}"
+    return loaded
 
 
 # pre-commit runs mypy in an isolated env without pytest installed, so its

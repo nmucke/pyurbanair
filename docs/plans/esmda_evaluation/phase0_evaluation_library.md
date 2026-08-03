@@ -142,7 +142,7 @@ Verification that the refactor is inert:
   mask a violation. The one-liner remains valid.
 
 Carried into WP0.2 (decide there, recorded here so it is not lost):
-`scripts/figspec/style.py:13` calls `matplotlib.use("Agg")` at module import.
+`scripts/figspec/style.py:14` calls `matplotlib.use("Agg")` at module import.
 Moved verbatim, that makes importing `evaluation.style` mutate global
 matplotlib state as a side effect — a leaf library reaching out into the
 process. Moving the backend choice to the scripts is the alternative, and is
