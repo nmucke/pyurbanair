@@ -34,6 +34,7 @@ Usage::
 import argparse
 import logging
 import pathlib
+import re
 import sys
 
 import numpy as np
@@ -70,7 +71,7 @@ def _flatten_parameter_members(params: xarray.Dataset) -> np.ndarray:
     """Flatten every ensemble parameter variable into one row per member."""
     arrays: list[np.ndarray] = []
     n_members: int | None = None
-    for name in sorted(params.data_vars):
+    for name in sorted(str(v) for v in params.data_vars):
         variable = params[name]
         if "ensemble" not in variable.dims:
             continue
@@ -100,9 +101,10 @@ def _ensemble_health(
     per-window counts see it -- hence both.
 
     This is a diagnostic, not a metric: a parameter file it cannot read (an old
-    layout, a window truncated by a killed job) costs its own count and a log
+    layout, a window truncated by a killed job) costs its own count -- a
+    ``null`` entry, so the list stays aligned with the window index -- and a log
     line, never the whole metric stage. Returns ``None`` when even the assembled
-    posterior is unreadable.
+    posterior cannot be read.
 
     ``min_over_median_pairwise`` is the near-duplicate detector exact row
     matching cannot be: a ratio near 0 means two members sit far closer to each
@@ -113,7 +115,7 @@ def _ensemble_health(
     """
     try:
         health = ensemble_uniqueness(_flatten_parameter_members(posterior_params))
-    except (ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError) as exc:
         logger.warning("Cannot assess ensemble health: %s", exc)
         return None
 
@@ -125,10 +127,17 @@ def _ensemble_health(
             health["n_members"],
         )
 
-    per_window: list[int] = []
+    per_window: list[int | None] = []
+
+    # Sorted by window index, with anything that does not carry one last: a
+    # stray or hand-renamed file in windows/ must not take the sort (and with
+    # it the whole metric stage) down.
+    def _window_index(path: pathlib.Path) -> tuple[int, int, str]:
+        match = re.fullmatch(r"window_(\d+)_posterior_params", path.stem)
+        return (0, int(match.group(1)), "") if match else (1, 0, path.stem)
+
     window_paths = sorted(
-        (run_dir / "windows").glob("window_*_posterior_params.nc"),
-        key=lambda path: int(path.stem.split("_")[1]),
+        (run_dir / "windows").glob("window_*_posterior_params.nc"), key=_window_index
     )
     for path in window_paths:
         try:
@@ -136,6 +145,8 @@ def _ensemble_health(
                 window_health = ensemble_uniqueness(_flatten_parameter_members(params))
         except (OSError, ValueError, KeyError) as exc:
             logger.warning("Skipping ensemble health for %s: %s", path.name, exc)
+            # Keep the slot: consumers index this list by window.
+            per_window.append(None)
             continue
         per_window.append(int(window_health["n_unique"]))
         if window_health["n_unique"] < window_health["n_members"]:

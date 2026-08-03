@@ -78,12 +78,15 @@ def crps_ensemble(ens: np.ndarray, truth: np.ndarray) -> np.ndarray:
     A single member has no pairwise term and the score degenerates to the
     absolute error.
 
-    Dtype is the *caller's* policy: nothing here casts, so a float32 ensemble
-    is scored in float32 (the pairwise term then differs from the float64
-    result at the ~1e-7 level). This matters because the two functions merged
+    *Floating* dtype is the caller's policy: a float32 ensemble against a
+    float32 truth is scored in float32 (differing from the float64 result at
+    the ~1e-7 level), and a float32 ensemble against a float64 truth promotes
+    to float64 as it always did. This matters because the two functions merged
     here disagreed on exactly that point -- ``da_metrics.per_knot_crps`` did
     not cast, ``plotting._crps_ensemble`` upcast to float64 -- so callers that
-    need the upcast now do it explicitly.
+    need the upcast now do it explicitly. Integer and float16 inputs are the
+    one exception: both terms are *differences*, which wrap or overflow in a
+    narrow or unsigned dtype, so they are promoted to a signed float.
     """
     n = ens.shape[0]
     # Both terms are differences, so they are formed in a signed floating dtype
@@ -167,7 +170,9 @@ def ensemble_uniqueness(members: np.ndarray) -> dict:
         judging "how close is too close" is what the pairwise L2 distances are
         for. The distances are ``None`` below two members and whenever every
         pair is non-finite; pairs involving a diverged (NaN) member are dropped
-        rather than poisoning the reduction.
+        rather than poisoning the reduction. Bitwise matching is why ``0.0`` and
+        ``-0.0`` count as two members at distance zero -- numerically equal, but
+        not the same bytes, so not the clone this is looking for.
     """
     values = np.asarray(members)
     if values.ndim != 2:
@@ -181,9 +186,8 @@ def ensemble_uniqueness(members: np.ndarray) -> dict:
     # ``np.unique`` would call two identical such rows distinct (NaN != NaN) --
     # losing the signal for exactly the ensemble that most needs flagging.
     rows = np.ascontiguousarray(values)
-    n_unique = int(
-        np.unique(rows.view(np.void(rows.dtype.itemsize * rows.shape[1]))).size
-    )
+    row_bytes = np.dtype((np.void, rows.dtype.itemsize * rows.shape[1]))
+    n_unique = int(np.unique(rows.view(row_bytes)).size)
     if n_members < 2:
         return {
             "n_members": n_members,
@@ -195,9 +199,10 @@ def ensemble_uniqueness(members: np.ndarray) -> dict:
     # Row-by-row rather than an (M, M, K) difference tensor: M is the ensemble
     # size (tens), K is every parameter knot of every window concatenated, and
     # the tensor reaches hundreds of MB on a long run.
+    as_float = values.astype(float, copy=False)
     pairwise = np.array(
         [
-            np.linalg.norm(values[i].astype(float) - values[j].astype(float))
+            np.linalg.norm(as_float[i] - as_float[j])
             for i in range(n_members)
             for j in range(i + 1, n_members)
         ]
@@ -525,6 +530,7 @@ def _energy_score(members, truth):
     """
     n_ens = members.shape[1]
     n_time = members.shape[2]
+    single_member = n_ens < 2  # no pairwise term; loop-invariant
     es = np.empty(n_time)
     # Loop over time so the pairwise term never materializes more than
     # ``(component, ensemble, ensemble, sensor)`` at once.
@@ -533,7 +539,7 @@ def _energy_score(members, truth):
         v = truth[:, t, :]  # (C, S)
         d_truth = np.sqrt(np.sum((m - v[:, None, :]) ** 2, axis=0))  # (E, S)
         term1 = d_truth.mean(axis=0)  # (S,)
-        if n_ens < 2:
+        if single_member:
             es[t] = float(term1.mean())
             continue
         diff = m[:, :, None, :] - m[:, None, :, :]  # (C, E, E, S)

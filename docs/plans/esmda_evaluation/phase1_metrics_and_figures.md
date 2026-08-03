@@ -162,9 +162,7 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
 - `compute_sweep_metrics.py` carried byte-identical private copies of
   `series_stats` and `parameter_metric_summary` (a WP0.2 dedup miss). They
   are deleted in favour of the library functions, so `metrics.yaml` gets the
-  CRPSS as well. That file also *downgrades* its own `metrics_version` when
-  it falls back to copying an old run's sensor scores instead of recomputing
-  them.
+  CRPSS as well.
 - `crps_ensemble` computes the pairwise term from sorted samples
   (`sum_{i,j}|x_i - x_j| = 2 sum_i (2i - n + 1) x_(i)`) rather than from the
   `(M, M, K)` difference tensor. Algebraically identical and asserted as
@@ -190,12 +188,19 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   bracketed by the two members, so `crps_reduction_vs_prior` is routinely
   `null` there; per the master plan that is guarded with null + a log, not
   special-cased.
-- `compute_sweep_metrics.py` **omits** the sensor block when it cannot
-  recompute it (no `truth_access.yaml`) rather than copying the run's own
-  scores forward. A single `metrics_version` cannot describe a file whose
-  parameter block is fair and whose sensor block may not be — the mixing
+- `compute_sweep_metrics.py` carries forward only the *estimator-independent*
+  sensor scores when it cannot recompute them (no `truth_access.yaml`): the
+  RMSE of the ensemble mean has no pairwise term and stays comparable, the
+  CRPS keys are dropped. A single `metrics_version` cannot describe a file
+  whose parameter block is fair and whose sensor block is not — the mixing
   guard would then either stay silent across the boundary or warn about runs
-  that are in fact comparable.
+  that are in fact comparable — but dropping the RMSE with it would silently
+  erase those runs from the comparison panels.
+- The analytic-Gaussian CRPS test runs at **M = 50**, not the `M = 10^4` the
+  plan names. At M=10⁴ the biased estimator's error is ~6e-5, inside any
+  tolerance loose enough for the Monte-Carlo noise, so that test cannot tell
+  the two estimators apart; averaging 20 000 independent M=50 ensembles is
+  both tighter and discriminating (the biased form is then 0.0113 out).
 - The three `scripts/figure_creation/` scripts touched here carry 26
   pre-existing strict-mypy errors that pre-commit only surfaces once a
   commit stages them; they get the repo's standard blanket

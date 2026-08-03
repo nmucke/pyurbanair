@@ -767,8 +767,14 @@ from the per-window ensemble state hyperslabs:
 Middle stage of a **sweep comparison pipeline** (runs across ensemble size or domain
 resolution). Computes every metric + metric time series from ESMDA posterior results
 and writes small artifacts to `pyurbanair/sweep_metrics/<run>/`:
-- `metrics.yaml` — configuration + parameter/state/sensor metrics (u/v/w + `|U|`
-  per component, per sensor set).
+- `metrics.yaml` — `metrics_version` (§2.3) + configuration + parameter/state/sensor
+  metrics (u/v/w + `|U|` per component, per sensor set). Every ensemble score in
+  it is recomputed here by the current estimators, so the marker is always the
+  current version. A run without `truth_access.yaml` (produced before that file
+  existed) cannot have its sensor scores recomputed: the RMSE keys are carried
+  over from its `run_summary.yaml` — no pairwise term, so still comparable — and
+  the CRPS keys are dropped rather than mixed into a version-2 file. Re-run
+  ESMDA to restore them.
 - `sensor_timeseries_<set>.nc` — truth + prior/posterior ensemble series (small;
   no full fields).
 - Copies of `posterior_params.nc`, `prior_params.nc`, `true_params.nc`.
@@ -778,12 +784,15 @@ and writes small artifacts to `pyurbanair/sweep_metrics/<run>/`:
 Final stage of the sweep pipeline. Reads `pyurbanair/sweep_metrics/` and draws
 comparison figures + a summary CSV. `--sweep domain` compares across grid cells;
 `--sweep ensemble` compares across ensemble sizes. `--sweep all` does both.
+Warns when the runs it is about to compare carry different `metrics_version`
+markers (§2.3), since their CRPS / energy scores are then incomparable.
 
 #### [`figure_creation/compare_state_runs.py`](../scripts/figure_creation/compare_state_runs.py)
 
 Compares multiple **state-estimation** ESMDA runs on shared metrics. Reads each
 run's `run_summary.yaml`. Groups bars by method (`svd`/`localization_corr`/
 `localization_dist_dist`) and labels by mode. `--mode ic|all|both` filter.
+Warns on mixed `metrics_version` markers (§2.3), as the sweep comparison does.
 
 #### [`figure_creation/compare_param_vs_state.py`](../scripts/figure_creation/compare_param_vs_state.py)
 

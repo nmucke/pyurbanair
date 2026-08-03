@@ -49,7 +49,8 @@ def _analytic_normal_crps(y: float, mean: float = 0.0, std: float = 1.0) -> floa
 def _biased_crps(ens: np.ndarray, truth: np.ndarray) -> np.ndarray:
     """The pre-WP1.1 estimator: pairwise mean over all ``M**2`` pairs."""
     diffs = np.abs(ens[:, None, :] - ens[None, :, :])
-    return np.mean(np.abs(ens - truth[None, :]), axis=0) - 0.5 * diffs.mean(axis=(0, 1))
+    term1 = np.mean(np.abs(ens - truth[None, :]), axis=0)
+    return np.asarray(term1 - 0.5 * diffs.mean(axis=(0, 1)))
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +440,64 @@ def test_run_summary_carries_the_version_marker_and_ensemble_health(
     assert summary["parameter_metrics"]["inflow_angle"]["crps_reduction_vs_prior"] > 0.0
 
 
+def test_filtering_summary_carries_the_same_version_marker(
+    tmp_path: pathlib.Path,
+) -> None:
+    # The filtering stage writes its own run_summary.yaml with the same
+    # estimators, so an unmarked file must not mean two different things. No e2e
+    # test runs this stage, so nothing else would notice the marker going away.
+    from scripts.esmda._esmda_common import read_yaml, write_yaml
+    from scripts.filtering.compute_filtering_metrics import (
+        compute_metrics as filtering_metrics,
+    )
+
+    run_dir = tmp_path / "filtering_run"
+    run_dir.mkdir()
+    write_yaml({"filtering": {"mode": "joint"}}, run_dir / "config.yaml")
+    write_yaml({"configuration": {"ensemble_size": 4}}, run_dir / "run_info.yaml")
+    # No truth_access.yaml: the stage stops after the parameter metrics.
+    _param_dataset([[0.0, 0.0], [1.0, 1.0]]).to_netcdf(run_dir / "posterior_params.nc")
+    _param_dataset([[-2.0, -2.0], [2.0, 2.0]]).to_netcdf(run_dir / "prior_params.nc")
+    xarray.Dataset(
+        {"inflow_angle": (("time",), [0.0, 0.0])}, coords={"time": [0.0, 1.0]}
+    ).to_netcdf(run_dir / "true_params.nc")
+
+    filtering_metrics(run_dir)
+
+    assert read_yaml(run_dir / "run_summary.yaml")["metrics_version"] == 2
+
+
+def test_vector_sensor_metrics_are_finite_through_the_fair_energy_score() -> None:
+    # The path compute_esmda_metrics takes into run_summary["sensor_metrics"]:
+    # xarray in, fair energy score, series_stats out. The metric-stage tests all
+    # run under skip_viz, so without this the (u, v, w) branch is unexercised.
+    from evaluation.scores import series_stats, vector_sensor_metrics
+
+    rng = np.random.default_rng(31)
+    coords = {
+        "component": ["u", "v", "w"],
+        "time": np.arange(4.0),
+        "sensor": np.arange(2),
+    }
+    truth = xarray.DataArray(
+        rng.standard_normal((3, 4, 2)),
+        dims=("component", "time", "sensor"),
+        coords=coords,
+    )
+    ensemble = xarray.DataArray(
+        rng.standard_normal((3, 5, 4, 2)),
+        dims=("component", "ensemble", "time", "sensor"),
+        coords={**coords, "ensemble": np.arange(5)},
+    )
+
+    metrics = vector_sensor_metrics(truth, ensemble)
+    summarized = series_stats(metrics["energy_score"])
+
+    assert np.all(np.isfinite(metrics["energy_score"]))
+    assert np.all(np.isfinite(metrics["rmse"]))
+    assert summarized is not None and np.isfinite(summarized["mean"])
+
+
 def test_ensemble_health_survives_a_run_dir_with_no_windows(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -458,20 +517,43 @@ def test_ensemble_health_survives_a_run_dir_with_no_windows(
     assert summary["ensemble_health"]["n_unique"] == 3
 
 
-def test_ensemble_health_skips_an_unreadable_window(tmp_path: pathlib.Path) -> None:
+def test_ensemble_health_holds_the_slot_of_an_unreadable_window(
+    tmp_path: pathlib.Path,
+) -> None:
     from scripts.esmda._esmda_common import read_yaml
     from scripts.esmda.compute_esmda_metrics import compute_metrics
 
     run_dir = tmp_path / "run"
     _write_run_dir(run_dir)
-    # A window truncated by a killed job must cost its own count, not the run's
-    # metrics.
-    (run_dir / "windows" / "window_1_posterior_params.nc").write_bytes(b"not netcdf")
+    # A window truncated by a killed job costs its own count, not the run's
+    # metrics -- and it must leave a null behind rather than compacting the
+    # list, which would silently renumber every later window.
+    (run_dir / "windows" / "window_0_posterior_params.nc").write_bytes(b"not netcdf")
+    (run_dir / "windows" / "window_1_posterior_params.nc").write_bytes(
+        (run_dir / "posterior_params.nc").read_bytes()
+    )
 
     compute_metrics(run_dir)
     summary = read_yaml(run_dir / "run_summary.yaml")
 
-    assert summary["ensemble_health"]["n_unique_per_window"] == [3]
+    assert summary["ensemble_health"]["n_unique_per_window"] == [None, 3]
+
+
+def test_ensemble_health_tolerates_a_stray_window_file(tmp_path: pathlib.Path) -> None:
+    # The sort key used to parse the index out of every filename it globbed, so
+    # one hand-renamed file took down the whole metric stage before any window
+    # was even opened.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = tmp_path / "run"
+    _write_run_dir(run_dir)
+    (run_dir / "windows" / "window_final_posterior_params.nc").write_bytes(b"stray")
+
+    compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+
+    assert summary["ensemble_health"]["n_unique_per_window"] == [3, None]
 
 
 def test_sweep_comparison_warns_on_mixed_metric_versions(
@@ -518,13 +600,15 @@ def test_state_run_comparison_warns_on_mixed_metric_versions(
     assert {r["metrics_version"] for r in rows} == {1, 2}
 
 
-def test_sweep_metrics_omit_sensor_scores_it_cannot_recompute(
+def test_sweep_metrics_drop_only_the_sensor_scores_the_change_invalidates(
     tmp_path: pathlib.Path,
 ) -> None:
-    # Without truth_access.yaml the sensor scores cannot be recomputed. Copying
-    # the run's own (possibly biased) ones forward would make a single
-    # metrics_version describe a file whose parameter block is fair and whose
-    # sensor block is not, defeating the mixing guard; the block is dropped.
+    # Without truth_access.yaml the sensor scores cannot be recomputed. The CRPS
+    # keys are dropped -- copying them would make one metrics_version describe a
+    # file whose parameter block is fair and whose sensor block is not -- but
+    # the RMSE of the ensemble mean has no pairwise term, is unaffected by the
+    # estimator change, and must survive: dropping it would silently erase those
+    # runs from the comparison panels.
     from scripts.esmda._esmda_common import read_yaml, write_yaml
     from scripts.figure_creation.compute_sweep_metrics import process_run
 
@@ -534,7 +618,13 @@ def test_sweep_metrics_omit_sensor_scores_it_cannot_recompute(
     write_yaml(
         {
             "configuration": {"assimilation_model": "pylbm"},
-            "sensor_metrics": {"assimilation": {"vel_magnitude_crps": {"mean": 123.0}}},
+            "sensor_metrics": {
+                "assimilation": {
+                    "num_sensors": 3,
+                    "vel_magnitude_rmse": {"mean": 0.5},
+                    "vel_magnitude_crps": {"mean": 123.0},
+                }
+            },
         },
         run_dir / "run_summary.yaml",
     )
@@ -563,8 +653,10 @@ def test_sweep_metrics_omit_sensor_scores_it_cannot_recompute(
 
     assert metrics["metrics_version"] == 2
     assert "parameter_metrics" in metrics
-    assert "sensor_metrics" not in metrics
-    assert "sensor metrics omitted" in status["note"]
+    assert metrics["sensor_metrics"] == {
+        "assimilation": {"num_sensors": 3, "vel_magnitude_rmse": {"mean": 0.5}}
+    }
+    assert "CRPS omitted" in status["note"]
 
 
 def test_comparisons_are_silent_when_every_run_shares_a_version(

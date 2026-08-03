@@ -343,15 +343,26 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     if sensor_metrics:
         metrics["sensor_metrics"] = sensor_metrics
     else:
-        # No truth_access (pre-update run), so the sensor scores cannot be
-        # recomputed. This used to copy them out of run_summary.yaml, but a
-        # single ``metrics_version`` cannot describe a file whose parameter
-        # block is fair and whose sensor block may not be: the comparison
-        # script would then either compare across the estimator boundary in
-        # silence or warn about runs that are in fact comparable. Omitting the
-        # block instead makes the gap visible -- the panels skip a missing
-        # metric, and the note says how to fill it.
-        status["note"] = "no truth_access.yaml -> sensor metrics omitted (re-run ESMDA)"
+        # No truth_access (pre-update run), so nothing can be recomputed here.
+        # Carry forward only the scores whose definition the estimator change
+        # did not touch -- the RMSE of the ensemble mean has no pairwise term
+        # and stays comparable across the version boundary. The CRPS keys are
+        # dropped rather than copied: one ``metrics_version`` cannot describe a
+        # file whose parameter block is fair and whose sensor block is not, so
+        # copying them would make the comparison script either compare across
+        # the boundary in silence or warn about runs that are in fact
+        # comparable.
+        legacy = summary.get("sensor_metrics", {}) or {}
+        carried = {
+            name: {k: v for k, v in entry.items() if not k.endswith("_crps")}
+            for name, entry in legacy.items()
+        }
+        if carried:
+            metrics["sensor_metrics"] = carried
+        status["note"] = (
+            "no truth_access.yaml -> sensor RMSE carried over, CRPS omitted "
+            "(re-run ESMDA)"
+        )
 
     _write_yaml(metrics, out_run / "metrics.yaml")
     return status
