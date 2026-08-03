@@ -1,139 +1,131 @@
-# Master plan: turbulence-aware evaluation in the ESMDA pipeline
+# Master plan: ESMDA evaluation — slimmed
 
-> **Status: ON HOLD — implementation rolled back, plan under review.** The
-> WP0.1–1.2 code was reverted from `main` (see [Rollback](#rollback) below);
-> the plan files are kept as-is so the design can be reviewed once more before
-> anything is rebuilt. Do not start a work package from this file until the
-> hold is lifted.
->
-> **Companion to** the research document
+> **Status: ready to implement** (slimmed 2026-08-03 after the July rollback;
+> see [Rollback](#rollback)). **Companion to** the research document
 > [../esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md)
-> (the *what and why* — metric definitions, formulas, figure conventions,
-> literature). This file is the index and status board; the per-phase plans
-> in this directory carry the implementation detail.
+> (the *what and why* — metric definitions, formulas, figure conventions).
+> This file is the index and status board; the per-phase plans carry the
+> implementation detail. The pre-slim plans (14 WPs, full metric survey)
+> live in git history before 2026-08-03.
+
+## Branching model
+
+All work integrates through a central branch, **`esmda-evaluation`**, cut
+from `main` when the effort starts. Every WP PR targets `esmda-evaluation`,
+not `main`; the branch is merged into `main` once at the end (or at an
+agreed intermediate milestone, e.g. after phase 1), as a single reviewed
+PR. Keep `esmda-evaluation` current by merging `main` into it periodically
+— at minimum before starting each phase — so the final merge is small.
+CLAUDE.md's "branch first" rule still applies per WP: branch off
+`esmda-evaluation`, PR back into it.
 
 ## Instructions for implementing agents
 
-- **Before starting a work package:** read the phase plan for it *and* the
-  metrics-doc sections it cites. Phase plans quote line numbers as of
-  2026-07-29 — verify against the current tree; the cited function/variable
-  names are the stable anchors.
-- **As each WP lands:** update the status table below (status + PR number),
-  and record any deviation from the plan (renamed keys, changed signatures,
-  descoped items) in the **Deviations** section of that phase's plan file.
-  Do not rewrite phase-plan bodies to match what was built — the deviation
-  log is the record.
-- **Follow CLAUDE.md workflow rules:** branch first, `pixi run -e dev
-  pre-commit` before committing, keep `docs/` in sync when artifacts or
-  configs change (phases 2–3 explicitly change artifacts), never commit
-  large artifacts.
-- **Cross-phase invariants** (repeated in each phase plan; violations are
-  review-blockers):
-  1. `run_summary.yaml` keys are additive only — existing key paths are
-     hard-coded in `scripts/figure_creation/`. Changing an existing key's
-     values or semantics requires bumping the `metrics_version` marker
-     (introduced in phase 0) so tooling can detect cross-version
-     comparisons; purely additive keys never bump it.
-  2. Full-ensemble window state files are never `.load()`ed — stream
-     member-at-a-time or z-slab-wise, ≤2 reader threads.
-  3. Every new metric/figure no-ops gracefully when its inputs are absent
+- **Before starting a work package:** read its phase plan *and* the
+  metrics-doc sections it cites; verify cited file/function anchors against
+  the current tree.
+- **As each WP lands:** update the status table below (status + PR number)
+  and record deviations in that phase plan's Deviations section. Do not
+  rewrite plan bodies to match what was built.
+- **Follow CLAUDE.md workflow rules:** branch first, pre-commit before
+  committing, keep `docs/` in sync when artifacts/configs change.
+- **Cross-phase invariants** (violations are review-blockers):
+  1. `run_summary.yaml` keys are additive only; changing an existing key's
+     values or semantics bumps the `metrics_version` marker (reintroduced in
+     WP1.1).
+  2. Full-ensemble window state files are never `.load()`ed by new code —
+     stream member-at-a-time or z-slab-wise, ≤2 reader threads. (One legacy
+     violation exists: `ensemble_sensor_series` loads whole window files;
+     its streaming rewrite is an explicit WP1.3 subtask.)
+  3. Every metric/figure no-ops gracefully when its inputs are absent
      (old run dirs, flags off, smoke shape).
-  4. Fair estimators and corrected spread formulas (phase 0) are the only
-     ones new code may use.
+  4. Only the fair estimators and corrected spread formulas (WP1.1) may be
+     used by new code.
+  5. `libs/evaluation` stays a leaf: plain functions, arrays/datasets in →
+     numbers/dicts/figures out; no Hydra, no run-dir layout knowledge, no
+     imports from `pyurbanair` or the backends.
 
-## Shape of the change
+## The evaluation library
 
-`scripts/run_esmda_pipeline.sh` itself stays untouched (it only resolves the
-run dir and chains the stages). Work lands in:
+All metric and figure code lives in a new editable lib, **`libs/evaluation`**
+(phase 0). Scripts (`scripts/esmda/`, `scripts/filtering/`,
+`scripts/figure_creation/`) become thin orchestration: resolve run dirs, open
+artifacts, call `evaluation`, write YAML/PNGs.
 
-| Stage | Files | Phase(s) |
-|---|---|---|
-| 1. run | `scripts/esmda/run_esmda.py` + `libs/data-assimilation` smoother | 2 (persistence), 3.2 (probe artifacts) |
-| backends | `libs/pylbm` wrapper; possibly `pyudales`/`pypalm` output handling | 3.2 (high-rate probes) — the only backend-touching work in the effort |
-| 2. metrics | `scripts/esmda/compute_esmda_metrics.py` | 0–3 |
-| 3. figures | `scripts/esmda/make_esmda_figures.py` + `src/pyurbanair/plotting.py` | 1–3 |
+```
+libs/evaluation/
+├── pyproject.toml          # same hatchling + pixi shape as libs/data-assimilation
+└── src/evaluation/
+    ├── __init__.py
+    ├── scores.py           # probabilistic ensemble scores (fair CRPS/CRPSS, energy
+    │                       # score, z-score, rank, spread–skill, hit rate,
+    │                       # parameter/sensor metric bundles)
+    ├── turbulence.py       # flow statistics: streaming moment accumulation over
+    │                       # state files, block bootstrap; phase 3: Welch + LSD
+    ├── sensors.py          # reductions of pre-extracted sensor/probe series
+    │                       # (window statistics); extraction from state files
+    │                       # stays in scripts — it needs the observation-operator
+    │                       # machinery from data-assimilation (jax)
+    ├── style.py            # figure conventions: colors, quantile bands, shared
+    │                       # norms, solid-cell masking
+    └── figures.py          # one function per figure ID (P1, S1, S5, F1, D1;
+                            # later D3, S4) + the general state/parameter plots
+```
 
-Shared math goes in two new reusable modules —
-`src/pyurbanair/utils/ensemble_scores.py` (probabilistic scores) and
-`src/pyurbanair/utils/turbulence_stats.py` (flow statistics) — so the sweep
-pipeline and `scripts/figspec/` can reuse them; `_esmda_common.py` stays
-orchestration glue. Figures reuse `scripts/figspec/style.py` conventions.
+Design rules (deliberate, keep them): five flat modules, no subpackages; no
+base classes or registries; the only class is the streaming moment
+accumulator (genuinely stateful); matplotlib is imported only by
+`style`/`figures`. Add abstraction only when a third caller would otherwise
+copy-paste.
 
 ## Phases and status
 
 | WP | Content | Plan | Size | Status | PR |
 |---|---|---|---|---|---|
-| 0.1 | Fair CRPS / energy-score estimators + CRPSS vs prior + `metrics_version` | [phase0](phase0_correctness_fixes.md) | S | reverted | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
-| 0.2 | Spread–skill: RMS-of-variances + Fortin factor (callers updated) | [phase0](phase0_correctness_fixes.md) | S | reverted | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
-| 0.3 | Duplicate-member guard (`ensemble_health`) | [phase0](phase0_correctness_fixes.md) | S | reverted | [#97](https://github.com/nmucke/pyurbanair/pull/97) |
-| 1.0 | `run.metrics` config block + module skeletons | [phase1](phase1_postprocessing_metrics.md) | S | reverted | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
-| 1.1 | Parameter bundle: z-scores, PIT, coverage, contraction, joint directions | [phase1](phase1_postprocessing_metrics.md) | S | reverted | [#99](https://github.com/nmucke/pyurbanair/pull/99) |
-| 1.2 | Statistics-space sensor scoring + Wasserstein w/ self-distance floor | [phase1](phase1_postprocessing_metrics.md) | M | reverted | [#100](https://github.com/nmucke/pyurbanair/pull/100) |
-| 1.3 | Shared-pass mean-field / Reynolds-stress layer + station columns + hit rate/FAC2/FB/NMSE + `eval_fields.nc` | [phase1](phase1_postprocessing_metrics.md) | M–L | closed unmerged | [#101](https://github.com/nmucke/pyurbanair/pull/101) |
-| 1.4 | Figures: P1, S1, S5, F1, F2, S2/S3 | [phase1](phase1_postprocessing_metrics.md) | M | not started | — |
-| 2.1 | Persist obs / per-iteration + posterior pred-obs / per-iteration params | [phase2](phase2_obs_persistence.md) | M | not started | — |
-| 2.2 | Diagnostics: `O_N` vs ½, innovations, contraction-vs-achievable, SNR/DFS, obs-space scores | [phase2](phase2_obs_persistence.md) | M | not started | — |
-| 2.3 | Figures: D1–D4, full P2 | [phase2](phase2_obs_persistence.md) | M | not started | — |
+| 0.1 | `libs/evaluation` skeleton + pixi wiring | [phase0](phase0_evaluation_library.md) | XS | not started | — |
+| 0.2 | Move existing metric/plot code into it (pure refactor) | [phase0](phase0_evaluation_library.md) | M | not started | — |
+| 1.1 | Correctness: fair CRPS/energy + CRPSS, spread–skill, `n_unique`, `metrics_version` | [phase1](phase1_metrics_and_figures.md) | S | not started | — |
+| 1.2 | Parameter bundle: z-score, contraction ratio, fair CRPS/CRPSS | [phase1](phase1_metrics_and_figures.md) | S | not started | — |
+| 1.3 | Sensor-statistics scoring (assimilated + held-out) | [phase1](phase1_metrics_and_figures.md) | S–M | not started | — |
+| 1.4 | Streaming mean fields + TKE + hit rate `q` | [phase1](phase1_metrics_and_figures.md) | M | not started | — |
+| 1.5 | Figures P1, S1, S5, F1, D1 | [phase1](phase1_metrics_and_figures.md) | M | not started | — |
+| 2.1 | Persist obs + per-iteration predicted obs / params | [phase2](phase2_obs_persistence.md) | S | not started | — |
+| 2.2 | `O_N` vs ½ + figure D3 | [phase2](phase2_obs_persistence.md) | S | not started | — |
 | 3.1 | Barcelona validation (held-out) sensors | [phase3](phase3_run_upgrades.md) | XS | not started | — |
-| 3.2 | High-rate probes + spectra / two-point / `S₃` / reverse-flow layer + S4 figure | [phase3](phase3_run_upgrades.md) | L | not started | — |
-| 3.3 | Optional: prior-state run docs, representativeness error in `C_D` | [phase3](phase3_run_upgrades.md) | S | not started | — |
+| 3.2 | High-rate probes + Welch spectrum + LSD + figure S4 | [phase3](phase3_run_upgrades.md) | M | not started | — |
 
-Sequencing: 0 → 1 strictly (phase 1 builds on the fair estimators); 2 after
-1 (its figures reuse phase-1 plumbing); 3.1 anytime after 1; 3.2 last
-(backend-touching); one PR per row unless a phase plan says otherwise.
-Phases 0–1 apply retroactively to existing run dirs; phase-2+ metrics only
-cover runs executed after WP2.1, older dirs degrading gracefully to the
-phase-1 set.
+Sequencing: 0 → 1 strictly; 2 after 1.1; 3.1 anytime after 1.3; 3.2 last
+(backend-touching). One PR per WP unless a phase plan says otherwise, all
+targeting the central `esmda-evaluation` branch (see Branching model).
+Phases 0–1 apply retroactively to existing run dirs; phase-2 metrics only
+cover runs executed after WP2.1, older dirs degrading gracefully.
 
 Cross-cutting cautions:
 
-- WP0.1 shifts all historical CRPS/energy-score numbers by ~O(1/M) — sweep
-  comparisons across the boundary are invalid; the boundary is
-  machine-detectable via the `metrics_version` key, and the comparison
-  scripts warn on version mixing (see phase 0).
-- The smoke test shape (2-member ensemble) degenerates several diagnostics
-  (ddof=1 variances, binned spread–skill) — guard with `null` + log, don't
+- WP1.1 shifts historical CRPS/energy-score numbers by ~O(1/M) — cross-
+  boundary sweep comparisons are invalid; `metrics_version: 2` marks the
+  boundary and the comparison scripts warn on mixing.
+- The smoke shape (2-member ensemble) degenerates several diagnostics
+  (ddof=1 variances, rank histograms) — guard with `null` + log, don't
   special-case.
-- ~28 pre-existing test failures are baseline (see auto-memory) —
-  stash-verify before blaming new changes.
+- Test baseline: compare against the current CI run on `main` (full local
+  collection crashes on this Mac — see auto-memory), not against an assumed
+  failure count.
 
 ## Rollback
 
-On 2026-07-31 the merged implementation (WP0.1–1.2, PRs #97/#99/#100) was
-reverted from `main`, and WP1.3 (#101) was closed unmerged. The reason was
-scope, not correctness: the delivered code was far more involved than the
-value it returned — ~11.3k lines across 24 files, of which `_esmda_common.py`
-alone grew by ~2.2k, for three work packages out of fourteen. The plan is on
-hold pending a re-read of the design with an eye to cutting it down.
-
-What the revert did and did not touch:
-
-- **Reverted:** all WP0.1–1.2 code and config — `conf/run_esmda.yaml`'s
-  `run.metrics` block, `scripts/esmda/`, `scripts/figspec/metrics.py`,
-  `scripts/figure_creation/`, `src/pyurbanair/plotting.py`,
-  `utils/da_metrics.py`, the new `utils/ensemble_scores.py` and
-  `utils/turbulence_stats.py`, their test files, and the
-  `docs/scripts_and_configs.md` sections describing them. The tree is
-  byte-identical to `97fa04e` (the merge of #98) apart from the exceptions
-  below.
-- **Kept:** the plan documents in this directory, at their post-#100 state —
-  including the phase-1 body as it grew during implementation and the phase-0
-  deviation log. They are the material for the review, so they were
-  deliberately not reset to their pristine `d3cf323` form.
-- **Kept:** the test-output isolation in `tests/conftest.py` (originally
-  `ea5f507`, carried in #99 but independent of the metrics work) — it stops
-  the suite from overwriting production run directories under `.temp/`.
-
-Nothing is lost: the reverted work survives on `origin/agent/esmda-phase0-correctness`,
+On 2026-07-31 the first implementation (WP0.1–1.2 of the old plan, PRs
+#97/#99/#100) was reverted from `main` for scope, not correctness: ~11.3k
+lines for three of fourteen work packages. This plan is the slimmed
+replacement. The reverted code survives on
+`origin/agent/esmda-phase0-correctness`,
 `origin/agent/esmda-phase1-metrics-foundation`,
-`origin/agent/esmda-wp12-sensor-statistics` and
-`origin/agent/esmda-wp13-mean-field-metrics`. If a slimmed-down plan reuses
-a piece, cherry-pick it from there rather than rewriting it.
-
-Note for whoever restarts this: `metrics_version` no longer exists anywhere,
-so the version-mixing caution above is moot until it is reintroduced. Run
-directories produced while #97–#100 were on `main` carry
-`metrics_version: 2` and fair-estimator scores in their `run_summary.yaml`;
-current code writes neither, and its CRPS/energy-score numbers are the
-biased-estimator values again. Those run dirs are not comparable with new
-ones.
+`origin/agent/esmda-wp12-sensor-statistics`, and
+`origin/agent/esmda-wp13-mean-field-metrics` — **cherry-pick the small,
+targeted pieces** (the fair-estimator math, the analytic-CRPS tests, the
+streaming accumulator core) rather than rewriting them, but adapt paths to
+`libs/evaluation` and drop everything the slimmed metric set no longer
+needs. Run dirs produced while #97–#100 were on `main` carry
+`metrics_version: 2` and fair-estimator scores; current code writes the
+biased values and no marker — those dirs are not comparable with new ones
+until WP1.1 reintroduces the marker.
