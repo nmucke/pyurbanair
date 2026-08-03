@@ -12,7 +12,9 @@
 > **Implementer: update the master_plan.md status table per WP; record
 > deviations at the bottom of this file. WP3.2 touches backend output
 > handling — read `docs/pylbm.md` first; default runs must stay
-> byte-identical (no-op rule).**
+> byte-identical (no-op rule). Follow the master plan's Implementation
+> process: Opus 5 agent team, tests in the same PR, two adversarial review
+> rounds, CI green before merge.**
 
 ## WP3.1 Validation (held-out) sensors for barcelona — size XS, do first
 

@@ -19,6 +19,30 @@ PR. Keep `esmda-evaluation` current by merging `main` into it periodically
 CLAUDE.md's "branch first" rule still applies per WP: branch off
 `esmda-evaluation`, PR back into it.
 
+## Implementation process
+
+Applies to every work package:
+
+- **Tests land alongside the code, in the same PR.** A WP without its
+  tests is incomplete — the Tests section of each phase plan is part of
+  the WP's scope, not follow-up work. **All tests must pass (CI green)
+  before a PR is merged** into `esmda-evaluation`; judge against the
+  current CI baseline on the target branch.
+- **Implementation is done by a team of Opus 5 agents** with roles
+  appropriate to the WP (e.g. implementer, test author, docs/config;
+  scale the team to the WP size — an XS config change does not need a
+  full team).
+- **Two adversarial review rounds after implementation:**
+  1. Launch an adversarial reviewer agent on the finished WP; apply the
+     fixes its review demands.
+  2. After the fixes, launch a *second* adversarial reviewer agent for a
+     fresh sweep; apply its fixes too.
+  Reviewers verify claims against the actual code, focusing **first on
+  correctness of the implementation**, and additionally flag unnecessary
+  complexity and abstraction (the library design rules in invariant 5 are
+  the yardstick). Only after both rounds and green CI is the PR ready to
+  merge.
+
 ## Instructions for implementing agents
 
 - **Before starting a work package:** read its phase plan *and* the

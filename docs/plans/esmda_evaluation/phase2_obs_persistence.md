@@ -12,7 +12,9 @@
 >
 > **Implementer: update the master_plan.md status table per WP; record
 > deviations at the bottom of this file. WP2.1 changes stage-1 artifacts —
-> update `docs/data_assimilation.md` in the same PR.**
+> update `docs/data_assimilation.md` in the same PR. Follow the master
+> plan's Implementation process: Opus 5 agent team, tests in the same PR,
+> two adversarial review rounds, CI green before merge.**
 
 ## Context: what exists and where (anchors as of 2026-07-29 — verify)
 

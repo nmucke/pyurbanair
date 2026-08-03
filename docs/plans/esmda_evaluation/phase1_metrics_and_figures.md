@@ -10,7 +10,9 @@
 > tables, joint directions, Wasserstein, FAC2/FB/NMSE).
 >
 > **Implementer: update the master_plan.md status table per WP; record
-> deviations at the bottom of this file.**
+> deviations at the bottom of this file. Follow the master plan's
+> Implementation process: Opus 5 agent team, tests in the same PR, two
+> adversarial review rounds, CI green before merge.**
 
 ## WP1.1 Correctness fixes (do first — everything later builds on these)
 

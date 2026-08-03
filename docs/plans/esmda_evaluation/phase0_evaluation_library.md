@@ -6,7 +6,9 @@
 > must leave every emitted number and figure byte-identical.
 >
 > **Implementer: update the master_plan.md status table per WP; record
-> deviations at the bottom of this file.**
+> deviations at the bottom of this file. Follow the master plan's
+> Implementation process: Opus 5 agent team, tests in the same PR, two
+> adversarial review rounds, CI green before merge.**
 
 ## WP0.1 Library skeleton + wiring — size XS
 
