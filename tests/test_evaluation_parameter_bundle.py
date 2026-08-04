@@ -11,11 +11,12 @@ That is what is pinned here:
   * the z-score is ``(θ* − θ̄ᵃ)/σᵃ`` with a ``ddof=1`` spread and that sign --
     both easy to write backwards, both silently plausible if you do
     (``..._exact_and_signed_toward_the_truth``, ``..._mirror_of_the_z_score``);
-  * pooled over knots it is ~N(0, 1) only in the *limit*, and the reference at
-    the ensemble sizes this repo runs is not 1 -- judging a 2-member smoke run
-    against 1.0 reports a 400x over-confident posterior for an ensemble that is
-    behaving perfectly (``..._reference_is_not_one_...``,
-    ``..._null_at_the_smoke_shape``);
+  * pooled over knots it is ~N(0, 1) only in the *limit*: at finite ``M`` a
+    calibrated ensemble gives ``sqrt(1+1/M)·t_(M-1)``, so the reference is 1.03
+    at M=50 and does not exist at all at M=2, where z is Cauchy and no moment
+    converges. Judged against 1.0, a perfectly calibrated smoke run reads as
+    catastrophically over-confident (``..._reference_is_not_one_...``,
+    ``..._no_z_score_summary_survives_the_smoke_shape``);
   * the canonical failure -- tight *and* wrong -- shows up as a small
     contraction ratio with a large ``|z|`` (``..._over_confident_...``);
   * degenerate scales (a pinned parameter's zero prior spread, a collapsed
@@ -152,20 +153,31 @@ def test_the_z_score_reference_is_not_one_at_the_ensemble_sizes_we_run() -> None
     assert stats["std"] > 1.15  # nowhere near the naive reference of 1.0
 
 
-def test_the_z_score_spread_is_null_at_the_smoke_shape() -> None:
-    # Master plan: degenerate diagnostics are guarded with null, not
-    # special-cased -- and at M=2 the sample std of z does not converge at all.
+def test_no_z_score_summary_survives_the_smoke_shape() -> None:
+    """At M=2 a calibrated ensemble's z is Cauchy, so *no* moment converges.
+
+    Nulling only the std and leaving ``mean`` / ``max_abs`` would move the
+    misreading rather than remove it. Demonstrated rather than asserted: over
+    many independent *perfectly calibrated* 2-member ensembles, the sample mean
+    of the pooled z-scores does not concentrate at 0 and routinely exceeds the
+    ``|z| > 3`` threshold the docs call over-confident. Master plan: guard the
+    degenerate diagnostic with null, do not special-case it.
+    """
     rng = np.random.default_rng(4)
-    draws = rng.standard_normal((3, 200))
 
-    stats = z_score_stats(parameter_bundle(draws[:2], None, draws[2])["z_score"], 2)
+    assert z_score_stats(np.array([0.1, -0.2, 0.3]), 2) is None
+    assert z_score_stats(np.array([0.1, -0.2, 0.3]), 3) is None
+    assert z_score_stats(np.array([0.1, -0.2, 0.3]), 4) is not None
 
-    assert stats is not None
-    assert stats["std"] is None
-    assert stats["expected_std"] is None
-    # The readings that survive: still centred, and the extremum is still real.
-    assert abs(stats["mean"]) < 5.0
-    assert stats["max_abs"] > 0.0
+    # Why: 200 independent calibrated 2-member runs, 8 knots each.
+    means = []
+    for _ in range(200):
+        draws = rng.standard_normal((3, 8))
+        z = parameter_bundle(draws[:2], None, draws[2])["z_score"]
+        means.append(abs(float(np.mean(z[np.isfinite(z)]))))
+    # A converging statistic could not do this; a Cauchy one does.
+    assert max(means) > 5.0
+    assert float(np.mean([m > 3.0 for m in means])) > 0.1
 
 
 def test_over_confident_posterior_shows_small_contraction_and_a_large_z() -> None:
@@ -204,14 +216,19 @@ def test_a_pinned_parameter_yields_null_rather_than_infinite_ratios() -> None:
 def test_a_pinned_parameter_reaches_the_summary_as_null() -> None:
     # The same degeneracy through the reduction: null, not a missing key and
     # not `.inf`. Pinned parameters are a supported ESMDA configuration.
-    posterior = _param_dataset(inflow_angle=[[-0.5, -0.5], [1.5, 1.5]])
-    prior = _param_dataset(inflow_angle=[[1.0, 1.0], [1.0, 1.0]])
+    posterior = _param_dataset(
+        inflow_angle=[[-0.5, -0.5], [0.5, 0.5], [1.0, 1.0], [1.5, 1.5]]
+    )
+    prior = _param_dataset(
+        inflow_angle=[[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]]
+    )
     truth = _truth_dataset(inflow_angle=[0.0, 0.0])
 
     summary = parameter_metric_summary(posterior, truth, prior)["inflow_angle"]
 
     assert summary["normalized_error"] is None
     assert summary["contraction_ratio"] is None
+    # Only the prior-relative half degenerates: the posterior has real spread.
     assert summary["z_score"]["n"] == 2
 
 
@@ -307,17 +324,34 @@ def _truth_dataset(**values: list[float]) -> xarray.Dataset:
 
 
 def _toy_run() -> tuple[xarray.Dataset, xarray.Dataset, xarray.Dataset]:
-    """Two parameters, a contracted posterior around a slightly offset truth."""
+    """Two parameters, a contracted posterior around a slightly offset truth.
+
+    Five members, because a z-score summary is null below four (see
+    :func:`evaluation.scores.z_score_stats`) and this fixture is used by the
+    tests that read one.
+    """
     posterior = _param_dataset(
-        inflow_angle=[[-0.5, -0.5], [0.5, 0.5], [1.5, 1.5]],
-        velocity_magnitude=[[4.2, 4.2], [5.2, 5.2], [6.2, 6.2]],
+        inflow_angle=[[-0.5, -0.5], [0.0, 0.0], [0.5, 0.5], [1.0, 1.0], [1.5, 1.5]],
+        velocity_magnitude=[
+            [4.2, 4.2],
+            [4.7, 4.7],
+            [5.2, 5.2],
+            [5.7, 5.7],
+            [6.2, 6.2],
+        ],
     )
     # Deliberately asymmetric about the truth: a prior ensemble spaced evenly
     # around it scores a fair CRPS of *exactly* zero, which would make the
     # CRPSS null here for a reason that has nothing to do with this WP.
     prior = _param_dataset(
-        inflow_angle=[[-6.0, -6.0], [-1.0, -1.0], [7.0, 7.0]],
-        velocity_magnitude=[[1.0, 1.0], [4.0, 4.0], [10.0, 10.0]],
+        inflow_angle=[[-6.0, -6.0], [-3.0, -3.0], [-1.0, -1.0], [3.0, 3.0], [7.0, 7.0]],
+        velocity_magnitude=[
+            [1.0, 1.0],
+            [2.5, 2.5],
+            [4.0, 4.0],
+            [7.0, 7.0],
+            [10.0, 10.0],
+        ],
     )
     truth = _truth_dataset(inflow_angle=[0.0, 0.0], velocity_magnitude=[5.0, 5.0])
     return posterior, prior, truth
@@ -377,8 +411,12 @@ def test_the_block_holds_only_parameter_names_and_pooled() -> None:
 def test_summary_reports_null_and_logs_when_the_posterior_has_collapsed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    posterior = _param_dataset(inflow_angle=[[3.0, 3.0], [3.0, 3.0]])
-    prior = _param_dataset(inflow_angle=[[-2.0, -2.0], [2.0, 2.0]])
+    posterior = _param_dataset(
+        inflow_angle=[[3.0, 3.0], [3.0, 3.0], [3.0, 3.0], [3.0, 3.0]]
+    )
+    prior = _param_dataset(
+        inflow_angle=[[-2.0, -2.0], [-1.0, -1.0], [1.0, 1.0], [2.0, 2.0]]
+    )
     truth = _truth_dataset(inflow_angle=[0.0, 0.0])
 
     with caplog.at_level("WARNING"):
@@ -396,8 +434,8 @@ def test_a_differently_sampled_prior_drops_only_the_prior_relative_entries() -> 
     # comparable knot-by-knot) now governs the bundle too.
     posterior, _prior, truth = _toy_run()
     prior = xarray.Dataset(
-        {"inflow_angle": (("ensemble", "time"), [[-6.0], [0.0], [6.0]])},
-        coords={"ensemble": np.arange(3), "time": [0.0]},
+        {"inflow_angle": (("ensemble", "time"), [[-6.0], [-3.0], [0.0], [3.0], [6.0]])},
+        coords={"ensemble": np.arange(5), "time": [0.0]},
     )
 
     bundles = compute_parameter_bundles(posterior, truth, prior)
@@ -421,7 +459,7 @@ def test_run_summary_serializes_the_calibration_block(tmp_path: pathlib.Path) ->
     run_dir = tmp_path / "run"
     (run_dir / "windows").mkdir(parents=True)
     write_yaml({"run": {"skip_viz": True}}, run_dir / "config.yaml")
-    write_yaml({"configuration": {"ensemble_size": 3}}, run_dir / "run_info.yaml")
+    write_yaml({"configuration": {"ensemble_size": 5}}, run_dir / "run_info.yaml")
     posterior, prior, truth = _toy_run()
     prior = prior.copy()
     prior["velocity_magnitude"] = prior["velocity_magnitude"] * 0.0 + 5.0
@@ -437,12 +475,15 @@ def test_run_summary_serializes_the_calibration_block(tmp_path: pathlib.Path) ->
     assert math.isfinite(entry["z_score"]["mean"])
     assert math.isfinite(entry["contraction_ratio"]["mean"])
     assert math.isfinite(written["pooled"]["z_score"]["max_abs"])
-    # The pinned parameter: undefined, so null -- and null in the YAML itself,
-    # not merely None after a round trip that could have hidden a `.inf`.
+    # The pinned parameter: undefined, so null all the way into the file.
     assert written["velocity_magnitude"]["contraction_ratio"] is None
     assert written["velocity_magnitude"]["normalized_error"] is None
     text = (run_dir / "run_summary.yaml").read_text()
     assert "contraction_ratio: null" in text
-    # ``.inf`` / ``.nan`` are how yaml.safe_dump spells a non-finite float.
-    # Neither may reach the file, degenerate parameters included.
+    # ``.inf`` / ``.nan`` are how yaml.safe_dump spells a non-finite float, and
+    # neither may reach the file. Note this cannot *discriminate* the guard in
+    # `_normalized`: both reductions filter on np.isfinite, so an unguarded inf
+    # would also arrive here as null. The array-level guard is pinned by
+    # test_a_pinned_parameter_yields_null_rather_than_infinite_ratios; what
+    # this adds is that the null survives yaml.safe_dump.
     assert ".inf" not in text and ".nan" not in text

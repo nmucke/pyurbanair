@@ -616,13 +616,22 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   `z_score.mean ≈ 0` and `std ≈ expected_std` — **compare against
   `expected_std`, never against 1.** The z-score is standard normal only in
   the limit; at finite `M` it is `√(1+1/M)·t₍M₋₁₎`, whose std is 1.02 at
-  `M=64`, 1.26 at `M=8`, and infinite at `M ≤ 3`. `std` and `expected_std` are
-  both `null` below four members, where no yardstick exists — read `max_abs`
-  and the contraction ratio there instead. Entries are likewise `null` where
-  the scale is degenerate (a pinned parameter has `σᵇ = 0`; a single-member
-  ensemble has no `ddof=1` spread). The pooled `n` is a count, not an
-  effective sample size: adjacent knots of one time-varying parameter are
-  strongly correlated, and a many-knot parameter outweighs a static one.
+  `M=64` and 1.26 at `M=8`. Below **four** members the whole `z_score` entry
+  is `null`: at `M=2` that t is Cauchy, so neither its variance *nor its mean*
+  exists and a perfectly calibrated run would report `|mean| > 5` about 13 %
+  of the time. Read `contraction_ratio` there — it is well defined at any
+  size. Entries are likewise `null` where the scale is degenerate (a pinned
+  parameter has `σᵇ = 0`; a single-member ensemble has no `ddof=1` spread).
+
+  Two caveats on reading `std`. It is a *sample* std over `n` knots and
+  carries its own sampling noise, which is wide when `n` is small: for a
+  calibrated `M=64` ensemble the 5th–95th percentile range is 0.06–1.99 at
+  `n=2` and still 0.57–1.47 at `n=8`, against an `expected_std` of 1.02. Treat
+  a single parameter's `std` at `n < ~10` as a coarse flag and prefer the
+  `pooled` entry, which aggregates knots across parameters. And the pooled `n`
+  is a count, not an effective sample size: adjacent knots of one time-varying
+  parameter are strongly correlated, and a many-knot parameter outweighs a
+  static one.
 - `ensemble_health` — `n_members` / `n_unique` (exact duplicate rows) run-wide
   and per window, plus the min/median pairwise-distance ratio. A resampling
   policy that clones a diverged member (pypalm) leaves an ensemble with fewer

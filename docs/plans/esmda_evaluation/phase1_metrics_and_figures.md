@@ -241,11 +241,17 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   calibrated ensemble `z ~ √(1+1/M)·t₍M₋₁₎`, with std
   `√((1+1/M)(M−1)/(M−3))` — 1.02 at `M=64`, 1.26 at `M=8`, **infinite at
   `M ≤ 3`**. `calibrated_z_std` emits that reference alongside the sample
-  `std`; at `M ≤ 3` both are `null` plus a log, per the master plan's
-  guard-with-null rule, because there the sample std does not converge and a
-  *perfectly calibrated* 2-member smoke run would otherwise report `std ≈
-  400` and read as catastrophic. Every constant is confirmed against a
-  400k-replicate simulation of the estimator.
+  `std`. Every constant is confirmed against a 400k-replicate simulation of
+  the estimator.
+  Below four members the **whole `z_score` entry** is `null` plus a log, per
+  the master plan's guard-with-null rule. Round 1 nulled only `std` and
+  pointed the reader at `mean` / `max_abs`; round 2 showed that merely
+  relocates the misreading, because at `M = 2` the reference distribution is
+  *Cauchy* — no moment converges, so a perfectly calibrated smoke run gives
+  `|mean| > 5` about 13 % of the time and `max_abs > 3` about 68 % of it. The
+  variance condition (`ν > 2` ⟺ `M ≥ 4`) had been applied; the mean condition
+  (`ν > 1`) had not. `contraction_ratio` is well defined at every size and is
+  what the log points at.
   A `frac_abs_gt_2` key was dropped for the same reason: its calibrated value
   is also M-dependent (0.05 at `M=64`, 0.10 at `M=8`, 0.35 at `M=2`) and a
   closed-form reference for it needs a t-CDF, i.e. scipy in a leaf library.
@@ -286,6 +292,27 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   at most `M × few-thousand` floats. The redundancy is cheaper than the
   abstraction; the shared generator already guarantees the two halves see
   identical knots, which was the only correctness stake.
+- `parameter_metric_summary` reads the ensemble size with
+  `sizes.get("ensemble", 0)`, not `sizes[...]`. Invariant 3: a posterior
+  without an ensemble dimension (an old ensemble-mean-only artifact) selected
+  no parameters and returned `{}` before this WP, and a `KeyError` there would
+  now abort the whole metric stage — costing the state and sensor blocks too,
+  not just the parameter one. Found in review round 2.
+- Known caveat, not fixed: `z_score.std` is a *sample* std over `n` knots and
+  its own sampling range is wide when `n` is small (5th–95th percentile
+  0.06–1.99 at `n = 2` for a calibrated `M = 64` ensemble). A static parameter
+  over two windows has `n = 2`. Documented in `scripts_and_configs.md` with
+  the advice to prefer the `pooled` entry there; an `n` floor was not added
+  because a plausible-interval key needs a χ² quantile, i.e. scipy in a leaf
+  library, and the honest fix for a 2-window run is more windows.
+- Known caveat, not fixed: a single non-finite member blanks the whole
+  calibration block for that parameter (mean and spread are poisoned at every
+  knot at once), which is the *opposite* convention from WP1.1's
+  `ensemble_uniqueness`, which reduces over finite pairs only. Left as is —
+  a NaN member means the member is not a sample from the posterior, so
+  dropping it silently would report a calibration for an ensemble that does
+  not exist — but the next WP that scores members should pick one convention
+  deliberately.
 - Known caveat, not fixed: the parameter artifacts are float32 on disk, so a
   hard-contracted posterior (`σᵃ ~ 1e-4` on an inflow angle near 270°) gets
   an O(10 %) quantization error in `z_score`. Unlike WP1.1's CRPS

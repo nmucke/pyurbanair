@@ -523,9 +523,11 @@ def parameter_bundle(
         Per-knot ``(K,)`` arrays, ``nan`` wherever a scale is degenerate:
 
         * ``z_score`` -- ``(θ* − θ̄ᵃ)/σᵃ``. The single most informative scalar:
-          pooled over knots and windows it should look ~N(0, 1). ``|z| > 3``
-          together with a small ``contraction_ratio`` is the canonical
-          over-confident posterior.
+          ``|z| > 3`` together with a small ``contraction_ratio`` is the
+          canonical over-confident posterior. Judge a *pooled* set against
+          :func:`calibrated_z_std`, **not** against N(0, 1) -- z is standard
+          normal only as ``M → ∞``, and at the ensemble sizes run here the
+          difference is large enough to invert the reading.
         * ``posterior_std`` -- ``σᵃ`` (``ddof=1``), reported so a reader can
           tell a large ``|z|`` caused by bias from one caused by collapse.
 
@@ -773,6 +775,13 @@ def calibrated_z_std(n_members: int) -> float | None:
     converge, so no yardstick exists and reporting one would invent it. A
     2-member ensemble scoring ``std`` in the hundreds is the *calibrated*
     result, not a failure.
+
+    The reference is exact (confirmed against a 400k-replicate simulation at
+    ``M`` = 4, 8, 16, 50, 64) but it is a *population* std, and the sample std
+    measured against it converges slowly just above the cutoff: ``t_3`` has no
+    fourth moment, so at ``M = 4`` a calibrated run's sample std has a median
+    of 1.71 against a reference of 1.94. Read the two as comparable from about
+    ``M = 8``.
     """
     if n_members <= 3:
         return None
@@ -780,7 +789,7 @@ def calibrated_z_std(n_members: int) -> float | None:
 
 
 def z_score_stats(z: np.ndarray, n_members: int) -> dict | None:
-    """Calibration reduction of a set of z-scores, or ``None`` if none are finite.
+    """Calibration reduction of a set of z-scores, or ``None`` if it has none.
 
     Not :func:`series_stats`: a z-score set is judged by its *distribution*, so
     this reports the moments to read it by rather than a series' endpoint.
@@ -792,24 +801,32 @@ def z_score_stats(z: np.ndarray, n_members: int) -> dict | None:
     ``M → ∞`` reference is the right one, so a silent default would bake in the
     misreading it exists to prevent.
 
-    ``std`` is ``None`` below two finite values (undefined, not zero) and
-    whenever ``expected_std`` is -- at ``M ≤ 3`` it is a draw from a
-    distribution with no variance, so the number would be noise presented as a
-    diagnostic. ``mean`` (still centred on 0) and ``max_abs`` survive there.
+    ``None`` below **four** members, not merely a null ``std``. A calibrated
+    ensemble's z-scores are ``sqrt(1 + 1/M) · t_(M-1)``, and a ``t`` has a mean
+    only above 1 dof and a variance only above 2 -- so at ``M = 2`` (the CI
+    smoke shape) z is *Cauchy*, whose sample mean never concentrates no matter
+    how many knots are pooled: a perfectly calibrated 2-member run produces
+    ``|mean| > 5`` about 13 % of the time and ``max_abs > 3`` about 68 % of it.
+    Reporting any one of those moments while nulling the others just moves the
+    misreading to whichever key the reader falls back on. Nothing about a
+    z-score set is interpretable at that size; ``contraction_ratio`` is, and is
+    where the reader is pointed. ``None`` also when no knot has a finite z.
+
+    ``std`` alone is ``None`` below two finite knots (undefined, not zero). It
+    is a *sample* std over ``n`` -- see the caveat in ``docs/scripts_and_configs.md``
+    on how wide its own sampling range is when ``n`` is small.
     """
+    expected = calibrated_z_std(n_members)
+    if expected is None:
+        return None
     values = np.asarray(z, dtype=float).ravel()
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return None
-    expected = calibrated_z_std(n_members)
     return {
         "n": int(finite.size),
         "mean": float(finite.mean()),
-        "std": (
-            float(finite.std(ddof=1))
-            if finite.size > 1 and expected is not None
-            else None
-        ),
+        "std": float(finite.std(ddof=1)) if finite.size > 1 else None,
         "expected_std": expected,
         "max_abs": float(np.abs(finite).max()),
     }
@@ -818,7 +835,9 @@ def z_score_stats(z: np.ndarray, n_members: int) -> dict | None:
 def _bundle_summary(name: str, bundle: dict[str, np.ndarray], n_members: int) -> dict:
     """Reduce one :func:`parameter_bundle` to the ``run_summary.yaml`` entries."""
     entry: dict = {"z_score": z_score_stats(bundle["z_score"], n_members)}
-    if entry["z_score"] is None:
+    # Below four members the entry is null by policy, not by degeneracy, and
+    # the caller has already said so once for the whole run.
+    if entry["z_score"] is None and calibrated_z_std(n_members) is not None:
         # No knot has a usable posterior spread. Either the ensemble collapsed,
         # or -- the likelier cause in practice -- a diverged member is NaN,
         # which poisons the mean and the spread at every knot at once. Worth a
@@ -882,12 +901,17 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
     """
     metrics = compute_parameter_metrics(posterior_params, true_params, prior_params)
     bundles = compute_parameter_bundles(posterior_params, true_params, prior_params)
-    n_members = int(posterior_params.sizes["ensemble"])
-    if calibrated_z_std(n_members) is None:
+    # ``.get``, not ``[...]``: invariant 3. A posterior without an ensemble
+    # dimension (an old ensemble-mean-only artifact) selected no parameters and
+    # returned ``{}`` before this WP, and must not now abort the whole metric
+    # stage -- which would cost the state and sensor blocks too.
+    n_members = int(posterior_params.sizes.get("ensemble", 0))
+    if metrics and calibrated_z_std(n_members) is None:
         logger.warning(
-            "Ensemble of %d: the z-score spread has no finite reference below 4 "
-            "members, so every z_score.std is null. Read max_abs and the "
-            "contraction ratio instead.",
+            "Ensemble of %d: no z-score summary is interpretable below 4 "
+            "members (z is Cauchy at M=2, so even its mean never converges), "
+            "so every z_score entry is null. Read the contraction ratio "
+            "instead -- it is well defined at any size.",
             n_members,
         )
     summary = {}
