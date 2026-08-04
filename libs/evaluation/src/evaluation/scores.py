@@ -4,8 +4,8 @@ Here today: the CRPS and energy-score estimators, per-knot skill metrics, the
 sweep-figure field/parameter/sensor metrics, and the parameter / sensor bundles
 that assemble them for ``run_summary.yaml`` (moved in WP0.2); CRPSS and
 spread--skill (WP1.1); the §3 parameter calibration bundle -- z-score,
-normalized error, contraction ratio (WP1.2). Still to come in phase 1: ranks
-(WP1.3) and the hit rate ``q`` (WP1.4).
+normalized error, contraction ratio (WP1.2); ranks and the §4.2 window-statistic
+summary (WP1.3). Still to come in phase 1: the hit rate ``q`` (WP1.4).
 
 Since WP1.1 the pairwise estimators divide by ``M(M-1)`` rather than ``M**2``,
 because the biased form's optimum is a collapsed ensemble -- the exact failure
@@ -28,6 +28,7 @@ Populated in WP0.2 (move), extended through phase 1.
 from __future__ import annotations
 
 import logging
+import warnings
 
 import numpy as np
 import xarray as xr
@@ -879,6 +880,275 @@ def _skill_score(
         )
         return prior_mean, None
     return prior_mean, float(1.0 - post_mean / prior_mean)
+
+
+# ---------------------------------------------------------------------------
+# Window-statistic scoring (metrics doc §4.2)
+# ---------------------------------------------------------------------------
+
+# Ties in a rank are broken by a draw, which must not depend on OS entropy:
+# re-running the metric stage on the same run directory has to reproduce the
+# same ``run_summary.yaml``. Same reasoning as the bootstrap's seed.
+_DEFAULT_TIE_SEED = 0
+
+
+def ensemble_rank(ens: np.ndarray, truth: np.ndarray, rng=None) -> np.ndarray:
+    """Rank of the truth within an ensemble: an integer in ``[0, M]`` per knot.
+
+    The third calibration view, beside the CRPS (sharpness *and* accuracy) and
+    the z-score (the first two moments): a rank uses only the ordering, so it
+    sees a *shape* failure -- a bimodal or skewed posterior that happens to have
+    the right mean and spread -- that neither of the others can. Pooled over
+    many knots the ranks of a calibrated ensemble are uniform on ``0..M``;
+    a U-shape means under-dispersion, a dome over-dispersion, and a pile at one
+    end a bias.
+
+    Ties get a uniform draw among the ranks they are consistent with, rather
+    than a fixed rule: a deterministic tie-break piles the mass at one end of
+    the histogram and reads as a bias that is not there. They are essentially
+    impossible for a continuous statistic and routine for a collapsed one, so
+    the draw is seeded (``_DEFAULT_TIE_SEED``) and the result reproduces.
+
+    Args:
+        ens: ``(M, K)`` members.
+        truth: ``(K,)`` truth.
+        rng: A ``numpy`` generator or a seed; ``None`` means the fixed default.
+
+    Returns:
+        ``(K,)`` float ranks -- float, not int, because a knot where the truth
+        or any member is non-finite has no rank and is ``nan``. Drop those
+        before pooling; a rank histogram of an ensemble whose members are
+        partly NaN is not a calibration statement.
+    """
+    ens = np.asarray(ens, dtype=float)
+    truth = np.asarray(truth, dtype=float)
+    if ens.ndim != 2 or truth.shape != (ens.shape[1],):
+        raise ValueError(
+            f"ens must be (M, K) and truth (K,); got {ens.shape} and {truth.shape}"
+        )
+    generator = (
+        rng
+        if isinstance(rng, np.random.Generator)
+        else np.random.default_rng(_DEFAULT_TIE_SEED if rng is None else rng)
+    )
+    usable = np.isfinite(truth) & np.isfinite(ens).all(axis=0)
+    below = (ens < truth[None, :]).sum(axis=0)
+    ties = (ens == truth[None, :]).sum(axis=0)
+    # An untied knot has ``ties == 0``, so its draw is deterministically 0 and
+    # its rank cannot depend on how many ties preceded it. (It does not follow
+    # that the *generator state* is data-independent: numpy short-circuits
+    # ``integers(0, 1)`` without consuming entropy, so a generator shared with
+    # a later caller would see a stream that depends on the tie count. Every
+    # call site here builds its own.)
+    drawn = generator.integers(0, ties + 1)
+    return np.where(usable, below + drawn, np.nan)
+
+
+def _flat_members(members: xr.DataArray) -> np.ndarray:
+    """``(window, ensemble, sensor)`` -> ``(M, K)``, ensemble first, K = W*S.
+
+    The transpose is by *name*, so it does not matter that ``window_statistics``
+    puts ``window`` first (it is the concat dim) -- but the remaining dims keep
+    their relative order, which is what makes ``K`` window-major and lets
+    :func:`_score_window_statistic` reshape it back to ``(window, sensor)``.
+    """
+    ordered = members.transpose("ensemble", ...)
+    values = np.asarray(ordered.values, dtype=float)
+    return values.reshape(values.shape[0], -1)
+
+
+def _score_window_statistic(members, truth, floor, name):
+    """Score one statistic's ``(window, sensor)`` grid; entry + its per-window CRPS.
+
+    ``members`` is ``(ensemble, window, sensor)``, ``truth`` ``(window, sensor)``
+    and ``floor`` the matching per-member bootstrap std (or ``None``). The
+    reductions differ by what the quantity *is*: the CRPS and the
+    identifiability ratio are averaged over sensors and reported as a series
+    over windows (so ``final`` is the end-of-run value, as everywhere else in
+    the summary), while the z-scores are a *distribution* and are pooled.
+    """
+    member_values = _flat_members(members)
+    truth_values = np.asarray(truth.values, dtype=float).reshape(-1)
+    n_members, n_windows = member_values.shape[0], members.sizes["window"]
+
+    crps = crps_ensemble(member_values, truth_values)
+    spread = _ensemble_std(member_values)
+    z = _normalized(truth_values - member_values.mean(axis=0), spread)
+    ranks = ensemble_rank(member_values, truth_values)
+
+    def _per_window(flat):
+        """Sensor-averaged series over windows, from a flat ``(W*S,)`` array.
+
+        A window with no frames at all (a truncated run -- invariant 3) is
+        all-``nan`` across its sensors, which is the documented null and not
+        something to warn about.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return np.nanmean(flat.reshape(n_windows, -1), axis=1)
+
+    crps_per_window = _per_window(crps)
+    finite_ranks = ranks[np.isfinite(ranks)].astype(int)
+    entry = {
+        "crps": series_stats(crps_per_window),
+        "z_score": z_score_stats(z, n_members),
+        # Counts per rank, not the raw rank list. A rank histogram is what
+        # figure D1 consumes, and pooling it over sensors and windows loses
+        # nothing D1 uses -- while the raw list is ~4x larger on disk (measured:
+        # 7053 lines of run_summary.yaml at Barcelona scale, since the YAML
+        # writer puts every int on its own line). ``M+1`` bins rather than the
+        # ~10 D1 draws: binning is exact here and the figure can coarsen, but
+        # not the other way round.
+        "rank_counts": np.bincount(finite_ranks, minlength=n_members + 1).tolist(),
+    }
+
+    if floor is not None:
+        # Median over members, not mean: one diverged member's window can have a
+        # wild sampling std, and the floor is meant to describe a typical
+        # member's window rather than the worst one. A column with no measured
+        # floor at all (a window too short to block, which is the CI smoke
+        # shape) is the documented null path, not something to warn about.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            within = np.nanmedian(_flat_members(floor), axis=0)
+        identifiability = series_stats(_per_window(_normalized(spread, within)))
+        if identifiability is not None:
+            entry["identifiability"] = identifiability
+            # Thresholded on the value that is actually written, not on a
+            # separate reduction of the same array: the docs tell the reader to
+            # compare the emitted number against 3, and a warning derived from a
+            # different pooling can disagree with it on skewed sensors.
+            if identifiability["mean"] < 3.0:
+                logger.warning(
+                    "%s: across-member spread is only %.2gx its own sampling "
+                    "noise (mean over windows of the sensor average) -- this "
+                    "statistic is not identifiable at this window length, so "
+                    "read its CRPS and ranks as noise, not as calibration",
+                    name,
+                    identifiability["mean"],
+                )
+    return entry, crps_per_window
+
+
+def window_statistics_summary(
+    truth_stats,
+    posterior_stats,
+    prior_stats=None,
+    posterior_sampling_std=None,
+    prior_sampling_std=None,
+    label="",
+):
+    """The ``sensor_statistics`` block for one sensor set (metrics doc §4.2).
+
+    Takes the dicts :func:`evaluation.sensors.window_statistics` and
+    :func:`evaluation.sensors.window_sampling_std` produce -- statistic name ->
+    ``(window, quantity, [ensemble,] sensor)`` -- and scores every
+    ``statistic × quantity`` combination as its own key (``mean_u``,
+    ``variance_magnitude``, ...), because they are separately identifiable: a
+    parameter that fixes the mean wind while leaving the resolved variance
+    halved is the failure this block exists to name.
+
+    The prior half is scored identically, and the posterior entries carry the
+    skill against it (``crps_reduction_vs_prior``, positive when assimilation
+    helped). Absent prior artifacts are a no-op, not an error: the prior state
+    is only saved under ``run.save_prior_state``.
+
+    Args:
+        truth_stats: ``window_statistics`` of the truth series.
+        posterior_stats: ``window_statistics`` of the posterior members.
+        prior_stats: The same for the prior members, or ``None``.
+        posterior_sampling_std: ``window_sampling_std`` of the posterior members,
+            or ``None`` to skip the identifiability guard.
+        prior_sampling_std: The same for the prior.
+        label: Prefix for the log lines (e.g. the sensor-set name), so a run
+            with several sets does not emit indistinguishable warnings.
+
+    Returns:
+        ``{"n_members", "n_windows", "num_sensors", "posterior"[, "prior"]}``,
+        or ``{}`` when the posterior carries no ensemble dimension.
+    """
+    sample = posterior_stats["mean"]
+    if "ensemble" not in sample.dims:
+        # Invariant 3: an ensemble-mean-only artifact (an old run, a state file
+        # written without the member axis) has nothing to score probabilistically,
+        # and must not abort the metric stage -- which would cost the parameter
+        # and state blocks too, not just this one.
+        logger.warning(
+            "%sno ensemble dimension in the window statistics -- the sensor "
+            "statistics need the members, so the block is omitted",
+            f"{label}: " if label else "",
+        )
+        return {}
+    quantities = [
+        str(q) for q in np.asarray(posterior_stats["mean"]["quantity"].values)
+    ]
+
+    def _score(stats, sampling_std, half):
+        entries, raw = {}, {}
+        for statistic, members in stats.items():
+            for quantity in quantities:
+                name = f"{statistic}_{quantity}"
+                floor = (
+                    sampling_std[statistic].sel(quantity=quantity)
+                    if sampling_std is not None
+                    else None
+                )
+                entries[name], raw[name] = _score_window_statistic(
+                    members.sel(quantity=quantity),
+                    truth_stats[statistic].sel(quantity=quantity),
+                    floor,
+                    # Qualified, because a run with two sensor sets and a saved
+                    # prior emits up to 32 of these warnings and a bare
+                    # "mean_u" cannot be traced to the one that produced it.
+                    f"{label}/{half}/{name}" if label else f"{half}/{name}",
+                )
+        return entries, raw
+
+    posterior, posterior_crps = _score(
+        posterior_stats, posterior_sampling_std, "posterior"
+    )
+    summary = {
+        "n_members": int(sample.sizes["ensemble"]),
+        "n_windows": int(sample.sizes["window"]),
+        "num_sensors": int(sample.sizes["sensor"]),
+        "posterior": posterior,
+    }
+
+    if prior_stats is None:
+        return summary
+
+    prior, prior_crps = _score(prior_stats, prior_sampling_std, "prior")
+    summary["prior"] = prior
+    for name, entry in posterior.items():
+        post_windows = np.isfinite(posterior_crps[name])
+        prior_windows = np.isfinite(prior_crps[name])
+        if not np.array_equal(post_windows, prior_windows):
+            # The two halves cover different windows -- a prior state file that
+            # exists but stops short leaves its last window empty. Averaging a
+            # 2-window prior against a 3-window posterior puts two horizons in
+            # one skill score, which is the comparison this WP exists to avoid.
+            logger.warning(
+                "%s: the prior covers %d windows and the posterior %d, so their "
+                "skill score would compare two different horizons (null)",
+                name,
+                int(prior_windows.sum()),
+                int(post_windows.sum()),
+            )
+            entry["prior_crps_mean"] = None
+            entry["crps_reduction_vs_prior"] = None
+            continue
+        with warnings.catch_warnings():
+            # An all-empty prior (every window truncated away) reduces to nan.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            prior_mean, skill = _skill_score(
+                posterior_crps[name], prior_crps[name], name, "sensor-statistic CRPS"
+            )
+        # ``null``, never ``.nan``: the reductions elsewhere in this block
+        # filter on ``np.isfinite``, and a bare nan in the YAML reads as a
+        # measured value to anything that does not check.
+        entry["prior_crps_mean"] = prior_mean if np.isfinite(prior_mean) else None
+        entry["crps_reduction_vs_prior"] = skill
+    return summary
 
 
 def parameter_metric_summary(posterior_params, true_params, prior_params):
