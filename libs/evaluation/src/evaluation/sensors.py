@@ -5,6 +5,13 @@ the state files. Extraction itself stays in ``scripts/esmda/_esmda_common.py``:
 it needs ``data_assimilation``'s observation operator (jax) and the run-dir
 layout, both forbidden here.
 
+WP1.3's premise (metrics doc §4.2): the verification object is the **window
+statistic**, not the time series. Instantaneous turbulence is chaotic -- two
+members with identical parameters decorrelate within an eddy turnover -- so a
+pointwise time-series error mostly measures phase, which no parameter estimate
+can control. What the estimated parameters do act on is the *statistics*, so
+those are the identifiable quantities and the thing worth scoring.
+
 Populated in WP0.2 (move), extended in WP1.3.
 """
 
@@ -15,9 +22,153 @@ Populated in WP0.2 (move), extended in WP1.3.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
+import xarray as xr
+from evaluation.turbulence import block_bootstrap_std
+
+logger = logging.getLogger(__name__)
+
+# The scored statistics, in the order they appear in ``run_summary.yaml``.
+# ``magnitude`` is |U|, which is what a cup anemometer reports and what the
+# sensor figures plot; the components carry the direction information |U|
+# discards.
+QUANTITIES = ("u", "v", "w", "magnitude")
 
 
 def sensor_magnitude(components):
     """Velocity magnitude |U| from a ``(component, ...)`` sensor series."""
     return np.sqrt((components**2).sum("component"))
+
+
+def _quantity_series(series):
+    """``(component, ...)`` series -> ``(quantity, ...)`` with |U| appended.
+
+    One array over :data:`QUANTITIES` so every downstream reduction is a single
+    vectorized call rather than four near-copies.
+    """
+    magnitude = sensor_magnitude(series).expand_dims(quantity=["magnitude"])
+    components = series.rename(component="quantity")
+    return xr.concat([components, magnitude], dim="quantity").sel(
+        quantity=list(QUANTITIES)
+    )
+
+
+def window_masks(times, sim_time, num_windows):
+    """Boolean time masks, one per assimilation window.
+
+    Binning by the *time coordinate* rather than by frame count is what lets the
+    truth and the ensemble be reduced by the same function: both series carry a
+    global time axis on which window ``w`` starts at ``w*sim_time`` (the
+    extraction rebases them), but they need not have the same output cadence --
+    a truth pre-simulated at one interval against an assimilation writing at
+    another is the normal case, not the exception.
+
+    A frame exactly on a boundary belongs to the window it opens, matching the
+    run's own ``[w*sim_time, (w+1)*sim_time)`` convention; anything past the
+    last boundary (float drift on the final frame) falls in the last window.
+    """
+    t = np.asarray(times, dtype=float)
+    if not sim_time > 0:
+        raise ValueError(f"sim_time must be positive, got {sim_time}")
+    index = np.clip(np.floor(t / sim_time).astype(int), 0, max(num_windows - 1, 0))
+    return [index == w for w in range(num_windows)]
+
+
+def _windowed(series, sim_time, num_windows, reduce_fn):
+    """Apply ``reduce_fn(window_slice)`` per window and stack on a ``window`` dim."""
+    quantities = _quantity_series(series)
+    masks = window_masks(quantities["time"].values, sim_time, num_windows)
+    reduced = []
+    for w, mask in enumerate(masks):
+        if not mask.any():
+            # Invariant 3: a window whose frames are missing (a killed job, a
+            # truncated file) costs its own entry, not the whole block.
+            logger.warning(
+                "No sensor frames fall in window %d -- its statistics are null", w
+            )
+            # ``mean`` over an empty selection, not ``isel(time=0)``: it yields
+            # the right dims and coords even when the series itself is empty.
+            empty = quantities.isel(time=slice(0, 0)).mean("time")
+            reduced.append(xr.full_like(empty, np.nan, dtype=float))
+            continue
+        reduced.append(reduce_fn(quantities.isel(time=mask)))
+    return xr.concat(reduced, dim="window").assign_coords(window=np.arange(num_windows))
+
+
+def window_statistics(series, sim_time, num_windows):
+    """Per-window mean and variance of each quantity at each sensor.
+
+    Args:
+        series: ``(component, [ensemble,] time, sensor)`` with a global ``time``
+            coordinate, as produced by the extraction helpers.
+        sim_time: Simulated seconds per assimilation window.
+        num_windows: Number of windows.
+
+    Returns:
+        ``{"mean": DataArray, "variance": DataArray}``, each
+        ``(quantity, [ensemble,] window, sensor)``.
+
+    The variance is ``ddof=1``: it is an estimate of the flow's variance from a
+    finite window, not the window's own second moment, and the truth and the
+    members are reduced identically so the choice cannot bias the comparison.
+    A single-frame window gives ``nan``, which is correct rather than zero.
+    """
+    return {
+        "mean": _windowed(series, sim_time, num_windows, lambda w: w.mean("time")),
+        "variance": _windowed(
+            series, sim_time, num_windows, lambda w: w.var("time", ddof=1)
+        ),
+    }
+
+
+def window_sampling_std(
+    series, sim_time, num_windows, n_blocks=20, n_resamples=200, rng=None
+):
+    """Block-bootstrap sampling std of each :func:`window_statistics` entry.
+
+    The noise floor the statistics are read against: how much a member's window
+    mean or variance would move if the same member were simulated over a
+    different stretch of the same flow. WP1.3's identifiability guard is the
+    ensemble's spread in a statistic divided by this -- a statistic whose
+    across-member spread does not clear its own sampling noise is not
+    identifiable at this window length, however good its CRPS looks.
+
+    Same shapes as :func:`window_statistics`. ``nan`` wherever the bootstrap is
+    undefined (see :func:`~evaluation.turbulence.block_bootstrap_std`); short
+    windows -- including the CI smoke shape -- are the common case, so callers
+    must treat an all-``nan`` result as "no floor measured", not as a failure.
+    """
+    reducers = {
+        "mean": lambda x, axis: np.mean(x, axis=axis),
+        "variance": lambda x, axis: np.var(x, axis=axis, ddof=1),
+    }
+    return {
+        name: _windowed(
+            series,
+            sim_time,
+            num_windows,
+            lambda w, fn=fn: _bootstrap_window(w, fn, n_blocks, n_resamples, rng),
+        )
+        for name, fn in reducers.items()
+    }
+
+
+def _bootstrap_window(window, statistic, n_blocks, n_resamples, rng):
+    """One window's bootstrap std, shaped exactly like that window's ``mean``."""
+    # ``block_bootstrap_std`` wants time last; the extracted series carries it in
+    # the middle (``..., time, sensor``). Dropping ``time`` in place leaves the
+    # dim order xarray's own ``mean("time")`` would produce, so the statistics
+    # and their sampling floor stack identically.
+    reduced_dims = tuple(d for d in window.dims if d != "time")
+    ordered = window.transpose(*reduced_dims, "time")
+    std = block_bootstrap_std(
+        np.asarray(ordered.values, dtype=float),
+        statistic=statistic,
+        n_blocks=n_blocks,
+        n_resamples=n_resamples,
+        rng=rng,
+    )
+    coords = {d: ordered.coords[d] for d in reduced_dims if d in ordered.coords}
+    return xr.DataArray(std, dims=reduced_dims, coords=coords)

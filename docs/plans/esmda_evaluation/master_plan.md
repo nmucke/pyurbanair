@@ -58,9 +58,9 @@ Applies to every work package:
      values or semantics bumps the `metrics_version` marker (reintroduced in
      WP1.1).
   2. Full-ensemble window state files are never `.load()`ed by new code —
-     stream member-at-a-time or z-slab-wise, ≤2 reader threads. (One legacy
-     violation exists: `ensemble_sensor_series` loads whole window files;
-     its streaming rewrite is an explicit WP1.3 subtask.)
+     stream member-at-a-time or z-slab-wise, ≤2 reader threads. (The one legacy
+     violation, `ensemble_sensor_series` loading whole window files, was
+     rewritten in WP1.3; no known violation remains.)
   3. Every metric/figure no-ops gracefully when its inputs are absent
      (old run dirs, flags off, smoke shape).
   4. Only the fair estimators and corrected spread formulas (WP1.1) may be
@@ -110,7 +110,7 @@ copy-paste.
 | 0.2 | Move existing metric/plot code into it (pure refactor) | [phase0](phase0_evaluation_library.md) | M | done | #104 |
 | 1.1 | Correctness: fair CRPS/energy + CRPSS, spread–skill, `n_unique`, `metrics_version` | [phase1](phase1_metrics_and_figures.md) | S | done | #105 |
 | 1.2 | Parameter bundle: z-score, contraction ratio, fair CRPS/CRPSS | [phase1](phase1_metrics_and_figures.md) | S | done | #106 |
-| 1.3 | Sensor-statistics scoring (assimilated + held-out) | [phase1](phase1_metrics_and_figures.md) | S–M | not started | — |
+| 1.3 | Sensor-statistics scoring (assimilated + held-out) | [phase1](phase1_metrics_and_figures.md) | S–M | done | — |
 | 1.4 | Streaming mean fields + TKE + hit rate `q` | [phase1](phase1_metrics_and_figures.md) | M | not started | — |
 | 1.5 | Figures P1, S1, S5, F1, D1 | [phase1](phase1_metrics_and_figures.md) | M | not started | — |
 | 2.1 | Persist obs + per-iteration predicted obs / params | [phase2](phase2_obs_persistence.md) | S | not started | — |

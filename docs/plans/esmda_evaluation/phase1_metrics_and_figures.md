@@ -319,3 +319,82 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   cancellation this is not an algorithmic defect — the precision is gone
   before the library sees the data — so it needs an artifact-precision
   change, not an estimator change.
+
+**WP1.3**
+
+- **The streaming rewrite is a slice loop, not a chunked read.** The plan says
+  "member-at-a-time"; the implementation opens the window file lazily and
+  materializes `ds[["u","v","w"]].isel(ensemble=slice(m, m+1))` per member,
+  because `interpolate_dataarray_at_points` reads `.values` and cannot consume
+  a lazy array. Peak memory is three components of one member's window instead
+  of the whole ensemble's. Both sensor sets are interpolated from the slice
+  already in memory, so a validation set costs no extra read — the previous
+  code re-walked the loaded dataset per set, which was free only because it had
+  loaded everything. Inertness is pinned by a test that reruns the pre-WP1.3
+  whole-file path and compares values, dims and the global time axis.
+- **Windows are cut by the time coordinate, not by frame count.** The plan does
+  not say which; frame count is the tempting one because `truth_access.yaml`
+  carries `n_per_window`. It is wrong here: that count describes the *truth's*
+  cadence, and the assimilation writes at its own `output_frequency`, so one
+  reduction cannot serve both. Both series already carry a global axis on which
+  window `w` starts at `w*sim_time` (the extraction rebases them), so
+  `floor(t/sim_time)` bins either one. A frame exactly on a boundary opens its
+  window, matching the run's own `[w·sim_time, (w+1)·sim_time)` convention.
+- **`block_bootstrap_std` is one vectorized function, not a scalar/batch pair.**
+  The rollback branch shipped both (`block_bootstrap_std` +
+  `block_bootstrap_std_batch`) with a shared index matrix and a test pinning
+  them equal. One function taking `(..., n_time)` and an axis-taking reducer
+  removes the drift risk instead of testing for it; the 1-D case is the 0-d
+  result. The cost is the statistic contract — `statistic(x, axis=-1)`, not
+  `statistic(1-D)` — which is checked and raises rather than silently
+  mis-reducing. Rows containing a non-finite sample return `nan` rather than
+  falling back to a per-row gap-dropping path: a row with gaps has a different
+  finite count, hence a different block length, which is exactly the sharing
+  that makes the vectorization possible.
+- **Statistic set: mean and variance of u, v, w and |U|** — eight keys, scored
+  separately. The plan says "window mean and window variance (of the velocity
+  magnitude and components)"; making the quantity a dimension rather than four
+  copies of the reduction keeps `evaluation.sensors` to two public functions.
+  No TKE key: it is `½·Σ_i var(u_i)`, i.e. a fixed combination of three keys
+  already present, and the resolved-stress machinery that makes TKE worth its
+  own entry lands in WP1.4.
+- **The CRPS and identifiability entries are `series_stats` over *windows*, the
+  z-scores pooled.** A CRPS averaged over sensors is a series whose `final` is
+  the end-of-run value, which is the reading every other summary key already
+  has; a z-score set is a distribution and gets `z_score_stats` (the WP1.2
+  precedent, including the `expected_std` reference and the null below four
+  members). The identifiability ratio is emitted per window for the same reason
+  the CRPS is: a statistic can become identifiable as the flow spins up.
+- **Ranks are written raw, not binned.** Figure D1 (WP1.5) wants ~10 bins over
+  a pooled set, but binning at metric time bakes the choice into the artifact.
+  The list is bounded — sensors × windows per statistic, ~1600 ints even at
+  Barcelona scale — so the figure can pool and bin as it likes. Ties get a
+  seeded uniform draw rather than a fixed rule: a collapsed ensemble is all
+  ties, and a deterministic tie-break piles them at one end of the histogram
+  and reads as a bias that is not there.
+- **The identifiability floor is a median over members, not a mean.** One
+  diverged member's window can have a wild sampling std, and the floor is meant
+  to describe a typical member. `< 3` logs a warning naming the statistic,
+  matching the metrics doc's "if not ≫ 1"; the threshold is a flag, not a gate —
+  nothing is suppressed on it.
+- **The whole `identifiability` key is absent, not null, when no floor was
+  measured.** The bootstrap needs ~21 frames per window at the default 20
+  blocks and the CI smoke shape has four, so this is the common case in tests.
+  An unmeasured floor is *unknown*, and a ratio over it would read as
+  "infinitely identifiable" — the opposite of what a short window means.
+- **No config knobs.** `n_blocks` / `n_resamples` are function defaults, not
+  Hydra keys. The rollback branch had a `resolve_metrics_settings` validator
+  for them; nothing in the slimmed set needs to vary them per run, and the
+  defaults are the only values any caller passes.
+- **Prior scoring is all-or-nothing per run.** A partially written set of
+  `window_*_prior_state.nc` (an interrupted job) is treated as absent rather
+  than scored over the windows that exist: a prior on three windows against a
+  posterior on ten would put two different horizons inside one skill score.
+  Logged at INFO, not WARNING — `run.save_prior_state` is off by default, so
+  absence is the normal case, not a fault.
+- **Deferred:** the e2e ESMDA tests all run under `run.skip_viz=true`, so none
+  of them reaches this block. The wiring is covered instead by a synthetic
+  run-dir test that builds the artifacts `compute_metrics` reads and runs the
+  real non-`skip_viz` path. A smoke run that exercises the sensor stages for
+  real is a gap that predates this WP (see the same note in auto-memory) and is
+  not closed here.

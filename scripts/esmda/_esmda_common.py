@@ -175,23 +175,64 @@ def _concat_sensor_pieces(pieces):
 def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
     """Ensemble per-component ``(u, v, w)`` sensor series across rollout windows.
 
-    Opens each window's full-ensemble state file once and interpolates u/v/w at
-    every sensor set's points (keeping ``component`` + ``ensemble`` + ``time``),
-    rebasing each window's local time onto a single global axis (window ``w``
-    starts at ``w*sim_time``) so it lines up with the truth. Returns
-    ``{name: DataArray(component, ensemble, time, sensor)}``.
+    Interpolates u/v/w at every sensor set's points (keeping ``component`` +
+    ``ensemble`` + ``time``), rebasing each window's local time onto a single
+    global axis (window ``w`` starts at ``w*sim_time``) so it lines up with the
+    truth. Returns ``{name: DataArray(component, ensemble, time, sensor)}``.
+
+    **One member at a time.** A window state file is
+    ``(ensemble, time, z, y, x)`` per component and runs to gigabytes, so it is
+    opened lazily and sliced per member: peak memory is three components of one
+    member's window, not the whole ensemble. (This function used to ``.load()``
+    each file whole -- the last such site in the post-processing stack.) The
+    per-member slice *is* materialised, because the interpolation reads
+    ``.values``; every sensor set is interpolated from that one slice so a
+    second set costs no extra read.
     """
     pieces = {name: [] for name in sensor_sets}
     for w, path in enumerate(state_paths):
-        ds = xarray.open_dataset(path).load()
-        t = np.asarray(ds["time"].values, dtype=float) if "time" in ds.coords else None
-        for name, (ox, oy, oz) in sensor_sets.items():
-            vel = _sensor_component_timeseries(ds, ox, oy, oz, solver_name)
-            if t is not None and "time" in vel.dims:
-                vel = vel.assign_coords(time=(t - t[0]) + w * sim_time)
-            pieces[name].append(vel)
-        ds.close()
+        with xarray.open_dataset(path) as ds:
+            t = (
+                np.asarray(ds["time"].values, dtype=float)
+                if "time" in ds.coords
+                else None
+            )
+            for name, vel in _window_sensor_series(
+                ds, sensor_sets, solver_name
+            ).items():
+                if t is not None and "time" in vel.dims:
+                    vel = vel.assign_coords(time=(t - t[0]) + w * sim_time)
+                pieces[name].append(vel)
     return _concat_sensor_pieces(pieces)
+
+
+def _window_sensor_series(ds, sensor_sets, solver_name):
+    """One window's ``{name: DataArray(component, ensemble, time, sensor)}``.
+
+    Members are read and interpolated one at a time from the lazily-opened
+    ``ds``; every sensor set is interpolated from the member slice already in
+    memory, so a second set costs no extra read.
+    """
+    if "ensemble" not in ds.dims:
+        return {
+            name: _sensor_component_timeseries(ds, ox, oy, oz, solver_name)
+            for name, (ox, oy, oz) in sensor_sets.items()
+        }
+
+    members = {name: [] for name in sensor_sets}
+    for m in range(ds.sizes["ensemble"]):
+        # A slice, not an index: it keeps the ``ensemble`` dim, so the pieces
+        # concatenate back into the layout the whole-file load produced.
+        member = ds[["u", "v", "w"]].isel(ensemble=slice(m, m + 1)).load()
+        for name, (ox, oy, oz) in sensor_sets.items():
+            members[name].append(
+                _sensor_component_timeseries(member, ox, oy, oz, solver_name)
+            )
+        member.close()
+    return {
+        name: (parts[0] if len(parts) == 1 else xarray.concat(parts, dim="ensemble"))
+        for name, parts in members.items()
+    }
 
 
 def truth_sensor_series(

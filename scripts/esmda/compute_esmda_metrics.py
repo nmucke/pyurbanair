@@ -27,6 +27,13 @@ run_esmda.py, augmented with:
                               energy score (multivariate CRPS). The comprehensive
                               per-component sweep series are computed separately by
                               scripts/figure_creation/compute_sweep_metrics.py.
+  * ``sensor_statistics``  -- per sensor set, the per-window mean and variance of
+                              u/v/w/|U| scored as the verification object (fair
+                              CRPS, z-score, rank), prior and posterior, with the
+                              identifiability guard. This is the statistics-space
+                              counterpart of ``sensor_metrics``: a pointwise
+                              time-series error mostly measures turbulent phase,
+                              which no parameter estimate controls.
 
 Usage::
 
@@ -53,7 +60,9 @@ from evaluation.scores import (
     parameter_metric_summary,
     series_stats,
     vector_sensor_metrics,
+    window_statistics_summary,
 )
+from evaluation.sensors import window_sampling_std, window_statistics
 from evaluation.turbulence import streaming_state_rmse
 
 from scripts.esmda._esmda_common import (
@@ -172,6 +181,80 @@ def _ensemble_health(
     }
 
 
+def _prior_sensor_series(
+    run_dir: pathlib.Path,
+    sensor_sets: dict,
+    num_windows: int,
+    sim_time: float,
+    solver_name: str,
+) -> dict | None:
+    """Sensor series from the saved prior states, or ``None`` with a log line.
+
+    ``run.save_prior_state`` is off by default (the prior states double the
+    state-file bytes a run writes), so the prior half of the statistics block is
+    genuinely optional -- absence is the common case, not a fault. A partially
+    written set is treated the same way: scoring a prior over some windows and a
+    posterior over all of them would put two different horizons in one skill
+    score.
+    """
+    paths = [
+        run_dir / "windows" / f"window_{w}_prior_state.nc" for w in range(num_windows)
+    ]
+    missing = [p for p in paths if not p.exists()]
+    if missing:
+        logger.info(
+            "No prior sensor statistics: %d of %d prior state files are absent "
+            "(run.save_prior_state was off, or the run was interrupted)",
+            len(missing),
+            num_windows,
+        )
+        return None
+    # ``dict(...)``: the extraction module is mypy-waived and returns ``Any``.
+    return dict(ensemble_sensor_series(paths, sensor_sets, solver_name, sim_time))
+
+
+def _sensor_statistics(
+    run_dir: pathlib.Path,
+    sensor_sets: dict,
+    truth_series: dict,
+    ensemble_series: dict,
+    num_windows: int,
+    sim_time: float,
+    solver_name: str,
+) -> dict:
+    """The ``sensor_statistics`` block, per sensor set (metrics doc §4.2).
+
+    Reuses the series the vector sensor metrics already extracted, so the
+    posterior half costs no extra pass over the state files; only the prior
+    (when saved) is read here.
+    """
+    prior_series = _prior_sensor_series(
+        run_dir, sensor_sets, num_windows, sim_time, solver_name
+    )
+
+    statistics = {}
+    for name in sensor_sets:
+        prior = prior_series[name] if prior_series is not None else None
+        statistics[name] = window_statistics_summary(
+            window_statistics(truth_series[name], sim_time, num_windows),
+            window_statistics(ensemble_series[name], sim_time, num_windows),
+            prior_stats=(
+                window_statistics(prior, sim_time, num_windows)
+                if prior is not None
+                else None
+            ),
+            posterior_sampling_std=window_sampling_std(
+                ensemble_series[name], sim_time, num_windows
+            ),
+            prior_sampling_std=(
+                window_sampling_std(prior, sim_time, num_windows)
+                if prior is not None
+                else None
+            ),
+        )
+    return statistics
+
+
 def compute_metrics(run_dir: pathlib.Path) -> None:
     """Compute every run metric from the saved artifacts and write run_summary.yaml."""
     cfg = load_run_config(run_dir)
@@ -252,6 +335,17 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
             "velocity_vector_energy_score": series_stats(m["energy_score"]),
         }
     summary["sensor_metrics"] = sensor_metrics
+
+    # --- Sensors: window statistics as the verification object (§4.2) --------
+    summary["sensor_statistics"] = _sensor_statistics(
+        run_dir,
+        sensor_sets,
+        truth_series,
+        ensemble_series,
+        num_windows,
+        float(ta["sim_time"]),
+        ta["assim_solver_name"],
+    )
 
     write_yaml(summary, run_dir / "run_summary.yaml")
     print(f"Saved run summary in {run_dir / 'run_summary.yaml'}")

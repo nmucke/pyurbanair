@@ -574,12 +574,14 @@ Provides:
   from the obs config.
 - `open_truth(cfg, ta)` — lazy truth access (multi-GB `state.nc` never fully loaded).
 - `ensemble_sensor_series(...)` / `truth_sensor_series(...)` — interpolate ensemble
-  and truth states at sensor locations.
+  and truth states at sensor locations. Both stream: the truth one window at a
+  time, the ensemble **one member at a time** (since WP1.3 — a full-ensemble
+  window state file runs to gigabytes and is never read whole).
 - `read_yaml(...)` / `write_yaml(...)` / `_to_native(...)` — small YAML helpers.
 
 The metric functions themselves (`streaming_state_rmse`, `select_z_plane`,
-`sensor_magnitude`, `parameter_metric_summary`, `series_stats`,
-`vector_sensor_metrics`) live in the
+`sensor_magnitude`, `window_statistics`, `parameter_metric_summary`,
+`series_stats`, `vector_sensor_metrics`) live in the
 [`evaluation`](../libs/evaluation/src/evaluation/) library; this module keeps
 only the run-dir-aware extraction they consume.
 
@@ -639,6 +641,33 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 - `state_metrics` — `|U|` field RMSE summary (streamed z-slice by z-slice).
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set
   (assimilation + validation).
+- `sensor_statistics` — the same sensor sets scored on **window statistics**
+  rather than on the instantaneous series. Instantaneous turbulence is chaotic:
+  two members with identical parameters decorrelate within an eddy turnover, so
+  a pointwise error is mostly a phase measurement that no parameter estimate
+  controls. The parameters act on the *statistics*, which is what makes those
+  the identifiable quantities. Per sensor set: `n_members`, `n_windows`,
+  `num_sensors`, and a `posterior` (plus `prior`, when `run.save_prior_state`
+  saved the prior states) block with one entry per `statistic × quantity` —
+  `mean_u` … `variance_magnitude`, eight in all, scored separately because a
+  parameter that fixes the mean wind while leaving the resolved variance halved
+  is exactly the failure this block names. Each entry carries:
+  - `crps` — the fair CRPS of `{T_m}` against `T*`, averaged over sensors and
+    reported as a series over windows (`final` = the last window), plus
+    `prior_crps_mean` / `crps_reduction_vs_prior` when the prior was scored.
+  - `z_score` — the same reduction and the same `expected_std` caveats as
+    `parameter_metrics` above, pooled over sensors and windows.
+  - `ranks` — the rank of `T*` within `{T_m}`, one per sensor and window. Ranks
+    use only the ordering, so pooled they see a *shape* failure (a skewed or
+    bimodal posterior with the right mean and spread) that neither the CRPS nor
+    the z-score can.
+  - `identifiability` — across-member spread of `T` divided by a typical
+    member's own block-bootstrap sampling std of `T`. **Read this first:**
+    below ~3 the statistic does not clear its own sampling noise at this window
+    length, and its CRPS and ranks are measuring the window, not the parameters.
+    Absent when no floor could be measured — the bootstrap needs ≳21 frames per
+    window, so short runs (including the CI smoke shape) have none, and an
+    unmeasured floor is unknown rather than infinitely identifiable.
 
 > **`metrics_version`.** The keys above are additive only; when an existing key
 > changes *meaning*, this marker bumps instead. `2` (current) means the fair
