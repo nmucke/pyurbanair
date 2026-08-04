@@ -388,7 +388,13 @@ def test_parameter_summary_omits_prior_keys_without_a_prior() -> None:
 
     summary = parameter_metric_summary(posterior, truth, None)["inflow_angle"]
 
-    assert set(summary) == {"rmse", "crps"}
+    # The prior-derived keys are named rather than the key set pinned exactly:
+    # the block is additive, so entries that need no prior (WP1.2's z-score)
+    # legitimately join it and must not fail this test.
+    assert not [k for k in summary if "prior" in k]
+    assert "normalized_error" not in summary
+    assert "contraction_ratio" not in summary
+    assert summary["rmse"] is not None and summary["crps"] is not None
 
 
 # ---------------------------------------------------------------------------

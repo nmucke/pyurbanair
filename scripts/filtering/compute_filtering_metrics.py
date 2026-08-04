@@ -19,8 +19,10 @@ run_filtering.py, augmented with:
                                pipeline; 2 = fair (``M(M-1)``) pairwise scores
                                (see scripts/esmda/compute_esmda_metrics.py).
   * ``parameter_metrics``   -- per-parameter RMSE/CRPS of the final analyzed
-                               ensemble vs truth (+ skill vs prior). Absent
-                               in ``mode='state'`` (no parameters estimated).
+                               ensemble vs truth (+ skill vs prior) and its
+                               calibration (z-score, normalized error,
+                               contraction ratio). Absent in ``mode='state'``
+                               (no parameters estimated).
   * ``filter_diagnostics``  -- summary stats of the per-cycle innovation chi2 and
                                observation-space prior/posterior RMSE.
   * ``state_metrics``       -- |U| field RMSE of the analyzed end-of-cycle states

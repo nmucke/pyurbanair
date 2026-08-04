@@ -1,9 +1,11 @@
 """Probabilistic ensemble scores and the metric bundles built on them.
 
-Here today (moved in WP0.2): the CRPS and energy-score estimators, per-knot
-skill metrics, the sweep-figure field/parameter/sensor metrics, and the
-parameter / sensor bundles that assemble them for ``run_summary.yaml``.
-Phase 1 adds CRPSS, z-scores, ranks, spread--skill and the hit rate ``q``.
+Here today: the CRPS and energy-score estimators, per-knot skill metrics, the
+sweep-figure field/parameter/sensor metrics, and the parameter / sensor bundles
+that assemble them for ``run_summary.yaml`` (moved in WP0.2); CRPSS and
+spread--skill (WP1.1); the §3 parameter calibration bundle -- z-score,
+normalized error, contraction ratio (WP1.2). Still to come in phase 1: ranks
+(WP1.3) and the hit rate ``q`` (WP1.4).
 
 Since WP1.1 the pairwise estimators divide by ``M(M-1)`` rather than ``M**2``,
 because the biased form's optimum is a collapsed ensemble -- the exact failure
@@ -13,7 +15,7 @@ larger and are **not** comparable with current ones; ``metrics_version: 2`` in
 ``docs/plans/esmda_turbulence_evaluation.md`` §3--§6; rollout in
 ``phase1_metrics_and_figures.md``.
 
-Populated in WP0.2 (move), extended in phase 1.
+Populated in WP0.2 (move), extended through phase 1.
 """
 
 # mypy: ignore-errors
@@ -381,6 +383,44 @@ def _param_members_and_x(da: xr.DataArray):
     return x, members
 
 
+def _aligned_parameter_members(
+    esmda_params: xr.Dataset,
+    true_params: xr.Dataset,
+    prior_params: xr.Dataset | None = None,
+):
+    """Yield ``(name, x, members, truth_on_x, prior_members)`` per parameter.
+
+    The one place the truth is put on the estimate's x-axis, so the error series
+    and the §3 bundle below cannot drift apart in how they align it: a static
+    (single-point) truth becomes a constant, a differently-sampled time-varying
+    truth is linearly interpolated.
+
+    ``prior_members`` is ``None`` unless the prior carries the parameter *and*
+    is sampled on the same x-grid -- a prior of a different length cannot be
+    compared knot-by-knot, and silently broadcasting it would invent a
+    correspondence that does not exist.
+    """
+    for param_name in _plotted_param_names(esmda_params, true_params):
+        x_est, members = _param_members_and_x(esmda_params[param_name])
+
+        true_da = true_params[param_name]
+        if "ensemble" in true_da.dims:
+            true_da = true_da.isel(ensemble=0)
+        x_true, true_members = _param_members_and_x(true_da.expand_dims("ensemble"))
+        truth = true_members[0]
+
+        order = np.argsort(x_true)
+        truth_on_est = np.interp(x_est, np.asarray(x_true)[order], truth[order])
+
+        prior_members = None
+        if prior_params is not None and param_name in prior_params.data_vars:
+            _, candidate = _param_members_and_x(prior_params[param_name])
+            if candidate.shape[1] == truth_on_est.shape[0]:
+                prior_members = candidate
+
+        yield param_name, x_est, members, truth_on_est, prior_members
+
+
 def compute_parameter_metrics(
     esmda_params: xr.Dataset,
     true_params: xr.Dataset,
@@ -405,21 +445,9 @@ def compute_parameter_metrics(
     same numbers :func:`evaluation.figures.plot_parameter_error` draws.
     """
     metrics: dict[str, dict[str, np.ndarray]] = {}
-    for param_name in _plotted_param_names(esmda_params, true_params):
-        x_est, members = _param_members_and_x(esmda_params[param_name])
-
-        true_da = true_params[param_name]
-        if "ensemble" in true_da.dims:
-            true_da = true_da.isel(ensemble=0)
-        x_true, true_members = _param_members_and_x(true_da.expand_dims("ensemble"))
-        truth = true_members[0]
-
-        # Align the truth onto the posterior's x-axis: a static truth (single
-        # point) becomes a constant; a differently-sampled time-varying truth is
-        # linearly interpolated.
-        order = np.argsort(x_true)
-        truth_on_est = np.interp(x_est, np.asarray(x_true)[order], truth[order])
-
+    for name, x_est, members, truth_on_est, prior_members in _aligned_parameter_members(
+        esmda_params, true_params, prior_params
+    ):
         entry: dict[str, np.ndarray] = {
             "x": x_est,
             "rmse": np.sqrt(np.mean((members - truth_on_est[None, :]) ** 2, axis=0)),
@@ -428,19 +456,139 @@ def compute_parameter_metrics(
             # caller-owned dtype policy), so cast explicitly.
             "crps": crps_ensemble(np.asarray(members, dtype=float), truth_on_est),
         }
-        if prior_params is not None and param_name in prior_params.data_vars:
-            _, prior_members = _param_members_and_x(prior_params[param_name])
-            if prior_members.shape[1] == truth_on_est.shape[0]:
-                entry["prior_rmse"] = np.sqrt(
-                    np.mean((prior_members - truth_on_est[None, :]) ** 2, axis=0)
-                )
-                # Same float64 cast as the posterior CRPS above, so the two are
-                # scored identically and their ratio (the CRPSS) is meaningful.
-                entry["prior_crps"] = crps_ensemble(
-                    np.asarray(prior_members, dtype=float), truth_on_est
-                )
-        metrics[param_name] = entry
+        if prior_members is not None:
+            entry["prior_rmse"] = np.sqrt(
+                np.mean((prior_members - truth_on_est[None, :]) ** 2, axis=0)
+            )
+            # Same float64 cast as the posterior CRPS above, so the two are
+            # scored identically and their ratio (the CRPSS) is meaningful.
+            entry["prior_crps"] = crps_ensemble(
+                np.asarray(prior_members, dtype=float), truth_on_est
+            )
+        metrics[name] = entry
     return metrics
+
+
+def _ensemble_std(members: np.ndarray) -> np.ndarray:
+    """Per-knot ensemble standard deviation (``ddof=1``), ``nan`` below 2 members.
+
+    ``nan`` rather than :func:`per_knot_spread`'s ``0``: every use here is as a
+    *divisor*, and a zero divisor would turn "the spread is unknown" into "the
+    ensemble is infinitely confident" -- the opposite reading.
+    """
+    if members.shape[0] < 2:
+        return np.full(members.shape[1], np.nan)
+    return np.asarray(members.std(axis=0, ddof=1))
+
+
+def _normalized(numerator: np.ndarray, spread: np.ndarray) -> np.ndarray:
+    """``numerator / spread`` where the spread is a usable scale, else ``nan``.
+
+    A non-positive or non-finite spread means the ratio is undefined, not
+    infinite: it is what a *pinned* parameter (zero prior spread by
+    construction) and a fully collapsed posterior both look like.
+
+    The reductions cannot tell the two apart -- both :func:`series_stats` and
+    :func:`z_score_stats` filter on ``np.isfinite``, which drops ``inf`` and
+    ``nan`` alike, so ``run_summary.yaml`` reads ``null`` either way. What the
+    guard buys is the *arrays*: the per-knot bundle is what the parameter
+    figures plot, where one ``inf`` rescales an axis into uselessness while a
+    ``nan`` is simply not drawn. Dividing under the guard rather than after it
+    also keeps numpy's divide-by-zero warning off every pinned-parameter run.
+    """
+    usable = np.isfinite(spread) & (spread > 0)
+    return np.where(usable, numerator / np.where(usable, spread, 1.0), np.nan)
+
+
+def parameter_bundle(
+    post: np.ndarray,
+    prior: np.ndarray | None,
+    truth: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Posterior-quality diagnostics for one parameter, per knot (metrics doc §3).
+
+    The scores above ask *how close* the posterior is; these ask whether it is
+    **honest about its own uncertainty**, which is the failure mode ESMDA
+    actually has. A posterior can halve its RMSE and still be wrong, if it
+    halved its spread by more.
+
+    Args:
+        post: ``(M, K)`` posterior members over ``M`` ensemble members and ``K``
+            knots (time knots for a time-varying parameter, else one per
+            assimilation window).
+        prior: ``(M, K)`` prior members on the same knots, or ``None``.
+        truth: ``(K,)`` true parameter values, already on the same knots.
+
+    Returns:
+        Per-knot ``(K,)`` arrays, ``nan`` wherever a scale is degenerate:
+
+        * ``z_score`` -- ``(θ* − θ̄ᵃ)/σᵃ``. The single most informative scalar:
+          ``|z| > 3`` together with a small ``contraction_ratio`` is the
+          canonical over-confident posterior. Judge a *pooled* set against
+          :func:`calibrated_z_std`, **not** against N(0, 1) -- z is standard
+          normal only as ``M → ∞``, and at the ensemble sizes run here the
+          difference is large enough to invert the reading.
+        * ``posterior_std`` -- ``σᵃ`` (``ddof=1``), reported so a reader can
+          tell a large ``|z|`` caused by bias from one caused by collapse.
+
+        and, when ``prior`` is given, also
+
+        * ``normalized_error`` -- ``(θ̄ᵃ − θ*)/σᵇ``, the error in units of prior
+          uncertainty, so parameters in different physical units compare.
+        * ``contraction_ratio`` -- ``σᵃ/σᵇ``. ``≪ 1`` = the data informed the
+          parameter; ``≈ 1`` = unidentifiable.
+        * ``prior_std`` -- ``σᵇ``.
+    """
+    post = np.asarray(post, dtype=float)
+    truth = np.asarray(truth, dtype=float)
+    if post.ndim != 2:
+        raise ValueError(f"post must have shape (n_members, n_knots); got {post.shape}")
+    if truth.shape != (post.shape[1],):
+        raise ValueError(
+            f"truth must have shape ({post.shape[1]},) to match post; "
+            f"got {truth.shape}"
+        )
+
+    post_mean = post.mean(axis=0)
+    post_std = _ensemble_std(post)
+    bundle = {
+        "z_score": _normalized(truth - post_mean, post_std),
+        "posterior_std": post_std,
+    }
+
+    if prior is None:
+        return bundle
+
+    prior = np.asarray(prior, dtype=float)
+    if prior.ndim != 2 or prior.shape[1] != post.shape[1]:
+        raise ValueError(
+            f"prior must have shape (n_members, {post.shape[1]}) to match post; "
+            f"got {prior.shape}"
+        )
+    prior_std = _ensemble_std(prior)
+    bundle["prior_std"] = prior_std
+    bundle["normalized_error"] = _normalized(post_mean - truth, prior_std)
+    bundle["contraction_ratio"] = _normalized(post_std, prior_std)
+    return bundle
+
+
+def compute_parameter_bundles(
+    esmda_params: xr.Dataset,
+    true_params: xr.Dataset,
+    prior_params: xr.Dataset | None = None,
+) -> dict[str, dict[str, np.ndarray]]:
+    """Per-parameter :func:`parameter_bundle`, from the saved parameter datasets.
+
+    The dataset front end of :func:`parameter_bundle`, sharing
+    :func:`compute_parameter_metrics`' truth alignment and parameter selection
+    so the two blocks of ``run_summary.yaml`` always describe the same knots.
+    """
+    return {
+        name: parameter_bundle(members, prior_members, truth_on_est)
+        for name, _x, members, truth_on_est, prior_members in (
+            _aligned_parameter_members(esmda_params, true_params, prior_params)
+        )
+    }
 
 
 def compute_sensor_metrics(
@@ -609,6 +757,104 @@ def series_stats(arr):
     }
 
 
+def calibrated_z_std(n_members: int) -> float | None:
+    """Std of the z-scores a *calibrated* ``n_members`` ensemble produces.
+
+    The reference to judge :func:`z_score_stats`' ``std`` against -- and it is
+    **not 1** at the ensemble sizes this repo runs. ``z = (θ* − θ̄ᵃ)/σᵃ`` is only
+    standard normal in the limit: at finite ``M`` the numerator carries the
+    ensemble mean's own sampling error and the denominator is a noisy estimate
+    of the true spread, so for a calibrated ensemble
+    ``z ~ sqrt(1 + 1/M) · t_(M-1)``, whose std is
+
+        sqrt((1 + 1/M) · (M - 1) / (M - 3)).
+
+    That is 1.02 at ``M = 64`` (the production default) and 1.03 at ``M = 50``,
+    but 1.26 at ``M = 8`` and *infinite* at ``M ≤ 3`` -- Student's t has no
+    variance there. ``None`` in that case: the sample std of z does not
+    converge, so no yardstick exists and reporting one would invent it. A
+    2-member ensemble scoring ``std`` in the hundreds is the *calibrated*
+    result, not a failure.
+
+    The reference is exact (confirmed against a 400k-replicate simulation at
+    ``M`` = 4, 8, 16, 50, 64) but it is a *population* std, and the sample std
+    measured against it converges slowly just above the cutoff: ``t_3`` has no
+    fourth moment, so at ``M = 4`` a calibrated run's sample std has a median
+    of 1.71 against a reference of 1.94. Read the two as comparable from about
+    ``M = 8``.
+    """
+    if n_members <= 3:
+        return None
+    return float(np.sqrt((1.0 + 1.0 / n_members) * (n_members - 1) / (n_members - 3)))
+
+
+def z_score_stats(z: np.ndarray, n_members: int) -> dict | None:
+    """Calibration reduction of a set of z-scores, or ``None`` if it has none.
+
+    Not :func:`series_stats`: a z-score set is judged by its *distribution*, so
+    this reports the moments to read it by rather than a series' endpoint.
+    Compare ``std`` against ``expected_std``, never against 1 -- see
+    :func:`calibrated_z_std` for why the two differ, and by how much.
+
+    ``n_members`` is required rather than defaulted, for the same reason
+    :func:`spread_skill` requires it: there is no ensemble size at which the
+    ``M → ∞`` reference is the right one, so a silent default would bake in the
+    misreading it exists to prevent.
+
+    ``None`` below **four** members, not merely a null ``std``. A calibrated
+    ensemble's z-scores are ``sqrt(1 + 1/M) · t_(M-1)``, and a ``t`` has a mean
+    only above 1 dof and a variance only above 2 -- so at ``M = 2`` (the CI
+    smoke shape) z is *Cauchy*, whose sample mean never concentrates no matter
+    how many knots are pooled: a perfectly calibrated 2-member run produces
+    ``|mean| > 5`` about 13 % of the time and ``max_abs > 3`` about 68 % of it.
+    Reporting any one of those moments while nulling the others just moves the
+    misreading to whichever key the reader falls back on. Nothing about a
+    z-score set is interpretable at that size; ``contraction_ratio`` is, and is
+    where the reader is pointed. ``None`` also when no knot has a finite z.
+
+    ``std`` alone is ``None`` below two finite knots (undefined, not zero). It
+    is a *sample* std over ``n`` -- see the caveat in ``docs/scripts_and_configs.md``
+    on how wide its own sampling range is when ``n`` is small.
+    """
+    expected = calibrated_z_std(n_members)
+    if expected is None:
+        return None
+    values = np.asarray(z, dtype=float).ravel()
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    return {
+        "n": int(finite.size),
+        "mean": float(finite.mean()),
+        "std": float(finite.std(ddof=1)) if finite.size > 1 else None,
+        "expected_std": expected,
+        "max_abs": float(np.abs(finite).max()),
+    }
+
+
+def _bundle_summary(name: str, bundle: dict[str, np.ndarray], n_members: int) -> dict:
+    """Reduce one :func:`parameter_bundle` to the ``run_summary.yaml`` entries."""
+    entry: dict = {"z_score": z_score_stats(bundle["z_score"], n_members)}
+    # Below four members the entry is null by policy, not by degeneracy, and
+    # the caller has already said so once for the whole run.
+    if entry["z_score"] is None and calibrated_z_std(n_members) is not None:
+        # No knot has a usable posterior spread. Either the ensemble collapsed,
+        # or -- the likelier cause in practice -- a diverged member is NaN,
+        # which poisons the mean and the spread at every knot at once. Worth a
+        # line either way, since the resulting ``null`` otherwise reads as
+        # "not computed".
+        logger.warning(
+            "%s: no finite z-score at any knot -- the posterior spread is zero, "
+            "undefined, or poisoned by a non-finite member, so the calibration "
+            "of this parameter is unknown",
+            name,
+        )
+    for key in ("normalized_error", "contraction_ratio"):
+        if key in bundle:
+            entry[key] = series_stats(bundle[key])
+    return entry
+
+
 def _skill_score(
     post: np.ndarray, prior: np.ndarray, name: str, what: str
 ) -> tuple[float, float | None]:
@@ -636,16 +882,40 @@ def _skill_score(
 
 
 def parameter_metric_summary(posterior_params, true_params, prior_params):
-    """Per-parameter RMSE/CRPS summary stats (posterior, with a prior reference).
+    """Per-parameter accuracy *and* calibration summary (metrics doc §3).
 
     The prior-relative entries are skill scores: ``1 - post/prior``, positive
     when assimilation helped. The CRPS one (``crps_reduction_vs_prior``, the
     CRPSS of the metrics doc §3) is the probabilistic counterpart of the RMSE
     reduction -- it also penalizes a posterior that got closer to the truth by
     collapsing, which the RMSE of the ensemble members cannot see.
+
+    WP1.2 adds the calibration half from :func:`parameter_bundle` -- per
+    parameter ``z_score``, ``normalized_error`` and ``contraction_ratio``, plus
+    a ``pooled`` entry whose z-scores are concatenated across every parameter
+    and knot. Pooling across parameters is legitimate precisely because a
+    z-score is dimensionless; read the pooled ``n`` as a count, though, not as
+    an effective sample size, since adjacent knots of one time-varying
+    parameter are strongly correlated and a many-knot parameter outweighs a
+    static one.
     """
     metrics = compute_parameter_metrics(posterior_params, true_params, prior_params)
+    bundles = compute_parameter_bundles(posterior_params, true_params, prior_params)
+    # ``.get``, not ``[...]``: invariant 3. A posterior without an ensemble
+    # dimension (an old ensemble-mean-only artifact) selected no parameters and
+    # returned ``{}`` before this WP, and must not now abort the whole metric
+    # stage -- which would cost the state and sensor blocks too.
+    n_members = int(posterior_params.sizes.get("ensemble", 0))
+    if metrics and calibrated_z_std(n_members) is None:
+        logger.warning(
+            "Ensemble of %d: no z-score summary is interpretable below 4 "
+            "members (z is Cauchy at M=2, so even its mean never converges), "
+            "so every z_score entry is null. Read the contraction ratio "
+            "instead -- it is well defined at any size.",
+            n_members,
+        )
     summary = {}
+    pooled_z: list[np.ndarray] = []
     for name, m in metrics.items():
         entry = {"rmse": series_stats(m["rmse"]), "crps": series_stats(m["crps"])}
         if "prior_rmse" in m:
@@ -656,5 +926,17 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
             prior_mean, skill = _skill_score(m["crps"], m["prior_crps"], name, "CRPS")
             entry["prior_crps_mean"] = prior_mean
             entry["crps_reduction_vs_prior"] = skill
+        # Same parameter selection and truth alignment as ``metrics`` (both go
+        # through _aligned_parameter_members), so the lookup always hits.
+        entry.update(_bundle_summary(name, bundles[name], n_members))
+        pooled_z.append(bundles[name]["z_score"])
         summary[name] = entry
+    if pooled_z:
+        # Sits beside the parameter names, as the plan specifies. Safe because
+        # the parameters are a closed whitelist (_PLOTTED_PARAMS) that will
+        # never contain "pooled", and every consumer indexes this block by an
+        # explicit parameter name rather than iterating it.
+        summary["pooled"] = {
+            "z_score": z_score_stats(np.concatenate(pooled_z), n_members)
+        }
     return summary

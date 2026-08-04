@@ -18,7 +18,9 @@ run_esmda.py, augmented with:
                               biased estimators, whose CRPS / energy-score
                               numbers sit ~O(1/M) higher and must not be
                               compared with version-2 ones.
-  * ``parameter_metrics``  -- per-parameter RMSE/CRPS summary (+ skill vs prior).
+  * ``parameter_metrics``  -- per-parameter RMSE/CRPS summary (+ skill vs prior)
+                              and calibration: z-score, normalized error and
+                              contraction ratio, plus a pooled z-score entry.
   * ``ensemble_health``    -- duplicate-member counts, run-wide and per window.
   * ``state_metrics``      -- |U| field RMSE summary (streamed over a few z-slices).
   * ``sensor_metrics``     -- per sensor set, the full-vector (u, v, w) RMSE and

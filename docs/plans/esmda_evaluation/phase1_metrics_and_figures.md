@@ -213,3 +213,109 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   plan's "later scores use `n_unique`" is read as forward-looking — the
   count is reported and warned on now, and no metric consumes it until a WP
   that has an actual duplicated-ensemble run to validate against.
+
+**WP1.2**
+
+- **No `crps_fair` / `crpss_vs_prior` keys.** WP1.1 already emits exactly
+  those two numbers under the names `crps` and `crps_reduction_vs_prior`.
+  Re-emitting them would put two names for one value in the block invariant
+  1 forbids clobbering, and leave the comparison scripts to guess which is
+  authoritative. The bundle adds only what is new: `z_score`,
+  `normalized_error`, `contraction_ratio`.
+- The pooled entry is `parameter_metrics.pooled`, beside the parameter
+  names as the plan specifies. Safe because `_PLOTTED_PARAMS` is a closed
+  whitelist that cannot contain `pooled`, and every consumer indexes this
+  block by an explicit parameter name rather than iterating it (checked:
+  `visualize_run`, `visualize_state_run`, `make_figures_block_a/b`,
+  `compare_sweep_results`, `compare_state_runs`, `compare_param_vs_state`).
+- z-scores get their own reduction, `z_score_stats` → `{n, mean, std,
+  expected_std, max_abs}`, not `series_stats`. A z set is judged by its
+  *distribution*, and `series_stats` has no std while its `final` (the last
+  knot) means nothing for a calibration set. `std` is `null` below two finite
+  knots rather than 0.
+- **The z-score reference is not 1** at any ensemble size this repo runs, and
+  `z_score_stats` therefore takes a required `n_members` (the `spread_skill`
+  precedent from WP1.1: no size makes the missing correction right, so a
+  default would bake in the misreading). `z = (θ*−θ̄ᵃ)/σᵃ` compares the truth
+  against a mean *and* a spread estimated from the same `M` members, so for a
+  calibrated ensemble `z ~ √(1+1/M)·t₍M₋₁₎`, with std
+  `√((1+1/M)(M−1)/(M−3))` — 1.02 at `M=64`, 1.26 at `M=8`, **infinite at
+  `M ≤ 3`**. `calibrated_z_std` emits that reference alongside the sample
+  `std`. Every constant is confirmed against a 400k-replicate simulation of
+  the estimator.
+  Below four members the **whole `z_score` entry** is `null` plus a log, per
+  the master plan's guard-with-null rule. Round 1 nulled only `std` and
+  pointed the reader at `mean` / `max_abs`; round 2 showed that merely
+  relocates the misreading, because at `M = 2` the reference distribution is
+  *Cauchy* — no moment converges, so a perfectly calibrated smoke run gives
+  `|mean| > 5` about 13 % of the time and `max_abs > 3` about 68 % of it. The
+  variance condition (`ν > 2` ⟺ `M ≥ 4`) had been applied; the mean condition
+  (`ν > 1`) had not. `contraction_ratio` is well defined at every size and is
+  what the log points at.
+  A `frac_abs_gt_2` key was dropped for the same reason: its calibrated value
+  is also M-dependent (0.05 at `M=64`, 0.10 at `M=8`, 0.35 at `M=2`) and a
+  closed-form reference for it needs a t-CDF, i.e. scipy in a leaf library.
+- Degenerate scales produce `nan` → `null`, never `inf`. Both cases are
+  real: a **pinned** parameter has `σᵇ = 0` by construction, and a collapsed
+  posterior has `σᵃ = 0`. Note what this does *not* buy: both reductions
+  filter on `np.isfinite`, which drops `inf` and `nan` alike, so the YAML
+  reads `null` either way. The guard is for the per-knot **arrays** the
+  WP1.5 figures plot, where one `inf` rescales an axis into uselessness —
+  and it keeps numpy's divide-by-zero warning off every pinned-parameter
+  run. (An earlier revision of this note claimed an `inf` would reach the
+  YAML as `.inf`; review round 1 disproved it by running the unguarded
+  form.) The run-through-YAML test now carries a pinned parameter, so it
+  actually exercises the `null` path instead of asserting about a run that
+  cannot produce one.
+- `parameter_bundle` returns `posterior_std` / `prior_std` but the summary
+  does not write them. They are what tells a large `|z|` caused by bias from
+  one caused by collapse, which figure P1 (WP1.5) annotates; the YAML has
+  `contraction_ratio` for the same reading and does not need both.
+- The truth alignment moved into a shared `_aligned_parameter_members`
+  generator used by both `compute_parameter_metrics` and the new
+  `compute_parameter_bundles`, so the accuracy and calibration blocks can
+  never end up describing different knots. It carries the pre-existing
+  guard (a prior sampled on a different knot grid is dropped rather than
+  broadcast), which now governs the bundle too.
+- One WP1.1 test assertion was relaxed:
+  `test_parameter_summary_omits_prior_keys_without_a_prior` pinned the
+  no-prior key set with `==`, which an additive-only block cannot support.
+  It now names the prior-derived keys it is actually about.
+- `compute_filtering_metrics.py` and `compute_sweep_metrics.py` gain the
+  block for free — both call `parameter_metric_summary`. Same reasoning as
+  WP1.1's `metrics_version` deviation: one function, one meaning.
+- **Considered and not done** (review round 1): `parameter_metric_summary`
+  walks `_aligned_parameter_members` twice, once for the accuracy half and
+  once for the bundles. Collapsing it into one pass would need the
+  per-parameter body of `compute_parameter_metrics` extracted into yet
+  another helper, to save a `np.interp` and a `.values` read over arrays of
+  at most `M × few-thousand` floats. The redundancy is cheaper than the
+  abstraction; the shared generator already guarantees the two halves see
+  identical knots, which was the only correctness stake.
+- `parameter_metric_summary` reads the ensemble size with
+  `sizes.get("ensemble", 0)`, not `sizes[...]`. Invariant 3: a posterior
+  without an ensemble dimension (an old ensemble-mean-only artifact) selected
+  no parameters and returned `{}` before this WP, and a `KeyError` there would
+  now abort the whole metric stage — costing the state and sensor blocks too,
+  not just the parameter one. Found in review round 2.
+- Known caveat, not fixed: `z_score.std` is a *sample* std over `n` knots and
+  its own sampling range is wide when `n` is small (5th–95th percentile
+  0.06–1.99 at `n = 2` for a calibrated `M = 64` ensemble). A static parameter
+  over two windows has `n = 2`. Documented in `scripts_and_configs.md` with
+  the advice to prefer the `pooled` entry there; an `n` floor was not added
+  because a plausible-interval key needs a χ² quantile, i.e. scipy in a leaf
+  library, and the honest fix for a 2-window run is more windows.
+- Known caveat, not fixed: a single non-finite member blanks the whole
+  calibration block for that parameter (mean and spread are poisoned at every
+  knot at once), which is the *opposite* convention from WP1.1's
+  `ensemble_uniqueness`, which reduces over finite pairs only. Left as is —
+  a NaN member means the member is not a sample from the posterior, so
+  dropping it silently would report a calibration for an ensemble that does
+  not exist — but the next WP that scores members should pick one convention
+  deliberately.
+- Known caveat, not fixed: the parameter artifacts are float32 on disk, so a
+  hard-contracted posterior (`σᵃ ~ 1e-4` on an inflow angle near 270°) gets
+  an O(10 %) quantization error in `z_score`. Unlike WP1.1's CRPS
+  cancellation this is not an algorithmic defect — the precision is gone
+  before the library sees the data — so it needs an artifact-precision
+  change, not an estimator change.
