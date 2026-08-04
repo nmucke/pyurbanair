@@ -159,11 +159,13 @@ def test_window_statistics_null_a_window_with_no_frames(
     truth = _series(rng, 40).isel(time=slice(0, 20))  # only window 0 is covered
 
     with caplog.at_level("WARNING"):
-        stats = window_statistics(truth, SIM_TIME, NUM_WINDOWS)
+        stats = window_statistics(truth, SIM_TIME, NUM_WINDOWS, label="validation")
 
     assert np.isfinite(stats["mean"].sel(window=0).values).all()
     assert np.isnan(stats["mean"].sel(window=2).values).all()
-    assert "No sensor frames fall in window 2" in caplog.text
+    # Labelled, so a run with several sensor sets does not emit six
+    # indistinguishable copies of this line.
+    assert "validation: no sensor frames fall in window 2" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -426,9 +428,11 @@ def test_summary_scores_every_statistic_and_quantity_separately() -> None:
         for q in ("u", "v", "w", "magnitude")
     }
     entry = summary["posterior"]["mean_magnitude"]
-    assert set(entry) >= {"crps", "z_score", "ranks", "identifiability"}
+    assert set(entry) >= {"crps", "z_score", "rank_counts", "identifiability"}
     assert entry["crps"]["mean"] > 0
-    assert len(entry["ranks"]) == NUM_WINDOWS * 2  # windows x sensors
+    # One count per rank 0..M; they total the scored knots (windows x sensors).
+    assert len(entry["rank_counts"]) == summary["n_members"] + 1
+    assert sum(entry["rank_counts"]) == NUM_WINDOWS * 2
 
 
 def test_summary_scores_the_prior_and_the_skill_against_it() -> None:
@@ -503,6 +507,115 @@ def test_summary_is_omitted_when_the_members_axis_is_absent(
     assert "no ensemble dimension" in caplog.text
 
 
+def test_summary_z_score_is_signed_toward_the_truth() -> None:
+    # The sign of z_score.mean is the ONLY thing that says "the posterior sits
+    # below the truth" rather than above it. z = (truth - mean)/sigma, so a
+    # posterior displaced downward must give a positive mean; written the other
+    # way round every other assertion in this file still passes.
+    rng = np.random.default_rng(26)
+    truth = _series(rng, 120)
+    posterior = _series(rng, 120, n_ensemble=8, offset=-2.0)
+
+    summary = window_statistics_summary(
+        window_statistics(truth, SIM_TIME, NUM_WINDOWS),
+        window_statistics(posterior, SIM_TIME, NUM_WINDOWS),
+    )
+
+    assert summary["posterior"]["mean_u"]["z_score"]["mean"] > 1.0
+
+
+def test_summary_z_score_denominator_is_the_ddof_one_spread() -> None:
+    # ddof=0 would scale every z by sqrt(M/(M-1)) -- 1.41 at M=2, 1.07 at M=8 --
+    # and silently break the expected_std reference, which is derived for
+    # t_(M-1). Four members at fixed offsets from the truth make z exact:
+    # member means are truth+{0,2,4,6}, so the ensemble mean is truth+3 and the
+    # ddof=1 spread is sqrt(20/3); ddof=0 would give sqrt(20/4) and a z of
+    # -1.342 instead of -1.108.
+    rng = np.random.default_rng(27)
+    truth = _series(rng, 60, n_sensors=1)
+    members = xarray.concat(
+        [truth + offset for offset in (0.0, 2.0, 4.0, 6.0)], dim="ensemble"
+    ).transpose("component", "ensemble", "time", "sensor")
+
+    summary = window_statistics_summary(
+        window_statistics(truth, SIM_TIME, NUM_WINDOWS),
+        window_statistics(members, SIM_TIME, NUM_WINDOWS),
+    )
+
+    z = summary["posterior"]["mean_u"]["z_score"]
+    assert z["mean"] == pytest.approx(-3.0 / np.sqrt(20.0 / 3.0))
+    assert z["std"] == pytest.approx(0.0, abs=1e-12)  # identical at every knot
+
+
+def test_summary_identifiability_is_measured_per_sensor() -> None:
+    # The floor is reduced over MEMBERS, per sensor and window. Reduced over the
+    # wrong axis it would be constant across sensors, and every test built on
+    # homogeneous synthetic data still passes. Two sensors, same member spread,
+    # 10x the within-member noise on the second: only its ratio may collapse.
+    rng = np.random.default_rng(28)
+    n_time = 160
+    time = np.linspace(0.0, NUM_WINDOWS * SIM_TIME, n_time, endpoint=False)
+    noise = rng.normal(size=(3, 6, n_time, 2)) * np.array([0.1, 10.0])
+    offsets = np.linspace(-2.0, 2.0, 6).reshape(1, 6, 1, 1)
+    members = xarray.DataArray(
+        noise + offsets,
+        dims=("component", "ensemble", "time", "sensor"),
+        coords={"component": ["u", "v", "w"], "time": time, "sensor": [0, 1]},
+    )
+
+    stats = window_statistics(members, SIM_TIME, NUM_WINDOWS)["mean"].sel(quantity="u")
+    floor = window_sampling_std(
+        members, SIM_TIME, NUM_WINDOWS, n_blocks=8, n_resamples=32
+    )["mean"].sel(quantity="u")
+    ratio = stats.std("ensemble", ddof=1) / floor.median("ensemble")
+
+    quiet, noisy = float(ratio.isel(sensor=0).mean()), float(
+        ratio.isel(sensor=1).mean()
+    )
+    assert quiet > 3.0 > noisy
+
+
+def test_summary_rank_counts_exclude_the_knots_that_have_no_rank() -> None:
+    # A window with no frames has no rank. Counting it as rank 0 (what
+    # ``nan_to_num`` would do) piles unrankable knots at one end and reads as a
+    # catastrophic bias in figure D1.
+    rng = np.random.default_rng(29)
+    truth = _series(rng, 90).isel(time=slice(0, 60))  # window 2 never ran
+    posterior = _series(rng, 90, n_ensemble=4).isel(time=slice(0, 60))
+
+    summary = window_statistics_summary(
+        window_statistics(truth, SIM_TIME, NUM_WINDOWS),
+        window_statistics(posterior, SIM_TIME, NUM_WINDOWS),
+    )
+
+    counts = summary["posterior"]["mean_u"]["rank_counts"]
+    assert sum(counts) == (NUM_WINDOWS - 1) * 2  # the two windows that ran
+
+
+def test_summary_nulls_the_skill_when_prior_and_posterior_span_different_windows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A prior state file that exists but stops short leaves its last window
+    # empty. Averaging a 2-window prior against a 3-window posterior puts two
+    # horizons in one skill score.
+    rng = np.random.default_rng(30)
+    truth = _series(rng, 90)
+    posterior = _series(rng, 90, n_ensemble=4)
+    prior = _series(rng, 90, n_ensemble=4).isel(time=slice(0, 60))
+
+    with caplog.at_level("WARNING"):
+        summary = window_statistics_summary(
+            window_statistics(truth, SIM_TIME, NUM_WINDOWS),
+            window_statistics(posterior, SIM_TIME, NUM_WINDOWS),
+            prior_stats=window_statistics(prior, SIM_TIME, NUM_WINDOWS),
+        )
+
+    entry = summary["posterior"]["mean_u"]
+    assert entry["crps_reduction_vs_prior"] is None
+    assert entry["prior_crps_mean"] is None
+    assert "two different horizons" in caplog.text
+
+
 def test_summary_identifiability_is_absent_when_no_floor_was_measured() -> None:
     # Short windows give no bootstrap, and a ratio over an unmeasured floor is
     # not "infinitely identifiable" -- it is unknown.
@@ -530,7 +643,7 @@ def test_summary_degrades_on_the_smoke_shape_rather_than_inventing_numbers() -> 
     assert summary["n_members"] == 2
     assert entry["z_score"] is None
     assert entry["crps"]["mean"] >= 0
-    assert all(0 <= r <= 2 for r in entry["ranks"])
+    assert len(entry["rank_counts"]) == 3  # ranks 0, 1, 2 at M=2
 
 
 def test_summary_survives_a_window_whose_frames_are_missing() -> None:
@@ -818,6 +931,33 @@ def test_run_summary_carries_sensor_statistics_for_every_sensor_set(
     # Additive: WP1.1/WP1.2 keys are untouched.
     assert summary["metrics_version"] == 2
     assert "parameter_metrics" in summary and "sensor_metrics" in summary
+
+
+def test_run_summary_survives_state_files_without_a_members_axis(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An ensemble-mean-only artifact. Both sensor blocks are probabilistic and
+    # need the members -- but the guard has to be at the SCRIPT level, because
+    # `vector_sensor_metrics` runs first and would raise before the library's
+    # own guard is ever reached. Invariant 3: the set is dropped, the file is
+    # still written, and everything already computed survives.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path)
+    for w in range(_RUN_WINDOWS):
+        _state_dataset(None, _RUN_FRAMES, seed=10 + w).to_netcdf(
+            run_dir / "windows" / f"window_{w}_posterior_state.nc"
+        )
+
+    with caplog.at_level("WARNING"):
+        compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+
+    assert "No ensemble dimension in the assimilation sensor series" in caplog.text
+    assert summary["sensor_metrics"] == {}
+    assert summary["sensor_statistics"] == {}
+    assert summary["parameter_metrics"] and summary["state_metrics"]
 
 
 def test_run_summary_sensor_statistics_no_op_without_saved_prior_states(

@@ -95,7 +95,7 @@ def window_masks(times, sim_time, num_windows):
     return [index == w for w in range(num_windows)]
 
 
-def _windowed(series, sim_time, num_windows, reduce_fn):
+def _windowed(series, sim_time, num_windows, reduce_fn, label=""):
     """Apply ``reduce_fn(window_slice)`` per window and stack on a ``window`` dim."""
     quantities = _quantity_series(series)
     masks = window_masks(quantities["time"].values, sim_time, num_windows)
@@ -105,7 +105,9 @@ def _windowed(series, sim_time, num_windows, reduce_fn):
             # Invariant 3: a window whose frames are missing (a killed job, a
             # truncated file) costs its own entry, not the whole block.
             logger.warning(
-                "No sensor frames fall in window %d -- its statistics are null", w
+                "%sno sensor frames fall in window %d -- its statistics are null",
+                f"{label}: " if label else "",
+                w,
             )
             # ``mean`` over an empty selection, not ``isel(time=0)``: it yields
             # the right dims and coords even when the series itself is empty.
@@ -116,7 +118,7 @@ def _windowed(series, sim_time, num_windows, reduce_fn):
     return xr.concat(reduced, dim="window").assign_coords(window=np.arange(num_windows))
 
 
-def window_statistics(series, sim_time, num_windows):
+def window_statistics(series, sim_time, num_windows, label=""):
     """Per-window mean and variance of each quantity at each sensor.
 
     Args:
@@ -124,6 +126,8 @@ def window_statistics(series, sim_time, num_windows):
             coordinate, as produced by the extraction helpers.
         sim_time: Simulated seconds per assimilation window.
         num_windows: Number of windows.
+        label: Prefix for the log lines (e.g. the sensor-set name), so a run
+            with several sensor sets does not emit indistinguishable warnings.
 
     Returns:
         ``{"mean": DataArray, "variance": DataArray}``, each
@@ -137,15 +141,17 @@ def window_statistics(series, sim_time, num_windows):
     A single-frame window gives ``nan``, which is correct rather than zero.
     """
     return {
-        "mean": _windowed(series, sim_time, num_windows, lambda w: w.mean("time")),
+        "mean": _windowed(
+            series, sim_time, num_windows, lambda w: w.mean("time"), label
+        ),
         "variance": _windowed(
-            series, sim_time, num_windows, lambda w: w.var("time", ddof=1)
+            series, sim_time, num_windows, lambda w: w.var("time", ddof=1), label
         ),
     }
 
 
 def window_sampling_std(
-    series, sim_time, num_windows, n_blocks=20, n_resamples=200, rng=None
+    series, sim_time, num_windows, n_blocks=20, n_resamples=200, rng=None, label=""
 ):
     """Block-bootstrap sampling std of each :func:`window_statistics` entry.
 
@@ -171,6 +177,7 @@ def window_sampling_std(
             sim_time,
             num_windows,
             lambda w, fn=fn: _bootstrap_window(w, fn, n_blocks, n_resamples, rng),
+            label,
         )
         for name, fn in reducers.items()
     }

@@ -657,17 +657,27 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
     `prior_crps_mean` / `crps_reduction_vs_prior` when the prior was scored.
   - `z_score` — the same reduction and the same `expected_std` caveats as
     `parameter_metrics` above, pooled over sensors and windows.
-  - `ranks` — the rank of `T*` within `{T_m}`, one per sensor and window. Ranks
-    use only the ordering, so pooled they see a *shape* failure (a skewed or
-    bimodal posterior with the right mean and spread) that neither the CRPS nor
-    the z-score can.
+  - `rank_counts` — how often the truth landed at each rank `0…M` within
+    `{T_m}`, pooled over sensors and windows (so the list has `M+1` entries and
+    sums to the number of scored knots). Ranks use only the ordering, so pooled
+    they see a *shape* failure (a skewed or bimodal posterior with the right
+    mean and spread) that neither the CRPS nor the z-score can. Figure D1
+    coarsens these to ~10 bins; binning is one-way, so the artifact keeps the
+    exact `M+1`.
   - `identifiability` — across-member spread of `T` divided by a typical
-    member's own block-bootstrap sampling std of `T`. **Read this first:**
-    below ~3 the statistic does not clear its own sampling noise at this window
-    length, and its CRPS and ranks are measuring the window, not the parameters.
-    Absent when no floor could be measured — the bootstrap needs ≳21 frames per
-    window, so short runs (including the CI smoke shape) have none, and an
-    unmeasured floor is unknown rather than infinitely identifiable.
+    member's own block-bootstrap sampling std of `T`, averaged over sensors and
+    reported per window. **Read this first:** below ~3 (which is what the
+    warning in the run log thresholds on, using this same `mean`) the statistic
+    does not clear its own sampling noise at this window length, and its CRPS
+    and ranks are measuring the window, not the parameters. Absent when no floor
+    could be measured — the bootstrap needs ≳21 frames per window, so short runs
+    (including the CI smoke shape) have none, and an unmeasured floor is unknown
+    rather than infinitely identifiable.
+
+  A sensor set whose state files carry no `ensemble` dimension (an old
+  ensemble-mean-only artifact) is dropped from **both** sensor blocks with a
+  log line — every score in them is probabilistic and needs the members — and
+  the rest of the summary is written as usual.
 
 > **`metrics_version`.** The keys above are additive only; when an existing key
 > changes *meaning*, this marker bumps instead. `2` (current) means the fair

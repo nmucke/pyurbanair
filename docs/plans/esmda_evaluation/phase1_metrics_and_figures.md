@@ -336,10 +336,16 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   not say which; frame count is the tempting one because `truth_access.yaml`
   carries `n_per_window`. It is wrong here: that count describes the *truth's*
   cadence, and the assimilation writes at its own `output_frequency`, so one
-  reduction cannot serve both. Both series already carry a global axis on which
-  window `w` starts at `w*sim_time` (the extraction rebases them), so
-  `floor(t/sim_time)` bins either one. A frame exactly on a boundary opens its
-  window, matching the run's own `[w·sim_time, (w+1)·sim_time)` convention.
+  reduction cannot serve both. Both series carry a global time axis, so
+  `floor(t/sim_time)` bins either one — though by different routes, and the
+  round-1 wording "the extraction rebases them" was only half right (found in
+  round 2): `ensemble_sensor_series` does rebase each window onto `w·sim_time`,
+  while `truth_sensor_series` keeps the truth's own `t − t_offset` axis and
+  relies on `t_offset = start_time` plus a uniform truth cadence. The
+  consequence is that the first kept truth frame sits at δ ∈ [0, dt) rather
+  than exactly at 0 — under one frame, so it changes no window assignment. A
+  frame exactly on a boundary opens its window, matching the run's own
+  `[w·sim_time, (w+1)·sim_time)` convention.
 - **`block_bootstrap_std` is one vectorized function, not a scalar/batch pair.**
   The rollback branch shipped both (`block_bootstrap_std` +
   `block_bootstrap_std_batch`) with a shared index matrix and a test pinning
@@ -365,13 +371,18 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   precedent, including the `expected_std` reference and the null below four
   members). The identifiability ratio is emitted per window for the same reason
   the CRPS is: a statistic can become identifiable as the flow spins up.
-- **Ranks are written raw, not binned.** Figure D1 (WP1.5) wants ~10 bins over
-  a pooled set, but binning at metric time bakes the choice into the artifact.
-  The list is bounded — sensors × windows per statistic, ~1600 ints even at
-  Barcelona scale — so the figure can pool and bin as it likes. Ties get a
-  seeded uniform draw rather than a fixed rule: a collapsed ensemble is all
-  ties, and a deterministic tie-break piles them at one end of the histogram
-  and reads as a bias that is not there.
+- **Ranks are written as `M+1` counts, not as the raw rank list** (revised in
+  review round 2). The first cut emitted the raw ranks, on the reasoning that
+  binning at metric time bakes the choice into the artifact and the list is
+  "bounded — ~1600 ints even at Barcelona scale". Measurement killed that: the
+  YAML writer runs `default_flow_style=False`, so every int gets its own line
+  and the block came to **7053 lines / 94 KB** at W=10, S=20, two sensor sets,
+  prior and posterior — swamping a file people read. Counts per rank are what a
+  rank histogram *is*, lose nothing figure D1 uses (it pools over sensors and
+  windows anyway), stay exact so D1 can still coarsen to its ~10 bins, and are
+  ~3x smaller. Ties get a seeded uniform draw rather than a fixed rule: a
+  collapsed ensemble is all ties, and a deterministic tie-break piles them at
+  one end of the histogram and reads as a bias that is not there.
 - **The identifiability floor is a median over members, not a mean.** One
   diverged member's window can have a wild sampling std, and the floor is meant
   to describe a typical member. `< 3` logs a warning naming the statistic,
@@ -421,3 +432,56 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   real non-`skip_viz` path. A smoke run that exercises the sensor stages for
   real is a gap that predates this WP (see the same note in auto-memory) and is
   not closed here.
+
+**WP1.3, review round 2.** The round-1 fixes were themselves unreviewed code;
+these are findings against them, and against what round 1 missed.
+
+- **The round-1 "absent `ensemble` axis" guard was unreachable.** It sat in
+  `window_statistics_summary`, but `vector_sensor_metrics` runs first in the
+  same script and raises on the same input — so the pipeline still died and
+  `run_summary.yaml` was still never written. The guard now lives in
+  `compute_esmda_metrics.py`, where one filtered dict drops the set from *both*
+  sensor blocks; the library keeps its own return-`{}` path for other callers.
+  The test that "covered" this called the library directly and bypassed the
+  script, which is exactly how the gap survived the round it was written in.
+- **The `try/except` round 1 added around the scoring is removed again.**
+  Everything inside it was pure computation on series already in memory — the
+  only I/O, the prior read, has its own guard — so `OSError` was unreachable
+  there and `ValueError`/`KeyError` could essentially only be bugs.
+  Demonstrated: a one-character key typo in the scorer made the stage exit 0
+  and write `sensor_statistics: {}`. A broken scorer shipping a green run is
+  worse than a crash. Invariant 3 is about *absent inputs*, not about absent
+  correctness.
+- **The identifiability warning thresholds on the value that is written.** It
+  had used `nanmedian` over all W×S knots while emitting `series_stats` of the
+  per-window sensor mean, so on skewed sensors the log and the artifact could
+  disagree — and `scripts_and_configs.md` tells the reader to compare the
+  emitted number against 3.
+- **A frame-truncated prior nulls the skill score.** "All-or-nothing per run"
+  was enforced at *file* granularity only; a prior file that exists but stops
+  short leaves its last window empty, and the skill then averaged a 2-window
+  prior against a 3-window posterior — the two-horizons comparison the
+  all-or-nothing rule exists to prevent.
+- **`label` now reaches the "no frames in window" warning too**, which round 1
+  left unlabelled while fixing the identifiability one.
+- **Kept against the reviewer's advice:** the `lambda w, fn=fn:` default-arg
+  capture in `window_sampling_std`. It is dead today — `_windowed` invokes the
+  callback synchronously, so `fn` cannot rebind first — but it is the standard
+  idiom, costs five characters, and removing it would make correctness depend
+  on a non-obvious property of a different function.
+- **Four mutants survived the round-1 suite** and now have tests: the z-score
+  sign; `ddof=1` in the z denominator (ddof=0 rescales by √(M/(M−1)) and breaks
+  the `expected_std` reference the WP1.2 machinery is built on); the axis the
+  bootstrap floor is reduced over (every earlier test used homogeneous data, so
+  a floor constant across sensors scored the same); and the `isfinite` filter on
+  ranks (`nan_to_num` would pile unrankable knots at rank 0 and read as
+  catastrophic bias in D1). All four passed 39/39 before.
+- **Measured, not asserted:** the streaming rewrite costs 2.2 MB peak RSS
+  against 50.4 MB for the old whole-file path on a 151 MB window file;
+  `window_sampling_std` takes 7.4 s at M=64 / S=20 / 2000 frames / 10 windows.
+- **Confirmed clean in round 2** (listed so a later WP does not re-litigate):
+  the `_BOUNDARY_TOLERANCE` direction and scale (still exact at `w = 1e9`; the
+  reverse pull needs a cadence ~10 orders below any output frequency), the
+  simplified `_replicate_spread`, the CRPS/z-score/rank math against §4.2, the
+  `_flat_members` window-major flattening, the identifiability median axis, and
+  all four cross-phase invariants.

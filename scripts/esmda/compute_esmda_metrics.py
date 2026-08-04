@@ -247,33 +247,31 @@ def _sensor_statistics(
         run_dir, sensor_sets, num_windows, sim_time, solver_name
     )
 
+    # No try/except around the scoring. Everything below is pure computation on
+    # series the stage already holds in memory -- the only I/O is the prior read
+    # above, which has its own guard -- so the exceptions it can raise are bugs,
+    # and swallowing them would ship a green run with an empty block.
     statistics = {}
     for name in sensor_sets:
         prior = prior_series[name] if prior_series is not None else None
-        try:
-            statistics[name] = window_statistics_summary(
-                window_statistics(truth_series[name], sim_time, num_windows),
-                window_statistics(ensemble_series[name], sim_time, num_windows),
-                prior_stats=(
-                    window_statistics(prior, sim_time, num_windows)
-                    if prior is not None
-                    else None
-                ),
-                posterior_sampling_std=window_sampling_std(
-                    ensemble_series[name], sim_time, num_windows
-                ),
-                prior_sampling_std=(
-                    window_sampling_std(prior, sim_time, num_windows)
-                    if prior is not None
-                    else None
-                ),
-                label=name,
-            )
-        except (OSError, ValueError, KeyError) as exc:
-            # Invariant 3, at the sensor-set level: one set that cannot be
-            # scored costs its own entry, not the other set and not the
-            # parameter/state/sensor blocks this stage has already computed.
-            logger.warning("Skipping %s sensor statistics: %s", name, exc)
+        statistics[name] = window_statistics_summary(
+            window_statistics(truth_series[name], sim_time, num_windows, label=name),
+            window_statistics(ensemble_series[name], sim_time, num_windows, label=name),
+            prior_stats=(
+                window_statistics(prior, sim_time, num_windows, label=name)
+                if prior is not None
+                else None
+            ),
+            posterior_sampling_std=window_sampling_std(
+                ensemble_series[name], sim_time, num_windows
+            ),
+            prior_sampling_std=(
+                window_sampling_std(prior, sim_time, num_windows)
+                if prior is not None
+                else None
+            ),
+            label=name,
+        )
     return statistics
 
 
@@ -348,8 +346,27 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         float(ta["sim_time"]),
     )
 
+    # Invariant 3, once for both sensor blocks: every score below is a
+    # *probabilistic* one and needs the members. A state file written without an
+    # ensemble axis (an old ensemble-mean-only artifact) has nothing to score,
+    # and must cost its own sensor set rather than the whole metric stage --
+    # which would take the parameter, health and state blocks with it.
+    scorable = {
+        name: coords
+        for name, coords in sensor_sets.items()
+        if "ensemble" in ensemble_series[name].dims
+    }
+    for name in sensor_sets:
+        if name not in scorable:
+            logger.warning(
+                "No ensemble dimension in the %s sensor series -- the sensor "
+                "metrics and statistics both need the members, so that set is "
+                "omitted from both blocks",
+                name,
+            )
+
     sensor_metrics = {}
-    for name, (sx, sy, sz) in sensor_sets.items():
+    for name, (sx, sy, sz) in scorable.items():
         m = vector_sensor_metrics(truth_series[name], ensemble_series[name])
         sensor_metrics[name] = {
             "num_sensors": int(np.asarray(sx).size),
@@ -361,7 +378,7 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     # --- Sensors: window statistics as the verification object (§4.2) --------
     summary["sensor_statistics"] = _sensor_statistics(
         run_dir,
-        sensor_sets,
+        scorable,
         truth_series,
         ensemble_series,
         num_windows,

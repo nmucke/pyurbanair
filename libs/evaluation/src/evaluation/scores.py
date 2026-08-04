@@ -958,7 +958,7 @@ def _flat_members(members: xr.DataArray) -> np.ndarray:
 
 
 def _score_window_statistic(members, truth, floor, name):
-    """Score one statistic's ``(window, sensor)`` grid; entry + its raw CRPS.
+    """Score one statistic's ``(window, sensor)`` grid; entry + its per-window CRPS.
 
     ``members`` is ``(ensemble, window, sensor)``, ``truth`` ``(window, sensor)``
     and ``floor`` the matching per-member bootstrap std (or ``None``). The
@@ -987,10 +987,19 @@ def _score_window_statistic(members, truth, floor, name):
             warnings.simplefilter("ignore", RuntimeWarning)
             return np.nanmean(flat.reshape(n_windows, -1), axis=1)
 
+    crps_per_window = _per_window(crps)
+    finite_ranks = ranks[np.isfinite(ranks)].astype(int)
     entry = {
-        "crps": series_stats(_per_window(crps)),
+        "crps": series_stats(crps_per_window),
         "z_score": z_score_stats(z, n_members),
-        "ranks": [int(r) for r in ranks[np.isfinite(ranks)]],
+        # Counts per rank, not the raw rank list. A rank histogram is what
+        # figure D1 consumes, and pooling it over sensors and windows loses
+        # nothing D1 uses -- while the raw list is ~4x larger on disk (measured:
+        # 7053 lines of run_summary.yaml at Barcelona scale, since the YAML
+        # writer puts every int on its own line). ``M+1`` bins rather than the
+        # ~10 D1 draws: binning is exact here and the figure can coarsen, but
+        # not the other way round.
+        "rank_counts": np.bincount(finite_ranks, minlength=n_members + 1).tolist(),
     }
 
     if floor is not None:
@@ -1002,19 +1011,23 @@ def _score_window_statistic(members, truth, floor, name):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             within = np.nanmedian(_flat_members(floor), axis=0)
-        ratio = _normalized(spread, within)
-        if np.isfinite(ratio).any():
-            entry["identifiability"] = series_stats(_per_window(ratio))
-            if np.nanmedian(ratio) < 3.0:
+        identifiability = series_stats(_per_window(_normalized(spread, within)))
+        if identifiability is not None:
+            entry["identifiability"] = identifiability
+            # Thresholded on the value that is actually written, not on a
+            # separate reduction of the same array: the docs tell the reader to
+            # compare the emitted number against 3, and a warning derived from a
+            # different pooling can disagree with it on skewed sensors.
+            if identifiability["mean"] < 3.0:
                 logger.warning(
                     "%s: across-member spread is only %.2gx its own sampling "
-                    "noise (median over sensors and windows) -- this statistic "
-                    "is not identifiable at this window length, so read its "
-                    "CRPS and rank as noise, not as calibration",
+                    "noise (mean over windows of the sensor average) -- this "
+                    "statistic is not identifiable at this window length, so "
+                    "read its CRPS and ranks as noise, not as calibration",
                     name,
-                    float(np.nanmedian(ratio)),
+                    identifiability["mean"],
                 )
-    return entry, crps
+    return entry, crps_per_window
 
 
 def window_statistics_summary(
@@ -1107,6 +1120,23 @@ def window_statistics_summary(
     prior, prior_crps = _score(prior_stats, prior_sampling_std, "prior")
     summary["prior"] = prior
     for name, entry in posterior.items():
+        post_windows = np.isfinite(posterior_crps[name])
+        prior_windows = np.isfinite(prior_crps[name])
+        if not np.array_equal(post_windows, prior_windows):
+            # The two halves cover different windows -- a prior state file that
+            # exists but stops short leaves its last window empty. Averaging a
+            # 2-window prior against a 3-window posterior puts two horizons in
+            # one skill score, which is the comparison this WP exists to avoid.
+            logger.warning(
+                "%s: the prior covers %d windows and the posterior %d, so their "
+                "skill score would compare two different horizons (null)",
+                name,
+                int(prior_windows.sum()),
+                int(post_windows.sum()),
+            )
+            entry["prior_crps_mean"] = None
+            entry["crps_reduction_vs_prior"] = None
+            continue
         with warnings.catch_warnings():
             # An all-empty prior (every window truncated away) reduces to nan.
             warnings.simplefilter("ignore", RuntimeWarning)
