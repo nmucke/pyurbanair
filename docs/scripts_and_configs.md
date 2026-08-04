@@ -606,8 +606,16 @@ These three scripts form the standard single-run pipeline, orchestrated by
 Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
 - `metrics_version` — estimator-semantics marker (see below).
-- `parameter_metrics` — per-parameter RMSE/CRPS summary + RMSE reduction and
-  CRPSS (`crps_reduction_vs_prior`) against the prior.
+- `parameter_metrics` — per parameter, accuracy (RMSE/CRPS summary + RMSE
+  reduction and CRPSS (`crps_reduction_vs_prior`) against the prior) and
+  calibration (`z_score` = `(θ*−θ̄ᵃ)/σᵃ`, `normalized_error` = `(θ̄ᵃ−θ*)/σᵇ`,
+  `contraction_ratio` = `σᵃ/σᵇ`), plus a `pooled` entry holding the z-scores
+  of every parameter and knot together. Read the two halves jointly: a small
+  contraction ratio with a large `|z|` is a *spuriously* confident posterior,
+  which no accuracy number reveals. A calibrated posterior has pooled
+  `z_score.mean ≈ 0`, `std ≈ 1` and `frac_abs_gt_2 ≈ 0.05`. Entries are `null`
+  where the scale is degenerate (a pinned parameter has `σᵇ = 0`; a
+  single-member ensemble has no `ddof=1` spread).
 - `ensemble_health` — `n_members` / `n_unique` (exact duplicate rows) run-wide
   and per window, plus the min/median pairwise-distance ratio. A resampling
   policy that clones a diverged member (pypalm) leaves an ensemble with fewer
@@ -670,7 +678,8 @@ Stage 2. Reads the artifacts saved by `run_filtering.py` and writes
 - `filter_diagnostics` — summary stats of the per-cycle innovation χ² and
   observation-space prior/posterior RMSE (always available; every mode).
 - `parameter_metrics` — per-parameter RMSE/CRPS of the final analyzed ensemble
-  + RMSE reduction and CRPSS vs prior (absent in `mode=state`).
+  + RMSE reduction and CRPSS vs prior, and the same calibration entries as the
+  ESMDA summary (§2.2) (absent in `mode=state`).
 - `state_metrics` — per-cycle `|U|` field RMSE vs the truth's end-of-cycle frames.
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set.
 

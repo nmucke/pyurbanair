@@ -213,3 +213,45 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   plan's "later scores use `n_unique`" is read as forward-looking — the
   count is reported and warned on now, and no metric consumes it until a WP
   that has an actual duplicated-ensemble run to validate against.
+
+**WP1.2**
+
+- **No `crps_fair` / `crpss_vs_prior` keys.** WP1.1 already emits exactly
+  those two numbers under the names `crps` and `crps_reduction_vs_prior`.
+  Re-emitting them would put two names for one value in the block invariant
+  1 forbids clobbering, and leave the comparison scripts to guess which is
+  authoritative. The bundle adds only what is new: `z_score`,
+  `normalized_error`, `contraction_ratio`.
+- The pooled entry is `parameter_metrics.pooled`, beside the parameter
+  names as the plan specifies. Safe because `_PLOTTED_PARAMS` is a closed
+  whitelist that cannot contain `pooled`, and every consumer indexes this
+  block by an explicit parameter name rather than iterating it (checked:
+  `visualize_run`, `visualize_state_run`, `make_figures_block_a/b`,
+  `compare_sweep_results`, `compare_state_runs`, `compare_param_vs_state`).
+- z-scores get their own reduction, `z_score_stats` → `{n, mean, std,
+  max_abs, frac_abs_gt_2}`, not `series_stats`. A z set is judged by its
+  *distribution* — mean 0, std 1, ~4.6 % beyond ±2 — and `series_stats` has
+  no std, while its `final` (the last knot) means nothing for a calibration
+  set. `std` is `null` below two finite knots rather than 0.
+- Degenerate scales produce `nan` → `null`, never `inf`. Both cases are
+  real: a **pinned** parameter has `σᵇ = 0` by construction, and a collapsed
+  posterior has `σᵃ = 0`. An `inf` would poison every reduction it entered
+  and serialize into `run_summary.yaml` as `.inf`; a run-through-YAML test
+  pins that neither token appears.
+- `parameter_bundle` returns `posterior_std` / `prior_std` but the summary
+  does not write them. They are what tells a large `|z|` caused by bias from
+  one caused by collapse, which figure P1 (WP1.5) annotates; the YAML has
+  `contraction_ratio` for the same reading and does not need both.
+- The truth alignment moved into a shared `_aligned_parameter_members`
+  generator used by both `compute_parameter_metrics` and the new
+  `compute_parameter_bundles`, so the accuracy and calibration blocks can
+  never end up describing different knots. It carries the pre-existing
+  guard (a prior sampled on a different knot grid is dropped rather than
+  broadcast), which now governs the bundle too.
+- One WP1.1 test assertion was relaxed:
+  `test_parameter_summary_omits_prior_keys_without_a_prior` pinned the
+  no-prior key set with `==`, which an additive-only block cannot support.
+  It now names the prior-derived keys it is actually about.
+- `compute_filtering_metrics.py` and `compute_sweep_metrics.py` gain the
+  block for free — both call `parameter_metric_summary`. Same reasoning as
+  WP1.1's `metrics_version` deviation: one function, one meaning.
