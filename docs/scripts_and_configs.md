@@ -605,10 +605,25 @@ These three scripts form the standard single-run pipeline, orchestrated by
 
 Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
-- `parameter_metrics` — per-parameter RMSE/CRPS summary + reduction vs prior.
+- `metrics_version` — estimator-semantics marker (see below).
+- `parameter_metrics` — per-parameter RMSE/CRPS summary + RMSE reduction and
+  CRPSS (`crps_reduction_vs_prior`) against the prior.
+- `ensemble_health` — `n_members` / `n_unique` (exact duplicate rows) run-wide
+  and per window, plus the min/median pairwise-distance ratio. A resampling
+  policy that clones a diverged member (pypalm) leaves an ensemble with fewer
+  degrees of freedom than its nominal size.
 - `state_metrics` — `|U|` field RMSE summary (streamed z-slice by z-slice).
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set
   (assimilation + validation).
+
+> **`metrics_version`.** The keys above are additive only; when an existing key
+> changes *meaning*, this marker bumps instead. `2` (current) means the fair
+> `M(M−1)` pairwise CRPS / energy-score estimators and the root-mean-variance
+> spread introduced in WP1.1. An absent marker (or `1`) means the older biased
+> `M²` form, whose scores sit ~O(1/M) higher — at M=50 roughly 2 %, enough to
+> reorder a sweep. `compare_sweep_results.py` and `compare_state_runs.py` warn
+> when the runs they are about to compare mix the two; re-run
+> `compute_esmda_metrics.py` on the older dirs to bring them forward.
 
 #### [`make_esmda_figures.py`](../scripts/esmda/make_esmda_figures.py)
 **Plain argparse CLI** — usage: `python scripts/esmda/make_esmda_figures.py --run-dir <dir>`
@@ -650,10 +665,12 @@ cycle's end-of-segment frame).
 
 Stage 2. Reads the artifacts saved by `run_filtering.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
+- `metrics_version` — estimator-semantics marker, shared with the ESMDA
+  pipeline (§2.3).
 - `filter_diagnostics` — summary stats of the per-cycle innovation χ² and
   observation-space prior/posterior RMSE (always available; every mode).
 - `parameter_metrics` — per-parameter RMSE/CRPS of the final analyzed ensemble
-  + reduction vs prior (absent in `mode=state`).
+  + RMSE reduction and CRPSS vs prior (absent in `mode=state`).
 - `state_metrics` — per-cycle `|U|` field RMSE vs the truth's end-of-cycle frames.
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set.
 
@@ -750,8 +767,14 @@ from the per-window ensemble state hyperslabs:
 Middle stage of a **sweep comparison pipeline** (runs across ensemble size or domain
 resolution). Computes every metric + metric time series from ESMDA posterior results
 and writes small artifacts to `pyurbanair/sweep_metrics/<run>/`:
-- `metrics.yaml` — configuration + parameter/state/sensor metrics (u/v/w + `|U|`
-  per component, per sensor set).
+- `metrics.yaml` — `metrics_version` (§2.3) + configuration + parameter/state/sensor
+  metrics (u/v/w + `|U|` per component, per sensor set). Every ensemble score in
+  it is recomputed here by the current estimators, so the marker is always the
+  current version. A run without `truth_access.yaml` (produced before that file
+  existed) cannot have its sensor scores recomputed: the RMSE keys are carried
+  over from its `run_summary.yaml` — no pairwise term, so still comparable — and
+  the CRPS keys are dropped rather than mixed into a version-2 file. Re-run
+  ESMDA to restore them.
 - `sensor_timeseries_<set>.nc` — truth + prior/posterior ensemble series (small;
   no full fields).
 - Copies of `posterior_params.nc`, `prior_params.nc`, `true_params.nc`.
@@ -761,12 +784,15 @@ and writes small artifacts to `pyurbanair/sweep_metrics/<run>/`:
 Final stage of the sweep pipeline. Reads `pyurbanair/sweep_metrics/` and draws
 comparison figures + a summary CSV. `--sweep domain` compares across grid cells;
 `--sweep ensemble` compares across ensemble sizes. `--sweep all` does both.
+Warns when the runs it is about to compare carry different `metrics_version`
+markers (§2.3), since their CRPS / energy scores are then incomparable.
 
 #### [`figure_creation/compare_state_runs.py`](../scripts/figure_creation/compare_state_runs.py)
 
 Compares multiple **state-estimation** ESMDA runs on shared metrics. Reads each
 run's `run_summary.yaml`. Groups bars by method (`svd`/`localization_corr`/
 `localization_dist_dist`) and labels by mode. `--mode ic|all|both` filter.
+Warns on mixed `metrics_version` markers (§2.3), as the sweep comparison does.
 
 #### [`figure_creation/compare_param_vs_state.py`](../scripts/figure_creation/compare_param_vs_state.py)
 

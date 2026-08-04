@@ -42,6 +42,12 @@ Usage::
         --out  pyurbanair/sweep_metrics --models pyudales pylbm
 """
 
+# mypy: ignore-errors
+# Legacy untyped comparison script: it predates the strict mypy config and is
+# only type-checked when a commit happens to touch it. Waived wholesale (as in
+# scripts/esmda/_esmda_common.py) rather than annotated in an unrelated PR;
+# dropping the waiver is its own cleanup.
+
 from __future__ import annotations
 
 import argparse
@@ -53,7 +59,12 @@ import xarray as xr
 import yaml
 from data_assimilation.interpolation import interpolate_dataarray_at_points
 from data_assimilation.observation_operator import ObservationOperator
-from evaluation.scores import compute_parameter_metrics, compute_sensor_metrics
+from evaluation.scores import (
+    METRICS_VERSION,
+    compute_sensor_metrics,
+    parameter_metric_summary,
+    series_stats,
+)
 from omegaconf import OmegaConf
 
 from pyurbanair.config.hydra_helpers import (
@@ -191,20 +202,6 @@ def _truth_series(ta, sensor_sets, solver_name):
 # ---------------------------------------------------------------------------
 
 
-def _series_stats(arr):
-    """{mean, final, max, min} of a 1-D series, or ``None`` if it has no values."""
-    a = np.asarray(arr, dtype=float).ravel()
-    finite = a[np.isfinite(a)]
-    if finite.size == 0:
-        return None
-    return {
-        "mean": float(finite.mean()),
-        "final": float(a[-1]) if np.isfinite(a[-1]) else None,
-        "max": float(finite.max()),
-        "min": float(finite.min()),
-    }
-
-
 def _to_native(obj):
     if isinstance(obj, dict):
         return {k: _to_native(v) for k, v in obj.items()}
@@ -220,23 +217,6 @@ def _to_native(obj):
 def _write_yaml(data, path) -> None:
     with open(path, "w") as f:
         yaml.safe_dump(_to_native(data), f, sort_keys=False, default_flow_style=False)
-
-
-def _parameter_metrics(post, true, prior):
-    """Per-parameter RMSE/CRPS summary + reduction vs prior (library compute)."""
-    metrics = compute_parameter_metrics(post, true, prior)
-    out = {}
-    for name, m in metrics.items():
-        entry = {"rmse": _series_stats(m["rmse"]), "crps": _series_stats(m["crps"])}
-        if "prior_rmse" in m:
-            prior_mean = float(np.nanmean(m["prior_rmse"]))
-            post_mean = float(np.nanmean(m["rmse"]))
-            entry["prior_rmse_mean"] = prior_mean
-            entry["rmse_reduction_vs_prior"] = (
-                float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
-            )
-        out[name] = entry
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +274,11 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     cfg = OmegaConf.load(run_dir / "config.yaml")
 
     metrics: dict = {
+        # Every ensemble score in this file is recomputed below by the current
+        # (fair-estimator) library code; the only block copied from the run's
+        # own summary is the state RMSE, which no estimator change touches. So
+        # the marker is unconditionally the current version.
+        "metrics_version": METRICS_VERSION,
         "configuration": summary.get("configuration", {}),
         "timing": summary.get("timing", {}),
     }
@@ -302,7 +287,7 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     post_p = xr.open_dataset(run_dir / "posterior_params.nc")
     true_p = xr.open_dataset(run_dir / "true_params.nc")
     prior_p = xr.open_dataset(run_dir / "prior_params.nc")
-    metrics["parameter_metrics"] = _parameter_metrics(post_p, true_p, prior_p)
+    metrics["parameter_metrics"] = parameter_metric_summary(post_p, true_p, prior_p)
     # Copy the (tiny) param files so the comparison script is self-contained.
     for fn in ("posterior_params.nc", "prior_params.nc", "true_params.nc"):
         shutil.copyfile(run_dir / fn, out_run / fn)
@@ -343,8 +328,8 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
             if post_s is not None:
                 for q in QUANTITIES:
                     m = compute_sensor_metrics(truth_s[name][q], post_s[name][q])
-                    entry[f"{_Q_KEY[q]}_rmse"] = _series_stats(m["rmse"])
-                    entry[f"{_Q_KEY[q]}_crps"] = _series_stats(m["crps"])
+                    entry[f"{_Q_KEY[q]}_rmse"] = series_stats(m["rmse"])
+                    entry[f"{_Q_KEY[q]}_crps"] = series_stats(m["crps"])
                 _save_sensor_timeseries(
                     out_run,
                     name,
@@ -355,13 +340,29 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
                 )
             sensor_metrics[name] = entry
 
-    if not sensor_metrics:
-        # No truth_access (pre-update run): fall back to the base |U| summary.
-        sensor_metrics = summary.get("sensor_metrics", {})
+    if sensor_metrics:
+        metrics["sensor_metrics"] = sensor_metrics
+    else:
+        # No truth_access (pre-update run), so nothing can be recomputed here.
+        # Carry forward only the scores whose definition the estimator change
+        # did not touch -- the RMSE of the ensemble mean has no pairwise term
+        # and stays comparable across the version boundary. The CRPS keys are
+        # dropped rather than copied: one ``metrics_version`` cannot describe a
+        # file whose parameter block is fair and whose sensor block is not, so
+        # copying them would make the comparison script either compare across
+        # the boundary in silence or warn about runs that are in fact
+        # comparable.
+        legacy = summary.get("sensor_metrics", {}) or {}
+        carried = {
+            name: {k: v for k, v in entry.items() if not k.endswith("_crps")}
+            for name, entry in legacy.items()
+        }
+        if carried:
+            metrics["sensor_metrics"] = carried
         status["note"] = (
-            "no truth_access.yaml -> base |U| sensor metrics only (re-run ESMDA)"
+            "no truth_access.yaml -> sensor RMSE carried over, CRPS omitted "
+            "(re-run ESMDA)"
         )
-    metrics["sensor_metrics"] = sensor_metrics
 
     _write_yaml(metrics, out_run / "metrics.yaml")
     return status

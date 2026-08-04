@@ -148,4 +148,68 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
 
 ## Deviations
 
-_(record here as they occur)_
+**WP1.1**
+
+- `METRICS_VERSION` lives in `evaluation.scores`, not in the metric script.
+  It marks the *estimator* semantics, which is the library's property, and
+  three writers need it (ESMDA, filtering, `compute_sweep_metrics.py`);
+  keeping it in one script would have meant importing across script
+  packages.
+- `compute_filtering_metrics.py` also emits `metrics_version`. It was not in
+  the WP's scope, but it writes a `run_summary.yaml` using the same
+  estimators, so leaving it unmarked would have made unmarked mean two
+  different things.
+- `compute_sweep_metrics.py` carried byte-identical private copies of
+  `series_stats` and `parameter_metric_summary` (a WP0.2 dedup miss). They
+  are deleted in favour of the library functions, so `metrics.yaml` gets the
+  CRPSS as well.
+- `crps_ensemble` computes the pairwise term from sorted samples
+  (`sum_{i,j}|x_i - x_j| = 2 sum_i (2i - n + 1) x_(i)`) rather than from the
+  `(M, M, K)` difference tensor. Algebraically identical and asserted as
+  such in the tests, and O(n log n) rather than O(M²K) in a function called
+  per timestep. Two consequences of the rewrite are handled explicitly and
+  pinned by tests: the weights sum to zero, so the sum is centred on the
+  median before accumulating (without it float32 data offset from the origin
+  — an inflow angle near 270° — loses ~4 orders of magnitude), and both
+  terms accumulate in a signed floating dtype (the raw form wrapped on
+  unsigned input).
+- `ensemble_uniqueness` counts unique rows **bitwise** rather than by value,
+  so two identical all-NaN rows (a diverged member cloned by the resampling
+  policy — the case the guard exists for) count as one; and it reduces only
+  over finite pairwise distances, so a NaN member cannot blank out
+  `min_pairwise` / `median_pairwise` for the whole ensemble. It also
+  computes distances row-by-row instead of via an `(M, M, K)` tensor, which
+  reached hundreds of MB on long runs.
+- `_ensemble_health` degrades instead of aborting (invariant 3): an
+  unreadable window costs its own count and a log line, and an assembled
+  posterior it cannot read omits the block entirely.
+- `_skill_score` logs when its reference is zero. At `M = 2` — the CI smoke
+  shape — the fair CRPS is *identically* zero whenever the truth is
+  bracketed by the two members, so `crps_reduction_vs_prior` is routinely
+  `null` there; per the master plan that is guarded with null + a log, not
+  special-cased.
+- `compute_sweep_metrics.py` carries forward only the *estimator-independent*
+  sensor scores when it cannot recompute them (no `truth_access.yaml`): the
+  RMSE of the ensemble mean has no pairwise term and stays comparable, the
+  CRPS keys are dropped. A single `metrics_version` cannot describe a file
+  whose parameter block is fair and whose sensor block is not — the mixing
+  guard would then either stay silent across the boundary or warn about runs
+  that are in fact comparable — but dropping the RMSE with it would silently
+  erase those runs from the comparison panels.
+- The analytic-Gaussian CRPS test runs at **M = 50**, not the `M = 10^4` the
+  plan names. At M=10⁴ the biased estimator's error is ~6e-5, inside any
+  tolerance loose enough for the Monte-Carlo noise, so that test cannot tell
+  the two estimators apart; averaging 20 000 independent M=50 ensembles is
+  both tighter and discriminating (the biased form is then 0.0113 out).
+- The three `scripts/figure_creation/` scripts touched here carry 26
+  pre-existing strict-mypy errors that pre-commit only surfaces once a
+  commit stages them; they get the repo's standard blanket
+  `# mypy: ignore-errors` waiver (as `scripts/esmda/_esmda_common.py`
+  already does) rather than an unrelated annotation pass.
+- `ensemble_health` also reports `min_over_median_pairwise` (from the
+  rollback branch): exact row matching cannot see a *near*-duplicate, and
+  the ratio is what flags one.
+- **Deferred:** scores still divide by the nominal `M`, not `n_unique`. The
+  plan's "later scores use `n_unique`" is read as forward-looking — the
+  count is reported and warned on now, and no metric consumes it until a WP
+  that has an actual duplicated-ensemble run to validate against.

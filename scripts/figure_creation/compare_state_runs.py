@@ -33,6 +33,12 @@ Usage:
     python scripts/compare_state_runs.py --root /path/to/runs --mode both --out result_figures/cmp
 """
 
+# mypy: ignore-errors
+# Legacy untyped comparison script: it predates the strict mypy config and is
+# only type-checked when a commit happens to touch it. Waived wholesale (as in
+# scripts/esmda/_esmda_common.py) rather than annotated in an unrelated PR;
+# dropping the waiver is its own cleanup.
+
 from __future__ import annotations
 
 import argparse
@@ -40,6 +46,7 @@ import csv
 import pathlib
 import re
 import sys
+import warnings
 
 import matplotlib
 
@@ -69,6 +76,7 @@ _MODE_HATCH = {"ic": "", "all": "//"}
 # Metric extraction
 # ---------------------------------------------------------------------------
 
+
 def _dig(d: dict, *keys, default=None):
     """Nested ``dict.get`` that tolerates missing intermediate keys."""
     cur = d
@@ -82,18 +90,66 @@ def _dig(d: dict, *keys, default=None):
 # (column key, human label, nested path into run_summary). Kept declarative so
 # the panels, the table and the CSV all stay in sync.
 _METRICS: list[tuple[str, str, tuple]] = [
-    ("param_angle_rmse", "inflow_angle RMSE (mean)", ("parameter_metrics", "inflow_angle", "rmse", "mean")),
-    ("param_vel_rmse", "velocity_mag RMSE (mean)", ("parameter_metrics", "velocity_magnitude", "rmse", "mean")),
-    ("param_angle_red", "inflow_angle RMSE reduction", ("parameter_metrics", "inflow_angle", "rmse_reduction_vs_prior")),
-    ("param_vel_red", "velocity_mag RMSE reduction", ("parameter_metrics", "velocity_magnitude", "rmse_reduction_vs_prior")),
-    ("param_angle_crps", "inflow_angle CRPS (mean)", ("parameter_metrics", "inflow_angle", "crps", "mean")),
-    ("param_vel_crps", "velocity_mag CRPS (mean)", ("parameter_metrics", "velocity_magnitude", "crps", "mean")),
-    ("state_rmse_mean", "state |U| RMSE (mean)", ("state_metrics", "vel_magnitude_rmse", "mean")),
-    ("state_rmse_final", "state |U| RMSE (final)", ("state_metrics", "vel_magnitude_rmse", "final")),
-    ("sensor_assim_rmse", "sensor RMSE assim (mean)", ("sensor_metrics", "assimilation", "velocity_vector_rmse", "mean")),
-    ("sensor_valid_rmse", "sensor RMSE valid (mean)", ("sensor_metrics", "validation", "velocity_vector_rmse", "mean")),
-    ("sensor_assim_es", "sensor energy assim (mean)", ("sensor_metrics", "assimilation", "velocity_vector_energy_score", "mean")),
-    ("sensor_valid_es", "sensor energy valid (mean)", ("sensor_metrics", "validation", "velocity_vector_energy_score", "mean")),
+    (
+        "param_angle_rmse",
+        "inflow_angle RMSE (mean)",
+        ("parameter_metrics", "inflow_angle", "rmse", "mean"),
+    ),
+    (
+        "param_vel_rmse",
+        "velocity_mag RMSE (mean)",
+        ("parameter_metrics", "velocity_magnitude", "rmse", "mean"),
+    ),
+    (
+        "param_angle_red",
+        "inflow_angle RMSE reduction",
+        ("parameter_metrics", "inflow_angle", "rmse_reduction_vs_prior"),
+    ),
+    (
+        "param_vel_red",
+        "velocity_mag RMSE reduction",
+        ("parameter_metrics", "velocity_magnitude", "rmse_reduction_vs_prior"),
+    ),
+    (
+        "param_angle_crps",
+        "inflow_angle CRPS (mean)",
+        ("parameter_metrics", "inflow_angle", "crps", "mean"),
+    ),
+    (
+        "param_vel_crps",
+        "velocity_mag CRPS (mean)",
+        ("parameter_metrics", "velocity_magnitude", "crps", "mean"),
+    ),
+    (
+        "state_rmse_mean",
+        "state |U| RMSE (mean)",
+        ("state_metrics", "vel_magnitude_rmse", "mean"),
+    ),
+    (
+        "state_rmse_final",
+        "state |U| RMSE (final)",
+        ("state_metrics", "vel_magnitude_rmse", "final"),
+    ),
+    (
+        "sensor_assim_rmse",
+        "sensor RMSE assim (mean)",
+        ("sensor_metrics", "assimilation", "velocity_vector_rmse", "mean"),
+    ),
+    (
+        "sensor_valid_rmse",
+        "sensor RMSE valid (mean)",
+        ("sensor_metrics", "validation", "velocity_vector_rmse", "mean"),
+    ),
+    (
+        "sensor_assim_es",
+        "sensor energy assim (mean)",
+        ("sensor_metrics", "assimilation", "velocity_vector_energy_score", "mean"),
+    ),
+    (
+        "sensor_valid_es",
+        "sensor energy valid (mean)",
+        ("sensor_metrics", "validation", "velocity_vector_energy_score", "mean"),
+    ),
 ]
 
 
@@ -131,18 +187,44 @@ def collect_runs(root: pathlib.Path, mode_filter: str) -> list[dict]:
             "label": _short_label(d.name, mode, info["method"]),
             "metrics": {key: _dig(summary, *path) for key, _, path in _METRICS},
             "timing": _dig(summary, "timing", "esmda_total_seconds"),
+            # Absent marker = pre-WP1.1 biased estimators.
+            "metrics_version": int(summary.get("metrics_version", 1)),
         }
         rows.append(row)
+    _warn_on_mixed_metric_versions(rows)
     # Group visually by mode then method then name.
     rows.sort(key=lambda r: (r["mode"], r["method"], r["name"]))
     return rows
+
+
+def _warn_on_mixed_metric_versions(rows: list[dict]) -> None:
+    """Warn when the runs about to be compared were scored by different estimators.
+
+    WP1.1 replaced the biased ``M**2`` pairwise CRPS / energy score with the fair
+    ``M(M-1)`` form, shifting every such number by ~O(1/M). The CRPS and
+    energy-score panels below would silently compare across that boundary.
+    """
+    versions = sorted({r["metrics_version"] for r in rows})
+    if len(versions) > 1:
+        stale = [r["name"] for r in rows if r["metrics_version"] < max(versions)]
+        warnings.warn(
+            f"comparing runs with mismatched metrics versions {versions}: the "
+            "CRPS / energy-score panels are not comparable across the WP1.1 "
+            "fair-estimator boundary. Re-run compute_esmda_metrics.py on: "
+            f"{', '.join(stale)}",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 # ---------------------------------------------------------------------------
 # Figures
 # ---------------------------------------------------------------------------
 
-def plot_metric_panels(rows: list[dict], out_path: pathlib.Path, mode_filter: str) -> None:
+
+def plot_metric_panels(
+    rows: list[dict], out_path: pathlib.Path, mode_filter: str
+) -> None:
     """One bar-chart panel per metric; bars coloured by method, hatched by mode."""
     n = len(rows)
     x = np.arange(n)
@@ -152,54 +234,86 @@ def plot_metric_panels(rows: list[dict], out_path: pathlib.Path, mode_filter: st
 
     ncols = 3
     nrows = int(np.ceil(len(_METRICS) / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6.2 * ncols, 3.8 * nrows),
-                             constrained_layout=True)
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(6.2 * ncols, 3.8 * nrows), constrained_layout=True
+    )
     axes = np.atleast_1d(axes).ravel()
 
     for ax, (key, label, _) in zip(axes, _METRICS):
-        vals = [np.nan if r["metrics"].get(key) is None else float(r["metrics"][key]) for r in rows]
+        vals = [
+            np.nan if r["metrics"].get(key) is None else float(r["metrics"][key])
+            for r in rows
+        ]
         bars = ax.bar(x, vals, color=colors)
         for b, h in zip(bars, hatches):
             b.set_hatch(h)
         for b, v in zip(bars, vals):
             if not np.isnan(v):
-                ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.3g}",
-                        ha="center", va="bottom", fontsize=8)
+                ax.text(
+                    b.get_x() + b.get_width() / 2,
+                    v,
+                    f"{v:.3g}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
         ax.set_title(label, fontsize=11)
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
         ax.margins(y=0.18)
         ax.grid(axis="y", alpha=0.3)
 
-    for ax in axes[len(_METRICS):]:
+    for ax in axes[len(_METRICS) :]:
         ax.axis("off")
 
     # Legends: method -> colour, mode -> hatch.
     from matplotlib.patches import Patch
+
     methods = sorted({r["method"] for r in rows})
     modes = sorted({r["mode"] for r in rows})
-    method_handles = [Patch(facecolor=_METHOD_COLORS.get(m, "#7f7f7f"), label=m) for m in methods]
-    mode_handles = [Patch(facecolor="white", edgecolor="k", hatch=_MODE_HATCH.get(m, ""),
-                          label=f"mode: {m}") for m in modes]
-    fig.legend(handles=method_handles + mode_handles, loc="lower center",
-               ncol=max(2, len(method_handles) + len(mode_handles)),
-               bbox_to_anchor=(0.5, -0.02), fontsize=9, frameon=False)
+    method_handles = [
+        Patch(facecolor=_METHOD_COLORS.get(m, "#7f7f7f"), label=m) for m in methods
+    ]
+    mode_handles = [
+        Patch(
+            facecolor="white",
+            edgecolor="k",
+            hatch=_MODE_HATCH.get(m, ""),
+            label=f"mode: {m}",
+        )
+        for m in modes
+    ]
+    fig.legend(
+        handles=method_handles + mode_handles,
+        loc="lower center",
+        ncol=max(2, len(method_handles) + len(mode_handles)),
+        bbox_to_anchor=(0.5, -0.02),
+        fontsize=9,
+        frameon=False,
+    )
 
-    fig.suptitle(f"State-estimation run comparison (mode: {mode_filter}, n={n})",
-                 fontsize=16, fontweight="bold")
+    fig.suptitle(
+        f"State-estimation run comparison (mode: {mode_filter}, n={n})",
+        fontsize=16,
+        fontweight="bold",
+    )
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def write_table_and_csv(rows: list[dict], png_path: pathlib.Path, csv_path: pathlib.Path) -> None:
+def write_table_and_csv(
+    rows: list[dict], png_path: pathlib.Path, csv_path: pathlib.Path
+) -> None:
     """A text-table PNG and a CSV of every metric for every run."""
     header = ["run", "mode", "method"] + [key for key, _, _ in _METRICS]
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
         for r in rows:
-            w.writerow([r["name"], r["mode"], r["method"]]
-                       + [r["metrics"].get(k) for k, _, _ in _METRICS])
+            w.writerow(
+                [r["name"], r["mode"], r["method"]]
+                + [r["metrics"].get(k) for k, _, _ in _METRICS]
+            )
 
     # Compact PNG table: rows = runs, cols = a readable subset of metrics.
     show_cols = [
@@ -223,7 +337,8 @@ def write_table_and_csv(rows: list[dict], png_path: pathlib.Path, csv_path: path
     table = ax.table(
         cellText=cell_text,
         colLabels=["run"] + [lbl for _, lbl in show_cols],
-        cellLoc="center", loc="center",
+        cellLoc="center",
+        loc="center",
     )
     table.auto_set_font_size(False)
     table.set_fontsize(9)
@@ -237,17 +352,30 @@ def write_table_and_csv(rows: list[dict], png_path: pathlib.Path, csv_path: path
 # Driver
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path(_DEFAULT_ROOT),
-                    help=f"directory of run folders (default: {_DEFAULT_ROOT})")
-    ap.add_argument("--mode", choices=["ic", "all", "both"], default="both",
-                    help="which runs to compare (default: both)")
-    ap.add_argument("--out", type=pathlib.Path, default=None,
-                    help="output dir (default: <repo>/result_figures/comparison_<mode>)")
+    ap.add_argument(
+        "--root",
+        type=pathlib.Path,
+        default=pathlib.Path(_DEFAULT_ROOT),
+        help=f"directory of run folders (default: {_DEFAULT_ROOT})",
+    )
+    ap.add_argument(
+        "--mode",
+        choices=["ic", "all", "both"],
+        default="both",
+        help="which runs to compare (default: both)",
+    )
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=None,
+        help="output dir (default: <repo>/result_figures/comparison_<mode>)",
+    )
     args = ap.parse_args()
 
     root = args.root.resolve()
@@ -269,7 +397,9 @@ def main() -> None:
 
     plot_metric_panels(rows, out_dir / "metric_comparison.png", args.mode)
     print(f"  + {out_dir/'metric_comparison.png'}")
-    write_table_and_csv(rows, out_dir / "comparison_table.png", out_dir / "comparison.csv")
+    write_table_and_csv(
+        rows, out_dir / "comparison_table.png", out_dir / "comparison.csv"
+    )
     print(f"  + {out_dir/'comparison_table.png'}")
     print(f"  + {out_dir/'comparison.csv'}")
     print(f"Done. Comparison in {out_dir}")
