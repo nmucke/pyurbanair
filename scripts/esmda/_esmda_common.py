@@ -19,19 +19,29 @@ in memory in full.
 
 from __future__ import annotations
 
+import logging
 import pathlib
+import warnings
 
 import numpy as np
 import xarray
 import yaml
 from data_assimilation.interpolation import interpolate_dataarray_at_points
 from data_assimilation.observation_operator import ObservationOperator
+from evaluation.turbulence import (
+    MomentAccumulator,
+    block_bootstrap_std,
+    colocate_components,
+    evenly_spaced_levels,
+)
 from omegaconf import OmegaConf
 
 from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_validation_points,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Run-directory loaders (config + persisted truth-access view + sensor sets)
@@ -172,7 +182,9 @@ def _concat_sensor_pieces(pieces):
     }
 
 
-def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
+def ensemble_sensor_series(
+    state_paths, sensor_sets, solver_name, sim_time, on_member=None
+):
     """Ensemble per-component ``(u, v, w)`` sensor series across rollout windows.
 
     Interpolates u/v/w at every sensor set's points (keeping ``component`` +
@@ -188,6 +200,14 @@ def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
     per-member slice *is* materialised, because the interpolation reads
     ``.values``; every sensor set is interpolated from that one slice so a
     second set costs no extra read.
+
+    ``on_member`` is called as ``on_member(window_index, member_index, member)``
+    with that same materialised slice, before it is dropped. It exists so the
+    WP1.4 mean fields can be accumulated inside this pass rather than in a
+    second one: at Barcelona scale the window files total tens of GB and a
+    second full read of them is not affordable, while a callback on a slice
+    already in memory costs no I/O at all. It is only called when the state
+    carries an ``ensemble`` axis -- everything hanging off it is per member.
     """
     pieces = {name: [] for name in sensor_sets}
     for w, path in enumerate(state_paths):
@@ -198,7 +218,7 @@ def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
                 else None
             )
             for name, vel in _window_sensor_series(
-                ds, sensor_sets, solver_name
+                ds, sensor_sets, solver_name, on_member, w
             ).items():
                 if t is not None and "time" in vel.dims:
                     vel = vel.assign_coords(time=(t - t[0]) + w * sim_time)
@@ -206,12 +226,13 @@ def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
     return _concat_sensor_pieces(pieces)
 
 
-def _window_sensor_series(ds, sensor_sets, solver_name):
+def _window_sensor_series(ds, sensor_sets, solver_name, on_member=None, window_index=0):
     """One window's ``{name: DataArray(component, ensemble, time, sensor)}``.
 
     Members are read and interpolated one at a time from the lazily-opened
     ``ds``; every sensor set is interpolated from the member slice already in
-    memory, so a second set costs no extra read.
+    memory, so a second set costs no extra read, and ``on_member`` (see
+    :func:`ensemble_sensor_series`) sees the same slice.
     """
     if "ensemble" not in ds.dims:
         return {
@@ -228,6 +249,8 @@ def _window_sensor_series(ds, sensor_sets, solver_name):
             members[name].append(
                 _sensor_component_timeseries(member, ox, oy, oz, solver_name)
             )
+        if on_member is not None:
+            on_member(window_index, m, member)
         # No ``member.close()``: ``.load()``'s result owns no file handle, so
         # the call would be a no-op that reads as if it released something. The
         # slice is dropped at the end of the iteration, which is the real thing.
@@ -266,6 +289,401 @@ def truth_sensor_series(
             )
         ts.close()
     return _concat_sensor_pieces(pieces)
+
+
+# ---------------------------------------------------------------------------
+# Mean fields and resolved second moments (WP1.4, metrics doc section 4.1)
+# ---------------------------------------------------------------------------
+
+# Cell-centre dims, in (z, y, x) order, as they can appear after colocation:
+# ``zt/yt/xt`` for uDALES, ``z/y/x`` for PALM, pylbm and the surrogate.
+_CENTRE_DIM_CANDIDATES = (("z", "zt"), ("y", "yt"), ("x", "xt"))
+
+# Evenly spaced z-levels the horizontal slabs are accumulated on. The same
+# count (and the same selection rule) as the ``|U|`` RMSE slices, so the two
+# state blocks describe the same heights.
+_MEAN_FIELD_Z_SLICES = 4
+
+# Ceiling on the accumulator state held for the *whole ensemble* during the
+# pass. One member costs 80 bytes per slab cell (an int64 count, three float64
+# means and six float64 co-moments), independent of how many frames go past, so
+# at M=128 and four 512x512 slabs the unstrided cost would be 10 GB. The
+# horizontal stride derived from this budget bounds it without a config knob;
+# it is applied to the slabs only -- never to the station columns, which are a
+# handful of cells, and never to time.
+_MEAN_FIELD_BUDGET_BYTES = 1 << 30
+_MEAN_FIELD_BYTES_PER_CELL = 80
+
+# Points at which the truth's series is kept during its pass so the hit rate's
+# absolute tolerance ``W`` can be block-bootstrapped from it. Kept per
+# component: 64 points x a run's frames is a few hundred kB, against the whole
+# field it is sampled from.
+_W_SAMPLE_POINTS = 64
+_W_SAMPLE_SEED = 0
+
+# Quantiles stored at the station columns (figure S1's nested bands). The slabs
+# get per-cell ensemble mean and std only -- quantiles over a full 3-D field
+# would multiply ``eval_fields.nc`` by the number of levels stored here.
+STATION_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
+
+
+def _centre_dims(field):
+    """``(z, y, x)`` dim names of a co-located field."""
+    dims = []
+    for candidates in _CENTRE_DIM_CANDIDATES:
+        found = [d for d in candidates if d in field.dims]
+        if not found:
+            raise ValueError(
+                f"co-located field has none of {candidates} among its dims "
+                f"{tuple(field.dims)}"
+            )
+        dims.append(found[0])
+    return tuple(dims)
+
+
+def _drop_member_axis(field):
+    """Drop the length-1 ``ensemble`` axis the per-member slices carry."""
+    return field.isel(ensemble=0) if "ensemble" in field.dims else field
+
+
+def _mean_field_stride(n_members, n_z, n_y, n_x):
+    """Horizontal stride keeping the ensemble's accumulators inside the budget.
+
+    A knob would be the obvious alternative, and WP1.3 deliberately shipped no
+    metric knobs: nothing here needs to vary per run, and the only value a
+    caller could sensibly pick is the one that fits in memory -- which is what
+    this computes. Logged when it bites, so a strided run says so.
+    """
+    stride = 1
+    while (
+        n_members * n_z * -(-n_y // stride) * -(-n_x // stride)
+    ) * _MEAN_FIELD_BYTES_PER_CELL > _MEAN_FIELD_BUDGET_BYTES and stride < min(
+        n_y, n_x
+    ):
+        stride += 1
+    if stride > 1:
+        logger.info(
+            "Mean fields: %d members x %d x %d x %d cells would exceed the "
+            "%.1f GB accumulator budget -- scoring every %d-th cell horizontally",
+            n_members,
+            n_z,
+            n_y,
+            n_x,
+            _MEAN_FIELD_BUDGET_BYTES / (1 << 30),
+            stride,
+        )
+    return stride
+
+
+class MeanFieldCollector:
+    """Per-member time-mean velocity, TKE and ``<u'w'>`` on a fixed region.
+
+    The ensemble half of WP1.4. One :class:`~evaluation.turbulence.
+    MomentAccumulator` per member and region, fed from the member slices the
+    sensor pass already materialises (see ``ensemble_sensor_series``'s
+    ``on_member``), so the mean fields cost no extra read of the window files.
+
+    Two regions, because the two consumers want different things. The
+    **slabs** -- a few evenly spaced z-levels at full (or strided) horizontal
+    resolution -- are what the hit rate scores and what figure F1 draws. The
+    **station columns** -- full-depth profiles at the sensor (x, y) -- are what
+    figure S1 plots, and they are small enough to carry per-member quantiles.
+
+    Accumulation spans windows: a member's statistics cover every frame of every
+    window it was fed, which is what makes them comparable with a truth pass
+    over the same time range.
+
+    Args:
+        solver_name: The staggering the states follow, for colocation.
+        station_x, station_y: Station coordinates (the sensor points), in domain
+            coordinates.
+        n_members: Ensemble size, used only to derive the horizontal stride.
+        target: ``None`` to define the scored region from the first state seen
+            (what the ensemble collector does); a target from another
+            collector's :attr:`target` to sample onto *that* region instead,
+            interpolating (what the truth collector does -- see :meth:`_slab`).
+        keep_samples: Retain a fixed sample of slab cells' series so
+            :meth:`sampling_tolerance` can bootstrap the hit rate's ``W`` from
+            them. Only the truth collector needs it -- ``W`` is a property of
+            the truth -- and it is off by default so the ensemble pass does not
+            carry M copies of series nothing reads.
+
+    Failures degrade rather than propagate: the sensor extraction shares the
+    pass and must not be taken down by, say, a solver whose staggering
+    colocation refuses, so a failure sets :attr:`reason`, stops accumulation and
+    makes :meth:`result` return ``None``.
+    """
+
+    def __init__(
+        self,
+        solver_name,
+        station_x,
+        station_y,
+        n_members=1,
+        target=None,
+        keep_samples=False,
+    ):
+        self.solver_name = solver_name
+        self.station_x = np.asarray(station_x, dtype=float)
+        self.station_y = np.asarray(station_y, dtype=float)
+        self.n_members = int(n_members)
+        self.target = target
+        self.keep_samples = bool(keep_samples)
+        self.reason = None
+        self.failed = False
+        self._moments = {}
+        self._frames = {}
+        self._windows = set()
+        self._samples = []
+        self._sample_index = None
+
+    # -- accumulation -------------------------------------------------------
+
+    def add_member(self, window_index, member_index, member_state):
+        """``on_member`` callback: fold one member's window into its accumulators."""
+        self.add(window_index, member_index, member_state)
+
+    def add(self, window_index, member_index, state):
+        """Fold one chunk of frames into ``member_index``'s accumulators."""
+        if self.failed:
+            return
+        try:
+            self._add(window_index, member_index, state)
+        except (ValueError, KeyError) as error:
+            self.failed = True
+            self.reason = str(error)
+            logger.warning(
+                "Mean fields disabled after window %s member %s: %s",
+                window_index,
+                member_index,
+                error,
+            )
+
+    def _add(self, window_index, member_index, state):
+        components = [
+            _drop_member_axis(field)
+            for field in colocate_components(state, self.solver_name)
+        ]
+        if "time" not in components[0].dims:
+            raise ValueError("state has no 'time' axis, so there is nothing to average")
+        dims = _centre_dims(components[0])
+        if self.target is None:
+            self.target = self._derive_target(components[0], dims)
+
+        slabs = [self._slab(field, dims) for field in components]
+        columns = [self._columns(field, dims) for field in components]
+        moments = self._moments.setdefault(
+            member_index, {"slab": MomentAccumulator(), "station": MomentAccumulator()}
+        )
+        moments["slab"].update(*slabs)
+        moments["station"].update(*columns)
+
+        self._keep_samples(slabs)
+        self._frames[member_index] = self._frames.get(member_index, 0) + int(
+            components[0].sizes["time"]
+        )
+        self._windows.add(int(window_index))
+
+    def _derive_target(self, field, dims):
+        """Fix the scored region from the first state: the collector owns the grid."""
+        zdim, ydim, xdim = dims
+        z_index = evenly_spaced_levels(int(field.sizes[zdim]), _MEAN_FIELD_Z_SLICES)
+        stride = _mean_field_stride(
+            self.n_members,
+            int(z_index.size),
+            int(field.sizes[ydim]),
+            int(field.sizes[xdim]),
+        )
+        native_z = np.asarray(field[zdim].values, dtype=float)
+        native_y = np.asarray(field[ydim].values, dtype=float)
+        native_x = np.asarray(field[xdim].values, dtype=float)
+        return {
+            "z": native_z[z_index],
+            "y": native_y[::stride],
+            "x": native_x[::stride],
+            "station_z": native_z,
+            "station_x": self.station_x,
+            "station_y": self.station_y,
+            "z_index": z_index,
+            "stride": int(stride),
+            # The full grid the target was cut from, so a later state can be
+            # recognised as living on it (and sliced) rather than interpolated.
+            "native": (native_z, native_y, native_x),
+        }
+
+    def _slab(self, field, dims):
+        """``(time, zlev, y, x)`` on the target slab cells.
+
+        Interpolation, always, when the target came from elsewhere: that is the
+        truth collector, whose grid is a *different* grid in the general case
+        (a PALM truth against a surrogate ensemble is the shipped default), and
+        the metrics doc's rule is to interpolate the truth onto the assimilation
+        grid before scoring. On identical grids linear interpolation returns the
+        samples themselves, so the cross-grid path costs accuracy only where
+        there is a genuine grid difference; target cells outside the truth's
+        domain come back ``nan`` and are dropped by every consumer.
+        """
+        zdim, ydim, xdim = dims
+        target = self.target
+        if self._is_native(field, dims):
+            stride = target["stride"]
+            selected = field.isel(
+                {
+                    zdim: target["z_index"],
+                    ydim: slice(None, None, stride),
+                    xdim: slice(None, None, stride),
+                }
+            )
+        else:
+            selected = field.interp(
+                {zdim: target["z"], ydim: target["y"], xdim: target["x"]}
+            )
+        return np.asarray(
+            selected.transpose("time", zdim, ydim, xdim).values, dtype=float
+        )
+
+    def _columns(self, field, dims):
+        """``(time, z, station)`` profiles at the station points.
+
+        Always an interpolation: a station is an arbitrary (x, y) point, not a
+        cell centre. For a foreign grid the vertical is interpolated too, so the
+        truth's profiles land on the assimilation grid's levels.
+        """
+        zdim, ydim, xdim = dims
+        target = self.target
+        n_station = int(target["station_x"].size)
+        if self._is_native(field, dims):
+            points = {
+                xdim: xarray.DataArray(target["station_x"], dims="station"),
+                ydim: xarray.DataArray(target["station_y"], dims="station"),
+            }
+        else:
+            n_z = int(target["station_z"].size)
+            points = {
+                zdim: xarray.DataArray(
+                    np.repeat(target["station_z"][:, None], n_station, axis=1),
+                    dims=("z_target", "station"),
+                ),
+                xdim: xarray.DataArray(
+                    np.repeat(target["station_x"][None, :], n_z, axis=0),
+                    dims=("z_target", "station"),
+                ),
+                ydim: xarray.DataArray(
+                    np.repeat(target["station_y"][None, :], n_z, axis=0),
+                    dims=("z_target", "station"),
+                ),
+            }
+        sampled = field.interp(points)
+        vertical = zdim if self._is_native(field, dims) else "z_target"
+        return np.asarray(
+            sampled.transpose("time", vertical, "station").values, dtype=float
+        )
+
+    def _is_native(self, field, dims):
+        """Whether ``field`` lives on the very grid the target was cut from.
+
+        Compared against the *full* stored axes rather than the strided target
+        ones, so a grid that merely happens to share every fourth coordinate
+        cannot be mistaken for the native one and sliced.
+        """
+        native = self.target["native"]
+        return all(
+            int(field.sizes[dim]) == axis.size
+            and np.allclose(np.asarray(field[dim].values, dtype=float), axis)
+            for dim, axis in zip(dims, native)
+        )
+
+    def _keep_samples(self, slabs):
+        """Retain a fixed sample of slab cells' series for the ``W`` bootstrap.
+
+        Inside the streaming pass because that is the only place the series
+        exist; a fixed cell sample rather than the whole slab because ``W`` is a
+        median over cells and 64 of them settle it.
+        """
+        if not self.keep_samples:
+            return
+        flat = [component.reshape(component.shape[0], -1) for component in slabs]
+        if self._sample_index is None:
+            n_cells = flat[0].shape[1]
+            rng = np.random.default_rng(_W_SAMPLE_SEED)
+            size = min(_W_SAMPLE_POINTS, n_cells)
+            self._sample_index = np.sort(rng.choice(n_cells, size=size, replace=False))
+        self._samples.append(
+            np.stack([component[:, self._sample_index] for component in flat])
+        )
+
+    # -- reduction ----------------------------------------------------------
+
+    def result(self):
+        """Per-member fields, or ``None`` if nothing usable was accumulated.
+
+        Returns:
+            ``{"n_members", "n_windows", "frames_per_member", "target",
+            "slab_mean" (M, 3, zlev, y, x), "slab_tke", "slab_uw",
+            "station_mean" (M, 3, z, station), "station_tke", "station_uw"}``.
+            ``slab_uw`` is ``<u'w'>``, the off-diagonal the metrics doc singles
+            out because it discriminates anisotropy that TKE alone cannot.
+        """
+        if self.failed or not self._moments:
+            return None
+        members = sorted(self._moments)
+        stacked = {}
+        for region in ("slab", "station"):
+            accumulators = [self._moments[m][region] for m in members]
+            stacked[f"{region}_mean"] = np.stack([a.mean() for a in accumulators])
+            stacked[f"{region}_tke"] = np.stack([a.tke() for a in accumulators])
+            stacked[f"{region}_uw"] = np.stack(
+                [a.reynolds_stress()[0, 2] for a in accumulators]
+            )
+        return {
+            "n_members": len(members),
+            "n_windows": len(self._windows),
+            "frames_per_member": [int(self._frames[m]) for m in members],
+            "target": self.target,
+            **stacked,
+        }
+
+    def truth_pass(self, truth_access, n_chunks, chunk_frames):
+        """Stream the truth through this collector, one window's frames at a time.
+
+        Mirrors the window loop's memory discipline (only one chunk of the
+        potentially multi-GB truth is held at once) and, because the collector
+        was given the ensemble's target, lands the truth's statistics on the
+        assimilation grid -- the metrics doc's cross-grid rule.
+        """
+        for chunk in range(n_chunks):
+            ds = open_truth(
+                truth_access["true_state_path"],
+                truth_access["n_total"],
+                truth_access["x_offset"],
+                truth_access["start_idx"],
+                truth_access["t_offset"],
+            ).isel(time=slice(chunk * chunk_frames, (chunk + 1) * chunk_frames))
+            if ds.sizes.get("time", 0):
+                self.add(chunk, 0, ds)
+            ds.close()
+        return self
+
+    def sampling_tolerance(self):
+        """Per-component ``W``: the truth's own sampling error on its time-mean.
+
+        The block-bootstrap standard error of the time-mean at each sampled slab
+        cell (which is ``sigma_u/sqrt(N_eff)`` with the correlation kept),
+        reduced by the **median** over cells: a single cell inside a
+        recirculation can carry a wild floor, and ``W`` is meant to describe a
+        typical one. ``nan`` per component where no floor could be measured --
+        short runs cannot be blocked, which includes the CI smoke shape -- and
+        :func:`~evaluation.scores.hit_rate` reads that as "relative test only".
+        """
+        if not self._samples:
+            return None
+        series = np.concatenate(self._samples, axis=1)  # (component, time, point)
+        floors = block_bootstrap_std(np.moveaxis(series, 1, -1))  # (component, point)
+        with warnings.catch_warnings():
+            # Every sampled cell unmeasurable (a run too short to block) is the
+            # common case in the smoke shape, not a fault.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return np.nanmedian(floors, axis=1)
 
 
 # ---------------------------------------------------------------------------

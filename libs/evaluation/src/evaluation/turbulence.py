@@ -8,7 +8,8 @@ run to gigabytes, so nothing here may ``.load()`` one whole. The streaming
 moment accumulator is the one class the library allows.
 
 Populated in WP0.2 (move), extended in WP1.3 (the block bootstrap that gives
-every window statistic its sampling floor), WP1.4 and phase 3.
+every window statistic its sampling floor), WP1.4 (colocation and the moment
+accumulator behind the mean-field metrics) and phase 3.
 """
 
 # mypy: ignore-errors
@@ -297,3 +298,438 @@ def block_bootstrap_std(
 
     out[finite_rows] = _replicate_spread(replicates)
     return out.reshape(lead_shape)
+
+
+# ---------------------------------------------------------------------------
+# Staggered-grid colocation (WP1.4)
+# ---------------------------------------------------------------------------
+
+# Per solver, the staggered dim each velocity component sits on and the
+# cell-centre dim it must be moved to. Authority: ``ObservationOperator``'s
+# ``dim_mapping`` in ``libs/data-assimilation`` -- the same solver names and the
+# same axes, restated here because this library may not import that one.
+#
+# An empty tuple means "already co-located": pylbm writes one uniform grid, and
+# ``conf/model/neural_surrogate.yaml`` sets ``solver_name: pylbm``, so the
+# surrogate alias is here only so a future config naming it gets the
+# pass-through rather than a raise. ``palm``'s ``w`` is listed although pypalm's
+# postprocess already interpolates it from ``zw_3d`` onto ``z``; a pair whose
+# staggered dim is absent is skipped, so the entry is a no-op on a
+# post-processed state and correct on a raw one.
+_STAGGERED_TO_CENTRE = {
+    "udales": {"u": (("xm", "xt"),), "v": (("ym", "yt"),), "w": (("zm", "zt"),)},
+    "palm": {"u": (("xu", "x"),), "v": (("yv", "y"),), "w": (("zw", "z"),)},
+    "pylbm": {"u": (), "v": (), "w": ()},
+    "neural_surrogate": {"u": (), "v": (), "w": ()},
+}
+
+_VELOCITY_COMPONENTS = ("u", "v", "w")
+
+# How far a cell centre may sit from the midpoint of its two bounding faces, as
+# a fraction of the local face spacing, before colocation refuses to run.
+# ``centre[i] == 0.5*(face[i] + face[i+1])`` is the *definition* of a cell
+# centre, so in exact arithmetic this could be zero; it absorbs the rounding of
+# coordinates stored as float32 (~1e-7 relative) and is still far below the
+# smallest slicing mistake it must catch -- a stride-2 level selection displaces
+# the midpoint by half a cell.
+_FACE_CENTRE_TOLERANCE = 1e-3
+
+
+def _faces_to_centres(da, face_dim, centre_dim, centres):
+    """Linearly interpolate ``da`` from face samples onto cell centres.
+
+    Each solver stores one face per cell (the lower one), so the face and centre
+    axes have the same length and the last centre has no upper face; it is filled
+    by linear extrapolation from the last two faces (weights 1.5 and -0.5) --
+    the same ``fill_value="extrapolate"`` choice pypalm's own ``zw -> z``
+    interpolation makes. Dropping the column instead would silently shorten the
+    returned grid, which every consumer then has to re-derive.
+
+    Works on ``.values``: adding two ``isel`` slices as DataArrays would make
+    xarray align them on their (different) face coordinates and return nothing.
+    """
+    axis = da.get_axis_num(face_dim)
+    values = np.asarray(da.values)
+    n = values.shape[axis]
+
+    def _take(index):
+        return np.take(values, index, axis=axis)
+
+    interior = 0.5 * (_take(np.arange(n - 1)) + _take(np.arange(1, n)))
+    edge = 1.5 * _take([n - 1]) - 0.5 * _take([n - 2])
+    moved = np.concatenate([interior, edge], axis=axis)
+
+    dims = tuple(centre_dim if d == face_dim else d for d in da.dims)
+    coords = {
+        name: coord
+        for name, coord in da.coords.items()
+        if face_dim not in coord.dims and name != centre_dim
+    }
+    coords[centre_dim] = centres
+    return xarray.DataArray(moved, dims=dims, coords=coords, name=da.name)
+
+
+def _centre_values(ds, face_dim, centre_dim):
+    """The centre coordinate for a face axis, checked to *be* the midpoints.
+
+    The check is what makes colocation safe to call blindly: interpolating
+    between two z-levels five cells apart is arithmetically fine and physically
+    meaningless, so a state that was strided or level-selected before colocation
+    is refused rather than silently averaged.
+    """
+    if face_dim not in ds.coords or centre_dim not in ds.coords:
+        raise ValueError(
+            f"cannot colocate off {face_dim!r}: the state carries "
+            f"{'the centre' if face_dim in ds.coords else 'neither'} coordinate "
+            f"but not both {face_dim!r} and {centre_dim!r}, so there is no way "
+            "to know where the samples are"
+        )
+    faces = np.asarray(ds[face_dim].values, dtype=float)
+    centres = np.asarray(ds[centre_dim].values, dtype=float)
+    if faces.size < 2:
+        raise ValueError(f"cannot colocate off a single {face_dim!r} level")
+    if centres.size != faces.size:
+        raise ValueError(
+            f"{centre_dim!r} has {centres.size} levels but {face_dim!r} has "
+            f"{faces.size}; one face per cell is the layout every backend writes"
+        )
+    spacing = np.diff(faces)
+    midpoints = faces[:-1] + 0.5 * spacing
+    offset = np.abs(centres[:-1] - midpoints)
+    if np.any(offset > _FACE_CENTRE_TOLERANCE * np.abs(spacing)):
+        raise ValueError(
+            f"{centre_dim!r} centres are not the midpoints of the {face_dim!r} "
+            "faces (worst offset "
+            f"{float(np.max(offset / np.abs(spacing))):.3g} of a cell) -- the "
+            "state was subset or strided along that axis before colocation; "
+            "colocate first, then select"
+        )
+    return centres
+
+
+def colocate_components(ds, solver_name):
+    """``(u, v, w)`` interpolated onto cell centres, per backend.
+
+    Reynolds stresses are *one-point* moments, so the components have to be
+    evaluated at the same point before they are multiplied. On a staggered grid
+    they are not: uDALES stores ``u`` on the x-faces, ``v`` on the y-faces and
+    ``w`` on the z-faces; PALM stores ``u`` on ``xu`` and ``v`` on ``yv``.
+
+    Why not combine by index, as :func:`streaming_state_rmse` does for ``|U|``:
+    ``u[k,j,i]`` and ``w[k,j,i]`` sit half a cell apart in both x and z, so an
+    ``<u'w'>`` formed from them is a *two-point* correlation at lag
+    ``(dx/2, 0, dz/2)`` while the diagonal ``<u'u'>`` is a one-point moment --
+    every entry of the tensor is evaluated somewhere else, and the resulting
+    bias in the anisotropy ratio follows the staggering pattern rather than the
+    flow, so no amount of ensemble averaging removes it and it differs between
+    backends. For the mean field the displacement is a plain first-order error
+    (``0.5*dx*dU/dx``), which is harmless in the ``|U|`` summary and wrong here.
+
+    What colocation does *not* buy: linear interpolation is a low-pass filter,
+    so it does not recover the amplitude of a grid-scale stress -- it makes the
+    filter the *same* for every entry of the tensor, which is what the ratio
+    needs. Neither method substitutes for resolving the fluctuation.
+
+    Solid cells are not marked by any backend (pylbm writes near-zeros plus a
+    ``blanking`` variable, pypalm replaces PALM's NaN with 0.0, uDALES ships no
+    mask), so this function never decides which cells are solid -- masking is
+    the caller's step, and interpolation is not a way to discover the mask
+    either, since a zero-filled solid face pulls its neighbouring centre
+    halfway to zero.
+
+    Args:
+        ds: A state Dataset (or one member of one) carrying ``u``, ``v``, ``w``
+            and the coordinates of both the staggered and the centre axes. It
+            must not have been subset along an axis that still needs colocating
+            (see :func:`_centre_values`).
+        solver_name: ``udales``, ``palm``, ``pylbm`` or ``neural_surrogate`` --
+            the ``assim_solver_name`` recorded in a run's ``truth_access.yaml``.
+
+    Returns:
+        Three DataArrays on the centre axes, carrying the centre coordinates, so
+        they share one grid and can be multiplied cell by cell (and handed to
+        ``.interp`` for a cross-grid truth comparison). Non-spatial dims
+        (``time``, and ``ensemble`` when present) pass through untouched.
+
+    Raises:
+        ValueError: If the solver is unknown, a component is missing, or an axis
+            cannot be colocated (see :func:`_centre_values`).
+    """
+    if solver_name not in _STAGGERED_TO_CENTRE:
+        raise ValueError(
+            f"unknown solver {solver_name!r}: colocation needs the staggering, "
+            f"known are {sorted(_STAGGERED_TO_CENTRE)}"
+        )
+    mapping = _STAGGERED_TO_CENTRE[solver_name]
+    missing = [name for name in _VELOCITY_COMPONENTS if name not in ds]
+    if missing:
+        raise ValueError(f"state is missing the velocity components {missing}")
+
+    out = []
+    for name in _VELOCITY_COMPONENTS:
+        field = ds[name]
+        for face_dim, centre_dim in mapping[name]:
+            if face_dim not in field.dims:
+                continue  # already co-located on this axis (e.g. pypalm's w)
+            field = _faces_to_centres(
+                field, face_dim, centre_dim, _centre_values(ds, face_dim, centre_dim)
+            )
+        out.append(field)
+    return tuple(out)
+
+
+def evenly_spaced_levels(n_levels, n_wanted):
+    """Indices of ``n_wanted`` evenly spaced levels, endpoints included.
+
+    The same selection :func:`_vel_field_4z` uses, so the accumulated slabs
+    coincide with the z-levels the ``|U|`` RMSE is already reported on.
+    """
+    if n_levels < 1:
+        raise ValueError(f"n_levels must be positive, got {n_levels}")
+    if n_wanted < 1:
+        raise ValueError(f"n_wanted must be positive, got {n_wanted}")
+    return np.unique(np.linspace(0, n_levels - 1, n_wanted).round().astype(int))
+
+
+# ---------------------------------------------------------------------------
+# Streaming moments (WP1.4)
+# ---------------------------------------------------------------------------
+
+
+class MomentAccumulator:
+    """Chunk-wise ``n``, ``U_i`` and ``<u_i'u_j'>`` without holding the frames.
+
+    The library's one class, and stateful for a reason: a run's mean fields are
+    an average over every frame of every window, and the window state files
+    total tens of GB, so the moments have to be folded in as the frames stream
+    past. One instance covers one member (or the truth) over one region; feed it
+    chunk after chunk with :meth:`update` and read :meth:`mean`, :meth:`tke` and
+    :meth:`reynolds_stress` at the end.
+
+    State is per cell and independent of how many frames pass through: one count
+    plus ``C`` running means plus the ``C(C+1)/2`` co-moments of the ``i <= j``
+    pairs -- 10 float64 arrays at the usual ``C = 3``, so 1.3 MB for four
+    64x64 slabs and 21 MB for four 256x256 ones. It is the *ensemble* total that
+    bites (one accumulator per member), which is the caller's problem to bound.
+
+    **NaN policy: per-cell counts, casewise deletion.** ``n`` is an array over
+    cells, not a scalar, and a frame contributes to a cell only if every
+    component is finite there. A scalar count would have to either drop a whole
+    frame because one cell is masked or count a masked cell as a sample; and a
+    truth field interpolated onto the assimilation grid comes back NaN at the
+    cells the interpolation cannot reach, so per-cell counts are the only
+    version that gives the interior its correct sample size. Casewise (rather
+    than pairwise) deletion keeps ``R_ij`` a covariance: counting each pair over
+    its own available frames can make ``R`` indefinite and ``tke`` negative at a
+    cell that is masked intermittently in one component only.
+
+    **Numerics: the chunk-wise (Chan) combine, not ``sum uu - (sum u)^2/n``.**
+    Each chunk's co-moment is formed about that chunk's own mean and merged with
+    a ``delta_i*delta_j*n*m/(n+m)`` correction. The textbook form subtracts two
+    nearly equal large numbers and this is exactly its bad regime -- urban flow
+    at a 5 m/s mean carries ~0.2 m/s fluctuations, so the mean square is ~600x
+    the variance being recovered. Relative error of the ``ddof=1`` variance
+    against an exact ``longdouble`` two-pass over the stored samples, 360 frames
+    fed in 10 chunks of 36 (measured, ``float64`` throughout):
+
+    ==================  ========  ==========
+    mean / fluctuation  naive     this class
+    ==================  ========  ==========
+    5 / 0.2                8e-14      2e-16
+    5 / 0.002              2e-09      4e-15
+    1e4 / 1e-3             4e-02      7e-11
+    ==================  ========  ==========
+
+    The last row is a 4% error on data that is not pathological -- just a field
+    with a large offset relative to its fluctuation -- which is what rules the
+    naive form out.
+    """
+
+    def __init__(self):
+        # Everything is allocated on the first update: only the data knows the
+        # cell shape, and one class then serves slabs and station columns
+        # without the caller restating shapes the arrays already carry.
+        self._count = None
+        self._mean = None
+        self._comoment = None
+        self._pairs = ()
+        self._n_components = 0
+        self._cell_shape = ()
+
+    @property
+    def n_components(self):
+        """Components being accumulated; ``0`` before the first update."""
+        return self._n_components
+
+    @property
+    def cell_shape(self):
+        """Shape of one frame (the chunk shape minus its leading time axis)."""
+        return self._cell_shape
+
+    def update(self, *components):
+        """Fold one time chunk of co-located components into the accumulators.
+
+        Args:
+            *components: One array per component, **time first**, all of the
+                same shape ``(n_time, *cell_shape)``. ``np.asarray`` is applied,
+                so DataArrays and float32 fields are accepted; accumulation is
+                always in float64. A single frame must be passed with an
+                explicit length-1 time axis -- the leading axis is always read
+                as time and a missing one cannot be detected.
+
+        Raises:
+            ValueError: If no components are given, if their shapes differ, if
+                an array has no time axis, or if the component count or cell
+                shape differs from the first call -- which is what catches a
+                caller that changed its z-level selection between chunks.
+        """
+        if not components:
+            raise ValueError("update needs at least one component array")
+        chunk = [np.asarray(component, dtype=float) for component in components]
+        shapes = {component.shape for component in chunk}
+        if len(shapes) != 1:
+            raise ValueError(
+                f"all components must share one shape, got {sorted(shapes)}"
+            )
+        if chunk[0].ndim < 1:
+            raise ValueError(
+                "components need a leading time axis; pass a single frame as "
+                "field[None] rather than as a bare frame"
+            )
+        n_time = int(chunk[0].shape[0])
+        cell_shape = tuple(chunk[0].shape[1:])
+
+        if self._count is None:
+            self._initialise(len(chunk), cell_shape)
+        elif (len(chunk), cell_shape) != (self._n_components, self._cell_shape):
+            raise ValueError(
+                f"expected {self._n_components} components of cell shape "
+                f"{self._cell_shape} (fixed by the first update), got "
+                f"{len(chunk)} of {cell_shape}"
+            )
+        if n_time == 0:
+            return
+
+        count, mean, comoment = self._state()
+
+        # Casewise validity: one mask for every component, so the mean and every
+        # co-moment are taken over the same frames at every cell.
+        valid = np.isfinite(chunk[0])
+        for component in chunk[1:]:
+            valid &= np.isfinite(component)
+        n_new = valid.sum(axis=0)
+        if not bool(np.any(n_new)):
+            return
+
+        # Deviations from the *running* mean rather than from zero: on every
+        # chunk but the first this is already the small quantity, which is what
+        # keeps the chunk mean itself accurate for large-offset fields.
+        deviation = [
+            np.where(valid, component - mean[i], 0.0)
+            for i, component in enumerate(chunk)
+        ]
+        safe_new = np.where(n_new > 0, n_new, 1)
+        delta = np.stack([d.sum(axis=0) / safe_new for d in deviation])
+
+        # Each chunk's co-moment is formed about the chunk's own mean (a
+        # two-pass computation *within* the chunk) and the shift between that
+        # mean and the running one is added back exactly.
+        centred = [np.where(valid, d - delta[i], 0.0) for i, d in enumerate(deviation)]
+        total = count + n_new
+        safe_total = np.where(total > 0, total, 1)
+        cross_weight = count * n_new / safe_total
+        for pair, (i, j) in enumerate(self._pairs):
+            comoment[pair] += (centred[i] * centred[j]).sum(axis=0) + (
+                delta[i] * delta[j] * cross_weight
+            )
+        mean += delta * (n_new / safe_total)
+        self._count = total
+
+    def count(self):
+        """Per-cell frames in which **all** components were finite (a copy)."""
+        return self._state()[0].copy()
+
+    def mean(self):
+        """Per-cell time means ``U_i``.
+
+        Returns:
+            ``(n_components, *cell_shape)``; ``nan`` at cells with no finite
+            frames (a masked solid cell, or a cell outside an interpolated truth
+            field).
+        """
+        count, mean, _ = self._state()
+        return np.where(count > 0, mean, np.nan)
+
+    def reynolds_stress(self, ddof=1):
+        """Per-cell resolved stresses ``R_ij = <u_i'u_j'>``.
+
+        **Resolved only** -- these are moments of the fields the solver wrote;
+        the subgrid contribution is not in them and is not negligible inside a
+        canopy (metrics doc section 4.1 asks for that to be stated wherever the
+        stresses are reported).
+
+        Args:
+            ddof: Denominator correction. ``1`` (the default) is the unbiased
+                sample covariance, matching the ``ddof=1`` variances WP1.3
+                reports for the same quantity at sensors; ``0`` gives the plain
+                time average ``<u_i u_j> - U_i U_j``.
+
+        Returns:
+            ``(n_components, n_components, *cell_shape)``, symmetric by
+            construction (the ``i > j`` entries are the accumulated ``i <= j``
+            ones, not a second estimate); ``nan`` where ``n <= ddof``.
+        """
+        scale = self._moment_scale(ddof)
+        comoment = self._state()[2]
+        n = self._n_components
+        stress = np.empty((n, n) + self._cell_shape)
+        for pair, (i, j) in enumerate(self._pairs):
+            value = comoment[pair] * scale
+            stress[i, j] = value
+            stress[j, i] = value
+        return stress
+
+    def tke(self, ddof=1):
+        """Per-cell resolved TKE ``k = 0.5*R_ii``.
+
+        Formed from the diagonal co-moments directly rather than by tracing
+        :meth:`reynolds_stress`, so it costs one array instead of ``C**2``. At
+        the default ``ddof=1`` this is exactly ``0.5*sum_i var_ddof1(u_i)``, the
+        estimator WP1.3 reports at sensors.
+        """
+        scale = self._moment_scale(ddof)
+        comoment = self._state()[2]
+        diagonal = np.zeros(self._cell_shape, dtype=float)
+        for pair, (i, j) in enumerate(self._pairs):
+            if i == j:
+                diagonal += comoment[pair]
+        return np.asarray(0.5 * diagonal * scale)
+
+    def _initialise(self, n_components, cell_shape):
+        """Allocate once the first chunk has fixed the shapes."""
+        self._n_components = n_components
+        self._cell_shape = cell_shape
+        self._pairs = tuple(
+            (i, j) for i in range(n_components) for j in range(i, n_components)
+        )
+        self._count = np.zeros(cell_shape, dtype=np.int64)
+        self._mean = np.zeros((n_components, *cell_shape), dtype=float)
+        self._comoment = np.zeros((len(self._pairs), *cell_shape), dtype=float)
+
+    def _state(self):
+        """``(count, mean, comoment)``, or a readable error if nothing was fed."""
+        if self._count is None or self._mean is None or self._comoment is None:
+            raise ValueError(
+                "no frames accumulated yet: MomentAccumulator takes its shapes "
+                "from the first update, so there is nothing to report"
+            )
+        return self._count, self._mean, self._comoment
+
+    def _moment_scale(self, ddof):
+        """``1/(n - ddof)`` per cell, ``nan`` where that is not a sample size."""
+        if ddof < 0:
+            raise ValueError(f"ddof must be non-negative, got {ddof}")
+        count = self._state()[0]
+        denominator = count - ddof
+        usable = denominator > 0
+        return np.where(usable, 1.0 / np.where(usable, denominator, 1), np.nan)

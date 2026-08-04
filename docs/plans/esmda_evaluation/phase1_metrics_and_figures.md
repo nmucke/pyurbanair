@@ -485,3 +485,107 @@ these are findings against them, and against what round 1 missed.
   simplified `_replicate_spread`, the CRPS/z-score/rank math against §4.2, the
   `_flat_members` window-major flattening, the identifiability median axis, and
   all four cross-phase invariants.
+
+**WP1.4**
+
+- **The accumulation rides on the sensor pass, it does not get its own.** The
+  plan says "extend the existing streaming pattern"; the implementation adds an
+  `on_member` callback to `ensemble_sensor_series` and feeds the accumulators
+  from the member slice that pass already materialises. A second pass would
+  have doubled the read of files that total tens of GB at Barcelona scale for
+  information the first pass already has in memory. The callback fires only
+  when the state carries an `ensemble` axis (everything hanging off it is per
+  member), and a failure inside it disables the mean-field layer rather than
+  propagating — the sensor blocks share the loop and must not die with it.
+- **The truth is accumulated directly on the assimilation grid**, by
+  interpolating each time chunk onto the target region before folding it in,
+  rather than accumulated on its own grid and interpolated afterwards. The
+  alternative needs the truth's *reduced* fields on the target's z heights,
+  which the truth grid does not carry — nearest-level selection plus horizontal
+  interpolation was the fallback, and it silently mixes a half-cell vertical
+  offset into a cell-against-cell comparison. Interpolating first costs one
+  scipy call per chunk on a few slabs (a small fraction of the read it rides
+  on) and makes the identical-grid case exact: linear interpolation at
+  coincident points returns the samples themselves.
+- **Region: evenly spaced z-slabs + full-depth station columns.** The plan
+  names neither. Slabs because the hit rate scores cells and figure F1 draws
+  planes, on the *same* levels `streaming_state_rmse` already reports so the
+  two state blocks describe the same heights; columns because figure S1 wants
+  profiles, and at a handful of cells they are free — which is what lets the
+  quantiles the plan asks for live there and only there.
+- **Station columns are the assimilation sensors' `(x, y)`.** The plan's figure
+  S1 says "upstream / in-canyon / wake" without saying where those come from.
+  A new config group for three hand-placed stations would be a knob per case
+  that nothing else reads; the sensors are already placed where the flow is
+  interesting, already in the config, and already what every other block is
+  scored at. If a case wants named stations, the honest place is the obs config
+  that defines the sensors.
+- **No config knobs, and the stride is derived rather than set** (the WP1.3
+  precedent). The one number a caller could sensibly choose — how much of the
+  horizontal grid to score — is fully determined by what fits in memory:
+  `n_members × cells × 80 bytes` against a 1 GB budget, since a member's
+  accumulator is 10 arrays per cell independent of the frame count. It is
+  logged whenever it is not 1, so a strided run says so in its own log.
+- **`hit_rate` returns `{q, n_points}`, not a bare float**, and the block
+  reports the pooled `q` over the three components *and* a per-component
+  breakdown. One scalar is what the metrics doc asks for and what the pooled
+  entry is; the breakdown costs three lines of YAML and is the difference
+  between "the field is off" and "`v` is off". Each component is scored against
+  its own `W`, which is why the pooled call takes a broadcast tolerance rather
+  than a scalar.
+- **`W` is a median over 64 sampled cells, not over every cell.** The
+  bootstrap is per-cell and the reduction is a median (a cell inside a
+  recirculation carries a wild floor and `W` is meant to describe a typical
+  one), so the sampling error of the median over 64 draws is far below the
+  spread between cells that the median is summarising. Keeping every cell's
+  series through the pass would have cost the whole field in memory — the one
+  thing the streaming design exists to avoid.
+- **Non-finite `W` falls back to the relative criterion**, rather than
+  disqualifying every point. The bootstrap needs ~21 frames and the CI smoke
+  shape has fewer, so an unmeasured floor is the common case in tests; the
+  relative test is the guideline's own, and the absolute one is the refinement.
+  Logged at INFO when no component measured a floor.
+- **`eval_fields.nc` stores reductions only, and NaN propagates through them.**
+  A member whose field is not finite is not a sample from the posterior, so a
+  `nanmean` across members would describe an ensemble that does not exist —
+  the same convention WP1.2 settled on for the parameter calibration block, and
+  deliberately the opposite of WP1.1's `ensemble_uniqueness`, which reduces over
+  finite pairs because it is counting duplicates rather than estimating a
+  moment.
+- **The prior's mean fields reuse the prior sensor pass** (`_prior_sensor_series`
+  gained the same callback), so the prior half costs no read of its own either,
+  and it inherits that function's all-or-nothing rule: a partially written set
+  of prior states is absent, not partially scored.
+- **Dropped from the rollback branch's version** (`turbulence_stats.py`, 1339
+  lines): `fac2`, `fractional_bias`, `nmse` and `nmse_split` — the slimmed
+  metric set scores the mean field with the hit rate alone; the scalar/batch
+  bootstrap pair, superseded by WP1.3's single vectorized `block_bootstrap_std`;
+  `extrapolated_centre_dims` and the fluid-indicator plumbing built on the
+  `blanking` variable, which no shipped case's state files actually carry (the
+  masking rule reduces to "score the cells that are finite", which
+  `hit_rate` already implements); and `resolve_metrics_settings` with its four
+  Hydra knobs. Kept and adapted: the Chan/Welford accumulator core (re-measured
+  here — 7e-11 relative error against `longdouble` where the naive form loses
+  4 %) and the colocation table.
+- **Known caveat, not fixed:** on a z-staggered backend (uDALES `w` on `zm`)
+  the *top* z-level of the co-located grid is filled by linear extrapolation
+  from the last two faces, and `evenly_spaced_levels` always includes it, so
+  that slab's second moments are inflated — up to ~5x for face-to-face white
+  noise, ~20 % for a well-resolved field. The rollback branch reported which
+  axes carried the edge so a caller could exclude it from aggregates; that is
+  three functions of plumbing for one level of a four-level slab set, and the
+  honest fix is a level selection that excludes the domain top, which is a
+  question for WP1.5's figures rather than for the accumulator.
+- **Deferred:** the block scores the mean *velocity* only. TKE and `<u'w'>` are
+  accumulated and written to `eval_fields.nc` (figure S1 plots them) but get no
+  scalar score — the metrics doc names the hit rate as the single standards-based
+  number for the mean field and gives no threshold for a second-moment one, and
+  inventing one here would put a number in `run_summary.yaml` that nothing can
+  be read against.
+- **The filtering side is not wired.** WP1.1 and WP1.2 reached
+  `compute_filtering_metrics.py` for free because both went through
+  `parameter_metric_summary`, one function with one meaning. Nothing is shared
+  here: the mean fields hang off the ESMDA window-state layout and its sensor
+  pass, so the filtering stage would need its own driver rather than an import.
+  Out of scope for this WP, and the library half (accumulator, colocation, hit
+  rate) is ready for it.

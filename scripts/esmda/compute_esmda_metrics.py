@@ -34,6 +34,14 @@ run_esmda.py, augmented with:
                               counterpart of ``sensor_metrics``: a pointwise
                               time-series error mostly measures turbulent phase,
                               which no parameter estimate controls.
+  * ``field_metrics``      -- the VDI 3783/9 hit rate ``q`` of the time-mean
+                              velocity field over evenly spaced z-slabs, prior
+                              and posterior, with the absolute tolerance ``W``
+                              block-bootstrapped from the truth's own sampling
+                              error. The reduced fields behind it (mean, TKE,
+                              ``<u'w'>``, on the slabs and at the station
+                              columns) are written beside it as
+                              ``eval_fields.nc`` for the figure stage.
 
 Usage::
 
@@ -45,6 +53,7 @@ import logging
 import pathlib
 import re
 import sys
+from collections.abc import Callable
 
 import numpy as np
 import xarray
@@ -57,6 +66,7 @@ if __package__ is None or __package__ == "":
 from evaluation.scores import (
     METRICS_VERSION,
     ensemble_uniqueness,
+    hit_rate,
     parameter_metric_summary,
     series_stats,
     vector_sensor_metrics,
@@ -66,6 +76,8 @@ from evaluation.sensors import window_sampling_std, window_statistics
 from evaluation.turbulence import streaming_state_rmse
 
 from scripts.esmda._esmda_common import (
+    STATION_QUANTILES,
+    MeanFieldCollector,
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
@@ -76,6 +88,10 @@ from scripts.esmda._esmda_common import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The ``on_member`` callback the streaming extraction hands each materialised
+# member slice: ``(window_index, member_index, member_state)``.
+_OnMember = Callable[[int, int, xarray.Dataset], None] | None
 
 
 def _flatten_parameter_members(params: xarray.Dataset) -> np.ndarray:
@@ -187,6 +203,7 @@ def _prior_sensor_series(
     num_windows: int,
     sim_time: float,
     solver_name: str,
+    on_member: _OnMember = None,
 ) -> dict | None:
     """Sensor series from the saved prior states, or ``None`` with a log line.
 
@@ -211,7 +228,11 @@ def _prior_sensor_series(
         return None
     try:
         # ``dict(...)``: the extraction module is mypy-waived and returns ``Any``.
-        return dict(ensemble_sensor_series(paths, sensor_sets, solver_name, sim_time))
+        return dict(
+            ensemble_sensor_series(
+                paths, sensor_sets, solver_name, sim_time, on_member=on_member
+            )
+        )
     except (OSError, ValueError, KeyError) as exc:
         # A prior state file that *exists* but cannot be read -- a job killed
         # mid-``to_netcdf``, which is the same interrupted run the absence
@@ -229,6 +250,7 @@ def _sensor_statistics(
     num_windows: int,
     sim_time: float,
     solver_name: str,
+    on_prior_member: _OnMember = None,
 ) -> dict:
     """The ``sensor_statistics`` block, per sensor set (metrics doc §4.2).
 
@@ -244,7 +266,7 @@ def _sensor_statistics(
     file), so this shows up as a marginally noisier truth in the final window.
     """
     prior_series = _prior_sensor_series(
-        run_dir, sensor_sets, num_windows, sim_time, solver_name
+        run_dir, sensor_sets, num_windows, sim_time, solver_name, on_prior_member
     )
 
     # No try/except around the scoring. Everything below is pure computation on
@@ -273,6 +295,210 @@ def _sensor_statistics(
             label=name,
         )
     return statistics
+
+
+# ---------------------------------------------------------------------------
+# Mean fields (WP1.4, metrics doc section 4.1)
+# ---------------------------------------------------------------------------
+
+_COMPONENTS = ("u", "v", "w")
+
+# Region -> the dims each accumulated quantity carries, once the member axis is
+# reduced away. ``mean`` is a vector (one entry per velocity component); ``tke``
+# and ``uw`` are scalars per cell.
+_FIELD_DIMS = {
+    "slab": {
+        "mean": ("component", "zlev", "y", "x"),
+        "tke": ("zlev", "y", "x"),
+        "uw": ("zlev", "y", "x"),
+    },
+    "station": {
+        "mean": ("component", "z", "station"),
+        "tke": ("z", "station"),
+        "uw": ("z", "station"),
+    },
+}
+
+
+def _ensemble_size(state_paths: list[pathlib.Path]) -> int:
+    """Members in the window state files, from metadata alone.
+
+    Read before the pass because the accumulators' horizontal stride has to be
+    fixed at the first member, which is too late to count them. A metadata-only
+    open, so it costs no data read; 1 when the files are unreadable or carry no
+    ensemble axis, which is the conservative direction (no stride).
+    """
+    for path in state_paths:
+        try:
+            with xarray.open_dataset(path) as ds:
+                return int(ds.sizes.get("ensemble", 1))
+        except OSError:
+            continue
+    return 1
+
+
+def _ensemble_reduction(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(mean, ddof=1 std)`` over the leading member axis.
+
+    NaN propagates rather than being skipped: a member whose field is not
+    finite is not a sample from the posterior, so a mean that silently drops it
+    would describe an ensemble that does not exist (WP1.2 settled the same
+    question the same way for the parameter calibration block). Cells that are
+    NaN in *every* member -- masked solids, the edges an interpolated truth
+    cannot reach -- come out NaN either way.
+    """
+    mean = values.mean(axis=0)
+    if values.shape[0] < 2:
+        return mean, np.full_like(mean, np.nan)
+    return mean, values.std(axis=0, ddof=1)
+
+
+def _source_variables(prefix: str, result: dict, ensemble: bool) -> dict:
+    """``{variable name: (dims, array)}`` for one source (truth / prior / posterior)."""
+    variables: dict[str, tuple[tuple[str, ...], np.ndarray]] = {}
+    for region, quantities in _FIELD_DIMS.items():
+        for quantity, dims in quantities.items():
+            members = result[f"{region}_{quantity}"]
+            name = f"{prefix}_{region}_{quantity}"
+            if not ensemble:
+                # The truth is a single "member"; keep the same layout minus the
+                # spread, so every consumer indexes the two the same way.
+                variables[name] = (dims, members[0])
+                continue
+            mean, spread = _ensemble_reduction(members)
+            variables[name] = (dims, mean)
+            variables[f"{name}_spread"] = (dims, spread)
+            if region == "station":
+                # Nested quantile bands, at the station columns only: the same
+                # thing over a 3-D slab would multiply the file by the number of
+                # quantiles for a figure nobody draws.
+                variables[f"{name}_quantile"] = (
+                    ("quantile",) + dims,
+                    np.quantile(members, STATION_QUANTILES, axis=0),
+                )
+    return variables
+
+
+def _eval_fields_dataset(target: dict, sources: dict) -> xarray.Dataset:
+    """``eval_fields.nc``: the reduced fields the WP1.5 figures read.
+
+    Reductions only -- never the per-member fields, which are what the window
+    state files already hold and what would make this file grow with the
+    ensemble. float32 throughout: these are plotted and differenced, not
+    accumulated, and the accumulation that needed float64 already happened.
+    """
+    variables = {}
+    for prefix, (result, ensemble) in sources.items():
+        for name, (dims, values) in _source_variables(prefix, result, ensemble).items():
+            variables[name] = (dims, np.asarray(values, dtype=np.float32))
+    return xarray.Dataset(
+        variables,
+        coords={
+            "component": list(_COMPONENTS),
+            "zlev": target["z"],
+            "y": target["y"],
+            "x": target["x"],
+            "z": target["station_z"],
+            "station": np.arange(target["station_x"].size),
+            "station_x": ("station", target["station_x"]),
+            "station_y": ("station", target["station_y"]),
+            "quantile": list(STATION_QUANTILES),
+        },
+        attrs={
+            "description": (
+                "Time-mean velocity, resolved TKE and <u'w'> on evenly spaced "
+                "z-slabs and at the sensor station columns, reduced across the "
+                "ensemble. Stresses are resolved-only: the subgrid contribution "
+                "is not included and is not negligible inside a canopy."
+            ),
+            "horizontal_stride": target["stride"],
+        },
+    )
+
+
+def _hit_rates(predicted: np.ndarray, observed: np.ndarray, w: np.ndarray) -> dict:
+    """Hit rate over the slab cells: pooled over the components, and per component.
+
+    Pooled is the headline number the metrics doc asks for (one scalar for the
+    mean field); the per-component entries are what says *which* component a
+    poor one came from, and each is scored against its own sampling floor.
+    """
+    pooled = hit_rate(predicted, observed, tolerance_w=w[:, None, None, None])
+    entry = {"q": pooled["q"], "n_points": pooled["n_points"]}
+    for i, name in enumerate(_COMPONENTS):
+        entry[name] = hit_rate(predicted[i], observed[i], tolerance_w=w[i])["q"]
+    return entry
+
+
+def _mean_field_block(
+    run_dir: pathlib.Path,
+    posterior: MeanFieldCollector,
+    truth: MeanFieldCollector,
+    prior: MeanFieldCollector | None,
+) -> dict | None:
+    """Write ``eval_fields.nc`` and return the ``field_metrics`` summary block.
+
+    ``None`` (with a log line) whenever the fields could not be built --
+    invariant 3: a state layout colocation refuses, or a truth that shares no
+    cell with the assimilation grid, costs this block and nothing else.
+    """
+    posterior_fields = posterior.result()
+    truth_fields = truth.result()
+    if posterior_fields is None or truth_fields is None:
+        logger.warning(
+            "No mean-field metrics: %s",
+            posterior.reason or truth.reason or "no frames were accumulated",
+        )
+        return None
+
+    target = posterior_fields["target"]
+    sources = {"truth": (truth_fields, False), "posterior": (posterior_fields, True)}
+    prior_fields = prior.result() if prior is not None else None
+    if prior_fields is not None:
+        if prior_fields["slab_mean"].shape == posterior_fields["slab_mean"].shape:
+            sources["prior"] = (prior_fields, True)
+        else:
+            # A prior written on a different grid than the posterior: comparing
+            # the two hit rates would compare two different sets of cells.
+            logger.warning(
+                "Prior mean fields cover %s cells and the posterior %s -- the "
+                "prior half is dropped rather than scored on another grid",
+                prior_fields["slab_mean"].shape,
+                posterior_fields["slab_mean"].shape,
+            )
+            prior_fields = None
+
+    _eval_fields_dataset(target, sources).to_netcdf(run_dir / "eval_fields.nc")
+
+    tolerance = truth.sampling_tolerance()
+    if tolerance is None:
+        tolerance = np.full(len(_COMPONENTS), np.nan)
+    if not np.any(np.isfinite(tolerance)):
+        logger.info(
+            "Mean fields: the truth's window is too short to block-bootstrap a "
+            "sampling floor, so the hit rate runs on its relative criterion "
+            "alone (W = 0)"
+        )
+
+    observed = truth_fields["slab_mean"][0]
+    block: dict[str, object] = {
+        "n_windows": posterior_fields["n_windows"],
+        "frames_per_member": posterior_fields["frames_per_member"],
+        "z_levels": [float(v) for v in target["z"]],
+        "horizontal_stride": target["stride"],
+        "hit_rate_tolerance_w": {
+            name: (float(v) if np.isfinite(v) else None)
+            for name, v in zip(_COMPONENTS, tolerance)
+        },
+        "hit_rate_posterior": _hit_rates(
+            _ensemble_reduction(posterior_fields["slab_mean"])[0], observed, tolerance
+        ),
+    }
+    if prior_fields is not None:
+        block["hit_rate_prior"] = _hit_rates(
+            _ensemble_reduction(prior_fields["slab_mean"])[0], observed, tolerance
+        )
+    return block
 
 
 def compute_metrics(run_dir: pathlib.Path) -> None:
@@ -339,11 +565,23 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         run_dir / "windows" / f"window_{w}_posterior_state.nc"
         for w in range(num_windows)
     ]
+    # The mean fields ride along on that same pass: the window files total tens
+    # of GB at Barcelona scale, and the accumulators are fed from the member
+    # slices the sensor extraction already materialises, so they cost no extra
+    # read (metrics doc §4.1, master-plan invariant 2).
+    station_x, station_y, _ = sensor_sets["assimilation"]
+    field_collector = MeanFieldCollector(
+        ta["assim_solver_name"],
+        station_x,
+        station_y,
+        n_members=_ensemble_size(state_paths),
+    )
     ensemble_series = ensemble_sensor_series(
         state_paths,
         sensor_sets,
         ta["assim_solver_name"],
         float(ta["sim_time"]),
+        on_member=field_collector.add_member,
     )
 
     # Invariant 3, once for both sensor blocks: every score below is a
@@ -376,6 +614,13 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     summary["sensor_metrics"] = sensor_metrics
 
     # --- Sensors: window statistics as the verification object (§4.2) --------
+    prior_collector = MeanFieldCollector(
+        ta["assim_solver_name"],
+        station_x,
+        station_y,
+        n_members=_ensemble_size(state_paths),
+        target=field_collector.target,
+    )
     summary["sensor_statistics"] = _sensor_statistics(
         run_dir,
         scorable,
@@ -384,7 +629,29 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         num_windows,
         float(ta["sim_time"]),
         ta["assim_solver_name"],
+        on_prior_member=prior_collector.add_member,
     )
+
+    # --- Mean fields: hit rate + eval_fields.nc (§4.1) ------------------------
+    truth_collector = MeanFieldCollector(
+        ta["truth_solver_name"],
+        station_x,
+        station_y,
+        target=field_collector.target,
+        keep_samples=True,
+    )
+    if field_collector.target is not None and not field_collector.failed:
+        # Only once the ensemble pass has fixed the region: the truth is scored
+        # *on the assimilation grid*, so without a target there is nothing to
+        # interpolate onto -- and re-reading the truth for a posterior that
+        # failed mid-pass would buy nothing either. The block is dropped below
+        # in both cases.
+        truth_collector.truth_pass(ta, num_windows, int(ta["n_per_window"]))
+    field_metrics = _mean_field_block(
+        run_dir, field_collector, truth_collector, prior_collector
+    )
+    if field_metrics is not None:
+        summary["field_metrics"] = field_metrics
 
     write_yaml(summary, run_dir / "run_summary.yaml")
     print(f"Saved run summary in {run_dir / 'run_summary.yaml'}")

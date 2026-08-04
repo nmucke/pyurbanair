@@ -5,7 +5,7 @@ sweep-figure field/parameter/sensor metrics, and the parameter / sensor bundles
 that assemble them for ``run_summary.yaml`` (moved in WP0.2); CRPSS and
 spread--skill (WP1.1); the §3 parameter calibration bundle -- z-score,
 normalized error, contraction ratio (WP1.2); ranks and the §4.2 window-statistic
-summary (WP1.3). Still to come in phase 1: the hit rate ``q`` (WP1.4).
+summary (WP1.3); the §4.1 mean-field hit rate ``q`` (WP1.4).
 
 Since WP1.1 the pairwise estimators divide by ``M(M-1)`` rather than ``M**2``,
 because the biased form's optimum is a collapsed ensemble -- the exact failure
@@ -1210,3 +1210,80 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
             "z_score": z_score_stats(np.concatenate(pooled_z), n_members)
         }
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Mean-field scoring (WP1.4, metrics doc §4.1)
+# ---------------------------------------------------------------------------
+
+
+def hit_rate(predicted, observed, tolerance_d=0.25, tolerance_w=0.0):
+    """VDI 3783/9 hit rate ``q``: the fraction of points that match.
+
+    The one standards-based number the metrics doc asks of a mean *field*. A
+    point counts as a hit when it is within a **relative** tolerance ``D`` or a
+    **absolute** one ``W`` of the observation:
+
+        ``|p - o| / |o| <= D``  or  ``|p - o| <= W``
+
+    The two are an ``or`` for a reason: a relative test alone is unreachable
+    wherever the observed value passes through zero (in an urban canopy, every
+    recirculation boundary), and an absolute test alone is meaningless in the
+    free stream. The guideline's acceptance threshold is ``q >= 0.66`` at
+    ``D = 0.25``.
+
+    ``W`` is what makes ``q`` a statement rather than a convention. Set from the
+    truth's own sampling uncertainty -- the block-bootstrap standard error of
+    its time-mean, ``sigma_u/sqrt(N_eff)`` (see
+    :func:`~evaluation.turbulence.block_bootstrap_std`) -- it turns the score
+    into "indistinguishable from the truth within the truth's own noise", which
+    is the strongest claim a finite averaging window supports. The default
+    ``0.0`` leaves the relative test alone, i.e. the guideline's fallback when
+    no floor was measured; it is deliberately not a physical constant, because
+    no single velocity scale is right for every case.
+
+    Args:
+        predicted: Model values, any shape.
+        observed: Reference (truth) values, broadcastable to ``predicted``.
+        tolerance_d: Relative tolerance ``D``; the guideline's 0.25.
+        tolerance_w: Absolute tolerance ``W``, broadcastable to ``predicted``
+            (so a per-component floor can be applied to a stacked field in one
+            call).
+
+    Returns:
+        ``{"q": float | None, "n_points": int}``. Points where either side is
+        non-finite are excluded from both -- that is the masked solid cells and
+        the edges an interpolated truth could not reach, which must not be
+        counted as hits *or* misses. ``q`` is ``None`` when nothing is left,
+        which is the honest answer for a fully masked region rather than 0.0.
+
+    Raises:
+        ValueError: If ``tolerance_d`` is negative, or ``tolerance_w`` is
+            negative anywhere (a tolerance is a distance).
+    """
+    if tolerance_d < 0:
+        raise ValueError(f"tolerance_d must be non-negative, got {tolerance_d}")
+    w = np.asarray(tolerance_w, dtype=float)
+    if np.any(w < 0):
+        raise ValueError("tolerance_w must be non-negative")
+
+    p = np.asarray(predicted, dtype=float)
+    o = np.asarray(observed, dtype=float)
+    scored = np.isfinite(p) & np.isfinite(o)
+    # A non-finite W (no floor measured for that component) falls back to the
+    # relative test alone rather than disqualifying the point: the relative
+    # criterion is the guideline's, the absolute one is the refinement.
+    w = np.where(np.isfinite(w), w, 0.0)
+    n_points = int(scored.sum())
+    if n_points == 0:
+        return {"q": None, "n_points": 0}
+
+    error = np.abs(p - o)
+    with warnings.catch_warnings():
+        # |o| == 0 at a stagnation point: the relative test is then False (inf
+        # or nan, neither <= D) and the absolute one decides, which is exactly
+        # the division of labour the ``or`` exists for.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        relative = error / np.abs(o)
+    hits = scored & ((relative <= tolerance_d) | (error <= w))
+    return {"q": float(hits.sum() / n_points), "n_points": n_points}

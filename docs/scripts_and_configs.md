@@ -678,6 +678,45 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   ensemble-mean-only artifact) is dropped from **both** sensor blocks with a
   log line — every score in them is probabilistic and needs the members — and
   the rest of the summary is written as usual.
+- `field_metrics` — the mean **field**, scored with the VDI 3783/9 hit rate `q`:
+  the fraction of cells where the posterior ensemble-mean time-mean velocity is
+  within a relative tolerance `D = 0.25` **or** an absolute one `W` of the
+  truth's. The `or` is the guideline's: a relative test alone is unreachable
+  wherever the velocity passes through zero (every recirculation boundary),
+  an absolute one alone is meaningless in the free stream. Acceptance is
+  `q ≥ 0.66`. `W` is not a convention here — it is the truth's own
+  block-bootstrap sampling error on its time-mean (median over sampled cells,
+  per component), which turns `q` into "indistinguishable from the truth within
+  the truth's own noise". The block carries `hit_rate_posterior` (pooled `q`
+  over the three components, `n_points`, and a per-component breakdown),
+  `hit_rate_prior` when `run.save_prior_state` saved the prior states,
+  `hit_rate_tolerance_w`, the scored `z_levels`, the `horizontal_stride` and
+  the frames each member contributed. A `W` of `null` means no floor could be
+  measured (the run is too short to block-bootstrap — the CI smoke shape always
+  is), and the hit rate then runs on its relative criterion alone.
+
+  The fields behind it are written beside the summary as **`eval_fields.nc`**
+  (the WP1.5 figures read it rather than re-streaming): per-cell time-mean
+  velocity, resolved TKE and `<u'w'>` for the truth and, reduced across the
+  ensemble, for the posterior (and prior). Two regions — a few evenly spaced
+  z-slabs at full horizontal resolution, and full-depth columns at the
+  assimilation sensors' `(x, y)` — with ensemble mean and `ddof=1` spread on
+  both and nested quantiles at the station columns only. Reductions only: no
+  per-member field is stored, and everything is float32. The stresses are
+  **resolved-only** — the subgrid contribution is not in them and is not
+  negligible inside a canopy.
+
+  Three things worth knowing about how they are produced. The accumulation
+  rides on the *same* pass over the window state files as the sensor
+  extraction, so it costs no extra read; the components are interpolated onto
+  cell centres first (a stress is a one-point moment, and combining staggered
+  components by array index biases the anisotropy ratio by the staggering
+  pattern rather than by the flow); and the truth is interpolated onto the
+  assimilation grid, so cross-grid runs are scored cell against cell. The
+  horizontal stride is derived from an accumulator memory budget rather than
+  configured, and is logged whenever it is not 1. The whole block is dropped —
+  with a log line, the rest of the summary intact — when the state carries no
+  ensemble axis or its layout cannot be co-located.
 
 > **`metrics_version`.** The keys above are additive only; when an existing key
 > changes *meaning*, this marker bumps instead. `2` (current) means the fair

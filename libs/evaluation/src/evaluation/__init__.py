@@ -25,9 +25,10 @@ docstring says what has actually landed there:
   state / parameter plots.
 
 Design rules (deliberate -- keep them): no base classes, no registries. The
-only class the library may grow is the streaming moment accumulator (WP1.4),
-which is genuinely stateful; there is none today. Add abstraction only when a
-third caller would otherwise copy-paste.
+only class the library may grow is the streaming moment accumulator
+(:class:`evaluation.turbulence.MomentAccumulator`, WP1.4), which is genuinely
+stateful; it is still the only one. Add abstraction only when a third caller
+would otherwise copy-paste.
 
 Nothing is re-exported here on purpose: ``style`` and ``figures`` import
 matplotlib, and a root re-export would drag it into every consumer. Import
