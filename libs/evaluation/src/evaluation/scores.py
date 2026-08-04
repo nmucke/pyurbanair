@@ -486,10 +486,15 @@ def _normalized(numerator: np.ndarray, spread: np.ndarray) -> np.ndarray:
 
     A non-positive or non-finite spread means the ratio is undefined, not
     infinite: it is what a *pinned* parameter (zero prior spread by
-    construction) and a fully collapsed posterior both look like. ``nan``
-    propagates into :func:`series_stats`, which drops it and reports ``None``;
-    an ``inf`` would instead poison every reduction it entered and serialize
-    into ``run_summary.yaml`` as ``.inf``.
+    construction) and a fully collapsed posterior both look like.
+
+    The reductions cannot tell the two apart -- both :func:`series_stats` and
+    :func:`z_score_stats` filter on ``np.isfinite``, which drops ``inf`` and
+    ``nan`` alike, so ``run_summary.yaml`` reads ``null`` either way. What the
+    guard buys is the *arrays*: the per-knot bundle is what the parameter
+    figures plot, where one ``inf`` rescales an axis into uselessness while a
+    ``nan`` is simply not drawn. Dividing under the guard rather than after it
+    also keeps numpy's divide-by-zero warning off every pinned-parameter run.
     """
     usable = np.isfinite(spread) & (spread > 0)
     return np.where(usable, numerator / np.where(usable, spread, 1.0), np.nan)
@@ -750,41 +755,79 @@ def series_stats(arr):
     }
 
 
-def z_score_stats(z: np.ndarray) -> dict | None:
+def calibrated_z_std(n_members: int) -> float | None:
+    """Std of the z-scores a *calibrated* ``n_members`` ensemble produces.
+
+    The reference to judge :func:`z_score_stats`' ``std`` against -- and it is
+    **not 1** at the ensemble sizes this repo runs. ``z = (θ* − θ̄ᵃ)/σᵃ`` is only
+    standard normal in the limit: at finite ``M`` the numerator carries the
+    ensemble mean's own sampling error and the denominator is a noisy estimate
+    of the true spread, so for a calibrated ensemble
+    ``z ~ sqrt(1 + 1/M) · t_(M-1)``, whose std is
+
+        sqrt((1 + 1/M) · (M - 1) / (M - 3)).
+
+    That is 1.02 at ``M = 64`` (the production default) and 1.03 at ``M = 50``,
+    but 1.26 at ``M = 8`` and *infinite* at ``M ≤ 3`` -- Student's t has no
+    variance there. ``None`` in that case: the sample std of z does not
+    converge, so no yardstick exists and reporting one would invent it. A
+    2-member ensemble scoring ``std`` in the hundreds is the *calibrated*
+    result, not a failure.
+    """
+    if n_members <= 3:
+        return None
+    return float(np.sqrt((1.0 + 1.0 / n_members) * (n_members - 1) / (n_members - 3)))
+
+
+def z_score_stats(z: np.ndarray, n_members: int) -> dict | None:
     """Calibration reduction of a set of z-scores, or ``None`` if none are finite.
 
-    Not :func:`series_stats`: a z-score set is judged by its *distribution*, not
-    by where it ends up, so this reports the two moments that should be 0 and 1
-    under a calibrated posterior plus the two tail readings. ``std`` is ``None``
-    below two finite values (undefined, not zero) -- the ``M = 2`` smoke shape
-    and single-window runs both land there.
+    Not :func:`series_stats`: a z-score set is judged by its *distribution*, so
+    this reports the moments to read it by rather than a series' endpoint.
+    Compare ``std`` against ``expected_std``, never against 1 -- see
+    :func:`calibrated_z_std` for why the two differ, and by how much.
 
-    ``frac_abs_gt_2`` is ~0.046 for a calibrated posterior; materially above
-    that with ``contraction_ratio ≪ 1`` is the over-confident posterior.
+    ``n_members`` is required rather than defaulted, for the same reason
+    :func:`spread_skill` requires it: there is no ensemble size at which the
+    ``M → ∞`` reference is the right one, so a silent default would bake in the
+    misreading it exists to prevent.
+
+    ``std`` is ``None`` below two finite values (undefined, not zero) and
+    whenever ``expected_std`` is -- at ``M ≤ 3`` it is a draw from a
+    distribution with no variance, so the number would be noise presented as a
+    diagnostic. ``mean`` (still centred on 0) and ``max_abs`` survive there.
     """
     values = np.asarray(z, dtype=float).ravel()
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return None
+    expected = calibrated_z_std(n_members)
     return {
         "n": int(finite.size),
         "mean": float(finite.mean()),
-        "std": float(finite.std(ddof=1)) if finite.size > 1 else None,
+        "std": (
+            float(finite.std(ddof=1))
+            if finite.size > 1 and expected is not None
+            else None
+        ),
+        "expected_std": expected,
         "max_abs": float(np.abs(finite).max()),
-        "frac_abs_gt_2": float(np.mean(np.abs(finite) > 2.0)),
     }
 
 
-def _bundle_summary(name: str, bundle: dict[str, np.ndarray]) -> dict:
+def _bundle_summary(name: str, bundle: dict[str, np.ndarray], n_members: int) -> dict:
     """Reduce one :func:`parameter_bundle` to the ``run_summary.yaml`` entries."""
-    entry: dict = {"z_score": z_score_stats(bundle["z_score"])}
+    entry: dict = {"z_score": z_score_stats(bundle["z_score"], n_members)}
     if entry["z_score"] is None:
-        # Every knot degenerate: a single-member ensemble, or a posterior that
-        # collapsed to zero spread. Both are worth a line, since the resulting
-        # ``null`` otherwise reads as "not computed".
+        # No knot has a usable posterior spread. Either the ensemble collapsed,
+        # or -- the likelier cause in practice -- a diverged member is NaN,
+        # which poisons the mean and the spread at every knot at once. Worth a
+        # line either way, since the resulting ``null`` otherwise reads as
+        # "not computed".
         logger.warning(
-            "%s: no finite z-score -- the posterior spread is zero or undefined "
-            "at every knot, so the calibration of this parameter is unknown",
+            "%s: no finite z-score at any knot -- the posterior spread is zero, "
+            "undefined, or poisoned by a non-finite member, so the calibration "
+            "of this parameter is unknown",
             name,
         )
     for key in ("normalized_error", "contraction_ratio"):
@@ -831,11 +874,22 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
     WP1.2 adds the calibration half from :func:`parameter_bundle` -- per
     parameter ``z_score``, ``normalized_error`` and ``contraction_ratio``, plus
     a ``pooled`` entry whose z-scores are concatenated across every parameter
-    and knot (the set that should look ~N(0, 1)). Pooling across parameters is
-    legitimate precisely because a z-score is dimensionless.
+    and knot. Pooling across parameters is legitimate precisely because a
+    z-score is dimensionless; read the pooled ``n`` as a count, though, not as
+    an effective sample size, since adjacent knots of one time-varying
+    parameter are strongly correlated and a many-knot parameter outweighs a
+    static one.
     """
     metrics = compute_parameter_metrics(posterior_params, true_params, prior_params)
     bundles = compute_parameter_bundles(posterior_params, true_params, prior_params)
+    n_members = int(posterior_params.sizes["ensemble"])
+    if calibrated_z_std(n_members) is None:
+        logger.warning(
+            "Ensemble of %d: the z-score spread has no finite reference below 4 "
+            "members, so every z_score.std is null. Read max_abs and the "
+            "contraction ratio instead.",
+            n_members,
+        )
     summary = {}
     pooled_z: list[np.ndarray] = []
     for name, m in metrics.items():
@@ -850,7 +904,7 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
             entry["crps_reduction_vs_prior"] = skill
         # Same parameter selection and truth alignment as ``metrics`` (both go
         # through _aligned_parameter_members), so the lookup always hits.
-        entry.update(_bundle_summary(name, bundles[name]))
+        entry.update(_bundle_summary(name, bundles[name], n_members))
         pooled_z.append(bundles[name]["z_score"])
         summary[name] = entry
     if pooled_z:
@@ -858,5 +912,7 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
         # the parameters are a closed whitelist (_PLOTTED_PARAMS) that will
         # never contain "pooled", and every consumer indexes this block by an
         # explicit parameter name rather than iterating it.
-        summary["pooled"] = {"z_score": z_score_stats(np.concatenate(pooled_z))}
+        summary["pooled"] = {
+            "z_score": z_score_stats(np.concatenate(pooled_z), n_members)
+        }
     return summary

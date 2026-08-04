@@ -229,15 +229,38 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   `visualize_run`, `visualize_state_run`, `make_figures_block_a/b`,
   `compare_sweep_results`, `compare_state_runs`, `compare_param_vs_state`).
 - z-scores get their own reduction, `z_score_stats` → `{n, mean, std,
-  max_abs, frac_abs_gt_2}`, not `series_stats`. A z set is judged by its
-  *distribution* — mean 0, std 1, ~4.6 % beyond ±2 — and `series_stats` has
-  no std, while its `final` (the last knot) means nothing for a calibration
-  set. `std` is `null` below two finite knots rather than 0.
+  expected_std, max_abs}`, not `series_stats`. A z set is judged by its
+  *distribution*, and `series_stats` has no std while its `final` (the last
+  knot) means nothing for a calibration set. `std` is `null` below two finite
+  knots rather than 0.
+- **The z-score reference is not 1** at any ensemble size this repo runs, and
+  `z_score_stats` therefore takes a required `n_members` (the `spread_skill`
+  precedent from WP1.1: no size makes the missing correction right, so a
+  default would bake in the misreading). `z = (θ*−θ̄ᵃ)/σᵃ` compares the truth
+  against a mean *and* a spread estimated from the same `M` members, so for a
+  calibrated ensemble `z ~ √(1+1/M)·t₍M₋₁₎`, with std
+  `√((1+1/M)(M−1)/(M−3))` — 1.02 at `M=64`, 1.26 at `M=8`, **infinite at
+  `M ≤ 3`**. `calibrated_z_std` emits that reference alongside the sample
+  `std`; at `M ≤ 3` both are `null` plus a log, per the master plan's
+  guard-with-null rule, because there the sample std does not converge and a
+  *perfectly calibrated* 2-member smoke run would otherwise report `std ≈
+  400` and read as catastrophic. Every constant is confirmed against a
+  400k-replicate simulation of the estimator.
+  A `frac_abs_gt_2` key was dropped for the same reason: its calibrated value
+  is also M-dependent (0.05 at `M=64`, 0.10 at `M=8`, 0.35 at `M=2`) and a
+  closed-form reference for it needs a t-CDF, i.e. scipy in a leaf library.
 - Degenerate scales produce `nan` → `null`, never `inf`. Both cases are
   real: a **pinned** parameter has `σᵇ = 0` by construction, and a collapsed
-  posterior has `σᵃ = 0`. An `inf` would poison every reduction it entered
-  and serialize into `run_summary.yaml` as `.inf`; a run-through-YAML test
-  pins that neither token appears.
+  posterior has `σᵃ = 0`. Note what this does *not* buy: both reductions
+  filter on `np.isfinite`, which drops `inf` and `nan` alike, so the YAML
+  reads `null` either way. The guard is for the per-knot **arrays** the
+  WP1.5 figures plot, where one `inf` rescales an axis into uselessness —
+  and it keeps numpy's divide-by-zero warning off every pinned-parameter
+  run. (An earlier revision of this note claimed an `inf` would reach the
+  YAML as `.inf`; review round 1 disproved it by running the unguarded
+  form.) The run-through-YAML test now carries a pinned parameter, so it
+  actually exercises the `null` path instead of asserting about a run that
+  cannot produce one.
 - `parameter_bundle` returns `posterior_std` / `prior_std` but the summary
   does not write them. They are what tells a large `|z|` caused by bias from
   one caused by collapse, which figure P1 (WP1.5) annotates; the YAML has
@@ -255,3 +278,17 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
 - `compute_filtering_metrics.py` and `compute_sweep_metrics.py` gain the
   block for free — both call `parameter_metric_summary`. Same reasoning as
   WP1.1's `metrics_version` deviation: one function, one meaning.
+- **Considered and not done** (review round 1): `parameter_metric_summary`
+  walks `_aligned_parameter_members` twice, once for the accuracy half and
+  once for the bundles. Collapsing it into one pass would need the
+  per-parameter body of `compute_parameter_metrics` extracted into yet
+  another helper, to save a `np.interp` and a `.values` read over arrays of
+  at most `M × few-thousand` floats. The redundancy is cheaper than the
+  abstraction; the shared generator already guarantees the two halves see
+  identical knots, which was the only correctness stake.
+- Known caveat, not fixed: the parameter artifacts are float32 on disk, so a
+  hard-contracted posterior (`σᵃ ~ 1e-4` on an inflow angle near 270°) gets
+  an O(10 %) quantization error in `z_score`. Unlike WP1.1's CRPS
+  cancellation this is not an algorithmic defect — the precision is gone
+  before the library sees the data — so it needs an artifact-precision
+  change, not an estimator change.
