@@ -158,25 +158,20 @@ def _block_resample_indices(n_samples, block_len, n_resamples, generator):
 def _replicate_spread(replicates):
     """``ddof=1`` spread down axis 0 of a ``(n_resamples, n_rows)`` array.
 
-    Identical replicates collapse to a true ``0.0`` rather than being handed to
+    Identical replicates collapse to a true ``0.0`` rather than being left to
     ``np.std``, whose mean subtraction leaves ~1e-17 of float rounding behind.
     That residue is not a measurement -- when every replicate is the same number
     the bootstrap distribution is a point mass -- and it matters downstream,
     where an identifiability ratio filters on a positive floor and 1e-17 turns
     a clean ``null`` into ~1e17.
+
+    No non-finite handling: the caller drops every row containing a non-finite
+    sample before resampling, and validates ``n_resamples >= 2``, so the only
+    way a ``nan`` arrives here is a statistic that produced one -- which should
+    propagate rather than be filtered away.
     """
-    n_rows = replicates.shape[1]
-    spread = np.full(n_rows, np.nan)
-    if replicates.shape[0] < 2:
-        return spread
-    finite = np.isfinite(replicates)
-    usable = finite.sum(axis=0) >= 2
-    if not usable.any():
-        return spread
-    columns = replicates[:, usable]
-    spread[usable] = np.nanstd(columns, axis=0, ddof=1)
-    degenerate = np.nanmin(columns, axis=0) == np.nanmax(columns, axis=0)
-    spread[np.flatnonzero(usable)[degenerate]] = 0.0
+    spread = np.std(replicates, axis=0, ddof=1)
+    spread[replicates.min(axis=0) == replicates.max(axis=0)] = 0.0
     return spread
 
 
@@ -243,7 +238,7 @@ def block_bootstrap_std(
 
         * every row, when the shared time axis has fewer than four samples or
           gives ``L < 2``. **This is routine, not exotic** -- the default 20
-          blocks needs 21 samples and the CI smoke shape has three frames per
+          blocks needs 21 samples and the CI smoke shape has four frames per
           window -- so callers must handle it.
         * a row containing any non-finite sample. Dropping the gaps per row
           would give that row a different finite count, hence a different block

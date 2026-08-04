@@ -209,8 +209,16 @@ def _prior_sensor_series(
             num_windows,
         )
         return None
-    # ``dict(...)``: the extraction module is mypy-waived and returns ``Any``.
-    return dict(ensemble_sensor_series(paths, sensor_sets, solver_name, sim_time))
+    try:
+        # ``dict(...)``: the extraction module is mypy-waived and returns ``Any``.
+        return dict(ensemble_sensor_series(paths, sensor_sets, solver_name, sim_time))
+    except (OSError, ValueError, KeyError) as exc:
+        # A prior state file that *exists* but cannot be read -- a job killed
+        # mid-``to_netcdf``, which is the same interrupted run the absence
+        # branch above names. Invariant 3: it costs the prior half, not the
+        # whole summary.
+        logger.warning("Cannot read the prior sensor series: %s", exc)
+        return None
 
 
 def _sensor_statistics(
@@ -227,6 +235,13 @@ def _sensor_statistics(
     Reuses the series the vector sensor metrics already extracted, so the
     posterior half costs no extra pass over the state files; only the prior
     (when saved) is read here.
+
+    One caveat on the last window: ``truth_sensor_series`` extracts exactly
+    ``num_windows * n_per_window`` frames, so when the truth's frame count is
+    not a multiple of the window count the trailing frames are dropped and the
+    last window's truth statistic is computed over slightly fewer samples than
+    its peers. The members are unaffected (each window state file is its own
+    file), so this shows up as a marginally noisier truth in the final window.
     """
     prior_series = _prior_sensor_series(
         run_dir, sensor_sets, num_windows, sim_time, solver_name
@@ -235,23 +250,30 @@ def _sensor_statistics(
     statistics = {}
     for name in sensor_sets:
         prior = prior_series[name] if prior_series is not None else None
-        statistics[name] = window_statistics_summary(
-            window_statistics(truth_series[name], sim_time, num_windows),
-            window_statistics(ensemble_series[name], sim_time, num_windows),
-            prior_stats=(
-                window_statistics(prior, sim_time, num_windows)
-                if prior is not None
-                else None
-            ),
-            posterior_sampling_std=window_sampling_std(
-                ensemble_series[name], sim_time, num_windows
-            ),
-            prior_sampling_std=(
-                window_sampling_std(prior, sim_time, num_windows)
-                if prior is not None
-                else None
-            ),
-        )
+        try:
+            statistics[name] = window_statistics_summary(
+                window_statistics(truth_series[name], sim_time, num_windows),
+                window_statistics(ensemble_series[name], sim_time, num_windows),
+                prior_stats=(
+                    window_statistics(prior, sim_time, num_windows)
+                    if prior is not None
+                    else None
+                ),
+                posterior_sampling_std=window_sampling_std(
+                    ensemble_series[name], sim_time, num_windows
+                ),
+                prior_sampling_std=(
+                    window_sampling_std(prior, sim_time, num_windows)
+                    if prior is not None
+                    else None
+                ),
+                label=name,
+            )
+        except (OSError, ValueError, KeyError) as exc:
+            # Invariant 3, at the sensor-set level: one set that cannot be
+            # scored costs its own entry, not the other set and not the
+            # parameter/state/sensor blocks this stage has already computed.
+            logger.warning("Skipping %s sensor statistics: %s", name, exc)
     return statistics
 
 

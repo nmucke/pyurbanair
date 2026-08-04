@@ -392,6 +392,29 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   posterior on ten would put two different horizons inside one skill score.
   Logged at INFO, not WARNING — `run.save_prior_state` is off by default, so
   absence is the normal case, not a fault.
+- **Window boundaries carry a 1e-9-of-a-window tolerance** (review round 1).
+  The extraction rebases window `w` to start at exactly `w·sim_time`, but
+  `(w·sim_time)/sim_time` is not exactly `w` in IEEE double for most values of
+  `sim_time`: at 10.76 (200 frames at pylbm's default 0.0538 s cadence) windows
+  7 and 14 come out a ULP short and a bare `floor` scores their opening frame
+  into the *previous* window. About a fifth of two-decimal `sim_time` values
+  misbin at least one boundary in the first ten windows, and the truth's global
+  axis drifts independently of the ensemble's, so the two need not even misbin
+  the same frame. Latent on the shipped case configs (`simulation_time: 300.0`
+  is exact) but `time.simulation_time=` is a routine CLI override.
+- **Not fixed, considered:** `window_statistics_summary` does not `xr.align`
+  the truth against the members. `crps_ensemble` catches a size mismatch, but a
+  sensor *permutation* would misalign silently. Both sides come from the same
+  `sensor_sets[name]` tuple in the same process, so there is no path that
+  produces one today; an alignment call would be guarding against a caller that
+  does not exist.
+- **`_skill_score`'s `nan` reference is nulled at this call site only.** An
+  all-empty prior reduces to `nan` and reaches the YAML as `.nan`, against
+  WP1.2's "degenerate scales produce `null`, never `inf`" convention. The same
+  is true of `parameter_metric_summary`'s `prior_rmse_mean` / `prior_crps_mean`
+  and predates this WP; fixing it there would change an existing key's written
+  value, which invariant 1 puts behind a `metrics_version` bump. The new block
+  guards locally instead.
 - **Deferred:** the e2e ESMDA tests all run under `run.skip_viz=true`, so none
   of them reaches this block. The wiring is covered instead by a synthetic
   run-dir test that builds the artifacts `compute_metrics` reads and runs the

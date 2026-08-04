@@ -934,15 +934,24 @@ def ensemble_rank(ens: np.ndarray, truth: np.ndarray, rng=None) -> np.ndarray:
     usable = np.isfinite(truth) & np.isfinite(ens).all(axis=0)
     below = (ens < truth[None, :]).sum(axis=0)
     ties = (ens == truth[None, :]).sum(axis=0)
-    # ``integers`` is drawn for every knot (not just the tied ones) so the
-    # generator is consumed identically whatever the data does -- the ranks of
-    # the untied knots must not depend on how many ties preceded them.
+    # An untied knot has ``ties == 0``, so its draw is deterministically 0 and
+    # its rank cannot depend on how many ties preceded it. (It does not follow
+    # that the *generator state* is data-independent: numpy short-circuits
+    # ``integers(0, 1)`` without consuming entropy, so a generator shared with
+    # a later caller would see a stream that depends on the tie count. Every
+    # call site here builds its own.)
     drawn = generator.integers(0, ties + 1)
     return np.where(usable, below + drawn, np.nan)
 
 
 def _flat_members(members: xr.DataArray) -> np.ndarray:
-    """``(quantity, ensemble, window, sensor)`` -> ``(M, K)`` with ensemble first."""
+    """``(window, ensemble, sensor)`` -> ``(M, K)``, ensemble first, K = W*S.
+
+    The transpose is by *name*, so it does not matter that ``window_statistics``
+    puts ``window`` first (it is the concat dim) -- but the remaining dims keep
+    their relative order, which is what makes ``K`` window-major and lets
+    :func:`_score_window_statistic` reshape it back to ``(window, sensor)``.
+    """
     ordered = members.transpose("ensemble", ...)
     values = np.asarray(ordered.values, dtype=float)
     return values.reshape(values.shape[0], -1)
@@ -1014,12 +1023,13 @@ def window_statistics_summary(
     prior_stats=None,
     posterior_sampling_std=None,
     prior_sampling_std=None,
+    label="",
 ):
     """The ``sensor_statistics`` block for one sensor set (metrics doc §4.2).
 
     Takes the dicts :func:`evaluation.sensors.window_statistics` and
     :func:`evaluation.sensors.window_sampling_std` produce -- statistic name ->
-    ``(quantity, [ensemble,] window, sensor)`` -- and scores every
+    ``(window, quantity, [ensemble,] sensor)`` -- and scores every
     ``statistic × quantity`` combination as its own key (``mean_u``,
     ``variance_magnitude``, ...), because they are separately identifiable: a
     parameter that fixes the mean wind while leaving the resolved variance
@@ -1030,15 +1040,37 @@ def window_statistics_summary(
     helped). Absent prior artifacts are a no-op, not an error: the prior state
     is only saved under ``run.save_prior_state``.
 
+    Args:
+        truth_stats: ``window_statistics`` of the truth series.
+        posterior_stats: ``window_statistics`` of the posterior members.
+        prior_stats: The same for the prior members, or ``None``.
+        posterior_sampling_std: ``window_sampling_std`` of the posterior members,
+            or ``None`` to skip the identifiability guard.
+        prior_sampling_std: The same for the prior.
+        label: Prefix for the log lines (e.g. the sensor-set name), so a run
+            with several sets does not emit indistinguishable warnings.
+
     Returns:
-        ``{"n_members", "n_windows", "num_sensors", "posterior"[, "prior"]}``.
+        ``{"n_members", "n_windows", "num_sensors", "posterior"[, "prior"]}``,
+        or ``{}`` when the posterior carries no ensemble dimension.
     """
+    sample = posterior_stats["mean"]
+    if "ensemble" not in sample.dims:
+        # Invariant 3: an ensemble-mean-only artifact (an old run, a state file
+        # written without the member axis) has nothing to score probabilistically,
+        # and must not abort the metric stage -- which would cost the parameter
+        # and state blocks too, not just this one.
+        logger.warning(
+            "%sno ensemble dimension in the window statistics -- the sensor "
+            "statistics need the members, so the block is omitted",
+            f"{label}: " if label else "",
+        )
+        return {}
     quantities = [
         str(q) for q in np.asarray(posterior_stats["mean"]["quantity"].values)
     ]
-    sample = posterior_stats["mean"]
 
-    def _score(stats, sampling_std):
+    def _score(stats, sampling_std, half):
         entries, raw = {}, {}
         for statistic, members in stats.items():
             for quantity in quantities:
@@ -1052,11 +1084,16 @@ def window_statistics_summary(
                     members.sel(quantity=quantity),
                     truth_stats[statistic].sel(quantity=quantity),
                     floor,
-                    name,
+                    # Qualified, because a run with two sensor sets and a saved
+                    # prior emits up to 32 of these warnings and a bare
+                    # "mean_u" cannot be traced to the one that produced it.
+                    f"{label}/{half}/{name}" if label else f"{half}/{name}",
                 )
         return entries, raw
 
-    posterior, posterior_crps = _score(posterior_stats, posterior_sampling_std)
+    posterior, posterior_crps = _score(
+        posterior_stats, posterior_sampling_std, "posterior"
+    )
     summary = {
         "n_members": int(sample.sizes["ensemble"]),
         "n_windows": int(sample.sizes["window"]),
@@ -1067,13 +1104,19 @@ def window_statistics_summary(
     if prior_stats is None:
         return summary
 
-    prior, prior_crps = _score(prior_stats, prior_sampling_std)
+    prior, prior_crps = _score(prior_stats, prior_sampling_std, "prior")
     summary["prior"] = prior
     for name, entry in posterior.items():
-        prior_mean, skill = _skill_score(
-            posterior_crps[name], prior_crps[name], name, "sensor-statistic CRPS"
-        )
-        entry["prior_crps_mean"] = prior_mean
+        with warnings.catch_warnings():
+            # An all-empty prior (every window truncated away) reduces to nan.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            prior_mean, skill = _skill_score(
+                posterior_crps[name], prior_crps[name], name, "sensor-statistic CRPS"
+            )
+        # ``null``, never ``.nan``: the reductions elsewhere in this block
+        # filter on ``np.isfinite``, and a bare nan in the YAML reads as a
+        # measured value to anything that does not check.
+        entry["prior_crps_mean"] = prior_mean if np.isfinite(prior_mean) else None
         entry["crps_reduction_vs_prior"] = skill
     return summary
 

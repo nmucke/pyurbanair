@@ -82,6 +82,25 @@ def test_window_masks_bin_by_time_not_by_frame_count() -> None:
     assert [list(np.flatnonzero(m)) for m in masks] == [[0, 1], [2, 3], [4, 5]]
 
 
+def test_window_masks_survive_float_drift_on_a_boundary() -> None:
+    # The extraction rebases window w to start at exactly ``w*sim_time``, but
+    # ``(w*sim_time)/sim_time`` is not exactly ``w`` in IEEE double for most
+    # sim_time. At 10.76 (200 frames at pylbm's default 0.0538 s cadence)
+    # windows 7 and 14 come out a ULP short, and a bare ``floor`` scores their
+    # opening frame into the *previous* window -- silently, and not necessarily
+    # for the same frame on the truth axis as on the ensemble axis.
+    sim_time = 10.76
+    starts = np.array([w * sim_time for w in range(16)])
+    masks = window_masks(starts, sim_time, 16)
+
+    assert [int(np.flatnonzero(m)[0]) for m in masks] == list(range(16))
+
+
+def test_window_masks_reject_a_run_with_no_windows() -> None:
+    with pytest.raises(ValueError, match="num_windows"):
+        window_masks(np.array([0.0]), SIM_TIME, 0)
+
+
 def test_window_statistics_bin_by_time_so_truth_and_ensemble_cadences_may_differ() -> (
     None
 ):
@@ -206,6 +225,24 @@ def test_block_bootstrap_is_vectorized_over_leading_dims_not_approximated() -> N
 
     assert batched.shape == (3, 5)
     assert np.allclose(batched, per_row)
+
+
+def test_block_bootstrap_chunking_moves_no_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The replicate axis is split to bound the temporary. Every shape the tests
+    # use fits in one chunk, so without this the "changes no value" claim is
+    # never exercised -- and the chunk loop only runs at production scale.
+    from evaluation import turbulence
+
+    rng = np.random.default_rng(23)
+    series = rng.normal(size=(6, 120))
+    unchunked = block_bootstrap_std(series, n_blocks=10, n_resamples=64)
+
+    monkeypatch.setattr(turbulence, "_BOOTSTRAP_CHUNK_BYTES", 1)
+    chunked = block_bootstrap_std(series, n_blocks=10, n_resamples=64)
+
+    assert np.array_equal(unchunked, chunked)
 
 
 def test_block_bootstrap_reproduces_without_a_seed() -> None:
@@ -425,6 +462,47 @@ def test_summary_identifiability_flags_a_statistic_the_window_cannot_resolve(
     assert "not identifiable at this window length" in caplog.text
 
 
+def test_summary_identifiability_rises_when_the_members_genuinely_differ() -> None:
+    # The direction check the noise-only case cannot make: with members offset
+    # well beyond their own sampling spread the ratio must go UP. Inverted
+    # (floor/spread) it would go down, and the "< 3" test below still passes.
+    rng = np.random.default_rng(24)
+    truth = _series(rng, 120)
+    members = xarray.concat(
+        [_series(rng, 120) + offset for offset in np.linspace(-3.0, 3.0, 6)],
+        dim="ensemble",
+    ).transpose("component", "ensemble", "time", "sensor")
+
+    summary = window_statistics_summary(
+        window_statistics(truth, SIM_TIME, NUM_WINDOWS),
+        window_statistics(members, SIM_TIME, NUM_WINDOWS),
+        posterior_sampling_std=window_sampling_std(
+            members, SIM_TIME, NUM_WINDOWS, n_blocks=5, n_resamples=32
+        ),
+    )
+
+    assert summary["posterior"]["mean_u"]["identifiability"]["mean"] > 3.0
+
+
+def test_summary_is_omitted_when_the_members_axis_is_absent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An ensemble-mean-only artifact has nothing to score probabilistically.
+    # Invariant 3: the block goes away, the metric stage does not.
+    rng = np.random.default_rng(25)
+    truth = _series(rng, 60)
+
+    with caplog.at_level("WARNING"):
+        summary = window_statistics_summary(
+            window_statistics(truth, SIM_TIME, NUM_WINDOWS),
+            window_statistics(truth, SIM_TIME, NUM_WINDOWS),
+            label="assimilation",
+        )
+
+    assert summary == {}
+    assert "no ensemble dimension" in caplog.text
+
+
 def test_summary_identifiability_is_absent_when_no_floor_was_measured() -> None:
     # Short windows give no bootstrap, and a ratio over an unmeasured floor is
     # not "infinitely identifiable" -- it is unknown.
@@ -557,6 +635,20 @@ def test_ensemble_sensor_series_streams_member_at_a_time(
 
     # 2 windows x 3 members x 2 sensor sets, never more than one member at a time.
     assert seen == [1] * 12
+
+
+def test_ensemble_sensor_series_preserves_the_member_axis(
+    tmp_path: pathlib.Path,
+) -> None:
+    # The per-member slices are concatenated back; a lost or reordered
+    # ``ensemble`` coord would silently re-label every member's scores.
+    from scripts.esmda._esmda_common import ensemble_sensor_series
+
+    paths = [_window_state_file(tmp_path, w) for w in range(2)]
+    series = ensemble_sensor_series(paths, _SENSOR_SETS, "pylbm", 4.0)["assimilation"]
+
+    assert series.sizes["ensemble"] == 3
+    assert list(series["ensemble"].values) == [0, 1, 2]
 
 
 def test_ensemble_sensor_series_is_inert_under_the_streaming_rewrite(
@@ -741,6 +833,30 @@ def test_run_summary_sensor_statistics_no_op_without_saved_prior_states(
 
     assert "prior" not in summary["sensor_statistics"]["assimilation"]
     assert "No prior sensor statistics" in caplog.text
+
+
+def test_run_summary_survives_an_unreadable_prior_state_file(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A job killed mid-``to_netcdf`` leaves a prior state file that exists but
+    # cannot be opened. Invariant 3: that costs the prior half of one block, not
+    # run_summary.yaml -- which would take the parameter, state and sensor
+    # metrics down with it.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path, save_prior_state=True)
+    (run_dir / "windows" / "window_1_prior_state.nc").write_bytes(b"not a netcdf")
+
+    with caplog.at_level("WARNING"):
+        compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+
+    assert "Cannot read the prior sensor series" in caplog.text
+    assert "prior" not in summary["sensor_statistics"]["assimilation"]
+    # Everything the stage had already computed survives.
+    assert summary["parameter_metrics"] and summary["sensor_metrics"]
+    assert summary["sensor_statistics"]["assimilation"]["posterior"]
 
 
 def test_run_summary_sensor_statistics_score_the_prior_when_it_was_saved(

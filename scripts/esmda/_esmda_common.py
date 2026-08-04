@@ -228,7 +228,9 @@ def _window_sensor_series(ds, sensor_sets, solver_name):
             members[name].append(
                 _sensor_component_timeseries(member, ox, oy, oz, solver_name)
             )
-        member.close()
+        # No ``member.close()``: ``.load()``'s result owns no file handle, so
+        # the call would be a no-op that reads as if it released something. The
+        # slice is dropped at the end of the iteration, which is the real thing.
     return {
         name: (parts[0] if len(parts) == 1 else xarray.concat(parts, dim="ensemble"))
         for name, parts in members.items()
