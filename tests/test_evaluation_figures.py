@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import re
 from collections.abc import Iterator, Sequence
 
 import numpy as np
@@ -213,6 +214,74 @@ def _axes_titles(fig: Figure) -> str:
 def _panel_axes(fig: Figure) -> list[object]:
     """Axes holding a mappable -- the image grid, plus any colourbar axes."""
     return [ax for ax in fig.axes if ax.images or ax.collections]
+
+
+def _tick_labels(fig: Figure) -> str:
+    """Every x tick label on the figure, lower-cased and joined.
+
+    P1 names its two marginals in the x tick labels, and the *knot* each one
+    comes from is part of that name.
+    """
+    return " | ".join(
+        t.get_text().lower()
+        for ax in fig.axes
+        for t in ax.get_xticklabels()
+        if t.get_text()
+    )
+
+
+def _labelled_lines(fig: Figure, label: str) -> list[object]:
+    """Every ``Line2D`` the figure drew under ``label`` (the legend label)."""
+    return [
+        line
+        for ax in fig.axes
+        for line in ax.lines
+        if str(line.get_label()).lower() == label.lower()
+    ]
+
+
+def _z_annotations(fig: Figure) -> list[str]:
+    """P1's per-panel ``z`` annotations, lower-cased.
+
+    The z annotation is the only panel text that starts with a bare ``z``, which
+    is what separates it from titles and axis labels without the test having to
+    know how the figure lays its panels out.
+    """
+    found = []
+    for ax in fig.axes:
+        for text in ax.texts:
+            body = text.get_text().strip().lower()
+            if body.startswith("z") and not body.startswith("z/"):
+                found.append(body)
+    return found
+
+
+def _annotated_z(fig: Figure) -> float:
+    """The single numeric z P1 annotated, as a float."""
+    annotations = _z_annotations(fig)
+    assert len(annotations) == 1, f"expected one z annotation, got {annotations}"
+    match = re.search(r"(-?\d+(?:\.\d+)?)", annotations[0])
+    assert match is not None, f"no number in the z annotation {annotations[0]!r}"
+    return float(match.group(1))
+
+
+def _image_of(fig: Figure, title: str) -> np.ndarray:
+    """The image data of the panel whose title contains ``title``, NaN-filled.
+
+    ``imshow`` masks the non-finite entries it is handed, so the mask is put
+    back as NaN -- masked and NaN are the same statement here ("this cell has no
+    value"), and only one of them is comparable with ``np.isnan``.
+    """
+    axes = [ax for ax in fig.axes if title.lower() in " | ".join(_titles(ax)).lower()]
+    assert len(axes) == 1, f"expected one {title!r} panel, found {len(axes)}"
+    images = axes[0].images
+    assert images, f"the {title!r} panel carries no image"
+    return np.ma.filled(images[0].get_array().astype(float), np.nan)
+
+
+def _station_panel_titles(fig: Figure) -> list[str]:
+    """S1's column titles -- the ones naming a station, in draw order."""
+    return [t for ax in fig.axes for t in _titles(ax) if t and "#" in t]
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +603,117 @@ def test_parameter_marginals_plot_the_final_knot_of_a_dynamic_parameter(
     )
 
 
+def test_parameter_marginals_annotate_the_z_of_the_knot_they_draw(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The annotated z must belong to the knot the panel DRAWS. Knot 0 here sits
+    # ~390 posterior sigmas off its own truth while the final knot is centred on
+    # its own, so an annotation lifted from ``z_score[0]`` prints "z = 386" over
+    # a picture of a perfectly calibrated posterior -- and a reader believes the
+    # number, not the violin.
+    from evaluation.scores import parameter_bundle
+
+    members = np.array(
+        [[0.0, 4.0], [1.0, 5.0], [2.0, 6.0], [3.0, 7.0]]
+    )  # (member, knot)
+    truth_values = np.array([500.0, 5.5])
+    posterior = _param_dataset(times=(0.0, 1.0), velocity_magnitude=members.tolist())
+    truth = _truth_dataset(times=(0.0, 1.0), velocity_magnitude=truth_values.tolist())
+    z_score = parameter_bundle(members, None, truth_values)["z_score"]
+
+    plot_parameter_marginals(posterior, truth, tmp_path / "p1.png")
+
+    assert abs(float(z_score[0])) > 1.0, "the fixture's two knots score the same"
+    assert _annotated_z(captured_figures[-1]) == pytest.approx(
+        float(z_score[-1]), abs=0.005
+    ), "the annotated z is not the drawn knot's"
+
+
+def test_parameter_marginals_draw_the_run_prior_when_the_truth_is_static(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # ``prior_params.nc`` stacks EVERY window's prior along ``time``, so for a
+    # static parameter over W windows knot ``w > 0`` is window ``w-1``'s
+    # POSTERIOR. Taking the marginal at the final knot therefore draws an
+    # already-updated ensemble as "the prior", and the panel reads as almost no
+    # contraction. The truth being constant is what identifies this case.
+    posterior = _param_dataset(
+        times=(0.0, 1.0),
+        velocity_magnitude=[[5.0, 4.9], [5.0, 5.1], [5.0, 5.0], [5.0, 5.05]],
+    )
+    prior = _param_dataset(
+        times=(0.0, 1.0),
+        velocity_magnitude=[[-20.0, 4.8], [30.0, 5.2], [-5.0, 5.0], [15.0, 5.1]],
+    )
+    truth = _truth_dataset(times=(0.0, 1.0), velocity_magnitude=[5.0, 5.0])
+
+    plot_parameter_marginals(posterior, truth, tmp_path / "p1.png", prior_params=prior)
+
+    fig = captured_figures[-1]
+    covered = any(
+        ax.get_ylim()[0] <= -20.0 and ax.get_ylim()[1] >= 30.0 for ax in fig.axes
+    )
+    assert covered, (
+        "the panel does not span the run's actual (knot 0) prior -- a later "
+        f"window's prior was drawn instead: {[a.get_ylim() for a in fig.axes]}"
+    )
+    # ...and the reader is told which window each marginal came from, because
+    # the two branches below pick different ones.
+    assert "window 0" in _tick_labels(fig)
+
+
+def test_parameter_marginals_keep_the_same_knot_pair_when_the_truth_varies(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # A truth that varies across knots is a genuinely time-varying parameter:
+    # knot 0 is a different physical time (500 m/s vs 5), so a knot-0 prior would
+    # put two different quantities in one panel. Per-window contraction is all
+    # there is here -- it just has to be labelled as such.
+    posterior = _param_dataset(
+        times=(0.0, 1.0),
+        velocity_magnitude=[[500.0, 5.0], [500.0, 5.2], [500.0, 4.8], [500.0, 5.1]],
+    )
+    prior = _param_dataset(
+        times=(0.0, 1.0),
+        velocity_magnitude=[[400.0, 3.0], [600.0, 7.0], [450.0, 4.0], [550.0, 6.0]],
+    )
+    truth = _truth_dataset(times=(0.0, 1.0), velocity_magnitude=[500.0, 5.0])
+
+    plot_parameter_marginals(posterior, truth, tmp_path / "p1.png", prior_params=prior)
+
+    fig = captured_figures[-1]
+    assert all(ax.get_ylim()[1] < 100.0 for ax in fig.axes), (
+        "a knot-0 marginal reached the panel, which spans a different physical "
+        f"time: {[a.get_ylim() for a in fig.axes]}"
+    )
+    assert "final" in _tick_labels(fig)
+
+
+def test_parameter_marginals_distinguish_a_missing_truth_from_a_collapsed_sigma(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # One ``n/a`` covering both cases makes two opposite diagnoses read the same:
+    # "this run saved no truth to score against" and "the posterior collapsed
+    # onto a point" call for completely different follow-ups.
+    posterior, prior, _truth = _toy_params()
+    plot_parameter_marginals(
+        posterior, None, tmp_path / "no_truth.png", prior_params=prior
+    )
+    without_truth = _z_annotations(captured_figures[-1])
+
+    collapsed = _param_dataset(inflow_angle=[[270.0], [270.0], [270.0], [270.0]])
+    plot_parameter_marginals(
+        collapsed, _truth_dataset(inflow_angle=[271.0]), tmp_path / "collapsed.png"
+    )
+    collapsed_sigma = _z_annotations(captured_figures[-1])
+
+    assert without_truth and collapsed_sigma
+    assert all("no truth" in a for a in without_truth), without_truth
+    assert all("n/a" in a for a in collapsed_sigma), collapsed_sigma
+    assert set(without_truth).isdisjoint(collapsed_sigma)
+    assert not any("inf" in a for a in without_truth + collapsed_sigma)
+
+
 def test_parameter_marginals_survive_the_smoke_shape(tmp_path: pathlib.Path) -> None:
     # M = 2: a KDE (and therefore a violin) is meaningless, but the CI shape
     # must still produce a figure rather than a traceback.
@@ -561,13 +741,14 @@ def test_parameter_marginals_render_without_a_truth(
     # A run against measured data has no true parameters. The marginals are
     # still worth drawing -- prior vs posterior contraction does not need a
     # truth -- so this renders rather than no-ops; only the dashed truth line
-    # and the z-score are dropped, the latter annotated ``n/a`` rather than
-    # silently omitted.
+    # and the z-score are dropped, the latter annotated with the reason rather
+    # than silently omitted.
     posterior, prior, _truth = _toy_params()
     out = tmp_path / "p1.png"
 
     _assert_png(plot_parameter_marginals(posterior, None, out, prior_params=prior), out)
-    assert "n/a" in _axes_text(captured_figures[-1])
+    annotations = _z_annotations(captured_figures[-1])
+    assert annotations and all("no truth" in a for a in annotations), annotations
 
 
 def test_parameter_marginals_no_op_on_a_dataset_with_no_estimable_parameters(
@@ -610,14 +791,56 @@ def test_station_profiles_render_without_a_reference_velocity(
     _assert_png(plot_station_profiles(fields, out), out)
 
 
-def test_station_profiles_exclude_the_extrapolated_top_level(
+def test_station_profiles_draw_the_streamwise_u_component(
     tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The mean row is the STREAMWISE profile: ``u``, because every shipped case
+    # puts the inflow along +x. Nothing about the panel changes if the figure
+    # reads ``v`` or ``w`` instead -- the axis label and the shape both survive
+    # -- so the component index is pinned on the drawn values. The other two
+    # components are offset by +-100 so a wrong one cannot be mistaken for
+    # noise. Only the mean row is kept here: the TKE variables carry no
+    # component axis and so cannot discriminate.
+    n_z = 4
+    fields = _eval_fields(
+        n_z=n_z, station_sets=("assimilation",), with_prior=False, slabs=False
+    )
+    fields = fields.drop_vars(
+        [v for v in fields.data_vars if "_station_tke" in v or "_station_uw" in v]
+    )
+    u_profile = np.arange(1.0, n_z + 1.0)
+    components = np.stack([u_profile, u_profile + 100.0, u_profile - 100.0])
+    fields["truth_station_mean"] = (
+        ("component", "z", "station"),
+        components[:, :, None].astype(np.float32),
+    )
+
+    plot_station_profiles(fields, tmp_path / "s1.png")
+
+    lines = _labelled_lines(captured_figures[-1], "Truth")
+    assert len(lines) == 1, f"expected one truth profile, got {len(lines)}"
+    drawn = np.asarray(lines[0].get_xdata(), dtype=float)  # type: ignore[attr-defined]
+    assert drawn == pytest.approx(
+        u_profile
+    ), f"the profile is not the u component: {drawn.tolist()}"
+
+
+@pytest.mark.parametrize("spelling", ["z", "zt"])  # type: ignore[misc]
+def test_station_profiles_exclude_the_extrapolated_top_level(
+    tmp_path: pathlib.Path, captured_figures: list[Figure], spelling: str
 ) -> None:
     # Colocation linearly extrapolates the LAST index of every axis it moved,
     # which leaves inflated second moments there. ``extrapolated_edges`` names
     # those axes, and a profile that includes the top cell plots an artefact.
+    #
+    # Both vertical spellings must trim. ``zt`` is uDALES's and is the one that
+    # matters in practice: PALM never extrapolates the vertical, so uDALES is
+    # the backend where the trim actually fires -- a check written only against
+    # ``z`` would pass while the real case plotted the artefact.
     n_z = 5
-    with_edge = _eval_fields(n_z=n_z, extrapolated="z", station_sets=("assimilation",))
+    with_edge = _eval_fields(
+        n_z=n_z, extrapolated=spelling, station_sets=("assimilation",)
+    )
     without_edge = _eval_fields(
         n_z=n_z, extrapolated="", station_sets=("assimilation",)
     )
@@ -641,16 +864,24 @@ def test_station_profiles_exclude_the_extrapolated_top_level(
         "the control figure does not reach the top level either -- the "
         "comparison below would be vacuous"
     )
-    assert (
-        _highest_plotted_z(dropped) <= penultimate + 1e-6
-    ), "the extrapolated top level is still plotted despite extrapolated_edges='z'"
+    assert _highest_plotted_z(dropped) <= penultimate + 1e-6, (
+        "the extrapolated top level is still plotted despite "
+        f"extrapolated_edges={spelling!r}"
+    )
 
 
 def test_station_profiles_keep_the_validation_columns_when_truncating(
-    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    tmp_path: pathlib.Path,
+    caplog: pytest.LogCaptureFixture,
+    captured_figures: list[Figure],
 ) -> None:
     # More columns than fit: the held-out sensors are the ones a reader came
     # for, so they are kept first -- and the drop is logged, never silent.
+    #
+    # Which columns survive is the whole assertion. A figure that kept the
+    # assimilated ones instead still writes a PNG and still logs a drop, so
+    # "a file appeared" says nothing: the panel titles carry the station index
+    # and its set, and those are what get read back.
     fields = _eval_fields(
         station_sets=("assimilation",) * 4 + ("validation",) * 4, n_z=4
     )
@@ -660,6 +891,13 @@ def test_station_profiles_keep_the_validation_columns_when_truncating(
         result = plot_station_profiles(fields, out, max_stations=3)
 
     _assert_png(result, out)
+    titles = _station_panel_titles(captured_figures[-1])
+    assert len(titles) == 3, f"expected 3 station columns, got {titles}"
+    assert all(
+        t.lower().startswith("validation") for t in titles
+    ), f"an assimilated column took a held-out column's slot: {titles}"
+    drawn = {int(re.search(r"#(\d+)", t).group(1)) for t in titles}  # type: ignore[union-attr]
+    assert drawn == {4, 5, 6}, f"the validation columns are 4-7, drawn: {sorted(drawn)}"
     assert caplog.records, "columns were dropped without a word about it"
 
 
@@ -730,6 +968,81 @@ def test_mean_slices_solid_cells_are_outside_the_shared_norm(
         assert (
             max(abs(low), abs(high)) < 100.0
         ), f"the solid-cell sentinel (1e6) reached a colour norm: {clims}"
+
+
+def test_mean_slices_mask_the_solid_cells_out_of_the_difference(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The difference panel has to be differenced from the MASKED fields, not
+    # from the raw ones. The test above cannot see this: it gives both sources
+    # the same 1e6 sentinel, so an unmasked ``posterior - truth`` is exactly 0
+    # inside the buildings and sails through a limits check. Here the two
+    # sentinels differ, so an unmasked difference paints a 1e6 building
+    # interior on a diverging map centred at zero -- every fluid cell then
+    # renders as the same shade of white.
+    n_zlev, ny, nx = 1, 4, 5
+    fluid = np.ones((n_zlev, ny, nx), dtype=np.int8)
+    fluid[0, :2, :2] = 0
+    rng = np.random.default_rng(7)
+    means = {}
+    for source, sentinel in (("truth", 1.0e6), ("posterior", 2.0e6)):
+        slab = rng.random((len(_COMPONENTS), n_zlev, ny, nx))
+        slab[:, fluid == 0] = sentinel
+        means[source] = slab
+    fields = _eval_fields(
+        n_zlev=n_zlev, ny=ny, nx=nx, with_prior=False, fluid=fluid, slab_mean=means
+    )
+
+    result = plot_mean_slices(fields, tmp_path / "f1.png")
+
+    assert result is not None
+    difference = _image_of(captured_figures[-1], "posterior - truth")
+    solid = fluid[0] == 0
+    assert np.all(
+        np.isnan(difference[solid])
+    ), "the difference carries a value inside the buildings"
+    assert np.all(
+        np.isfinite(difference[~solid])
+    ), "the fluid cells have no difference either -- the check is vacuous"
+
+
+def test_mean_slices_never_render_a_column_with_no_finite_cell(
+    tmp_path: pathlib.Path,
+    caplog: pytest.LogCaptureFixture,
+    captured_figures: list[Figure],
+) -> None:
+    # One diverged member is enough to leave a whole accumulated mean field
+    # non-finite, and the union-of-columns finiteness check does not fire on
+    # that -- the other two columns are finite. The dead column then renders
+    # entirely in the solid-cell grey, under a caption saying grey means solid:
+    # the figure claims the domain is one big building. Grey must not mean two
+    # things on one figure, so the column is either dropped or explicitly
+    # labelled, and either way it is logged.
+    n_zlev, ny, nx = 1, 4, 5
+    rng = np.random.default_rng(8)
+    means = {
+        source: rng.random((len(_COMPONENTS), n_zlev, ny, nx))
+        for source in ("truth", "posterior")
+    }
+    means["prior"] = np.full((len(_COMPONENTS), n_zlev, ny, nx), np.nan)
+    fields = _eval_fields(n_zlev=n_zlev, ny=ny, nx=nx, slab_mean=means)
+    out = tmp_path / "f1.png"
+
+    with caplog.at_level(logging.INFO, logger="evaluation.figures"):
+        result = plot_mean_slices(fields, out)
+
+    _assert_png(result, out)
+    fig = captured_figures[-1]
+    titles, text = _axes_titles(fig), _axes_text(fig)
+    assert "truth" in titles and "posterior" in titles, (
+        "the finite columns stopped rendering: one dead column must not cost "
+        f"the others ({titles})"
+    )
+    assert "prior" not in titles or "no finite" in text, (
+        "the all-NaN prior column renders in the solid-cell grey, which the "
+        "caption says means a building"
+    )
+    assert caplog.records, "a column was dropped without a word about it"
 
 
 def test_mean_slices_share_one_norm_across_truth_prior_and_posterior(
@@ -930,6 +1243,92 @@ def test_sensor_fans_caption_the_pre_wp21_observation_caveat(
     assert any(
         marker in text for marker in ("clean", "not persisted", "noisy", "wp2.1")
     ), f"no caveat about the clean observations in the figure text: {text!r}"
+
+
+def test_sensor_fans_draw_the_truth_on_the_ensemble_time_axis(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The truth and the fan must sit on ONE axis, the ensemble's physical time.
+    # A truth drawn against a raw frame index looks completely normal on a run
+    # whose frames happen to start at t=0 with unit spacing, and silently slides
+    # the whole comparison on any other -- which is every multi-window run,
+    # where window w starts at ``w * sim_time``.
+    n_times = 8
+    truth, ensemble = _sensor_series(
+        n_times=n_times, n_sensors=1, sets=("assimilation",)
+    )
+    times = np.linspace(100.0, 135.0, n_times)
+
+    plot_sensor_fans(truth, ensemble, tmp_path / "s5.png", times=times)
+
+    lines = _labelled_lines(captured_figures[-1], "Truth")
+    assert lines, "no truth line on the figure"
+    for line in lines:
+        drawn = np.asarray(line.get_xdata(), dtype=float)  # type: ignore[attr-defined]
+        assert drawn == pytest.approx(
+            times
+        ), f"the truth is not on the ensemble's time axis: {drawn.tolist()}"
+
+
+def test_sensor_fans_skip_a_truth_whose_cadence_does_not_match(
+    tmp_path: pathlib.Path,
+    caplog: pytest.LogCaptureFixture,
+    captured_figures: list[Figure],
+) -> None:
+    # A truth of a different length is a truth on a different axis, and the only
+    # honest options are to be told what that axis is or to leave it out.
+    # Stretching it over ``linspace(t[0], t[-1], T_truth)`` invents one: it
+    # assumes the truth is uniform over exactly the ensemble's span, and when it
+    # is not the drawn curve is wrong by O(1) on a unit-amplitude signal -- a
+    # wrong truth being far worse than a missing one.
+    truth, ensemble = _sensor_series(n_times=8, n_sensors=1, sets=("assimilation",))
+    truth["assimilation"] = truth["assimilation"][:5]
+    out = tmp_path / "s5.png"
+
+    with caplog.at_level(logging.INFO, logger="evaluation.figures"):
+        result = plot_sensor_fans(truth, ensemble, out, times=np.linspace(0.0, 7.0, 8))
+
+    _assert_png(result, out)
+    assert not _labelled_lines(
+        captured_figures[-1], "Truth"
+    ), "a truth on a mismatched cadence was drawn on an invented axis"
+    assert caplog.records, "the truth was dropped without a word about it"
+
+
+def test_sensor_fans_drop_a_non_finite_member_and_still_draw_the_fan(
+    tmp_path: pathlib.Path,
+    caplog: pytest.LogCaptureFixture,
+    captured_figures: list[Figure],
+) -> None:
+    # ``np.quantile`` propagates NaN, so with an ``.any()``-shaped guard a single
+    # diverged member empties the bands and makes the median all-NaN: the panel
+    # renders as a bare truth line and reads as "the ensemble was never plotted"
+    # rather than "one member blew up". WP1.4 records non-finite values through
+    # the ensemble reductions as expected on real runs, so this is the common
+    # case, not the exotic one.
+    n_members = 5
+    truth, ensemble = _sensor_series(
+        n_members=n_members, n_times=8, n_sensors=1, sets=("assimilation",)
+    )
+    ensemble["assimilation"][2, 4, 0] = np.nan
+    out = tmp_path / "s5.png"
+
+    with caplog.at_level(logging.INFO, logger="evaluation.figures"):
+        result = plot_sensor_fans(truth, ensemble, out)
+
+    _assert_png(result, out)
+    fig = captured_figures[-1]
+    medians = _labelled_lines(fig, "Posterior median")
+    assert medians, "the fan was not drawn at all"
+    for line in medians:
+        y = np.asarray(line.get_ydata(), dtype=float)  # type: ignore[attr-defined]
+        assert np.all(
+            np.isfinite(y)
+        ), "one non-finite member emptied the whole fan through np.quantile"
+    assert str(n_members - 1) in _axes_text(
+        fig
+    ), "the panel does not say how many members are behind the fan"
+    assert caplog.records, "a member was dropped without a word about it"
 
 
 def test_sensor_fans_survive_the_smoke_shape(tmp_path: pathlib.Path) -> None:
@@ -1204,3 +1603,425 @@ def test_rank_histogram_no_op_when_a_set_carries_no_statistics(
     out = tmp_path / "d1.png"
 
     _assert_no_op(plot_rank_histogram({"assimilation": {"posterior": {}}}, out), out)
+
+
+# ---------------------------------------------------------------------------
+# The wiring -- scripts/esmda/make_esmda_figures.py
+# ---------------------------------------------------------------------------
+#
+# Everything above tests the library; none of it executes the stage that calls
+# it. That stage is where the run-dir layout, the YAML shapes and the config
+# reads live, and no e2e ESMDA test reaches it either -- they all run under
+# ``run.skip_viz=true``, whose first act is to return. WP1.3's second review
+# round recorded exactly this: "the test that 'covered' this called the library
+# directly and bypassed the script, which is exactly how the gap survived the
+# round it was written in."
+#
+# So the two YAML/config readers are unit-tested on the shapes an old run dir
+# actually produces, and ``make_figures`` itself is driven end to end on a
+# synthetic run dir -- once complete, once missing the two artifacts an older
+# metric stage never wrote.
+
+_RUN_WINDOWS = 3  # >1, so the window boundaries are a real thing to get wrong
+_RUN_SIM_TIME = 4.0
+_RUN_FRAMES = 4  # per window
+
+
+def _state_dataset(
+    n_ensemble: int | None, n_time: int, seed: int, n_cells: int = 5
+) -> xarray.Dataset:
+    """A ``(time, z, y, x)`` state, with an ``ensemble`` axis when asked."""
+    rng = np.random.default_rng(seed)
+    axis = np.linspace(0.0, 20.0, n_cells)
+    dims: tuple[str, ...] = ("time", "z", "y", "x")
+    shape: tuple[int, ...] = (n_time, n_cells, n_cells, n_cells)
+    coords: dict[str, object] = {
+        "time": np.arange(n_time, dtype=float) * (_RUN_SIM_TIME / n_time),
+        "z": axis,
+        "y": axis,
+        "x": axis,
+    }
+    if n_ensemble is not None:
+        dims = ("ensemble",) + dims
+        shape = (n_ensemble,) + shape
+        coords["ensemble"] = np.arange(n_ensemble)
+    return xarray.Dataset(
+        {n: (dims, rng.normal(size=shape) + 2.0) for n in ("u", "v", "w")},
+        coords=coords,
+    )
+
+
+def _figure_run_dir(
+    tmp_path: pathlib.Path,
+    *,
+    n_members: int = 4,
+    is_dynamic: bool = True,
+    skip_viz: bool = False,
+    eval_fields: bool = True,
+    rank_counts: bool = True,
+    building_height: float | None = None,
+) -> pathlib.Path:
+    """An ESMDA run dir complete enough for the non-``skip_viz`` figure stage.
+
+    Same layout ``run_esmda.py`` writes -- ``truth_access.yaml`` plus the
+    assembled parameter/state artifacts -- with the two post-hoc metric
+    artifacts (``eval_fields.nc``, ``run_summary.yaml``) switchable, because
+    "the run dir predates them" is the degradation the stage exists to survive.
+    """
+    from scripts.esmda._esmda_common import write_yaml
+
+    run_dir = tmp_path / "run"
+    (run_dir / "windows").mkdir(parents=True)
+    n_total = _RUN_WINDOWS * _RUN_FRAMES
+
+    config: dict[str, object] = {
+        "run": {"skip_viz": skip_viz},
+        "esmda": {"obs_error_std": 0.2},
+        "obs": {
+            "mode": "points",
+            "x_points": [4.0, 12.0],
+            "y_points": [5.0, 13.0],
+            "z_points": [6.0, 7.0],
+            "validation_x_points": [8.0],
+            "validation_y_points": [9.0],
+            "validation_z_points": [10.0],
+        },
+    }
+    if building_height is not None:
+        config["geometry"] = {"building_height": building_height}
+    write_yaml(config, run_dir / "config.yaml")
+
+    truth = _state_dataset(None, n_total, seed=1).assign_coords(
+        time=np.linspace(0.0, _RUN_WINDOWS * _RUN_SIM_TIME, n_total, endpoint=False)
+    )
+    truth.to_netcdf(run_dir / "truth_state.nc")
+    write_yaml(
+        {
+            "true_state_path": str(run_dir / "truth_state.nc"),
+            "n_total": n_total,
+            "x_offset": 0.0,
+            "start_idx": 0,
+            "t_offset": 0.0,
+            "num_windows": _RUN_WINDOWS,
+            "n_per_window": _RUN_FRAMES,
+            "sim_time": _RUN_SIM_TIME,
+            "is_dynamic": is_dynamic,
+            "truth_solver_name": "pylbm",
+            "assim_solver_name": "pylbm",
+        },
+        run_dir / "truth_access.yaml",
+    )
+
+    for w in range(_RUN_WINDOWS):
+        _state_dataset(n_members, _RUN_FRAMES, seed=10 + w).to_netcdf(
+            run_dir / "windows" / f"window_{w}_posterior_state.nc"
+        )
+
+    # ``posterior_state_mean.nc`` carries the ensemble mean/std of |U| beside the
+    # mean state; the animation and the final-state plot read only those two.
+    mean_state = _state_dataset(None, n_total, seed=20)
+    magnitude = np.sqrt(sum(mean_state[c] ** 2 for c in ("u", "v", "w")))
+    mean_state["vel_mean"] = magnitude
+    mean_state["vel_std"] = magnitude * 0.1
+    mean_state.to_netcdf(run_dir / "posterior_state_mean.nc")
+
+    members = np.linspace(-1.0, 1.0, n_members)[:, None]
+    knots = np.array([0.0, 1.0, 2.0])
+    for name, spread in (("posterior_params", 1.0), ("prior_params", 4.0)):
+        xarray.Dataset(
+            {
+                "velocity_magnitude": (
+                    ("ensemble", "time"),
+                    5.0 + spread * members * np.ones_like(knots),
+                )
+            },
+            coords={"ensemble": np.arange(n_members), "time": knots},
+        ).to_netcdf(run_dir / f"{name}.nc")
+    xarray.Dataset(
+        {"velocity_magnitude": (("time",), np.full(knots.size, 5.0))},
+        coords={"time": knots},
+    ).to_netcdf(run_dir / "true_params.nc")
+
+    if eval_fields:
+        _eval_fields(n_zlev=2, ny=4, nx=5, n_z=4).to_netcdf(run_dir / "eval_fields.nc")
+    if rank_counts:
+        write_yaml(
+            {
+                "sensor_statistics": {
+                    "assimilation": {
+                        "n_members": n_members,
+                        "posterior": {"mean_u": {"rank_counts": [1, 2, 3, 2, 1]}},
+                    }
+                }
+            },
+            run_dir / "run_summary.yaml",
+        )
+    return run_dir
+
+
+def test_reference_velocity_reads_the_truth_inflow_speed() -> None:
+    from scripts.esmda.make_esmda_figures import _reference_velocity
+
+    # A time-varying truth is averaged over its knots: one profile figure covers
+    # the whole run, so it gets one reference speed.
+    present = _truth_dataset(times=(0.0, 1.0), velocity_magnitude=[4.0, 6.0])
+
+    assert _reference_velocity(present) == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "values",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param([np.nan, np.nan], id="all_non_finite"),
+        pytest.param([0.0, 0.0], id="zero"),
+        pytest.param([-3.0, -3.0], id="negative"),
+    ],
+)
+def test_reference_velocity_is_none_when_it_cannot_normalise(
+    values: list[float] | None,
+) -> None:
+    # ``None`` means "plot in m/s". A pressure-gradient driven case estimates no
+    # inflow speed at all, and a zero or negative one would divide the profiles
+    # by nothing or flip their sign -- all three are the same answer here.
+    from scripts.esmda.make_esmda_figures import _reference_velocity
+
+    truth = (
+        _truth_dataset(times=(0.0, 1.0), inflow_angle=[270.0, 270.0])
+        if values is None
+        else _truth_dataset(times=(0.0, 1.0), velocity_magnitude=values)
+    )
+
+    assert _reference_velocity(truth) is None
+
+
+def test_rank_counts_reads_the_summary_block() -> None:
+    from scripts.esmda.make_esmda_figures import _rank_counts as read_rank_counts
+
+    summary = {
+        "sensor_statistics": {
+            "assimilation": {
+                "n_members": 4,
+                "prior": {"mean_u": {"rank_counts": [1, 2, 1], "crps": 0.4}},
+                "posterior": {
+                    "mean_u": {"rank_counts": [2, 1, 1], "crps": 0.2},
+                    "variance_magnitude": {"rank_counts": [1, 1, 2]},
+                },
+            }
+        }
+    }
+
+    counts = read_rank_counts(summary)
+
+    # Only the rank vectors survive: the ensemble sizes and the other scores are
+    # this script's business, not the figure's (invariant 5).
+    assert counts == {
+        "assimilation": {
+            "prior": {"mean_u": [1, 2, 1]},
+            "posterior": {"mean_u": [2, 1, 1], "variance_magnitude": [1, 1, 2]},
+        }
+    }
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "summary",
+    [
+        pytest.param({}, id="no_summary_at_all"),
+        pytest.param({"sensor_statistics": None}, id="empty_block"),
+        pytest.param(
+            {"sensor_statistics": {"assimilation": {"n_members": 4}}},
+            id="set_with_no_halves",
+        ),
+        pytest.param(
+            {"sensor_statistics": {"assimilation": {"posterior": {"mean_u": 0.3}}}},
+            id="half_whose_entries_are_bare_scores",
+        ),
+        pytest.param(
+            {
+                "sensor_statistics": {
+                    "assimilation": {"posterior": {"mean_u": {"crps": 0.3}}}
+                }
+            },
+            id="entry_predating_the_rank_counts",
+        ),
+    ],
+)
+def test_rank_counts_drops_a_summary_it_cannot_read(summary: dict) -> None:
+    # An old run dir's summary is not malformed, it is *earlier*: WP1.3 added the
+    # halves and the rank vectors. Guessing at a shape that is not there would
+    # draw a histogram of nothing, so an empty result -- the caller's cue to skip
+    # D1 with a printed line -- is the answer.
+    from scripts.esmda.make_esmda_figures import _rank_counts as read_rank_counts
+
+    assert read_rank_counts(summary) == {}
+
+
+def test_make_figures_draws_the_whole_set_on_a_complete_run_dir(
+    tmp_path: pathlib.Path,
+) -> None:
+    from scripts.esmda.make_esmda_figures import make_figures
+
+    run_dir = _figure_run_dir(tmp_path)
+
+    make_figures(run_dir)
+
+    for name in (
+        "rollout_time_evolution.png",
+        "parameter_error.png",
+        "final_state_with_obs.png",
+        "sensor_timeseries_assimilation.png",
+        "sensor_timeseries_validation.png",
+        "parameter_marginals.png",
+        "station_profiles.png",
+        "mean_slices.png",
+        "sensor_fans.png",
+        "rank_histogram.png",
+    ):
+        assert (run_dir / name).is_file(), f"{name} was not written"
+    # ffmpeg is optional in this env; the writer falls back to a GIF without it.
+    assert (run_dir / "rollout_animation.mp4").is_file() or (
+        run_dir / "rollout_animation.gif"
+    ).is_file()
+
+
+def test_make_figures_skips_what_an_old_run_dir_cannot_support(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The degradation the stage exists for: a run whose metric stage predates
+    # ``eval_fields.nc`` (WP1.4) and the ``sensor_statistics`` block (WP1.3).
+    # Three figures cannot be drawn; the other seven must be, and each skip has
+    # to name the artifact and how to get it.
+    from scripts.esmda.make_esmda_figures import make_figures
+
+    run_dir = _figure_run_dir(tmp_path, eval_fields=False, rank_counts=False)
+
+    make_figures(run_dir)
+
+    printed = capsys.readouterr().out
+    for name in ("station_profiles.png", "mean_slices.png", "rank_histogram.png"):
+        assert not (run_dir / name).exists(), f"{name} was drawn from nothing"
+        assert name in printed, f"{name} was skipped silently"
+    assert "compute_esmda_metrics.py" in printed, "the skip does not say how to fix it"
+    # A skip never costs the figures after it (master-plan invariant 3).
+    for name in ("parameter_marginals.png", "sensor_fans.png"):
+        assert (run_dir / name).is_file(), f"{name} was lost to an earlier skip"
+
+
+def test_make_figures_is_a_no_op_under_skip_viz(tmp_path: pathlib.Path) -> None:
+    from scripts.esmda.make_esmda_figures import make_figures
+
+    run_dir = _figure_run_dir(tmp_path, skip_viz=True)
+
+    make_figures(run_dir)
+
+    assert not list(run_dir.glob("*.png"))
+
+
+def _captured_kwargs(
+    monkeypatch: pytest.MonkeyPatch, *names: str
+) -> dict[str, dict[str, object]]:
+    """Stub out figure calls in the wiring and record the kwargs they were given.
+
+    What this pins is the *arguments the script computes*, which is where the
+    run-dir and config knowledge lives; the figures themselves are covered
+    above. ``animate_rollout_state`` goes too -- it is not under test here and
+    it is the slowest thing in the stage.
+    """
+    import scripts.esmda.make_esmda_figures as wiring
+
+    recorded: dict[str, dict[str, object]] = {}
+
+    def _record(name: str) -> object:
+        def _stub(*args: object, **kwargs: object) -> None:
+            recorded[name] = kwargs
+            return None
+
+        return _stub
+
+    for name in names + ("animate_rollout_state",):
+        monkeypatch.setattr(wiring, name, _record(name))
+    return recorded
+
+
+@pytest.mark.parametrize("is_dynamic", [True, False])  # type: ignore[misc]
+def test_make_figures_marks_the_sensor_window_boundaries_on_any_multi_window_run(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, is_dynamic: bool
+) -> None:
+    # S5's x-axis is physical time on every run -- ``ensemble_sensor_series``
+    # rebases window ``w`` onto ``w * sim_time`` whether or not the parameters
+    # are dynamic -- so a static multi-window run (conf/run_esmda.yaml documents
+    # one) has real boundaries to mark. The *parameter* plots are the opposite
+    # case: a static parameter's x-axis is a window index, so shading it at
+    # ``w * sim_time`` would mark the wrong places, and it correctly gets none.
+    from scripts.esmda.make_esmda_figures import make_figures
+
+    recorded = _captured_kwargs(
+        monkeypatch, "plot_sensor_fans", "plot_rollout_time_evolution"
+    )
+    run_dir = _figure_run_dir(tmp_path, is_dynamic=is_dynamic)
+
+    make_figures(run_dir)
+
+    edges = recorded["plot_sensor_fans"]["window_edges"]
+    assert edges is not None, "S5 got no window boundaries on a multi-window run"
+    assert list(edges) == pytest.approx(  # type: ignore[call-overload]
+        [w * _RUN_SIM_TIME for w in range(_RUN_WINDOWS + 1)]
+    )
+    parameter_edges = recorded["plot_rollout_time_evolution"]["window_edges"]
+    assert (parameter_edges is not None) is is_dynamic, (
+        "the parameter plots' shading follows the parameter x-axis, which is a "
+        "window index on a static run"
+    )
+
+
+@pytest.mark.parametrize("height", [None, 12.5])  # type: ignore[misc]
+def test_make_figures_passes_a_configured_building_height_to_the_profiles(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, height: float | None
+) -> None:
+    # S1's ``z/H`` axis and its roof line need a canopy height, and until a case
+    # config carries one they are dead on every real run. Optional, so an absent
+    # key must still leave the profiles in metres rather than raise (CLAUDE.md's
+    # no-op-when-absent rule).
+    from scripts.esmda.make_esmda_figures import make_figures
+
+    recorded = _captured_kwargs(monkeypatch, "plot_station_profiles")
+    run_dir = _figure_run_dir(tmp_path, building_height=height)
+
+    make_figures(run_dir)
+
+    assert recorded["plot_station_profiles"]["building_height"] == height
+    # ``U_ref`` comes off the truth's ``velocity_magnitude`` on the same call.
+    assert recorded["plot_station_profiles"]["u_ref"] == pytest.approx(5.0)
+
+
+def test_make_figures_drops_the_fan_time_axis_when_the_sensor_sets_disagree(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # S5 draws every sensor set against ONE x-axis. The sets agree on it today
+    # -- they are all extracted from the same window state files -- and the loop
+    # that collects it keeps only the last set's. If they ever stopped agreeing,
+    # that would draw the other columns against a clock that is not theirs, and
+    # (since S5 no longer falls back to a frame index internally) could raise
+    # mid-stage and cost every figure after it, which invariant 3 forbids.
+    import scripts.esmda.make_esmda_figures as wiring
+
+    recorded = _captured_kwargs(monkeypatch, "plot_sensor_fans")
+    aligner = wiring.compute_sensor_metrics
+    offsets = iter((0.0, 1000.0))
+
+    def _shifted(truth: object, ensemble: object) -> dict:
+        aligned = dict(aligner(truth, ensemble))
+        aligned["time"] = aligned["time"] + next(offsets)
+        return aligned
+
+    monkeypatch.setattr(wiring, "compute_sensor_metrics", _shifted)
+    run_dir = _figure_run_dir(tmp_path)
+
+    wiring.make_figures(run_dir)
+
+    assert (
+        recorded["plot_sensor_fans"]["times"] is None
+    ), "one set's clock was handed to S5 for all of them"
+    assert "frame index" in capsys.readouterr().out

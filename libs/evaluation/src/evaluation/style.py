@@ -18,10 +18,11 @@ Populated in WP0.2 (move).
 # geometry of ``scripts/figspec/mask.py`` -- largely unannotated code predating
 # the strict mypy config. Waived rather than annotated as part of a pure
 # refactor; dropping the waiver is later cleanup. The WP1.5 additions
-# (:func:`finite_limits`, :func:`nested_bands`) are fully annotated and pass the
-# strict config on their own -- checked by deleting this line, which leaves 11
-# errors, all in the moved code -- but the waiver covers them too, so nothing
-# enforces it.
+# (:func:`finite_limits`, :func:`nested_bands`) and the save helpers are fully
+# annotated and pass the strict config on their own -- checked by deleting this
+# line, which leaves 6 errors, all in the moved code (``shade_windows``,
+# ``mark_windows``, ``band``, ``write_table`` and its two closures) -- but the
+# waiver covers them too, so nothing enforces it.
 
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ import matplotlib.patheffects as patheffects
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
-from matplotlib.lines import Line2D
+from matplotlib.figure import Figure
 
 # ---------------------------------------------------------------------------
 # §2.1 Colours (UrbanAIR palette)
@@ -242,19 +243,25 @@ def finite_limits(
     return low, high
 
 
+# Fill alpha of the outermost and innermost band; intermediate pairs
+# interpolate between them. Not a parameter: a band that reads as darker than
+# the one nested inside it is a different figure convention, not a caller's
+# choice.
+_BAND_ALPHAS = (0.18, 0.38)
+_BAND_LW = 1.8
+_BAND_ZORDER = 3
+
+
 def nested_bands(
     ax: Axes,
     coord: np.ndarray,
     values: np.ndarray,
-    quantiles: Sequence[float],
+    quantiles: Sequence[float] | np.ndarray,
     color: str,
     *,
     orient: str = "vertical",
-    alphas: tuple[float, float] = (0.18, 0.38),
     label: str | None = None,
-    lw: float = 1.8,
-    zorder: int = 3,
-) -> Line2D | None:
+) -> None:
     """Nested quantile bands (5--95 % outside, 25--75 % inside) plus the median.
 
     Args:
@@ -266,10 +273,11 @@ def nested_bands(
         color: Band and median colour (a ``COLORS`` entry).
         orient: ``"vertical"`` puts ``coord`` on x and the values on y (a time
             series); ``"horizontal"`` puts ``coord`` on y (a vertical profile).
-        alphas: Fill alpha of the outermost and innermost band; intermediate
-            pairs interpolate.
+        label: Legend label for the median line.
 
-    Returns the median line, or ``None`` when no level is a median.
+    Draws onto ``ax`` and returns nothing; the median line is not returned
+    because no caller has ever wanted it, and one that did would want the bands
+    too.
     """
     coord = np.asarray(coord, dtype=float)
     values = np.asarray(values, dtype=float)
@@ -285,34 +293,34 @@ def nested_bands(
     n_pairs = levels.size // 2
     for i in range(n_pairs):  # outermost pair first, so the inner ones sit on top
         alpha = (
-            alphas[1]
+            _BAND_ALPHAS[1]
             if n_pairs == 1
-            else alphas[0] + (alphas[1] - alphas[0]) * i / (n_pairs - 1)
+            else _BAND_ALPHAS[0]
+            + (_BAND_ALPHAS[1] - _BAND_ALPHAS[0]) * i / (n_pairs - 1)
         )
         lo, hi = values[i], values[-1 - i]
         fill = ax.fill_between if orient == "vertical" else ax.fill_betweenx
-        fill(coord, lo, hi, color=color, alpha=alpha, lw=0, zorder=zorder)
+        fill(coord, lo, hi, color=color, alpha=alpha, lw=0, zorder=_BAND_ZORDER)
 
     median = np.isclose(levels, 0.5)
     if not median.any():
-        return None
+        return
     med = values[int(np.argmax(median))]
     x, y = (coord, med) if orient == "vertical" else (med, coord)
-    (line,) = ax.plot(
+    ax.plot(
         x,
         y,
         color=color,
-        lw=lw,
+        lw=_BAND_LW,
         label=label,
-        zorder=zorder + 1,
+        zorder=_BAND_ZORDER + 1,
         # The median is the same colour as its own band; the halo is what keeps
         # it visible inside it.
         path_effects=[
-            patheffects.Stroke(linewidth=lw + 1.4, foreground="white", alpha=0.8),
+            patheffects.Stroke(linewidth=_BAND_LW + 1.4, foreground="white", alpha=0.8),
             patheffects.Normal(),
         ],
     )
-    return line
 
 
 # ---------------------------------------------------------------------------
@@ -320,26 +328,26 @@ def nested_bands(
 # ---------------------------------------------------------------------------
 
 
-def _ensure_parent(path: pathlib.Path) -> pathlib.Path:
-    path = pathlib.Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+def _ensure_parent(path: str | pathlib.Path) -> pathlib.Path:
+    resolved = pathlib.Path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
-def save_pdf(fig, path) -> pathlib.Path:
-    path = _ensure_parent(path)
-    fig.savefig(path, format="pdf", transparent=True, bbox_inches="tight")
+def save_pdf(fig: Figure, path: str | pathlib.Path) -> pathlib.Path:
+    resolved = _ensure_parent(path)
+    fig.savefig(resolved, format="pdf", transparent=True, bbox_inches="tight")
     plt.close(fig)
-    print(f"  + {path}")
-    return path
+    print(f"  + {resolved}")
+    return resolved
 
 
-def save_png(fig, path, dpi: int = 300) -> pathlib.Path:
-    path = _ensure_parent(path)
-    fig.savefig(path, format="png", dpi=dpi, transparent=True, bbox_inches="tight")
+def save_png(fig: Figure, path: str | pathlib.Path, dpi: int = 300) -> pathlib.Path:
+    resolved = _ensure_parent(path)
+    fig.savefig(resolved, format="png", dpi=dpi, transparent=True, bbox_inches="tight")
     plt.close(fig)
-    print(f"  + {path}")
-    return path
+    print(f"  + {resolved}")
+    return resolved
 
 
 # ---------------------------------------------------------------------------

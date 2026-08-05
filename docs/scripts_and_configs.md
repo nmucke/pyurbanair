@@ -775,23 +775,39 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
 - `sensor_timeseries_<set>.png` — truth vs ensemble at each sensor set.
 - `parameter_marginals.png` — prior vs posterior marginal per parameter, truth
   dashed and the z-score annotated, with the y-limits including the prior so the
-  contraction is visible. A time-varying parameter is drawn at its **final**
-  knot, matching the `final` convention `run_summary.yaml` uses throughout.
+  contraction is visible. **Which knots the two marginals come from depends on
+  the truth**, and both are labelled with it in the panel: for a *static*
+  parameter (the truth is the same at every knot — `prior_params.nc` stacks one
+  point per assimilation window) the prior is taken at **knot 0**, the run's
+  actual prior, against the posterior at the final knot, so the panel shows the
+  total contraction the run achieved; for a genuinely *time-varying* truth both
+  come from the **final** knot, since knot 0 is a different physical time and
+  the only contraction available is per-window. Note that WP1.2's
+  `parameter_metrics.contraction_ratio.final` in `run_summary.yaml` is always
+  per-knot, so on a static multi-window run the figure and the YAML deliberately
+  describe different things — the figure's subject is the run, the YAML's is the
+  window.
 - `station_profiles.png` — vertical `ū/U_ref` and TKE profiles at the sensor
   columns (assimilated *and* held-out, labelled by `station_set`): truth line,
   posterior median with nested quantile bands, prior bands, plus an inset plan
   view. `U_ref` is the truth's `velocity_magnitude` parameter when the case
-  estimates one, else the profiles are drawn in m/s.
+  estimates one, else the profiles are drawn in m/s. The `z/H` axis and its
+  roof line need a canopy height, read from the optional `geometry.building_height`
+  key; no shipped case defines it (the geometry is an STL, not a scalar), so the
+  default is metres.
 - `mean_slices.png` — a few z-levels × (truth | prior mean | posterior mean |
   posterior − truth), shared colour norm across the first three and a symmetric
   diverging one for the difference, solid cells masked out. Always the
   accumulated time-mean, never an instantaneous frame; the averaging window is
   annotated from the file's own `t_start`/`t_end`.
 - `sensor_fans.png` — the sensor `|U|` series as nested posterior quantile fans,
-  one column per sensor set, with the truth, the window boundaries and the
-  observations ± `esmda.obs_error_std`. **Pre-WP2.1 caveat, stated in the
-  figure:** the realized noisy observations the run actually assimilated are not
-  persisted yet, so the markers are the *clean* truth ± σ.
+  one column per sensor set, with the truth, the window boundaries and a
+  ± `esmda.obs_error_std` envelope around the truth. Its x-axis is physical time
+  on *every* run, so the window boundaries are marked whenever there is more than
+  one window — unlike the parameter plots, whose x-axis is a window index on a
+  static run. **Pre-WP2.1 caveat, stated in the figure:** the realized noisy
+  observations the run actually assimilated are not persisted yet, so the
+  envelope is the *clean* truth ± σ, not the values that were assimilated.
 - `rank_histogram.png` — the rank of the truth's window statistic within the
   members, read out of `run_summary.yaml`'s `sensor_statistics` block and pooled
   over statistics, sensors and windows; rows = sensor sets, columns = prior |
@@ -799,13 +815,23 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
   rank bins (the summary stores all `M+1`, since binning down is exact and
   binning up is not).
 
-The last five read `eval_fields.nc` and `run_summary.yaml`, which only exist for
-runs whose metric stage was current; each is **skipped with a printed line** when
-its input is absent, and a skip never costs the figures after it — an old run dir
-still gets every figure it can support. The prior halves of the profile, slice
-and rank figures additionally need `run.save_prior_state`. All the run-dir layout,
-config reading and YAML parsing lives in this script: `libs/evaluation` is handed
-opened datasets and plain dicts and stays a leaf.
+Three of the last five depend on an artifact an older run dir may not have:
+`station_profiles.png` and `mean_slices.png` read `eval_fields.nc`, and
+`rank_histogram.png` reads `run_summary.yaml`'s `sensor_statistics` block — both
+written only by a current metric stage. The other two need nothing extra:
+`parameter_marginals.png` reads the parameter datasets and `sensor_fans.png` the
+sensor series this stage extracts itself, and both are present on any run dir.
+Each figure is **skipped with a printed line** when its input is absent, and a
+skip never costs the figures after it — an old run dir still gets every figure it
+can support. The prior halves of the profile, slice and rank figures additionally
+need `run.save_prior_state`. All the run-dir layout, config reading and YAML
+parsing lives in this script: `libs/evaluation` is handed opened datasets and
+plain dicts and stays a leaf.
+
+The stage configures `logging` at INFO on its entry point, because the reason a
+figure no-oped is logged by `evaluation.figures` while only the *fact* is
+printed here — without a root handler the operator would see the skip and never
+the why.
 
 Honors `run.skip_viz` from the saved config (no-op if true).
 

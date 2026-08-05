@@ -21,14 +21,15 @@ Populated in WP0.2 (move), extended in WP1.5.
 # unannotated code predating the strict mypy config. Waived rather than
 # annotated as part of a pure refactor; dropping the waiver is later cleanup.
 # The WP1.5 figure set below is fully annotated and passes the strict config on
-# its own (checked by deleting this line: the eight remaining errors are all in
-# the moved code above it) -- but it is *inside* the waiver, so nothing enforces
-# that. Dropping the waiver needs the eight legacy errors fixed first.
+# its own (checked by deleting this line: the 18 remaining errors are all in the
+# moved code above it) -- but it is *inside* the waiver, so nothing enforces
+# that. Dropping the waiver needs the 18 legacy errors fixed first.
 
 import contextlib
 import logging
 import pathlib
-from typing import Iterator
+import warnings
+from typing import Iterator, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -55,6 +56,7 @@ from evaluation.style import (
 )
 from evaluation.turbulence import evenly_spaced_levels
 from matplotlib.axes import Axes
+from matplotlib.collections import PolyCollection
 from matplotlib.colors import Colormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -1030,6 +1032,12 @@ _MIN_VIOLIN_MEMBERS = 8
 # spells them (``z`` for PALM/pylbm, ``zt`` for uDALES).
 _VERTICAL_CENTRE_DIMS = ("z", "zt")
 
+# The streamwise velocity component, which S1 profiles and F1 slices. ``u`` is
+# streamwise only because every shipped case puts the inflow along +x; a case
+# with a different inflow axis needs its profiles rethought, not relabelled, so
+# this is a stated assumption rather than a caller's knob.
+_STREAMWISE = "u"
+
 
 @contextlib.contextmanager
 def _styled() -> Iterator[None]:
@@ -1046,7 +1054,8 @@ def _styled() -> Iterator[None]:
 def _finite(values: np.ndarray) -> np.ndarray:
     """The finite entries of ``values``, flattened."""
     flat = np.asarray(values, dtype=float).ravel()
-    return flat[np.isfinite(flat)]
+    kept: np.ndarray = flat[np.isfinite(flat)]  # boolean indexing is typed Any
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -1109,7 +1118,9 @@ def _draw_marginal(ax: Axes, position: float, values: np.ndarray, color: str) ->
         parts = ax.violinplot(
             [values], positions=[position], widths=0.7, showextrema=False
         )
-        for body in parts["bodies"]:
+        # matplotlib types every entry of that dict as a single ``Collection``;
+        # ``bodies`` is in fact one polygon per violin.
+        for body in cast(list[PolyCollection], parts["bodies"]):
             body.set_facecolor(color)
             body.set_edgecolor(color)
             body.set_alpha(0.45)
@@ -1149,6 +1160,47 @@ def _draw_marginal(ax: Axes, position: float, values: np.ndarray, color: str) ->
     )
 
 
+def _truth_is_static(truth: np.ndarray | None) -> bool:
+    """Whether a parameter's truth is the same value at every knot.
+
+    The discriminator between the two knot pairings P1 can draw. A *static*
+    parameter estimated over ``W`` windows still arrives with ``K = W`` knots
+    (``run_esmda.py`` stacks one point per window along ``time``), so the knot
+    count alone cannot tell the two apart -- but a constant truth can.
+    """
+    if truth is None:
+        return False
+    finite = _finite(truth)
+    return bool(finite.size) and bool(np.allclose(finite, finite[0]))
+
+
+def _z_annotation(bundle: dict[str, np.ndarray] | None, knot: int) -> str:
+    """P1's z label, distinguishing the reasons a z cannot be shown.
+
+    A bare ``z = n/a`` used to cover three opposite diagnoses -- no truth was
+    saved, the posterior collapsed, the parameter was pinned -- so a reader could
+    not tell a missing artifact from a failed assimilation. Each gets its own
+    string, told apart by the bundle's own scales: a pinned parameter has no
+    prior spread either, a collapsed one started with some.
+    """
+    if bundle is None:
+        return "z: no truth"
+
+    z_value = float(bundle["z_score"][knot])
+    if np.isfinite(z_value):
+        return f"z = {z_value:.2f}"
+
+    post_std = float(bundle["posterior_std"][knot])
+    if not np.isfinite(post_std) or post_std > 0.0:
+        # A finite, non-zero spread with a non-finite z means the *truth* is
+        # missing at this knot; a non-finite spread means the members are.
+        return "z = n/a"
+    prior_std = bundle.get("prior_std")
+    if prior_std is not None and float(prior_std[knot]) == 0.0:
+        return "z = n/a (pinned)"
+    return "z = n/a (posterior collapsed)"
+
+
 def plot_parameter_marginals(
     posterior_params: xarray.Dataset,
     true_params: xarray.Dataset | None,
@@ -1164,14 +1216,32 @@ def plot_parameter_marginals(
     span **both** marginals and the truth: autoscaling to the posterior alone
     hides the contraction, which is the one thing this figure exists to show.
 
-    A **dynamic** parameter (``K > 1`` knots) is drawn at its final knot, the
-    same ``final`` convention ``run_summary.yaml`` reports everywhere; ``K``
-    violins side by side would be a different figure.
+    **Which knot each marginal comes from depends on what the parameter is**,
+    and both are labelled so no reader has to guess. ``prior_params.nc`` stacks
+    *every* window's prior along ``time``, so on a multi-window run its final
+    knot is window ``W-1``'s prior -- which is window ``W-2``'s posterior, and
+    shows almost no contraction against the posterior beside it:
+
+    * A **static** parameter (:func:`_truth_is_static`: the truth is the same at
+      every knot, so the ``K`` knots are ``K`` windows of one quantity) draws the
+      prior at **knot 0** -- the run's actual prior -- against the posterior at
+      the final knot. That is the total contraction the run achieved.
+    * A genuinely **time-varying** parameter keeps the **same (final) knot** for
+      both. Knot 0 is a different physical time there, so a knot-0 prior would
+      compare two different quantities; per-window contraction is all that is
+      available, and the labels say so.
+
+    Without a truth the two cannot be told apart, so the same-knot pair is drawn
+    (the conservative reading) and labelled as such.
+
+    Note this is *not* the same ``final`` as ``run_summary.yaml``'s
+    ``contraction_ratio``, which is per knot and so stays per window on a static
+    multi-window run. The figure's subject is the run; the YAML's is the window.
 
     The annotated ``z = (theta* - mean_post)/sigma_post`` comes from
-    :func:`evaluation.scores.parameter_bundle` for that knot, and reads ``n/a``
-    when its scale is degenerate -- a collapsed posterior (``sigma_a = 0``) or a
-    pinned parameter -- rather than printing an infinity.
+    :func:`evaluation.scores.parameter_bundle` for the posterior's knot, and
+    :func:`_z_annotation` names the reason whenever it cannot be shown rather
+    than printing an infinity.
 
     Returns the path written, or ``None`` when no parameter carries finite
     members.
@@ -1194,17 +1264,32 @@ def plot_parameter_marginals(
             constrained_layout=True,
         )
         for ax, (name, post, truth, prior) in zip(axes[0], entries):
-            knot = post.shape[1] - 1  # the final knot; see the docstring
+            n_knots = post.shape[1]
+            knot = n_knots - 1  # the posterior's final knot; see the docstring
+            static = _truth_is_static(truth)
+            prior_knot = 0 if (static and n_knots > 1) else knot
+
             post_k = post[:, knot]
-            prior_k = None if prior is None else prior[:, knot]
+            prior_k = None if prior is None else prior[:, prior_knot]
             truth_k = None if truth is None else float(truth[knot])
+
+            if n_knots == 1:
+                prior_label, post_label, title = "Prior", "Posterior", name
+            elif static:
+                prior_label = "Prior\n(window 0)"
+                post_label = "Posterior\n(final window)"
+                title = f"{name} (static, {n_knots} windows)"
+            else:
+                prior_label = "Prior\n(final knot)"
+                post_label = "Posterior\n(final knot)"
+                title = f"{name} (knot {knot} of {n_knots})"
 
             positions = []
             if prior_k is not None:
                 _draw_marginal(ax, 0.0, prior_k, COLORS["prior"])
-                positions.append((0.0, "Prior"))
+                positions.append((0.0, prior_label))
             _draw_marginal(ax, 1.0, post_k, COLORS["posterior"])
-            positions.append((1.0, "Posterior"))
+            positions.append((1.0, post_label))
 
             if truth_k is not None and np.isfinite(truth_k):
                 ax.axhline(
@@ -1215,11 +1300,17 @@ def plot_parameter_marginals(
                     zorder=3,
                 )
 
-            z_value = np.nan
+            bundle = None
             if truth is not None:
-                z_value = float(parameter_bundle(post, prior, truth)["z_score"][knot])
+                with warnings.catch_warnings():
+                    # An ``inf`` member makes the mean and std non-finite; the
+                    # result is displayed as a named "no z" string, so the
+                    # numpy warning would only be noise on the operator's
+                    # console.
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    bundle = parameter_bundle(post, prior, truth)
             ax.annotate(
-                f"z = {z_value:.2f}" if np.isfinite(z_value) else "z = n/a",
+                _z_annotation(bundle, knot),
                 xy=(0.5, 0.98),
                 xycoords="axes fraction",
                 ha="center",
@@ -1237,12 +1328,10 @@ def plot_parameter_marginals(
             if limits is not None:
                 ax.set_ylim(*limits)
             ax.set_xticks([p for p, _ in positions])
-            ax.set_xticklabels([label for _, label in positions])
+            ax.set_xticklabels([label for _, label in positions], fontsize=8)
             ax.set_xlim(-0.6, 1.6)
             ax.set_ylabel(_param_axis_label(name))
-            ax.set_title(
-                name if post.shape[1] == 1 else f"{name} (final knot)", loc="left"
-            )
+            ax.set_title(title, loc="left")
 
         handles = [
             Patch(facecolor=COLORS["prior"], alpha=0.45, label="Prior"),
@@ -1300,17 +1389,31 @@ def _station_profile(
     station: int,
     component: str | None = None,
 ) -> np.ndarray | None:
-    """A station column's profile, ``(z,)`` or ``(quantile, z)``; ``None`` if absent."""
+    """A station column's profile, ``(z,)`` or ``(quantile, z)``; ``None`` if absent.
+
+    A *requested* component that the variable does not carry returns ``None``
+    rather than falling back to component 0: silently drawing ``u`` under a ``w``
+    label is worse than drawing nothing, and both callers already treat ``None``
+    as "this curve is not available".
+    """
     if variable not in fields.data_vars:
         return None
     da = fields[variable].isel(station=station)
     if "component" in da.dims:
-        if component is not None and component in [
-            str(c) for c in np.asarray(da["component"].values).ravel()
-        ]:
+        available = [str(c) for c in np.asarray(da["component"].values).ravel()]
+        if component is None:
+            da = da.isel(component=0)
+        elif component in available:
             da = da.sel(component=component)
         else:
-            da = da.isel(component=0)
+            logger.info(
+                "plot_station_profiles: %s has no component %r (has %s); "
+                "the profile is not drawn",
+                variable,
+                component,
+                ", ".join(available) or "none",
+            )
+            return None
     return np.asarray(da.transpose(..., "z").values, dtype=float)
 
 
@@ -1325,7 +1428,7 @@ def plot_station_profiles(
     """S1: mean-velocity and TKE profiles at the station columns (the LES figure).
 
     ``fields`` is an already-opened ``eval_fields.nc`` (WP1.4). Rows are the
-    streamwise time-mean ``u`` and the resolved TKE, columns are station
+    streamwise time-mean velocity and the resolved TKE, columns are station
     columns labelled with their sensor set and ``(x, y)``; the truth is a black
     line, the ensembles are nested quantile bands (5--95 % light, 25--75 % dark)
     about their median, teal for the posterior and grey for the prior. An inset
@@ -1340,6 +1443,11 @@ def plot_station_profiles(
     vertical axis: colocation fills that cell by extrapolating from the two
     faces below it, which inflates its second moments by ~20 % and up to 5x, and
     it is the TKE row that reads it. The caption records the exclusion.
+
+    The mean row is :data:`_STREAMWISE` (``u``), which is the streamwise
+    component only because every shipped case puts the inflow along +x. That is
+    an assumption of the figure, not a knob: a case with a different inflow axis
+    needs its profiles rethought rather than relabelled.
 
     Returns the path written, or ``None`` when the dataset carries no station
     columns or no profile variables.
@@ -1407,7 +1515,9 @@ def plot_station_profiles(
                 for prefix in prefixes:
                     name = f"{prefix}_station_{quantity}"
                     color = COLORS["truth" if prefix == "truth" else prefix]
-                    bands = _station_profile(fields, f"{name}_quantile", station, "u")
+                    bands = _station_profile(
+                        fields, f"{name}_quantile", station, _STREAMWISE
+                    )
                     if bands is not None:
                         bands = bands[:, keep] * scale[quantity]
                         nested_bands(
@@ -1421,7 +1531,7 @@ def plot_station_profiles(
                         )
                         drawn.append(bands)
                         continue
-                    profile = _station_profile(fields, name, station, "u")
+                    profile = _station_profile(fields, name, station, _STREAMWISE)
                     if profile is None:
                         continue
                     profile = profile[keep] * scale[quantity]
@@ -1506,17 +1616,27 @@ def _masked_cmap(name: str) -> Colormap:
 def _slab_component(
     fields: xarray.Dataset, variable: str, component: str
 ) -> np.ndarray | None:
-    """A slab variable as ``(zlev, y, x)`` for one component; ``None`` if absent."""
+    """A slab variable as ``(zlev, y, x)`` for one component; ``None`` if absent.
+
+    A variable that does not carry the requested component returns ``None``
+    rather than component 0 -- drawing ``u`` under a ``w`` label is worse than
+    drawing nothing, and the caller already handles a missing column.
+    """
     if variable not in fields.data_vars:
         return None
     da = fields[variable]
     if "component" in da.dims:
         available = [str(c) for c in np.asarray(da["component"].values).ravel()]
-        da = (
-            da.sel(component=component)
-            if component in available
-            else da.isel(component=0)
-        )
+        if component not in available:
+            logger.info(
+                "plot_mean_slices: %s has no component %r (has %s); "
+                "the column is not drawn",
+                variable,
+                component,
+                ", ".join(available) or "none",
+            )
+            return None
+        da = da.sel(component=component)
     return np.asarray(da.transpose("zlev", "y", "x").values, dtype=float)
 
 
@@ -1524,7 +1644,6 @@ def plot_mean_slices(
     fields: xarray.Dataset,
     output_path: str | pathlib.Path,
     *,
-    component: str = "u",
     max_levels: int = 3,
 ) -> pathlib.Path | None:
     """F1: time-mean horizontal slices, truth | prior | posterior | difference.
@@ -1532,15 +1651,26 @@ def plot_mean_slices(
     Rows are up to ``max_levels`` evenly spaced z-levels of ``eval_fields.nc``'s
     slabs; columns are the truth, the prior ensemble mean (dropped when the run
     did not save its prior state), the posterior ensemble mean and the
-    posterior-minus-truth difference. **The first three columns share one
-    ``Normalize``** over the finite fluid cells of all of them -- an unshared
-    colour scale across a prior/posterior pair is one of the three mistakes the
-    metrics doc names -- and the difference gets its own symmetric diverging
-    norm centred on zero.
+    posterior-minus-truth difference, all of the :data:`_STREAMWISE` component.
+    **The first three columns share one ``Normalize``** over the finite fluid
+    cells of all of them -- an unshared colour scale across a prior/posterior
+    pair is one of the three mistakes the metrics doc names -- and the difference
+    gets its own symmetric diverging norm centred on zero.
 
     Solid cells (``slab_fluid == 0``) are masked to :data:`_SOLID_COLOR` before
     anything is scaled, so an obstacle interior held at ~0 neither colours a
     panel nor compresses the scale of the flow around it.
+
+    Finiteness is checked **per column**, not over their union: a single
+    diverged member makes ``posterior_slab_mean`` all-NaN while the truth beside
+    it is fine, and an all-NaN column would otherwise render entirely in the
+    solid-cell grey under a caption saying grey means solid. Such a column is
+    dropped with a log line instead -- grey must not mean two things on one
+    figure.
+
+    Unlike S1 this figure deliberately does **not** apply
+    ``extrapolated_edges``: these are first moments, where the extrapolation
+    artefact is small. The exclusion matters for the second moments S1 draws.
 
     These are the accumulated time means only -- **never an instantaneous
     field**, which decorrelates after a Lyapunov horizon and would measure chaos
@@ -1550,12 +1680,17 @@ def plot_mean_slices(
     Returns the path written, or ``None`` without a posterior slab or without a
     single finite fluid cell to scale.
     """
-    posterior = _slab_component(fields, "posterior_slab_mean", component)
+    posterior = _slab_component(fields, "posterior_slab_mean", _STREAMWISE)
     if posterior is None:
         logger.info("plot_mean_slices: no posterior_slab_mean in the dataset")
         return None
-    truth = _slab_component(fields, "truth_slab_mean", component)
-    prior = _slab_component(fields, "prior_slab_mean", component)
+    if "zlev" not in fields.dims or int(fields.sizes["zlev"]) == 0:
+        # ``evenly_spaced_levels`` raises on a zero-length axis, which would
+        # abort the whole figure stage rather than skip this figure.
+        logger.info("plot_mean_slices: no z-levels in the slabs")
+        return None
+    truth = _slab_component(fields, "truth_slab_mean", _STREAMWISE)
+    prior = _slab_component(fields, "prior_slab_mean", _STREAMWISE)
 
     solid = None
     if "slab_fluid" in fields.data_vars:
@@ -1566,17 +1701,33 @@ def plot_mean_slices(
             return values
         return np.where(solid, np.nan, values)
 
+    masked_truth = masked(truth)
+    masked_posterior = masked(posterior)
+
+    def drawable(label: str, values: np.ndarray) -> bool:
+        """Whether a column has anything to show, logged per column when not."""
+        if not np.isfinite(values).any():
+            logger.info(
+                "plot_mean_slices: %s has no finite fluid cell and is not drawn "
+                "(check for a diverged member)",
+                label,
+            )
+            return False
+        return True
+
     columns: list[tuple[str, np.ndarray]] = []
     for label, values in (
-        ("Truth", masked(truth)),
+        ("Truth", masked_truth),
         ("Prior mean", masked(prior)),
-        ("Posterior mean", masked(posterior)),
+        ("Posterior mean", masked_posterior),
     ):
-        if values is not None:
+        if values is not None and drawable(label, values):
             columns.append((label, values))
-    difference = (
-        None if truth is None else masked(posterior) - masked(truth)  # type: ignore[operator]
-    )
+    difference = None
+    if masked_truth is not None and masked_posterior is not None:
+        candidate = masked_posterior - masked_truth
+        if drawable("Posterior - truth", candidate):
+            difference = candidate
 
     limits = finite_limits(*[values for _, values in columns])
     if limits is None:
@@ -1639,7 +1790,7 @@ def plot_mean_slices(
                 ax.set_xlabel("x [m]")
                 ax.grid(False)
 
-        unit = f"{component} [m/s]"
+        unit = f"{_STREAMWISE} [m/s]"
         if field_image is not None:
             fig.colorbar(
                 field_image,
@@ -1665,7 +1816,7 @@ def plot_mean_slices(
                 f"  (t = {float(fields.attrs['t_start']):.0f}"
                 f"-{float(fields.attrs['t_end']):.0f} s)"
             )
-        fig.suptitle(f"Time-mean {component} on horizontal slices{span}")
+        fig.suptitle(f"Time-mean {_STREAMWISE} on horizontal slices{span}")
 
         caption = "Time averages, never instantaneous."
         if solid is not None:
@@ -1682,21 +1833,10 @@ def plot_mean_slices(
 # ---------------------------------------------------------------------------
 
 
-def _sensor_time_axis(
-    times: np.ndarray | None, n_time: int, label: str
-) -> tuple[np.ndarray, str]:
+def _sensor_time_axis(times: np.ndarray | None, n_time: int) -> tuple[np.ndarray, str]:
     """``(x, axis label)`` for a sensor panel: the given times, or a frame index."""
     if times is not None:
-        axis = np.asarray(times, dtype=float).ravel()
-        if axis.size == n_time:
-            return axis, "Time [s]"
-        logger.info(
-            "plot_sensor_fans: %s has %d frames but %d times were given; "
-            "falling back to a frame index",
-            label,
-            n_time,
-            axis.size,
-        )
+        return np.asarray(times, dtype=float).ravel(), "Time [s]"
     return np.arange(n_time, dtype=float), "Frame"
 
 
@@ -1707,10 +1847,8 @@ def plot_sensor_fans(
     *,
     times: np.ndarray | None = None,
     obs_error_std: float | None = None,
-    obs_times: np.ndarray | None = None,
     window_edges: np.ndarray | list[float] | None = None,
     max_sensors: int = 4,
-    quantiles: tuple[float, ...] = _BAND_QUANTILES,
 ) -> pathlib.Path | None:
     """S5: quantile fans at the sensors, assimilated and held-out side by side.
 
@@ -1720,13 +1858,26 @@ def plot_sensor_fans(
     sensor sets**, labelled: the held-out column beside the assimilated one is
     the strongest anti-overfitting evidence in the suite, which it only is if a
     reader can see which is which. Rows are sensors, up to ``max_sensors``;
-    anything dropped is logged. Window boundaries are marked, and observation
-    markers carry ``+/- obs_error_std`` error bars.
+    anything dropped is logged. Window boundaries are marked, and the truth
+    carries a ``+/- obs_error_std`` envelope when the caller knows that width.
+
+    The fan is :data:`_BAND_QUANTILES` of the members that are **finite across
+    the whole window**. A member that diverged mid-window is dropped, logged, and
+    subtracted from the surviving-member count annotated on the panel: quantiles
+    propagate NaN, so one such member used to erase the whole fan and leave a
+    bare truth line with nothing to say why. A panel no-ops only when no member
+    survives.
+
+    The truth is drawn on the ensemble's own time axis. A truth series of a
+    different length is skipped with a log rather than resampled onto an invented
+    axis -- the only honest options are the ensemble's axis or none, and
+    :func:`evaluation.scores.compute_sensor_metrics` (which the wiring goes
+    through) has already aligned them.
 
     **Pre-WP2.1 caveat, stated in the figure itself:** the realized noisy
     observations the filter actually assimilated are not persisted yet, so the
-    markers are the *clean* truth plus or minus the nominal observation error --
-    the assimilated values scatter around them. WP2.1 swaps the source.
+    envelope is the *clean* truth plus or minus the nominal observation error --
+    the assimilated values scatter around it. WP2.1 swaps the source.
 
     Returns the path written, or ``None`` when no sensor set carries a finite
     ensemble series.
@@ -1763,19 +1914,26 @@ def plot_sensor_fans(
             constrained_layout=True,
         )
         obs_drawn = False
+        edges = None if window_edges is None else np.asarray(window_edges, dtype=float)
         for c, (name, members) in enumerate(sets):
-            t, t_label = _sensor_time_axis(times, members.shape[1], name)
+            t, t_label = _sensor_time_axis(times, members.shape[1])
             truth_series = truth.get(name)
-            t_truth = None
             if truth_series is not None:
                 truth_series = np.asarray(truth_series, dtype=float)
-                # The truth may be written at its own cadence over the same
-                # span; put it on that span rather than dropping it.
-                t_truth = (
-                    t
-                    if truth_series.shape[0] == t.size
-                    else np.linspace(t[0], t[-1], truth_series.shape[0])
-                )
+                if truth_series.shape[0] != t.size:
+                    # The only axes this figure can honestly put the truth on are
+                    # the ensemble's own and none at all; resampling it onto
+                    # ``linspace(t[0], t[-1], ...)`` assumes a uniform cadence
+                    # over exactly the ensemble's span, and is wrong by O(1) on a
+                    # unit signal when that does not hold.
+                    logger.info(
+                        "plot_sensor_fans: set %r has %d truth frames but %d "
+                        "ensemble frames; the truth line is not drawn",
+                        name,
+                        truth_series.shape[0],
+                        t.size,
+                    )
+                    truth_series = None
 
             for r in range(n_rows):
                 ax = axes[r][c]
@@ -1784,24 +1942,48 @@ def plot_sensor_fans(
                     continue
 
                 panel = members[:, :, r]
+                # Quantiles propagate NaN, so a member that is non-finite
+                # anywhere in the window would blank the whole fan. Drop it
+                # instead and say how many are left.
+                usable = np.isfinite(panel).all(axis=1)
+                n_kept, n_total = int(usable.sum()), int(panel.shape[0])
+                if n_kept < n_total:
+                    logger.info(
+                        "plot_sensor_fans: set %r sensor %d: %d of %d members are "
+                        "not finite across the window and are dropped from the fan",
+                        name,
+                        r,
+                        n_total - n_kept,
+                        n_total,
+                    )
+
                 drawn: list[np.ndarray] = []
-                if np.isfinite(panel).any():
-                    bands = np.quantile(panel, quantiles, axis=0)
+                if n_kept:
+                    bands = np.quantile(panel[usable], _BAND_QUANTILES, axis=0)
                     nested_bands(
                         ax,
                         t,
                         bands,
-                        quantiles,
+                        _BAND_QUANTILES,
                         COLORS["posterior"],
                         label="Posterior median",
                     )
                     drawn.append(bands)
+                ax.annotate(
+                    f"M = {n_kept}/{n_total}",
+                    xy=(0.99, 0.97),
+                    xycoords="axes fraction",
+                    ha="right",
+                    va="top",
+                    fontsize=7,
+                    color=COLORS["charcoal"],
+                )
 
                 truth_r = None
                 if truth_series is not None and r < truth_series.shape[1]:
                     truth_r = truth_series[:, r]
                     ax.plot(
-                        t_truth,
+                        t,
                         truth_r,
                         color=COLORS["truth"],
                         lw=1.5,
@@ -1812,35 +1994,21 @@ def plot_sensor_fans(
 
                 if truth_r is not None and obs_error_std:
                     obs_drawn = True
-                    if obs_times is not None:
-                        marks = np.asarray(obs_times, dtype=float).ravel()
-                        ax.errorbar(
-                            marks,
-                            np.interp(marks, t_truth, truth_r),
-                            yerr=float(obs_error_std),
-                            fmt="o",
-                            ms=3,
-                            lw=0.9,
-                            color=COLORS["orange"],
-                            label=r"Obs $\pm\sigma_o$",
-                            zorder=7,
-                        )
-                    else:
-                        ax.fill_between(
-                            t_truth,
-                            truth_r - obs_error_std,
-                            truth_r + obs_error_std,
-                            color=COLORS["orange"],
-                            alpha=0.18,
-                            lw=0,
-                            label=r"Truth $\pm\sigma_o$",
-                            zorder=2,
-                        )
+                    ax.fill_between(
+                        t,
+                        truth_r - obs_error_std,
+                        truth_r + obs_error_std,
+                        color=COLORS["orange"],
+                        alpha=0.18,
+                        lw=0,
+                        label=r"Truth $\pm\sigma_o$",
+                        zorder=2,
+                    )
 
                 limits = finite_limits(*drawn, pad=0.08)
                 if limits is not None:
                     ax.set_ylim(*limits)
-                mark_windows(ax, window_edges, annotate=(r == 0))
+                mark_windows(ax, edges, annotate=(r == 0))
                 ax.set_ylabel(f"sensor {r}\n|U| [m/s]")
                 ax.margins(x=0.01)
                 if r == 0:
@@ -1853,10 +2021,11 @@ def plot_sensor_fans(
 
         fig.suptitle("Sensor time series: posterior quantile fan vs truth")
         if obs_drawn:
-            # Only claimed when markers were actually drawn -- a caption about
-            # observations on a figure that has none is its own kind of wrong.
+            # Only claimed when the envelope was actually drawn -- a caption
+            # about observations on a figure that has none is its own kind of
+            # wrong.
             fig.supxlabel(
-                "Observation markers are the clean truth +/- the nominal sigma_o: "
+                "The orange envelope is the clean truth +/- the nominal sigma_o: "
                 "the realized noisy assimilated observations are not persisted "
                 "before WP2.1.",
                 fontsize=8,
@@ -1875,8 +2044,12 @@ def _pool_rank_counts(statistics: dict[str, list[int]]) -> np.ndarray | None:
 
     Per-window statistics are already ~independent samples, so pooling over
     statistics, sensors and windows is what makes the counts numerous enough to
-    read. Vectors of a length other than the modal one describe a different
-    ensemble size and are dropped rather than padded.
+    read.
+
+    Every vector in one cell has the same length by construction: the writer
+    (``_score_window_statistic``) bins with ``minlength=n_members + 1`` and one
+    ``(set, half)`` cell has a single ensemble size, so a ragged cell is a
+    programming error rather than a run-dir degradation and is left to raise.
     """
     vectors = [
         np.asarray(counts, dtype=float).ravel()
@@ -1886,19 +2059,8 @@ def _pool_rank_counts(statistics: dict[str, list[int]]) -> np.ndarray | None:
     if not vectors:
         return None
 
-    lengths = [v.size for v in vectors]
-    modal = max(set(lengths), key=lengths.count)
-    dropped = [n for n in lengths if n != modal]
-    if dropped:
-        logger.info(
-            "plot_rank_histogram: dropped %d rank vector(s) of length %s "
-            "(expected %d)",
-            len(dropped),
-            sorted(set(dropped)),
-            modal,
-        )
-    pooled = np.sum([v for v in vectors if v.size == modal], axis=0)
-    if modal < 2 or pooled.sum() <= 0:
+    pooled: np.ndarray = np.sum(vectors, axis=0)
+    if pooled.size < 2 or pooled.sum() <= 0:
         return None
     return pooled
 

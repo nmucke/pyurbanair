@@ -24,12 +24,16 @@ Writes, into the run directory:
   * ``rank_histogram.png``         -- rank histogram of the window statistics
                                       (needs ``run_summary.yaml``).
 
-The last five (WP1.5) each degrade to a printed skip line when their inputs are
-absent, so an old run dir -- one whose metric stage predates ``eval_fields.nc``
-or the ``sensor_statistics`` block -- still gets every figure it can support.
-This script owns all the run-dir layout, config and YAML knowledge; the figure
-functions in ``evaluation.figures`` are handed opened datasets and plain dicts
-(master-plan invariant 5).
+Of the last five (WP1.5), three read an artifact an old run dir may not have --
+``station_profiles.png`` and ``mean_slices.png`` need ``eval_fields.nc``,
+``rank_histogram.png`` needs ``run_summary.yaml``'s ``sensor_statistics`` block
+-- and each degrades to a printed skip line when it is absent, so a run whose
+metric stage predates those still gets every figure it can support. The other
+two read artifacts every run dir has: the parameter datasets
+(``parameter_marginals.png``) and the sensor series extracted above
+(``sensor_fans.png``). This script owns all the run-dir layout, config and YAML
+knowledge; the figure functions in ``evaluation.figures`` are handed opened
+datasets and plain dicts (master-plan invariant 5).
 
 Honors ``run.skip_viz`` (set in the saved config): a no-op when true, mirroring
 the old in-script behaviour.
@@ -40,6 +44,7 @@ Usage::
 """
 
 import argparse
+import logging
 import pathlib
 import sys
 
@@ -185,10 +190,24 @@ def make_figures(run_dir: pathlib.Path) -> None:
     rmse = streaming_state_rmse(true_state, posterior_state)
 
     # Boundaries between assimilation windows on the (rebased) global time axis,
-    # used to lightly shade alternating windows in the parameter plot.
+    # used to lightly shade alternating windows in the parameter plot. Gated on
+    # ``is_dynamic`` because a STATIC parameter's x-axis is a window index, not a
+    # time -- ``_concat_windows`` only rebases onto ``w * sim_time`` when the
+    # parameters are dynamic -- so shading it at ``w * sim_time`` would mark the
+    # wrong places.
     window_edges = (
         list(np.linspace(0.0, sim_time * num_windows, num_windows + 1))
         if is_dynamic and num_windows > 1
+        else None
+    )
+    # S5's x-axis is physical time on EVERY run: ``ensemble_sensor_series``
+    # rebases window ``w`` onto ``w * sim_time`` regardless of whether the
+    # parameters are dynamic, so a static multi-window run (conf/run_esmda.yaml
+    # documents one) has real window boundaries to mark even though its
+    # parameter plots get none. Hence a second, dynamics-independent edge list.
+    sensor_window_edges = (
+        list(np.linspace(0.0, sim_time * num_windows, num_windows + 1))
+        if num_windows > 1
         else None
     )
 
@@ -253,16 +272,23 @@ def make_figures(run_dir: pathlib.Path) -> None:
     )
     # The |U| series the S5 fans draw, collected here rather than re-extracted:
     # this is the only pass over the window state files the figure stage makes
-    # (master-plan invariant 2). ``compute_sensor_metrics`` is the library's own
-    # aligner -- it interpolates the truth onto the ensemble's time axis per
-    # sensor, so the fan and the time-series figure draw the identical truth
-    # curve on the identical axis rather than two near-copies of it.
+    # (master-plan invariant 2).
     fan_truth: dict[str, np.ndarray] = {}
     fan_ensemble: dict[str, np.ndarray] = {}
     fan_times: np.ndarray | None = None
+    shared_time_axis = True
     for name, (sx, sy, sz) in sensor_sets.items():
         true_magnitude = sensor_magnitude(truth_series[name])
         ensemble_magnitude = sensor_magnitude(ensemble_series[name])
+        # ``compute_sensor_metrics`` is the library's own aligner -- it
+        # interpolates the truth onto the ensemble's time axis per sensor, so
+        # the fan and the time-series figure draw the identical truth curve on
+        # the identical axis rather than two near-copies of it.
+        # ``plot_sensor_timeseries`` recomputes the same alignment internally
+        # from its two DataArray arguments (a WP0.2 signature this WP does not
+        # widen), so the call runs twice per sensor set. Measured at 0.06 s on a
+        # real run -- not worth a signature change to remove.
+        aligned = compute_sensor_metrics(true_magnitude, ensemble_magnitude)
         plot_sensor_timeseries(
             true_sensor=true_magnitude,
             ensemble_sensor=ensemble_magnitude,
@@ -272,10 +298,26 @@ def make_figures(run_dir: pathlib.Path) -> None:
             sensor_y=sy,
             sensor_z=sz,
         )
-        aligned = compute_sensor_metrics(true_magnitude, ensemble_magnitude)
         fan_truth[name] = aligned["truth"]
         fan_ensemble[name] = aligned["members"]
-        fan_times = aligned["time"]
+        # S5 draws every sensor set against ONE x-axis, so the sets have to
+        # agree on it. They do today -- all of them are extracted from the same
+        # window state files, so they share the assimilation grid's frames -- and
+        # this only guards the case where they stop agreeing: passing the last
+        # set's clock for all of them would silently slide the other columns.
+        if fan_times is None:
+            fan_times = aligned["time"]
+        elif fan_times.shape != aligned["time"].shape or not np.allclose(
+            fan_times, aligned["time"]
+        ):
+            shared_time_axis = False
+
+    if not shared_time_axis:
+        print(
+            "Sensor sets do not share one time axis; sensor_fans.png falls back "
+            "to a frame index rather than drawing them against each other's clock"
+        )
+        fan_times = None
 
     # --- WP1.5 evaluation figures --------------------------------------------
     # Each of these is skipped, with a printed line, when the artifact it reads
@@ -296,19 +338,33 @@ def make_figures(run_dir: pathlib.Path) -> None:
         ),
     )
 
+    # Canopy height for S1's ``z/H`` axis and its roof line, when the case
+    # carries one. Optional and absent from every shipped case today (the
+    # geometry is an STL, not a config scalar), so this is read the same way as
+    # ``esmda.obs_error_std`` and simply not passed when it is missing --
+    # CLAUDE.md's no-op-when-absent rule. Note the path: the ``case`` group is
+    # ``# @package _global_``, so its keys land at the config root and the
+    # canopy scalar belongs beside the rest of the geometry, not under a
+    # ``case:`` node (there is none).
+    building_height = OmegaConf.select(cfg, "geometry.building_height", default=None)
+
     eval_fields_path = run_dir / "eval_fields.nc"
     if eval_fields_path.exists():
         # The averaging window, the stride, the fluid mask and the station
         # labels all travel inside this file, so neither figure reopens anything
         # else -- and neither re-streams the window states the file exists to
-        # replace. No building height is passed: the canopy geometry is an STL,
-        # not a config scalar, so there is no saved key to read a roof line from.
+        # replace.
         with xarray.open_dataset(eval_fields_path) as fields:
             profiles = run_dir / "station_profiles.png"
             _note_skipped(
                 profiles,
                 plot_station_profiles(
-                    fields, profiles, u_ref=_reference_velocity(true_params)
+                    fields,
+                    profiles,
+                    u_ref=_reference_velocity(true_params),
+                    building_height=(
+                        None if building_height is None else float(building_height)
+                    ),
                 ),
             )
             slices = run_dir / "mean_slices.png"
@@ -322,10 +378,9 @@ def make_figures(run_dir: pathlib.Path) -> None:
 
     # The observation error the run actually assimilated with: this is the key
     # run_esmda.py builds C_D from. ``None`` when the saved config predates it,
-    # which S5 degrades on (no error bars) rather than inventing a width. No
-    # ``obs_times`` either -- the realized noisy observations are not persisted
-    # before WP2.1, so the figure falls back to the clean truth +/- sigma
-    # envelope and says so in its own caption.
+    # which S5 degrades on (no envelope) rather than inventing a width. The
+    # realized noisy observations are not persisted before WP2.1, so the band
+    # S5 draws is the clean truth +/- sigma_o and the figure says so itself.
     obs_error_std = OmegaConf.select(cfg, "esmda.obs_error_std", default=None)
     fans = run_dir / "sensor_fans.png"
     _note_skipped(
@@ -336,7 +391,7 @@ def make_figures(run_dir: pathlib.Path) -> None:
             fans,
             times=fan_times,
             obs_error_std=None if obs_error_std is None else float(obs_error_std),
-            window_edges=window_edges,
+            window_edges=sensor_window_edges,
         ),
     )
 
@@ -355,6 +410,14 @@ def make_figures(run_dir: pathlib.Path) -> None:
 
 
 def main() -> None:
+    # Every "why" behind a skipped figure is a ``logger.info`` inside
+    # ``evaluation.figures``; with no handler on the root logger the operator
+    # gets the bare "Skipped x.png" line and none of the reasons. Configured
+    # here, at the entry point, rather than in ``make_figures`` -- importing
+    # this module (the tests do) must not reconfigure anyone's logging.
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
