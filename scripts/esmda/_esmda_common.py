@@ -172,7 +172,9 @@ def _concat_sensor_pieces(pieces):
     }
 
 
-def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
+def ensemble_sensor_series(
+    state_paths, sensor_sets, solver_name, sim_time, on_member=None
+):
     """Ensemble per-component ``(u, v, w)`` sensor series across rollout windows.
 
     Interpolates u/v/w at every sensor set's points (keeping ``component`` +
@@ -188,6 +190,14 @@ def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
     per-member slice *is* materialised, because the interpolation reads
     ``.values``; every sensor set is interpolated from that one slice so a
     second set costs no extra read.
+
+    ``on_member`` is called as ``on_member(window_index, member_index, member)``
+    with that same materialised slice, before it is dropped. It exists so the
+    WP1.4 mean fields can be accumulated inside this pass rather than in a
+    second one: at Barcelona scale the window files total tens of GB and a
+    second full read of them is not affordable, while a callback on a slice
+    already in memory costs no I/O at all. It is only called when the state
+    carries an ``ensemble`` axis -- everything hanging off it is per member.
     """
     pieces = {name: [] for name in sensor_sets}
     for w, path in enumerate(state_paths):
@@ -198,7 +208,7 @@ def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
                 else None
             )
             for name, vel in _window_sensor_series(
-                ds, sensor_sets, solver_name
+                ds, sensor_sets, solver_name, on_member, w
             ).items():
                 if t is not None and "time" in vel.dims:
                     vel = vel.assign_coords(time=(t - t[0]) + w * sim_time)
@@ -206,12 +216,13 @@ def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
     return _concat_sensor_pieces(pieces)
 
 
-def _window_sensor_series(ds, sensor_sets, solver_name):
+def _window_sensor_series(ds, sensor_sets, solver_name, on_member, window_index):
     """One window's ``{name: DataArray(component, ensemble, time, sensor)}``.
 
     Members are read and interpolated one at a time from the lazily-opened
     ``ds``; every sensor set is interpolated from the member slice already in
-    memory, so a second set costs no extra read.
+    memory, so a second set costs no extra read, and ``on_member`` (see
+    :func:`ensemble_sensor_series`) sees the same slice.
     """
     if "ensemble" not in ds.dims:
         return {
@@ -228,6 +239,8 @@ def _window_sensor_series(ds, sensor_sets, solver_name):
             members[name].append(
                 _sensor_component_timeseries(member, ox, oy, oz, solver_name)
             )
+        if on_member is not None:
+            on_member(window_index, m, member)
         # No ``member.close()``: ``.load()``'s result owns no file handle, so
         # the call would be a no-op that reads as if it released something. The
         # slice is dropped at the end of the iteration, which is the real thing.

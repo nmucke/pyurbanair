@@ -678,6 +678,82 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   ensemble-mean-only artifact) is dropped from **both** sensor blocks with a
   log line — every score in them is probabilistic and needs the members — and
   the rest of the summary is written as usual.
+- `field_metrics` — the mean **field**, scored with the VDI 3783/9 hit rate `q`:
+  the fraction of cells where the posterior ensemble-mean time-mean velocity is
+  within a relative tolerance `D = 0.25` **or** an absolute one `W` of the
+  truth's. The `or` is the guideline's: a relative test alone is unreachable
+  wherever the velocity passes through zero (every recirculation boundary),
+  an absolute one alone is meaningless in the free stream. Acceptance is
+  `q ≥ 0.66`. `W` is not a convention here — it is the truth's own
+  block-bootstrap sampling error on its time-mean (median over sampled cells,
+  per component), which turns `q` into "indistinguishable from the truth within
+  the truth's own noise". The block carries `hit_rate_posterior` (pooled `q`
+  over the three components, `n_points`, and a per-component breakdown),
+  `hit_rate_prior` when `run.save_prior_state` saved the prior states,
+  `hit_rate_tolerance_w`, the scored `z_levels`, the `horizontal_stride`,
+  `n_windows` and the frames each member (and the truth) contributed. A `W` of
+  `null` means no floor could be measured (the run is too short to
+  block-bootstrap — the CI smoke shape always is), and the hit rate then runs on
+  its relative criterion alone; a `q` of `null` means no cell was scorable at
+  all. The prior half is all-or-nothing: a prior covering fewer windows or fewer
+  frames than the posterior — a job killed mid-write — is dropped rather than
+  compared across a different horizon.
+
+  **Fluid cells only**, which matters more than it sounds: a solid cell holds
+  ~0 in the truth *and* in every member, so it is a hit whatever the flow does,
+  and counting solids drags `q` toward the built-up fraction — at 30 % solid a
+  fluid hit rate of 0.52 would report as 0.66 and clear the acceptance
+  threshold on a field that fails it. Two rules, in order of authority: the
+  backend's own `blanking` indicator when the state files carry one (pylbm), and
+  otherwise the truth's own resolved TKE, since a cell a solver held at a
+  constant has exactly zero variance while a fluid cell in a turbulent flow does
+  not. `solid_cell_source` records which ran, with `n_fluid_cells` and
+  `solid_fraction` beside it; `none` means every cell was scored and `q` is
+  diluted by whatever obstacles the domain holds. The fallback cannot see an
+  obstacle a backend filled with time-varying junk rather than zeros (uDALES),
+  and it stands down entirely on a truth with no resolved fluctuation anywhere.
+
+  The fields behind it are written beside the summary as **`eval_fields.nc`**
+  (the WP1.5 figures read it rather than re-streaming): per-cell time-mean
+  velocity, resolved TKE and `<u'w'>` for the truth and, reduced across the
+  ensemble, for the posterior (and prior). Two regions — a few evenly spaced
+  z-slabs at full (or strided) horizontal resolution, and full-depth columns at
+  the sensors' `(x, y)`, **both** the assimilated and the held-out ones, labelled
+  by a `station_set` coordinate — with ensemble mean and `ddof=1` spread on both
+  and nested quantiles at the station columns only. Reductions only: no
+  per-member field is stored, and everything is float32. The stresses are
+  **resolved-only** — the subgrid contribution is not in them and is not
+  negligible inside a canopy. The file is self-contained by design: the
+  averaging window (`t_start`/`t_end`), the stride, the station labels, the
+  fluid mask (`slab_fluid`) and which axes carry colocation's extrapolated edge
+  (`extrapolated_edges`) are attributes, coordinates or variables here, so a
+  figure never reopens the run's other artifacts — or re-derives a mask — to
+  draw an honest plot. That last one matters for plotting: every axis colocation
+  moves has its **last** index extrapolated from the two faces below it rather
+  than interpolated between two, so those cells carry inflated second moments
+  (~20 % for a well-resolved field, up to 5× for face-to-face white noise). It
+  is not only the vertical — uDALES moves x, y and z, PALM moves x and y — and
+  an evenly spaced selection always includes the last index.
+
+  Three things worth knowing about how they are produced. The accumulation
+  rides on the *same* pass over the window state files as the sensor
+  extraction, so the ensemble — the M-times-larger half — costs no extra read
+  (the truth is streamed a second time, because it can only be sampled once the
+  ensemble pass has fixed the grid); the components are interpolated onto
+  cell centres first (a stress is a one-point moment, and combining staggered
+  components by array index biases the anisotropy ratio by the staggering
+  pattern rather than by the flow); and the truth is interpolated onto the
+  assimilation grid, so cross-grid runs are scored cell against cell. Memory is
+  bounded by two derived numbers rather than by config, because they answer two
+  different questions: a horizontal stride keeping **one ensemble's** persistent
+  accumulators inside ~1 GB (that is all M members' — and the posterior and prior
+  collectors are alive at once, so the pass's persistent worst case is twice it;
+  logged whenever the stride is not 1), and a time sub-chunk keeping one
+  accumulation step's transient inside ~256 MB. The transient is the larger term
+  and is sized on whichever grid the step touches — the source grid when
+  colocation or a cross-grid interpolation runs, the target slab otherwise. The
+  whole block is dropped — with a log line, the rest of the summary intact —
+  when the state carries no ensemble axis or its layout cannot be co-located.
 
 > **`metrics_version`.** The keys above are additive only; when an existing key
 > changes *meaning*, this marker bumps instead. `2` (current) means the fair

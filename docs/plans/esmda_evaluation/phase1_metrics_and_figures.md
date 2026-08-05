@@ -485,3 +485,266 @@ these are findings against them, and against what round 1 missed.
   simplified `_replicate_spread`, the CRPS/z-score/rank math against §4.2, the
   `_flat_members` window-major flattening, the identifiability median axis, and
   all four cross-phase invariants.
+
+**WP1.4**
+
+- **The accumulation rides on the sensor pass, it does not get its own.** The
+  plan says "extend the existing streaming pattern"; the implementation adds an
+  `on_member` callback to `ensemble_sensor_series` and feeds the accumulators
+  from the member slice that pass already materialises. A second pass would
+  have doubled the read of files that total tens of GB at Barcelona scale for
+  information the first pass already has in memory. The callback fires only
+  when the state carries an `ensemble` axis (everything hanging off it is per
+  member), and a failure inside it disables the mean-field layer rather than
+  propagating — the sensor blocks share the loop and must not die with it.
+- **The truth is accumulated directly on the assimilation grid**, by
+  interpolating each time chunk onto the target region before folding it in,
+  rather than accumulated on its own grid and interpolated afterwards. The
+  alternative needs the truth's *reduced* fields on the target's z heights,
+  which the truth grid does not carry — nearest-level selection plus horizontal
+  interpolation was the fallback, and it silently mixes a half-cell vertical
+  offset into a cell-against-cell comparison. Interpolating first costs one
+  scipy call per chunk on a few slabs (a small fraction of the read it rides
+  on) and makes the identical-grid case exact: linear interpolation at
+  coincident points returns the samples themselves.
+- **Region: evenly spaced z-slabs + full-depth station columns.** The plan
+  names neither. Slabs because the hit rate scores cells and figure F1 draws
+  planes, on the *same* levels `streaming_state_rmse` already reports so the
+  two state blocks describe the same heights; columns because figure S1 wants
+  profiles, and at a handful of cells they are free — which is what lets the
+  quantiles the plan asks for live there and only there.
+- **Station columns are the assimilation sensors' `(x, y)`.** The plan's figure
+  S1 says "upstream / in-canyon / wake" without saying where those come from.
+  A new config group for three hand-placed stations would be a knob per case
+  that nothing else reads; the sensors are already placed where the flow is
+  interesting, already in the config, and already what every other block is
+  scored at. If a case wants named stations, the honest place is the obs config
+  that defines the sensors.
+- **No config knobs, and the two memory bounds are derived rather than set**
+  (the WP1.3 precedent). Neither number is one a caller could usefully choose:
+  both are "what fits". The horizontal stride bounds the *persistent*
+  accumulators — `n_members × cells × 80 bytes` against 1 GB, a member's
+  accumulator being 10 arrays per cell independent of the frame count — and is
+  logged whenever it is not 1. The time sub-chunk bounds the *transient* of one
+  accumulation step, which is a different and initially unbounded quantity (see
+  the review-round-1 entry below).
+- **`hit_rate` returns `{q, n_points}`, not a bare float**, and the block
+  reports the pooled `q` over the three components *and* a per-component
+  breakdown. One scalar is what the metrics doc asks for and what the pooled
+  entry is; the breakdown costs three lines of YAML and is the difference
+  between "the field is off" and "`v` is off". Each component is scored against
+  its own `W`, which is why the pooled call takes a broadcast tolerance rather
+  than a scalar.
+- **`W` is a median over 64 sampled cells, not over every cell.** The
+  bootstrap is per-cell and the reduction is a median (a cell inside a
+  recirculation carries a wild floor and `W` is meant to describe a typical
+  one), so the sampling error of the median over 64 draws is far below the
+  spread between cells that the median is summarising. Keeping every cell's
+  series through the pass would have cost the whole field in memory — the one
+  thing the streaming design exists to avoid.
+- **Non-finite `W` falls back to the relative criterion**, rather than
+  disqualifying every point. The bootstrap needs ~21 frames and the CI smoke
+  shape has fewer, so an unmeasured floor is the common case in tests; the
+  relative test is the guideline's own, and the absolute one is the refinement.
+  Logged at INFO when no component measured a floor.
+- **`eval_fields.nc` stores reductions only, and NaN propagates through them.**
+  A member whose field is not finite is not a sample from the posterior, so a
+  `nanmean` across members would describe an ensemble that does not exist —
+  the same convention WP1.2 settled on for the parameter calibration block, and
+  deliberately the opposite of WP1.1's `ensemble_uniqueness`, which reduces over
+  finite pairs because it is counting duplicates rather than estimating a
+  moment.
+- **The prior's mean fields reuse the prior sensor pass** (`_prior_sensor_series`
+  gained the same callback), so the prior half costs no read of its own either.
+  The all-or-nothing rule it inherits took two attempts to get right — see the
+  review-round-1 entry below, which is where it became true of the *failed-read*
+  path and not only of the missing-file one.
+- **Dropped from the rollback branch's version** (`turbulence_stats.py`, 1339
+  lines): `fac2`, `fractional_bias`, `nmse` and `nmse_split` — the slimmed
+  metric set scores the mean field with the hit rate alone; the scalar/batch
+  bootstrap pair, superseded by WP1.3's single vectorized `block_bootstrap_std`;
+  and `resolve_metrics_settings` with its four Hydra knobs. (Two things dropped
+  here came back in review round 2: `extrapolated_centre_dims` and the
+  fluid-cell masking, both for reasons recorded there.) Kept and adapted: the Chan/Welford accumulator core (re-measured
+  here — 7e-11 relative error against `longdouble` where the naive form loses
+  4 %) and the colocation table.
+- **Colocation's extrapolated edge is disclosed rather than fixed.** Every axis
+  colocation moves has its *last* index filled by linear extrapolation from the
+  two faces below it (weights 1.5 / −0.5) rather than interpolated between two,
+  so those cells' second moments are inflated — ~20 % for a well-resolved field,
+  up to ~5x for face-to-face white noise — and `evenly_spaced_levels` (now
+  shared with `_vel_field_4z` rather than copied into it) always includes the
+  last index. It is **not** only the vertical, as an earlier revision of this
+  entry said: uDALES moves x, y and z, PALM moves x and y, so the artefact is in
+  every slab and no level selection can avoid it. `eval_fields.nc` therefore
+  carries an `extrapolated_edges` attribute (round 2) naming the affected axes,
+  which is what a WP1.5 figure needs to exclude them from an aggregate.
+- **Deferred:** the block scores the mean *velocity* only. TKE and `<u'w'>` are
+  accumulated and written to `eval_fields.nc` — figure S1 plots the TKE;
+  `<u'w'>` has no reader in the phase-1 figure set and is stored because the
+  WP's charter names it and the anisotropy ratio it enables is what the metrics
+  doc calls more discriminating than TKE alone — but they get no scalar score — the metrics doc names the hit rate as the single standards-based
+  number for the mean field and gives no threshold for a second-moment one, and
+  inventing one here would put a number in `run_summary.yaml` that nothing can
+  be read against.
+- **The filtering side is not wired.** WP1.1 and WP1.2 reached
+  `compute_filtering_metrics.py` for free because both went through
+  `parameter_metric_summary`, one function with one meaning. Nothing is shared
+  here: the mean fields hang off the ESMDA window-state layout and its sensor
+  pass, so the filtering stage would need its own driver rather than an import.
+  Out of scope for this WP, and the library half (accumulator, colocation, hit
+  rate) is ready for it.
+
+**WP1.4, review round 1.** Two adversarial reviewers were launched; the
+integration/scope one completed and the correctness one died partway (an API
+session limit) with its mutation-testing sweep unfinished — so its findings are
+**not** in this record and round 2 has to cover the correctness lens.
+
+- **A partially-read prior was scored, against this plan's own claim.** The
+  guard compared the prior's *shape* against the posterior's — and a per-member
+  mean over three windows has exactly the same shape as one over ten. So a prior
+  state file that existed but could not be read (a job killed mid-`to_netcdf`)
+  left the windows already folded into the accumulators, and `hit_rate_prior`
+  was computed over half the horizon it was compared against, with nothing in
+  either artifact recording the discrepancy. Demonstrated by the reviewer on a
+  corrupted two-window run. Fixed at the root rather than with another guard:
+  the prior read moved out of `_sensor_statistics` up into `compute_metrics`, so
+  **one** place owns the read, and a prior it could not read reaches neither
+  block — the split ownership is how the bug happened. A frame-count check backs
+  it up, since it also catches a prior that is readable but short, which the
+  shape check cannot. Note what that check is *not*: it gates the field block
+  only, so a readable prior on a shorter horizon still reaches
+  `sensor_statistics`, where WP1.3's own per-window guard governs it (round 2
+  corrected an earlier wording here that claimed one gate for both blocks).
+  Regression tests: `test_field_metrics_drop_a_prior_written_over_a_shorter_horizon`
+  (the frame check) and the unreadable-prior case (the hoist).
+- **The blanket `except` around accumulation is narrowed to colocation only.**
+  It had wrapped the whole `_add`, which re-introduced exactly what WP1.3 round 2
+  removed: a typo in the reduction would have shipped a green run with the block
+  silently missing. Invariant 3 is about absent inputs — colocation refusing a
+  layout — not about absent correctness.
+- **The memory budget was calibrated against the wrong term**, which mattered
+  because that budget is the entire argument for shipping no knob. It bounded
+  the *persistent* accumulators (80 bytes per cell, frame-count independent),
+  while the actual peak was the *transient*: measured 512 MB for a 200-frame
+  64³ member against 1.3 MB of persistent state. Two fixes. (1) The station
+  columns no longer hand the whole 3-D field to `.interp` — each station is
+  bracketed between the two cells around it first, which is a 16x saving on the
+  dominant term (223 MB → 13.0 MB measured, pinned by
+  `test_station_columns_match_a_whole_field_interpolation`). The bracketed and
+  whole-field interpolations agree to ~1 ULP, not bit-for-bit — the test asserts
+  `allclose`, and an earlier wording here overstated it. (2) Time is sub-chunked
+  to a 256 MB transient bound, which is what the chunk-wise accumulator is
+  *for*; round 2 found two shapes that escaped the first cut of it, fixed there.
+- **`MeanFieldCollector` moved from `_esmda_common.py` into
+  `compute_esmda_metrics.py`** and is annotated. `_esmda_common.py` carries a
+  file-level mypy waiver as legacy untyped code; ~250 statement lines of new
+  code had landed inside it, escaping the strict config, for a module whose
+  reason to exist is *sharing* between the metric and figure stages — and the
+  figure stage reads `eval_fields.nc`, not the collector. Only the `on_member`
+  parameter stays behind. The `target` dict became a `NamedTuple` in the move:
+  it is shared by aliasing across three collectors, so immutability is worth the
+  twelve lines.
+- **Station columns now cover the validation sensors too**, labelled by a
+  `station_set` coordinate. The original argument (sensors are already placed
+  where the flow is interesting) survives, but figure S1's profiles are worth
+  most at the *held-out* columns — a profile drawn only where the assimilation
+  was fitted is the least informative one available — and the columns are a
+  handful of cells either way.
+- **A test now pins `_STAGGERED_TO_CENTRE` against
+  `ObservationOperator.dim_mapping`.** Invariant 5 forbids the import, so the
+  table is a restatement, and nothing failed if the two drifted — silently, in a
+  way that would have the sensor series and the mean fields read one component
+  off different axes *in the same pass over the same slice*. Writing the test
+  found that the table is a strict superset, not a copy: pypalm's postprocess
+  already moves `w` from `zw_3d` onto `z`, so that pair is a no-op on a shipped
+  state and correct on a raw one. The assertion pins the invariant that actually
+  holds — every staggered axis the operator reads has a colocation pair, and
+  every pair names an axis the operator agrees exists.
+- **Dead weight removed:** the `neural_surrogate` staggering entry (the surrogate
+  records its spin-up backend's name, `pylbm`, and `ObservationOperator` rejects
+  the other spelling outright, so it was unreachable), the `add_member` alias for
+  `add`, and `MomentAccumulator`'s unread `n_components`/`cell_shape`
+  properties. `evenly_spaced_levels` is now genuinely shared with
+  `_vel_field_4z`, which had kept its own copy — the drift the function was
+  introduced to prevent was still open.
+- **`eval_fields.nc` gained `long_name` on every variable and `t_start`/`t_end`
+  attributes**, so figure F1 can annotate its averaging window without reopening
+  `truth_access.yaml`, and a `station_set` coordinate so S1 can label its
+  columns. The file's stated purpose is cross-WP consumption; being
+  self-describing is cheap insurance for that.
+- **Accepted as-is, with the documentation corrected instead of the code:** the
+  truth is streamed a second time (it can only be sampled once the ensemble pass
+  has fixed the target, and it is one member's worth of frames against the
+  ensemble's M). The reviewer's alternative — reordering `truth_sensor_series`
+  after the ensemble pass and giving it the same callback — is a real saving and
+  a reasonable follow-up, but it moves the sensor extraction's control flow for
+  a term that is 1/M of the read this WP already avoids.
+
+**WP1.4, review round 2.** A fresh adversarial sweep over the round-1 fixes
+(which were themselves unreviewed code) and over what round 1 missed. The
+correctness reviewer died on a session limit twice, so this pass carried both
+lenses.
+
+- **The hit rate scored solid cells, and that is the WP's headline number.** The
+  spec says "over fluid cells"; nothing masked. A solid cell holds ~0 in the
+  truth *and* in every member — every backend fills obstacle interiors rather
+  than marking them (pylbm near-zeros, pypalm replaces PALM's NaN with 0.0,
+  uDALES junk) — so `|p−o| ≈ 0 ≤ W` and each one counts as a **hit**. The
+  reviewer demonstrated a posterior 100 % wrong in every fluid cell reporting
+  `q_u = 0.50` on a half-solid domain: in general `q = f_solid + (1−f_solid)·
+  q_fluid`, so at a Barcelona built-up fraction of ~0.3 a fluid hit rate of 0.52
+  reports as 0.66 and *crosses the acceptance threshold on a field that fails
+  it*. The round-1 deviation claiming "the masking rule reduces to score the
+  cells that are finite" was simply false, and this PR's own colocation
+  docstring said so two files away.
+  Fixed with a two-rule mask: the backend's `blanking` indicator when the state
+  files carry one (read once from a window file, not through every member slice
+  — the sensor pass hands out `ds[["u","v","w"]]` and the indicator is not in
+  it), and otherwise the truth's own resolved TKE, since a cell held at a
+  constant has *exactly* zero variance and a fluid cell in a turbulent flow does
+  not. `solid_cell_source`, `n_fluid_cells` and `solid_fraction` record which
+  rule ran; `none` means every cell was scored and says so. The fallback stands
+  down when it would mask everything (a laminar or single-frame truth), because
+  a rule that masks the whole domain is not separating anything.
+- **`W` was sampled over solid cells too**, the same root cause pointing the
+  other way: a cell inside a building holds a constant, so its bootstrap floor
+  is ~0, and in a slab more than half solid the *median* collapses to zero and
+  the absolute criterion silently switches off. The sample is now filtered by
+  the fluid mask at reduction time — the mask is not known during the truth
+  pass, but the retained cells' flat indices are, which is enough.
+- **The narrowed `except` did not match its own docstring.** `_centre_dims`
+  raises on a state with no vertical dim and sat *outside* the guard, so that
+  layout took the whole metric stage down — parameter, health, state and sensor
+  blocks with it. Moved inside, with the no-time-axis check. Zero sensors had
+  the same shape of bug (`concat([])`, `np.concatenate([])`); both now
+  short-circuit, since the slabs do not depend on the stations.
+- **The 256 MB transient bound was not enforced on two shapes.** (1) Colocation
+  ran *before* the sub-chunk loop and materialises every axis it moves, so a
+  staggered backend copied the whole member window regardless — measured 429 MB
+  against 129 MB native. Colocation now happens inside the loop, on each piece;
+  the layout probe that has to run first is one frame. (2) The block was derived
+  from the *target* cells, but a cross-grid `.interp` scales with the **source**
+  grid — measured 766 MB for a 96³ truth against a 32³ assimilation grid, the
+  shipped default direction. It is now sized on whichever grid the step touches.
+- **Four of the six round-1 fixes had no test that would fail if reverted**, and
+  the drift test pinned coverage rather than the mapping it was written for: of
+  six mutated `_STAGGERED_TO_CENTRE` entries (a component co-located onto the
+  *wrong axis*, which is exactly the drift that would have the sensor series and
+  the mean fields read one component off two different axes) **five survived**.
+  The assertions now pin the destination per spatial letter — each pair must land
+  on the centre axis of the letter the operator reads that face on — and all six
+  mutants are caught. The pairs no operator axis can vouch for (pypalm
+  pre-interpolates `w` off `zw`, so `dim_mapping` has the same blind spot) are
+  stated outright.
+  New regression tests, each verified to fail with its fix reverted: the solid-cell
+  mask (both rules), the `W` filter, the frame-count prior check, the narrowed
+  `except`, the no-vertical-dim and no-time-axis guards, sub-chunk equivalence at
+  one frame per step, and the horizontal stride — which no grid in the suite was
+  large enough to reach, despite being the whole "no config knob" argument.
+- **Reported but deliberately not changed.** The truth is still read a second
+  time (it can only be sampled once the ensemble pass has fixed the grid; it is
+  1/M of the read the WP already avoids). `<u'w'>` still has no phase-1 reader.
+  `_ensemble_reduction` still runs twice over the posterior slab (once for the
+  netCDF, once for the score) — one array, and collapsing it would couple the
+  writer to the scorer.
