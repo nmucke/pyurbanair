@@ -1076,8 +1076,25 @@ def _marginal_members(
     metric block scored. Without a truth there is nothing to align, so the same
     parameter selection and the same prior guard are applied directly: a run
     whose truth was never saved still has a contraction worth drawing.
+
+    An estimated parameter that the truth file does not carry has no panel --
+    the alignment yields only the parameters both datasets hold -- so it is
+    logged: "one panel per estimated parameter" is otherwise silently untrue.
     """
     if true_params is not None:
+        scored = set(_plotted_param_names(posterior_params, true_params))
+        unscored = [
+            name
+            for name in _plotted_param_names(posterior_params)
+            if name not in scored
+        ]
+        if unscored:
+            logger.info(
+                "plot_parameter_marginals: %d estimated parameter(s) absent from "
+                "the truth and so not drawn: %s",
+                len(unscored),
+                ", ".join(unscored),
+            )
         for name, _x, members, truth, prior in _aligned_parameter_members(
             posterior_params, true_params, prior_params
         ):
@@ -1161,17 +1178,24 @@ def _draw_marginal(ax: Axes, position: float, values: np.ndarray, color: str) ->
 
 
 def _truth_is_static(truth: np.ndarray | None) -> bool:
-    """Whether a parameter's truth is the same value at every knot.
+    """Whether a parameter's truth is the same value at **two or more** knots.
 
     The discriminator between the two knot pairings P1 can draw. A *static*
     parameter estimated over ``W`` windows still arrives with ``K = W`` knots
     (``run_esmda.py`` stacks one point per window along ``time``), so the knot
     count alone cannot tell the two apart -- but a constant truth can.
+
+    Two finite knots are the minimum evidence for that claim: ``np.allclose``
+    over a single value is trivially true, so a truth known at one knot only
+    (the rest NaN) would read as static and pair a knot-0 prior against a
+    final-knot posterior -- two different quantities in one panel, the exact
+    failure this branch exists to prevent. Below that threshold the conservative
+    same-knot pair is drawn instead.
     """
     if truth is None:
         return False
     finite = _finite(truth)
-    return bool(finite.size) and bool(np.allclose(finite, finite[0]))
+    return finite.size >= 2 and bool(np.allclose(finite, finite[0]))
 
 
 def _z_annotation(bundle: dict[str, np.ndarray] | None, knot: int) -> str:
@@ -1223,16 +1247,23 @@ def plot_parameter_marginals(
     shows almost no contraction against the posterior beside it:
 
     * A **static** parameter (:func:`_truth_is_static`: the truth is the same at
-      every knot, so the ``K`` knots are ``K`` windows of one quantity) draws the
-      prior at **knot 0** -- the run's actual prior -- against the posterior at
-      the final knot. That is the total contraction the run achieved.
+      two or more finite knots, so those knots are repeats of one quantity)
+      draws the prior at **knot 0** -- the run's actual prior -- against the
+      posterior at the final knot. That is the total contraction the run
+      achieved.
     * A genuinely **time-varying** parameter keeps the **same (final) knot** for
       both. Knot 0 is a different physical time there, so a knot-0 prior would
       compare two different quantities; per-window contraction is all that is
       available, and the labels say so.
 
     Without a truth the two cannot be told apart, so the same-knot pair is drawn
-    (the conservative reading) and labelled as such.
+    (the conservative reading) and labelled as such. A truth whose every knot is
+    non-finite counts as no truth: it is not drawn, not scored, and does not
+    pick the knot pair.
+
+    Both branches label their marginals by **knot**, never by window: a
+    ``static_parameters`` entry inside a dynamic run is broadcast onto the
+    dynamic knot grid, so its knot count is not the run's window count.
 
     Note this is *not* the same ``final`` as ``run_summary.yaml``'s
     ``contraction_ratio``, which is per knot and so stays per window on a static
@@ -1264,6 +1295,18 @@ def plot_parameter_marginals(
             constrained_layout=True,
         )
         for ax, (name, post, truth, prior) in zip(axes[0], entries):
+            if truth is not None and not np.isfinite(truth).any():
+                # A truth with no finite knot is no truth: it can neither be
+                # drawn, nor scored, nor used to pick the knot pair. Reading it
+                # as a time-varying one would label the panel with a property it
+                # does not have; ``None`` reaches the honest "z: no truth".
+                logger.info(
+                    "plot_parameter_marginals: %s has no finite truth knot; "
+                    "the panel is drawn as if no truth were saved",
+                    name,
+                )
+                truth = None
+
             n_knots = post.shape[1]
             knot = n_knots - 1  # the posterior's final knot; see the docstring
             static = _truth_is_static(truth)
@@ -1276,9 +1319,12 @@ def plot_parameter_marginals(
             if n_knots == 1:
                 prior_label, post_label, title = "Prior", "Posterior", name
             elif static:
-                prior_label = "Prior\n(window 0)"
-                post_label = "Posterior\n(final window)"
-                title = f"{name} (static, {n_knots} windows)"
+                # Knots, not windows: a ``static_parameters`` entry inside a
+                # *dynamic* run is broadcast onto the dynamic knot grid, so its
+                # knot count is not the window count.
+                prior_label = "Prior\n(knot 0)"
+                post_label = "Posterior\n(final knot)"
+                title = f"{name} (static, {n_knots} knots)"
             else:
                 prior_label = "Prior\n(final knot)"
                 post_label = "Posterior\n(final knot)"
@@ -1471,8 +1517,14 @@ def plot_station_profiles(
         return None
 
     z = np.asarray(fields["z"].values, dtype=float)
-    trimmed = bool(set(_extrapolated_axes(fields)) & set(_VERTICAL_CENTRE_DIMS))
-    keep = slice(0, -1) if trimmed and z.size > 1 else slice(None)
+    # Only the vertical axis is trimmed, so only it is named in the caption:
+    # ``extrapolated_edges`` lists every extrapolated axis (x and y among them)
+    # and printing all of them claims exclusions that did not happen.
+    vertical_extrapolated = tuple(
+        name for name in _extrapolated_axes(fields) if name in _VERTICAL_CENTRE_DIMS
+    )
+    trimmed = bool(vertical_extrapolated) and z.size > 1
+    keep = slice(0, -1) if trimmed else slice(None)
     z = z[keep]
     z_plot = z / building_height if building_height else z
     z_label = "z/H [-]" if building_height else "z [m]"
@@ -1594,7 +1646,7 @@ def plot_station_profiles(
         if trimmed:
             caption += (
                 " Top z cell excluded: colocation extrapolates it "
-                f"({', '.join(_extrapolated_axes(fields))})."
+                f"({', '.join(vertical_extrapolated)})."
             )
         fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
         fig.suptitle("Vertical profiles at the station columns")
@@ -1611,6 +1663,41 @@ def _masked_cmap(name: str) -> Colormap:
     cmap = plt.get_cmap(name).copy()
     cmap.set_bad(_SOLID_COLOR)
     return cmap
+
+
+# Why a column can carry no finite fluid cell, per column: an ensemble mean is
+# blanked by a diverged member, the truth has no ensemble to diverge, and the
+# difference only inherits its sources' gaps. One hint for all four would send a
+# reader hunting a member that does not exist.
+_EMPTY_SLAB_HINT = {
+    "Truth": "the truth field is all NaN",
+    "Prior mean": "check for a diverged member",
+    "Posterior mean": "check for a diverged member",
+    "Posterior - truth": "its truth or posterior source has none",
+}
+
+
+def _empty_slab_panel(
+    ax: Axes, extent: tuple[float, float, float, float], hint: str
+) -> None:
+    """Draw an empty F1 panel that says *why* it is empty, on the field's extent.
+
+    The alternative -- dropping the column -- leaves nothing on the PNG to
+    distinguish "the posterior is missing" from "this figure only ever had three
+    columns", while the suptitle keeps promising the missing subject.
+    """
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.annotate(
+        f"no finite cell\n({hint})",
+        xy=(0.5, 0.5),
+        xycoords="axes fraction",
+        ha="center",
+        va="center",
+        fontsize=9,
+        color=COLORS["charcoal"],
+    )
 
 
 def _slab_component(
@@ -1664,9 +1751,12 @@ def plot_mean_slices(
     Finiteness is checked **per column**, not over their union: a single
     diverged member makes ``posterior_slab_mean`` all-NaN while the truth beside
     it is fine, and an all-NaN column would otherwise render entirely in the
-    solid-cell grey under a caption saying grey means solid. Such a column is
-    dropped with a log line instead -- grey must not mean two things on one
-    figure.
+    solid-cell grey under a caption saying grey means solid -- grey must not mean
+    two things on one figure. Such a column instead **keeps its slot in the grid
+    and is drawn blank, labelled with why** (and logged): a column silently
+    dropped is a figure that looks complete while missing its subject. It
+    contributes nothing to the shared norm. Only a column the run never wrote
+    (no prior state saved) is absent from the grid altogether.
 
     Unlike S1 this figure deliberately does **not** apply
     ``extrapolated_edges``: these are first moments, where the extrapolation
@@ -1708,23 +1798,31 @@ def plot_mean_slices(
         """Whether a column has anything to show, logged per column when not."""
         if not np.isfinite(values).any():
             logger.info(
-                "plot_mean_slices: %s has no finite fluid cell and is not drawn "
-                "(check for a diverged member)",
+                "plot_mean_slices: %s has no finite fluid cell and is drawn empty "
+                "(%s)",
                 label,
+                _EMPTY_SLAB_HINT[label],
             )
             return False
         return True
 
-    columns: list[tuple[str, np.ndarray]] = []
+    # A column present in the dataset but carrying nothing finite keeps its slot
+    # and is drawn as a labelled blank (``values`` is ``None`` below). Dropping
+    # it from the grid instead leaves the PNG reading "Truth | Prior mean" under
+    # an unchanged suptitle, with nothing on the figure to say the subject of the
+    # whole figure is missing. A column the run never wrote at all (no prior
+    # state saved) is genuinely absent and stays out of the grid.
+    columns: list[tuple[str, np.ndarray | None]] = []
     for label, values in (
         ("Truth", masked_truth),
         ("Prior mean", masked(prior)),
         ("Posterior mean", masked_posterior),
     ):
-        if values is not None and drawable(label, values):
-            columns.append((label, values))
+        if values is not None:
+            columns.append((label, values if drawable(label, values) else None))
     difference = None
-    if masked_truth is not None and masked_posterior is not None:
+    has_difference = masked_truth is not None and masked_posterior is not None
+    if has_difference:
         candidate = masked_posterior - masked_truth
         if drawable("Posterior - truth", candidate):
             difference = candidate
@@ -1748,7 +1846,7 @@ def plot_mean_slices(
     x = np.asarray(fields["x"].values, dtype=float)
     y = np.asarray(fields["y"].values, dtype=float)
     extent = (float(x.min()), float(x.max()), float(y.min()), float(y.max()))
-    n_cols = len(columns) + (1 if difference is not None else 0)
+    n_cols = len(columns) + (1 if has_difference else 0)
 
     with _styled():
         fig, axes = plt.subplots(
@@ -1761,28 +1859,34 @@ def plot_mean_slices(
         field_image = difference_image = None
         for r, level in enumerate(levels):
             for c, (label, values) in enumerate(columns):
-                field_image = axes[r][c].imshow(
-                    values[level],
-                    origin="lower",
-                    extent=extent,
-                    aspect="equal",
-                    cmap=_masked_cmap(CMAP_FIELD),
-                    vmin=vmin,
-                    vmax=vmax,
-                )
+                if values is None:
+                    _empty_slab_panel(axes[r][c], extent, _EMPTY_SLAB_HINT[label])
+                else:
+                    field_image = axes[r][c].imshow(
+                        values[level],
+                        origin="lower",
+                        extent=extent,
+                        aspect="equal",
+                        cmap=_masked_cmap(CMAP_FIELD),
+                        vmin=vmin,
+                        vmax=vmax,
+                    )
                 if r == 0:
                     axes[r][c].set_title(label, fontsize=10)
-            if difference is not None:
+            if has_difference:
                 ax = axes[r][len(columns)]
-                difference_image = ax.imshow(
-                    difference[level],
-                    origin="lower",
-                    extent=extent,
-                    aspect="equal",
-                    cmap=_masked_cmap(CMAP_DIFF),
-                    vmin=-diff_max,
-                    vmax=diff_max,
-                )
+                if difference is None:
+                    _empty_slab_panel(ax, extent, _EMPTY_SLAB_HINT["Posterior - truth"])
+                else:
+                    difference_image = ax.imshow(
+                        difference[level],
+                        origin="lower",
+                        extent=extent,
+                        aspect="equal",
+                        cmap=_masked_cmap(CMAP_DIFF),
+                        vmin=-diff_max,
+                        vmax=diff_max,
+                    )
                 if r == 0:
                     ax.set_title("Posterior - truth", fontsize=10)
             axes[r][0].set_ylabel(f"z = {z_values[level]:.1f} m\ny [m]")
@@ -1859,7 +1963,10 @@ def plot_sensor_fans(
     the strongest anti-overfitting evidence in the suite, which it only is if a
     reader can see which is which. Rows are sensors, up to ``max_sensors``;
     anything dropped is logged. Window boundaries are marked, and the truth
-    carries a ``+/- obs_error_std`` envelope when the caller knows that width.
+    carries a ``+/- obs_error_std`` envelope when the caller knows that width --
+    inside the y-limits, which span it: an envelope wider than the fan would
+    otherwise clip to the panel edges and read as a background tint rather than
+    as the observation error it is being compared against.
 
     The fan is :data:`_BAND_QUANTILES` of the members that are **finite across
     the whole window**. A member that diverged mid-window is dropped, logged, and
@@ -2004,6 +2111,13 @@ def plot_sensor_fans(
                         label=r"Truth $\pm\sigma_o$",
                         zorder=2,
                     )
+                    # The envelope sets the limits too: at the shipped
+                    # ``obs_error_std`` a narrow sensor series has a sigma_o wider
+                    # than the fan, and an envelope clipped to limits taken from
+                    # the fan alone fills the panel edge to edge and reads as a
+                    # background tint instead of the width it is.
+                    drawn.append(truth_r - obs_error_std)
+                    drawn.append(truth_r + obs_error_std)
 
                 limits = finite_limits(*drawn, pad=0.08)
                 if limits is not None:

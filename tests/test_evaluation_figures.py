@@ -25,6 +25,13 @@ instead of degrading. So what is pinned here is:
   * **F1 masks the solid cells before it scales the colours** -- they are never
     scored and must never be colour-scaled either
     (``..._solid_cells_are_outside_the_shared_norm``);
+  * **identity, not only content**: which row, column, station, sensor or knot
+    a drawn value belongs to. A figure whose numbers are right but attached to
+    the wrong panel renders exactly like a correct one, so the sign of F1's
+    difference, its row labels against the levels they draw, S1's captions
+    against their own stations, S5's per-row truth and per-panel surviving
+    member count, and P1's two marginals against the knots their tick labels
+    claim are each pinned to their own panel rather than to the figure;
   * the two schema-driven degradations a reader would not guess: F1 drops the
     prior column when the prior state was not saved
     (``..._drops_the_prior_column_...``) and S1 drops colocation's
@@ -71,6 +78,7 @@ from evaluation.figures import (
     plot_sensor_fans,
     plot_station_profiles,
 )
+from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
@@ -282,6 +290,66 @@ def _image_of(fig: Figure, title: str) -> np.ndarray:
 def _station_panel_titles(fig: Figure) -> list[str]:
     """S1's column titles -- the ones naming a station, in draw order."""
     return [t for ax in fig.axes for t in _titles(ax) if t and "#" in t]
+
+
+# The readers below all answer the same question -- *which* row, column, sensor
+# or knot does this artist belong to? -- because that is the class of error the
+# figure-wide readers above cannot see: a figure whose content is right but
+# attached to the wrong panel renders exactly like a correct one.
+
+
+def _panel_text(ax: Axes) -> str:
+    """One panel's own annotations, lower-cased and joined."""
+    return " | ".join(t.get_text() for t in ax.texts if t.get_text()).lower()
+
+
+def _image_array(ax: Axes) -> np.ndarray:
+    """The panel's image data, NaN-filled (see :func:`_image_of`)."""
+    assert ax.images, "the panel carries no image"
+    return np.ma.filled(ax.images[0].get_array().astype(float), np.nan)
+
+
+def _row_label_axes(fig: Figure) -> list[Axes]:
+    """F1's leftmost column in row order -- the panels carrying the ``z`` label."""
+    return [ax for ax in fig.axes if ax.images and ax.get_ylabel().startswith("z =")]
+
+
+def _labelled_z(ax: Axes) -> float:
+    """The z height F1 printed on a row, as a float."""
+    match = re.search(r"z = (-?\d+(?:\.\d+)?)", ax.get_ylabel())
+    assert match is not None, f"no z in the row label {ax.get_ylabel()!r}"
+    return float(match.group(1))
+
+
+def _sensor_row(fig: Figure, row: int) -> Axes:
+    """S5's panel for sensor ``row`` (single-column figures)."""
+    axes = [ax for ax in fig.axes if ax.get_ylabel().startswith(f"sensor {row}\n")]
+    assert len(axes) == 1, f"expected one panel for sensor {row}, found {len(axes)}"
+    return axes[0]
+
+
+def _vertical_line_positions(ax: Axes) -> list[float]:
+    """The x of every full-height vertical rule on the panel (``axvline``)."""
+    found = []
+    for line in ax.lines:
+        x = np.asarray(line.get_xdata(), dtype=float)
+        y = np.asarray(line.get_ydata(), dtype=float)
+        if x.size == 2 and y.size == 2 and x[0] == x[1] and y.tolist() == [0.0, 1.0]:
+            found.append(float(x[0]))
+    return sorted(found)
+
+
+def _tick_labels_by_position(ax: Axes) -> dict[float, str]:
+    """The panel's x tick labels keyed by the tick they are attached to.
+
+    P1's two marginals come from different knots, so *which* label sits on which
+    tick is the statement; a figure-wide substring search cannot see them swap.
+    """
+    return {
+        float(position): label.get_text().lower()
+        for position, label in zip(ax.get_xticks(), ax.get_xticklabels())
+        if label.get_text()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -657,9 +725,9 @@ def test_parameter_marginals_draw_the_run_prior_when_the_truth_is_static(
         "the panel does not span the run's actual (knot 0) prior -- a later "
         f"window's prior was drawn instead: {[a.get_ylim() for a in fig.axes]}"
     )
-    # ...and the reader is told which window each marginal came from, because
-    # the two branches below pick different ones.
-    assert "window 0" in _tick_labels(fig)
+    # ...and the reader is told which knot each marginal came from, because the
+    # two branches below pick different ones.
+    assert "knot 0" in _tick_labels(fig)
 
 
 def test_parameter_marginals_keep_the_same_knot_pair_when_the_truth_varies(
@@ -687,6 +755,167 @@ def test_parameter_marginals_keep_the_same_knot_pair_when_the_truth_varies(
         f"time: {[a.get_ylim() for a in fig.axes]}"
     )
     assert "final" in _tick_labels(fig)
+
+
+def _static_knot_pair() -> tuple[xarray.Dataset, xarray.Dataset, xarray.Dataset]:
+    """A static parameter over two knots: knot 0's prior is nowhere near knot 1's."""
+    posterior = _param_dataset(
+        times=(0.0, 1.0),
+        velocity_magnitude=[[5.0, 4.9], [5.0, 5.1], [5.0, 5.0], [5.0, 5.05]],
+    )
+    prior = _param_dataset(
+        times=(0.0, 1.0),
+        velocity_magnitude=[[-20.0, 4.8], [30.0, 5.2], [-5.0, 5.0], [15.0, 5.1]],
+    )
+    truth = _truth_dataset(times=(0.0, 1.0), velocity_magnitude=[5.0, 5.0])
+    return posterior, prior, truth
+
+
+def test_parameter_marginals_attach_each_knot_label_to_its_own_marginal(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The static panel's two marginals come from DIFFERENT knots -- the prior
+    # from knot 0, the posterior from the final one -- so the labels are not
+    # decoration: swapped, they attribute the run's entire contraction to the
+    # wrong end of it, and the picture is unchanged. Asserting that "0" and
+    # "final" appear *somewhere* on the figure cannot see that, so each label is
+    # read off the tick it is attached to.
+    posterior, prior, truth = _static_knot_pair()
+
+    plot_parameter_marginals(posterior, truth, tmp_path / "p1.png", prior_params=prior)
+
+    fig = captured_figures[-1]
+    for ax in fig.axes:
+        labels = _tick_labels_by_position(ax)
+        assert set(labels) == {0.0, 1.0}, f"unexpected tick positions: {labels}"
+        prior_label, post_label = labels[0.0], labels[1.0]
+        assert prior_label.startswith("prior") and post_label.startswith(
+            "posterior"
+        ), f"the marginals are not where their labels say: {labels}"
+        assert "0" in prior_label and "final" not in prior_label, (
+            "the prior marginal is drawn at knot 0 and must say so, not "
+            f"'final': {prior_label!r}"
+        )
+        assert (
+            "final" in post_label
+        ), f"the posterior marginal is the final knot's: {post_label!r}"
+
+
+def test_parameter_marginals_count_the_static_knots_never_windows(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # ``K`` is a KNOT count. It equals the window count only on a pure static
+    # run: a ``static_parameters`` entry inside a dynamic run (the shipped
+    # ``dynamic_sine`` truth has one, and so does the CLI example in
+    # ``conf/run_esmda.yaml``) is broadcast onto the dynamic knot grid, where a
+    # 2-window run carries four knots. "4 windows" is then a wrong number rather
+    # than a loose word, and the tick labels name the wrong axis with it.
+    posterior, prior, truth = _static_knot_pair()
+
+    plot_parameter_marginals(posterior, truth, tmp_path / "p1.png", prior_params=prior)
+
+    fig = captured_figures[-1]
+    printed = f"{_axes_titles(fig)} | {_tick_labels(fig)}"
+    assert "static, 2 knots" in printed, f"the static title miscounts: {printed!r}"
+    assert "knot 0" in printed and "final knot" in printed, printed
+    assert "window" not in printed, (
+        "the panel calls its knots windows -- they are only the same thing on a "
+        f"pure static run: {printed!r}"
+    )
+
+
+def test_parameter_marginals_need_two_finite_knots_to_call_a_truth_static(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # ``np.allclose`` over a length-1 array is trivially True, so a truth with a
+    # single finite knot reads as "constant" and takes the knot-0 prior branch.
+    # Here that would draw a 400-600 prior beside a posterior at ~5 in one
+    # panel -- the exact "two different quantities in one panel" failure the
+    # branch exists to prevent. One finite knot is no evidence of staticness, so
+    # the conservative same-knot pair is the answer.
+    posterior = _param_dataset(
+        times=(0.0, 1.0, 2.0),
+        velocity_magnitude=[
+            [500.0, 50.0, 5.0],
+            [500.0, 50.0, 5.2],
+            [500.0, 50.0, 4.8],
+            [500.0, 50.0, 5.1],
+        ],
+    )
+    prior = _param_dataset(
+        times=(0.0, 1.0, 2.0),
+        velocity_magnitude=[
+            [400.0, 40.0, 4.0],
+            [600.0, 60.0, 6.0],
+            [450.0, 45.0, 4.5],
+            [550.0, 55.0, 5.5],
+        ],
+    )
+    truth = _truth_dataset(
+        times=(0.0, 1.0, 2.0), velocity_magnitude=[np.nan, np.nan, 5.0]
+    )
+
+    plot_parameter_marginals(posterior, truth, tmp_path / "p1.png", prior_params=prior)
+
+    fig = captured_figures[-1]
+    assert all(ax.get_ylim()[1] < 100.0 for ax in fig.axes), (
+        "a knot-0 marginal reached the panel on the strength of one finite "
+        f"truth knot: {[a.get_ylim() for a in fig.axes]}"
+    )
+
+
+def test_parameter_marginals_read_an_all_nan_truth_as_no_truth_at_all(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # A truth variable that is present but never finite (a parameter the truth
+    # run did not carry, or one whose knots did not align) is not a *dynamic*
+    # truth -- it is no truth. ``z = n/a`` reads as "the posterior is degenerate"
+    # and sends a reader to look at the ensemble; "no truth" sends them to the
+    # run dir, which is where the problem is.
+    posterior = _param_dataset(
+        velocity_magnitude=[[5.0], [5.1], [4.9], [5.05]],
+    )
+    truth = _truth_dataset(velocity_magnitude=[np.nan])
+
+    result = plot_parameter_marginals(posterior, truth, tmp_path / "p1.png")
+
+    assert result is not None, "an unscoreable truth is not a reason to skip P1"
+    annotations = _z_annotations(captured_figures[-1])
+    assert annotations and all(
+        "no truth" in a for a in annotations
+    ), f"an all-NaN truth is reported as something other than a missing one: {annotations}"
+
+
+def test_parameter_marginals_tell_a_pinned_parameter_from_a_collapsed_one(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # Both cases have sigma_a = 0 and so no z, and the two diagnoses are
+    # opposite: a *pinned* parameter was never estimated (it had no prior spread
+    # either, and nothing is wrong), a *collapsed* one started wide and lost its
+    # spread to the update (which is the failure ESMDA actually has). The prior
+    # is the only thing that separates them, so it has to reach the diagnosis --
+    # a bundle scored without it can only ever say "collapsed".
+    pinned = _param_dataset(velocity_magnitude=[[5.0], [5.0], [5.0], [5.0]])
+    truth = _truth_dataset(velocity_magnitude=[5.5])
+
+    plot_parameter_marginals(
+        pinned, truth, tmp_path / "pinned.png", prior_params=pinned
+    )
+    pinned_annotations = _z_annotations(captured_figures[-1])
+
+    wide_prior = _param_dataset(velocity_magnitude=[[3.0], [4.0], [6.0], [7.0]])
+    plot_parameter_marginals(
+        pinned, truth, tmp_path / "collapsed.png", prior_params=wide_prior
+    )
+    collapsed_annotations = _z_annotations(captured_figures[-1])
+
+    assert pinned_annotations and all(
+        "pinned" in a for a in pinned_annotations
+    ), f"a pinned parameter is not diagnosed as one: {pinned_annotations}"
+    assert collapsed_annotations and all(
+        "collapsed" in a for a in collapsed_annotations
+    ), collapsed_annotations
+    assert set(pinned_annotations).isdisjoint(collapsed_annotations)
 
 
 def test_parameter_marginals_distinguish_a_missing_truth_from_a_collapsed_sigma(
@@ -901,6 +1130,40 @@ def test_station_profiles_keep_the_validation_columns_when_truncating(
     assert caplog.records, "columns were dropped without a word about it"
 
 
+def test_station_profiles_title_each_column_with_its_own_stations_position(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # ``_station_order`` puts the held-out columns first, so the column position
+    # and the station index disagree on every run that has any -- and the
+    # ``(x, y)`` in the title is what a reader uses to find the sensor in the
+    # plan view and in the case config. A title reading the position instead
+    # sends them to another sensor's coordinates while the index beside it says
+    # otherwise, and nothing about the drawn profile looks wrong.
+    fields = _eval_fields(
+        n_z=4,
+        station_sets=("assimilation", "assimilation", "validation"),
+        slabs=False,
+    )
+
+    plot_station_profiles(fields, tmp_path / "s1.png")
+
+    titles = _station_panel_titles(captured_figures[-1])
+    assert len(titles) == 3, titles
+    assert (
+        titles[0].lower().startswith("validation")
+    ), f"the held-out column lost the first slot, so index != position: {titles}"
+    for title in titles:
+        match = re.search(r"#(\d+)\D+x=(-?\d+)\D+y=(-?\d+)", title)
+        assert match is not None, f"unreadable station title {title!r}"
+        station = int(match.group(1))
+        drawn = (float(match.group(2)), float(match.group(3)))
+        # ``_eval_fields`` places station ``i`` at ``(5i, 2i)``.
+        assert drawn == (5.0 * station, 2.0 * station), (
+            f"panel {title!r} is captioned with another station's position "
+            f"(station {station} is at {(5.0 * station, 2.0 * station)})"
+        )
+
+
 def test_station_profiles_no_op_without_a_station_block(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1006,6 +1269,116 @@ def test_mean_slices_mask_the_solid_cells_out_of_the_difference(
     ), "the fluid cells have no difference either -- the check is vacuous"
 
 
+def test_mean_slices_difference_is_the_posterior_minus_the_truth(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The panel is titled "Posterior - truth" and its norm is symmetric
+    # (``diff_max`` is a ``max |.|``), so an inverted subtraction changes
+    # nothing about the figure except that every bias on it reads backwards: a
+    # posterior blowing too fast is drawn as one blowing too slow. Nothing above
+    # can see it -- the masking test only asks where the difference is finite --
+    # so the sign is pinned on a known offset.
+    n_zlev, ny, nx = 1, 4, 5
+    fluid = np.ones((n_zlev, ny, nx), dtype=np.int8)
+    fluid[0, :2, :2] = 0
+    offset = 0.75  # exact in float32, so the assertion below is not about dtype
+    rng = np.random.default_rng(11)
+    truth_slab = rng.random((len(_COMPONENTS), n_zlev, ny, nx)) + 2.0
+    fields = _eval_fields(
+        n_zlev=n_zlev,
+        ny=ny,
+        nx=nx,
+        with_prior=False,
+        fluid=fluid,
+        slab_mean={"truth": truth_slab, "posterior": truth_slab + offset},
+    )
+
+    result = plot_mean_slices(fields, tmp_path / "f1.png")
+
+    assert result is not None
+    difference = _image_of(captured_figures[-1], "posterior - truth")
+    solid = fluid[0] == 0
+    assert difference[~solid] == pytest.approx(offset, abs=1e-5), (
+        "the difference panel is not posterior - truth: a posterior "
+        f"{offset} m/s ABOVE the truth is drawn as {difference[~solid].tolist()}"
+    )
+    assert np.all(np.isnan(difference[solid])), "a building interior was differenced"
+
+
+def test_mean_slices_label_each_row_with_the_level_it_draws(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # ``max_levels`` subsamples the slab axis, so the row index and the level
+    # index part company on every real run (``eval_fields.nc`` carries four
+    # z-levels, the figure draws three). A row label taken from the row index
+    # then prints the height of a level the panel is not showing, and the panel
+    # is a perfectly ordinary picture of the wrong height. Each level is filled
+    # with its own constant, so the panel says which one it is.
+    n_zlev, ny, nx = 5, 3, 4
+    per_level = np.arange(n_zlev, dtype=float)[None, :, None, None]
+    slab = np.broadcast_to(per_level, (len(_COMPONENTS), n_zlev, ny, nx)).copy()
+    fields = _eval_fields(
+        n_zlev=n_zlev,
+        ny=ny,
+        nx=nx,
+        with_prior=False,
+        slab_mean={"truth": slab, "posterior": slab},
+    )
+    z_values = np.asarray(fields["zlev"].values, dtype=float)
+
+    plot_mean_slices(fields, tmp_path / "f1.png", max_levels=2)
+
+    rows = _row_label_axes(captured_figures[-1])
+    assert len(rows) == 2, f"expected two labelled rows, got {len(rows)}"
+    drawn_levels = []
+    for ax in rows:
+        level = int(round(float(np.nanmax(_image_array(ax)))))
+        drawn_levels.append(level)
+        assert _labelled_z(ax) == pytest.approx(z_values[level]), (
+            f"the row drawing level {level} (z = {z_values[level]:.1f} m) is "
+            f"labelled {ax.get_ylabel()!r}"
+        )
+    assert drawn_levels == [0, n_zlev - 1], (
+        "the two rows do not straddle the slab axis, so a row-index label would "
+        f"have been right by accident: {drawn_levels}"
+    )
+
+
+def test_mean_slices_keep_the_difference_out_of_the_shared_norm(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The shared norm exists so the truth/prior/posterior panels can be compared
+    # by eye; the difference is a different quantity on its own diverging map.
+    # Folding it into the shared limits stretches all three field panels over a
+    # range no field cell occupies -- here down to -3 m/s, which no panel holds
+    # -- and flattens exactly the contrast the figure is for.
+    n_zlev, ny, nx = 1, 3, 4
+    truth_level, posterior_level = 5.0, 2.0
+    shape = (len(_COMPONENTS), n_zlev, ny, nx)
+    fields = _eval_fields(
+        n_zlev=n_zlev,
+        ny=ny,
+        nx=nx,
+        with_prior=False,
+        slab_mean={
+            "truth": np.full(shape, truth_level),
+            "posterior": np.full(shape, posterior_level),
+        },
+    )
+
+    plot_mean_slices(fields, tmp_path / "f1.png")
+
+    clims = _clims(captured_figures[-1])
+    assert any(
+        low == pytest.approx(posterior_level) and high == pytest.approx(truth_level)
+        for low, high in clims
+    ), (
+        "no panel is scaled to the fields alone "
+        f"({posterior_level}, {truth_level}); the -3 m/s difference reached the "
+        f"shared norm: {clims}"
+    )
+
+
 def test_mean_slices_never_render_a_column_with_no_finite_cell(
     tmp_path: pathlib.Path,
     caplog: pytest.LogCaptureFixture,
@@ -1043,6 +1416,43 @@ def test_mean_slices_never_render_a_column_with_no_finite_cell(
         "caption says means a building"
     )
     assert caplog.records, "a column was dropped without a word about it"
+
+
+def test_mean_slices_keep_a_dead_subject_column_in_the_grid_and_say_why(
+    tmp_path: pathlib.Path,
+    caplog: pytest.LogCaptureFixture,
+    captured_figures: list[Figure],
+) -> None:
+    # The diverged-member case, on the column the figure is ABOUT. Dropping it
+    # leaves "Truth | Prior mean" under the suptitle "Time-mean u on horizontal
+    # slices" and a PNG that looks complete: nothing on the figure says the
+    # posterior is missing, and the log line is in a console the reader of the
+    # PNG does not have. A missing column must be visible as a missing column.
+    n_zlev, ny, nx = 1, 4, 5
+    rng = np.random.default_rng(12)
+    means = {
+        source: rng.random((len(_COMPONENTS), n_zlev, ny, nx))
+        for source in ("truth", "prior")
+    }
+    means["posterior"] = np.full((len(_COMPONENTS), n_zlev, ny, nx), np.nan)
+    fields = _eval_fields(n_zlev=n_zlev, ny=ny, nx=nx, slab_mean=means)
+    out = tmp_path / "f1.png"
+
+    with caplog.at_level(logging.INFO, logger="evaluation.figures"):
+        result = plot_mean_slices(fields, out)
+
+    _assert_png(result, out)
+    fig = captured_figures[-1]
+    assert "posterior mean" in _axes_titles(fig), (
+        "the posterior column vanished from the grid: the figure reads as a "
+        "complete truth-vs-prior comparison"
+    )
+    assert "no finite" in _axes_text(fig), (
+        "the empty posterior panel carries no on-figure explanation, so it is "
+        "indistinguishable from a rendering failure"
+    )
+    assert "truth" in _axes_titles(fig), "the surviving columns stopped rendering"
+    assert caplog.records, "the dead column was not logged"
 
 
 def test_mean_slices_share_one_norm_across_truth_prior_and_posterior(
@@ -1268,6 +1678,154 @@ def test_sensor_fans_draw_the_truth_on_the_ensemble_time_axis(
         assert drawn == pytest.approx(
             times
         ), f"the truth is not on the ensemble's time axis: {drawn.tolist()}"
+
+
+def _two_sensor_series(
+    *, n_members: int = 5, n_times: int = 6, seed: int = 0
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """One set, two sensors whose truths are metres per second apart.
+
+    Separating the two sensors by 8 m/s is what makes "row ``r`` drew sensor
+    ``r``" an assertion: with the usual noise around a common mean, a row that
+    plots the wrong sensor's series looks exactly like a row that plots its own.
+    """
+    rng = np.random.default_rng(seed)
+    base = np.array([1.0, 9.0])
+    truth = base[None, :] + 0.1 * np.arange(n_times, dtype=float)[:, None]
+    members = truth[None] + rng.normal(scale=0.05, size=(n_members, n_times, 2))
+    return {"assimilation": truth}, {"assimilation": members}
+
+
+def test_sensor_fans_draw_each_rows_own_sensor_truth(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # Every row of S5 is a different sensor, and the truth is the thing the fan
+    # is judged against. A truth column index frozen at 0 puts sensor 0's series
+    # in every row: the fan then sits metres away from "its" truth on every row
+    # but the first, which reads as a catastrophically biased posterior rather
+    # than as a plotting error -- and on a run where the sensors happen to agree
+    # it reads as nothing at all.
+    truth, ensemble = _two_sensor_series()
+
+    plot_sensor_fans(truth, ensemble, tmp_path / "s5.png")
+
+    fig = captured_figures[-1]
+    for row in range(truth["assimilation"].shape[1]):
+        ax = _sensor_row(fig, row)
+        lines = [line for line in ax.lines if str(line.get_label()) == "Truth"]
+        assert len(lines) == 1, f"expected one truth line on row {row}"
+        drawn = np.asarray(lines[0].get_ydata(), dtype=float)
+        assert drawn == pytest.approx(
+            truth["assimilation"][:, row]
+        ), f"row {row} is drawn against another sensor's truth: {drawn.tolist()}"
+
+
+def test_sensor_fans_count_the_surviving_members_against_the_ensemble_size(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # ``M = kept/total`` is the only thing on the figure that says a member was
+    # dropped, so both halves have to be real: ``kept/kept`` always reads
+    # "M = 4/4", a complete ensemble, on exactly the runs where one diverged.
+    # The count is per sensor -- one member can be finite at one sensor and not
+    # at another -- so it is read off each panel rather than off the figure.
+    n_members = 5
+    truth, ensemble = _two_sensor_series(n_members=n_members)
+    ensemble["assimilation"][2, 3, 0] = np.nan  # mid-window, sensor 0 only
+
+    plot_sensor_fans(truth, ensemble, tmp_path / "s5.png")
+
+    fig = captured_figures[-1]
+    assert f"m = {n_members - 1}/{n_members}" in _panel_text(
+        _sensor_row(fig, 0)
+    ), f"sensor 0 dropped a member without saying so: {_panel_text(_sensor_row(fig, 0))}"
+    assert f"m = {n_members}/{n_members}" in _panel_text(
+        _sensor_row(fig, 1)
+    ), "sensor 1 lost a member it never had a non-finite value at"
+
+
+def test_sensor_fans_filter_members_on_the_last_frame_too(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The last frame is where a member diverges: it is the end of the window,
+    # after the instability has had the whole window to grow. A filter that
+    # stops one frame short keeps that member, and ``np.quantile`` then NaNs the
+    # final point of every band -- the fan stops short of the axis and the panel
+    # still claims the full ensemble.
+    n_members = 5
+    truth, ensemble = _two_sensor_series(n_members=n_members)
+    ensemble["assimilation"][2, -1, 0] = np.nan
+
+    plot_sensor_fans(truth, ensemble, tmp_path / "s5.png")
+
+    ax = _sensor_row(captured_figures[-1], 0)
+    assert f"m = {n_members - 1}/{n_members}" in _panel_text(
+        ax
+    ), f"a member non-finite only at the last frame was counted: {_panel_text(ax)}"
+    medians = [line for line in ax.lines if str(line.get_label()) == "Posterior median"]
+    assert medians, "the fan was not drawn at all"
+    for line in medians:
+        y = np.asarray(line.get_ydata(), dtype=float)
+        assert np.all(np.isfinite(y)), "the fan ends in NaN: the member was kept"
+
+
+def test_sensor_fans_mark_the_window_boundaries_they_are_given(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The boundaries are what makes a multi-window fan readable -- a jump at a
+    # window edge is an update, a jump inside one is the model. The wiring test
+    # only checks the kwarg the script computes, so a figure that accepts
+    # ``window_edges`` and never draws them passes it while the PNG carries no
+    # window structure at all.
+    truth, ensemble = _two_sensor_series()
+    edges = [0.0, 2.0, 5.0]
+
+    plot_sensor_fans(
+        truth,
+        ensemble,
+        tmp_path / "s5.png",
+        times=np.arange(truth["assimilation"].shape[0], dtype=float),
+        window_edges=np.asarray(edges),
+    )
+
+    fig = captured_figures[-1]
+    for row in range(2):
+        ax = _sensor_row(fig, row)
+        assert _vertical_line_positions(ax) == pytest.approx(
+            edges
+        ), f"row {row} carries no window boundaries: {_vertical_line_positions(ax)}"
+    assert "w0" in _panel_text(_sensor_row(fig, 0)), "the windows are not numbered"
+
+
+def test_sensor_fans_y_limits_include_the_observation_envelope(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # sigma_o is routinely wider than the fan (the shipped
+    # ``esmda.obs_error_std`` is 0.25 against sensor series that vary by far
+    # less), and an envelope outside the y-limits does not clip politely: it
+    # fills the panel edge to edge and reads as a background tint, so the one
+    # thing the figure says about the observations -- how wide their error is
+    # against the spread -- is lost exactly when it matters.
+    n_times = 6
+    truth = {"assimilation": 4.0 + 0.01 * np.arange(n_times, dtype=float)[:, None]}
+    ensemble = {
+        "assimilation": truth["assimilation"][None]
+        + 0.02 * np.linspace(-1.0, 1.0, 4)[:, None, None]
+    }
+    obs_error_std = 2.0
+
+    plot_sensor_fans(truth, ensemble, tmp_path / "s5.png", obs_error_std=obs_error_std)
+
+    ax = _sensor_row(captured_figures[-1], 0)
+    low, high = ax.get_ylim()
+    series = truth["assimilation"][:, 0]
+    assert low <= float(series.min()) - obs_error_std, (
+        f"the -sigma_o edge of the envelope ({series.min() - obs_error_std}) is "
+        f"outside the panel: {(low, high)}"
+    )
+    assert high >= float(series.max()) + obs_error_std, (
+        f"the +sigma_o edge of the envelope ({series.max() + obs_error_std}) is "
+        f"outside the panel: {(low, high)}"
+    )
 
 
 def test_sensor_fans_skip_a_truth_whose_cadence_does_not_match(
@@ -1511,6 +2069,22 @@ def test_rank_histogram_labels_the_pooled_sample_size(
     plot_rank_histogram(_rank_counts(counts), tmp_path / "d1.png", n_bins=3)
 
     assert "127" in _axes_text(captured_figures[-1])
+
+
+def test_rank_histogram_labels_the_rank_axis_with_the_ranks_that_exist(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # ``M + 1`` bins are ranks ``0 .. M``. Naming an extra rank on the axis is
+    # the difference between "the ensemble has M members" and "M + 1", which is
+    # the whole quantity a rank histogram is read against -- and the coarsened
+    # bars cannot be counted back to it by eye.
+    counts = [3, 4, 5, 6, 7]  # M + 1 = 5 rank bins, i.e. ranks 0-4
+
+    plot_rank_histogram(_rank_counts(counts), tmp_path / "d1.png", n_bins=3)
+
+    text = _axes_text(captured_figures[-1])
+    assert f"(0-{len(counts) - 1})" in text, f"the rank axis is mislabelled: {text!r}"
+    assert f"(0-{len(counts)})" not in text, f"the rank axis is off by one: {text!r}"
 
 
 def test_rank_histogram_pools_over_the_statistics(
