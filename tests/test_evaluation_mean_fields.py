@@ -304,28 +304,51 @@ def test_colocation_staggering_matches_the_observation_operator() -> None:
             obs_states=["u", "v", "w"],
             solver_name=solver,
         )
+        # The centre axis of each spatial letter, learned from the components
+        # that are *not* staggered on it: uDALES reads v's x on ``xt``, so ``xt``
+        # is the x-centre. This is what pins colocation's **destination** -- a
+        # test that only checks "every face has a pair" cannot tell ``xm -> xt``
+        # from ``xm -> yt``, and a wrong destination is precisely the drift that
+        # would have the two readers disagree.
+        centre_by_letter: dict[str, set[str]] = {}
+        for component in ("u", "v", "w"):
+            for letter, axis in operator.dim_mapping[component].items():
+                if axis in centre_names:
+                    centre_by_letter.setdefault(letter, set()).add(axis)
+
         for component, pairs in mapping.items():
-            axes = set(operator.dim_mapping[component].values())
+            axes = operator.dim_mapping[component]
             faces = {face for face, _ in pairs}
 
             # Every staggered axis the operator reads has a colocation pair --
             # otherwise a component would be multiplied into a co-moment while
             # still sitting half a cell away from its partners.
-            assert axes - centre_names <= faces, (
+            staggered = set(axes.values()) - centre_names
+            assert staggered <= faces, (
                 f"{solver}/{component}: the observation operator reads "
-                f"{sorted(axes - centre_names)}, which colocation cannot move "
-                f"off (it knows {sorted(faces)})"
+                f"{sorted(staggered)}, which colocation cannot move off "
+                f"(it knows {sorted(faces)})"
             )
-            # And every pair names an axis the operator agrees exists: either
-            # the staggered one (colocation does the move) or the centre one
-            # (the backend's own postprocess already did it -- pypalm
-            # interpolates w from zw_3d onto z before writing).
+            # And each pair lands on the centre axis of the *same spatial
+            # letter* the operator reads that face on.
             for face, centre in pairs:
-                assert face in axes or centre in axes, (
-                    f"{solver}/{component}: colocation pairs "
-                    f"{face!r} -> {centre!r}, but the operator reads neither "
-                    f"({sorted(axes)})"
+                letter = next((k for k, v in axes.items() if v == face), None)
+                if letter is None:
+                    # The operator does not read this face at all: pypalm
+                    # pre-interpolates w off ``zw``, so the pair is a no-op on a
+                    # post-processed state and correct on a raw one. Nothing in
+                    # dim_mapping can confirm it -- the operator has the same
+                    # blind spot -- so it is pinned explicitly below.
+                    continue
+                assert centre in centre_by_letter.get(letter, set()), (
+                    f"{solver}/{component}: colocation moves {face!r} (the "
+                    f"operator's {letter} axis) onto {centre!r}, which is not "
+                    f"the {letter}-centre "
+                    f"({sorted(centre_by_letter.get(letter, set()))})"
                 )
+
+    # The pairs no operator axis can vouch for, stated outright.
+    assert table["palm"]["w"] == (("zw", "z"),)
 
 
 # ---------------------------------------------------------------------------
@@ -906,3 +929,288 @@ def test_collector_disables_itself_rather_than_breaking_the_shared_pass(
     # Still inert on everything that follows it in the pass.
     collector.add(0, 1, _udales_state())
     assert collector.result() is None
+
+
+def _state_with_buildings(
+    n_ensemble: int | None,
+    n_time: int,
+    seed: int,
+    fluid_value: float = 1.0,
+    n_cells: int = 5,
+    n_solid: int = 2,
+) -> xarray.Dataset:
+    """A state whose first ``n_solid`` x-columns are zero-filled 'buildings'.
+
+    The shape every shipped backend actually writes: pylbm writes near-exact
+    zeros inside obstacles and pypalm replaces PALM's NaN there with 0.0, so a
+    solid cell is a *constant*, not a gap -- which is why it is finite, why it
+    matches between truth and members, and why it has to be masked rather than
+    left to ``hit_rate``'s non-finite filter.
+    """
+    rng = np.random.default_rng(seed)
+    axis = np.linspace(0.0, 20.0, n_cells)
+    dims: tuple[str, ...] = ("time", "z", "y", "x")
+    shape: tuple[int, ...] = (n_time, n_cells, n_cells, n_cells)
+    coords = {
+        "time": np.arange(n_time, dtype=float) * (_RUN_SIM_TIME / n_time),
+        "z": axis,
+        "y": axis,
+        "x": axis,
+    }
+    if n_ensemble is not None:
+        dims = ("ensemble",) + dims
+        shape = (n_ensemble,) + shape
+        coords["ensemble"] = np.arange(n_ensemble)
+    variables = {}
+    for name in ("u", "v", "w"):
+        values = fluid_value + 0.1 * rng.normal(size=shape)
+        values[..., :n_solid] = 0.0  # the building interior
+        variables[name] = (dims, values)
+    return xarray.Dataset(variables, coords=coords)
+
+
+def _write_building_run(run_dir: pathlib.Path, n_members: int = 4) -> None:
+    """Overwrite a run dir's states so the truth and members share buildings."""
+    truth = _state_with_buildings(
+        None, _RUN_WINDOWS * _RUN_FRAMES, seed=1, fluid_value=1.0
+    )
+    truth.assign_coords(
+        time=np.linspace(
+            0.0,
+            _RUN_WINDOWS * _RUN_SIM_TIME,
+            _RUN_WINDOWS * _RUN_FRAMES,
+            endpoint=False,
+        )
+    ).to_netcdf(run_dir / "truth_state.nc")
+    for w in range(_RUN_WINDOWS):
+        # 10x the truth's velocity in every fluid cell: a 900 % error, so the
+        # fluid-only hit rate is exactly 0 and anything above it is dilution.
+        _state_with_buildings(
+            n_members, _RUN_FRAMES, seed=10 + w, fluid_value=10.0
+        ).to_netcdf(run_dir / "windows" / f"window_{w}_posterior_state.nc")
+
+
+def test_field_metrics_exclude_solid_cells_from_the_hit_rate(
+    tmp_path: pathlib.Path,
+) -> None:
+    # The metrics doc scores q "over fluid cells", and a solid cell is a hit
+    # whatever the flow does: it holds ~0 in the truth *and* in every member, so
+    # |p - o| = 0 <= W. Counting them dilutes q toward the built-up fraction --
+    # at 30 % solid a fluid hit rate of 0.52 reports as 0.66 and clears the VDI
+    # acceptance threshold on a field that fails it.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path)
+    _write_building_run(run_dir)
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["field_metrics"]
+
+    assert block["solid_cell_source"] == "truth-zero-variance"
+    assert block["solid_fraction"] == pytest.approx(2 / 5)  # 2 of 5 x-columns
+    assert block["n_fluid_cells"] == 4 * 5 * 3
+    # Every scored cell is 900 % out, so the honest answer is exactly zero.
+    assert block["hit_rate_posterior"]["q"] == 0.0
+    assert block["hit_rate_posterior"]["n_points"] == 3 * 4 * 5 * 3
+
+    fields = xarray.open_dataset(run_dir / "eval_fields.nc")
+    assert fields["slab_fluid"].dims == ("zlev", "y", "x")
+    assert int(fields["slab_fluid"].isel(zlev=0, y=0, x=0)) == 0
+    assert int(fields["slab_fluid"].isel(zlev=0, y=0, x=-1)) == 1
+    fields.close()
+
+
+def test_field_metrics_prefer_the_backend_solid_indicator(
+    tmp_path: pathlib.Path,
+) -> None:
+    # pylbm ships ``blanking`` beside the state; it is authoritative, and unlike
+    # the variance fallback it also sees an obstacle a backend filled with
+    # time-varying junk rather than with zeros.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path)
+    _write_building_run(run_dir)
+    for w in range(_RUN_WINDOWS):
+        path = run_dir / "windows" / f"window_{w}_posterior_state.nc"
+        state = xarray.open_dataset(path).load()
+        blanking = np.zeros((5, 5, 5))
+        blanking[..., :3] = 1.0  # one column MORE than the zero-filled region
+        state["blanking"] = (("z", "y", "x"), blanking)
+        state.close()
+        state.to_netcdf(path)
+
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["field_metrics"]
+
+    assert block["solid_cell_source"] == "blanking"
+    assert block["solid_fraction"] == pytest.approx(3 / 5)
+    assert block["n_fluid_cells"] == 4 * 5 * 2
+
+
+def test_field_metrics_sampling_floor_ignores_the_solid_cells(
+    tmp_path: pathlib.Path,
+) -> None:
+    # W is a median over sampled cells. A cell inside a building holds a
+    # constant, so its bootstrap floor is exactly 0 -- in a slab that is more
+    # than half solid an unfiltered median collapses to 0 and the absolute
+    # criterion silently disappears.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path)
+    truth = _state_with_buildings(
+        None, _RUN_WINDOWS * _RUN_FRAMES, seed=1, n_solid=4  # 4 of 5 columns solid
+    )
+    truth.assign_coords(
+        time=np.linspace(
+            0.0,
+            _RUN_WINDOWS * _RUN_SIM_TIME,
+            _RUN_WINDOWS * _RUN_FRAMES,
+            endpoint=False,
+        )
+    ).to_netcdf(run_dir / "truth_state.nc")
+    for w in range(_RUN_WINDOWS):
+        _state_with_buildings(4, _RUN_FRAMES, seed=10 + w, n_solid=4).to_netcdf(
+            run_dir / "windows" / f"window_{w}_posterior_state.nc"
+        )
+
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["field_metrics"]
+
+    assert block["solid_fraction"] == pytest.approx(4 / 5)
+    # The floor is measured on the fluid fifth, not zeroed by the solid majority.
+    assert all(w > 0 for w in block["hit_rate_tolerance_w"].values())
+
+
+def test_field_metrics_drop_a_prior_written_over_a_shorter_horizon(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Readable, complete, on the right grid -- and half the frames. The shape
+    # test cannot see it (a per-member mean over 15 frames has exactly the shape
+    # of one over 30), so without the frame check the prior hit rate would be
+    # computed over a different horizon than the posterior it is compared with.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path, save_prior_state=True)
+    for w in range(_RUN_WINDOWS):
+        _state_dataset(4, _RUN_FRAMES // 2, seed=50 + w).to_netcdf(
+            run_dir / "windows" / f"window_{w}_prior_state.nc"
+        )
+
+    with caplog.at_level("WARNING"):
+        compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["field_metrics"]
+
+    assert "frames per member" in caplog.text
+    assert "hit_rate_prior" not in block
+    fields = xarray.open_dataset(run_dir / "eval_fields.nc")
+    assert "prior_slab_mean" not in fields
+    fields.close()
+
+
+def test_collector_lets_a_broken_reduction_raise(tmp_path: pathlib.Path) -> None:
+    # The guard is deliberately narrow: it covers the layout inspection, which
+    # legitimately refuses an input, and nothing after it. A bug in the
+    # accumulation must crash rather than ship a green run with the block
+    # silently missing -- the regression WP1.3's round 2 removed and this pins.
+    from scripts.esmda import compute_esmda_metrics as stage
+
+    collector = stage.MeanFieldCollector("pylbm", np.array([4.0]), np.array([8.0]))
+    original = stage.MomentAccumulator.update
+
+    def _broken(self: object, *components: object) -> None:
+        raise ValueError("a bug in the accumulation, not an absent input")
+
+    stage.MomentAccumulator.update = _broken  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ValueError, match="a bug in the accumulation"):
+            collector.add(0, 0, _state_dataset(None, 4, seed=3))
+    finally:
+        stage.MomentAccumulator.update = original  # type: ignore[method-assign]
+
+
+def test_collector_disables_itself_when_the_state_has_no_vertical_dim(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The dim lookup sits inside the guard with colocation: it refuses a layout,
+    # which is an absent input, and it runs inside the shared sensor pass -- so
+    # it must cost this layer alone, not the whole metric stage.
+    from scripts.esmda.compute_esmda_metrics import MeanFieldCollector
+
+    flat = xarray.Dataset(
+        {n: (("time", "y", "x"), np.zeros((2, 3, 3))) for n in ("u", "v", "w")},
+        coords={"time": [0.0, 1.0], "y": np.arange(3.0), "x": np.arange(3.0)},
+    )
+    collector = MeanFieldCollector("pylbm", np.array([1.0]), np.array([1.0]))
+    with caplog.at_level("WARNING"):
+        collector.add(0, 0, flat)
+
+    assert "Mean fields disabled" in caplog.text
+    assert collector.result() is None
+
+
+def test_collector_disables_itself_on_a_state_with_no_time_axis(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from scripts.esmda.compute_esmda_metrics import MeanFieldCollector
+
+    axis = np.linspace(0.0, 4.0, 3)
+    frozen = xarray.Dataset(
+        {n: (("z", "y", "x"), np.zeros((3, 3, 3))) for n in ("u", "v", "w")},
+        coords={"z": axis, "y": axis, "x": axis},
+    )
+    collector = MeanFieldCollector("pylbm", np.array([1.0]), np.array([1.0]))
+    with caplog.at_level("WARNING"):
+        collector.add(0, 0, frozen)
+
+    assert "no 'time' axis" in caplog.text
+    assert collector.result() is None
+
+
+def test_collector_sub_chunking_in_time_moves_no_number(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The transient budget decides how many frames go into one ``update`` call.
+    # The accumulator is built to combine chunks, so the budget must be a memory
+    # knob and nothing else -- at one frame per step it has to reproduce the
+    # single-shot answer.
+    from scripts.esmda import compute_esmda_metrics as stage
+
+    state = _state_dataset(None, 37, seed=7)
+
+    whole = stage.MeanFieldCollector("pylbm", np.array([4.0]), np.array([8.0]))
+    whole.add(0, 0, state)
+
+    monkeypatch.setattr(stage, "_MEAN_FIELD_TRANSIENT_BYTES", 1)
+    frame_at_a_time = stage.MeanFieldCollector(
+        "pylbm", np.array([4.0]), np.array([8.0])
+    )
+    frame_at_a_time.add(0, 0, state)
+    assert frame_at_a_time._time_block(state, ("z", "y", "x")) == 1
+
+    single_shot, chunked = _fields(whole), _fields(frame_at_a_time)
+    for key in ("slab_mean", "slab_tke", "slab_uw", "station_mean"):
+        assert np.allclose(single_shot[key], chunked[key], rtol=1e-12, atol=1e-12)
+
+
+def test_mean_field_stride_bounds_the_accumulators(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The entire "no config knob" argument rests on this path, which no shipped
+    # grid in the test suite is large enough to reach.
+    from scripts.esmda import compute_esmda_metrics as stage
+    from scripts.esmda._esmda_common import read_yaml
+
+    run_dir = _full_run_dir(tmp_path)
+    # A budget small enough that 4 members x 4 x 5 x 5 cells cannot fit.
+    monkeypatch.setattr(stage, "_MEAN_FIELD_BUDGET_BYTES", 4 * 4 * 3 * 3 * 80)
+    stage.compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["field_metrics"]
+
+    assert block["horizontal_stride"] == 2
+    fields = xarray.open_dataset(run_dir / "eval_fields.nc")
+    assert fields.sizes["x"] == 3 and fields.sizes["y"] == 3  # ceil(5 / 2)
+    assert fields.attrs["horizontal_stride"] == 2
+    fields.close()

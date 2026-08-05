@@ -563,23 +563,22 @@ these are findings against them, and against what round 1 missed.
   lines): `fac2`, `fractional_bias`, `nmse` and `nmse_split` — the slimmed
   metric set scores the mean field with the hit rate alone; the scalar/batch
   bootstrap pair, superseded by WP1.3's single vectorized `block_bootstrap_std`;
-  `extrapolated_centre_dims` and the fluid-indicator plumbing built on the
-  `blanking` variable, which no shipped case's state files actually carry (the
-  masking rule reduces to "score the cells that are finite", which
-  `hit_rate` already implements); and `resolve_metrics_settings` with its four
-  Hydra knobs. Kept and adapted: the Chan/Welford accumulator core (re-measured
+  and `resolve_metrics_settings` with its four Hydra knobs. (Two things dropped
+  here came back in review round 2: `extrapolated_centre_dims` and the
+  fluid-cell masking, both for reasons recorded there.) Kept and adapted: the Chan/Welford accumulator core (re-measured
   here — 7e-11 relative error against `longdouble` where the naive form loses
   4 %) and the colocation table.
-- **Known caveat, not fixed:** on a z-staggered backend (uDALES `w` on `zm`)
-  the *top* z-level of the co-located grid is filled by linear extrapolation
-  from the last two faces, and `evenly_spaced_levels` (now shared with
-  `_vel_field_4z` rather than copied into it) always includes it, so
-  that slab's second moments are inflated — up to ~5x for face-to-face white
-  noise, ~20 % for a well-resolved field. The rollback branch reported which
-  axes carried the edge so a caller could exclude it from aggregates; that is
-  three functions of plumbing for one level of a four-level slab set, and the
-  honest fix is a level selection that excludes the domain top, which is a
-  question for WP1.5's figures rather than for the accumulator.
+- **Colocation's extrapolated edge is disclosed rather than fixed.** Every axis
+  colocation moves has its *last* index filled by linear extrapolation from the
+  two faces below it (weights 1.5 / −0.5) rather than interpolated between two,
+  so those cells' second moments are inflated — ~20 % for a well-resolved field,
+  up to ~5x for face-to-face white noise — and `evenly_spaced_levels` (now
+  shared with `_vel_field_4z` rather than copied into it) always includes the
+  last index. It is **not** only the vertical, as an earlier revision of this
+  entry said: uDALES moves x, y and z, PALM moves x and y, so the artefact is in
+  every slab and no level selection can avoid it. `eval_fields.nc` therefore
+  carries an `extrapolated_edges` attribute (round 2) naming the affected axes,
+  which is what a WP1.5 figure needs to exclude them from an aggregate.
 - **Deferred:** the block scores the mean *velocity* only. TKE and `<u'w'>` are
   accumulated and written to `eval_fields.nc` — figure S1 plots the TKE;
   `<u'w'>` has no reader in the phase-1 figure set and is stored because the
@@ -610,10 +609,15 @@ session limit) with its mutation-testing sweep unfinished — so its findings ar
   either artifact recording the discrepancy. Demonstrated by the reviewer on a
   corrupted two-window run. Fixed at the root rather than with another guard:
   the prior read moved out of `_sensor_statistics` up into `compute_metrics`, so
-  **one** place owns the all-or-nothing decision for both blocks — the split
-  ownership is how the bug happened. A frame-count check backs it up, since it
-  also catches a prior that is readable but short, which the shape check cannot.
-  Regression test: `test_field_metrics_drop_a_prior_that_covers_fewer_windows`.
+  **one** place owns the read, and a prior it could not read reaches neither
+  block — the split ownership is how the bug happened. A frame-count check backs
+  it up, since it also catches a prior that is readable but short, which the
+  shape check cannot. Note what that check is *not*: it gates the field block
+  only, so a readable prior on a shorter horizon still reaches
+  `sensor_statistics`, where WP1.3's own per-window guard governs it (round 2
+  corrected an earlier wording here that claimed one gate for both blocks).
+  Regression tests: `test_field_metrics_drop_a_prior_written_over_a_shorter_horizon`
+  (the frame check) and the unreadable-prior case (the hoist).
 - **The blanket `except` around accumulation is narrowed to colocation only.**
   It had wrapped the whole `_add`, which re-introduced exactly what WP1.3 round 2
   removed: a typo in the reduction would have shipped a green run with the block
@@ -626,10 +630,12 @@ session limit) with its mutation-testing sweep unfinished — so its findings ar
   64³ member against 1.3 MB of persistent state. Two fixes. (1) The station
   columns no longer hand the whole 3-D field to `.interp` — each station is
   bracketed between the two cells around it first, which is a 16x saving on the
-  dominant term (223 MB → 13.7 MB measured, same numbers to the bit, pinned by
-  `test_station_columns_match_a_whole_field_interpolation`). (2) Time is
-  sub-chunked to a 256 MB transient bound, which is what the chunk-wise
-  accumulator is *for*. Measured peak after both: 172 MB, inside the bound.
+  dominant term (223 MB → 13.0 MB measured, pinned by
+  `test_station_columns_match_a_whole_field_interpolation`). The bracketed and
+  whole-field interpolations agree to ~1 ULP, not bit-for-bit — the test asserts
+  `allclose`, and an earlier wording here overstated it. (2) Time is sub-chunked
+  to a 256 MB transient bound, which is what the chunk-wise accumulator is
+  *for*; round 2 found two shapes that escaped the first cut of it, fixed there.
 - **`MeanFieldCollector` moved from `_esmda_common.py` into
   `compute_esmda_metrics.py`** and is annotated. `_esmda_common.py` carries a
   file-level mypy waiver as legacy untyped code; ~250 statement lines of new
@@ -674,3 +680,71 @@ session limit) with its mutation-testing sweep unfinished — so its findings ar
   after the ensemble pass and giving it the same callback — is a real saving and
   a reasonable follow-up, but it moves the sensor extraction's control flow for
   a term that is 1/M of the read this WP already avoids.
+
+**WP1.4, review round 2.** A fresh adversarial sweep over the round-1 fixes
+(which were themselves unreviewed code) and over what round 1 missed. The
+correctness reviewer died on a session limit twice, so this pass carried both
+lenses.
+
+- **The hit rate scored solid cells, and that is the WP's headline number.** The
+  spec says "over fluid cells"; nothing masked. A solid cell holds ~0 in the
+  truth *and* in every member — every backend fills obstacle interiors rather
+  than marking them (pylbm near-zeros, pypalm replaces PALM's NaN with 0.0,
+  uDALES junk) — so `|p−o| ≈ 0 ≤ W` and each one counts as a **hit**. The
+  reviewer demonstrated a posterior 100 % wrong in every fluid cell reporting
+  `q_u = 0.50` on a half-solid domain: in general `q = f_solid + (1−f_solid)·
+  q_fluid`, so at a Barcelona built-up fraction of ~0.3 a fluid hit rate of 0.52
+  reports as 0.66 and *crosses the acceptance threshold on a field that fails
+  it*. The round-1 deviation claiming "the masking rule reduces to score the
+  cells that are finite" was simply false, and this PR's own colocation
+  docstring said so two files away.
+  Fixed with a two-rule mask: the backend's `blanking` indicator when the state
+  files carry one (read once from a window file, not through every member slice
+  — the sensor pass hands out `ds[["u","v","w"]]` and the indicator is not in
+  it), and otherwise the truth's own resolved TKE, since a cell held at a
+  constant has *exactly* zero variance and a fluid cell in a turbulent flow does
+  not. `solid_cell_source`, `n_fluid_cells` and `solid_fraction` record which
+  rule ran; `none` means every cell was scored and says so. The fallback stands
+  down when it would mask everything (a laminar or single-frame truth), because
+  a rule that masks the whole domain is not separating anything.
+- **`W` was sampled over solid cells too**, the same root cause pointing the
+  other way: a cell inside a building holds a constant, so its bootstrap floor
+  is ~0, and in a slab more than half solid the *median* collapses to zero and
+  the absolute criterion silently switches off. The sample is now filtered by
+  the fluid mask at reduction time — the mask is not known during the truth
+  pass, but the retained cells' flat indices are, which is enough.
+- **The narrowed `except` did not match its own docstring.** `_centre_dims`
+  raises on a state with no vertical dim and sat *outside* the guard, so that
+  layout took the whole metric stage down — parameter, health, state and sensor
+  blocks with it. Moved inside, with the no-time-axis check. Zero sensors had
+  the same shape of bug (`concat([])`, `np.concatenate([])`); both now
+  short-circuit, since the slabs do not depend on the stations.
+- **The 256 MB transient bound was not enforced on two shapes.** (1) Colocation
+  ran *before* the sub-chunk loop and materialises every axis it moves, so a
+  staggered backend copied the whole member window regardless — measured 429 MB
+  against 129 MB native. Colocation now happens inside the loop, on each piece;
+  the layout probe that has to run first is one frame. (2) The block was derived
+  from the *target* cells, but a cross-grid `.interp` scales with the **source**
+  grid — measured 766 MB for a 96³ truth against a 32³ assimilation grid, the
+  shipped default direction. It is now sized on whichever grid the step touches.
+- **Four of the six round-1 fixes had no test that would fail if reverted**, and
+  the drift test pinned coverage rather than the mapping it was written for: of
+  six mutated `_STAGGERED_TO_CENTRE` entries (a component co-located onto the
+  *wrong axis*, which is exactly the drift that would have the sensor series and
+  the mean fields read one component off two different axes) **five survived**.
+  The assertions now pin the destination per spatial letter — each pair must land
+  on the centre axis of the letter the operator reads that face on — and all six
+  mutants are caught. The pairs no operator axis can vouch for (pypalm
+  pre-interpolates `w` off `zw`, so `dim_mapping` has the same blind spot) are
+  stated outright.
+  New regression tests, each verified to fail with its fix reverted: the solid-cell
+  mask (both rules), the `W` filter, the frame-count prior check, the narrowed
+  `except`, the no-vertical-dim and no-time-axis guards, sub-chunk equivalence at
+  one frame per step, and the horizontal stride — which no grid in the suite was
+  large enough to reach, despite being the whole "no config knob" argument.
+- **Reported but deliberately not changed.** The truth is still read a second
+  time (it can only be sampled once the ensemble pass has fixed the grid; it is
+  1/M of the read the WP already avoids). `<u'w'>` still has no phase-1 reader.
+  `_ensemble_reduction` still runs twice over the posterior slab (once for the
+  netCDF, once for the score) — one array, and collapsing it would couple the
+  writer to the scorer.

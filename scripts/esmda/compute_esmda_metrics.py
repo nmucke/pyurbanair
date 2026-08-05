@@ -80,6 +80,7 @@ from evaluation.turbulence import (
     block_bootstrap_std,
     colocate_components,
     evenly_spaced_levels,
+    extrapolated_centre_dims,
     streaming_state_rmse,
 )
 
@@ -361,6 +362,10 @@ _MEAN_FIELD_BYTES_PER_CELL = 80
 _MEAN_FIELD_TRANSIENT_BYTES = 256 << 20
 _MEAN_FIELD_BYTES_PER_SAMPLE = 128
 
+# The obstacle indicator pylbm writes beside the state (non-zero = solid).
+# pypalm replaces PALM's NaN with 0.0 and keeps no mask; uDALES ships none.
+_BLANKING_VAR = "blanking"
+
 # Points at which the truth's series is kept during its pass so the hit rate's
 # absolute tolerance ``W`` can be block-bootstrapped from it.
 _W_SAMPLE_POINTS = 64
@@ -460,8 +465,12 @@ def station_columns(
     profiles are the place a held-out column is worth most -- a profile drawn
     only at the points the assimilation was fitted to is the least informative
     one available -- and the columns are a handful of cells either way.
+
+    Empty arrays when there are no sensors at all: the slabs are the scored
+    region and they do not depend on this, so a sensorless run loses its station
+    columns and keeps its hit rate (invariant 3).
     """
-    xs, ys, labels = [], [], []
+    xs, ys, labels = [np.empty(0)], [np.empty(0)], []
     for name, (sx, sy, _) in sensor_sets.items():
         x = np.asarray(sx, dtype=float).ravel()
         xs.append(x)
@@ -498,6 +507,10 @@ class MeanFieldCollector:
             (what the ensemble collector does); another collector's
             :attr:`target` to sample onto *that* region instead (what the prior
             and truth collectors do -- see :meth:`_slab`).
+        solid_state_path: A window state file to read the backend's obstacle
+            indicator from (see :meth:`_record_solid`). ``None`` falls back to
+            the indicator on the state itself, if it carries one, and then to the
+            truth-variance rule in :func:`_fluid_cells`.
         keep_samples: Retain a fixed sample of slab cells' series so
             :meth:`sampling_tolerance` can bootstrap the hit rate's ``W`` from
             them. Only the truth collector needs it -- ``W`` is a property of the
@@ -521,6 +534,7 @@ class MeanFieldCollector:
         n_members: int = 1,
         target: _Target | None = None,
         keep_samples: bool = False,
+        solid_state_path: pathlib.Path | None = None,
     ) -> None:
         self.solver_name = solver_name
         self.station_x = np.asarray(station_x, dtype=float)
@@ -529,8 +543,14 @@ class MeanFieldCollector:
         self.n_members = int(n_members)
         self.target = target
         self.keep_samples = bool(keep_samples)
+        self.solid_state_path = solid_state_path
         self.reason: str | None = None
         self.failed = False
+        # Which centre axes carry an extrapolated last index, and which slab
+        # cells the backend marks as solid; both are static, both are recorded
+        # on the first state seen (see :meth:`_prepare`).
+        self.extrapolated: tuple[str, ...] = ()
+        self.solid: np.ndarray | None = None
         self._moments: dict[int, dict[str, MomentAccumulator]] = {}
         self._frames: dict[int, int] = {}
         self._windows: set[int] = set()
@@ -544,14 +564,15 @@ class MeanFieldCollector:
         if self.failed:
             return
         try:
-            components = self._colocated(state)
+            dims = self._prepare(state)
         except (ValueError, KeyError) as error:
-            # Only colocation is guarded: it is the one step that legitimately
-            # refuses an input (a staggering it does not know, a state subset
-            # before colocation, a missing centre coordinate). Everything after
-            # it is pure computation on arrays already in memory, so an
-            # exception there is a bug and must not be swallowed into a green
-            # run with a silently missing block.
+            # Only the layout inspection is guarded: colocation and the dim
+            # lookup are the steps that legitimately refuse an input (a
+            # staggering the table does not know, a state subset before
+            # colocation, a missing centre coordinate, no time axis). Everything
+            # after them is pure computation on arrays already in memory, so an
+            # exception there is a bug and must not be swallowed into a green run
+            # with a silently missing block.
             self.failed = True
             self.reason = str(error)
             logger.warning(
@@ -561,35 +582,54 @@ class MeanFieldCollector:
                 error,
             )
             return
-        self._accumulate(window_index, member_index, components)
+        self._accumulate(window_index, member_index, state, dims)
+
+    def _prepare(self, state: xarray.Dataset) -> tuple[str, str, str]:
+        """Inspect the layout on one frame: the dims, the target, the solid mask.
+
+        One frame rather than the window because colocation *materialises* every
+        axis it moves: probing keeps the layout check cheap and keeps the
+        full-size copy inside the sub-chunked loop below, where the transient
+        budget governs it. Everything read here (grid coordinates, staggering,
+        obstacle geometry) is static, so one frame settles it.
+        """
+        if "time" not in state.dims:
+            raise ValueError("state has no 'time' axis, so there is nothing to average")
+        probe = self._colocated(state.isel(time=slice(0, 1)))
+        dims = _centre_dims(probe[0])
+        if self.target is None:
+            self.target = self._derive_target(probe[0], dims)
+            self.extrapolated = extrapolated_centre_dims(state, self.solver_name)
+        self._record_solid(state, dims)
+        return dims
 
     def _colocated(self, state: xarray.Dataset) -> list[xarray.DataArray]:
         """The three velocity components on cell centres, member axis dropped."""
-        components = [
+        return [
             _drop_member_axis(field)
             for field in colocate_components(state, self.solver_name)
         ]
-        if "time" not in components[0].dims:
-            raise ValueError("state has no 'time' axis, so there is nothing to average")
-        return components
 
     def _accumulate(
-        self, window_index: int, member_index: int, components: list[xarray.DataArray]
+        self,
+        window_index: int,
+        member_index: int,
+        state: xarray.Dataset,
+        dims: tuple[str, str, str],
     ) -> None:
-        """Fold the components in, sub-chunked in time to bound the transient."""
-        dims = _centre_dims(components[0])
-        if self.target is None:
-            self.target = self._derive_target(components[0], dims)
+        """Fold the frames in, sub-chunked in time to bound the transient.
 
+        Colocation happens *inside* the loop, on each piece: it copies every axis
+        it moves, so colocating the whole window first would materialise three
+        full-size float64 copies of it before the budget below ever applied.
+        """
         moments = self._moments.setdefault(
             member_index, {"slab": MomentAccumulator(), "station": MomentAccumulator()}
         )
-        n_time = int(components[0].sizes["time"])
-        for start in range(0, n_time, self._time_block()):
-            piece = [
-                field.isel(time=slice(start, start + self._time_block()))
-                for field in components
-            ]
+        n_time = int(state.sizes["time"])
+        block = self._time_block(state, dims)
+        for start in range(0, n_time, block):
+            piece = self._colocated(state.isel(time=slice(start, start + block)))
             slabs = [self._slab(field, dims) for field in piece]
             moments["slab"].update(*slabs)
             moments["station"].update(*(self._columns(field, dims) for field in piece))
@@ -598,13 +638,87 @@ class MeanFieldCollector:
         self._frames[member_index] = self._frames.get(member_index, 0) + n_time
         self._windows.add(int(window_index))
 
-    def _time_block(self) -> int:
-        """Frames per accumulation step, from the transient budget."""
-        assert self.target is not None  # set by _accumulate before this is called
-        cells = int(self.target.z.size * self.target.y.size * self.target.x.size)
+    def _time_block(self, state: xarray.Dataset, dims: tuple[str, str, str]) -> int:
+        """Frames per accumulation step, from the transient budget.
+
+        Sized on the **source** grid whenever a step touches it -- colocation on
+        a staggered backend, or the cross-grid interpolation of a truth -- and on
+        the target slab otherwise. The distinction matters in exactly the case it
+        is most needed: a truth finer than the assimilation grid (a PALM truth
+        against a surrogate ensemble) has more source cells than target cells, so
+        sizing on the target alone would leave the larger term unbounded.
+        """
+        assert self.target is not None  # _prepare sets it before this is called
+        target_cells = int(self.target.z.size * self.target.y.size * self.target.x.size)
+        source_cells = 1
+        for dim in dims:
+            source_cells *= int(state.sizes.get(dim, 1))
+        touches_source = bool(self.extrapolated) or not self._is_native_grid(
+            state, dims
+        )
+        cells = max(target_cells, source_cells if touches_source else 0)
         return max(
             1, _MEAN_FIELD_TRANSIENT_BYTES // (_MEAN_FIELD_BYTES_PER_SAMPLE * cells)
         )
+
+    def _record_solid(self, state: xarray.Dataset, dims: tuple[str, str, str]) -> None:
+        """The backend's own obstacle indicator on the slab cells, read once.
+
+        Static geometry, so one frame of one member settles it; and only from a
+        state on the target's own grid, since an interpolated indicator is not an
+        indicator (a zero-filled solid pulls its neighbour halfway to zero).
+        pylbm ships ``blanking``; pypalm and uDALES ship no mask at all, and
+        :func:`_fluid_cells` falls back to the truth for those.
+
+        Read from ``solid_state_path`` rather than from the member slice, because
+        the sensor pass hands out ``ds[["u", "v", "w"]]`` and the indicator is not
+        in it. One metadata-cheap open of one window file, once per run -- against
+        pulling the variable through every member's slice, which is a third more
+        bytes per window for one frame's worth of static geometry.
+        """
+        if self.solid is not None:
+            return
+        indicator = self._solid_indicator(state)
+        if indicator is None:
+            return
+        for dim in ("ensemble", "time"):
+            if dim in indicator.dims:
+                indicator = indicator.isel({dim: 0})
+        if not all(dim in indicator.dims for dim in dims):
+            return
+        if not self._is_native_grid(indicator, dims):
+            return
+        assert self.target is not None
+        zdim, ydim, xdim = dims
+        selected = indicator.isel(
+            {
+                zdim: self.target.z_index,
+                ydim: slice(None, None, self.target.stride),
+                xdim: slice(None, None, self.target.stride),
+            }
+        )
+        # Convention (pylbm's own, see warm_start_utils): non-zero is solid.
+        self.solid = (
+            np.asarray(selected.transpose(zdim, ydim, xdim).values, dtype=float) >= 0.5
+        )
+
+    def _solid_indicator(self, state: xarray.Dataset) -> xarray.DataArray | None:
+        """The obstacle indicator, from the state itself or from the state file."""
+        if _BLANKING_VAR in state:
+            return state[_BLANKING_VAR]
+        if self.solid_state_path is None:
+            return None
+        try:
+            with xarray.open_dataset(self.solid_state_path) as ds:
+                if _BLANKING_VAR not in ds:
+                    return None
+                return ds[_BLANKING_VAR].load()
+        except OSError as error:
+            # Unreadable is not fatal: the truth-variance fallback still runs.
+            logger.info(
+                "No solid-cell indicator (%s): %s", self.solid_state_path, error
+            )
+            return None
 
     def _derive_target(
         self, field: xarray.DataArray, dims: tuple[str, str, str]
@@ -647,7 +761,7 @@ class MeanFieldCollector:
         zdim, ydim, xdim = dims
         target = self.target
         assert target is not None
-        if self._is_native(field, dims):
+        if self._is_native_grid(field, dims):
             selected = field.isel(
                 {
                     zdim: target.z_index,
@@ -682,7 +796,7 @@ class MeanFieldCollector:
         zdim, ydim, xdim = dims
         target = self.target
         assert target is not None
-        native = self._is_native(field, dims)
+        native = self._is_native_grid(field, dims)
         y_axis = np.asarray(field[ydim].values, dtype=float)
         x_axis = np.asarray(field[xdim].values, dtype=float)
 
@@ -701,6 +815,13 @@ class MeanFieldCollector:
                 # here, which is why this needs no broadcast index arrays.
                 points[zdim] = target.station_z
             columns.append(near.interp(points))
+        if not columns:
+            # No sensors at all. The slabs do not depend on the stations, so
+            # this costs the columns and nothing else (invariant 3); an empty
+            # concat would take the whole pass down instead.
+            return np.empty(
+                (int(field.sizes["time"]), int(target.station_z.size), 0), dtype=float
+            )
         # A station outside the domain brackets to an edge cell pair and
         # interpolates to nan, which is what every consumer already expects of
         # a cell the source cannot reach.
@@ -709,7 +830,9 @@ class MeanFieldCollector:
             stacked.transpose("time", zdim, "station").values, dtype=float
         )
 
-    def _is_native(self, field: xarray.DataArray, dims: tuple[str, str, str]) -> bool:
+    def _is_native_grid(
+        self, field: xarray.DataArray, dims: tuple[str, str, str]
+    ) -> bool:
         """Whether ``field`` lives on the very grid the target was cut from.
 
         Compared against the *full* stored axes rather than the strided target
@@ -797,7 +920,7 @@ class MeanFieldCollector:
             ds.close()
         return self
 
-    def sampling_tolerance(self) -> np.ndarray | None:
+    def sampling_tolerance(self, fluid: np.ndarray | None = None) -> np.ndarray | None:
         """Per-component ``W``: the truth's own sampling error on its time-mean.
 
         The block-bootstrap standard error of the time-mean at each sampled slab
@@ -807,11 +930,23 @@ class MeanFieldCollector:
         typical one. ``nan`` per component where no floor could be measured --
         short runs cannot be blocked, which includes the CI smoke shape -- and
         :func:`~evaluation.scores.hit_rate` reads that as "relative test only".
+
+        Args:
+            fluid: Flat boolean over the slab cells. Solid cells are dropped from
+                the sample before the median, and they have to be: a cell inside
+                a building holds a constant, so its sampling floor is ~0, and in
+                a slab that is more than half solid the median would collapse to
+                zero and silently switch the absolute criterion off. Ignored when
+                no sampled cell survives it.
         """
         if not self._samples:
             return None
         series = np.concatenate(self._samples, axis=1)  # (component, time, point)
         floors = block_bootstrap_std(np.moveaxis(series, 1, -1))  # (component, point)
+        if fluid is not None and self._sample_index is not None:
+            keep = np.asarray(fluid, dtype=bool).ravel()[self._sample_index]
+            if keep.any():
+                floors = floors[:, keep]
         with warnings.catch_warnings():
             # Every sampled cell unmeasurable (a run too short to block) is the
             # common case in the smoke shape, not a fault.
@@ -890,7 +1025,11 @@ def _long_name(variable: str) -> str:
 
 
 def _eval_fields_dataset(
-    target: _Target, sources: dict, time_span: tuple[float, float] | None = None
+    target: _Target,
+    sources: dict,
+    time_span: tuple[float, float] | None = None,
+    fluid: np.ndarray | None = None,
+    extrapolated: tuple[str, ...] = (),
 ) -> xarray.Dataset:
     """``eval_fields.nc``: the reduced fields the WP1.5 figures read.
 
@@ -900,9 +1039,10 @@ def _eval_fields_dataset(
     accumulated, and the accumulation that needed float64 already happened.
 
     Self-contained on purpose: the averaging window figure F1 has to annotate,
-    the stride, and which sensor set each station column came from are all
-    attributes or coordinates here, so a figure never has to re-open the run's
-    other artifacts to caption a plot.
+    the stride, which sensor set each station column came from, which cells are
+    fluid and which axes carry colocation's extrapolated edge are all here, so a
+    figure never has to re-open the run's other artifacts -- or re-derive a mask
+    -- to draw an honest plot.
     """
     variables = {}
     for prefix, (result, ensemble) in sources.items():
@@ -912,6 +1052,17 @@ def _eval_fields_dataset(
                 np.asarray(values, dtype=np.float32),
                 {"long_name": _long_name(name)},
             )
+    if fluid is not None:
+        variables["slab_fluid"] = (
+            _FIELD_DIMS["slab"]["tke"],
+            np.asarray(fluid, dtype=np.int8),
+            {
+                "long_name": (
+                    "1 where the slab cell was scored as fluid, 0 where it was "
+                    "excluded as solid"
+                )
+            },
+        )
     attrs: dict[str, object] = {
         "description": (
             "Time-mean velocity, resolved TKE and <u'w'> on evenly spaced "
@@ -920,6 +1071,14 @@ def _eval_fields_dataset(
             "is not included and is not negligible inside a canopy."
         ),
         "horizontal_stride": target.stride,
+        # Every axis colocation moved has its LAST index extrapolated from the
+        # two faces below it rather than interpolated between two, so those cells
+        # carry inflated second moments -- ~20 % for a well-resolved field, up to
+        # 5x for face-to-face white noise. It is not only the vertical: uDALES
+        # moves x, y and z, PALM moves x and y. An evenly spaced selection always
+        # includes the last index, so a figure that does not want the artefact
+        # has to exclude those cells itself -- hence recording them here.
+        "extrapolated_edges": ",".join(extrapolated),
     }
     if time_span is not None:
         attrs["t_start"], attrs["t_end"] = time_span
@@ -1019,11 +1178,12 @@ def _mean_field_block(
     if prior_fields is not None:
         sources["prior"] = (prior_fields, True)
 
-    _eval_fields_dataset(target, sources, time_span).to_netcdf(
-        run_dir / "eval_fields.nc"
-    )
+    fluid, fluid_source = _fluid_cells(posterior, truth_fields)
+    _eval_fields_dataset(
+        target, sources, time_span, fluid=fluid, extrapolated=posterior.extrapolated
+    ).to_netcdf(run_dir / "eval_fields.nc")
 
-    tolerance = truth.sampling_tolerance()
+    tolerance = truth.sampling_tolerance(fluid)
     if tolerance is None:
         tolerance = np.full(len(_COMPONENTS), np.nan)
     if not np.any(np.isfinite(tolerance)):
@@ -1033,12 +1193,22 @@ def _mean_field_block(
             "alone (W = 0)"
         )
 
-    observed = truth_fields["slab_mean"][0]
+    # Fluid cells only, per the metrics doc. A solid cell holds ~0 in the truth
+    # *and* in every member, so it is a hit whatever the flow does, and counting
+    # them dilutes q toward the built-up fraction: at 30 % solid a fluid hit rate
+    # of 0.52 would report as 0.66 and cross the acceptance threshold on a field
+    # that fails it. Masking the truth is enough -- ``hit_rate`` drops a point
+    # where either side is non-finite.
+    observed = np.where(fluid, truth_fields["slab_mean"][0], np.nan)
     block: dict[str, object] = {
         "n_windows": posterior_fields["n_windows"],
         "frames_per_member": posterior_fields["frames_per_member"],
+        "truth_frames": truth_fields["frames_per_member"][0],
         "z_levels": [float(v) for v in target.z],
         "horizontal_stride": target.stride,
+        "n_fluid_cells": int(np.count_nonzero(fluid)),
+        "solid_fraction": float(1.0 - np.count_nonzero(fluid) / fluid.size),
+        "solid_cell_source": fluid_source,
         "hit_rate_tolerance_w": {
             name: (float(v) if np.isfinite(v) else None)
             for name, v in zip(_COMPONENTS, tolerance)
@@ -1052,6 +1222,48 @@ def _mean_field_block(
             _ensemble_reduction(prior_fields["slab_mean"])[0], observed, tolerance
         )
     return block
+
+
+def _fluid_cells(
+    posterior: MeanFieldCollector, truth_fields: dict
+) -> tuple[np.ndarray, str]:
+    """Which slab cells to score, and where the answer came from.
+
+    The metrics doc scores the hit rate over **fluid cells**, and no backend
+    makes that free: pylbm ships a ``blanking`` indicator, pypalm replaces PALM's
+    NaN inside obstacles with 0.0 and keeps no mask, uDALES ships neither. So
+    two rules, in order of authority:
+
+    1. The backend's own indicator, when the state carried one.
+    2. Otherwise the truth's own resolved TKE. A cell the solver held at a
+       constant (a zero-filled obstacle interior) has *exactly* zero variance in
+       every component, while a fluid cell in a turbulent flow does not -- so
+       ``tke > 0`` separates them without a threshold to tune. It needs at least
+       two frames to mean anything (a one-frame ``ddof=1`` variance is ``nan``),
+       and it cannot see an obstacle a backend filled with time-varying junk
+       rather than zeros, which is why it is the fallback and not the rule.
+
+    Returns the mask and a label for it, so ``run_summary.yaml`` records which
+    rule ran -- ``"none"`` means every cell was scored and a reader should treat
+    ``q`` as diluted by whatever solids the domain holds.
+    """
+    if posterior.solid is not None:
+        return ~posterior.solid, _BLANKING_VAR
+    tke = truth_fields["slab_tke"][0]
+    fluid = np.asarray(np.isfinite(tke) & (tke > 0.0))
+    if fluid.any() and not fluid.all():
+        return fluid, "truth-zero-variance"
+    if not fluid.any():
+        # Nothing in the slab fluctuates at all: a single-frame truth (``ddof=1``
+        # leaves no variance to test) or a laminar/synthetic field. The rule
+        # cannot separate solid from fluid there -- it would mask everything --
+        # so it stands down rather than reporting a null hit rate.
+        logger.info(
+            "Mean fields: no solid-cell indicator and no resolved variance "
+            "anywhere in the truth, so the hit rate scores every cell -- read q "
+            "as diluted by any obstacles the domain holds"
+        )
+    return np.ones_like(tke, dtype=bool), "none"
 
 
 def compute_metrics(run_dir: pathlib.Path) -> None:
@@ -1130,6 +1342,7 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         station_y,
         station_set,
         n_members=n_members,
+        solid_state_path=state_paths[0] if state_paths else None,
     )
     ensemble_series = ensemble_sensor_series(
         state_paths,

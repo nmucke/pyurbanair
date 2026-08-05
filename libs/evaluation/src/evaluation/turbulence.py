@@ -484,6 +484,40 @@ def colocate_components(ds, solver_name):
     return tuple(out)
 
 
+def extrapolated_centre_dims(ds, solver_name):
+    """Centre dims whose **last** index colocation fills by extrapolation.
+
+    Every axis :func:`colocate_components` moves gets its final centre from
+    ``1.5*face[-1] - 0.5*face[-2]`` rather than from two bounding faces, because
+    the backends store one face per cell (see :func:`_faces_to_centres`). That
+    column's second moments are inflated -- ~20 % for a well-resolved field, up
+    to 5x for face-to-face white noise -- and it is **not** only the vertical:
+    uDALES moves x, y *and* z, PALM moves x and y. An evenly spaced level or
+    cell selection always includes the last index, so the affected cells are
+    scored unless a consumer knows to exclude them.
+
+    Returns the centre dim names, so a caller can record which cells of a
+    reduced field carry the artefact. Empty for an unstaggered grid (pylbm) and
+    for an axis the state does not carry (pypalm pre-interpolates ``w`` off
+    ``zw``), which is exactly when no extrapolation happens.
+
+    Raises:
+        ValueError: If the solver is unknown -- same table as
+            :func:`colocate_components`, so the two cannot disagree.
+    """
+    if solver_name not in _STAGGERED_TO_CENTRE:
+        raise ValueError(
+            f"unknown solver {solver_name!r}: colocation needs the staggering, "
+            f"known are {sorted(_STAGGERED_TO_CENTRE)}"
+        )
+    moved = []
+    for pairs in _STAGGERED_TO_CENTRE[solver_name].values():
+        for face_dim, centre_dim in pairs:
+            if face_dim in ds.dims and centre_dim not in moved:
+                moved.append(centre_dim)
+    return tuple(moved)
+
+
 def evenly_spaced_levels(n_levels, n_wanted):
     """Indices of ``n_wanted`` evenly spaced levels, endpoints included.
 
