@@ -17,19 +17,26 @@ Populated in WP0.2 (move).
 # Moved wholesale in WP0.2 from ``scripts/figspec/style.py`` and the pure
 # geometry of ``scripts/figspec/mask.py`` -- largely unannotated code predating
 # the strict mypy config. Waived rather than annotated as part of a pure
-# refactor; dropping the waiver is later cleanup.
+# refactor; dropping the waiver is later cleanup. The WP1.5 additions
+# (:func:`finite_limits`, :func:`nested_bands`) are fully annotated and pass the
+# strict config on their own -- checked by deleting this line, which leaves 11
+# errors, all in the moved code -- but the waiver covers them too, so nothing
+# enforces it.
 
 from __future__ import annotations
 
 import pathlib
 import struct
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.patheffects as patheffects
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
+from matplotlib.lines import Line2D
 
 # ---------------------------------------------------------------------------
 # §2.1 Colours (UrbanAIR palette)
@@ -186,6 +193,125 @@ def band(ax, x, mean, std, color, *, alpha=0.25, label=None, lw=2.0, ls="-", nsi
             lw=0,
             zorder=3,
         )
+    return line
+
+
+# ---------------------------------------------------------------------------
+# Shared limits and nested quantile bands (WP1.5)
+#
+# Two conventions the evaluation figure set repeats: every prior/posterior pair
+# shares one scale, and an ensemble is drawn as nested quantile bands rather
+# than as a mean +- sigma (which is what :func:`band` above does, and which
+# reads as symmetric when the posterior is not). Both live here because more
+# than one figure needs them -- anything only one figure needs stays private in
+# ``figures.py``.
+# ---------------------------------------------------------------------------
+
+
+def finite_limits(
+    *arrays: np.ndarray | None, pad: float = 0.0
+) -> tuple[float, float] | None:
+    """``(min, max)`` over the finite entries of every array, or ``None``.
+
+    The one place non-finite values are excluded before an axis limit or a
+    colour norm is set: a single ``inf`` (a pinned parameter's ratio, a member
+    that diverged) rescales an axis into uselessness, and NaN makes ``min``
+    return NaN outright. ``None`` means nothing finite was passed, which every
+    caller reads as "there is no figure to draw here".
+
+    ``pad`` widens the interval by that fraction of its span on both sides; a
+    *degenerate* interval (a collapsed ensemble, a pinned parameter -- every
+    value identical) is instead widened by ``pad`` of its own magnitude, so the
+    result is always usable as a limit.
+    """
+    finite = [
+        np.asarray(a, dtype=float).ravel() for a in arrays if a is not None
+    ]  # keep the empty ones: concatenate handles them, an empty list does not
+    if not finite:
+        return None
+    values = np.concatenate(finite)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None
+
+    low, high = float(values.min()), float(values.max())
+    if pad:
+        span = high - low
+        margin = pad * (span if span > 0 else max(abs(high), 1.0))
+        low, high = low - margin, high + margin
+    return low, high
+
+
+def nested_bands(
+    ax: Axes,
+    coord: np.ndarray,
+    values: np.ndarray,
+    quantiles: Sequence[float],
+    color: str,
+    *,
+    orient: str = "vertical",
+    alphas: tuple[float, float] = (0.18, 0.38),
+    label: str | None = None,
+    lw: float = 1.8,
+    zorder: int = 3,
+) -> Line2D | None:
+    """Nested quantile bands (5--95 % outside, 25--75 % inside) plus the median.
+
+    Args:
+        ax: Target axes.
+        coord: ``(N,)`` values of the coordinate the bands run along.
+        values: ``(Q, N)`` quantiles of the ensemble, one row per level in
+            ``quantiles`` (any order; sorted here).
+        quantiles: The ``Q`` quantile levels.
+        color: Band and median colour (a ``COLORS`` entry).
+        orient: ``"vertical"`` puts ``coord`` on x and the values on y (a time
+            series); ``"horizontal"`` puts ``coord`` on y (a vertical profile).
+        alphas: Fill alpha of the outermost and innermost band; intermediate
+            pairs interpolate.
+
+    Returns the median line, or ``None`` when no level is a median.
+    """
+    coord = np.asarray(coord, dtype=float)
+    values = np.asarray(values, dtype=float)
+    levels = np.asarray(quantiles, dtype=float)
+    if values.ndim != 2 or values.shape[0] != levels.size:
+        raise ValueError(
+            f"values must have shape ({levels.size}, n_coord) to match quantiles; "
+            f"got {values.shape}"
+        )
+
+    order = np.argsort(levels)
+    levels, values = levels[order], values[order]
+    n_pairs = levels.size // 2
+    for i in range(n_pairs):  # outermost pair first, so the inner ones sit on top
+        alpha = (
+            alphas[1]
+            if n_pairs == 1
+            else alphas[0] + (alphas[1] - alphas[0]) * i / (n_pairs - 1)
+        )
+        lo, hi = values[i], values[-1 - i]
+        fill = ax.fill_between if orient == "vertical" else ax.fill_betweenx
+        fill(coord, lo, hi, color=color, alpha=alpha, lw=0, zorder=zorder)
+
+    median = np.isclose(levels, 0.5)
+    if not median.any():
+        return None
+    med = values[int(np.argmax(median))]
+    x, y = (coord, med) if orient == "vertical" else (med, coord)
+    (line,) = ax.plot(
+        x,
+        y,
+        color=color,
+        lw=lw,
+        label=label,
+        zorder=zorder + 1,
+        # The median is the same colour as its own band; the halo is what keeps
+        # it visible inside it.
+        path_effects=[
+            patheffects.Stroke(linewidth=lw + 1.4, foreground="white", alpha=0.8),
+            patheffects.Normal(),
+        ],
+    )
     return line
 
 

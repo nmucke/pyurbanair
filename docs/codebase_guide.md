@@ -103,7 +103,8 @@ libs/evaluation/src/evaluation/    # Metrics + figures for DA runs. Leaf lib: no
   turbulence.py                    # z-plane selection, streaming |U| state RMSE
   sensors.py                       # Reductions of pre-extracted sensor series
   style.py                         # Talk-figure palette/rcParams/save + STL solid masks
-  figures.py                       # plot_* for DA runs (parameters, sensors, state)
+  figures.py                       # plot_* for DA runs (parameters, sensors, state,
+                                   #   mean-field slices, station profiles, rank hist.)
 
 libs/pylbm/src/pylbm/              # LBM wrapper. __init__ git-clones the LBM Fortran code.
   forward_model.py                 # ForwardModel(BaseForwardModel)

@@ -20,19 +20,46 @@ Populated in WP0.2 (move), extended in WP1.5.
 # Moved wholesale in WP0.2 from ``src/pyurbanair/plotting.py`` -- largely
 # unannotated code predating the strict mypy config. Waived rather than
 # annotated as part of a pure refactor; dropping the waiver is later cleanup.
+# The WP1.5 figure set below is fully annotated and passes the strict config on
+# its own (checked by deleting this line: the eight remaining errors are all in
+# the moved code above it) -- but it is *inside* the waiver, so nothing enforces
+# that. Dropping the waiver needs the eight legacy errors fixed first.
 
+import contextlib
+import logging
 import pathlib
+from typing import Iterator
 
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray
 from evaluation.scores import (
+    _aligned_parameter_members,
     _param_members_and_x,
     _plotted_param_names,
     compute_parameter_metrics,
     compute_sensor_metrics,
+    parameter_bundle,
 )
+from evaluation.style import (
+    CMAP_DIFF,
+    CMAP_FIELD,
+    COLORS,
+    PARAM_LABELS,
+    PARAM_UNITS,
+    apply_style,
+    finite_limits,
+    mark_windows,
+    nested_bands,
+    save_png,
+)
+from evaluation.turbulence import evenly_spaced_levels
+from matplotlib.axes import Axes
+from matplotlib.colors import Colormap
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+
+logger = logging.getLogger(__name__)
 
 # --- Shared figure style ----------------------------------------------------
 # Semantic colours used consistently across every figure.
@@ -974,3 +1001,1037 @@ def plot_final_state_with_obs(
 
         fig.suptitle("State at final time", fontsize=15, fontweight="bold")
         _save(fig, output_path)
+
+
+# ===========================================================================
+# The WP1.5 evaluation figure set -- P1, S1, F1, S5, D1
+# (docs/plans/esmda_turbulence_evaluation.md section 7)
+#
+# A different contract from the general plots above, which stay as they are:
+# these take already-opened objects, write the file themselves and return the
+# path written -- or ``None`` when their inputs are absent, empty or degenerate
+# (master-plan invariant 3), which is never an exception. Every colour, band
+# and save goes through ``evaluation.style`` rather than the legacy ``_COLOR_*``
+# constants above, so a prior/posterior pair cannot end up on two scales.
+# ===========================================================================
+
+# Nested quantile bands: the levels ``compute_esmda_metrics`` stores at the
+# station columns (its ``STATION_QUANTILES``), and S5's default fan.
+_BAND_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
+
+# Solid (masked) cells are drawn *outside* the colour scale, never inside it.
+_SOLID_COLOR = "#D9D9D9"
+
+# Below this many members a KDE says more about the kernel than about the
+# posterior, so the marginal becomes a box + strip of the members themselves.
+_MIN_VIOLIN_MEMBERS = 8
+
+# Cell-centre vertical dim names, as ``eval_fields.nc``'s ``extrapolated_edges``
+# spells them (``z`` for PALM/pylbm, ``zt`` for uDALES).
+_VERTICAL_CENTRE_DIMS = ("z", "zt")
+
+
+@contextlib.contextmanager
+def _styled() -> Iterator[None]:
+    """The shared rcParams, scoped to one figure.
+
+    ``apply_style`` mutates the global rcParams; the surrounding ``rc_context``
+    is what keeps a figure from leaking its style into the caller's process.
+    """
+    with plt.rc_context():
+        apply_style()
+        yield
+
+
+def _finite(values: np.ndarray) -> np.ndarray:
+    """The finite entries of ``values``, flattened."""
+    flat = np.asarray(values, dtype=float).ravel()
+    return flat[np.isfinite(flat)]
+
+
+# ---------------------------------------------------------------------------
+# P1 -- parameter marginals
+# ---------------------------------------------------------------------------
+
+
+def _marginal_members(
+    posterior_params: xarray.Dataset,
+    true_params: xarray.Dataset | None,
+    prior_params: xarray.Dataset | None,
+) -> Iterator[tuple[str, np.ndarray, np.ndarray | None, np.ndarray | None]]:
+    """Yield ``(name, posterior (M, K), truth (K,) | None, prior (M, K) | None)``.
+
+    With a truth this is :func:`evaluation.scores._aligned_parameter_members`,
+    which owns the knot-grid alignment and the guard that drops a prior sampled
+    on a different grid -- so P1 annotates the z-score of exactly the knots the
+    metric block scored. Without a truth there is nothing to align, so the same
+    parameter selection and the same prior guard are applied directly: a run
+    whose truth was never saved still has a contraction worth drawing.
+    """
+    if true_params is not None:
+        for name, _x, members, truth, prior in _aligned_parameter_members(
+            posterior_params, true_params, prior_params
+        ):
+            yield name, members, truth, prior
+        return
+
+    for name in _plotted_param_names(posterior_params):
+        _x, members = _param_members_and_x(posterior_params[name])
+        prior = None
+        if prior_params is not None and name in prior_params.data_vars:
+            _, candidate = _param_members_and_x(prior_params[name])
+            if candidate.shape[1] == members.shape[1]:
+                prior = candidate
+        yield name, members, None, prior
+
+
+def _param_axis_label(name: str) -> str:
+    """The parameter's labelled axis title, units included when they are known."""
+    if name in PARAM_LABELS:
+        return PARAM_LABELS[name]
+    label = name.replace("_", " ").capitalize()
+    return f"{label} [{PARAM_UNITS[name]}]" if name in PARAM_UNITS else label
+
+
+def _draw_marginal(ax: Axes, position: float, values: np.ndarray, color: str) -> None:
+    """One marginal at ``position``: a violin, or a box + strip when a KDE lies.
+
+    A violin needs both enough members for the KDE and a non-zero spread -- a
+    *pinned* parameter has every member identical by construction, and
+    ``gaussian_kde`` raises on that singular covariance rather than drawing a
+    line.
+    """
+    values = _finite(values)
+    if values.size == 0:
+        return
+
+    if values.size >= _MIN_VIOLIN_MEMBERS and np.ptp(values) > 0:
+        parts = ax.violinplot(
+            [values], positions=[position], widths=0.7, showextrema=False
+        )
+        for body in parts["bodies"]:
+            body.set_facecolor(color)
+            body.set_edgecolor(color)
+            body.set_alpha(0.45)
+    else:
+        ax.boxplot(
+            [values],
+            positions=[position],
+            widths=0.45,
+            patch_artist=True,
+            boxprops={"facecolor": color, "alpha": 0.35, "edgecolor": color},
+            medianprops={"color": color, "linewidth": 1.6},
+            whiskerprops={"color": color},
+            capprops={"color": color},
+            showfliers=False,
+        )
+        # The members themselves, jittered off the box so ties stay countable.
+        jitter = np.linspace(-0.13, 0.13, values.size)
+        ax.scatter(
+            position + jitter,
+            values,
+            s=14,
+            color=color,
+            alpha=0.85,
+            edgecolor="white",
+            linewidth=0.4,
+            zorder=4,
+        )
+
+    ax.scatter(
+        [position],
+        [values.mean()],
+        marker="_",
+        s=260,
+        color=color,
+        linewidth=1.8,
+        zorder=5,
+    )
+
+
+def plot_parameter_marginals(
+    posterior_params: xarray.Dataset,
+    true_params: xarray.Dataset | None,
+    output_path: str | pathlib.Path,
+    *,
+    prior_params: xarray.Dataset | None = None,
+) -> pathlib.Path | None:
+    """P1: prior vs posterior marginal per parameter, truth dashed, z annotated.
+
+    One panel per estimated parameter, each holding the prior marginal (grey)
+    beside the posterior one (teal) -- a violin where a KDE is meaningful, a box
+    plus the members themselves below :data:`_MIN_VIOLIN_MEMBERS`. The y-limits
+    span **both** marginals and the truth: autoscaling to the posterior alone
+    hides the contraction, which is the one thing this figure exists to show.
+
+    A **dynamic** parameter (``K > 1`` knots) is drawn at its final knot, the
+    same ``final`` convention ``run_summary.yaml`` reports everywhere; ``K``
+    violins side by side would be a different figure.
+
+    The annotated ``z = (theta* - mean_post)/sigma_post`` comes from
+    :func:`evaluation.scores.parameter_bundle` for that knot, and reads ``n/a``
+    when its scale is degenerate -- a collapsed posterior (``sigma_a = 0``) or a
+    pinned parameter -- rather than printing an infinity.
+
+    Returns the path written, or ``None`` when no parameter carries finite
+    members.
+    """
+    entries = [
+        entry
+        for entry in _marginal_members(posterior_params, true_params, prior_params)
+        if np.isfinite(entry[1]).any()
+    ]
+    if not entries:
+        logger.info("plot_parameter_marginals: no parameter with finite members")
+        return None
+
+    with _styled():
+        fig, axes = plt.subplots(
+            1,
+            len(entries),
+            figsize=(3.5 * len(entries), 4.4),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        for ax, (name, post, truth, prior) in zip(axes[0], entries):
+            knot = post.shape[1] - 1  # the final knot; see the docstring
+            post_k = post[:, knot]
+            prior_k = None if prior is None else prior[:, knot]
+            truth_k = None if truth is None else float(truth[knot])
+
+            positions = []
+            if prior_k is not None:
+                _draw_marginal(ax, 0.0, prior_k, COLORS["prior"])
+                positions.append((0.0, "Prior"))
+            _draw_marginal(ax, 1.0, post_k, COLORS["posterior"])
+            positions.append((1.0, "Posterior"))
+
+            if truth_k is not None and np.isfinite(truth_k):
+                ax.axhline(
+                    truth_k,
+                    color=COLORS["truth"],
+                    linestyle="--",
+                    linewidth=1.5,
+                    zorder=3,
+                )
+
+            z_value = np.nan
+            if truth is not None:
+                z_value = float(parameter_bundle(post, prior, truth)["z_score"][knot])
+            ax.annotate(
+                f"z = {z_value:.2f}" if np.isfinite(z_value) else "z = n/a",
+                xy=(0.5, 0.98),
+                xycoords="axes fraction",
+                ha="center",
+                va="top",
+                fontsize=9,
+                color=COLORS["charcoal"],
+            )
+
+            limits = finite_limits(
+                post_k,
+                prior_k,
+                None if truth_k is None else np.array([truth_k]),
+                pad=0.10,
+            )
+            if limits is not None:
+                ax.set_ylim(*limits)
+            ax.set_xticks([p for p, _ in positions])
+            ax.set_xticklabels([label for _, label in positions])
+            ax.set_xlim(-0.6, 1.6)
+            ax.set_ylabel(_param_axis_label(name))
+            ax.set_title(
+                name if post.shape[1] == 1 else f"{name} (final knot)", loc="left"
+            )
+
+        handles = [
+            Patch(facecolor=COLORS["prior"], alpha=0.45, label="Prior"),
+            Patch(facecolor=COLORS["posterior"], alpha=0.45, label="Posterior"),
+            Line2D([0], [0], color=COLORS["truth"], ls="--", lw=1.5, label="Truth"),
+        ]
+        axes[0, 0].legend(handles=handles, loc="lower left", fontsize=8)
+        fig.suptitle("Parameter marginals: prior vs posterior")
+        return save_png(fig, output_path)
+
+
+# ---------------------------------------------------------------------------
+# S1 -- vertical profiles at the station columns
+# ---------------------------------------------------------------------------
+
+
+def _extrapolated_axes(fields: xarray.Dataset) -> tuple[str, ...]:
+    """The centre axes whose last index ``eval_fields.nc`` flags as extrapolated."""
+    raw = str(fields.attrs.get("extrapolated_edges", ""))
+    return tuple(name for name in (part.strip() for part in raw.split(",")) if name)
+
+
+def _station_order(fields: xarray.Dataset, max_stations: int) -> list[int]:
+    """Station indices to draw: held-out columns first, then the assimilated ones.
+
+    A profile drawn only where the assimilation was fitted is the least
+    informative one available, so a validation column never loses its slot to an
+    assimilation column. Anything dropped is logged -- silent truncation would
+    make a figure that omits half the evidence look complete.
+    """
+    sets = (
+        [str(s) for s in np.asarray(fields["station_set"].values).ravel()]
+        if "station_set" in fields.coords
+        else [""] * int(fields.sizes["station"])
+    )
+    held_out = [i for i, s in enumerate(sets) if s != "assimilation"]
+    assimilated = [i for i, s in enumerate(sets) if s == "assimilation"]
+    order = held_out + assimilated
+    if len(order) > max_stations:
+        dropped = order[max_stations:]
+        logger.info(
+            "plot_station_profiles: %d of %d station columns not drawn (max_stations"
+            "=%d): %s",
+            len(dropped),
+            len(order),
+            max_stations,
+            ", ".join(f"{i} ({sets[i]})" for i in dropped),
+        )
+    return order[:max_stations]
+
+
+def _station_profile(
+    fields: xarray.Dataset,
+    variable: str,
+    station: int,
+    component: str | None = None,
+) -> np.ndarray | None:
+    """A station column's profile, ``(z,)`` or ``(quantile, z)``; ``None`` if absent."""
+    if variable not in fields.data_vars:
+        return None
+    da = fields[variable].isel(station=station)
+    if "component" in da.dims:
+        if component is not None and component in [
+            str(c) for c in np.asarray(da["component"].values).ravel()
+        ]:
+            da = da.sel(component=component)
+        else:
+            da = da.isel(component=0)
+    return np.asarray(da.transpose(..., "z").values, dtype=float)
+
+
+def plot_station_profiles(
+    fields: xarray.Dataset,
+    output_path: str | pathlib.Path,
+    *,
+    u_ref: float | None = None,
+    building_height: float | None = None,
+    max_stations: int = 6,
+) -> pathlib.Path | None:
+    """S1: mean-velocity and TKE profiles at the station columns (the LES figure).
+
+    ``fields`` is an already-opened ``eval_fields.nc`` (WP1.4). Rows are the
+    streamwise time-mean ``u`` and the resolved TKE, columns are station
+    columns labelled with their sensor set and ``(x, y)``; the truth is a black
+    line, the ensembles are nested quantile bands (5--95 % light, 25--75 % dark)
+    about their median, teal for the posterior and grey for the prior. An inset
+    plan view marks which column each panel draws.
+
+    Both axes are non-dimensionalised when the caller supplies the scales:
+    ``z/H`` with a roof line at 1 given ``building_height``, ``u/U_ref`` (and
+    ``k/U_ref^2``) given ``u_ref``. Without them the panels are in metres and
+    m/s and say so.
+
+    The **last z index is dropped** when ``extrapolated_edges`` names the
+    vertical axis: colocation fills that cell by extrapolating from the two
+    faces below it, which inflates its second moments by ~20 % and up to 5x, and
+    it is the TKE row that reads it. The caption records the exclusion.
+
+    Returns the path written, or ``None`` when the dataset carries no station
+    columns or no profile variables.
+    """
+    if "station" not in fields.dims or int(fields.sizes["station"]) == 0:
+        logger.info("plot_station_profiles: no station columns in the dataset")
+        return None
+
+    prefixes = [
+        p
+        for p in ("truth", "prior", "posterior")
+        if any(f"{p}_station_{quantity}" in fields for quantity in ("mean", "tke"))
+    ]
+    rows = [
+        quantity
+        for quantity in ("mean", "tke")
+        if any(f"{p}_station_{quantity}" in fields for p in prefixes)
+    ]
+    if not rows:
+        logger.info("plot_station_profiles: no station profile variables present")
+        return None
+
+    z = np.asarray(fields["z"].values, dtype=float)
+    trimmed = bool(set(_extrapolated_axes(fields)) & set(_VERTICAL_CENTRE_DIMS))
+    keep = slice(0, -1) if trimmed and z.size > 1 else slice(None)
+    z = z[keep]
+    z_plot = z / building_height if building_height else z
+    z_label = "z/H [-]" if building_height else "z [m]"
+
+    scale = {
+        "mean": 1.0 if u_ref is None else 1.0 / u_ref,
+        "tke": 1.0 if u_ref is None else 1.0 / u_ref**2,
+    }
+    row_label = {
+        "mean": r"$\bar{u}/U_{ref}$ [-]" if u_ref else r"$\bar{u}$ [m/s]",
+        "tke": r"$k/U_{ref}^2$ [-]" if u_ref else r"$k$ [m$^2$/s$^2$]",
+    }
+    stations = _station_order(fields, max_stations)
+    sets = (
+        [str(s) for s in np.asarray(fields["station_set"].values).ravel()]
+        if "station_set" in fields.coords
+        else ["" for _ in range(int(fields.sizes["station"]))]
+    )
+    station_x = np.asarray(fields["station_x"].values, dtype=float)
+    station_y = np.asarray(fields["station_y"].values, dtype=float)
+    levels = (
+        np.asarray(fields["quantile"].values, dtype=float)
+        if "quantile" in fields.coords
+        else np.asarray(_BAND_QUANTILES)
+    )
+
+    with _styled():
+        fig, axes = plt.subplots(
+            len(rows),
+            len(stations),
+            figsize=(2.9 * len(stations), 3.6 * len(rows)),
+            squeeze=False,
+            sharey=True,
+            constrained_layout=True,
+        )
+        for r, quantity in enumerate(rows):
+            for c, station in enumerate(stations):
+                ax = axes[r][c]
+                drawn: list[np.ndarray] = []
+                for prefix in prefixes:
+                    name = f"{prefix}_station_{quantity}"
+                    color = COLORS["truth" if prefix == "truth" else prefix]
+                    bands = _station_profile(fields, f"{name}_quantile", station, "u")
+                    if bands is not None:
+                        bands = bands[:, keep] * scale[quantity]
+                        nested_bands(
+                            ax,
+                            z_plot,
+                            bands,
+                            levels,
+                            color,
+                            orient="horizontal",
+                            label=prefix.capitalize(),
+                        )
+                        drawn.append(bands)
+                        continue
+                    profile = _station_profile(fields, name, station, "u")
+                    if profile is None:
+                        continue
+                    profile = profile[keep] * scale[quantity]
+                    ax.plot(
+                        profile,
+                        z_plot,
+                        color=color,
+                        lw=1.8,
+                        label=prefix.capitalize(),
+                        zorder=5 if prefix == "truth" else 4,
+                    )
+                    drawn.append(profile)
+
+                if building_height:
+                    ax.axhline(1.0, color=COLORS["charcoal"], ls=":", lw=1.0, zorder=2)
+                    ax.annotate(
+                        "z/H = 1",
+                        xy=(0.02, 1.0),
+                        xycoords=("axes fraction", "data"),
+                        va="bottom",
+                        fontsize=7,
+                        color=COLORS["charcoal"],
+                    )
+                limits = finite_limits(*drawn, pad=0.05)
+                if limits is not None:
+                    ax.set_xlim(*limits)
+                ax.set_xlabel(row_label[quantity])
+                if c == 0:
+                    ax.set_ylabel(z_label)
+                if r == 0:
+                    ax.set_title(
+                        f"{sets[station] or 'station'} #{station}\n"
+                        f"(x={station_x[station]:.0f}, y={station_y[station]:.0f})",
+                        fontsize=9,
+                    )
+                    # Plan view in the lower right: a boundary-layer profile
+                    # leaves that corner empty, and the inset needs its own
+                    # opaque background against the bands behind it.
+                    inset = ax.inset_axes((0.64, 0.06, 0.34, 0.30))
+                    inset.scatter(station_x, station_y, s=6, color=COLORS["prior"])
+                    inset.scatter(
+                        [station_x[station]],
+                        [station_y[station]],
+                        s=22,
+                        color=COLORS["orange"],
+                        zorder=3,
+                    )
+                    inset.set_facecolor("white")
+                    inset.patch.set_alpha(0.9)
+                    inset.margins(0.2)
+                    inset.set_xticks([])
+                    inset.set_yticks([])
+                    inset.set_xlabel("plan view", fontsize=6, labelpad=1)
+
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        if handles:
+            axes[0][0].legend(handles, labels, loc="upper left", fontsize=8)
+
+        caption = "Time-averaged profiles; ensembles as 5-95 % / 25-75 % bands."
+        if trimmed:
+            caption += (
+                " Top z cell excluded: colocation extrapolates it "
+                f"({', '.join(_extrapolated_axes(fields))})."
+            )
+        fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
+        fig.suptitle("Vertical profiles at the station columns")
+        return save_png(fig, output_path)
+
+
+# ---------------------------------------------------------------------------
+# F1 -- time-averaged horizontal slices
+# ---------------------------------------------------------------------------
+
+
+def _masked_cmap(name: str) -> Colormap:
+    """A copy of ``name`` whose masked (solid) cells get their own flat colour."""
+    cmap = plt.get_cmap(name).copy()
+    cmap.set_bad(_SOLID_COLOR)
+    return cmap
+
+
+def _slab_component(
+    fields: xarray.Dataset, variable: str, component: str
+) -> np.ndarray | None:
+    """A slab variable as ``(zlev, y, x)`` for one component; ``None`` if absent."""
+    if variable not in fields.data_vars:
+        return None
+    da = fields[variable]
+    if "component" in da.dims:
+        available = [str(c) for c in np.asarray(da["component"].values).ravel()]
+        da = (
+            da.sel(component=component)
+            if component in available
+            else da.isel(component=0)
+        )
+    return np.asarray(da.transpose("zlev", "y", "x").values, dtype=float)
+
+
+def plot_mean_slices(
+    fields: xarray.Dataset,
+    output_path: str | pathlib.Path,
+    *,
+    component: str = "u",
+    max_levels: int = 3,
+) -> pathlib.Path | None:
+    """F1: time-mean horizontal slices, truth | prior | posterior | difference.
+
+    Rows are up to ``max_levels`` evenly spaced z-levels of ``eval_fields.nc``'s
+    slabs; columns are the truth, the prior ensemble mean (dropped when the run
+    did not save its prior state), the posterior ensemble mean and the
+    posterior-minus-truth difference. **The first three columns share one
+    ``Normalize``** over the finite fluid cells of all of them -- an unshared
+    colour scale across a prior/posterior pair is one of the three mistakes the
+    metrics doc names -- and the difference gets its own symmetric diverging
+    norm centred on zero.
+
+    Solid cells (``slab_fluid == 0``) are masked to :data:`_SOLID_COLOR` before
+    anything is scaled, so an obstacle interior held at ~0 neither colours a
+    panel nor compresses the scale of the flow around it.
+
+    These are the accumulated time means only -- **never an instantaneous
+    field**, which decorrelates after a Lyapunov horizon and would measure chaos
+    rather than parameter quality. The averaging window is annotated from the
+    file's ``t_start`` / ``t_end``.
+
+    Returns the path written, or ``None`` without a posterior slab or without a
+    single finite fluid cell to scale.
+    """
+    posterior = _slab_component(fields, "posterior_slab_mean", component)
+    if posterior is None:
+        logger.info("plot_mean_slices: no posterior_slab_mean in the dataset")
+        return None
+    truth = _slab_component(fields, "truth_slab_mean", component)
+    prior = _slab_component(fields, "prior_slab_mean", component)
+
+    solid = None
+    if "slab_fluid" in fields.data_vars:
+        solid = np.asarray(fields["slab_fluid"].values) == 0
+
+    def masked(values: np.ndarray | None) -> np.ndarray | None:
+        if values is None or solid is None:
+            return values
+        return np.where(solid, np.nan, values)
+
+    columns: list[tuple[str, np.ndarray]] = []
+    for label, values in (
+        ("Truth", masked(truth)),
+        ("Prior mean", masked(prior)),
+        ("Posterior mean", masked(posterior)),
+    ):
+        if values is not None:
+            columns.append((label, values))
+    difference = (
+        None if truth is None else masked(posterior) - masked(truth)  # type: ignore[operator]
+    )
+
+    limits = finite_limits(*[values for _, values in columns])
+    if limits is None:
+        logger.info("plot_mean_slices: no finite fluid cell in the slabs")
+        return None
+    vmin, vmax = limits
+    if vmax <= vmin:  # a uniform field: a zero-width norm colours nothing
+        vmin, vmax = vmin - 0.5, vmax + 0.5
+    diff_max = 1.0
+    if difference is not None:
+        finite_diff = _finite(difference)
+        if finite_diff.size and np.max(np.abs(finite_diff)) > 0:
+            diff_max = float(np.max(np.abs(finite_diff)))
+
+    n_levels = int(fields.sizes["zlev"])
+    levels = evenly_spaced_levels(n_levels, min(max_levels, n_levels))
+    z_values = np.asarray(fields["zlev"].values, dtype=float)
+    x = np.asarray(fields["x"].values, dtype=float)
+    y = np.asarray(fields["y"].values, dtype=float)
+    extent = (float(x.min()), float(x.max()), float(y.min()), float(y.max()))
+    n_cols = len(columns) + (1 if difference is not None else 0)
+
+    with _styled():
+        fig, axes = plt.subplots(
+            len(levels),
+            n_cols,
+            figsize=(3.4 * n_cols, 3.2 * len(levels)),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        field_image = difference_image = None
+        for r, level in enumerate(levels):
+            for c, (label, values) in enumerate(columns):
+                field_image = axes[r][c].imshow(
+                    values[level],
+                    origin="lower",
+                    extent=extent,
+                    aspect="equal",
+                    cmap=_masked_cmap(CMAP_FIELD),
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                if r == 0:
+                    axes[r][c].set_title(label, fontsize=10)
+            if difference is not None:
+                ax = axes[r][len(columns)]
+                difference_image = ax.imshow(
+                    difference[level],
+                    origin="lower",
+                    extent=extent,
+                    aspect="equal",
+                    cmap=_masked_cmap(CMAP_DIFF),
+                    vmin=-diff_max,
+                    vmax=diff_max,
+                )
+                if r == 0:
+                    ax.set_title("Posterior - truth", fontsize=10)
+            axes[r][0].set_ylabel(f"z = {z_values[level]:.1f} m\ny [m]")
+            for ax in axes[r]:
+                ax.set_xlabel("x [m]")
+                ax.grid(False)
+
+        unit = f"{component} [m/s]"
+        if field_image is not None:
+            fig.colorbar(
+                field_image,
+                ax=[
+                    axes[r][c] for r in range(len(levels)) for c in range(len(columns))
+                ],
+                fraction=0.03,
+                pad=0.02,
+                label=f"time-mean {unit}",
+            )
+        if difference_image is not None:
+            fig.colorbar(
+                difference_image,
+                ax=[axes[r][len(columns)] for r in range(len(levels))],
+                fraction=0.05,
+                pad=0.02,
+                label=f"difference {unit}",
+            )
+
+        span = ""
+        if "t_start" in fields.attrs and "t_end" in fields.attrs:
+            span = (
+                f"  (t = {float(fields.attrs['t_start']):.0f}"
+                f"-{float(fields.attrs['t_end']):.0f} s)"
+            )
+        fig.suptitle(f"Time-mean {component} on horizontal slices{span}")
+
+        caption = "Time averages, never instantaneous."
+        if solid is not None:
+            caption += " Solid cells masked (grey) and excluded from the norm."
+        stride = int(fields.attrs.get("horizontal_stride", 1) or 1)
+        if stride > 1:
+            caption += f" Horizontal stride {stride}."
+        fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
+        return save_png(fig, output_path)
+
+
+# ---------------------------------------------------------------------------
+# S5 -- sensor time-series fans
+# ---------------------------------------------------------------------------
+
+
+def _sensor_time_axis(
+    times: np.ndarray | None, n_time: int, label: str
+) -> tuple[np.ndarray, str]:
+    """``(x, axis label)`` for a sensor panel: the given times, or a frame index."""
+    if times is not None:
+        axis = np.asarray(times, dtype=float).ravel()
+        if axis.size == n_time:
+            return axis, "Time [s]"
+        logger.info(
+            "plot_sensor_fans: %s has %d frames but %d times were given; "
+            "falling back to a frame index",
+            label,
+            n_time,
+            axis.size,
+        )
+    return np.arange(n_time, dtype=float), "Frame"
+
+
+def plot_sensor_fans(
+    truth: dict[str, np.ndarray],
+    ensemble: dict[str, np.ndarray],
+    output_path: str | pathlib.Path,
+    *,
+    times: np.ndarray | None = None,
+    obs_error_std: float | None = None,
+    obs_times: np.ndarray | None = None,
+    window_edges: np.ndarray | list[float] | None = None,
+    max_sensors: int = 4,
+    quantiles: tuple[float, ...] = _BAND_QUANTILES,
+) -> pathlib.Path | None:
+    """S5: quantile fans at the sensors, assimilated and held-out side by side.
+
+    ``truth[set]`` is ``(time, sensor)`` and ``ensemble[set]`` is
+    ``(ensemble, time, sensor)`` -- what
+    :func:`evaluation.sensors.sensor_magnitude` produces. **Columns are the
+    sensor sets**, labelled: the held-out column beside the assimilated one is
+    the strongest anti-overfitting evidence in the suite, which it only is if a
+    reader can see which is which. Rows are sensors, up to ``max_sensors``;
+    anything dropped is logged. Window boundaries are marked, and observation
+    markers carry ``+/- obs_error_std`` error bars.
+
+    **Pre-WP2.1 caveat, stated in the figure itself:** the realized noisy
+    observations the filter actually assimilated are not persisted yet, so the
+    markers are the *clean* truth plus or minus the nominal observation error --
+    the assimilated values scatter around them. WP2.1 swaps the source.
+
+    Returns the path written, or ``None`` when no sensor set carries a finite
+    ensemble series.
+    """
+    sets = []
+    for name, members in ensemble.items():
+        values = np.asarray(members, dtype=float)
+        if values.ndim == 3 and values.size and np.isfinite(values).any():
+            sets.append((name, values))
+        else:
+            logger.info("plot_sensor_fans: sensor set %r has no finite series", name)
+    if not sets:
+        logger.info("plot_sensor_fans: no sensor set with a finite ensemble series")
+        return None
+
+    n_rows = min(max_sensors, max(values.shape[2] for _, values in sets))
+    for name, values in sets:
+        if values.shape[2] > n_rows:
+            logger.info(
+                "plot_sensor_fans: %d of %d sensors not drawn for set %r "
+                "(max_sensors=%d)",
+                values.shape[2] - n_rows,
+                values.shape[2],
+                name,
+                max_sensors,
+            )
+
+    with _styled():
+        fig, axes = plt.subplots(
+            n_rows,
+            len(sets),
+            figsize=(5.4 * len(sets), 2.5 * n_rows),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        obs_drawn = False
+        for c, (name, members) in enumerate(sets):
+            t, t_label = _sensor_time_axis(times, members.shape[1], name)
+            truth_series = truth.get(name)
+            t_truth = None
+            if truth_series is not None:
+                truth_series = np.asarray(truth_series, dtype=float)
+                # The truth may be written at its own cadence over the same
+                # span; put it on that span rather than dropping it.
+                t_truth = (
+                    t
+                    if truth_series.shape[0] == t.size
+                    else np.linspace(t[0], t[-1], truth_series.shape[0])
+                )
+
+            for r in range(n_rows):
+                ax = axes[r][c]
+                if r >= members.shape[2]:
+                    ax.set_axis_off()
+                    continue
+
+                panel = members[:, :, r]
+                drawn: list[np.ndarray] = []
+                if np.isfinite(panel).any():
+                    bands = np.quantile(panel, quantiles, axis=0)
+                    nested_bands(
+                        ax,
+                        t,
+                        bands,
+                        quantiles,
+                        COLORS["posterior"],
+                        label="Posterior median",
+                    )
+                    drawn.append(bands)
+
+                truth_r = None
+                if truth_series is not None and r < truth_series.shape[1]:
+                    truth_r = truth_series[:, r]
+                    ax.plot(
+                        t_truth,
+                        truth_r,
+                        color=COLORS["truth"],
+                        lw=1.5,
+                        label="Truth",
+                        zorder=6,
+                    )
+                    drawn.append(truth_r)
+
+                if truth_r is not None and obs_error_std:
+                    obs_drawn = True
+                    if obs_times is not None:
+                        marks = np.asarray(obs_times, dtype=float).ravel()
+                        ax.errorbar(
+                            marks,
+                            np.interp(marks, t_truth, truth_r),
+                            yerr=float(obs_error_std),
+                            fmt="o",
+                            ms=3,
+                            lw=0.9,
+                            color=COLORS["orange"],
+                            label=r"Obs $\pm\sigma_o$",
+                            zorder=7,
+                        )
+                    else:
+                        ax.fill_between(
+                            t_truth,
+                            truth_r - obs_error_std,
+                            truth_r + obs_error_std,
+                            color=COLORS["orange"],
+                            alpha=0.18,
+                            lw=0,
+                            label=r"Truth $\pm\sigma_o$",
+                            zorder=2,
+                        )
+
+                limits = finite_limits(*drawn, pad=0.08)
+                if limits is not None:
+                    ax.set_ylim(*limits)
+                mark_windows(ax, window_edges, annotate=(r == 0))
+                ax.set_ylabel(f"sensor {r}\n|U| [m/s]")
+                ax.margins(x=0.01)
+                if r == 0:
+                    ax.set_title(f"{name} sensors", loc="left")
+                    # Lower left: the window indices sit along the top edge and
+                    # the fan through the middle.
+                    ax.legend(loc="lower left", fontsize=8, ncol=3)
+                if r == n_rows - 1:
+                    ax.set_xlabel(t_label)
+
+        fig.suptitle("Sensor time series: posterior quantile fan vs truth")
+        if obs_drawn:
+            # Only claimed when markers were actually drawn -- a caption about
+            # observations on a figure that has none is its own kind of wrong.
+            fig.supxlabel(
+                "Observation markers are the clean truth +/- the nominal sigma_o: "
+                "the realized noisy assimilated observations are not persisted "
+                "before WP2.1.",
+                fontsize=8,
+                color=COLORS["charcoal"],
+            )
+        return save_png(fig, output_path)
+
+
+# ---------------------------------------------------------------------------
+# D1 -- rank histogram
+# ---------------------------------------------------------------------------
+
+
+def _pool_rank_counts(statistics: dict[str, list[int]]) -> np.ndarray | None:
+    """Sum the per-statistic rank-count vectors of one (set, half) cell.
+
+    Per-window statistics are already ~independent samples, so pooling over
+    statistics, sensors and windows is what makes the counts numerous enough to
+    read. Vectors of a length other than the modal one describe a different
+    ensemble size and are dropped rather than padded.
+    """
+    vectors = [
+        np.asarray(counts, dtype=float).ravel()
+        for counts in (statistics or {}).values()
+        if counts is not None and np.size(counts) > 0
+    ]
+    if not vectors:
+        return None
+
+    lengths = [v.size for v in vectors]
+    modal = max(set(lengths), key=lengths.count)
+    dropped = [n for n in lengths if n != modal]
+    if dropped:
+        logger.info(
+            "plot_rank_histogram: dropped %d rank vector(s) of length %s "
+            "(expected %d)",
+            len(dropped),
+            sorted(set(dropped)),
+            modal,
+        )
+    pooled = np.sum([v for v in vectors if v.size == modal], axis=0)
+    if modal < 2 or pooled.sum() <= 0:
+        return None
+    return pooled
+
+
+def _coarsen_rank_counts(
+    counts: np.ndarray, n_bins: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Group ``M+1`` rank bins into ``min(n_bins, M+1)`` contiguous groups.
+
+    Pooled rank counts are small (~50--300), so ``M+1`` bins would draw sampling
+    noise rather than a shape. ``np.array_split`` leaves the groups **unequal**
+    in width whenever ``M+1`` is not divisible, so the uniform reference is
+    per group: ``expected_g = N * size_g/(M+1)`` with a binomial consistency
+    band ``2*sqrt(N*p_g*(1-p_g))``, ``p_g = size_g/(M+1)``. A flat line across
+    unequal groups would flag a calibrated ensemble as biased.
+
+    Returns ``(sizes, grouped_counts, expected, band)``, all ``(G,)``.
+    """
+    counts = np.asarray(counts, dtype=float).ravel()
+    n_ranks = counts.size
+    groups = np.array_split(np.arange(n_ranks), min(max(n_bins, 1), n_ranks))
+    sizes = np.array([g.size for g in groups], dtype=float)
+    grouped = np.array([counts[g].sum() for g in groups], dtype=float)
+    total = grouped.sum()
+    p = sizes / n_ranks
+    return sizes, grouped, total * p, 2.0 * np.sqrt(total * p * (1.0 - p))
+
+
+def plot_rank_histogram(
+    rank_counts: dict[str, dict[str, dict[str, list[int]]]],
+    output_path: str | pathlib.Path,
+    *,
+    n_bins: int = 10,
+) -> pathlib.Path | None:
+    """D1: rank of the truth within the ensemble, prior | posterior, per sensor set.
+
+    ``rank_counts`` is ``run_summary.yaml``'s ``sensor_statistics`` rank block:
+    ``[set][half][statistic]`` holding the ``M+1`` counts
+    :func:`evaluation.scores._score_window_statistic` writes. Rows are sensor
+    sets, columns the prior and posterior halves (the prior column is dropped
+    when no set has one). Counts are pooled over statistics, sensors and windows
+    and coarsened by :func:`_coarsen_rank_counts`; the panels plot **counts**,
+    not densities, with ``N`` labelled, over the per-group uniform reference and
+    its binomial consistency band.
+
+    A U shape means the ensemble is over-confident, a dome means it is
+    over-dispersed, a slope means bias.
+
+    Returns the path written, or ``None`` when no cell has usable counts (an old
+    run dir, a run whose sensor block never ran, an ensemble of one).
+    """
+    cells: dict[tuple[str, str], np.ndarray] = {}
+    for set_name, by_half in (rank_counts or {}).items():
+        for half, statistics in (by_half or {}).items():
+            pooled = _pool_rank_counts(statistics)
+            if pooled is not None:
+                cells[(set_name, half)] = pooled
+    if not cells:
+        logger.info("plot_rank_histogram: no usable rank counts")
+        return None
+
+    set_names = [s for s in rank_counts if any(key[0] == s for key in cells)]
+    known = [h for h in ("prior", "posterior") if any(key[1] == h for key in cells)]
+    halves = known + sorted({key[1] for key in cells} - set(known))
+
+    with _styled():
+        fig, axes = plt.subplots(
+            len(set_names),
+            len(halves),
+            figsize=(4.2 * len(halves), 3.0 * len(set_names)),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        for r, set_name in enumerate(set_names):
+            for c, half in enumerate(halves):
+                ax = axes[r][c]
+                pooled = cells.get((set_name, half))
+                if pooled is None:
+                    ax.set_axis_off()
+                    continue
+
+                sizes, grouped, expected, band = _coarsen_rank_counts(pooled, n_bins)
+                edges = np.concatenate([[0.0], np.cumsum(sizes)])
+                ax.bar(
+                    edges[:-1],
+                    grouped,
+                    width=sizes,
+                    align="edge",
+                    color=COLORS["posterior" if half == "posterior" else "prior"],
+                    edgecolor="white",
+                    linewidth=0.6,
+                    zorder=3,
+                )
+                # Step + band in rank units, so the unequal group widths show.
+                stepped = np.concatenate([expected, expected[-1:]])
+                low = np.clip(
+                    np.concatenate([expected - band, (expected - band)[-1:]]), 0.0, None
+                )
+                high = np.concatenate([expected + band, (expected + band)[-1:]])
+                ax.fill_between(
+                    edges, low, high, step="post", color=COLORS["window"], alpha=0.25
+                )
+                ax.step(
+                    edges,
+                    stepped,
+                    where="post",
+                    color=COLORS["charcoal"],
+                    lw=1.2,
+                    ls="--",
+                    zorder=4,
+                )
+                ax.set_xlim(0.0, edges[-1])
+                ax.annotate(
+                    f"N = {int(grouped.sum())}",
+                    xy=(0.02, 0.94),
+                    xycoords="axes fraction",
+                    va="top",
+                    fontsize=8,
+                    color=COLORS["charcoal"],
+                )
+                if r == 0:
+                    ax.set_title(half.capitalize(), loc="left")
+                if c == 0:
+                    ax.set_ylabel(f"{set_name}\ncount")
+                if r == len(set_names) - 1:
+                    ax.set_xlabel(f"rank of truth (0-{int(pooled.size) - 1})")
+
+        handles = [
+            Line2D(
+                [0], [0], color=COLORS["charcoal"], ls="--", lw=1.2, label="Uniform"
+            ),
+            Patch(facecolor=COLORS["window"], alpha=0.25, label=r"$\pm 2\sigma$ band"),
+        ]
+        axes[0][-1].legend(handles=handles, loc="upper right", fontsize=8)
+        fig.suptitle("Rank histogram of the truth within the ensemble")
+        return save_png(fig, output_path)

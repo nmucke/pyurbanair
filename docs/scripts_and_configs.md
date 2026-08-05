@@ -773,6 +773,39 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
 - `rollout_animation.mp4` — ensemble-mean `|U|` field vs truth.
 - `final_state_with_obs.png` — final `|U|` field with sensor locations.
 - `sensor_timeseries_<set>.png` — truth vs ensemble at each sensor set.
+- `parameter_marginals.png` — prior vs posterior marginal per parameter, truth
+  dashed and the z-score annotated, with the y-limits including the prior so the
+  contraction is visible. A time-varying parameter is drawn at its **final**
+  knot, matching the `final` convention `run_summary.yaml` uses throughout.
+- `station_profiles.png` — vertical `ū/U_ref` and TKE profiles at the sensor
+  columns (assimilated *and* held-out, labelled by `station_set`): truth line,
+  posterior median with nested quantile bands, prior bands, plus an inset plan
+  view. `U_ref` is the truth's `velocity_magnitude` parameter when the case
+  estimates one, else the profiles are drawn in m/s.
+- `mean_slices.png` — a few z-levels × (truth | prior mean | posterior mean |
+  posterior − truth), shared colour norm across the first three and a symmetric
+  diverging one for the difference, solid cells masked out. Always the
+  accumulated time-mean, never an instantaneous frame; the averaging window is
+  annotated from the file's own `t_start`/`t_end`.
+- `sensor_fans.png` — the sensor `|U|` series as nested posterior quantile fans,
+  one column per sensor set, with the truth, the window boundaries and the
+  observations ± `esmda.obs_error_std`. **Pre-WP2.1 caveat, stated in the
+  figure:** the realized noisy observations the run actually assimilated are not
+  persisted yet, so the markers are the *clean* truth ± σ.
+- `rank_histogram.png` — the rank of the truth's window statistic within the
+  members, read out of `run_summary.yaml`'s `sensor_statistics` block and pooled
+  over statistics, sensors and windows; rows = sensor sets, columns = prior |
+  posterior, with the uniform reference and its binomial band. Coarsened to ~10
+  rank bins (the summary stores all `M+1`, since binning down is exact and
+  binning up is not).
+
+The last five read `eval_fields.nc` and `run_summary.yaml`, which only exist for
+runs whose metric stage was current; each is **skipped with a printed line** when
+its input is absent, and a skip never costs the figures after it — an old run dir
+still gets every figure it can support. The prior halves of the profile, slice
+and rank figures additionally need `run.save_prior_state`. All the run-dir layout,
+config reading and YAML parsing lives in this script: `libs/evaluation` is handed
+opened datasets and plain dicts and stays a leaf.
 
 Honors `run.skip_viz` from the saved config (no-op if true).
 

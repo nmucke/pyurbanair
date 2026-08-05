@@ -252,10 +252,14 @@ python scripts/esmda/run_esmda.py model@truth_model=pylbm model@assim_model=pylb
 
 Each run writes per-window prior/posterior parameters and state, a
 `run_summary.yaml` with timing and accuracy metrics (parameter RMSE/CRPS, state
-RMSE, assimilated- and validation-sensor RMSE/CRPS), and diagnostic figures
-(parameter time-evolution, parameter error, sensor time series, final state with
-observations, and an animation). All forward models also generate a `.temp`
-folder where intermediate files are stored.
+RMSE, assimilated- and validation-sensor RMSE/CRPS, sensor window statistics and
+the mean-field hit rate) beside the reduced `eval_fields.nc` the field figures
+read, and diagnostic figures (parameter time-evolution and marginals, parameter
+error, sensor time series and quantile fans, station profiles, time-mean field
+slices, a rank histogram, final state with observations, and an animation). The
+figure stage skips whatever a given run dir cannot support rather than failing.
+All forward models also generate a `.temp` folder where intermediate files are
+stored.
 
 ### Sequential filtering (EnKF)
 
