@@ -690,31 +690,42 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   the truth's own noise". The block carries `hit_rate_posterior` (pooled `q`
   over the three components, `n_points`, and a per-component breakdown),
   `hit_rate_prior` when `run.save_prior_state` saved the prior states,
-  `hit_rate_tolerance_w`, the scored `z_levels`, the `horizontal_stride` and
-  the frames each member contributed. A `W` of `null` means no floor could be
-  measured (the run is too short to block-bootstrap — the CI smoke shape always
-  is), and the hit rate then runs on its relative criterion alone.
+  `hit_rate_tolerance_w`, the scored `z_levels`, the `horizontal_stride`,
+  `n_windows` and the frames each member contributed. A `W` of `null` means no
+  floor could be measured (the run is too short to block-bootstrap — the CI
+  smoke shape always is), and the hit rate then runs on its relative criterion
+  alone. The prior half is all-or-nothing: a prior covering fewer windows than
+  the posterior — a job killed mid-write — is dropped rather than compared
+  across a different horizon.
 
   The fields behind it are written beside the summary as **`eval_fields.nc`**
   (the WP1.5 figures read it rather than re-streaming): per-cell time-mean
   velocity, resolved TKE and `<u'w'>` for the truth and, reduced across the
   ensemble, for the posterior (and prior). Two regions — a few evenly spaced
-  z-slabs at full horizontal resolution, and full-depth columns at the
-  assimilation sensors' `(x, y)` — with ensemble mean and `ddof=1` spread on
-  both and nested quantiles at the station columns only. Reductions only: no
+  z-slabs at full (or strided) horizontal resolution, and full-depth columns at
+  the sensors' `(x, y)`, **both** the assimilated and the held-out ones, labelled
+  by a `station_set` coordinate — with ensemble mean and `ddof=1` spread on both
+  and nested quantiles at the station columns only. Reductions only: no
   per-member field is stored, and everything is float32. The stresses are
   **resolved-only** — the subgrid contribution is not in them and is not
-  negligible inside a canopy.
+  negligible inside a canopy. The file is self-contained by design: the
+  averaging window (`t_start`/`t_end`), the stride and the station labels are
+  attributes or coordinates, so a figure never reopens the run's other artifacts
+  to caption a plot.
 
   Three things worth knowing about how they are produced. The accumulation
   rides on the *same* pass over the window state files as the sensor
-  extraction, so it costs no extra read; the components are interpolated onto
+  extraction, so the ensemble — the M-times-larger half — costs no extra read
+  (the truth is streamed a second time, because it can only be sampled once the
+  ensemble pass has fixed the grid); the components are interpolated onto
   cell centres first (a stress is a one-point moment, and combining staggered
   components by array index biases the anisotropy ratio by the staggering
   pattern rather than by the flow); and the truth is interpolated onto the
-  assimilation grid, so cross-grid runs are scored cell against cell. The
-  horizontal stride is derived from an accumulator memory budget rather than
-  configured, and is logged whenever it is not 1. The whole block is dropped —
+  assimilation grid, so cross-grid runs are scored cell against cell. Memory is
+  bounded by two derived numbers rather than by config: a horizontal stride
+  keeping the per-member accumulators inside ~1 GB (logged whenever it is not
+  1), and a time sub-chunk keeping one accumulation step's transient inside
+  ~256 MB. The whole block is dropped —
   with a log line, the rest of the summary intact — when the state carries no
   ensemble axis or its layout cannot be co-located.
 

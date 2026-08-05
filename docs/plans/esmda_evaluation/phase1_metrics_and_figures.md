@@ -520,12 +520,14 @@ these are findings against them, and against what round 1 missed.
   interesting, already in the config, and already what every other block is
   scored at. If a case wants named stations, the honest place is the obs config
   that defines the sensors.
-- **No config knobs, and the stride is derived rather than set** (the WP1.3
-  precedent). The one number a caller could sensibly choose — how much of the
-  horizontal grid to score — is fully determined by what fits in memory:
-  `n_members × cells × 80 bytes` against a 1 GB budget, since a member's
-  accumulator is 10 arrays per cell independent of the frame count. It is
-  logged whenever it is not 1, so a strided run says so in its own log.
+- **No config knobs, and the two memory bounds are derived rather than set**
+  (the WP1.3 precedent). Neither number is one a caller could usefully choose:
+  both are "what fits". The horizontal stride bounds the *persistent*
+  accumulators — `n_members × cells × 80 bytes` against 1 GB, a member's
+  accumulator being 10 arrays per cell independent of the frame count — and is
+  logged whenever it is not 1. The time sub-chunk bounds the *transient* of one
+  accumulation step, which is a different and initially unbounded quantity (see
+  the review-round-1 entry below).
 - **`hit_rate` returns `{q, n_points}`, not a bare float**, and the block
   reports the pooled `q` over the three components *and* a per-component
   breakdown. One scalar is what the metrics doc asks for and what the pooled
@@ -553,9 +555,10 @@ these are findings against them, and against what round 1 missed.
   finite pairs because it is counting duplicates rather than estimating a
   moment.
 - **The prior's mean fields reuse the prior sensor pass** (`_prior_sensor_series`
-  gained the same callback), so the prior half costs no read of its own either,
-  and it inherits that function's all-or-nothing rule: a partially written set
-  of prior states is absent, not partially scored.
+  gained the same callback), so the prior half costs no read of its own either.
+  The all-or-nothing rule it inherits took two attempts to get right — see the
+  review-round-1 entry below, which is where it became true of the *failed-read*
+  path and not only of the missing-file one.
 - **Dropped from the rollback branch's version** (`turbulence_stats.py`, 1339
   lines): `fac2`, `fractional_bias`, `nmse` and `nmse_split` — the slimmed
   metric set scores the mean field with the hit rate alone; the scalar/batch
@@ -569,7 +572,8 @@ these are findings against them, and against what round 1 missed.
   4 %) and the colocation table.
 - **Known caveat, not fixed:** on a z-staggered backend (uDALES `w` on `zm`)
   the *top* z-level of the co-located grid is filled by linear extrapolation
-  from the last two faces, and `evenly_spaced_levels` always includes it, so
+  from the last two faces, and `evenly_spaced_levels` (now shared with
+  `_vel_field_4z` rather than copied into it) always includes it, so
   that slab's second moments are inflated — up to ~5x for face-to-face white
   noise, ~20 % for a well-resolved field. The rollback branch reported which
   axes carried the edge so a caller could exclude it from aggregates; that is
@@ -577,8 +581,10 @@ these are findings against them, and against what round 1 missed.
   honest fix is a level selection that excludes the domain top, which is a
   question for WP1.5's figures rather than for the accumulator.
 - **Deferred:** the block scores the mean *velocity* only. TKE and `<u'w'>` are
-  accumulated and written to `eval_fields.nc` (figure S1 plots them) but get no
-  scalar score — the metrics doc names the hit rate as the single standards-based
+  accumulated and written to `eval_fields.nc` — figure S1 plots the TKE;
+  `<u'w'>` has no reader in the phase-1 figure set and is stored because the
+  WP's charter names it and the anisotropy ratio it enables is what the metrics
+  doc calls more discriminating than TKE alone — but they get no scalar score — the metrics doc names the hit rate as the single standards-based
   number for the mean field and gives no threshold for a second-moment one, and
   inventing one here would put a number in `run_summary.yaml` that nothing can
   be read against.
@@ -589,3 +595,82 @@ these are findings against them, and against what round 1 missed.
   pass, so the filtering stage would need its own driver rather than an import.
   Out of scope for this WP, and the library half (accumulator, colocation, hit
   rate) is ready for it.
+
+**WP1.4, review round 1.** Two adversarial reviewers were launched; the
+integration/scope one completed and the correctness one died partway (an API
+session limit) with its mutation-testing sweep unfinished — so its findings are
+**not** in this record and round 2 has to cover the correctness lens.
+
+- **A partially-read prior was scored, against this plan's own claim.** The
+  guard compared the prior's *shape* against the posterior's — and a per-member
+  mean over three windows has exactly the same shape as one over ten. So a prior
+  state file that existed but could not be read (a job killed mid-`to_netcdf`)
+  left the windows already folded into the accumulators, and `hit_rate_prior`
+  was computed over half the horizon it was compared against, with nothing in
+  either artifact recording the discrepancy. Demonstrated by the reviewer on a
+  corrupted two-window run. Fixed at the root rather than with another guard:
+  the prior read moved out of `_sensor_statistics` up into `compute_metrics`, so
+  **one** place owns the all-or-nothing decision for both blocks — the split
+  ownership is how the bug happened. A frame-count check backs it up, since it
+  also catches a prior that is readable but short, which the shape check cannot.
+  Regression test: `test_field_metrics_drop_a_prior_that_covers_fewer_windows`.
+- **The blanket `except` around accumulation is narrowed to colocation only.**
+  It had wrapped the whole `_add`, which re-introduced exactly what WP1.3 round 2
+  removed: a typo in the reduction would have shipped a green run with the block
+  silently missing. Invariant 3 is about absent inputs — colocation refusing a
+  layout — not about absent correctness.
+- **The memory budget was calibrated against the wrong term**, which mattered
+  because that budget is the entire argument for shipping no knob. It bounded
+  the *persistent* accumulators (80 bytes per cell, frame-count independent),
+  while the actual peak was the *transient*: measured 512 MB for a 200-frame
+  64³ member against 1.3 MB of persistent state. Two fixes. (1) The station
+  columns no longer hand the whole 3-D field to `.interp` — each station is
+  bracketed between the two cells around it first, which is a 16x saving on the
+  dominant term (223 MB → 13.7 MB measured, same numbers to the bit, pinned by
+  `test_station_columns_match_a_whole_field_interpolation`). (2) Time is
+  sub-chunked to a 256 MB transient bound, which is what the chunk-wise
+  accumulator is *for*. Measured peak after both: 172 MB, inside the bound.
+- **`MeanFieldCollector` moved from `_esmda_common.py` into
+  `compute_esmda_metrics.py`** and is annotated. `_esmda_common.py` carries a
+  file-level mypy waiver as legacy untyped code; ~250 statement lines of new
+  code had landed inside it, escaping the strict config, for a module whose
+  reason to exist is *sharing* between the metric and figure stages — and the
+  figure stage reads `eval_fields.nc`, not the collector. Only the `on_member`
+  parameter stays behind. The `target` dict became a `NamedTuple` in the move:
+  it is shared by aliasing across three collectors, so immutability is worth the
+  twelve lines.
+- **Station columns now cover the validation sensors too**, labelled by a
+  `station_set` coordinate. The original argument (sensors are already placed
+  where the flow is interesting) survives, but figure S1's profiles are worth
+  most at the *held-out* columns — a profile drawn only where the assimilation
+  was fitted is the least informative one available — and the columns are a
+  handful of cells either way.
+- **A test now pins `_STAGGERED_TO_CENTRE` against
+  `ObservationOperator.dim_mapping`.** Invariant 5 forbids the import, so the
+  table is a restatement, and nothing failed if the two drifted — silently, in a
+  way that would have the sensor series and the mean fields read one component
+  off different axes *in the same pass over the same slice*. Writing the test
+  found that the table is a strict superset, not a copy: pypalm's postprocess
+  already moves `w` from `zw_3d` onto `z`, so that pair is a no-op on a shipped
+  state and correct on a raw one. The assertion pins the invariant that actually
+  holds — every staggered axis the operator reads has a colocation pair, and
+  every pair names an axis the operator agrees exists.
+- **Dead weight removed:** the `neural_surrogate` staggering entry (the surrogate
+  records its spin-up backend's name, `pylbm`, and `ObservationOperator` rejects
+  the other spelling outright, so it was unreachable), the `add_member` alias for
+  `add`, and `MomentAccumulator`'s unread `n_components`/`cell_shape`
+  properties. `evenly_spaced_levels` is now genuinely shared with
+  `_vel_field_4z`, which had kept its own copy — the drift the function was
+  introduced to prevent was still open.
+- **`eval_fields.nc` gained `long_name` on every variable and `t_start`/`t_end`
+  attributes**, so figure F1 can annotate its averaging window without reopening
+  `truth_access.yaml`, and a `station_set` coordinate so S1 can label its
+  columns. The file's stated purpose is cross-WP consumption; being
+  self-describing is cheap insurance for that.
+- **Accepted as-is, with the documentation corrected instead of the code:** the
+  truth is streamed a second time (it can only be sampled once the ensemble pass
+  has fixed the target, and it is one member's worth of frames against the
+  ensemble's M). The reviewer's alternative — reordering `truth_sensor_series`
+  after the ensemble pass and giving it the same callback — is a real saving and
+  a reasonable follow-up, but it moves the sensor extraction's control flow for
+  a term that is 1/M of the read this WP already avoids.

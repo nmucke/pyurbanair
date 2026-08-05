@@ -53,7 +53,9 @@ import logging
 import pathlib
 import re
 import sys
+import warnings
 from collections.abc import Callable
+from typing import NamedTuple
 
 import numpy as np
 import xarray
@@ -73,11 +75,15 @@ from evaluation.scores import (
     window_statistics_summary,
 )
 from evaluation.sensors import window_sampling_std, window_statistics
-from evaluation.turbulence import streaming_state_rmse
+from evaluation.turbulence import (
+    MomentAccumulator,
+    block_bootstrap_std,
+    colocate_components,
+    evenly_spaced_levels,
+    streaming_state_rmse,
+)
 
 from scripts.esmda._esmda_common import (
-    STATION_QUANTILES,
-    MeanFieldCollector,
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
@@ -243,20 +249,20 @@ def _prior_sensor_series(
 
 
 def _sensor_statistics(
-    run_dir: pathlib.Path,
     sensor_sets: dict,
     truth_series: dict,
     ensemble_series: dict,
+    prior_series: dict | None,
     num_windows: int,
     sim_time: float,
-    solver_name: str,
-    on_prior_member: _OnMember = None,
 ) -> dict:
     """The ``sensor_statistics`` block, per sensor set (metrics doc §4.2).
 
     Reuses the series the vector sensor metrics already extracted, so the
-    posterior half costs no extra pass over the state files; only the prior
-    (when saved) is read here.
+    posterior half costs no extra pass over the state files; the prior series is
+    read by the caller (``compute_metrics``), which is also what decides whether
+    the *field* block may use its prior -- one owner for one all-or-nothing
+    decision, rather than the same decision made in two places.
 
     One caveat on the last window: ``truth_sensor_series`` extracts exactly
     ``num_windows * n_per_window`` frames, so when the truth's frame count is
@@ -265,14 +271,11 @@ def _sensor_statistics(
     its peers. The members are unaffected (each window state file is its own
     file), so this shows up as a marginally noisier truth in the final window.
     """
-    prior_series = _prior_sensor_series(
-        run_dir, sensor_sets, num_windows, sim_time, solver_name, on_prior_member
-    )
-
     # No try/except around the scoring. Everything below is pure computation on
-    # series the stage already holds in memory -- the only I/O is the prior read
-    # above, which has its own guard -- so the exceptions it can raise are bugs,
-    # and swallowing them would ship a green run with an empty block.
+    # series the stage already holds in memory -- the only I/O, the prior read,
+    # happened in the caller and has its own guard -- so the exceptions it can
+    # raise are bugs, and swallowing them would ship a green run with an empty
+    # block.
     statistics = {}
     for name in sensor_sets:
         prior = prior_series[name] if prior_series is not None else None
@@ -306,7 +309,11 @@ _COMPONENTS = ("u", "v", "w")
 # Region -> the dims each accumulated quantity carries, once the member axis is
 # reduced away. ``mean`` is a vector (one entry per velocity component); ``tke``
 # and ``uw`` are scalars per cell.
-_FIELD_DIMS = {
+#
+# The variables this produces in ``eval_fields.nc``, so a reader can grep for
+# them: ``{truth,prior,posterior}_{slab,station}_{mean,tke,uw}``, each ensemble
+# source additionally carrying ``_spread`` and, at the stations, ``_quantile``.
+_FIELD_DIMS: dict[str, dict[str, tuple[str, ...]]] = {
     "slab": {
         "mean": ("component", "zlev", "y", "x"),
         "tke": ("zlev", "y", "x"),
@@ -318,6 +325,498 @@ _FIELD_DIMS = {
         "uw": ("z", "station"),
     },
 }
+
+_LONG_NAMES = {
+    "mean": "time-mean velocity component",
+    "tke": "resolved turbulent kinetic energy 0.5*<u_i'u_i'> (resolved only)",
+    "uw": "resolved Reynolds stress <u'w'> (resolved only)",
+}
+
+# Cell-centre dims, in (z, y, x) order, as they appear after colocation:
+# ``zt/yt/xt`` for uDALES, ``z/y/x`` for PALM, pylbm and the surrogate.
+_CENTRE_DIM_CANDIDATES = (("z", "zt"), ("y", "yt"), ("x", "xt"))
+
+# Evenly spaced z-levels the horizontal slabs are accumulated on.
+_MEAN_FIELD_Z_SLICES = 4
+
+# Ceiling on the accumulator state held for one ensemble during the pass. One
+# member costs 80 bytes per slab cell (an int64 count, three float64 means and
+# six float64 co-moments), independent of how many frames go past, so at M=128
+# and four 512x512 slabs the unstrided cost would be 10 GB. The horizontal
+# stride derived from this budget bounds it without a config knob; it is applied
+# to the slabs only -- never to the station columns, which are a handful of
+# cells, and never to time. Note the posterior and prior collectors are alive at
+# the same time, so the pass's persistent worst case is twice this.
+_MEAN_FIELD_BUDGET_BYTES = 1 << 30
+_MEAN_FIELD_BYTES_PER_CELL = 80
+
+# Ceiling on the *transient* of one accumulation step, which is a different
+# quantity from the accumulator state and has to be bounded separately: a chunk
+# of frames is materialised as float64 and ``MomentAccumulator.update``
+# allocates about ten arrays of that shape. Time is sub-chunked to this bound,
+# which the accumulator is designed for -- combining chunks is exactly what it
+# does -- so neither term is left unbounded. 128 bytes per (frame, slab cell) is
+# measured, not derived: the selection, its float64 upcast, the transpose copy
+# and update's own temporaries.
+_MEAN_FIELD_TRANSIENT_BYTES = 256 << 20
+_MEAN_FIELD_BYTES_PER_SAMPLE = 128
+
+# Points at which the truth's series is kept during its pass so the hit rate's
+# absolute tolerance ``W`` can be block-bootstrapped from it.
+_W_SAMPLE_POINTS = 64
+_W_SAMPLE_SEED = 0
+
+# Quantiles stored at the station columns (figure S1's nested bands). The slabs
+# get per-cell ensemble mean and spread only -- quantiles over a full 3-D field
+# would multiply ``eval_fields.nc`` by the number of levels stored here.
+STATION_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
+
+
+class _Target(NamedTuple):
+    """The scored region: which cells every source is accumulated on.
+
+    Derived once, from the first state the ensemble collector sees, and then
+    handed to the prior and truth collectors so all three describe the same
+    cells. Immutable on purpose -- it is shared by aliasing.
+    """
+
+    z: np.ndarray  # slab heights
+    y: np.ndarray  # slab y coordinates (strided)
+    x: np.ndarray  # slab x coordinates (strided)
+    z_index: np.ndarray  # native indices of the slab levels
+    stride: int
+    station_z: np.ndarray  # full column heights
+    station_x: np.ndarray
+    station_y: np.ndarray
+    station_set: tuple[str, ...]  # which sensor set each station came from
+    native: tuple[np.ndarray, np.ndarray, np.ndarray]  # the grid it was cut from
+
+
+def _centre_dims(field: xarray.DataArray) -> tuple[str, str, str]:
+    """``(z, y, x)`` dim names of a co-located field."""
+    dims = []
+    for candidates in _CENTRE_DIM_CANDIDATES:
+        found = [d for d in candidates if d in field.dims]
+        if not found:
+            raise ValueError(
+                f"co-located field has none of {candidates} among its dims "
+                f"{tuple(field.dims)}"
+            )
+        dims.append(found[0])
+    return (dims[0], dims[1], dims[2])
+
+
+def _drop_member_axis(field: xarray.DataArray) -> xarray.DataArray:
+    """Drop the length-1 ``ensemble`` axis the per-member slices carry."""
+    return field.isel(ensemble=0) if "ensemble" in field.dims else field
+
+
+def _bracket(axis: np.ndarray, value: float) -> slice:
+    """The two cells of ``axis`` that surround ``value``.
+
+    Clipped to the ends, so a point outside the domain brackets to an edge pair
+    and interpolates to ``nan`` rather than raising -- the same answer the
+    whole-field interpolation gave, at a fraction of the memory.
+    """
+    index = int(np.clip(np.searchsorted(axis, value) - 1, 0, max(axis.size - 2, 0)))
+    return slice(index, index + 2)
+
+
+def _mean_field_stride(n_members: int, n_z: int, n_y: int, n_x: int) -> int:
+    """Horizontal stride keeping one ensemble's accumulators inside the budget.
+
+    A knob would be the obvious alternative, and WP1.3 deliberately shipped no
+    metric knobs: nothing here needs to vary per run, and the only value a
+    caller could sensibly pick is the one that fits in memory -- which is what
+    this computes. Logged when it bites, so a strided run says so.
+    """
+    stride = 1
+    while (
+        n_members * n_z * -(-n_y // stride) * -(-n_x // stride)
+    ) * _MEAN_FIELD_BYTES_PER_CELL > _MEAN_FIELD_BUDGET_BYTES and stride < min(
+        n_y, n_x
+    ):
+        stride += 1
+    if stride > 1:
+        logger.info(
+            "Mean fields: %d members x %d x %d x %d cells would exceed the "
+            "%.1f GB accumulator budget -- scoring every %d-th cell horizontally",
+            n_members,
+            n_z,
+            n_y,
+            n_x,
+            _MEAN_FIELD_BUDGET_BYTES / (1 << 30),
+            stride,
+        )
+    return stride
+
+
+def station_columns(
+    sensor_sets: dict,
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+    """Station ``(x, y)`` and the sensor set each came from.
+
+    **Both** sets, when the obs config defines validation sensors. Figure S1's
+    profiles are the place a held-out column is worth most -- a profile drawn
+    only at the points the assimilation was fitted to is the least informative
+    one available -- and the columns are a handful of cells either way.
+    """
+    xs, ys, labels = [], [], []
+    for name, (sx, sy, _) in sensor_sets.items():
+        x = np.asarray(sx, dtype=float).ravel()
+        xs.append(x)
+        ys.append(np.asarray(sy, dtype=float).ravel())
+        labels.extend([name] * int(x.size))
+    return np.concatenate(xs), np.concatenate(ys), tuple(labels)
+
+
+class MeanFieldCollector:
+    """Per-member time-mean velocity, TKE and ``<u'w'>`` on a fixed region.
+
+    One :class:`~evaluation.turbulence.MomentAccumulator` per member and region,
+    fed from the member slices the sensor pass already materialises (see
+    ``ensemble_sensor_series``'s ``on_member``), so the mean fields cost no extra
+    read of the window files.
+
+    Two regions, because the two consumers want different things. The **slabs**
+    -- a few evenly spaced z-levels at full (or strided) horizontal resolution --
+    are what the hit rate scores and what figure F1 draws. The **station
+    columns** -- full-depth profiles at the sensor (x, y) -- are what figure S1
+    plots, and they are small enough to carry per-member quantiles.
+
+    Accumulation spans windows: a member's statistics cover every frame of every
+    window it was fed, which is what makes them comparable with a truth pass over
+    the same time range.
+
+    Args:
+        solver_name: The staggering the states follow, for colocation.
+        station_x, station_y: Station coordinates, in domain coordinates.
+        station_set: Which sensor set each station came from, carried through to
+            ``eval_fields.nc`` so a figure can label the columns.
+        n_members: Ensemble size, used only to derive the horizontal stride.
+        target: ``None`` to define the scored region from the first state seen
+            (what the ensemble collector does); another collector's
+            :attr:`target` to sample onto *that* region instead (what the prior
+            and truth collectors do -- see :meth:`_slab`).
+        keep_samples: Retain a fixed sample of slab cells' series so
+            :meth:`sampling_tolerance` can bootstrap the hit rate's ``W`` from
+            them. Only the truth collector needs it -- ``W`` is a property of the
+            truth -- and it is off by default so the ensemble pass does not carry
+            M copies of series nothing reads.
+
+    A layout colocation refuses sets :attr:`reason`, stops accumulation and makes
+    :meth:`result` return ``None`` rather than propagating: the sensor extraction
+    shares the pass and must not be taken down with it. That guard is deliberately
+    narrow (invariant 3 is about absent inputs, not absent correctness) -- a bug
+    in the accumulation itself raises, because a broken scorer shipping a green
+    run is worse than a crash.
+    """
+
+    def __init__(
+        self,
+        solver_name: str,
+        station_x: np.ndarray,
+        station_y: np.ndarray,
+        station_set: tuple[str, ...] = (),
+        n_members: int = 1,
+        target: _Target | None = None,
+        keep_samples: bool = False,
+    ) -> None:
+        self.solver_name = solver_name
+        self.station_x = np.asarray(station_x, dtype=float)
+        self.station_y = np.asarray(station_y, dtype=float)
+        self.station_set = station_set or tuple("" for _ in self.station_x)
+        self.n_members = int(n_members)
+        self.target = target
+        self.keep_samples = bool(keep_samples)
+        self.reason: str | None = None
+        self.failed = False
+        self._moments: dict[int, dict[str, MomentAccumulator]] = {}
+        self._frames: dict[int, int] = {}
+        self._windows: set[int] = set()
+        self._samples: list[np.ndarray] = []
+        self._sample_index: np.ndarray | None = None
+
+    # -- accumulation -------------------------------------------------------
+
+    def add(self, window_index: int, member_index: int, state: xarray.Dataset) -> None:
+        """Fold one chunk of frames into ``member_index``'s accumulators."""
+        if self.failed:
+            return
+        try:
+            components = self._colocated(state)
+        except (ValueError, KeyError) as error:
+            # Only colocation is guarded: it is the one step that legitimately
+            # refuses an input (a staggering it does not know, a state subset
+            # before colocation, a missing centre coordinate). Everything after
+            # it is pure computation on arrays already in memory, so an
+            # exception there is a bug and must not be swallowed into a green
+            # run with a silently missing block.
+            self.failed = True
+            self.reason = str(error)
+            logger.warning(
+                "Mean fields disabled after window %s member %s: %s",
+                window_index,
+                member_index,
+                error,
+            )
+            return
+        self._accumulate(window_index, member_index, components)
+
+    def _colocated(self, state: xarray.Dataset) -> list[xarray.DataArray]:
+        """The three velocity components on cell centres, member axis dropped."""
+        components = [
+            _drop_member_axis(field)
+            for field in colocate_components(state, self.solver_name)
+        ]
+        if "time" not in components[0].dims:
+            raise ValueError("state has no 'time' axis, so there is nothing to average")
+        return components
+
+    def _accumulate(
+        self, window_index: int, member_index: int, components: list[xarray.DataArray]
+    ) -> None:
+        """Fold the components in, sub-chunked in time to bound the transient."""
+        dims = _centre_dims(components[0])
+        if self.target is None:
+            self.target = self._derive_target(components[0], dims)
+
+        moments = self._moments.setdefault(
+            member_index, {"slab": MomentAccumulator(), "station": MomentAccumulator()}
+        )
+        n_time = int(components[0].sizes["time"])
+        for start in range(0, n_time, self._time_block()):
+            piece = [
+                field.isel(time=slice(start, start + self._time_block()))
+                for field in components
+            ]
+            slabs = [self._slab(field, dims) for field in piece]
+            moments["slab"].update(*slabs)
+            moments["station"].update(*(self._columns(field, dims) for field in piece))
+            self._keep_samples(slabs)
+
+        self._frames[member_index] = self._frames.get(member_index, 0) + n_time
+        self._windows.add(int(window_index))
+
+    def _time_block(self) -> int:
+        """Frames per accumulation step, from the transient budget."""
+        assert self.target is not None  # set by _accumulate before this is called
+        cells = int(self.target.z.size * self.target.y.size * self.target.x.size)
+        return max(
+            1, _MEAN_FIELD_TRANSIENT_BYTES // (_MEAN_FIELD_BYTES_PER_SAMPLE * cells)
+        )
+
+    def _derive_target(
+        self, field: xarray.DataArray, dims: tuple[str, str, str]
+    ) -> _Target:
+        """Fix the scored region from the first state: the collector owns the grid."""
+        zdim, ydim, xdim = dims
+        z_index = evenly_spaced_levels(int(field.sizes[zdim]), _MEAN_FIELD_Z_SLICES)
+        stride = _mean_field_stride(
+            self.n_members,
+            int(z_index.size),
+            int(field.sizes[ydim]),
+            int(field.sizes[xdim]),
+        )
+        native_z = np.asarray(field[zdim].values, dtype=float)
+        native_y = np.asarray(field[ydim].values, dtype=float)
+        native_x = np.asarray(field[xdim].values, dtype=float)
+        return _Target(
+            z=native_z[z_index],
+            y=native_y[::stride],
+            x=native_x[::stride],
+            z_index=z_index,
+            stride=int(stride),
+            station_z=native_z,
+            station_x=self.station_x,
+            station_y=self.station_y,
+            station_set=self.station_set,
+            native=(native_z, native_y, native_x),
+        )
+
+    def _slab(self, field: xarray.DataArray, dims: tuple[str, str, str]) -> np.ndarray:
+        """``(time, zlev, y, x)`` on the target slab cells.
+
+        Interpolation when the field does not live on the grid the target was cut
+        from: that is the truth collector, whose grid is a *different* grid in the
+        general case (a PALM truth against a surrogate ensemble is the shipped
+        default), and the metrics doc's rule is to interpolate the truth onto the
+        assimilation grid before scoring. Target cells outside the truth's domain
+        come back ``nan`` and are dropped by every consumer.
+        """
+        zdim, ydim, xdim = dims
+        target = self.target
+        assert target is not None
+        if self._is_native(field, dims):
+            selected = field.isel(
+                {
+                    zdim: target.z_index,
+                    ydim: slice(None, None, target.stride),
+                    xdim: slice(None, None, target.stride),
+                }
+            )
+        else:
+            selected = field.interp({zdim: target.z, ydim: target.y, xdim: target.x})
+        return np.asarray(
+            selected.transpose("time", zdim, ydim, xdim).values, dtype=float
+        )
+
+    def _columns(
+        self, field: xarray.DataArray, dims: tuple[str, str, str]
+    ) -> np.ndarray:
+        """``(time, z, station)`` profiles at the station points.
+
+        Always an interpolation: a station is an arbitrary (x, y) point, not a
+        cell centre. For a foreign grid the vertical is interpolated too, so the
+        truth's profiles land on the assimilation grid's levels.
+
+        **The horizontal neighbourhood is selected first**, one station at a
+        time, and this is what makes the columns cheap rather than the most
+        expensive thing in the pass. Handing the whole 3-D field to ``.interp``
+        costs a float64 upcast of every cell in it -- measured at 8.5 bytes per
+        source sample, 223 MB for a 100-frame 64^3 member, against 46 MB for the
+        slab selection that is the actual point of this pass. Bracketing each
+        station between the two cells that surround it reduces the source to
+        ``(time, z, 2, 2)`` per station, and a station is a handful of them.
+        """
+        zdim, ydim, xdim = dims
+        target = self.target
+        assert target is not None
+        native = self._is_native(field, dims)
+        y_axis = np.asarray(field[ydim].values, dtype=float)
+        x_axis = np.asarray(field[xdim].values, dtype=float)
+
+        columns = []
+        for station_x, station_y in zip(target.station_x, target.station_y):
+            near = field.isel(
+                {
+                    ydim: _bracket(y_axis, station_y),
+                    xdim: _bracket(x_axis, station_x),
+                }
+            )
+            points: dict[str, object] = {xdim: station_x, ydim: station_y}
+            if not native:
+                # A foreign grid's levels are not the target's, so the vertical
+                # is interpolated too -- orthogonally, since x and y are scalars
+                # here, which is why this needs no broadcast index arrays.
+                points[zdim] = target.station_z
+            columns.append(near.interp(points))
+        # A station outside the domain brackets to an edge cell pair and
+        # interpolates to nan, which is what every consumer already expects of
+        # a cell the source cannot reach.
+        stacked = xarray.concat(columns, dim="station")
+        return np.asarray(
+            stacked.transpose("time", zdim, "station").values, dtype=float
+        )
+
+    def _is_native(self, field: xarray.DataArray, dims: tuple[str, str, str]) -> bool:
+        """Whether ``field`` lives on the very grid the target was cut from.
+
+        Compared against the *full* stored axes rather than the strided target
+        ones, so a grid that merely happens to share every fourth coordinate
+        cannot be mistaken for the native one and sliced.
+        """
+        assert self.target is not None
+        return all(
+            int(field.sizes[dim]) == axis.size
+            and np.allclose(np.asarray(field[dim].values, dtype=float), axis)
+            for dim, axis in zip(dims, self.target.native)
+        )
+
+    def _keep_samples(self, slabs: list[np.ndarray]) -> None:
+        """Retain a fixed sample of slab cells' series for the ``W`` bootstrap.
+
+        Inside the streaming pass because that is the only place the series
+        exist; a fixed cell sample rather than the whole slab because ``W`` is a
+        median over cells and 64 of them settle it.
+        """
+        if not self.keep_samples:
+            return
+        flat = [component.reshape(component.shape[0], -1) for component in slabs]
+        if self._sample_index is None:
+            n_cells = flat[0].shape[1]
+            rng = np.random.default_rng(_W_SAMPLE_SEED)
+            size = min(_W_SAMPLE_POINTS, n_cells)
+            self._sample_index = np.sort(rng.choice(n_cells, size=size, replace=False))
+        self._samples.append(
+            np.stack([component[:, self._sample_index] for component in flat])
+        )
+
+    # -- reduction ----------------------------------------------------------
+
+    def result(self) -> dict | None:
+        """Per-member fields, or ``None`` if nothing usable was accumulated.
+
+        Returns:
+            ``{"n_members", "n_windows", "frames_per_member", "target",
+            "slab_mean" (M, 3, zlev, y, x), "slab_tke", "slab_uw",
+            "station_mean" (M, 3, z, station), "station_tke", "station_uw"}``.
+            ``slab_uw`` is ``<u'w'>``, the off-diagonal the metrics doc singles
+            out because it discriminates anisotropy that TKE alone cannot.
+        """
+        if self.failed or not self._moments:
+            return None
+        members = sorted(self._moments)
+        stacked: dict[str, np.ndarray] = {}
+        for region in ("slab", "station"):
+            accumulators = [self._moments[m][region] for m in members]
+            stacked[f"{region}_mean"] = np.stack([a.mean() for a in accumulators])
+            stacked[f"{region}_tke"] = np.stack([a.tke() for a in accumulators])
+            stacked[f"{region}_uw"] = np.stack(
+                [a.reynolds_stress()[0, 2] for a in accumulators]
+            )
+        return {
+            "n_members": len(members),
+            "n_windows": len(self._windows),
+            "frames_per_member": [int(self._frames[m]) for m in members],
+            "target": self.target,
+            **stacked,
+        }
+
+    def truth_pass(
+        self, truth_access: dict, n_chunks: int, chunk_frames: int
+    ) -> "MeanFieldCollector":
+        """Stream the truth through this collector, one window's frames at a time.
+
+        A second read of the truth, which the window-state pass avoids for the
+        ensemble: the truth has to be sampled onto the target, and the target is
+        only fixed once the ensemble pass has run. It is one member's worth of
+        frames against the ensemble's M, and it keeps the same memory discipline
+        -- one chunk at a time, sub-chunked again inside :meth:`_accumulate`.
+        """
+        for chunk in range(n_chunks):
+            ds = open_truth(
+                truth_access["true_state_path"],
+                truth_access["n_total"],
+                truth_access["x_offset"],
+                truth_access["start_idx"],
+                truth_access["t_offset"],
+            ).isel(time=slice(chunk * chunk_frames, (chunk + 1) * chunk_frames))
+            if ds.sizes.get("time", 0):
+                self.add(chunk, 0, ds)
+            ds.close()
+        return self
+
+    def sampling_tolerance(self) -> np.ndarray | None:
+        """Per-component ``W``: the truth's own sampling error on its time-mean.
+
+        The block-bootstrap standard error of the time-mean at each sampled slab
+        cell (which is ``sigma_u/sqrt(N_eff)`` with the correlation kept),
+        reduced by the **median** over cells: a single cell inside a
+        recirculation can carry a wild floor, and ``W`` is meant to describe a
+        typical one. ``nan`` per component where no floor could be measured --
+        short runs cannot be blocked, which includes the CI smoke shape -- and
+        :func:`~evaluation.scores.hit_rate` reads that as "relative test only".
+        """
+        if not self._samples:
+            return None
+        series = np.concatenate(self._samples, axis=1)  # (component, time, point)
+        floors = block_bootstrap_std(np.moveaxis(series, 1, -1))  # (component, point)
+        with warnings.catch_warnings():
+            # Every sampled cell unmeasurable (a run too short to block) is the
+            # common case in the smoke shape, not a fault.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return np.asarray(np.nanmedian(floors, axis=1))
 
 
 def _ensemble_size(state_paths: list[pathlib.Path]) -> int:
@@ -379,40 +878,66 @@ def _source_variables(prefix: str, result: dict, ensemble: bool) -> dict:
     return variables
 
 
-def _eval_fields_dataset(target: dict, sources: dict) -> xarray.Dataset:
+def _long_name(variable: str) -> str:
+    """A readable label for a ``{source}_{region}_{quantity}[_{reduction}]`` name."""
+    parts = variable.split("_")
+    label = f"{parts[0]} {_LONG_NAMES[parts[2]]}"
+    reduction = {
+        "spread": " -- ensemble spread (ddof=1)",
+        "quantile": " -- ensemble quantiles",
+    }
+    return label + (reduction.get(parts[3], "") if len(parts) > 3 else "")
+
+
+def _eval_fields_dataset(
+    target: _Target, sources: dict, time_span: tuple[float, float] | None = None
+) -> xarray.Dataset:
     """``eval_fields.nc``: the reduced fields the WP1.5 figures read.
 
     Reductions only -- never the per-member fields, which are what the window
     state files already hold and what would make this file grow with the
     ensemble. float32 throughout: these are plotted and differenced, not
     accumulated, and the accumulation that needed float64 already happened.
+
+    Self-contained on purpose: the averaging window figure F1 has to annotate,
+    the stride, and which sensor set each station column came from are all
+    attributes or coordinates here, so a figure never has to re-open the run's
+    other artifacts to caption a plot.
     """
     variables = {}
     for prefix, (result, ensemble) in sources.items():
         for name, (dims, values) in _source_variables(prefix, result, ensemble).items():
-            variables[name] = (dims, np.asarray(values, dtype=np.float32))
+            variables[name] = (
+                dims,
+                np.asarray(values, dtype=np.float32),
+                {"long_name": _long_name(name)},
+            )
+    attrs: dict[str, object] = {
+        "description": (
+            "Time-mean velocity, resolved TKE and <u'w'> on evenly spaced "
+            "z-slabs and at the sensor station columns, reduced across the "
+            "ensemble. Stresses are resolved-only: the subgrid contribution "
+            "is not included and is not negligible inside a canopy."
+        ),
+        "horizontal_stride": target.stride,
+    }
+    if time_span is not None:
+        attrs["t_start"], attrs["t_end"] = time_span
     return xarray.Dataset(
         variables,
         coords={
             "component": list(_COMPONENTS),
-            "zlev": target["z"],
-            "y": target["y"],
-            "x": target["x"],
-            "z": target["station_z"],
-            "station": np.arange(target["station_x"].size),
-            "station_x": ("station", target["station_x"]),
-            "station_y": ("station", target["station_y"]),
+            "zlev": target.z,
+            "y": target.y,
+            "x": target.x,
+            "z": target.station_z,
+            "station": np.arange(target.station_x.size),
+            "station_x": ("station", target.station_x),
+            "station_y": ("station", target.station_y),
+            "station_set": ("station", list(target.station_set)),
             "quantile": list(STATION_QUANTILES),
         },
-        attrs={
-            "description": (
-                "Time-mean velocity, resolved TKE and <u'w'> on evenly spaced "
-                "z-slabs and at the sensor station columns, reduced across the "
-                "ensemble. Stresses are resolved-only: the subgrid contribution "
-                "is not included and is not negligible inside a canopy."
-            ),
-            "horizontal_stride": target["stride"],
-        },
+        attrs=attrs,
     )
 
 
@@ -430,11 +955,44 @@ def _hit_rates(predicted: np.ndarray, observed: np.ndarray, w: np.ndarray) -> di
     return entry
 
 
+def _comparable_prior(prior_fields: dict, posterior_fields: dict) -> bool:
+    """Whether the prior covers the same cells *and* the same horizon.
+
+    The shape test alone is not enough, and the gap is not hypothetical: a prior
+    read that fails partway (a job killed mid-``to_netcdf``) leaves the
+    accumulators holding the windows that were read, and a per-member mean over
+    three windows has exactly the same shape as one over ten. Scoring those
+    against each other is the "two different horizons in one skill score" that
+    WP1.3's all-or-nothing prior rule exists to prevent -- and neither the YAML
+    nor ``eval_fields.nc`` records the prior's frame count, so a reader could not
+    detect it afterwards.
+    """
+    if prior_fields["slab_mean"].shape != posterior_fields["slab_mean"].shape:
+        logger.warning(
+            "Prior mean fields cover %s cells and the posterior %s -- the prior "
+            "half is dropped rather than scored on another grid",
+            prior_fields["slab_mean"].shape,
+            posterior_fields["slab_mean"].shape,
+        )
+        return False
+    if prior_fields["frames_per_member"] != posterior_fields["frames_per_member"]:
+        logger.warning(
+            "Prior mean fields cover %s frames per member and the posterior %s "
+            "-- the prior half is dropped rather than compared over a different "
+            "horizon",
+            prior_fields["frames_per_member"],
+            posterior_fields["frames_per_member"],
+        )
+        return False
+    return True
+
+
 def _mean_field_block(
     run_dir: pathlib.Path,
     posterior: MeanFieldCollector,
     truth: MeanFieldCollector,
     prior: MeanFieldCollector | None,
+    time_span: tuple[float, float] | None = None,
 ) -> dict | None:
     """Write ``eval_fields.nc`` and return the ``field_metrics`` summary block.
 
@@ -454,21 +1012,16 @@ def _mean_field_block(
     target = posterior_fields["target"]
     sources = {"truth": (truth_fields, False), "posterior": (posterior_fields, True)}
     prior_fields = prior.result() if prior is not None else None
+    if prior_fields is not None and not _comparable_prior(
+        prior_fields, posterior_fields
+    ):
+        prior_fields = None
     if prior_fields is not None:
-        if prior_fields["slab_mean"].shape == posterior_fields["slab_mean"].shape:
-            sources["prior"] = (prior_fields, True)
-        else:
-            # A prior written on a different grid than the posterior: comparing
-            # the two hit rates would compare two different sets of cells.
-            logger.warning(
-                "Prior mean fields cover %s cells and the posterior %s -- the "
-                "prior half is dropped rather than scored on another grid",
-                prior_fields["slab_mean"].shape,
-                posterior_fields["slab_mean"].shape,
-            )
-            prior_fields = None
+        sources["prior"] = (prior_fields, True)
 
-    _eval_fields_dataset(target, sources).to_netcdf(run_dir / "eval_fields.nc")
+    _eval_fields_dataset(target, sources, time_span).to_netcdf(
+        run_dir / "eval_fields.nc"
+    )
 
     tolerance = truth.sampling_tolerance()
     if tolerance is None:
@@ -484,8 +1037,8 @@ def _mean_field_block(
     block: dict[str, object] = {
         "n_windows": posterior_fields["n_windows"],
         "frames_per_member": posterior_fields["frames_per_member"],
-        "z_levels": [float(v) for v in target["z"]],
-        "horizontal_stride": target["stride"],
+        "z_levels": [float(v) for v in target.z],
+        "horizontal_stride": target.stride,
         "hit_rate_tolerance_w": {
             name: (float(v) if np.isfinite(v) else None)
             for name, v in zip(_COMPONENTS, tolerance)
@@ -569,19 +1122,21 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     # of GB at Barcelona scale, and the accumulators are fed from the member
     # slices the sensor extraction already materialises, so they cost no extra
     # read (metrics doc §4.1, master-plan invariant 2).
-    station_x, station_y, _ = sensor_sets["assimilation"]
+    station_x, station_y, station_set = station_columns(sensor_sets)
+    n_members = _ensemble_size(state_paths)
     field_collector = MeanFieldCollector(
         ta["assim_solver_name"],
         station_x,
         station_y,
-        n_members=_ensemble_size(state_paths),
+        station_set,
+        n_members=n_members,
     )
     ensemble_series = ensemble_sensor_series(
         state_paths,
         sensor_sets,
         ta["assim_solver_name"],
         float(ta["sim_time"]),
-        on_member=field_collector.add_member,
+        on_member=field_collector.add,
     )
 
     # Invariant 3, once for both sensor blocks: every score below is a
@@ -614,22 +1169,35 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     summary["sensor_metrics"] = sensor_metrics
 
     # --- Sensors: window statistics as the verification object (§4.2) --------
+    # One read of the prior states, feeding both prior blocks -- and one place
+    # that decides whether they may be used at all. ``None`` means the set was
+    # absent or unreadable, and *neither* the sensor prior nor the field prior
+    # may be scored then: the field accumulators may already hold the windows
+    # that were read before the failure, and a per-member mean over three
+    # windows has the same shape as one over ten.
     prior_collector = MeanFieldCollector(
         ta["assim_solver_name"],
         station_x,
         station_y,
-        n_members=_ensemble_size(state_paths),
+        station_set,
+        n_members=n_members,
         target=field_collector.target,
     )
-    summary["sensor_statistics"] = _sensor_statistics(
+    prior_series = _prior_sensor_series(
         run_dir,
         scorable,
-        truth_series,
-        ensemble_series,
         num_windows,
         float(ta["sim_time"]),
         ta["assim_solver_name"],
-        on_prior_member=prior_collector.add_member,
+        prior_collector.add,
+    )
+    summary["sensor_statistics"] = _sensor_statistics(
+        scorable,
+        truth_series,
+        ensemble_series,
+        prior_series,
+        num_windows,
+        float(ta["sim_time"]),
     )
 
     # --- Mean fields: hit rate + eval_fields.nc (§4.1) ------------------------
@@ -637,6 +1205,7 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         ta["truth_solver_name"],
         station_x,
         station_y,
+        station_set,
         target=field_collector.target,
         keep_samples=True,
     )
@@ -647,8 +1216,13 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         # failed mid-pass would buy nothing either. The block is dropped below
         # in both cases.
         truth_collector.truth_pass(ta, num_windows, int(ta["n_per_window"]))
+    sim_time = float(ta["sim_time"])
     field_metrics = _mean_field_block(
-        run_dir, field_collector, truth_collector, prior_collector
+        run_dir,
+        field_collector,
+        truth_collector,
+        prior_collector if prior_series is not None else None,
+        time_span=(0.0, num_windows * sim_time),
     )
     if field_metrics is not None:
         summary["field_metrics"] = field_metrics

@@ -67,7 +67,7 @@ def _vel_field_4z(state, n_time, n_z_slices=4):
     """
     zdim = next((d for d in _Z_DIMS if d in state.dims), None)
     nz = state.sizes[zdim] if zdim is not None else 1
-    z_idx = np.unique(np.linspace(0, nz - 1, n_z_slices).round().astype(int))
+    z_idx = evenly_spaced_levels(nz, n_z_slices)
 
     s = state.isel(time=slice(0, n_time))
 
@@ -311,8 +311,8 @@ def block_bootstrap_std(
 #
 # An empty tuple means "already co-located": pylbm writes one uniform grid, and
 # ``conf/model/neural_surrogate.yaml`` sets ``solver_name: pylbm``, so the
-# surrogate alias is here only so a future config naming it gets the
-# pass-through rather than a raise. ``palm``'s ``w`` is listed although pypalm's
+# surrogate reaches this table under its spin-up backend's name and needs no
+# entry of its own. ``palm``'s ``w`` is listed although pypalm's
 # postprocess already interpolates it from ``zw_3d`` onto ``z``; a pair whose
 # staggered dim is absent is skipped, so the entry is a no-op on a
 # post-processed state and correct on a raw one.
@@ -320,7 +320,6 @@ _STAGGERED_TO_CENTRE = {
     "udales": {"u": (("xm", "xt"),), "v": (("ym", "yt"),), "w": (("zm", "zt"),)},
     "palm": {"u": (("xu", "x"),), "v": (("yv", "y"),), "w": (("zw", "z"),)},
     "pylbm": {"u": (), "v": (), "w": ()},
-    "neural_surrogate": {"u": (), "v": (), "w": ()},
 }
 
 _VELOCITY_COMPONENTS = ("u", "v", "w")
@@ -442,8 +441,11 @@ def colocate_components(ds, solver_name):
             and the coordinates of both the staggered and the centre axes. It
             must not have been subset along an axis that still needs colocating
             (see :func:`_centre_values`).
-        solver_name: ``udales``, ``palm``, ``pylbm`` or ``neural_surrogate`` --
-            the ``assim_solver_name`` recorded in a run's ``truth_access.yaml``.
+        solver_name: ``udales``, ``palm`` or ``pylbm`` -- the
+            ``assim_solver_name`` recorded in a run's ``truth_access.yaml``.
+            The surrogate is not listed because it records its spin-up
+            backend's name (``pylbm``), which ``ObservationOperator`` also
+            requires.
 
     Returns:
         Three DataArrays on the centre axes, carrying the centre coordinates, so
@@ -453,7 +455,11 @@ def colocate_components(ds, solver_name):
 
     Raises:
         ValueError: If the solver is unknown, a component is missing, or an axis
-            cannot be colocated (see :func:`_centre_values`).
+            cannot be colocated (see :func:`_centre_values`). The staggering
+            table restates ``ObservationOperator.dim_mapping``; a test pins the
+            two together, since silent drift would have the sensor series and
+            the mean fields read one component off different axes in the same
+            pass.
     """
     if solver_name not in _STAGGERED_TO_CENTRE:
         raise ValueError(
@@ -481,8 +487,8 @@ def colocate_components(ds, solver_name):
 def evenly_spaced_levels(n_levels, n_wanted):
     """Indices of ``n_wanted`` evenly spaced levels, endpoints included.
 
-    The same selection :func:`_vel_field_4z` uses, so the accumulated slabs
-    coincide with the z-levels the ``|U|`` RMSE is already reported on.
+    Shared with :func:`_vel_field_4z` -- one implementation, so the accumulated
+    slabs and the z-levels the ``|U|`` RMSE is streamed over cannot drift apart.
     """
     if n_levels < 1:
         raise ValueError(f"n_levels must be positive, got {n_levels}")
@@ -555,16 +561,6 @@ class MomentAccumulator:
         self._pairs = ()
         self._n_components = 0
         self._cell_shape = ()
-
-    @property
-    def n_components(self):
-        """Components being accumulated; ``0`` before the first update."""
-        return self._n_components
-
-    @property
-    def cell_shape(self):
-        """Shape of one frame (the chunk shape minus its leading time axis)."""
-        return self._cell_shape
 
     def update(self, *components):
         """Fold one time chunk of co-located components into the accumulators.

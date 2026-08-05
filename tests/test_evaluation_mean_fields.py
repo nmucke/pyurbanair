@@ -25,6 +25,14 @@ from evaluation.turbulence import (
     evenly_spaced_levels,
 )
 
+
+def _fields(collector: object) -> dict:
+    """``collector.result()``, asserted non-``None`` -- it is Optional by design."""
+    result = collector.result()  # type: ignore[attr-defined]
+    assert result is not None
+    return dict(result)
+
+
 # ---------------------------------------------------------------------------
 # MomentAccumulator
 # ---------------------------------------------------------------------------
@@ -271,6 +279,55 @@ def test_colocation_rejects_an_unknown_solver() -> None:
         colocate_components(_udales_state(), "not_a_solver")
 
 
+def test_colocation_staggering_matches_the_observation_operator() -> None:
+    # The library may not import ``data_assimilation`` (invariant 5), so the
+    # staggering table restates ``ObservationOperator.dim_mapping``. Nothing in
+    # either module fails if they drift -- and the drift would be nasty and
+    # silent: within one pass over one member slice, the sensor series would
+    # read a component off one axis and the mean fields off another. This test
+    # is the only thing holding them together.
+    from data_assimilation.observation_operator import ObservationOperator
+    from evaluation.turbulence import _STAGGERED_TO_CENTRE
+
+    # The library is mypy-waived, so the table arrives untyped.
+    table: dict = dict(_STAGGERED_TO_CENTRE)
+
+    # Cell-centre axis names. An operator axis outside this set is a *staggered*
+    # one, and colocation must know how to move off it.
+    centre_names = {"x", "y", "z", "xt", "yt", "zt"}
+
+    for solver, mapping in table.items():
+        operator = ObservationOperator(
+            obs_x=[0.0],
+            obs_y=[0.0],
+            obs_z=[0.0],
+            obs_states=["u", "v", "w"],
+            solver_name=solver,
+        )
+        for component, pairs in mapping.items():
+            axes = set(operator.dim_mapping[component].values())
+            faces = {face for face, _ in pairs}
+
+            # Every staggered axis the operator reads has a colocation pair --
+            # otherwise a component would be multiplied into a co-moment while
+            # still sitting half a cell away from its partners.
+            assert axes - centre_names <= faces, (
+                f"{solver}/{component}: the observation operator reads "
+                f"{sorted(axes - centre_names)}, which colocation cannot move "
+                f"off (it knows {sorted(faces)})"
+            )
+            # And every pair names an axis the operator agrees exists: either
+            # the staggered one (colocation does the move) or the centre one
+            # (the backend's own postprocess already did it -- pypalm
+            # interpolates w from zw_3d onto z before writing).
+            for face, centre in pairs:
+                assert face in axes or centre in axes, (
+                    f"{solver}/{component}: colocation pairs "
+                    f"{face!r} -> {centre!r}, but the operator reads neither "
+                    f"({sorted(axes)})"
+                )
+
+
 # ---------------------------------------------------------------------------
 # Hit rate
 # ---------------------------------------------------------------------------
@@ -367,17 +424,18 @@ def test_collector_matches_a_direct_time_mean_over_both_windows(
     # The statistics span windows: a member's mean field covers every frame of
     # every window it was fed, which is what makes it comparable with a truth
     # pass over the same range.
-    from scripts.esmda._esmda_common import MeanFieldCollector, ensemble_sensor_series
+    from scripts.esmda._esmda_common import ensemble_sensor_series
+    from scripts.esmda.compute_esmda_metrics import MeanFieldCollector
 
     paths = [
         _member_state(tmp_path / f"window_{w}_posterior_state.nc", 3, 6, seed=w)
         for w in range(2)
     ]
-    collector = MeanFieldCollector("pylbm", *_SENSOR_SETS["assimilation"][:2], 3)
-    ensemble_sensor_series(
-        paths, _SENSOR_SETS, "pylbm", 6.0, on_member=collector.add_member
+    collector = MeanFieldCollector(
+        "pylbm", *_SENSOR_SETS["assimilation"][:2], n_members=3
     )
-    fields = collector.result()
+    ensemble_sensor_series(paths, _SENSOR_SETS, "pylbm", 6.0, on_member=collector.add)
+    fields = _fields(collector)
 
     both = xarray.concat(
         [xarray.open_dataset(p) for p in paths], dim="time", join="override"
@@ -396,21 +454,80 @@ def test_collector_rides_along_without_changing_the_sensor_series(
 ) -> None:
     # The callback exists so the mean fields cost no second read of the window
     # files; it must not perturb what that pass returns.
-    from scripts.esmda._esmda_common import MeanFieldCollector, ensemble_sensor_series
+    from scripts.esmda._esmda_common import ensemble_sensor_series
+    from scripts.esmda.compute_esmda_metrics import MeanFieldCollector
 
     paths = [
         _member_state(tmp_path / f"window_{w}_posterior_state.nc", 2, 4, seed=10 + w)
         for w in range(2)
     ]
     plain = ensemble_sensor_series(paths, _SENSOR_SETS, "pylbm", 4.0)["assimilation"]
-    collector = MeanFieldCollector("pylbm", *_SENSOR_SETS["assimilation"][:2], 2)
+    collector = MeanFieldCollector(
+        "pylbm", *_SENSOR_SETS["assimilation"][:2], n_members=2
+    )
     with_fields = ensemble_sensor_series(
-        paths, _SENSOR_SETS, "pylbm", 4.0, on_member=collector.add_member
+        paths, _SENSOR_SETS, "pylbm", 4.0, on_member=collector.add
     )["assimilation"]
 
     assert np.array_equal(plain.values, with_fields.values)
     assert plain.dims == with_fields.dims
-    assert collector.result()["n_members"] == 2
+    assert _fields(collector)["n_members"] == 2
+
+
+def test_station_columns_match_a_whole_field_interpolation(
+    tmp_path: pathlib.Path,
+) -> None:
+    # The columns bracket each station between the two cells around it instead
+    # of handing the whole 3-D field to ``.interp`` -- a 16x memory saving, and
+    # exactly the kind of optimisation that can silently move numbers. It must
+    # return what the whole-field interpolation returned, to the bit.
+    from scripts.esmda.compute_esmda_metrics import MeanFieldCollector, _centre_dims
+
+    rng = np.random.default_rng(7)
+    axis = np.linspace(0.0, 20.0, 6)
+    field = xarray.DataArray(
+        rng.normal(size=(3, 6, 6, 6)),
+        dims=("time", "z", "y", "x"),
+        coords={"time": np.arange(3.0), "z": axis, "y": axis, "x": axis},
+    )
+    state = xarray.Dataset({name: field for name in ("u", "v", "w")})
+
+    stations_x = np.array([3.0, 11.5, 20.0])  # interior, off-centre, on the edge
+    stations_y = np.array([4.0, 12.0, 0.0])
+    collector = MeanFieldCollector("pylbm", stations_x, stations_y)
+    components = collector._colocated(state)
+    dims = _centre_dims(components[0])
+    collector.target = collector._derive_target(components[0], dims)
+
+    columns = collector._columns(components[0], dims)  # (time, z, station)
+    whole = field.interp(
+        x=xarray.DataArray(stations_x, dims="station"),
+        y=xarray.DataArray(stations_y, dims="station"),
+    ).transpose("time", "z", "station")
+
+    assert np.allclose(columns, whole.values, equal_nan=True)
+
+
+def test_station_columns_are_null_outside_the_domain() -> None:
+    # A station the source cannot reach brackets to an edge cell pair and comes
+    # back nan, which is what the whole-field interpolation did too -- an
+    # extrapolated column would read as data.
+    from scripts.esmda.compute_esmda_metrics import MeanFieldCollector, _centre_dims
+
+    axis = np.linspace(0.0, 20.0, 5)
+    field = xarray.DataArray(
+        np.ones((2, 5, 5, 5)),
+        dims=("time", "z", "y", "x"),
+        coords={"time": [0.0, 1.0], "z": axis, "y": axis, "x": axis},
+    )
+    state = xarray.Dataset({name: field for name in ("u", "v", "w")})
+
+    collector = MeanFieldCollector("pylbm", np.array([100.0]), np.array([4.0]))
+    components = collector._colocated(state)
+    dims = _centre_dims(components[0])
+    collector.target = collector._derive_target(components[0], dims)
+
+    assert np.isnan(collector._columns(components[0], dims)).all()
 
 
 def test_collector_puts_a_foreign_truth_grid_onto_the_assimilation_one(
@@ -419,13 +536,14 @@ def test_collector_puts_a_foreign_truth_grid_onto_the_assimilation_one(
     # Cross-grid runs are the default (a PALM truth against a surrogate
     # ensemble), so the truth is interpolated onto the assimilation grid before
     # anything is scored on it.
-    from scripts.esmda._esmda_common import MeanFieldCollector, ensemble_sensor_series
+    from scripts.esmda._esmda_common import ensemble_sensor_series
+    from scripts.esmda.compute_esmda_metrics import MeanFieldCollector
 
     paths = [_member_state(tmp_path / "window_0_posterior_state.nc", 2, 4, seed=1)]
-    collector = MeanFieldCollector("pylbm", *_SENSOR_SETS["assimilation"][:2], 2)
-    ensemble_sensor_series(
-        paths, _SENSOR_SETS, "pylbm", 4.0, on_member=collector.add_member
+    collector = MeanFieldCollector(
+        "pylbm", *_SENSOR_SETS["assimilation"][:2], n_members=2
     )
+    ensemble_sensor_series(paths, _SENSOR_SETS, "pylbm", 4.0, on_member=collector.add)
 
     # A twice-as-fine truth carrying an exactly linear field: interpolation is
     # then exact, so any difference is a grid-handling bug rather than error.
@@ -442,12 +560,13 @@ def test_collector_puts_a_foreign_truth_grid_onto_the_assimilation_one(
         keep_samples=True,
     )
     truth_collector.add(0, 0, truth)
-    fields = truth_collector.result()
+    fields = _fields(truth_collector)
 
     # One "member" (the truth), on the ensemble's cells.
-    assert fields["slab_mean"].shape[1:] == collector.result()["slab_mean"].shape[1:]
+    assert fields["slab_mean"].shape[1:] == _fields(collector)["slab_mean"].shape[1:]
     # u = x on the assimilation grid's own x coordinates.
-    assert np.allclose(fields["slab_mean"][0, 0, 0, 0], collector.target["x"])
+    assert collector.target is not None
+    assert np.allclose(fields["slab_mean"][0, 0, 0, 0], collector.target.x)
 
 
 # ---------------------------------------------------------------------------
@@ -483,25 +602,29 @@ def _state_dataset(
 
 
 def _full_run_dir(
-    tmp_path: pathlib.Path, n_members: int = 4, save_prior_state: bool = False
+    tmp_path: pathlib.Path,
+    n_members: int = 4,
+    save_prior_state: bool = False,
+    validation_sensors: bool = False,
 ) -> pathlib.Path:
     """An ESMDA run dir complete enough for the non-``skip_viz`` metric path."""
     from scripts.esmda._esmda_common import write_yaml
 
     run_dir = tmp_path / "run"
     (run_dir / "windows").mkdir(parents=True)
-    write_yaml(
-        {
-            "run": {"skip_viz": False},
-            "obs": {
-                "mode": "points",
-                "x_points": [4.0, 12.0],
-                "y_points": [5.0, 13.0],
-                "z_points": [6.0, 7.0],
-            },
-        },
-        run_dir / "config.yaml",
-    )
+    obs: dict[str, object] = {
+        "mode": "points",
+        "x_points": [4.0, 12.0],
+        "y_points": [5.0, 13.0],
+        "z_points": [6.0, 7.0],
+    }
+    if validation_sensors:
+        obs.update(
+            validation_x_points=[8.0],
+            validation_y_points=[9.0],
+            validation_z_points=[10.0],
+        )
+    write_yaml({"run": {"skip_viz": False}, "obs": obs}, run_dir / "config.yaml")
     write_yaml(
         {"configuration": {"ensemble_size": n_members}}, run_dir / "run_info.yaml"
     )
@@ -693,6 +816,76 @@ def test_field_metrics_are_dropped_without_a_members_axis(
     assert summary["parameter_metrics"] and summary["state_metrics"]
 
 
+def test_field_metrics_drop_a_prior_that_covers_fewer_windows(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A job killed mid-``to_netcdf`` leaves a prior state file that exists but
+    # cannot be read -- *after* the earlier windows have already been folded
+    # into the accumulators. A per-member mean over one window has exactly the
+    # same shape as one over two, so the shape check cannot see it, and neither
+    # run_summary.yaml nor eval_fields.nc records the prior's frame count for a
+    # reader to catch afterwards. Scoring it would put two horizons in one
+    # comparison, which is what WP1.3's all-or-nothing prior rule forbids.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path, save_prior_state=True)
+    (run_dir / "windows" / "window_1_prior_state.nc").write_bytes(b"not a netcdf")
+
+    with caplog.at_level("WARNING"):
+        compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+
+    assert "Cannot read the prior sensor series" in caplog.text
+    assert "hit_rate_prior" not in summary["field_metrics"]
+    assert "prior" not in summary["sensor_statistics"]["assimilation"]
+    fields = xarray.open_dataset(run_dir / "eval_fields.nc")
+    assert not any(v.startswith("prior_") for v in fields.data_vars)
+    fields.close()
+    # Everything the stage had already computed survives.
+    assert summary["field_metrics"]["hit_rate_posterior"]["q"] is not None
+
+
+def test_field_metrics_degrade_on_the_two_member_smoke_shape(
+    tmp_path: pathlib.Path,
+) -> None:
+    # M=2 is the CI shape. The ddof=1 spread of two members is defined but every
+    # quantile band collapses onto them; the block must still be written, with
+    # numbers rather than crashes.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path, n_members=2)
+    compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+
+    assert summary["field_metrics"]["hit_rate_posterior"]["q"] is not None
+    fields = xarray.open_dataset(run_dir / "eval_fields.nc")
+    assert np.isfinite(fields["posterior_slab_mean"].values).all()
+    assert np.isfinite(fields["posterior_slab_mean_spread"].values).all()
+    fields.close()
+
+
+def test_eval_fields_label_the_station_columns_by_sensor_set(
+    tmp_path: pathlib.Path,
+) -> None:
+    # Figure S1's profiles are worth most at the *held-out* columns, so both
+    # sets get one and the file says which is which.
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path, validation_sensors=True)
+    compute_metrics(run_dir)
+
+    fields = xarray.open_dataset(run_dir / "eval_fields.nc")
+    labels = list(fields["station_set"].values)
+    assert labels == ["assimilation", "assimilation", "validation"]
+    assert fields["truth_station_mean"].sizes["station"] == 3
+    # Self-contained: F1 annotates the averaging window from the file itself.
+    assert fields.attrs["t_end"] == _RUN_WINDOWS * _RUN_SIM_TIME
+    assert fields["posterior_slab_tke"].attrs["long_name"].startswith("posterior")
+    fields.close()
+
+
 def test_collector_disables_itself_rather_than_breaking_the_shared_pass(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -701,7 +894,7 @@ def test_collector_disables_itself_rather_than_breaking_the_shared_pass(
     # colocation -- must cost this layer alone. The callback runs inside the
     # sensor loop; an exception escaping it would take the sensor blocks with
     # it (invariant 3).
-    from scripts.esmda._esmda_common import MeanFieldCollector
+    from scripts.esmda.compute_esmda_metrics import MeanFieldCollector
 
     collector = MeanFieldCollector("udales", np.array([1.0]), np.array([1.0]))
     with caplog.at_level("WARNING"):
