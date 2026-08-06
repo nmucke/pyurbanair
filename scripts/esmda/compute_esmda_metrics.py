@@ -34,6 +34,13 @@ run_esmda.py, augmented with:
                               counterpart of ``sensor_metrics``: a pointwise
                               time-series error mostly measures turbulent phase,
                               which no parameter estimate controls.
+  * ``spectral_metrics``   -- the log-spectral distance between the truth's and
+                              the posterior-median frequency spectrum at the
+                              probes, beside the truth's own self-distance floor
+                              (metrics doc §4.3). Only present when an explicit
+                              ``run_probe_series.py`` rerun wrote the high-rate
+                              probe records: the assimilation's own output cadence
+                              is far too coarse for a Welch spectrum.
   * ``field_metrics``      -- the VDI 3783/9 hit rate ``q`` of the time-mean
                               velocity field over evenly spaced z-slabs, prior
                               and posterior, with the absolute tolerance ``W``
@@ -81,6 +88,7 @@ from evaluation.turbulence import (
     colocate_components,
     evenly_spaced_levels,
     extrapolated_centre_dims,
+    spectral_metric_summary,
     streaming_state_rmse,
 )
 
@@ -89,6 +97,7 @@ from scripts.esmda._esmda_common import (
     ensemble_sensor_series,
     load_run_config,
     open_truth,
+    probe_spectra_bundle,
     read_yaml,
     truth_sensor_series,
     write_yaml,
@@ -1286,6 +1295,17 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     if health is not None:
         summary["ensemble_health"] = health
 
+    # --- Probe spectra: Welch + LSD (§4.3) -----------------------------------
+    # Above the ``skip_viz`` gate on purpose. Every block below reads the
+    # (multi-GB) truth, which is what that flag exists to avoid; this one reads
+    # only the small probe records an explicit rerun wrote, and a rerun is far too
+    # deliberate an act to have its one metric dropped because the assimilation
+    # itself was run on the fast path. Absent records -- every run dir that never
+    # had a rerun -- log and skip (invariant 3).
+    spectra = probe_spectra_bundle(run_dir)
+    if spectra is not None:
+        summary["spectral_metrics"] = spectral_metric_summary(spectra)
+
     # The parameter metrics are always available. The state and sensor metrics
     # both open the (potentially multi-GB) truth, so -- matching run_esmda.py's
     # old in-script behaviour -- they are skipped under run.skip_viz (the fast
@@ -1445,6 +1465,15 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
 
 
 def main() -> None:
+    # Every reason a block degraded or was skipped is a ``logger`` call in this
+    # module and in ``evaluation``; with no handler on the root logger, a stage run
+    # standalone printed only its final line and none of them. Configured here, at
+    # the entry point (never in ``compute_metrics``) so importing this module -- the
+    # tests do -- cannot reconfigure anyone's logging. Mirrors
+    # ``make_esmda_figures.main``.
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

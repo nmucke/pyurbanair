@@ -21,6 +21,8 @@ Writes, into the run directory:
   * ``mean_slices.png``            -- time-mean field slices, truth vs prior vs
                                       posterior vs difference (same file).
   * ``sensor_fans.png``            -- sensor quantile fans with the observations.
+  * ``probe_spectra.png``          -- premultiplied energy spectra at the probes
+                                      (needs the high-rate probe records).
   * ``rank_histogram.png``         -- rank histogram of the window statistics
                                       (needs ``run_summary.yaml``).
 
@@ -31,9 +33,12 @@ Of the last five (WP1.5), three read an artifact an old run dir may not have --
 metric stage predates those still gets every figure it can support. The other
 two read artifacts every run dir has: the parameter datasets
 (``parameter_marginals.png``) and the sensor series extracted above
-(``sensor_fans.png``). This script owns all the run-dir layout, config and YAML
-knowledge; the figure functions in ``evaluation.figures`` are handed opened
-datasets and plain dicts (master-plan invariant 5).
+(``sensor_fans.png``). ``probe_spectra.png`` (phase 3) is skipped the same way,
+and is skipped on almost every run dir: it needs the high-rate probe records only
+an explicit ``scripts/esmda/run_probe_series.py`` rerun writes. This script owns
+all the run-dir layout, config and YAML knowledge; the figure functions in
+``evaluation.figures`` are handed opened datasets and plain dicts (master-plan
+invariant 5).
 
 Honors ``run.skip_viz`` (set in the saved config): a no-op when true, mirroring
 the old in-script behaviour.
@@ -66,6 +71,7 @@ from evaluation.figures import (
     plot_rollout_time_evolution,
     plot_sensor_fans,
     plot_sensor_timeseries,
+    plot_spectra,
     plot_station_profiles,
 )
 from evaluation.scores import compute_sensor_metrics
@@ -80,6 +86,7 @@ from scripts.esmda._esmda_common import (
     ensemble_sensor_series,
     load_run_config,
     open_truth,
+    probe_spectra_bundle,
     read_yaml,
     truth_sensor_series,
 )
@@ -394,6 +401,37 @@ def make_figures(run_dir: pathlib.Path) -> None:
             window_edges=sensor_window_edges,
         ),
     )
+
+    # S4 needs the high-rate probe records an explicit ``run_probe_series.py``
+    # rerun writes; no assimilation produces them, so absence is the normal case
+    # and costs this figure alone. The bundle is the same reduction the metric
+    # stage scores, so the LSD annotated on a panel is the number in
+    # ``run_summary.yaml`` before its median over sensors.
+    spectra = probe_spectra_bundle(run_dir)
+    if spectra is None:
+        # Printed, not only logged: this stage's contract is that every skipped
+        # figure says so on stdout, and the *reason* is the log line the bundle
+        # already emitted.
+        print(
+            f"No usable probe records in {run_dir}; skipping probe_spectra.png "
+            "(run scripts/esmda/run_probe_series.py on this run dir first)"
+        )
+    else:
+        spectrum_figure = run_dir / "probe_spectra.png"
+        _note_skipped(
+            spectrum_figure,
+            plot_spectra(
+                spectra["f"],
+                spectra["truth"],
+                spectra["posterior"],
+                spectrum_figure,
+                prior=spectra["prior"],
+                truth_halves=spectra["truth_halves"],
+                variance=spectra["variance"],
+                f_cutoff=spectra["f_cutoff"],
+                sensor_sets=spectra["sensor_sets"],
+            ),
+        )
 
     rank_counts = _rank_counts(read_yaml(run_dir / "run_summary.yaml"))
     if rank_counts:

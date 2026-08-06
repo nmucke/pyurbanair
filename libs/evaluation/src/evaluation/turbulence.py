@@ -9,18 +9,25 @@ moment accumulator is the one class the library allows.
 
 Populated in WP0.2 (move), extended in WP1.3 (the block bootstrap that gives
 every window statistic its sampling floor), WP1.4 (colocation and the moment
-accumulator behind the mean-field metrics) and phase 3.
+accumulator behind the mean-field metrics) and phase 3 (Welch spectra at the
+probes and the log-spectral distance).
 """
 
 # mypy: ignore-errors
 # Moved in WP0.2 from ``scripts/esmda/_esmda_common.py``, which carries a
 # file-level mypy waiver; kept here rather than annotated during a pure
-# refactor.
+# refactor. The phase-3 spectrum section below is annotated.
 
 from __future__ import annotations
 
+import logging
+import warnings
+
 import numpy as np
 import xarray
+from scipy import signal
+
+logger = logging.getLogger(__name__)
 
 # z-like dims across the backends: pylbm / the surrogate are cell-centred
 # (``z``), uDALES and PALM stagger u/v on ``zt`` and w on ``zm``.
@@ -763,3 +770,887 @@ class MomentAccumulator:
         denominator = count - ddof
         usable = denominator > 0
         return np.where(usable, 1.0 / np.where(usable, denominator, 1), np.nan)
+
+
+# ---------------------------------------------------------------------------
+# Frequency spectra at the probes (phase 3, metrics doc section 4.3)
+#
+# The one structural check the suite keeps. An over-smoothed or
+# surrogate-collapsed flow can pass every mean-field metric -- the right
+# time-mean, and a variance a parameter can be tuned to reproduce -- while
+# carrying that variance at the wrong frequencies; nothing else here looks at
+# *where in frequency* the energy sits.
+#
+# Frequency spectra at probe points, never wavenumber spectra: converting one to
+# the other needs Taylor's frozen-turbulence hypothesis, and inside a canopy the
+# convection velocity is comparable to the fluctuations, so it does not hold.
+# ---------------------------------------------------------------------------
+
+# Welch segments per record: ``nperseg = n_truth // SPECTRUM_SEGMENTS``, which at
+# 50 % overlap averages ``2*S - 1 = 15`` segments. That is the trade this
+# diagnostic wants -- the estimator's own scatter has to sit well below the
+# truth-vs-model differences it is meant to resolve -- and the alternative (fewer,
+# longer segments) buys low-frequency resolution that the cutoff below discards
+# anyway.
+SPECTRUM_SEGMENTS = 8
+
+# Comparisons stop at this fraction of the Nyquist frequency. The top of a
+# sampled band is not data: a solver damps its own smallest resolved scales, and
+# whatever the flow carried above Nyquist has aliased into the last octave. Both
+# effects are discretisation-specific, so scoring there would compare numerics
+# rather than flows.
+SPECTRUM_CUTOFF_FRACTION = 0.25
+
+# Fewest frequency bins below the cutoff for a comparison to mean anything. Not a
+# resolution claim -- it is the floor under which the LSD is one or two bins of a
+# noisy periodogram. Note what it implies about record length: the band holds
+# about ``nperseg/8`` bins and ``nperseg`` is ``n/8``, so four bins needs ~260
+# samples, which is the metrics doc's "≳10^3 samples per sensor" stated as a
+# minimum rather than as a comfort level.
+_MIN_BAND_BINS = 4
+
+_PROBE_COMPONENTS = ("u", "v", "w")
+
+
+def minimum_spectral_samples() -> int:
+    """Samples per sensor a probe record needs before a spectrum can be scored.
+
+    Worth having as a function rather than a comment because the caller that can
+    act on it -- whatever writes the probe records -- pays for a full solver
+    re-run first, and the check costs nothing. The band holds
+    ``n * SPECTRUM_CUTOFF_FRACTION / (2 * SPECTRUM_SEGMENTS)`` bins: the bin width
+    is ``fs/nperseg`` with ``nperseg = n // SPECTRUM_SEGMENTS`` and the cutoff is
+    ``SPECTRUM_CUTOFF_FRACTION * fs/2``, so ``fs`` cancels and **the cadence drops
+    out entirely** -- only the sample count matters.
+
+    Two details make the naive inversion (``2*B*S/c``) wrong by an octave-edge
+    bin, so they are carried explicitly: the DC bin is dropped, and the band is
+    ``f < cutoff`` strictly. Scored bins are the integers ``k >= 1`` with
+    ``k/nperseg < c/2``, i.e. ``ceil(c*nperseg/2) - 1`` of them, so the floor is
+    the smallest ``nperseg`` with ``c*nperseg/2 > B``.
+    """
+    nperseg = int(np.floor(2 * _MIN_BAND_BINS / SPECTRUM_CUTOFF_FRACTION)) + 1
+    return nperseg * SPECTRUM_SEGMENTS
+
+
+# The non-dimension coordinates (xarray's term) a probe file carries on ``sensor``.
+# Two probe files are matched *on these*, not on sensor order: comparing the
+# truth at one point against a member at another renders exactly like a correct
+# figure, and the writer's ordering is not something this side can verify.
+_SENSOR_COORDS = ("sensor_x", "sensor_y", "sensor_z")
+
+# Decimals the sensor coordinates are rounded to before they are matched. The
+# same probe points travel through a YAML config and two netCDF files, so they
+# can differ in the last float bits; a micrometre is far below any sensor spacing
+# a case defines.
+_SENSOR_MATCH_DECIMALS = 6
+
+# How far two sources' bin SPACINGS may differ before the comparison is refused.
+#
+# The grids are ``k/segment_seconds``, so sharing the segment duration makes the
+# spacing identical -- which is the point of deriving ``nperseg`` from a shared
+# duration rather than from a shared sample count, and is why a genuinely coarser
+# record is truncated to its own Nyquist rather than rejected. What survives is a
+# residual: ``nperseg`` is rounded to an integer per record, so two records whose
+# achieved cadences differ by a relative eps end up with spacings differing by
+# ~eps. On the run this was verified against, truth and posterior came out at
+# 1.00079 s and 0.99917 s (eps = 1.6e-3) because the LBM timestep is derived from
+# each solve's own velocity scale.
+#
+# The criterion is on the SPACING RATIO, not on the accumulated frequency offset:
+# that offset grows as k*eps, so an offset budget would tighten as 1/n and start
+# refusing exactly the long records the diagnostic wants (measured: an
+# offset-based rule accepted n=480 but refused n=1024 and n=2048 at this run's
+# own cadence pair). Mislabelling costs nothing at this size -- bin k truly sits
+# at f_k*(1+eps) and is scored as f_k, so for a local slope s the amplitude error
+# is 10*s*log10(1+eps) ~ 0.012 dB at eps=1.6e-3, four orders below the 1-3 dB the
+# LSD reports, and it is the same at every k.
+_GRID_SPACING_RTOL = 1e-2
+
+# How much the truth-halves distance exceeds the like-for-like scatter of the
+# reported truth-vs-posterior-median distance. Halving the record at fixed
+# ``nperseg`` halves the segment count, so each half's log-spectrum carries ~2x a
+# full-record estimate's variance (``LSD_halves^2 ~ 4*var_full``), while the
+# posterior side is a median over M members whose own scatter is ~1/M of one
+# estimate's and negligible by M ~ 8 (``LSD_null^2 ~ var_full``). Hence 2, measured
+# at 1.99 (M=8) and 2.08 (M=32) over 40 trials of statistically identical
+# ``f^-5/3`` flows. Not a fitted constant and not exact at small M, where the
+# median's own scatter pulls the true ratio below 2 -- which makes the halved
+# reference the *stricter* of the two readings there, the safe direction for a
+# number whose whole job is to stop "under the floor" being read as a pass.
+_HALVES_INFLATION = 2.0
+
+
+def welch_spectrum(
+    series: np.ndarray, fs: float, nperseg: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """One-sided Welch power spectral density: Hann window, 50 % overlap, detrended.
+
+    Args:
+        series: ``(..., n_time)``, **time last**. Leading dims are independent
+            series (members, sensors, components).
+        fs: Sampling frequency in Hz -- the *achieved* cadence of the record, not
+            a nominal one (see :func:`probe_spectra`).
+        nperseg: Samples per segment. **The same ``(fs, nperseg)`` must be used
+            for the truth and for every member**: the window and the segment
+            length fix the estimator's own bias and variance, so two spectra
+            computed with different ones differ by the estimator as well as by
+            the flow, and the LSD cannot tell those apart.
+
+    Returns:
+        ``(f, psd)`` with ``f`` the positive frequencies and ``psd`` of shape
+        ``series.shape[:-1] + f.shape``, in units of ``series**2`` per Hz.
+
+        The **zero-frequency bin is dropped**. Linear detrending removes the mean
+        and the trend from every segment, so what is left at DC is leakage rather
+        than energy; it is also the one bin that has no place on a log frequency
+        axis and contributes ``0`` to a premultiplied ``f*E``.
+
+        A row containing any non-finite sample comes back all-``nan``, the same
+        policy as :func:`block_bootstrap_std`: consumers drop such rows rather
+        than being handed a spectrum computed over a gap. Those rows are held out
+        of the transform rather than left to propagate, because the linear detrend
+        solves a least-squares fit per segment and *raises* on a gap -- one
+        diverged member would otherwise take the whole ensemble's spectra down.
+
+    Raises:
+        ValueError: If ``series`` has no time axis, ``fs`` is not positive, or
+            ``nperseg`` is under four samples or over the record length. The
+            record length is checked here rather than left to scipy, which
+            silently shortens the segment and would hand back a spectrum on a
+            *different* frequency grid than its siblings -- the one failure this
+            function exists to prevent.
+    """
+    values = np.asarray(series, dtype=float)
+    if values.ndim < 1:
+        raise ValueError("series must have at least a time dimension")
+    if not np.isfinite(fs) or fs <= 0.0:
+        raise ValueError(f"fs must be a positive frequency, got {fs}")
+    n_time = values.shape[-1]
+    n_segment = int(nperseg)
+    if n_segment < 4:
+        raise ValueError(f"nperseg must be at least 4 samples, got {n_segment}")
+    if n_segment > n_time:
+        raise ValueError(
+            f"nperseg={n_segment} exceeds the {n_time} samples in the record; "
+            "shortening it here would put this spectrum on a different frequency "
+            "grid than the ones it is compared against"
+        )
+
+    # The grid a one-sided Welch estimate lands on, DC already dropped. Derived
+    # rather than read off the transform's output so it is available even when
+    # every row is held out below.
+    frequencies = np.fft.rfftfreq(n_segment, d=1.0 / float(fs))[1:]
+
+    rows = values.reshape(-1, n_time)
+    usable = np.isfinite(rows).all(axis=1)
+    psd = np.full((rows.shape[0], frequencies.size), np.nan)
+    if usable.any():
+        _, estimated = signal.welch(
+            rows[usable],
+            fs=float(fs),
+            window="hann",
+            nperseg=n_segment,
+            noverlap=n_segment // 2,
+            detrend="linear",
+            scaling="density",
+            axis=-1,
+        )
+        psd[usable] = np.asarray(estimated)[..., 1:]
+    return frequencies, psd.reshape(values.shape[:-1] + frequencies.shape)
+
+
+def log_spectral_distance(
+    truth_spectrum: np.ndarray, member_spectrum: np.ndarray
+) -> np.ndarray:
+    """``LSD = sqrt(mean_k [10*log10(E_t/E_m)]^2)`` over the last (frequency) axis.
+
+    The one scalar of the spectral check, in dB. It is a *shape and amplitude*
+    distance: 3 dB of it means the model's spectrum sits, in the
+    root-mean-square over the band, a factor of two off the truth's at a typical
+    frequency. Being a log measure it weights a factor-of-two deficit in the
+    smallest resolved eddies exactly as heavily as one in the largest, which is
+    the point -- an over-smoothed flow loses energy at the top of the band, where
+    a linear-scale distance would not notice.
+
+    Read it against a floor, never on its own: two finite records of the *same*
+    flow have a non-zero LSD purely from the estimator's scatter (see
+    :func:`probe_spectra`'s ``truth_halves``).
+
+    Args:
+        truth_spectrum: ``(..., n_freq)``.
+        member_spectrum: ``(..., n_freq)``, broadcast against the truth -- so
+            ``(M, n_sensor, n_freq)`` against ``(n_sensor, n_freq)`` gives one
+            distance per member and sensor.
+
+    Returns:
+        The broadcast leading shape (a 0-d array for two 1-D spectra). A bin
+        where either spectrum is not finite or not strictly positive is dropped
+        from the mean rather than turning the whole distance into ``inf``: a
+        zero-energy bin is a property of one estimate, not of the pair. Rows with
+        no usable bin left come back ``nan``.
+
+    Raises:
+        ValueError: If the two frequency axes have different lengths -- the
+            spectra are then not on one grid, and a distance between them would
+            be comparing different frequencies.
+    """
+    truth = np.asarray(truth_spectrum, dtype=float)
+    member = np.asarray(member_spectrum, dtype=float)
+    if truth.shape[-1] != member.shape[-1]:
+        raise ValueError(
+            f"spectra must share one frequency grid: got {truth.shape[-1]} bins "
+            f"against {member.shape[-1]}"
+        )
+
+    # ``&`` broadcasts, so ``usable`` already has the pair's full shape and its
+    # per-row count below is taken over the bins each row actually contributed.
+    usable = np.isfinite(truth) & np.isfinite(member) & (truth > 0.0) & (member > 0.0)
+    ratio = np.where(usable, truth, 1.0) / np.where(usable, member, 1.0)
+    squared = np.where(usable, (10.0 * np.log10(ratio)) ** 2, 0.0)
+    n_usable = usable.sum(axis=-1)
+    mean = np.where(
+        n_usable > 0, squared.sum(axis=-1) / np.where(n_usable > 0, n_usable, 1), np.nan
+    )
+    return np.asarray(np.sqrt(mean))
+
+
+def _sample_frequency(probes: xarray.Dataset) -> float | None:
+    """The achieved sampling frequency of a probe record, in Hz.
+
+    Read from the record's own ``time`` axis, with the ``output_frequency``
+    attribute (a cadence in *seconds*) as the fallback: what the run asked for and
+    what the solver wrote are not always the same number, and Welch is a function
+    of the latter. A cadence that varies across the record is logged -- Welch
+    assumes uniform sampling, and a median step silently papers over a record with
+    gaps in it.
+
+    ``None`` when neither source gives a usable cadence, which the caller reads as
+    "there is no spectrum to compute here".
+    """
+    recorded = probes.attrs.get("output_frequency")
+    period = float(recorded) if recorded not in (None, "") else None
+
+    times = (
+        np.asarray(probes["time"].values, dtype=float)
+        if "time" in probes.coords
+        else None
+    )
+    if times is not None and times.size >= 2:
+        steps = np.diff(times)
+        steps = steps[np.isfinite(steps) & (steps > 0.0)]
+        if steps.size:
+            spacing = float(np.median(steps))
+            spread = float(steps.max() - steps.min())
+            if spread > 0.05 * spacing:
+                logger.warning(
+                    "Probe cadence is not uniform: steps span %.4g s about a "
+                    "median of %.4g s. Welch assumes even sampling, so the "
+                    "spectrum's frequency axis is only as good as that median",
+                    spread,
+                    spacing,
+                )
+            if period is not None and abs(period - spacing) > 0.01 * spacing:
+                logger.info(
+                    "Probe record says output_frequency=%.4g s but its time axis "
+                    "steps by %.4g s; using the time axis",
+                    period,
+                    spacing,
+                )
+            return 1.0 / spacing
+
+    if period is not None and period > 0.0:
+        return 1.0 / period
+    return None
+
+
+def _sensor_keys(probes: xarray.Dataset) -> list[tuple[float, ...]] | None:
+    """Rounded ``(x, y, z)`` per sensor, or ``None`` when the file carries no points."""
+    if not all(name in probes.coords for name in _SENSOR_COORDS):
+        return None
+    columns = [
+        np.asarray(probes[name].values, dtype=float).ravel() for name in _SENSOR_COORDS
+    ]
+    if any(column.size != int(probes.sizes["sensor"]) for column in columns):
+        return None
+    rounded = np.round(np.stack(columns, axis=1), _SENSOR_MATCH_DECIMALS)
+    return [tuple(float(v) for v in row) for row in rounded]
+
+
+def _aligned_sensors(
+    sources: dict[str, xarray.Dataset]
+) -> dict[str, np.ndarray] | None:
+    """Per source, the sensor indices of the points **every** source holds.
+
+    Matched on the ``sensor_x/y/z`` coordinates and ordered as the truth holds
+    them, so every array the bundle returns is indexed by the same physical point.
+    Falls back to positional indexing only when a source carries no sensor
+    coordinates *and* all the counts agree -- the assumption is then stated in the
+    log rather than made silently.
+
+    ``None`` when the sources share no sensor, which is the caller's cue that
+    there is nothing to compare.
+    """
+    keys = {name: _sensor_keys(ds) for name, ds in sources.items()}
+    if any(value is None for value in keys.values()):
+        sizes = {name: int(ds.sizes["sensor"]) for name, ds in sources.items()}
+        if len(set(sizes.values())) != 1 or not min(sizes.values()):
+            logger.info(
+                "probe_spectra: probe files carry no sensor coordinates and "
+                "different sensor counts (%s), so their sensors cannot be paired",
+                sizes,
+            )
+            return None
+        logger.info(
+            "probe_spectra: at least one probe file carries no sensor_x/y/z "
+            "coordinates; pairing the %d sensors by position instead",
+            next(iter(sizes.values())),
+        )
+        count = next(iter(sizes.values()))
+        return {name: np.arange(count) for name in sources}
+
+    shared = set.intersection(*(set(value) for value in keys.values()))
+    truth_keys = keys["truth"]
+    assert truth_keys is not None  # every entry is non-None in this branch
+    # ``dict.fromkeys`` deduplicates while keeping the truth's order: a probe point
+    # listed twice (a case config with a repeated sensor) would otherwise be drawn
+    # as two identical panels and counted twice in the median over sensors, and the
+    # index map below keeps only one position for it anyway.
+    order = [key for key in dict.fromkeys(truth_keys) if key in shared]
+    if not order:
+        logger.info(
+            "probe_spectra: the truth and member probe files share no sensor "
+            "location, so there is nothing to compare"
+        )
+        return None
+    dropped = len(set(truth_keys)) - len(order)
+    if dropped:
+        logger.info(
+            "probe_spectra: %d of the truth's %d probe sensors are absent from a "
+            "member probe file and are not scored",
+            dropped,
+            len(set(truth_keys)),
+        )
+    index = {}
+    for name, value in keys.items():
+        assert value is not None
+        position = {key: i for i, key in enumerate(value)}
+        index[name] = np.array([position[key] for key in order], dtype=int)
+    return index
+
+
+def _probe_series(probes: xarray.Dataset, sensors: np.ndarray) -> np.ndarray:
+    """``(component, ..., sensor, time)`` velocity series at the paired sensors."""
+    stacked = []
+    for name in _PROBE_COMPONENTS:
+        field = probes[name].transpose(..., "sensor", "time")
+        # One advanced index among slices keeps the axis in place, so the sensor
+        # axis stays second-to-last whether or not there is a member axis.
+        stacked.append(np.asarray(field.values, dtype=float)[..., sensors, :])
+    return np.stack(stacked)
+
+
+def _energy_spectra(
+    probes: xarray.Dataset, sensors: np.ndarray, fs: float, nperseg: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(f, E)`` with ``E`` the trace ``E_uu + E_vv + E_ww`` of the spectral tensor.
+
+    One spectrum per sensor rather than three. The component spectra are what
+    ``welch_spectrum`` produces, and the trace is the quantity the diagnostic is
+    about -- the turbulent energy's distribution over frequency, whose inertial
+    range is the ``-5/3`` this figure draws a guide for. Anisotropy is already
+    covered, and covered better, by the resolved ``<u'w'>`` in the mean-field
+    block; splitting the spectra per component instead would triple the panels
+    and the reported scalars to say something a third metric already says.
+
+    A member axis, when the record has one, stays leading: ``E`` is
+    ``(M, sensor, freq)`` for an ensemble record and ``(sensor, freq)`` for the
+    truth.
+    """
+    frequencies, psd = welch_spectrum(_probe_series(probes, sensors), fs, nperseg)
+    return frequencies, np.asarray(psd.sum(axis=0))
+
+
+def _usable_record(name: str, probes: xarray.Dataset) -> bool:
+    """Whether a probe record carries the components and axes a spectrum needs."""
+    missing = [v for v in _PROBE_COMPONENTS if v not in probes.data_vars]
+    if missing or "time" not in probes.dims or "sensor" not in probes.dims:
+        logger.info(
+            "probe_spectra: the %s probe record is missing %s",
+            name,
+            ", ".join(missing) or "its time/sensor dims",
+        )
+        return False
+    return True
+
+
+def _grids_are_the_same_bins(
+    name: str,
+    grid: np.ndarray,
+    reference: np.ndarray,
+    *,
+    consequence: str = "the spectral comparison is skipped",
+) -> bool:
+    """Whether ``grid`` resolves the same frequency bins as ``reference``.
+
+    Judged on bin SPACING (see :data:`_GRID_SPACING_RTOL`), which is
+    length-independent, rather than on how far the two grids have drifted apart by
+    the last bin, which is not. Records built on a shared segment duration always
+    pass; what this rejects is a record whose spacing genuinely disagrees, i.e.
+    one that was not built against the same duration at all. When a small residual
+    is tolerated the comparison proceeds on ``reference``'s bins, so it is logged.
+    """
+    if grid.size < 2 or reference.size < 2:
+        # One bin carries no spacing; compare the frequencies themselves, where
+        # the same relative tolerance is the honest test.
+        return bool(
+            grid.size
+            and reference.size
+            and abs(float(grid[0]) / float(reference[0]) - 1.0) <= _GRID_SPACING_RTOL
+        )
+    spacing = float(grid[1] - grid[0])
+    reference_spacing = float(reference[1] - reference[0])
+    mismatch = abs(spacing / reference_spacing - 1.0)
+    if mismatch > _GRID_SPACING_RTOL:
+        logger.info(
+            "probe_spectra: the %s record's bin spacing is %.6g Hz against the "
+            "truth's %.6g Hz (%.2f%% apart), so its bins are not the same "
+            "frequencies -- %s",
+            name,
+            spacing,
+            reference_spacing,
+            100.0 * mismatch,
+            consequence,
+        )
+        return False
+    if mismatch > 0.0:
+        logger.info(
+            "probe_spectra: the %s record's cadence differs from the truth's, so its "
+            "bin spacing sits %.3f%% off; scoring it on the truth's bins (worth "
+            "~%.3g dB of mislabelling, far below what the LSD resolves)",
+            name,
+            100.0 * mismatch,
+            4.343 * mismatch,
+        )
+    return True
+
+
+def _matched_spectra(
+    name: str,
+    probes: xarray.Dataset,
+    sensors: np.ndarray,
+    cadence: float,
+    segment_seconds: float,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """One record's spectra on the shared segment *duration*, member axis kept.
+
+    ``None`` with a log line when the record cannot carry that duration -- the one
+    place the shared-estimator rule is enforced per record, so the truth, the
+    posterior and the prior all reach it the same way.
+    """
+    n_segment = int(round(segment_seconds * cadence))
+    available = int(probes.sizes["time"])
+    if n_segment < 4 or n_segment > available:
+        logger.info(
+            "probe_spectra: a %.4g s Welch segment is %d samples at the %s record's "
+            "cadence, which its %d samples cannot carry",
+            segment_seconds,
+            n_segment,
+            name,
+            available,
+        )
+        return None
+    frequencies, spectra = _energy_spectra(probes, sensors, cadence, n_segment)
+    if name != "truth" and spectra.ndim == 2:
+        # No ensemble axis (a single-member probe run): keep the member axis so
+        # every consumer indexes the arrays the same way.
+        spectra = spectra[None]
+    return frequencies, spectra
+
+
+def _fitted_prior(
+    prior: xarray.Dataset,
+    core: dict[str, xarray.Dataset],
+    sensors: dict[str, np.ndarray],
+    frequencies: np.ndarray,
+    segment_seconds: float,
+) -> tuple[np.ndarray | None, float | None]:
+    """The prior's spectra on the *already fixed* sensors and frequency grid.
+
+    Returns ``(spectra, cadence)``, both ``None`` when the prior cannot be fitted
+    onto that grid. It is fitted rather than negotiated with because the prior
+    record is optional: letting it take part in choosing the sensors, the shared
+    band or the cutoff would make ``lsd_posterior_median`` -- a mandatory number --
+    depend on whether an optional rerun happened, and a prior at half the cadence
+    would silently halve the band the posterior is scored on.
+
+    A prior that resolves *fewer* bins than the scored grid is kept and padded with
+    ``nan`` above its own Nyquist rather than dropped: the per-bin masking in
+    :func:`log_spectral_distance` then scores it over the bins it does have, and S4
+    draws its envelope where it exists. Only a prior that cannot be aligned at all
+    -- other sensors, another frequency spacing, a record too short for the shared
+    segment -- is dropped.
+    """
+    if not _usable_record("prior", prior):
+        return None, None
+    cadence = _sample_frequency(prior)
+    if cadence is None:
+        logger.info("probe_spectra: the prior probe record carries no usable cadence")
+        return None, None
+
+    with_prior = _aligned_sensors({**core, "prior": prior})
+    if with_prior is None or not np.array_equal(with_prior["truth"], sensors["truth"]):
+        logger.info(
+            "probe_spectra: the prior probe record does not cover the same sensors "
+            "as the truth and the posterior; S4 loses its prior envelope rather "
+            "than the comparison losing sensors"
+        )
+        return None, None
+
+    estimated = _matched_spectra(
+        "prior", prior, with_prior["prior"], cadence, segment_seconds
+    )
+    if estimated is None:
+        return None, None
+    grid, spectra = estimated
+
+    shared = min(grid.size, frequencies.size)
+    if not _grids_are_the_same_bins(
+        "prior",
+        grid[:shared],
+        frequencies[:shared],
+        consequence="S4 loses its prior envelope",
+    ):
+        return None, None
+    if shared < frequencies.size:
+        logger.info(
+            "probe_spectra: the prior probe record resolves %d of the %d scored "
+            "frequency bins (it was written at a coarser cadence); its envelope "
+            "stops there and its LSD is scored over those bins only",
+            shared,
+            frequencies.size,
+        )
+    padded = np.full(spectra.shape[:-1] + (frequencies.size,), np.nan)
+    padded[..., :shared] = spectra[..., :shared]
+    return padded, cadence
+
+
+def probe_spectra(
+    truth: xarray.Dataset,
+    posterior: xarray.Dataset,
+    prior: xarray.Dataset | None = None,
+    segments: int = SPECTRUM_SEGMENTS,
+) -> dict | None:
+    """Matched Welch energy spectra at every probe sensor, truth and members.
+
+    The shared reduction behind both consumers of the probe files -- the
+    ``spectral_metrics`` block (:func:`spectral_metric_summary`) and figure S4
+    (``evaluation.figures.plot_spectra``) -- so the numbers in the summary and the
+    curves in the figure cannot be computed two different ways.
+
+    Args:
+        truth: Probe record of the truth: ``u``, ``v``, ``w`` on
+            ``(time, sensor)``, spin-up already excluded, with the sensor
+            coordinates and the achieved cadence on it (see
+            :func:`_sample_frequency`).
+        posterior: The same for the posterior members, with a leading
+            ``ensemble`` dim. A record without one is treated as a single member.
+        prior: Optional prior-member record. Prior probe reruns are optional, so
+            its absence is the common case and costs only S4's prior envelope and
+            ``lsd_prior_median`` -- see "the prior never moves a reported number"
+            below, which is a property this function enforces rather than a hope.
+        segments: Welch segments per record; see :data:`SPECTRUM_SEGMENTS`.
+
+    Returns:
+        ``None`` -- with the reason logged -- whenever the records cannot be
+        compared: a missing component or axis, a cadence neither the time axis nor
+        the attributes give, no shared sensor, frequency grids that do not line
+        up, or a record too short to leave :data:`_MIN_BAND_BINS` bins under the
+        cutoff. Every one of those is an input property rather than a bug, and
+        each costs this block alone (master-plan invariant 3).
+
+        Otherwise a dict:
+
+        * ``f`` ``(K,)`` -- the shared positive frequencies, up to the lowest
+          Nyquist among the records. It runs **past** the cutoff on purpose: S4
+          draws the whole resolved band and marks where scoring stops.
+        * ``band`` ``(K,)`` bool -- ``f < f_cutoff``, the bins comparisons use.
+        * ``f_cutoff``, ``segment_seconds``, ``sample_frequency`` -- the cutoff in
+          Hz, the Welch segment duration in seconds, and each record's achieved
+          cadence in Hz.
+        * ``truth`` ``(sensor, K)``, ``posterior`` ``(M, sensor, K)``, ``prior``
+          ``(M, sensor, K)`` or ``None`` -- the trace spectra.
+        * ``truth_halves`` ``(2, sensor, K)`` -- the same spectrum from the first
+          and second half of the truth record: the truth measured against itself,
+          which is the only reference this diagnostic can produce without a second
+          truth run. Deliberately computed with the **same** ``nperseg`` as the full
+          record, so both spectra come off the same estimator.
+
+          **It is ~2x the like-for-like scatter, and it is not a pass threshold.**
+          Two effects, both in the same direction. Halving the record at fixed
+          ``nperseg`` halves the segment count, so each half's log-spectrum carries
+          ~2x the variance of a full-record estimate: ``LSD_halves^2 ~ 2*var_half =
+          4*var_full``. The reported ``lsd_posterior_median`` instead compares the
+          full truth against a *median over M members*, whose own scatter is ~1/M of
+          one estimate and negligible by M ~ 8: ``LSD_posterior^2 ~ var_full``.
+          Hence ``LSD_halves / LSD_null -> 2``, measured at 1.99 (M=8) and 2.08
+          (M=32) over 40 trials of statistically identical ``f^-5/3`` flows. So a
+          posterior at 2 dB against a 2.5 dB halves distance is **not**
+          indistinguishable from the truth -- its like-for-like reference is ~1.2 dB
+          and it is well outside it. :func:`spectral_metric_summary` reports the
+          halved value beside it as ``lsd_truth_floor_comparable`` for exactly this
+          reason.
+        * ``variance`` ``(sensor,)`` -- the truth's total resolved variance
+          ``sum_i var(u_i)`` (``ddof=1``), i.e. twice its resolved TKE. It is what
+          S4 premultiplies by, and it comes from the truth for both records: a
+          curve normalized by its *own* variance would let a member with half the
+          energy overlay the truth exactly, which is the failure this check
+          exists to catch.
+        * ``sensor_sets`` ``(sensor,)`` -- ``"assimilation"`` / ``"validation"``
+          per scored sensor when the file labels them, so a figure can put the
+          held-out sensors first.
+
+    **One shared segment duration, not one shared sample count.** When the truth
+    and the members were written at the same cadence those are the same statement
+    and ``nperseg`` is identical. When they differ -- a pre-existing truth that
+    could not be re-run at the probe cadence -- the shared quantity has to be the
+    segment's length *in seconds*, since that is what fixes the frequency
+    resolution and the spectral window in physical units; the sample count then
+    differs per record and the comparison is restricted to the band both resolve
+    (the lower Nyquist), which is the metrics doc's "common resolved band". No
+    resampling happens anywhere: interpolating a coarse record onto a fine axis
+    invents high-frequency content, which is precisely the quantity under test.
+
+    **The prior never moves a reported number.** The scored sensors, the shared
+    band, the cutoff and the segment duration are all derived from the truth and
+    the posterior alone; the prior record is then fitted onto that result and
+    dropped (with a log line) if it does not fit -- see :func:`_fitted_prior`. Doing
+    it the other way round is a real trap rather than a hypothetical one: a prior
+    written at half the cadence would drag ``min(fs)`` down, halve ``f_cutoff`` and
+    the bins under it, and so change ``lsd_posterior_median`` -- a mandatory
+    number -- depending on whether an optional rerun happened.
+    """
+    if int(segments) < 2:
+        # A programmer error rather than an input property, hence a raise: at one
+        # segment the record cannot also be halved for the self-distance floor,
+        # which is not an optional part of this bundle.
+        raise ValueError(f"segments must be at least 2, got {segments}")
+    if "ensemble" in truth.dims:
+        # The truth is one realisation; a member axis on its record means the
+        # rerun wrote it through the ensemble path. Drop it so the truth is one
+        # series per sensor, as everything below assumes.
+        truth = truth.isel(ensemble=0)
+    # ``core`` is what every reported number is derived from. The prior is fitted
+    # onto that result afterwards and can only ever be *dropped* -- see the
+    # "the prior never moves a reported number" paragraph in this docstring.
+    core: dict[str, xarray.Dataset] = {"truth": truth, "posterior": posterior}
+
+    for name, ds in core.items():
+        if not _usable_record(name, ds):
+            return None
+
+    fs: dict[str, float] = {}
+    for name, ds in core.items():
+        cadence = _sample_frequency(ds)
+        if cadence is None:
+            logger.info(
+                "probe_spectra: the %s probe record carries no usable cadence "
+                "(neither a time axis with two frames nor output_frequency)",
+                name,
+            )
+            return None
+        fs[name] = cadence
+
+    n_truth = int(truth.sizes["time"])
+    nperseg_truth = n_truth // int(segments)
+    if nperseg_truth < 4:
+        logger.info(
+            "probe_spectra: %d truth samples leave %d per segment at %d segments, "
+            "which is not a spectrum",
+            n_truth,
+            nperseg_truth,
+            segments,
+        )
+        return None
+    segment_seconds = nperseg_truth / fs["truth"]
+
+    sensors = _aligned_sensors(core)
+    if sensors is None:
+        return None
+
+    grids: dict[str, np.ndarray] = {}
+    spectra: dict[str, np.ndarray] = {}
+    for name, ds in core.items():
+        estimated = _matched_spectra(name, ds, sensors[name], fs[name], segment_seconds)
+        if estimated is None:
+            return None
+        grids[name], spectra[name] = estimated
+
+    n_common = min(grid.size for grid in grids.values())
+    frequencies = grids["truth"][:n_common]
+    if not _grids_are_the_same_bins(
+        "posterior", grids["posterior"][:n_common], frequencies
+    ):
+        return None
+
+    f_cutoff = SPECTRUM_CUTOFF_FRACTION * 0.5 * min(fs.values())
+    band = frequencies < f_cutoff
+    if int(band.sum()) < _MIN_BAND_BINS:
+        logger.info(
+            "probe_spectra: only %d frequency bins fall under the %.4g Hz cutoff "
+            "(need %d) -- the records are too short, or too coarsely sampled, for "
+            "a spectral comparison",
+            int(band.sum()),
+            f_cutoff,
+            _MIN_BAND_BINS,
+        )
+        return None
+
+    half = n_truth // 2
+    halves = np.stack(
+        [
+            _energy_spectra(
+                truth.isel(time=slice(0, half)),
+                sensors["truth"],
+                fs["truth"],
+                nperseg_truth,
+            )[1],
+            _energy_spectra(
+                truth.isel(time=slice(n_truth - half, n_truth)),
+                sensors["truth"],
+                fs["truth"],
+                nperseg_truth,
+            )[1],
+        ]
+    )
+
+    series = _probe_series(truth, sensors["truth"])  # (component, sensor, time)
+    variance = np.asarray(np.var(series, axis=-1, ddof=1).sum(axis=0))
+
+    labels = (
+        [str(s) for s in np.asarray(truth["sensor_set"].values).ravel()]
+        if "sensor_set" in truth.coords
+        else ["" for _ in range(int(truth.sizes["sensor"]))]
+    )
+    if prior is not None:
+        prior_spectra, prior_cadence = _fitted_prior(
+            prior, core, sensors, frequencies, segment_seconds
+        )
+    else:
+        prior_spectra, prior_cadence = None, None
+    if prior_cadence is not None:
+        fs["prior"] = prior_cadence
+    return {
+        "f": frequencies,
+        "band": band,
+        "f_cutoff": float(f_cutoff),
+        "segment_seconds": float(segment_seconds),
+        "sample_frequency": {name: float(value) for name, value in fs.items()},
+        "truth": spectra["truth"][..., :n_common],
+        "truth_halves": halves[..., :n_common],
+        "posterior": spectra["posterior"][..., :n_common],
+        "prior": prior_spectra,
+        "variance": variance,
+        "sensor_sets": tuple(labels[i] for i in sensors["truth"]),
+    }
+
+
+def median_spectrum(members: np.ndarray) -> np.ndarray:
+    """Bin-wise median over the leading member axis, ignoring non-finite members.
+
+    The posterior median spectrum -- the object the LSD scores and S4 draws --
+    with the same member policy as the S5 fan: a member whose probe series had a
+    gap has an all-``nan`` spectrum (see :func:`welch_spectrum`) and is dropped
+    rather than blanking the median. A bin where no member is finite stays
+    ``nan``. The median commutes with the log, so this is also the median in dB.
+    """
+    values = np.asarray(members, dtype=float)
+    with warnings.catch_warnings():
+        # A bin where every member is non-finite is a legitimate outcome (an
+        # ensemble that all diverged, a sensor inside a solid cell), and ``nan``
+        # is the right answer for it -- but ``nanmedian`` calls it a RuntimeWarning
+        # per bin, which would bury the operator's log in thousands of lines.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.asarray(np.nanmedian(values, axis=0))
+
+
+def _median_over_sensors(distances: np.ndarray) -> float | None:
+    """Median LSD over the sensors, or ``None`` when no sensor produced one.
+
+    The median rather than the mean: one sensor sitting in a solid cell or in a
+    stagnation point can carry a wild distance, and the headline number is meant
+    to describe a typical probe. ``None`` (not ``nan``) because this goes into
+    YAML, where the rest of the summary spells an unmeasurable entry ``null``.
+    """
+    values = np.asarray(distances, dtype=float).ravel()
+    finite = values[np.isfinite(values)]
+    return float(np.median(finite)) if finite.size else None
+
+
+def spectral_metric_summary(spectra: dict) -> dict:
+    """The ``spectral_metrics`` block: the LSD beside the truth's own references.
+
+    Args:
+        spectra: A :func:`probe_spectra` bundle.
+
+    Returns:
+        A YAML-safe dict. ``lsd_posterior_median`` is the log-spectral distance
+        between the truth's spectrum and the **member-median** spectrum, per
+        sensor, reduced over sensors by the median -- two medians, one over
+        members (the object being scored) and one over sensors (the reduction).
+
+        Two references beside it, and they are not interchangeable.
+        ``lsd_truth_floor`` is the distance between the two halves of the truth
+        record; it is what the halves measure and nothing more, and it runs **~2x**
+        the scatter this comparison would show under a null of identical flows (the
+        derivation and the measured 1.99--2.08 are in :func:`probe_spectra`).
+        ``lsd_truth_floor_comparable`` is that value halved, which *is* the
+        like-for-like reference: read ``lsd_posterior_median`` against **it**.
+        Being under ``lsd_truth_floor`` is not a pass criterion and neither number
+        is a threshold -- there is no acceptance level for the LSD in the metrics
+        doc, only the comparison against the prior and against these references.
+
+        ``lsd_prior_median`` appears only when prior probes were run, and is what
+        makes the posterior number readable as a change rather than as an absolute.
+        ``f_cutoff`` (Hz) with ``n_band_bins``, ``segment_seconds`` and
+        ``sample_frequency`` record the band the comparison ran on; ``n_sensors``
+        how many probe points it covered and ``n_members`` how many members the
+        median was taken over. **``n_members`` is not bookkeeping**: the median of
+        M spectra is smoother the larger M is, so the distance falls with ensemble
+        size on identical flows (measured 1.409 dB at M=2 against 1.171 dB at
+        M=32), and two runs' LSDs are comparable only at equal M.
+
+        Every distance is in dB and is ``null`` when no sensor produced a finite
+        one.
+    """
+    band = spectra["band"]
+    truth = spectra["truth"][:, band]
+    halves_distance = _median_over_sensors(
+        log_spectral_distance(
+            spectra["truth_halves"][0][:, band], spectra["truth_halves"][1][:, band]
+        )
+    )
+    entry: dict[str, object] = {
+        "n_sensors": int(truth.shape[0]),
+        "n_members": int(np.asarray(spectra["posterior"]).shape[0]),
+        "n_band_bins": int(np.count_nonzero(band)),
+        "f_cutoff": float(spectra["f_cutoff"]),
+        "segment_seconds": float(spectra["segment_seconds"]),
+        "sample_frequency": dict(spectra["sample_frequency"]),
+        "lsd_posterior_median": _median_over_sensors(
+            log_spectral_distance(truth, median_spectrum(spectra["posterior"])[:, band])
+        ),
+        "lsd_truth_floor": halves_distance,
+        # The halves' distance divided by the factor derived in ``probe_spectra``:
+        # halving the record doubles each estimate's log-spectral variance (4x in
+        # LSD^2) while the posterior side's median over members contributes ~1/M of
+        # one estimate's, so the like-for-like reference is half the halves'.
+        "lsd_truth_floor_comparable": (
+            None if halves_distance is None else halves_distance / _HALVES_INFLATION
+        ),
+    }
+    if spectra.get("prior") is not None:
+        entry["lsd_prior_median"] = _median_over_sensors(
+            log_spectral_distance(truth, median_spectrum(spectra["prior"])[:, band])
+        )
+    return entry

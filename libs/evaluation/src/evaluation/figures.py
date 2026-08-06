@@ -13,7 +13,8 @@ and they take an ``output_path`` and write the file themselves rather than
 returning a ``Figure``. WP0.2 is a pure refactor and keeps both properties;
 changing either is a later cleanup.
 
-Populated in WP0.2 (move), extended in WP1.5.
+Populated in WP0.2 (move), extended in WP1.5 (P1, S1, S5, F1, D1) and phase 3
+(S4).
 """
 
 # mypy: ignore-errors
@@ -29,7 +30,7 @@ import contextlib
 import logging
 import pathlib
 import warnings
-from typing import Iterator, cast
+from typing import Iterator, Sequence, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,7 +43,11 @@ from evaluation.scores import (
     compute_sensor_metrics,
     parameter_bundle,
 )
+
+# ``_BAND_ALPHAS`` is imported rather than restated so S4's legend patch cannot
+# drift from the alpha the envelope is actually drawn with.
 from evaluation.style import (
+    _BAND_ALPHAS,
     CMAP_DIFF,
     CMAP_FIELD,
     COLORS,
@@ -54,7 +59,11 @@ from evaluation.style import (
     nested_bands,
     save_png,
 )
-from evaluation.turbulence import evenly_spaced_levels
+from evaluation.turbulence import (
+    evenly_spaced_levels,
+    log_spectral_distance,
+    median_spectrum,
+)
 from matplotlib.axes import Axes
 from matplotlib.collections import PolyCollection
 from matplotlib.colors import Colormap
@@ -1400,33 +1409,37 @@ def _extrapolated_axes(fields: xarray.Dataset) -> tuple[str, ...]:
     return tuple(name for name in (part.strip() for part in raw.split(",")) if name)
 
 
-def _station_order(fields: xarray.Dataset, max_stations: int) -> list[int]:
-    """Station indices to draw: held-out columns first, then the assimilated ones.
+def _held_out_first(
+    sensor_sets: Sequence[str], max_items: int, *, figure: str, noun: str
+) -> list[int]:
+    """Indices to draw: the held-out points first, then the assimilated ones.
 
-    A profile drawn only where the assimilation was fitted is the least
-    informative one available, so a validation column never loses its slot to an
-    assimilation column. Anything dropped is logged -- silent truncation would
-    make a figure that omits half the evidence look complete.
+    A panel drawn only where the assimilation was fitted is the least informative
+    one available, so a validation point never loses its slot to an assimilation
+    point. Anything dropped is logged -- silent truncation would make a figure that
+    omits half the evidence look complete.
+
+    Shared by S1's station columns and S4's probe sensors: the rule is a figure
+    convention, and two figures applying it two ways is how the held-out column
+    quietly stops being first in one of them. ``figure`` and ``noun`` only shape
+    the log line.
     """
-    sets = (
-        [str(s) for s in np.asarray(fields["station_set"].values).ravel()]
-        if "station_set" in fields.coords
-        else [""] * int(fields.sizes["station"])
-    )
+    sets = [str(s) for s in sensor_sets]
     held_out = [i for i, s in enumerate(sets) if s != "assimilation"]
     assimilated = [i for i, s in enumerate(sets) if s == "assimilation"]
     order = held_out + assimilated
-    if len(order) > max_stations:
-        dropped = order[max_stations:]
+    if len(order) > max_items:
+        dropped = order[max_items:]
         logger.info(
-            "plot_station_profiles: %d of %d station columns not drawn (max_stations"
-            "=%d): %s",
+            "%s: %d of %d %s not drawn (max=%d): %s",
+            figure,
             len(dropped),
             len(order),
-            max_stations,
-            ", ".join(f"{i} ({sets[i]})" for i in dropped),
+            noun,
+            max_items,
+            ", ".join(f"{i} ({sets[i] or 'unlabelled'})" for i in dropped),
         )
-    return order[:max_stations]
+    return order[:max_items]
 
 
 def _station_profile(
@@ -1537,11 +1550,14 @@ def plot_station_profiles(
         "mean": r"$\bar{u}/U_{ref}$ [-]" if u_ref else r"$\bar{u}$ [m/s]",
         "tke": r"$k/U_{ref}^2$ [-]" if u_ref else r"$k$ [m$^2$/s$^2$]",
     }
-    stations = _station_order(fields, max_stations)
+    # Extracted once and handed to the ordering rule, which is shared with S4.
     sets = (
         [str(s) for s in np.asarray(fields["station_set"].values).ravel()]
         if "station_set" in fields.coords
         else ["" for _ in range(int(fields.sizes["station"]))]
+    )
+    stations = _held_out_first(
+        sets, max_stations, figure="plot_station_profiles", noun="station columns"
     )
     station_x = np.asarray(fields["station_x"].values, dtype=float)
     station_y = np.asarray(fields["station_y"].values, dtype=float)
@@ -2311,3 +2327,431 @@ def plot_rank_histogram(
         axes[0][-1].legend(handles=handles, loc="upper right", fontsize=8)
         fig.suptitle("Rank histogram of the truth within the ensemble")
         return save_png(fig, output_path)
+
+
+# ---------------------------------------------------------------------------
+# S4 -- premultiplied energy spectra at the probes
+# ---------------------------------------------------------------------------
+
+# Premultiplying turns the inertial range's -5/3 into -2/3, since
+# ``f*E ~ f*f**(-5/3)``. It also makes equal areas equal energy on a log
+# frequency axis, which is why the metrics doc asks for this form rather than for
+# a bare ``E(f)``.
+_INERTIAL_SLOPE = -2.0 / 3.0
+
+# The guide segment spans this factor in frequency and sits this many times above
+# the highest curve inside that span. Both exist to keep it a *reference* rather
+# than a fit: a slope line drawn through the data reads as one, and no shipped
+# probe record is long enough to claim a fitted inertial range.
+_GUIDE_SPAN = 3.0
+_GUIDE_OFFSET = 4.0
+
+
+def _log_limits(*arrays: np.ndarray | None) -> tuple[float, float] | None:
+    """Axis limits for a log scale: :func:`finite_limits` applied in decades.
+
+    ``finite_limits`` pads *additively*, which on a decade-spanning spectrum would
+    be either invisible at the top or negative at the bottom; padding in
+    ``log10`` and exponentiating back is the same 5 % margin measured the way the
+    axis measures it. Non-positive values become non-finite in the log and are
+    dropped by the shared helper, which is the correct treatment on a log axis --
+    they cannot be drawn either.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        decades = [
+            np.log10(np.asarray(a, dtype=float)) for a in arrays if a is not None
+        ]
+    limits = finite_limits(*decades, pad=0.05)
+    return None if limits is None else (10.0 ** limits[0], 10.0 ** limits[1])
+
+
+def _member_bands(members: np.ndarray, sensor: int) -> np.ndarray | None:
+    """``(Q, K)`` nested-band quantiles of one sensor's member spectra.
+
+    Quantiles are taken **per frequency bin, ignoring non-finite members**: a
+    member whose probe series had a gap has an all-``nan`` spectrum (see
+    :func:`evaluation.turbulence.welch_spectrum`) and would otherwise blank the
+    whole envelope, which is the same failure mode S5's fan guards against.
+    ``None`` when no member is finite anywhere at this sensor.
+    """
+    values = np.asarray(members, dtype=float)[:, sensor]
+    if not np.isfinite(values).any():
+        return None
+    with warnings.catch_warnings():
+        # An all-nan bin is a legitimate outcome and ``nan`` the right answer for
+        # it; the per-bin RuntimeWarning is what has to go.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.asarray(np.nanquantile(values, _BAND_QUANTILES, axis=0))
+
+
+def _guide_segment(
+    frequencies: np.ndarray, drawn: list[np.ndarray], upper: float
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """A short ``-2/3`` reference segment, offset above the curves it sits beside.
+
+    Anchored at the *geometric* middle of the compared band -- the panel's axis is
+    logarithmic, so an index-based anchor on a linearly spaced frequency grid would
+    put it in the top decade every time -- spanning :data:`_GUIDE_SPAN` in
+    frequency at :data:`_GUIDE_OFFSET` times the highest value any curve reaches
+    inside that span. So it is never drawn *through* the data (metrics doc §7,
+    figure S4).
+    ``None`` when the band is too narrow to carry it or nothing finite was drawn.
+    """
+    f = np.asarray(frequencies, dtype=float)
+    if f.size < 3 or not (upper > f[0] > 0.0):
+        return None
+    start = float(np.sqrt(f[0] * upper))
+    stop = min(upper, start * _GUIDE_SPAN)
+    if not (stop > start > 0.0):
+        return None
+    inside = (f >= start) & (f <= stop)
+    peak = finite_limits(*[np.asarray(d)[..., inside] for d in drawn])
+    if peak is None or peak[1] <= 0.0:
+        return None
+    segment = np.array([start, stop])
+    return segment, _GUIDE_OFFSET * peak[1] * (segment / start) ** _INERTIAL_SLOPE
+
+
+def plot_spectra(
+    f: np.ndarray,
+    truth: np.ndarray,
+    posterior: np.ndarray,
+    output_path: str | pathlib.Path,
+    *,
+    prior: np.ndarray | None = None,
+    truth_halves: np.ndarray | None = None,
+    variance: np.ndarray | None = None,
+    f_cutoff: float | None = None,
+    sensor_sets: Sequence[str] | None = None,
+    max_sensors: int = 6,
+) -> pathlib.Path | None:
+    """S4: premultiplied energy spectra at the probes, truth vs posterior vs prior.
+
+    The figure the mean-field metrics cannot replace: an over-smoothed or
+    collapsed flow can carry the right time-mean and even the right total
+    variance while putting that variance at the wrong frequencies, and this is the
+    only panel in the suite that shows *where* the energy sits. One panel per probe
+    sensor (held-out first, see :func:`_held_out_first`), log--log, premultiplied
+    ``f*E(f)/sigma^2``. The default ``max_sensors`` is the same 6 as S1's
+    ``max_stations``: the shipped case defines 6 assimilation + 4 validation probe
+    points, and a smaller budget would fill the figure with held-out panels alone
+    and leave no in-sample reference beside them.
+
+    Args:
+        f: ``(K,)`` frequencies, as :func:`evaluation.turbulence.probe_spectra`
+            returns them -- running past ``f_cutoff``, so the panel shows the whole
+            resolved band and marks where scoring stops.
+        truth: ``(sensor, K)`` truth spectra (the trace ``E_uu + E_vv + E_ww``).
+        posterior: ``(M, sensor, K)`` member spectra.
+        output_path: PNG to write.
+        prior: ``(M, sensor, K)`` prior-member spectra. Prior probe reruns are
+            optional, so ``None`` simply drops the grey envelope -- the figure is
+            truth vs posterior then, not a failure.
+        truth_halves: ``(2, sensor, K)`` spectra of the two halves of the truth
+            record, annotated beside each panel's distance so the reader has
+            *something* to read it against -- two finite records of the same flow
+            are already some dB apart. It is **not** a pass threshold and it is not
+            the like-for-like scatter either: it runs ~2x that (see
+            :func:`evaluation.turbulence.probe_spectra`), which is why the panel
+            labels it "truth halves" rather than "floor" and the caption says so.
+        variance: ``(sensor,)`` normalisation, the truth's total resolved variance.
+            **One shared scale for every curve in a panel** -- normalising each
+            curve by its own variance would let a member carrying half the energy
+            overlay the truth exactly. ``None`` plots the raw premultiplied
+            spectrum in m^2/s^2 and says so on the axis. A sensor whose variance is
+            not finite and positive is **dropped with a log line** rather than
+            drawn unnormalized: the axis label and the shared scale are per figure,
+            so one raw panel among normalized ones is mislabelled by construction.
+        f_cutoff: Where comparisons stop (``f_Nyquist/4``); drawn as a dotted
+            vertical line, and the band the annotated LSD is computed over.
+        sensor_sets: ``(sensor,)`` set labels, used to order and title the panels.
+        max_sensors: Panels drawn; anything dropped is logged.
+
+    The posterior is nested quantile bands about its median (5--95 % light,
+    25--75 % dark, teal); the prior is its 5--95 % **envelope** only (grey), since
+    two full band stacks in one panel obscure the comparison the figure is for.
+    The ``-2/3`` guide is a reference slope offset above the curves, never a fit.
+
+    Each panel annotates the log-spectral distance of that sensor's
+    posterior-median spectrum and the truth's own halves distance, both computed by
+    :func:`evaluation.turbulence.log_spectral_distance` over ``f < f_cutoff`` --
+    the same function and the same band as ``run_summary.yaml``'s
+    ``spectral_metrics``, whose entries are these numbers reduced over sensors by
+    the median.
+
+    Returns the path written, or ``None`` when there is nothing to draw (no
+    sensor, no finite spectrum, no sensor with a usable normalisation, a truth and
+    an ensemble on different frequency grids).
+    """
+    frequencies = np.asarray(f, dtype=float).ravel()
+    truth_e = np.asarray(truth, dtype=float)
+    posterior_e = np.asarray(posterior, dtype=float)
+    if truth_e.ndim != 2 or posterior_e.ndim != 3:
+        logger.info(
+            "plot_spectra: expected (sensor, freq) truth and (member, sensor, freq) "
+            "posterior spectra, got %s and %s",
+            truth_e.shape,
+            posterior_e.shape,
+        )
+        return None
+    if not frequencies.size or truth_e.shape != posterior_e.shape[1:]:
+        logger.info(
+            "plot_spectra: %d frequencies against truth %s and posterior %s -- the "
+            "spectra are not on one grid",
+            frequencies.size,
+            truth_e.shape,
+            posterior_e.shape,
+        )
+        return None
+    if not (np.isfinite(truth_e).any() and np.isfinite(posterior_e).any()):
+        logger.info("plot_spectra: no finite truth or posterior spectrum")
+        return None
+
+    n_sensors = truth_e.shape[0]
+    sets = (
+        [str(s) for s in sensor_sets]
+        if sensor_sets is not None and len(sensor_sets) == n_sensors
+        else ["" for _ in range(n_sensors)]
+    )
+    normalized = variance is not None and np.asarray(variance).size == n_sensors
+    scale = (
+        np.asarray(variance, dtype=float).ravel() if normalized else np.ones(n_sensors)
+    )
+    # A sensor whose normalisation is not usable is dropped here rather than drawn
+    # raw: ``normalized`` sets the axis label and the panels share one scale, so a
+    # single unnormalized panel would be mislabelled *and* off-scale. It happens
+    # for real -- a probe inside a solid cell has zero variance, and one with a gap
+    # in its series has none at all.
+    usable = [
+        i
+        for i in range(n_sensors)
+        if not normalized or (np.isfinite(scale[i]) and scale[i] > 0.0)
+    ]
+    if len(usable) < n_sensors:
+        logger.info(
+            "plot_spectra: %d of %d probe sensors have no usable variance to "
+            "normalize by (zero or non-finite) and are not drawn: %s",
+            n_sensors - len(usable),
+            n_sensors,
+            [i for i in range(n_sensors) if i not in usable],
+        )
+    # Dropped *before* the ordering, so an unusable sensor costs itself rather than
+    # a panel slot that another sensor could have filled.
+    order = [
+        usable[i]
+        for i in _held_out_first(
+            [sets[i] for i in usable],
+            max_sensors,
+            figure="plot_spectra",
+            noun="probe sensors",
+        )
+    ]
+    if not order:
+        logger.info("plot_spectra: no probe sensors to draw")
+        return None
+
+    band = frequencies < f_cutoff if f_cutoff else np.ones(frequencies.size, bool)
+    median = median_spectrum(posterior_e)
+
+    with _styled():
+        fig, axes = plt.subplots(
+            1,
+            len(order),
+            figsize=(3.5 * len(order), 3.7),
+            squeeze=False,
+            sharex=True,
+            # One y scale for every panel: the curves are all divided by their own
+            # sensor's truth variance, so they *are* comparable across sensors, and
+            # per-panel autoscaling would hide that one probe carries an order of
+            # magnitude less energy than another.
+            sharey=True,
+            constrained_layout=True,
+        )
+        panels: list[np.ndarray] = []
+        for column, sensor in enumerate(order):
+            ax = axes[0][column]
+            # Premultiplied and on one scale per panel: the same divisor for the
+            # truth, the posterior and the prior (see ``variance`` above). Every
+            # sensor left in ``order`` has a finite positive scale.
+            weight = frequencies / scale[sensor]
+            drawn: list[np.ndarray] = []
+
+            prior_bands = None if prior is None else _member_bands(prior, sensor)
+            if prior_bands is not None:
+                # The outer envelope only: the comparison is posterior vs truth,
+                # and a second full band stack buries it.
+                envelope = prior_bands[[0, -1]] * weight
+                nested_bands(
+                    ax,
+                    frequencies,
+                    envelope,
+                    (_BAND_QUANTILES[0], _BAND_QUANTILES[-1]),
+                    COLORS["prior"],
+                )
+                drawn.append(envelope)
+
+            posterior_bands = _member_bands(posterior_e, sensor)
+            if posterior_bands is not None:
+                bands = posterior_bands * weight
+                nested_bands(
+                    ax,
+                    frequencies,
+                    bands,
+                    _BAND_QUANTILES,
+                    COLORS["posterior"],
+                    label="Posterior median",
+                )
+                drawn.append(bands)
+
+            truth_curve = truth_e[sensor] * weight
+            ax.plot(
+                frequencies,
+                truth_curve,
+                color=COLORS["truth"],
+                lw=1.6,
+                label="Truth",
+                zorder=6,
+            )
+            drawn.append(truth_curve)
+
+            guide = _guide_segment(
+                frequencies,
+                drawn,
+                float(f_cutoff) if f_cutoff else float(frequencies[-1]),
+            )
+            if guide is not None:
+                ax.plot(
+                    *guide,
+                    color=COLORS["charcoal"],
+                    lw=1.2,
+                    ls="--",
+                    zorder=5,
+                )
+                ax.annotate(
+                    r"$-2/3$",
+                    xy=(guide[0][-1], guide[1][-1]),
+                    xytext=(3, 2),
+                    textcoords="offset points",
+                    fontsize=8,
+                    color=COLORS["charcoal"],
+                )
+                drawn.append(guide[1])
+
+            if f_cutoff:
+                ax.axvline(
+                    float(f_cutoff),
+                    color=COLORS["charcoal"],
+                    ls=":",
+                    lw=1.0,
+                    zorder=2,
+                )
+
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+            panels.extend(drawn)
+            ax.set_xlabel("f [Hz]")
+            if column == 0:
+                ax.set_ylabel(
+                    r"$f\,E(f)/\sigma^2$ [-]"
+                    if normalized
+                    else r"$f\,E(f)$ [m$^2$/s$^2$]"
+                )
+            ax.set_title(f"{sets[sensor] or 'probe'} #{sensor}", loc="left", fontsize=9)
+            ax.annotate(
+                _lsd_label(truth_e, median, truth_halves, sensor, band),
+                xy=(0.03, 0.05),
+                xycoords="axes fraction",
+                fontsize=8,
+                color=COLORS["charcoal"],
+                # A premultiplied spectrum dips towards the bottom-left of the
+                # panel exactly where this sits, so on a real run the curve runs
+                # straight through the text. The number is the panel's headline
+                # and has to stay readable, hence the backing box rather than a
+                # different corner (every corner is occupied in some panel).
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.75,
+                    "pad": 1.5,
+                },
+                zorder=5,
+            )
+
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        if prior is not None:
+            handles.append(
+                Patch(
+                    facecolor=COLORS["prior"],
+                    # ``nested_bands`` draws a lone band at its inner alpha; the
+                    # legend swatch has to be the same shade as what it labels.
+                    alpha=_BAND_ALPHAS[1],
+                    label="Prior 5-95 %",
+                )
+            )
+        if f_cutoff:
+            handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=COLORS["charcoal"],
+                    ls=":",
+                    lw=1.0,
+                    label=r"$f_{Nyq}/4$ cutoff",
+                )
+            )
+        # A decade of headroom above the shared limits, and the legend inside it.
+        # A premultiplied spectrum runs from the top left to the bottom right and
+        # the guide segment and the per-panel LSD take the corners it leaves, so
+        # every in-panel corner is occupied by *something*; making room is the only
+        # placement that cannot land on a curve. (An ``outside`` figure legend is
+        # the other option and collides with the suptitle or the caption instead.)
+        limits = _log_limits(*panels)
+        if limits is not None:
+            axes[0][0].set_ylim(limits[0], limits[1] * (10.0 if handles else 1.0))
+        if handles:
+            axes[0][-1].legend(handles=handles, loc="upper right", fontsize=8)
+        fig.suptitle("Premultiplied energy spectra at the probes")
+        fig.supxlabel(
+            "Spectra are the trace E_uu+E_vv+E_ww: Welch (Hann, 50 % overlap, "
+            "linear detrend), one segment length for the truth and every member.\n"
+            "Normalized by the TRUTH's resolved variance, so an energy deficit "
+            "stays visible. Comparisons stop at the dotted cutoff; the -2/3 line "
+            "is a reference slope, not a fit.\n"
+            "'truth halves' is the LSD between the two halves of the truth's own "
+            "record. It runs ~2x the like-for-like scatter of this comparison, so "
+            "it is a reference, NOT a pass threshold: halve it before reading an "
+            "LSD as indistinguishable from the truth.",
+            fontsize=8,
+            color=COLORS["charcoal"],
+        )
+        return save_png(fig, output_path)
+
+
+def _lsd_label(
+    truth_e: np.ndarray,
+    median: np.ndarray,
+    truth_halves: np.ndarray | None,
+    sensor: int,
+    band: np.ndarray,
+) -> str:
+    """``LSD = x dB (truth halves y)`` for one panel, or that it is unmeasurable.
+
+    The halves distance is the whole reason the number is annotated at all: a bare
+    "3 dB" invites a reader to compare it against zero, which is not the reachable
+    value at any finite record length. It is deliberately **not** called a floor
+    here -- it runs ~2x the like-for-like scatter (derivation in
+    :func:`evaluation.turbulence.probe_spectra`), so a panel under it is not thereby
+    a passing panel, and the caption repeats the factor.
+    """
+    distance = float(log_spectral_distance(truth_e[sensor, band], median[sensor, band]))
+    if not np.isfinite(distance):
+        return "LSD: no comparable bin"
+    label = f"LSD = {distance:.2f} dB"
+    if truth_halves is not None and np.asarray(truth_halves).shape[0] == 2:
+        halves = np.asarray(truth_halves, dtype=float)
+        reference = float(
+            log_spectral_distance(halves[0, sensor, band], halves[1, sensor, band])
+        )
+        if np.isfinite(reference):
+            label += f" (truth halves {reference:.2f})"
+    return label

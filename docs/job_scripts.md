@@ -459,6 +459,36 @@ MODELS="pyudales pylbm" bash job_scripts/local/eval_sweep.sh /path/to/runs
 Results: output directories `METRICS_DIR` (default `sweep_metrics/`) and
 `COMPARISON_DIR` (default `comparison/`) under the repo root.
 
+### High-rate probe series (`run_probe_series.py`)
+
+[`scripts/esmda/run_probe_series.py`](../scripts/esmda/run_probe_series.py) adds
+the probe time series the Welch spectrum / figure S4 need to a **finished** pylbm
+ESMDA run: it re-runs one window's truth and posterior members at ~1 s cadence,
+extracts the sensor points from each snapshot, and deletes the snapshots again.
+Compose it with the same overrides the ESMDA run used and add the `probes.*`
+knobs:
+
+```bash
+python scripts/esmda/run_probe_series.py \
+  case=barcelona model@truth_model=pylbm model@assim_model=pylbm \
+  probes.run_dir=/path/to/esmda_run probes.window_index=-1 \
+  probes.output_frequency=1.0 probes.spinup_time=100 \
+  paths.experiment_dir=$PWD/.temp_probes
+```
+
+Budget it as a **job of its own**: the cost is one window of forward solves per
+member (plus the discarded `probes.spinup_time` lead-in), parallelised over
+`ensemble.num_parallel_processes` exactly like the assimilation ensemble. Two
+practical notes: give it its own `paths.experiment_dir` (it clones per-member
+experiment dirs under `<experiment_dir>/probe_experiments/`, and sharing scratch
+with a running job is asking for trouble), and pass
+`assim_model.compile=false truth_model.compile=false` when the binary in the
+build tree already matches the grid. Use `probes.max_members=<N>` to probe a
+subset and `probes.include_prior=true` to add the prior envelope.
+
+Writes into the run dir: `truth_probes.nc`, `windows/window_{w}_probes.nc` and
+(opt-in) `windows/window_{w}_probes_prior.nc`. It changes no existing artifact.
+
 ### Local quick reference
 
 | Task | Command |
@@ -470,6 +500,7 @@ Results: output directories `METRICS_DIR` (default `sweep_metrics/`) and
 | Ensemble sweep (neural surrogate) | `bash job_scripts/local/neural_surrogate/sweep_ensemble_rollout_esmda_from_truth.sh` |
 | Enable localization for one run | `USE_LOCALIZATION=true bash job_scripts/local/pyudales/rollout_esmda_from_truth.sh` |
 | Post-process sweep → figures | `bash job_scripts/local/eval_sweep.sh /path/to/runs` |
+| High-rate probe series for one window | `python scripts/esmda/run_probe_series.py probes.run_dir=/path/to/esmda_run` |
 
 ---
 

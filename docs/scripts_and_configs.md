@@ -577,6 +577,17 @@ Provides:
   and truth states at sensor locations. Both stream: the truth one window at a
   time, the ensemble **one member at a time** (since WP1.3 — a full-ensemble
   window state file runs to gigabytes and is never read whole).
+- `probe_record_paths(run_dir)` / `probe_spectra_bundle(run_dir)` — locate the
+  high-rate probe records an optional `run_probe_series.py` rerun wrote (one
+  window's truth, posterior and — optionally — prior) and reduce them to the
+  matched Welch spectra both the metric and the figure stage consume, so
+  `spectral_metrics` and `probe_spectra.png` cannot be computed two different ways.
+  `None` when a run dir has no probe records, which is most of them. `truth_probes.nc`
+  is unversioned and overwritten by every rerun, so the pairing is decided by the
+  truth's own `window_index` and a truth whose window has no posterior record (or a
+  member record whose recorded window disagrees) is **refused** rather than paired
+  with a stale one — re-probing window 2 after window 1 must not silently compare
+  two different windows.
 - `read_yaml(...)` / `write_yaml(...)` / `_to_native(...)` — small YAML helpers.
 
 The metric functions themselves (`streaming_state_rmse`, `select_z_plane`,
@@ -754,6 +765,48 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   colocation or a cross-grid interpolation runs, the target slab otherwise. The
   whole block is dropped — with a log line, the rest of the summary intact —
   when the state carries no ensemble axis or its layout cannot be co-located.
+- `spectral_metrics` — the **frequency spectra** at the probes, and the one thing
+  the mean-field metrics cannot see: a flow can carry the right time-mean and even
+  the right total variance while putting that variance at the wrong frequencies,
+  which is what an over-smoothed or surrogate-collapsed field does. Welch
+  estimates (Hann, 50 % overlap, linear detrend) of the trace `E_uu+E_vv+E_ww` at
+  each probe, with **one segment duration for the truth and every member** —
+  identical `nperseg` at a shared cadence, and at differing cadences the shared
+  quantity is the segment's length in *seconds*, with the comparison restricted to
+  the band both records resolve. Nothing is ever resampled: interpolating a coarse
+  record onto a fine axis invents the high-frequency content under test.
+  Comparisons stop at `f_Nyquist/4` (`f_cutoff`), since the top of a sampled band
+  is the solver's own damping plus whatever aliased into it.
+  `lsd_posterior_median` is the log-spectral distance
+  `√(mean_k [10·log₁₀(E_t/E_m)]²)` in dB between the truth and the *member-median*
+  spectrum, reduced over sensors by the median (`n_sensors`, `n_band_bins`,
+  `segment_seconds` and `sample_frequency` record what it ran on).
+
+  **Never read it against zero, and not against `lsd_truth_floor` either.**
+  `lsd_truth_floor` is the distance between the two halves of the truth's own
+  record, and it runs **~2×** the scatter this comparison shows under a null of
+  identical flows: halving the record at fixed `nperseg` halves the segment count
+  (≈4× the variance in `LSD²`) while the reported number compares the full truth
+  against a *median over M members*, whose own scatter is ~1/M of one estimate —
+  measured 1.99 (M=8) and 2.08 (M=32) on statistically identical `f^-5/3` flows.
+  So `lsd_truth_floor_comparable` (that value halved) is the like-for-like
+  reference, and it is the one to read against. **Neither is a pass threshold**:
+  the metrics doc sets no acceptance level for the LSD, and a posterior at 2 dB
+  under a 2.5 dB halves distance is *not* indistinguishable from the truth — its
+  comparable reference is ~1.2 dB. `lsd_prior_median` appears when prior
+  probe reruns were done and is what makes the posterior number a change rather
+  than an absolute; the optional prior record can never move any other entry (the
+  scored sensors, the band and the cutoff come from the truth and posterior alone,
+  and a prior that does not fit that grid is dropped with a log line).
+  **`n_members` is not bookkeeping**: the median of M spectra is smoother the
+  larger M is, so the distance falls with ensemble size on identical flows (1.409
+  dB at M=2 against 1.171 dB at M=32) and two runs' LSDs are comparable only at
+  equal M — which matters directly for the ensemble-size sweeps in
+  [docs/job_scripts.md](job_scripts.md). The whole block is absent unless an explicit
+  `scripts/esmda/run_probe_series.py` rerun wrote the high-rate probe records —
+  the assimilation's own output cadence is ~30× too coarse for a spectrum — and
+  it is the one block computed even under `run.skip_viz`, since it reads only
+  those small records and never the truth.
 
 > **`metrics_version`.** The keys above are additive only; when an existing key
 > changes *meaning*, this marker bumps instead. `2` (current) means the fair
@@ -808,6 +861,21 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
   static run. **Pre-WP2.1 caveat, stated in the figure:** the realized noisy
   observations the run actually assimilated are not persisted yet, so the
   envelope is the *clean* truth ± σ, not the values that were assimilated.
+- `probe_spectra.png` — premultiplied `f·E(f)/σ²` at the probes, log–log, one panel
+  per probe sensor (held-out first): truth line, posterior nested quantile bands,
+  prior 5–95 % envelope, a dotted line at the `f_Nyquist/4` comparison cutoff and a
+  short `−2/3` reference slope offset above the curves (a reference, not a fit).
+  Every curve in a panel is divided by the **truth's** resolved variance, so a
+  member carrying half the energy cannot overlay the truth. Each panel annotates
+  its own log-spectral distance and the truth's *halves* distance — the same
+  function and band as `spectral_metrics`, whose entries are these numbers reduced
+  over sensors. The panel says "truth halves" rather than "floor" deliberately: it
+  is ~2× the like-for-like scatter and not a pass threshold, which the caption
+  repeats. A probe whose truth variance is zero or non-finite (a sensor in a solid
+  cell, a series with a gap) is dropped with a log line rather than drawn
+  unnormalized under a normalized axis label. Needs the high-rate probe records
+  (see `run_probe_series.py`), so it is absent on any run dir without a probe
+  rerun.
 - `rank_histogram.png` — the rank of the truth's window statistic within the
   members, read out of `run_summary.yaml`'s `sensor_statistics` block and pooled
   over statistics, sensors and windows; rows = sensor sets, columns = prior |
@@ -815,10 +883,12 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
   rank bins (the summary stores all `M+1`, since binning down is exact and
   binning up is not).
 
-Three of the last five depend on an artifact an older run dir may not have:
-`station_profiles.png` and `mean_slices.png` read `eval_fields.nc`, and
+Four of the last six depend on an artifact a run dir may not have:
+`station_profiles.png` and `mean_slices.png` read `eval_fields.nc`,
 `rank_histogram.png` reads `run_summary.yaml`'s `sensor_statistics` block — both
-written only by a current metric stage. The other two need nothing extra:
+written only by a current metric stage — and `probe_spectra.png` reads the probe
+records only an explicit probe rerun writes, so it is missing from almost every
+run dir by design. The other two need nothing extra:
 `parameter_marginals.png` reads the parameter datasets and `sensor_fans.png` the
 sensor series this stage extracts itself, and both are present on any run dir.
 Each figure is **skipped with a printed line** when its input is absent, and a

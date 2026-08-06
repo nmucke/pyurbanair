@@ -19,19 +19,24 @@ in memory in full.
 
 from __future__ import annotations
 
+import logging
 import pathlib
+import re
 
 import numpy as np
 import xarray
 import yaml
 from data_assimilation.interpolation import interpolate_dataarray_at_points
 from data_assimilation.observation_operator import ObservationOperator
+from evaluation.turbulence import probe_spectra
 from omegaconf import OmegaConf
 
 from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_validation_points,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Run-directory loaders (config + persisted truth-access view + sensor sets)
@@ -279,6 +284,168 @@ def truth_sensor_series(
             )
         ts.close()
     return _concat_sensor_pieces(pieces)
+
+
+# ---------------------------------------------------------------------------
+# High-rate probe records (phase 3: the spectral check)
+#
+# The probe records are written by ``scripts/esmda/run_probe_series.py``, an
+# optional rerun of one window at ~1 s output -- never by the assimilation, whose
+# own cadence (10 s in a 300 s window) is ~30x too coarse for a Welch spectrum.
+# So a run dir *usually* has none, and every helper here treats their absence as
+# the normal case: the metric and figure stages both call in, and both skip their
+# spectral block when they get ``None`` (master-plan invariant 3).
+# ---------------------------------------------------------------------------
+
+_TRUTH_PROBES = "truth_probes.nc"
+_PROBE_STEM = re.compile(r"window_(\d+)_probes")
+
+
+def probe_record_paths(
+    run_dir: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path | None] | None:
+    """``(truth, posterior, prior | None)`` probe records in ``run_dir``.
+
+    The probe rerun covers **one** window, and ``truth_probes.nc`` is a single
+    unversioned file the rerun overwrites, so which window the *truth* record
+    describes is decided by whichever invocation ran last. That makes the truth's
+    ``window_index`` attribute the authority here: the matching posterior record is
+    the only one it may be paired with. Re-probing window 2 after window 1 leaves
+    ``windows/window_1_probes.nc`` on disk beside a window-2 truth, and pairing
+    those would produce a plausible figure and a wrong LSD, so a truth whose window
+    has no posterior record is refused outright rather than fallen back on.
+
+    The fallback to the highest-numbered record applies only to a truth record that
+    carries no ``window_index`` at all (a hand-made or pre-WP3.2 file), and it is
+    logged.
+
+    The prior record is optional by design: prior probe reruns double the rerun
+    cost and only feed figure S4's grey envelope, so ``None`` in the third slot is
+    a normal outcome, not a degradation.
+
+    Returns ``None`` when there is no truth record or no window record at all,
+    which is every run dir that never had a probe rerun.
+    """
+    run_dir = pathlib.Path(run_dir)
+    truth_path = run_dir / _TRUTH_PROBES
+    windows: dict[int, pathlib.Path] = {}
+    for path in sorted((run_dir / "windows").glob("window_*_probes.nc")):
+        match = _PROBE_STEM.fullmatch(path.stem)
+        if match:
+            windows[int(match.group(1))] = path
+    if not truth_path.exists() or not windows:
+        return None
+
+    wanted: int | None = None
+    try:
+        # Metadata only: the attribute is read without touching the series.
+        with xarray.open_dataset(truth_path) as truth:
+            recorded = truth.attrs.get("window_index")
+        wanted = None if recorded is None else int(recorded)
+    except (OSError, TypeError, ValueError) as error:
+        logger.info("Cannot read %s: %s", truth_path.name, error)
+        return None
+
+    if wanted is None:
+        index = max(windows)
+        logger.info(
+            "%s carries no window_index; pairing it with the highest-numbered "
+            "posterior probe record (window %s) -- check that they are from the "
+            "same rerun",
+            _TRUTH_PROBES,
+            index,
+        )
+    elif wanted not in windows:
+        logger.warning(
+            "%s covers window %s but the only posterior probe records are for %s. "
+            "The truth record is overwritten by every rerun, so this is a stale "
+            "pairing rather than a choice: the spectral check is skipped. Re-run "
+            "scripts/esmda/run_probe_series.py for one window, or delete the stale "
+            "window_*_probes.nc",
+            _TRUTH_PROBES,
+            wanted,
+            sorted(windows),
+        )
+        return None
+    else:
+        index = wanted
+    prior_path = windows[index].with_name(f"window_{index}_probes_prior.nc")
+    return truth_path, windows[index], prior_path if prior_path.exists() else None
+
+
+def _same_probe_window(
+    truth: xarray.Dataset, members: xarray.Dataset, path: pathlib.Path
+) -> bool:
+    """Whether a member record describes the same window as the truth record.
+
+    The filename says one thing and the file's own ``window_index`` says another
+    only when something went wrong -- a record moved by hand, or a rerun that wrote
+    a different window than the name it was given. Both are silent failures
+    otherwise: the spectra would be of two different windows of the flow, which
+    still *looks* like a comparison. Records with no ``window_index`` at all pass,
+    since there is nothing to contradict.
+    """
+    theirs = members.attrs.get("window_index")
+    ours = truth.attrs.get("window_index")
+    if theirs is None or ours is None or int(theirs) == int(ours):
+        return True
+    logger.warning(
+        "%s records window %s but %s records window %s; the spectra would compare "
+        "two different windows, so this pairing is refused",
+        path.name,
+        theirs,
+        _TRUTH_PROBES,
+        ours,
+    )
+    return False
+
+
+def probe_spectra_bundle(run_dir: pathlib.Path) -> dict | None:
+    """Matched Welch spectra from the run's probe records, or ``None``.
+
+    The one place the probe records are located, opened and reduced, called by
+    both the metric stage (which turns the bundle into ``spectral_metrics``) and
+    the figure stage (which draws it as S4) -- so the annotated distances in the
+    figure and the numbers in ``run_summary.yaml`` come off the same arrays.
+
+    The records are the small artifact of the rerun (a handful of sensors x a few
+    thousand frames, megabytes), not window state files, so they are read whole;
+    invariant 2 is about the multi-GB state files this never touches.
+
+    ``None``, with the reason logged, when there are no probe records or they
+    cannot be compared -- see :func:`evaluation.turbulence.probe_spectra` for the
+    latter.
+    """
+    paths = probe_record_paths(run_dir)
+    if paths is None:
+        logger.info(
+            "No probe records in %s; the spectral check is skipped (run "
+            "scripts/esmda/run_probe_series.py on this run dir to write them)",
+            run_dir,
+        )
+        return None
+
+    truth_path, posterior_path, prior_path = paths
+    try:
+        with (
+            xarray.open_dataset(truth_path) as truth,
+            xarray.open_dataset(posterior_path) as posterior,
+        ):
+            if not _same_probe_window(truth, posterior, posterior_path):
+                return None
+            if prior_path is None:
+                return probe_spectra(truth, posterior)
+            with xarray.open_dataset(prior_path) as prior:
+                if not _same_probe_window(truth, prior, prior_path):
+                    # The prior only feeds S4's envelope, so a stale one costs
+                    # itself rather than the whole check.
+                    return probe_spectra(truth, posterior)
+                return probe_spectra(truth, posterior, prior)
+    except (OSError, ValueError, KeyError) as error:
+        # A record that exists but cannot be read (a rerun killed mid-write) costs
+        # the spectral block alone, like every other optional artifact here.
+        logger.warning("Cannot read the probe records in %s: %s", run_dir, error)
+        return None
 
 
 # ---------------------------------------------------------------------------

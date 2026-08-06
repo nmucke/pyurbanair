@@ -171,6 +171,18 @@ The public entry point (called by `BaseForwardModel.__call__`):
 Sets `self.spinup_time = 0.0`. Called by `BaseRolloutForwardModel` after
 window 0 when `spinup_first_step_only=True`.
 
+> **One external caller drives these steps itself.**
+> [`scripts/esmda/run_probe_series.py`](../scripts/esmda/run_probe_series.py)
+> (the high-rate probe re-runs behind the Welch spectrum / figure S4) repeats
+> `run_single`'s launch sequence — `_set_scaling_factors` → `_prepare_warmstart`
+> → `_set_scaling_factors` → `_apply_inflow_settings` → `_clean_output` →
+> `run()` — and replaces only its *collection* step: at a ~1 s cadence one
+> window's snapshots are tens of GB, so each file is reduced to the probe points
+> and unlinked instead of being concatenated into one Dataset. It also keeps
+> `spinup_time` on a warm start (which `run_single` zeroes) to trim the restart's
+> transient. Keep that sequence and the `out_0000_F<iter>.nc` layout in mind when
+> refactoring `run_single`.
+
 ### `EnsembleForwardModel`
 
 [`libs/pylbm/src/pylbm/ensemble_forward_model.py`](../libs/pylbm/src/pylbm/ensemble_forward_model.py)
@@ -541,10 +553,43 @@ cause is invisible. **To see Fortran error messages, add
 `model.forward_model.verbose=true` to the CLI.** This is the first thing to try
 when LBM produces no output or all members fail.
 
+### Restart filename width: Python writes i9.9, the pinned Fortran reads i6.6
+
+**Verified on the current pin (2026-08-06).** `write_restart_file_from_xarray`
+names the restart it writes `restart_0000_<iter:09d>.uf`, but
+`m_readrestart.F90`/`m_saverestart.F90` at the recorded submodule commit
+(`2635d44`) format the iteration with `i6.6` — as do the output files
+(`m_diag.F90`). So:
+
+- A **Python-authored warm start is invisible to the solver.** `readrestart`
+  prints `restart file does not exist: restart/restart_0000_<iter:06d>.uf` and
+  calls `stop`, which exits **0** (a Fortran `stop` is a success exit), so the
+  wrapper sees no `CalledProcessError` — only an empty output dir and a
+  `FileNotFoundError` from `_get_output_files_for_current_run`.
+- Where a *stale* 6-digit restart with the same iteration number is still in the
+  experiment dir — which is exactly the situation in a rollout, because the
+  solver wrote one itself at the end of the previous window — that file is read
+  instead, **silently**, and the state the wrapper handed in is discarded. The
+  run continues and looks healthy.
+- Output collection is unaffected: `_get_output_files_for_current_run` globs
+  `out_0000_F(\d+)` and is width-agnostic.
+
+`MAX_ITERATION = 999_999_999` and the `:09d` formatting were introduced for a
+newer LBM (commit `2ff4a05`); commit `68d3aa4` later moved the submodule pin back
+to the last commit CI could build, leaving the two sides inconsistent. Fixing it
+properly (match the width the compiled sources use, or bump the pin) changes the
+physics of every pylbm rollout warm start, so it has not been done as a side
+effect of another change. `scripts/esmda/run_probe_series.py` — which is nothing
+but a warm start and therefore cannot tolerate either failure mode — hard-links
+each restart it writes to the legacy 6-digit name locally
+(`_link_restart_for_solver`) and says why.
+
 ### Iteration filename field width — i9.9 overflow
 
-LBM output and restart files encode the iteration in a 9-digit fixed-width
-Fortran format field. `_set_scaling_factors` guards against this:
+The Python side formats iterations into a 9-digit fixed-width field (the
+*pinned* Fortran sources use `i6.6` — see the previous gotcha, which is the live
+inconsistency; this guard is about the wider field's own ceiling).
+`_set_scaling_factors` guards against overflowing it:
 
 ```python
 MAX_ITERATION = 999_999_999  # forward_model.py top-level constant

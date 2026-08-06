@@ -208,7 +208,7 @@ def create_validation_points(
 def create_observation_operator(
     obs_cfg: Any,
     solver_name: str,
-) -> TemporalObservationOperator:
+) -> ObservationOperator | TemporalObservationOperator:
     obs = _plain(obs_cfg)
     obs_x, obs_y, obs_z = create_observation_points(obs)
     operator = ObservationOperator(
@@ -218,6 +218,10 @@ def create_observation_operator(
         obs_states=obs["states"],
         solver_name=solver_name,
     )
+
+    if ("temporal_mode" not in obs) or (obs["temporal_mode"] is None):
+        return operator
+
     return TemporalObservationOperator(
         operator,
         mode=obs["temporal_mode"],
