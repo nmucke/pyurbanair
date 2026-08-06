@@ -61,13 +61,19 @@ def _assert_probe_schema(
         assert ds[coord].dims == ("sensor",)
     assert ds.attrs["member_source"] == member_source
     assert ds.attrs["window_index"] == 0
-    assert ds.attrs["output_frequency"] == pytest.approx(_PROBE_FREQUENCY)
+    # The ACHIEVED cadence, not the requested one: `iout = round(cadence/dt)` is an
+    # integer and `dt` comes from the member's own velocity scale, so the request is
+    # almost never hit exactly (0.5 s asked, 0.5067 s delivered here). What must
+    # hold exactly is that the attr equals the axis it labels; the request is only
+    # approached.
+    achieved = float(ds.attrs["output_frequency"])
+    assert achieved == pytest.approx(_PROBE_FREQUENCY, rel=0.2)
     assert ds.attrs["spinup_time"] == pytest.approx(_PROBE_SPINUP)
     assert ds.attrs["cadence_fallback"] == 0
     # Time is seconds from the window start, uniformly sampled at the probe
     # cadence (the discarded lead-in is not in it).
     assert ds["time"].values[0] == pytest.approx(0.0)
-    assert np.allclose(np.diff(ds["time"].values), _PROBE_FREQUENCY)
+    assert np.allclose(np.diff(ds["time"].values), achieved)
     assert np.isfinite(ds["u"].values).all()
 
 
@@ -85,13 +91,20 @@ def test_run_probe_series_smoke(
     probe_cfg = compose_test_cfg(
         [
             # The probe run must be composed like the run it re-probes (the
-            # script cross-checks the saved config), plus the probes knobs. The
-            # ESMDA run above just built the binary into the shared test build
-            # tree for this exact grid, so skip the rebuild.
+            # script cross-checks the saved config), plus the probes knobs.
+            #
+            # It must COMPILE, even though the ESMDA run above just built a binary
+            # for this exact grid into the shared test build tree: the experiment
+            # name is compiled in (mod_dimensions + the geometry case), and the
+            # probe models are constructed under `_PROBE_EXPERIMENT` precisely so
+            # they cannot touch the assimilation run's experiment dir. So that
+            # binary is stamped `runcase`, `compile=false` sees a stale stamp and
+            # refuses, and the extra build is the price of that isolation. (On a
+            # developer machine whose build cache already holds a probe-stamped
+            # binary this passes either way, which is exactly why it took CI on a
+            # clean cache to catch.)
             "case=xie_and_castro",
             *_ESMDA_MODE,
-            "truth_model.compile=false",
-            "assim_model.compile=false",
             f"probes.run_dir={run_dir}",
             "probes.window_index=0",
             f"probes.output_frequency={_PROBE_FREQUENCY}",

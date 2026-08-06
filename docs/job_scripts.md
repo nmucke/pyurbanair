@@ -481,10 +481,17 @@ member (plus the discarded `probes.spinup_time` lead-in), parallelised over
 `ensemble.num_parallel_processes` exactly like the assimilation ensemble. Two
 practical notes: give it its own `paths.experiment_dir` (it clones per-member
 experiment dirs under `<experiment_dir>/probe_experiments/`, and sharing scratch
-with a running job is asking for trouble), and pass
-`assim_model.compile=false truth_model.compile=false` when the binary in the
-build tree already matches the grid. Use `probes.max_members=<N>` to probe a
-subset and `probes.include_prior=true` to add the prior envelope.
+with a running job is asking for trouble), and expect it to **compile once**.
+`compile=false` does *not* let it borrow the assimilation run's binary: the
+experiment name is compiled in, and the probe models are built under
+`probe_runcase` exactly so they cannot reach the run's `runcase` experiment dir,
+so a `runcase`-stamped binary reads as stale and the build is refused.
+`compile=false` is only useful for a REPEAT probe run against a build tree that
+already holds a probe-stamped binary — and note that moving
+`paths.experiment_dir` moves the build tree with it (`<experiment_dir>/lbm_build`),
+so point `PYLBM_BUILD_ROOT` (or `PYLBM_LBM_PATH`) at the cached tree rather than
+trying to keep both. Use `probes.max_members=<N>` to probe a subset and
+`probes.include_prior=true` to add the prior envelope.
 
 Writes into the run dir: `truth_probes.nc`, `windows/window_{w}_probes.nc` and
 (opt-in) `windows/window_{w}_probes_prior.nc`. It changes no existing artifact.
