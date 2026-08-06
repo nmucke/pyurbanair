@@ -15,6 +15,25 @@ Writes, into the run directory:
   * ``rollout_animation.mp4``      -- ensemble-mean |U| field vs the truth.
   * ``final_state_with_obs.png``   -- final |U| field with the sensor locations.
   * ``sensor_timeseries_<set>.png`` -- truth vs ensemble |U| at each sensor set.
+  * ``parameter_marginals.png``    -- prior vs posterior marginal per parameter.
+  * ``station_profiles.png``       -- mean-velocity / TKE profiles at the sensor
+                                      columns (needs ``eval_fields.nc``).
+  * ``mean_slices.png``            -- time-mean field slices, truth vs prior vs
+                                      posterior vs difference (same file).
+  * ``sensor_fans.png``            -- sensor quantile fans with the observations.
+  * ``rank_histogram.png``         -- rank histogram of the window statistics
+                                      (needs ``run_summary.yaml``).
+
+Of the last five (WP1.5), three read an artifact an old run dir may not have --
+``station_profiles.png`` and ``mean_slices.png`` need ``eval_fields.nc``,
+``rank_histogram.png`` needs ``run_summary.yaml``'s ``sensor_statistics`` block
+-- and each degrades to a printed skip line when it is absent, so a run whose
+metric stage predates those still gets every figure it can support. The other
+two read artifacts every run dir has: the parameter datasets
+(``parameter_marginals.png``) and the sensor series extracted above
+(``sensor_fans.png``). This script owns all the run-dir layout, config and YAML
+knowledge; the figure functions in ``evaluation.figures`` are handed opened
+datasets and plain dicts (master-plan invariant 5).
 
 Honors ``run.skip_viz`` (set in the saved config): a no-op when true, mirroring
 the old in-script behaviour.
@@ -25,11 +44,13 @@ Usage::
 """
 
 import argparse
+import logging
 import pathlib
 import sys
 
 import numpy as np
 import xarray
+from omegaconf import OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise)
 
@@ -38,10 +59,16 @@ if __package__ is None or __package__ == "":
 
 from evaluation.figures import (
     plot_final_state_with_obs,
+    plot_mean_slices,
     plot_parameter_error,
+    plot_parameter_marginals,
+    plot_rank_histogram,
     plot_rollout_time_evolution,
+    plot_sensor_fans,
     plot_sensor_timeseries,
+    plot_station_profiles,
 )
+from evaluation.scores import compute_sensor_metrics
 from evaluation.sensors import sensor_magnitude
 from evaluation.turbulence import select_z_plane, streaming_state_rmse
 
@@ -56,6 +83,73 @@ from scripts.esmda._esmda_common import (
     read_yaml,
     truth_sensor_series,
 )
+
+
+def _note_skipped(output_path: pathlib.Path, written: pathlib.Path | None) -> None:
+    """Say so when a figure no-oped on inputs that were present but unusable.
+
+    The WP1.5 figures return the path they wrote, or ``None`` when their inputs
+    were empty or degenerate (a 2-member smoke ensemble has no meaningful KDE,
+    a run with no sensors has no station columns). The reason is logged by the
+    figure itself; this only makes the *absence* visible in the stage's own
+    print-based output, so a missing PNG is never a silent one.
+    """
+    if written is None:
+        print(f"Skipped {output_path.name}: its inputs were absent or degenerate")
+
+
+def _reference_velocity(true_params: xarray.Dataset) -> float | None:
+    """The truth's inflow speed, for normalizing the S1 profiles by ``U_ref``.
+
+    ``velocity_magnitude`` is the run's free-stream inflow parameter (see
+    ``conf/params/static.yaml``), so the truth's value is the natural reference;
+    a time-varying truth is averaged over its knots, since one profile figure
+    covers the whole run. ``None`` -- which the figure reads as "plot in m/s" --
+    when the case does not carry that parameter at all (a pressure-gradient
+    driven run) or when its value is not a usable positive number.
+    """
+    if "velocity_magnitude" not in true_params:
+        return None
+    values = np.asarray(true_params["velocity_magnitude"].values, dtype=float)
+    # Filtered before the mean rather than with ``nanmean``: an all-non-finite
+    # parameter is a documented null path here, not something to warn about.
+    finite = values[np.isfinite(values)]
+    if not finite.size:
+        return None
+    u_ref = float(finite.mean())
+    return u_ref if u_ref > 0.0 else None
+
+
+def _rank_counts(summary: dict) -> dict:
+    """``{set: {half: {statistic: counts}}}`` out of ``run_summary.yaml``.
+
+    The YAML shape is this script's business, not the figure's (invariant 5):
+    ``sensor_statistics[set]`` holds the ensemble sizes beside a ``posterior``
+    (and, under ``run.save_prior_state``, a ``prior``) mapping of statistic name
+    to its scored entry, of which figure D1 wants only ``rank_counts``. Anything
+    that is not shaped like that -- an older summary whose sets carry no halves,
+    a half whose entries predate the rank counts -- is dropped rather than
+    guessed at, and an empty result is the caller's cue to skip the figure.
+    """
+    counts: dict = {}
+    for name, block in (summary.get("sensor_statistics") or {}).items():
+        if not isinstance(block, dict):
+            continue
+        halves = {}
+        for half in ("prior", "posterior"):
+            entries = block.get(half)
+            if not isinstance(entries, dict):
+                continue
+            per_statistic = {
+                statistic: entry["rank_counts"]
+                for statistic, entry in entries.items()
+                if isinstance(entry, dict) and entry.get("rank_counts")
+            }
+            if per_statistic:
+                halves[half] = per_statistic
+        if halves:
+            counts[name] = halves
+    return counts
 
 
 def make_figures(run_dir: pathlib.Path) -> None:
@@ -96,10 +190,24 @@ def make_figures(run_dir: pathlib.Path) -> None:
     rmse = streaming_state_rmse(true_state, posterior_state)
 
     # Boundaries between assimilation windows on the (rebased) global time axis,
-    # used to lightly shade alternating windows in the parameter plot.
+    # used to lightly shade alternating windows in the parameter plot. Gated on
+    # ``is_dynamic`` because a STATIC parameter's x-axis is a window index, not a
+    # time -- ``_concat_windows`` only rebases onto ``w * sim_time`` when the
+    # parameters are dynamic -- so shading it at ``w * sim_time`` would mark the
+    # wrong places.
     window_edges = (
         list(np.linspace(0.0, sim_time * num_windows, num_windows + 1))
         if is_dynamic and num_windows > 1
+        else None
+    )
+    # S5's x-axis is physical time on EVERY run: ``ensemble_sensor_series``
+    # rebases window ``w`` onto ``w * sim_time`` regardless of whether the
+    # parameters are dynamic, so a static multi-window run (conf/run_esmda.yaml
+    # documents one) has real window boundaries to mark even though its
+    # parameter plots get none. Hence a second, dynamics-independent edge list.
+    sensor_window_edges = (
+        list(np.linspace(0.0, sim_time * num_windows, num_windows + 1))
+        if num_windows > 1
         else None
     )
 
@@ -162,21 +270,154 @@ def make_figures(run_dir: pathlib.Path) -> None:
         ta["assim_solver_name"],
         sim_time,
     )
+    # The |U| series the S5 fans draw, collected here rather than re-extracted:
+    # this is the only pass over the window state files the figure stage makes
+    # (master-plan invariant 2).
+    fan_truth: dict[str, np.ndarray] = {}
+    fan_ensemble: dict[str, np.ndarray] = {}
+    fan_times: np.ndarray | None = None
+    shared_time_axis = True
     for name, (sx, sy, sz) in sensor_sets.items():
+        true_magnitude = sensor_magnitude(truth_series[name])
+        ensemble_magnitude = sensor_magnitude(ensemble_series[name])
+        # ``compute_sensor_metrics`` is the library's own aligner -- it
+        # interpolates the truth onto the ensemble's time axis per sensor, so
+        # the fan and the time-series figure draw the identical truth curve on
+        # the identical axis rather than two near-copies of it.
+        # ``plot_sensor_timeseries`` recomputes the same alignment internally
+        # from its two DataArray arguments (a WP0.2 signature this WP does not
+        # widen), so the call runs twice per sensor set. Measured at 0.06 s on a
+        # real run -- not worth a signature change to remove.
+        aligned = compute_sensor_metrics(true_magnitude, ensemble_magnitude)
         plot_sensor_timeseries(
-            true_sensor=sensor_magnitude(truth_series[name]),
-            ensemble_sensor=sensor_magnitude(ensemble_series[name]),
+            true_sensor=true_magnitude,
+            ensemble_sensor=ensemble_magnitude,
             output_path=run_dir / f"sensor_timeseries_{name}.png",
             title=f"State at {name} sensors",
             sensor_x=sx,
             sensor_y=sy,
             sensor_z=sz,
         )
+        fan_truth[name] = aligned["truth"]
+        fan_ensemble[name] = aligned["members"]
+        # S5 draws every sensor set against ONE x-axis, so the sets have to
+        # agree on it. They do today -- all of them are extracted from the same
+        # window state files, so they share the assimilation grid's frames -- and
+        # this only guards the case where they stop agreeing: passing the last
+        # set's clock for all of them would silently slide the other columns.
+        if fan_times is None:
+            fan_times = aligned["time"]
+        elif fan_times.shape != aligned["time"].shape or not np.allclose(
+            fan_times, aligned["time"]
+        ):
+            shared_time_axis = False
+
+    if not shared_time_axis:
+        print(
+            "Sensor sets do not share one time axis; sensor_fans.png falls back "
+            "to a frame index rather than drawing them against each other's clock"
+        )
+        fan_times = None
+
+    # --- WP1.5 evaluation figures --------------------------------------------
+    # Each of these is skipped, with a printed line, when the artifact it reads
+    # is absent, and a skip never costs the figures after it (master-plan
+    # invariant 3): ``eval_fields.nc`` only exists for runs whose metric stage
+    # ran post-WP1.4, the ``sensor_statistics`` block only post-WP1.3, and the
+    # prior halves of both only under ``run.save_prior_state``. All of the layout
+    # and config knowledge lives here -- the figures are handed opened datasets,
+    # numpy arrays and plain dicts, so ``libs/evaluation`` stays a leaf.
+    marginals = run_dir / "parameter_marginals.png"
+    _note_skipped(
+        marginals,
+        plot_parameter_marginals(
+            posterior_params=posterior_params,
+            true_params=true_params,
+            output_path=marginals,
+            prior_params=prior_params,
+        ),
+    )
+
+    # Canopy height for S1's ``z/H`` axis and its roof line, when the case
+    # carries one. Optional and absent from every shipped case today (the
+    # geometry is an STL, not a config scalar), so this is read the same way as
+    # ``esmda.obs_error_std`` and simply not passed when it is missing --
+    # CLAUDE.md's no-op-when-absent rule. Note the path: the ``case`` group is
+    # ``# @package _global_``, so its keys land at the config root and the
+    # canopy scalar belongs beside the rest of the geometry, not under a
+    # ``case:`` node (there is none).
+    building_height = OmegaConf.select(cfg, "geometry.building_height", default=None)
+
+    eval_fields_path = run_dir / "eval_fields.nc"
+    if eval_fields_path.exists():
+        # The averaging window, the stride, the fluid mask and the station
+        # labels all travel inside this file, so neither figure reopens anything
+        # else -- and neither re-streams the window states the file exists to
+        # replace.
+        with xarray.open_dataset(eval_fields_path) as fields:
+            profiles = run_dir / "station_profiles.png"
+            _note_skipped(
+                profiles,
+                plot_station_profiles(
+                    fields,
+                    profiles,
+                    u_ref=_reference_velocity(true_params),
+                    building_height=(
+                        None if building_height is None else float(building_height)
+                    ),
+                ),
+            )
+            slices = run_dir / "mean_slices.png"
+            _note_skipped(slices, plot_mean_slices(fields, slices))
+    else:
+        print(
+            f"No eval_fields.nc in {run_dir}; skipping station_profiles.png and "
+            "mean_slices.png (re-run scripts/esmda/compute_esmda_metrics.py on "
+            "this run dir to write it)"
+        )
+
+    # The observation error the run actually assimilated with: this is the key
+    # run_esmda.py builds C_D from. ``None`` when the saved config predates it,
+    # which S5 degrades on (no envelope) rather than inventing a width. The
+    # realized noisy observations are not persisted before WP2.1, so the band
+    # S5 draws is the clean truth +/- sigma_o and the figure says so itself.
+    obs_error_std = OmegaConf.select(cfg, "esmda.obs_error_std", default=None)
+    fans = run_dir / "sensor_fans.png"
+    _note_skipped(
+        fans,
+        plot_sensor_fans(
+            fan_truth,
+            fan_ensemble,
+            fans,
+            times=fan_times,
+            obs_error_std=None if obs_error_std is None else float(obs_error_std),
+            window_edges=sensor_window_edges,
+        ),
+    )
+
+    rank_counts = _rank_counts(read_yaml(run_dir / "run_summary.yaml"))
+    if rank_counts:
+        histogram = run_dir / "rank_histogram.png"
+        _note_skipped(histogram, plot_rank_histogram(rank_counts, histogram))
+    else:
+        print(
+            f"No sensor_statistics rank counts in {run_dir / 'run_summary.yaml'}; "
+            "skipping rank_histogram.png (run scripts/esmda/compute_esmda_metrics.py "
+            "on this run dir first)"
+        )
 
     print(f"Saved figures in {run_dir}")
 
 
 def main() -> None:
+    # Every "why" behind a skipped figure is a ``logger.info`` inside
+    # ``evaluation.figures``; with no handler on the root logger the operator
+    # gets the bare "Skipped x.png" line and none of the reasons. Configured
+    # here, at the entry point, rather than in ``make_figures`` -- importing
+    # this module (the tests do) must not reconfigure anyone's logging.
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -112,7 +112,7 @@ copy-paste.
 | 1.2 | Parameter bundle: z-score, contraction ratio, fair CRPS/CRPSS | [phase1](phase1_metrics_and_figures.md) | S | done | #106 |
 | 1.3 | Sensor-statistics scoring (assimilated + held-out) | [phase1](phase1_metrics_and_figures.md) | S–M | done | #107 |
 | 1.4 | Streaming mean fields + TKE + hit rate `q` | [phase1](phase1_metrics_and_figures.md) | M | done | #108 |
-| 1.5 | Figures P1, S1, S5, F1, D1 | [phase1](phase1_metrics_and_figures.md) | M | not started | — |
+| 1.5 | Figures P1, S1, S5, F1, D1 | [phase1](phase1_metrics_and_figures.md) | M | done | #109 |
 | 2.1 | Persist obs + per-iteration predicted obs / params | [phase2](phase2_obs_persistence.md) | S | not started | — |
 | 2.2 | `O_N` vs ½ + figure D3 | [phase2](phase2_obs_persistence.md) | S | not started | — |
 | 3.1 | Barcelona validation (held-out) sensors | [phase3](phase3_run_upgrades.md) | XS | not started | — |

@@ -748,3 +748,251 @@ lenses.
   `_ensemble_reduction` still runs twice over the posterior slab (once for the
   netCDF, once for the score) — one array, and collapsing it would couple the
   writer to the scorer.
+
+**WP1.5**
+
+- **P1 draws two different knot pairs, chosen by the truth.** The spec says
+  "prior vs posterior" and the first implementation read both marginals at the
+  final knot — which is wrong on any **multi-window run whose estimated
+  parameters have a static truth**, because `prior_params.nc` stacks
+  **every window's** prior along `time` (`run_esmda.py:365-376`). The final
+  column of the prior is therefore window *W−1*'s prior, i.e. window *W−2*'s
+  posterior, and the panel showed a nearly-converged "prior" beside the
+  posterior: no visible contraction, which is the one thing the figure exists
+  to show. Measured on a synthetic 3-window run (per-window prior stds
+  2.0/0.6/0.25): the fixed static branch spans `(1.955, 8.122)`, the old code
+  `(4.748, 5.226)`.
+  **Which runs this actually affects** (an earlier revision of this entry said
+  "the shipped default", and review round 2 disproved it by composing the
+  config): the default estimates `inflow_angle` and `velocity_magnitude`, both
+  of which have a *time-varying* truth under the default
+  `params@truth_params`, so the new discriminator takes the same-knot branch
+  and the fixed code is byte-identical to the old one there. The mode that was
+  drawing the wrong prior is the documented static override —
+  `params@prior_params=static params@truth_params=static_truth
+  esmda.num_assimilation_windows=3` (`conf/run_esmda.yaml:32-34`) — and any
+  other multi-window run whose estimated parameters have a constant truth.
+  The fix cannot be "always use knot 0", because for a genuinely time-varying
+  parameter knot 0 is a *different physical time* and the comparison would be
+  between two different quantities. So the discriminator is the truth itself
+  (`np.allclose` across its finite knots): a **static** truth takes the prior
+  at knot 0 against the posterior at the final knot (the total contraction the
+  run achieved); a **time-varying** truth keeps the same-knot pair (per-window
+  contraction, the only thing available). Both marginals are labelled with the
+  knot they came from in either branch, and the panel title names the branch.
+  Two limits, deliberate: with `true_params=None` there is no discriminator, so
+  the same-knot pair is drawn and labelled as such; and a time-varying truth
+  that happens to be flat reads as static, where the comparison is still valid
+  and only the word "window" in the label is loose.
+- **P1 and `run_summary.yaml` describe different things on a static
+  multi-window run, on purpose.** WP1.2's `contraction_ratio` is per-knot, so
+  its `final` keeps the per-window meaning. The figure's subject is the run,
+  the YAML's is the window. Both are correct; neither was changed to match the
+  other, and `docs/scripts_and_configs.md` states the difference where a reader
+  meets it.
+- **`U_ref` is the truth's `velocity_magnitude` parameter**, and the canopy
+  height is an optional `geometry.building_height`. The spec names `u/U_ref`
+  and `z/H` as conventions but no source for either. `U_ref` falls back to
+  plotting in m/s. No shipped case defines a building height (the geometry is
+  an STL, not a scalar), so S1's `z/H` axis and its roof line are reachable by
+  config but off by default — the key is read the same no-op-when-absent way as
+  `esmda.obs_error_std`, and adding it to the case configs belongs with the
+  phase-3 run upgrades, not here.
+- **S5 draws a `±σ_o` envelope, not observation markers.** The spec says
+  "observations with ±σ_o bars". Pre-WP2.1 the realized noisy observations are
+  not persisted, and the run assimilates the truth at *every* frame in a window
+  (`run_esmda.py:606-619`) — so a marker-per-observation rendering is not the
+  right shape for this pipeline even once WP2.1 lands. The first implementation
+  carried an unreachable `obs_times`/`errorbar` branch for it; the branch was
+  deleted in round 1 and the caption now describes the ribbon it actually draws.
+- **Two spec details were read differently.** S1's columns are ordered
+  held-out-first rather than "upstream / in-canyon / wake" (the sensor sets
+  carry no spatial role, and a profile drawn only where the assimilation was
+  fitted is the least informative one available); D1's rows split by sensor set
+  rather than pooling every set into one panel (the held-out ranks are the
+  anti-overfitting evidence and pooling them with the assimilated ones would
+  hide exactly that).
+- **`style` gained `finite_limits` and `nested_bands`.** Two helpers with two
+  and four call sites — short of the plan's "third caller" rule, but the plan's
+  own charter for `style.py` names "quantile bands, shared norms" as its
+  contents, and a shared norm that each figure computed for itself is the
+  failure the module exists to prevent. F1's masked colormap stayed private to
+  `figures.py`: one caller, no charter mandate.
+- **`figures.py` imports three underscore-private names from `scores.py`**
+  (`_aligned_parameter_members`, `_param_members_and_x`, `_plotted_param_names`);
+  the WP0.2 deviation recorded two. Intra-library, so no invariant-5 issue.
+- **F1 does not apply the `extrapolated_edges` exclusion, while S1 does.** The
+  artefact inflates *second* moments; F1 plots a first moment, where it is
+  small. Recorded in the docstring as a choice rather than left as an omission.
+- **The new figures return `pathlib.Path | None`; the WP0.2 legacy plots return
+  `None` unconditionally.** Two contracts in one module, explained at the WP1.5
+  block header and pinned by tests. Unifying them means touching the moved code,
+  which WP0.2 deliberately did not.
+
+**WP1.5, review round 1.** Two adversarial reviewers, one per lens; the
+correctness one had to be relaunched after dying on a connection error before
+reading anything. The scope lens' headline: ~2.6k lines is earned (~700 of the
+new `figures.py` lines are code, ~140 per multi-panel figure), no new config
+groups, no new artifacts, no registries — the problems were a content bug, a
+false claim, an untested layer and ~90 lines of dead code.
+
+- **The blocker was P1's prior knot** (above). Found by the scope reviewer
+  tracing `prior_params.nc` back to its writer, not by any test — the suite was
+  green on a figure that misrepresented its headline quantity.
+- **Six mutants survived all 53 tests.** The correctness reviewer mutation-tested
+  the suite: P1 annotating `z_score[0]` instead of the drawn knot's, S1 reading
+  the `v` component under a streamwise label, F1 computing its difference on
+  *unmasked* fields, `_station_order` dropping held-out columns first, S5 drawing
+  the truth on a frame index, and `_VERTICAL_CENTRE_DIMS` forgetting the uDALES
+  `zt` spelling — each passed every test. Two named tests were vacuous:
+  `test_station_profiles_keep_the_validation_columns_when_truncating` asserted
+  only that a PNG appeared and a log fired, so the exact inversion it is named
+  for passed; and the solid-cell test could not catch an unmasked difference,
+  because both sentinels were `1e6` and their difference is 0. The `zt` mutant is
+  the one that matters most in practice — PALM does not extrapolate the vertical
+  at all, so `zt` is the spelling for the one backend where the trim ever fires,
+  and it was untested. Each mutant now has a test verified to fail against it.
+- **Two NaN paths degraded into plausible-looking lies.** S5 guarded with
+  `.any()` and then called `np.quantile`, which *propagates* NaN — so one
+  diverged member produced empty bands and an all-NaN median, rendered as a
+  clean truth line with no fan and no log. F1's all-NaN no-op tested the *union*
+  of its columns, while the case that occurs is a single all-NaN source (WP1.4's
+  `_ensemble_reduction` propagates NaN by design); that column rendered entirely
+  in the solid-cell grey, under a caption saying grey means solid — so it read as
+  "the whole domain is a building". S5 now drops non-finite members, logs the
+  count and annotates each panel `M = kept/total`; F1 checks finiteness per
+  column and drops one with a log.
+- **The wiring had zero test coverage**, repeating the lesson WP1.3's round 2
+  recorded verbatim: every e2e ESMDA test runs `run.skip_viz=true`, so the figure
+  stage never executed in CI and `_rank_counts`, `_reference_velocity` and
+  `_note_skipped` were exercised by nothing. Closed with unit tests plus
+  synthetic-run-dir tests that drive `make_figures` on the non-`skip_viz` path,
+  on a complete run dir and on an old one.
+- **Every no-op *reason* was invisible on a real run.** No script under
+  `scripts/` calls `logging.basicConfig`, so the root logger has no handler and
+  the library's `logger.info` lines were dropped — the operator saw
+  `Skipped station_profiles.png` and never why. The tests passed only because
+  `caplog` installs a handler. `main()` now configures logging (the entry point,
+  not `make_figures`, so importing the module stays side-effect free).
+- **S5 lost its window boundaries on static multi-window runs.** `window_edges`
+  was gated on `is_dynamic and num_windows > 1`, which is right for the legacy
+  parameter plots (a static parameter's x-axis is a window index) and wrong for
+  S5, whose x-axis is physical time on every run — `ensemble_sensor_series`
+  rebases window *w* onto `w·sim_time` regardless of dynamics, and
+  `conf/run_esmda.yaml` documents a static-truth 3-window mode. S5 now gets its
+  own dynamics-independent edge list.
+- **The `mypy: ignore-errors` comment asserted something false.** It claimed
+  deleting the waiver left only legacy errors; measured, `figures.py` had 24
+  errors of which 6 were WP1.5's. Fixed to make the claim true: `figures.py` is
+  down to 18, all above the WP1.5 block header, and `style.py` to 6, all legacy.
+  Note the reviewer's *itemisation* was partly wrong even though its headline was
+  right — `_param_axis_label` does not error and the five `save_png` return
+  errors never existed, since `save_png` was already annotated. Measuring beat
+  believing the list.
+- **~90 lines of dead code deleted**, each confirmed callerless first:
+  `plot_sensor_fans`'s `obs_times`/`errorbar` branch and `quantiles` parameter,
+  `plot_mean_slices`'s `component` parameter (now the shared `_STREAMWISE`
+  constant), `nested_bands`' `alphas`/`lw`/`zorder` arguments and its unused
+  return, `_sensor_time_axis`'s length-mismatch fallback, and
+  `_pool_rank_counts`' modal-length guard — the last only after failing to
+  construct a case that reaches it (`rank_counts` is `bincount(minlength=M+1)`
+  from one ensemble, so a cell's vectors cannot differ in length). S5's invented
+  `np.linspace` truth axis went too: it assumed the truth was uniform over
+  exactly the ensemble's span, and the reviewer demonstrated a 1.897 error on a
+  unit-amplitude signal when it is not. A length mismatch now logs and skips the
+  truth line rather than drawing a wrong one.
+- **`z = n/a` covered three opposite diagnoses** — no truth saved, posterior
+  collapsed, parameter pinned. Each now has its own string.
+- **Smaller fixes:** P1's `parameter_bundle` call is wrapped in
+  `catch_warnings` (an `inf` member printed a numpy `RuntimeWarning` to the
+  operator's console for a value then displayed as `n/a`);
+  `_station_profile`/`_slab_component` return `None` instead of silently falling
+  back to `isel(component=0)`, which could draw `u` under a `w` label; a
+  zero-length `zlev` no-ops instead of raising (invariant 3); S1's streamwise
+  assumption (`u` is streamwise only because the shipped configs put the inflow
+  along +x) is documented rather than knobbed.
+- **Reported and deliberately not changed.** `compute_sensor_metrics` runs twice
+  per sensor set — once inside `plot_sensor_timeseries`, once for S5's numpy
+  payload — because the two take different argument types and the legacy
+  signature is WP0.2's; measured at 0.06 s. The duplication is now stated in the
+  comment that used to justify only the alignment.
+
+**WP1.5, review round 2.** A fresh sweep over the round-1 fixes, which were
+themselves unreviewed code, plus a second mutation campaign — 13 new mutants of
+the reviewer's own design, aimed at the round-1 fix code. **Eleven survived.**
+The pattern behind all of them: the suite pinned figure *content* but never
+*identity per row, column, station or sensor*.
+
+- **The round-1 deviation record misdescribed its own blocker.** It said P1 drew
+  the wrong prior "on the shipped default". The reviewer composed the default
+  config and sampled the truth model: both estimated parameters
+  (`inflow_angle`, `velocity_magnitude`) have a time-varying truth, so the new
+  discriminator takes the same-knot branch and the fixed code is byte-identical
+  to the old one there. The bug is real but affects the documented *static
+  override* mode. Corrected above. Same class of finding as WP1.4's round 2 —
+  a record that misdescribes the code is itself a defect, and it is worth noting
+  that both times it was caught by composing the config rather than by reading.
+- **F1's difference column had no sign test, and inverting it passed
+  everything.** `truth − posterior` under a panel titled "Posterior − truth"
+  survived all 83 tests, because `diff_max` is `max|·|` — the symmetric norm is
+  unchanged and there is no visual tell, so every bias on the figure would read
+  backwards. Round 1 had added a test that the difference is *masked* (NaN-ness
+  only) and one that its norm is *symmetric* (sign-blind by construction). The
+  new test sets `posterior = truth + c` and asserts the image equals `+c` on the
+  fluid cells: sign and magnitude.
+- **Three more figures would have rendered a plausible-looking lie**, each
+  wrong on *every real run* rather than in a corner case: S5 drawing sensor 0's
+  truth on every sensor row; F1 labelling each row by its row index rather than
+  the z-level it draws (wrong whenever `n_zlev > max_levels`, which is always);
+  and S1 printing station coordinates by column position rather than station
+  index (wrong whenever `_station_order` reorders, which is whenever a held-out
+  column exists). All three are now pinned by identity assertions.
+- **F1 dropped its subject column invisibly.** Round 1 made an all-NaN column
+  drop out of the grid with a log — but the log is not on the PNG, and the
+  function still returned a path, so `_note_skipped` printed nothing and the
+  figure read as a complete "Truth | Prior mean" pair. A dead column now keeps
+  its grid slot as a labelled empty panel ("no finite cell", with a per-column
+  hint), which is what round 1 had done for S5's `M = kept/total` and should
+  have done here. Applied to every column, not just the posterior: an all-NaN
+  posterior implies an all-NaN difference, which would otherwise vanish too.
+  A column the run never *wrote* (no saved prior) is still absent from the grid
+  — absent and dead are different things.
+- **S5's `±σ_o` envelope was drawn outside the panel's y-limits.** The limits
+  were computed from the fan and the truth only, so whenever σ_o exceeds the
+  ensemble spread — reachable at the shipped `esmda.obs_error_std: 0.25` against
+  a narrow series — the ribbon clipped and filled the panel edge to edge,
+  reading as a background tint and destroying the fan-width-vs-σ_o comparison
+  the panel exists for. Measured after the fix: limits `[3.6797, 4.3279]` around
+  an envelope of `[3.7244, 4.2832]`, where before they were `[3.9638, 4.0503]`.
+- **P1's static branch printed a knot count as a window count.** `n_knots`
+  equals the window count only on a pure-static run: a `static_parameters` entry
+  inside a *dynamic* run is broadcast onto the dynamic knot grid (verified —
+  `vertical_inflow_exponent`, which is in the shipped `dynamic_sine` truth and
+  in the CLI example at `conf/run_esmda.yaml:88`, gets 4 knots on a 2-window
+  run). The knot *choice* was right; only the wording was wrong. Every label now
+  says knot and never window, and the two branches are told apart by which knot
+  the prior comes from, which is the actual difference between them.
+- **`_truth_is_static` called a one-finite-knot truth static**, since
+  `np.allclose` over a length-1 array is trivially true. Demonstrated with truth
+  `[nan, nan, 5.0]` against a posterior running 500 → 50 → 5: P1 drew the knot-0
+  prior (400–600) beside the final-knot posterior (~5) in one panel — precisely
+  the "two different quantities in one panel" failure the branch exists to
+  prevent. A truth now needs **two** finite knots to count as static, and an
+  all-NaN truth reads as *no truth* rather than as a time-varying one.
+- **Verified clean on re-inspection**, so a later round need not re-litigate:
+  every round-1 deletion (no callers, no behaviour change), `_pool_rank_counts`'
+  removed guard (genuinely unreachable from the writer),
+  `geometry.building_height` as the config path (the `case` group is
+  `# @package _global_`, so `geometry` is a root node), `sensor_window_edges`,
+  the `zt` claim against `_STAGGERED_TO_CENTRE`, F1's shared norm after a column
+  drop, P1's y-limits including the drawn prior in both branches, invariant 5,
+  `basicConfig` confined to `main()`, and the `mypy: ignore-errors` counts —
+  18 in `figures.py` and 6 in `style.py`, zero at or after the WP1.5 block
+  header. The reviewer also found no vacuous assertions among the round-1 tests;
+  the weakness was coverage, not vacuity.
+- **Still not covered, and named rather than hidden:** the acceptance
+  criterion "P1/S1/S5/F1/D1 render on a real run" is met by hand, not in CI —
+  the wiring tests drive `make_figures` on a synthetic run dir, and every e2e
+  ESMDA test sets `run.skip_viz=true`. Making an e2e run draw figures would add
+  minutes to the suite for the pixels; the synthetic-run-dir tests cover the
+  wiring's control flow, which is what actually broke.
