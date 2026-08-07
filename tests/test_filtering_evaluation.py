@@ -882,6 +882,38 @@ def test_make_figures_draws_the_whole_set_on_a_complete_run_dir(
     ).is_file()
 
 
+def test_every_figure_is_written_on_an_opaque_background(
+    tmp_path: pathlib.Path,
+) -> None:
+    # These PNGs are opened straight out of a run directory, so a transparent
+    # background takes the viewer's -- and on a dark-mode viewer the dark axis
+    # labels, tick text and truth lines land on dark grey and the figure cannot
+    # be read at all. ``evaluation.style.apply_style`` defaults to transparent
+    # because it was written for the paper/slide figures in
+    # scripts/figure_creation/, which ARE composited onto a page the document
+    # owns; ``figures._styled`` pins white over it and each save site passes
+    # ``transparent=False``. Both halves are needed -- an explicit ``savefig``
+    # keyword overrides ``savefig.transparent``, so the rcParam alone is not
+    # enough -- which is exactly the kind of pair that silently comes undone.
+    from PIL import Image
+
+    from scripts.filtering.make_filtering_figures import make_figures
+
+    run_dir = _filtering_run_dir(tmp_path)
+    make_figures(run_dir)
+
+    for name in (
+        "parameter_marginals.png",
+        "station_profiles.png",
+        "mean_slices.png",
+        "sensor_fans.png",
+        "rank_histogram.png",
+    ):
+        with Image.open(run_dir / name) as image:
+            alpha = image.convert("RGBA").getchannel("A")
+        assert alpha.getextrema()[0] == 255, f"{name} has transparent pixels"
+
+
 def test_make_figures_skips_what_a_run_dir_without_the_metric_stage_cannot_support(
     tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
