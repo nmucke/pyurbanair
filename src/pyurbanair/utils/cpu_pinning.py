@@ -161,7 +161,10 @@ def pin_worker_initializer(cpu_queue: "mp.Queue") -> None:
         logger.debug("CPU pinning queue empty; worker pid=%d not pinned.", os.getpid())
         return
     try:
-        os.sched_setaffinity(0, set(cpu_set))
+        # Linux-only; absent from the macOS ``os`` stub, so mypy cannot see
+        # it when the suite is type-checked on a Mac. The call is already
+        # inside the try/except that handles a platform without it.
+        os.sched_setaffinity(0, set(cpu_set))  # type: ignore[attr-defined]
         logger.info(
             "Worker pid=%d pinned to cpus=%s",
             os.getpid(),

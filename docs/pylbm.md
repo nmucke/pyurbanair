@@ -629,6 +629,39 @@ shaped dtypes sized from the grid, which would enable a code path that has never
 executed in production and changes the field every pylbm warm start begins from —
 so it wants its own change with its own stability check, not a drive-by fix.
 
+### A truncated run exits 0, and is now caught
+
+The LBM's error paths call Fortran `stop`, which exits **0**, so
+`subprocess.run(check=True)` returns cleanly and the wrapper is left holding a
+partial run. The collector still finds files and the trims in `run_single` only
+ever *shorten*, so a short member used to pass straight through and surface
+windows later as a broadcast/`AlignmentError` at ensemble assembly — nowhere near
+the member that caused it.
+
+`run_single` now verifies the frame count *before* loading or trimming and raises
+`pyurbanair.base_ensemble_forward_model.ForwardModelRunFailure`, which the
+ensemble runner treats exactly like a `CalledProcessError`: under
+`resample_from_successes` the member is cloned from a survivor, under `raise` it
+aborts. A single non-ensemble run still fails loudly.
+
+The expected count mirrors `m_diag.F90`'s dump rule rather than
+`simulation_time / output_frequency` — those agree only on a cold start:
+
+```
+expected = (nt1 // iout - nt0 // iout) + (0 if nt1 % iout == 0 else 1)
+```
+
+The trailing term is the **warm-start** case. `nt1 - nt0` is always a multiple of
+`iout`, but `nt0` is the previous window's final iteration and
+`iout = C_l/C_u/output_frequency` moves with each member's inflow speed, so
+`nt0 % iout != 0` is normal from window 1 onwards and the run legitimately ends
+one off-grid frame long. A rule derived from the window length alone would flag
+every healthy warm start as truncated.
+
+Only a shortfall is an error; a surplus is trimmed as before. When a member does
+trip this, rerun with `model.forward_model.verbose=true` to see the solver's own
+`stop` message — it is the only place the reason appears.
+
 ### Domain-height SIGFPE
 
 The Boltzmann solver diverges to SIGFPE when the STL building heights exceed the
