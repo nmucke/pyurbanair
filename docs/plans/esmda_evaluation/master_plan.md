@@ -115,7 +115,7 @@ copy-paste.
 | 1.5 | Figures P1, S1, S5, F1, D1 | [phase1](phase1_metrics_and_figures.md) | M | done | #109 |
 | 2.1 | Persist obs + per-iteration predicted obs / params | [phase2](phase2_obs_persistence.md) | S | not started | — |
 | 2.2 | `O_N` vs ½ + figure D3 | [phase2](phase2_obs_persistence.md) | S | not started | — |
-| 3 | xie_and_castro validation (held-out) sensors **+** high-rate probes + Welch spectrum + LSD + figure S4 (WP3.1 and WP3.2 merged) | [phase3](phase3_run_upgrades.md) | M | in review | #110 |
+| 3 | xie_and_castro validation (held-out) sensors **+** high-rate probes + Welch spectrum + LSD + figure S4 (WP3.1 and WP3.2 merged) | [phase3](phase3_run_upgrades.md) | M | done | #110 |
 
 Sequencing: 0 → 1 strictly; 2 after 1.1; 3 after 1.3, last (backend-touching).
 One PR per WP unless a phase plan says otherwise, all
@@ -128,6 +128,20 @@ is too slow to iterate on; the machinery is case-independent) — see the
 phase-3 plan header.
 Phases 0–1 apply retroactively to existing run dirs; phase-2 metrics only
 cover runs executed after WP2.1, older dirs degrading gracefully.
+
+**Outside the WP list: the filtering pipeline** (PR #111, not a planned WP).
+The WP1.5 figures and the metric blocks behind them were ported to
+`scripts/run_filtering_pipeline.sh` on request, so the sequential filter
+(EnKF) is evaluated with the same instruments as the smoothers. The one
+structural difference is what stands in for ESMDA's per-window state files:
+the filter keeps only one analyzed frame per cycle unless
+`run.ensemble_save_on_disk=true`, in which case it keeps every member's full
+forecast segment. Both are supported and which one a run used is recorded in
+`run_summary.yaml`'s `cycle_states`; the weaker one nulls the per-cycle
+variance and takes the TKE moments across cycles instead of within them. See
+[scripts_and_configs.md](../../scripts_and_configs.md) §2.4. S4 has no
+filtering counterpart — the probe records need a dedicated solver rerun, which
+the ESMDA *pipeline* script does not run either.
 
 Cross-cutting cautions:
 
