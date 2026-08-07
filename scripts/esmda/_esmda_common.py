@@ -449,6 +449,102 @@ def probe_spectra_bundle(run_dir: pathlib.Path) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Observation-space diagnostics (phase 2)
+# ---------------------------------------------------------------------------
+
+
+def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
+    """Per-iteration ``O_N`` from the run's observation-space files, or ``None``.
+
+    The one place ``windows/window_{w}_{obs,pred_obs}.nc`` are located, opened
+    and reduced, called by both the metric stage (which turns the bundle into
+    ``esmda_diagnostics``) and the figure stage (which draws it as D3) — so the
+    boxes in the figure and the numbers in ``run_summary.yaml`` come off the
+    same arrays.
+
+    The files are KB-scale (``N_d × M`` floats per iteration), not window state
+    files, so they are read whole; invariant 2 concerns the multi-GB state files
+    this never touches.
+
+    Returns ``{"per_step": [np.ndarray, ...], "num_observations": int,
+    "num_windows": int, "per_window": [np.ndarray (L, M), ...]}``. ``per_step``
+    pools members across windows, one entry per iteration; ``per_window`` keeps
+    them separate, which is what D3 needs to avoid conflating window 0's
+    cold-start prior with a later window's extrapolated one.
+
+    ``None``, with the reason logged, when the run has no such files — every run
+    dir written before WP2.1 or with ``esmda.save_obs_diagnostics=false``.
+    """
+    from evaluation.scores import data_mismatch
+
+    run_dir = pathlib.Path(run_dir)
+    windows_dir = run_dir / "windows"
+    pairs = []
+    for obs_path in sorted(windows_dir.glob("window_*_obs.nc")):
+        match = re.fullmatch(r"window_(\d+)_obs", obs_path.stem)
+        pred_path = (
+            windows_dir / f"window_{match.group(1)}_pred_obs.nc" if match else None
+        )
+        if match and pred_path.exists():
+            pairs.append((int(match.group(1)), obs_path, pred_path))
+    if not pairs:
+        logger.info(
+            "No observation-space files in %s; the data-mismatch diagnostic is "
+            "skipped (rerun with esmda.save_obs_diagnostics=true to write them)",
+            run_dir,
+        )
+        return None
+
+    per_window: list[np.ndarray] = []
+    n_obs = 0
+    for window, obs_path, pred_path in sorted(pairs):
+        try:
+            with (
+                xarray.open_dataset(obs_path) as obs_ds,
+                xarray.open_dataset(pred_path) as pred_ds,
+            ):
+                obs = obs_ds["obs"].values
+                sigma = obs_ds["obs_error_std"].values
+                pred = pred_ds["pred_obs"].values  # (esmda_step, obs, ensemble)
+                # One row per iteration; ``data_mismatch`` validates the shapes.
+                per_window.append(
+                    np.stack(
+                        [
+                            data_mismatch(obs, pred[i], sigma)
+                            for i in range(pred.shape[0])
+                        ]
+                    )
+                )
+                n_obs = max(n_obs, int(np.size(obs)))
+        except (OSError, ValueError, KeyError) as error:
+            # A window killed mid-write costs itself, not the whole diagnostic.
+            logger.warning(
+                "Cannot read the observation-space files for window %d in %s: %s",
+                window,
+                run_dir,
+                error,
+            )
+
+    if not per_window:
+        return None
+
+    # Windows may in principle differ in iteration count (a config changed
+    # between reruns into one dir); pool over whatever each window actually has
+    # rather than assuming a rectangle.
+    n_steps = max(w.shape[0] for w in per_window)
+    per_step = [
+        np.concatenate([w[i] for w in per_window if w.shape[0] > i])
+        for i in range(n_steps)
+    ]
+    return {
+        "per_step": per_step,
+        "per_window": per_window,
+        "num_observations": n_obs,
+        "num_windows": len(per_window),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Scalar / YAML helpers
 # ---------------------------------------------------------------------------
 

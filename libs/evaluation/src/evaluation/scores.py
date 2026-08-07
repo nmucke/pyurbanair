@@ -5,7 +5,8 @@ sweep-figure field/parameter/sensor metrics, and the parameter / sensor bundles
 that assemble them for ``run_summary.yaml`` (moved in WP0.2); CRPSS and
 spread--skill (WP1.1); the §3 parameter calibration bundle -- z-score,
 normalized error, contraction ratio (WP1.2); ranks and the §4.2 window-statistic
-summary (WP1.3); the §4.1 mean-field hit rate ``q`` (WP1.4).
+summary (WP1.3); the §4.1 mean-field hit rate ``q`` (WP1.4); the §5 normalized
+data mismatch ``O_N`` (WP2.2).
 
 Since WP1.1 the pairwise estimators divide by ``M(M-1)`` rather than ``M**2``,
 because the biased form's optimum is a collapsed ensemble -- the exact failure
@@ -1287,3 +1288,158 @@ def hit_rate(predicted, observed, tolerance_d=0.25, tolerance_w=0.0):
         relative = error / np.abs(o)
     hits = scored & ((relative <= tolerance_d) | (error <= w))
     return {"q": float(hits.sum() / n_points), "n_points": n_points}
+
+
+# ---------------------------------------------------------------------------
+# ESMDA health: the normalized data mismatch (metrics doc §5)
+# ---------------------------------------------------------------------------
+
+# Posterior target for O_N and the half-width of the band around it. Under the
+# chi-squared argument (Emerick & Reynolds; Evensen) a correctly conditioned
+# posterior member has ``E[O_N] = 1/2`` with ``Var[O_N] = 1/(2 N_d)``, so the
+# 3-sigma band is ``1/2 ± 3/sqrt(2 N_d)``.
+DATA_MISMATCH_TARGET = 0.5
+
+# The advisory collapse test: an across-member IQR below this fraction of the
+# band's half-width means the members agree on their own mismatch to within the
+# noise the target is defined at. Paired with an off-target median, that is
+# ensemble collapse rather than convergence.
+_COLLAPSE_IQR_FRACTION = 0.1
+
+
+def data_mismatch(obs, pred_obs, obs_error_std):
+    """Normalized data mismatch ``O_N`` per ensemble member (metrics doc §5).
+
+    ``O_N(θ_m) = (1/2N_d)·(d − g(θ_m))ᵀ C_D⁻¹ (d − g(θ_m))`` with the
+    **un-inflated** ``C_D`` — the mean over observations of the squared
+    standardized residual, halved.
+
+    The one diagnostic that separates the two ways an ES-MDA run fails, which no
+    RMSE can: ``O_N`` well above ½ is under-fitting; ``O_N`` well below it means
+    the ensemble is fitting the observation *noise* — an over-aggressive
+    schedule, or a missing localization letting spurious long-range correlations
+    consume the residual.
+
+    Args:
+        obs: The assimilated observations ``d``, shape ``(N_d,)``.
+        pred_obs: Predicted observations ``g(θ_m)``, shape ``(N_d, M)``.
+        obs_error_std: ``sqrt(diag(C_D))``, shape ``(N_d,)`` or a scalar.
+
+    Returns:
+        ``(M,)`` array of ``O_N``, one per member. Observations with a
+        non-finite or non-positive error std, or a non-finite value on either
+        side, are dropped from the average; a member left with none scores
+        ``nan`` rather than 0.
+
+    Raises:
+        ValueError: If ``pred_obs`` is not 2-D or its observation axis does not
+            match ``obs``.
+    """
+    d = np.asarray(obs, dtype=float).ravel()
+    g = np.asarray(pred_obs, dtype=float)
+    if g.ndim != 2:
+        raise ValueError(f"pred_obs must be 2-D (N_d, M), got shape {g.shape}.")
+    if g.shape[0] != d.size:
+        raise ValueError(
+            f"pred_obs has {g.shape[0]} observations but obs has {d.size}."
+        )
+
+    sigma = np.broadcast_to(np.asarray(obs_error_std, dtype=float).ravel(), d.shape)
+    # A zero/negative/non-finite sigma would divide the residual by nothing. It
+    # cannot reach here from a validated C_D (the smoother rejects those at
+    # construction), but these arrays may equally come off an old or hand-edited
+    # run dir, which is not a contract this function controls.
+    usable = np.isfinite(sigma) & (sigma > 0.0) & np.isfinite(d)
+    if not np.any(usable):
+        return np.full(g.shape[1], np.nan)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        standardized = ((d[:, None] - g) / sigma[:, None]) ** 2
+        standardized = np.where(
+            usable[:, None] & np.isfinite(standardized), standardized, np.nan
+        )
+        # An all-nan column -- a member whose forecast failed at every sensor --
+        # scores nan, which the summary then drops.
+        return np.nanmean(standardized, axis=0) / 2.0
+
+
+def data_mismatch_target_band(n_obs):
+    """Half-width ``3/√(2N_d)`` of the 3-sigma band around the ½ target.
+
+    ``None`` when ``n_obs`` is not positive: there is no band without
+    observations, and reporting one would invent a tolerance.
+    """
+    n = int(n_obs)
+    if n <= 0:
+        return None
+    return float(3.0 / np.sqrt(2.0 * n))
+
+
+def data_mismatch_summary(per_step, n_obs):
+    """Reduce per-iteration ``O_N`` values to the ``data_mismatch`` block.
+
+    Args:
+        per_step: Sequence of length ``L`` (the ESMDA iterations, index 0 the
+            prior forecast and −1 the posterior forecast), each entry that
+            iteration's per-member ``O_N`` values — pooled over the run's
+            windows, so a rollout contributes ``W·M`` values per iteration.
+        n_obs: ``N_d`` per window, which sets the target band.
+
+    Returns:
+        The block described in ``phase2_obs_persistence.md``, or ``None`` when
+        no iteration has a finite value (an empty or fully failed history).
+
+    The three flags are **advisory**, and the block carries that in its own
+    ``caveat`` field: the χ² target assumes ``C_D`` covers representativeness
+    error as well as instrument error, and here it does not
+    (``esmda.obs_error_std`` is a single instrument-scale number). A ``C_D``
+    that is too small makes an otherwise healthy run look under-fitted. Read the
+    *trend* across iterations and the across-member spread — neither of which a
+    constant mis-scaling of ``C_D`` moves — before reading the flags.
+    """
+    steps = [np.asarray(v, dtype=float).ravel() for v in (per_step or [])]
+    finite = [s[np.isfinite(s)] for s in steps]
+    if not any(f.size for f in finite):
+        return None
+
+    medians = [float(np.median(f)) if f.size else None for f in finite]
+    iqrs = [
+        float(np.subtract(*np.percentile(f, [75, 25]))) if f.size else None
+        for f in finite
+    ]
+    minima = [float(np.min(f)) if f.size else None for f in finite]
+
+    band = data_mismatch_target_band(n_obs)
+    # The last iteration that produced anything -- not simply ``[-1]``, which
+    # would report ``None`` for a run whose posterior forecast failed outright.
+    final_median = next((m for m in reversed(medians) if m is not None), None)
+    final_iqr = next((q for q in reversed(iqrs) if q is not None), None)
+
+    # Off-target counts as over/under-fitting only outside the band; with no
+    # band (no observations) there is nothing to judge against, hence ``None``
+    # rather than a default-False that would read as "checked, and fine".
+    underfit = overfit = None
+    if band is not None and final_median is not None:
+        underfit = bool(final_median > DATA_MISMATCH_TARGET + band)
+        overfit = bool(final_median < DATA_MISMATCH_TARGET - band)
+
+    collapsed = None
+    if band is not None and final_iqr is not None and final_median is not None:
+        collapsed = bool(
+            final_iqr < _COLLAPSE_IQR_FRACTION * band
+            and abs(final_median - DATA_MISMATCH_TARGET) > band
+        )
+
+    return {
+        "per_step_median": medians,
+        "per_step_iqr": iqrs,
+        "per_step_min": minima,
+        "target": DATA_MISMATCH_TARGET,
+        "target_band": band,
+        "num_observations": int(n_obs),
+        "underfit_final": underfit,
+        "overfit_final": overfit,
+        "collapsed": collapsed,
+        "caveat": "no_representativeness_error",
+    }

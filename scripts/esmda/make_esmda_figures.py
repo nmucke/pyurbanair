@@ -25,8 +25,11 @@ Writes, into the run directory:
                                       (needs the high-rate probe records).
   * ``rank_histogram.png``         -- rank histogram of the window statistics
                                       (needs ``run_summary.yaml``).
+  * ``data_mismatch_decay.png``    -- per-member O_N vs ESMDA iteration against
+                                      the 1/2 target band (needs the per-window
+                                      observation-space files).
 
-Of the last five (WP1.5), three read an artifact an old run dir may not have --
+Of the WP1.5 five, three read an artifact an old run dir may not have --
 ``station_profiles.png`` and ``mean_slices.png`` need ``eval_fields.nc``,
 ``rank_histogram.png`` needs ``run_summary.yaml``'s ``sensor_statistics`` block
 -- and each degrades to a printed skip line when it is absent, so a run whose
@@ -35,7 +38,9 @@ two read artifacts every run dir has: the parameter datasets
 (``parameter_marginals.png``) and the sensor series extracted above
 (``sensor_fans.png``). ``probe_spectra.png`` (phase 3) is skipped the same way,
 and is skipped on almost every run dir: it needs the high-rate probe records only
-an explicit ``scripts/esmda/run_probe_series.py`` rerun writes. This script owns
+an explicit ``scripts/esmda/run_probe_series.py`` rerun writes.
+``data_mismatch_decay.png`` (phase 2) likewise skips on any run dir written
+before WP2.1 or with ``esmda.save_obs_diagnostics=false``. This script owns
 all the run-dir layout, config and YAML knowledge; the figure functions in
 ``evaluation.figures`` are handed opened datasets and plain dicts (master-plan
 invariant 5).
@@ -63,6 +68,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from evaluation.figures import (
+    plot_data_mismatch_decay,
     plot_final_state_with_obs,
     plot_mean_slices,
     plot_parameter_error,
@@ -85,6 +91,7 @@ from scripts.esmda._esmda_common import (
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
+    obs_diagnostics_bundle,
     open_truth,
     probe_spectra_bundle,
     read_yaml,
@@ -432,6 +439,21 @@ def make_figures(run_dir: pathlib.Path) -> None:
                 sensor_sets=spectra["sensor_sets"],
             ),
         )
+
+    # D3 reads the same bundle the metric stage scores, so the boxes and
+    # ``run_summary.yaml``'s ``esmda_diagnostics`` come off one reduction. Absent
+    # on any run dir written before WP2.1 or with
+    # ``esmda.save_obs_diagnostics=false`` -- the bundle logs the reason.
+    mismatch = obs_diagnostics_bundle(run_dir)
+    if mismatch is None:
+        print(
+            f"No observation-space files in {run_dir}; skipping "
+            "data_mismatch_decay.png (rerun the assimilation with "
+            "esmda.save_obs_diagnostics=true to write them)"
+        )
+    else:
+        decay = run_dir / "data_mismatch_decay.png"
+        _note_skipped(decay, plot_data_mismatch_decay(mismatch, decay))
 
     rank_counts = _rank_counts(read_yaml(run_dir / "run_summary.yaml"))
     if rank_counts:

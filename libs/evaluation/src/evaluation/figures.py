@@ -13,8 +13,8 @@ and they take an ``output_path`` and write the file themselves rather than
 returning a ``Figure``. WP0.2 is a pure refactor and keeps both properties;
 changing either is a later cleanup.
 
-Populated in WP0.2 (move), extended in WP1.5 (P1, S1, S5, F1, D1) and phase 3
-(S4).
+Populated in WP0.2 (move), extended in WP1.5 (P1, S1, S5, F1, D1), phase 3
+(S4) and phase 2 (D3).
 """
 
 # mypy: ignore-errors
@@ -36,11 +36,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray
 from evaluation.scores import (
+    DATA_MISMATCH_TARGET,
     _aligned_parameter_members,
     _param_members_and_x,
     _plotted_param_names,
     compute_parameter_metrics,
     compute_sensor_metrics,
+    data_mismatch_target_band,
     parameter_bundle,
 )
 
@@ -66,7 +68,7 @@ from evaluation.turbulence import (
 )
 from matplotlib.axes import Axes
 from matplotlib.collections import PolyCollection
-from matplotlib.colors import Colormap
+from matplotlib.colors import Colormap, LinearSegmentedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
@@ -2774,3 +2776,201 @@ def _lsd_label(
         if np.isfinite(reference):
             label += f" (truth halves {reference:.2f})"
     return label
+
+
+# ---------------------------------------------------------------------------
+# D3 -- data-mismatch decay
+# ---------------------------------------------------------------------------
+
+# Switch to a log y-axis once the medians span at least this many decades: a
+# healthy MDA run drops O_N by one to two orders of magnitude from the prior, and
+# on a linear axis every posterior iteration is then flattened onto zero -- the
+# part of the figure the target band exists to resolve.
+_D3_LOG_DECADES = 1.5
+
+
+def _d3_box_positions(n_steps: int, n_windows: int) -> np.ndarray:
+    """Box centres for ``n_windows`` groups of ``n_steps`` boxes, per iteration.
+
+    Returns an ``(n_windows, n_steps)`` array of x positions: iteration ``i``
+    sits at integer ``i``, and a rollout's windows are offset around it so the
+    per-window boxes read as a cluster rather than overlapping. A single window
+    lands exactly on the integers.
+    """
+    if n_windows <= 1:
+        return np.arange(n_steps, dtype=float)[None, :]
+    # Keep the whole cluster inside 0.8 of an iteration slot so neighbouring
+    # iterations stay visually separate.
+    offsets = np.linspace(-0.4, 0.4, n_windows)
+    return np.arange(n_steps, dtype=float)[None, :] + offsets[:, None]
+
+
+def plot_data_mismatch_decay(
+    bundle: dict | None,
+    output_path: str | pathlib.Path,
+) -> pathlib.Path | None:
+    """D3: per-member ``O_N`` vs ESMDA iteration against the ½ target band.
+
+    ``bundle`` is what ``scripts/esmda/_esmda_common.obs_diagnostics_bundle``
+    returns: ``per_window`` (a list of ``(n_steps, M)`` arrays of
+    :func:`evaluation.scores.data_mismatch` values) and ``num_observations``,
+    which sets the band. Windows are drawn as separate boxes per iteration
+    rather than pooled — window 0's prior is a cold-start draw and a later
+    window's is an extrapolated posterior, so pooling their step-0 boxes would
+    conflate two different objects.
+
+    A healthy run's boxes descend from the prior and settle inside the band. The
+    two failure modes the figure exists to separate: boxes settling **above** the
+    band are under-fitting, boxes settling **below** it mean the ensemble is
+    fitting observation noise. The band's χ² target assumes ``C_D`` includes
+    representativeness error, which it does not here — annotated on the figure,
+    so the trend and the box heights are read before the absolute placement.
+
+    Returns the path written, or ``None`` when the bundle is absent or holds no
+    finite values (an old run dir, or ``esmda.save_obs_diagnostics=false``).
+    """
+    per_window = (bundle or {}).get("per_window") or []
+    windows = [np.atleast_2d(np.asarray(w, dtype=float)) for w in per_window]
+    windows = [w for w in windows if w.size and np.any(np.isfinite(w))]
+    if not windows:
+        logger.info("plot_data_mismatch_decay: no usable data-mismatch values")
+        return None
+
+    n_steps = max(w.shape[0] for w in windows)
+    positions = _d3_box_positions(n_steps, len(windows))
+    band = data_mismatch_target_band((bundle or {}).get("num_observations", 0))
+
+    # Colour the prior end grey and the posterior end teal, interpolating in
+    # between, so the direction of travel is legible without reading the axis.
+    ramp = _step_colors(n_steps)
+
+    # Decided before anything is drawn: a log axis cannot take the band's lower
+    # edge at zero (which happens whenever ``band >= 1/2``, i.e. under ~18
+    # observations), so the floor below depends on this.
+    pooled = np.concatenate([_finite(w) for w in windows])
+    use_log = _spans_decades(pooled, _D3_LOG_DECADES)
+
+    with _styled():
+        fig, ax = plt.subplots(figsize=(1.6 + 1.5 * n_steps, 4.2))
+
+        for w, values in enumerate(windows):
+            for step in range(values.shape[0]):
+                finite = _finite(values[step])
+                if finite.size == 0:
+                    continue
+                box = ax.boxplot(
+                    finite,
+                    positions=[positions[w][step]],
+                    widths=0.8 / max(len(windows), 1) * 0.8,
+                    showfliers=True,
+                    patch_artist=True,
+                    medianprops={"color": COLORS["charcoal"], "lw": 1.4},
+                    flierprops={
+                        "marker": ".",
+                        "markersize": 3,
+                        "markerfacecolor": COLORS["charcoal"],
+                        "markeredgecolor": "none",
+                    },
+                    whiskerprops={"color": COLORS["charcoal"], "lw": 1.0},
+                    capprops={"color": COLORS["charcoal"], "lw": 1.0},
+                    zorder=3,
+                )
+                box["boxes"][0].set_facecolor(ramp[step])
+                box["boxes"][0].set_edgecolor(COLORS["charcoal"])
+                box["boxes"][0].set_alpha(0.85)
+
+        if use_log:
+            ax.set_yscale("log")
+
+        if band is not None:
+            # On a log axis a zero lower edge is off the scale entirely; floor it
+            # at the smallest plotted value instead, so the band still reads as
+            # "everything below the target is inside tolerance".
+            floor = float(pooled.min()) if use_log else 0.0
+            ax.axhspan(
+                max(DATA_MISMATCH_TARGET - band, floor),
+                DATA_MISMATCH_TARGET + band,
+                color=COLORS["window"],
+                alpha=0.25,
+                zorder=1,
+            )
+        ax.axhline(
+            DATA_MISMATCH_TARGET, color=COLORS["charcoal"], ls="--", lw=1.2, zorder=2
+        )
+
+        ax.set_xticks(np.arange(n_steps))
+        ax.set_xticklabels(_d3_step_labels(n_steps))
+        ax.set_xlim(-0.6, n_steps - 0.4)
+        ax.set_xlabel("ESMDA iteration")
+        ax.set_ylabel(r"$O_N$")
+        ax.set_title("Normalized data mismatch per iteration", loc="left")
+
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                color=COLORS["charcoal"],
+                ls="--",
+                lw=1.2,
+                label=r"target $1/2$",
+            )
+        ]
+        if band is not None:
+            handles.append(
+                Patch(
+                    facecolor=COLORS["window"],
+                    alpha=0.25,
+                    label=r"$1/2 \pm 3/\sqrt{2N_d}$",
+                )
+            )
+        if len(windows) > 1:
+            handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color="none",
+                    label=f"{len(windows)} windows, left to right",
+                )
+            )
+        ax.legend(handles=handles, loc="best", fontsize=8)
+        ax.annotate(
+            "band assumes $C_D$ includes representativeness error (it does not);\n"
+            "read the trend and the box heights before the absolute placement",
+            xy=(0.0, -0.22),
+            xycoords="axes fraction",
+            fontsize=7,
+            color=COLORS["charcoal"],
+            va="top",
+        )
+        return save_png(fig, output_path, transparent=False)
+
+
+def _d3_step_labels(n_steps: int) -> list[str]:
+    """Iteration tick labels: ``prior``, the interior indices, ``posterior``."""
+    labels = [str(i) for i in range(n_steps)]
+    labels[0] = "0\nprior"
+    if n_steps > 1:
+        labels[-1] = f"{n_steps - 1}\nposterior"
+    return labels
+
+
+def _step_colors(n_steps: int) -> list[tuple[float, float, float, float]]:
+    """Prior-grey to posterior-teal ramp, one colour per iteration."""
+    ramp = LinearSegmentedColormap.from_list(
+        "d3", [COLORS["prior"], COLORS["posterior"]]
+    )
+    if n_steps <= 1:
+        return [ramp(1.0)]
+    return [ramp(i / (n_steps - 1)) for i in range(n_steps)]
+
+
+def _spans_decades(values: np.ndarray, decades: float) -> bool:
+    """True when the strictly positive ``values`` span at least ``decades``.
+
+    Non-positive values make a log axis impossible, so their presence answers
+    the question ``False`` regardless of the range.
+    """
+    finite = _finite(values)
+    if finite.size == 0 or np.any(finite <= 0.0):
+        return False
+    return bool(np.log10(finite.max() / finite.min()) >= decades)

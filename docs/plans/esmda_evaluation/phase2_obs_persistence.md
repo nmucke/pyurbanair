@@ -114,4 +114,46 @@ esmda_diagnostics:
 
 ## Deviations
 
-_(record here as they occur)_
+Recorded during the WP2.1 + WP2.2 implementation (2026-08-07). Both WPs
+landed as **one PR**, not two: WP2.2 is ~150 lines that only exercise WP2.1's
+files, and splitting them would have merged a persistence format with no
+reader.
+
+1. **The flat-index coordinate is `obs_index`, not `obs`.** The plan asks for
+   "at minimum the flat obs index" on a dimension the observation variable is
+   also called `obs`; xarray refuses a name that is both a data variable and a
+   coordinate. The dimension stays `obs`; the index coordinate on it is
+   `obs_index`. The `obs_sensor` / `obs_state` / `obs_interval` labels are as
+   planned, and the flattening order is in the file attrs.
+2. **`data_mismatch_summary` emits two keys beyond the sketched schema**:
+   `per_step_min` (the plan's prose asks for `min`, its YAML sketch omits it)
+   and `num_observations` (what the band was computed from). Additive within a
+   new block, so invariant 1 is unaffected.
+3. **The three flags are `None`, not `False`, when unjudgeable** — no
+   observations means no band, and a `False` there would read as "checked, and
+   fine". `collapsed` fires only when a vanishing IQR is paired with an
+   off-target median: identical members *on* target are converged, not
+   collapsed.
+4. **The bundle loader lives in `scripts/esmda/_esmda_common.py`**
+   (`obs_diagnostics_bundle`), mirroring `probe_spectra_bundle`, and both the
+   metric and figure stages call it. The alternative — the metric stage writing
+   raw per-member `O_N` values into `run_summary.yaml` for D3 to read back —
+   would have put `W·L·M` floats in the summary for no gain; this way the boxes
+   and the YAML come off one reduction.
+5. **D3 draws per-window boxes rather than pooling the windows.** Window 0's
+   prior is a cold-start draw and a later window's is an extrapolated
+   posterior, so one pooled step-0 box would conflate two different objects.
+   The `run_summary.yaml` block still pools (the plan's schema is per-step, not
+   per-window-per-step); the bundle carries both.
+6. **The `esmda_diagnostics` block is computed above the `skip_viz` gate**, on
+   the same reasoning as WP3's `spectral_metrics`: that flag exists to avoid
+   reading the multi-GB truth, and this block reads only the KB-scale
+   observation-space files.
+7. **`_BaseESMDA._results_dir_or_none()` was extracted** while instrumenting
+   the three `_one_step` sites — the `results_dir if save_on_disk else None`
+   expression already existed verbatim in three places and the new
+   posterior-forecast call site would have been a fourth.
+
+Not done, and deliberately: nothing reads `window_{w}_params_steps.nc`. The
+plan says so explicitly ("kept for future debugging, no diagnostic builds on
+it in this plan").

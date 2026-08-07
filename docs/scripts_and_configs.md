@@ -507,6 +507,16 @@ Stage 1 of the three-script pipeline (see `run_esmda_pipeline.sh`). Saves:
 - Per-window `prior_params.nc`/`posterior_params.nc`, optionally prior state ensemble.
 - Assembled `posterior_state_mean.nc`, `posterior_params.nc`, `prior_params.nc`,
   `true_params.nc`, `truth_access.yaml`, `run_info.yaml`, `config.yaml`.
+- Under `esmda.save_obs_diagnostics=true` (the default), the per-window
+  observation-space arrays: `windows/window_{w}_obs.nc` (`obs` = truth + noise,
+  `obs_clean` = the noise-free projection, `obs_error_std` = `sqrt(diag(C_D))`,
+  with `obs_sensor`/`obs_state`/`obs_interval` labels and the flattening order in
+  the file attrs), `windows/window_{w}_pred_obs.nc`
+  (`pred_obs(esmda_step, obs, ensemble)`, step 0 the prior forecast and −1 the
+  posterior forecast) and `windows/window_{w}_params_steps.nc` (the parameter
+  ensemble at every iteration, kept for debugging). All KB-scale. These feed
+  `run_summary.yaml`'s `esmda_diagnostics` block and figure D3; set the flag
+  false to reproduce the pre-phase-2 artifact set exactly.
 
 Mode is the cross product of:
 - `esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic`
@@ -807,6 +817,26 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   the assimilation's own output cadence is ~30× too coarse for a spectrum — and
   it is the one block computed even under `run.skip_viz`, since it reads only
   those small records and never the truth.
+- `esmda_diagnostics.data_mismatch` — the normalized data mismatch
+  `O_N = (1/2N_d)·(d−g(θ))ᵀ C_D⁻¹ (d−g(θ))` per member per ESMDA iteration,
+  reduced to `per_step_median` / `per_step_iqr` / `per_step_min` (index 0 the
+  prior forecast, −1 the posterior). This is the one diagnostic that separates
+  the two ways an ES-MDA run fails: `O_N` well above the `target` of ½ is
+  under-fitting, `O_N` well *below* it means the ensemble is fitting the
+  observation noise — an over-aggressive schedule or a missing localization —
+  and no RMSE distinguishes those. `target_band` is `3/√(2N_d)`; the
+  `underfit_final` / `overfit_final` / `collapsed` flags compare the last
+  iteration against it, `collapsed` firing only when a vanishing across-member
+  IQR is paired with an off-target median (identical members *on* target are
+  converged, not collapsed). **The flags are advisory**, and the block carries
+  `caveat: no_representativeness_error` saying why: the χ² target assumes `C_D`
+  covers representativeness error and here it is a single instrument-scale
+  `esmda.obs_error_std`, so a too-small `C_D` makes a healthy run look
+  under-fitted. Read the trend across iterations and the member spread — neither
+  moved by a constant mis-scaling of `C_D` — before the flags. Absent on any run
+  dir written before WP2.1 or with `esmda.save_obs_diagnostics=false`; like
+  `spectral_metrics` it is computed even under `run.skip_viz`, reading only the
+  KB-scale observation-space files.
 
 > **`metrics_version`.** The keys above are additive only; when an existing key
 > changes *meaning*, this marker bumps instead. `2` (current) means the fair
@@ -882,11 +912,24 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
   posterior, with the uniform reference and its binomial band. Coarsened to ~10
   rank bins (the summary stores all `M+1`, since binning down is exact and
   binning up is not).
+- `data_mismatch_decay.png` (D3) — per-member `O_N` boxes vs ESMDA iteration
+  against the ½ target band, the figure the ES-MDA literature conditions readers
+  to expect. A rollout's windows are drawn as separate boxes per iteration rather
+  than pooled: window 0's prior is a cold-start draw and a later window's is an
+  extrapolated posterior, so one pooled step-0 box would conflate two different
+  objects. The y-axis goes log once the medians span ≥1.5 decades (a healthy MDA
+  run drops `O_N` by one to two orders of magnitude, which a linear axis flattens
+  onto zero exactly where the band matters). The `C_D` caveat above is annotated
+  on the figure. Reads the same `obs_diagnostics_bundle` the metric stage scores,
+  so the boxes and the YAML come off one reduction; absent whenever
+  `esmda_diagnostics` is.
 
-Four of the last six depend on an artifact a run dir may not have:
+Five of the last seven depend on an artifact a run dir may not have:
 `station_profiles.png` and `mean_slices.png` read `eval_fields.nc`,
 `rank_histogram.png` reads `run_summary.yaml`'s `sensor_statistics` block — both
-written only by a current metric stage — and `probe_spectra.png` reads the probe
+written only by a current metric stage — `data_mismatch_decay.png` reads the
+per-window observation-space files (WP2.1, `esmda.save_obs_diagnostics`), and
+`probe_spectra.png` reads the probe
 records only an explicit probe rerun writes, so it is missing from almost every
 run dir by design. The other two need nothing extra:
 `parameter_marginals.png` reads the parameter datasets and `sensor_fans.png` the
