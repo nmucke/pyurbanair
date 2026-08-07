@@ -89,9 +89,11 @@ probes:
 
   # Lead-in (seconds) prepended to the window and then discarded. The re-run
   # warm-starts from the window's own initial field via an LBM restart file. That
-  # carries the macroscopic field essentially exactly, but its ghost cells and
-  # non-equilibrium stress come from whatever restart template the clone holds
-  # rather than from this member's own history, and the inflow settings and
+  # carries the macroscopic field essentially exactly, but each clone's restart
+  # dir is cleared before it runs (so no earlier invocation's truth field can
+  # seed it), leaving the ghost cells and non-equilibrium stress to be rebuilt
+  # from equilibrium rather than from this member's own history, and the
+  # inflow settings and
   # velocity scale are re-applied for this run — so the series still opens on a
   # short seam, and this trims it. The field is already developed, so this can be
   # much shorter than a cold-start spin-up — cut it per run if the extra solve is

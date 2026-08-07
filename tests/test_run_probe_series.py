@@ -303,6 +303,145 @@ def test_probe_models_are_built_under_their_own_experiment_name(
     assert run_probe_series._PROBE_EXPERIMENT != "runcase"
 
 
+def test_member_clones_never_inherit_a_restart_they_did_not_produce(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compose_test_cfg: Callable[..., DictConfig],
+) -> None:
+    """A SECOND invocation must not seed the members from the first truth solve.
+
+    Cloning before the truth runs protects only the FIRST invocation. The truth
+    model shares the probe experiment dir with the clone template, and
+    ``_probe_window``'s `finally` prunes restarts but keeps the LATEST -- so a
+    finished invocation leaves the truth's final restart in
+    ``probe_runcase/restart/``. ``create_new_forward_model`` copies the whole
+    experiment dir into every clone, and ``_prepare_warmstart`` then reads the
+    newest restart it finds as the ghost-cell / non-equilibrium template and takes
+    ``nt0`` from its iteration -- i.e. the truth's own stress field on the member
+    side of a truth-vs-member diagnostic, which biases the LSD optimistically.
+
+    The leftover clone dir from an aborted invocation (``clone_root`` is only
+    removed on success, and the copy is ``dirs_exist_ok=True``) is the same bug
+    with a stale MEMBER restart, so it is checked here too.
+
+    Driven through the real ``create_new_forward_model`` -- the copy IS the
+    mechanism -- with only ``get_lbm_directory_paths`` stubbed, so no LBM build
+    tree is resolved and nothing compiles.
+    """
+    import dataclasses
+
+    from pylbm.utils import forward_model_utils
+    from pylbm.utils.warm_start_utils import RESTART_FILE_PATTERN, restart_file_name
+
+    from scripts.esmda import run_probe_series
+
+    @dataclasses.dataclass
+    class _Dirs:
+        """The fields ``create_new_forward_model`` and the pruning helpers read."""
+
+        temp_dir: pathlib.Path
+        case_dir: pathlib.Path
+        experiment_base_dir: pathlib.Path
+        experiment_dir: pathlib.Path
+        output_dir: pathlib.Path
+        experiment_name: str
+        cwd: pathlib.Path
+        results_dir: pathlib.Path | None = None
+
+    def _fake_dirs(
+        temp_dir: pathlib.Path,
+        case_dir: pathlib.Path,
+        experiment_name: str,
+        experiment_base_dir: pathlib.Path | None = None,
+        results_dir: pathlib.Path | None = None,
+    ) -> _Dirs:
+        base = pathlib.Path(experiment_base_dir or (temp_dir / "experiment"))
+        return _Dirs(
+            temp_dir=pathlib.Path(temp_dir),
+            case_dir=pathlib.Path(case_dir),
+            experiment_base_dir=base,
+            experiment_dir=base / experiment_name,
+            output_dir=base / experiment_name / "output",
+            experiment_name=experiment_name,
+            cwd=pathlib.Path(temp_dir),
+            results_dir=results_dir,
+        )
+
+    monkeypatch.setattr(forward_model_utils, "get_lbm_directory_paths", _fake_dirs)
+
+    # --- the state a finished (and an aborted) previous invocation leaves behind
+    truth_restart = restart_file_name(1234)
+    truth_bytes = b"the truth solve's final field"
+    experiment_dir = tmp_path / "experiment" / run_probe_series._PROBE_EXPERIMENT
+    (experiment_dir / "restart").mkdir(parents=True)
+    (experiment_dir / "restart" / truth_restart).write_bytes(truth_bytes)
+    # A non-restart artifact of the same dir: the clone still needs everything
+    # else the template holds, so a fix that skips the copy fails here.
+    (experiment_dir / "infile.in").write_text("experiment probe_runcase\n")
+
+    stale_member_restart = restart_file_name(900)
+    stale_clone_restart_dir = tmp_path / "probe_experiments" / "000" / "restart"
+    stale_clone_restart_dir.mkdir(parents=True)
+    (stale_clone_restart_dir / stale_member_restart).write_bytes(b"aborted member 000")
+
+    class _Template:
+        """Stands in for the compiled template model; only its dirs are used."""
+
+        def __init__(self) -> None:
+            self.dirs = _fake_dirs(
+                temp_dir=tmp_path,
+                case_dir=tmp_path / "case",
+                experiment_name=run_probe_series._PROBE_EXPERIMENT,
+            )
+
+    template = _Template()
+
+    def _spy(target: object, **kwargs: object) -> object:
+        # `prepare` (the compile step) is a no-op here; the constructor returns
+        # the template whose experiment dir already holds the truth's restart.
+        return None if "forward_model" in kwargs else template
+
+    monkeypatch.setattr(run_probe_series, "instantiate", _spy)
+    cfg = compose_test_cfg(_ESMDA_MODE, config_name="run_probe_series")
+
+    models, clone_root = run_probe_series._member_models(
+        cfg, 2, sim_time=3.0, output_frequency=1.0, spinup_time=0.0
+    )
+
+    assert len(models) == 2
+    for model in models:
+        clone_dir = model.dirs.experiment_dir
+        assert (clone_dir / "infile.in").exists(), (
+            "the clone lost the rest of the template's experiment dir, which the "
+            "solver needs"
+        )
+        inherited = [
+            path.name
+            for path in (clone_dir / "restart").glob("*")
+            if RESTART_FILE_PATTERN.match(path.name)
+        ]
+        assert inherited == [], (
+            f"clone {clone_dir.name} inherited restart(s) {inherited} it did not "
+            "produce; _prepare_warmstart would read the newest as its "
+            "non-equilibrium template and take nt0 from it"
+        )
+    # Named explicitly, so the assertion above cannot pass by (say) matching the
+    # wrong filename width: the truth's bytes must be nowhere in the clone tree.
+    assert not [
+        path
+        for path in clone_root.rglob("*")
+        if path.is_file() and path.read_bytes() == truth_bytes
+    ], "the truth solve's restart file was copied into a member clone verbatim"
+
+    # The member's OWN warm start is untouched: `_probe_window` still writes the
+    # member's restart from the window state it was handed. What must not survive
+    # is a restart from a run that is not this member's, in this invocation.
+    assert not (stale_clone_restart_dir / stale_member_restart).exists(), (
+        "a leftover clone from an aborted invocation kept its old restart, so "
+        "this member's nt0 continues a run it did not make"
+    )
+
+
 def test_window_snapshots_rejects_a_run_that_died_in_the_lead_in() -> None:
     """A stop inside the lead-in still leaves enough on-grid frames to slice.
 

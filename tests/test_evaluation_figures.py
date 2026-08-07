@@ -174,6 +174,37 @@ def _line_ydata(ax: object) -> list[np.ndarray]:
     return candidates
 
 
+def _filled_bands(ax: Axes, orient: str = "vertical") -> list[tuple[np.ndarray, ...]]:
+    """``(coord, lo, hi)`` of every ``fill_between`` band drawn on ``ax``.
+
+    ``style.nested_bands`` draws each quantile pair as a filled polygon, and a
+    polygon is the only place the *pairing* is recorded -- the numbers never
+    reach a line artist. ``fill_between`` closes the region by walking one edge
+    forward and the other back, so every vertex sits on one of the two edges and
+    the two y values present at a given coordinate ARE ``(lo, hi)``.
+
+    ``orient="horizontal"`` reads a ``fill_betweenx`` band (S1's profiles), whose
+    coordinate axis is y and whose edges are x.
+    """
+    from matplotlib.collections import PolyCollection
+
+    bands: list[tuple[np.ndarray, ...]] = []
+    c_axis, v_axis = (0, 1) if orient == "vertical" else (1, 0)
+    for collection in ax.collections:
+        if not isinstance(collection, PolyCollection):
+            continue
+        paths = collection.get_paths()
+        if not paths:
+            continue
+        vertices = np.concatenate([np.asarray(p.vertices, float) for p in paths])
+        coord = np.unique(np.round(vertices[:, c_axis], 9))
+        at = [vertices[np.isclose(vertices[:, c_axis], c), v_axis] for c in coord]
+        bands.append(
+            (coord, np.array([v.min() for v in at]), np.array([v.max() for v in at]))
+        )
+    return bands
+
+
 def _mappables(fig: Figure) -> list[object]:
     """Everything on the figure that carries a colour norm."""
     found: list[object] = []
@@ -1020,6 +1051,132 @@ def test_station_profiles_render_without_a_reference_velocity(
     _assert_png(plot_station_profiles(fields, out), out)
 
 
+def _one_row_fields(quantity: str, values: np.ndarray, n_z: int) -> xarray.Dataset:
+    """An ``eval_fields`` carrying exactly one profile row, with a known truth.
+
+    Dropping the other quantity leaves ``plot_station_profiles`` a single row,
+    so the panel under test is identified by the dataset rather than by matching
+    an axis label -- the labels are prose and a reworded one must not decide
+    which numbers a test reads.
+    """
+    fields = _eval_fields(
+        n_z=n_z, station_sets=("assimilation",), with_prior=False, slabs=False
+    )
+    other = "tke" if quantity == "mean" else "mean"
+    fields = fields.drop_vars(
+        [
+            v
+            for v in map(str, fields.data_vars)
+            if f"_station_{other}" in v or "_station_uw" in v
+        ]
+    )
+    dims = ("component", "z", "station") if quantity == "mean" else ("z", "station")
+    payload = values[None, :, None] if quantity == "mean" else values[:, None]
+    if quantity == "mean":
+        payload = np.repeat(payload, len(_COMPONENTS), axis=0)
+    fields[f"truth_station_{quantity}"] = (dims, payload.astype(np.float64))
+    return fields
+
+
+def test_station_profiles_divide_tke_by_the_squared_reference_velocity(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # ``k`` is an energy, so its non-dimensionalisation is ``U_ref^2`` while the
+    # mean row's is ``U_ref``. Dividing ``k`` by ``U_ref`` instead leaves a
+    # correctly shaped profile under a correct-looking ``k/U_ref^2`` label, off
+    # by a whole velocity scale -- on every published figure at once. The
+    # reference is chosen so the two divisors disagree (2 vs 4) and the values
+    # are exact in binary, so the drawn numbers pin which one was used.
+    n_z, u_ref = 4, 2.0
+    tke = np.array([4.0, 8.0, 16.0, 32.0])
+    fields = _one_row_fields("tke", tke, n_z)
+
+    plot_station_profiles(fields, tmp_path / "s1.png", u_ref=u_ref)
+
+    lines = _labelled_lines(captured_figures[-1], "Truth")
+    assert len(lines) == 1, f"expected one truth profile, got {len(lines)}"
+    drawn = np.asarray(lines[0].get_xdata(), dtype=float)  # type: ignore[attr-defined]
+    assert drawn == pytest.approx(tke / u_ref**2), (
+        f"k was not divided by U_ref^2: drew {drawn.tolist()}, expected "
+        f"{(tke / u_ref**2).tolist()} (dividing by U_ref alone gives "
+        f"{(tke / u_ref).tolist()})"
+    )
+
+
+def test_station_profiles_divide_the_mean_row_by_the_reference_velocity(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The mean row's counterpart to the check above: ``u/U_ref``, first power.
+    n_z, u_ref = 4, 2.0
+    mean = np.array([1.0, 2.0, 4.0, 8.0])
+    fields = _one_row_fields("mean", mean, n_z)
+
+    plot_station_profiles(fields, tmp_path / "s1.png", u_ref=u_ref)
+
+    lines = _labelled_lines(captured_figures[-1], "Truth")
+    assert len(lines) == 1, f"expected one truth profile, got {len(lines)}"
+    drawn = np.asarray(lines[0].get_xdata(), dtype=float)  # type: ignore[attr-defined]
+    assert drawn == pytest.approx(mean / u_ref), (
+        f"the mean row was not divided by U_ref: drew {drawn.tolist()}, "
+        f"expected {(mean / u_ref).tolist()}"
+    )
+
+
+def test_station_profiles_divide_the_height_by_the_building_height(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # ``z/H`` is what makes the roof line sit at 1, and it is the axis every
+    # canopy comparison in the literature is read against. Multiplying by ``H``
+    # instead rescales the whole ordinate: the profile keeps its shape, the
+    # label still says ``z/H``, and the dotted roof line still lands at 1 --
+    # just at the wrong physical height. ``H = 2`` keeps ``z/H`` and ``z*H``
+    # apart at every level (the two agree only at z = 1).
+    n_z, height = 4, 2.0
+    fields = _one_row_fields("mean", np.array([1.0, 2.0, 4.0, 8.0]), n_z)
+    z = np.asarray(fields["z"].values, dtype=float)
+
+    plot_station_profiles(fields, tmp_path / "s1.png", building_height=height)
+
+    lines = _labelled_lines(captured_figures[-1], "Truth")
+    assert len(lines) == 1, f"expected one truth profile, got {len(lines)}"
+    drawn = np.asarray(lines[0].get_ydata(), dtype=float)  # type: ignore[attr-defined]
+    assert drawn == pytest.approx(z / height), (
+        f"the ordinate is not z/H: drew {drawn.tolist()}, expected "
+        f"{(z / height).tolist()} (z*H would give {(z * height).tolist()})"
+    )
+    # The roof line is drawn at z/H = 1, i.e. at the physical building height:
+    # it has to fall inside the plotted levels for the panel to mean anything.
+    assert float(np.min(drawn)) < 1.0 < float(np.max(drawn))
+
+
+def test_station_profiles_normalise_the_ensemble_bands_too(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The quantile bands take the same scale as the line they surround. A scale
+    # applied to the median but not the bands (or the reverse) draws an envelope
+    # in one unit system around a profile in another, which renders as a wildly
+    # over- or under-dispersed ensemble rather than as a units bug.
+    n_z, u_ref = 4, 2.0
+    fields = _one_row_fields("tke", np.array([4.0, 8.0, 16.0, 32.0]), n_z)
+    raw = np.asarray(fields["posterior_station_tke_quantile"].values, dtype=float)
+    raw = raw[:, :, 0]  # (quantile, z) at the single station
+    outer = (raw[0], raw[-1])
+    z = np.asarray(fields["z"].values, dtype=float)
+
+    plot_station_profiles(fields, tmp_path / "s1.png", u_ref=u_ref, building_height=2.0)
+
+    bands = [
+        band
+        for ax in captured_figures[-1].axes
+        for band in _filled_bands(ax, orient="horizontal")
+    ]
+    assert bands, "no quantile band was drawn around the posterior profile"
+    coord, lo, hi = max(bands, key=lambda b: float(np.mean(b[2] - b[1])))
+    assert coord == pytest.approx(z / 2.0), "the band's ordinate is not z/H"
+    assert lo == pytest.approx(outer[0] / u_ref**2)
+    assert hi == pytest.approx(outer[1] / u_ref**2)
+
+
 def test_station_profiles_draw_the_streamwise_u_component(
     tmp_path: pathlib.Path, captured_figures: list[Figure]
 ) -> None:
@@ -1768,6 +1925,105 @@ def test_sensor_fans_filter_members_on_the_last_frame_too(
         assert np.all(np.isfinite(y)), "the fan ends in NaN: the member was kept"
 
 
+def _ranked_fan(
+    n_members: int = 21, n_times: int = 4
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray]:
+    """One sensor whose members are ``t + 0 .. t + M-1`` at every frame.
+
+    With ``M = 21`` every level in ``_BAND_QUANTILES`` lands on a member exactly
+    (``np.quantile``'s linear rule puts level ``q`` at index ``20 q``), so the
+    5/25/50/75/95 % values are the integers ``t + 1, 5, 10, 15, 19`` -- all
+    distinct, all exact, and none of them equal to any other level's. A median
+    read off the wrong row, or a band paired with the wrong partner, therefore
+    cannot coincide with the right answer.
+    """
+    times = np.arange(float(n_times))
+    members = times[None, :, None] + np.arange(float(n_members))[:, None, None]
+    truth = times[:, None] + 10.0
+    return {"assimilation": truth}, {"assimilation": members}, times
+
+
+def test_sensor_fans_draw_the_median_not_another_quantile(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The line labelled "<fan> median" is the ONLY number a reader takes off S5
+    # by eye, and every quantile row is a plausible, smooth, correctly-shaped
+    # curve: drawing the 5th percentile under a "median" label renders exactly
+    # like the real thing. So the drawn y-data is checked against the 0.5
+    # quantile of the members themselves, computed here rather than by the
+    # figure, and against the neighbouring levels it must NOT be.
+    truth, ensemble, times = _ranked_fan()
+    panel = ensemble["assimilation"][:, :, 0]
+
+    plot_sensor_fans(truth, ensemble, tmp_path / "s5.png", times=times)
+
+    ax = _sensor_row(captured_figures[-1], 0)
+    medians = [line for line in ax.lines if str(line.get_label()) == "Posterior median"]
+    assert len(medians) == 1, f"expected one median line, got {len(medians)}"
+    drawn = np.asarray(medians[0].get_ydata(), dtype=float)
+    assert np.asarray(medians[0].get_xdata(), dtype=float) == pytest.approx(times)
+    assert drawn == pytest.approx(np.quantile(panel, 0.5, axis=0)), (
+        f"the 'median' line is not the 0.5 quantile: drew {drawn.tolist()}, "
+        f"expected {np.quantile(panel, 0.5, axis=0).tolist()}"
+    )
+    for level in (0.05, 0.25, 0.75, 0.95):
+        other = np.quantile(panel, level, axis=0)
+        assert not np.allclose(drawn, other), f"the median line is the {level} quantile"
+
+
+def test_sensor_fans_pair_each_band_with_its_opposite_quantile(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # The fan's caption claims nested 5--95 % and 25--75 % intervals. Pairing
+    # adjacent rows instead (5--25 under the outer alpha, 25--50 under the
+    # inner) draws a fan that is monotone, nested and entirely plausible while
+    # understating the ensemble's spread by roughly half -- the one thing S5
+    # exists to show. The pairs are read off the filled polygons because that is
+    # where the pairing lives; nothing else on the figure records it.
+    truth, ensemble, times = _ranked_fan()
+    panel = ensemble["assimilation"][:, :, 0]
+    wanted = {
+        (0.05, 0.95): (
+            np.quantile(panel, 0.05, axis=0),
+            np.quantile(panel, 0.95, axis=0),
+        ),
+        (0.25, 0.75): (
+            np.quantile(panel, 0.25, axis=0),
+            np.quantile(panel, 0.75, axis=0),
+        ),
+    }
+
+    plot_sensor_fans(truth, ensemble, tmp_path / "s5.png", times=times)
+
+    bands = _filled_bands(_sensor_row(captured_figures[-1], 0))
+    assert len(bands) == len(
+        wanted
+    ), f"{len(bands)} bands drawn, expected {len(wanted)}"
+    for coord, lo, hi in bands:
+        assert coord == pytest.approx(times)
+    unmatched = dict(wanted)
+    for coord, lo, hi in bands:
+        for levels, (want_lo, want_hi) in list(unmatched.items()):
+            if np.allclose(lo, want_lo) and np.allclose(hi, want_hi):
+                del unmatched[levels]
+                break
+    assert not unmatched, (
+        "no band spans "
+        + ", ".join(f"{a:.0%}-{b:.0%}" for a, b in unmatched)
+        + "; the bands drawn were "
+        + "; ".join(f"({lo.tolist()}, {hi.tolist()})" for _, lo, hi in bands)
+    )
+    # The outer (widest) band is the lighter one: a fan whose alphas run the
+    # other way reads as a 25--75 % interval with a faint halo.
+    widths = [float(np.mean(hi - lo)) for _, lo, hi in bands]
+    alphas = [
+        float(c.get_alpha() or 1.0)
+        for c in _sensor_row(captured_figures[-1], 0).collections
+        if c.get_paths()
+    ]
+    assert alphas[int(np.argmax(widths))] < alphas[int(np.argmin(widths))]
+
+
 def test_sensor_fans_mark_the_window_boundaries_they_are_given(
     tmp_path: pathlib.Path, captured_figures: list[Figure]
 ) -> None:
@@ -1987,6 +2243,51 @@ def test_rank_histogram_coarsens_with_array_split_semantics(
             f"{expected_heights} (group widths {[g.size for g in groups]})"
         )
         assert sum(heights) == pytest.approx(total), "the coarsening lost counts"
+
+
+def test_rank_histogram_bars_span_the_rank_bins_they_group(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    # Heights alone do not make a histogram: WHERE each bar sits and how wide it
+    # is are what tie a group of counts to a range of ranks, and the x axis is
+    # in rank units so the unequal ``array_split`` widths are visible. Bars
+    # placed by their centres rather than their left edges shift the entire
+    # histogram by half a bin -- the shape, the totals and the reference step
+    # all survive, but the leftmost bar starts at a negative rank and every
+    # group is read against the wrong ranks. That is exactly the misreading D1
+    # exists to prevent (a U-shape read one bin over is a different diagnosis).
+    #
+    # Expected geometry is written out rather than recomputed with
+    # ``array_split``: for 7 rank bins in 3 groups the widths are [3, 2, 2], so
+    # the bars occupy ranks [0,3), [3,5), [5,7) and carry 1+2+4, 8+16, 32+64.
+    counts = [1, 2, 4, 8, 16, 32, 64]
+    # (left edge, width, height) per bar, flattened so a mismatch prints as
+    # numbers rather than as a nest of tuples.
+    expected = [0.0, 3.0, 7.0, 3.0, 2.0, 24.0, 5.0, 2.0, 96.0]
+
+    plot_rank_histogram(_rank_counts(counts), tmp_path / "d1.png", n_bins=3)
+
+    panels = _bar_axes(captured_figures[-1])
+    assert panels, "no bars on the figure"
+    for ax in panels:
+        bars = sorted(
+            (float(p.get_x()), float(p.get_width()), float(p.get_height()))
+            for p in _rectangles(ax)
+        )
+        drawn = [value for bar in bars for value in bar]
+        assert drawn == pytest.approx(expected), (
+            f"bar geometry {drawn} is not the [0,3)/[3,5)/[5,7) rank groups "
+            f"{expected}; centred bars would start at {expected[0] - 1.5}"
+        )
+        # The bars tile the rank axis exactly: no gap, no overlap, and the last
+        # one ends at ``M + 1``.
+        assert bars[0][0] == pytest.approx(0.0)
+        assert bars[-1][0] + bars[-1][1] == pytest.approx(len(counts))
+    # The reference step and its band are drawn on the same rank axis, so a
+    # half-bin shift of the bars alone would also put them out of register.
+    for ax in panels:
+        left, right = ax.get_xlim()  # type: ignore[attr-defined]
+        assert left <= 0.0 and right >= len(counts)
 
 
 def test_rank_histogram_reference_is_proportional_to_the_group_width(

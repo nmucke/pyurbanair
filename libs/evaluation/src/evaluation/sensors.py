@@ -15,14 +15,14 @@ those are the identifiable quantities and the thing worth scoring.
 Populated in WP0.2 (move), extended in WP1.3.
 """
 
-# mypy: ignore-errors
-# Moved in WP0.2 from ``scripts/esmda/_esmda_common.py``, which carries a
-# file-level mypy waiver; kept here rather than annotated during a pure
-# refactor.
+# WP0.2 moved this module out of ``scripts/esmda/_esmda_common.py`` under a
+# file-level ``# mypy: ignore-errors``. The waiver is gone: every function here
+# is annotated and the module passes the repo's strict config on its own.
 
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 import numpy as np
 import xarray as xr
@@ -41,12 +41,12 @@ QUANTITIES = ("u", "v", "w", "magnitude")
 _BOUNDARY_TOLERANCE = 1e-9
 
 
-def sensor_magnitude(components):
+def sensor_magnitude(components: xr.DataArray) -> xr.DataArray:
     """Velocity magnitude |U| from a ``(component, ...)`` sensor series."""
     return np.sqrt((components**2).sum("component"))
 
 
-def _quantity_series(series):
+def _quantity_series(series: xr.DataArray) -> xr.DataArray:
     """``(component, ...)`` series -> ``(quantity, ...)`` with |U| appended.
 
     One array over :data:`QUANTITIES` so every downstream reduction is a single
@@ -59,7 +59,9 @@ def _quantity_series(series):
     )
 
 
-def window_masks(times, sim_time, num_windows):
+def window_masks(
+    times: np.ndarray, sim_time: float, num_windows: int
+) -> list[np.ndarray]:
     """Boolean time masks, one per assimilation window.
 
     Binning by the *time coordinate* rather than by frame count is what lets the
@@ -95,7 +97,17 @@ def window_masks(times, sim_time, num_windows):
     return [index == w for w in range(num_windows)]
 
 
-def _windowed(series, sim_time, num_windows, reduce_fn, label=""):
+def _windowed(
+    series: xr.DataArray,
+    sim_time: float,
+    num_windows: int,
+    # ``...`` rather than ``[xr.DataArray]``: it is always called with the one
+    # window slice, but :func:`window_sampling_std` passes a lambda that binds
+    # its reducer through a default argument, which mypy will not infer against
+    # a fixed-arity signature. The return type is the part worth pinning.
+    reduce_fn: Callable[..., xr.DataArray],
+    label: str = "",
+) -> xr.DataArray:
     """Apply ``reduce_fn(window_slice)`` per window and stack on a ``window`` dim."""
     quantities = _quantity_series(series)
     masks = window_masks(quantities["time"].values, sim_time, num_windows)
@@ -118,7 +130,9 @@ def _windowed(series, sim_time, num_windows, reduce_fn, label=""):
     return xr.concat(reduced, dim="window").assign_coords(window=np.arange(num_windows))
 
 
-def window_statistics(series, sim_time, num_windows, label=""):
+def window_statistics(
+    series: xr.DataArray, sim_time: float, num_windows: int, label: str = ""
+) -> dict[str, xr.DataArray]:
     """Per-window mean and variance of each quantity at each sensor.
 
     Args:
@@ -151,8 +165,14 @@ def window_statistics(series, sim_time, num_windows, label=""):
 
 
 def window_sampling_std(
-    series, sim_time, num_windows, n_blocks=20, n_resamples=200, rng=None, label=""
-):
+    series: xr.DataArray,
+    sim_time: float,
+    num_windows: int,
+    n_blocks: int = 20,
+    n_resamples: int = 200,
+    rng: np.random.Generator | None = None,
+    label: str = "",
+) -> dict[str, xr.DataArray]:
     """Block-bootstrap sampling std of each :func:`window_statistics` entry.
 
     The noise floor the statistics are read against: how much a member's window
@@ -183,7 +203,13 @@ def window_sampling_std(
     }
 
 
-def _bootstrap_window(window, statistic, n_blocks, n_resamples, rng):
+def _bootstrap_window(
+    window: xr.DataArray,
+    statistic: Callable[..., np.ndarray],
+    n_blocks: int,
+    n_resamples: int,
+    rng: np.random.Generator | None,
+) -> xr.DataArray:
     """One window's bootstrap std, shaped exactly like that window's ``mean``."""
     # ``block_bootstrap_std`` wants time last; the extracted series carries it in
     # the middle (``..., time, sensor``). Dropping ``time`` in place leaves the

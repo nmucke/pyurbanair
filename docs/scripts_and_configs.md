@@ -699,9 +699,14 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
     warning in the run log thresholds on, using this same `mean`) the statistic
     does not clear its own sampling noise at this window length, and its CRPS
     and ranks are measuring the window, not the parameters. Absent when no floor
-    could be measured — the bootstrap needs ≳21 frames per window, so short runs
+    could be measured — the bootstrap needs both ≳15 frames per window *and* a
+    window spanning ≳15 integral time scales of the series itself, so short runs
     (including the CI smoke shape) have none, and an unmeasured floor is unknown
-    rather than infinitely identifiable.
+    rather than infinitely identifiable. The second condition is the binding one
+    on real urban-canopy flow: in-canopy velocity decorrelates over ~140 s, so a
+    300 s window holds ~2 independent samples and the floor is refused outright
+    rather than under-reported. See the phase-3 note in
+    `docs/plans/esmda_evaluation/`.
 
   A sensor set whose state files carry no `ensemble` dimension (an old
   ensemble-mean-only artifact) is dropped from **both** sensor blocks with a
@@ -755,8 +760,9 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   negligible inside a canopy. The file is self-contained by design: the
   averaging window (`t_start`/`t_end`), the stride, the station labels, the
   fluid mask (`slab_fluid`), **which frames the moments were reduced over**
-  (`moment_sampling`) and which axes carry colocation's extrapolated edge
-  (`extrapolated_edges`) are attributes, coordinates or variables here, so a
+  (`moment_sampling`, and whether those frames left gaps —
+  `moment_sampling_is_sparse`) and which axes carry colocation's extrapolated
+  edge (`extrapolated_edges`) are attributes, coordinates or variables here, so a
   figure never reopens the run's other artifacts — or re-derives a mask — to
   draw an honest plot. That last one matters for plotting: every axis colocation
   moves has its **last** index extrapolated from the two faces below it rather
@@ -775,7 +781,29 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   across-cycle variance carrying the analysis increments rather than resolved
   turbulence, and nothing in the numbers says which. The figure stage opens
   this file and not `run_summary.yaml`, so the line has to travel with the data
-  it qualifies; S1 and F1 read it as their `sampling_note`.
+  it qualifies; S1 and F1 take it as their `sampling_note`.
+
+  **`moment_sampling` is provenance; `moment_sampling_is_sparse` is the
+  caveat.** The second attribute is beside it on every `eval_fields.nc` — `0` or
+  `1`, an int because netCDF attributes have no boolean type — and it records
+  whether those frames leave *gaps* in `t_start`–`t_end`, so that the moments
+  are not a continuous time average. **That flag, and not the presence of
+  `moment_sampling`, is what S1 and F1 qualify their labels on.** The note
+  prints on both cycle-state sources, dense and sparse alike; the flag alone
+  drives "time-mean" versus "sample-mean" — F1's colorbar label, title prefix,
+  span preposition (`t = …` versus `sampled over t = …`) and caption, and S1's
+  caption — and it is what marks S1's TKE rows with a `*` (the marker needs a
+  footnote to point at, so it also needs the note). The split is deliberate:
+  sparseness is a property of the frames, not of whether someone wrote a
+  sentence about them. The `forecast` cycle-state source names its frames too
+  and genuinely *is* a continuous time average, so a figure that inferred the
+  caveat from the note's mere presence would qualify it exactly as loudly as it
+  qualifies a one-frame-per-cycle run — and the warning would stop
+  discriminating between the two. ESMDA always writes `0`; the filter writes
+  `1` for every source but `forecast` (§2.4). One asymmetry worth knowing:
+  `make_filtering_figures.py` reads both attributes off the file and forwards
+  them, while `make_esmda_figures.py` reads neither, so on an ESMDA run the
+  wording is right by default but the provenance line is not drawn.
 
   Three things worth knowing about how they are produced. The accumulation
   rides on the *same* pass over the window state files as the sensor
@@ -1064,7 +1092,11 @@ Stage 2. Reads the artifacts saved by `run_filtering.py` and writes
   sampling error. Writes `eval_fields.nc` beside the summary for the figure
   stage, stamping its `moment_sampling` attribute (§2.3) with the cycle-state
   source's own `description` — the same line the `cycle_states` block above
-  carries, put where the figure stage will actually see it. `n_cycles` is the
+  carries, put where the figure stage will actually see it — and its
+  `moment_sampling_is_sparse` attribute with `source.kind != "forecast"`, i.e.
+  `1` under the default `analysis` source and `0` under `forecast`, whose
+  segments tile the run and whose moments therefore *are* a continuous time
+  average. That flag is what S1 and F1 branch on (§2.3). `n_cycles` is the
   run's cycle count; `n_windows` beside it is the number of accumulator chunks,
   which is 1 under the `analysis` source.
 

@@ -17,14 +17,11 @@ Populated in WP0.2 (move), extended in WP1.5 (P1, S1, S5, F1, D1), phase 3
 (S4) and phase 2 (D3).
 """
 
-# mypy: ignore-errors
-# Moved wholesale in WP0.2 from ``src/pyurbanair/plotting.py`` -- largely
-# unannotated code predating the strict mypy config. Waived rather than
-# annotated as part of a pure refactor; dropping the waiver is later cleanup.
-# The WP1.5 figure set below is fully annotated and passes the strict config on
-# its own (checked by deleting this line: the 18 remaining errors are all in the
-# moved code above it) -- but it is *inside* the waiver, so nothing enforces
-# that. Dropping the waiver needs the 18 legacy errors fixed first.
+# WP0.2 moved the general plots here out of ``src/pyurbanair/plotting.py``
+# under a file-level ``# mypy: ignore-errors``. The waiver is gone: the moved
+# helpers are annotated and the module passes the repo's strict config, so the
+# WP1.5/phase-2/phase-3 figure set is now actually enforced rather than merely
+# believed to be clean.
 
 import contextlib
 import logging
@@ -70,6 +67,7 @@ from evaluation.turbulence import (
 from matplotlib.axes import Axes
 from matplotlib.collections import PolyCollection
 from matplotlib.colors import Colormap, LinearSegmentedColormap
+from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
@@ -121,6 +119,11 @@ _PARAM_LABELS = {
 # ``pyurbanair.utils.state_utils``: the originals also serve non-evaluation
 # flows and stay put, and this leaf library must not import ``pyurbanair``.
 # The arithmetic is identical to the originals.
+#
+# ``_add_velocity_magnitude`` has no caller left in this module -- its only two
+# call sites were in the callerless snapshot plots deleted with the WP0.2 dead
+# code. It is kept because ``tests/test_evaluation_library.py`` pins it by name
+# as the drift check against ``pyurbanair.utils.run_utils``.
 def _add_velocity_magnitude(state: xarray.Dataset) -> xarray.Dataset:
     if not all(v in state.data_vars for v in ("u", "v", "w")):
         return state
@@ -136,14 +139,14 @@ def _get_velocity_magnitude_field(state: xarray.Dataset) -> np.ndarray:
     return np.sqrt(u**2 + v**2 + w**2)
 
 
-def _save(fig, output_path: str | pathlib.Path) -> None:
+def _save(fig: Figure, output_path: str | pathlib.Path) -> None:
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path)
     plt.close(fig)
 
 
-def _shade_windows(ax, edges) -> None:
+def _shade_windows(ax: Axes, edges: Sequence[float] | None) -> None:
     """Lightly shade alternating assimilation windows with dotted dividers."""
     if edges is None or len(edges) < 2:
         return
@@ -216,412 +219,6 @@ def _extract_2d_slice_with_extent(
     return values, extent
 
 
-def plot_parameter_distributions(
-    params_history: xarray.Dataset,
-    true_params: xarray.Dataset | None,
-    output_path: str | pathlib.Path,
-    bins: int = 25,
-) -> None:
-    """Plot per-step parameter distributions for an ESMDA parameter history."""
-    step_dim = None
-    for candidate in ("esmda_step", "assimilation_step", "step", "window", "iteration"):
-        if candidate in params_history.dims:
-            step_dim = candidate
-            break
-
-    if step_dim is None:
-        params_history = params_history.expand_dims(esmda_step=[0])
-        step_dim = "esmda_step"
-
-    num_steps = int(params_history.sizes[step_dim])
-    param_names = list(params_history.data_vars)
-    if not param_names:
-        raise ValueError("No parameters found in params_history.")
-
-    # Compute fixed x-axis limits per parameter (across all steps)
-    param_xlims: dict[str, tuple[float, float]] = {}
-    for param_name in param_names:
-        all_vals: list[float] = []
-        for i in range(num_steps):
-            step_slice = params_history.isel({step_dim: i})
-            vals = np.asarray(step_slice[param_name].values).reshape(-1)
-            vals = vals[np.isfinite(vals)]
-            if vals.size > 0:
-                all_vals.extend(vals.tolist())
-        if true_params is not None and param_name in true_params.data_vars:
-            true_val = np.asarray(true_params[param_name].values).reshape(-1)
-            if true_val.size > 0 and np.isfinite(true_val[0]):
-                all_vals.append(float(true_val[0]))
-        if all_vals:
-            vmin, vmax = float(np.min(all_vals)), float(np.max(all_vals))
-            margin = max((vmax - vmin) * 0.05, 1e-10)
-            param_xlims[param_name] = (vmin - margin, vmax + margin)
-        else:
-            param_xlims[param_name] = (0.0, 1.0)
-
-    fig, axes = plt.subplots(
-        num_steps,
-        len(param_names),
-        figsize=(5 * len(param_names), 3.5 * num_steps),
-        squeeze=False,
-        constrained_layout=True,
-    )
-
-    for i in range(num_steps):
-        step_slice = params_history.isel({step_dim: i})
-        for j, param_name in enumerate(param_names):
-            ax = axes[i, j]
-            values = np.asarray(step_slice[param_name].values).reshape(-1)
-            values = values[np.isfinite(values)]
-            if values.size == 0:
-                ax.text(0.5, 0.5, "No finite values", ha="center", va="center")
-                ax.set_axis_off()
-                continue
-
-            ax.hist(values, bins=bins, alpha=0.7, label=f"Step {i}")
-            ax.axvline(
-                float(np.mean(values)),
-                color="black",
-                linestyle="--",
-                linewidth=2,
-                label="ESMDA mean",
-            )
-
-            if true_params is not None and param_name in true_params.data_vars:
-                true_value = np.asarray(true_params[param_name].values).reshape(-1)
-                if true_value.size > 0 and np.isfinite(true_value[0]):
-                    ax.axvline(
-                        float(true_value[0]),
-                        color="red",
-                        linewidth=2,
-                        label="True",
-                    )
-
-            ax.set_xlim(param_xlims[param_name])
-
-            if i == 0:
-                ax.set_title(f"{param_name} distribution")
-            ax.set_ylabel(f"Step {i}")
-            ax.legend()
-
-    output_path = pathlib.Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
-def plot_true_vs_estimated_state(
-    true_state: xarray.Dataset,
-    estimated_state: xarray.Dataset,
-    output_path: str | pathlib.Path,
-    obs_x: np.ndarray | None = None,
-    obs_y: np.ndarray | None = None,
-    z_level: int | None = None,
-) -> None:
-    """Plot estimated vs true state snapshots, error, and RMSE by step."""
-    true_for_plot = _add_velocity_magnitude(true_state)
-    est_for_plot = _add_velocity_magnitude(estimated_state)
-
-    plot_var = "vel_magnitude" if "vel_magnitude" in est_for_plot.data_vars else "u"
-    if plot_var not in est_for_plot.data_vars:
-        plot_var = list(est_for_plot.data_vars)[0]
-    if plot_var not in true_for_plot.data_vars:
-        true_plot_var = (
-            "vel_magnitude" if "vel_magnitude" in true_for_plot.data_vars else None
-        )
-        if true_plot_var is None:
-            true_plot_var = list(true_for_plot.data_vars)[0]
-    else:
-        true_plot_var = plot_var
-
-    step_dim = None
-    for candidate in ("esmda_step", "assimilation_step", "step", "window", "iteration"):
-        if candidate in est_for_plot.dims:
-            step_dim = candidate
-            break
-
-    if step_dim is None:
-        est_for_plot = est_for_plot.expand_dims(esmda_step=[0])
-        step_dim = "esmda_step"
-
-    true_2d, true_extent = _extract_2d_slice_with_extent(
-        true_for_plot[true_plot_var], z_level=z_level
-    )
-    num_steps = int(est_for_plot.sizes[step_dim])
-    rmse_vals: list[float] = []
-    est_slices: list[np.ndarray] = []
-    true_slices: list[np.ndarray] = []
-    err_slices: list[np.ndarray] = []
-    est_extents: list[tuple[float, float, float, float]] = []
-    true_extents: list[tuple[float, float, float, float]] = []
-    err_extents: list[tuple[float, float, float, float]] = []
-
-    for i in range(num_steps):
-        est_2d, est_extent = _extract_2d_slice_with_extent(
-            est_for_plot.isel({step_dim: i})[plot_var],
-            z_level=z_level,
-        )
-        true_2d_aligned = true_2d
-        true_extent_aligned = true_extent
-        min_y = min(est_2d.shape[0], true_2d.shape[0])
-        min_x = min(est_2d.shape[1], true_2d.shape[1])
-        if est_2d.shape != true_2d.shape:
-            est_2d = est_2d[:min_y, :min_x]
-            true_2d_aligned = true_2d[:min_y, :min_x]
-            x0 = max(est_extent[0], true_extent[0])
-            x1 = min(est_extent[1], true_extent[1])
-            y0 = max(est_extent[2], true_extent[2])
-            y1 = min(est_extent[3], true_extent[3])
-            if x1 > x0 and y1 > y0:
-                est_extent = (x0, x1, y0, y1)
-                true_extent_aligned = (x0, x1, y0, y1)
-        err_2d = est_2d - true_2d_aligned
-        rmse_vals.append(float(np.sqrt(np.mean(err_2d**2))))
-        est_slices.append(est_2d)
-        true_slices.append(true_2d_aligned)
-        err_slices.append(err_2d)
-        est_extents.append(est_extent)
-        true_extents.append(true_extent_aligned)
-        err_extents.append(est_extent)
-
-    true_vmin = float(np.nanmin(true_2d))
-    true_vmax = float(np.nanmax(true_2d))
-    err_abs = max(float(np.nanmax(np.abs(e))) for e in err_slices)
-    err_vmin, err_vmax = -err_abs, err_abs
-
-    fig, axes = plt.subplots(
-        num_steps,
-        3,
-        figsize=(12, 4 * num_steps),
-        squeeze=False,
-        constrained_layout=True,
-    )
-    for i in range(num_steps):
-        im0 = axes[i, 0].imshow(
-            est_slices[i],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=est_extents[i],
-        )
-        im1 = axes[i, 1].imshow(
-            true_slices[i],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=true_extents[i],
-        )
-        im2 = axes[i, 2].imshow(
-            err_slices[i],
-            origin="lower",
-            cmap="RdBu_r",
-            vmin=err_vmin,
-            vmax=err_vmax,
-            extent=err_extents[i],
-        )
-
-        if obs_x is not None and obs_y is not None:
-            axes[i, 0].scatter(obs_x, obs_y, color="red", s=12)
-            axes[i, 1].scatter(obs_x, obs_y, color="red", s=12)
-
-        if i == 0:
-            axes[i, 0].set_title(f"Estimated ({plot_var})")
-            axes[i, 1].set_title(f"True ({true_plot_var})")
-            axes[i, 2].set_title("Error")
-        axes[i, 2].set_ylabel(f"Step {i}\nRMSE={rmse_vals[i]:.4f}")
-
-        fig.colorbar(im0, ax=axes[i, 0])
-        fig.colorbar(im1, ax=axes[i, 1])
-        fig.colorbar(im2, ax=axes[i, 2])
-
-    output_path = pathlib.Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
-def plot_state_init_and_terminal(
-    true_state: xarray.Dataset,
-    estimated_state: xarray.Dataset,
-    output_path: str | pathlib.Path,
-    obs_x: np.ndarray | None = None,
-    obs_y: np.ndarray | None = None,
-    z_level: int | None = None,
-) -> None:
-    """Plot estimated vs true state with both initial and terminal time for each step."""
-    true_for_plot = _add_velocity_magnitude(true_state)
-    est_for_plot = _add_velocity_magnitude(estimated_state)
-
-    plot_var = "vel_magnitude" if "vel_magnitude" in est_for_plot.data_vars else "u"
-    if plot_var not in est_for_plot.data_vars:
-        plot_var = list(est_for_plot.data_vars)[0]
-    if plot_var not in true_for_plot.data_vars:
-        true_plot_var = (
-            "vel_magnitude" if "vel_magnitude" in true_for_plot.data_vars else None
-        )
-        if true_plot_var is None:
-            true_plot_var = list(true_for_plot.data_vars)[0]
-    else:
-        true_plot_var = plot_var
-
-    step_dim = None
-    for candidate in ("esmda_step", "assimilation_step", "step", "window", "iteration"):
-        if candidate in est_for_plot.dims:
-            step_dim = candidate
-            break
-
-    if step_dim is None:
-        est_for_plot = est_for_plot.expand_dims(esmda_step=[0])
-        step_dim = "esmda_step"
-
-    has_time_est = "time" in est_for_plot.dims
-    has_time_true = "time" in true_for_plot.dims
-
-    true_init, _ = _extract_2d_slice_with_extent(
-        true_for_plot[true_plot_var],
-        z_level=z_level,
-        time_index=0 if has_time_true else None,
-    )
-    true_terminal, _ = _extract_2d_slice_with_extent(
-        true_for_plot[true_plot_var],
-        z_level=z_level,
-        time_index=-1 if has_time_true else None,
-    )
-
-    num_steps = int(est_for_plot.sizes[step_dim])
-    init_slices: list[np.ndarray] = []
-    terminal_slices: list[np.ndarray] = []
-    init_extents: list[tuple[float, float, float, float]] = []
-    terminal_extents: list[tuple[float, float, float, float]] = []
-    init_rmse: list[float] = []
-    terminal_rmse: list[float] = []
-
-    for i in range(num_steps):
-        step_slice = est_for_plot.isel({step_dim: i})
-        est_init, est_init_ext = _extract_2d_slice_with_extent(
-            step_slice[plot_var],
-            z_level=z_level,
-            time_index=0 if has_time_est else None,
-        )
-        est_terminal, est_terminal_ext = _extract_2d_slice_with_extent(
-            step_slice[plot_var],
-            z_level=z_level,
-            time_index=-1 if has_time_est else None,
-        )
-
-        min_y = min(est_init.shape[0], true_init.shape[0])
-        min_x = min(est_init.shape[1], true_init.shape[1])
-        true_init_aligned = true_init[:min_y, :min_x]
-        est_init_crop = est_init[:min_y, :min_x]
-        init_err = est_init_crop - true_init_aligned
-        init_rmse.append(float(np.sqrt(np.mean(init_err**2))))
-
-        min_y = min(est_terminal.shape[0], true_terminal.shape[0])
-        min_x = min(est_terminal.shape[1], true_terminal.shape[1])
-        true_terminal_aligned = true_terminal[:min_y, :min_x]
-        est_terminal_crop = est_terminal[:min_y, :min_x]
-        terminal_err = est_terminal_crop - true_terminal_aligned
-        terminal_rmse.append(float(np.sqrt(np.mean(terminal_err**2))))
-
-        init_slices.append(est_init_crop)
-        terminal_slices.append(est_terminal_crop)
-        init_extents.append(est_init_ext)
-        terminal_extents.append(est_terminal_ext)
-
-    true_vmin = float(
-        np.nanmin(np.concatenate([true_init.ravel(), true_terminal.ravel()]))
-    )
-    true_vmax = float(
-        np.nanmax(np.concatenate([true_init.ravel(), true_terminal.ravel()]))
-    )
-    err_abs = 0.0
-    for i in range(num_steps):
-        sy, sx = init_slices[i].shape
-        err_abs = max(
-            err_abs, float(np.nanmax(np.abs(init_slices[i] - true_init[:sy, :sx])))
-        )
-        sy, sx = terminal_slices[i].shape
-        err_abs = max(
-            err_abs,
-            float(np.nanmax(np.abs(terminal_slices[i] - true_terminal[:sy, :sx]))),
-        )
-    err_vmin, err_vmax = -err_abs, err_abs
-
-    fig, axes = plt.subplots(
-        num_steps,
-        6,
-        figsize=(18, 4 * num_steps),
-        squeeze=False,
-        constrained_layout=True,
-    )
-    for i in range(num_steps):
-        sy, sx = init_slices[i].shape
-        im0 = axes[i, 0].imshow(
-            init_slices[i],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=init_extents[i],
-        )
-        im1 = axes[i, 1].imshow(
-            true_init[:sy, :sx],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=init_extents[i],
-        )
-        im2 = axes[i, 2].imshow(
-            init_slices[i] - true_init[:sy, :sx],
-            origin="lower",
-            cmap="RdBu_r",
-            vmin=err_vmin,
-            vmax=err_vmax,
-            extent=init_extents[i],
-        )
-        sy, sx = terminal_slices[i].shape
-        im3 = axes[i, 3].imshow(
-            terminal_slices[i],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=terminal_extents[i],
-        )
-        im4 = axes[i, 4].imshow(
-            true_terminal[:sy, :sx],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=terminal_extents[i],
-        )
-        im5 = axes[i, 5].imshow(
-            terminal_slices[i] - true_terminal[:sy, :sx],
-            origin="lower",
-            cmap="RdBu_r",
-            vmin=err_vmin,
-            vmax=err_vmax,
-            extent=terminal_extents[i],
-        )
-
-        if obs_x is not None and obs_y is not None:
-            for col in (0, 1, 3, 4):
-                axes[i, col].scatter(obs_x, obs_y, color="red", s=12)
-
-        if i == 0:
-            axes[i, 0].set_title(f"Estimated init ({plot_var})")
-            axes[i, 1].set_title(f"True init ({true_plot_var})")
-            axes[i, 2].set_title("Init error")
-            axes[i, 3].set_title(f"Estimated terminal ({plot_var})")
-            axes[i, 4].set_title(f"True terminal ({true_plot_var})")
-            axes[i, 5].set_title("Terminal error")
-        axes[i, 2].set_ylabel(f"Step {i}\nInit RMSE={init_rmse[i]:.4f}")
-        axes[i, 5].set_ylabel(f"Terminal RMSE={terminal_rmse[i]:.4f}")
-
-    output_path = pathlib.Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
 def plot_rollout_time_evolution(
     esmda_params: xarray.Dataset,
     true_params: xarray.Dataset,
@@ -646,7 +243,9 @@ def plot_rollout_time_evolution(
     from the two states (the original whole-domain behaviour).
     """
 
-    def _plot_ensemble(ax, ds, param_name, color):
+    def _plot_ensemble(
+        ax: Axes, ds: xarray.Dataset, param_name: str, color: str
+    ) -> None:
         x, members = _param_members_and_x(ds[param_name])
         ax.plot(x, members.T, color=color, alpha=0.35, linewidth=0.9)
         ax.plot(x, members.mean(axis=0), color=color, alpha=1.0, linewidth=2.5)
@@ -655,15 +254,24 @@ def plot_rollout_time_evolution(
         # Fallback: whole-domain RMSE between the ensemble-mean state and the
         # truth. This materialises the full velocity fields; callers handling a
         # large truth should precompute a streamed ``rmse`` and pass it in.
+        #
+        # The two states are declared optional because the streamed-``rmse``
+        # path -- which is what every caller in the repo uses -- leaves them
+        # unset. This branch is exactly the case where they are required, so
+        # they are cast rather than guarded: a ``raise`` here would change what
+        # a mis-call does at run time, and this pass adds types only. Calling
+        # with ``rmse=None`` and no states still fails, as it always has.
+        truth_states = cast(xarray.Dataset, true_state)
+        esmda_states = cast(xarray.Dataset, esmda_state)
         true_state_mean = (
-            true_state.mean(dim="ensemble")
-            if "ensemble" in true_state.dims
-            else true_state
+            truth_states.mean(dim="ensemble")
+            if "ensemble" in truth_states.dims
+            else truth_states
         )
         esmda_state_mean = (
-            esmda_state.mean(dim="ensemble")
-            if "ensemble" in esmda_state.dims
-            else esmda_state
+            esmda_states.mean(dim="ensemble")
+            if "ensemble" in esmda_states.dims
+            else esmda_states
         )
 
         true_vel = np.asarray(_get_velocity_magnitude_field(true_state_mean))
@@ -691,7 +299,10 @@ def plot_rollout_time_evolution(
         for i, param_name in enumerate(param_names):
             ax = axes[i]
             _shade_windows(ax, window_edges)
-            if has_prior and param_name in prior_params.data_vars:
+            # ``prior_params is not None`` rather than the ``has_prior`` alias
+            # it is assigned from: identical at run time, but only the direct
+            # test narrows the Optional for the type checker.
+            if prior_params is not None and param_name in prior_params.data_vars:
                 _plot_ensemble(ax, prior_params, param_name, _COLOR_PRIOR)
             _plot_ensemble(ax, esmda_params, param_name, _COLOR_POSTERIOR)
             if param_name in true_params.data_vars:
@@ -1945,7 +1556,9 @@ def plot_mean_slices(
             columns.append((label, values if drawable(label, values) else None))
     difference = None
     has_difference = masked_truth is not None and masked_posterior is not None
-    if has_difference:
+    # Re-tested directly rather than through ``has_difference``: same condition,
+    # but only this form narrows the two Optionals for the type checker.
+    if masked_truth is not None and masked_posterior is not None:
         candidate = masked_posterior - masked_truth
         if drawable("Posterior - truth", candidate):
             difference = candidate

@@ -37,6 +37,42 @@ _Z_DIMS = ("z", "zm", "zt")
 # on the same run directory has to reproduce the same ``run_summary.yaml``.
 _DEFAULT_BOOTSTRAP_SEED = 0
 
+# Fewest blocks a resample may be built from before the spread of the replicates
+# stops being a measurement. Two effects pull the estimate in opposite
+# directions as the block length grows -- longer blocks keep more of the
+# correlation, fewer blocks make the replicate spread itself a lottery -- and
+# this constant is the second half of that trade. Measured on independent data
+# (where the block length costs nothing), the median estimate against the true
+# spread of the mean is 0.84 at 5 blocks, 0.92 at 10 and 0.96 at 20 -- so five
+# is already 16 % low on that count alone, and it is the floor rather than the
+# target for exactly that reason.
+_MIN_BOOTSTRAP_BLOCKS = 5
+
+# Block length in integral time scales (see :func:`integral_time_scale`).
+#
+# One scale is not enough, which is the whole reason this is not 1. The moving
+# block bootstrap's implicit lag window is triangular, so a block of length L
+# estimates the long-run variance as ``sum_{|k|<L} (1 - |k|/L) gamma_k`` -- it
+# does not just truncate the autocovariance sum, it down-weights the lags it
+# does keep. Evaluated on AR(1), that recovers ~75 % of the true sampling sd of
+# a mean at ``L = tau``, ~87 % at ``2*tau`` and ~94 % at ``4*tau``.
+#
+# Three rather than two because :func:`integral_time_scale` is itself biased low
+# on a short record (~20 % at the shortest window this function will still
+# report on, since a sample autocorrelation of an n-frame record is biased down
+# by ~tau/n), so a nominal three estimated scales is nearer 2.4 true ones.
+#
+# Together with :data:`_MIN_BOOTSTRAP_BLOCKS` this says a record must hold at
+# least **fifteen estimated integral time scales** before it gets a sampling
+# floor at all. The pair was chosen on measurements, not on the algebra: over an
+# AR(1) grid (phi 0 to 0.95, n 30 to 480) plus a two-scale process built to
+# hide half its variance at a time scale a short record cannot see, ``3 x 5``
+# is where the worst reported estimate stops falling (0.58 of the truth, on the
+# adversarial process; 0.70 on AR(1)) without refusing every window the shipped
+# configs produce. Raising either one buys a percent or two of worst case and
+# refuses a third more of the grid.
+_BLOCK_TIME_SCALES = 3
+
 # Ceiling on the temporary the bootstrap builds. The resampled array is
 # ``(n_rows, n_replicates_in_chunk, n_time)`` float64, which at M=128 / 4
 # quantities / 20 sensors would be ~1.6 GB unchunked. Splitting the replicate
@@ -163,6 +199,155 @@ def _block_resample_indices(n_samples, block_len, n_resamples, generator):
     return index.reshape(n_resamples, -1)[:, :n_samples]
 
 
+def integral_time_scale(series):
+    """Integral time scale of a set of series, in samples.
+
+    ``tau = 1 + 2*sum_k rho_k`` -- the factor by which correlation inflates the
+    variance of a time mean, so ``n/tau`` is the number of *independent* samples
+    an ``n``-frame record actually carries. It is the length a block bootstrap
+    has to preserve: resampled blocks shorter than ``tau`` cut the
+    autocovariance sum short, and the bootstrap then reports the sampling spread
+    of a series more independent than the one it was handed.
+
+    Three choices, each of which changes the answer on a short record:
+
+    * **The sum is truncated at the first non-positive ``rho_k``** (Geyer's
+      initial positive sequence). The autocorrelation of a stationary process is
+      positive over the lags that carry the correlation; past them the estimates
+      are noise of the same size as the terms themselves, and that noise does
+      not shrink with more lags, so summing further adds variance and no signal.
+    * **``rho_k`` is the median over rows, not one row's.** A 30-frame window
+      gives a single row's ``rho_1`` a standard error of ~0.18, which is the
+      whole quantity at stake. The rows of one call are members and sensors of
+      the same flow, so pooling them is the difference between an estimate and a
+      coin toss. The median rather than the mean because both consumers reduce
+      this function's downstream product the same way (a median over members in
+      ``evaluation.scores``, over cells in the metric script's ``W``), and one
+      drifting cell must not set the block length for the whole set.
+    * **Lags come from a ``1/n``-normalized (biased) autocovariance**, computed
+      by FFT. That normalization tapers the high-lag estimates towards zero,
+      which is what stops the truncated sum running away on a short record, and
+      it keeps the sequence positive semi-definite.
+
+    **It is biased low on a short record**, and knowingly so: the sample
+    autocorrelation of an ``n``-frame series is biased down by ~``tau/n`` because
+    the series' own mean is subtracted, so a 30-frame AR(1) at ``phi = 0.9``
+    (``tau = 19``) returns ~5. No estimator can do better -- 30 frames of that
+    process hold ~1.6 independent samples, and the information is not there.
+    That bias is why :data:`_BLOCK_TIME_SCALES` carries a margin and why
+    :func:`block_bootstrap_std` refuses rather than reports when the answer is a
+    large fraction of the record.
+
+    Args:
+        series: ``(..., n_time)``, **time last**. Leading dims are independent
+            series of the same flow; rows containing a non-finite sample are
+            dropped (the same policy as :func:`block_bootstrap_std`).
+
+    Returns:
+        The pooled time scale in samples, never below ``1.0`` -- an uncorrelated
+        series has ``tau = 1``, one independent sample per sample. Exactly
+        ``1.0`` when every row is constant: nothing decorrelates because nothing
+        varies, and the bootstrap of a constant series is a measured zero at any
+        block length. ``nan`` when no row survives, or when there are fewer than
+        two samples to take a lag over.
+
+    Raises:
+        ValueError: If ``series`` has no dimensions.
+    """
+    values = np.asarray(series, dtype=float)
+    if values.ndim < 1:
+        raise ValueError("series must have at least a time dimension")
+    n_time = values.shape[-1]
+    rows = values.reshape(-1, n_time)
+    rows = rows[np.isfinite(rows).all(axis=1)]
+    if rows.shape[0] == 0 or n_time < 2:
+        return float("nan")
+
+    # Autocovariance by FFT rather than a lag loop: the loop is O(n_rows*n) per
+    # lag and both call sites want every lag, which is O(n_rows*n^2) against
+    # O(n_rows*n log n) here. Zero-padding past ``2n-1`` is what makes the
+    # circular correlation the FFT computes agree with the linear one.
+    centred = rows - rows.mean(axis=-1, keepdims=True)
+    size = 1 << int(2 * n_time - 1).bit_length()
+    spectrum = np.fft.rfft(centred, n=size, axis=-1)
+    acov = np.fft.irfft(np.abs(spectrum) ** 2, n=size, axis=-1)[:, :n_time]
+
+    varying = acov[:, 0] > 0.0
+    if not varying.any():
+        return 1.0
+    usable = acov[varying]
+    rho = np.median(usable / usable[:, :1], axis=0)
+
+    # Half the record is the far end of the search. A lag past it is an average
+    # over fewer than half the products, and the ``1/n`` taper has already
+    # halved what it does carry; the truncation above normally bites long
+    # before this, and when it does not the sum is not to be trusted anyway.
+    tail = rho[1 : n_time // 2 + 1]
+    nonpositive = np.flatnonzero(tail <= 0.0)
+    keep = int(nonpositive[0]) if nonpositive.size else tail.size
+    return float(1.0 + 2.0 * tail[:keep].sum())
+
+
+def _bootstrap_block_length(rows, n_blocks):
+    """Block length for one call, or ``None`` when the record cannot carry one.
+
+    ``L = max(ceil(n / n_blocks), ceil(_BLOCK_TIME_SCALES * tau))``: the caller's
+    block count sets a floor under the length, and the measured correlation time
+    can only push it up. ``None`` -- with a log line, because a missing floor is
+    a result and not a silence -- when that leaves fewer than
+    :data:`_MIN_BOOTSTRAP_BLOCKS` blocks to resample from.
+
+    That refusal is the policy this function exists to state. The two
+    requirements genuinely conflict on a short window: ``L >= tau`` needs long
+    blocks and a usable resample needs many of them, and a 30-frame window of a
+    flow that decorrelates over 5 frames cannot have both. The alternative --
+    shortening the blocks until enough of them fit -- is what this module used to
+    do, and it does not produce a worse estimate so much as a *confident* one:
+    the returned number is then the sampling spread of a series that decorrelates
+    faster than the real one, which on the shipped window shapes came out 2.6-4.2x
+    too small (see :func:`block_bootstrap_std`). ``nan`` is the honest answer.
+
+    ``rows`` are the finite rows of a record of at least four samples -- the
+    caller has already returned on everything else -- so the time scale here is
+    always a number.
+    """
+    n_time = rows.shape[-1]
+    requested = int(np.ceil(n_time / n_blocks))
+    time_scale = integral_time_scale(rows)
+    block_len = max(requested, int(np.ceil(_BLOCK_TIME_SCALES * time_scale)))
+    if n_time // block_len >= _MIN_BOOTSTRAP_BLOCKS:
+        return block_len
+
+    # Which of the two constraints actually bit: a record that could not be
+    # blocked even if it were uncorrelated is simply short (routine -- the CI
+    # smoke shape is four frames), while one that could is losing its floor to
+    # the flow's own correlation time, which is a finding about the run.
+    if n_time // max(requested, _BLOCK_TIME_SCALES) < _MIN_BOOTSTRAP_BLOCKS:
+        logger.info(
+            "Block bootstrap: %d frames leave under %d blocks of the %d-frame "
+            "minimum; no sampling floor is measured for them (nan)",
+            n_time,
+            _MIN_BOOTSTRAP_BLOCKS,
+            block_len,
+        )
+    else:
+        logger.warning(
+            "Block bootstrap: the series decorrelates over ~%.1f frames, so %d "
+            "frames hold only ~%.1f independent samples -- blocks long enough "
+            "to keep that correlation (%d frames) leave under %d to resample "
+            "from. Reporting no sampling floor (nan) rather than one measured "
+            "over blocks shorter than the correlation time, which understates "
+            "it several-fold and would make every statistic read as "
+            "identifiable",
+            time_scale,
+            n_time,
+            n_time / time_scale,
+            block_len,
+            _MIN_BOOTSTRAP_BLOCKS,
+        )
+    return None
+
+
 def _replicate_spread(replicates):
     """``ddof=1`` spread down axis 0 of a ``(n_resamples, n_rows)`` array.
 
@@ -193,49 +378,89 @@ def block_bootstrap_std(
     series by a large factor, because turbulent samples are not independent --
     a 400-sample AR(1) series at ``phi = 0.9`` has roughly the sampling spread
     of 20 independent ones. The moving-block bootstrap keeps the within-block
-    correlation by resampling *contiguous stretches* rather than points: block
-    length ``L = ceil(n / n_blocks)``, then ``ceil(n / L)`` blocks drawn with
-    replacement from all ``n - L + 1`` start positions, concatenated and
-    truncated back to ``n``, repeated ``n_resamples`` times. The answer is the
-    ``ddof=1`` spread of the statistic over those replicates.
+    correlation by resampling *contiguous stretches* rather than points:
+    ``ceil(n / L)`` blocks of length ``L`` drawn with replacement from all
+    ``n - L + 1`` start positions, concatenated and truncated back to ``n``,
+    repeated ``n_resamples`` times. The answer is the ``ddof=1`` spread of the
+    statistic over those replicates.
 
-    Measured on AR(1) series of unit marginal variance with ``statistic =
-    np.mean``, median over 200 series; "true" is the spread of the sample mean
-    across those same series, i.e. the quantity being estimated:
+    **The block length is measured, not configured.** ``L`` is
+    ``max(ceil(n / n_blocks), ceil(_BLOCK_TIME_SCALES * tau))`` with ``tau`` the
+    integral time scale of the rows themselves (:func:`integral_time_scale`);
+    ``n_blocks`` only puts a floor under it. A block shorter than the
+    correlation time does not resample the series it was given -- it resamples a
+    more independent one -- so a block *count* fixed at 20 is exactly wrong: it
+    shrinks ``L`` as the window shortens, when a fixed physical correlation time
+    demands the opposite. That is what this function used to do, and on the
+    shipped window shapes (``barcelona`` 30 frames/window, ``xie_and_castro``
+    60) it gave ``L = 2`` and ``L = 3`` and understated a correlated series'
+    sampling spread by 2.6-4.2x.
 
-    ====  ====  ==  =======  ===========  =====
-    n     phi   L   this fn  std/sqrt(n)  true
-    ====  ====  ==  =======  ===========  =====
-    400   0.0   20  0.049    0.050        0.055
-    400   0.7   20  0.106    0.050        0.131
-    400   0.9   20  0.154    0.048        0.238
-    36    0.9   2   0.168    0.128        0.596
-    ====  ====  ==  =======  ===========  =====
+    **When the two requirements cannot both be met, the answer is ``nan``.**
+    ``L >= tau`` and "enough blocks to resample" fight each other on a short
+    window, and a 30-frame record of a flow that decorrelates over 5 frames
+    cannot satisfy both. It is refused (with a log line) rather than served with
+    the short blocks that fit -- see :func:`_bootstrap_block_length`.
 
-    Two readings. On independent data it lands on the iid formula, so blocking
-    costs nothing when there is no correlation to preserve. On correlated data
-    it is 2-3x the iid formula and still **below** the truth, increasingly so as
-    ``L`` falls under the correlation time. So it is a *lower bound* on the
-    sampling spread of a correlated series -- the safe direction for its WP1.3
-    consumer, where it is a denominator: it can only make an identifiability
-    ratio look better than it is, never worse.
+    Measured with ``statistic = np.mean`` on 400 unit-variance series per row of
+    the table; "true" is the spread of the sample mean across those same series,
+    i.e. the quantity being estimated. ``blocks`` before is always
+    ``n_blocks = 20``:
 
-    Every row shares one time axis and therefore one resample index matrix,
-    which is what makes the vectorized form possible: the draw happens once and
-    the whole resampled block is reduced in a single ``statistic(..., axis=-1)``
-    call (chunked over replicates to bound the temporary, which changes no
-    value -- the reduction is along time only).
+    =====  ====  ===  =======  ======  ===  =======  =====
+    n      phi   tau  tau_hat  before  L    after    true
+    =====  ====  ===  =======  ======  ===  =======  =====
+    30     0.0     1     1.00   0.170    3    0.168  0.183
+    30     0.9    19     4.96   0.160   --  refused  0.665
+    60     0.5     3     2.39   0.163    8    0.169  0.221
+    60     0.9    19     7.69   0.164   --  refused  0.516
+    200    0.8     9     7.47   0.154   23    0.169  0.210
+    480    0.9    19    15.79   0.148   48    0.160  0.197
+    =====  ====  ===  =======  ======  ===  =======  =====
+
+    Over the whole AR(1) grid (``phi`` 0 to 0.95, ``n`` 30 to 480) every
+    estimate it still reports lands between 0.70 and 0.96 of the truth, against
+    0.16-0.96 before; the cases that were 2.6-4.2x low are refused instead. It
+    remains a **lower bound** -- the implicit lag window is triangular and
+    ``tau`` is itself biased low on a short record, so 0.7-0.9 of the truth is
+    what a correct implementation delivers here, not 1.0 -- and it degrades
+    further on a spectrum with a long tail a short record cannot see: on a
+    two-scale process holding half its variance at ``tau = 39``, the worst
+    reported estimate is 0.58 of the truth at ``n = 200`` (0.48 before, and
+    0.28 before at ``n = 30``, where it is now refused).
+
+    **Which direction that bound is safe in depends on the consumer, and they
+    differ.** As WP1.3's identifiability *denominator* (``evaluation.scores``)
+    an understated floor makes the ratio look **better** than it is, so it is
+    the **unsafe** direction -- the guard exists to say "read this CRPS as
+    noise" and a floor 3x too small keeps it silent. That is why the refusal
+    above is a refusal and not a smaller number. As WP1.4's absolute hit-rate
+    tolerance ``W`` (the metric script's ``sampling_tolerance``) the same
+    understatement makes the criterion **stricter**, which is safe; there, a
+    ``nan`` falls back to the relative test alone. One function, two opposite
+    readings, and only the second tolerates a bound that is too small.
+
+    Every row shares one time axis and one measured block length, and therefore
+    one resample index matrix, which is what makes the vectorized form possible:
+    the draw happens once and the whole resampled block is reduced in a single
+    ``statistic(..., axis=-1)`` call (chunked over replicates to bound the
+    temporary, which changes no value -- the reduction is along time only).
 
     Args:
         series: ``(..., n_time)``, **time last**. Leading dims are independent
-            series; a 1-D input is one series.
+            series *of the same flow* -- they set the block length together (see
+            :func:`integral_time_scale`), so a call must not mix records that
+            decorrelate at different rates.
         statistic: An *axis-taking* reducer, called as ``statistic(x, axis=-1)``
             on a 3-D array and returning ``x``'s leading shape. ``np.mean`` and
             ``np.var`` qualify as they are; a closure must take and forward
             ``axis`` (``lambda x, axis: np.var(x, axis=axis, ddof=1)``) rather
             than assuming a flat series.
-        n_blocks: Target block count; the block length is derived from it, so
-            one call site works on windows of different lengths.
+        n_blocks: The **most** blocks to resample from, i.e. a floor of
+            ``ceil(n / n_blocks)`` under the block length. The measured
+            correlation time can only lengthen the blocks past it, never shorten
+            them, so this is a cap on cost and resolution and not the estimator's
+            physics.
         n_resamples: Number of bootstrap replicates.
         rng: A ``numpy`` generator or a seed for one. ``None`` means the fixed
             default seed -- never OS entropy, so the default path reproduces.
@@ -244,19 +469,24 @@ def block_bootstrap_std(
         ``series.shape[:-1]`` bootstrap standard errors (a 0-d array for a 1-D
         input), ``nan`` where undefined:
 
-        * every row, when the shared time axis has fewer than four samples or
-          gives ``L < 2``. **This is routine, not exotic** -- the default 20
-          blocks needs 21 samples and the CI smoke shape has four frames per
-          window -- so callers must handle it.
+        * every row, when the shared time axis has fewer than four samples, or
+          when the measured block length leaves under
+          :data:`_MIN_BOOTSTRAP_BLOCKS` blocks. **This is routine, not exotic**
+          -- it takes 15 frames to block even an uncorrelated record and the CI
+          smoke shape has four per window -- so callers must handle it. It is
+          also the path a correlated production window takes, which is the
+          point: ``nan`` means "this window cannot measure its own sampling
+          floor", not "the floor is small".
         * a row containing any non-finite sample. Dropping the gaps per row
           would give that row a different finite count, hence a different block
           length and index matrix, which is exactly the sharing that makes this
           vectorized; reporting ``nan`` is honest about an input this path does
           not serve.
 
-        ``n_blocks=1`` returns exactly ``0.0`` for finite rows, a *measured*
-        zero: one block spans the series, there is one legal start, so every
-        replicate is the original series.
+        A set of rows that are all constant comes back exactly ``0.0`` -- a
+        *measured* zero, since every replicate of a constant series is that same
+        constant, and exact rather than the ~1e-17 ``np.std`` would leave (see
+        :func:`_replicate_spread`).
 
     Raises:
         ValueError: If ``series`` has no dimensions, ``n_blocks < 1``,
@@ -275,14 +505,19 @@ def block_bootstrap_std(
     flat = values.reshape(-1, n_time)
     out = np.full(flat.shape[0], np.nan)
 
-    block_len = int(np.ceil(n_time / n_blocks)) if n_time else 0
-    if flat.shape[0] == 0 or n_time < 4 or block_len < 2:
+    if flat.shape[0] == 0 or n_time < 4:
         return out.reshape(lead_shape)
 
     finite_rows = np.isfinite(flat).all(axis=1)
     if not finite_rows.any():
         return out.reshape(lead_shape)
     rows = flat[finite_rows]
+
+    # The block length is measured off the rows that will actually be resampled,
+    # so a diverged member cannot lengthen the blocks for the ones beside it.
+    block_len = _bootstrap_block_length(rows, n_blocks)
+    if block_len is None:
+        return out.reshape(lead_shape)
 
     generator = (
         rng

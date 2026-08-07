@@ -53,12 +53,15 @@ Three things to know before reading the numbers:
     the same LENGTH, from the window's own initial field, under the window's own
     parameters, after a discarded lead-in. It is not bit-identical to the
     assimilation forecast -- the restart carries the macroscopic field
-    essentially exactly, but its ghost cells and non-equilibrium stress come
-    from whatever restart template the clone holds rather than from this
-    member's own history (see the cloning-order note in ``run``), and the
-    inflow settings and velocity scale are re-applied for this run -- and it is
-    offset from the forecast in absolute time. Spectra and window statistics
-    are what this is for; instantaneous phase agreement is not.
+    essentially exactly, but every re-run starts from a cleared ``restart/``
+    (see the note in ``run``: a restart left there is another run's field, and
+    on a repeat invocation it is the *truth's*), so its ghost cells and
+    non-equilibrium stress are reconstructed as equilibrium rather than carried
+    from this member's own history, and the inflow settings and velocity scale
+    are re-applied for this run -- and it is offset from the forecast in
+    absolute time. Spectra and window statistics are what this is for;
+    instantaneous phase agreement is not. That reconstruction is the same on
+    both sides of the comparison and is what ``probes.spinup_time`` trims.
   * **Cadence.** ``output_frequency`` is what the solver *achieved*
     (``iout * dt``), not what was asked for: ``dt = C_l/C_u`` is quantised by the
     member's own ``velocity_magnitude``, so members differ by ~1 % and the
@@ -825,6 +828,11 @@ def _truth_probes(
             truth_access, window, points, sensor_set_labels, reason
         )
 
+    # Local import, and deliberately below the fallback return: this script is
+    # pylbm-only, and a truth that cannot be re-run must not trigger the LBM
+    # submodule bootstrap.
+    from pylbm.utils.warm_start_utils import clean_all_restart_files
+
     truth_model = instantiate(
         cfg.truth_model.forward_model,
         results_dir=None,
@@ -835,6 +843,14 @@ def _truth_probes(
         spinup_time=spinup_time,
     )
     instantiate(cfg.truth_model.prepare, forward_model=truth_model)
+    # The same clean slate the members get in :func:`_member_models` (usually the
+    # very same directory, but not if the two models' temp dirs are overridden
+    # apart). A previous invocation's truth restart is not this run's history
+    # either, and leaving it would give the truth a non-equilibrium template the
+    # members deliberately do not have -- an asymmetry in the one comparison this
+    # script exists to make. Its own warm start, written from the stored truth
+    # frame, follows in ``_probe_window``.
+    clean_all_restart_files(truth_model.dirs)
     values, achieved = _probe_window(
         truth_model,
         points,
@@ -905,10 +921,24 @@ def _member_models(
     for both member sources: cloning is cheap, but ``prepare`` rebuilds the solver.
     The clone root is returned so the caller can remove it once the probes are
     written (each clone otherwise keeps a restart file forever).
+
+    **A clone starts with an empty ``restart/``, always.** ``_prepare_warmstart``
+    reads the newest restart it finds as the ghost-cell / non-equilibrium template
+    and takes ``nt0`` from its iteration, so any restart present at clone time is
+    a field from some *other* run that this member's re-run would then be seeded
+    from and continue the clock of. There are two such fields and neither is the
+    member's: the truth's final restart, which the previous invocation left in the
+    shared ``_PROBE_EXPERIMENT`` dir this clone is copied from (see the note in
+    :func:`run`), and -- because ``clone_root`` is only removed on success and the
+    copy is ``dirs_exist_ok=True`` -- an aborted invocation's own leftover in the
+    clone dir. The member's legitimate warm start is unaffected: it is the restart
+    ``_probe_window`` writes from the window state file it was handed, one line
+    later, and it is written into this now-empty dir.
     """
     # Local import: this script is pylbm-only, and importing pylbm runs the LBM
     # submodule bootstrap -- a run dir that no-ops early should not trigger it.
     from pylbm.utils.forward_model_utils import create_new_forward_model
+    from pylbm.utils.warm_start_utils import clean_all_restart_files
 
     template = instantiate(
         cfg.assim_model.forward_model,
@@ -919,11 +949,20 @@ def _member_models(
         spinup_time=spinup_time,
     )
     instantiate(cfg.assim_model.prepare, forward_model=template)
+    # Cleared at the source as well as in every clone: the source is the shared
+    # `_PROBE_EXPERIMENT` dir the TRUTH re-run also uses, so this is what makes a
+    # repeat invocation reproduce the first one on both sides of the comparison
+    # rather than handing the truth a template the members do not have.
+    clean_all_restart_files(template.dirs)
     clone_root = template.dirs.temp_dir / "probe_experiments"
-    return [
-        create_new_forward_model(template, clone_root, f"{member:03d}")
-        for member in range(n_members)
-    ], clone_root
+    models: list[Any] = []
+    for member in range(n_members):
+        model = create_new_forward_model(template, clone_root, f"{member:03d}")
+        # Cleared per clone too, not only at the source: the clone dir can itself
+        # be a leftover, and this is where the invariant has to hold.
+        clean_all_restart_files(model.dirs)
+        models.append(model)
+    return models, clone_root
 
 
 def _member_probes(
@@ -1156,17 +1195,23 @@ def run(cfg: DictConfig) -> None:
 
     points, sensor_set_labels = _probe_points(build_sensor_sets(cfg))
 
-    # The member clones are made FIRST, and the ordering is load-bearing. Both
-    # mounts are constructed under `_PROBE_EXPERIMENT`, so they share one
-    # experiment dir; `_probe_window`'s `finally` prunes restarts but deliberately
-    # keeps the latest, so a truth solve leaves ITS final field in
-    # `probe_runcase/restart/`. `create_new_forward_model` copies the whole
-    # experiment dir into every clone, and `_prepare_warmstart` then uses whatever
-    # restart it finds as the template for ghost cells and non-equilibrium
-    # content -- which would seed every member with the truth's stress field, i.e.
-    # inject truth information into the member side of a truth-vs-member
-    # diagnostic and bias the LSD optimistically. Cloning before the truth runs
-    # keeps the template clean.
+    # The member clones are made FIRST, and the ordering matters -- but it is not
+    # what makes this safe, and on its own it was not enough. Both models are
+    # constructed under `_PROBE_EXPERIMENT`, so they share one experiment dir;
+    # `_probe_window`'s `finally` prunes restarts but deliberately keeps the
+    # latest, so a truth solve leaves ITS final field in `probe_runcase/restart/`.
+    # `create_new_forward_model` copies the whole experiment dir into every clone,
+    # and `_prepare_warmstart` then uses whatever restart it finds as the template
+    # for ghost cells and non-equilibrium content -- which would seed every member
+    # with the truth's stress field, i.e. inject truth information into the member
+    # side of a truth-vs-member diagnostic and bias the LSD optimistically.
+    # Cloning first only keeps the FIRST invocation clean: nothing clears
+    # `probe_runcase/restart/` between runs, so a re-probe of the same window at a
+    # different cadence -- the normal iteration -- clones the previous
+    # invocation's truth restart. `_member_models` therefore clears the restart
+    # dir at the clone source and in every clone, and `_truth_probes` does the
+    # same on its side; the ordering is kept because it costs nothing and the
+    # in-invocation leak is one fewer thing to depend on the clearing for.
     models, clone_root = _member_models(
         cfg,
         n_members,

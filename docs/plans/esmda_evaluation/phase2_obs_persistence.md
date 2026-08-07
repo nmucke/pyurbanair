@@ -214,3 +214,30 @@ Two acceptance-criterion notes, recorded rather than fixed:
 Not done, and deliberately: nothing reads `window_{w}_params_steps.nc`. The
 plan says so explicitly ("kept for future debugging, no diagnostic builds on
 it in this plan").
+
+**Branch review round 3 (2026-08-07, `be1433e`).** Not a WP review: an
+eight-agent adversarial sweep over the *whole* `esmda-evaluation` branch after
+every WP had merged, which confirmed the plan is fully implemented and found six
+blockers. One of them is phase 2's; the rest are recorded in the phase-1 and
+phase-3 plans and in the master plan's filtering section.
+
+12. **`obs_diagnostics_bundle` reads the run's own `save_obs_diagnostics` flag,
+   not just the files.** Deviation 8's window-count bound catches a rerun with
+   *fewer* windows; it cannot catch one that merely turned the flag off — which
+   `conf/run_esmda.yaml` explicitly offers as the way to reproduce the
+   pre-phase-2 artifact set — because the leftover `windows/*_obs.nc` then still
+   match this run's window count exactly. On such a rerun the previous
+   assimilation's data mismatch was republished into this run's
+   `run_summary.yaml` and D3 was redrawn from it, beside this run's own
+   parameter and state metrics. The flag is now read from `run_info.yaml` and a
+   leftover set is skipped with a warning. An **absent** flag (a run dir written
+   before WP2.1) means *unknown*, not false, and falls through to the files, so
+   invariant 3 is intact. The guard lives in the bundle loader, which is why one
+   change covers both the metric and the figure stage.
+
+**Branch review round 4 (2026-08-07, `a843f00`).** A four-agent review of round
+3's own fixes. Phase 2's fix was verified sound as landed and is unchanged; the
+round's findings fall in phase 1 and in the master plan's filtering section.
+Round 4 did document the `save_obs_diagnostics` flag-versus-files rule in
+`docs/scripts_and_configs.md`, so the deviation above is now stated where a
+reader of the artifact docs will meet it and not only here.

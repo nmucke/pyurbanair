@@ -84,11 +84,18 @@ _X_COORDS = ("x", "xt", "xm")
 #
 # Deliberately an explicit allowlist, not a suffix denylist. The denylist this
 # replaces (``not k.endswith("_crps")``) named a key only the recompute path
-# below ever emits: run_esmda / compute_esmda_metrics summaries have carried
-# ``velocity_vector_{rmse,energy_score}`` since ec39233, so the biased energy
-# score sailed through it into files stamped ``metrics_version: 2``. An
-# allowlist fails closed -- a future score is dropped until someone vouches for
-# it -- which is exactly what the denylist did not do.
+# below ever emits: summaries have carried ``velocity_vector_{rmse,
+# energy_score}`` since ec39233, and neither name ends in ``_crps``, so the
+# biased energy score would have been carried into a file stamped
+# ``metrics_version: 2``.
+#
+# In practice it never was. This branch runs only when ``truth_access.yaml`` is
+# absent, and run_esmda has written that file unconditionally since 5d3b697
+# (two days before ec39233) -- so a run dir that reaches here predates the
+# rename and can only carry ``vel_magnitude_crps``, which the denylist did
+# drop. The allowlist is hardening against the *next* score key, not a repair:
+# it fails closed, dropping anything nobody has vouched for, which is exactly
+# what the denylist did not do.
 _CARRYABLE_SENSOR_KEYS = frozenset(
     {
         "num_sensors",
