@@ -74,7 +74,6 @@ Usage (compose with the SAME overrides the ESMDA run used)::
 import collections
 import logging
 import multiprocessing as mp
-import os
 import pathlib
 import re
 import shutil
@@ -121,11 +120,6 @@ _SOLVER = "pylbm"
 # build tree is stamped for `probe_runcase`: `model.compile=false` works for a
 # REPEAT probe run, not for reusing an assimilation run's binary.
 _PROBE_EXPERIMENT = "probe_runcase"
-
-# Iteration field width of the pinned LBM Fortran (`i6.6`); above this, its
-# filenames print as `******` and nothing can find or prune them. See
-# `_link_restart_for_solver` and docs/pylbm.md §9.
-_MAX_LEGACY_ITERATION = 999_999
 
 # Relative spread of the members' achieved cadences that is still worth one
 # shared (fs, nperseg) downstream. dt is quantised by C_u = int(15*|U|), so a
@@ -271,61 +265,6 @@ def _probe_dataset(
 # ---------------------------------------------------------------------------
 
 
-def _link_restart_for_solver(
-    forward_model: Any, iteration: int
-) -> Optional[pathlib.Path]:
-    """Make the Python-written restart visible to the compiled solver.
-
-    ``write_restart_file_from_xarray`` names the restart with a **9-digit**
-    iteration field (``restart_0000_000000305.uf``), while the pinned LBM Fortran
-    (``m_readrestart.F90`` at submodule commit 2635d44) still formats it with
-    ``i6.6`` and calls ``stop`` when that exact name is absent. So the file the
-    wrapper writes is invisible to the solver, and any *stale* 6-digit restart
-    left in the directory is read instead -- for a probe re-run that would mean
-    replaying whichever field the last run in that directory happened to leave
-    behind, silently and with no error anywhere.
-
-    A probe re-run is nothing but a warm start, so it cannot proceed on that. The
-    freshly written restart is therefore also exposed under the legacy 6-digit
-    name (a hard link -- same bytes, no extra disk), replacing any stale file of
-    that name. Both widths hold identical content, so this is correct whether the
-    solver reads the 6- or the 9-digit name.
-
-    Returns the legacy path so the caller can delete it once the solver has read
-    it: a 6-digit restart holding a *probe's* field, left in a scratch dir, is
-    exactly the stale file that would later be read in place of somebody else's
-    warm start.
-
-    Deliberately local to this script: the same mismatch means an ESMDA rollout's
-    Python-supplied warm-start state is silently ignored too, but repairing that
-    changes the physics of every pylbm rollout and belongs in its own reviewed
-    pylbm change, not in a probe post-processing script.
-    """
-    if iteration > _MAX_LEGACY_ITERATION:
-        # Above the i6.6 field the Fortran writes (and this shim would write)
-        # `restart_0000_******.uf`, which matches neither restart pattern, so it
-        # can never be pruned and every later warm start at that iteration reads
-        # a permanently stale file. Refuse instead of creating it.
-        raise ValueError(
-            f"Warm-start iteration {iteration} exceeds the pinned LBM's i6.6 "
-            f"restart filename field ({_MAX_LEGACY_ITERATION}); its restart name "
-            "would overflow to '******' and could never be read or pruned. Start "
-            "the probe re-run from a clean scratch dir (its iteration counter "
-            "accumulates across runs) or widen the field in the Fortran sources."
-        )
-    restart_dir = pathlib.Path(forward_model.dirs.experiment_dir) / "restart"
-    written = restart_dir / f"restart_0000_{iteration:09d}.uf"
-    legacy = restart_dir / f"restart_0000_{iteration:06d}.uf"
-    if not written.exists() or legacy == written:
-        return None
-    legacy.unlink(missing_ok=True)
-    try:
-        os.link(written, legacy)
-    except OSError:  # no hard links on this filesystem
-        shutil.copyfile(written, legacy)
-    return legacy
-
-
 def _snapshot_iteration(path: pathlib.Path) -> Optional[int]:
     """The absolute LBM timestep encoded in a snapshot filename, if any."""
     match = _SNAPSHOT_ITERATION.search(path.stem)
@@ -440,7 +379,6 @@ def _probe_window(
             "enable_netcdf=False (it would write output/tec_*.plt instead)."
         )
 
-    legacy_restart: Optional[pathlib.Path] = None
     try:
         if state is not None:
             # C_u must be fixed for THIS run before the restart is written, or the
@@ -448,9 +386,6 @@ def _probe_window(
             # scale (docs/pylbm.md, "Warm-start C_u sequencing").
             fm._set_scaling_factors(params)
             fm._prepare_warmstart(state)
-            # ``_prepare_warmstart`` parks the restart's iteration in
-            # ``_nt0_override``; read it before the next call consumes it.
-            legacy_restart = _link_restart_for_solver(fm, int(fm._nt0_override or 0))
         fm._set_scaling_factors(params)
         if params is not None:
             fm._apply_inflow_settings(params)
@@ -492,10 +427,9 @@ def _probe_window(
         # The transient full-field cost must not survive the run, including when
         # the solver or the extraction died partway through it.
         fm._clean_output()
-        if legacy_restart is not None:
-            # A 6-digit restart holding this re-run's field is precisely the stale
-            # file the solver would silently prefer next time (docs/pylbm.md §9).
-            legacy_restart.unlink(missing_ok=True)
+        # Leaves exactly one restart, at the kept iteration: a re-run's field
+        # left behind in a shared scratch dir is what a later warm start would
+        # silently pick up.
         remove_old_restart_files(fm.dirs)
 
     if not frames:
