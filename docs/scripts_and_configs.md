@@ -928,6 +928,21 @@ figure stages reuse the ESMDA truth-access / sensor-series helpers via
 them to the filter's per-**cycle** time axis (the truth is compared at each
 cycle's end-of-segment frame).
 
+**Cycle state sources.** The ESMDA evaluation blocks all reduce over the
+ensemble states of one assimilation step, and ESMDA has exactly one thing to
+reduce (`windows/window_{w}_posterior_state.nc`). The filter has two, and
+`_filtering_common.cycle_state_source` picks between them — the choice is
+recorded in `run_summary.yaml`'s `cycle_states` block, so the numbers always say
+which they came from:
+
+| Source | When | What you get |
+|---|---|---|
+| `forecast` | `run.ensemble_save_on_disk=true` | Every member's full forecast segment, kept under `_ensemble_states/cycle_{k}/state_{m}.nc` and never pruned. Cycle *k*'s forecast is the ensemble rolled out from cycle *k−1*'s analysis under its analyzed parameters — the exact analogue of an ESMDA window file, and out-of-sample. Within-cycle variance and real resolved turbulence. |
+| `analysis` | default | `state_history.nc` alone: **one** analyzed frame per cycle. Every block still runs, but the per-cycle *variance* statistic is null (a `ddof=1` variance of one sample) and the TKE / `<u'w'>` moments are taken *across* cycles, so they carry the analysis increments — read those panels as an upper bound. |
+
+Both are frame-matched against the truth by the same contract, so the statistics
+compare like with like either way.
+
 #### [`compute_filtering_metrics.py`](../scripts/filtering/compute_filtering_metrics.py)
 **Plain argparse CLI** — usage: `python scripts/filtering/compute_filtering_metrics.py --run-dir <dir>`
 
@@ -942,6 +957,22 @@ Stage 2. Reads the artifacts saved by `run_filtering.py` and writes
   ESMDA summary (§2.2) (absent in `mode=state`).
 - `state_metrics` — per-cycle `|U|` field RMSE vs the truth's end-of-cycle frames.
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set.
+- `ensemble_health` — duplicate-member counts of the analyzed parameter
+  ensemble, run-wide and per cycle (`n_unique_per_cycle`, read out of
+  `params_history.nc`) (absent in `mode=state`).
+- `cycle_states` — which of the two cycle state sources above the three blocks
+  below reduced over, with its cycle/member counts and a one-line caveat.
+- `sensor_statistics` — per sensor set, the per-cycle mean and variance of
+  u/v/w/`|U|` scored as the verification object (fair CRPS, z-score, rank
+  counts, identifiability) — the statistics-space counterpart of
+  `sensor_metrics` (§2.3). Posterior half only: the filter saves no comparable
+  prior rollout. Its `n_windows` key is the shared library's name for the bin
+  count, which here is the cycle count.
+- `field_metrics` — the VDI 3783/9 hit rate `q` of the time-mean velocity field
+  over evenly spaced z-slabs, with `W` block-bootstrapped from the truth's own
+  sampling error. Writes `eval_fields.nc` beside the summary for the figure
+  stage. `n_cycles` is the run's cycle count; `n_windows` beside it is the
+  number of accumulator chunks, which is 1 under the `analysis` source.
 
 #### [`make_filtering_figures.py`](../scripts/filtering/make_filtering_figures.py)
 **Plain argparse CLI** — usage: `python scripts/filtering/make_filtering_figures.py --run-dir <dir>`
@@ -952,8 +983,24 @@ Stage 3. Reads artifacts and writes into the run directory:
 - `rollout_animation.mp4` — analyzed ensemble-mean `|U|` field vs truth (one frame/cycle).
 - `final_state_with_obs.png` — final analyzed `|U|` field with sensor locations.
 - `sensor_timeseries_<set>.png` — truth vs ensemble at each sensor set.
+- `parameter_marginals.png` (P1) — prior vs posterior marginal per parameter.
+- `station_profiles.png` (S1) — mean-velocity / TKE profiles at the sensor
+  columns (needs `eval_fields.nc`).
+- `mean_slices.png` (F1) — time-mean field slices, truth vs posterior vs
+  difference (needs `eval_fields.nc`).
+- `sensor_fans.png` (S5) — sensor quantile fans with the observation-error
+  envelope, assimilated and held-out columns side by side.
+- `rank_histogram.png` (D1) — rank histogram of the per-cycle statistics (needs
+  `run_summary.yaml`'s `sensor_statistics`).
 
 The parameter figures are skipped in `mode=state` (no parameters estimated).
+The last five mirror the ESMDA stage's WP1.5 figures (§2.3); each degrades to a
+printed skip line when the artifact it reads is absent, so a run dir whose metric
+stage predates them still gets every figure it can support, and a skip never
+costs the figures after it. There is no filtering counterpart to the ESMDA
+suite's `probe_spectra.png` (S4): it needs the high-rate probe records only a
+dedicated solver rerun (`scripts/esmda/run_probe_series.py`) writes, and the
+filtering pipeline has no such script.
 
 #### [`run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh)
 **Shell script** (executable). Runs all three stages in sequence, resolving the

@@ -690,9 +690,19 @@ class MeanFieldCollector:
         indicator = self._solid_indicator(state)
         if indicator is None:
             return
-        for dim in ("ensemble", "time"):
-            if dim in indicator.dims:
-                indicator = indicator.isel({dim: 0})
+        # Collapse every axis that is not one of the three centre dims, rather
+        # than a fixed ("ensemble", "time") pair: the geometry is static, so any
+        # of them is settled by index 0, and the leading axis is not always
+        # called ``time``. The filtering pipeline's ``state_history.nc`` stacks
+        # its analyzed frames on ``cycle``, and leaving that one in place used to
+        # make the transpose below raise -- taking the whole mean-field block
+        # down on a run whose obstacle mask was right there in the file. An axis
+        # that IS spatial but under another name (a staggered indicator) is
+        # collapsed too, and then fails the centre-dim check just below, which is
+        # the same "no usable mask" outcome as before.
+        extra = {dim: 0 for dim in indicator.dims if dim not in dims}
+        if extra:
+            indicator = indicator.isel(extra)
         if not all(dim in indicator.dims for dim in dims):
             return
         if not self._is_native_grid(indicator, dims):
