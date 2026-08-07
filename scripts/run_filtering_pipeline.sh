@@ -12,6 +12,25 @@
 # overrides applied -- so the metric/figure stages read it back. The output
 # location is therefore configured in one place (the YAML), not here.
 #
+# Stages 2 and 3 produce the same evaluation blocks and figures as the ESMDA
+# pipeline -- the parameter marginals (P1), station profiles (S1), sensor fans
+# (S5), mean slices (F1) and rank histogram (D1) -- reducing over the filter's
+# per-CYCLE ensemble states in place of ESMDA's per-window ones. Which states
+# those are depends on one knob:
+#
+#   run.ensemble_save_on_disk=false  (default) -- only the per-cycle ANALYZED
+#       frames survive (state_history.nc), one frame per cycle. Every block still
+#       runs, but the per-cycle variance statistic is null and the TKE / <u'w'>
+#       moments are taken across cycles rather than within them, so they carry
+#       the analysis increments; read those panels as an upper bound.
+#   run.ensemble_save_on_disk=true -- the filter keeps every member's full
+#       forecast segment under _ensemble_states/cycle_*/, which is the exact
+#       analogue of ESMDA's window state files. Costs disk (ensemble x cycles x
+#       segment), and buys within-cycle turbulence statistics.
+#
+# Whichever ran is recorded in run_summary.yaml's `cycle_states` block, so the
+# numbers always say which of the two they came from.
+#
 # Any extra arguments are forwarded to run_filtering.py as Hydra overrides (and
 # used to resolve the run dir), e.g.:
 #
@@ -19,6 +38,7 @@
 #   scripts/run_filtering_pipeline.sh filtering.mode=parameter \
 #       filtering/evolution=random_walk filtering/inflation=none
 #   scripts/run_filtering_pipeline.sh model@truth_model=pylbm model@assim_model=pylbm
+#   scripts/run_filtering_pipeline.sh run.ensemble_save_on_disk=true
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

@@ -1054,9 +1054,28 @@ def _styled() -> Iterator[None]:
 
     ``apply_style`` mutates the global rcParams; the surrounding ``rc_context``
     is what keeps a figure from leaking its style into the caller's process.
+
+    **Opaque, unlike ``apply_style``'s own default.** That default is transparent
+    because it was written for the paper/slide figures in
+    ``scripts/figure_creation/``, which are composited onto a page whose colour
+    the document owns. Every figure in this module is instead a PNG an operator
+    opens straight out of a run directory, where a transparent background takes
+    the viewer's -- and on a dark-mode viewer the dark axis labels, tick text and
+    truth lines land on dark grey and the figure is unreadable. So the three
+    facecolors are pinned white here, and the matching ``transparent=False`` goes
+    to ``save_png`` at each save site (an explicit ``savefig`` keyword overrides
+    ``savefig.transparent``, so setting the rcParam alone would not be enough).
     """
     with plt.rc_context():
         apply_style()
+        plt.rcParams.update(
+            {
+                "figure.facecolor": "white",
+                "axes.facecolor": "white",
+                "savefig.facecolor": "white",
+                "savefig.transparent": False,
+            }
+        )
         yield
 
 
@@ -1395,7 +1414,7 @@ def plot_parameter_marginals(
         ]
         axes[0, 0].legend(handles=handles, loc="lower left", fontsize=8)
         fig.suptitle("Parameter marginals: prior vs posterior")
-        return save_png(fig, output_path)
+        return save_png(fig, output_path, transparent=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1666,7 +1685,7 @@ def plot_station_profiles(
             )
         fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
         fig.suptitle("Vertical profiles at the station columns")
-        return save_png(fig, output_path)
+        return save_png(fig, output_path, transparent=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1945,7 +1964,7 @@ def plot_mean_slices(
         if stride > 1:
             caption += f" Horizontal stride {stride}."
         fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
-        return save_png(fig, output_path)
+        return save_png(fig, output_path, transparent=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2161,7 +2180,7 @@ def plot_sensor_fans(
                 fontsize=8,
                 color=COLORS["charcoal"],
             )
-        return save_png(fig, output_path)
+        return save_png(fig, output_path, transparent=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2326,7 +2345,7 @@ def plot_rank_histogram(
         ]
         axes[0][-1].legend(handles=handles, loc="upper right", fontsize=8)
         fig.suptitle("Rank histogram of the truth within the ensemble")
-        return save_png(fig, output_path)
+        return save_png(fig, output_path, transparent=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2724,7 +2743,7 @@ def plot_spectra(
             fontsize=8,
             color=COLORS["charcoal"],
         )
-        return save_png(fig, output_path)
+        return save_png(fig, output_path, transparent=False)
 
 
 def _lsd_label(

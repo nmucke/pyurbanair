@@ -334,17 +334,42 @@ def _ensure_parent(path: str | pathlib.Path) -> pathlib.Path:
     return resolved
 
 
-def save_pdf(fig: Figure, path: str | pathlib.Path) -> pathlib.Path:
+def save_pdf(
+    fig: Figure, path: str | pathlib.Path, *, transparent: bool = True
+) -> pathlib.Path:
     resolved = _ensure_parent(path)
-    fig.savefig(resolved, format="pdf", transparent=True, bbox_inches="tight")
+    fig.savefig(resolved, format="pdf", transparent=transparent, bbox_inches="tight")
     plt.close(fig)
     print(f"  + {resolved}")
     return resolved
 
 
-def save_png(fig: Figure, path: str | pathlib.Path, dpi: int = 300) -> pathlib.Path:
+def save_png(
+    fig: Figure,
+    path: str | pathlib.Path,
+    dpi: int = 300,
+    *,
+    transparent: bool = True,
+) -> pathlib.Path:
+    """Write a PNG. ``transparent=False`` for a figure meant to be read on its own.
+
+    Transparency is the right default for the figures that go into the paper and
+    the slide deck (``scripts/figure_creation/``): they are composited onto a
+    page whose colour the document owns. It is the wrong one for a PNG an
+    operator opens straight out of a run directory -- on a dark-mode viewer, dark
+    axis labels and tick text land on a dark background and the figure is
+    unreadable. Those callers pass ``transparent=False`` and get the white
+    background the rcParams set.
+
+    Passed explicitly rather than read from ``savefig.transparent`` because an
+    explicit ``savefig`` keyword overrides the rcParam anyway, so honouring the
+    rcParam would mean *not* passing the keyword at all -- and then every caller
+    that never applied the style would silently flip to matplotlib's default.
+    """
     resolved = _ensure_parent(path)
-    fig.savefig(resolved, format="png", dpi=dpi, transparent=True, bbox_inches="tight")
+    fig.savefig(
+        resolved, format="png", dpi=dpi, transparent=transparent, bbox_inches="tight"
+    )
     plt.close(fig)
     print(f"  + {resolved}")
     return resolved
