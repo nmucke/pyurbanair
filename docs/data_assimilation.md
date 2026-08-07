@@ -245,6 +245,21 @@ state-bearing variants when `final_time_smoothing=True`).
 sensor xyz coordinates so that observation index `j` maps to sensor
 `j % num_sensors`, matching the flattened observation vector layout.
 
+**Observation-space diagnostics (opt-in).** Set `collect_obs_diagnostics =
+True` after construction (the same attribute-plumbing pattern as
+`prune_disk_steps`) and the smoother records, in `pred_obs_history`, the
+`(N_d, N_e)` predicted observations it materializes at every iteration —
+`num_steps + 1` entries per `_analysis` call, entry 0 the prior forecast and
+entry −1 the posterior forecast. The list is rebound at `_analysis` entry, so
+a multi-window caller reads one window's entries per call. The extra
+`_observation_step` for the posterior forecast runs **before**
+`_final_time_smoothing_step` (that step is a second Kalman update of the
+trajectory, not a forecast, so its predicted observations are excluded); with
+`final_time_smoothing=True` the last entry is therefore pre-smoothing. Off by
+default: nothing is recorded and no extra operator evaluation happens.
+`run_esmda.py` turns it on under `esmda.save_obs_diagnostics` and persists the
+arrays per window.
+
 ### Four variants
 
 | Class | Augmented state | Notes |

@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import xarray
 from data_assimilation.augmentation import ParamAugmentation, StateAugmentation
 from data_assimilation.filtering.analysis import stochastic_enkf_update
@@ -139,6 +140,17 @@ class _BaseESMDA(BaseSmoothing):
         self.prune_disk_steps = False
         self.keep_prior_disk_step = True
 
+        # Observation-space diagnostics, set by the caller (e.g. run_esmda.py)
+        # after construction, same attribute-plumbing pattern as
+        # ``prune_disk_steps``. When ``collect_obs_diagnostics`` is True each
+        # ``_one_step`` records the predicted observations it materialized, and
+        # ``_analysis`` appends one final entry for the posterior forecast --
+        # ``num_steps + 1`` entries per window, entry 0 the prior. Off by
+        # default: nothing is collected, and no extra observation operator
+        # evaluation happens, unless a caller asks for it.
+        self.collect_obs_diagnostics = False
+        self.pred_obs_history: list[np.ndarray] = []
+
         if self.forward_model.save_on_disk:
             self.base_results_dir = self.forward_model.results_dir
             for i in range(num_steps + 1):
@@ -163,6 +175,27 @@ class _BaseESMDA(BaseSmoothing):
         """
         if self.forward_model.save_on_disk and self.prune_disk_steps:
             shutil.rmtree(self.base_results_dir / f"step_{step}", ignore_errors=True)
+
+    def _record_pred_obs(self, pred_obs: jnp.ndarray) -> None:
+        """Record one iteration's predicted observations ``(N_d, N_e)``.
+
+        No-op unless ``collect_obs_diagnostics`` is set. ``np.asarray`` copies
+        the block off the JAX device, so a whole window's history never pins
+        accelerator memory (it is KB-scale on the host).
+        """
+        if self.collect_obs_diagnostics:
+            self.pred_obs_history.append(np.asarray(pred_obs))
+
+    def _results_dir_or_none(self) -> Optional[pathlib.Path]:
+        """The forward model's results dir on the disk path, ``None`` in memory.
+
+        What every ``_observation_step`` call site passes: in on-disk save mode
+        ``_forecast_step`` returns ``None`` and the operator reads the per-member
+        files, in memory mode the state is passed directly and the dir is unused.
+        """
+        return (
+            self.forward_model.results_dir if self.forward_model.save_on_disk else None
+        )
 
     def get_state(self, ensemble_member: int, step: int) -> xarray.Dataset:
         """Get the state for one ensemble member at a given step."""
@@ -307,6 +340,11 @@ sensor_observation_coords` (shared with the filtering package); see its
 
         initial_state = state
 
+        # One history per call, so a multi-window caller reading it after each
+        # window gets that window's entries alone. Rebound rather than cleared:
+        # the caller may still hold the previous window's list.
+        self.pred_obs_history = []
+
         params_history: list[xarray.Dataset] = [params] if return_params_history else []
         state_history: list[xarray.Dataset] = []
 
@@ -355,6 +393,21 @@ sensor_observation_coords` (shared with the filtering package); see its
         self._set_step_results_dir(self.num_steps)
         state = self._forecast_step(state=initial_state, params=params)
 
+        # Close the observation-space history with the POSTERIOR forecast: the
+        # in-loop appends only cover the num_steps prior/intermediate forecasts,
+        # and the posterior is the one the run is judged on. Recorded here --
+        # before ``_final_time_smoothing_step``, which is a second Kalman update
+        # of the trajectory rather than a forecast (see its docstring), so its
+        # own predicted observations are a different object and stay out.
+        if self.collect_obs_diagnostics:
+            self._record_pred_obs(
+                jnp.asarray(
+                    self._observation_step(
+                        state=state, results_dir=self._results_dir_or_none()
+                    )
+                ).T
+            )
+
         # Optional post-loop trajectory smoothing (state-bearing variants with
         # final_time_smoothing enabled; no-op otherwise). Reuses the final
         # forecast — no extra forward solve — and never touches the params.
@@ -397,12 +450,7 @@ class ParameterESMDA(_BaseESMDA):
         N_e = params.sizes["ensemble"]
 
         pred_obs = self._observation_step(
-            state=state,
-            results_dir=(
-                self.forward_model.results_dir
-                if self.forward_model.save_on_disk
-                else None
-            ),
+            state=state, results_dir=self._results_dir_or_none()
         )
         pred_obs = jnp.asarray(pred_obs).T
 
@@ -413,6 +461,7 @@ class ParameterESMDA(_BaseESMDA):
                 "This usually indicates stale or unexpected files in the ESMDA "
                 "results step directory."
             )
+        self._record_pred_obs(pred_obs)
 
         params_array = jnp.array([params[name].values for name in param_names])
 
@@ -820,12 +869,11 @@ group_ids`, which raises on staggered (non-collocated) shapes.
         # ``group_ids`` is unused: the state-bearing variant builds its own block
         # ids (state cells + per-parameter) inside ``_augmented_state_update``.
         obs = jnp.asarray(obs)
-        results_dir = (
-            self.forward_model.results_dir if self.forward_model.save_on_disk else None
-        )
+        results_dir = self._results_dir_or_none()
 
         pred_obs = self._observation_step(state=state, results_dir=results_dir)
         pred_obs = jnp.asarray(pred_obs).T
+        self._record_pred_obs(pred_obs)
 
         states_array = self._get_states(state=state, results_dir=results_dir)
         N_e = params.sizes["ensemble"]
@@ -939,12 +987,11 @@ class StateAndTimeVaryingParameterESMDA(
         # ``group_ids`` is unused: block ids are built inside
         # ``_augmented_state_update`` (state cells + per-parameter blocks).
         obs = jnp.asarray(obs)
-        results_dir = (
-            self.forward_model.results_dir if self.forward_model.save_on_disk else None
-        )
+        results_dir = self._results_dir_or_none()
 
         pred_obs = self._observation_step(state=state, results_dir=results_dir)
         pred_obs = jnp.asarray(pred_obs).T
+        self._record_pred_obs(pred_obs)
 
         # Time=0 state ensemble + time-varying params flattened to per-knot
         # scalars (respecting pin_initial_time_point). The shared state-only

@@ -13,8 +13,8 @@ and they take an ``output_path`` and write the file themselves rather than
 returning a ``Figure``. WP0.2 is a pure refactor and keeps both properties;
 changing either is a later cleanup.
 
-Populated in WP0.2 (move), extended in WP1.5 (P1, S1, S5, F1, D1) and phase 3
-(S4).
+Populated in WP0.2 (move), extended in WP1.5 (P1, S1, S5, F1, D1), phase 3
+(S4) and phase 2 (D3).
 """
 
 # mypy: ignore-errors
@@ -36,11 +36,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray
 from evaluation.scores import (
+    DATA_MISMATCH_TARGET,
     _aligned_parameter_members,
     _param_members_and_x,
     _plotted_param_names,
     compute_parameter_metrics,
     compute_sensor_metrics,
+    data_mismatch_target_band,
     parameter_bundle,
 )
 
@@ -66,7 +68,7 @@ from evaluation.turbulence import (
 )
 from matplotlib.axes import Axes
 from matplotlib.collections import PolyCollection
-from matplotlib.colors import Colormap
+from matplotlib.colors import Colormap, LinearSegmentedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
@@ -2774,3 +2776,252 @@ def _lsd_label(
         if np.isfinite(reference):
             label += f" (truth halves {reference:.2f})"
     return label
+
+
+# ---------------------------------------------------------------------------
+# D3 -- data-mismatch decay
+# ---------------------------------------------------------------------------
+
+# Switch to a log y-axis once the per-step MEDIANS span at least this many
+# decades: a healthy MDA run drops O_N by one to two orders of magnitude from the
+# prior, and on a linear axis every posterior iteration is then flattened onto
+# zero -- the part of the figure the target band exists to resolve. Judged on the
+# medians, not on every member: one outlier member two decades below its step's
+# median would otherwise flip the whole figure to log.
+_D3_LOG_DECADES = 1.5
+
+# Fraction of an iteration slot the per-window box cluster may occupy, box widths
+# included. Below 1.0 with a margin, so consecutive iterations' clusters never
+# touch and every box stays on its own tick.
+_D3_CLUSTER_SPAN = 0.72
+
+
+def _d3_box_layout(n_steps: int, n_windows: int) -> tuple[np.ndarray, float]:
+    """``(positions, width)`` for ``n_windows`` boxes per iteration.
+
+    ``positions`` is ``(n_windows, n_steps)``: iteration ``i`` sits at integer
+    ``i`` and a rollout's windows are offset around it. The offsets are placed so
+    the cluster's full extent -- **outer box edges included** -- stays within
+    ``_D3_CLUSTER_SPAN`` of one slot, which is what keeps window ``w``'s box at
+    iteration ``i+1`` clear of window ``w'``'s at iteration ``i``. A single
+    window lands exactly on the integers.
+    """
+    steps = np.arange(n_steps, dtype=float)[None, :]
+    if n_windows <= 1:
+        return steps, _D3_CLUSTER_SPAN * 0.6
+
+    # n_windows boxes of width ``w`` spanning centres [-h, +h] occupy
+    # 2h + w; solving 2h + w = span with w = span/(n_windows + 1) leaves a
+    # box-width gap between adjacent clusters.
+    width = _D3_CLUSTER_SPAN / (n_windows + 1)
+    half = (_D3_CLUSTER_SPAN - width) / 2.0
+    offsets = np.linspace(-half, half, n_windows)
+    return steps + offsets[:, None], width
+
+
+def plot_data_mismatch_decay(
+    per_window: Sequence[np.ndarray] | None,
+    output_path: str | pathlib.Path,
+    *,
+    num_observations: int = 0,
+    window_indices: Sequence[int] | None = None,
+) -> pathlib.Path | None:
+    """D3: per-member ``O_N`` vs ESMDA iteration against the ½ target band.
+
+    ``per_window`` is a list of ``(n_steps, M)`` arrays of
+    :func:`evaluation.scores.data_mismatch` values, one per assimilation window;
+    ``num_observations`` is ``N_d``, which sets the band; ``window_indices``
+    says which window each entry is, so a run whose window 1 could not be read
+    labels its boxes 0 and 2 rather than silently renumbering them 0 and 1.
+    Windows are drawn as separate boxes per iteration rather than pooled —
+    window 0's prior is a cold-start draw and a later window's is an
+    extrapolated posterior, so pooling their step-0 boxes would conflate two
+    different objects.
+
+    A healthy run's boxes descend from the prior and settle inside the band. The
+    two failure modes the figure exists to separate: boxes settling **above** the
+    band are under-fitting, boxes settling **below** it mean the ensemble is
+    fitting observation noise. The band's χ² target assumes ``C_D`` includes
+    representativeness error, which it does not here — annotated on the figure,
+    so the trend and the box heights are read before the absolute placement.
+
+    Returns the path written, or ``None`` when there is nothing to draw (an old
+    run dir, or ``esmda.save_obs_diagnostics=false``).
+    """
+    supplied = list(per_window if per_window is not None else [])
+    windows = [np.atleast_2d(np.asarray(w, dtype=float)) for w in supplied]
+    keep = [i for i, w in enumerate(windows) if w.size and np.any(np.isfinite(w))]
+    windows = [windows[i] for i in keep]
+    if not windows:
+        logger.info("plot_data_mismatch_decay: no usable data-mismatch values")
+        return None
+
+    labels = [window_indices[i] for i in keep] if window_indices is not None else keep
+    n_steps = max(w.shape[0] for w in windows)
+    positions, box_width = _d3_box_layout(n_steps, len(windows))
+    band = data_mismatch_target_band(num_observations)
+
+    # Colour the prior end grey and the posterior end teal, interpolating in
+    # between, so the direction of travel is legible without reading the axis.
+    ramp = _step_colors(n_steps)
+
+    # Decided before anything is drawn: the band's placement depends on it.
+    # Judged on the per-step medians (see ``_D3_LOG_DECADES``) but only allowed
+    # when every plotted value is strictly positive, since a single O_N of
+    # exactly 0 -- a member reproducing the observations exactly -- has no place
+    # on a log axis.
+    pooled = np.concatenate([_finite(w) for w in windows])
+    step_values = [
+        _finite(np.concatenate([w[s] for w in windows if w.shape[0] > s]))
+        for s in range(n_steps)
+    ]
+    # ``np.median`` of an empty step warns on stdout before returning nan. The
+    # nan is the right answer and ``_spans_decades`` drops it, so the guard here
+    # suppresses only the noise.
+    medians = np.array([np.median(v) if v.size else np.nan for v in step_values])
+    use_log = _spans_decades(medians, _D3_LOG_DECADES) and bool(np.all(pooled > 0.0))
+
+    with _styled():
+        fig, ax = plt.subplots(figsize=(1.6 + 1.5 * n_steps, 4.2))
+
+        for w, values in enumerate(windows):
+            for step in range(values.shape[0]):
+                finite = _finite(values[step])
+                if finite.size == 0:
+                    continue
+                box = ax.boxplot(
+                    finite,
+                    positions=[positions[w][step]],
+                    widths=box_width,
+                    showfliers=True,
+                    patch_artist=True,
+                    medianprops={"color": COLORS["charcoal"], "lw": 1.4},
+                    flierprops={
+                        "marker": ".",
+                        "markersize": 3,
+                        "markerfacecolor": COLORS["charcoal"],
+                        "markeredgecolor": "none",
+                    },
+                    whiskerprops={"color": COLORS["charcoal"], "lw": 1.0},
+                    capprops={"color": COLORS["charcoal"], "lw": 1.0},
+                    zorder=3,
+                )
+                box["boxes"][0].set_facecolor(ramp[step])
+                box["boxes"][0].set_edgecolor(COLORS["charcoal"])
+                box["boxes"][0].set_alpha(0.85)
+
+        if use_log:
+            ax.set_yscale("log")
+
+        band_drawn = band is not None
+        if band is not None:
+            lower, upper = DATA_MISMATCH_TARGET - band, DATA_MISMATCH_TARGET + band
+            if lower <= 0.0:
+                # ``band >= 1/2``, i.e. 18 or fewer observations (3/sqrt(2*18)
+                # is exactly 1/2). The true lower edge is at or below zero,
+                # which a log axis cannot take and which on a linear one just
+                # means "no lower bound".
+                if not use_log:
+                    lower = 0.0
+                elif float(pooled.min()) < upper:
+                    lower = float(pooled.min())
+                else:
+                    # A band with no drawable lower edge, and nothing plotted
+                    # inside it: a decoration rather than a reference.
+                    band_drawn = False
+            # Whenever ``lower > 0`` -- every N_d >= 19, which is every real
+            # run -- the true band is drawn as-is and the axis grows to include
+            # it. That is deliberate: on an off-target run the reader needs to
+            # see HOW FAR above the band the boxes sit, and clipping the band to
+            # the data was what made the span invert.
+
+            if band_drawn:
+                ax.axhspan(lower, upper, color=COLORS["window"], alpha=0.25, zorder=1)
+        ax.axhline(
+            DATA_MISMATCH_TARGET, color=COLORS["charcoal"], ls="--", lw=1.2, zorder=2
+        )
+
+        ax.set_xticks(np.arange(n_steps))
+        ax.set_xticklabels(_d3_step_labels(n_steps))
+        ax.set_xlim(-0.6, n_steps - 0.4)
+        ax.set_xlabel("ESMDA iteration")
+        ax.set_ylabel(r"$O_N$")
+        ax.set_title("Normalized data mismatch per iteration", loc="left")
+
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                color=COLORS["charcoal"],
+                ls="--",
+                lw=1.2,
+                label=r"target $1/2$",
+            )
+        ]
+        if band_drawn:
+            handles.append(
+                Patch(
+                    facecolor=COLORS["window"],
+                    alpha=0.25,
+                    label=r"$1/2 \pm 3/\sqrt{2N_d}$",
+                )
+            )
+        if len(windows) > 1:
+            # The actual window numbers, so a run that lost one to a read error
+            # does not present the survivors as a contiguous 0..N-1.
+            handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color="none",
+                    label="windows "
+                    + ", ".join(str(w) for w in labels)
+                    + " (left to right)",
+                )
+            )
+        ax.legend(handles=handles, loc="best", fontsize=8)
+        # Only when a band is on the figure -- otherwise the note explains a
+        # reference the reader cannot see.
+        if band_drawn:
+            ax.annotate(
+                "band assumes $C_D$ includes representativeness error (it does "
+                "not);\nread the trend and the box heights before the absolute "
+                "placement",
+                xy=(0.0, -0.22),
+                xycoords="axes fraction",
+                fontsize=7,
+                color=COLORS["charcoal"],
+                va="top",
+            )
+        return save_png(fig, output_path, transparent=False)
+
+
+def _d3_step_labels(n_steps: int) -> list[str]:
+    """Iteration tick labels: ``prior``, the interior indices, ``posterior``."""
+    labels = [str(i) for i in range(n_steps)]
+    labels[0] = "0\nprior"
+    if n_steps > 1:
+        labels[-1] = f"{n_steps - 1}\nposterior"
+    return labels
+
+
+def _step_colors(n_steps: int) -> list[tuple[float, float, float, float]]:
+    """Prior-grey to posterior-teal ramp, one colour per iteration."""
+    ramp = LinearSegmentedColormap.from_list(
+        "d3", [COLORS["prior"], COLORS["posterior"]]
+    )
+    if n_steps <= 1:
+        return [ramp(1.0)]
+    return [ramp(i / (n_steps - 1)) for i in range(n_steps)]
+
+
+def _spans_decades(values: np.ndarray, decades: float) -> bool:
+    """True when the finite ``values`` are positive and span ``decades`` of them.
+
+    Non-positive values have no ratio to take, so their presence answers the
+    question ``False`` rather than raising.
+    """
+    finite = _finite(values)
+    if finite.size == 0 or np.any(finite <= 0.0):
+        return False
+    return bool(np.log10(finite.max() / finite.min()) >= decades)

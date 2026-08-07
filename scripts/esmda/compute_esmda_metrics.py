@@ -74,6 +74,7 @@ if __package__ is None or __package__ == "":
 
 from evaluation.scores import (
     METRICS_VERSION,
+    data_mismatch_summary,
     ensemble_uniqueness,
     hit_rate,
     parameter_metric_summary,
@@ -96,6 +97,7 @@ from scripts.esmda._esmda_common import (
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
+    obs_diagnostics_bundle,
     open_truth,
     probe_spectra_bundle,
     read_yaml,
@@ -1315,6 +1317,21 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     spectra = probe_spectra_bundle(run_dir)
     if spectra is not None:
         summary["spectral_metrics"] = spectral_metric_summary(spectra)
+
+    # --- ESMDA health: normalized data mismatch O_N (§5) ----------------------
+    # Above the ``skip_viz`` gate for the same reason as the block above: it
+    # reads only the KB-scale observation-space files, never the truth. Absent
+    # on every run dir written before WP2.1 or with
+    # ``esmda.save_obs_diagnostics=false`` -- logged and skipped (invariant 3).
+    mismatch = obs_diagnostics_bundle(run_dir)
+    if mismatch is not None:
+        block = data_mismatch_summary(
+            mismatch["per_step"],
+            mismatch["num_observations"],
+            per_window=mismatch["per_window"],
+        )
+        if block is not None:
+            summary["esmda_diagnostics"] = {"data_mismatch": block}
 
     # The parameter metrics are always available. The state and sensor metrics
     # both open the (potentially multi-GB) truth, so -- matching run_esmda.py's

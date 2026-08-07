@@ -449,6 +449,142 @@ def probe_spectra_bundle(run_dir: pathlib.Path) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Observation-space diagnostics (phase 2)
+# ---------------------------------------------------------------------------
+
+
+def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
+    """Per-iteration ``O_N`` from the run's observation-space files, or ``None``.
+
+    The one place ``windows/window_{w}_{obs,pred_obs}.nc`` are located, opened
+    and reduced, called by both the metric stage (which turns the bundle into
+    ``esmda_diagnostics``) and the figure stage (which draws it as D3) — so the
+    boxes in the figure and the numbers in ``run_summary.yaml`` come off the
+    same arrays.
+
+    The files are KB-scale (``N_d × M`` floats per iteration), not window state
+    files, so they are read whole; invariant 2 concerns the multi-GB state files
+    this never touches.
+
+    Returns ``{"per_step": [np.ndarray, ...], "num_observations": int,
+    "num_windows": int, "per_window": [np.ndarray (L, M), ...],
+    "window_indices": [int, ...]}``. ``per_step`` pools members across windows,
+    one entry per iteration; ``per_window`` keeps them separate, which is what
+    D3 needs to avoid conflating window 0's cold-start prior with a later
+    window's extrapolated one, and ``window_indices`` says which window each
+    entry is so a dropped one does not silently renumber the rest.
+
+    **Bounded by ``truth_access.yaml``'s ``num_windows``**, like every other
+    consumer in ``compute_esmda_metrics``. ``paths.results_dir`` is a fixed,
+    non-timestamped path and the window loop never clears ``windows/``, so a
+    rerun with fewer windows (or a crash partway through one) leaves a previous
+    run's files in place; globbing alone would pool them into this run's
+    diagnostic while every other block in the same ``run_summary.yaml`` covered
+    only the current windows.
+
+    ``None``, with the reason logged, when the run has no such files — every run
+    dir written before WP2.1 or with ``esmda.save_obs_diagnostics=false``.
+    """
+    from evaluation.scores import data_mismatch
+
+    run_dir = pathlib.Path(run_dir)
+    windows_dir = run_dir / "windows"
+    expected = read_yaml(run_dir / "truth_access.yaml").get("num_windows")
+
+    pairs = []
+    for obs_path in sorted(windows_dir.glob("window_*_obs.nc")):
+        match = re.fullmatch(r"window_(\d+)_obs", obs_path.stem)
+        if not match:
+            continue
+        window = int(match.group(1))
+        if expected is not None and window >= int(expected):
+            logger.warning(
+                "Ignoring %s: window %d is beyond this run's %d window(s), so it "
+                "is left over from an earlier run into the same output dir",
+                obs_path.name,
+                window,
+                int(expected),
+            )
+            continue
+        pred_path = windows_dir / f"window_{window}_pred_obs.nc"
+        if pred_path.exists():
+            pairs.append((window, obs_path, pred_path))
+    if not pairs:
+        logger.info(
+            "No observation-space files in %s; the data-mismatch diagnostic is "
+            "skipped (rerun with esmda.save_obs_diagnostics=true to write them)",
+            run_dir,
+        )
+        return None
+
+    per_window: list[np.ndarray] = []
+    window_indices: list[int] = []
+    n_obs = 0
+    for window, obs_path, pred_path in sorted(pairs):
+        try:
+            with (
+                xarray.open_dataset(obs_path) as obs_ds,
+                xarray.open_dataset(pred_path) as pred_ds,
+            ):
+                obs = obs_ds["obs"].values
+                sigma = obs_ds["obs_error_std"].values
+                pred = pred_ds["pred_obs"].values  # (esmda_step, obs, ensemble)
+                # N_d sets the target band, so windows scored against different
+                # observation counts cannot share one. The first window kept
+                # fixes it; a later mismatch is a stale or reconfigured file and
+                # is dropped rather than silently widening the band.
+                window_n_obs = int(np.size(obs))
+                if n_obs and window_n_obs != n_obs:
+                    logger.warning(
+                        "Ignoring window %d in %s: %d observations against the "
+                        "run's %d, so it cannot share the target band",
+                        window,
+                        run_dir,
+                        window_n_obs,
+                        n_obs,
+                    )
+                    continue
+                # One row per iteration; ``data_mismatch`` validates the shapes.
+                per_window.append(
+                    np.stack(
+                        [
+                            data_mismatch(obs, pred[i], sigma)
+                            for i in range(pred.shape[0])
+                        ]
+                    )
+                )
+                window_indices.append(window)
+                n_obs = window_n_obs
+        except (OSError, ValueError, KeyError) as error:
+            # A window killed mid-write costs itself, not the whole diagnostic.
+            logger.warning(
+                "Cannot read the observation-space files for window %d in %s: %s",
+                window,
+                run_dir,
+                error,
+            )
+
+    if not per_window:
+        return None
+
+    # Windows may in principle differ in iteration count (a config changed
+    # between reruns into one dir); pool over whatever each window actually has
+    # rather than assuming a rectangle.
+    n_steps = max(w.shape[0] for w in per_window)
+    per_step = [
+        np.concatenate([w[i] for w in per_window if w.shape[0] > i])
+        for i in range(n_steps)
+    ]
+    return {
+        "per_step": per_step,
+        "per_window": per_window,
+        "window_indices": window_indices,
+        "num_observations": n_obs,
+        "num_windows": len(per_window),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Scalar / YAML helpers
 # ---------------------------------------------------------------------------
 
