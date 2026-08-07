@@ -453,7 +453,14 @@ def make_figures(run_dir: pathlib.Path) -> None:
         )
     else:
         decay = run_dir / "data_mismatch_decay.png"
-        _note_skipped(decay, plot_data_mismatch_decay(mismatch, decay))
+        _note_skipped(
+            decay,
+            plot_data_mismatch_decay(
+                mismatch["per_window"],
+                decay,
+                num_observations=mismatch["num_observations"],
+            ),
+        )
 
     rank_counts = _rank_counts(read_yaml(run_dir / "run_summary.yaml"))
     if rank_counts:

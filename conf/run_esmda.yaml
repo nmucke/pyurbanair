@@ -130,7 +130,9 @@ esmda:
   # `esmda_diagnostics`) and figure D3; they are KB-scale, so default-on. Set
   # false to reproduce the pre-phase-2 artifact set exactly — the diagnostic and
   # the figure then skip themselves. Costs one extra observation-operator
-  # evaluation per window (the posterior forecast's), no extra forward solve.
+  # evaluation per window (the posterior forecast's), no extra forward solve;
+  # under final_time_smoothing=true that forecast is evaluated twice, since the
+  # smoothing step does its own and this one is deliberately taken before it.
   save_obs_diagnostics: true
 
 run:

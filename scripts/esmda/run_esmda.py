@@ -371,9 +371,18 @@ def _streaming_state_summary(path):
 # rather than in ``evaluation`` because it reads the operator object, which is
 # data-assimilation machinery the leaf library must not import (see the phase-2
 # plan and the master plan's invariant 5).
+#
+# The dimension is ``obs_index``, not ``obs``: the observation variable is called
+# ``obs``, and a variable whose name equals its dimension is silently promoted to
+# an index coordinate on the netCDF round-trip -- so a file written with an
+# ``obs`` dimension reads back with ``obs`` as a coordinate rather than the data
+# variable the docs describe.
+_OBS_DIM = "obs_index"
 _OBS_ORDERING = (
-    "obs index j = interval*(n_states*n_sensors) + state*n_sensors + sensor; "
-    "the sensor index is the fastest-varying axis."
+    "obs_index j = interval*(n_states*n_sensors) + state*n_sensors + sensor; "
+    "the sensor index is the fastest-varying axis. Under obs.temporal_mode=full "
+    "the slowest axis is the output frame rather than an aggregation interval, "
+    "and obs_interval indexes frames."
 )
 
 
@@ -382,10 +391,15 @@ def _obs_index_coords(obs_op, n_d):
 
     ``obs_op`` is the observation operator (a ``TemporalObservationOperator`` or
     a bare ``ObservationOperator``); ``n_d`` the length of the flat observation
-    vector. Returns coordinate arrays keyed on the ``obs`` dimension. Degrades to
-    an empty mapping -- the flat index alone -- when the operator does not expose
-    the counts or when ``n_d`` is not a whole number of (state, sensor) blocks,
-    so an unusual operator costs metadata rather than the whole artifact.
+    vector. Returns coordinate arrays keyed on the ``obs_index`` dimension.
+    Degrades to an empty mapping -- the flat index alone -- when the operator
+    does not expose the counts or when ``n_d`` is not a whole number of (state,
+    sensor) blocks, so an unusual operator costs metadata rather than the whole
+    artifact.
+
+    ``obs_interval`` counts aggregation intervals under ``temporal_mode:
+    intervals`` and output *frames* under ``full``; the arithmetic is identical
+    either way, and the file attrs say so.
     """
     base = getattr(obs_op, "observation_operator", obs_op)
     n_sensors = int(getattr(base, "num_sensors", 0))
@@ -394,17 +408,17 @@ def _obs_index_coords(obs_op, n_d):
         return {}
 
     block = n_sensors * len(states)
-    if block <= 0 or int(n_d) % block != 0:
+    if int(n_d) % block != 0:
         return {}
 
     j = np.arange(int(n_d))
     return {
-        "obs_sensor": ("obs", (j % n_sensors).astype(int)),
+        "obs_sensor": (_OBS_DIM, (j % n_sensors).astype(int)),
         "obs_state": (
-            "obs",
+            _OBS_DIM,
             np.asarray(states, dtype=object)[(j // n_sensors) % len(states)],
         ),
-        "obs_interval": ("obs", (j // block).astype(int)),
+        "obs_interval": (_OBS_DIM, (j // block).astype(int)),
     }
 
 
@@ -437,17 +451,14 @@ def _save_obs_diagnostics(
 
     obs_ds = xarray.Dataset(
         data_vars={
-            "obs": ("obs", np.asarray(obs, dtype=float).ravel()),
-            "obs_clean": ("obs", np.asarray(obs_clean, dtype=float).ravel()),
+            "obs": (_OBS_DIM, np.asarray(obs, dtype=float).ravel()),
+            "obs_clean": (_OBS_DIM, np.asarray(obs_clean, dtype=float).ravel()),
             "obs_error_std": (
-                "obs",
+                _OBS_DIM,
                 np.asarray(obs_error_std, dtype=float).ravel(),
             ),
         },
-        # ``obs_index`` rather than ``obs``: the dimension is named ``obs`` and
-        # so is the observation variable, and xarray refuses a name that is both
-        # a data variable and a coordinate.
-        coords={"obs_index": ("obs", np.arange(n_d)), **coords},
+        coords={_OBS_DIM: np.arange(n_d), **coords},
     )
     obs_ds.attrs["ordering"] = _OBS_ORDERING
     obs_ds["obs"].attrs["long_name"] = "assimilated observation (truth + noise)"
@@ -458,10 +469,10 @@ def _save_obs_diagnostics(
     if pred_obs_history:
         stacked = np.stack([np.asarray(p, dtype=float) for p in pred_obs_history])
         pred_ds = xarray.Dataset(
-            data_vars={"pred_obs": (("esmda_step", "obs", "ensemble"), stacked)},
+            data_vars={"pred_obs": (("esmda_step", _OBS_DIM, "ensemble"), stacked)},
             coords={
                 "esmda_step": np.arange(stacked.shape[0]),
-                "obs_index": ("obs", np.arange(stacked.shape[1])),
+                _OBS_DIM: np.arange(stacked.shape[1]),
                 **coords,
             },
         )

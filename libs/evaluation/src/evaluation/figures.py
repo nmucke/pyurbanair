@@ -2782,42 +2782,57 @@ def _lsd_label(
 # D3 -- data-mismatch decay
 # ---------------------------------------------------------------------------
 
-# Switch to a log y-axis once the medians span at least this many decades: a
-# healthy MDA run drops O_N by one to two orders of magnitude from the prior, and
-# on a linear axis every posterior iteration is then flattened onto zero -- the
-# part of the figure the target band exists to resolve.
+# Switch to a log y-axis once the per-step MEDIANS span at least this many
+# decades: a healthy MDA run drops O_N by one to two orders of magnitude from the
+# prior, and on a linear axis every posterior iteration is then flattened onto
+# zero -- the part of the figure the target band exists to resolve. Judged on the
+# medians, not on every member: one outlier member two decades below its step's
+# median would otherwise flip the whole figure to log.
 _D3_LOG_DECADES = 1.5
 
+# Fraction of an iteration slot the per-window box cluster may occupy, box widths
+# included. Below 1.0 with a margin, so consecutive iterations' clusters never
+# touch and every box stays on its own tick.
+_D3_CLUSTER_SPAN = 0.72
 
-def _d3_box_positions(n_steps: int, n_windows: int) -> np.ndarray:
-    """Box centres for ``n_windows`` groups of ``n_steps`` boxes, per iteration.
 
-    Returns an ``(n_windows, n_steps)`` array of x positions: iteration ``i``
-    sits at integer ``i``, and a rollout's windows are offset around it so the
-    per-window boxes read as a cluster rather than overlapping. A single window
-    lands exactly on the integers.
+def _d3_box_layout(n_steps: int, n_windows: int) -> tuple[np.ndarray, float]:
+    """``(positions, width)`` for ``n_windows`` boxes per iteration.
+
+    ``positions`` is ``(n_windows, n_steps)``: iteration ``i`` sits at integer
+    ``i`` and a rollout's windows are offset around it. The offsets are placed so
+    the cluster's full extent -- **outer box edges included** -- stays within
+    ``_D3_CLUSTER_SPAN`` of one slot, which is what keeps window ``w``'s box at
+    iteration ``i+1`` clear of window ``w'``'s at iteration ``i``. A single
+    window lands exactly on the integers.
     """
+    steps = np.arange(n_steps, dtype=float)[None, :]
     if n_windows <= 1:
-        return np.arange(n_steps, dtype=float)[None, :]
-    # Keep the whole cluster inside 0.8 of an iteration slot so neighbouring
-    # iterations stay visually separate.
-    offsets = np.linspace(-0.4, 0.4, n_windows)
-    return np.arange(n_steps, dtype=float)[None, :] + offsets[:, None]
+        return steps, _D3_CLUSTER_SPAN * 0.6
+
+    # n_windows boxes of width ``w`` spanning centres [-h, +h] occupy
+    # 2h + w; solving 2h + w = span with w = span/(n_windows + 1) leaves a
+    # box-width gap between adjacent clusters.
+    width = _D3_CLUSTER_SPAN / (n_windows + 1)
+    half = (_D3_CLUSTER_SPAN - width) / 2.0
+    offsets = np.linspace(-half, half, n_windows)
+    return steps + offsets[:, None], width
 
 
 def plot_data_mismatch_decay(
-    bundle: dict | None,
+    per_window: Sequence[np.ndarray] | None,
     output_path: str | pathlib.Path,
+    *,
+    num_observations: int = 0,
 ) -> pathlib.Path | None:
     """D3: per-member ``O_N`` vs ESMDA iteration against the ½ target band.
 
-    ``bundle`` is what ``scripts/esmda/_esmda_common.obs_diagnostics_bundle``
-    returns: ``per_window`` (a list of ``(n_steps, M)`` arrays of
-    :func:`evaluation.scores.data_mismatch` values) and ``num_observations``,
-    which sets the band. Windows are drawn as separate boxes per iteration
-    rather than pooled — window 0's prior is a cold-start draw and a later
-    window's is an extrapolated posterior, so pooling their step-0 boxes would
-    conflate two different objects.
+    ``per_window`` is a list of ``(n_steps, M)`` arrays of
+    :func:`evaluation.scores.data_mismatch` values, one per assimilation window;
+    ``num_observations`` is ``N_d``, which sets the band. Windows are drawn as
+    separate boxes per iteration rather than pooled — window 0's prior is a
+    cold-start draw and a later window's is an extrapolated posterior, so pooling
+    their step-0 boxes would conflate two different objects.
 
     A healthy run's boxes descend from the prior and settle inside the band. The
     two failure modes the figure exists to separate: boxes settling **above** the
@@ -2826,29 +2841,38 @@ def plot_data_mismatch_decay(
     representativeness error, which it does not here — annotated on the figure,
     so the trend and the box heights are read before the absolute placement.
 
-    Returns the path written, or ``None`` when the bundle is absent or holds no
-    finite values (an old run dir, or ``esmda.save_obs_diagnostics=false``).
+    Returns the path written, or ``None`` when there is nothing to draw (an old
+    run dir, or ``esmda.save_obs_diagnostics=false``).
     """
-    per_window = (bundle or {}).get("per_window") or []
-    windows = [np.atleast_2d(np.asarray(w, dtype=float)) for w in per_window]
+    windows = [np.atleast_2d(np.asarray(w, dtype=float)) for w in (per_window or [])]
     windows = [w for w in windows if w.size and np.any(np.isfinite(w))]
     if not windows:
         logger.info("plot_data_mismatch_decay: no usable data-mismatch values")
         return None
 
     n_steps = max(w.shape[0] for w in windows)
-    positions = _d3_box_positions(n_steps, len(windows))
-    band = data_mismatch_target_band((bundle or {}).get("num_observations", 0))
+    positions, box_width = _d3_box_layout(n_steps, len(windows))
+    band = data_mismatch_target_band(num_observations)
 
     # Colour the prior end grey and the posterior end teal, interpolating in
     # between, so the direction of travel is legible without reading the axis.
     ramp = _step_colors(n_steps)
 
-    # Decided before anything is drawn: a log axis cannot take the band's lower
-    # edge at zero (which happens whenever ``band >= 1/2``, i.e. under ~18
-    # observations), so the floor below depends on this.
+    # Decided before anything is drawn: the band's placement depends on it.
+    # Judged on the per-step medians (see ``_D3_LOG_DECADES``) but only allowed
+    # when every plotted value is strictly positive, since a single O_N of
+    # exactly 0 -- a member reproducing the observations exactly -- has no place
+    # on a log axis.
     pooled = np.concatenate([_finite(w) for w in windows])
-    use_log = _spans_decades(pooled, _D3_LOG_DECADES)
+    medians = np.array(
+        [
+            np.median(
+                _finite(np.concatenate([w[s] for w in windows if w.shape[0] > s]))
+            )
+            for s in range(n_steps)
+        ]
+    )
+    use_log = _spans_decades(medians, _D3_LOG_DECADES) and bool(np.all(pooled > 0.0))
 
     with _styled():
         fig, ax = plt.subplots(figsize=(1.6 + 1.5 * n_steps, 4.2))
@@ -2861,7 +2885,7 @@ def plot_data_mismatch_decay(
                 box = ax.boxplot(
                     finite,
                     positions=[positions[w][step]],
-                    widths=0.8 / max(len(windows), 1) * 0.8,
+                    widths=box_width,
                     showfliers=True,
                     patch_artist=True,
                     medianprops={"color": COLORS["charcoal"], "lw": 1.4},
@@ -2882,18 +2906,31 @@ def plot_data_mismatch_decay(
         if use_log:
             ax.set_yscale("log")
 
+        band_drawn = band is not None
         if band is not None:
-            # On a log axis a zero lower edge is off the scale entirely; floor it
-            # at the smallest plotted value instead, so the band still reads as
-            # "everything below the target is inside tolerance".
-            floor = float(pooled.min()) if use_log else 0.0
-            ax.axhspan(
-                max(DATA_MISMATCH_TARGET - band, floor),
-                DATA_MISMATCH_TARGET + band,
-                color=COLORS["window"],
-                alpha=0.25,
-                zorder=1,
-            )
+            lower, upper = DATA_MISMATCH_TARGET - band, DATA_MISMATCH_TARGET + band
+            if use_log:
+                # A log axis cannot take a lower edge at or below zero (which
+                # happens whenever ``band >= 1/2``, i.e. under 18 observations),
+                # so the band is floored at the smallest plotted value. That
+                # floor must never be allowed to *exceed* the band's upper edge:
+                # on an entirely off-target run -- every box above the band,
+                # which is the regime the C_D caveat says to expect -- the span
+                # would invert and shade a huge region under the band's legend
+                # label, saying the opposite of what the YAML's
+                # ``underfit_final`` flag says.
+                floor = float(pooled.min())
+                if floor >= upper:
+                    # Nothing plotted is anywhere near the band; drawing it at
+                    # the axis floor would be a decoration, not a reference.
+                    band_drawn = False
+                else:
+                    lower = max(lower, min(floor, upper))
+            else:
+                lower = max(lower, 0.0)
+
+            if band_drawn:
+                ax.axhspan(lower, upper, color=COLORS["window"], alpha=0.25, zorder=1)
         ax.axhline(
             DATA_MISMATCH_TARGET, color=COLORS["charcoal"], ls="--", lw=1.2, zorder=2
         )
@@ -2915,7 +2952,7 @@ def plot_data_mismatch_decay(
                 label=r"target $1/2$",
             )
         ]
-        if band is not None:
+        if band_drawn:
             handles.append(
                 Patch(
                     facecolor=COLORS["window"],
@@ -2965,10 +3002,10 @@ def _step_colors(n_steps: int) -> list[tuple[float, float, float, float]]:
 
 
 def _spans_decades(values: np.ndarray, decades: float) -> bool:
-    """True when the strictly positive ``values`` span at least ``decades``.
+    """True when the finite ``values`` are positive and span ``decades`` of them.
 
-    Non-positive values make a log axis impossible, so their presence answers
-    the question ``False`` regardless of the range.
+    Non-positive values have no ratio to take, so their presence answers the
+    question ``False`` rather than raising.
     """
     finite = _finite(values)
     if finite.size == 0 or np.any(finite <= 0.0):

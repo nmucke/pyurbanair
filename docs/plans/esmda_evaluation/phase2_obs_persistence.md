@@ -119,21 +119,35 @@ landed as **one PR**, not two: WP2.2 is ~150 lines that only exercise WP2.1's
 files, and splitting them would have merged a persistence format with no
 reader.
 
-1. **The flat-index coordinate is `obs_index`, not `obs`.** The plan asks for
-   "at minimum the flat obs index" on a dimension the observation variable is
-   also called `obs`; xarray refuses a name that is both a data variable and a
-   coordinate. The dimension stays `obs`; the index coordinate on it is
-   `obs_index`. The `obs_sensor` / `obs_state` / `obs_interval` labels are as
-   planned, and the flattening order is in the file attrs.
-2. **`data_mismatch_summary` emits two keys beyond the sketched schema**:
-   `per_step_min` (the plan's prose asks for `min`, its YAML sketch omits it)
-   and `num_observations` (what the band was computed from). Additive within a
-   new block, so invariant 1 is unaffected.
+1. **The observation dimension is `obs_index`, not `obs`.** The plan asks for
+   "at minimum the flat obs index" on a dimension whose observation variable is
+   also called `obs`. xarray accepts that in memory, but a variable whose name
+   equals its dimension is silently promoted to an *index coordinate* on the
+   netCDF round-trip — so a file written with an `obs` dimension reads back with
+   `obs` as a coordinate rather than the data variable the docs describe.
+   Naming the dimension `obs_index` avoids the promotion and leaves `obs`,
+   `obs_clean` and `obs_error_std` as plain data variables. The `obs_sensor` /
+   `obs_state` / `obs_interval` labels are as planned, and the flattening order
+   is in the file attrs.
+   (An earlier revision claimed xarray *refuses* the collision. It does not —
+   it refuses only a name given as both a data variable and a coordinate in the
+   same constructor call, which is a different thing.)
+2. **`data_mismatch_summary` emits three keys beyond the sketched schema**:
+   `per_step_min` (the plan's prose asks for `min`, its YAML sketch omits it),
+   `num_observations` (what the band was computed from) and `final_step_index`
+   (which iteration the `*_final` flags actually describe — a run whose
+   posterior forecast failed for every member falls back to an earlier one, and
+   nothing else in the block would reveal that). Additive within a new block, so
+   invariant 1 is unaffected.
 3. **The three flags are `None`, not `False`, when unjudgeable** — no
    observations means no band, and a `False` there would read as "checked, and
    fine". `collapsed` fires only when a vanishing IQR is paired with an
-   off-target median: identical members *on* target are converged, not
-   collapsed.
+   off-target median (identical members *on* target are converged, not
+   collapsed) and abstains below 8 pooled values: at the smoke shape's `M = 2`
+   the "quartiles" are just the two members scaled, so every CI run would
+   otherwise publish `collapsed: true`. That follows the master plan's
+   cross-cutting caution to guard the smoke shape with `null` + a log line
+   rather than a special case.
 4. **The bundle loader lives in `scripts/esmda/_esmda_common.py`**
    (`obs_diagnostics_bundle`), mirroring `probe_spectra_bundle`, and both the
    metric and figure stages call it. The alternative — the metric stage writing
@@ -144,7 +158,9 @@ reader.
    prior is a cold-start draw and a later window's is an extrapolated
    posterior, so one pooled step-0 box would conflate two different objects.
    The `run_summary.yaml` block still pools (the plan's schema is per-step, not
-   per-window-per-step); the bundle carries both.
+   per-window-per-step); the bundle carries both. D3 takes `per_window` and
+   `num_observations` as plain arguments rather than the bundle dict, so the
+   leaf library does not bind itself to a script's key names (invariant 5).
 6. **The `esmda_diagnostics` block is computed above the `skip_viz` gate**, on
    the same reasoning as WP3's `spectral_metrics`: that flag exists to avoid
    reading the multi-GB truth, and this block reads only the KB-scale

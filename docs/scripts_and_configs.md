@@ -512,11 +512,14 @@ Stage 1 of the three-script pipeline (see `run_esmda_pipeline.sh`). Saves:
   `obs_clean` = the noise-free projection, `obs_error_std` = `sqrt(diag(C_D))`,
   with `obs_sensor`/`obs_state`/`obs_interval` labels and the flattening order in
   the file attrs), `windows/window_{w}_pred_obs.nc`
-  (`pred_obs(esmda_step, obs, ensemble)`, step 0 the prior forecast and −1 the
-  posterior forecast) and `windows/window_{w}_params_steps.nc` (the parameter
-  ensemble at every iteration, kept for debugging). All KB-scale. These feed
-  `run_summary.yaml`'s `esmda_diagnostics` block and figure D3; set the flag
-  false to reproduce the pre-phase-2 artifact set exactly.
+  (`pred_obs(esmda_step, obs_index, ensemble)`, step 0 the prior forecast and −1
+  the posterior forecast) and `windows/window_{w}_params_steps.nc` (the parameter
+  ensemble at every iteration, kept for debugging). All KB-scale. The observation
+  axis is named `obs_index`, not `obs`, because a variable whose name equals its
+  dimension is silently promoted to an index coordinate on the netCDF
+  round-trip — which would turn the `obs` data variable into a coordinate on
+  read. These feed `run_summary.yaml`'s `esmda_diagnostics` block and figure D3;
+  set the flag false to reproduce the pre-phase-2 artifact set exactly.
 
 Mode is the cross product of:
 - `esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic`
@@ -826,9 +829,12 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   observation noise — an over-aggressive schedule or a missing localization —
   and no RMSE distinguishes those. `target_band` is `3/√(2N_d)`; the
   `underfit_final` / `overfit_final` / `collapsed` flags compare the last
-  iteration against it, `collapsed` firing only when a vanishing across-member
-  IQR is paired with an off-target median (identical members *on* target are
-  converged, not collapsed). **The flags are advisory**, and the block carries
+  iteration that produced values — `final_step_index` says which, since a run
+  whose posterior forecast failed outright gets an earlier one — against it.
+  `collapsed` fires only when a vanishing across-member IQR is paired with an
+  off-target median (identical members *on* target are converged, not collapsed)
+  and is `null` when fewer than 8 values back it, since the smoke shape's two
+  members have no meaningful IQR. **The flags are advisory**, and the block carries
   `caveat: no_representativeness_error` saying why: the χ² target assumes `C_D`
   covers representativeness error and here it is a single instrument-scale
   `esmda.obs_error_std`, so a too-small `C_D` makes a healthy run look
@@ -917,9 +923,12 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
   to expect. A rollout's windows are drawn as separate boxes per iteration rather
   than pooled: window 0's prior is a cold-start draw and a later window's is an
   extrapolated posterior, so one pooled step-0 box would conflate two different
-  objects. The y-axis goes log once the medians span ≥1.5 decades (a healthy MDA
-  run drops `O_N` by one to two orders of magnitude, which a linear axis flattens
-  onto zero exactly where the band matters). The `C_D` caveat above is annotated
+  objects. The y-axis goes log once the per-step medians span ≥1.5 decades and
+  every plotted value is positive (a healthy MDA run drops `O_N` by one to two
+  orders of magnitude, which a linear axis flattens onto zero exactly where the
+  band matters); on a log axis the band is floored at the smallest plotted value,
+  and dropped altogether when nothing plotted comes near it, so it can never be
+  drawn inverted. The `C_D` caveat above is annotated
   on the figure. Reads the same `obs_diagnostics_bundle` the metric stage scores,
   so the boxes and the YAML come off one reduction; absent whenever
   `esmda_diagnostics` is.

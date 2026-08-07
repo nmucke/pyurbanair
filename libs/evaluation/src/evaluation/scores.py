@@ -1306,6 +1306,12 @@ DATA_MISMATCH_TARGET = 0.5
 # ensemble collapse rather than convergence.
 _COLLAPSE_IQR_FRACTION = 0.1
 
+# Fewest pooled values an IQR-based collapse verdict may rest on. At M=2 the
+# "quartiles" are just the two values scaled, so a smoke run's two near-identical
+# members trip the test every time -- and the master plan's smoke caution asks
+# for ``None`` + a log line on a degenerate shape rather than a special case.
+_COLLAPSE_MIN_VALUES = 8
+
 
 def data_mismatch(obs, pred_obs, obs_error_std):
     """Normalized data mismatch ``O_N`` per ensemble member (metrics doc §5).
@@ -1413,8 +1419,15 @@ def data_mismatch_summary(per_step, n_obs):
     band = data_mismatch_target_band(n_obs)
     # The last iteration that produced anything -- not simply ``[-1]``, which
     # would report ``None`` for a run whose posterior forecast failed outright.
-    final_median = next((m for m in reversed(medians) if m is not None), None)
-    final_iqr = next((q for q in reversed(iqrs) if q is not None), None)
+    # Which one that was is published as ``final_step_index``: the flags below
+    # are named ``*_final``, and on such a run they describe an earlier
+    # iteration, which the reader has no other way to discover.
+    final_step = next(
+        (i for i in reversed(range(len(finite))) if finite[i].size > 0), None
+    )
+    final_median = None if final_step is None else medians[final_step]
+    final_iqr = None if final_step is None else iqrs[final_step]
+    final_count = 0 if final_step is None else int(finite[final_step].size)
 
     # Off-target counts as over/under-fitting only outside the band; with no
     # band (no observations) there is nothing to judge against, hence ``None``
@@ -1425,7 +1438,14 @@ def data_mismatch_summary(per_step, n_obs):
         overfit = bool(final_median < DATA_MISMATCH_TARGET - band)
 
     collapsed = None
-    if band is not None and final_iqr is not None and final_median is not None:
+    if final_count < _COLLAPSE_MIN_VALUES:
+        logger.info(
+            "data_mismatch: %d value(s) at the final iteration is too few for an "
+            "IQR-based collapse verdict (need %d); reporting collapsed=None",
+            final_count,
+            _COLLAPSE_MIN_VALUES,
+        )
+    elif band is not None and final_iqr is not None and final_median is not None:
         collapsed = bool(
             final_iqr < _COLLAPSE_IQR_FRACTION * band
             and abs(final_median - DATA_MISMATCH_TARGET) > band
@@ -1438,6 +1458,7 @@ def data_mismatch_summary(per_step, n_obs):
         "target": DATA_MISMATCH_TARGET,
         "target_band": band,
         "num_observations": int(n_obs),
+        "final_step_index": final_step,
         "underfit_final": underfit,
         "overfit_final": overfit,
         "collapsed": collapsed,
