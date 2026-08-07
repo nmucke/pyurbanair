@@ -232,25 +232,13 @@ def test_snapshot_grid_drops_the_extra_nt1_frame() -> None:
     assert files[-1] in drop
 
 
-def test_legacy_restart_link_refuses_to_overflow_the_i6_field() -> None:
-    """Above 999999 the legacy name overflows to '******' and can never be pruned.
-
-    That is the very stale-substitution failure the shim exists to prevent, so it
-    has to refuse rather than write a file no reader or pruner can ever match.
-    """
-    from scripts.esmda.run_probe_series import (
-        _MAX_LEGACY_ITERATION,
-        _link_restart_for_solver,
-    )
-
-    class _Dirs:
-        experiment_dir = pathlib.Path("/nonexistent")
-
-    class _Model:
-        dirs = _Dirs()
-
-    with pytest.raises(ValueError, match="i6.6"):
-        _link_restart_for_solver(_Model(), _MAX_LEGACY_ITERATION + 1)
+# The probe re-run used to carry its own shim (`_link_restart_for_solver`) that
+# re-exposed the wrapper's 9-digit restart under the 6-digit name the solver
+# actually opens, plus its own overflow ceiling. Both are gone: the wrapper now
+# writes the solver-readable name directly, so there is nothing to re-expose and
+# the ceiling belongs to whoever spells the filename. That coverage lives in
+# tests/test_pylbm_restart_filenames.py -- which additionally pins the width
+# against the Fortran sources, so it cannot drift back.
 
 
 def test_short_members_are_dropped_rather_than_stacked_ragged() -> None:
@@ -313,29 +301,6 @@ def test_probe_models_are_built_under_their_own_experiment_name(
     assert named, f"no forward model was constructed with an experiment name: {seen}"
     assert all(name == run_probe_series._PROBE_EXPERIMENT for name in named), named
     assert run_probe_series._PROBE_EXPERIMENT != "runcase"
-
-
-def test_legacy_restart_link_accepts_the_highest_representable_iteration(
-    tmp_path: pathlib.Path,
-) -> None:
-    """The refusal must be a ceiling, not an unconditional raise.
-
-    Without this, an implementation that raised for every iteration would satisfy
-    the overflow test and silently disable warm starts altogether.
-    """
-    from scripts.esmda.run_probe_series import (
-        _MAX_LEGACY_ITERATION,
-        _link_restart_for_solver,
-    )
-
-    class _Dirs:
-        experiment_dir = tmp_path
-
-    class _Model:
-        dirs = _Dirs()
-
-    # No restart written for that iteration -> returns None rather than raising.
-    assert _link_restart_for_solver(_Model(), _MAX_LEGACY_ITERATION) is None
 
 
 def test_window_snapshots_rejects_a_run_that_died_in_the_lead_in() -> None:

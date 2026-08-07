@@ -553,57 +553,81 @@ cause is invisible. **To see Fortran error messages, add
 `model.forward_model.verbose=true` to the CLI.** This is the first thing to try
 when LBM produces no output or all members fail.
 
-### Restart filename width: Python writes i9.9, the pinned Fortran reads i6.6
+### Restart / output filename width: i6.6, on both sides
 
-**Verified on the current pin (2026-08-06).** `write_restart_file_from_xarray`
-names the restart it writes `restart_0000_<iter:09d>.uf`, but
-`m_readrestart.F90`/`m_saverestart.F90` at the recorded submodule commit
-(`2635d44`) format the iteration with `i6.6` — as do the output files
-(`m_diag.F90`). So:
-
-- A **Python-authored warm start is invisible to the solver.** `readrestart`
-  prints `restart file does not exist: restart/restart_0000_<iter:06d>.uf` and
-  calls `stop`, which exits **0** (a Fortran `stop` is a success exit), so the
-  wrapper sees no `CalledProcessError` — only an empty output dir and a
-  `FileNotFoundError` from `_get_output_files_for_current_run`.
-- Where a *stale* 6-digit restart with the same iteration number is still in the
-  experiment dir — which is exactly the situation in a rollout, because the
-  solver wrote one itself at the end of the previous window — that file is read
-  instead, **silently**, and the state the wrapper handed in is discarded. The
-  run continues and looks healthy.
-- Output collection is unaffected: `_get_output_files_for_current_run` globs
-  `out_0000_F(\d+)` and is width-agnostic.
-
-`MAX_ITERATION = 999_999_999` and the `:09d` formatting were introduced for a
-newer LBM (commit `2ff4a05`); commit `68d3aa4` later moved the submodule pin back
-to the last commit CI could build, leaving the two sides inconsistent. Fixing it
-properly (match the width the compiled sources use, or bump the pin) changes the
-physics of every pylbm rollout warm start, so it has not been done as a side
-effect of another change. `scripts/esmda/run_probe_series.py` — which is nothing
-but a warm start and therefore cannot tolerate either failure mode — hard-links
-each restart it writes to the legacy 6-digit name locally
-(`_link_restart_for_solver`) and says why.
-
-### Iteration filename field width — i9.9 overflow
-
-The Python side formats iterations into a 9-digit fixed-width field (the
-*pinned* Fortran sources use `i6.6` — see the previous gotcha, which is the live
-inconsistency; this guard is about the wider field's own ceiling).
-`_set_scaling_factors` guards against overflowing it:
+Every LBM filename encodes its iteration in a fixed-width field. The Fortran
+declares `character(len=6) cit` and formats it with `i6.6`
+(`m_readrestart.F90`, `m_saverestart.F90`, `m_save_uvw.F90`, `m_diag.F90`), builds
+the name it opens from that, and calls `stop` when the file is absent. Python
+writes those same files, so it has to spell them identically. One constant owns
+this:
 
 ```python
-MAX_ITERATION = 999_999_999  # forward_model.py top-level constant
-if nt1 > MAX_ITERATION:
-    raise ValueError(...)
+# pylbm/utils/warm_start_utils.py
+ITERATION_FIELD_WIDTH = 6
+MAX_ITERATION = 10**ITERATION_FIELD_WIDTH - 1          # 999_999
+restart_file_name(iteration, prefix="restart", tile="0000")
 ```
 
-Rollout runs accumulate large `nt0` values across windows. If the total
-`nt0 + total_timesteps` exceeds 999,999,999 the output filenames overflow to
-`out_0000_F*********.nc` (literal asterisks), the glob does not match them, and
-`_get_output_files_for_current_run` raises `FileNotFoundError` or the concat
-fails with an `AlignmentError` across members. Reduce `simulation_time`,
-`output_frequency`, or the number of rollout windows, or widen the field in the
-Fortran sources.
+`tests/test_pylbm_restart_filenames.py` parses the width out of the Fortran
+sources and fails if the two ever disagree, so a submodule bump that widens the
+field is caught there rather than in a silently wrong run.
+
+**This was broken until 2026-08-07 and is worth understanding.** Python carried a
+9-digit field (`MAX_ITERATION = 999_999_999`, `:09d`) introduced for a newer LBM;
+commit `68d3aa4` moved the submodule pin back to a commit that never had it, and
+the two sides drifted apart with nothing to catch it. The consequences were all
+silent:
+
+- **The warm start was discarded.** Python wrote
+  `restart_0000_000000696.uf`; the solver opened `restart_0000_000696.uf` — its
+  own restart from the previous window, sitting in the same directory at the same
+  iteration. The run continued and looked healthy. For a state-bearing smoother
+  that means the Kalman state update never reached the solver.
+- **When no same-iteration file existed**, `readrestart` printed
+  `restart file does not exist: ...` and called `stop`, which exits **0** — so the
+  wrapper saw no `CalledProcessError`, only an empty output dir or a truncated
+  member. (That is the other half of the "truncated member exits 0" failure.)
+- **The template lookup missed too**, so the restart Python wrote was built from
+  a pure-equilibrium distribution — see the next gotcha.
+
+Output *collection* was never affected: `_get_output_files_for_current_run` globs
+`out_0000_F(\d+)` and is width-agnostic. Only the exact-name fallback used the
+wrong width.
+
+The ceiling still matters after the fix. `nt0` accumulates across warm starts, so
+a long rollout reaches 999,999 even when no single window is near it;
+`_set_scaling_factors` raises rather than letting the name overflow to
+`out_0000_F******.nc`, which matches no glob and no restart pattern (so it could
+never be read *or* pruned). Start from a clean experiment dir, shorten the run,
+or widen `i6.6` in the Fortran **and** `ITERATION_FIELD_WIDTH` together.
+
+### Warm starts are built from a pure-equilibrium distribution
+
+**Open defect, verified 2026-08-07.** `_try_load_restart_distribution` reads the
+restart template with
+`FortranFile.read_record(np.int32, np.int32, np.int32, np.int32, np.float32)`.
+Given a list of scalar dtypes, scipy treats them as one repeating 20-byte
+compound and requires the record length to be a multiple of it. An LBM restart is
+4 `int32` followed by `27*(nx+2)*(ny+2)*(nz+2)` `float32`, which is not — so the
+call always raises:
+
+```
+ValueError: Size obtained (313648) is not a multiple of the dtypes given (20).
+```
+
+The exception used to hit a bare `except Exception: return None`, so the template
+was silently treated as absent on **every** call and
+`write_restart_file_from_xarray` always fell back to a pure-equilibrium restart —
+losing the non-equilibrium and ghost-cell content the template exists to carry.
+The macroscopic fields (rho, u, v, w) it writes are still correct, which is why
+this was invisible; the filename-width bug above hid it further, because the
+template lookup was also looking under the wrong name.
+
+The fallback is now logged rather than swallowed. Reading it correctly needs
+shaped dtypes sized from the grid, which would enable a code path that has never
+executed in production and changes the field every pylbm warm start begins from —
+so it wants its own change with its own stability check, not a drive-by fix.
 
 ### Domain-height SIGFPE
 

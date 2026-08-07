@@ -7,9 +7,11 @@ from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
-# Largest iteration representable in the LBM filename field (i9.9 in the Fortran
-# sources). Iterations above this overflow to '*' and break output collection.
-MAX_ITERATION = 999_999_999
+# ``MAX_ITERATION`` and ``ITERATION_FIELD_WIDTH`` used to be defined here, as a
+# 9-digit copy that disagreed with the Fortran and with nothing else in the
+# process -- so nothing ever caught it. They now live beside the restart naming
+# in ``.utils.warm_start_utils`` (imported below) and are re-exported from this
+# module for callers that already read them off it.
 
 import numpy as np
 import xarray
@@ -42,7 +44,9 @@ from .utils.params_utils import (
     write_uvel_time_file,
 )
 from .utils.state_utils import scale_velocity_to_physical
-from .utils.warm_start_utils import (
+from .utils.warm_start_utils import (  # noqa: F401  (MAX_ITERATION re-exported)
+    ITERATION_FIELD_WIDTH,
+    MAX_ITERATION,
     identify_latest_restart_iteration,
     remove_old_restart_files,
     write_restart_file_from_xarray,
@@ -340,17 +344,22 @@ class ForwardModel(BaseForwardModel):
         else:
             nt0 = 0
         # LBM output/restart filenames encode the iteration in a fixed-width
-        # field (currently i9.9). Guard against silently overflowing it: an
-        # overflowed name (out_0000_F*********.nc) is dropped by the collector,
+        # field (i6.6 in the Fortran). Guard against silently overflowing it: an
+        # overflowed name (out_0000_F******.nc) is dropped by the collector,
         # yielding mismatched time dims across members and a concat AlignmentError.
+        # Note the iteration counter ACCUMULATES across warm starts, so a long
+        # rollout reaches the ceiling even when no single window is near it.
         nt1 = nt0 + total_timesteps
         if nt1 > MAX_ITERATION:
             raise ValueError(
                 f"LBM final timestep nt1={nt1} exceeds the maximum representable "
-                f"iteration {MAX_ITERATION} (filenames use a 9-digit field). "
-                "Reduce the run length or widen the i9.9 format in the LBM Fortran "
-                "sources (m_diag/m_saverestart/m_save_uvw/m_readrestart) and the "
-                "matching Python filename formats."
+                f"iteration {MAX_ITERATION} (filenames use a "
+                f"{ITERATION_FIELD_WIDTH}-digit field). The counter accumulates "
+                "across warm starts, so start from a clean experiment directory, "
+                "reduce the run length, or widen the i6.6 format in the LBM "
+                "Fortran sources (m_diag/m_saverestart/m_save_uvw/m_readrestart) "
+                "and ITERATION_FIELD_WIDTH in pylbm.utils.warm_start_utils "
+                "together."
             )
         self._set_infile_value("nt0", nt0)
         self._set_infile_value("nt1", nt1)
@@ -409,7 +418,11 @@ class ForwardModel(BaseForwardModel):
             return [path for _, path in output_files]
 
         # Fallback to expected final file
-        expected_file = self.dirs.output_dir / f"out_0000_F{nt1:09d}.nc"
+        # Same width as the restarts: m_diag writes this name with
+        # ``write(cit,'(a1,i6.6)') 'F', it``.
+        expected_file = (
+            self.dirs.output_dir / f"out_0000_F{nt1:0{ITERATION_FIELD_WIDTH}d}.nc"
+        )
         if expected_file.exists():
             return [expected_file]
 
