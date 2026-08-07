@@ -113,8 +113,8 @@ copy-paste.
 | 1.3 | Sensor-statistics scoring (assimilated + held-out) | [phase1](phase1_metrics_and_figures.md) | S–M | done | #107 |
 | 1.4 | Streaming mean fields + TKE + hit rate `q` | [phase1](phase1_metrics_and_figures.md) | M | done | #108 |
 | 1.5 | Figures P1, S1, S5, F1, D1 | [phase1](phase1_metrics_and_figures.md) | M | done | #109 |
-| 2.1 | Persist obs + per-iteration predicted obs / params | [phase2](phase2_obs_persistence.md) | S | in review | — |
-| 2.2 | `O_N` vs ½ + figure D3 | [phase2](phase2_obs_persistence.md) | S | in review | — |
+| 2.1 | Persist obs + per-iteration predicted obs / params | [phase2](phase2_obs_persistence.md) | S | in review | #115 |
+| 2.2 | `O_N` vs ½ + figure D3 | [phase2](phase2_obs_persistence.md) | S | in review | #115 |
 | 3 | xie_and_castro validation (held-out) sensors **+** high-rate probes + Welch spectrum + LSD + figure S4 (WP3.1 and WP3.2 merged) | [phase3](phase3_run_upgrades.md) | M | done | #110 |
 
 Sequencing: 0 → 1 strictly; 2 after 1.1; 3 after 1.3, last (backend-touching).
