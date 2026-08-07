@@ -176,10 +176,11 @@ window 0 when `spinup_first_step_only=True`.
 > (the high-rate probe re-runs behind the Welch spectrum / figure S4) repeats
 > `run_single`'s launch sequence — `_set_scaling_factors` → `_prepare_warmstart`
 > → `_set_scaling_factors` → `_apply_inflow_settings` → `_clean_output` →
-> `run()` — and replaces only its *collection* step: at a ~1 s cadence one
-> window's snapshots are tens of GB, so each file is reduced to the probe points
-> and unlinked instead of being concatenated into one Dataset. It also keeps
-> `spinup_time` on a warm start (which `run_single` zeroes) to trim the restart's
+> `run()` — and replaces only its *collection* step: at its 0.25 s default
+> cadence one window's snapshots run to ~100 GB per member on `case=barcelona`,
+> so each file is reduced to the probe points and unlinked instead of being
+> concatenated into one Dataset. It also keeps `spinup_time` on a warm start
+> (which `run_single` zeroes) to trim the restart's
 > transient. Keep that sequence and the `out_0000_F<iter>.nc` layout in mind when
 > refactoring `run_single`.
 

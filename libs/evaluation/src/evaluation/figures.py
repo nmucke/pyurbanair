@@ -1432,18 +1432,31 @@ def plot_parameter_marginals(
 # increments. The writer of ``eval_fields.nc`` knows which it was and records it
 # there; these two figures take that line as ``sampling_note`` and render it,
 # because the numbers themselves are indistinguishable either way.
+#
+# WHICH frames and WHETHER they were sparse are two separate inputs on purpose
+# (``sampling_note`` and ``sampling_is_sparse``). Deriving the second from the
+# first -- "there is a note, so the frames must have been sparse" -- reads the
+# provenance of a run that saved every forecast frame as a caveat and stamps
+# "sample-mean" on a genuine time average, which is both false and the exact
+# signal that stops discriminating between the two sources once it fires on
+# both. A note is provenance; only the flag is a caveat.
 _SAMPLING_WRAP = 108
 
 
-def _sampling_caption(note: str) -> str:
+def _sampling_caption(note: str, marker: str = "") -> str:
     """The provenance line as it goes under a figure: prefixed and wrapped.
 
     Wrapped here rather than left to matplotlib, which does not wrap a
     ``supxlabel``: the notes come from the metric stage and run to a couple of
     hundred characters, and one that runs off both edges of the PNG is a
     qualification a reader cannot read.
+
+    ``marker`` is the footnote symbol tying the line back to a row label that
+    carries the same symbol (S1's ``k *``). It leads the line -- a footnote
+    marker reads as one at the start of its footnote and as a typo anywhere
+    else, and the line's own first word is what the marker refers to.
     """
-    return textwrap.fill(f"Moments sampled from {note}", width=_SAMPLING_WRAP)
+    return textwrap.fill(f"{marker}Moments sampled from {note}", width=_SAMPLING_WRAP)
 
 
 def _extrapolated_axes(fields: xarray.Dataset) -> tuple[str, ...]:
@@ -1527,6 +1540,7 @@ def plot_station_profiles(
     building_height: float | None = None,
     max_stations: int = 6,
     sampling_note: str | None = None,
+    sampling_is_sparse: bool = False,
 ) -> pathlib.Path | None:
     """S1: mean-velocity and TKE profiles at the station columns (the LES figure).
 
@@ -1555,11 +1569,18 @@ def plot_station_profiles(
     ``sampling_note`` is the caller's one-line record of WHICH frames the
     moments were reduced over (``eval_fields.nc``'s ``moment_sampling``). It is
     a plain string -- this function learns nothing about run directories from it
-    -- and when it is given the TKE row is marked ``*`` and the caption stops
-    calling the profiles a time average and prints the note instead. That row is
-    the reason: ``k`` from one analyzed frame per cycle is an across-cycle
-    variance, not resolved turbulence, and it renders identically to the real
-    thing.
+    -- and it is printed as a provenance line under the panels whatever it says.
+
+    ``sampling_is_sparse`` is the separate claim that those frames do NOT cover
+    the horizon continuously (``eval_fields.nc``'s
+    ``moment_sampling_is_sparse``), and it alone decides the wording: the TKE
+    row is marked ``*``, tied to the note's own leading ``*``, and the caption
+    stops calling the profiles a time average. That row is the reason: ``k``
+    from one analyzed frame per cycle is an across-cycle variance, not resolved
+    turbulence, and it renders identically to the real thing. A dense source
+    that names its frames gets the provenance line without the caveat -- saying
+    "not a continuous time average" over one that is would mislabel the better
+    of two runs.
 
     Returns the path written, or ``None`` when the dataset carries no station
     columns or no profile variables.
@@ -1602,7 +1623,10 @@ def plot_station_profiles(
     # Only the second-moment row is marked: the mean row survives sparse
     # sampling as a mean of what was sampled, while ``k`` changes meaning
     # outright, and marking both would blur which one the caption is about.
-    tke_mark = " *" if sampling_note else ""
+    # The mark needs a footnote to point at, so it needs both inputs -- without
+    # a note the caption still says the profiles are not a time average, which
+    # is the same warning without a dangling symbol.
+    tke_mark = " *" if sampling_is_sparse and sampling_note else ""
     row_label = {
         "mean": r"$\bar{u}/U_{ref}$ [-]" if u_ref else r"$\bar{u}$ [m/s]",
         "tke": (r"$k/U_{ref}^2$ [-]" if u_ref else r"$k$ [m$^2$/s$^2$]") + tke_mark,
@@ -1715,7 +1739,7 @@ def plot_station_profiles(
         if handles:
             axes[0][0].legend(handles, labels, loc="upper left", fontsize=8)
 
-        if sampling_note:
+        if sampling_is_sparse:
             caption = (
                 "Profiles averaged over the sampled frames only -- NOT a "
                 "continuous time average; ensembles as 5-95 % / 25-75 % bands."
@@ -1728,7 +1752,9 @@ def plot_station_profiles(
                 f"({', '.join(vertical_extrapolated)})."
             )
         if sampling_note:
-            caption += "\n" + _sampling_caption(f"* {sampling_note}")
+            caption += "\n" + _sampling_caption(
+                sampling_note, marker="* " if tke_mark else ""
+            )
         fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
         fig.suptitle("Vertical profiles at the station columns")
         return save_png(fig, output_path, transparent=False)
@@ -1814,6 +1840,7 @@ def plot_mean_slices(
     *,
     max_levels: int = 3,
     sampling_note: str | None = None,
+    sampling_is_sparse: bool = False,
 ) -> pathlib.Path | None:
     """F1: time-mean horizontal slices, truth | prior | posterior | difference.
 
@@ -1850,12 +1877,18 @@ def plot_mean_slices(
     file's ``t_start`` / ``t_end``.
 
     ``sampling_note`` is the caller's one-line record of WHICH frames were
-    accumulated (``eval_fields.nc``'s ``moment_sampling``), a plain string. When
-    it is given the title says "sample-mean" rather than "time-mean" and the
-    span reads "sampled over t = a-b s": ``t_start`` / ``t_end`` are the horizon
-    the frames were drawn from, not proof that the horizon was covered
-    continuously, and the filter's default source draws one frame per cycle from
-    it.
+    accumulated (``eval_fields.nc``'s ``moment_sampling``), a plain string,
+    printed as a provenance line under the panels whatever it says.
+
+    ``sampling_is_sparse`` (``eval_fields.nc``'s ``moment_sampling_is_sparse``)
+    is the separate claim that those frames do not cover the span, and it alone
+    changes the wording: the title says "sample-mean" rather than "time-mean"
+    and the span reads "sampled over t = a-b s", because ``t_start`` /
+    ``t_end`` are the horizon the frames were drawn from, not proof that the
+    horizon was covered continuously, and the filter's default source draws one
+    frame per cycle from it. A run that saved every forecast frame covered it,
+    so it keeps the time-mean wording and merely says where the frames came
+    from.
 
     Returns the path written, or ``None`` without a posterior slab or without a
     single finite fluid cell to scale.
@@ -1987,7 +2020,7 @@ def plot_mean_slices(
         unit = f"{_STREAMWISE} [m/s]"
         # "time-mean" is a claim about how the frames were drawn, not only about
         # what was averaged, so it goes everywhere the mean is named or nowhere.
-        mean_label = "sample-mean" if sampling_note else "time-mean"
+        mean_label = "sample-mean" if sampling_is_sparse else "time-mean"
         if field_image is not None:
             fig.colorbar(
                 field_image,
@@ -2018,12 +2051,14 @@ def plot_mean_slices(
                 f"-{float(fields.attrs['t_end']):.0f} s"
             )
             span = (
-                f"  (sampled over t = {edges})" if sampling_note else f"  (t = {edges})"
+                f"  (sampled over t = {edges})"
+                if sampling_is_sparse
+                else f"  (t = {edges})"
             )
-        title_prefix = "Sample-mean" if sampling_note else "Time-mean"
+        title_prefix = "Sample-mean" if sampling_is_sparse else "Time-mean"
         fig.suptitle(f"{title_prefix} {_STREAMWISE} on horizontal slices{span}")
 
-        if sampling_note:
+        if sampling_is_sparse:
             caption = (
                 "Means over the sampled frames only -- never instantaneous, but "
                 "NOT a continuous time average either."

@@ -344,3 +344,132 @@ def test_window_snapshots_rejects_a_hole_in_the_kept_window() -> None:
         _window_snapshots(
             holed, iout=iout, n_window=n_window, expected_total=len(holed)
         )
+
+
+# ---------------------------------------------------------------------------
+# The pre-flight cadence check
+# ---------------------------------------------------------------------------
+#
+# `run` reports the band the requested cadence will buy BEFORE any solver runs,
+# because the alternative is 20 minutes of solving followed by a `spectral_metrics`
+# that no-ops (below the refusal floor) or an S4 panel with a `-5/3` guide drawn
+# over four bins (above the floor, under a decade). The floor branch is a hard
+# fact the metric side already pins; the sub-decade branch is advice, which is
+# exactly the kind of branch that can be deleted without a single test noticing.
+#
+# Driven through `run` rather than through a helper: the numbers behind the
+# warning (`sim_time` from truth_access.yaml, the cadence from the probes config)
+# are read there and nowhere else, so a check extracted into a unit would stop
+# covering the wiring that decides whether it fires at all.
+
+
+class _StopBeforeSolving(Exception):
+    """Raised in place of the probe points, to end `run` after the pre-flight."""
+
+
+def _probe_run_dir(tmp_path: pathlib.Path, *, sim_time: float) -> pathlib.Path:
+    """The least of an ESMDA run dir `run` reads before its cadence report.
+
+    No config.yaml on purpose: `_check_config_matches_run` degrades to a warning
+    without one (invariant 3), which keeps this fixture from having to reproduce
+    a composed config just to get past a guard that is not under test.
+    """
+    from scripts.esmda._esmda_common import write_yaml
+
+    run_dir = tmp_path / "run"
+    (run_dir / "windows").mkdir(parents=True)
+    write_yaml(
+        {
+            "true_state_path": str(run_dir / "true_state.nc"),
+            "num_windows": 1,
+            "sim_time": sim_time,
+            "n_per_window": 4,
+            "truth_solver_name": "pylbm",
+        },
+        run_dir / "truth_access.yaml",
+    )
+    xarray.Dataset(
+        {"velocity_magnitude": (("ensemble",), np.array([5.0, 6.0]))},
+        coords={"ensemble": [0, 1]},
+    ).to_netcdf(run_dir / "windows" / "window_0_posterior_params.nc")
+    return run_dir
+
+
+@pytest.mark.parametrize("at_the_decade", [False, True])  # type: ignore[misc]
+def test_run_warns_when_the_cadence_buys_less_than_a_decade_of_band(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    compose_test_cfg: Callable[..., DictConfig],
+    at_the_decade: bool,
+) -> None:
+    """Sized off the library's own inversion, not off numbers copied out of it.
+
+    `minimum_spectral_samples(SPECTRAL_BAND_DECADE_BINS)` IS the boundary the
+    branch tests, so the two cases are "one sample count at it" and "one below
+    it": a change to `SPECTRUM_SEGMENTS` or the cutoff fraction moves the test
+    with the code instead of turning it into a false failure.
+    """
+    import logging
+
+    from evaluation.turbulence import (
+        SPECTRAL_BAND_DECADE_BINS,
+        minimum_spectral_samples,
+        spectral_band_bins,
+    )
+
+    from scripts.esmda import run_probe_series
+
+    decade = minimum_spectral_samples(SPECTRAL_BAND_DECADE_BINS)
+    # Below: the hard refusal floor itself, which is the widest band that is
+    # still under a decade -- so this case cannot pass by tripping the floor
+    # branch instead (that one fires strictly below it).
+    n_samples = decade if at_the_decade else minimum_spectral_samples()
+    assert n_samples <= decade
+    cadence = 1.0
+
+    run_dir = _probe_run_dir(tmp_path, sim_time=float(n_samples) * cadence)
+    cfg = compose_test_cfg(
+        [
+            *_ESMDA_MODE,
+            f"probes.run_dir={run_dir}",
+            "probes.window_index=0",
+            f"probes.output_frequency={cadence}",
+        ],
+        config_name="run_probe_series",
+    )
+
+    def _stop(*args: object, **kwargs: object) -> object:
+        raise _StopBeforeSolving
+
+    # The report is the last thing before the probe points are built, so this
+    # ends the run there: no solver, no clones, no compile.
+    monkeypatch.setattr(run_probe_series, "_probe_points", _stop)
+
+    with caplog.at_level(logging.INFO, logger=run_probe_series.__name__):
+        with pytest.raises(_StopBeforeSolving):
+            run_probe_series.run(cfg)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    band = [message for message in warnings if "frequency bins" in message]
+    # The floor branch must not be what fired: it says the numbers will not be
+    # produced at all, which is a different (and here false) statement.
+    assert not [m for m in warnings if "no-op" in m], warnings
+
+    if at_the_decade:
+        assert not band, (
+            "a cadence that buys the full decade is warned about anyway, which "
+            f"makes the warning noise the next caller learns to ignore: {band}"
+        )
+        assert spectral_band_bins(n_samples) >= SPECTRAL_BAND_DECADE_BINS
+    else:
+        assert band, (
+            f"{n_samples} samples score {spectral_band_bins(n_samples)} bins -- "
+            "under the decade a -5/3 reading needs -- and the re-run says "
+            f"nothing about it: {warnings}"
+        )
+        # It has to carry the two numbers a caller acts on: how wide the band
+        # actually is, and the cadence that would widen it to a decade.
+        message = band[0]
+        assert f"{spectral_band_bins(n_samples)} frequency bins" in message
+        assert f"{n_samples} samples" in message

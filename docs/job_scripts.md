@@ -463,21 +463,41 @@ Results: output directories `METRICS_DIR` (default `sweep_metrics/`) and
 
 [`scripts/esmda/run_probe_series.py`](../scripts/esmda/run_probe_series.py) adds
 the probe time series the Welch spectrum / figure S4 need to a **finished** pylbm
-ESMDA run: it re-runs one window's truth and posterior members at ~1 s cadence,
-extracts the sensor points from each snapshot, and deletes the snapshots again.
-Compose it with the same overrides the ESMDA run used and add the `probes.*`
-knobs:
+ESMDA run: it re-runs one window's truth and posterior members at a high output
+cadence (`probes.output_frequency`, default **0.25 s**), extracts the sensor
+points from each snapshot, and deletes the snapshots again. Compose it with the
+same overrides the ESMDA run used and add the `probes.*` knobs:
 
 ```bash
 python scripts/esmda/run_probe_series.py \
   case=barcelona model@truth_model=pylbm model@assim_model=pylbm \
   probes.run_dir=/path/to/esmda_run probes.window_index=-1 \
-  probes.output_frequency=1.0 probes.spinup_time=100 \
+  probes.spinup_time=100 \
   paths.experiment_dir=$PWD/.temp_probes
 ```
 
-Budget it as a **job of its own**: the cost is one window of forward solves per
-member (plus the discarded `probes.spinup_time` lead-in), parallelised over
+**Leave `probes.output_frequency` alone unless you have re-derived it.** The
+width of the band figure S4 scores is fixed by the sample count, and over a
+300 s window 1.0 s yields 300 samples — exactly the 4-bin refusal floor, less
+than a decade of frequency, in the energy-containing range. The default 0.25 s
+yields 1200 samples and 18 bins. The pre-flight reports the bin count before any
+solver starts and warns below a decade; `conf/run_probe_series.yaml` carries the
+cadence/band table.
+
+Budget it as a **job of its own**, and budget the *scratch* first. The solve
+itself does not depend on the output cadence, but the whole window is on disk
+before Python reduces any of it, so peak scratch is
+`ensemble.num_parallel_processes` × one member's snapshots. At the 0.25 s
+default that is **~103 GB per member on `case=barcelona`** (3200 snapshots of
+224×224×32 × 5 float32 fields), i.e. **~411 GB at 4 workers** — four times the
+old 1.0 s figure of ~26 GB per member. `case=xie_and_castro` goes 0.22 →
+0.90 GB per member. The cheapest lever is `probes.spinup_time` (500 s of
+barcelona's 800 s solve at the case default, so 5/8 of the snapshots);
+`probes.include_prior=true` doubles the member count. The probe files themselves
+stay in the megabytes either way.
+
+The compute cost is one window of forward solves per member (plus the discarded
+`probes.spinup_time` lead-in), parallelised over
 `ensemble.num_parallel_processes` exactly like the assimilation ensemble. Two
 practical notes: give it its own `paths.experiment_dir` (it clones per-member
 experiment dirs under `<experiment_dir>/probe_experiments/`, and sharing scratch

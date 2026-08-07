@@ -1070,6 +1070,7 @@ def _eval_fields_dataset(
     fluid: np.ndarray | None = None,
     extrapolated: tuple[str, ...] = (),
     moment_sampling: str | None = None,
+    moment_sampling_is_sparse: bool = False,
 ) -> xarray.Dataset:
     """``eval_fields.nc``: the reduced fields the WP1.5 figures read.
 
@@ -1092,6 +1093,16 @@ def _eval_fields_dataset(
     and would otherwise be invisible on the figures too, which read this file
     and nothing else -- so the caller's sampling line travels with the data it
     qualifies.
+
+    ``moment_sampling_is_sparse`` is the machine-readable half of that and the
+    only thing a figure may branch on: whether those frames leave gaps in
+    ``t_start``--``t_end``, so that the moments are NOT a continuous time
+    average. It is recorded separately because the note is prose -- every
+    source has one, including the dense ones, and a figure that inferred the
+    caveat from the note's mere presence would qualify a genuine time average
+    exactly as loudly as it qualifies a three-frame one. Written as ``0``/``1``
+    rather than a Python ``bool`` because netCDF attributes have no boolean
+    type.
     """
     variables = {}
     for prefix, (result, ensemble) in sources.items():
@@ -1119,9 +1130,12 @@ def _eval_fields_dataset(
             "ensemble. Stresses are resolved-only: the subgrid contribution "
             "is not included and is not negligible inside a canopy."
         ),
-        # Read by S1 and F1 (via their ``sampling_note``) to qualify the labels
-        # they would otherwise put on a continuous time average.
+        # Read by S1 and F1 (via their ``sampling_note``) and printed as the
+        # figure's provenance line, whichever source it names.
         "moment_sampling": moment_sampling or _ESMDA_MOMENT_SAMPLING,
+        # Read by S1 and F1 (via their ``sampling_is_sparse``) and the ONLY
+        # input that makes them stop calling the moments a time average.
+        "moment_sampling_is_sparse": int(bool(moment_sampling_is_sparse)),
         "horizontal_stride": target.stride,
         # Every axis colocation moved has its LAST index extrapolated from the
         # two faces below it rather than interpolated between two, so those cells
@@ -1205,6 +1219,7 @@ def _mean_field_block(
     prior: MeanFieldCollector | None,
     time_span: tuple[float, float] | None = None,
     moment_sampling: str | None = None,
+    moment_sampling_is_sparse: bool = False,
 ) -> dict | None:
     """Write ``eval_fields.nc`` and return the ``field_metrics`` summary block.
 
@@ -1212,9 +1227,9 @@ def _mean_field_block(
     invariant 3: a state layout colocation refuses, or a truth that shares no
     cell with the assimilation grid, costs this block and nothing else.
 
-    ``moment_sampling`` is passed straight through to
-    :func:`_eval_fields_dataset`; it defaults to the ESMDA sampling, so the
-    ESMDA call site never mentions it.
+    ``moment_sampling`` and ``moment_sampling_is_sparse`` are passed straight
+    through to :func:`_eval_fields_dataset`; both default to the ESMDA sampling
+    (named, and not sparse), so the ESMDA call site never mentions either.
     """
     posterior_fields = posterior.result()
     truth_fields = truth.result()
@@ -1243,6 +1258,7 @@ def _mean_field_block(
         fluid=fluid,
         extrapolated=posterior.extrapolated,
         moment_sampling=moment_sampling,
+        moment_sampling_is_sparse=moment_sampling_is_sparse,
     ).to_netcdf(run_dir / "eval_fields.nc")
 
     tolerance = truth.sampling_tolerance(fluid)

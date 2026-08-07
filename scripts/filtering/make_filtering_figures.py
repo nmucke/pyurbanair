@@ -401,6 +401,17 @@ def make_figures(run_dir: pathlib.Path) -> None:
             # before it existed.
             moment_sampling = fields.attrs.get("moment_sampling")
             sampling_note = None if moment_sampling is None else str(moment_sampling)
+            # ...and separately, whether those frames were SPARSE. The note says
+            # where the frames came from and is printed either way; this is the
+            # only thing the figures qualify their labels on, because the
+            # forecast source's note describes a genuine continuous time average
+            # and a figure that read "there is a note" as "the frames were
+            # sparse" would stamp "sample-mean" on it. Same file-over-``source``
+            # reasoning, and the same degradation on a run dir predating it:
+            # unqualified, as before the attribute existed.
+            sampling_is_sparse = bool(
+                int(fields.attrs.get("moment_sampling_is_sparse", 0) or 0)
+            )
             profiles = run_dir / "station_profiles.png"
             _note_skipped(
                 profiles,
@@ -412,11 +423,18 @@ def make_figures(run_dir: pathlib.Path) -> None:
                         None if building_height is None else float(building_height)
                     ),
                     sampling_note=sampling_note,
+                    sampling_is_sparse=sampling_is_sparse,
                 ),
             )
             slices = run_dir / "mean_slices.png"
             _note_skipped(
-                slices, plot_mean_slices(fields, slices, sampling_note=sampling_note)
+                slices,
+                plot_mean_slices(
+                    fields,
+                    slices,
+                    sampling_note=sampling_note,
+                    sampling_is_sparse=sampling_is_sparse,
+                ),
             )
     else:
         print(
