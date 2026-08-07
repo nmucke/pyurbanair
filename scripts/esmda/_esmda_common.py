@@ -467,10 +467,20 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
     this never touches.
 
     Returns ``{"per_step": [np.ndarray, ...], "num_observations": int,
-    "num_windows": int, "per_window": [np.ndarray (L, M), ...]}``. ``per_step``
-    pools members across windows, one entry per iteration; ``per_window`` keeps
-    them separate, which is what D3 needs to avoid conflating window 0's
-    cold-start prior with a later window's extrapolated one.
+    "num_windows": int, "per_window": [np.ndarray (L, M), ...],
+    "window_indices": [int, ...]}``. ``per_step`` pools members across windows,
+    one entry per iteration; ``per_window`` keeps them separate, which is what
+    D3 needs to avoid conflating window 0's cold-start prior with a later
+    window's extrapolated one, and ``window_indices`` says which window each
+    entry is so a dropped one does not silently renumber the rest.
+
+    **Bounded by ``truth_access.yaml``'s ``num_windows``**, like every other
+    consumer in ``compute_esmda_metrics``. ``paths.results_dir`` is a fixed,
+    non-timestamped path and the window loop never clears ``windows/``, so a
+    rerun with fewer windows (or a crash partway through one) leaves a previous
+    run's files in place; globbing alone would pool them into this run's
+    diagnostic while every other block in the same ``run_summary.yaml`` covered
+    only the current windows.
 
     ``None``, with the reason logged, when the run has no such files — every run
     dir written before WP2.1 or with ``esmda.save_obs_diagnostics=false``.
@@ -479,14 +489,26 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
 
     run_dir = pathlib.Path(run_dir)
     windows_dir = run_dir / "windows"
+    expected = read_yaml(run_dir / "truth_access.yaml").get("num_windows")
+
     pairs = []
     for obs_path in sorted(windows_dir.glob("window_*_obs.nc")):
         match = re.fullmatch(r"window_(\d+)_obs", obs_path.stem)
-        pred_path = (
-            windows_dir / f"window_{match.group(1)}_pred_obs.nc" if match else None
-        )
-        if match and pred_path.exists():
-            pairs.append((int(match.group(1)), obs_path, pred_path))
+        if not match:
+            continue
+        window = int(match.group(1))
+        if expected is not None and window >= int(expected):
+            logger.warning(
+                "Ignoring %s: window %d is beyond this run's %d window(s), so it "
+                "is left over from an earlier run into the same output dir",
+                obs_path.name,
+                window,
+                int(expected),
+            )
+            continue
+        pred_path = windows_dir / f"window_{window}_pred_obs.nc"
+        if pred_path.exists():
+            pairs.append((window, obs_path, pred_path))
     if not pairs:
         logger.info(
             "No observation-space files in %s; the data-mismatch diagnostic is "
@@ -496,6 +518,7 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
         return None
 
     per_window: list[np.ndarray] = []
+    window_indices: list[int] = []
     n_obs = 0
     for window, obs_path, pred_path in sorted(pairs):
         try:
@@ -506,6 +529,21 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
                 obs = obs_ds["obs"].values
                 sigma = obs_ds["obs_error_std"].values
                 pred = pred_ds["pred_obs"].values  # (esmda_step, obs, ensemble)
+                # N_d sets the target band, so windows scored against different
+                # observation counts cannot share one. The first window kept
+                # fixes it; a later mismatch is a stale or reconfigured file and
+                # is dropped rather than silently widening the band.
+                window_n_obs = int(np.size(obs))
+                if n_obs and window_n_obs != n_obs:
+                    logger.warning(
+                        "Ignoring window %d in %s: %d observations against the "
+                        "run's %d, so it cannot share the target band",
+                        window,
+                        run_dir,
+                        window_n_obs,
+                        n_obs,
+                    )
+                    continue
                 # One row per iteration; ``data_mismatch`` validates the shapes.
                 per_window.append(
                     np.stack(
@@ -515,7 +553,8 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
                         ]
                     )
                 )
-                n_obs = max(n_obs, int(np.size(obs)))
+                window_indices.append(window)
+                n_obs = window_n_obs
         except (OSError, ValueError, KeyError) as error:
             # A window killed mid-write costs itself, not the whole diagnostic.
             logger.warning(
@@ -539,6 +578,7 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
     return {
         "per_step": per_step,
         "per_window": per_window,
+        "window_indices": window_indices,
         "num_observations": n_obs,
         "num_windows": len(per_window),
     }

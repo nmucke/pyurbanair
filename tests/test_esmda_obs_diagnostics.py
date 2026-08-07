@@ -190,27 +190,72 @@ def test_data_mismatch_summary_flags_underfit_and_overfit() -> None:
 def test_data_mismatch_summary_flags_collapse_only_when_off_target() -> None:
     """A vanishing across-member IQR is the pathology only away from the target."""
     n_obs = 200
-    collapsed = data_mismatch_summary([np.full(20, 4.0), np.full(20, 4.0)], n_obs)
+    window = [np.stack([np.full(20, 4.0), np.full(20, 4.0)])]
+    collapsed = data_mismatch_summary(
+        [np.full(20, 4.0), np.full(20, 4.0)], n_obs, per_window=window
+    )
     assert collapsed["collapsed"] is True
     assert collapsed["per_step_iqr"][-1] == pytest.approx(0.0)
 
     # Identical members that agree ON the target are converged, not collapsed.
-    converged = data_mismatch_summary([np.full(20, 4.0), np.full(20, 0.5)], n_obs)
+    on_target = [np.stack([np.full(20, 4.0), np.full(20, 0.5)])]
+    converged = data_mismatch_summary(
+        [np.full(20, 4.0), np.full(20, 0.5)], n_obs, per_window=on_target
+    )
     assert converged["collapsed"] is False
+
+
+def test_data_mismatch_summary_judges_collapse_per_window_not_pooled() -> None:
+    """The verdict is ACROSS MEMBERS, so a rollout is judged window by window.
+
+    Pooling the windows measures the drift of ``O_N`` from one window to the
+    next — entirely healthy — and reads it as spread. A run where every window
+    has collapsed on a different value would then report a large pooled IQR and
+    ``collapsed: False``, which is backwards.
+    """
+    n_obs = 200
+    # Each window's members sit on top of each other, at different levels.
+    per_window = [
+        np.stack([np.full(20, 20.0), np.full(20, level)]) for level in (8.0, 2.0)
+    ]
+    pooled = [np.full(40, 20.0), np.concatenate([np.full(20, 8.0), np.full(20, 2.0)])]
+
+    assert data_mismatch_summary(pooled, n_obs, per_window=per_window)["collapsed"] is (
+        True
+    )
+    # The pooled view alone cannot see it -- which is why `per_window` exists.
+    assert data_mismatch_summary(pooled, n_obs)["collapsed"] is None
+
+    # One healthy window is enough to withhold the verdict.
+    mixed = [per_window[0], np.stack([np.full(20, 20.0), np.linspace(0.2, 4.0, 20)])]
+    assert data_mismatch_summary(pooled, n_obs, per_window=mixed)["collapsed"] is False
 
 
 def test_data_mismatch_summary_will_not_judge_collapse_on_a_smoke_ensemble() -> None:
     """The 2-member smoke shape has no meaningful IQR, so ``collapsed`` is None.
 
     Without the guard this is the *default* smoke outcome: two near-identical
-    members give a tiny IQR, and a 3-step smoke run's median is nowhere near the
-    target, so every CI run would publish ``collapsed: true``.
+    members give a tiny IQR, and a smoke run's median is nowhere near the
+    target, so every CI run would publish ``collapsed: true``. Judging per
+    window is what keeps the guard effective on a rollout — pooling would sail
+    a 2-member run past a pooled count threshold once it had 4 windows.
     """
-    smoke = data_mismatch_summary([np.array([9.0, 9.001]), np.array([8.0, 8.001])], 200)
+    smoke_window = [np.array([[9.0, 9.001], [8.0, 8.001]])]
+    smoke = data_mismatch_summary(
+        [np.array([9.0, 9.001]), np.array([8.0, 8.001])], 200, per_window=smoke_window
+    )
     assert smoke["collapsed"] is None
     # The rest of the block is still reported -- only the IQR verdict abstains.
     assert smoke["underfit_final"] is True
     assert smoke["per_step_median"] == pytest.approx([9.0005, 8.0005])
+
+    # Four windows of two members each: still None, not a verdict off 8 values.
+    assert (
+        data_mismatch_summary(
+            [np.full(8, 9.0), np.full(8, 8.0)], 200, per_window=smoke_window * 4
+        )["collapsed"]
+        is None
+    )
 
 
 def test_data_mismatch_summary_reports_which_step_the_flags_describe() -> None:
@@ -451,20 +496,67 @@ def test_plot_data_mismatch_decay_never_draws_an_inverted_band(
         assert all(lo < hi for lo, hi in recorded), f"inverted band, {name}: {recorded}"
         return recorded
 
-    # Nothing plotted comes near the band, so it is dropped rather than floored
-    # into an inverted span. Asserted as "no span at all", not merely "no
-    # inverted span" -- the latter passes vacuously here, whereas the old
-    # behaviour drew exactly one span, upside down.
-    assert spans_for((500.0, 80.0, 10.0), "off_target") == []
+    band = data_mismatch_target_band(200)
+    true_span = (DATA_MISMATCH_TARGET - band, DATA_MISMATCH_TARGET + band)
 
-    # A healthy log-axis run still gets a band, floored at the lowest box.
-    healthy = spans_for((40.0, 4.0, 0.5), "healthy")
-    assert len(healthy) == 1 and healthy[0][1] > DATA_MISMATCH_TARGET
+    # An entirely off-target run on a log axis: the band is drawn at its TRUE
+    # position and the axis grows to include it, so the reader sees how far
+    # above it the boxes sit. The old behaviour clipped the lower edge to the
+    # data, which is what inverted the span.
+    off_target = spans_for((500.0, 80.0, 10.0), "off_target")
+    assert off_target == [pytest.approx(true_span)]
 
-    # An off-target run that does NOT span decades stays linear and keeps the
-    # full band -- the drop above is specific to the log axis.
-    linear = spans_for((3.0, 2.5, 2.0), "linear_off_target")
-    assert len(linear) == 1 and linear[0][0] < DATA_MISMATCH_TARGET
+    # Healthy, and off-target without spanning decades (linear axis): same band.
+    assert spans_for((40.0, 4.0, 0.5), "healthy") == [pytest.approx(true_span)]
+    assert spans_for((3.0, 2.5, 2.0), "linear_off") == [pytest.approx(true_span)]
+
+
+def test_plot_data_mismatch_decay_band_floor_only_matters_at_tiny_observation_counts(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``1/2 − band <= 0`` only when ``N_d <= 18``; that is the sole floored case.
+
+    Everywhere else the true band has a positive lower edge and needs no floor
+    at all — which is what removed the inversion rather than papering over it.
+    """
+    from unittest.mock import patch
+
+    # 3/sqrt(2*18) is exactly 1/2, so 18 is the last count with a non-positive
+    # lower edge and 19 the first with a drawable one.
+    assert data_mismatch_target_band(19) < DATA_MISMATCH_TARGET
+    assert data_mismatch_target_band(18) == pytest.approx(DATA_MISMATCH_TARGET)
+    assert data_mismatch_target_band(17) > DATA_MISMATCH_TARGET
+
+    rng = np.random.default_rng(2)
+
+    def spans(
+        levels: tuple[float, ...], n_obs: int, name: str
+    ) -> list[tuple[float, float]]:
+        recorded: list[tuple[float, float]] = []
+        with patch.object(Axes, "axhspan", autospec=True) as spy:
+            spy.side_effect = lambda ax, ymin, ymax, **kw: recorded.append((ymin, ymax))
+            plot_data_mismatch_decay(
+                _decay_windows(rng, levels, n_windows=1),
+                tmp_path / f"{name}.png",
+                num_observations=n_obs,
+            )
+        assert all(lo < hi for lo, hi in recorded), f"inverted band, {name}"
+        return recorded
+
+    # N_d = 8: band 0.75, so the true lower edge is negative. On a LINEAR axis
+    # that just means "no lower bound", and the span starts at zero.
+    linear = spans((3.0, 2.0, 1.0), 8, "tiny_nd_linear")
+    assert linear == [(0.0, pytest.approx(DATA_MISMATCH_TARGET + 0.75))]
+
+    # On a log axis zero is off the scale, so it is floored at the lowest box
+    # when that box is inside the band. (Levels chosen to clear the 1.5-decade
+    # log threshold: log10(60/0.2) = 2.5.)
+    floored = spans((60.0, 2.0, 0.2), 8, "tiny_nd_log")
+    assert len(floored) == 1 and floored[0][0] > 0.0
+
+    # ...and dropped when nothing plotted is anywhere near it, since a band with
+    # no drawable lower edge and no data inside is a decoration, not a reference.
+    assert spans((500.0, 80.0, 10.0), 8, "tiny_nd_far") == []
 
 
 def test_plot_data_mismatch_decay_boxes_stay_on_their_own_iteration(
@@ -516,6 +608,118 @@ def test_plot_data_mismatch_decay_survives_a_zero_score(
         windows, tmp_path / "zero.png", num_observations=200
     )
     assert written is not None and written.exists()
+
+
+# ---------------------------------------------------------------------------
+# Consumer wiring: the metric and figure stages actually read the bundle
+# ---------------------------------------------------------------------------
+
+
+def _write_window_diagnostics(
+    run_dir: pathlib.Path, n_windows: int, *, n_obs: int = 24, n_members: int = 10
+) -> None:
+    """Phase-2 files for ``n_windows`` windows, converging on the target."""
+    rng = np.random.default_rng(4)
+    windows_dir = run_dir / "windows"
+    windows_dir.mkdir(parents=True, exist_ok=True)
+    sigma = np.full(n_obs, 0.5)
+    params = xarray.Dataset(
+        {"inflow_angle": (("esmda_step", "ensemble"), rng.normal(size=(3, n_members)))}
+    )
+    for window in range(n_windows):
+        obs = rng.normal(size=n_obs)
+        # Residuals shrinking from ~4 sigma to ~1 sigma: prior -> posterior.
+        history = [
+            obs[:, None] + scale * sigma[:, None] * rng.normal(size=(n_obs, n_members))
+            for scale in (4.0, 2.0, 1.0)
+        ]
+        _save_obs_diagnostics(
+            windows_dir, window, obs, obs, sigma, history, params, object()
+        )
+
+
+def test_metric_stage_emits_esmda_diagnostics_only_with_the_files(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The block lands in ``run_summary.yaml`` — and is absent, not null, without it.
+
+    The wiring neither the unit tests nor the ``skip_viz`` e2e exercises: a typo
+    in a bundle key at this call site would ship silently. Also pins the
+    deliberate asymmetry that the block is computed **under** ``run.skip_viz``,
+    since it reads only the KB-scale observation files, never the truth.
+    """
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+    from tests.test_evaluation_spectra import _minimal_run_dir
+
+    run_dir = tmp_path / "run"
+    _minimal_run_dir(run_dir)
+
+    compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+    assert "esmda_diagnostics" not in summary
+    assert summary["parameter_metrics"], "the rest of the summary must be intact"
+
+    _write_window_diagnostics(run_dir, n_windows=2)
+    compute_metrics(run_dir)
+    block = read_yaml(run_dir / "run_summary.yaml")["esmda_diagnostics"][
+        "data_mismatch"
+    ]
+    assert len(block["per_step_median"]) == 3
+    # Residuals shrink 4σ -> 1σ, so O_N descends towards the ½ target.
+    assert block["per_step_median"][0] > block["per_step_median"][-1]
+    assert block["final_step_index"] == 2
+    assert block["num_observations"] == 24
+    assert block["caveat"] == "no_representativeness_error"
+
+
+def test_metric_stage_ignores_windows_left_by_an_earlier_run(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``paths.results_dir`` is fixed and ``windows/`` is never cleared.
+
+    A rerun with fewer windows leaves the earlier run's files in place. Every
+    other block in ``run_summary.yaml`` is bounded by ``truth_access.yaml``'s
+    ``num_windows``; this one must be too, or one summary reports two windows'
+    sensors beside four windows' data mismatch.
+    """
+    from scripts.esmda._esmda_common import obs_diagnostics_bundle, write_yaml
+    from tests.test_evaluation_spectra import _minimal_run_dir
+
+    run_dir = tmp_path / "run"
+    _minimal_run_dir(run_dir)
+    _write_window_diagnostics(run_dir, n_windows=4)
+
+    # No truth_access.yaml yet: nothing to bound against, so all four are used.
+    unbounded = obs_diagnostics_bundle(run_dir)
+    assert unbounded is not None and unbounded["num_windows"] == 4
+
+    write_yaml({"num_windows": 2}, run_dir / "truth_access.yaml")
+    bundle = obs_diagnostics_bundle(run_dir)
+    assert bundle is not None
+    assert bundle["num_windows"] == 2
+    assert bundle["window_indices"] == [0, 1]
+
+
+def test_figure_stage_draws_d3_only_with_the_files(tmp_path: pathlib.Path) -> None:
+    """The figure wiring, on the WP1.5 suite's own complete run dir.
+
+    ``_figure_run_dir`` is imported rather than re-fabricated, for the reason
+    the WP3 suite gives: it is ``run_esmda.py``'s output layout, and a second
+    copy here would be the thing that drifts.
+    """
+    from scripts.esmda.make_esmda_figures import make_figures
+    from tests.test_evaluation_figures import _figure_run_dir
+
+    run_dir = _figure_run_dir(tmp_path)
+    make_figures(run_dir)
+    assert not (run_dir / "data_mismatch_decay.png").exists()
+
+    _write_window_diagnostics(run_dir, n_windows=2)
+    make_figures(run_dir)
+    assert (run_dir / "data_mismatch_decay.png").is_file()
+    # A new figure must not cost an old one.
+    assert (run_dir / "sensor_fans.png").is_file()
 
 
 # ---------------------------------------------------------------------------

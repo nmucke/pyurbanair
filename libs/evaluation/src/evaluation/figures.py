@@ -2824,15 +2824,19 @@ def plot_data_mismatch_decay(
     output_path: str | pathlib.Path,
     *,
     num_observations: int = 0,
+    window_indices: Sequence[int] | None = None,
 ) -> pathlib.Path | None:
     """D3: per-member ``O_N`` vs ESMDA iteration against the ½ target band.
 
     ``per_window`` is a list of ``(n_steps, M)`` arrays of
     :func:`evaluation.scores.data_mismatch` values, one per assimilation window;
-    ``num_observations`` is ``N_d``, which sets the band. Windows are drawn as
-    separate boxes per iteration rather than pooled — window 0's prior is a
-    cold-start draw and a later window's is an extrapolated posterior, so pooling
-    their step-0 boxes would conflate two different objects.
+    ``num_observations`` is ``N_d``, which sets the band; ``window_indices``
+    says which window each entry is, so a run whose window 1 could not be read
+    labels its boxes 0 and 2 rather than silently renumbering them 0 and 1.
+    Windows are drawn as separate boxes per iteration rather than pooled —
+    window 0's prior is a cold-start draw and a later window's is an
+    extrapolated posterior, so pooling their step-0 boxes would conflate two
+    different objects.
 
     A healthy run's boxes descend from the prior and settle inside the band. The
     two failure modes the figure exists to separate: boxes settling **above** the
@@ -2844,12 +2848,15 @@ def plot_data_mismatch_decay(
     Returns the path written, or ``None`` when there is nothing to draw (an old
     run dir, or ``esmda.save_obs_diagnostics=false``).
     """
-    windows = [np.atleast_2d(np.asarray(w, dtype=float)) for w in (per_window or [])]
-    windows = [w for w in windows if w.size and np.any(np.isfinite(w))]
+    supplied = list(per_window if per_window is not None else [])
+    windows = [np.atleast_2d(np.asarray(w, dtype=float)) for w in supplied]
+    keep = [i for i, w in enumerate(windows) if w.size and np.any(np.isfinite(w))]
+    windows = [windows[i] for i in keep]
     if not windows:
         logger.info("plot_data_mismatch_decay: no usable data-mismatch values")
         return None
 
+    labels = [window_indices[i] for i in keep] if window_indices is not None else keep
     n_steps = max(w.shape[0] for w in windows)
     positions, box_width = _d3_box_layout(n_steps, len(windows))
     band = data_mismatch_target_band(num_observations)
@@ -2864,14 +2871,14 @@ def plot_data_mismatch_decay(
     # exactly 0 -- a member reproducing the observations exactly -- has no place
     # on a log axis.
     pooled = np.concatenate([_finite(w) for w in windows])
-    medians = np.array(
-        [
-            np.median(
-                _finite(np.concatenate([w[s] for w in windows if w.shape[0] > s]))
-            )
-            for s in range(n_steps)
-        ]
-    )
+    step_values = [
+        _finite(np.concatenate([w[s] for w in windows if w.shape[0] > s]))
+        for s in range(n_steps)
+    ]
+    # ``np.median`` of an empty step warns on stdout before returning nan. The
+    # nan is the right answer and ``_spans_decades`` drops it, so the guard here
+    # suppresses only the noise.
+    medians = np.array([np.median(v) if v.size else np.nan for v in step_values])
     use_log = _spans_decades(medians, _D3_LOG_DECADES) and bool(np.all(pooled > 0.0))
 
     with _styled():
@@ -2909,25 +2916,24 @@ def plot_data_mismatch_decay(
         band_drawn = band is not None
         if band is not None:
             lower, upper = DATA_MISMATCH_TARGET - band, DATA_MISMATCH_TARGET + band
-            if use_log:
-                # A log axis cannot take a lower edge at or below zero (which
-                # happens whenever ``band >= 1/2``, i.e. under 18 observations),
-                # so the band is floored at the smallest plotted value. That
-                # floor must never be allowed to *exceed* the band's upper edge:
-                # on an entirely off-target run -- every box above the band,
-                # which is the regime the C_D caveat says to expect -- the span
-                # would invert and shade a huge region under the band's legend
-                # label, saying the opposite of what the YAML's
-                # ``underfit_final`` flag says.
-                floor = float(pooled.min())
-                if floor >= upper:
-                    # Nothing plotted is anywhere near the band; drawing it at
-                    # the axis floor would be a decoration, not a reference.
-                    band_drawn = False
+            if lower <= 0.0:
+                # ``band >= 1/2``, i.e. 18 or fewer observations (3/sqrt(2*18)
+                # is exactly 1/2). The true lower edge is at or below zero,
+                # which a log axis cannot take and which on a linear one just
+                # means "no lower bound".
+                if not use_log:
+                    lower = 0.0
+                elif float(pooled.min()) < upper:
+                    lower = float(pooled.min())
                 else:
-                    lower = max(lower, min(floor, upper))
-            else:
-                lower = max(lower, 0.0)
+                    # A band with no drawable lower edge, and nothing plotted
+                    # inside it: a decoration rather than a reference.
+                    band_drawn = False
+            # Whenever ``lower > 0`` -- every N_d >= 19, which is every real
+            # run -- the true band is drawn as-is and the axis grows to include
+            # it. That is deliberate: on an off-target run the reader needs to
+            # see HOW FAR above the band the boxes sit, and clipping the band to
+            # the data was what made the span invert.
 
             if band_drawn:
                 ax.axhspan(lower, upper, color=COLORS["window"], alpha=0.25, zorder=1)
@@ -2961,24 +2967,32 @@ def plot_data_mismatch_decay(
                 )
             )
         if len(windows) > 1:
+            # The actual window numbers, so a run that lost one to a read error
+            # does not present the survivors as a contiguous 0..N-1.
             handles.append(
                 Line2D(
                     [0],
                     [0],
                     color="none",
-                    label=f"{len(windows)} windows, left to right",
+                    label="windows "
+                    + ", ".join(str(w) for w in labels)
+                    + " (left to right)",
                 )
             )
         ax.legend(handles=handles, loc="best", fontsize=8)
-        ax.annotate(
-            "band assumes $C_D$ includes representativeness error (it does not);\n"
-            "read the trend and the box heights before the absolute placement",
-            xy=(0.0, -0.22),
-            xycoords="axes fraction",
-            fontsize=7,
-            color=COLORS["charcoal"],
-            va="top",
-        )
+        # Only when a band is on the figure -- otherwise the note explains a
+        # reference the reader cannot see.
+        if band_drawn:
+            ax.annotate(
+                "band assumes $C_D$ includes representativeness error (it does "
+                "not);\nread the trend and the box heights before the absolute "
+                "placement",
+                xy=(0.0, -0.22),
+                xycoords="axes fraction",
+                fontsize=7,
+                color=COLORS["charcoal"],
+                va="top",
+            )
         return save_png(fig, output_path, transparent=False)
 
 

@@ -1382,7 +1382,57 @@ def data_mismatch_target_band(n_obs):
     return float(3.0 / np.sqrt(2.0 * n))
 
 
-def data_mismatch_summary(per_step, n_obs):
+def _collapse_verdict(per_window, band):
+    """Whether EVERY window's final iteration shows a collapsed member spread.
+
+    The collapse signature is an across-member IQR that has fallen to a fraction
+    of the target band's half-width *while the median is off target*: members
+    agreeing on a wrong answer to within the noise the target is defined at.
+    Identical members sitting **on** target are converged, not collapsed.
+
+    Judged per window and ``and``-ed, because the IQR is only meaningful across
+    members of one window: pooling a rollout's windows measures the drift of
+    ``O_N`` from window to window, which is not a spread at all.
+
+    ``None`` -- the verdict abstains -- when there is no band, no data, or fewer
+    than :data:`_COLLAPSE_MIN_VALUES` members in a window. At the smoke shape's
+    ``M = 2`` the "quartiles" are just the two members scaled, so a verdict there
+    would fire on every CI run; the master plan's smoke caution asks for ``None``
+    plus a log line rather than a special case.
+    """
+    windows = [
+        np.atleast_2d(np.asarray(w, dtype=float))
+        for w in (per_window if per_window is not None else [])
+    ]
+    if band is None or not windows:
+        return None
+
+    verdicts = []
+    for values in windows:
+        finite = [row[np.isfinite(row)] for row in values]
+        final = next((f for f in reversed(finite) if f.size > 0), None)
+        if final is None:
+            continue
+        if final.size < _COLLAPSE_MIN_VALUES:
+            logger.info(
+                "data_mismatch: %d member(s) at a window's final iteration is too "
+                "few for an IQR-based collapse verdict (need %d); reporting "
+                "collapsed=None",
+                int(final.size),
+                _COLLAPSE_MIN_VALUES,
+            )
+            return None
+        iqr = float(np.subtract(*np.percentile(final, [75, 25])))
+        median = float(np.median(final))
+        verdicts.append(
+            iqr < _COLLAPSE_IQR_FRACTION * band
+            and abs(median - DATA_MISMATCH_TARGET) > band
+        )
+
+    return bool(verdicts and all(verdicts))
+
+
+def data_mismatch_summary(per_step, n_obs, per_window=None):
     """Reduce per-iteration ``O_N`` values to the ``data_mismatch`` block.
 
     Args:
@@ -1391,6 +1441,10 @@ def data_mismatch_summary(per_step, n_obs):
             iteration's per-member ``O_N`` values — pooled over the run's
             windows, so a rollout contributes ``W·M`` values per iteration.
         n_obs: ``N_d`` per window, which sets the target band.
+        per_window: Optional list of ``(L, M)`` arrays, one per window, used for
+            the ``collapsed`` verdict alone — see :func:`_collapse_verdict` for
+            why that one cannot be taken off the pooled ``per_step``. Omitted,
+            ``collapsed`` is ``None`` rather than a pooled approximation of it.
 
     Returns:
         The block described in ``phase2_obs_persistence.md``, or ``None`` when
@@ -1404,7 +1458,10 @@ def data_mismatch_summary(per_step, n_obs):
     *trend* across iterations and the across-member spread — neither of which a
     constant mis-scaling of ``C_D`` moves — before reading the flags.
     """
-    steps = [np.asarray(v, dtype=float).ravel() for v in (per_step or [])]
+    steps = [
+        np.asarray(v, dtype=float).ravel()
+        for v in (per_step if per_step is not None else [])
+    ]
     finite = [s[np.isfinite(s)] for s in steps]
     if not any(f.size for f in finite):
         return None
@@ -1426,8 +1483,6 @@ def data_mismatch_summary(per_step, n_obs):
         (i for i in reversed(range(len(finite))) if finite[i].size > 0), None
     )
     final_median = None if final_step is None else medians[final_step]
-    final_iqr = None if final_step is None else iqrs[final_step]
-    final_count = 0 if final_step is None else int(finite[final_step].size)
 
     # Off-target counts as over/under-fitting only outside the band; with no
     # band (no observations) there is nothing to judge against, hence ``None``
@@ -1437,19 +1492,13 @@ def data_mismatch_summary(per_step, n_obs):
         underfit = bool(final_median > DATA_MISMATCH_TARGET + band)
         overfit = bool(final_median < DATA_MISMATCH_TARGET - band)
 
-    collapsed = None
-    if final_count < _COLLAPSE_MIN_VALUES:
-        logger.info(
-            "data_mismatch: %d value(s) at the final iteration is too few for an "
-            "IQR-based collapse verdict (need %d); reporting collapsed=None",
-            final_count,
-            _COLLAPSE_MIN_VALUES,
-        )
-    elif band is not None and final_iqr is not None and final_median is not None:
-        collapsed = bool(
-            final_iqr < _COLLAPSE_IQR_FRACTION * band
-            and abs(final_median - DATA_MISMATCH_TARGET) > band
-        )
+    # ``collapsed`` is an ACROSS-MEMBER verdict, so on a rollout it is taken per
+    # window rather than from ``per_step`` -- which pools every window's members,
+    # and whose IQR is therefore dominated by the (entirely healthy) drift of
+    # O_N from one window to the next. A 10-window run in which every window's
+    # members sat on top of each other would report a large pooled IQR and
+    # ``collapsed: False``, the exact conflation D3 un-pools to avoid.
+    collapsed = _collapse_verdict(per_window, band)
 
     return {
         "per_step_median": medians,

@@ -170,6 +170,47 @@ reader.
    expression already existed verbatim in three places and the new
    posterior-forecast call site would have been a fourth.
 
+8. **`obs_diagnostics_bundle` is bounded by `truth_access.yaml`'s
+   `num_windows`**, like every other consumer in `compute_esmda_metrics`.
+   `paths.results_dir` is a fixed, non-timestamped path and the window loop
+   never clears `windows/`, so a rerun with fewer windows — the normal case
+   under this repo's "retune between live runs" workflow — leaves the earlier
+   run's files in place. Globbing alone would pool them into this run's
+   diagnostic while every other block in the same `run_summary.yaml` covered
+   only the current windows. A window whose `N_d` differs from the first one
+   kept is also dropped, since the target band cannot be shared across them.
+9. **`collapsed` is judged per window, not on the pooled `per_step`.** It is an
+   *across-member* verdict; pooling a rollout's windows measures the drift of
+   `O_N` from window to window, which is not a spread. `data_mismatch_summary`
+   therefore takes an optional `per_window`, and reports `collapsed: null`
+   without it rather than a pooled approximation. This also keeps the
+   `_COLLAPSE_MIN_VALUES` guard honest: pooling would sail a 2-member smoke run
+   past a count threshold once it had four windows.
+10. **The D3 band is drawn at its true position rather than clipped to the
+   data.** For every `N_d >= 19` the lower edge `1/2 - 3/sqrt(2 N_d)` is
+   positive and needs no floor at all, so the axis simply grows to include the
+   band — which is what a reader of an off-target run needs, and removes the
+   inversion at its source rather than clamping around it. Only at `N_d <= 18`
+   (`3/sqrt(2*18)` is exactly `1/2`) is a floor needed, and only on a log axis.
+11. **The bundle carries `window_indices`** so D3's legend names the actual
+   windows: a run that lost window 1 to a read error would otherwise present
+   windows 0 and 2 as though they were 0 and 1.
+
+Two acceptance-criterion notes, recorded rather than fixed:
+
+- The plan asks for flag-off **byte-compatibility** against the *pre-phase-2*
+  artifact set. The test compares flag-on against flag-off within this branch,
+  which cannot catch a file added or dropped in both modes; a true pre/post
+  comparison would need a fixture built from the parent commit. Also, flag-off
+  is not literally byte-identical — `run_info.yaml` gains the
+  `save_obs_diagnostics` key unconditionally, which the plan itself asks for.
+- `window_{w}_params_steps.nc` records a failed member's *un-substituted*
+  parameters, while its posterior `pred_obs` column holds the donor clone that
+  `apply_failure_substitutions_to_params` wrote. The final forecast is not
+  followed by that substitution (pre-existing, unchanged here), so the two
+  sides of the debugging artifact disagree for failed members. `O_N` is
+  unaffected — it reads `pred_obs` only.
+
 Not done, and deliberately: nothing reads `window_{w}_params_steps.nc`. The
 plan says so explicitly ("kept for future debugging, no diagnostic builds on
 it in this plan").

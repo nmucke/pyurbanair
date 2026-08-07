@@ -1326,7 +1326,9 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     mismatch = obs_diagnostics_bundle(run_dir)
     if mismatch is not None:
         block = data_mismatch_summary(
-            mismatch["per_step"], mismatch["num_observations"]
+            mismatch["per_step"],
+            mismatch["num_observations"],
+            per_window=mismatch["per_window"],
         )
         if block is not None:
             summary["esmda_diagnostics"] = {"data_mismatch": block}

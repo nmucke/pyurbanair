@@ -459,6 +459,7 @@ def make_figures(run_dir: pathlib.Path) -> None:
                 mismatch["per_window"],
                 decay,
                 num_observations=mismatch["num_observations"],
+                window_indices=mismatch["window_indices"],
             ),
         )
 
