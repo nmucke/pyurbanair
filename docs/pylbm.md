@@ -589,7 +589,8 @@ silent:
   wrapper saw no `CalledProcessError`, only an empty output dir or a truncated
   member. (That is the other half of the "truncated member exits 0" failure.)
 - **The template lookup missed too**, so the restart Python wrote was built from
-  a pure-equilibrium distribution — see the next gotcha.
+  a pure-equilibrium distribution. That had a second, independent cause and is
+  fixed separately — see "Restart record layout" below.
 
 Output *collection* was never affected: `_get_output_files_for_current_run` globs
 `out_0000_F(\d+)` and is width-agnostic. Only the exact-name fallback used the
@@ -602,32 +603,63 @@ a long rollout reaches 999,999 even when no single window is near it;
 never be read *or* pruned). Start from a clean experiment dir, shorten the run,
 or widen `i6.6` in the Fortran **and** `ITERATION_FIELD_WIDTH` together.
 
-### Warm starts are built from a pure-equilibrium distribution
+### Restart record layout, and why the template read needs shaped dtypes
 
-**Open defect, verified 2026-08-07.** `_try_load_restart_distribution` reads the
-restart template with
-`FortranFile.read_record(np.int32, np.int32, np.int32, np.int32, np.float32)`.
-Given a list of scalar dtypes, scipy treats them as one repeating 20-byte
-compound and requires the record length to be a multiple of it. An LBM restart is
-4 `int32` followed by `27*(nx+2)*(ny+2)*(nz+2)` `float32`, which is not — so the
-call always raises:
+`m_saverestart.F90` writes one unformatted record — `write(iunit) nx,ny,nz,nl,f`
+with `f(nl,0:nx+1,0:ny+1,0:nz+1)` — so on disk it is 4 default `int32` followed
+by `27*(nx+2)*(ny+2)*(nz+2)` `float32`, wrapped in gfortran's 4-byte length
+marker at each end. The reals are 4-byte **only because this repo's build never
+passes the makefile's `DP=1`** (`-fdefault-real-8`); if that ever changes, the
+reader and `write_restart_file_from_xarray` will silently disagree with the
+solver about every value in the file.
+
+Reading it needs **shaped** dtypes:
+
+```python
+_, f_flat = f.read_record(
+    np.dtype((np.int32, (4,))),                # header
+    np.dtype((np.float32, (expected_size,))),  # payload
+)
+```
+
+Given a list of *scalar* dtypes, scipy treats them as one repeating 20-byte
+compound and demands the record be a multiple of it — which an LBM restart never
+is, so `read_record(np.int32, np.int32, np.int32, np.int32, np.float32)` raises:
 
 ```
 ValueError: Size obtained (313648) is not a multiple of the dtypes given (20).
 ```
 
-The exception used to hit a bare `except Exception: return None`, so the template
-was silently treated as absent on **every** call and
-`write_restart_file_from_xarray` always fell back to a pure-equilibrium restart —
-losing the non-equilibrium and ghost-cell content the template exists to carry.
-The macroscopic fields (rho, u, v, w) it writes are still correct, which is why
-this was invisible; the filename-width bug above hid it further, because the
-template lookup was also looking under the wrong name.
+The payload length is derived from the record's **own** leading marker rather
+than from the expected grid (mirroring `m_readrestart`'s read-header-then-rewind).
+Sized from an assumed grid instead, a wrong-grid restart and a truncated one both
+fail inside scipy with the same arithmetic complaint and lose their specific
+diagnostics; sized from the file, each reaches the guard that names it.
 
-The fallback is now logged rather than swallowed. Reading it correctly needs
-shaped dtypes sized from the grid, which would enable a code path that has never
-executed in production and changes the field every pylbm warm start begins from —
-so it wants its own change with its own stability check, not a drive-by fix.
+**This was broken until 2026-08-07**, and the consequence outlived the filename
+bug above. The exception hit a bare `except Exception: return None`, so the
+template was treated as absent on *every* call and every pylbm warm start was
+built from a pure-equilibrium distribution — discarding the non-equilibrium
+stress. The macroscopic fields were still correct, which is why nothing looked
+wrong; the solver simply had to re-establish the stress each time, as a startup
+transient. Measured on a tiny case: the first warm frame sat **3.17 %** (RMS)
+from the state handed in, with a visible `max|u|` excursion at frame 0; with the
+template it is **0.12 %** and there is no excursion.
+
+Two things this turned on that outlive the fix:
+
+- **The blanking mask is live for the first time.** `fluid_mask_zyx` is computed
+  unconditionally but consulted *only* inside `if template_f is not None:`, so
+  the "non-zero == solid" convention had never executed. It is correct
+  (`stl_to_lbm.py` writes 1 for solid; `m_solid_objects_init` sets `.true.` for
+  solids; `m_netcdfout` writes 1.0 where `lblanking`) — fluid cells take the new
+  state, solid cells keep the template. An inverted mask would swap the whole
+  domain, so this is the thing to eyeball if a warm start ever looks wrong.
+- **Peak memory per member roughly doubles.** The template branch holds
+  `template_f`, `feq`, `feq_template` and `f_new` at once — four full
+  27-direction fields where the equilibrium path held one. Negligible at
+  45x60x24 (~8 MB each), ~890 MB each at 200³, i.e. ~3.5 GB per member times
+  `ensemble.num_parallel_processes`. See the in-memory ensemble OOM gotcha below.
 
 ### A truncated run exits 0, and is now caught
 
