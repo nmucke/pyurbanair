@@ -606,31 +606,15 @@ def test_state_run_comparison_warns_on_mixed_metric_versions(
     assert {r["metrics_version"] for r in rows} == {1, 2}
 
 
-def test_sweep_metrics_drop_only_the_sensor_scores_the_change_invalidates(
-    tmp_path: pathlib.Path,
-) -> None:
-    # Without truth_access.yaml the sensor scores cannot be recomputed. The CRPS
-    # keys are dropped -- copying them would make one metrics_version describe a
-    # file whose parameter block is fair and whose sensor block is not -- but
-    # the RMSE of the ensemble mean has no pairwise term, is unaffected by the
-    # estimator change, and must survive: dropping it would silently erase those
-    # runs from the comparison panels.
-    from scripts.esmda._esmda_common import read_yaml, write_yaml
-    from scripts.figure_creation.compute_sweep_metrics import process_run
+def _write_legacy_run(run_dir: pathlib.Path, sensor_entry: dict) -> None:
+    """A pre-WP1.1 run dir: a summary + config + param files, no truth_access."""
+    from scripts.esmda._esmda_common import write_yaml
 
-    run_dir = tmp_path / "legacy_run"
-    out_dir = tmp_path / "sweep_metrics" / "legacy_run"
     run_dir.mkdir()
     write_yaml(
         {
             "configuration": {"assimilation_model": "pylbm"},
-            "sensor_metrics": {
-                "assimilation": {
-                    "num_sensors": 3,
-                    "vel_magnitude_rmse": {"mean": 0.5},
-                    "vel_magnitude_crps": {"mean": 123.0},
-                }
-            },
+            "sensor_metrics": {"assimilation": sensor_entry},
         },
         run_dir / "run_summary.yaml",
     )
@@ -654,15 +638,119 @@ def test_sweep_metrics_drop_only_the_sensor_scores_the_change_invalidates(
     ).to_netcdf(run_dir / "prior_params.nc")
     xarray.Dataset({"inflow_angle": 0.5}).to_netcdf(run_dir / "true_params.nc")
 
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("legacy_entry", "expected_entry", "expected_dropped"),
+    [
+        # What every run in the current sweeps actually carries: run_esmda /
+        # compute_esmda_metrics have emitted the full-vector keys since ec39233.
+        # Neither ends in ``_crps``, so a ``_crps`` denylist copies the biased
+        # M**2 energy score into a file stamped metrics_version 2.
+        pytest.param(
+            {
+                "num_sensors": 3,
+                "velocity_vector_rmse": {"mean": 0.5},
+                "velocity_vector_energy_score": {"mean": 0.42},
+            },
+            {"num_sensors": 3, "velocity_vector_rmse": {"mean": 0.5}},
+            ["velocity_vector_energy_score"],
+            id="velocity_vector",
+        ),
+        # Pre-ec39233 summaries. Their |U| RMSE is the one carried key the
+        # comparison panels actually read (compare_sweep_results._SENSOR_Q).
+        pytest.param(
+            {
+                "num_sensors": 3,
+                "vel_magnitude_rmse": {"mean": 0.5},
+                "vel_magnitude_crps": {"mean": 123.0},
+            },
+            {"num_sensors": 3, "vel_magnitude_rmse": {"mean": 0.5}},
+            ["vel_magnitude_crps"],
+            id="vel_magnitude",
+        ),
+        # A score key nobody has vouched for is dropped rather than copied --
+        # the allowlist must fail closed, which is precisely what the denylist
+        # it replaced did not do.
+        pytest.param(
+            {
+                "num_sensors": 3,
+                "velocity_vector_rmse": {"mean": 0.5},
+                "velocity_vector_variogram_score": {"mean": 0.7},
+            },
+            {"num_sensors": 3, "velocity_vector_rmse": {"mean": 0.5}},
+            ["velocity_vector_variogram_score"],
+            id="unknown_future_score",
+        ),
+    ],
+)
+def test_sweep_metrics_carry_forward_drops_every_estimator_dependent_score(
+    tmp_path: pathlib.Path,
+    legacy_entry: dict,
+    expected_entry: dict,
+    expected_dropped: list[str],
+) -> None:
+    # Without truth_access.yaml the sensor scores cannot be recomputed, so the
+    # only honest carry-forward is the estimator-*independent* subset: the RMSE
+    # of the ensemble mean has no pairwise term and crosses the WP1.1 boundary
+    # unchanged, while every pairwise score (CRPS, energy score, ...) shifts by
+    # ~O(1/M). Copying one of the latter into a file stamped metrics_version 2
+    # both corrupts the ensemble-size axis the sweeps exist to probe and
+    # silences compare_sweep_results' mixed-version guard.
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.figure_creation.compute_sweep_metrics import process_run
+
+    run_dir = tmp_path / "legacy_run"
+    out_dir = tmp_path / "sweep_metrics" / "legacy_run"
+    _write_legacy_run(run_dir, legacy_entry)
+
     status = process_run(run_dir, out_dir)
     metrics = read_yaml(out_dir / "metrics.yaml")
 
     assert metrics["metrics_version"] == 2
     assert "parameter_metrics" in metrics
-    assert metrics["sensor_metrics"] == {
-        "assimilation": {"num_sensors": 3, "vel_magnitude_rmse": {"mean": 0.5}}
-    }
-    assert "CRPS omitted" in status["note"]
+    assert metrics["sensor_metrics"] == {"assimilation": expected_entry}
+    # The stamp is only honest because the provenance says which block was
+    # carried and what was dropped to make it comparable.
+    provenance = metrics["sensor_metrics_provenance"]
+    assert provenance["carried_from_metrics_version"] == 1
+    assert provenance["dropped_keys"] == expected_dropped
+    assert "carried" in status["note"]
+
+
+def test_sweep_metrics_carry_forward_survives_the_comparison_readers(
+    tmp_path: pathlib.Path,
+) -> None:
+    # The carried block must still flatten into the comparison CSV, and the
+    # added provenance key must not disturb any reader. Note which column the
+    # |U| RMSE lands in: _SENSOR_Q reads ``vel_magnitude_rmse``, never
+    # ``velocity_vector_rmse``, so the full-vector runs contribute no sensor
+    # column at all -- carrying their RMSE forward keeps nothing in the panels.
+    from scripts.figure_creation.compare_sweep_results import load_runs
+    from scripts.figure_creation.compute_sweep_metrics import process_run
+
+    vector_run = "pylbm_nx10_ny10_nz4_ens20_steps2"
+    magnitude_run = "pylbm_nx10_ny10_nz4_ens10_steps2"
+    root = tmp_path / "sweep_metrics"
+    root.mkdir()
+    for name, entry in (
+        (magnitude_run, {"num_sensors": 3, "vel_magnitude_rmse": {"mean": 0.5}}),
+        (vector_run, {"num_sensors": 3, "velocity_vector_rmse": {"mean": 0.4}}),
+    ):
+        run_dir = tmp_path / name
+        _write_legacy_run(run_dir, entry)
+        process_run(run_dir, root / name)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        df = load_runs(root, models=None)
+
+    assert set(df["metrics_version"]) == {2}
+    col = "sensor_assimilation_vel_rmse_mean"
+    by_name = df.set_index("name")
+    assert by_name.loc[magnitude_run, col] == 0.5
+    assert bool(by_name[col].isna()[vector_run])
+    # No CRPS column survives the boundary for either run.
+    assert df["sensor_assimilation_vel_crps_mean"].isna().all()
 
 
 def test_comparisons_are_silent_when_every_run_shares_a_version(

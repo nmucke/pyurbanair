@@ -27,6 +27,11 @@ discipline rather than the plotting:
     component or a sensor set with nothing in common all no-op with a log rather
     than raising, and the metric/figure stages skip their block
     (``..._no_ops_...``, ``..._is_absent_without_probe_records``);
+  * **the SHIPPED probe cadence scores a band worth scoring.** Everything else
+    here picks its own record length, so nothing exercised the estimator at the
+    length `conf/run_probe_series.yaml` actually produces -- which is how a
+    default landing exactly on the refusal floor shipped
+    (``test_the_shipped_probe_cadence_scores_a_band_wider_than_the_refusal_floor``);
   * **the reported keys are present and finite on a short record** -- smoke-scale
     spectra are noise-dominated, so their *values* are not assertable and only
     their presence and finiteness are (``..._are_finite_on_a_short_record``);
@@ -57,11 +62,15 @@ import xarray
 import yaml  # type: ignore[import-untyped]
 from evaluation.figures import plot_spectra
 from evaluation.turbulence import (
+    _MIN_BAND_BINS,
+    SPECTRAL_BAND_DECADE_BINS,
     SPECTRUM_CUTOFF_FRACTION,
     SPECTRUM_SEGMENTS,
     log_spectral_distance,
     median_spectrum,
+    minimum_spectral_samples,
     probe_spectra,
+    spectral_band_bins,
     spectral_metric_summary,
     welch_spectrum,
 )
@@ -1244,3 +1253,91 @@ def test_probe_spectra_compares_a_coarser_record_over_the_band_it_resolves() -> 
 def truth_as_posterior(truth: xarray.Dataset) -> xarray.Dataset:
     """The truth record reshaped as a one-member posterior, for a like-for-like run."""
     return truth.expand_dims(ensemble=1).assign_coords(member=("ensemble", [0]))
+
+
+# ---------------------------------------------------------------------------
+# The SHIPPED probe cadence (conf/run_probe_series.yaml)
+# ---------------------------------------------------------------------------
+
+_PROBE_CONFIG = (
+    pathlib.Path(__file__).resolve().parents[1] / "conf/run_probe_series.yaml"
+)
+
+# The window length figure S4 is specified against: `time.simulation_time` as it
+# is COMMITTED in conf/case/xie_and_castro.yaml and conf/case/barcelona.yaml.
+# Hard-coded rather than composed, deliberately -- the case files carry live run
+# tuning between experiments, and what is under test here is the shipped cadence
+# against the documented window, not whatever window someone is mid-run on.
+_REFERENCE_WINDOW_SECONDS = 300.0
+
+
+def _shipped_probe_cadence() -> float:
+    """`probes.output_frequency` as an operator gets it, straight off the file."""
+    with _PROBE_CONFIG.open() as handle:
+        return float(yaml.safe_load(handle)["probes"]["output_frequency"])
+
+
+def test_the_shipped_probe_cadence_scores_a_band_wider_than_the_refusal_floor() -> None:
+    """The default an operator pays for a full re-run to get must be worth having.
+
+    Nothing else in this suite runs the estimator at the length the SHIPPED config
+    actually produces -- the synthetic records above pick their own -- which is
+    exactly how `probes.output_frequency: 1.0` survived: over the documented 300 s
+    window it yields 300 samples, which land on `_MIN_BAND_BINS` EXACTLY. Four
+    bins is the point at which `probe_spectra` stops refusing, not a comparison:
+    it is a factor-of-four frequency span, an `lsd_posterior_median` that is an
+    RMS over four numbers, and (at 0.027-0.108 Hz, U~8 m/s over 14 m blocks) the
+    energy-containing range rather than an inertial one -- so S4's `-5/3` guide
+    would be drawn over a band that cannot contain a `-5/3`.
+
+    The bar is a decade of scored band, `SPECTRAL_BAND_DECADE_BINS`: bins run
+    1..B, so the span is exactly a factor of B, and a slope guide over less than
+    a decade is decoration. This asserts the whole chain -- config file to
+    `probe_spectra`'s own `band` -- rather than the arithmetic alone.
+    """
+    cadence = _shipped_probe_cadence()
+    n_samples = int(round(_REFERENCE_WINDOW_SECONDS / cadence))
+    assert n_samples >= minimum_spectral_samples(SPECTRAL_BAND_DECADE_BINS), (
+        f"the shipped {cadence} s cadence yields {n_samples} samples over a "
+        f"{_REFERENCE_WINDOW_SECONDS} s window"
+    )
+
+    rng = np.random.default_rng(17)
+    fs = 1.0 / cadence
+    truth = _probes(
+        _components((n_samples, 3), fs, -5.0 / 3.0, rng), fs, window_index=0
+    )
+    posterior = _probes(
+        _components((4, n_samples, 3), fs, -5.0 / 3.0, rng), fs, window_index=0
+    )
+    bundle = probe_spectra(truth, posterior)
+    assert bundle is not None, "the shipped cadence does not even produce a bundle"
+
+    scored = bundle["f"][bundle["band"]]
+    assert scored.size == spectral_band_bins(n_samples), (
+        "spectral_band_bins disagrees with the band probe_spectra applies, so "
+        "run_probe_series.py's pre-flight would quote a number the run misses"
+    )
+    assert scored.size >= SPECTRAL_BAND_DECADE_BINS, (
+        f"the shipped {cadence} s cadence scores {scored.size} bins over a "
+        f"{_REFERENCE_WINDOW_SECONDS} s window, against the "
+        f"{SPECTRAL_BAND_DECADE_BINS} a decade-wide band needs "
+        f"(_MIN_BAND_BINS, the refusal floor, is {_MIN_BAND_BINS})"
+    )
+    # A decade in frequency, not merely a bin count -- the property S4 needs.
+    assert float(scored[-1] / scored[0]) >= 10.0
+
+
+def test_spectral_band_bins_inverts_the_sample_floor() -> None:
+    """The pre-flight promises a bin count; it has to be the one that arrives.
+
+    Checked at both edges of the two thresholds `run_probe_series.py` reports,
+    because both are quoted to the operator as "use a cadence at least this fine"
+    and an off-by-one there is a silently narrow band.
+    """
+    for bins in (_MIN_BAND_BINS, SPECTRAL_BAND_DECADE_BINS):
+        floor = minimum_spectral_samples(bins)
+        assert spectral_band_bins(floor) == bins
+        assert spectral_band_bins(floor - 1) < bins
+    # A record too short to carry one segment scores nothing rather than raising.
+    assert spectral_band_bins(8) == 0

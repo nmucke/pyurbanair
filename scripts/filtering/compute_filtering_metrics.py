@@ -366,6 +366,13 @@ def _cycle_evaluation_blocks(
         # index rather than on seconds, but they still sample this stretch of
         # the run and that is what figure F1 annotates.
         time_span=(0.0, int(source.num_cycles) * float(ta["sim_time"])),
+        # ...and the span alone is exactly what would mislead: under the default
+        # source those frames are ONE per cycle, so the TKE and <u'w'> the same
+        # file carries are an across-cycle variance rather than resolved
+        # turbulence, and nothing in the numbers says so. ``run_summary.yaml``
+        # already records the caveat, but the figure stage reads
+        # ``eval_fields.nc`` and not the summary, so it travels with the data.
+        moment_sampling=source.description,
     )
     if field_metrics is not None:
         # ``n_windows`` is the number of distinct chunk indices the accumulators

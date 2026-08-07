@@ -1195,6 +1195,42 @@ def test_collector_sub_chunking_in_time_moves_no_number(
         assert np.allclose(single_shot[key], chunked[key], rtol=1e-12, atol=1e-12)
 
 
+def test_time_block_bounds_the_source_grid_for_a_target_given_collector() -> None:
+    # The prior and truth collectors are handed another collector's target, so
+    # they never run the branch that derives one -- and the transient budget is
+    # sized on the *source* grid only when a step is known to materialise it.
+    # Colocation always does on a staggered backend, so a collector that failed
+    # to record that sizes its sub-chunk source_cells/target_cells too large:
+    # n_z/4 * stride^2, which is 64x at Barcelona shape and turns a 256 MB
+    # transient into ~16 GB. The test above cannot see it because colocation is
+    # a pass-through on pylbm, so this one runs on a uDALES grid.
+    from scripts.esmda import compute_esmda_metrics as stage
+
+    state = _udales_state(n=8)
+    dims = ("zt", "yt", "xt")
+
+    deriving = stage.MeanFieldCollector("udales", np.array([1.0]), np.array([1.0]))
+    deriving.add(0, 0, state)
+    given = stage.MeanFieldCollector(
+        "udales", np.array([1.0]), np.array([1.0]), target=deriving.target
+    )
+    given.add(0, 0, state)
+
+    assert set(deriving.extrapolated) == {"zt", "yt", "xt"}
+    assert given.extrapolated == deriving.extrapolated
+    assert given._time_block(state, dims) == deriving._time_block(state, dims)
+
+    # And the shared block is the source-sized one, not merely a shared target
+    # one: sizing on the target slab alone would leave the larger term unbounded.
+    target = deriving.target
+    assert target is not None
+    target_only = stage._MEAN_FIELD_TRANSIENT_BYTES // (
+        stage._MEAN_FIELD_BYTES_PER_SAMPLE
+        * int(target.z.size * target.y.size * target.x.size)
+    )
+    assert given._time_block(state, dims) < target_only
+
+
 def test_mean_field_stride_bounds_the_accumulators(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

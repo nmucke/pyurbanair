@@ -867,9 +867,50 @@ def _skill_score(
     pairwise term coincide), which is the CI smoke shape. The skill is genuinely
     undefined there, so it is emitted as ``None`` and logged rather than
     special-cased away.
+
+    **Both means are taken over the knots finite in *both* series**, never over
+    each series' own finite set. A diverged member is ``nan`` from the knot it
+    blew up at onwards while the prior stays finite everywhere, so averaging the
+    two independently builds ``1 - mean(post)/mean(prior)`` out of two different
+    horizons -- and inflates the score exactly when the knot that dropped out is
+    the hard one the prior scored worst at. Intersecting is preferred over the
+    sibling ``window_statistics_summary`` guard's outright ``None``, because a
+    knot here is one sample of a horizon rather than a whole assimilation
+    window: the surviving knots still carry a meaningful score, whereas nulling
+    would lose the parameter entirely over a single diverged member. The
+    returned reference is the mean over those same knots, so it is always the
+    denominator that was actually used -- never a full-horizon prior mean
+    standing next to a partial-horizon skill.
+
+    ``prior_mean`` is ``nan`` when no knot is finite in both (the skill is
+    ``None`` then, via the undefined branch). Callers must write that ``nan`` as
+    ``null``: a bare ``.nan`` in the YAML reads as a measured value to anything
+    that does not check. Nothing on that path warns, so no caller needs a
+    ``catch_warnings`` wrapper.
     """
-    prior_mean = float(np.nanmean(prior))
-    post_mean = float(np.nanmean(post))
+    post_knots = np.isfinite(post)
+    prior_knots = np.isfinite(prior)
+    both = post_knots & prior_knots
+    if not np.array_equal(post_knots, prior_knots):
+        logger.warning(
+            "%s: the prior %s is finite at %d knots and the posterior at %d, so "
+            "their skill score is taken over the %d knots finite in both -- it "
+            "covers less than the full horizon",
+            name,
+            what,
+            int(prior_knots.sum()),
+            int(post_knots.sum()),
+            int(both.sum()),
+        )
+    if both.any():
+        # Plain ``mean`` on the selection rather than ``nanmean`` on the whole:
+        # the empty case is handled below instead of by numpy, which reports it
+        # as a "Mean of empty slice" RuntimeWarning on stderr -- indistinguishable
+        # from a crash when it surfaces in the middle of a metric stage.
+        prior_mean = float(prior[both].mean())
+        post_mean = float(post[both].mean())
+    else:
+        prior_mean = post_mean = float("nan")
     if not prior_mean > 0:
         logger.warning(
             "%s: prior %s is %.3g, so its skill score is undefined (null). At "
@@ -1138,12 +1179,12 @@ def window_statistics_summary(
             entry["prior_crps_mean"] = None
             entry["crps_reduction_vs_prior"] = None
             continue
-        with warnings.catch_warnings():
-            # An all-empty prior (every window truncated away) reduces to nan.
-            warnings.simplefilter("ignore", RuntimeWarning)
-            prior_mean, skill = _skill_score(
-                posterior_crps[name], prior_crps[name], name, "sensor-statistic CRPS"
-            )
+        # An all-empty prior (every window truncated away) reduces to nan, but
+        # quietly: _skill_score handles the empty case itself rather than
+        # letting nanmean warn, so no catch_warnings wrapper is needed here.
+        prior_mean, skill = _skill_score(
+            posterior_crps[name], prior_crps[name], name, "sensor-statistic CRPS"
+        )
         # ``null``, never ``.nan``: the reductions elsewhere in this block
         # filter on ``np.isfinite``, and a bare nan in the YAML reads as a
         # measured value to anything that does not check.
@@ -1189,13 +1230,18 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
     pooled_z: list[np.ndarray] = []
     for name, m in metrics.items():
         entry = {"rmse": series_stats(m["rmse"]), "crps": series_stats(m["crps"])}
+        # ``null``, never ``.nan``, for the same reason as the window block
+        # above: a diverged member leaves every posterior knot non-finite, and a
+        # bare nan in the YAML reads as a measured value to anything that does
+        # not check. This only ever fires on a run that has no comparable knot
+        # left, so no run whose numbers meant anything changes value.
         if "prior_rmse" in m:
             prior_mean, skill = _skill_score(m["rmse"], m["prior_rmse"], name, "RMSE")
-            entry["prior_rmse_mean"] = prior_mean
+            entry["prior_rmse_mean"] = prior_mean if np.isfinite(prior_mean) else None
             entry["rmse_reduction_vs_prior"] = skill
         if "prior_crps" in m:
             prior_mean, skill = _skill_score(m["crps"], m["prior_crps"], name, "CRPS")
-            entry["prior_crps_mean"] = prior_mean
+            entry["prior_crps_mean"] = prior_mean if np.isfinite(prior_mean) else None
             entry["crps_reduction_vs_prior"] = skill
         # Same parameter selection and truth alignment as ``metrics`` (both go
         # through _aligned_parameter_members), so the lookup always hits.

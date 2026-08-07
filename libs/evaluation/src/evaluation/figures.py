@@ -29,6 +29,7 @@ Populated in WP0.2 (move), extended in WP1.5 (P1, S1, S5, F1, D1), phase 3
 import contextlib
 import logging
 import pathlib
+import textwrap
 import warnings
 from typing import Iterator, Sequence, cast
 
@@ -1424,6 +1425,27 @@ def plot_parameter_marginals(
 # ---------------------------------------------------------------------------
 
 
+# S1's TKE row and F1's mean are the two places a reader reads "time average"
+# off a figure, and the frames behind them are not always a time average: the
+# filter's default source hands the collectors ONE analyzed frame per cycle, so
+# the second moments are an across-cycle variance carrying the analysis
+# increments. The writer of ``eval_fields.nc`` knows which it was and records it
+# there; these two figures take that line as ``sampling_note`` and render it,
+# because the numbers themselves are indistinguishable either way.
+_SAMPLING_WRAP = 108
+
+
+def _sampling_caption(note: str) -> str:
+    """The provenance line as it goes under a figure: prefixed and wrapped.
+
+    Wrapped here rather than left to matplotlib, which does not wrap a
+    ``supxlabel``: the notes come from the metric stage and run to a couple of
+    hundred characters, and one that runs off both edges of the PNG is a
+    qualification a reader cannot read.
+    """
+    return textwrap.fill(f"Moments sampled from {note}", width=_SAMPLING_WRAP)
+
+
 def _extrapolated_axes(fields: xarray.Dataset) -> tuple[str, ...]:
     """The centre axes whose last index ``eval_fields.nc`` flags as extrapolated."""
     raw = str(fields.attrs.get("extrapolated_edges", ""))
@@ -1504,6 +1526,7 @@ def plot_station_profiles(
     u_ref: float | None = None,
     building_height: float | None = None,
     max_stations: int = 6,
+    sampling_note: str | None = None,
 ) -> pathlib.Path | None:
     """S1: mean-velocity and TKE profiles at the station columns (the LES figure).
 
@@ -1528,6 +1551,15 @@ def plot_station_profiles(
     component only because every shipped case puts the inflow along +x. That is
     an assumption of the figure, not a knob: a case with a different inflow axis
     needs its profiles rethought rather than relabelled.
+
+    ``sampling_note`` is the caller's one-line record of WHICH frames the
+    moments were reduced over (``eval_fields.nc``'s ``moment_sampling``). It is
+    a plain string -- this function learns nothing about run directories from it
+    -- and when it is given the TKE row is marked ``*`` and the caption stops
+    calling the profiles a time average and prints the note instead. That row is
+    the reason: ``k`` from one analyzed frame per cycle is an across-cycle
+    variance, not resolved turbulence, and it renders identically to the real
+    thing.
 
     Returns the path written, or ``None`` when the dataset carries no station
     columns or no profile variables.
@@ -1567,9 +1599,13 @@ def plot_station_profiles(
         "mean": 1.0 if u_ref is None else 1.0 / u_ref,
         "tke": 1.0 if u_ref is None else 1.0 / u_ref**2,
     }
+    # Only the second-moment row is marked: the mean row survives sparse
+    # sampling as a mean of what was sampled, while ``k`` changes meaning
+    # outright, and marking both would blur which one the caption is about.
+    tke_mark = " *" if sampling_note else ""
     row_label = {
         "mean": r"$\bar{u}/U_{ref}$ [-]" if u_ref else r"$\bar{u}$ [m/s]",
-        "tke": r"$k/U_{ref}^2$ [-]" if u_ref else r"$k$ [m$^2$/s$^2$]",
+        "tke": (r"$k/U_{ref}^2$ [-]" if u_ref else r"$k$ [m$^2$/s$^2$]") + tke_mark,
     }
     # Extracted once and handed to the ordering rule, which is shared with S4.
     sets = (
@@ -1679,12 +1715,20 @@ def plot_station_profiles(
         if handles:
             axes[0][0].legend(handles, labels, loc="upper left", fontsize=8)
 
-        caption = "Time-averaged profiles; ensembles as 5-95 % / 25-75 % bands."
+        if sampling_note:
+            caption = (
+                "Profiles averaged over the sampled frames only -- NOT a "
+                "continuous time average; ensembles as 5-95 % / 25-75 % bands."
+            )
+        else:
+            caption = "Time-averaged profiles; ensembles as 5-95 % / 25-75 % bands."
         if trimmed:
             caption += (
                 " Top z cell excluded: colocation extrapolates it "
                 f"({', '.join(vertical_extrapolated)})."
             )
+        if sampling_note:
+            caption += "\n" + _sampling_caption(f"* {sampling_note}")
         fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
         fig.suptitle("Vertical profiles at the station columns")
         return save_png(fig, output_path, transparent=False)
@@ -1769,6 +1813,7 @@ def plot_mean_slices(
     output_path: str | pathlib.Path,
     *,
     max_levels: int = 3,
+    sampling_note: str | None = None,
 ) -> pathlib.Path | None:
     """F1: time-mean horizontal slices, truth | prior | posterior | difference.
 
@@ -1803,6 +1848,14 @@ def plot_mean_slices(
     field**, which decorrelates after a Lyapunov horizon and would measure chaos
     rather than parameter quality. The averaging window is annotated from the
     file's ``t_start`` / ``t_end``.
+
+    ``sampling_note`` is the caller's one-line record of WHICH frames were
+    accumulated (``eval_fields.nc``'s ``moment_sampling``), a plain string. When
+    it is given the title says "sample-mean" rather than "time-mean" and the
+    span reads "sampled over t = a-b s": ``t_start`` / ``t_end`` are the horizon
+    the frames were drawn from, not proof that the horizon was covered
+    continuously, and the filter's default source draws one frame per cycle from
+    it.
 
     Returns the path written, or ``None`` without a posterior slab or without a
     single finite fluid cell to scale.
@@ -1932,6 +1985,9 @@ def plot_mean_slices(
                 ax.grid(False)
 
         unit = f"{_STREAMWISE} [m/s]"
+        # "time-mean" is a claim about how the frames were drawn, not only about
+        # what was averaged, so it goes everywhere the mean is named or nowhere.
+        mean_label = "sample-mean" if sampling_note else "time-mean"
         if field_image is not None:
             fig.colorbar(
                 field_image,
@@ -1940,7 +1996,7 @@ def plot_mean_slices(
                 ],
                 fraction=0.03,
                 pad=0.02,
-                label=f"time-mean {unit}",
+                label=f"{mean_label} {unit}",
             )
         if difference_image is not None:
             fig.colorbar(
@@ -1953,18 +2009,34 @@ def plot_mean_slices(
 
         span = ""
         if "t_start" in fields.attrs and "t_end" in fields.attrs:
-            span = (
-                f"  (t = {float(fields.attrs['t_start']):.0f}"
-                f"-{float(fields.attrs['t_end']):.0f} s)"
+            # ``t = 0-40 s`` reads as "averaged continuously over 40 seconds".
+            # It is only ever the horizon the frames came FROM, and under a
+            # sparse source that horizon was visited a handful of times, so the
+            # preposition changes with the sampling.
+            edges = (
+                f"{float(fields.attrs['t_start']):.0f}"
+                f"-{float(fields.attrs['t_end']):.0f} s"
             )
-        fig.suptitle(f"Time-mean {_STREAMWISE} on horizontal slices{span}")
+            span = (
+                f"  (sampled over t = {edges})" if sampling_note else f"  (t = {edges})"
+            )
+        title_prefix = "Sample-mean" if sampling_note else "Time-mean"
+        fig.suptitle(f"{title_prefix} {_STREAMWISE} on horizontal slices{span}")
 
-        caption = "Time averages, never instantaneous."
+        if sampling_note:
+            caption = (
+                "Means over the sampled frames only -- never instantaneous, but "
+                "NOT a continuous time average either."
+            )
+        else:
+            caption = "Time averages, never instantaneous."
         if solid is not None:
             caption += " Solid cells masked (grey) and excluded from the norm."
         stride = int(fields.attrs.get("horizontal_stride", 1) or 1)
         if stride > 1:
             caption += f" Horizontal stride {stride}."
+        if sampling_note:
+            caption += "\n" + _sampling_caption(sampling_note)
         fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
         return save_png(fig, output_path, transparent=False)
 
@@ -1990,6 +2062,7 @@ def plot_sensor_fans(
     obs_error_std: float | None = None,
     window_edges: np.ndarray | list[float] | None = None,
     max_sensors: int = 4,
+    fan_label: str = "Posterior",
 ) -> pathlib.Path | None:
     """S5: quantile fans at the sensors, assimilated and held-out side by side.
 
@@ -2022,6 +2095,13 @@ def plot_sensor_fans(
     observations the filter actually assimilated are not persisted yet, so the
     envelope is the *clean* truth plus or minus the nominal observation error --
     the assimilated values scatter around it. WP2.1 swaps the source.
+
+    ``fan_label`` names what the fan IS, in the legend and the title. It is not
+    always the posterior: the filtering pipeline hands this function every frame
+    of each cycle's *forecast* segment when the run saved them -- the prior side
+    of each analysis -- and the same fan under a "Posterior" legend would be the
+    same PNG meaning two different things depending on which artifacts the run
+    happened to write. The caller knows which; this function cannot.
 
     Returns the path written, or ``None`` when no sensor set carries a finite
     ensemble series.
@@ -2110,7 +2190,7 @@ def plot_sensor_fans(
                         bands,
                         _BAND_QUANTILES,
                         COLORS["posterior"],
-                        label="Posterior median",
+                        label=f"{fan_label} median",
                     )
                     drawn.append(bands)
                 ax.annotate(
@@ -2170,7 +2250,7 @@ def plot_sensor_fans(
                 if r == n_rows - 1:
                     ax.set_xlabel(t_label)
 
-        fig.suptitle("Sensor time series: posterior quantile fan vs truth")
+        fig.suptitle(f"Sensor time series: {fan_label.lower()} quantile fan vs truth")
         if obs_drawn:
             # Only claimed when the envelope was actually drawn -- a caption
             # about observations on a figure that has none is its own kind of

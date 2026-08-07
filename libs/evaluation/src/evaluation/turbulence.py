@@ -794,42 +794,99 @@ class MomentAccumulator:
 # anyway.
 SPECTRUM_SEGMENTS = 8
 
-# Comparisons stop at this fraction of the Nyquist frequency. The top of a
-# sampled band is not data: a solver damps its own smallest resolved scales, and
-# whatever the flow carried above Nyquist has aliased into the last octave. Both
-# effects are discretisation-specific, so scoring there would compare numerics
-# rather than flows.
+# Comparisons stop at this fraction of the Nyquist frequency. What it bounds is
+# SOLVER DAMPING, nothing else: a solver dissipates its own smallest resolved
+# scales, and the SGS closure bites at the same end, so the top of a sampled band
+# carries the discretisation's roll-off rather than the flow's. Scoring there
+# would compare numerics against numerics.
+#
+# It is **not** an anti-aliasing margin, and reading it as one licenses a much
+# coarser cadence than is safe. Snapshot probing is instantaneous point sampling
+# with no anti-alias filter, so content in ``(fs/2, fs)`` folds *mirrored* onto
+# ``(fs/2, 0)``: energy just above Nyquist lands just under it (in the octave this
+# constant discards), but energy near ``f ~ fs`` lands near **DC** -- at the
+# BOTTOM of the scored band, where no cutoff can reach it. Verified directly:
+# sampling ``sin(2*pi*0.98*fs*t)`` at ``fs`` puts the peak at ``0.02*fs``, and
+# ``0.90*fs`` puts it at ``0.10*fs``, both inside ``f < fs/8``.
+#
+# The folded power is small at a sane cadence and that is the only reason it can
+# be ignored: summed over all orders on an ``f^-5/3`` record it is ~0.2 % of the
+# true level a decade below the cutoff, ~3 % at ``fs/20`` and ~13 % (0.55 dB) at
+# the cutoff itself, against the 1-3 dB the LSD reports -- and truth and members
+# are sampled alike, so most of it is common-mode. But that is a property of the
+# CADENCE the probe re-run was configured with, not of this constant. Sizing a
+# cadence is `conf/run_probe_series.yaml`'s job (and `run_probe_series.py`'s
+# pre-flight check), and it has to be sized from the band wanted, never from here.
 SPECTRUM_CUTOFF_FRACTION = 0.25
 
 # Fewest frequency bins below the cutoff for a comparison to mean anything. Not a
 # resolution claim -- it is the floor under which the LSD is one or two bins of a
 # noisy periodogram. Note what it implies about record length: the band holds
-# about ``nperseg/8`` bins and ``nperseg`` is ``n/8``, so four bins needs ~260
-# samples, which is the metrics doc's "≳10^3 samples per sensor" stated as a
-# minimum rather than as a comfort level.
+# about ``nperseg/8`` bins and ``nperseg`` is ``n/8``, so four bins needs 264
+# samples.
+#
+# **264 is a refusal threshold, not a sample count to aim at.** It is the point
+# below which this module cannot form a scorable band at all and gives up; it is
+# emphatically not the metrics doc's "≳10^3 samples per sensor", which is a
+# different number nearly 4x larger and is the one a *usable* band comes from. A
+# record sitting on this floor scores four bins -- a factor-of-four frequency
+# span, well under a decade -- which is enough for the code to return an
+# ``lsd_posterior_median`` and nowhere near enough to read the ``-5/3`` guide
+# figure S4 draws over it. Anything that CONFIGURES a probe re-run must size its
+# cadence from the band it wants (:data:`SPECTRAL_BAND_DECADE_BINS`), not from
+# this constant.
 _MIN_BAND_BINS = 4
+
+# Bins that make the scored band a decade wide, which is the span a log-log slope
+# guide needs before it is a reading rather than a decoration. The band runs from
+# bin 1 to bin B, so its frequency span is exactly a factor of B and "a decade"
+# is simply ``B >= 10``. Nothing in this module enforces it -- the estimator still
+# scores a narrower band down to :data:`_MIN_BAND_BINS` -- but it is what a
+# producer of probe records should size its cadence against, and
+# ``run_probe_series.py`` warns below it.
+SPECTRAL_BAND_DECADE_BINS = 10
 
 _PROBE_COMPONENTS = ("u", "v", "w")
 
 
-def minimum_spectral_samples() -> int:
-    """Samples per sensor a probe record needs before a spectrum can be scored.
+def spectral_band_bins(n_samples: int, segments: int = SPECTRUM_SEGMENTS) -> int:
+    """Frequency bins a record of ``n_samples`` would have scored.
+
+    The inverse of :func:`minimum_spectral_samples`, and the number a producer of
+    probe records actually wants to see: "will this be scored at all" is the wrong
+    question, "over how wide a band" is the right one.
+
+    The bin width is ``fs/nperseg`` with ``nperseg = n // segments`` and the cutoff
+    is ``c * fs/2``, so ``fs`` cancels and **the cadence drops out entirely** --
+    only the sample count matters. Scored bins are the integers ``k >= 1`` with
+    ``k/nperseg < c/2`` (the DC bin is dropped and the band is ``f < cutoff``
+    strictly), i.e. ``ceil(c*nperseg/2) - 1`` of them. Returns ``0`` when the
+    record cannot carry a segment at all.
+    """
+    nperseg = int(n_samples) // int(segments)
+    if nperseg < 4:
+        return 0
+    return int(np.ceil(SPECTRUM_CUTOFF_FRACTION * nperseg / 2.0)) - 1
+
+
+def minimum_spectral_samples(band_bins: int = _MIN_BAND_BINS) -> int:
+    """Samples per sensor a probe record needs to score ``band_bins`` bins.
 
     Worth having as a function rather than a comment because the caller that can
     act on it -- whatever writes the probe records -- pays for a full solver
-    re-run first, and the check costs nothing. The band holds
-    ``n * SPECTRUM_CUTOFF_FRACTION / (2 * SPECTRUM_SEGMENTS)`` bins: the bin width
-    is ``fs/nperseg`` with ``nperseg = n // SPECTRUM_SEGMENTS`` and the cutoff is
-    ``SPECTRUM_CUTOFF_FRACTION * fs/2``, so ``fs`` cancels and **the cadence drops
-    out entirely** -- only the sample count matters.
+    re-run first, and the check costs nothing.
+
+    The default argument returns the **refusal floor** (264 samples): below it
+    :func:`probe_spectra` returns ``None``, at it the band is four bins wide and
+    barely a comparison at all. Pass :data:`SPECTRAL_BAND_DECADE_BINS` for the
+    number a cadence should actually be sized against.
 
     Two details make the naive inversion (``2*B*S/c``) wrong by an octave-edge
     bin, so they are carried explicitly: the DC bin is dropped, and the band is
-    ``f < cutoff`` strictly. Scored bins are the integers ``k >= 1`` with
-    ``k/nperseg < c/2``, i.e. ``ceil(c*nperseg/2) - 1`` of them, so the floor is
-    the smallest ``nperseg`` with ``c*nperseg/2 > B``.
+    ``f < cutoff`` strictly (see :func:`spectral_band_bins`), so the answer is the
+    smallest ``nperseg`` with ``c*nperseg/2 > B``.
     """
-    nperseg = int(np.floor(2 * _MIN_BAND_BINS / SPECTRUM_CUTOFF_FRACTION)) + 1
+    nperseg = int(np.floor(2 * int(band_bins) / SPECTRUM_CUTOFF_FRACTION)) + 1
     return nperseg * SPECTRUM_SEGMENTS
 
 

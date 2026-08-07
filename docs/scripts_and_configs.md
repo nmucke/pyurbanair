@@ -749,10 +749,17 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   **resolved-only** — the subgrid contribution is not in them and is not
   negligible inside a canopy. The file is self-contained by design: the
   averaging window (`t_start`/`t_end`), the stride, the station labels, the
-  fluid mask (`slab_fluid`) and which axes carry colocation's extrapolated edge
-  (`extrapolated_edges`) are attributes, coordinates or variables here, so a
+  fluid mask (`slab_fluid`), which axes carry colocation's extrapolated edge
+  (`extrapolated_edges`) and **which frames the moments were reduced over**
+  (`moment_sampling`) are attributes, coordinates or variables here, so a
   figure never reopens the run's other artifacts — or re-derives a mask — to
-  draw an honest plot. That last one matters for plotting: every axis colocation
+  draw an honest plot. `moment_sampling` exists because `t_start`/`t_end` alone
+  are a horizon, not a cadence: an ESMDA run averaged every output frame of it,
+  but a *filtering* run on the default `run.ensemble_save_on_disk=false` sampled
+  it once per cycle, which makes the TKE an across-cycle variance carrying the
+  analysis increments rather than resolved turbulence. Nothing in the numbers
+  says which, so S1 and F1 take this string as their `sampling_note` and qualify
+  their labels with it (the filter passes `CycleStates.description`). That last one matters for plotting: every axis colocation
   moves has its **last** index extrapolated from the two faces below it rather
   than interpolated between two, so those cells carry inflated second moments
   (~20 % for a well-resolved field, up to 5× for face-to-face white noise). It

@@ -247,8 +247,8 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # states are extracted -- every frame of every member's forecast segment
     # when the run saved them, one analyzed frame per cycle otherwise -- and the
     # truth frames they are paired against are decided ONCE, by the contract in
-    # _filtering_common; nothing below branches on the kind again except where
-    # an axis label would otherwise lie (see the fan edges).
+    # _filtering_common; nothing below branches on the kind again except where a
+    # LABEL would otherwise lie -- the fan's x-axis and its legend, both below.
     sensor_sets = build_sensor_sets(cfg)
     source = cycle_state_source(run_dir, ta)
     print(f"Cycle states: {source.description}")
@@ -304,10 +304,11 @@ def make_figures(run_dir: pathlib.Path) -> None:
         )
         fan_times = None
 
-    # The one place the state source has to be re-read, because it decides what
-    # the fan's x-axis MEANS. Under ``forecast`` the series carry real seconds on
-    # the run's global clock, so the axis is a time and the cycle boundaries sit
-    # at ``k * sim_time``. Under ``analysis`` they carry an integer CYCLE INDEX
+    # The first of the two places the state source has to be re-read (the other
+    # is the fan's legend, below), because it decides what the fan's x-axis
+    # MEANS. Under ``forecast`` the series carry real seconds on the run's
+    # global clock, so the axis is a time and the cycle boundaries sit at
+    # ``k * sim_time``. Under ``analysis`` they carry an integer CYCLE INDEX
     # instead -- one frame per cycle, and ``state_history.nc`` does not record
     # the analyzed frames' physical times -- while ``plot_sensor_fans`` labels
     # any axis it is handed "Time [s]". Handing it the raw indices would print
@@ -390,6 +391,16 @@ def make_figures(run_dir: pathlib.Path) -> None:
         # all travel inside this file, so neither figure reopens anything else --
         # and neither re-streams the cycle states the file exists to replace.
         with xarray.open_dataset(eval_fields_path) as fields:
+            # Which frames the moments were reduced over, recorded by the metric
+            # stage that reduced them. Read off the FILE rather than recomputed
+            # from ``source`` above: the two can disagree (a run whose forecasts
+            # were pruned after the metrics ran), and the honest label is the one
+            # describing the numbers actually in the file. Absent on a run dir
+            # whose metric stage predates the attribute, which the figures
+            # degrade on by labelling nothing -- the same reading they gave
+            # before it existed.
+            moment_sampling = fields.attrs.get("moment_sampling")
+            sampling_note = None if moment_sampling is None else str(moment_sampling)
             profiles = run_dir / "station_profiles.png"
             _note_skipped(
                 profiles,
@@ -400,10 +411,13 @@ def make_figures(run_dir: pathlib.Path) -> None:
                     building_height=(
                         None if building_height is None else float(building_height)
                     ),
+                    sampling_note=sampling_note,
                 ),
             )
             slices = run_dir / "mean_slices.png"
-            _note_skipped(slices, plot_mean_slices(fields, slices))
+            _note_skipped(
+                slices, plot_mean_slices(fields, slices, sampling_note=sampling_note)
+            )
     else:
         print(
             f"No eval_fields.nc in {run_dir}; skipping station_profiles.png and "
@@ -418,6 +432,15 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # observations are not persisted, so the band S5 draws is the clean truth
     # +/- sigma_o and the figure says so itself.
     obs_error_std = OmegaConf.select(cfg, "filtering.obs_error_std", default=None)
+    # What the fan draws, which is the other thing the state source decides: the
+    # analysis source's series ARE the analyzed states, but the forecast source's
+    # are every frame of each cycle's forecast segment -- the PRIOR side of each
+    # analysis, before the update. Same figure, same fan, opposite side of the
+    # filter, so the legend has to follow the source rather than assume the
+    # posterior. (The analyzed frame is the last of its own segment, so the
+    # forecast series does end on it; naming the series by its last frame would
+    # still mislabel every frame before it.)
+    fan_label = "Forecast" if source.kind == "forecast" else "Posterior"
     fans = run_dir / "sensor_fans.png"
     _note_skipped(
         fans,
@@ -428,6 +451,7 @@ def make_figures(run_dir: pathlib.Path) -> None:
             times=fan_times,
             obs_error_std=None if obs_error_std is None else float(obs_error_std),
             window_edges=cycle_edges,
+            fan_label=fan_label,
         ),
     )
 

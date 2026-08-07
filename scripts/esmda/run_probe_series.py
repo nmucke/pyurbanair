@@ -52,9 +52,13 @@ Three things to know before reading the numbers:
   * **Same window, not the same wall clock.** Each series re-runs a window of
     the same LENGTH, from the window's own initial field, under the window's own
     parameters, after a discarded lead-in. It is not bit-identical to the
-    assimilation forecast (the restart reconstructs an equilibrium
-    distribution) and is offset from it in absolute time. Spectra and window
-    statistics are what this is for; instantaneous phase agreement is not.
+    assimilation forecast -- the restart carries the macroscopic field
+    essentially exactly, but its ghost cells and non-equilibrium stress come
+    from whatever restart template the clone holds rather than from this
+    member's own history (see the cloning-order note in ``run``), and the
+    inflow settings and velocity scale are re-applied for this run -- and it is
+    offset from the forecast in absolute time. Spectra and window statistics
+    are what this is for; instantaneous phase agreement is not.
   * **Cadence.** ``output_frequency`` is what the solver *achieved*
     (``iout * dt``), not what was asked for: ``dt = C_l/C_u`` is quantised by the
     member's own ``velocity_magnitude``, so members differ by ~1 % and the
@@ -67,8 +71,7 @@ Usage (compose with the SAME overrides the ESMDA run used)::
 
     python scripts/esmda/run_probe_series.py \
         case=barcelona model@truth_model=pylbm model@assim_model=pylbm \
-        probes.run_dir=<esmda output dir> probes.window_index=-1 \
-        probes.output_frequency=1.0
+        probes.run_dir=<esmda output dir> probes.window_index=-1
 """
 
 import collections
@@ -97,7 +100,11 @@ from pyurbanair.utils.cpu_pinning import (
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from evaluation.turbulence import minimum_spectral_samples
+from evaluation.turbulence import (
+    SPECTRAL_BAND_DECADE_BINS,
+    minimum_spectral_samples,
+    spectral_band_bins,
+)
 
 from scripts.esmda._esmda_common import (
     _sensor_component_timeseries,
@@ -1087,29 +1094,64 @@ def run(cfg: DictConfig) -> None:
         return
 
     # Also before any solver runs: the whole point of the re-run is a spectrum,
-    # and whether one can be scored is fixed by the SAMPLE COUNT alone (the
+    # and how WIDE a band gets scored is fixed by the SAMPLE COUNT alone (the
     # cadence cancels out of the in-band bin count -- see
-    # evaluation.turbulence.minimum_spectral_samples). A 120 s window at the
-    # default 1 s cadence yields 120 samples against a floor of 256, so the
-    # records would be written, the snapshots deleted, and `spectral_metrics`
-    # would then silently no-op after ~20 minutes of solving. Warn rather than
-    # refuse: the series is still valid data, and the stored-cadence fallback
-    # cannot choose its own sampling.
+    # evaluation.turbulence.spectral_band_bins). Two separate things can go wrong
+    # and both are silent until after the solve, so both are reported here.
+    #
+    # The hard floor first: a 120 s window at a 1 s cadence yields 120 samples
+    # against a floor of 264, so the records would be written, the snapshots
+    # deleted, and `spectral_metrics` would then no-op after ~20 minutes of
+    # solving. But clearing that floor is NOT the bar -- at it the band is four
+    # bins wide, an RMS over less than a decade of frequency, and figure S4 draws
+    # a `-5/3` guide over it regardless. So the band width is reported on every
+    # run and warned about below a decade (bins 1..B span exactly a factor of B,
+    # hence B >= 10); a caller who wants a slope out of S4 needs that much.
+    #
+    # Warn rather than refuse in both cases: the series is still valid data for
+    # the window statistics, and the stored-cadence fallback cannot choose its
+    # own sampling.
     # Rounded the same way `_probe_window` sizes the window, so the two cannot
     # disagree by a frame on a cadence that does not divide the window.
     n_samples = int(round(sim_time / output_frequency))
     floor = minimum_spectral_samples()
+    decade = minimum_spectral_samples(SPECTRAL_BAND_DECADE_BINS)
+    scored_bins = spectral_band_bins(n_samples)
     if n_samples < floor:
         logger.warning(
             "This re-run yields %d samples per sensor (%.4g s window / %.4g s "
-            "cadence), under the %d a spectral comparison needs, so "
+            "cadence), under the %d a spectral comparison needs at all, so "
             "spectral_metrics and S4 will no-op. Use "
-            "probes.output_frequency<=%.4g for this window length.",
+            "probes.output_frequency<=%.4g for a decade-wide band at this "
+            "window length.",
             n_samples,
             sim_time,
             output_frequency,
             floor,
-            sim_time / floor,
+            sim_time / decade,
+        )
+    elif scored_bins < SPECTRAL_BAND_DECADE_BINS:
+        logger.warning(
+            "This re-run yields %d samples per sensor (%.4g s window / %.4g s "
+            "cadence), which scores only %d frequency bins -- a factor-of-%d "
+            "band, under the decade a -5/3 reading off figure S4 needs. The "
+            "numbers will be produced but are an RMS over a very narrow band. "
+            "Use probes.output_frequency<=%.4g (>=%d samples) for %d bins.",
+            n_samples,
+            sim_time,
+            output_frequency,
+            scored_bins,
+            scored_bins,
+            sim_time / decade,
+            decade,
+            SPECTRAL_BAND_DECADE_BINS,
+        )
+    else:
+        logger.info(
+            "This re-run yields %d samples per sensor and will score %d "
+            "frequency bins under the cutoff.",
+            n_samples,
+            scored_bins,
         )
 
     points, sensor_set_labels = _probe_points(build_sensor_sets(cfg))
