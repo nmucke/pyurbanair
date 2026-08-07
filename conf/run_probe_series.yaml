@@ -1,0 +1,71 @@
+# @package _global_
+#
+# Entry point for scripts/esmda/run_probe_series.py — the high-rate probe
+# re-runs (WP3.2a) that feed the Welch spectrum / LSD metric and figure S4.
+#
+# It extends `run_esmda.yaml` rather than redefining anything: the probe re-run
+# must be launched with the SAME case / model / params / obs overrides the ESMDA
+# run itself used (the script cross-checks the run dir's saved config.yaml and
+# refuses a mismatched grid), so composing the ESMDA entry point and adding only
+# the `probes:` knobs below is the whole difference.
+#
+# Example (re-probe the last window of an existing run at 1 s cadence)::
+#
+#   python scripts/esmda/run_probe_series.py \
+#     case=barcelona model@truth_model=pylbm model@assim_model=pylbm \
+#     probes.run_dir=/export/scratch2/ntm/pylbm_to_pylbm \
+#     probes.window_index=-1 probes.output_frequency=1.0
+defaults:
+  - /run_esmda
+  - _self_
+
+# --- Scratch (NOT the assimilation run's) ---------------------------------------
+# `/run_esmda` points `experiment_dir` at the scratch its own solvers chdir into.
+# A probe re-run must never share it: it cleans output dirs and prunes restart
+# files in the dir it runs in, and its LBM build tree would be rebuilt underneath
+# a live job. So it gets its own root here, and the models are additionally
+# constructed under a probe-specific experiment name (`_PROBE_EXPERIMENT` in the
+# script) so even an explicit override onto the assimilation scratch cannot write
+# into `experiment/runcase/`. Sharing the compiled binary across the two is a
+# `PYLBM_BUILD_ROOT` / `PYLBM_LBM_PATH` question, not an `experiment_dir` one.
+paths:
+  experiment_dir: ${oc.env:PWD}/.temp_probes
+
+probes:
+  # The finished ESMDA run directory to re-probe (it holds the posterior params /
+  # states and truth_access.yaml, and receives truth_probes.nc +
+  # windows/window_{w}_probes*.nc). null -> ${paths.results_dir}, i.e. the same
+  # dir the identically-composed ESMDA run wrote to.
+  run_dir: null
+
+  # Which assimilation window to re-run. Negative indices count from the end, so
+  # the default is the LAST window — the one whose posterior is best constrained.
+  window_index: -1
+
+  # Probe cadence in seconds. Welch spectra need >~1e3 samples per sensor, which
+  # the assimilation cadence (`time.output_frequency`, 2-10 s) cannot supply;
+  # this is the only reason the re-run exists. The snapshots it produces are
+  # deleted again as soon as the probes are extracted from them.
+  output_frequency: 1.0
+
+  # Lead-in (seconds) prepended to the window and then discarded. The re-run
+  # warm-starts from the window's own initial field via an LBM restart file,
+  # which reconstructs an equilibrium distribution and therefore starts with a
+  # short transient; this trims it. The field is already developed, so this can
+  # be much shorter than a cold-start spin-up — cut it per run if the extra
+  # solve is expensive.
+  spinup_time: ${time.spinup_time}
+
+  # Also re-probe the PRIOR members (doubles the solver cost). Without them the
+  # S4 figure shows truth vs posterior only, no prior envelope.
+  include_prior: false
+
+  # Cap on the number of members re-probed (the first N). null -> every member
+  # in the window's posterior params file.
+  max_members: null
+
+  # Truth handling: `auto` re-runs the truth at the probe cadence when it can
+  # (pylbm truth on the assimilation grid) and otherwise falls back to the
+  # truth's stored cadence, recording that in the output attrs; `stored` forces
+  # the fallback (no truth solve at all).
+  truth_source: auto

@@ -55,6 +55,20 @@ _SMOKE_OVERRIDES = [
     "time.seconds_per_knot=1.5",
     "ensemble.ensemble_size=2",
     "ensemble.num_parallel_processes=1",
+    # The case's held-out sensors sit at the real geometry's coordinates, all of
+    # which fall OUTSIDE the 20x20x10 smoke box, so the validation sensor set was
+    # present but scored nothing inside the domain. Pin one held-out sensor into
+    # the smoke box — (16, 18) is a fluid street-level cell just downstream of the
+    # single block the smoke domain crops (x=[5,15], y=[5,15], roof at the domain
+    # top) — so the validation branches (sensor_statistics.validation, the S5
+    # validation columns, the D1 held-out histograms) run under CI.
+    # ``++`` because these keys exist only in the xie_and_castro case: barcelona
+    # defines no held-out sensors, and a plain assignment would make any
+    # ``compose_test_cfg(["case=barcelona"])` die with a Hydra "no match in
+    # config" error instead of composing.
+    "++obs.validation_x_points=[16.0]",
+    "++obs.validation_y_points=[18.0]",
+    "++obs.validation_z_points=[2.0]",
 ]
 
 
@@ -153,7 +167,11 @@ def _compose_test_cfg(
     # tests use ``run_forward_model``; ESMDA tests use ``run_esmda`` (the single
     # primary config for scripts/esmda/run_esmda.py) and pick the smoother via the
     # ``esmda/smoother`` group override.
-    esmda_overrides = _ESMDA_OVERRIDES if config_name == "run_esmda" else []
+    # ``run_probe_series`` inherits ``/run_esmda``'s defaults, including the
+    # ``case`` that gets retuned per production run, so it needs the same pin.
+    esmda_overrides = (
+        _ESMDA_OVERRIDES if config_name in ("run_esmda", "run_probe_series") else []
+    )
     # The path overrides go before the caller's, so a test that wants its own
     # (already isolated) tmp_path for one of the roots still wins.
     with initialize(version_base=None, config_path="../conf"):

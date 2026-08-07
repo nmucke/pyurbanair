@@ -115,12 +115,17 @@ copy-paste.
 | 1.5 | Figures P1, S1, S5, F1, D1 | [phase1](phase1_metrics_and_figures.md) | M | done | #109 |
 | 2.1 | Persist obs + per-iteration predicted obs / params | [phase2](phase2_obs_persistence.md) | S | not started | — |
 | 2.2 | `O_N` vs ½ + figure D3 | [phase2](phase2_obs_persistence.md) | S | not started | — |
-| 3.1 | Barcelona validation (held-out) sensors | [phase3](phase3_run_upgrades.md) | XS | not started | — |
-| 3.2 | High-rate probes + Welch spectrum + LSD + figure S4 | [phase3](phase3_run_upgrades.md) | M | not started | — |
+| 3 | xie_and_castro validation (held-out) sensors **+** high-rate probes + Welch spectrum + LSD + figure S4 (WP3.1 and WP3.2 merged) | [phase3](phase3_run_upgrades.md) | M | in review | #110 |
 
-Sequencing: 0 → 1 strictly; 2 after 1.1; 3.1 anytime after 1.3; 3.2 last
-(backend-touching). One PR per WP unless a phase plan says otherwise, all
+Sequencing: 0 → 1 strictly; 2 after 1.1; 3 after 1.3, last (backend-touching).
+One PR per WP unless a phase plan says otherwise, all
 targeting the central `esmda-evaluation` branch (see Branching model).
+Phase 3 is one PR by the 2026-08-06 rescope: its held-out half is
+config-only and gated on wall-clock, so the run is launched first and the
+probe/spectrum half is implemented while it is in flight. That rescope also
+moved the held-out sensors from `barcelona` to `xie_and_castro` (barcelona
+is too slow to iterate on; the machinery is case-independent) — see the
+phase-3 plan header.
 Phases 0–1 apply retroactively to existing run dirs; phase-2 metrics only
 cover runs executed after WP2.1, older dirs degrading gracefully.
 

@@ -55,13 +55,35 @@ obs:
   z_points: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
 
   # Validation sensors (held out from assimilation): a separate set the Kalman
-  # update never sees, used only to score the posterior at unseen locations (see
-  # scripts/esmda/run_esmda.py sensor time-series plots). Distinct from the
-  # assimilation sensors above, every one sits in open space (>=5 m clear of any
-  # building footprint).
-  validation_x_points: [2.0, 20.0]
-  validation_y_points: [30.0, 55.0]
-  validation_z_points: [2.0, 2.0]
+  # update never sees, used only to score the posterior at unseen locations
+  # (`sensor_statistics.validation`, the S5 validation columns and the D1
+  # held-out rank histograms). Every one sits in open space, and the set spans
+  # flow regimes the street-level assimilation sensors above do NOT cover, so
+  # the held-out score is a genuine generalization test rather than a
+  # near-duplicate of the assimilated one:
+  #   (2, 30)   z=2   undisturbed approach flow, upstream of the array
+  #   (20, 55)  z=2   open lane between the two block rows
+  #   (17, 30)  z=2   wake / recirculation, ~2.3 m behind the block at
+  #                   x=[5.3, 14.7] (13-14 m tall, depending on grid)
+  #   (10, 30)  z=20  the only sensor above the canopy, over that same block.
+  #                   z=20 is chosen against the TALLEST roof in the array
+  #                   (17.2 m in the STL, 18 m voxelized on the full x=[-20,80]
+  #                   domain) rather than against its own column's roof, so it
+  #                   stays above-canopy at every grid and domain crop. Note the
+  #                   margin is thin at the coarsest grid — one cell at nz=16
+  #                   (cell centre 19 m over an 18 m roof) — so it sits in the
+  #                   roughness sublayer, not in free-stream flow.
+  # The two additions stay >=10 m from every assimilation sensor: the wake one
+  # 12.2 m, the above-canopy one exactly 10.0 m horizontally from (10, 20) but
+  # 18 m above it. (The closest pair in the whole set is the pre-existing lane
+  # sensor, exactly 5 m from the assimilation sensor at (20, 50).)
+  # Held-out placement is grid-independent: all four are fluid cells at the case
+  # resolution and at the 50x40x16 / 60x80x16 sweep grids. Guarded by
+  # tests/test_case_sensor_placement.py, which checks the voxelized geometry
+  # rather than restating these coordinates.
+  validation_x_points: [2.0, 20.0, 17.0, 10.0]
+  validation_y_points: [30.0, 55.0, 30.0, 30.0]
+  validation_z_points: [2.0, 2.0, 2.0, 20.0]
 
   states: [u, v]
   temporal_mode: intervals
