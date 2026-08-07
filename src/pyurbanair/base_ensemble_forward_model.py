@@ -24,6 +24,32 @@ logger = logging.getLogger(__name__)
 FailurePolicy = Literal["raise", "resample_from_successes"]
 
 
+class ForwardModelRunFailure(RuntimeError):
+    """A single forward-model run failed in a way the ensemble can resample around.
+
+    Exists because a non-zero exit code is *not* the only way a member dies. A
+    Fortran ``stop`` -- which several LBM error paths take (a missing restart
+    file, a dimension mismatch) -- exits **0**, so ``subprocess.run(check=True)``
+    returns happily and the wrapper is left holding whatever partial output the
+    solver managed to write. Backends that can tell a truncated run from a
+    complete one raise this instead, at the point where the expectation is known,
+    so the failure lands in the same place a crash would.
+
+    It is deliberately a distinct type from ``subprocess.CalledProcessError``:
+    the ensemble runner treats the two identically (see ``MEMBER_FAILURES``),
+    but a backend must never have to fake a process error to report a failure it
+    detected itself.
+    """
+
+
+# The exception types that mean "this member died, the rest of the ensemble is
+# fine". Kept as one tuple rather than repeated ``except`` clauses because the
+# three dispatch paths below (parallel, sequential in-memory, sequential
+# on-disk) must agree: this bug's original form was exactly one of them knowing
+# about a failure mode the others did not.
+MEMBER_FAILURES = (subprocess.CalledProcessError, ForwardModelRunFailure)
+
+
 def create_dir(
     dir_path: pathlib.Path,
 ) -> pathlib.Path:
@@ -133,7 +159,8 @@ class BaseEnsembleForwardModel:
     ) -> None:
         """Configure how per-member forward-run failures are handled.
 
-        - ``"raise"``: any ``CalledProcessError`` aborts the ensemble.
+        - ``"raise"``: any member failure (``MEMBER_FAILURES``) aborts the
+          ensemble.
         - ``"resample_from_successes"``: failed members' states are cloned
           from a randomly chosen successful member; the failed slots in the
           parameter ensemble are also replaced (with jitter) when the caller
@@ -267,7 +294,7 @@ class BaseEnsembleForwardModel:
                     params=self.get_member_params(params, i),
                     sim_name=f"{sim_name}_{i}",
                 )
-            except subprocess.CalledProcessError as exc:
+            except MEMBER_FAILURES as exc:
                 if self._failure_policy == "raise":
                     raise
                 logger.warning(
@@ -314,7 +341,7 @@ class BaseEnsembleForwardModel:
         for i, s in enumerate(states):
             if s is None:
                 donor_idx = substitutions[i]
-                resolved.append(states[donor_idx])  # type: ignore[arg-type]
+                resolved.append(states[donor_idx])
             else:
                 resolved.append(s)
 
@@ -426,9 +453,10 @@ class BaseEnsembleForwardModel:
         before running. Override in subclasses for custom behavior.
 
         Member failures are handled exactly as in the in-memory path: under
-        ``resample_from_successes`` a diverged member (``CalledProcessError``,
-        e.g. a SIGFPE from the LBM binary) is recorded and, after the loop, its
-        missing state file is replaced by a clone of a randomly chosen
+        ``resample_from_successes`` a diverged member (a ``CalledProcessError``
+        from a SIGFPE, or a ``ForwardModelRunFailure`` from a backend that caught
+        a truncated run the exit code did not report) is recorded and, after the
+        loop, its missing state file is replaced by a clone of a randomly chosen
         successful member's file. The same substitutions are recorded in
         ``_last_failure_substitutions`` so the caller (ESMDA) applies the
         matching (jittered) substitution to the parameter ensemble -- keeping
@@ -449,7 +477,7 @@ class BaseEnsembleForwardModel:
                     params=self.get_member_params(params, i),
                     sim_name=f"{sim_name}_{i}",
                 )
-            except subprocess.CalledProcessError as exc:
+            except MEMBER_FAILURES as exc:
                 if self._failure_policy == "raise":
                     raise
                 logger.warning(
@@ -460,7 +488,7 @@ class BaseEnsembleForwardModel:
                 )
                 failed.append(i)
 
-        self._resolve_failures_on_disk(failed, sim_name)
+        self._resolve_failures_on_disk(failed, sim_name or "state")
         return None
 
     def _resolve_failures_on_disk(
@@ -480,9 +508,7 @@ class BaseEnsembleForwardModel:
         if not failed:
             return
 
-        survivors = [
-            i for i in range(self.ensemble_size) if i not in set(failed)
-        ]
+        survivors = [i for i in range(self.ensemble_size) if i not in set(failed)]
         if not survivors:
             raise RuntimeError(
                 "All ensemble members failed; cannot resample. "
@@ -571,7 +597,7 @@ class BaseEnsembleForwardModel:
                 idx = future_to_idx[future]
                 try:
                     states[idx] = future.result()
-                except subprocess.CalledProcessError as exc:
+                except MEMBER_FAILURES as exc:
                     if self._failure_policy == "raise":
                         raise
                     logger.warning(

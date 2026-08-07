@@ -8,7 +8,10 @@ import numpy as np
 import pytest
 import xarray
 
-from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
+from pyurbanair.base_ensemble_forward_model import (
+    BaseEnsembleForwardModel,
+    ForwardModelRunFailure,
+)
 from pyurbanair.base_forward_model import BaseForwardModel
 
 
@@ -24,11 +27,25 @@ class _StubForwardModel:
 
 
 class _MockMember:
-    """One ensemble member: returns a Dataset, or raises if its index is failing."""
+    """One ensemble member: returns a Dataset, or raises if its index is failing.
 
-    def __init__(self, index: int, fail_indices: set[int]) -> None:
+    ``failure`` picks how the member dies. Both modes must be handled
+    identically: a non-zero exit (``CalledProcessError``) and a backend-detected
+    failure the exit code never reported (``ForwardModelRunFailure``, e.g. a
+    Fortran ``stop`` that exits 0 after writing only part of its output).
+    """
+
+    results_dir: Optional[pathlib.Path] = None
+
+    def __init__(
+        self,
+        index: int,
+        fail_indices: set[int],
+        failure: str = "process",
+    ) -> None:
         self.index = index
         self.fail_indices = fail_indices
+        self.failure = failure
 
     def __call__(
         self,
@@ -37,21 +54,39 @@ class _MockMember:
         sim_name: Optional[str] = None,
     ) -> xarray.Dataset:
         if self.index in self.fail_indices:
+            if self.failure == "truncated":
+                raise ForwardModelRunFailure(
+                    f"member_{self.index} wrote 3 of the 48 expected snapshots"
+                )
             raise subprocess.CalledProcessError(
                 returncode=132,
                 cmd=["mock", f"member_{self.index}"],
             )
-        return xarray.Dataset(
+        result = xarray.Dataset(
             data_vars={"value": ("x", np.full(3, float(self.index)))},
             coords={"x": np.arange(3)},
         )
+        results_dir = getattr(self, "results_dir", None)
+        if results_dir is not None:
+            # On-disk mode: the member's file is what the ensemble later repairs.
+            result.to_netcdf(results_dir / f"{sim_name}.nc")
+        return result
+
+    def set_results_dir(self, results_dir: Optional[pathlib.Path]) -> None:
+        self.results_dir = results_dir
 
 
 class _MockEnsemble(BaseEnsembleForwardModel):
     """Concrete ensemble whose members never touch the disk."""
 
-    def __init__(self, ensemble_size: int, fail_indices: set[int]) -> None:
+    def __init__(
+        self,
+        ensemble_size: int,
+        fail_indices: set[int],
+        failure: str = "process",
+    ) -> None:
         self._fail_indices = fail_indices
+        self._failure = failure
         super().__init__(
             forward_model=_StubForwardModel(),  # type: ignore[arg-type]
             ensemble_size=ensemble_size,
@@ -59,7 +94,7 @@ class _MockEnsemble(BaseEnsembleForwardModel):
         )
         # Replace the auto-created list with mock members.
         self.ensemble_forward_models = [
-            _MockMember(i, fail_indices) for i in range(ensemble_size)  # type: ignore[misc]
+            _MockMember(i, fail_indices, failure) for i in range(ensemble_size)  # type: ignore[misc]
         ]
 
     def _create_new_forward_model(
@@ -69,7 +104,7 @@ class _MockEnsemble(BaseEnsembleForwardModel):
         experiment_name: str,
     ) -> Any:
         # Auto-create called by base __init__; we overwrite below anyway.
-        return _MockMember(int(experiment_name), self._fail_indices)
+        return _MockMember(int(experiment_name), self._fail_indices, self._failure)
 
     def _pre_run_ensemble(self, *_args: Any, **_kwargs: Any) -> None:
         return None
@@ -106,9 +141,9 @@ def test_resample_substitutes_failed_states_with_donor_states() -> None:
     for j in failed:
         # Failed slot's value field equals the donor's index-valued vector.
         donor_value = float(states["value"].isel(ensemble=j).values[0])
-        assert int(donor_value) in survivors, (
-            f"failed member {j} should be cloned from a survivor, got {donor_value}"
-        )
+        assert (
+            int(donor_value) in survivors
+        ), f"failed member {j} should be cloned from a survivor, got {donor_value}"
 
     assert set(ensemble._last_failure_substitutions.keys()) == failed
     assert all(d in survivors for d in ensemble._last_failure_substitutions.values())
@@ -169,7 +204,10 @@ def _make_state(n: int) -> xarray.Dataset:
     """
     return xarray.Dataset(
         data_vars={
-            "u": (("ensemble", "x"), np.repeat(np.arange(n)[:, None], 3, axis=1).astype(float)),
+            "u": (
+                ("ensemble", "x"),
+                np.repeat(np.arange(n)[:, None], 3, axis=1).astype(float),
+            ),
             "topo": ("x", np.array([1.0, 2.0, 3.0])),
         },
         coords={"ensemble": np.arange(n), "x": np.arange(3)},
@@ -190,6 +228,7 @@ def test_apply_substitutions_clones_state_from_donor() -> None:
 
     state = _make_state(n)
     new_state = ensemble.apply_failure_substitutions_to_state(state)
+    assert new_state is not None  # a Dataset in, a Dataset out
 
     # Original not mutated.
     assert np.array_equal(state["u"].values, _make_state(n)["u"].values)
@@ -220,6 +259,7 @@ def test_apply_state_substitutions_noops_on_none_and_no_failures() -> None:
     # No failures: state returned unchanged.
     state = _make_state(n)
     new_state = ensemble.apply_failure_substitutions_to_state(state)
+    assert new_state is not None  # a Dataset in, a Dataset out
     assert np.array_equal(new_state["u"].values, state["u"].values)
 
 
@@ -273,6 +313,95 @@ def test_apply_substitutions_handles_read_only_arrays() -> None:
         new_val = new_params[var].isel(ensemble=6).item()
         assert new_val != donor_val  # jitter applied
         assert new_val != params[var].isel(ensemble=6).item()  # slot changed
+
+
+# ---------------------------------------------------------------------------
+# Failures a non-zero exit code never reported (ForwardModelRunFailure)
+# ---------------------------------------------------------------------------
+#
+# A Fortran ``stop`` exits 0, so a member that dies mid-run raises no
+# ``CalledProcessError``; the backend detects the truncation itself and raises
+# ``ForwardModelRunFailure`` instead. All three dispatch paths must treat it
+# exactly like a crash -- the original bug was one path knowing about a failure
+# mode the others did not, so each is covered separately here.
+
+
+def test_truncated_member_is_resampled_in_memory() -> None:
+    n = 12
+    failed = {2, 9}
+    ensemble = _MockEnsemble(n, fail_indices=failed, failure="truncated")
+    ensemble.configure_failure_policy(
+        policy="resample_from_successes", jitter_scale=0.0, seed=5
+    )
+
+    states = ensemble._run_ensemble_sequentially_in_memory(
+        params=_make_params(n), sim_name="state"
+    )
+
+    assert states.sizes["ensemble"] == n
+    survivors = set(range(n)) - failed
+    assert set(ensemble._last_failure_substitutions) == failed
+    for j in failed:
+        donor_value = int(states["value"].isel(ensemble=j).values[0])
+        assert donor_value in survivors
+
+
+def test_truncated_member_is_resampled_on_disk(tmp_path: pathlib.Path) -> None:
+    n = 8
+    failed = {3}
+    ensemble = _MockEnsemble(n, fail_indices=failed, failure="truncated")
+    ensemble.configure_failure_policy(
+        policy="resample_from_successes", jitter_scale=0.0, seed=11
+    )
+    ensemble.set_results_dir(tmp_path)
+
+    ensemble._run_ensemble_sequentially_on_disk(sim_name="state")
+
+    donor = ensemble._last_failure_substitutions[3]
+    assert donor in set(range(n)) - failed
+    # The failed member wrote no file; its slot now holds the donor's.
+    with xarray.open_dataset(tmp_path / "state_3.nc") as repaired:
+        assert int(repaired["value"].values[0]) == donor
+
+
+def test_truncated_member_is_resampled_in_parallel() -> None:
+    n = 6
+    failed = {1, 4}
+    ensemble = _MockEnsemble(n, fail_indices=failed, failure="truncated")
+    ensemble.configure_failure_policy(
+        policy="resample_from_successes", jitter_scale=0.0, seed=17
+    )
+    ensemble.num_parallel_processes = 2
+
+    states = ensemble._run_parallel(params=_make_params(n), sim_name="state")
+
+    assert states is not None
+    assert states.sizes["ensemble"] == n
+    assert set(ensemble._last_failure_substitutions) == failed
+    for j in failed:
+        assert int(states["value"].isel(ensemble=j).values[0]) in set(range(n)) - failed
+
+
+def test_raise_policy_propagates_truncated_member_failure() -> None:
+    """``raise`` must abort on the new failure exactly as it does on a crash."""
+    ensemble = _MockEnsemble(8, fail_indices={4}, failure="truncated")
+    # Default policy is "raise"; configure_failure_policy not called.
+    with pytest.raises(ForwardModelRunFailure, match="3 of the 48"):
+        ensemble._run_ensemble_sequentially_in_memory(
+            params=_make_params(8), sim_name="state"
+        )
+
+
+def test_all_members_truncated_raises() -> None:
+    n = 4
+    ensemble = _MockEnsemble(n, fail_indices=set(range(n)), failure="truncated")
+    ensemble.configure_failure_policy(
+        policy="resample_from_successes", jitter_scale=0.0, seed=0
+    )
+    with pytest.raises(RuntimeError, match="All ensemble members failed"):
+        ensemble._run_ensemble_sequentially_in_memory(
+            params=_make_params(n), sim_name="state"
+        )
 
 
 def test_no_failures_leaves_substitutions_empty_and_params_untouched() -> None:
