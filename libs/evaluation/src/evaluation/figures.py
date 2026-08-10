@@ -17,18 +17,16 @@ Populated in WP0.2 (move), extended in WP1.5 (P1, S1, S5, F1, D1), phase 3
 (S4) and phase 2 (D3).
 """
 
-# mypy: ignore-errors
-# Moved wholesale in WP0.2 from ``src/pyurbanair/plotting.py`` -- largely
-# unannotated code predating the strict mypy config. Waived rather than
-# annotated as part of a pure refactor; dropping the waiver is later cleanup.
-# The WP1.5 figure set below is fully annotated and passes the strict config on
-# its own (checked by deleting this line: the 18 remaining errors are all in the
-# moved code above it) -- but it is *inside* the waiver, so nothing enforces
-# that. Dropping the waiver needs the 18 legacy errors fixed first.
+# WP0.2 moved the general plots here out of ``src/pyurbanair/plotting.py``
+# under a file-level ``# mypy: ignore-errors``. The waiver is gone: the moved
+# helpers are annotated and the module passes the repo's strict config, so the
+# WP1.5/phase-2/phase-3 figure set is now actually enforced rather than merely
+# believed to be clean.
 
 import contextlib
 import logging
 import pathlib
+import textwrap
 import warnings
 from typing import Iterator, Sequence, cast
 
@@ -69,6 +67,7 @@ from evaluation.turbulence import (
 from matplotlib.axes import Axes
 from matplotlib.collections import PolyCollection
 from matplotlib.colors import Colormap, LinearSegmentedColormap
+from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
@@ -120,6 +119,11 @@ _PARAM_LABELS = {
 # ``pyurbanair.utils.state_utils``: the originals also serve non-evaluation
 # flows and stay put, and this leaf library must not import ``pyurbanair``.
 # The arithmetic is identical to the originals.
+#
+# ``_add_velocity_magnitude`` has no caller left in this module -- its only two
+# call sites were in the callerless snapshot plots deleted with the WP0.2 dead
+# code. It is kept because ``tests/test_evaluation_library.py`` pins it by name
+# as the drift check against ``pyurbanair.utils.run_utils``.
 def _add_velocity_magnitude(state: xarray.Dataset) -> xarray.Dataset:
     if not all(v in state.data_vars for v in ("u", "v", "w")):
         return state
@@ -135,14 +139,14 @@ def _get_velocity_magnitude_field(state: xarray.Dataset) -> np.ndarray:
     return np.sqrt(u**2 + v**2 + w**2)
 
 
-def _save(fig, output_path: str | pathlib.Path) -> None:
+def _save(fig: Figure, output_path: str | pathlib.Path) -> None:
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path)
     plt.close(fig)
 
 
-def _shade_windows(ax, edges) -> None:
+def _shade_windows(ax: Axes, edges: Sequence[float] | None) -> None:
     """Lightly shade alternating assimilation windows with dotted dividers."""
     if edges is None or len(edges) < 2:
         return
@@ -215,412 +219,6 @@ def _extract_2d_slice_with_extent(
     return values, extent
 
 
-def plot_parameter_distributions(
-    params_history: xarray.Dataset,
-    true_params: xarray.Dataset | None,
-    output_path: str | pathlib.Path,
-    bins: int = 25,
-) -> None:
-    """Plot per-step parameter distributions for an ESMDA parameter history."""
-    step_dim = None
-    for candidate in ("esmda_step", "assimilation_step", "step", "window", "iteration"):
-        if candidate in params_history.dims:
-            step_dim = candidate
-            break
-
-    if step_dim is None:
-        params_history = params_history.expand_dims(esmda_step=[0])
-        step_dim = "esmda_step"
-
-    num_steps = int(params_history.sizes[step_dim])
-    param_names = list(params_history.data_vars)
-    if not param_names:
-        raise ValueError("No parameters found in params_history.")
-
-    # Compute fixed x-axis limits per parameter (across all steps)
-    param_xlims: dict[str, tuple[float, float]] = {}
-    for param_name in param_names:
-        all_vals: list[float] = []
-        for i in range(num_steps):
-            step_slice = params_history.isel({step_dim: i})
-            vals = np.asarray(step_slice[param_name].values).reshape(-1)
-            vals = vals[np.isfinite(vals)]
-            if vals.size > 0:
-                all_vals.extend(vals.tolist())
-        if true_params is not None and param_name in true_params.data_vars:
-            true_val = np.asarray(true_params[param_name].values).reshape(-1)
-            if true_val.size > 0 and np.isfinite(true_val[0]):
-                all_vals.append(float(true_val[0]))
-        if all_vals:
-            vmin, vmax = float(np.min(all_vals)), float(np.max(all_vals))
-            margin = max((vmax - vmin) * 0.05, 1e-10)
-            param_xlims[param_name] = (vmin - margin, vmax + margin)
-        else:
-            param_xlims[param_name] = (0.0, 1.0)
-
-    fig, axes = plt.subplots(
-        num_steps,
-        len(param_names),
-        figsize=(5 * len(param_names), 3.5 * num_steps),
-        squeeze=False,
-        constrained_layout=True,
-    )
-
-    for i in range(num_steps):
-        step_slice = params_history.isel({step_dim: i})
-        for j, param_name in enumerate(param_names):
-            ax = axes[i, j]
-            values = np.asarray(step_slice[param_name].values).reshape(-1)
-            values = values[np.isfinite(values)]
-            if values.size == 0:
-                ax.text(0.5, 0.5, "No finite values", ha="center", va="center")
-                ax.set_axis_off()
-                continue
-
-            ax.hist(values, bins=bins, alpha=0.7, label=f"Step {i}")
-            ax.axvline(
-                float(np.mean(values)),
-                color="black",
-                linestyle="--",
-                linewidth=2,
-                label="ESMDA mean",
-            )
-
-            if true_params is not None and param_name in true_params.data_vars:
-                true_value = np.asarray(true_params[param_name].values).reshape(-1)
-                if true_value.size > 0 and np.isfinite(true_value[0]):
-                    ax.axvline(
-                        float(true_value[0]),
-                        color="red",
-                        linewidth=2,
-                        label="True",
-                    )
-
-            ax.set_xlim(param_xlims[param_name])
-
-            if i == 0:
-                ax.set_title(f"{param_name} distribution")
-            ax.set_ylabel(f"Step {i}")
-            ax.legend()
-
-    output_path = pathlib.Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
-def plot_true_vs_estimated_state(
-    true_state: xarray.Dataset,
-    estimated_state: xarray.Dataset,
-    output_path: str | pathlib.Path,
-    obs_x: np.ndarray | None = None,
-    obs_y: np.ndarray | None = None,
-    z_level: int | None = None,
-) -> None:
-    """Plot estimated vs true state snapshots, error, and RMSE by step."""
-    true_for_plot = _add_velocity_magnitude(true_state)
-    est_for_plot = _add_velocity_magnitude(estimated_state)
-
-    plot_var = "vel_magnitude" if "vel_magnitude" in est_for_plot.data_vars else "u"
-    if plot_var not in est_for_plot.data_vars:
-        plot_var = list(est_for_plot.data_vars)[0]
-    if plot_var not in true_for_plot.data_vars:
-        true_plot_var = (
-            "vel_magnitude" if "vel_magnitude" in true_for_plot.data_vars else None
-        )
-        if true_plot_var is None:
-            true_plot_var = list(true_for_plot.data_vars)[0]
-    else:
-        true_plot_var = plot_var
-
-    step_dim = None
-    for candidate in ("esmda_step", "assimilation_step", "step", "window", "iteration"):
-        if candidate in est_for_plot.dims:
-            step_dim = candidate
-            break
-
-    if step_dim is None:
-        est_for_plot = est_for_plot.expand_dims(esmda_step=[0])
-        step_dim = "esmda_step"
-
-    true_2d, true_extent = _extract_2d_slice_with_extent(
-        true_for_plot[true_plot_var], z_level=z_level
-    )
-    num_steps = int(est_for_plot.sizes[step_dim])
-    rmse_vals: list[float] = []
-    est_slices: list[np.ndarray] = []
-    true_slices: list[np.ndarray] = []
-    err_slices: list[np.ndarray] = []
-    est_extents: list[tuple[float, float, float, float]] = []
-    true_extents: list[tuple[float, float, float, float]] = []
-    err_extents: list[tuple[float, float, float, float]] = []
-
-    for i in range(num_steps):
-        est_2d, est_extent = _extract_2d_slice_with_extent(
-            est_for_plot.isel({step_dim: i})[plot_var],
-            z_level=z_level,
-        )
-        true_2d_aligned = true_2d
-        true_extent_aligned = true_extent
-        min_y = min(est_2d.shape[0], true_2d.shape[0])
-        min_x = min(est_2d.shape[1], true_2d.shape[1])
-        if est_2d.shape != true_2d.shape:
-            est_2d = est_2d[:min_y, :min_x]
-            true_2d_aligned = true_2d[:min_y, :min_x]
-            x0 = max(est_extent[0], true_extent[0])
-            x1 = min(est_extent[1], true_extent[1])
-            y0 = max(est_extent[2], true_extent[2])
-            y1 = min(est_extent[3], true_extent[3])
-            if x1 > x0 and y1 > y0:
-                est_extent = (x0, x1, y0, y1)
-                true_extent_aligned = (x0, x1, y0, y1)
-        err_2d = est_2d - true_2d_aligned
-        rmse_vals.append(float(np.sqrt(np.mean(err_2d**2))))
-        est_slices.append(est_2d)
-        true_slices.append(true_2d_aligned)
-        err_slices.append(err_2d)
-        est_extents.append(est_extent)
-        true_extents.append(true_extent_aligned)
-        err_extents.append(est_extent)
-
-    true_vmin = float(np.nanmin(true_2d))
-    true_vmax = float(np.nanmax(true_2d))
-    err_abs = max(float(np.nanmax(np.abs(e))) for e in err_slices)
-    err_vmin, err_vmax = -err_abs, err_abs
-
-    fig, axes = plt.subplots(
-        num_steps,
-        3,
-        figsize=(12, 4 * num_steps),
-        squeeze=False,
-        constrained_layout=True,
-    )
-    for i in range(num_steps):
-        im0 = axes[i, 0].imshow(
-            est_slices[i],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=est_extents[i],
-        )
-        im1 = axes[i, 1].imshow(
-            true_slices[i],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=true_extents[i],
-        )
-        im2 = axes[i, 2].imshow(
-            err_slices[i],
-            origin="lower",
-            cmap="RdBu_r",
-            vmin=err_vmin,
-            vmax=err_vmax,
-            extent=err_extents[i],
-        )
-
-        if obs_x is not None and obs_y is not None:
-            axes[i, 0].scatter(obs_x, obs_y, color="red", s=12)
-            axes[i, 1].scatter(obs_x, obs_y, color="red", s=12)
-
-        if i == 0:
-            axes[i, 0].set_title(f"Estimated ({plot_var})")
-            axes[i, 1].set_title(f"True ({true_plot_var})")
-            axes[i, 2].set_title("Error")
-        axes[i, 2].set_ylabel(f"Step {i}\nRMSE={rmse_vals[i]:.4f}")
-
-        fig.colorbar(im0, ax=axes[i, 0])
-        fig.colorbar(im1, ax=axes[i, 1])
-        fig.colorbar(im2, ax=axes[i, 2])
-
-    output_path = pathlib.Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
-def plot_state_init_and_terminal(
-    true_state: xarray.Dataset,
-    estimated_state: xarray.Dataset,
-    output_path: str | pathlib.Path,
-    obs_x: np.ndarray | None = None,
-    obs_y: np.ndarray | None = None,
-    z_level: int | None = None,
-) -> None:
-    """Plot estimated vs true state with both initial and terminal time for each step."""
-    true_for_plot = _add_velocity_magnitude(true_state)
-    est_for_plot = _add_velocity_magnitude(estimated_state)
-
-    plot_var = "vel_magnitude" if "vel_magnitude" in est_for_plot.data_vars else "u"
-    if plot_var not in est_for_plot.data_vars:
-        plot_var = list(est_for_plot.data_vars)[0]
-    if plot_var not in true_for_plot.data_vars:
-        true_plot_var = (
-            "vel_magnitude" if "vel_magnitude" in true_for_plot.data_vars else None
-        )
-        if true_plot_var is None:
-            true_plot_var = list(true_for_plot.data_vars)[0]
-    else:
-        true_plot_var = plot_var
-
-    step_dim = None
-    for candidate in ("esmda_step", "assimilation_step", "step", "window", "iteration"):
-        if candidate in est_for_plot.dims:
-            step_dim = candidate
-            break
-
-    if step_dim is None:
-        est_for_plot = est_for_plot.expand_dims(esmda_step=[0])
-        step_dim = "esmda_step"
-
-    has_time_est = "time" in est_for_plot.dims
-    has_time_true = "time" in true_for_plot.dims
-
-    true_init, _ = _extract_2d_slice_with_extent(
-        true_for_plot[true_plot_var],
-        z_level=z_level,
-        time_index=0 if has_time_true else None,
-    )
-    true_terminal, _ = _extract_2d_slice_with_extent(
-        true_for_plot[true_plot_var],
-        z_level=z_level,
-        time_index=-1 if has_time_true else None,
-    )
-
-    num_steps = int(est_for_plot.sizes[step_dim])
-    init_slices: list[np.ndarray] = []
-    terminal_slices: list[np.ndarray] = []
-    init_extents: list[tuple[float, float, float, float]] = []
-    terminal_extents: list[tuple[float, float, float, float]] = []
-    init_rmse: list[float] = []
-    terminal_rmse: list[float] = []
-
-    for i in range(num_steps):
-        step_slice = est_for_plot.isel({step_dim: i})
-        est_init, est_init_ext = _extract_2d_slice_with_extent(
-            step_slice[plot_var],
-            z_level=z_level,
-            time_index=0 if has_time_est else None,
-        )
-        est_terminal, est_terminal_ext = _extract_2d_slice_with_extent(
-            step_slice[plot_var],
-            z_level=z_level,
-            time_index=-1 if has_time_est else None,
-        )
-
-        min_y = min(est_init.shape[0], true_init.shape[0])
-        min_x = min(est_init.shape[1], true_init.shape[1])
-        true_init_aligned = true_init[:min_y, :min_x]
-        est_init_crop = est_init[:min_y, :min_x]
-        init_err = est_init_crop - true_init_aligned
-        init_rmse.append(float(np.sqrt(np.mean(init_err**2))))
-
-        min_y = min(est_terminal.shape[0], true_terminal.shape[0])
-        min_x = min(est_terminal.shape[1], true_terminal.shape[1])
-        true_terminal_aligned = true_terminal[:min_y, :min_x]
-        est_terminal_crop = est_terminal[:min_y, :min_x]
-        terminal_err = est_terminal_crop - true_terminal_aligned
-        terminal_rmse.append(float(np.sqrt(np.mean(terminal_err**2))))
-
-        init_slices.append(est_init_crop)
-        terminal_slices.append(est_terminal_crop)
-        init_extents.append(est_init_ext)
-        terminal_extents.append(est_terminal_ext)
-
-    true_vmin = float(
-        np.nanmin(np.concatenate([true_init.ravel(), true_terminal.ravel()]))
-    )
-    true_vmax = float(
-        np.nanmax(np.concatenate([true_init.ravel(), true_terminal.ravel()]))
-    )
-    err_abs = 0.0
-    for i in range(num_steps):
-        sy, sx = init_slices[i].shape
-        err_abs = max(
-            err_abs, float(np.nanmax(np.abs(init_slices[i] - true_init[:sy, :sx])))
-        )
-        sy, sx = terminal_slices[i].shape
-        err_abs = max(
-            err_abs,
-            float(np.nanmax(np.abs(terminal_slices[i] - true_terminal[:sy, :sx]))),
-        )
-    err_vmin, err_vmax = -err_abs, err_abs
-
-    fig, axes = plt.subplots(
-        num_steps,
-        6,
-        figsize=(18, 4 * num_steps),
-        squeeze=False,
-        constrained_layout=True,
-    )
-    for i in range(num_steps):
-        sy, sx = init_slices[i].shape
-        im0 = axes[i, 0].imshow(
-            init_slices[i],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=init_extents[i],
-        )
-        im1 = axes[i, 1].imshow(
-            true_init[:sy, :sx],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=init_extents[i],
-        )
-        im2 = axes[i, 2].imshow(
-            init_slices[i] - true_init[:sy, :sx],
-            origin="lower",
-            cmap="RdBu_r",
-            vmin=err_vmin,
-            vmax=err_vmax,
-            extent=init_extents[i],
-        )
-        sy, sx = terminal_slices[i].shape
-        im3 = axes[i, 3].imshow(
-            terminal_slices[i],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=terminal_extents[i],
-        )
-        im4 = axes[i, 4].imshow(
-            true_terminal[:sy, :sx],
-            origin="lower",
-            vmin=true_vmin,
-            vmax=true_vmax,
-            extent=terminal_extents[i],
-        )
-        im5 = axes[i, 5].imshow(
-            terminal_slices[i] - true_terminal[:sy, :sx],
-            origin="lower",
-            cmap="RdBu_r",
-            vmin=err_vmin,
-            vmax=err_vmax,
-            extent=terminal_extents[i],
-        )
-
-        if obs_x is not None and obs_y is not None:
-            for col in (0, 1, 3, 4):
-                axes[i, col].scatter(obs_x, obs_y, color="red", s=12)
-
-        if i == 0:
-            axes[i, 0].set_title(f"Estimated init ({plot_var})")
-            axes[i, 1].set_title(f"True init ({true_plot_var})")
-            axes[i, 2].set_title("Init error")
-            axes[i, 3].set_title(f"Estimated terminal ({plot_var})")
-            axes[i, 4].set_title(f"True terminal ({true_plot_var})")
-            axes[i, 5].set_title("Terminal error")
-        axes[i, 2].set_ylabel(f"Step {i}\nInit RMSE={init_rmse[i]:.4f}")
-        axes[i, 5].set_ylabel(f"Terminal RMSE={terminal_rmse[i]:.4f}")
-
-    output_path = pathlib.Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
 def plot_rollout_time_evolution(
     esmda_params: xarray.Dataset,
     true_params: xarray.Dataset,
@@ -645,7 +243,9 @@ def plot_rollout_time_evolution(
     from the two states (the original whole-domain behaviour).
     """
 
-    def _plot_ensemble(ax, ds, param_name, color):
+    def _plot_ensemble(
+        ax: Axes, ds: xarray.Dataset, param_name: str, color: str
+    ) -> None:
         x, members = _param_members_and_x(ds[param_name])
         ax.plot(x, members.T, color=color, alpha=0.35, linewidth=0.9)
         ax.plot(x, members.mean(axis=0), color=color, alpha=1.0, linewidth=2.5)
@@ -654,15 +254,24 @@ def plot_rollout_time_evolution(
         # Fallback: whole-domain RMSE between the ensemble-mean state and the
         # truth. This materialises the full velocity fields; callers handling a
         # large truth should precompute a streamed ``rmse`` and pass it in.
+        #
+        # The two states are declared optional because the streamed-``rmse``
+        # path -- which is what every caller in the repo uses -- leaves them
+        # unset. This branch is exactly the case where they are required, so
+        # they are cast rather than guarded: a ``raise`` here would change what
+        # a mis-call does at run time, and this pass adds types only. Calling
+        # with ``rmse=None`` and no states still fails, as it always has.
+        truth_states = cast(xarray.Dataset, true_state)
+        esmda_states = cast(xarray.Dataset, esmda_state)
         true_state_mean = (
-            true_state.mean(dim="ensemble")
-            if "ensemble" in true_state.dims
-            else true_state
+            truth_states.mean(dim="ensemble")
+            if "ensemble" in truth_states.dims
+            else truth_states
         )
         esmda_state_mean = (
-            esmda_state.mean(dim="ensemble")
-            if "ensemble" in esmda_state.dims
-            else esmda_state
+            esmda_states.mean(dim="ensemble")
+            if "ensemble" in esmda_states.dims
+            else esmda_states
         )
 
         true_vel = np.asarray(_get_velocity_magnitude_field(true_state_mean))
@@ -690,7 +299,10 @@ def plot_rollout_time_evolution(
         for i, param_name in enumerate(param_names):
             ax = axes[i]
             _shade_windows(ax, window_edges)
-            if has_prior and param_name in prior_params.data_vars:
+            # ``prior_params is not None`` rather than the ``has_prior`` alias
+            # it is assigned from: identical at run time, but only the direct
+            # test narrows the Optional for the type checker.
+            if prior_params is not None and param_name in prior_params.data_vars:
                 _plot_ensemble(ax, prior_params, param_name, _COLOR_PRIOR)
             _plot_ensemble(ax, esmda_params, param_name, _COLOR_POSTERIOR)
             if param_name in true_params.data_vars:
@@ -1424,6 +1036,40 @@ def plot_parameter_marginals(
 # ---------------------------------------------------------------------------
 
 
+# S1's TKE row and F1's mean are the two places a reader reads "time average"
+# off a figure, and the frames behind them are not always a time average: the
+# filter's default source hands the collectors ONE analyzed frame per cycle, so
+# the second moments are an across-cycle variance carrying the analysis
+# increments. The writer of ``eval_fields.nc`` knows which it was and records it
+# there; these two figures take that line as ``sampling_note`` and render it,
+# because the numbers themselves are indistinguishable either way.
+#
+# WHICH frames and WHETHER they were sparse are two separate inputs on purpose
+# (``sampling_note`` and ``sampling_is_sparse``). Deriving the second from the
+# first -- "there is a note, so the frames must have been sparse" -- reads the
+# provenance of a run that saved every forecast frame as a caveat and stamps
+# "sample-mean" on a genuine time average, which is both false and the exact
+# signal that stops discriminating between the two sources once it fires on
+# both. A note is provenance; only the flag is a caveat.
+_SAMPLING_WRAP = 108
+
+
+def _sampling_caption(note: str, marker: str = "") -> str:
+    """The provenance line as it goes under a figure: prefixed and wrapped.
+
+    Wrapped here rather than left to matplotlib, which does not wrap a
+    ``supxlabel``: the notes come from the metric stage and run to a couple of
+    hundred characters, and one that runs off both edges of the PNG is a
+    qualification a reader cannot read.
+
+    ``marker`` is the footnote symbol tying the line back to a row label that
+    carries the same symbol (S1's ``k *``). It leads the line -- a footnote
+    marker reads as one at the start of its footnote and as a typo anywhere
+    else, and the line's own first word is what the marker refers to.
+    """
+    return textwrap.fill(f"{marker}Moments sampled from {note}", width=_SAMPLING_WRAP)
+
+
 def _extrapolated_axes(fields: xarray.Dataset) -> tuple[str, ...]:
     """The centre axes whose last index ``eval_fields.nc`` flags as extrapolated."""
     raw = str(fields.attrs.get("extrapolated_edges", ""))
@@ -1504,6 +1150,8 @@ def plot_station_profiles(
     u_ref: float | None = None,
     building_height: float | None = None,
     max_stations: int = 6,
+    sampling_note: str | None = None,
+    sampling_is_sparse: bool = False,
 ) -> pathlib.Path | None:
     """S1: mean-velocity and TKE profiles at the station columns (the LES figure).
 
@@ -1528,6 +1176,22 @@ def plot_station_profiles(
     component only because every shipped case puts the inflow along +x. That is
     an assumption of the figure, not a knob: a case with a different inflow axis
     needs its profiles rethought rather than relabelled.
+
+    ``sampling_note`` is the caller's one-line record of WHICH frames the
+    moments were reduced over (``eval_fields.nc``'s ``moment_sampling``). It is
+    a plain string -- this function learns nothing about run directories from it
+    -- and it is printed as a provenance line under the panels whatever it says.
+
+    ``sampling_is_sparse`` is the separate claim that those frames do NOT cover
+    the horizon continuously (``eval_fields.nc``'s
+    ``moment_sampling_is_sparse``), and it alone decides the wording: the TKE
+    row is marked ``*``, tied to the note's own leading ``*``, and the caption
+    stops calling the profiles a time average. That row is the reason: ``k``
+    from one analyzed frame per cycle is an across-cycle variance, not resolved
+    turbulence, and it renders identically to the real thing. A dense source
+    that names its frames gets the provenance line without the caveat -- saying
+    "not a continuous time average" over one that is would mislabel the better
+    of two runs.
 
     Returns the path written, or ``None`` when the dataset carries no station
     columns or no profile variables.
@@ -1567,9 +1231,16 @@ def plot_station_profiles(
         "mean": 1.0 if u_ref is None else 1.0 / u_ref,
         "tke": 1.0 if u_ref is None else 1.0 / u_ref**2,
     }
+    # Only the second-moment row is marked: the mean row survives sparse
+    # sampling as a mean of what was sampled, while ``k`` changes meaning
+    # outright, and marking both would blur which one the caption is about.
+    # The mark needs a footnote to point at, so it needs both inputs -- without
+    # a note the caption still says the profiles are not a time average, which
+    # is the same warning without a dangling symbol.
+    tke_mark = " *" if sampling_is_sparse and sampling_note else ""
     row_label = {
         "mean": r"$\bar{u}/U_{ref}$ [-]" if u_ref else r"$\bar{u}$ [m/s]",
-        "tke": r"$k/U_{ref}^2$ [-]" if u_ref else r"$k$ [m$^2$/s$^2$]",
+        "tke": (r"$k/U_{ref}^2$ [-]" if u_ref else r"$k$ [m$^2$/s$^2$]") + tke_mark,
     }
     # Extracted once and handed to the ordering rule, which is shared with S4.
     sets = (
@@ -1679,11 +1350,21 @@ def plot_station_profiles(
         if handles:
             axes[0][0].legend(handles, labels, loc="upper left", fontsize=8)
 
-        caption = "Time-averaged profiles; ensembles as 5-95 % / 25-75 % bands."
+        if sampling_is_sparse:
+            caption = (
+                "Profiles averaged over the sampled frames only -- NOT a "
+                "continuous time average; ensembles as 5-95 % / 25-75 % bands."
+            )
+        else:
+            caption = "Time-averaged profiles; ensembles as 5-95 % / 25-75 % bands."
         if trimmed:
             caption += (
                 " Top z cell excluded: colocation extrapolates it "
                 f"({', '.join(vertical_extrapolated)})."
+            )
+        if sampling_note:
+            caption += "\n" + _sampling_caption(
+                sampling_note, marker="* " if tke_mark else ""
             )
         fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
         fig.suptitle("Vertical profiles at the station columns")
@@ -1769,6 +1450,8 @@ def plot_mean_slices(
     output_path: str | pathlib.Path,
     *,
     max_levels: int = 3,
+    sampling_note: str | None = None,
+    sampling_is_sparse: bool = False,
 ) -> pathlib.Path | None:
     """F1: time-mean horizontal slices, truth | prior | posterior | difference.
 
@@ -1803,6 +1486,20 @@ def plot_mean_slices(
     field**, which decorrelates after a Lyapunov horizon and would measure chaos
     rather than parameter quality. The averaging window is annotated from the
     file's ``t_start`` / ``t_end``.
+
+    ``sampling_note`` is the caller's one-line record of WHICH frames were
+    accumulated (``eval_fields.nc``'s ``moment_sampling``), a plain string,
+    printed as a provenance line under the panels whatever it says.
+
+    ``sampling_is_sparse`` (``eval_fields.nc``'s ``moment_sampling_is_sparse``)
+    is the separate claim that those frames do not cover the span, and it alone
+    changes the wording: the title says "sample-mean" rather than "time-mean"
+    and the span reads "sampled over t = a-b s", because ``t_start`` /
+    ``t_end`` are the horizon the frames were drawn from, not proof that the
+    horizon was covered continuously, and the filter's default source draws one
+    frame per cycle from it. A run that saved every forecast frame covered it,
+    so it keeps the time-mean wording and merely says where the frames came
+    from.
 
     Returns the path written, or ``None`` without a posterior slab or without a
     single finite fluid cell to scale.
@@ -1859,7 +1556,9 @@ def plot_mean_slices(
             columns.append((label, values if drawable(label, values) else None))
     difference = None
     has_difference = masked_truth is not None and masked_posterior is not None
-    if has_difference:
+    # Re-tested directly rather than through ``has_difference``: same condition,
+    # but only this form narrows the two Optionals for the type checker.
+    if masked_truth is not None and masked_posterior is not None:
         candidate = masked_posterior - masked_truth
         if drawable("Posterior - truth", candidate):
             difference = candidate
@@ -1932,6 +1631,9 @@ def plot_mean_slices(
                 ax.grid(False)
 
         unit = f"{_STREAMWISE} [m/s]"
+        # "time-mean" is a claim about how the frames were drawn, not only about
+        # what was averaged, so it goes everywhere the mean is named or nowhere.
+        mean_label = "sample-mean" if sampling_is_sparse else "time-mean"
         if field_image is not None:
             fig.colorbar(
                 field_image,
@@ -1940,7 +1642,7 @@ def plot_mean_slices(
                 ],
                 fraction=0.03,
                 pad=0.02,
-                label=f"time-mean {unit}",
+                label=f"{mean_label} {unit}",
             )
         if difference_image is not None:
             fig.colorbar(
@@ -1953,18 +1655,36 @@ def plot_mean_slices(
 
         span = ""
         if "t_start" in fields.attrs and "t_end" in fields.attrs:
-            span = (
-                f"  (t = {float(fields.attrs['t_start']):.0f}"
-                f"-{float(fields.attrs['t_end']):.0f} s)"
+            # ``t = 0-40 s`` reads as "averaged continuously over 40 seconds".
+            # It is only ever the horizon the frames came FROM, and under a
+            # sparse source that horizon was visited a handful of times, so the
+            # preposition changes with the sampling.
+            edges = (
+                f"{float(fields.attrs['t_start']):.0f}"
+                f"-{float(fields.attrs['t_end']):.0f} s"
             )
-        fig.suptitle(f"Time-mean {_STREAMWISE} on horizontal slices{span}")
+            span = (
+                f"  (sampled over t = {edges})"
+                if sampling_is_sparse
+                else f"  (t = {edges})"
+            )
+        title_prefix = "Sample-mean" if sampling_is_sparse else "Time-mean"
+        fig.suptitle(f"{title_prefix} {_STREAMWISE} on horizontal slices{span}")
 
-        caption = "Time averages, never instantaneous."
+        if sampling_is_sparse:
+            caption = (
+                "Means over the sampled frames only -- never instantaneous, but "
+                "NOT a continuous time average either."
+            )
+        else:
+            caption = "Time averages, never instantaneous."
         if solid is not None:
             caption += " Solid cells masked (grey) and excluded from the norm."
         stride = int(fields.attrs.get("horizontal_stride", 1) or 1)
         if stride > 1:
             caption += f" Horizontal stride {stride}."
+        if sampling_note:
+            caption += "\n" + _sampling_caption(sampling_note)
         fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
         return save_png(fig, output_path, transparent=False)
 
@@ -1990,6 +1710,7 @@ def plot_sensor_fans(
     obs_error_std: float | None = None,
     window_edges: np.ndarray | list[float] | None = None,
     max_sensors: int = 4,
+    fan_label: str = "Posterior",
 ) -> pathlib.Path | None:
     """S5: quantile fans at the sensors, assimilated and held-out side by side.
 
@@ -2022,6 +1743,13 @@ def plot_sensor_fans(
     observations the filter actually assimilated are not persisted yet, so the
     envelope is the *clean* truth plus or minus the nominal observation error --
     the assimilated values scatter around it. WP2.1 swaps the source.
+
+    ``fan_label`` names what the fan IS, in the legend and the title. It is not
+    always the posterior: the filtering pipeline hands this function every frame
+    of each cycle's *forecast* segment when the run saved them -- the prior side
+    of each analysis -- and the same fan under a "Posterior" legend would be the
+    same PNG meaning two different things depending on which artifacts the run
+    happened to write. The caller knows which; this function cannot.
 
     Returns the path written, or ``None`` when no sensor set carries a finite
     ensemble series.
@@ -2110,7 +1838,7 @@ def plot_sensor_fans(
                         bands,
                         _BAND_QUANTILES,
                         COLORS["posterior"],
-                        label="Posterior median",
+                        label=f"{fan_label} median",
                     )
                     drawn.append(bands)
                 ax.annotate(
@@ -2170,7 +1898,7 @@ def plot_sensor_fans(
                 if r == n_rows - 1:
                     ax.set_xlabel(t_label)
 
-        fig.suptitle("Sensor time series: posterior quantile fan vs truth")
+        fig.suptitle(f"Sensor time series: {fan_label.lower()} quantile fan vs truth")
         if obs_drawn:
             # Only claimed when the envelope was actually drawn -- a caption
             # about observations on a figure that has none is its own kind of

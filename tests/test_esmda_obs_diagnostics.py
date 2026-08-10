@@ -701,6 +701,63 @@ def test_metric_stage_ignores_windows_left_by_an_earlier_run(
     assert bundle["window_indices"] == [0, 1]
 
 
+def _disable_obs_diagnostics(run_dir: pathlib.Path) -> None:
+    """Record ``esmda.save_obs_diagnostics=false`` in the run's ``run_info.yaml``."""
+    from scripts.esmda._esmda_common import read_yaml, write_yaml
+
+    info = read_yaml(run_dir / "run_info.yaml")
+    info.setdefault("configuration", {})["save_obs_diagnostics"] = False
+    write_yaml(info, run_dir / "run_info.yaml")
+
+
+def test_metric_stage_ignores_windows_left_when_diagnostics_are_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A flag-off rerun must not republish the *previous* run's diagnostic.
+
+    ``conf/run_esmda.yaml`` offers ``esmda.save_obs_diagnostics=false`` to
+    reproduce the pre-phase-2 artifact set exactly. But ``paths.results_dir`` is
+    fixed and ``windows/`` is never cleared, so the earlier run's files survive
+    with a window count that still matches -- the ``num_windows`` bound catches
+    only a *shrinking* run. Deciding on file existence alone would then put the
+    earlier assimilation's ``O_N`` beside this run's parameter and state metrics.
+    """
+    from scripts.esmda._esmda_common import obs_diagnostics_bundle, read_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+    from tests.test_evaluation_spectra import _minimal_run_dir
+
+    run_dir = tmp_path / "run"
+    _minimal_run_dir(run_dir)
+    _write_window_diagnostics(run_dir, n_windows=2)
+
+    # The flag-on run these files are left over from: the bundle is scored.
+    assert obs_diagnostics_bundle(run_dir) is not None
+
+    _disable_obs_diagnostics(run_dir)
+    assert obs_diagnostics_bundle(run_dir) is None
+    compute_metrics(run_dir)
+    summary = read_yaml(run_dir / "run_summary.yaml")
+    assert "esmda_diagnostics" not in summary
+    assert summary["parameter_metrics"], "the rest of the summary must be intact"
+
+
+def test_figure_stage_draws_no_d3_when_diagnostics_are_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The other consumer of the same stale files -- D3 must skip itself too."""
+    from scripts.esmda.make_esmda_figures import make_figures
+    from tests.test_evaluation_figures import _figure_run_dir
+
+    run_dir = _figure_run_dir(tmp_path)
+    _write_window_diagnostics(run_dir, n_windows=2)
+    _disable_obs_diagnostics(run_dir)
+
+    make_figures(run_dir)
+    assert not (run_dir / "data_mismatch_decay.png").exists()
+    # A skipped figure must not cost the rest of the set.
+    assert (run_dir / "sensor_fans.png").is_file()
+
+
 def test_figure_stage_draws_d3_only_with_the_files(tmp_path: pathlib.Path) -> None:
     """The figure wiring, on the WP1.5 suite's own complete run dir.
 

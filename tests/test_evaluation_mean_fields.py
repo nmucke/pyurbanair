@@ -14,6 +14,7 @@ Specification: ``docs/plans/esmda_evaluation/phase1_metrics_and_figures.md``
 from __future__ import annotations
 
 import pathlib
+from collections.abc import Sequence
 
 import numpy as np
 import pytest
@@ -370,6 +371,42 @@ def test_hit_rate_absolute_tolerance_rescues_a_near_zero_reference() -> None:
     predicted = np.array([0.05, 0.5])
     assert hit_rate(predicted, observed)["q"] == 0.0
     assert hit_rate(predicted, observed, tolerance_w=0.1)["q"] == 0.5
+
+
+def test_hit_rate_counts_a_point_exactly_on_the_relative_tolerance() -> None:
+    # VDI 3783/9 writes the criterion ``|p - o| / |o| <= D``, and ``q >= 0.66``
+    # at ``D = 0.25`` is the only standards-based acceptance number anywhere in
+    # this pipeline. The inclusion is therefore part of the standard, not a
+    # rounding detail: a point at exactly D is a hit, and on a field where a
+    # tuned model piles up against the tolerance an exclusive test shifts q
+    # downward across the whole domain -- enough to fail a run that passes.
+    #
+    # 1.0 and 1.25 are exact in binary, so ``|p - o| / |o|`` is exactly 0.25
+    # with no floating-point slack for the comparison to hide behind.
+    observed = np.array([1.0, 1.0])
+    predicted = np.array([1.25, 0.75])  # +25 % and -25 %, both on the edge
+
+    assert hit_rate(predicted, observed, tolerance_d=0.25)["q"] == 1.0
+    # ...and the neighbourhood just outside it is still a miss, so the test
+    # above is pinning a boundary rather than a tolerance that swallows
+    # everything.
+    assert (
+        hit_rate(np.array([1.25 + 1e-9]), np.array([1.0]), tolerance_d=0.25)["q"] == 0.0
+    )
+
+
+def test_hit_rate_counts_a_point_exactly_on_the_absolute_tolerance() -> None:
+    # The other half of the ``or``. ``W`` is the truth's own block-bootstrap
+    # standard error, so "within W" means "indistinguishable from the truth
+    # within the truth's own noise" -- a difference of exactly W is
+    # indistinguishable, and excluding it makes the strongest claim the
+    # criterion supports unreachable at its own boundary. The relative test
+    # cannot rescue these points: |o| = 0 sends it to inf.
+    observed = np.zeros(2)
+    predicted = np.array([0.5, -0.5])
+
+    assert hit_rate(predicted, observed, tolerance_w=0.5)["q"] == 1.0
+    assert hit_rate(np.array([0.5 + 1e-9]), np.zeros(1), tolerance_w=0.5)["q"] == 0.0
 
 
 def test_hit_rate_broadcasts_a_per_component_tolerance() -> None:
@@ -889,6 +926,112 @@ def test_field_metrics_degrade_on_the_two_member_smoke_shape(
     fields.close()
 
 
+def test_ensemble_reduction_spread_is_the_unbiased_sample_std() -> None:
+    # ``_spread`` is the ensemble standard deviation ``eval_fields.nc``
+    # publishes and F1/S1 draw. It is the SAMPLE std (``ddof=1``): the members
+    # are draws from the posterior, not the posterior itself, and the population
+    # form understates the spread by ``sqrt((M-1)/M)`` -- 29 % at M = 2, which
+    # is the CI shape, and still 13 % at M = 4. That is a plausible-looking
+    # number in every cell, so nothing downstream can notice it.
+    from scripts.esmda.compute_esmda_metrics import _ensemble_reduction
+
+    two = np.array([[1.0, 5.0], [3.0, 5.0]])  # spread sqrt(2) and 0
+    mean, spread = _ensemble_reduction(two)
+    assert mean == pytest.approx([2.0, 5.0])
+    assert spread == pytest.approx([np.sqrt(2.0), 0.0])
+    assert spread[0] != pytest.approx(np.std(two[:, 0]))  # the ddof=0 value, 1.0
+
+    four = np.array([[1.0], [2.0], [4.0], [8.0]])
+    mean, spread = _ensemble_reduction(four)
+    assert mean == pytest.approx([3.75])
+    assert spread == pytest.approx([np.sqrt(28.75 / 3.0)])
+    assert spread != pytest.approx([np.sqrt(28.75 / 4.0)])
+
+
+def test_ensemble_reduction_has_no_spread_for_a_single_member() -> None:
+    # One draw carries no information about the spread, and ``0.0`` would claim
+    # a perfectly collapsed ensemble rather than an unmeasurable one.
+    from scripts.esmda.compute_esmda_metrics import _ensemble_reduction
+
+    mean, spread = _ensemble_reduction(np.array([[2.0, 3.0]]))
+    assert mean == pytest.approx([2.0, 3.0])
+    assert np.isnan(spread).all()
+
+
+def _member_constant_state(
+    values: Sequence[float], n_time: int, n_cells: int = 5
+) -> xarray.Dataset:
+    """Member ``m`` holds ``values[m]`` in ``u``, twice it in ``v``, three in ``w``.
+
+    Constant in space and time, so each member's time-mean field IS its own
+    constant and the published spread has a closed form -- no re-running of the
+    colocation or the accumulator to say what the answer should be. The per
+    component factors make the three components' spreads differ, so a spread
+    attached to the wrong component cannot pass either.
+    """
+    axis = np.linspace(0.0, 20.0, n_cells)
+    members = np.asarray(values, dtype=float)
+    shape = (members.size, n_time, n_cells, n_cells, n_cells)
+    return xarray.Dataset(
+        {
+            name: (
+                ("ensemble", "time", "z", "y", "x"),
+                np.broadcast_to(
+                    (factor * members)[:, None, None, None, None], shape
+                ).copy(),
+            )
+            for factor, name in ((1.0, "u"), (2.0, "v"), (3.0, "w"))
+        },
+        coords={
+            "ensemble": np.arange(members.size),
+            "time": np.arange(n_time, dtype=float) * (_RUN_SIM_TIME / n_time),
+            "z": axis,
+            "y": axis,
+            "x": axis,
+        },
+    )
+
+
+def test_eval_fields_publish_the_unbiased_spread_across_members(
+    tmp_path: pathlib.Path,
+) -> None:
+    # The end-to-end half: what actually lands in ``eval_fields.nc``. Every
+    # member is a constant field, so its time-mean is that constant and the
+    # published ``_spread`` must be the ddof=1 std of the four constants in
+    # every cell of every component -- an expectation written down here, not
+    # obtained by running the accumulator again.
+    #
+    # M = 2 as well, because that is the CI shape and the one where the ddof
+    # choice is worth a factor of sqrt(2) rather than 13 %.
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    for members in ([1.0, 2.0, 4.0, 8.0], [1.0, 3.0]):
+        run_dir = _full_run_dir(tmp_path / f"m{len(members)}", n_members=len(members))
+        for w in range(_RUN_WINDOWS):
+            _member_constant_state(members, _RUN_FRAMES).to_netcdf(
+                run_dir / "windows" / f"window_{w}_posterior_state.nc"
+            )
+
+        compute_metrics(run_dir)
+
+        with xarray.open_dataset(run_dir / "eval_fields.nc") as fields:
+            spread = fields["posterior_slab_mean_spread"]
+            components = [str(c) for c in np.asarray(spread["component"].values)]
+            base = float(np.std(np.asarray(members), ddof=1))
+            biased = float(np.std(np.asarray(members)))
+            assert base != pytest.approx(biased), "the fixture cannot see ddof"
+            for factor, name in ((1.0, "u"), (2.0, "v"), (3.0, "w")):
+                drawn = spread.isel(component=components.index(name)).values
+                assert drawn == pytest.approx(factor * base), (
+                    f"M={len(members)} {name}: published spread {np.unique(drawn)} "
+                    f"is not the ddof=1 std {factor * base} "
+                    f"(ddof=0 would give {factor * biased})"
+                )
+            # The mean is published beside it and must be the plain average.
+            mean = fields["posterior_slab_mean"].isel(component=components.index("u"))
+            assert mean.values == pytest.approx(float(np.mean(members)))
+
+
 def test_eval_fields_label_the_station_columns_by_sensor_set(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1193,6 +1336,42 @@ def test_collector_sub_chunking_in_time_moves_no_number(
     single_shot, chunked = _fields(whole), _fields(frame_at_a_time)
     for key in ("slab_mean", "slab_tke", "slab_uw", "station_mean"):
         assert np.allclose(single_shot[key], chunked[key], rtol=1e-12, atol=1e-12)
+
+
+def test_time_block_bounds_the_source_grid_for_a_target_given_collector() -> None:
+    # The prior and truth collectors are handed another collector's target, so
+    # they never run the branch that derives one -- and the transient budget is
+    # sized on the *source* grid only when a step is known to materialise it.
+    # Colocation always does on a staggered backend, so a collector that failed
+    # to record that sizes its sub-chunk source_cells/target_cells too large:
+    # n_z/4 * stride^2, which is 64x at Barcelona shape and turns a 256 MB
+    # transient into ~16 GB. The test above cannot see it because colocation is
+    # a pass-through on pylbm, so this one runs on a uDALES grid.
+    from scripts.esmda import compute_esmda_metrics as stage
+
+    state = _udales_state(n=8)
+    dims = ("zt", "yt", "xt")
+
+    deriving = stage.MeanFieldCollector("udales", np.array([1.0]), np.array([1.0]))
+    deriving.add(0, 0, state)
+    given = stage.MeanFieldCollector(
+        "udales", np.array([1.0]), np.array([1.0]), target=deriving.target
+    )
+    given.add(0, 0, state)
+
+    assert set(deriving.extrapolated) == {"zt", "yt", "xt"}
+    assert given.extrapolated == deriving.extrapolated
+    assert given._time_block(state, dims) == deriving._time_block(state, dims)
+
+    # And the shared block is the source-sized one, not merely a shared target
+    # one: sizing on the target slab alone would leave the larger term unbounded.
+    target = deriving.target
+    assert target is not None
+    target_only = stage._MEAN_FIELD_TRANSIENT_BYTES // (
+        stage._MEAN_FIELD_BYTES_PER_SAMPLE
+        * int(target.z.size * target.y.size * target.x.size)
+    )
+    assert given._time_block(state, dims) < target_only
 
 
 def test_mean_field_stride_bounds_the_accumulators(

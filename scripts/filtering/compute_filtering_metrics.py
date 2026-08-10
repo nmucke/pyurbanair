@@ -366,6 +366,23 @@ def _cycle_evaluation_blocks(
         # index rather than on seconds, but they still sample this stretch of
         # the run and that is what figure F1 annotates.
         time_span=(0.0, int(source.num_cycles) * float(ta["sim_time"])),
+        # ...and the span alone is exactly what would mislead: under the default
+        # source those frames are ONE per cycle, so the TKE and <u'w'> the same
+        # file carries are an across-cycle variance rather than resolved
+        # turbulence, and nothing in the numbers says so. ``run_summary.yaml``
+        # already records the caveat, but the figure stage reads
+        # ``eval_fields.nc`` and not the summary, so it travels with the data.
+        moment_sampling=source.description,
+        # Whether those frames leave GAPS in the span above, which is the half a
+        # figure may act on -- and it is the source's kind, not the presence of
+        # the line beside it. Both sources name their frames; only ``analysis``
+        # is sparse (one analyzed frame per cycle). ``forecast`` accumulates
+        # every frame of every cycle's forecast segment, and the segments tile
+        # the run, so its moments ARE a continuous time average and labelling
+        # them otherwise would mislabel the better-configured of the two runs
+        # -- with the same words, so a reader who learned to discount them here
+        # would discount them on the run that needs them.
+        moment_sampling_is_sparse=source.kind != "forecast",
     )
     if field_metrics is not None:
         # ``n_windows`` is the number of distinct chunk indices the accumulators

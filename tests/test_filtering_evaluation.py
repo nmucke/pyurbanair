@@ -33,6 +33,14 @@ consequences:
   * the documented degradation of the analysis source -- a ddof=1 variance of
     one sample is null -- pinned as a fact rather than left as prose
     (``..._null_the_per_cycle_variance_...``);
+  * where that degradation has to be VISIBLE: it reaches ``eval_fields.nc`` as
+    ``moment_sampling`` and from there the rendered S1, F1 and S5 (the last
+    section below). The moments are correctly computed and the truth is sampled
+    identically, so the comparison is fair -- what was wrong was calling a
+    3-point across-cycle variance "resolved TKE, time-averaged over 12 s". Those
+    tests read the figure's own artists back, because a note threaded through
+    three layers and then dropped by the renderer produces exactly the PNG this
+    is about;
   * the two stages end to end on a synthetic run dir, in the shape
     ``tests/test_evaluation_sensor_statistics.py`` and
     ``tests/test_evaluation_figures.py`` established for the ESMDA pipeline:
@@ -44,11 +52,15 @@ consequences:
 from __future__ import annotations
 
 import pathlib
+import re
+import shutil
+from collections.abc import Iterator
 
 import numpy as np
 import pytest
 import xarray
 from evaluation.sensors import window_masks, window_statistics
+from matplotlib.figure import Figure
 
 # One cycle of the smoke shape: three cycles so a cycle boundary is a real thing
 # to get wrong, four truth frames in each, and four forecast frames per segment
@@ -1059,3 +1071,381 @@ def test_make_figures_passes_a_configured_building_height_to_the_profiles(
     assert recorded["plot_station_profiles"]["building_height"] == height
     # ``U_ref`` comes off the truth's ``velocity_magnitude`` on the same call.
     assert recorded["plot_station_profiles"]["u_ref"] == pytest.approx(5.0)
+
+
+# ---------------------------------------------------------------------------
+# Sampling provenance: which frames the moments came from, and whether the
+# figures say so
+# ---------------------------------------------------------------------------
+#
+# The blocker these cover: on a DEFAULT filtering run
+# (``run.ensemble_save_on_disk=false``) the mean-field collector is fed the
+# analyzed end-of-cycle frames alone, so ``eval_fields.nc``'s ``*_tke`` and
+# ``*_uw`` are moments over ~``num_cycles`` decorrelated snapshots -- with the
+# analysis increments folded into the variance -- and not resolved turbulence
+# over a window. The numbers are correctly computed and the truth is sampled
+# identically, so the comparison is fair; what was wrong is that S1 labelled the
+# row ``k`` and captioned it "Time-averaged profiles" while F1 annotated
+# ``t = 0-N s``, and nothing anywhere on either PNG said the average was N
+# points rather than N seconds. ``CycleStates.description`` already stated it
+# exactly, but it reached only the log and ``run_summary.yaml`` -- neither of
+# which the figure stage opens.
+#
+# These read back the RENDERED figure (the ``captured_figures`` spy, as
+# ``tests/test_evaluation_figures.py`` does) rather than the kwargs the wiring
+# passed: a note threaded correctly through three layers and then dropped on the
+# floor by the renderer produces exactly the misleading PNG this is about.
+
+
+@pytest.fixture  # type: ignore[misc]
+def captured_figures(monkeypatch: pytest.MonkeyPatch) -> list[Figure]:
+    """Every ``Figure`` a plot function saves, in save order.
+
+    ``style.save_png`` closes the figure it wrote, but closing only drops it
+    from pyplot's registry -- the axes, lines and text survive -- so this reads a
+    figure's content back without the figure functions growing an accessor for
+    the tests' benefit. Same spy as ``tests/test_evaluation_figures.py``.
+    """
+    saved: list[Figure] = []
+    original = Figure.savefig
+
+    def _spy(self: Figure, *args: object, **kwargs: object) -> object:
+        saved.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", _spy)
+    return saved
+
+
+@pytest.fixture(autouse=True)  # type: ignore[misc]
+def _close_figures() -> Iterator[None]:
+    """No test leaks a figure into the next one (or into the suite's memory)."""
+    import matplotlib.pyplot as plt
+
+    yield
+    plt.close("all")
+
+
+def _figure_text(fig: Figure) -> str:
+    """Every string the figure renders, lower-cased, on one whitespace-run.
+
+    Newlines and runs of spaces are collapsed because the sampling note is
+    wrapped for the PNG, so the phrase a reader sees as one sentence is not one
+    string -- and a test that asserted on the unwrapped form would pass or fail
+    on the wrap width.
+    """
+    parts: list[str] = [t.get_text() for t in fig.texts]
+    for ax in fig.axes:
+        parts.extend(ax.get_title(loc=loc) for loc in ("left", "center", "right"))
+        parts.append(ax.get_xlabel())
+        parts.append(ax.get_ylabel())
+        parts.extend(t.get_text() for t in ax.texts)
+    return " ".join(" | ".join(p for p in parts if p).lower().split())
+
+
+def _figure_titled(figures: list[Figure], marker: str) -> Figure:
+    """The one captured figure whose suptitle contains ``marker``."""
+    found = [
+        fig
+        for fig in figures
+        if any(marker.lower() in t.get_text().lower() for t in fig.texts)
+    ]
+    assert len(found) == 1, f"expected one {marker!r} figure, found {len(found)}"
+    return found[0]
+
+
+# The two claims S1's caption can make about its profiles, matched as patterns
+# rather than as literals. The wording is prose that a copy edit may legitimately
+# reflow or hyphenate ("continuous time-average"); what these tests are about is
+# WHICH of the two claims is made, so they pin the claim and let the phrasing
+# move. (``_figure_text`` already collapses the PNG's wrap, so only the hyphen is
+# left to absorb.) They stay non-vacuous because they are asserted in opposite
+# directions on the two sources: the same text cannot satisfy both.
+_DENIES_TIME_AVERAGE = re.compile(r"not a continuous time[- ]averag")
+_CLAIMS_TIME_AVERAGED_PROFILES = re.compile(r"time[- ]averaged profiles")
+
+
+def _fan_median_labels(fig: Figure) -> list[str]:
+    """The legend labels S5 attached to its fan medians."""
+    return sorted(
+        {
+            str(line.get_label()).lower()
+            for ax in fig.axes
+            for line in ax.lines
+            if "median" in str(line.get_label()).lower()
+        }
+    )
+
+
+@pytest.mark.parametrize("forecast_states", [False, True])  # type: ignore[misc]
+def test_eval_fields_records_which_frames_the_moments_were_taken_over(
+    tmp_path: pathlib.Path, forecast_states: bool
+) -> None:
+    # ``eval_fields.nc`` is the ONLY artifact the figure stage opens for S1 and
+    # F1, so a caveat that lives only in run_summary.yaml cannot reach them.
+    # ``CycleStates.description`` is the single authority on the caveat (its
+    # docstring says so), so it is what travels -- not a second phrasing that
+    # could drift from it.
+    from scripts.filtering._filtering_common import cycle_state_source, read_yaml
+
+    run_dir = _filtering_run_dir(tmp_path, forecast_states=forecast_states)
+    source = cycle_state_source(run_dir, read_yaml(run_dir / "truth_access.yaml"))
+
+    with xarray.open_dataset(run_dir / "eval_fields.nc") as fields:
+        recorded = fields.attrs["moment_sampling"]
+        # The machine-readable half, beside the prose: WHETHER those frames
+        # leave gaps in ``t_start``--``t_end``. Recorded separately because both
+        # sources carry a note, so the note's presence says nothing about which
+        # one this is -- and a figure branching on it would qualify the source
+        # that needs no qualification exactly as loudly as the one that does.
+        sparse = bool(int(fields.attrs["moment_sampling_is_sparse"]))
+        # The generic description is still there: this is an addition, not a
+        # replacement, and the ESMDA reader of the same schema depends on it.
+        assert "resolved TKE" in fields.attrs["description"]
+
+    assert recorded == source.description
+    if forecast_states:
+        assert "every frame of every cycle's forecast segment" in recorded
+        assert not sparse, (
+            "the forecast source accumulates every frame of every cycle's "
+            "segment and the segments tile the run, so its moments ARE a "
+            "continuous time average"
+        )
+    else:
+        # The default run, and the one the labels were lying about.
+        assert "ONE frame per cycle" in recorded
+        assert sparse, "one analyzed frame per cycle is not a time average"
+
+
+def test_the_default_run_marks_the_tke_profiles_as_sampled_not_time_averaged(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_figures: list[Figure],
+) -> None:
+    # S1's second row is the one that changes meaning: ``k`` over one analyzed
+    # frame per cycle is an across-cycle variance carrying the analysis
+    # increments, and it renders exactly like resolved turbulence. A reader with
+    # only the PNG has to be able to tell, so the row itself is marked and the
+    # caption carries the sampling and stops saying "time-averaged".
+    from scripts.filtering.make_filtering_figures import make_figures
+
+    _captured_kwargs(monkeypatch)  # the animation only; every figure still draws
+    run_dir = _filtering_run_dir(tmp_path)
+
+    make_figures(run_dir)
+
+    fig = _figure_titled(captured_figures, "Vertical profiles at the station columns")
+    text = _figure_text(fig)
+    assert "one frame per cycle" in text, (
+        "the PNG does not say the moments are one frame per cycle: a reader "
+        f"comparing the TKE profiles cannot tell ({text!r})"
+    )
+    # Matched loosely on purpose: what has to survive a copy edit is the DENIAL
+    # of a continuous time average, not one spelling of it. ``_figure_text``
+    # already absorbs the wrap width; these absorb the hyphen.
+    assert _DENIES_TIME_AVERAGE.search(text), (
+        "the caption does not deny a continuous time average anywhere a reader "
+        f"can see it ({text!r})"
+    )
+    assert not _CLAIMS_TIME_AVERAGED_PROFILES.search(text), (
+        "the caption still claims a time average over a run that sampled "
+        f"{_RUN_CYCLES} frames"
+    )
+    # The mark sits on the TKE row's own axis label, not only in the caption:
+    # the caption is one line under a grid of panels and says nothing about
+    # WHICH row it qualifies. The mean row is deliberately left unmarked -- it
+    # survives sparse sampling as a mean of what was sampled.
+    labels = {ax.get_xlabel() for ax in fig.axes if ax.get_xlabel()}
+    tke_labels = [label for label in labels if "$k" in label]
+    assert tke_labels, f"no TKE row label on the figure ({sorted(labels)})"
+    assert all(
+        label.rstrip().endswith("*") for label in tke_labels
+    ), f"the TKE row is unmarked: {tke_labels}"
+    assert not any(
+        label.rstrip().endswith("*") for label in labels if "bar{u}" in label
+    ), "the mean row was marked too, which blurs what the caption qualifies"
+
+
+def test_the_default_run_does_not_claim_a_continuous_average_over_the_f1_span(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_figures: list[Figure],
+) -> None:
+    # F1 annotates ``t_start``/``t_end``, which the metric stage sets to the
+    # whole run horizon under BOTH sources -- correctly, since that is the
+    # stretch the frames were drawn from. But "Time-mean u on horizontal slices
+    # (t = 0-12 s)" asserts the 12 seconds were covered, and on a default run
+    # they were visited three times. The span stays (it is the right horizon);
+    # what changes is the claim made about it.
+    from scripts.filtering.make_filtering_figures import make_figures
+
+    _captured_kwargs(monkeypatch)
+    run_dir = _filtering_run_dir(tmp_path)
+
+    make_figures(run_dir)
+
+    fig = _figure_titled(captured_figures, "on horizontal slices")
+    text = _figure_text(fig)
+    span = f"0-{_RUN_CYCLES * _RUN_SIM_TIME:.0f} s"
+    assert (
+        f"sampled over t = {span}" in text
+    ), f"the span still reads as a continuous average over {span} ({text!r})"
+    assert f"(t = {span})" not in text
+    assert (
+        "time-mean" not in text
+    ), "the title and/or the colourbar still call the sampled mean a time mean"
+    assert "one frame per cycle" in text, "the sampling itself is not on the figure"
+
+
+def test_the_forecast_run_keeps_the_f1_time_mean_wording(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_figures: list[Figure],
+) -> None:
+    # The counterpart, and the reason the qualification is a parameter rather
+    # than a constant: with the forecasts on disk the frames ARE every frame of
+    # every cycle's segment, the segments tile the run, and the moments are a
+    # genuine time average over the annotated span. Qualifying THIS figure is
+    # its own misstatement -- and, because F1's qualified wording is identical
+    # whichever source produced it, it is the one that costs the qualification
+    # its meaning on the run that needs it.
+    #
+    # So this pins the unqualified wording positively, not merely the absence of
+    # the sparse note: the regression it guards against says "every frame of
+    # every cycle's forecast segment" one line under a caption reading "means
+    # over the sampled frames only".
+    from scripts.filtering.make_filtering_figures import make_figures
+
+    _captured_kwargs(monkeypatch)
+    run_dir = _filtering_run_dir(tmp_path, forecast_states=True)
+
+    make_figures(run_dir)
+
+    text = _figure_text(_figure_titled(captured_figures, "on horizontal slices"))
+    # Where the frames came from is still on the figure -- the note is
+    # provenance, and provenance is not a caveat.
+    assert "every frame of every cycle's forecast segment" in text
+    assert "one frame per cycle" not in text
+    # ...and every place the mean is named still names it a time mean: the
+    # title, the colourbar, and the span, which was covered continuously here.
+    span = f"0-{_RUN_CYCLES * _RUN_SIM_TIME:.0f} s"
+    assert "time-mean" in text, f"the mean is no longer named a time mean ({text!r})"
+    assert "sample-mean" not in text, (
+        "the forecast run's continuous time average is labelled a sample mean, "
+        f"which is false and reads identically to the default run's ({text!r})"
+    )
+    assert f"(t = {span})" in text
+    assert f"sampled over t = {span}" not in text
+    assert "sampled frames only" not in text, (
+        "the caption calls a mean over every frame of every segment a mean over "
+        "sampled frames only"
+    )
+
+
+def test_the_forecast_run_keeps_the_s1_time_averaged_wording(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_figures: list[Figure],
+) -> None:
+    # S1's half of the same statement. Its TKE row is the one that changes
+    # meaning under sparse sampling, so under a source that is NOT sparse the
+    # row must come back unmarked and the caption must go back to claiming the
+    # time average it is entitled to: a ``*`` on every run marks nothing.
+    from scripts.filtering.make_filtering_figures import make_figures
+
+    _captured_kwargs(monkeypatch)
+    run_dir = _filtering_run_dir(tmp_path, forecast_states=True)
+
+    make_figures(run_dir)
+
+    fig = _figure_titled(captured_figures, "Vertical profiles at the station columns")
+    text = _figure_text(fig)
+    assert _CLAIMS_TIME_AVERAGED_PROFILES.search(
+        text
+    ), f"the caption no longer claims the time average these frames are ({text!r})"
+    assert not _DENIES_TIME_AVERAGE.search(text), (
+        "the caption denies a continuous time average over frames that cover "
+        f"every segment of every cycle ({text!r})"
+    )
+    assert "every frame of every cycle's forecast segment" in text
+    labels = {ax.get_xlabel() for ax in fig.axes if ax.get_xlabel()}
+    tke_labels = [label for label in labels if "$k" in label]
+    assert tke_labels, f"no TKE row label on the figure ({sorted(labels)})"
+    assert not any(
+        label.rstrip().endswith("*") for label in tke_labels
+    ), f"the TKE row is marked on a run whose moments are resolved: {tke_labels}"
+
+
+def test_the_figures_label_the_frames_the_metrics_actually_saw(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_figures: list[Figure],
+) -> None:
+    # The reason both halves are read off ``eval_fields.nc`` rather than
+    # recomputed from ``cycle_state_source`` in the figure stage: the two CAN
+    # disagree. Here the metrics ran with the forecasts on disk and the tree was
+    # pruned afterwards (they are the bulkiest thing a run writes), so a figure
+    # stage that re-derived its labels would describe frames that never entered
+    # the numbers -- calling a continuous time average a three-frame sample, on
+    # a file whose numbers are the time average.
+    from scripts.filtering.make_filtering_figures import make_figures
+
+    _captured_kwargs(monkeypatch)
+    run_dir = _filtering_run_dir(tmp_path, forecast_states=True)
+    shutil.rmtree(run_dir / "_ensemble_states")
+
+    make_figures(run_dir)
+
+    text = _figure_text(_figure_titled(captured_figures, "on horizontal slices"))
+    assert "every frame of every cycle's forecast segment" in text, (
+        "the figure names frames the metric stage never saw: it re-derived the "
+        f"sampling from the pruned run dir instead of reading the file ({text!r})"
+    )
+    assert "one frame per cycle" not in text
+    assert "time-mean" in text and "sample-mean" not in text, (
+        "the figure re-derived the SPARSENESS from the pruned run dir and "
+        f"qualified moments that are a time average ({text!r})"
+    )
+
+
+def test_the_sensor_fan_is_labelled_the_forecast_when_it_draws_the_forecasts(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_figures: list[Figure],
+) -> None:
+    # S5's fan is whatever the cycle-state source hands it. Under ``forecast``
+    # that is every frame of each cycle's forecast segment -- the PRIOR side of
+    # each analysis -- so a hardcoded "Posterior median" makes one PNG mean two
+    # different things depending only on which artifacts the run wrote.
+    from scripts.filtering.make_filtering_figures import make_figures
+
+    _captured_kwargs(monkeypatch)
+    run_dir = _filtering_run_dir(tmp_path, forecast_states=True)
+
+    make_figures(run_dir)
+
+    fig = _figure_titled(captured_figures, "quantile fan vs truth")
+    assert _fan_median_labels(fig) == [
+        "forecast median"
+    ], "the fan draws the forecast segments but names them the posterior"
+    assert "forecast quantile fan" in _figure_text(fig)
+
+
+def test_the_sensor_fan_stays_the_posterior_on_the_analyzed_frames(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_figures: list[Figure],
+) -> None:
+    # The other half of the same statement: on the default source the fan really
+    # is the analyzed states, so the label it always had is the correct one and
+    # must not have been swapped for a blanket rename.
+    from scripts.filtering.make_filtering_figures import make_figures
+
+    _captured_kwargs(monkeypatch)
+    run_dir = _filtering_run_dir(tmp_path)
+
+    make_figures(run_dir)
+
+    fig = _figure_titled(captured_figures, "quantile fan vs truth")
+    assert _fan_median_labels(fig) == ["posterior median"]
+    assert "posterior quantile fan" in _figure_text(fig)

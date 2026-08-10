@@ -14,6 +14,12 @@ statistics, so WP1.3 scores those instead. What is pinned here:
     preserve and rises well above it when there is -- the whole point, since
     the iid formula understates a turbulent series by 2-3x
     (``..._matches_the_iid_formula_...``, ``..._exceeds_the_iid_formula_...``);
+  * its blocks are as long as the flow's own correlation time, and when the
+    window is too short to hold enough of them the floor is **refused** rather
+    than measured over blocks that are too short. A floor is a denominator, so
+    one that is too small does not read as a worse estimate, it reads as a
+    better verdict (``..._never_reports_a_floor_below_...``,
+    ``..._blocks_grow_with_the_correlation_...``, ``..._refuses_...``);
   * the identifiability guard is the ratio of those two spreads. A statistic
     whose across-member spread does not clear its own sampling noise is not
     identifiable at this window length however good its CRPS looks
@@ -37,7 +43,7 @@ import pytest
 import xarray
 from evaluation.scores import ensemble_rank, window_statistics_summary
 from evaluation.sensors import window_masks, window_sampling_std, window_statistics
-from evaluation.turbulence import block_bootstrap_std
+from evaluation.turbulence import block_bootstrap_std, integral_time_scale
 
 SIM_TIME = 10.0
 NUM_WINDOWS = 3
@@ -183,6 +189,17 @@ def _ar1(rng: np.random.Generator, n: int, phi: float, n_series: int = 1) -> np.
     return out
 
 
+def _true_mean_spread(n: int, phi: float) -> float:
+    """Exact sd of the sample mean of a stationary AR(1) of unit variance.
+
+    ``var(mean) = (n + 2*sum_k (n-k) phi^k) / n^2`` -- the reference the
+    bootstrap is measured against, computed rather than resampled so the
+    comparison is against the answer and not against another estimate of it.
+    """
+    lags = np.arange(1, n)
+    return float(np.sqrt((n + 2.0 * np.sum((n - lags) * phi**lags)) / n**2))
+
+
 def test_block_bootstrap_matches_the_iid_formula_on_independent_data() -> None:
     # Blocking costs nothing when there is no correlation to preserve, which is
     # what makes it safe to apply unconditionally.
@@ -206,6 +223,102 @@ def test_block_bootstrap_exceeds_the_iid_formula_on_correlated_data() -> None:
     iid = np.median(series.std(axis=1, ddof=1) / np.sqrt(400))
 
     assert blocked > 2.0 * iid
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("n_time", "phi"),
+    [
+        (30, 0.0),  # barcelona's window length, uncorrelated
+        (30, 0.9),  # barcelona's window length, a turbulent correlation time
+        (60, 0.9),  # xie_and_castro's window length
+        (200, 0.8),
+        (480, 0.9),
+    ],
+)
+def test_block_bootstrap_never_reports_a_floor_below_the_true_sampling_spread(
+    n_time: int, phi: float
+) -> None:
+    # THE property, and the one the old fixed-block-count implementation broke:
+    # the number this returns is a *floor* other code divides by, so a floor that
+    # is too small is not a worse estimate, it is a wrong verdict. Measured
+    # against the exact sd of an AR(1) sample mean -- an independent reference,
+    # not another run of the estimator -- it may come back nan, but it may not
+    # come back materially under the truth.
+    #
+    # Pre-fix this fails at the shipped window shapes: the block count was fixed
+    # at 20, so L = ceil(n/20) = 2 at n=30 and 3 at n=60, both far under a
+    # turbulent correlation time, and the reported floor was 0.24x (n=30,
+    # phi=0.9) and 0.32x the truth.
+    rng = np.random.default_rng(31)
+    series = _ar1(rng, n_time, phi, n_series=400)
+    true = _true_mean_spread(n_time, phi)
+    # The algebra above, checked against the realizations actually resampled.
+    assert np.std(series.mean(axis=1), ddof=1) == pytest.approx(true, rel=0.1)
+
+    floor = np.median(block_bootstrap_std(series, n_resamples=400))
+
+    if np.isnan(floor):
+        return  # refused: the honest answer when the window is too short
+    assert 0.65 * true <= floor <= 1.25 * true
+
+
+def test_block_bootstrap_refuses_a_correlated_window_it_cannot_block(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The refusal has to be audible. Losing the floor means losing the
+    # identifiability guard for that window, and the only place that can be
+    # said is here -- the summary just omits the key.
+    rng = np.random.default_rng(32)
+    series = _ar1(rng, 30, phi=0.9, n_series=64)
+
+    with caplog.at_level("WARNING"):
+        floor = block_bootstrap_std(series, n_resamples=64)
+
+    assert np.isnan(floor).all()
+    assert "decorrelates over" in caplog.text
+    assert "independent samples" in caplog.text
+
+
+def test_block_bootstrap_blocks_grow_with_the_correlation_not_with_the_window() -> None:
+    # The inversion at the heart of the defect: with the block *count* fixed,
+    # L = ceil(n/20) shrinks as the window shortens, so the same flow sampled
+    # over a shorter window got shorter blocks -- exactly backwards for a fixed
+    # physical correlation time. The length must be set by the flow.
+    rng = np.random.default_rng(33)
+    correlated = _ar1(rng, 480, phi=0.9, n_series=32)
+    independent = rng.normal(size=(32, 480))
+
+    assert integral_time_scale(correlated) > 8.0 * integral_time_scale(independent)
+    # Same n, same n_blocks: only the correlation differs, and the floor must
+    # follow it rather than the record length.
+    assert np.median(
+        block_bootstrap_std(correlated, n_resamples=200)
+    ) > 3.0 * np.median(block_bootstrap_std(independent, n_resamples=200))
+
+
+def test_integral_time_scale_recovers_the_ar1_correlation_time() -> None:
+    # tau = (1+phi)/(1-phi) for AR(1) -- an analytic reference, so this pins the
+    # estimator against the answer rather than against itself. A long record,
+    # because the estimate is knowingly biased low on a short one (the sample
+    # autocorrelation of an n-frame series is biased by ~tau/n) and that bias is
+    # what the refusal policy exists to absorb.
+    rng = np.random.default_rng(34)
+
+    for phi in (0.5, 0.8, 0.9):
+        tau = integral_time_scale(_ar1(rng, 4000, phi, n_series=16))
+        assert tau == pytest.approx((1.0 + phi) / (1.0 - phi), rel=0.15)
+
+
+def test_integral_time_scale_is_one_when_nothing_decorrelates() -> None:
+    # Both ends of the degenerate range: independent samples carry one
+    # independent sample each, and a constant series has no correlation time at
+    # all (its bootstrap is a measured zero at any block length).
+    rng = np.random.default_rng(35)
+
+    assert integral_time_scale(rng.normal(size=(64, 400))) == pytest.approx(
+        1.0, abs=0.1
+    )
+    assert integral_time_scale(np.full((4, 50), 2.5)) == 1.0
 
 
 def test_block_bootstrap_is_vectorized_over_leading_dims_not_approximated() -> None:
@@ -260,12 +373,18 @@ def test_block_bootstrap_reproduces_without_a_seed() -> None:
 
 
 def test_block_bootstrap_is_null_on_windows_too_short_to_block() -> None:
-    # Routine, not exotic: the default 20 blocks needs 21 samples and the CI
-    # smoke shape has four frames per window, so callers must handle the null.
+    # Routine, not exotic: even an uncorrelated record needs 15 frames (three
+    # per block, five blocks) and the CI smoke shape has four frames per window,
+    # so callers must handle the null.
     rng = np.random.default_rng(8)
 
     assert np.isnan(block_bootstrap_std(rng.normal(size=(2, 3)))).all()  # n < 4
-    assert np.isnan(block_bootstrap_std(rng.normal(size=(2, 10)))).all()  # L < 2
+    assert np.isnan(block_bootstrap_std(rng.normal(size=(2, 10)))).all()  # < 5 blocks
+    # 15 is the shortest an *uncorrelated* record can be, and only when the
+    # measured time scale comes out at exactly one sample: with a couple of rows
+    # to pool over, its own scatter can put the length at four and cost the
+    # floor a 15-frame window as well. It is a floor, not a promise.
+    assert np.isfinite(block_bootstrap_std(rng.normal(size=(64, 15)))).all()
 
 
 def test_block_bootstrap_nulls_only_the_rows_that_are_not_finite() -> None:
@@ -280,16 +399,48 @@ def test_block_bootstrap_nulls_only_the_rows_that_are_not_finite() -> None:
     assert np.isfinite(std[[0, 2]]).all()
 
 
-def test_block_bootstrap_of_a_single_block_is_a_measured_zero() -> None:
-    # One block spans the series, so there is one legal start and every replicate
-    # is the original: the spread really is zero. Exactly zero, not 1e-17 of
-    # float rounding, which would survive the ``> 0`` filter downstream and turn
+def test_block_bootstrap_of_a_constant_series_is_an_exact_zero() -> None:
+    # Every replicate of a constant series is that same constant, so the spread
+    # really is zero. Exactly zero, not the 1e-17 of float rounding ``np.std``
+    # leaves behind, which would survive the ``> 0`` filter downstream and turn
     # an identifiability ratio into ~1e17 instead of a clean null.
+    std = block_bootstrap_std(np.full((2, 60), 3.25), n_resamples=16)
+
+    assert np.array_equal(std, np.zeros(2))
+
+
+def test_block_bootstrap_refuses_a_single_block_instead_of_reporting_zero() -> None:
+    # ``n_blocks=1`` asks for blocks as long as the record. That is a point mass
+    # -- one legal start, every replicate the original -- and a point mass is not
+    # a measurement of anything, so it takes the same refusal path as any other
+    # block count under five rather than reporting a floor of 0.0 that reads as
+    # "this statistic has no sampling noise".
     rng = np.random.default_rng(10)
 
     std = block_bootstrap_std(rng.normal(size=(2, 60)), n_blocks=1, n_resamples=16)
 
-    assert np.array_equal(std, np.zeros(2))
+    assert np.isnan(std).all()
+
+
+def test_block_bootstrap_spread_over_replicates_is_the_ddof_one_one() -> None:
+    # ddof=0 over the replicates rescales every floor by sqrt((R-1)/R): 0.25 % at
+    # the 200 replicates production uses, which no statistical assertion can
+    # see, and 29 % at the two used here. So it is pinned exactly, against the
+    # closed form for two samples (|a - b|/sqrt(2)) rather than against another
+    # call of the estimator.
+    from evaluation.turbulence import _block_resample_indices, _bootstrap_block_length
+
+    rng = np.random.default_rng(36)
+    series = rng.normal(size=(3, 60))
+
+    std = block_bootstrap_std(series, n_resamples=2)
+
+    block_len = _bootstrap_block_length(series, 20)
+    index = _block_resample_indices(60, block_len, 2, np.random.default_rng(0))
+    replicates = series[:, index].mean(axis=-1)  # (3, 2)
+    assert std == pytest.approx(
+        np.abs(replicates[:, 0] - replicates[:, 1]) / np.sqrt(2.0)
+    )
 
 
 def test_block_bootstrap_rejects_a_statistic_that_ignores_its_axis() -> None:
@@ -303,19 +454,48 @@ def test_block_bootstrap_rejects_a_statistic_that_ignores_its_axis() -> None:
 
 def test_window_sampling_std_matches_the_statistics_it_floors() -> None:
     # The floor has to be shaped exactly like the statistic it divides into, or
-    # the identifiability ratio silently broadcasts across sensors.
+    # the identifiability ratio silently broadcasts across sensors. At the
+    # SHIPPED settings: 90 frames over 3 windows is barcelona's 30 frames per
+    # window, and the block count is the default rather than a test-only one, so
+    # the production block length is what gets exercised.
     rng = np.random.default_rng(12)
-    members = _series(rng, 120, n_ensemble=3)
+    members = _series(rng, 90, n_ensemble=3)
 
     stats = window_statistics(members, SIM_TIME, NUM_WINDOWS)
-    floor = window_sampling_std(
-        members, SIM_TIME, NUM_WINDOWS, n_blocks=5, n_resamples=32
-    )
+    floor = window_sampling_std(members, SIM_TIME, NUM_WINDOWS, n_resamples=32)
 
     for name in ("mean", "variance"):
         assert floor[name].dims == stats[name].dims
         assert floor[name].shape == stats[name].shape
         assert np.isfinite(floor[name].values).all()
+
+
+def test_window_sampling_std_nulls_the_shipped_window_when_the_flow_is_correlated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # End to end at the shape that shipped: barcelona's 300 s window at a 10 s
+    # cadence is 30 frames, and 30 frames of a flow that decorrelates over ~19 of
+    # them cannot measure their own sampling floor. Pre-fix this returned a
+    # number ~4x too small at every sensor, which is what let the identifiability
+    # guard pass silently; the floor is now absent and the reason is logged.
+    rng = np.random.default_rng(37)
+    n_time = NUM_WINDOWS * 30
+    correlated = _ar1(rng, n_time, phi=0.9, n_series=3 * 4 * 2).reshape(3, 4, n_time, 2)
+    members = xarray.DataArray(
+        correlated,
+        dims=("component", "ensemble", "time", "sensor"),
+        coords={
+            "component": ["u", "v", "w"],
+            "time": np.linspace(0.0, NUM_WINDOWS * SIM_TIME, n_time, endpoint=False),
+            "sensor": np.arange(2),
+        },
+    )
+
+    with caplog.at_level("WARNING"):
+        floor = window_sampling_std(members, SIM_TIME, NUM_WINDOWS, n_resamples=32)
+
+    assert np.isnan(floor["mean"].values).all()
+    assert "decorrelates over" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +574,10 @@ def _summary(
         if with_prior
         else None
     )
-    boot = {"n_blocks": 5, "n_resamples": 32}
+    # Spelled out at both call sites rather than ``**boot``: unpacking an
+    # inferred ``dict[str, int]`` into a signature whose tail is ``label: str``
+    # is not something mypy can check.
+    boot_blocks, boot_resamples = 5, 32
     # ``dict(...)``: ``evaluation.scores`` is mypy-waived and returns ``Any``.
     return dict(
         window_statistics_summary(
@@ -406,10 +589,20 @@ def _summary(
                 else None
             ),
             posterior_sampling_std=window_sampling_std(
-                posterior, SIM_TIME, NUM_WINDOWS, **boot
+                posterior,
+                SIM_TIME,
+                NUM_WINDOWS,
+                n_blocks=boot_blocks,
+                n_resamples=boot_resamples,
             ),
             prior_sampling_std=(
-                window_sampling_std(prior, SIM_TIME, NUM_WINDOWS, **boot)
+                window_sampling_std(
+                    prior,
+                    SIM_TIME,
+                    NUM_WINDOWS,
+                    n_blocks=boot_blocks,
+                    n_resamples=boot_resamples,
+                )
                 if prior is not None
                 else None
             ),
@@ -618,17 +811,16 @@ def test_summary_nulls_the_skill_when_prior_and_posterior_span_different_windows
 
 def test_summary_identifiability_is_absent_when_no_floor_was_measured() -> None:
     # Short windows give no bootstrap, and a ratio over an unmeasured floor is
-    # not "infinitely identifiable" -- it is unknown.
+    # not "infinitely identifiable" -- it is unknown. 10 frames per window is
+    # under the 15 an uncorrelated record needs to be blocked at all.
     rng = np.random.default_rng(19)
-    truth = _series(rng, 90)
-    posterior = _series(rng, 90, n_ensemble=4)
+    truth = _series(rng, 30)
+    posterior = _series(rng, 30, n_ensemble=4)
 
     summary = window_statistics_summary(
         window_statistics(truth, SIM_TIME, NUM_WINDOWS),
         window_statistics(posterior, SIM_TIME, NUM_WINDOWS),
-        posterior_sampling_std=window_sampling_std(
-            posterior, SIM_TIME, NUM_WINDOWS, n_blocks=200
-        ),
+        posterior_sampling_std=window_sampling_std(posterior, SIM_TIME, NUM_WINDOWS),
     )
 
     assert "identifiability" not in summary["posterior"]["mean_u"]

@@ -300,8 +300,11 @@ class CycleStates(NamedTuple):
         n_members: Ensemble size, read from metadata alone.
         paths: ``forecast`` only -- ``paths[k][m]`` is member ``m``'s forecast
             file for cycle ``k``. ``None`` for ``analysis``.
-        description: One line naming the source and its caveat, for the run
-            summary, the ``eval_fields.nc`` attrs and the log.
+        description: One line naming the source and its caveat. It reaches the
+            reader by three routes, and all three are needed: the log, the run
+            summary's ``cycle_states`` block, and ``eval_fields.nc``'s
+            ``moment_sampling`` attribute -- which is the one the figure stage
+            reads, since S1 and F1 open that file and nothing else.
     """
 
     kind: str

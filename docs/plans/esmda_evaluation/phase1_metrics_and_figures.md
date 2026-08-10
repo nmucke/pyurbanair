@@ -195,7 +195,10 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   whose parameter block is fair and whose sensor block is not — the mixing
   guard would then either stay silent across the boundary or warn about runs
   that are in fact comparable — but dropping the RMSE with it would silently
-  erase those runs from the comparison panels.
+  erase those runs from the comparison panels. (Branch review round 3 turned
+  the mechanism from a `_crps` suffix denylist into an explicit allowlist, which
+  fails closed; the *behaviour* recorded here is unchanged. See the round-3 and
+  round-4 records at the end of this section.)
 - The analytic-Gaussian CRPS test runs at **M = 50**, not the `M = 10^4` the
   plan names. At M=10⁴ the biased estimator's error is ~6e-5, inside any
   tolerance loose enough for the Monte-Carlo noise, so that test cannot tell
@@ -419,13 +422,49 @@ across every prior/posterior pair**). Each no-ops when inputs are absent.
   `sensor_sets[name]` tuple in the same process, so there is no path that
   produces one today; an alignment call would be guarding against a caller that
   does not exist.
-- **`_skill_score`'s `nan` reference is nulled at this call site only.** An
+- **`_skill_score`'s `nan` reference is nulled at this call site only — and
+  every clause of that reasoning is now superseded.** As WP1.3 shipped it: an
   all-empty prior reduces to `nan` and reaches the YAML as `.nan`, against
-  WP1.2's "degenerate scales produce `null`, never `inf`" convention. The same
-  is true of `parameter_metric_summary`'s `prior_rmse_mean` / `prior_crps_mean`
-  and predates this WP; fixing it there would change an existing key's written
-  value, which invariant 1 puts behind a `metrics_version` bump. The new block
-  guards locally instead.
+  WP1.2's "degenerate scales produce `null`, never `inf`" convention; the same
+  was true of `parameter_metric_summary`'s `prior_rmse_mean` /
+  `prior_crps_mean`, which predates this WP, and fixing it *there* would change
+  an existing key's written value — which invariant 1 puts behind a
+  `metrics_version` bump. So the new block guarded locally instead.
+
+  Branch review round 3 (`be1433e`) undid all of it. It nulls both keys in
+  `parameter_metric_summary` as well, and it changed `_skill_score` itself to
+  take both means over the **intersection** of the two finite knot masks rather
+  than over each side's own — which moves a real number on a non-degenerate
+  run, not just a `.nan`. **User decision: keep `METRICS_VERSION = 2` and record
+  this as an explicit exemption to invariant 1.**
+
+  - *Which keys change value.* `prior_rmse_mean` and `prior_crps_mean` (a bare
+    `.nan` becomes `null`, and a finite value can move because the mean is now
+    over the intersected knots — the reference reported is always the
+    denominator that was actually used); `rmse_reduction_vs_prior` and
+    `crps_reduction_vs_prior` (a different finite value). All four are in
+    `parameter_metrics`. `sensor_statistics` reaches `_skill_score` through the
+    same helper, so its `prior_crps_mean` and `crps_reduction_vs_prior` move for
+    the same reason — those two were already `null`-guarded against the
+    all-empty prior, but not against a partial mask mismatch.
+  - *On which runs.* Any run where the prior and the posterior have different
+    NaN patterns across knots — a diverged or truncated member is the usual
+    cause. Where the two masks agree, which is every all-finite run, the
+    intersection is the whole set and no number moves at all. Measured on a
+    constructed mismatch: 0.906 against an honest 0.810.
+  - *Why no bump.* The old number built `1 − mean(post)/mean(prior)` out of two
+    **different knot sets**, i.e. two different horizons, and inflated the skill
+    exactly when the knot that dropped out was the hard one the prior scored
+    worst at. It was never a valid measurement, so no comparable number is lost
+    by replacing it. A `metrics_version` bump would, in exchange, declare every
+    `run_summary.yaml` on this branch incomparable with every earlier one — to
+    retire numbers that were already wrong. The marker exists to protect
+    comparisons between two numbers that each meant something; that condition
+    is not met here.
+
+  This is a deliberate, recorded exemption, not an oversight. Invariant 1 is
+  otherwise intact across the branch, and the next change to any of these keys
+  is back under it.
 - **Deferred:** the e2e ESMDA tests all run under `run.skip_viz=true`, so none
   of them reaches this block. The wiring is covered instead by a synthetic
   run-dir test that builds the artifacts `compute_metrics` reads and runs the
@@ -996,3 +1035,69 @@ The pattern behind all of them: the suite pinned figure *content* but never
   ESMDA test sets `run.skip_viz=true`. Making an e2e run draw figures would add
   minutes to the suite for the pixels; the synthetic-run-dir tests cover the
   wiring's control flow, which is what actually broke.
+
+**Branch review round 3 (2026-08-07, `be1433e`).** Not a WP review: an
+eight-agent adversarial sweep over the *whole* `esmda-evaluation` branch, run
+once every WP had merged. It confirmed every work package is implemented as
+planned and found six blockers, all fixed in that one commit, each with a
+regression test verified to fail against the unfixed code. Three of the six land
+in this phase (the other three are recorded in the phase-2 and phase-3 plans and
+in the master plan's filtering section).
+
+- **`_skill_score` averaged the two sides over independently nan-filtered knot
+  sets** (WP1.3), and `parameter_metric_summary` wrote a bare `.nan` for both
+  reductions on a diverged member (WP1.2/1.3). Both fixed; the fix changes an
+  existing key's value and is a recorded exemption to invariant 1 rather than a
+  `metrics_version` bump. The full record is in the rewritten WP1.3 deviation
+  above — it is the one place on this branch where invariant 1 is knowingly
+  waived, so it is written out in full there rather than summarised here.
+- **`MeanFieldCollector.extrapolated` was assigned only on the target-deriving
+  path** (WP1.4). The prior and truth collectors are handed *another*
+  collector's target, so they never entered that branch and their
+  `extrapolated` stayed `()`. `_time_block` reads it to decide whether a step
+  materialises the full source grid — which colocation does, per member, on
+  every staggered backend — so those two passes sized their time sub-chunk on
+  target cells while the step touched source cells: a ~64x overshoot of the
+  256 MB transient budget at barcelona shape. Hoisted out of the branch. The
+  value is static per solver and layout, so recording it on every state is a
+  table lookup and cannot drift.
+- **`compute_sweep_metrics.py`'s legacy carry-forward is now an allowlist**
+  (WP1.1), replacing the `not k.endswith("_crps")` denylist. An allowlist fails
+  closed — a score added later is withheld until someone vouches for it —
+  which a suffix rule cannot do. Round 4 corrected the severity this was
+  recorded with; see below.
+- Round 3 also confirmed, and this is worth keeping so a later reader does not
+  re-derive it: the branch implements every WP in the status table, with no
+  WP found missing or partially built.
+
+**Branch review round 4 (2026-08-07, `a843f00`).** A four-agent review of round
+3's own fixes — the round-3 commit was itself unreviewed code. Five of the six
+were verified sound as landed. The sixth (the filtering label fix) had
+over-applied and is recorded in the master plan's filtering section. Two
+corrections land in this phase:
+
+- **The sweep blocker's severity was overstated, and the correction matters
+  more than the fix.** Round 3's commit message claimed the denylist let a
+  biased `M²` pairwise `velocity_vector_energy_score` through into files stamped
+  `metrics_version: 2`, producing "a spurious 0.04 m/s improvement with ensemble
+  size on exactly the axis the sweeps probe". That could not have happened. The
+  carry-forward branch runs **only** when a run dir has no `truth_access.yaml`;
+  `run_esmda.py` has written that file unconditionally since `5d3b697`
+  (2026-06-08), and the `velocity_vector_energy_score` name only exists from
+  `ec39233` (2026-06-10), which renamed it from `vel_magnitude_crps`. A run dir
+  old enough to reach the branch therefore predates the rename by two days and
+  can only carry `vel_magnitude_crps` — which the old denylist already dropped.
+  No shipped sweep output was ever corrupted. **The allowlist is still the right
+  shape** (it fails closed against the *next* score, which is a real hazard),
+  but it is hardening, not a repair, and the record should not claim otherwise.
+  Round 3's commit message and the in-code comment above
+  `_CARRYABLE_SENSOR_KEYS` still carry the overstated version; this note is the
+  correction.
+- **Round 3's "no computed number changes" claim is true only on pylbm.** It
+  was verified end-to-end there — `run_summary.yaml` byte-identical, every
+  `eval_fields.nc` variable bit-identical. In general it does not hold: on a
+  staggered backend the `extrapolated` hoist *correctly* changes the time block,
+  and `MomentAccumulator`'s Chan combine is not chunk-size invariant, so the
+  prior and truth moments shift by ~1e-13 relative. That is a re-chunking
+  artifact of a fix that was needed, not a semantic change, and it is well below
+  anything `field_metrics` reports — but it is not "no change".

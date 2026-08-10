@@ -2,8 +2,10 @@
 
 > **Status: every work package implemented and merged into
 > `esmda-evaluation`** as of 2026-08-07 (slimmed 2026-08-03 after the July
-> rollback; see [Rollback](#rollback)). What remains is the single reviewed
-> merge of `esmda-evaluation` into `main` — see [Branching
+> rollback; see [Rollback](#rollback)), and two branch-wide adversarial review
+> rounds have since run over the merged result and had their blockers fixed
+> (see [Implementation process](#implementation-process)). What remains is the
+> single reviewed merge into `main` — see [Branching
 > model](#branching-model). **Companion to** the research document
 > [../esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md)
 > (the *what and why* — metric definitions, formulas, figure conventions).
@@ -45,6 +47,18 @@ Applies to every work package:
   complexity and abstraction (the library design rules in invariant 5 are
   the yardstick). Only after both rounds and green CI is the PR ready to
   merge.
+- **Two further adversarial rounds over the whole branch, once every WP had
+  merged** (2026-08-07). Not in the original process, which reviews a WP at a
+  time; these read the assembled branch. **Round 3** (`be1433e`) was an
+  eight-agent sweep: it confirmed every work package in the table below is
+  implemented as planned, and found six blockers — all fixed in that one
+  commit, each with a regression test verified to fail against the unfixed
+  code. **Round 4** (`a843f00`) was a four-agent review of round 3's own
+  fixes, which were themselves unreviewed code; five of the six were sound,
+  the sixth had over-applied and is corrected. Each finding is recorded in
+  the phase plan it touches (phase 1: the skill-score knot sets and the
+  mean-field memory bound; phase 2: the stale obs-diagnostics bundle; phase
+  3: the probe cadence) or, for the filtering port, in the section below.
 
 ## Instructions for implementing agents
 
@@ -59,7 +73,8 @@ Applies to every work package:
 - **Cross-phase invariants** (violations are review-blockers):
   1. `run_summary.yaml` keys are additive only; changing an existing key's
      values or semantics bumps the `metrics_version` marker (reintroduced in
-     WP1.1).
+     WP1.1). **One exemption was taken deliberately** — see the cross-cutting
+     cautions below.
   2. Full-ensemble window state files are never `.load()`ed by new code —
      stream member-at-a-time or z-slab-wise, ≤2 reader threads. (The one legacy
      violation, `ensemble_sensor_series` loading whole window files, was
@@ -149,11 +164,104 @@ variance and takes the TKE moments across cycles instead of within them. See
 filtering counterpart — the probe records need a dedicated solver rerun, which
 the ESMDA *pipeline* script does not run either.
 
+Branch review round 3 (see [Implementation
+process](#implementation-process)) found that this port's **S1 TKE row and F1 time
+mean were labelled as continuous time averages** while, on the shipped default
+`cycle_states` source, they are moments over one analyzed frame per cycle — an
+across-cycle variance carrying the analysis increments, which is invisible in
+the numbers. The caveat existed but only reached `run_summary.yaml`, and the
+figure stage reads `eval_fields.nc`. That file now carries a `moment_sampling`
+attribute and the figures take a `sampling_note` (a plain string, so invariant 5
+is intact). S5's fan legend said "Posterior median" while drawing forecast
+segments and now names what it draws. Round 4 then found the fix had
+**over-applied**: it gated the qualification on the *presence of a note* rather
+than on sparseness, so the `forecast` cycle-state source — every frame of every
+cycle's forecast segment, tiling the run, a genuine continuous time average —
+was stamped "sample-mean", "sampled over t = a–b s" and "NOT a continuous time
+average" one line above a note saying it saw every frame. The same PNG
+contradicted itself, and F1's wording was byte-identical between the two sources
+apart from the note, so the qualification carried no discriminating signal.
+Fixed by recording sparseness as what it is — a property of the frames —
+in a separate `moment_sampling_is_sparse` (`0`/`1`) attribute on
+`eval_fields.nc` and a separate `sampling_is_sparse` figure parameter: the note
+is provenance and prints on both sources, the flag alone drives the
+time-mean/sample-mean wording and S1's TKE-row marker. Encoding a caveat in the
+presence of prose was the defect. See
+[scripts_and_configs.md](../../scripts_and_configs.md) §2.3.
+
+**Outside the WP list: three pylbm backend fixes** (PRs **#112**, **#113**,
+**#114**, all merged 2026-08-07). Phase 3's verification run turned up two
+backend bugs that were deferred out of that WP as needing their own reviewed
+PRs, and fixing the first uncovered a third. Together they add ~350 lines under
+`libs/pylbm` (plus ~50 in `pyurbanair`'s ensemble base class) and 1,022 lines of
+new test files — none of it planned work, all of it on this branch.
+Cross-referenced from
+[data_assimilation.md](../../data_assimilation.md) and documented in
+[pylbm.md](../../pylbm.md).
+
+- **#112 — restart/output filename width** (`bea72c3`). The pinned Fortran
+  declares `character(len=6) cit` and opens `restart_0000_<it:i6.6>.uf`; pylbm
+  wrote a 9-digit field, introduced for a newer LBM that a later submodule pin
+  moved away from. The solver therefore never saw the restart Python wrote — and
+  because the wrapper writes at the iteration the solver itself last wrote, the
+  6-digit name it *did* open was the solver's own restart from the previous
+  window, sitting in the same directory. **The consequence: for
+  `esmda/smoother=state_and_parameter` and `state_and_dynamic`, every pylbm
+  rollout produced before 2026-08-07 discarded the Kalman state update at every
+  window boundary** and continued on the solver's own free trajectory. Nothing
+  looked wrong — the run completed and the fields were physically consistent,
+  just not conditioned. The filter's cycle-to-cycle warm start is affected the
+  same way. Both sides now spell the width from one constant, pinned in tests
+  against the Fortran sources. This also deleted `run_probe_series.py`'s local
+  `os.link` workaround (see the phase-3 plan).
+- **#113 — a truncated run is a member failure** (`7e1c73d`). The LBM's error
+  paths call Fortran `stop`, which exits **0**, so `subprocess.run(check=True)`
+  returned cleanly on a partial run and the trims in `run_single` only ever
+  shorten. A member that wrote 3 of 48 frames passed straight through
+  `resample_from_successes` and killed a two-window ESMDA run hours later inside
+  `_stream_concat_members`, nowhere near the cause. Frame counts are now checked
+  against the cadence-derived expected count, so a short member is a member
+  failure at the window that produced it.
+- **#114 — actually read the restart template** (`fae5dc0`). Uncovered by #112,
+  whose fix also corrected the template lookup's filename width.
+  `_try_load_restart_distribution` passed scipy a list of *scalar* dtypes, which
+  it reads as one repeating 20-byte compound and then demands the record be an
+  exact multiple of — an LBM restart never is, so the read raised on **every**
+  call into a bare `except Exception: return None`. The template was treated as
+  absent always, and **every pylbm warm start was rebuilt from a pure-equilibrium
+  distribution**, discarding the non-equilibrium stress it exists to carry. This
+  is the one that changed what a pylbm warm start physically *is*. It did not
+  discard the state update — the macroscopic fields were built from the analyzed
+  ρ, u, v, w either way, which is why nothing ever looked wrong; the solver
+  simply re-established the stress as a startup transient each time. Measured:
+  the first warm frame sat 3.17 % (RMS) from the state handed in with a `max|u|`
+  excursion at frame 0, and 0.12 % with no excursion after. Two things outlive
+  the fix — the blanking mask is live for the first time, and peak memory per
+  member roughly doubles.
+
+  Note for anyone reading the two bugs together: it is **#112**, not #114, that
+  discarded the state update. #114's effect is a lost stress tensor and a
+  startup transient on a state that did arrive.
+
+**Any pylbm ESMDA or filtering result from before 2026-08-07 should be
+re-checked before it is read**, for both reasons. No other backend is affected
+and nothing in `libs/data-assimilation` changed.
+
 Cross-cutting cautions:
 
 - WP1.1 shifts historical CRPS/energy-score numbers by ~O(1/M) — cross-
   boundary sweep comparisons are invalid; `metrics_version: 2` marks the
   boundary and the comparison scripts warn on mixing.
+- **Invariant 1 has exactly one recorded exemption on this branch.** Round 3's
+  `_skill_score` fix changes the written value of `prior_rmse_mean`,
+  `prior_crps_mean`, `rmse_reduction_vs_prior` and `crps_reduction_vs_prior` on
+  any run whose prior and posterior differ in their NaN pattern across knots,
+  without a `metrics_version` bump. The old value averaged the two sides of the
+  ratio over different knot sets and was never a valid measurement, so a bump
+  would invalidate cross-run comparison across the whole branch in order to
+  retire numbers that were already wrong. This is a user decision, and it is
+  written out in full in the phase-1 plan's WP1.3 deviations. Nothing else on
+  the branch changes an existing key's value.
 - The smoke shape (2-member ensemble) degenerates several diagnostics
   (ddof=1 variances, rank histograms) — guard with `null` + log, don't
   special-case.

@@ -196,9 +196,12 @@ In `evaluation.turbulence`; no-ops without `probes.nc`.
   (`evaluation.turbulence.minimum_spectral_samples`, derived from
   `_MIN_BAND_BINS`, `SPECTRUM_SEGMENTS` and `SPECTRUM_CUTOFF_FRACTION`; the
   naive inversion gives 256 and is wrong because the DC bin is dropped and the
-  band is `f < cutoff` strictly). The shipped `probes.output_frequency: 1.0`
-  therefore cannot produce a spectrum for a window shorter than ~264 s, so the
-  probe script warns before it spends the solve.
+  band is `f < cutoff` strictly). The probe script warns before it spends the
+  solve. The cadence this WP shipped, `probes.output_frequency: 1.0`, therefore
+  could not produce a spectrum at all for a window shorter than ~264 s — and at
+  the plan's nominal 300 s window it produced exactly the refusal floor. Branch
+  review round 3 replaced it with `0.25` (see below); the 264-sample floor
+  itself is unchanged.
 - The probe re-run clones its member models **before** the truth solve, and the
   ordering is load-bearing: both mounts share one experiment dir,
   `_probe_window` prunes restarts but keeps the latest, and clones are copied
@@ -210,28 +213,115 @@ In `evaluation.turbulence`; no-ops without `probes.nc`.
   window at a different cadence, which is the normal iteration.
 - `lsd_truth_floor` keeps the full-record `nperseg` on half records, which
   makes it ≈2x (not ≈sqrt(2)x) the like-for-like scatter — measured 1.99 at
-  M=8, 2.08 at M=32 over statistically identical flows. Documented rather than
-  silently rescaled, because the key is defined as the halves' LSD; "at or
-  under the floor" is therefore *not* the pass criterion.
+  M=8, 2.08 at M=32 over statistically identical flows. The plan's key is not
+  silently rescaled — it is defined as the halves' LSD and still is — but the
+  halved value is emitted beside it as **`lsd_truth_floor_comparable`**
+  (`= lsd_truth_floor / _HALVES_INFLATION`, `_HALVES_INFLATION = 2.0`), and
+  that is the reference the reader is told to score `lsd_posterior_median`
+  against, by `spectral_metric_summary`'s own docstring and by
+  `docs/scripts_and_configs.md` §2.3 alike. "At or under `lsd_truth_floor`" is
+  therefore *not* the pass criterion — and neither number is a threshold at
+  all, since the metrics doc sets no acceptance level for the LSD.
 - `spectral_metrics` is computed above the `skip_viz` gate, unlike the other
   metric blocks.
+- **`spectral_metrics` emits ten keys, not the three the plan names.** The
+  spec above asks for `{lsd_posterior_median, lsd_truth_floor, f_cutoff}`;
+  `spectral_metric_summary` emits nine unconditionally — `n_sensors`,
+  `n_members`, `n_band_bins`, `f_cutoff`, `segment_seconds`, `sample_frequency`
+  (a per-record dict), `lsd_posterior_median`, `lsd_truth_floor`,
+  `lsd_truth_floor_comparable` — plus `lsd_prior_median` when the run included
+  prior probe records. That is seven beyond the plan, and the overshoot is
+  recorded rather than trimmed because each one answers a question the three
+  planned keys leave open on a real run: `lsd_truth_floor_comparable` is the
+  reference the reader is actually told to score against (above);
+  `n_band_bins` and `segment_seconds` are what say whether the LSD was measured
+  over a decade or over the 4-bin refusal floor; `sample_frequency` is what lets
+  a reader recover the per-record cadence offset the deviation above describes;
+  `n_sensors` / `n_members` are what the medians were taken over. Additive
+  within a new block, so invariant 1 is unaffected — but the plan's schema line
+  is not the shipped schema, and this is the record of that.
 
-**Found while implementing, deferred to their own PRs (not fixed here)**
+**Found while implementing, each fixed in its own reviewed pylbm PR**
 
-- **pylbm restart filename width.** The pinned Fortran reads
-  `restart_0000_<it:i6.6>.uf` while pylbm writes `:09d`. A Python-authored warm
-  start is therefore invisible, and when a stale 6-digit restart at the same
-  iteration exists — which is exactly the rollout case, since the solver writes
-  one at the end of every window — it is read *instead*, silently discarding
-  the state Python supplied. So every pylbm ESMDA rollout warm start has been
-  restarting from the solver's own previous-window field; for
-  `esmda/smoother=state_and_parameter|state_and_dynamic` the state update is
+Two backend bugs surfaced in the WP3.1 verification run and were deferred out of
+this WP as needing their own reviewed PRs. Both landed on 2026-08-07, before
+this branch was merged, along with a third that the first one uncovered. All
+three are recorded in the master plan's "Outside the WP list" section; this is
+the phase-3 view of how they were found.
+
+- **pylbm restart filename width — PR #112 (`bea72c3`).** The pinned Fortran
+  reads `restart_0000_<it:i6.6>.uf` while pylbm wrote `:09d`. A Python-authored
+  warm start was therefore invisible, and when a stale 6-digit restart at the
+  same iteration existed — which is exactly the rollout case, since the solver
+  writes one at the end of every window — it was read *instead*, silently
+  discarding the state Python supplied. So every pylbm ESMDA rollout warm start
+  had been restarting from the solver's own previous-window field; for
+  `esmda/smoother=state_and_parameter|state_and_dynamic` the state update was
   discarded outright. Observed directly in the WP3.1 verification run (a member
-  dir holding both filename widths at a stale iteration). `run_probe_series.py`
-  hard-links both names as a local workaround; the bug itself needs a reviewed
-  pylbm PR and a cross-reference from `docs/data_assimilation.md`.
-- **A truncated member is not treated as a failure.** The same run lost a
-  member whose solver hit a Fortran `stop` (exit code **0**) after 3 of 48
-  frames. `resample_from_successes` never saw a failure, and the run died two
-  hours in inside `_stream_concat_members` on the shape mismatch. Ensembles
-  should validate frame counts before assembly.
+  dir holding both filename widths at a stale iteration). Both sides now spell
+  the width from one constant. `run_probe_series.py` had carried a local
+  workaround — `_link_restart_for_solver`, an `os.link` re-exposing the 9-digit
+  restart under the 6-digit name, plus its own overflow ceiling; **#112 deleted
+  the shim along with the bug**, so no hard link remains anywhere in the tree
+  and its coverage moved to `tests/test_pylbm_restart_filenames.py`, which pins
+  the width against the Fortran sources so it cannot drift back.
+- **A truncated member is not treated as a failure — PR #113 (`7e1c73d`).** The
+  same run lost a member whose solver hit a Fortran `stop` (exit code **0**)
+  after 3 of 48 frames. `resample_from_successes` never saw a failure, and the
+  run died two hours in inside `_stream_concat_members` on the shape mismatch.
+  The wrapper now checks the frame count against the cadence-derived expected
+  count and reports a short member as a member failure, so the substitution
+  machinery sees it at the window that produced it.
+- **The restart template was never read — PR #114 (`fae5dc0`),** uncovered by
+  #112 (whose fix also corrected the template lookup's filename width). See the
+  master plan; it changed what a pylbm warm start physically is, so it bears on
+  every pylbm number this phase's probe reruns produce.
+
+**Branch review round 3 (2026-08-07, `be1433e`).** Not a WP review: an
+eight-agent adversarial sweep over the *whole* `esmda-evaluation` branch after
+every WP had merged, which confirmed the plan is fully implemented and found six
+blockers. One is phase 3's; the rest are recorded in the phase-1 and phase-2
+plans and in the master plan's filtering section.
+
+- **The shipped probe cadence produced exactly the refusal floor.**
+  `probes.output_frequency: 1.0` over the plan's nominal 300 s window gives 300
+  samples and **4** scored bins — `_MIN_BAND_BINS` itself — spanning 0.027 to
+  0.108 Hz, about 0.6 of a decade. At `U ~ 8 m/s` over 14 m blocks that band is
+  the *energy-containing* range, not an inertial range, so figure S4's inertial
+  reference slope (`−2/3` on the premultiplied axes, i.e. `−5/3` in `E(f)`)
+  would have been drawn beside a band that contains no inertial range at all,
+  and the LSD reported was an RMS over four bins — against this WP's own stated
+  requirement of `≳ 10³` samples. One window shorter and the metric no-ops
+  entirely, *after*
+  the solve. The default is now **0.25 s** (1200 samples, 18 bins, 1.26
+  decades), which is the value the WP3.2 spec was written against; the
+  pre-flight reports the bin count and warns below a decade. The cost is 4x the
+  transient scratch, which `conf/run_probe_series.yaml` and
+  `docs/job_scripts.md` now lead with rather than bury.
+- **The cutoff's stated rationale was wrong.** `SPECTRUM_CUTOFF_FRACTION` was
+  documented as an anti-aliasing margin. It is not one, and reading it as one
+  licenses a much coarser cadence than is safe: snapshot probing is
+  instantaneous point sampling with no anti-alias filter, so content in
+  `(fs/2, fs)` folds *mirrored* onto `(fs/2, 0)` — energy near `f ~ fs` lands
+  near **DC**, at the bottom of the scored band, where discarding the top octave
+  cannot reach it (verified: sampling `sin(2π·0.98·fs·t)` at `fs` puts the peak
+  at `0.02·fs`). What the constant actually bounds is **solver damping** — a
+  solver dissipates its own smallest resolved scales and the SGS closure bites
+  at the same end, so scoring there compares numerics against numerics — and the
+  comment now says so, with the folded power quantified (~0.2 % a decade below
+  the cutoff, ~13 % / 0.55 dB at it, against the 1–3 dB the LSD reports, and
+  largely common-mode since truth and members are sampled alike). No number
+  changed; the justification did, and with it the rule that a cadence is sized
+  from the band wanted rather than from this constant.
+
+**Branch review round 4 (2026-08-07, `a843f00`).** A four-agent review of round
+3's own fixes. Phase 3's cadence fix was verified sound as landed and the value
+is unchanged. Two follow-ups:
+
+- The sub-decade pre-flight warning round 3 added **had no test at all** — the
+  one new user-facing behaviour of that fix was unpinned. It now has one.
+- `docs/job_scripts.md` still shipped a copy-pasteable command pinning
+  `probes.output_frequency=1.0`, which would have reinstated the 4-bin refusal
+  floor the cadence change exists to prevent. Removed, and the scratch budget
+  there now leads with the 4x cost (barcelona ~103 GB/member, ~411 GB at 4
+  workers).

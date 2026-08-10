@@ -77,6 +77,38 @@ QUANTITIES = ("u", "v", "w", "vel")
 _Q_KEY = {"vel": "vel_magnitude", "u": "u", "v": "v", "w": "w"}
 _X_COORDS = ("x", "xt", "xm")
 
+# Sensor-metric keys that may be carried across the WP1.1 estimator boundary
+# (see ``_carry_forward_sensors``). Every one is estimator-*independent*: a
+# sensor count, or an RMSE of the ensemble mean -- a deterministic error with no
+# pairwise ``M**2`` term, so the fair-estimator switch left it bit-identical.
+#
+# Deliberately an explicit allowlist, not a suffix denylist. The denylist this
+# replaces (``not k.endswith("_crps")``) named a key only the recompute path
+# below ever emits: summaries have carried ``velocity_vector_{rmse,
+# energy_score}`` since ec39233, and neither name ends in ``_crps``, so the
+# biased energy score would have been carried into a file stamped
+# ``metrics_version: 2``.
+#
+# In practice it never was. This branch runs only when ``truth_access.yaml`` is
+# absent, and run_esmda has written that file unconditionally since 5d3b697
+# (two days before ec39233) -- so a run dir that reaches here predates the
+# rename and can only carry ``vel_magnitude_crps``, which the denylist did
+# drop. The allowlist is hardening against the *next* score key, not a repair:
+# it fails closed, dropping anything nobody has vouched for, which is exactly
+# what the denylist did not do.
+_CARRYABLE_SENSOR_KEYS = frozenset(
+    {
+        "num_sensors",
+        # Pre-ec39233 run_esmda summaries, and this script's own recompute path.
+        "vel_magnitude_rmse",
+        "u_rmse",
+        "v_rmse",
+        "w_rmse",
+        # ec39233 onward (compute_esmda_metrics' full-vector sensor block).
+        "velocity_vector_rmse",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Truth access (mirrors run_esmda.py's lazy view, driven by truth_access.yaml)
@@ -264,6 +296,23 @@ def _save_sensor_timeseries(out_run, name, coords, truth_q, prior_q, post_q):
 # ---------------------------------------------------------------------------
 
 
+def _carry_forward_sensors(legacy: dict) -> tuple[dict, list[str]]:
+    """Keep the estimator-independent sensor scores of a pre-WP1.1 summary.
+
+    Returns ``(carried, dropped_keys)``. Everything outside
+    :data:`_CARRYABLE_SENSOR_KEYS` is dropped: those values came from the biased
+    ``M**2`` pairwise estimator and sit ~O(1/M) above the fair ones, so plotting
+    them beside freshly scored runs turns the estimator bias into a spurious
+    trend along the ensemble-size axis the sweeps exist to probe -- and the
+    mixed-version guard cannot catch it once the file is stamped version 2.
+    """
+    carried, dropped = {}, set()
+    for name, entry in legacy.items():
+        carried[name] = {k: v for k, v in entry.items() if k in _CARRYABLE_SENSOR_KEYS}
+        dropped |= {k for k in entry if k not in _CARRYABLE_SENSOR_KEYS}
+    return carried, sorted(dropped)
+
+
 def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     """Compute every metric + time series for one run; returns a short status dict."""
     out_run.mkdir(parents=True, exist_ok=True)
@@ -275,9 +324,11 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
 
     metrics: dict = {
         # Every ensemble score in this file is recomputed below by the current
-        # (fair-estimator) library code; the only block copied from the run's
-        # own summary is the state RMSE, which no estimator change touches. So
-        # the marker is unconditionally the current version.
+        # (fair-estimator) library code. The blocks copied from the run's own
+        # summary are the state RMSE and -- when the sensors cannot be
+        # recomputed -- the estimator-independent sensor keys, neither of which
+        # any estimator change touches. So the marker is unconditionally the
+        # current version.
         "metrics_version": METRICS_VERSION,
         "configuration": summary.get("configuration", {}),
         "timing": summary.get("timing", {}),
@@ -344,23 +395,24 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
         metrics["sensor_metrics"] = sensor_metrics
     else:
         # No truth_access (pre-update run), so nothing can be recomputed here.
-        # Carry forward only the scores whose definition the estimator change
-        # did not touch -- the RMSE of the ensemble mean has no pairwise term
-        # and stays comparable across the version boundary. The CRPS keys are
-        # dropped rather than copied: one ``metrics_version`` cannot describe a
-        # file whose parameter block is fair and whose sensor block is not, so
-        # copying them would make the comparison script either compare across
-        # the boundary in silence or warn about runs that are in fact
-        # comparable.
+        # Carry forward only the estimator-independent scores, so the file the
+        # comparison script reads holds no v1-derived pairwise number and the
+        # ``metrics_version: 2`` stamp above stays honest. What was dropped to
+        # earn that stamp is recorded next to the block rather than left to be
+        # inferred from a missing key -- an empty CRPS panel otherwise looks
+        # like a metric that failed rather than one that was withheld.
         legacy = summary.get("sensor_metrics", {}) or {}
-        carried = {
-            name: {k: v for k, v in entry.items() if not k.endswith("_crps")}
-            for name, entry in legacy.items()
-        }
+        carried, dropped = _carry_forward_sensors(legacy)
         if carried:
             metrics["sensor_metrics"] = carried
+            metrics["sensor_metrics_provenance"] = {
+                "recomputed": False,
+                "carried_from_metrics_version": int(summary.get("metrics_version", 1)),
+                "dropped_keys": dropped,
+            }
         status["note"] = (
-            "no truth_access.yaml -> sensor RMSE carried over, CRPS omitted "
+            "no truth_access.yaml -> estimator-independent sensor metrics "
+            f"carried over, {len(dropped)} estimator-dependent key(s) omitted "
             "(re-run ESMDA)"
         )
 

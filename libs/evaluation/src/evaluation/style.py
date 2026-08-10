@@ -13,16 +13,10 @@ repo keeps its data is the caller's business.
 Populated in WP0.2 (move).
 """
 
-# mypy: ignore-errors
-# Moved wholesale in WP0.2 from ``scripts/figspec/style.py`` and the pure
-# geometry of ``scripts/figspec/mask.py`` -- largely unannotated code predating
-# the strict mypy config. Waived rather than annotated as part of a pure
-# refactor; dropping the waiver is later cleanup. The WP1.5 additions
-# (:func:`finite_limits`, :func:`nested_bands`) and the save helpers are fully
-# annotated and pass the strict config on their own -- checked by deleting this
-# line, which leaves 6 errors, all in the moved code (``shade_windows``,
-# ``mark_windows``, ``band``, ``write_table`` and its two closures) -- but the
-# waiver covers them too, so nothing enforces it.
+# WP0.2 moved this module out of ``scripts/figspec/style.py`` and the pure
+# geometry of ``scripts/figspec/mask.py`` under a file-level
+# ``# mypy: ignore-errors``. The waiver is gone: the moved functions are
+# annotated and the module passes the repo's strict config on its own.
 
 from __future__ import annotations
 
@@ -38,6 +32,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 
 # ---------------------------------------------------------------------------
 # §2.1 Colours (UrbanAIR palette)
@@ -140,7 +135,7 @@ def apply_style() -> None:
 # ---------------------------------------------------------------------------
 
 
-def shade_windows(ax, edges: np.ndarray | None) -> None:
+def shade_windows(ax: Axes, edges: np.ndarray | None) -> None:
     """Light alternating shading of assimilation windows (subtle)."""
     if edges is None:
         return
@@ -148,7 +143,7 @@ def shade_windows(ax, edges: np.ndarray | None) -> None:
         ax.axvspan(edges[k], edges[k + 1], color="0.93", zorder=0)
 
 
-def mark_windows(ax, edges: np.ndarray | None, *, annotate: bool = True) -> None:
+def mark_windows(ax: Axes, edges: np.ndarray | None, *, annotate: bool = True) -> None:
     """Thin dashed grey vertical lines at window boundaries + window indices."""
     if edges is None:
         return
@@ -178,7 +173,19 @@ def mark_windows(ax, edges: np.ndarray | None, *, annotate: bool = True) -> None
             )
 
 
-def band(ax, x, mean, std, color, *, alpha=0.25, label=None, lw=2.0, ls="-", nsig=1.0):
+def band(
+    ax: Axes,
+    x: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray | None,
+    color: str,
+    *,
+    alpha: float = 0.25,
+    label: str | None = None,
+    lw: float = 2.0,
+    ls: str = "-",
+    nsig: float = 1.0,
+) -> Line2D:
     """Mean line + ±nσ shaded band in a single colour."""
     x = np.asarray(x, dtype=float)
     mean = np.asarray(mean, dtype=float)
@@ -381,7 +388,7 @@ def save_png(
 
 
 def write_table(
-    path_stem,
+    path_stem: str | pathlib.Path,
     header: list[str],
     rows: list[list],
     *,
@@ -409,7 +416,7 @@ def write_table(
             w.writerow(r)
 
     # Identify best cell per flagged numeric column.
-    def col_vals(c):
+    def col_vals(c: int) -> np.ndarray:
         out = []
         for r in rows:
             try:
@@ -428,7 +435,7 @@ def write_table(
         if np.isfinite(v).any():
             best[c] = int(np.nanargmax(v))
 
-    def fmt_cell(v):
+    def fmt_cell(v: object) -> str:
         if isinstance(v, float):
             return f"{v:.3g}"
         if isinstance(v, (int, np.integer)):

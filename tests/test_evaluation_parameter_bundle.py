@@ -32,11 +32,13 @@ from __future__ import annotations
 
 import math
 import pathlib
+import warnings
 
 import numpy as np
 import pytest
 import xarray
 from evaluation.scores import (
+    _skill_score,
     calibrated_z_std,
     compute_parameter_bundles,
     compute_parameter_metrics,
@@ -309,17 +311,23 @@ def test_z_score_stats_has_no_std_for_a_single_knot() -> None:
 
 
 def _param_dataset(**members: list[list[float]]) -> xarray.Dataset:
-    n_members = len(next(iter(members.values())))
+    # The knot grid is read off the rows, so a test that needs three knots just
+    # passes three columns; two columns reproduce the original [0.0, 1.0] grid.
+    rows = next(iter(members.values()))
     return xarray.Dataset(
-        {name: (("ensemble", "time"), rows) for name, rows in members.items()},
-        coords={"ensemble": np.arange(n_members), "time": [0.0, 1.0]},
+        {name: (("ensemble", "time"), values) for name, values in members.items()},
+        coords={
+            "ensemble": np.arange(len(rows)),
+            "time": np.arange(len(rows[0])) * 1.0,
+        },
     )
 
 
 def _truth_dataset(**values: list[float]) -> xarray.Dataset:
+    n_knots = len(next(iter(values.values())))
     return xarray.Dataset(
         {name: (("time",), series) for name, series in values.items()},
-        coords={"time": [0.0, 1.0]},
+        coords={"time": np.arange(n_knots) * 1.0},
     )
 
 
@@ -447,6 +455,124 @@ def test_a_differently_sampled_prior_drops_only_the_prior_relative_entries() -> 
     assert summary["inflow_angle"]["z_score"]["n"] == 2
 
 
+# ---------------------------------------------------------------------------
+# Skill scores on a run with a diverged member
+# ---------------------------------------------------------------------------
+#
+# A member that blows up is `nan` from then on, and the parameter block's skill
+# scores are the numbers used to argue that assimilation helped. Two ways they
+# lie about a `nan`: they reach the YAML as a bare `.nan` (which reads as a
+# measured value to anything that does not check `isfinite`), and they average
+# the posterior over the knots that survived while averaging the prior over all
+# of them -- a ratio of two different horizons, inflated exactly when the knot
+# that was dropped is the hard one.
+
+
+def _diverged_run(
+    post_last_knot_only: bool,
+) -> tuple[xarray.Dataset, xarray.Dataset, xarray.Dataset]:
+    """A three-knot run whose first posterior member is non-finite.
+
+    ``post_last_knot_only`` diverges it at the final knot alone (so posterior
+    and prior stay finite on a *different* set of knots); otherwise the member
+    is ``nan`` throughout (so no knot survives at all). The prior's error grows
+    sharply over the knots, which is what makes the mixed-horizon skill score
+    read *better* than the honest one.
+    """
+    nan = math.nan
+    diverged = [-0.5, -0.5, nan] if post_last_knot_only else [nan, nan, nan]
+    posterior = _param_dataset(
+        inflow_angle=[
+            diverged,
+            [0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.5],
+            [1.0, 1.0, 1.0],
+            [1.5, 1.5, 1.5],
+        ]
+    )
+    prior = _param_dataset(
+        inflow_angle=[
+            [-6.0, -6.0, -20.0],
+            [-3.0, -3.0, -10.0],
+            [-1.0, -1.0, -4.0],
+            [3.0, 3.0, 12.0],
+            [7.0, 7.0, 28.0],
+        ]
+    )
+    truth = _truth_dataset(inflow_angle=[0.0, 0.0, 0.0])
+    return posterior, prior, truth
+
+
+def test_the_skill_score_is_silent_when_no_knot_is_finite_in_both() -> None:
+    # The all-nan path used to reach `np.nanmean` and print "Mean of empty
+    # slice" to stderr from inside a metric stage, where it reads as a crash.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        prior_mean, skill = _skill_score(
+            np.array([1.0, 2.0, 3.0]), np.full(3, np.nan), "inflow_angle", "RMSE"
+        )
+
+    assert math.isnan(prior_mean)
+    assert skill is None
+
+
+def test_the_skill_score_never_averages_over_two_different_knot_sets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    posterior, prior, truth = _diverged_run(post_last_knot_only=True)
+    m = compute_parameter_metrics(posterior, truth, prior)["inflow_angle"]
+    common = np.isfinite(m["rmse"]) & np.isfinite(m["prior_rmse"])
+    assert common.tolist() == [True, True, False]  # the fixture does its job
+
+    with caplog.at_level("WARNING"):
+        entry = parameter_metric_summary(posterior, truth, prior)["inflow_angle"]
+
+    honest = 1.0 - m["rmse"][common].mean() / m["prior_rmse"][common].mean()
+    mixed = 1.0 - m["rmse"][common].mean() / np.nanmean(m["prior_rmse"])
+    # The dropped knot is the one the prior was worst at, so scoring the two
+    # halves over their own knots credits the posterior for a knot it never
+    # produced. Both readings are numbers; only one of them is a skill score.
+    assert honest < mixed
+    assert entry["rmse_reduction_vs_prior"] == pytest.approx(float(honest))
+    # The reported reference is the denominator that was actually used.
+    assert entry["prior_rmse_mean"] == pytest.approx(
+        float(m["prior_rmse"][common].mean())
+    )
+    assert "knots finite in both" in caplog.text
+
+
+def test_a_diverged_member_leaves_the_skill_null_rather_than_nan() -> None:
+    # Nothing is finite in both series, so there is no horizon to score over:
+    # `null`, and in particular not a `prior_rmse_mean` that looks measured
+    # while its posterior counterpart is missing.
+    posterior, prior, truth = _diverged_run(post_last_knot_only=False)
+
+    entry = parameter_metric_summary(posterior, truth, prior)["inflow_angle"]
+
+    assert entry["rmse"] is None
+    for key in (
+        "prior_rmse_mean",
+        "rmse_reduction_vs_prior",
+        "prior_crps_mean",
+        "crps_reduction_vs_prior",
+    ):
+        assert entry[key] is None, key
+
+
+def test_an_all_nan_prior_reports_a_null_reference_rather_than_nan() -> None:
+    # The mirror image: a prior artifact that exists but carries no usable
+    # values. The reference mean is undefined, not zero and not "nan".
+    posterior, prior, truth = _diverged_run(post_last_knot_only=True)
+    prior = prior * math.nan
+
+    entry = parameter_metric_summary(posterior, truth, prior)["inflow_angle"]
+
+    assert entry["prior_rmse_mean"] is None
+    assert entry["rmse_reduction_vs_prior"] is None
+    assert entry["prior_crps_mean"] is None
+    assert entry["crps_reduction_vs_prior"] is None
+
+
 def test_run_summary_serializes_the_calibration_block(tmp_path: pathlib.Path) -> None:
     # End to end through the real metric stage: the values must survive
     # yaml.safe_dump as plain scalars, and the degenerate ones must land as
@@ -486,4 +612,35 @@ def test_run_summary_serializes_the_calibration_block(tmp_path: pathlib.Path) ->
     # would also arrive here as null. The array-level guard is pinned by
     # test_a_pinned_parameter_yields_null_rather_than_infinite_ratios; what
     # this adds is that the null survives yaml.safe_dump.
+    assert ".inf" not in text and ".nan" not in text
+
+
+def test_run_summary_writes_no_nan_when_a_member_diverged(
+    tmp_path: pathlib.Path,
+) -> None:
+    # The sibling above only proves the file is clean on an *all-finite* run,
+    # which is the one run that cannot produce a `.nan` in the first place.
+    # This one is the degenerate case the guards exist for: one member is nan
+    # from the start, so every posterior score is undefined while the prior's
+    # is not.
+    from scripts.esmda._esmda_common import read_yaml, write_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = tmp_path / "run"
+    (run_dir / "windows").mkdir(parents=True)
+    write_yaml({"run": {"skip_viz": True}}, run_dir / "config.yaml")
+    write_yaml({"configuration": {"ensemble_size": 5}}, run_dir / "run_info.yaml")
+    posterior, prior, truth = _diverged_run(post_last_knot_only=False)
+    posterior.to_netcdf(run_dir / "posterior_params.nc")
+    prior.to_netcdf(run_dir / "prior_params.nc")
+    truth.to_netcdf(run_dir / "true_params.nc")
+
+    compute_metrics(run_dir)
+    written = read_yaml(run_dir / "run_summary.yaml")["parameter_metrics"]
+
+    entry = written["inflow_angle"]
+    assert entry["rmse_reduction_vs_prior"] is None
+    assert entry["prior_rmse_mean"] is None
+    text = (run_dir / "run_summary.yaml").read_text()
+    assert "rmse_reduction_vs_prior: null" in text
     assert ".inf" not in text and ".nan" not in text

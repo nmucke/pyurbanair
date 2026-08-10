@@ -303,6 +303,145 @@ def test_probe_models_are_built_under_their_own_experiment_name(
     assert run_probe_series._PROBE_EXPERIMENT != "runcase"
 
 
+def test_member_clones_never_inherit_a_restart_they_did_not_produce(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compose_test_cfg: Callable[..., DictConfig],
+) -> None:
+    """A SECOND invocation must not seed the members from the first truth solve.
+
+    Cloning before the truth runs protects only the FIRST invocation. The truth
+    model shares the probe experiment dir with the clone template, and
+    ``_probe_window``'s `finally` prunes restarts but keeps the LATEST -- so a
+    finished invocation leaves the truth's final restart in
+    ``probe_runcase/restart/``. ``create_new_forward_model`` copies the whole
+    experiment dir into every clone, and ``_prepare_warmstart`` then reads the
+    newest restart it finds as the ghost-cell / non-equilibrium template and takes
+    ``nt0`` from its iteration -- i.e. the truth's own stress field on the member
+    side of a truth-vs-member diagnostic, which biases the LSD optimistically.
+
+    The leftover clone dir from an aborted invocation (``clone_root`` is only
+    removed on success, and the copy is ``dirs_exist_ok=True``) is the same bug
+    with a stale MEMBER restart, so it is checked here too.
+
+    Driven through the real ``create_new_forward_model`` -- the copy IS the
+    mechanism -- with only ``get_lbm_directory_paths`` stubbed, so no LBM build
+    tree is resolved and nothing compiles.
+    """
+    import dataclasses
+
+    from pylbm.utils import forward_model_utils
+    from pylbm.utils.warm_start_utils import RESTART_FILE_PATTERN, restart_file_name
+
+    from scripts.esmda import run_probe_series
+
+    @dataclasses.dataclass
+    class _Dirs:
+        """The fields ``create_new_forward_model`` and the pruning helpers read."""
+
+        temp_dir: pathlib.Path
+        case_dir: pathlib.Path
+        experiment_base_dir: pathlib.Path
+        experiment_dir: pathlib.Path
+        output_dir: pathlib.Path
+        experiment_name: str
+        cwd: pathlib.Path
+        results_dir: pathlib.Path | None = None
+
+    def _fake_dirs(
+        temp_dir: pathlib.Path,
+        case_dir: pathlib.Path,
+        experiment_name: str,
+        experiment_base_dir: pathlib.Path | None = None,
+        results_dir: pathlib.Path | None = None,
+    ) -> _Dirs:
+        base = pathlib.Path(experiment_base_dir or (temp_dir / "experiment"))
+        return _Dirs(
+            temp_dir=pathlib.Path(temp_dir),
+            case_dir=pathlib.Path(case_dir),
+            experiment_base_dir=base,
+            experiment_dir=base / experiment_name,
+            output_dir=base / experiment_name / "output",
+            experiment_name=experiment_name,
+            cwd=pathlib.Path(temp_dir),
+            results_dir=results_dir,
+        )
+
+    monkeypatch.setattr(forward_model_utils, "get_lbm_directory_paths", _fake_dirs)
+
+    # --- the state a finished (and an aborted) previous invocation leaves behind
+    truth_restart = restart_file_name(1234)
+    truth_bytes = b"the truth solve's final field"
+    experiment_dir = tmp_path / "experiment" / run_probe_series._PROBE_EXPERIMENT
+    (experiment_dir / "restart").mkdir(parents=True)
+    (experiment_dir / "restart" / truth_restart).write_bytes(truth_bytes)
+    # A non-restart artifact of the same dir: the clone still needs everything
+    # else the template holds, so a fix that skips the copy fails here.
+    (experiment_dir / "infile.in").write_text("experiment probe_runcase\n")
+
+    stale_member_restart = restart_file_name(900)
+    stale_clone_restart_dir = tmp_path / "probe_experiments" / "000" / "restart"
+    stale_clone_restart_dir.mkdir(parents=True)
+    (stale_clone_restart_dir / stale_member_restart).write_bytes(b"aborted member 000")
+
+    class _Template:
+        """Stands in for the compiled template model; only its dirs are used."""
+
+        def __init__(self) -> None:
+            self.dirs = _fake_dirs(
+                temp_dir=tmp_path,
+                case_dir=tmp_path / "case",
+                experiment_name=run_probe_series._PROBE_EXPERIMENT,
+            )
+
+    template = _Template()
+
+    def _spy(target: object, **kwargs: object) -> object:
+        # `prepare` (the compile step) is a no-op here; the constructor returns
+        # the template whose experiment dir already holds the truth's restart.
+        return None if "forward_model" in kwargs else template
+
+    monkeypatch.setattr(run_probe_series, "instantiate", _spy)
+    cfg = compose_test_cfg(_ESMDA_MODE, config_name="run_probe_series")
+
+    models, clone_root = run_probe_series._member_models(
+        cfg, 2, sim_time=3.0, output_frequency=1.0, spinup_time=0.0
+    )
+
+    assert len(models) == 2
+    for model in models:
+        clone_dir = model.dirs.experiment_dir
+        assert (clone_dir / "infile.in").exists(), (
+            "the clone lost the rest of the template's experiment dir, which the "
+            "solver needs"
+        )
+        inherited = [
+            path.name
+            for path in (clone_dir / "restart").glob("*")
+            if RESTART_FILE_PATTERN.match(path.name)
+        ]
+        assert inherited == [], (
+            f"clone {clone_dir.name} inherited restart(s) {inherited} it did not "
+            "produce; _prepare_warmstart would read the newest as its "
+            "non-equilibrium template and take nt0 from it"
+        )
+    # Named explicitly, so the assertion above cannot pass by (say) matching the
+    # wrong filename width: the truth's bytes must be nowhere in the clone tree.
+    assert not [
+        path
+        for path in clone_root.rglob("*")
+        if path.is_file() and path.read_bytes() == truth_bytes
+    ], "the truth solve's restart file was copied into a member clone verbatim"
+
+    # The member's OWN warm start is untouched: `_probe_window` still writes the
+    # member's restart from the window state it was handed. What must not survive
+    # is a restart from a run that is not this member's, in this invocation.
+    assert not (stale_clone_restart_dir / stale_member_restart).exists(), (
+        "a leftover clone from an aborted invocation kept its old restart, so "
+        "this member's nt0 continues a run it did not make"
+    )
+
+
 def test_window_snapshots_rejects_a_run_that_died_in_the_lead_in() -> None:
     """A stop inside the lead-in still leaves enough on-grid frames to slice.
 
@@ -344,3 +483,132 @@ def test_window_snapshots_rejects_a_hole_in_the_kept_window() -> None:
         _window_snapshots(
             holed, iout=iout, n_window=n_window, expected_total=len(holed)
         )
+
+
+# ---------------------------------------------------------------------------
+# The pre-flight cadence check
+# ---------------------------------------------------------------------------
+#
+# `run` reports the band the requested cadence will buy BEFORE any solver runs,
+# because the alternative is 20 minutes of solving followed by a `spectral_metrics`
+# that no-ops (below the refusal floor) or an S4 panel with a `-5/3` guide drawn
+# over four bins (above the floor, under a decade). The floor branch is a hard
+# fact the metric side already pins; the sub-decade branch is advice, which is
+# exactly the kind of branch that can be deleted without a single test noticing.
+#
+# Driven through `run` rather than through a helper: the numbers behind the
+# warning (`sim_time` from truth_access.yaml, the cadence from the probes config)
+# are read there and nowhere else, so a check extracted into a unit would stop
+# covering the wiring that decides whether it fires at all.
+
+
+class _StopBeforeSolving(Exception):
+    """Raised in place of the probe points, to end `run` after the pre-flight."""
+
+
+def _probe_run_dir(tmp_path: pathlib.Path, *, sim_time: float) -> pathlib.Path:
+    """The least of an ESMDA run dir `run` reads before its cadence report.
+
+    No config.yaml on purpose: `_check_config_matches_run` degrades to a warning
+    without one (invariant 3), which keeps this fixture from having to reproduce
+    a composed config just to get past a guard that is not under test.
+    """
+    from scripts.esmda._esmda_common import write_yaml
+
+    run_dir = tmp_path / "run"
+    (run_dir / "windows").mkdir(parents=True)
+    write_yaml(
+        {
+            "true_state_path": str(run_dir / "true_state.nc"),
+            "num_windows": 1,
+            "sim_time": sim_time,
+            "n_per_window": 4,
+            "truth_solver_name": "pylbm",
+        },
+        run_dir / "truth_access.yaml",
+    )
+    xarray.Dataset(
+        {"velocity_magnitude": (("ensemble",), np.array([5.0, 6.0]))},
+        coords={"ensemble": [0, 1]},
+    ).to_netcdf(run_dir / "windows" / "window_0_posterior_params.nc")
+    return run_dir
+
+
+@pytest.mark.parametrize("at_the_decade", [False, True])  # type: ignore[misc]
+def test_run_warns_when_the_cadence_buys_less_than_a_decade_of_band(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    compose_test_cfg: Callable[..., DictConfig],
+    at_the_decade: bool,
+) -> None:
+    """Sized off the library's own inversion, not off numbers copied out of it.
+
+    `minimum_spectral_samples(SPECTRAL_BAND_DECADE_BINS)` IS the boundary the
+    branch tests, so the two cases are "one sample count at it" and "one below
+    it": a change to `SPECTRUM_SEGMENTS` or the cutoff fraction moves the test
+    with the code instead of turning it into a false failure.
+    """
+    import logging
+
+    from evaluation.turbulence import (
+        SPECTRAL_BAND_DECADE_BINS,
+        minimum_spectral_samples,
+        spectral_band_bins,
+    )
+
+    from scripts.esmda import run_probe_series
+
+    decade = minimum_spectral_samples(SPECTRAL_BAND_DECADE_BINS)
+    # Below: the hard refusal floor itself, which is the widest band that is
+    # still under a decade -- so this case cannot pass by tripping the floor
+    # branch instead (that one fires strictly below it).
+    n_samples = decade if at_the_decade else minimum_spectral_samples()
+    assert n_samples <= decade
+    cadence = 1.0
+
+    run_dir = _probe_run_dir(tmp_path, sim_time=float(n_samples) * cadence)
+    cfg = compose_test_cfg(
+        [
+            *_ESMDA_MODE,
+            f"probes.run_dir={run_dir}",
+            "probes.window_index=0",
+            f"probes.output_frequency={cadence}",
+        ],
+        config_name="run_probe_series",
+    )
+
+    def _stop(*args: object, **kwargs: object) -> object:
+        raise _StopBeforeSolving
+
+    # The report is the last thing before the probe points are built, so this
+    # ends the run there: no solver, no clones, no compile.
+    monkeypatch.setattr(run_probe_series, "_probe_points", _stop)
+
+    with caplog.at_level(logging.INFO, logger=run_probe_series.__name__):
+        with pytest.raises(_StopBeforeSolving):
+            run_probe_series.run(cfg)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    band = [message for message in warnings if "frequency bins" in message]
+    # The floor branch must not be what fired: it says the numbers will not be
+    # produced at all, which is a different (and here false) statement.
+    assert not [m for m in warnings if "no-op" in m], warnings
+
+    if at_the_decade:
+        assert not band, (
+            "a cadence that buys the full decade is warned about anyway, which "
+            f"makes the warning noise the next caller learns to ignore: {band}"
+        )
+        assert spectral_band_bins(n_samples) >= SPECTRAL_BAND_DECADE_BINS
+    else:
+        assert band, (
+            f"{n_samples} samples score {spectral_band_bins(n_samples)} bins -- "
+            "under the decade a -5/3 reading needs -- and the re-run says "
+            f"nothing about it: {warnings}"
+        )
+        # It has to carry the two numbers a caller acts on: how wide the band
+        # actually is, and the cadence that would widen it to a decade.
+        message = band[0]
+        assert f"{spectral_band_bins(n_samples)} frequency bins" in message
+        assert f"{n_samples} samples" in message

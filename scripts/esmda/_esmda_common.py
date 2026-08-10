@@ -482,6 +482,16 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
     diagnostic while every other block in the same ``run_summary.yaml`` covered
     only the current windows.
 
+    **And by the run's own ``save_obs_diagnostics``**, read from
+    ``run_info.yaml``. The window-count bound above catches a *shrinking* rerun;
+    it cannot catch one that merely turned the flag off — which
+    ``conf/run_esmda.yaml`` offers as the way to reproduce the pre-phase-2
+    artifact set exactly — because the leftover files then still match this run's
+    window count. Deciding on file existence alone would put the *previous*
+    assimilation's mismatch beside this run's parameter and state metrics, and
+    draw D3 from it. An absent flag (a run dir written before WP2.1) means
+    unknown, not false, and falls through to the files.
+
     ``None``, with the reason logged, when the run has no such files — every run
     dir written before WP2.1 or with ``esmda.save_obs_diagnostics=false``.
     """
@@ -489,6 +499,16 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
 
     run_dir = pathlib.Path(run_dir)
     windows_dir = run_dir / "windows"
+    configuration = read_yaml(run_dir / "run_info.yaml").get("configuration") or {}
+    if configuration.get("save_obs_diagnostics") is False:
+        if any(windows_dir.glob("window_*_obs.nc")):
+            logger.warning(
+                "Ignoring the observation-space files in %s: this run set "
+                "esmda.save_obs_diagnostics=false, so they are left over from an "
+                "earlier run into the same output dir",
+                windows_dir,
+            )
+        return None
     expected = read_yaml(run_dir / "truth_access.yaml").get("num_windows")
 
     pairs = []

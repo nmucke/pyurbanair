@@ -559,7 +559,7 @@ class MeanFieldCollector:
         self.failed = False
         # Which centre axes carry an extrapolated last index, and which slab
         # cells the backend marks as solid; both are static, both are recorded
-        # on the first state seen (see :meth:`_prepare`).
+        # from the states themselves (see :meth:`_prepare`).
         self.extrapolated: tuple[str, ...] = ()
         self.solid: np.ndarray | None = None
         self._moments: dict[int, dict[str, MomentAccumulator]] = {}
@@ -610,7 +610,14 @@ class MeanFieldCollector:
         dims = _centre_dims(probe[0])
         if self.target is None:
             self.target = self._derive_target(probe[0], dims)
-            self.extrapolated = extrapolated_centre_dims(state, self.solver_name)
+        # Outside the branch above: a collector handed *another's* target (the
+        # prior and truth passes) never enters it, and :meth:`_time_block` reads
+        # this to decide whether a step materialises the full source grid --
+        # which colocation does for every member on a staggered backend. Left
+        # unset it sizes the sub-chunk source_cells/target_cells too large (64x
+        # at Barcelona shape). Static per solver and layout, so recording it on
+        # every state is a table lookup and cannot drift.
+        self.extrapolated = extrapolated_centre_dims(state, self.solver_name)
         self._record_solid(state, dims)
         return dims
 
@@ -1045,12 +1052,25 @@ def _long_name(variable: str) -> str:
     return label + (reduction.get(parts[3], "") if len(parts) > 3 else "")
 
 
+# What ``eval_fields.nc`` records when nobody says otherwise, which is every
+# ESMDA run: one per-window posterior rollout per member, written at the output
+# cadence, so the moments are within-window time averages and the figures need
+# no qualification. Only a caller whose frames are sparser than that has to pass
+# its own line (see ``moment_sampling``).
+_ESMDA_MOMENT_SAMPLING = (
+    "every output frame of each window's posterior rollout, so the moments are "
+    "within-window time averages"
+)
+
+
 def _eval_fields_dataset(
     target: _Target,
     sources: dict,
     time_span: tuple[float, float] | None = None,
     fluid: np.ndarray | None = None,
     extrapolated: tuple[str, ...] = (),
+    moment_sampling: str | None = None,
+    moment_sampling_is_sparse: bool = False,
 ) -> xarray.Dataset:
     """``eval_fields.nc``: the reduced fields the WP1.5 figures read.
 
@@ -1064,6 +1084,25 @@ def _eval_fields_dataset(
     fluid and which axes carry colocation's extrapolated edge are all here, so a
     figure never has to re-open the run's other artifacts -- or re-derive a mask
     -- to draw an honest plot.
+
+    ``moment_sampling`` is the last piece of that: WHICH frames the moments were
+    reduced over. The ESMDA pipeline has one answer and it is the default, so
+    this file's writer never has to name it; the filter has two, and one of them
+    ("one analyzed frame per cycle") makes ``*_tke`` / ``*_uw`` an across-cycle
+    variance rather than resolved turbulence. That is invisible in the numbers
+    and would otherwise be invisible on the figures too, which read this file
+    and nothing else -- so the caller's sampling line travels with the data it
+    qualifies.
+
+    ``moment_sampling_is_sparse`` is the machine-readable half of that and the
+    only thing a figure may branch on: whether those frames leave gaps in
+    ``t_start``--``t_end``, so that the moments are NOT a continuous time
+    average. It is recorded separately because the note is prose -- every
+    source has one, including the dense ones, and a figure that inferred the
+    caveat from the note's mere presence would qualify a genuine time average
+    exactly as loudly as it qualifies a three-frame one. Written as ``0``/``1``
+    rather than a Python ``bool`` because netCDF attributes have no boolean
+    type.
     """
     variables = {}
     for prefix, (result, ensemble) in sources.items():
@@ -1091,6 +1130,12 @@ def _eval_fields_dataset(
             "ensemble. Stresses are resolved-only: the subgrid contribution "
             "is not included and is not negligible inside a canopy."
         ),
+        # Read by S1 and F1 (via their ``sampling_note``) and printed as the
+        # figure's provenance line, whichever source it names.
+        "moment_sampling": moment_sampling or _ESMDA_MOMENT_SAMPLING,
+        # Read by S1 and F1 (via their ``sampling_is_sparse``) and the ONLY
+        # input that makes them stop calling the moments a time average.
+        "moment_sampling_is_sparse": int(bool(moment_sampling_is_sparse)),
         "horizontal_stride": target.stride,
         # Every axis colocation moved has its LAST index extrapolated from the
         # two faces below it rather than interpolated between two, so those cells
@@ -1173,12 +1218,18 @@ def _mean_field_block(
     truth: MeanFieldCollector,
     prior: MeanFieldCollector | None,
     time_span: tuple[float, float] | None = None,
+    moment_sampling: str | None = None,
+    moment_sampling_is_sparse: bool = False,
 ) -> dict | None:
     """Write ``eval_fields.nc`` and return the ``field_metrics`` summary block.
 
     ``None`` (with a log line) whenever the fields could not be built --
     invariant 3: a state layout colocation refuses, or a truth that shares no
     cell with the assimilation grid, costs this block and nothing else.
+
+    ``moment_sampling`` and ``moment_sampling_is_sparse`` are passed straight
+    through to :func:`_eval_fields_dataset`; both default to the ESMDA sampling
+    (named, and not sparse), so the ESMDA call site never mentions either.
     """
     posterior_fields = posterior.result()
     truth_fields = truth.result()
@@ -1201,7 +1252,13 @@ def _mean_field_block(
 
     fluid, fluid_source = _fluid_cells(posterior, truth_fields)
     _eval_fields_dataset(
-        target, sources, time_span, fluid=fluid, extrapolated=posterior.extrapolated
+        target,
+        sources,
+        time_span,
+        fluid=fluid,
+        extrapolated=posterior.extrapolated,
+        moment_sampling=moment_sampling,
+        moment_sampling_is_sparse=moment_sampling_is_sparse,
     ).to_netcdf(run_dir / "eval_fields.nc")
 
     tolerance = truth.sampling_tolerance(fluid)

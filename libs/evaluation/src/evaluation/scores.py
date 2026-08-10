@@ -19,17 +19,22 @@ larger and are **not** comparable with current ones; ``metrics_version: 2`` in
 Populated in WP0.2 (move), extended through phase 1.
 """
 
-# mypy: ignore-errors
-# Moved wholesale in WP0.2 from ``src/pyurbanair/utils/da_metrics.py``,
+# WP0.2 moved this module out of ``src/pyurbanair/utils/da_metrics.py``,
 # ``scripts/figspec/metrics.py``, ``src/pyurbanair/plotting.py`` and
-# ``scripts/esmda/_esmda_common.py`` -- largely unannotated code predating the
-# strict mypy config. Waived rather than annotated as part of a pure refactor;
-# dropping the waiver is later cleanup.
+# ``scripts/esmda/_esmda_common.py`` under a file-level
+# ``# mypy: ignore-errors``. The waiver is gone: every function here is
+# annotated and the module passes the repo's strict config on its own. The
+# summary builders return a bare ``dict`` -- these are heterogeneous YAML
+# blocks, and the pre-existing ``z_score_stats`` / ``_bundle_summary`` already
+# type them that way. What is worth pinning, and is pinned, is which of them
+# can return ``None``: a caller that unpacks the result unconditionally now
+# fails the type check rather than at run time on the one shape that nulls.
 
 from __future__ import annotations
 
 import logging
 import warnings
+from typing import Iterator, Sequence
 
 import numpy as np
 import xarray as xr
@@ -368,7 +373,7 @@ def _plotted_param_names(
     return names
 
 
-def _param_members_and_x(da: xr.DataArray):
+def _param_members_and_x(da: xr.DataArray) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(x, members)`` for a parameter, members shaped ``(n_ensemble, n_x)``.
 
     ``x`` is the ``time`` coordinate when the parameter is time-varying and
@@ -389,7 +394,7 @@ def _aligned_parameter_members(
     esmda_params: xr.Dataset,
     true_params: xr.Dataset,
     prior_params: xr.Dataset | None = None,
-):
+) -> Iterator[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]]:
     """Yield ``(name, x, members, truth_on_x, prior_members)`` per parameter.
 
     The one place the truth is put on the estimate's x-axis, so the error series
@@ -656,7 +661,7 @@ def compute_sensor_metrics(
 # ---------------------------------------------------------------------------
 
 
-def _energy_score(members, truth):
+def _energy_score(members: np.ndarray, truth: np.ndarray) -> np.ndarray:
     """Per-timestep *fair* energy score, averaged over sensors.
 
     The energy score is the multivariate generalization of the CRPS (Gneiting &
@@ -700,7 +705,9 @@ def _energy_score(members, truth):
     return es
 
 
-def vector_sensor_metrics(truth_comp, ensemble_comp):
+def vector_sensor_metrics(
+    truth_comp: xr.DataArray, ensemble_comp: xr.DataArray
+) -> dict[str, np.ndarray]:
     """Full-vector ``(u, v, w)`` sensor error, reduced over sensors per timestep.
 
     One scalar per sensor per timestep is formed from the whole velocity vector
@@ -741,7 +748,7 @@ def vector_sensor_metrics(truth_comp, ensemble_comp):
 # ---------------------------------------------------------------------------
 
 
-def series_stats(arr):
+def series_stats(arr: np.ndarray) -> dict | None:
     """{mean, final, max, min} of a 1-D series, or ``None`` if it has no values.
 
     ``final`` is the last element (the end-of-rollout value); the rest reduce
@@ -867,9 +874,50 @@ def _skill_score(
     pairwise term coincide), which is the CI smoke shape. The skill is genuinely
     undefined there, so it is emitted as ``None`` and logged rather than
     special-cased away.
+
+    **Both means are taken over the knots finite in *both* series**, never over
+    each series' own finite set. A diverged member is ``nan`` from the knot it
+    blew up at onwards while the prior stays finite everywhere, so averaging the
+    two independently builds ``1 - mean(post)/mean(prior)`` out of two different
+    horizons -- and inflates the score exactly when the knot that dropped out is
+    the hard one the prior scored worst at. Intersecting is preferred over the
+    sibling ``window_statistics_summary`` guard's outright ``None``, because a
+    knot here is one sample of a horizon rather than a whole assimilation
+    window: the surviving knots still carry a meaningful score, whereas nulling
+    would lose the parameter entirely over a single diverged member. The
+    returned reference is the mean over those same knots, so it is always the
+    denominator that was actually used -- never a full-horizon prior mean
+    standing next to a partial-horizon skill.
+
+    ``prior_mean`` is ``nan`` when no knot is finite in both (the skill is
+    ``None`` then, via the undefined branch). Callers must write that ``nan`` as
+    ``null``: a bare ``.nan`` in the YAML reads as a measured value to anything
+    that does not check. Nothing on that path warns, so no caller needs a
+    ``catch_warnings`` wrapper.
     """
-    prior_mean = float(np.nanmean(prior))
-    post_mean = float(np.nanmean(post))
+    post_knots = np.isfinite(post)
+    prior_knots = np.isfinite(prior)
+    both = post_knots & prior_knots
+    if not np.array_equal(post_knots, prior_knots):
+        logger.warning(
+            "%s: the prior %s is finite at %d knots and the posterior at %d, so "
+            "their skill score is taken over the %d knots finite in both -- it "
+            "covers less than the full horizon",
+            name,
+            what,
+            int(prior_knots.sum()),
+            int(post_knots.sum()),
+            int(both.sum()),
+        )
+    if both.any():
+        # Plain ``mean`` on the selection rather than ``nanmean`` on the whole:
+        # the empty case is handled below instead of by numpy, which reports it
+        # as a "Mean of empty slice" RuntimeWarning on stderr -- indistinguishable
+        # from a crash when it surfaces in the middle of a metric stage.
+        prior_mean = float(prior[both].mean())
+        post_mean = float(post[both].mean())
+    else:
+        prior_mean = post_mean = float("nan")
     if not prior_mean > 0:
         logger.warning(
             "%s: prior %s is %.3g, so its skill score is undefined (null). At "
@@ -893,7 +941,11 @@ def _skill_score(
 _DEFAULT_TIE_SEED = 0
 
 
-def ensemble_rank(ens: np.ndarray, truth: np.ndarray, rng=None) -> np.ndarray:
+def ensemble_rank(
+    ens: np.ndarray,
+    truth: np.ndarray,
+    rng: np.random.Generator | int | None = None,
+) -> np.ndarray:
     """Rank of the truth within an ensemble: an integer in ``[0, M]`` per knot.
 
     The third calibration view, beside the CRPS (sharpness *and* accuracy) and
@@ -958,7 +1010,12 @@ def _flat_members(members: xr.DataArray) -> np.ndarray:
     return values.reshape(values.shape[0], -1)
 
 
-def _score_window_statistic(members, truth, floor, name):
+def _score_window_statistic(
+    members: xr.DataArray,
+    truth: xr.DataArray,
+    floor: xr.DataArray | None,
+    name: str,
+) -> tuple[dict, np.ndarray]:
     """Score one statistic's ``(window, sensor)`` grid; entry + its per-window CRPS.
 
     ``members`` is ``(ensemble, window, sensor)``, ``truth`` ``(window, sensor)``
@@ -977,7 +1034,7 @@ def _score_window_statistic(members, truth, floor, name):
     z = _normalized(truth_values - member_values.mean(axis=0), spread)
     ranks = ensemble_rank(member_values, truth_values)
 
-    def _per_window(flat):
+    def _per_window(flat: np.ndarray) -> np.ndarray:
         """Sensor-averaged series over windows, from a flat ``(W*S,)`` array.
 
         A window with no frames at all (a truncated run -- invariant 3) is
@@ -1032,13 +1089,13 @@ def _score_window_statistic(members, truth, floor, name):
 
 
 def window_statistics_summary(
-    truth_stats,
-    posterior_stats,
-    prior_stats=None,
-    posterior_sampling_std=None,
-    prior_sampling_std=None,
-    label="",
-):
+    truth_stats: dict[str, xr.DataArray],
+    posterior_stats: dict[str, xr.DataArray],
+    prior_stats: dict[str, xr.DataArray] | None = None,
+    posterior_sampling_std: dict[str, xr.DataArray] | None = None,
+    prior_sampling_std: dict[str, xr.DataArray] | None = None,
+    label: str = "",
+) -> dict:
     """The ``sensor_statistics`` block for one sensor set (metrics doc §4.2).
 
     Takes the dicts :func:`evaluation.sensors.window_statistics` and
@@ -1084,7 +1141,11 @@ def window_statistics_summary(
         str(q) for q in np.asarray(posterior_stats["mean"]["quantity"].values)
     ]
 
-    def _score(stats, sampling_std, half):
+    def _score(
+        stats: dict[str, xr.DataArray],
+        sampling_std: dict[str, xr.DataArray] | None,
+        half: str,
+    ) -> tuple[dict, dict]:
         entries, raw = {}, {}
         for statistic, members in stats.items():
             for quantity in quantities:
@@ -1138,12 +1199,12 @@ def window_statistics_summary(
             entry["prior_crps_mean"] = None
             entry["crps_reduction_vs_prior"] = None
             continue
-        with warnings.catch_warnings():
-            # An all-empty prior (every window truncated away) reduces to nan.
-            warnings.simplefilter("ignore", RuntimeWarning)
-            prior_mean, skill = _skill_score(
-                posterior_crps[name], prior_crps[name], name, "sensor-statistic CRPS"
-            )
+        # An all-empty prior (every window truncated away) reduces to nan, but
+        # quietly: _skill_score handles the empty case itself rather than
+        # letting nanmean warn, so no catch_warnings wrapper is needed here.
+        prior_mean, skill = _skill_score(
+            posterior_crps[name], prior_crps[name], name, "sensor-statistic CRPS"
+        )
         # ``null``, never ``.nan``: the reductions elsewhere in this block
         # filter on ``np.isfinite``, and a bare nan in the YAML reads as a
         # measured value to anything that does not check.
@@ -1152,7 +1213,11 @@ def window_statistics_summary(
     return summary
 
 
-def parameter_metric_summary(posterior_params, true_params, prior_params):
+def parameter_metric_summary(
+    posterior_params: xr.Dataset,
+    true_params: xr.Dataset,
+    prior_params: xr.Dataset | None,
+) -> dict:
     """Per-parameter accuracy *and* calibration summary (metrics doc §3).
 
     The prior-relative entries are skill scores: ``1 - post/prior``, positive
@@ -1188,14 +1253,22 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
     summary = {}
     pooled_z: list[np.ndarray] = []
     for name, m in metrics.items():
-        entry = {"rmse": series_stats(m["rmse"]), "crps": series_stats(m["crps"])}
+        entry: dict = {
+            "rmse": series_stats(m["rmse"]),
+            "crps": series_stats(m["crps"]),
+        }
+        # ``null``, never ``.nan``, for the same reason as the window block
+        # above: a diverged member leaves every posterior knot non-finite, and a
+        # bare nan in the YAML reads as a measured value to anything that does
+        # not check. This only ever fires on a run that has no comparable knot
+        # left, so no run whose numbers meant anything changes value.
         if "prior_rmse" in m:
             prior_mean, skill = _skill_score(m["rmse"], m["prior_rmse"], name, "RMSE")
-            entry["prior_rmse_mean"] = prior_mean
+            entry["prior_rmse_mean"] = prior_mean if np.isfinite(prior_mean) else None
             entry["rmse_reduction_vs_prior"] = skill
         if "prior_crps" in m:
             prior_mean, skill = _skill_score(m["crps"], m["prior_crps"], name, "CRPS")
-            entry["prior_crps_mean"] = prior_mean
+            entry["prior_crps_mean"] = prior_mean if np.isfinite(prior_mean) else None
             entry["crps_reduction_vs_prior"] = skill
         # Same parameter selection and truth alignment as ``metrics`` (both go
         # through _aligned_parameter_members), so the lookup always hits.
@@ -1218,7 +1291,12 @@ def parameter_metric_summary(posterior_params, true_params, prior_params):
 # ---------------------------------------------------------------------------
 
 
-def hit_rate(predicted, observed, tolerance_d=0.25, tolerance_w=0.0):
+def hit_rate(
+    predicted: np.ndarray,
+    observed: np.ndarray,
+    tolerance_d: float = 0.25,
+    tolerance_w: float | np.ndarray = 0.0,
+) -> dict:
     """VDI 3783/9 hit rate ``q``: the fraction of points that match.
 
     The one standards-based number the metrics doc asks of a mean *field*. A
@@ -1313,7 +1391,9 @@ _COLLAPSE_IQR_FRACTION = 0.1
 _COLLAPSE_MIN_VALUES = 8
 
 
-def data_mismatch(obs, pred_obs, obs_error_std):
+def data_mismatch(
+    obs: np.ndarray, pred_obs: np.ndarray, obs_error_std: float | np.ndarray
+) -> np.ndarray:
     """Normalized data mismatch ``O_N`` per ensemble member (metrics doc §5).
 
     ``O_N(θ_m) = (1/2N_d)·(d − g(θ_m))ᵀ C_D⁻¹ (d − g(θ_m))`` with the
@@ -1370,7 +1450,7 @@ def data_mismatch(obs, pred_obs, obs_error_std):
         return np.nanmean(standardized, axis=0) / 2.0
 
 
-def data_mismatch_target_band(n_obs):
+def data_mismatch_target_band(n_obs: int) -> float | None:
     """Half-width ``3/√(2N_d)`` of the 3-sigma band around the ½ target.
 
     ``None`` when ``n_obs`` is not positive: there is no band without
@@ -1382,7 +1462,9 @@ def data_mismatch_target_band(n_obs):
     return float(3.0 / np.sqrt(2.0 * n))
 
 
-def _collapse_verdict(per_window, band):
+def _collapse_verdict(
+    per_window: Sequence[np.ndarray] | None, band: float | None
+) -> bool | None:
     """Whether EVERY window's final iteration shows a collapsed member spread.
 
     The collapse signature is an across-member IQR that has fallen to a fraction
@@ -1432,7 +1514,11 @@ def _collapse_verdict(per_window, band):
     return bool(verdicts and all(verdicts))
 
 
-def data_mismatch_summary(per_step, n_obs, per_window=None):
+def data_mismatch_summary(
+    per_step: Sequence[np.ndarray] | None,
+    n_obs: int,
+    per_window: Sequence[np.ndarray] | None = None,
+) -> dict | None:
     """Reduce per-iteration ``O_N`` values to the ``data_mismatch`` block.
 
     Args:
