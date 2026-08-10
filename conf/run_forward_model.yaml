@@ -25,9 +25,9 @@
 # edit their amplitude/frequency (Hz) in conf/params/ or override them on the
 # CLI for a controlled forcing experiment.
 defaults:
-  - case: xie_and_castro
+  - case: barcelona
   - params: dynamic
-  - model@model: pypalm
+  - model@model: pyudales
   - _self_
 
 # --- Output roots (everything mutable lands under .temp/) ---

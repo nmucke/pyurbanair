@@ -22,9 +22,9 @@ a mismatch, so regenerate (re-run this script) whenever you change
 
 Examples
 --------
-    pixi run python tools/preprocess_udales_geometry.py --case barcelona
+    pixi run python scripts/tools/preprocess_udales_geometry.py --case barcelona
     # override the grid for the generated bundle:
-    pixi run python tools/preprocess_udales_geometry.py --case barcelona \
+    pixi run python scripts/tools/preprocess_udales_geometry.py --case barcelona \
         --overrides domain.nx=300 domain.ny=300 domain.nz=64
 """
 
@@ -39,7 +39,7 @@ from hydra.utils import instantiate
 
 from pyudales.forward_model import save_precomputed_geometry
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CONF_DIR = PROJECT_ROOT / "conf"
 
 
