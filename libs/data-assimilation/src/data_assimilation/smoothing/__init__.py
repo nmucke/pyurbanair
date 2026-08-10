@@ -5,12 +5,14 @@ from data_assimilation.smoothing.esmda import (
     ParameterESMDA,
     StateAndParameterESMDA,
     StateAndTimeVaryingParameterESMDA,
+    StateESMDA,
     TimeVaryingParameterESMDA,
 )
 
 __all__ = [
     "BaseSmoothing",
     "ParameterESMDA",
+    "StateESMDA",
     "StateAndParameterESMDA",
     "StateAndTimeVaryingParameterESMDA",
     "TimeVaryingParameterESMDA",

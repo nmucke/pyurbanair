@@ -71,6 +71,7 @@ import dataclasses
 import pathlib
 import sys
 import time
+from typing import Any
 
 import hydra
 import jax
@@ -254,12 +255,20 @@ def run(cfg: DictConfig) -> None:
 
     # --- Filter ----------------------------------------------------------------
     rng_key, filter_key = jax.random.split(rng_key)
+    filter_overrides: dict[str, Any] = {}
+    if cfg.filtering.mode == "state":
+        # The default config selects a random-walk evolution for the parameter-
+        # updating modes. A plain `filtering.mode=state` override must remain a
+        # valid independent axis: parameters are fixed in this mode, so do not
+        # pass the otherwise-default evolution into the constructor.
+        filter_overrides["parameter_evolution"] = None
     enkf = instantiate(
         cfg.filtering.filter,
         observation_operator=assim_obs_op,
         forward_model=ensemble_model,
         C_D=C_D_diag,
         rng_key=filter_key,
+        **filter_overrides,
     )
 
     save_history = bool(cfg.run.get("save_history", True))

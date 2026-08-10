@@ -115,7 +115,8 @@ shared files):
   (`params=...`) for forward runs, twice (`params@truth_params=...`
   `params@prior_params=...`) for assimilation.
 - **`esmda/smoother/`** — the ESMDA variant: `static` (parameter-only),
-  `dynamic` (time-varying parameters), `state_and_parameter` (joint). Selected
+  `state` (state-only with fixed parameters), `dynamic` (time-varying
+  parameters), `state_and_parameter` / `state_and_dynamic` (joint). Selected
   with `esmda/smoother=...`.
 - **`filtering/`** (run_filtering only) — the sequential-EnKF machinery, one
   option per group: `filtering/analysis` (`stochastic`), `filtering/localization`
@@ -188,8 +189,9 @@ These (multi-GB) `ground_truth*` folders are gitignored.
 All data assimilation runs through a **single** script, `run_esmda.py`. The
 mode is the cross product of three declarative axes plus a truth source:
 
-- `esmda/smoother=static | state_and_parameter | dynamic` — parameter-only,
-  joint state+parameter, or time-varying-parameter Kalman update.
+- `esmda/smoother=static | state | state_and_parameter | dynamic |
+  state_and_dynamic` — parameter-only, state-only, or joint state+parameter,
+  with static or time-varying parameters as appropriate.
 - `params@prior_params=static | dynamic` (paired with the matching
   `params@truth_params=static_truth | dynamic_truth`) — static scalar
   parameters vs. a time-varying AR(2) prior.
@@ -221,6 +223,11 @@ python scripts/esmda/run_esmda.py esmda/smoother=static \
 python scripts/esmda/run_esmda.py esmda/smoother=state_and_parameter \
   params@prior_params=static params@truth_params=static_truth
 
+# State-only estimation (parameters are used by forecasts but held fixed)
+python scripts/esmda/run_esmda.py esmda/smoother=state \
+  params@prior_params=static params@truth_params=static_truth \
+  esmda/localization=distance
+
 # Rollout-based ESMDA with multiple assimilation windows
 python scripts/esmda/run_esmda.py esmda/smoother=state_and_parameter \
   params@prior_params=static esmda.num_assimilation_windows=3
@@ -237,6 +244,7 @@ python scripts/esmda/run_esmda.py esmda/smoother=dynamic \
 # Adaptive correlation localization (Vossepoel et al. 2025) is OFF by default;
 # enable it with the esmda/localization group, or set its fields:
 python scripts/esmda/run_esmda.py esmda/smoother=static \
+  esmda/localization=correlation \
   esmda.localization.truncation_correlation=0.35 esmda.localization.block_grouping=true
 
 # Fast smoke run (small domain, few steps)
@@ -248,7 +256,7 @@ python scripts/esmda/run_esmda.py model@truth_model=pylbm model@assim_model=pylb
 > **Note:** `run_esmda.yaml` defaults to the time-varying rollout
 > (`esmda/smoother=dynamic`, `params=dynamic`, `pyudales`↔`pyudales`); set the
 > axes above explicitly for the other modes. The smoother group filenames are
-> `static`/`dynamic`/`state_and_parameter`.
+> `static`/`state`/`dynamic`/`state_and_parameter`/`state_and_dynamic`.
 
 Each run writes per-window prior/posterior parameters and state, a
 `run_summary.yaml` with timing and accuracy metrics (parameter RMSE/CRPS, state

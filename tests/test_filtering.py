@@ -7,7 +7,7 @@ parameter-collapse construction guard, and the inflation / parameter-evolution
 schemes. Everything runs on toy in-memory forward models — no CFD solver.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -17,6 +17,8 @@ import xarray
 from data_assimilation.filtering import EnsembleKalmanFilter, RandomWalkEvolution
 from data_assimilation.inflation import RTPP, RTPS, MultiplicativeInflation
 from data_assimilation.localization.base import BaseLocalization
+from data_assimilation.localization.correlation import CorrelationLocalization
+from data_assimilation.localization.distance import DistanceLocalization
 
 
 class _ToyLinearModel:
@@ -102,6 +104,16 @@ class _ToyObsOp:
     def __call__(self, state: xarray.Dataset) -> jnp.ndarray:
         x = jnp.asarray(state["u"].isel(time=-1).values)  # (N_e, nx)
         return x @ self.H.T  # (N_e, N_d)
+
+
+class _CoordinateToyObsOp(_ToyObsOp):
+    """Toy operator exposing one physical sensor for distance localization."""
+
+    use_interpolation = True
+    obs_x = np.array([0.0])
+    obs_y = np.array([0.0])
+    obs_z = np.array([0.0])
+    num_sensors = 1
 
 
 class _AllOnesLocalization(BaseLocalization):
@@ -241,6 +253,38 @@ def test_parameter_mode_converges_to_truth() -> None:
     assert result.diagnostics[-1].state_spread_prior is None
 
 
+def test_parameter_mode_correlation_localizes_each_parameter() -> None:
+    """Correlation localization updates the informed param and rejects noise."""
+    n_e = 40
+    rng = np.random.default_rng(12)
+    signal = rng.standard_normal(n_e)
+    nuisance = rng.standard_normal(n_e)
+    params = xarray.Dataset(
+        {
+            "a": ("ensemble", signal),
+            "b": ("ensemble", nuisance),
+        },
+        coords={"ensemble": np.arange(n_e)},
+    )
+
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_ToyObsOp(np.array([[1.0, 0.0]])),
+        forward_model=_ParamOnlyModel(),
+        C_D=jnp.array([0.1]),
+        mode="parameter",
+        localization=CorrelationLocalization(
+            truncation_correlation=0.999, max_inflation=1.0
+        ),
+        inflation=MultiplicativeInflation(1.0),
+        rng_key=jax.random.PRNGKey(13),
+    )
+    result = enkf.run(params=params, observations=jnp.array([[2.0]]))
+
+    assert result.params is not None
+    assert not np.allclose(result.params["a"], params["a"])
+    np.testing.assert_allclose(result.params["b"], params["b"], atol=1e-7)
+
+
 # ---------------------------------------------------------------------------
 # (c) Joint mode and localization plumbing
 # ---------------------------------------------------------------------------
@@ -279,9 +323,8 @@ def test_joint_mode_all_ones_localization_matches_global() -> None:
     """All-ones localization reproduces the global joint update exactly.
 
     Exercises the filter's localize_mask/group_ids plumbing end to end: with
-    every observation kept at full weight, the per-row local analyses (and
-    the globally-updated parameter rows) must equal the unlocalized filter
-    run with the same rng key.
+    every observation kept at full weight, every per-row local analysis must
+    equal the unlocalized filter run with the same rng key.
     """
     state_glob, params_glob = _run_joint(localization=None)
     state_loc, params_loc = _run_joint(localization=_AllOnesLocalization())
@@ -319,6 +362,71 @@ def test_joint_mode_updates_both_blocks() -> None:
     assert diag.state_spread_posterior <= diag.state_spread_prior + 1e-8
 
 
+def test_joint_correlation_localizes_parameter_rows() -> None:
+    """Joint correlation localization applies to parameters, not only state."""
+    n_e = 40
+    rng = np.random.default_rng(14)
+    state = _initial_state(jax.random.PRNGKey(15), n_e, np.zeros(2), np.eye(2))
+    params = _params_dataset(rng.standard_normal(n_e))
+    common: Any = dict(
+        observation_operator=_ToyObsOp(np.array([[1.0, 0.0]])),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.array([0.1]),
+        mode="joint",
+        inflation=MultiplicativeInflation(1.0),
+        rng_key=jax.random.PRNGKey(16),
+    )
+    localized = EnsembleKalmanFilter(
+        localization=CorrelationLocalization(
+            truncation_correlation=0.999, max_inflation=1.0
+        ),
+        **common,
+    ).run(state=state, params=params, observations=jnp.array([[2.0]]))
+    global_result = EnsembleKalmanFilter(localization=None, **common).run(
+        state=state, params=params, observations=jnp.array([[2.0]])
+    )
+
+    assert localized.params is not None and global_result.params is not None
+    np.testing.assert_allclose(localized.params["a"], params["a"], atol=1e-7)
+    assert not np.allclose(global_result.params["a"], params["a"])
+
+
+def test_joint_distance_localizes_state_but_keeps_parameter_update_global() -> None:
+    """Joint distance localization changes state support, not parameter math."""
+    n_e = 40
+    signal = jax.random.normal(jax.random.PRNGKey(17), (n_e,))
+    state = xarray.Dataset(
+        {"u": (("ensemble", "x"), jnp.stack([signal, signal], axis=1))},
+        coords={"ensemble": np.arange(n_e), "x": [0.0, 10.0]},
+    )
+    params = _params_dataset(np.asarray(signal))
+    common: Any = dict(
+        observation_operator=_CoordinateToyObsOp(np.array([[1.0, 0.0]])),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.array([0.1]),
+        mode="joint",
+        inflation=MultiplicativeInflation(1.0),
+        rng_key=jax.random.PRNGKey(18),
+    )
+    localized = EnsembleKalmanFilter(
+        localization=DistanceLocalization(
+            localization_radius=0.1, max_inflation=1.0, block_grouping=False
+        ),
+        **common,
+    ).run(state=state, params=params, observations=jnp.array([[2.0]]))
+    global_result = EnsembleKalmanFilter(localization=None, **common).run(
+        state=state, params=params, observations=jnp.array([[2.0]])
+    )
+
+    assert localized.state is not None and global_result.state is not None
+    assert localized.params is not None and global_result.params is not None
+    np.testing.assert_allclose(localized.state["u"][:, 1], state["u"][:, 1], atol=1e-6)
+    assert not np.allclose(global_result.state["u"][:, 1], state["u"][:, 1])
+    np.testing.assert_allclose(
+        localized.params["a"], global_result.params["a"], atol=1e-6
+    )
+
+
 # ---------------------------------------------------------------------------
 # (d) Construction guards
 # ---------------------------------------------------------------------------
@@ -345,6 +453,16 @@ def test_parameter_mode_with_inflation_only_is_accepted() -> None:
     EnsembleKalmanFilter(
         mode="parameter", inflation=RTPS(alpha=0.5), **_dummy_filter_kwargs()
     )
+
+
+def test_parameter_mode_rejects_distance_localization() -> None:
+    with pytest.raises(ValueError, match="parameter-only"):
+        EnsembleKalmanFilter(
+            mode="parameter",
+            localization=DistanceLocalization(localization_radius=1.0),
+            inflation=MultiplicativeInflation(1.0),
+            **_dummy_filter_kwargs(),
+        )
 
 
 def test_state_mode_with_parameter_evolution_raises() -> None:

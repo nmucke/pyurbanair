@@ -13,9 +13,9 @@ grid point and the sensor location — *not* any ensemble correlation:
   strategy in standard distance-based localization", sec. 3d).
 
 Because it needs grid-point and sensor coordinates, this strategy only applies
-to the state rows of a state-bearing smoother (``state_and_parameter`` /
-``state_and_dynamic``); parameter rows have no spatial location and always get
-the global update.
+to the state rows of a state-bearing smoother (``state`` /
+``state_and_parameter`` / ``state_and_dynamic``); parameter rows have no
+spatial location and always get the global update.
 """
 
 from typing import Optional
@@ -52,6 +52,7 @@ class DistanceLocalization(BaseLocalization):
     """
 
     requires_coordinates: bool = True
+    localizes_parameters: bool = False
 
     def __init__(
         self,
@@ -87,7 +88,8 @@ class DistanceLocalization(BaseLocalization):
             raise ValueError(
                 "DistanceLocalization requires row_coords and obs_coords. "
                 "It only applies to a state-bearing smoother "
-                "(esmda/smoother=state_and_parameter or state_and_dynamic) with "
+                "(esmda/smoother=state, state_and_parameter, or "
+                "state_and_dynamic) with "
                 "coordinate-based observations."
             )
 

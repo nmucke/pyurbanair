@@ -146,6 +146,13 @@ class BaseLocalization(ABC):
     #: state-bearing smoothers can supply.
     requires_coordinates: bool = False
 
+    #: Whether the strategy can localize non-spatial parameter rows. Adaptive
+    #: correlation localization can, because it uses only ensemble
+    #: correlations. Physical-distance localization cannot assign a meaningful
+    #: location to a scalar/global parameter, so those rows must retain the
+    #: global update in a joint analysis.
+    localizes_parameters: bool = True
+
     #: Whether the strategy requests the paper's "grid block" joint local
     #: analysis (sec. 3b): co-located augmented rows are updated with a single
     #: observation selection and transition.  Subclasses set it from their
@@ -236,8 +243,9 @@ class BaseLocalization(ABC):
             localize_mask: Optional boolean array, shape ``(N_aug,)``.  Rows
                 where ``False`` receive the exact global (unlocalized) Kalman
                 update; rows where ``True`` (or when ``None``) use this
-                strategy's inflation factors.  Used to localize only the state
-                rows of a joint state-and-parameter augmented vector.
+                strategy's inflation factors. Used when a strategy does not
+                apply to every augmented block (for example distance
+                localization on joint parameter rows).
             row_coords: Optional augmented-row coordinates, shape ``(N_aug, 3)``,
                 forwarded to :meth:`inflation_factors` (distance strategy).
             obs_coords: Optional observation coordinates, shape ``(N_d, 3)``,
@@ -272,22 +280,24 @@ class BaseLocalization(ABC):
             aug_dev, pred_obs_dev, row_coords=row_coords, obs_coords=obs_coords
         )  # (N_aug, N_d)
 
-        # State-only localization: force masked-out rows to all-ones inflation
-        # so they receive the exact global update. An inflation row of all 1.0
-        # keeps every observation with no taper, so that row's per-row solve
-        # reduces to ``aug_row + C_MD_row @ solve(C_DD + alpha*C_D, innovation)``
-        # — exactly that row's slice of the global Kalman update — and it shares
-        # the SAME observation-perturbation realization as the localized rows
-        # (one consistent ESMDA step). Done before grouping so a masked row's
-        # all-ones inflation does not pull a block's min down.
+        # Joint "grid block" update: rows in the same block share one selection
+        # and transition. Masked/global rows are temporarily set to infinity so
+        # they cannot pull a localized block's minimum inflation down to 1 when
+        # a caller accidentally gives both kinds of row the same group id.
+        if group_ids is not None:
+            grouping_inflation = inflation
+            if localize_mask is not None:
+                grouping_inflation = jnp.where(
+                    localize_mask[:, None], inflation, jnp.inf
+                )
+            inflation = _group_inflation(grouping_inflation, group_ids)
+
+        # Force masked-out rows to all-ones inflation so they receive the exact
+        # global update. An all-ones row keeps every observation with no taper,
+        # reducing its solve to the corresponding row of the global Kalman
+        # update with the SAME observation-perturbation realization.
         if localize_mask is not None:
             inflation = jnp.where(localize_mask[:, None], inflation, 1.0)
-
-        # Joint "grid block" update: rows in the same block share one selection
-        # and transition.  Sharing the inflation vector across the block is what
-        # makes the per-row solves below collapse to one transition per block.
-        if group_ids is not None:
-            inflation = _group_inflation(inflation, group_ids)
 
         def update_row(
             aug_row: jnp.ndarray,

@@ -239,37 +239,52 @@ class StateAugmentation:
         return jnp.concatenate(flat_vars, axis=0)
 
     def group_ids(self, state: xarray.Dataset) -> jnp.ndarray:
-        """Block id per flattened state row, grouping co-located cells.
+        """Block id per flattened state row, grouping truly co-located cells.
 
-        Each variable flattens (in :meth:`flatten`) to its per-cell positions
-        in the same order, so the within-variable position is the cell id.
-        Sharing that id across variables groups the co-located components —
-        e.g. ``u``/``v``/``w`` at one grid cell — into one block, giving them
-        the joint, balanced update of the paper's grid-block local analysis.
+        Variables whose ordered spatial axes have identical physical coordinate
+        arrays share the same per-cell block ids. This groups ``u``/``v``/``w``
+        on pylbm's collocated grid, while keeping face-centred variables on the
+        staggered uDALES/PALM grids in separate blocks. Merely sharing an array
+        shape is insufficient: flat index ``i`` on ``xm`` and ``xt`` generally
+        denotes different physical locations.
 
-        This co-location by flat index is only physically correct when every
-        state variable lives on the **same grid shape** (pylbm's collocated
-        grid). On a staggered grid (uDALES/PALM, where ``u``/``v``/``w`` sit on
-        different ``xm``/``xt`` … axes) index ``i`` of ``u`` is not co-located
-        with index ``i`` of ``v``, and differing sizes would misalign the
-        blocks — so require a single shared shape and raise otherwise.
+        The signature comparison is done once per variable, rather than by
+        materializing and uniquing one xyz tuple per state row. It therefore
+        preserves the cheap metadata construction needed for large CFD grids.
         """
-        per_var = []
-        cell_shapes: set[tuple[int, ...]] = set()
+        per_var: list[jnp.ndarray] = []
+        grid_offsets: dict[tuple, int] = {}
+        next_group = 0
+
         for var_name in sorted(state.data_vars):
             variable = state[var_name]
-            cell_shapes.add(
-                tuple(int(variable.sizes[d]) for d in variable.dims if d != "ensemble")
-            )
+            dims_no_ensemble = [d for d in variable.dims if d != "ensemble"]
+            signature_parts = []
+            for dim in dims_no_ensemble:
+                if dim not in state.coords:
+                    raise ValueError(
+                        f"State dimension '{dim}' (variable '{var_name}') has no "
+                        "coordinate values; grid-block localization cannot "
+                        "determine whether state rows are physically co-located."
+                    )
+                # Normalize numeric dtype so physically identical float32 and
+                # float64 coordinate axes are recognized as the same grid.
+                values = np.asarray(state[dim].values, dtype=float)
+                signature_parts.append(
+                    (str(dim)[0], values.dtype.str, values.shape, values.tobytes())
+                )
+
+            # Dimension order is part of the signature, matching flatten()'s
+            # C-order. Equal signatures therefore imply equal flat-index ->
+            # physical-location mappings.
+            signature = tuple(signature_parts)
             n_cells = variable.size // variable.sizes["ensemble"]
-            per_var.append(jnp.arange(n_cells, dtype=int))
-        if len(cell_shapes) > 1:
-            raise ValueError(
-                "Grid-block grouping requires collocated state variables (one "
-                f"shared grid shape), but got shapes {sorted(cell_shapes)}. On a "
-                "staggered grid the components are not co-located by flat index; "
-                "disable block_grouping or build ids from physical coordinates."
-            )
+            if signature not in grid_offsets:
+                grid_offsets[signature] = next_group
+                next_group += n_cells
+            offset = grid_offsets[signature]
+            per_var.append(offset + jnp.arange(n_cells, dtype=int))
+
         return jnp.concatenate(per_var)
 
     def row_coords(self, state: xarray.Dataset) -> jnp.ndarray:

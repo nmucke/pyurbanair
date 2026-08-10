@@ -8,7 +8,7 @@ case. Everything runs under the tiny smoke config (conftest `_SMOKE_OVERRIDES`) 
 (unlocalized) update — the default correlation localization is degenerate at
 this 2-member ensemble size and has its own test.
 
-The smoother group options are static | state_and_parameter | dynamic |
+The smoother group options are static | state | state_and_parameter | dynamic |
 state_and_dynamic (the old `parameter`/`time_varying` names mapped to
 `static`/`dynamic`).
 """
@@ -82,6 +82,7 @@ def _overrides(
     [
         # The parameter/state modes the single script unifies (pylbm/pylbm).
         pytest.param("pylbm", "pylbm", "static", "static", 1, id="parameter"),
+        pytest.param("pylbm", "pylbm", "state", "static", 1, id="state"),
         pytest.param(
             "pylbm", "pylbm", "state_and_parameter", "static", 1, id="state_and_param"
         ),
@@ -115,10 +116,20 @@ def test_run_esmda(
     num_windows: int,
     compose_test_cfg,
 ) -> None:
+    import xarray
+
     from scripts.esmda.run_esmda import run
 
     overrides = _overrides(truth_model, assim_model, smoother, prior, num_windows)
-    run(compose_test_cfg(overrides, config_name="run_esmda"))
+    cfg = compose_test_cfg(overrides, config_name="run_esmda")
+    run(cfg)
+
+    if smoother == "state":
+        out_dir = pathlib.Path(cfg.paths.results_dir)
+        prior_ds = xarray.load_dataset(out_dir / "prior_params.nc")
+        posterior_ds = xarray.load_dataset(out_dir / "posterior_params.nc")
+        for name in prior_ds.data_vars:
+            np.testing.assert_array_equal(posterior_ds[name], prior_ds[name])
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -177,6 +188,7 @@ def test_run_esmda_with_model_error_parameters(
     [
         # Distance-based localization on the STATE (params stay global), selected
         # via the `esmda/localization` config group. Geometric -> fine at N_e=2.
+        pytest.param("state", "static", 1, id="state_only_distance"),
         pytest.param("state_and_parameter", "static", 1, id="state_static_distance"),
         pytest.param("state_and_dynamic", "dynamic", 1, id="state_tv_distance"),
     ],

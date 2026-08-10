@@ -248,13 +248,14 @@ Selects the DA variant. The `esmda/smoother` group default in `run_esmda.yaml` i
 `dynamic`. The `_target_` is the one genuinely mode-specific field; all shared
 fields are wired via `${esmda.*}` interpolation.
 
-> **Naming note:** The actual filenames are `static`, `state_and_parameter`,
+> **Naming note:** The actual filenames are `static`, `state`, `state_and_parameter`,
 > `dynamic`, `state_and_dynamic`. The `run_esmda.yaml` header and docstring use
 > these names. The `run_esmda.py` docstring also uses these names as the CLI values.
 
 | File | `_target_` class | What it estimates |
 |---|---|---|
 | [`esmda/smoother/static.yaml`](../conf/esmda/smoother/static.yaml) | `data_assimilation.smoothing.esmda.ParameterESMDA` | Static scalar parameters only. |
+| [`esmda/smoother/state.yaml`](../conf/esmda/smoother/state.yaml) | `data_assimilation.smoothing.esmda.StateESMDA` | State only; static parameters are held fixed. Also wires `state_reduction` + `final_time_smoothing`. |
 | [`esmda/smoother/state_and_parameter.yaml`](../conf/esmda/smoother/state_and_parameter.yaml) | `data_assimilation.smoothing.esmda.StateAndParameterESMDA` | Joint time=0 state IC + static parameters. Also wires `state_reduction` + `final_time_smoothing`. |
 | [`esmda/smoother/dynamic.yaml`](../conf/esmda/smoother/dynamic.yaml) | `data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA` | Time-varying (AR(2)) parameters only. Has `pin_initial_time_point: true` (re-toggled per window by `run_esmda.py` for continuity). |
 | [`esmda/smoother/state_and_dynamic.yaml`](../conf/esmda/smoother/state_and_dynamic.yaml) | `data_assimilation.smoothing.esmda.StateAndTimeVaryingParameterESMDA` | Joint time=0 state IC + time-varying parameters. Pair with `params@prior_params=dynamic`. |
@@ -273,9 +274,10 @@ wires `localization: ${esmda.localization}`.
 | [`esmda/localization/correlation.yaml`](../conf/esmda/localization/correlation.yaml) | `CorrelationLocalization` — excludes observations by ensemble correlation | `truncation_correlation: 0.35`, `tapering_beta: 0.5`, `max_inflation: 8.0`, `block_grouping: true` |
 | [`esmda/localization/distance.yaml`](../conf/esmda/localization/distance.yaml) | `DistanceLocalization` — excludes by Euclidean sensor–gridpoint distance | `localization_radius: 10.0`, `tapering_beta: 0.5`, `max_inflation: 4.0`, `block_grouping: true`, `horizontal_only: false` |
 
-State localization is applied to **state rows only**; parameter rows always get
-the global update. `distance` requires a state-bearing smoother
-(`state_and_parameter` or `state_and_dynamic`) and is incompatible with
+Correlation localization applies to every estimated state/parameter row.
+Distance localization applies to state rows only and keeps joint parameter rows
+on the global update. `distance` requires a state-bearing smoother
+(`state`, `state_and_parameter`, or `state_and_dynamic`) and is incompatible with
 `state_reduction`. See [codebase_guide.md §6](codebase_guide.md) for the math.
 
 ---
@@ -527,7 +529,7 @@ Stage 1 of the three-script pipeline (see `run_esmda_pipeline.sh`). Saves:
   run's mismatch beside this run's metrics.
 
 Mode is the cross product of:
-- `esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic`
+- `esmda/smoother=static|state|state_and_parameter|dynamic|state_and_dynamic`
 - `params@prior_params=static|dynamic`
 - `esmda.num_assimilation_windows=1|N`
 
@@ -1325,7 +1327,7 @@ Brief summary:
 | Add a new experiment (domain/sensors/geometry) | [`conf/case/`](../conf/case/) — one YAML per case |
 | Change run size (ensemble, ESMDA steps, windows) | CLI overrides on `ensemble.*`/`esmda.*`; or edit the inlined blocks in [`run_esmda.yaml`](../conf/run_esmda.yaml) |
 | Switch CFD backend | `model@model=pylbm|pyudales|pypalm|neural_surrogate` (fwd) or `model@truth_model=...` + `model@assim_model=...` (esmda) |
-| Change DA mode | `esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic` |
+| Change DA mode | `esmda/smoother=static|state|state_and_parameter|dynamic|state_and_dynamic` |
 | Run a sequential filter (EnKF) instead of ESMDA | [`scripts/filtering/run_filtering.py`](../scripts/filtering/run_filtering.py) — `filtering.mode=state|parameter|joint` + `filtering/*` groups (§1.8) |
 | Enable localization | `esmda/localization=correlation|distance` (smoother) or `filtering/localization=...` (filter) + optional field overrides |
 | Enable reduced state update | `esmda/state_reduction=svd` (requires state-bearing smoother, incompatible with localization) |

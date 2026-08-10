@@ -110,7 +110,8 @@ class _BaseESMDA(BaseSmoothing):
                 f"{type(localization).__name__} requires physical row "
                 "coordinates, which this smoother cannot supply. Distance-based "
                 "localization only applies to a state-bearing smoother "
-                "(esmda/smoother=state_and_parameter or state_and_dynamic)."
+                "(esmda/smoother=state, state_and_parameter, or "
+                "state_and_dynamic)."
             )
 
         self.alpha = num_steps if alpha is None else alpha
@@ -717,17 +718,9 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
     def _state_group_ids(self, state: xarray.Dataset) -> jnp.ndarray:
         """Block id per flattened state row, grouping co-located cells.
 
-        Each variable flattens (in :meth:`_flatten_state`) to its per-cell
-        positions in the same order, so the within-variable position is the
-        cell id.  Sharing that id across variables groups the co-located
-        components — e.g. ``u``/``v``/``w`` at one grid cell — into one block,
-        giving them the joint, balanced update of the paper's grid-block
-        local analysis.
-
-        This co-location by flat index is only physically correct when every
-        state variable lives on the **same grid shape** (pylbm's collocated
-        grid); see :meth:`~data_assimilation.augmentation.StateAugmentation.\
-group_ids`, which raises on staggered (non-collocated) shapes.
+        Variables sharing the same physical coordinate grid share blocks (for
+        example pylbm's collocated ``u/v/w``). Variables on distinct staggered
+        grids receive distinct block ids even when their array shapes match.
         """
         return self._state_augmentation.group_ids(state)
 
@@ -760,13 +753,16 @@ group_ids`, which raises on staggered (non-collocated) shapes.
         obs: jnp.ndarray,
         N_e: int,
         snapshots_flat: Optional[jnp.ndarray] = None,
+        param_group_ids: Optional[jnp.ndarray] = None,
     ) -> tuple[xarray.Dataset, xarray.Dataset]:
-        """Build ``[state | params]``, apply the (state-only) Kalman update, split.
+        """Build ``[state | params]``, apply the localized Kalman update, split.
 
         ``flat_params`` is a Dataset of scalar ``(ensemble,)`` variables (static
         params, or time-varying params already flattened to ``{name}_{t}``).
-        Localization — correlation- or distance-based — is applied to the STATE
-        rows only; parameter rows always get the global update (``localize_mask``).
+        State rows are localized by either strategy. Correlation localization
+        also applies to parameter rows; distance localization leaves parameters
+        on the global update because scalar/global parameters have no physical
+        coordinates.
         Returns ``(updated_state, updated_flat_params)``.
 
         With ``state_reduction`` set, the state rows are replaced by reduced
@@ -812,24 +808,30 @@ group_ids`, which raises on staggered (non-collocated) shapes.
         N_s = states_flat.shape[0]
         augmented = jnp.concatenate([states_flat, params_array], axis=0)
 
-        # State-only localization (no-op on the global path where localization is
-        # None). Parameter rows are masked out so they receive the global update.
+        # Localization is a no-op on the global path. Correlation localization
+        # can act on parameter rows; distance localization masks them out so they
+        # receive the exact global update.
         localize_mask = None
         group_ids = None
         row_coords = None
         obs_coords = None
         if self.localization is not None:
+            localize_params = self.localization.localizes_parameters
             localize_mask = jnp.concatenate(
-                [jnp.ones(N_s, dtype=bool), jnp.zeros(len(param_names), dtype=bool)]
+                [
+                    jnp.ones(N_s, dtype=bool),
+                    jnp.full((len(param_names),), localize_params, dtype=bool),
+                ]
             )
-            # Block grouping: co-locate state rows by grid cell. Each parameter
-            # gets its own block; parameter rows are masked to the global update
-            # regardless, so how they group among themselves is immaterial (which
-            # is why a plain per-parameter id, not a structured one, suffices).
+            # Block grouping: co-locate state rows by their physical grid and
+            # group structured parameter rows when the caller supplies their
+            # mapping (e.g. all time knots of one dynamic parameter).
             if _block_grouping_enabled(self.localization):
                 state_groups = self._state_group_ids(states_array)
                 offset = int(state_groups.max()) + 1
-                param_groups = offset + jnp.arange(len(param_names), dtype=int)
+                if param_group_ids is None:
+                    param_group_ids = jnp.arange(len(param_names), dtype=int)
+                param_groups = offset + param_group_ids
                 group_ids = jnp.concatenate([state_groups, param_groups])
             # Distance-based localization additionally needs grid/sensor coords.
             if self.localization.requires_coordinates:
@@ -950,6 +952,67 @@ group_ids`, which raises on staggered (non-collocated) shapes.
         return self._unflatten_state(traj_updated, state)
 
 
+class StateESMDA(StateAndParameterESMDA):
+    """State-only ESMDA smoothing with fixed forward-model parameters.
+
+    The window's initial-condition state is the complete augmented vector.
+    ``params`` are still supplied to every forecast, but are returned unchanged
+    after every analysis step. Correlation- and distance-based localization both
+    act on the state rows; distance localization therefore remains fully valid
+    in this mode.
+    """
+
+    def _one_step(
+        self,
+        params: xarray.Dataset,
+        obs: jnp.ndarray,
+        state: Optional[xarray.Dataset] = None,
+        group_ids: Optional[jnp.ndarray] = None,
+    ) -> tuple[xarray.Dataset, xarray.Dataset]:
+        obs = jnp.asarray(obs)
+        results_dir = self._results_dir_or_none()
+
+        pred_obs = self._observation_step(state=state, results_dir=results_dir)
+        pred_obs = jnp.asarray(pred_obs).T
+        self._record_pred_obs(pred_obs)
+
+        states_array = self._get_states(state=state, results_dir=results_dir)
+        states_flat = self._flatten_state(states_array)
+        N_e = states_flat.shape[1]
+        snapshots_flat = self._basis_snapshots(state, results_dir)
+
+        if self.state_reduction is not None:
+            self.state_reduction.fit(
+                states_flat if snapshots_flat is None else snapshots_flat
+            )
+            xi = self.state_reduction.encode(states_flat)
+            xi_updated = self._compute_kalman_update(xi, pred_obs, obs, N_e)
+            updated_flat = states_flat + self.state_reduction.decode_increment(
+                xi_updated - xi
+            )
+        else:
+            state_group_ids = None
+            row_coords = None
+            obs_coords = None
+            if self.localization is not None:
+                if _block_grouping_enabled(self.localization):
+                    state_group_ids = self._state_group_ids(states_array)
+                if self.localization.requires_coordinates:
+                    row_coords = self._state_row_coords(states_array)
+                    obs_coords = self._observation_coords(obs.shape[0])
+            updated_flat = self._compute_kalman_update(
+                states_flat,
+                pred_obs,
+                obs,
+                N_e,
+                group_ids=state_group_ids,
+                row_coords=row_coords,
+                obs_coords=obs_coords,
+            )
+
+        return self._unflatten_state(updated_flat, states_array), params
+
+
 class StateAndTimeVaryingParameterESMDA(
     StateAndParameterESMDA, TimeVaryingParameterESMDA
 ):
@@ -961,12 +1024,11 @@ class StateAndTimeVaryingParameterESMDA(
     into per-time-knot scalars ``{name}_{t}``, respecting
     ``pin_initial_time_point``).
 
-    Localization — correlation- or distance-based — when enabled is applied ONLY
-    to the state rows: parameter rows always receive the plain global Kalman
-    update (via ``localize_mask``).  The augmented update is built by the shared
+    Correlation localization applies to both state and parameter rows. Physical-
+    distance localization applies only to state rows, leaving parameter rows on
+    the global update. The augmented update is built by the shared
     :meth:`StateAndParameterESMDA._augmented_state_update`; grid-block grouping
-    co-locates the state rows by cell and keeps parameters in separate blocks
-    (moot, since they are masked to the global update).
+    co-locates state rows and groups time knots belonging to one parameter.
 
     The constructor chains through the MRO: ``StateAndParameterESMDA.__init__``
     consumes the state-specific keywords (``state_reduction``,
@@ -994,8 +1056,8 @@ class StateAndTimeVaryingParameterESMDA(
         self._record_pred_obs(pred_obs)
 
         # Time=0 state ensemble + time-varying params flattened to per-knot
-        # scalars (respecting pin_initial_time_point). The shared state-only
-        # localized update handles the augmented [state | params] vector.
+        # scalars (respecting pin_initial_time_point). The shared localized
+        # update handles the augmented [state | params] vector.
         states_array = self._get_states(state=state, results_dir=results_dir)
         flat_params = self._flatten_time_varying_params(params)
         N_e = flat_params.sizes["ensemble"]
@@ -1007,6 +1069,7 @@ class StateAndTimeVaryingParameterESMDA(
             obs,
             N_e,
             snapshots_flat=self._basis_snapshots(state, results_dir),
+            param_group_ids=self._time_varying_group_ids(params),
         )
         updated_params = self._unflatten_params(updated_flat, params)
         return updated_states, updated_params

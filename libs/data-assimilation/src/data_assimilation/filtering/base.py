@@ -114,8 +114,9 @@ class BaseFilter:
         mode: Which blocks the analysis updates. ``"state"``: the flattened
             end-of-segment state (params, if any, are carried unmodified);
             ``"parameter"``: the flattened params only (analyzed params apply
-            from the next cycle); ``"joint"``: ``[state | params]`` with
-            parameter rows always globally updated under localization.
+            from the next cycle); ``"joint"``: ``[state | params]``.
+            Correlation localization applies to both joint blocks; physical-
+            distance localization applies only to state rows.
         localization: Optional localization strategy, reused from the
             smoother unchanged. Distance-based strategies need state rows.
         inflation: Optional spread maintenance applied to the augmented
@@ -584,11 +585,11 @@ class BaseFilter:
     ]:
         """(group_ids, localize_mask, row_coords, obs_coords) for the update.
 
-        Mirrors the smoother's conventions: state rows are localized; in
-        joint mode the parameter rows always receive the exact global update
-        (``localize_mask=False``); in parameter mode the parameter rows are
-        localized (as in ``ParameterESMDA``). The appended diagnostic
-        predicted-observation rows are always masked to the global update.
+        Mirrors the smoother's conventions: state rows are localized; parameter
+        rows are localized when the strategy supports non-spatial rows
+        (correlation), but receive the exact global update for physical-distance
+        localization. The appended diagnostic predicted-observation rows are
+        always masked to the global update.
         """
         if self.localization is None:
             return None, None, None, None
@@ -598,7 +599,7 @@ class BaseFilter:
             mask_blocks.append(jnp.ones(n_state, dtype=bool))
         if n_param:
             mask_blocks.append(
-                jnp.full((n_param,), self.mode == "parameter", dtype=bool)
+                jnp.full((n_param,), self.localization.localizes_parameters, dtype=bool)
             )
         mask_blocks.append(jnp.zeros(n_d, dtype=bool))
         localize_mask = jnp.concatenate(mask_blocks)
