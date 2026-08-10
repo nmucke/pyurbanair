@@ -4,8 +4,9 @@
 # offline from prior samples). The state rows of the augmented Kalman vector
 # are replaced by reduced coefficients xi = Sigma_r^-1 Phi_r^T (u - u_bar);
 # the update increment is decoded back onto each member's full state.
-# Parameters always keep the exact global update. Only the state-bearing
-# smoothers (state_and_parameter, state_and_dynamic) consume this; it is
+# Joint parameters always keep the exact global update on this non-localized
+# reduced path. Only the state-bearing smoothers (state, state_and_parameter,
+# state_and_dynamic) consume this; it is
 # incompatible with (state) localization (the coefficients are nonlocal), so
 # pair it with esmda/localization=none. Select with esmda/state_reduction=svd.
 state_reduction:

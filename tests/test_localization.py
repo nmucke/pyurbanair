@@ -368,6 +368,44 @@ def test_localize_mask_with_state_grouping() -> None:
     assert jnp.allclose(updated[N_state:], global_result[N_state:], atol=1e-5)
 
 
+def test_masked_row_cannot_disable_localization_for_shared_group() -> None:
+    """A global row must not pull a localized block's inflation down to one."""
+    from data_assimilation.localization.correlation import CorrelationLocalization
+
+    n_e = 60
+    state = jax.random.normal(jax.random.PRNGKey(60), (n_e,))
+    param = jax.random.normal(jax.random.PRNGKey(61), (n_e,))
+    pred_obs = jax.random.normal(jax.random.PRNGKey(62), (1, n_e))
+    augmented = jnp.stack([state, param])
+    obs = jnp.array([2.0])
+    C_D = jnp.diag(jnp.array([0.1]))
+    key = jax.random.PRNGKey(63)
+
+    aug_dev = augmented - augmented.mean(axis=1, keepdims=True)
+    pred_dev = pred_obs - pred_obs.mean(axis=1, keepdims=True)
+    loc = CorrelationLocalization(truncation_correlation=0.999, max_inflation=1.0)
+    updated = loc.localized_update(
+        augmented=augmented,
+        aug_dev=aug_dev,
+        pred_obs=pred_obs,
+        pred_obs_dev=pred_dev,
+        obs=obs,
+        C_D=C_D,
+        C_D_sqrt=jnp.sqrt(C_D),
+        alpha=1.0,
+        rng_key=key,
+        group_ids=jnp.array([0, 0]),
+        localize_mask=jnp.array([True, False]),
+    )
+    global_result = _global_update(
+        augmented, pred_obs, obs, C_D, jnp.sqrt(C_D), 1.0, key
+    )
+
+    np.testing.assert_allclose(updated[0], augmented[0], atol=1e-7)
+    np.testing.assert_allclose(updated[1], global_result[1], atol=1e-6)
+    assert not np.allclose(global_result[0], augmented[0])
+
+
 def test_parameter_esmda_runs_with_correlation_localization(
     compose_test_cfg: Callable[..., Any],
 ) -> None:

@@ -35,6 +35,7 @@ from data_assimilation.smoothing.esmda import (
     ParameterESMDA,
     StateAndParameterESMDA,
     StateAndTimeVaryingParameterESMDA,
+    StateESMDA,
     TimeVaryingParameterESMDA,
 )
 
@@ -58,6 +59,7 @@ __all__ = [
     "RandomWalkEvolution",
     "RTPP",
     "RTPS",
+    "StateESMDA",
     "StateAndParameterESMDA",
     "StateAndTimeVaryingParameterESMDA",
     "StochasticEnKFAnalysis",

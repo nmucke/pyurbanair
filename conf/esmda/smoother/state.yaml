@@ -1,0 +1,9 @@
+# State-only ESMDA smoother. The window's time=0 state is updated while the
+# supplied static parameters are held fixed and used only by the forecasts.
+# Pair with `params@prior_params=static`.
+_target_: data_assimilation.smoothing.esmda.StateESMDA
+num_steps: ${esmda.num_steps}
+alpha: ${esmda.alpha}
+localization: ${esmda.localization}
+state_reduction: ${esmda.state_reduction}
+final_time_smoothing: ${esmda.final_time_smoothing}

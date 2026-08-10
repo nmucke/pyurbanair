@@ -1,4 +1,4 @@
-"""Run ESMDA: parameter-only / joint state+parameter, static / time-varying
+"""Run ESMDA: parameter-only / state-only / joint state+parameter, static / time-varying
 parameters, single-window / multi-window rollout, with truth simulated inline
 or loaded from disk.
 
@@ -32,9 +32,10 @@ run_{parameter,state_and_parameter,rollout,time_varying_parameter,
 time_varying_parameters_rollout}_esmda.py family. Two declarative axes (plus the
 window count) select the mode (see conf/run_esmda.yaml):
 
-  * ``esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic``
+  * ``esmda/smoother=static|state|state_and_parameter|dynamic|state_and_dynamic``
         which augmented state the Kalman update acts on:
           - ``static``             parameter-only, static scalar parameters.
+          - ``state``              state-only, with static parameters fixed.
           - ``state_and_parameter`` joint time=0 state + static parameters.
           - ``dynamic``            parameter-only, time-varying (AR(2)) params.
           - ``state_and_dynamic``  joint time=0 state + time-varying params
@@ -42,7 +43,7 @@ window count) select the mode (see conf/run_esmda.yaml):
                                    ``include_state`` and ``is_dynamic`` are True.
   * ``params@prior_params=static|dynamic``
         static scalar parameters vs a time-varying (AR(2)) prior. Pair
-        static/state_and_parameter with ``static``; dynamic/state_and_dynamic
+        static/state/state_and_parameter with ``static``; dynamic/state_and_dynamic
         with ``dynamic``.
   * ``esmda.num_assimilation_windows=1|N``
         a single assimilation window vs an N-window rollout.
@@ -68,6 +69,8 @@ Examples::
         params@prior_params=static params@truth_params=static_truth
     python scripts/esmda/run_esmda.py esmda/smoother=state_and_parameter \
         params@prior_params=static esmda.num_assimilation_windows=3
+    python scripts/esmda/run_esmda.py esmda/smoother=state \
+        params@prior_params=static esmda/localization=distance
     python scripts/esmda/run_esmda.py esmda/smoother=dynamic \
         params@prior_params=dynamic params@truth_params=dynamic_truth \
         esmda.num_assimilation_windows=3

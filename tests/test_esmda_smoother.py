@@ -6,6 +6,7 @@ block grouping, and the constructor validation added in the code review.
 """
 
 from types import SimpleNamespace
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +19,7 @@ from data_assimilation.observation_operator import ObservationOperator
 from data_assimilation.smoothing.esmda import (
     ParameterESMDA,
     StateAndParameterESMDA,
+    StateESMDA,
     TimeVaryingParameterESMDA,
 )
 
@@ -250,6 +252,126 @@ def test_parameter_group_ids_keep_static_params_separate() -> None:
     assert int(group_ids[0]) != int(group_ids[1])
 
 
+def _bare_smoother(
+    cls: Any,
+    localization: Any,
+    key: jax.Array,
+) -> Any:
+    """Minimal initialized smoother for array-level localization tests."""
+    obj = cls.__new__(cls)
+    obj.alpha = 1.0
+    obj.C_D = jnp.diag(jnp.array([0.1]))
+    obj.C_D_sqrt = jnp.sqrt(obj.C_D)
+    obj.localization = localization
+    obj.rng_key = key
+    obj.state_reduction = None
+    return obj
+
+
+def test_parameter_esmda_correlation_localizes_parameter_rows() -> None:
+    """Parameter-only ESMDA keeps only significantly correlated updates."""
+    n_e = 40
+    signal = jax.random.normal(jax.random.PRNGKey(30), (n_e,))
+    nuisance = jax.random.normal(jax.random.PRNGKey(31), (n_e,))
+    params = jnp.stack([signal, nuisance])
+    pred_obs = signal[None, :]
+    obs = jnp.array([2.0])
+    key = jax.random.PRNGKey(32)
+
+    localized = _bare_smoother(
+        ParameterESMDA,
+        CorrelationLocalization(truncation_correlation=0.999, max_inflation=1.0),
+        key,
+    )._compute_kalman_update(params, pred_obs, obs, n_e)
+    global_result = _bare_smoother(ParameterESMDA, None, key)._compute_kalman_update(
+        params, pred_obs, obs, n_e
+    )
+
+    assert not np.allclose(np.asarray(localized[0]), np.asarray(params[0]))
+    np.testing.assert_allclose(localized[1], params[1], atol=1e-7)
+    assert not np.allclose(np.asarray(global_result[1]), np.asarray(params[1]))
+
+
+def test_joint_esmda_correlation_localizes_state_and_parameter_rows() -> None:
+    """Correlation localization applies to both blocks in joint ESMDA."""
+    n_e = 40
+    signal = jax.random.normal(jax.random.PRNGKey(40), (n_e,))
+    nuisance = jax.random.normal(jax.random.PRNGKey(41), (n_e,))
+    state = xarray.Dataset(
+        {"u": (("ensemble", "x"), signal[:, None])},
+        coords={"ensemble": np.arange(n_e), "x": [0.0]},
+    )
+    params = xarray.Dataset(
+        {"a": ("ensemble", nuisance)}, coords={"ensemble": np.arange(n_e)}
+    )
+    pred_obs = signal[None, :]
+    obs = jnp.array([2.0])
+    key = jax.random.PRNGKey(42)
+
+    localized_obj = _bare_smoother(
+        StateAndParameterESMDA,
+        CorrelationLocalization(truncation_correlation=0.999, max_inflation=1.0),
+        key,
+    )
+    _, localized_params = localized_obj._augmented_state_update(
+        state, params, pred_obs, obs, n_e
+    )
+    global_obj = _bare_smoother(StateAndParameterESMDA, None, key)
+    _, global_params = global_obj._augmented_state_update(
+        state, params, pred_obs, obs, n_e
+    )
+
+    np.testing.assert_allclose(localized_params["a"], params["a"], atol=1e-7)
+    assert not np.allclose(global_params["a"], params["a"])
+
+
+def test_joint_esmda_distance_localizes_state_but_not_parameters() -> None:
+    """Distance localization leaves non-spatial parameters on the global path."""
+    n_e = 40
+    signal = jax.random.normal(jax.random.PRNGKey(50), (n_e,))
+    state = xarray.Dataset(
+        {"u": (("ensemble", "x"), jnp.stack([signal, signal], axis=1))},
+        coords={"ensemble": np.arange(n_e), "x": [0.0, 10.0]},
+    )
+    params = xarray.Dataset(
+        {"a": ("ensemble", signal)}, coords={"ensemble": np.arange(n_e)}
+    )
+    pred_obs = signal[None, :]
+    obs = jnp.array([2.0])
+    key = jax.random.PRNGKey(51)
+
+    localized_obj = _bare_smoother(
+        StateAndParameterESMDA,
+        DistanceLocalization(
+            localization_radius=1.0, max_inflation=1.0, block_grouping=False
+        ),
+        key,
+    )
+    localized_obj.observation_operator = ObservationOperator(
+        obs_x=[0.0],
+        obs_y=[0.0],
+        obs_z=[0.0],
+        obs_states=["u"],
+        solver_name="pylbm",
+    )
+    localized_state, localized_params = localized_obj._augmented_state_update(
+        state, params, pred_obs, obs, n_e
+    )
+    global_obj = _bare_smoother(StateAndParameterESMDA, None, key)
+    global_state, global_params = global_obj._augmented_state_update(
+        state, params, pred_obs, obs, n_e
+    )
+
+    np.testing.assert_allclose(localized_state["u"][:, 1], state["u"][:, 1])
+    assert not np.allclose(global_state["u"][:, 1], state["u"][:, 1])
+    np.testing.assert_allclose(localized_params["a"], global_params["a"], atol=1e-6)
+
+
+def test_state_only_esmda_is_a_state_bearing_smoother() -> None:
+    """The state-only variant participates in the shared state-localization path."""
+    assert issubclass(StateESMDA, StateAndParameterESMDA)
+
+
 # ---------------------------------------------------------------------------
 # Constructor validation
 # ---------------------------------------------------------------------------
@@ -345,16 +467,37 @@ def test_rng_key_default_is_not_shared_import_time_object() -> None:
     jax.random.split(esmda.rng_key)
 
 
-def test_state_group_ids_reject_staggered_shapes() -> None:
-    """Block grouping requires collocated state variables (one shared shape)."""
-    # Staggered C-grid: u on (zt, yt, xm), v on (zt, ym, xt) -- different cell
-    # shapes, so the flat-index co-location assumption does not hold.
+def test_state_group_ids_keep_staggered_grids_separate() -> None:
+    """Equal flat indices on staggered grids must not be treated as co-located."""
     state = xarray.Dataset(
         {
-            "u": (("ensemble", "zt", "yt", "xm"), np.zeros((2, 3, 4, 5))),
-            "v": (("ensemble", "zt", "ym", "xt"), np.zeros((2, 3, 4, 6))),
-        }
+            "u": (("ensemble", "zt", "yt", "xm"), np.zeros((2, 2, 2, 3))),
+            "v": (("ensemble", "zt", "ym", "xt"), np.zeros((2, 2, 2, 3))),
+        },
+        coords={
+            "zt": [1.0, 2.0],
+            "yt": [0.0, 1.0],
+            "ym": [0.5, 1.5],
+            "xm": [0.5, 1.5, 2.5],
+            "xt": [0.0, 1.0, 2.0],
+        },
     )
     obj = StateAndParameterESMDA.__new__(StateAndParameterESMDA)
-    with pytest.raises(ValueError, match="collocated"):
-        obj._state_group_ids(state)
+    groups = np.asarray(obj._state_group_ids(state))
+    n_cells = state["u"].size // state.sizes["ensemble"]
+    assert set(groups[:n_cells]).isdisjoint(set(groups[n_cells:]))
+
+
+def test_state_group_ids_share_collocated_grid() -> None:
+    """Variables on the same physical grid retain joint block updates."""
+    state = xarray.Dataset(
+        {
+            "u": (("ensemble", "z", "x"), np.zeros((2, 2, 3))),
+            "v": (("ensemble", "z", "x"), np.zeros((2, 2, 3))),
+        },
+        coords={"z": [1.0, 2.0], "x": [0.0, 1.0, 2.0]},
+    )
+    obj = StateAndParameterESMDA.__new__(StateAndParameterESMDA)
+    groups = np.asarray(obj._state_group_ids(state))
+    n_cells = state["u"].size // state.sizes["ensemble"]
+    np.testing.assert_array_equal(groups[:n_cells], groups[n_cells:])

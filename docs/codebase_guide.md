@@ -78,7 +78,7 @@ conf/                              # Hydra config (see §5 Configuration system)
                                    #   contained file per case (xie_and_castro, barcelona). `case=...`.
   params/                          # Parameter samplers: static, dynamic, static_truth,
                                    #   dynamic_truth (mounted twice: truth + prior)
-  esmda/smoother/                  # ESMDA variant group: static, dynamic, state_and_parameter,
+  esmda/smoother/                  # ESMDA variant group: static, state, dynamic, state_and_parameter,
                                    #   state_and_dynamic (see docs/data_assimilation.md)
   model/                           # forward + ensemble backend (mounted under model@<pkg>)
   neural_surrogate/                # surrogate: training.yaml, testing.yaml, training_data.yaml
@@ -275,7 +275,7 @@ Everything that varies per variant is a **group**:
 | `case/` | experiment bundle (`xie_and_castro`, `barcelona`) | one self-contained file per experiment: `domain` (bounds + grid) + `obs` (sensors incl. validation) + `geometry` (STL) + per-window `time`. `case=xie_and_castro` is the default. The single place to define/add an experiment. |
 | `model/` | forward + ensemble backend | mounted under a package: `model@model=pylbm` (forward), or twice for assimilation (see below) |
 | `params/` | parameter sampler | `static`, `dynamic`, `static_truth`, `dynamic_truth` — see below. Mounts at runtime key `params` (forward) or `truth_params`/`prior_params` (esmda). |
-| `esmda/smoother/` | ESMDA variant | `static` (`ParameterESMDA`), `dynamic` (`TimeVaryingParameterESMDA`), `state_and_parameter` (`StateAndParameterESMDA`). The one genuinely mode-specific `_target_`. |
+| `esmda/smoother/` | ESMDA variant | `static` (`ParameterESMDA`), `state` (`StateESMDA`), `dynamic` (`TimeVaryingParameterESMDA`), `state_and_parameter` (`StateAndParameterESMDA`), `state_and_dynamic` (`StateAndTimeVaryingParameterESMDA`). The one genuinely mode-specific `_target_`. |
 | `training_data/` | surrogate data-generation overlay | each size pulls `training_data/_base.yaml` (sampler skeleton + horizon) and overrides only what scales |
 
 **Parameter samplers** are a group mounted *by package*, not a flat file. Each
@@ -300,12 +300,9 @@ script handles every former esmda script — mode is the cross product of
 (1 = single window, N = rollout). Tests compose `config_name="run_esmda"` and
 pick the smoother via the group override (see [tests/conftest.py](../tests/conftest.py)).
 
-> **Naming drift to watch**: the `run_esmda.yaml` / `run_esmda.py` header
-> comments call the smoother options `parameter|state_and_parameter|time_varying`,
-> and `tests/test_run_esmda.py` uses those names — but the actual files in
-> [`conf/esmda/smoother/`](../conf/esmda/smoother/) are
-> `static|state_and_parameter|dynamic`. The CLI selector must match the
-> **filenames** (`esmda/smoother=static`, `esmda/smoother=dynamic`).
+The available files are `static|state|state_and_parameter|dynamic|state_and_dynamic`;
+the CLI selector must match these filenames (for example
+`esmda/smoother=state`).
 
 **Localization** is selected via the `esmda/localization` config **group**
 (`conf/esmda/localization/{none,correlation,distance}.yaml`), each setting
@@ -316,8 +313,9 @@ al. 2025); `distance` = physical-distance-based. Pick one with
 `esmda/localization=distance` and tweak its fields
 (`esmda.localization.localization_radius=40`), or force the global update with
 `esmda.localization=null`. In the state-bearing smoothers
-(`state_and_parameter`, `state_and_dynamic`) localization is applied to the
-**state rows only**; parameters always get the global update. Each strategy's
+(`state`, `state_and_parameter`, `state_and_dynamic`) state rows are localized.
+Correlation localization also applies to joint parameter rows; distance
+localization keeps parameter rows on the global update. Each strategy's
 `block_grouping` flag toggles per-row vs. the paper's "grid block" joint
 analysis (see §6).
 
@@ -504,11 +502,11 @@ def test_something(compose_test_cfg) -> None:
     grid point and the sensor: exclude beyond `localization_radius`, taper the
     rest. `requires_coordinates=True` (`horizontal_only` ignores the vertical);
     only valid on a state-bearing smoother with coordinate-based observations.
-- **State-only localization.** Both state-bearing smoothers localize the STATE
-  rows only; parameter rows always get the global update. The augmented update is
-  built by the shared `StateAndParameterESMDA._augmented_state_update`, which sets
-  `localize_mask` (True=state, False=param → forced to all-ones inflation = exact
-  global update), and for `requires_coordinates` strategies computes
+- **Strategy-aware joint localization.** State-bearing smoothers localize state
+  rows. Correlation also localizes parameter rows; distance sets those parameter
+  rows to `localize_mask=False` (all-ones inflation = exact global update). The
+  shared `StateAndParameterESMDA._augmented_state_update` also computes
+  coordinates for `requires_coordinates` strategies via
   `_state_row_coords` (per-row x/y/z, dim axis from the dim-name prefix, in
   `_flatten_state` order) and `_observation_coords` (sensor xyz tiled, since the
   sensor is the innermost obs-vector axis → obs `j` ↔ sensor `j % num_sensors`).
@@ -554,9 +552,9 @@ def test_something(compose_test_cfg) -> None:
   at **all window time steps jointly**, reusing the final posterior forecast
   (no extra solve) with the parameters frozen.
 - Selected via the `esmda/state_reduction` config group (`none`|`svd`, default
-  `none`) + the `esmda.final_time_smoothing` flag; wired only into
-  [conf/esmda/smoother/](../conf/esmda/smoother/) `state_and_parameter.yaml`
-  and `state_and_dynamic.yaml`.
+  `none`) + the `esmda.final_time_smoothing` flag; wired into
+  [conf/esmda/smoother/](../conf/esmda/smoother/) `state.yaml`,
+  `state_and_parameter.yaml`, and `state_and_dynamic.yaml`.
 
 ### Multi-window rollout ESMDA
 Handled directly inside [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py)'s window

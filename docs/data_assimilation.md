@@ -48,7 +48,7 @@ libs/data-assimilation/src/data_assimilation/
     distance.py             # DistanceLocalization
   smoothing/
     base.py                 # BaseSmoothing (_forecast_step, _observation_step)
-    esmda.py                # all four ESMDA variant classes
+    esmda.py                # all five ESMDA variant classes
   filtering/
     analysis.py             # stochastic_enkf_update (shared with ESMDA),
                             #   AnalysisScheme, StochasticEnKFAnalysis
@@ -260,17 +260,19 @@ default: nothing is recorded and no extra operator evaluation happens.
 `run_esmda.py` turns it on under `esmda.save_obs_diagnostics` and persists the
 arrays per window.
 
-### Four variants
+### Five variants
 
 | Class | Augmented state | Notes |
 |---|---|---|
 | `ParameterESMDA` | Parameters only (scalar per ensemble member) | Groups time knots by `_group_ids_by_base_name` when block grouping is enabled |
 | `TimeVaryingParameterESMDA` | Time-varying params flattened to `{name}_{t}` scalars | `_flatten_time_varying_params` / `_unflatten_params`; `pin_initial_time_point` optionally fixes `t=0` across windows |
-| `StateAndParameterESMDA` | `[time=0 state | static params]` | `_flatten_state` / `_unflatten_state`; state-only localization via `localize_mask`; optional `state_reduction` + `final_time_smoothing` |
+| `StateESMDA` | `time=0 state` | Parameters are supplied to forecasts but held fixed; optional `state_reduction` + `final_time_smoothing` |
+| `StateAndParameterESMDA` | `[time=0 state | static params]` | `_flatten_state` / `_unflatten_state`; strategy-aware localization via `localize_mask`; optional `state_reduction` + `final_time_smoothing` |
 | `StateAndTimeVaryingParameterESMDA` | `[time=0 state | {name}_{t} scalars]` | MRO combines both parents: state flattening from `StateAndParameterESMDA`, param flattening from `TimeVaryingParameterESMDA` |
 
 **Config names** (the `esmda/smoother` group filenames):
-`static` → `ParameterESMDA`; `dynamic` → `TimeVaryingParameterESMDA`;
+`static` → `ParameterESMDA`; `state` → `StateESMDA`;
+`dynamic` → `TimeVaryingParameterESMDA`;
 `state_and_parameter` → `StateAndParameterESMDA`;
 `state_and_dynamic` → `StateAndTimeVaryingParameterESMDA`.
 
@@ -282,8 +284,8 @@ and `_state_row_coords`. `_get_states` selects `time=0` so the augmented
 vector holds the window initial condition. `_get_window_states` (no time
 selection) feeds the `window_snapshots` basis source for state reduction.
 
-**`_augmented_state_update`.** The shared method for both state-bearing
-variants: builds `[states_flat | params_array]`, applies the Kalman update
+**`_augmented_state_update`.** The shared method for joint state-bearing
+variants builds `[states_flat | params_array]`, applies the Kalman update
 (global or localized), and splits the result back into updated state and
 updated params.
 
@@ -339,11 +341,11 @@ placing 1 on the diagonal of `C_DD_alpha`, keeping the shape stable for
 `vmap`. Cost: `O(N_aug · N_d²)` — cheap for parameter variants, expensive
 for large state-bearing ones.
 
-**State-only localization.** For the state-bearing smoothers `localize_mask`
-is set to `True` for state rows and `False` for parameter rows. Rows where
-`localize_mask == False` receive all-ones inflation, which reduces their
-per-row solve to the exact global update — so parameter rows are always
-globally updated regardless of the localization strategy.
+**Strategy-aware joint localization.** State rows are always localized.
+Correlation localization also localizes parameter rows because it needs no
+spatial coordinates. Distance localization sets parameter rows to
+`localize_mask=False`; those rows receive all-ones inflation and therefore the
+exact global update.
 
 **Grid-block joint analysis** (`block_grouping`, Vossepoel §3b). When
 `block_grouping=True` (on the localization instance), `_group_inflation`
@@ -351,8 +353,8 @@ takes the per-observation minimum inflation across all rows in a block so
 they share one active-observation set and one transition matrix. For
 `ParameterESMDA` blocks group time knots of the same parameter
 (`_group_ids_by_base_name`); for `StateAndParameterESMDA` blocks group
-co-located `u/v/w` grid cells (`_state_group_ids`). Done before grouping,
-masked rows use all-ones inflation so they never influence a block's minimum.
+co-located `u/v/w` grid cells (`_state_group_ids`). Masked/global rows are
+excluded from the block minimum, then restored to all-ones inflation.
 
 ### `CorrelationLocalization`
 
@@ -387,7 +389,7 @@ Euclidean distance between the grid point and the sensor via the
 `|a|² + |b|² − 2a·b` identity to avoid the large `(N_aug, N_d, 3)`
 broadcast. When `horizontal_only=True`, only `(x, y)` separation is used.
 
-**Only valid with state-bearing smoothers** (`state_and_parameter` /
+**Only valid with state-bearing smoothers** (`state` / `state_and_parameter` /
 `state_and_dynamic`) and **coordinate-based observations** (the operator
 must have `obs_x/obs_y/obs_z` to supply `_observation_coords`).
 
@@ -490,10 +492,11 @@ Mode semantics: `"state"` updates the flattened end-of-segment state only
 (params, if any, are carried unmodified); `"parameter"` updates the flattened
 params only (applied from the next cycle onward) and **requires spread
 maintenance** (`parameter_evolution` or `inflation` — the constructor refuses
-silently-collapsing configurations); `"joint"` updates `[state | params]` with
-parameter rows always globally updated under localization (`localize_mask`),
-exactly as the joint smoothers do. Localization strategies are reused from
-`localization/` unchanged; distance-based strategies need state rows.
+silently-collapsing configurations); `"joint"` updates `[state | params]`.
+Correlation localization applies to both blocks, while physical-distance
+localization applies to state rows and keeps parameter rows global. Localization
+strategies are reused from `localization/` unchanged; distance-based strategies
+need state rows.
 
 `FilterResult` is a plain dataclass (`params`, `state`, optional
 `cycle`-concatenated histories, and `diagnostics`: one `CycleDiagnostics` per
@@ -537,12 +540,13 @@ All smoother configuration is via Hydra groups under
 
 ### `esmda/smoother` group
 
-Four options in
+Five options in
 [conf/esmda/smoother/](../conf/esmda/smoother/):
 
 | File | Class | Notes |
 |---|---|---|
 | `static.yaml` | `ParameterESMDA` | Parameter-only, static scalars |
+| `state.yaml` | `StateESMDA` | State-only; static parameters held fixed; wires `state_reduction` / `final_time_smoothing` |
 | `dynamic.yaml` | `TimeVaryingParameterESMDA` | Parameter-only, time-varying (AR(2)) |
 | `state_and_parameter.yaml` | `StateAndParameterESMDA` | Joint state + static; wires `state_reduction` / `final_time_smoothing` |
 | `state_and_dynamic.yaml` | `StateAndTimeVaryingParameterESMDA` | Joint state + time-varying; same reduction knobs |
@@ -581,8 +585,8 @@ Two options in
 | `none.yaml` | — (`state_reduction: null`) |
 | `svd.yaml` | `OnlineStateReduction` |
 
-The `state_reduction` key is only consumed by `state_and_parameter.yaml`
-and `state_and_dynamic.yaml` (the two smoother YAMLs that list it). Selecting
+The `state_reduction` key is consumed by `state.yaml`,
+`state_and_parameter.yaml`, and `state_and_dynamic.yaml`. Selecting
 `esmda/state_reduction=svd` while using a parameter-only smoother is a no-op.
 
 ---
@@ -626,7 +630,7 @@ truth; see `codebase_guide.md §6` and the script's docstring.
 > #112–#114). Python spelled the restart filename with a 9-digit iteration
 > field while the Fortran opened a 6-digit one, so the solver silently reopened
 > its own restart from the previous window: for
-> `esmda/smoother=state_and_parameter` and `state_and_dynamic`, **every pylbm
+> `esmda/smoother=state`, `state_and_parameter`, and `state_and_dynamic`, **every pylbm
 > rollout discarded the Kalman state update at every window boundary**.
 > Separately, the restart *template* read raised into a bare `except`, so every
 > pylbm warm start was rebuilt from a pure-equilibrium distribution, discarding
@@ -656,7 +660,7 @@ truth; see `codebase_guide.md §6` and the script's docstring.
    whatever `cfg.esmda.smoother` resolves to.
 4. If the variant needs the flattened field, check
    `isinstance(esmda, StateAndParameterESMDA)` as the script already does
-   for both state-bearing branches.
+   for all state-bearing branches.
 
 ### Adding a new localization strategy
 

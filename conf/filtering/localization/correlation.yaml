@@ -4,9 +4,8 @@
 # conf/esmda/localization/correlation.yaml). Select with
 # `filtering/localization=correlation`.
 #
-# In joint mode the localization is applied to the STATE rows only; parameter
-# rows always get the global update. In parameter mode the parameter rows are
-# localized directly (correlations need no spatial coordinates).
+# Correlation localization applies to every estimated row in state, parameter,
+# and joint modes (it needs no spatial coordinates).
 localization:
   _target_: data_assimilation.localization.correlation.CorrelationLocalization
   # Correlation truncation threshold rho_t. null -> theoretical 3/sqrt(N_e).

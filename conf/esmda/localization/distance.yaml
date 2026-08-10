@@ -7,7 +7,8 @@
 # to physical distance; Vossepoel et al. 2025 sec. 3d). Select with
 # `esmda/localization=distance`.
 #
-# Requires a state-bearing smoother (state_and_parameter / state_and_dynamic) and
+# Requires a state-bearing smoother (state / state_and_parameter /
+# state_and_dynamic) and
 # coordinate-based observations: it needs the grid-point and sensor coordinates.
 # Applied to the STATE rows only; parameter rows always get the global update.
 localization:
