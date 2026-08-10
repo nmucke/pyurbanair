@@ -4,9 +4,11 @@
 > `esmda-evaluation`** as of 2026-08-07 (slimmed 2026-08-03 after the July
 > rollback; see [Rollback](#rollback)), and two branch-wide adversarial review
 > rounds have since run over the merged result and had their blockers fixed
-> (see [Implementation process](#implementation-process)). What remains is the
-> single reviewed merge into `main` — see [Branching
-> model](#branching-model). **Companion to** the research document
+> (PR **#116**, merged 2026-08-10, CI green — see [Implementation
+> process](#implementation-process)). The branch is complete; the only step
+> left is the single reviewed merge into `main`, opened 2026-08-10 as PR
+> **#117** — see [Branching model](#branching-model). **Companion to** the
+> research document
 > [../esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md)
 > (the *what and why* — metric definitions, formulas, figure conventions).
 > This file is the index and status board; the per-phase plans carry the
@@ -48,7 +50,8 @@ Applies to every work package:
   the yardstick). Only after both rounds and green CI is the PR ready to
   merge.
 - **Two further adversarial rounds over the whole branch, once every WP had
-  merged** (2026-08-07). Not in the original process, which reviews a WP at a
+  merged** (2026-08-07), merged as PR **#116** on 2026-08-10 with CI green.
+  Not in the original process, which reviews a WP at a
   time; these read the assembled branch. **Round 3** (`be1433e`) was an
   eight-agent sweep: it confirmed every work package in the table below is
   implemented as planned, and found six blockers — all fixed in that one
@@ -59,6 +62,17 @@ Applies to every work package:
   the phase plan it touches (phase 1: the skill-score knot sets and the
   mean-field memory bound; phase 2: the stale obs-diagnostics bundle; phase
   3: the probe cadence) or, for the filtering port, in the section below.
+- **Four non-blocker findings from those rounds were also fixed** (`bb4aa09`,
+  in the same PR #116), on the user's election rather than because the review
+  demanded them: the block-bootstrap block length (a fixed *count* of blocks
+  shrank `L` as the window shortened, under-reporting the identifiability
+  floor 2.6–4.2×; now floored at 3τ from a measured integral time scale, and
+  refused outright rather than guessed — see the caution below); a probe-run
+  restart leak that warm-started every member from the *truth's* restart on
+  any second invocation of `run_probe_series`; five test mutations that had
+  survived the whole suite; and the cleanup of 406 lines of callerless figure
+  code plus all four blanket mypy waivers in `libs/evaluation` (which exposed
+  three latent defects, including an unguarded `Dataset | None` dereference).
 
 ## Instructions for implementing agents
 
@@ -262,6 +276,15 @@ Cross-cutting cautions:
   retire numbers that were already wrong. This is a user decision, and it is
   written out in full in the phase-1 plan's WP1.3 deviations. Nothing else on
   the branch changes an existing key's value.
+- **The `identifiability` key now disappears from `run_summary.yaml` on
+  production-shaped runs** (round 4's block-bootstrap fix, `bb4aa09`). The
+  floor needs a window spanning ≳15 integral time scales; in-canopy velocity
+  decorrelates over ~140 s, so a 300 s window holds ~2 independent samples and
+  the floor is refused in 5/5 windows at both shipped case shapes. Absent
+  means unmeasured, not identifiable — this is the honest verdict, not a
+  regression, and it replaces a number that was silently 2.6–4.2× optimistic.
+  See [scripts_and_configs.md](../../scripts_and_configs.md) §`identifiability`
+  and the phase-3 note.
 - The smoke shape (2-member ensemble) degenerates several diagnostics
   (ddof=1 variances, rank histograms) — guard with `null` + log, don't
   special-case.
