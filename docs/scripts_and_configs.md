@@ -507,6 +507,24 @@ Stage 1 of the three-script pipeline (see `run_esmda_pipeline.sh`). Saves:
 - Per-window `prior_params.nc`/`posterior_params.nc`, optionally prior state ensemble.
 - Assembled `posterior_state_mean.nc`, `posterior_params.nc`, `prior_params.nc`,
   `true_params.nc`, `truth_access.yaml`, `run_info.yaml`, `config.yaml`.
+- Under `esmda.save_obs_diagnostics=true` (the default), the per-window
+  observation-space arrays: `windows/window_{w}_obs.nc` (`obs` = truth + noise,
+  `obs_clean` = the noise-free projection, `obs_error_std` = `sqrt(diag(C_D))`,
+  with `obs_sensor`/`obs_state`/`obs_interval` labels and the flattening order in
+  the file attrs), `windows/window_{w}_pred_obs.nc`
+  (`pred_obs(esmda_step, obs_index, ensemble)`, step 0 the prior forecast and −1
+  the posterior forecast) and `windows/window_{w}_params_steps.nc` (the parameter
+  ensemble at every iteration, kept for debugging). All KB-scale. The observation
+  axis is named `obs_index`, not `obs`, because a variable whose name equals its
+  dimension is silently promoted to an index coordinate on the netCDF
+  round-trip — which would turn the `obs` data variable into a coordinate on
+  read. These feed `run_summary.yaml`'s `esmda_diagnostics` block and figure D3;
+  set the flag false to reproduce the pre-phase-2 artifact set exactly. The
+  post-processing decides on the **run's own flag**, read back from
+  `run_info.yaml`'s `configuration`, not on whether the files are there: a
+  flag-off rerun into a `paths.results_dir` an earlier run already populated
+  ignores the leftovers (with a warning) instead of republishing the previous
+  run's mismatch beside this run's metrics.
 
 Mode is the cross product of:
 - `esmda/smoother=static|state_and_parameter|dynamic|state_and_dynamic`
@@ -534,7 +552,7 @@ Mode is the cross product of `filtering.mode=state|parameter|joint` and the
 `run_esmda.py`. Static scalar parameters only — a dynamic (AR(2)) params
 mount fails loudly; time-varying priors stay with the ESMDA smoothers.
 
-Stage 1 of the single-run filtering pipeline (§2.5), orchestrated by
+Stage 1 of the single-run filtering pipeline (§2.4), orchestrated by
 [`run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh).
 
 Saves: `posterior_params.nc` / `posterior_state.nc` (analyzed final-frame
@@ -559,13 +577,14 @@ Not a Hydra script; imported directly. Provides:
   a common grid before display.
 - `plot_derived_inflow_angle(...)` / `plot_derived_velocity_magnitude(...)` —
   derived-vs-prescribed inflow diagnostics.
-- DA metric utilities (CRPS, per-knot error/spread/in-band, summary scalars).
+- Per-parameter skill panels built on `evaluation.scores` (CRPS, per-knot
+  error/spread/in-band, summary scalars).
 
 #### [`_esmda_common.py`](../scripts/esmda/_esmda_common.py)
 
 Post-processing helpers shared by `compute_esmda_metrics.py` and
 `make_esmda_figures.py` (and reused by the filtering pipeline's
-[`_filtering_common.py`](../scripts/filtering/_filtering_common.py), §2.5).
+[`_filtering_common.py`](../scripts/filtering/_filtering_common.py), §2.4).
 Read-only with respect to the run directory except explicit write calls.
 Provides:
 - `load_run_config(run_dir)` — re-load the Hydra config saved by `run_esmda.py`.
@@ -573,10 +592,27 @@ Provides:
   from the obs config.
 - `open_truth(cfg, ta)` — lazy truth access (multi-GB `state.nc` never fully loaded).
 - `ensemble_sensor_series(...)` / `truth_sensor_series(...)` — interpolate ensemble
-  and truth states at sensor locations.
-- `streaming_state_rmse(...)` — streamed z-slice RMSE without loading the full field.
-- `parameter_metric_summary(...)` / `vector_sensor_metrics(...)` — scalar summaries
-  written to `run_summary.yaml`.
+  and truth states at sensor locations. Both stream: the truth one window at a
+  time, the ensemble **one member at a time** (since WP1.3 — a full-ensemble
+  window state file runs to gigabytes and is never read whole).
+- `probe_record_paths(run_dir)` / `probe_spectra_bundle(run_dir)` — locate the
+  high-rate probe records an optional `run_probe_series.py` rerun wrote (one
+  window's truth, posterior and — optionally — prior) and reduce them to the
+  matched Welch spectra both the metric and the figure stage consume, so
+  `spectral_metrics` and `probe_spectra.png` cannot be computed two different ways.
+  `None` when a run dir has no probe records, which is most of them. `truth_probes.nc`
+  is unversioned and overwritten by every rerun, so the pairing is decided by the
+  truth's own `window_index` and a truth whose window has no posterior record (or a
+  member record whose recorded window disagrees) is **refused** rather than paired
+  with a stale one — re-probing window 2 after window 1 must not silently compare
+  two different windows.
+- `read_yaml(...)` / `write_yaml(...)` / `_to_native(...)` — small YAML helpers.
+
+The metric functions themselves (`streaming_state_rmse`, `select_z_plane`,
+`sensor_magnitude`, `window_statistics`, `parameter_metric_summary`,
+`series_stats`, `vector_sensor_metrics`) live in the
+[`evaluation`](../libs/evaluation/src/evaluation/) library; this module keeps
+only the run-dir-aware extraction they consume.
 
 ---
 
@@ -585,15 +621,304 @@ Provides:
 These three scripts form the standard single-run pipeline, orchestrated by
 [`run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh).
 
+> The metric and figure *computation* lives in the editable leaf library
+> [`libs/evaluation`](../libs/evaluation/src/evaluation/) (`scores`,
+> `turbulence`, `sensors`, `style`, `figures`), leaving the two metric/figure
+> stages below — and their filtering counterparts in §2.4 — as thin
+> orchestration: resolve run dirs, open artifacts, call `evaluation`,
+> write YAML/PNGs. The library takes arrays and datasets and returns
+> numbers, dicts and figures — it knows nothing about Hydra or the run-dir
+> layout, and imports neither jax nor `pyurbanair`. See
+> [docs/plans/esmda_evaluation/master_plan.md](plans/esmda_evaluation/master_plan.md).
+
 #### [`compute_esmda_metrics.py`](../scripts/esmda/compute_esmda_metrics.py)
 **Plain argparse CLI** — usage: `python scripts/esmda/compute_esmda_metrics.py --run-dir <dir>`
 
 Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
-- `parameter_metrics` — per-parameter RMSE/CRPS summary + reduction vs prior.
+- `metrics_version` — estimator-semantics marker (see below).
+- `parameter_metrics` — per parameter, accuracy (RMSE/CRPS summary + RMSE
+  reduction and CRPSS (`crps_reduction_vs_prior`) against the prior) and
+  calibration (`z_score` = `(θ*−θ̄ᵃ)/σᵃ`, `normalized_error` = `(θ̄ᵃ−θ*)/σᵇ`,
+  `contraction_ratio` = `σᵃ/σᵇ`), plus a `pooled` entry holding the z-scores
+  of every parameter and knot together. Read the two halves jointly: a small
+  contraction ratio with a large `|z|` is a *spuriously* confident posterior,
+  which no accuracy number reveals. A calibrated posterior has pooled
+  `z_score.mean ≈ 0` and `std ≈ expected_std` — **compare against
+  `expected_std`, never against 1.** The z-score is standard normal only in
+  the limit; at finite `M` it is `√(1+1/M)·t₍M₋₁₎`, whose std is 1.02 at
+  `M=64` and 1.26 at `M=8`. Below **four** members the whole `z_score` entry
+  is `null`: at `M=2` that t is Cauchy, so neither its variance *nor its mean*
+  exists and a perfectly calibrated run would report `|mean| > 5` about 13 %
+  of the time. Read `contraction_ratio` there — it is well defined at any
+  size. Entries are likewise `null` where the scale is degenerate (a pinned
+  parameter has `σᵇ = 0`; a single-member ensemble has no `ddof=1` spread).
+
+  Two caveats on reading `std`. It is a *sample* std over `n` knots and
+  carries its own sampling noise, which is wide when `n` is small: for a
+  calibrated `M=64` ensemble the 5th–95th percentile range is 0.06–1.99 at
+  `n=2` and still 0.57–1.47 at `n=8`, against an `expected_std` of 1.02. Treat
+  a single parameter's `std` at `n < ~10` as a coarse flag and prefer the
+  `pooled` entry, which aggregates knots across parameters. And the pooled `n`
+  is a count, not an effective sample size: adjacent knots of one time-varying
+  parameter are strongly correlated, and a many-knot parameter outweighs a
+  static one.
+- `ensemble_health` — `n_members` / `n_unique` (exact duplicate rows) run-wide
+  and per window, plus the min/median pairwise-distance ratio. A resampling
+  policy that clones a diverged member (pypalm) leaves an ensemble with fewer
+  degrees of freedom than its nominal size.
 - `state_metrics` — `|U|` field RMSE summary (streamed z-slice by z-slice).
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set
   (assimilation + validation).
+- `sensor_statistics` — the same sensor sets scored on **window statistics**
+  rather than on the instantaneous series. Instantaneous turbulence is chaotic:
+  two members with identical parameters decorrelate within an eddy turnover, so
+  a pointwise error is mostly a phase measurement that no parameter estimate
+  controls. The parameters act on the *statistics*, which is what makes those
+  the identifiable quantities. Per sensor set: `n_members`, `n_windows`,
+  `num_sensors`, and a `posterior` (plus `prior`, when `run.save_prior_state`
+  saved the prior states) block with one entry per `statistic × quantity` —
+  `mean_u` … `variance_magnitude`, eight in all, scored separately because a
+  parameter that fixes the mean wind while leaving the resolved variance halved
+  is exactly the failure this block names. Each entry carries:
+  - `crps` — the fair CRPS of `{T_m}` against `T*`, averaged over sensors and
+    reported as a series over windows (`final` = the last window), plus
+    `prior_crps_mean` / `crps_reduction_vs_prior` when the prior was scored.
+  - `z_score` — the same reduction and the same `expected_std` caveats as
+    `parameter_metrics` above, pooled over sensors and windows.
+  - `rank_counts` — how often the truth landed at each rank `0…M` within
+    `{T_m}`, pooled over sensors and windows (so the list has `M+1` entries and
+    sums to the number of scored knots). Ranks use only the ordering, so pooled
+    they see a *shape* failure (a skewed or bimodal posterior with the right
+    mean and spread) that neither the CRPS nor the z-score can. Figure D1
+    coarsens these to ~10 bins; binning is one-way, so the artifact keeps the
+    exact `M+1`.
+  - `identifiability` — across-member spread of `T` divided by a typical
+    member's own block-bootstrap sampling std of `T`, averaged over sensors and
+    reported per window. **Read this first:** below ~3 (which is what the
+    warning in the run log thresholds on, using this same `mean`) the statistic
+    does not clear its own sampling noise at this window length, and its CRPS
+    and ranks are measuring the window, not the parameters. Absent when no floor
+    could be measured — the bootstrap needs both ≳15 frames per window *and* a
+    window spanning ≳15 integral time scales of the series itself, so short runs
+    (including the CI smoke shape) have none, and an unmeasured floor is unknown
+    rather than infinitely identifiable. The second condition is the binding one
+    on real urban-canopy flow: in-canopy velocity decorrelates over ~140 s, so a
+    300 s window holds ~2 independent samples and the floor is refused outright
+    rather than under-reported. See the phase-3 note in
+    `docs/plans/esmda_evaluation/`.
+
+  A sensor set whose state files carry no `ensemble` dimension (an old
+  ensemble-mean-only artifact) is dropped from **both** sensor blocks with a
+  log line — every score in them is probabilistic and needs the members — and
+  the rest of the summary is written as usual.
+- `field_metrics` — the mean **field**, scored with the VDI 3783/9 hit rate `q`:
+  the fraction of cells where the posterior ensemble-mean time-mean velocity is
+  within a relative tolerance `D = 0.25` **or** an absolute one `W` of the
+  truth's. The `or` is the guideline's: a relative test alone is unreachable
+  wherever the velocity passes through zero (every recirculation boundary),
+  an absolute one alone is meaningless in the free stream. Acceptance is
+  `q ≥ 0.66`. `W` is not a convention here — it is the truth's own
+  block-bootstrap sampling error on its time-mean (median over sampled cells,
+  per component), which turns `q` into "indistinguishable from the truth within
+  the truth's own noise". The block carries `hit_rate_posterior` (pooled `q`
+  over the three components, `n_points`, and a per-component breakdown),
+  `hit_rate_prior` when `run.save_prior_state` saved the prior states,
+  `hit_rate_tolerance_w`, the scored `z_levels`, the `horizontal_stride`,
+  `n_windows` and the frames each member (and the truth) contributed. A `W` of
+  `null` means no floor could be measured (the run is too short to
+  block-bootstrap — the CI smoke shape always is), and the hit rate then runs on
+  its relative criterion alone; a `q` of `null` means no cell was scorable at
+  all. The prior half is all-or-nothing: a prior covering fewer windows or fewer
+  frames than the posterior — a job killed mid-write — is dropped rather than
+  compared across a different horizon.
+
+  **Fluid cells only**, which matters more than it sounds: a solid cell holds
+  ~0 in the truth *and* in every member, so it is a hit whatever the flow does,
+  and counting solids drags `q` toward the built-up fraction — at 30 % solid a
+  fluid hit rate of 0.52 would report as 0.66 and clear the acceptance
+  threshold on a field that fails it. Two rules, in order of authority: the
+  backend's own `blanking` indicator when the state files carry one (pylbm), and
+  otherwise the truth's own resolved TKE, since a cell a solver held at a
+  constant has exactly zero variance while a fluid cell in a turbulent flow does
+  not. `solid_cell_source` records which ran, with `n_fluid_cells` and
+  `solid_fraction` beside it; `none` means every cell was scored and `q` is
+  diluted by whatever obstacles the domain holds. The fallback cannot see an
+  obstacle a backend filled with time-varying junk rather than zeros (uDALES),
+  and it stands down entirely on a truth with no resolved fluctuation anywhere.
+
+  The fields behind it are written beside the summary as **`eval_fields.nc`**
+  (the WP1.5 figures read it rather than re-streaming): per-cell time-mean
+  velocity, resolved TKE and `<u'w'>` for the truth and, reduced across the
+  ensemble, for the posterior (and prior). Two regions — a few evenly spaced
+  z-slabs at full (or strided) horizontal resolution, and full-depth columns at
+  the sensors' `(x, y)`, **both** the assimilated and the held-out ones, labelled
+  by a `station_set` coordinate — with ensemble mean and `ddof=1` spread on both
+  and nested quantiles at the station columns only. Reductions only: no
+  per-member field is stored, and everything is float32. The stresses are
+  **resolved-only** — the subgrid contribution is not in them and is not
+  negligible inside a canopy. The file is self-contained by design: the
+  averaging window (`t_start`/`t_end`), the stride, the station labels, the
+  fluid mask (`slab_fluid`), **which frames the moments were reduced over**
+  (`moment_sampling`, and whether those frames left gaps —
+  `moment_sampling_is_sparse`) and which axes carry colocation's extrapolated
+  edge (`extrapolated_edges`) are attributes, coordinates or variables here, so a
+  figure never reopens the run's other artifacts — or re-derives a mask — to
+  draw an honest plot. That last one matters for plotting: every axis colocation
+  moves has its **last** index extrapolated from the two faces below it rather
+  than interpolated between two, so those cells carry inflated second moments
+  (~20 % for a well-resolved field, up to 5× for face-to-face white noise). It
+  is not only the vertical — uDALES moves x, y and z, PALM moves x and y — and
+  an evenly spaced selection always includes the last index.
+
+  `moment_sampling` is on **every** `eval_fields.nc`, ESMDA and filtering
+  alike, because `t_start`/`t_end` alone are a horizon, not a cadence. It is a
+  plain sentence naming the frames; ESMDA writes the default one — *"every
+  output frame of each window's posterior rollout, so the moments are
+  within-window time averages"* — and a pipeline whose frames are not that
+  passes its own (the filter does, §2.4). What it exists to disambiguate is
+  `*_tke` / `*_uw`: moments reduced over one frame per cycle are an
+  across-cycle variance carrying the analysis increments rather than resolved
+  turbulence, and nothing in the numbers says which. The figure stage opens
+  this file and not `run_summary.yaml`, so the line has to travel with the data
+  it qualifies; S1 and F1 take it as their `sampling_note`.
+
+  **`moment_sampling` is provenance; `moment_sampling_is_sparse` is the
+  caveat.** The second attribute is beside it on every `eval_fields.nc` — `0` or
+  `1`, an int because netCDF attributes have no boolean type — and it records
+  whether those frames leave *gaps* in `t_start`–`t_end`, so that the moments
+  are not a continuous time average. **That flag, and not the presence of
+  `moment_sampling`, is what S1 and F1 qualify their labels on.** The note
+  prints on both cycle-state sources, dense and sparse alike; the flag alone
+  drives "time-mean" versus "sample-mean" — F1's colorbar label, title prefix,
+  span preposition (`t = …` versus `sampled over t = …`) and caption, and S1's
+  caption — and it is what marks S1's TKE rows with a `*` (the marker needs a
+  footnote to point at, so it also needs the note). The split is deliberate:
+  sparseness is a property of the frames, not of whether someone wrote a
+  sentence about them. The `forecast` cycle-state source names its frames too
+  and genuinely *is* a continuous time average, so a figure that inferred the
+  caveat from the note's mere presence would qualify it exactly as loudly as it
+  qualifies a one-frame-per-cycle run — and the warning would stop
+  discriminating between the two. ESMDA always writes `0`; the filter writes
+  `1` for every source but `forecast` (§2.4). One asymmetry worth knowing:
+  `make_filtering_figures.py` reads both attributes off the file and forwards
+  them, while `make_esmda_figures.py` reads neither, so on an ESMDA run the
+  wording is right by default but the provenance line is not drawn.
+
+  Three things worth knowing about how they are produced. The accumulation
+  rides on the *same* pass over the window state files as the sensor
+  extraction, so the ensemble — the M-times-larger half — costs no extra read
+  (the truth is streamed a second time, because it can only be sampled once the
+  ensemble pass has fixed the grid); the components are interpolated onto
+  cell centres first (a stress is a one-point moment, and combining staggered
+  components by array index biases the anisotropy ratio by the staggering
+  pattern rather than by the flow); and the truth is interpolated onto the
+  assimilation grid, so cross-grid runs are scored cell against cell. Memory is
+  bounded by two derived numbers rather than by config, because they answer two
+  different questions: a horizontal stride keeping **one ensemble's** persistent
+  accumulators inside ~1 GB (that is all M members' — and the posterior and prior
+  collectors are alive at once, so the pass's persistent worst case is twice it;
+  logged whenever the stride is not 1), and a time sub-chunk keeping one
+  accumulation step's transient inside ~256 MB. The transient is the larger term
+  and is sized on whichever grid the step touches — the source grid when
+  colocation or a cross-grid interpolation runs, the target slab otherwise. The
+  whole block is dropped — with a log line, the rest of the summary intact —
+  when the state carries no ensemble axis or its layout cannot be co-located.
+- `spectral_metrics` — the **frequency spectra** at the probes, and the one thing
+  the mean-field metrics cannot see: a flow can carry the right time-mean and even
+  the right total variance while putting that variance at the wrong frequencies,
+  which is what an over-smoothed or surrogate-collapsed field does. Welch
+  estimates (Hann, 50 % overlap, linear detrend) of the trace `E_uu+E_vv+E_ww` at
+  each probe, with **one segment duration for the truth and every member** —
+  identical `nperseg` at a shared cadence, and at differing cadences the shared
+  quantity is the segment's length in *seconds*, with the comparison restricted to
+  the band both records resolve. Nothing is ever resampled: interpolating a coarse
+  record onto a fine axis invents the high-frequency content under test.
+  Comparisons stop at `f_Nyquist/4` (`f_cutoff`), since the top of a sampled band
+  carries the discretisation's roll-off and the SGS closure rather than the
+  flow. It is **not** an anti-aliasing margin: snapshot probing applies no
+  anti-alias filter, and content near `f_s` folds toward *DC* — the bottom of
+  the scored band, where no cutoff reaches it. Bounding that is the probe
+  cadence's job.
+  `lsd_posterior_median` is the log-spectral distance
+  `√(mean_k [10·log₁₀(E_t/E_m)]²)` in dB between the truth and the *member-median*
+  spectrum, reduced over sensors by the median (`n_sensors`, `n_band_bins`,
+  `segment_seconds` and `sample_frequency` record what it ran on).
+
+  **`n_band_bins` is the number to size a probe rerun against**, and it depends
+  on the **sample count alone** — `nperseg = n/8` and the cutoff is a fraction
+  of `f_s`, so the cadence cancels.
+  `evaluation.turbulence.spectral_band_bins(n)` returns the bins a record of
+  `n` samples would score and
+  `minimum_spectral_samples(band_bins)` inverts it. Its default argument is the
+  **refusal floor** — 4 bins, 264 samples, below which `probe_spectra` returns
+  `None` — which is not a target: bins run `1..B`, so `B` bins is a frequency
+  span of exactly `B`, and four of them is well under a decade.
+  `SPECTRAL_BAND_DECADE_BINS` (10 bins, **648 samples**) is the decade a `-5/3`
+  reading off figure S4 needs; `run_probe_series.py`'s pre-flight reports the
+  bin count and warns below it.
+
+  **Never read it against zero, and not against `lsd_truth_floor` either.**
+  `lsd_truth_floor` is the distance between the two halves of the truth's own
+  record, and it runs **~2×** the scatter this comparison shows under a null of
+  identical flows: halving the record at fixed `nperseg` halves the segment count
+  (≈4× the variance in `LSD²`) while the reported number compares the full truth
+  against a *median over M members*, whose own scatter is ~1/M of one estimate —
+  measured 1.99 (M=8) and 2.08 (M=32) on statistically identical `f^-5/3` flows.
+  So `lsd_truth_floor_comparable` (that value halved) is the like-for-like
+  reference, and it is the one to read against. **Neither is a pass threshold**:
+  the metrics doc sets no acceptance level for the LSD, and a posterior at 2 dB
+  under a 2.5 dB halves distance is *not* indistinguishable from the truth — its
+  comparable reference is ~1.2 dB. `lsd_prior_median` appears when prior
+  probe reruns were done and is what makes the posterior number a change rather
+  than an absolute; the optional prior record can never move any other entry (the
+  scored sensors, the band and the cutoff come from the truth and posterior alone,
+  and a prior that does not fit that grid is dropped with a log line).
+  **`n_members` is not bookkeeping**: the median of M spectra is smoother the
+  larger M is, so the distance falls with ensemble size on identical flows (1.409
+  dB at M=2 against 1.171 dB at M=32) and two runs' LSDs are comparable only at
+  equal M — which matters directly for the ensemble-size sweeps in
+  [docs/job_scripts.md](job_scripts.md). The whole block is absent unless an explicit
+  `scripts/esmda/run_probe_series.py` rerun wrote the high-rate probe records —
+  the assimilation's own output cadence is ~30× too coarse for a spectrum — and
+  it is the one block computed even under `run.skip_viz`, since it reads only
+  those small records and never the truth.
+- `esmda_diagnostics.data_mismatch` — the normalized data mismatch
+  `O_N = (1/2N_d)·(d−g(θ))ᵀ C_D⁻¹ (d−g(θ))` per member per ESMDA iteration,
+  reduced to `per_step_median` / `per_step_iqr` / `per_step_min` (index 0 the
+  prior forecast, −1 the posterior). This is the one diagnostic that separates
+  the two ways an ES-MDA run fails: `O_N` well above the `target` of ½ is
+  under-fitting, `O_N` well *below* it means the ensemble is fitting the
+  observation noise — an over-aggressive schedule or a missing localization —
+  and no RMSE distinguishes those. `target_band` is `3/√(2N_d)`; the
+  `underfit_final` / `overfit_final` / `collapsed` flags compare the last
+  iteration that produced values — `final_step_index` says which, since a run
+  whose posterior forecast failed outright gets an earlier one — against it.
+  `collapsed` fires only when a vanishing across-member IQR is paired with an
+  off-target median (identical members *on* target are converged, not collapsed)
+  and is `null` when fewer than 8 values back it, since the smoke shape's two
+  members have no meaningful IQR. **The flags are advisory**, and the block carries
+  `caveat: no_representativeness_error` saying why: the χ² target assumes `C_D`
+  covers representativeness error and here it is a single instrument-scale
+  `esmda.obs_error_std`, so a too-small `C_D` makes a healthy run look
+  under-fitted. Read the trend across iterations and the member spread — neither
+  moved by a constant mis-scaling of `C_D` — before the flags. Absent on any run
+  dir written before WP2.1 or with `esmda.save_obs_diagnostics=false` — that
+  second case is decided by the flag recorded in the run's own `run_info.yaml`
+  and not by whether the files exist, so a flag-off rerun into a results dir an
+  earlier run populated drops the block (and D3) with a warning instead of
+  reporting the earlier run's mismatch. An *absent* flag means unknown, not
+  false, and falls through to the files. Like `spectral_metrics` it is computed
+  even under `run.skip_viz`, reading only the KB-scale observation-space files.
+
+> **`metrics_version`.** The keys above are additive only; when an existing key
+> changes *meaning*, this marker bumps instead. `2` (current) means the fair
+> `M(M−1)` pairwise CRPS / energy-score estimators and the root-mean-variance
+> spread introduced in WP1.1. An absent marker (or `1`) means the older biased
+> `M²` form, whose scores sit ~O(1/M) higher — at M=50 roughly 2 %, enough to
+> reorder a sweep. `compare_sweep_results.py` and `compare_state_runs.py` warn
+> when the runs they are about to compare mix the two; re-run
+> `compute_esmda_metrics.py` on the older dirs to bring them forward.
 
 #### [`make_esmda_figures.py`](../scripts/esmda/make_esmda_figures.py)
 **Plain argparse CLI** — usage: `python scripts/esmda/make_esmda_figures.py --run-dir <dir>`
@@ -604,6 +929,98 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
 - `rollout_animation.mp4` — ensemble-mean `|U|` field vs truth.
 - `final_state_with_obs.png` — final `|U|` field with sensor locations.
 - `sensor_timeseries_<set>.png` — truth vs ensemble at each sensor set.
+- `parameter_marginals.png` — prior vs posterior marginal per parameter, truth
+  dashed and the z-score annotated, with the y-limits including the prior so the
+  contraction is visible. **Which knots the two marginals come from depends on
+  the truth**, and both are labelled with it in the panel: for a *static*
+  parameter (the truth is the same at every knot — `prior_params.nc` stacks one
+  point per assimilation window) the prior is taken at **knot 0**, the run's
+  actual prior, against the posterior at the final knot, so the panel shows the
+  total contraction the run achieved; for a genuinely *time-varying* truth both
+  come from the **final** knot, since knot 0 is a different physical time and
+  the only contraction available is per-window. Note that WP1.2's
+  `parameter_metrics.contraction_ratio.final` in `run_summary.yaml` is always
+  per-knot, so on a static multi-window run the figure and the YAML deliberately
+  describe different things — the figure's subject is the run, the YAML's is the
+  window.
+- `station_profiles.png` — vertical `ū/U_ref` and TKE profiles at the sensor
+  columns (assimilated *and* held-out, labelled by `station_set`): truth line,
+  posterior median with nested quantile bands, prior bands, plus an inset plan
+  view. `U_ref` is the truth's `velocity_magnitude` parameter when the case
+  estimates one, else the profiles are drawn in m/s. The `z/H` axis and its
+  roof line need a canopy height, read from the optional `geometry.building_height`
+  key; no shipped case defines it (the geometry is an STL, not a scalar), so the
+  default is metres.
+- `mean_slices.png` — a few z-levels × (truth | prior mean | posterior mean |
+  posterior − truth), shared colour norm across the first three and a symmetric
+  diverging one for the difference, solid cells masked out. Always the
+  accumulated time-mean, never an instantaneous frame; the averaging window is
+  annotated from the file's own `t_start`/`t_end`.
+- `sensor_fans.png` — the sensor `|U|` series as nested posterior quantile fans,
+  one column per sensor set, with the truth, the window boundaries and a
+  ± `esmda.obs_error_std` envelope around the truth. Its x-axis is physical time
+  on *every* run, so the window boundaries are marked whenever there is more than
+  one window — unlike the parameter plots, whose x-axis is a window index on a
+  static run. **Pre-WP2.1 caveat, stated in the figure:** the realized noisy
+  observations the run actually assimilated are not persisted yet, so the
+  envelope is the *clean* truth ± σ, not the values that were assimilated.
+- `probe_spectra.png` — premultiplied `f·E(f)/σ²` at the probes, log–log, one panel
+  per probe sensor (held-out first): truth line, posterior nested quantile bands,
+  prior 5–95 % envelope, a dotted line at the `f_Nyquist/4` comparison cutoff and a
+  short `−2/3` reference slope offset above the curves (a reference, not a fit).
+  Every curve in a panel is divided by the **truth's** resolved variance, so a
+  member carrying half the energy cannot overlay the truth. Each panel annotates
+  its own log-spectral distance and the truth's *halves* distance — the same
+  function and band as `spectral_metrics`, whose entries are these numbers reduced
+  over sensors. The panel says "truth halves" rather than "floor" deliberately: it
+  is ~2× the like-for-like scatter and not a pass threshold, which the caption
+  repeats. A probe whose truth variance is zero or non-finite (a sensor in a solid
+  cell, a series with a gap) is dropped with a log line rather than drawn
+  unnormalized under a normalized axis label. Needs the high-rate probe records
+  (see `run_probe_series.py`), so it is absent on any run dir without a probe
+  rerun.
+- `rank_histogram.png` — the rank of the truth's window statistic within the
+  members, read out of `run_summary.yaml`'s `sensor_statistics` block and pooled
+  over statistics, sensors and windows; rows = sensor sets, columns = prior |
+  posterior, with the uniform reference and its binomial band. Coarsened to ~10
+  rank bins (the summary stores all `M+1`, since binning down is exact and
+  binning up is not).
+- `data_mismatch_decay.png` (D3) — per-member `O_N` boxes vs ESMDA iteration
+  against the ½ target band, the figure the ES-MDA literature conditions readers
+  to expect. A rollout's windows are drawn as separate boxes per iteration rather
+  than pooled: window 0's prior is a cold-start draw and a later window's is an
+  extrapolated posterior, so one pooled step-0 box would conflate two different
+  objects. The y-axis goes log once the per-step medians span ≥1.5 decades and
+  every plotted value is positive (a healthy MDA run drops `O_N` by one to two
+  orders of magnitude, which a linear axis flattens onto zero exactly where the
+  band matters); on a log axis the band is floored at the smallest plotted value,
+  and dropped altogether when nothing plotted comes near it, so it can never be
+  drawn inverted. The `C_D` caveat above is annotated
+  on the figure. Reads the same `obs_diagnostics_bundle` the metric stage scores,
+  so the boxes and the YAML come off one reduction; absent whenever
+  `esmda_diagnostics` is.
+
+Five of the last seven depend on an artifact a run dir may not have:
+`station_profiles.png` and `mean_slices.png` read `eval_fields.nc`,
+`rank_histogram.png` reads `run_summary.yaml`'s `sensor_statistics` block — both
+written only by a current metric stage — `data_mismatch_decay.png` reads the
+per-window observation-space files (WP2.1, `esmda.save_obs_diagnostics`), and
+`probe_spectra.png` reads the probe
+records only an explicit probe rerun writes, so it is missing from almost every
+run dir by design. The other two need nothing extra:
+`parameter_marginals.png` reads the parameter datasets and `sensor_fans.png` the
+sensor series this stage extracts itself, and both are present on any run dir.
+Each figure is **skipped with a printed line** when its input is absent, and a
+skip never costs the figures after it — an old run dir still gets every figure it
+can support. The prior halves of the profile, slice and rank figures additionally
+need `run.save_prior_state`. All the run-dir layout, config reading and YAML
+parsing lives in this script: `libs/evaluation` is handed opened datasets and
+plain dicts and stays a leaf.
+
+The stage configures `logging` at INFO on its entry point, because the reason a
+figure no-oped is logged by `evaluation.figures` while only the *fact* is
+printed here — without a root handler the operator would see the skip and never
+the why.
 
 Honors `run.skip_viz` from the saved config (no-op if true).
 
@@ -630,17 +1047,58 @@ figure stages reuse the ESMDA truth-access / sensor-series helpers via
 them to the filter's per-**cycle** time axis (the truth is compared at each
 cycle's end-of-segment frame).
 
+**Cycle state sources.** The ESMDA evaluation blocks all reduce over the
+ensemble states of one assimilation step, and ESMDA has exactly one thing to
+reduce (`windows/window_{w}_posterior_state.nc`). The filter has two, and
+`_filtering_common.cycle_state_source` picks between them — the choice is
+recorded in `run_summary.yaml`'s `cycle_states` block, so the numbers always say
+which they came from:
+
+| Source | When | What you get |
+|---|---|---|
+| `forecast` | `run.ensemble_save_on_disk=true` | Every member's full forecast segment, kept under `_ensemble_states/cycle_{k}/state_{m}.nc` and never pruned. Cycle *k*'s forecast is the ensemble rolled out from cycle *k−1*'s analysis under its analyzed parameters — the exact analogue of an ESMDA window file, and out-of-sample. Within-cycle variance and real resolved turbulence. |
+| `analysis` | default | `state_history.nc` alone: **one** analyzed frame per cycle. Every block still runs, but the per-cycle *variance* statistic is null (a `ddof=1` variance of one sample) and the TKE / `<u'w'>` moments are taken *across* cycles, so they carry the analysis increments — read those panels as an upper bound. |
+
+Both are frame-matched against the truth by the same contract, so the statistics
+compare like with like either way.
+
 #### [`compute_filtering_metrics.py`](../scripts/filtering/compute_filtering_metrics.py)
 **Plain argparse CLI** — usage: `python scripts/filtering/compute_filtering_metrics.py --run-dir <dir>`
 
 Stage 2. Reads the artifacts saved by `run_filtering.py` and writes
 `run_summary.yaml` — the `run_info` metadata augmented with:
+- `metrics_version` — estimator-semantics marker, shared with the ESMDA
+  pipeline (§2.3).
 - `filter_diagnostics` — summary stats of the per-cycle innovation χ² and
   observation-space prior/posterior RMSE (always available; every mode).
 - `parameter_metrics` — per-parameter RMSE/CRPS of the final analyzed ensemble
-  + reduction vs prior (absent in `mode=state`).
+  + RMSE reduction and CRPSS vs prior, and the same calibration entries as the
+  ESMDA summary (§2.3) (absent in `mode=state`).
 - `state_metrics` — per-cycle `|U|` field RMSE vs the truth's end-of-cycle frames.
 - `sensor_metrics` — full-vector (u, v, w) RMSE and energy score per sensor set.
+- `ensemble_health` — duplicate-member counts of the analyzed parameter
+  ensemble, run-wide and per cycle (`n_unique_per_cycle`, read out of
+  `params_history.nc`) (absent in `mode=state`).
+- `cycle_states` — which of the two cycle state sources above the three blocks
+  below reduced over, with its cycle/member counts and a one-line caveat.
+- `sensor_statistics` — per sensor set, the per-cycle mean and variance of
+  u/v/w/`|U|` scored as the verification object (fair CRPS, z-score, rank
+  counts, identifiability) — the statistics-space counterpart of
+  `sensor_metrics` (§2.3). Posterior half only: the filter saves no comparable
+  prior rollout. Its `n_windows` key is the shared library's name for the bin
+  count, which here is the cycle count.
+- `field_metrics` — the VDI 3783/9 hit rate `q` of the time-mean velocity field
+  over evenly spaced z-slabs, with `W` block-bootstrapped from the truth's own
+  sampling error. Writes `eval_fields.nc` beside the summary for the figure
+  stage, stamping its `moment_sampling` attribute (§2.3) with the cycle-state
+  source's own `description` — the same line the `cycle_states` block above
+  carries, put where the figure stage will actually see it — and its
+  `moment_sampling_is_sparse` attribute with `source.kind != "forecast"`, i.e.
+  `1` under the default `analysis` source and `0` under `forecast`, whose
+  segments tile the run and whose moments therefore *are* a continuous time
+  average. That flag is what S1 and F1 branch on (§2.3). `n_cycles` is the
+  run's cycle count; `n_windows` beside it is the number of accumulator chunks,
+  which is 1 under the `analysis` source.
 
 #### [`make_filtering_figures.py`](../scripts/filtering/make_filtering_figures.py)
 **Plain argparse CLI** — usage: `python scripts/filtering/make_filtering_figures.py --run-dir <dir>`
@@ -651,8 +1109,24 @@ Stage 3. Reads artifacts and writes into the run directory:
 - `rollout_animation.mp4` — analyzed ensemble-mean `|U|` field vs truth (one frame/cycle).
 - `final_state_with_obs.png` — final analyzed `|U|` field with sensor locations.
 - `sensor_timeseries_<set>.png` — truth vs ensemble at each sensor set.
+- `parameter_marginals.png` (P1) — prior vs posterior marginal per parameter.
+- `station_profiles.png` (S1) — mean-velocity / TKE profiles at the sensor
+  columns (needs `eval_fields.nc`).
+- `mean_slices.png` (F1) — time-mean field slices, truth vs posterior vs
+  difference (needs `eval_fields.nc`).
+- `sensor_fans.png` (S5) — sensor quantile fans with the observation-error
+  envelope, assimilated and held-out columns side by side.
+- `rank_histogram.png` (D1) — rank histogram of the per-cycle statistics (needs
+  `run_summary.yaml`'s `sensor_statistics`).
 
 The parameter figures are skipped in `mode=state` (no parameters estimated).
+The last five mirror the ESMDA stage's WP1.5 figures (§2.3); each degrades to a
+printed skip line when the artifact it reads is absent, so a run dir whose metric
+stage predates them still gets every figure it can support, and a skip never
+costs the figures after it. There is no filtering counterpart to the ESMDA
+suite's `probe_spectra.png` (S4): it needs the high-rate probe records only a
+dedicated solver rerun (`scripts/esmda/run_probe_series.py`) writes, and the
+filtering pipeline has no such script.
 
 #### [`run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh)
 **Shell script** (executable). Runs all three stages in sequence, resolving the
@@ -735,8 +1209,23 @@ from the per-window ensemble state hyperslabs:
 Middle stage of a **sweep comparison pipeline** (runs across ensemble size or domain
 resolution). Computes every metric + metric time series from ESMDA posterior results
 and writes small artifacts to `pyurbanair/sweep_metrics/<run>/`:
-- `metrics.yaml` — configuration + parameter/state/sensor metrics (u/v/w + `|U|`
-  per component, per sensor set).
+- `metrics.yaml` — `metrics_version` (§2.3) + configuration + parameter/state/sensor
+  metrics (u/v/w + `|U|` per component, per sensor set). Every ensemble score in
+  it is recomputed here by the current estimators, so the marker is always the
+  current version. A run without `truth_access.yaml` (produced before that file
+  existed) cannot have its sensor scores recomputed, so what is carried over
+  from its `run_summary.yaml` is decided by an **allowlist**
+  (`_CARRYABLE_SENSOR_KEYS`): `num_sensors` plus the RMSE keys
+  (`vel_magnitude_rmse`, `u/v/w_rmse`, `velocity_vector_rmse`), each of them
+  estimator-*independent* and therefore bit-identical across the WP1.1 switch.
+  Everything else is dropped rather than mixed into a version-2 file — including
+  `velocity_vector_energy_score`, which the suffix denylist this replaced
+  (`not k.endswith("_crps")`) let through even though it is a biased `M²`
+  pairwise score. An allowlist fails closed: a future score is withheld until
+  someone vouches for it. A carried-forward file records
+  `sensor_metrics_provenance` next to the block — `recomputed: false`,
+  `carried_from_metrics_version`, `dropped_keys` — so an empty CRPS panel reads
+  as withheld rather than failed. Re-run ESMDA to restore them.
 - `sensor_timeseries_<set>.nc` — truth + prior/posterior ensemble series (small;
   no full fields).
 - Copies of `posterior_params.nc`, `prior_params.nc`, `true_params.nc`.
@@ -746,12 +1235,15 @@ and writes small artifacts to `pyurbanair/sweep_metrics/<run>/`:
 Final stage of the sweep pipeline. Reads `pyurbanair/sweep_metrics/` and draws
 comparison figures + a summary CSV. `--sweep domain` compares across grid cells;
 `--sweep ensemble` compares across ensemble sizes. `--sweep all` does both.
+Warns when the runs it is about to compare carry different `metrics_version`
+markers (§2.3), since their CRPS / energy scores are then incomparable.
 
 #### [`figure_creation/compare_state_runs.py`](../scripts/figure_creation/compare_state_runs.py)
 
 Compares multiple **state-estimation** ESMDA runs on shared metrics. Reads each
 run's `run_summary.yaml`. Groups bars by method (`svd`/`localization_corr`/
 `localization_dist_dist`) and labels by mode. `--mode ic|all|both` filter.
+Warns on mixed `metrics_version` markers (§2.3), as the sweep comparison does.
 
 #### [`figure_creation/compare_param_vs_state.py`](../scripts/figure_creation/compare_param_vs_state.py)
 
@@ -796,10 +1288,13 @@ imported by the block drivers in `figure_creation/`.
 |---|---|
 | [`figspec/dataio.py`](../scripts/figspec/dataio.py) | I/O helpers: lazy truth dataset access, loading parameter/state artifacts, grid metadata. |
 | [`figspec/figcommon.py`](../scripts/figspec/figcommon.py) | Reusable plotting primitives (parameter-trajectory panels, error-vs-time lines, field + difference heatmap grids). |
-| [`figspec/style.py`](../scripts/figspec/style.py) | Matplotlib style constants (colors, line styles, fonts) shared across all block drivers. |
-| [`figspec/mask.py`](../scripts/figspec/mask.py) | Building-mask utilities for field plots (fluid/obstacle masking). |
-| [`figspec/metrics.py`](../scripts/figspec/metrics.py) | Metric computation helpers used by the block drivers. |
+| [`figspec/mask.py`](../scripts/figspec/mask.py) | Building-mask utilities for field plots (fluid/obstacle masking); binds `evaluation.style`'s STL geometry to this repo's data locations. |
 | [`figspec/_selftest.py`](../scripts/figspec/_selftest.py) | Quick smoke test for the figspec library. |
+
+The Matplotlib style constants and the metric definitions the block drivers use
+live in the `evaluation` library instead:
+[`evaluation.style`](../libs/evaluation/src/evaluation/style.py) and
+[`evaluation.scores`](../libs/evaluation/src/evaluation/scores.py).
 
 ---
 

@@ -1,5 +1,6 @@
 """Utilities for handling LBM warmstart/restart files."""
 
+import logging
 import pathlib
 import re
 from typing import Optional
@@ -11,12 +12,72 @@ from scipy.io import FortranFile
 from .dir_utils import DirectoryPaths
 from .infile_utils import Infile
 
-# Iteration field width is variable (6 digits historically, 9 digits since the
-# overflow fix). Match \d+ so both legacy and current restart names parse.
+logger = logging.getLogger(__name__)
+
+# Width of the iteration field in every LBM filename. This is the FORTRAN's
+# choice, not ours: m_readrestart, m_saverestart, m_save_uvw and m_diag each
+# declare ``character(len=6) cit`` and format the iteration with ``i6.6``. The
+# solver builds the name it opens from that format and calls ``stop`` when the
+# file is absent, so a restart written under any other width is one the solver
+# will never read -- it is not a cosmetic difference.
+#
+# This used to be 9 here, on the assumption that an upstream "overflow fix" had
+# widened the Fortran. The pinned submodule (and upstream HEAD) never carried
+# it, so every Python-written warm start was invisible to the solver: it opened
+# its OWN restart from the previous run at the same iteration instead, silently
+# discarding the field the wrapper had just written. Changing this back is the
+# fix; ``tests/test_pylbm_restart_filenames.py`` reads the Fortran sources and
+# fails if the two ever disagree again.
+ITERATION_FIELD_WIDTH = 6
+
+# Largest iteration the field can hold. Above it the Fortran's own write
+# overflows ``cit`` to '******', producing a name that matches neither restart
+# pattern below -- so it can never be pruned, and every later warm start at that
+# iteration reads a permanently stale file.
+MAX_ITERATION = 10**ITERATION_FIELD_WIDTH - 1
+
+# Reading stays deliberately width-agnostic (``\d+``): run directories written
+# before the fix hold 9-digit names, and they must still be found, parsed and
+# pruned rather than lingering forever beside the correct ones.
 RESTART_FILE_PATTERN = re.compile(
     r"^(?P<prefix>restart|turbulence|theta|pottemp|tracer)_(?P<tile>\d{4})_(?P<iteration>\d+)\.uf$"
 )
 MAIN_RESTART_PATTERN = re.compile(r"^restart_\d{4}_(?P<iteration>\d+)\.uf$")
+
+# The on-disk framing of an LBM restart record, which the reader below has to
+# know before it can read anything. ``m_saverestart.F90`` emits one unformatted
+# ``write(iunit) nx,ny,nz,nl,f``: gfortran wraps that record in a 4-byte length
+# marker at each end -- the width scipy's ``FortranFile`` assumes by default
+# (``header_dtype='uint32'``) -- and the four leading values are default
+# integers. The reals are 4-byte because this repo's build never passes the
+# makefile's ``DP=1`` (``-fdefault-real-8``); were that to change, both this
+# reader and ``write_restart_file_from_xarray`` below would silently disagree
+# with the solver about every value in the file.
+_RECORD_MARKER_DTYPE = np.dtype(np.uint32)
+_RESTART_HEADER_COUNT = 4
+
+
+def restart_file_name(
+    iteration: int, prefix: str = "restart", tile: str = "0000"
+) -> str:
+    """The one place an LBM restart filename is spelled.
+
+    Every writer goes through this so the width can never drift apart from the
+    Fortran's ``i6.6`` in one call site and not another -- which is exactly how
+    the original bug survived: three sites agreed with each other and none of
+    them agreed with the solver.
+    """
+    if iteration > MAX_ITERATION:
+        raise ValueError(
+            f"LBM iteration {iteration} does not fit the solver's "
+            f"{ITERATION_FIELD_WIDTH}-digit restart filename field (max "
+            f"{MAX_ITERATION}). Its name would overflow to "
+            f"'{'*' * ITERATION_FIELD_WIDTH}', which the solver cannot read and "
+            "the pruning cannot match. Start from a clean experiment directory "
+            "(the iteration counter accumulates across warm starts) or widen "
+            "the i6.6 format in the LBM Fortran sources."
+        )
+    return f"{prefix}_{tile}_{iteration:0{ITERATION_FIELD_WIDTH}d}.uf"
 
 
 def _restart_dir(dirs: DirectoryPaths) -> pathlib.Path:
@@ -85,6 +146,18 @@ def remove_old_restart_files(
             continue
         iteration = int(match.group("iteration"))
         if iteration != keep_iteration:
+            path.unlink(missing_ok=True)
+            continue
+        # Right iteration, wrong width. A run directory written before the
+        # filename-width fix holds 9-digit names beside the 6-digit ones the
+        # solver actually reads, and both parse to the same iteration -- so the
+        # test above keeps them forever. Drop them: they are bytes nothing will
+        # ever open, and leaving a second restart at the kept iteration is
+        # precisely the ambiguity this bug was made of.
+        canonical = restart_file_name(
+            iteration, prefix=match.group("prefix"), tile=match.group("tile")
+        )
+        if path.name != canonical:
             path.unlink(missing_ok=True)
 
 
@@ -534,9 +607,47 @@ def _copy_auxiliary_restart_files(
         tile = match.group("tile")
         if prefix == "restart" or iteration != source_iteration:
             continue
-        target_name = f"{prefix}_{tile}_{target_iteration:09d}.uf"
+        target_name = restart_file_name(target_iteration, prefix=prefix, tile=tile)
         target_path = restart_dir / target_name
         target_path.write_bytes(path.read_bytes())
+
+
+def _peek_restart_record_layout(
+    restart_file: pathlib.Path,
+) -> tuple[int, np.ndarray]:
+    """Read a restart record's byte length and its four leading integers.
+
+    This is the same two-step the solver itself performs -- ``m_readrestart``
+    reads ``i,j,k,l``, rewinds, and only then reads the whole record -- and for
+    the same reason: the grid a restart was written for has to be known before
+    its payload can be read, because ``read_record`` needs the payload's exact
+    length up front and scipy cannot read part of a record.
+
+    Taking the length from the record's own marker rather than from the grid the
+    caller expects is what keeps the two failure modes distinguishable. Sized
+    from an assumed grid, a restart written for a different grid and a restart
+    that is simply truncated both surface as the same arithmetic complaint from
+    inside scipy; sized from the file, each reaches the guard that names it.
+    """
+    header_bytes = _RESTART_HEADER_COUNT * np.dtype(np.int32).itemsize
+    prefix_bytes = _RECORD_MARKER_DTYPE.itemsize + header_bytes
+    with open(restart_file, "rb") as raw:
+        prefix = raw.read(prefix_bytes)
+    if len(prefix) < prefix_bytes:
+        raise ValueError(
+            f"file is {len(prefix)} bytes, too short to hold even the "
+            f"{prefix_bytes}-byte record marker and grid header"
+        )
+    record_bytes = int(
+        np.frombuffer(prefix, dtype=_RECORD_MARKER_DTYPE, count=1, offset=0)[0]
+    )
+    header = np.frombuffer(
+        prefix,
+        dtype=np.int32,
+        count=_RESTART_HEADER_COUNT,
+        offset=_RECORD_MARKER_DTYPE.itemsize,
+    )
+    return record_bytes, header
 
 
 def _try_load_restart_distribution(
@@ -545,26 +656,103 @@ def _try_load_restart_distribution(
     ny: int,
     nz: int,
 ) -> Optional[np.ndarray]:
-    """Try loading restart distribution f from a Fortran unformatted file."""
+    """Try loading restart distribution f from a Fortran unformatted file.
+
+    An LBM restart is a SINGLE Fortran record -- ``write(iunit) nx,ny,nz,nl,f``
+    in ``m_saverestart.F90``, with ``f(nl,0:nx+1,0:ny+1,0:nz+1)`` -- so its
+    payload is ``27*(nx+2)*(ny+2)*(nz+2)`` float32 behind four int32, framed by
+    a record-length marker at each end. That layout is why the dtypes handed to
+    ``read_record`` must be SHAPED. Given a list of *scalar* dtypes scipy treats
+    them as one repeating compound (20 bytes for four int32 plus a float32) and
+    demands the record be an exact multiple of it, which a restart never is: for
+    years that made this function raise on every single call, fall into the
+    ``except`` below, and hand the caller ``None``. Shaped dtypes -- ``(4,)i4``
+    plus ``(n,)f4`` -- instead sum to exactly one record, so scipy reads it in
+    one pass and hands back the header and the payload separately.
+
+    ``None`` means "no template" and the caller falls back to a pure-equilibrium
+    restart, which loses the non-equilibrium and ghost-cell content the template
+    exists to carry. That is a real degradation of the warm start, so every route
+    to it is logged rather than swallowed -- the silence is what let the defect
+    above survive unnoticed for as long as it did.
+    """
     if not restart_file.exists():
+        logger.info(
+            "No restart template at %s; the warm start will be built from a pure "
+            "equilibrium distribution",
+            restart_file,
+        )
         return None
     try:
-        with FortranFile(str(restart_file), "r") as f:
-            i, j, k, l, f_flat = f.read_record(
-                np.int32, np.int32, np.int32, np.int32, np.float32
+        record_bytes, header = _peek_restart_record_layout(restart_file)
+        i, j, k, l = (int(value) for value in header)
+        if i != nx or j != ny or k != nz or l != 27:
+            logger.warning(
+                "Restart template %s describes a %sx%sx%s grid with %s directions, "
+                "not %sx%sx%s with 27; falling back to a pure-equilibrium warm start",
+                restart_file.name,
+                i,
+                j,
+                k,
+                l,
+                nx,
+                ny,
+                nz,
             )
-        if int(i) != nx or int(j) != ny or int(k) != nz or int(l) != 27:
             return None
         expected_size = 27 * (nx + 2) * (ny + 2) * (nz + 2)
-        if f_flat.size != expected_size:
+        # The header agrees with the compiled grid, so the record length is the
+        # only thing left that can disagree. A payload that is not a whole number
+        # of float32 is a corrupt file rather than a mismatched one, so it is
+        # raised into the handler below with the rest of the damaged files.
+        payload_size, remainder = divmod(
+            record_bytes - _RESTART_HEADER_COUNT * np.dtype(np.int32).itemsize,
+            np.dtype(np.float32).itemsize,
+        )
+        if remainder != 0 or payload_size < 0:
+            raise ValueError(
+                f"record is {record_bytes} bytes, which is not a grid header "
+                "followed by a whole number of float32 values"
+            )
+        if payload_size != expected_size:
+            logger.warning(
+                "Restart template %s holds %d values, expected %d; falling back "
+                "to a pure-equilibrium warm start",
+                restart_file.name,
+                payload_size,
+                expected_size,
+            )
             return None
+        with FortranFile(str(restart_file), "r") as f:
+            _, f_flat = f.read_record(
+                np.dtype((np.int32, (_RESTART_HEADER_COUNT,))),
+                np.dtype((np.float32, (expected_size,))),
+            )
+        # ``f`` is column-major in the Fortran with the lattice direction
+        # fastest, hence order="F" here and the Fortran-ordered return: the
+        # caller subtracts and re-adds equilibria direction by direction, and
+        # writes the result back out with ``np.ravel(..., order="F")``.
         f_data = np.reshape(
             f_flat.astype(np.float32),
             (27, nx + 2, ny + 2, nz + 2),
             order="F",
         )
         return np.asfortranarray(f_data)
-    except Exception:
+    except Exception as error:
+        # A truncated, half-written or otherwise damaged restart is a real
+        # possibility -- an ensemble member killed mid-write leaves one behind --
+        # so this stays. It used to be a bare `return None`, and because the
+        # scalar-dtype call above always raised, it was the path EVERY call took
+        # and every warm start was silently built from equilibrium. It must never
+        # be the common case again, which is what the log line is for.
+        logger.warning(
+            "Cannot read the restart template %s (%s: %s); the warm start falls "
+            "back to a pure-equilibrium distribution, losing the non-equilibrium "
+            "content the template carries",
+            restart_file.name,
+            type(error).__name__,
+            error,
+        )
         return None
 
 
@@ -669,7 +857,12 @@ def write_restart_file_from_xarray(
     # Prefer template-based update to preserve consistent ghost/boundary data.
     template_f = None
     if latest_iteration is not None:
-        template_restart = restart_dir / f"restart_0000_{latest_iteration:09d}.uf"
+        # Same width as everything else, and it matters here too: at 9 digits
+        # this never matched the Fortran's own restart, so the template was
+        # always absent and the warm start silently fell back to a PURE
+        # EQUILIBRIUM field -- losing the non-equilibrium and ghost-cell content
+        # the template exists to carry.
+        template_restart = restart_dir / restart_file_name(latest_iteration)
         template_f = _try_load_restart_distribution(
             restart_file=template_restart,
             nx=nx,
@@ -713,6 +906,17 @@ def write_restart_file_from_xarray(
     if template_f is not None:
         # Preserve non-equilibrium content from template restart for better stability:
         # f_new = f_template - feq(template_macro) + feq(target_macro)
+        #
+        # Everything below is reachable only now that the template actually
+        # loads; until the shaped-dtype fix in _try_load_restart_distribution it
+        # was dead code. Two consequences worth knowing. First, ``fluid_mask_zyx``
+        # is read unconditionally above but consulted only here, so the blanking
+        # convention (non-zero == solid) has never been exercised on a real run
+        # either. Second, this branch holds four full 27-direction fields at once
+        # (template, its equilibrium, the target equilibrium, the result) where
+        # the equilibrium path holds one, so peak memory per member roughly
+        # doubles -- which matters at the grid sizes where ensembles already sit
+        # near the DRAM ceiling.
         rho_t, u_t, v_t, w_t = _compute_macrovars_from_distribution(template_f)
         # Build target macro fields in interior, defaulting to template values where
         # xarray values are invalid or correspond to blanked/solid cells.
@@ -776,7 +980,7 @@ def write_restart_file_from_xarray(
         )
         feq = np.asfortranarray(f_new.astype(np.float32))
 
-    restart_file = restart_dir / f"restart_0000_{restart_iteration:09d}.uf"
+    restart_file = restart_dir / restart_file_name(restart_iteration)
     with FortranFile(str(restart_file), "w") as f:
         f.write_record(
             np.int32(nx),

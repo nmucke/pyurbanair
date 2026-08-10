@@ -163,3 +163,38 @@ def test_interval_count_change_between_calls_raises() -> None:
     assert top.num_obs == 3
     with pytest.raises(ValueError, match="Interval count changed"):
         top(_make_state([0.0, 2.0, 4.0, 6.0]))  # 2 bins
+
+
+def test_create_observation_operator_skips_the_temporal_wrapper_without_a_mode() -> (
+    None
+):
+    """No ``temporal_mode`` in the obs config -> the bare spatial operator.
+
+    Configs that never aggregate in time (forward-only runs, and the filtering
+    entry point when it observes instantaneous state) leave ``temporal_mode`` out
+    or set it to null. Wrapping those in a ``TemporalObservationOperator`` with
+    ``mode=None`` raised ``ValueError: Invalid mode 'None'`` at construction, so the helper
+    now returns the spatial operator untouched -- the same "no-op when the field
+    is absent" rule the backends follow for optional parameters.
+    """
+    from pyurbanair.config.hydra_helpers import create_observation_operator
+
+    base = {
+        "mode": "points",
+        "x_points": [1.0, 2.0],
+        "y_points": [1.0, 2.0],
+        "z_points": [2.0, 2.0],
+        "states": ["u", "v"],
+    }
+
+    for obs in (base, {**base, "temporal_mode": None}):
+        operator = create_observation_operator(obs, "pylbm")
+        assert isinstance(operator, ObservationOperator)
+        assert not isinstance(operator, TemporalObservationOperator)
+        assert operator.num_sensors == 2
+
+    temporal = create_observation_operator(
+        {**base, "temporal_mode": "mean", "aggregation_mode": None}, "pylbm"
+    )
+    assert isinstance(temporal, TemporalObservationOperator)
+    assert temporal.mode == "mean"

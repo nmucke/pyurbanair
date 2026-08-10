@@ -122,6 +122,18 @@ esmda:
   # step jointly) reusing the final posterior forecast — no extra forward solve,
   # parameters frozen. Requires state_reduction; state-bearing smoothers only.
   final_time_smoothing: false
+  # Persist the observation-space arrays per window (windows/window_*_obs.nc,
+  # *_pred_obs.nc, *_params_steps.nc): the assimilated observations, the
+  # predicted observations at every ESMDA iteration (0 = prior, -1 = posterior
+  # forecast) and the per-iteration parameter ensembles. These are the inputs to
+  # the normalized data-mismatch diagnostic (run_summary.yaml's
+  # `esmda_diagnostics`) and figure D3; they are KB-scale, so default-on. Set
+  # false to reproduce the pre-phase-2 artifact set exactly — the diagnostic and
+  # the figure then skip themselves. Costs one extra observation-operator
+  # evaluation per window (the posterior forecast's), no extra forward solve;
+  # under final_time_smoothing=true that forecast is evaluated twice, since the
+  # smoothing step does its own and this one is deliberately taken before it.
+  save_obs_diagnostics: true
 
 run:
   skip_viz: false

@@ -19,6 +19,7 @@ system module exposed via the ``FFMPEG_BIN`` env var (set by the SLURM script).
 The module is import-clean and per-frame rendering works without ffmpeg; only the
 final ``mp4`` write needs it (a missing ffmpeg prints a clear message).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,10 +35,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from evaluation import style as S
+from figspec import dataio
+from figspec import figcommon as FC
+from figspec import mask
 from matplotlib.animation import FFMpegWriter, FuncAnimation
-
-from figspec import dataio, figcommon as FC, mask
-from figspec import style as S
 
 HORIZON_B_S = 300.0  # Block B overlapping horizon [s] (10 windows x 30 s)
 
@@ -95,9 +97,9 @@ def _slice_stack(run, zi: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     sm = dataio.load_state_mean(run)
     if sm is None:
         raise FileNotFoundError(f"no posterior_state_mean.nc for {run.name}")
-    model_f = dataio.interp_to_truth(dataio.velmag_field(sm))      # (t,z,y,x)
+    model_f = dataio.interp_to_truth(dataio.velmag_field(sm))  # (t,z,y,x)
     truth_f = dataio.align_truth_time(dataio.truth_velmag(), model_f)
-    model = np.asarray(model_f.isel(z=zi).values, dtype=float)     # (t,y,x)
+    model = np.asarray(model_f.isel(z=zi).values, dtype=float)  # (t,y,x)
     truth = np.asarray(truth_f.isel(z=zi).values, dtype=float)
     t = np.asarray(model_f["time"].values, dtype=float)
     sm.close()
@@ -110,7 +112,7 @@ def _baseline_slice_on_axis(run, zi: int, time_axis: np.ndarray) -> np.ndarray:
     sm = dataio.load_state_mean(run)
     if sm is None:
         raise FileNotFoundError(f"no posterior_state_mean.nc for {run.name}")
-    field = dataio.interp_to_truth(dataio.velmag_field(sm))        # (t,z,y,x)
+    field = dataio.interp_to_truth(dataio.velmag_field(sm))  # (t,z,y,x)
     field = field.interp(time=time_axis, kwargs={"fill_value": "extrapolate"})
     out = np.asarray(field.isel(z=zi).values, dtype=float)
     sm.close()
@@ -164,23 +166,45 @@ def _hatch(ax, solid2d, extent) -> None:
         return
     xs = np.linspace(extent[0], extent[1], solid2d.shape[1])
     ys = np.linspace(extent[2], extent[3], solid2d.shape[0])
-    ax.contourf(xs, ys, solid2d.astype(float), levels=[0.5, 1.5],
-                colors="none", hatches=["////"])
-    ax.contour(xs, ys, solid2d.astype(float), levels=[0.5], colors="0.3",
-               linewidths=0.5)
+    ax.contourf(
+        xs,
+        ys,
+        solid2d.astype(float),
+        levels=[0.5, 1.5],
+        colors="none",
+        hatches=["////"],
+    )
+    ax.contour(
+        xs, ys, solid2d.astype(float), levels=[0.5], colors="0.3", linewidths=0.5
+    )
 
 
 def _imshow(ax, frame, extent, *, cmap, vmin, vmax):
-    return ax.imshow(frame, origin="lower", extent=extent, aspect="equal",
-                     cmap=cmap, vmin=vmin, vmax=vmax)
+    return ax.imshow(
+        frame,
+        origin="lower",
+        extent=extent,
+        aspect="equal",
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Animation writing
 # ---------------------------------------------------------------------------
-def _write_animation(fig, update, frames, out_path: pathlib.Path, fps: int,
-                     ff: str | None, *, frame_indices=None,
-                     dump_frames: bool = False) -> bool:
+def _write_animation(
+    fig,
+    update,
+    frames,
+    out_path: pathlib.Path,
+    fps: int,
+    ff: str | None,
+    *,
+    frame_indices=None,
+    dump_frames: bool = False,
+) -> bool:
     """Drive ``FuncAnimation`` and encode H.264/yuv420p; return success.
 
     Renders all panels once via ``update`` per frame. When ``dump_frames`` is
@@ -204,8 +228,7 @@ def _write_animation(fig, update, frames, out_path: pathlib.Path, fps: int,
         return False
 
     anim = FuncAnimation(fig, update, frames=list(frame_indices), blit=False)
-    writer = FFMpegWriter(fps=fps, codec="libx264",
-                          extra_args=["-pix_fmt", "yuv420p"])
+    writer = FFMpegWriter(fps=fps, codec="libx264", extra_args=["-pix_fmt", "yuv420p"])
     anim.save(str(out_path), writer=writer, dpi=fig.dpi)
     plt.close(fig)
     print(f"  + {out_path} ({len(frame_indices)} frames @ {fps} fps)")
@@ -215,8 +238,17 @@ def _write_animation(fig, update, frames, out_path: pathlib.Path, fps: int,
 # ---------------------------------------------------------------------------
 # Triptych animation (A-anim, anim_C): truth | estimate | error
 # ---------------------------------------------------------------------------
-def build_triptych(truth: np.ndarray, model: np.ndarray, t: np.ndarray,
-                   *, extent, solid2d, edges, title_prefix: str, dpi: int = 100):
+def build_triptych(
+    truth: np.ndarray,
+    model: np.ndarray,
+    t: np.ndarray,
+    *,
+    extent,
+    solid2d,
+    edges,
+    title_prefix: str,
+    dpi: int = 100,
+):
     """Build a 3-panel ``[truth | estimate | error]`` figure + per-frame update.
 
     Returns ``(fig, update)``. Color scales: fields share ``[0, vmax]`` viridis;
@@ -228,8 +260,7 @@ def build_triptych(truth: np.ndarray, model: np.ndarray, t: np.ndarray,
 
     # One panel is ~3.0 in wide; 3 panels + colorbars -> ~10 in wide, even px.
     fig_w, fig_h = _figsize_even(2000, 760, dpi)
-    fig, axes = plt.subplots(1, 3, figsize=(fig_w, fig_h),
-                             constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(fig_w, fig_h), constrained_layout=True)
     titles = ["truth", "posterior-mean estimate", "error (estimate - truth)"]
     ims = []
     for j, ax in enumerate(axes):
@@ -261,9 +292,17 @@ def build_triptych(truth: np.ndarray, model: np.ndarray, t: np.ndarray,
 # ---------------------------------------------------------------------------
 # 4-panel method animation (B-anim)
 # ---------------------------------------------------------------------------
-def build_methods_panel(panels, truth: np.ndarray, t: np.ndarray,
-                        *, extent, solid2d, edges, title_prefix: str,
-                        dpi: int = 100):
+def build_methods_panel(
+    panels,
+    truth: np.ndarray,
+    t: np.ndarray,
+    *,
+    extent,
+    solid2d,
+    edges,
+    title_prefix: str,
+    dpi: int = 100,
+):
     """Build a 4-panel ``{truth, param-only, ic, icstate}`` figure + update.
 
     ``panels``: list of ``(label, stack[time,y,x])``; the first is conventionally
@@ -275,13 +314,13 @@ def build_methods_panel(panels, truth: np.ndarray, t: np.ndarray,
 
     n = len(stacks)
     fig_w, fig_h = _figsize_even(2000, 720, dpi)
-    fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h),
-                             constrained_layout=True)
+    fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h), constrained_layout=True)
     axes = np.atleast_1d(axes)
     ims = []
     for j, ax in enumerate(axes):
-        ims.append(_imshow(ax, stacks[j][0], extent, cmap=S.CMAP_FIELD,
-                           vmin=0.0, vmax=vmax))
+        ims.append(
+            _imshow(ax, stacks[j][0], extent, cmap=S.CMAP_FIELD, vmin=0.0, vmax=vmax)
+        )
         _hatch(ax, solid2d, extent)
         ax.set_title(labels[j], fontsize=10)
         ax.set_xlabel("x [m]")
@@ -304,8 +343,19 @@ def build_methods_panel(panels, truth: np.ndarray, t: np.ndarray,
 # ---------------------------------------------------------------------------
 # Drivers
 # ---------------------------------------------------------------------------
-def animate_block_a(out, fps, max_frames, ff, *, solid2d, zi, extent, edges_of,
-                    dump_frames=False, sample_only=False):
+def animate_block_a(
+    out,
+    fps,
+    max_frames,
+    ff,
+    *,
+    solid2d,
+    zi,
+    extent,
+    edges_of,
+    dump_frames=False,
+    sample_only=False,
+):
     """anim_A_<model>_<res>.mp4 for each model's finest complete run.
 
     With ``sample_only`` no mp4 is written -- a single mid-horizon PNG frame is
@@ -327,8 +377,14 @@ def animate_block_a(out, fps, max_frames, ff, *, solid2d, zi, extent, edges_of,
         idx = _subsample(len(t), max_frames)
         edges = edges_of(run)
         fig, update = build_triptych(
-            truth_s, model_s, t, extent=extent, solid2d=solid2d, edges=edges,
-            title_prefix=f"Block A {S.MODEL_LABELS[model]} ({run.res_label})")
+            truth_s,
+            model_s,
+            t,
+            extent=extent,
+            solid2d=solid2d,
+            edges=edges,
+            title_prefix=f"Block A {S.MODEL_LABELS[model]} ({run.res_label})",
+        )
         res = f"nx{run.nx}"
         if sample_only:
             mid = int(idx[len(idx) // 2])
@@ -336,15 +392,25 @@ def animate_block_a(out, fps, max_frames, ff, *, solid2d, zi, extent, edges_of,
             p = pathlib.Path("/tmp") / f"sample_anim_A_{model}_{res}.png"
             fig.savefig(p, dpi=fig.dpi, transparent=False)
             plt.close(fig)
-            print(f"  sample frame -> {p} (t={t[mid]:.1f}s, {len(idx)} frames @ {fps} fps)")
+            print(
+                f"  sample frame -> {p} (t={t[mid]:.1f}s, {len(idx)} frames @ {fps} fps)"
+            )
             return p  # one sample is enough for the check
-        _write_animation(fig, update, len(idx),
-                         odir / f"anim_A_{model}_{res}.mp4", fps, ff,
-                         frame_indices=idx, dump_frames=dump_frames)
+        _write_animation(
+            fig,
+            update,
+            len(idx),
+            odir / f"anim_A_{model}_{res}.mp4",
+            fps,
+            ff,
+            frame_indices=idx,
+            dump_frames=dump_frames,
+        )
 
 
-def animate_block_b(out, fps, max_frames, ff, *, solid2d, zi, extent,
-                    n_windows=2, dump_frames=False):
+def animate_block_b(
+    out, fps, max_frames, ff, *, solid2d, zi, extent, n_windows=2, dump_frames=False
+):
     """anim_B_methods.mp4: 4 panels over the last ``n_windows`` Block-B windows."""
     runs = dataio.discover_block_b()
     by_method = block_b_by_method(runs)
@@ -357,11 +423,16 @@ def animate_block_b(out, fps, max_frames, ff, *, solid2d, zi, extent,
     if edges is not None:
         edges = edges[edges <= HORIZON_B_S + 1e-6]
     # last n_windows windows -> [t_lo, horizon]
-    t_lo = float(edges[max(0, len(edges) - 1 - n_windows)]) if edges is not None else 0.0
+    t_lo = (
+        float(edges[max(0, len(edges) - 1 - n_windows)]) if edges is not None else 0.0
+    )
 
     # best-localization method for the IC+param panel: prefer ic_corr, else ic_dist
-    ic_key = "ic_corr" if "ic_corr" in by_method else (
-        "ic_dist" if "ic_dist" in by_method else None)
+    ic_key = (
+        "ic_corr"
+        if "ic_corr" in by_method
+        else ("ic_dist" if "ic_dist" in by_method else None)
+    )
     base = param_only_baseline()
 
     icstate = by_method.get("icstate_red")
@@ -388,14 +459,29 @@ def animate_block_b(out, fps, max_frames, ff, *, solid2d, zi, extent,
 
     idx = _subsample(len(t), max_frames)
     fig, update = build_methods_panel(
-        panels, truth_s, t, extent=extent, solid2d=solid2d, edges=edges,
-        title_prefix="Block B methods")
-    _write_animation(fig, update, len(idx), odir / "anim_B_methods.mp4", fps, ff,
-                     frame_indices=idx, dump_frames=dump_frames)
+        panels,
+        truth_s,
+        t,
+        extent=extent,
+        solid2d=solid2d,
+        edges=edges,
+        title_prefix="Block B methods",
+    )
+    _write_animation(
+        fig,
+        update,
+        len(idx),
+        odir / "anim_B_methods.mp4",
+        fps,
+        ff,
+        frame_indices=idx,
+        dump_frames=dump_frames,
+    )
 
 
-def animate_block_c(out, fps, max_frames, ff, *, solid2d, zi, extent,
-                    dump_frames=False):
+def animate_block_c(
+    out, fps, max_frames, ff, *, solid2d, zi, extent, dump_frames=False
+):
     """anim_C_full.mp4: full-joint icstate_red triptych over the short horizon."""
     runs = dataio.discover_block_b()
     by_method = block_b_by_method(runs)
@@ -412,10 +498,24 @@ def animate_block_c(out, fps, max_frames, ff, *, solid2d, zi, extent,
         edges = edges[edges <= HORIZON_B_S + 1e-6]
     idx = _subsample(len(t), max_frames)
     fig, update = build_triptych(
-        truth_s, model_s, t, extent=extent, solid2d=solid2d, edges=edges,
-        title_prefix="Block C full-joint IC+state+param (reduction)")
-    _write_animation(fig, update, len(idx), odir / "anim_C_full.mp4", fps, ff,
-                     frame_indices=idx, dump_frames=dump_frames)
+        truth_s,
+        model_s,
+        t,
+        extent=extent,
+        solid2d=solid2d,
+        edges=edges,
+        title_prefix="Block C full-joint IC+state+param (reduction)",
+    )
+    _write_animation(
+        fig,
+        update,
+        len(idx),
+        odir / "anim_C_full.mp4",
+        fps,
+        ff,
+        frame_indices=idx,
+        dump_frames=dump_frames,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -423,27 +523,50 @@ def animate_block_c(out, fps, max_frames, ff, *, solid2d, zi, extent,
 # ---------------------------------------------------------------------------
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", type=pathlib.Path,
-                    default=pathlib.Path(__file__).resolve().parent.parent / "figures")
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=pathlib.Path(__file__).resolve().parent.parent / "figures",
+    )
     ap.add_argument("--fps", type=int, default=10)
-    ap.add_argument("--max-frames", type=int, default=150,
-                    help="cap on frames per animation (time subsampled evenly)")
+    ap.add_argument(
+        "--max-frames",
+        type=int,
+        default=150,
+        help="cap on frames per animation (time subsampled evenly)",
+    )
     ap.add_argument("--which", choices=["A", "B", "C", "all"], default="all")
-    ap.add_argument("--no-mask", action="store_true",
-                    help="do not mask building cells")
-    ap.add_argument("--frames", action="store_true",
-                    help="also dump frames/<name>/frame_*.png per animation")
-    ap.add_argument("--b-windows", type=int, default=2,
-                    help="number of trailing Block-B windows for anim_B (1 or 2)")
-    ap.add_argument("--dry-check", action="store_true",
-                    help="render one Block-A sample frame to /tmp (no ffmpeg/mp4)")
+    ap.add_argument("--no-mask", action="store_true", help="do not mask building cells")
+    ap.add_argument(
+        "--frames",
+        action="store_true",
+        help="also dump frames/<name>/frame_*.png per animation",
+    )
+    ap.add_argument(
+        "--b-windows",
+        type=int,
+        default=2,
+        help="number of trailing Block-B windows for anim_B (1 or 2)",
+    )
+    ap.add_argument(
+        "--dry-check",
+        action="store_true",
+        help="render one Block-A sample frame to /tmp (no ffmpeg/mp4)",
+    )
     args = ap.parse_args()
 
     S.apply_style()
     # opaque background reads better for talk video frames
-    plt.rcParams.update({"figure.facecolor": "white", "axes.facecolor": "white",
-                         "savefig.facecolor": "white", "savefig.transparent": False})
+    plt.rcParams.update(
+        {
+            "figure.facecolor": "white",
+            "axes.facecolor": "white",
+            "savefig.facecolor": "white",
+            "savefig.transparent": False,
+        }
+    )
 
     ff = configure_ffmpeg()
     print(f"ffmpeg: {ff or 'NOT FOUND (mp4 writing will be skipped)'}")
@@ -451,32 +574,69 @@ def main() -> None:
     solid = None if args.no_mask else mask.truth_solid_mask()
     zi = mask.nearest_z_index(FC.PED_Z)
     solid2d = None if solid is None else solid[zi]
-    extent = [float(v) for v in (
-        dataio.truth_grid()["x"].min(), dataio.truth_grid()["x"].max(),
-        dataio.truth_grid()["y"].min(), dataio.truth_grid()["y"].max())]
+    extent = [
+        float(v)
+        for v in (
+            dataio.truth_grid()["x"].min(),
+            dataio.truth_grid()["x"].max(),
+            dataio.truth_grid()["y"].min(),
+            dataio.truth_grid()["y"].max(),
+        )
+    ]
 
     if args.dry_check:
         print("Dry check: rendering one Block-A sample frame (no ffmpeg).")
-        animate_block_a(args.out, args.fps, args.max_frames, None,
-                        solid2d=solid2d, zi=zi, extent=extent,
-                        edges_of=dataio.window_edges, sample_only=True)
+        animate_block_a(
+            args.out,
+            args.fps,
+            args.max_frames,
+            None,
+            solid2d=solid2d,
+            zi=zi,
+            extent=extent,
+            edges_of=dataio.window_edges,
+            sample_only=True,
+        )
         return
 
     if args.which in ("A", "all"):
         print("Animation A (per-model state evolution):")
-        animate_block_a(args.out, args.fps, args.max_frames, ff,
-                        solid2d=solid2d, zi=zi, extent=extent,
-                        edges_of=dataio.window_edges, dump_frames=args.frames)
+        animate_block_a(
+            args.out,
+            args.fps,
+            args.max_frames,
+            ff,
+            solid2d=solid2d,
+            zi=zi,
+            extent=extent,
+            edges_of=dataio.window_edges,
+            dump_frames=args.frames,
+        )
     if args.which in ("B", "all"):
         print("Animation B (methods side by side):")
-        animate_block_b(args.out, args.fps, args.max_frames, ff,
-                        solid2d=solid2d, zi=zi, extent=extent,
-                        n_windows=args.b_windows, dump_frames=args.frames)
+        animate_block_b(
+            args.out,
+            args.fps,
+            args.max_frames,
+            ff,
+            solid2d=solid2d,
+            zi=zi,
+            extent=extent,
+            n_windows=args.b_windows,
+            dump_frames=args.frames,
+        )
     if args.which in ("C", "all"):
         print("Animation C (full-joint triptych):")
-        animate_block_c(args.out, args.fps, args.max_frames, ff,
-                        solid2d=solid2d, zi=zi, extent=extent,
-                        dump_frames=args.frames)
+        animate_block_c(
+            args.out,
+            args.fps,
+            args.max_frames,
+            ff,
+            solid2d=solid2d,
+            zi=zi,
+            extent=extent,
+            dump_frames=args.frames,
+        )
     print("Done.")
 
 

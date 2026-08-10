@@ -171,6 +171,19 @@ The public entry point (called by `BaseForwardModel.__call__`):
 Sets `self.spinup_time = 0.0`. Called by `BaseRolloutForwardModel` after
 window 0 when `spinup_first_step_only=True`.
 
+> **One external caller drives these steps itself.**
+> [`scripts/esmda/run_probe_series.py`](../scripts/esmda/run_probe_series.py)
+> (the high-rate probe re-runs behind the Welch spectrum / figure S4) repeats
+> `run_single`'s launch sequence — `_set_scaling_factors` → `_prepare_warmstart`
+> → `_set_scaling_factors` → `_apply_inflow_settings` → `_clean_output` →
+> `run()` — and replaces only its *collection* step: at its 0.25 s default
+> cadence one window's snapshots run to ~100 GB per member on `case=barcelona`,
+> so each file is reduced to the probe points and unlinked instead of being
+> concatenated into one Dataset. It also keeps `spinup_time` on a warm start
+> (which `run_single` zeroes) to trim the restart's
+> transient. Keep that sequence and the `out_0000_F<iter>.nc` layout in mind when
+> refactoring `run_single`.
+
 ### `EnsembleForwardModel`
 
 [`libs/pylbm/src/pylbm/ensemble_forward_model.py`](../libs/pylbm/src/pylbm/ensemble_forward_model.py)
@@ -541,24 +554,146 @@ cause is invisible. **To see Fortran error messages, add
 `model.forward_model.verbose=true` to the CLI.** This is the first thing to try
 when LBM produces no output or all members fail.
 
-### Iteration filename field width — i9.9 overflow
+### Restart / output filename width: i6.6, on both sides
 
-LBM output and restart files encode the iteration in a 9-digit fixed-width
-Fortran format field. `_set_scaling_factors` guards against this:
+Every LBM filename encodes its iteration in a fixed-width field. The Fortran
+declares `character(len=6) cit` and formats it with `i6.6`
+(`m_readrestart.F90`, `m_saverestart.F90`, `m_save_uvw.F90`, `m_diag.F90`), builds
+the name it opens from that, and calls `stop` when the file is absent. Python
+writes those same files, so it has to spell them identically. One constant owns
+this:
 
 ```python
-MAX_ITERATION = 999_999_999  # forward_model.py top-level constant
-if nt1 > MAX_ITERATION:
-    raise ValueError(...)
+# pylbm/utils/warm_start_utils.py
+ITERATION_FIELD_WIDTH = 6
+MAX_ITERATION = 10**ITERATION_FIELD_WIDTH - 1          # 999_999
+restart_file_name(iteration, prefix="restart", tile="0000")
 ```
 
-Rollout runs accumulate large `nt0` values across windows. If the total
-`nt0 + total_timesteps` exceeds 999,999,999 the output filenames overflow to
-`out_0000_F*********.nc` (literal asterisks), the glob does not match them, and
-`_get_output_files_for_current_run` raises `FileNotFoundError` or the concat
-fails with an `AlignmentError` across members. Reduce `simulation_time`,
-`output_frequency`, or the number of rollout windows, or widen the field in the
-Fortran sources.
+`tests/test_pylbm_restart_filenames.py` parses the width out of the Fortran
+sources and fails if the two ever disagree, so a submodule bump that widens the
+field is caught there rather than in a silently wrong run.
+
+**This was broken until 2026-08-07 and is worth understanding.** Python carried a
+9-digit field (`MAX_ITERATION = 999_999_999`, `:09d`) introduced for a newer LBM;
+commit `68d3aa4` moved the submodule pin back to a commit that never had it, and
+the two sides drifted apart with nothing to catch it. The consequences were all
+silent:
+
+- **The warm start was discarded.** Python wrote
+  `restart_0000_000000696.uf`; the solver opened `restart_0000_000696.uf` — its
+  own restart from the previous window, sitting in the same directory at the same
+  iteration. The run continued and looked healthy. For a state-bearing smoother
+  that means the Kalman state update never reached the solver.
+- **When no same-iteration file existed**, `readrestart` printed
+  `restart file does not exist: ...` and called `stop`, which exits **0** — so the
+  wrapper saw no `CalledProcessError`, only an empty output dir or a truncated
+  member. (That is the other half of the "truncated member exits 0" failure.)
+- **The template lookup missed too**, so the restart Python wrote was built from
+  a pure-equilibrium distribution. That had a second, independent cause and is
+  fixed separately — see "Restart record layout" below.
+
+Output *collection* was never affected: `_get_output_files_for_current_run` globs
+`out_0000_F(\d+)` and is width-agnostic. Only the exact-name fallback used the
+wrong width.
+
+The ceiling still matters after the fix. `nt0` accumulates across warm starts, so
+a long rollout reaches 999,999 even when no single window is near it;
+`_set_scaling_factors` raises rather than letting the name overflow to
+`out_0000_F******.nc`, which matches no glob and no restart pattern (so it could
+never be read *or* pruned). Start from a clean experiment dir, shorten the run,
+or widen `i6.6` in the Fortran **and** `ITERATION_FIELD_WIDTH` together.
+
+### Restart record layout, and why the template read needs shaped dtypes
+
+`m_saverestart.F90` writes one unformatted record — `write(iunit) nx,ny,nz,nl,f`
+with `f(nl,0:nx+1,0:ny+1,0:nz+1)` — so on disk it is 4 default `int32` followed
+by `27*(nx+2)*(ny+2)*(nz+2)` `float32`, wrapped in gfortran's 4-byte length
+marker at each end. The reals are 4-byte **only because this repo's build never
+passes the makefile's `DP=1`** (`-fdefault-real-8`); if that ever changes, the
+reader and `write_restart_file_from_xarray` will silently disagree with the
+solver about every value in the file.
+
+Reading it needs **shaped** dtypes:
+
+```python
+_, f_flat = f.read_record(
+    np.dtype((np.int32, (4,))),                # header
+    np.dtype((np.float32, (expected_size,))),  # payload
+)
+```
+
+Given a list of *scalar* dtypes, scipy treats them as one repeating 20-byte
+compound and demands the record be a multiple of it — which an LBM restart never
+is, so `read_record(np.int32, np.int32, np.int32, np.int32, np.float32)` raises:
+
+```
+ValueError: Size obtained (313648) is not a multiple of the dtypes given (20).
+```
+
+The payload length is derived from the record's **own** leading marker rather
+than from the expected grid (mirroring `m_readrestart`'s read-header-then-rewind).
+Sized from an assumed grid instead, a wrong-grid restart and a truncated one both
+fail inside scipy with the same arithmetic complaint and lose their specific
+diagnostics; sized from the file, each reaches the guard that names it.
+
+**This was broken until 2026-08-07**, and the consequence outlived the filename
+bug above. The exception hit a bare `except Exception: return None`, so the
+template was treated as absent on *every* call and every pylbm warm start was
+built from a pure-equilibrium distribution — discarding the non-equilibrium
+stress. The macroscopic fields were still correct, which is why nothing looked
+wrong; the solver simply had to re-establish the stress each time, as a startup
+transient. Measured on a tiny case: the first warm frame sat **3.17 %** (RMS)
+from the state handed in, with a visible `max|u|` excursion at frame 0; with the
+template it is **0.12 %** and there is no excursion.
+
+Two things this turned on that outlive the fix:
+
+- **The blanking mask is live for the first time.** `fluid_mask_zyx` is computed
+  unconditionally but consulted *only* inside `if template_f is not None:`, so
+  the "non-zero == solid" convention had never executed. It is correct
+  (`stl_to_lbm.py` writes 1 for solid; `m_solid_objects_init` sets `.true.` for
+  solids; `m_netcdfout` writes 1.0 where `lblanking`) — fluid cells take the new
+  state, solid cells keep the template. An inverted mask would swap the whole
+  domain, so this is the thing to eyeball if a warm start ever looks wrong.
+- **Peak memory per member roughly doubles.** The template branch holds
+  `template_f`, `feq`, `feq_template` and `f_new` at once — four full
+  27-direction fields where the equilibrium path held one. Negligible at
+  45x60x24 (~8 MB each), ~890 MB each at 200³, i.e. ~3.5 GB per member times
+  `ensemble.num_parallel_processes`. See the in-memory ensemble OOM gotcha below.
+
+### A truncated run exits 0, and is now caught
+
+The LBM's error paths call Fortran `stop`, which exits **0**, so
+`subprocess.run(check=True)` returns cleanly and the wrapper is left holding a
+partial run. The collector still finds files and the trims in `run_single` only
+ever *shorten*, so a short member used to pass straight through and surface
+windows later as a broadcast/`AlignmentError` at ensemble assembly — nowhere near
+the member that caused it.
+
+`run_single` now verifies the frame count *before* loading or trimming and raises
+`pyurbanair.base_ensemble_forward_model.ForwardModelRunFailure`, which the
+ensemble runner treats exactly like a `CalledProcessError`: under
+`resample_from_successes` the member is cloned from a survivor, under `raise` it
+aborts. A single non-ensemble run still fails loudly.
+
+The expected count mirrors `m_diag.F90`'s dump rule rather than
+`simulation_time / output_frequency` — those agree only on a cold start:
+
+```
+expected = (nt1 // iout - nt0 // iout) + (0 if nt1 % iout == 0 else 1)
+```
+
+The trailing term is the **warm-start** case. `nt1 - nt0` is always a multiple of
+`iout`, but `nt0` is the previous window's final iteration and
+`iout = C_l/C_u/output_frequency` moves with each member's inflow speed, so
+`nt0 % iout != 0` is normal from window 1 onwards and the run legitimately ends
+one off-grid frame long. A rule derived from the window length alone would flag
+every healthy warm start as truncated.
+
+Only a shortfall is an error; a surplus is trimmed as before. When a member does
+trip this, rerun with `model.forward_model.verbose=true` to see the solver's own
+`stop` message — it is the only place the reason appears.
 
 ### Domain-height SIGFPE
 

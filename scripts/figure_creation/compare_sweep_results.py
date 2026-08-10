@@ -46,12 +46,19 @@ Usage::
         --root pyurbanair/sweep_metrics --out pyurbanair/comparison --models pyudales pylbm
 """
 
+# mypy: ignore-errors
+# Legacy untyped comparison script: it predates the strict mypy config and is
+# only type-checked when a commit happens to touch it. Waived wholesale (as in
+# scripts/esmda/_esmda_common.py) rather than annotated in an unrelated PR;
+# dropping the waiver is its own cleanup.
+
 from __future__ import annotations
 
 import argparse
 import math
 import pathlib
 import re
+import warnings
 from collections import Counter
 
 import matplotlib
@@ -154,7 +161,12 @@ def _flatten_summary(run_dir: pathlib.Path, summary: dict) -> dict:
     sm = summary.get("state_metrics", {}) or {}
     sen = summary.get("sensor_metrics", {}) or {}
 
-    rec: dict = {"run_dir": str(run_dir), "name": run_dir.name}
+    rec: dict = {
+        "run_dir": str(run_dir),
+        "name": run_dir.name,
+        # Absent marker = pre-WP1.1 biased estimators (see load_runs).
+        "metrics_version": int(summary.get("metrics_version", 1)),
+    }
 
     # Axes: prefer the dir-name tag (carries nx/ny/nz, not in the summary);
     # fall back to the summary configuration for the rest.
@@ -206,6 +218,28 @@ def _flatten_summary(run_dir: pathlib.Path, summary: dict) -> dict:
     return rec
 
 
+def _warn_on_mixed_metric_versions(df: pd.DataFrame) -> None:
+    """Warn when the runs about to be compared were scored by different estimators.
+
+    WP1.1 replaced the biased ``M**2`` pairwise CRPS / energy score with the fair
+    ``M(M-1)`` form, which shifts every such number by ~O(1/M). Curves mixing
+    both are meaningless in exactly the region the sweeps probe (small
+    ensembles), and nothing else in the figures reveals it.
+    """
+    if df.empty or "metrics_version" not in df.columns:
+        return
+    versions = sorted({int(v) for v in df["metrics_version"].dropna()})
+    if len(versions) > 1:
+        warnings.warn(
+            f"comparing runs with mismatched metrics versions {versions}: "
+            "CRPS / energy-score numbers are not comparable across the WP1.1 "
+            "fair-estimator boundary (version 1 values sit ~O(1/M) higher). "
+            "Re-run compute_esmda_metrics.py on the version-1 runs.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
 def load_runs(root: pathlib.Path, models: list[str] | None) -> pd.DataFrame:
     records = []
     # Prefer compute_sweep_metrics' metrics.yaml; fall back to run_summary.yaml so
@@ -226,6 +260,7 @@ def load_runs(root: pathlib.Path, models: list[str] | None) -> pd.DataFrame:
             continue
         records.append(rec)
     df = pd.DataFrame(records)
+    _warn_on_mixed_metric_versions(df)
     if not df.empty:
         df = df.sort_values(
             ["assim_model", "grid_cells", "ensemble_size", "num_esmda_steps"]

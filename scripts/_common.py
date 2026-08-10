@@ -15,16 +15,16 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray
-from omegaconf import DictConfig
-
-from pyurbanair.utils.animation_utils import animate_height_panels
-from pyurbanair.utils.da_metrics import (
-    per_knot_crps,
+from evaluation.scores import (
+    crps_ensemble,
     per_knot_error,
     per_knot_in_band,
     per_knot_spread,
     summary_scalars,
 )
+from omegaconf import DictConfig
+
+from pyurbanair.utils.animation_utils import animate_height_panels
 from pyurbanair.utils.run_utils import extract_2d_slice
 
 
@@ -274,7 +274,7 @@ def compute_time_varying_metrics(
             truth = np.asarray(true_params[name].values)
             err = per_knot_error(ens, truth)
             spr = per_knot_spread(ens)
-            crps = per_knot_crps(ens, truth)
+            crps = crps_ensemble(ens, truth)
             band = per_knot_in_band(ens, truth)
             for t_idx, t in enumerate(time_coords):
                 rows.append(
@@ -346,7 +346,7 @@ def plot_time_varying_metrics(
             )
             err = per_knot_error(ens, truth)
             spr = per_knot_spread(ens)
-            crps = per_knot_crps(ens, truth)
+            crps = crps_ensemble(ens, truth)
             band = per_knot_in_band(ens, truth).astype(float)
             shade = 0.2 + 0.8 * (k / max(n_steps - 1, 1))
             color = cmap(shade)

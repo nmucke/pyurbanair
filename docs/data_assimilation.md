@@ -245,6 +245,21 @@ state-bearing variants when `final_time_smoothing=True`).
 sensor xyz coordinates so that observation index `j` maps to sensor
 `j % num_sensors`, matching the flattened observation vector layout.
 
+**Observation-space diagnostics (opt-in).** Set `collect_obs_diagnostics =
+True` after construction (the same attribute-plumbing pattern as
+`prune_disk_steps`) and the smoother records, in `pred_obs_history`, the
+`(N_d, N_e)` predicted observations it materializes at every iteration —
+`num_steps + 1` entries per `_analysis` call, entry 0 the prior forecast and
+entry −1 the posterior forecast. The list is rebound at `_analysis` entry, so
+a multi-window caller reads one window's entries per call. The extra
+`_observation_step` for the posterior forecast runs **before**
+`_final_time_smoothing_step` (that step is a second Kalman update of the
+trajectory, not a forecast, so its predicted observations are excluded); with
+`final_time_smoothing=True` the last entry is therefore pre-smoothing. Off by
+default: nothing is recorded and no extra operator evaluation happens.
+`run_esmda.py` turns it on under `esmda.save_obs_diagnostics` and persists the
+arrays per window.
+
 ### Four variants
 
 | Class | Augmented state | Notes |
@@ -603,6 +618,24 @@ case's `obs_x/y/z_points`. `create_C_D` produces the diagonal
 `σ² I` error covariance. The script also constructs validation sensors
 (never assimilated; scored as held-out check) and handles inline vs. on-disk
 truth; see `codebase_guide.md §6` and the script's docstring.
+
+> **pylbm results produced before 2026-08-07 do not carry the state update.**
+> The `prior_state = posterior_state` handoff above (and the filter's
+> cycle-to-cycle warm start, §8) reaches a pylbm solver as an LBM *restart
+> file*, and two independent bugs there were fixed only on 2026-08-07 (PRs
+> #112–#114). Python spelled the restart filename with a 9-digit iteration
+> field while the Fortran opened a 6-digit one, so the solver silently reopened
+> its own restart from the previous window: for
+> `esmda/smoother=state_and_parameter` and `state_and_dynamic`, **every pylbm
+> rollout discarded the Kalman state update at every window boundary**.
+> Separately, the restart *template* read raised into a bare `except`, so every
+> pylbm warm start was rebuilt from a pure-equilibrium distribution, discarding
+> the non-equilibrium stress. Both ran to completion and looked healthy; a
+> truncated member also exited 0 and is only now treated as a failure. Nothing
+> in this library changed, and no other backend is affected — but re-check any
+> pylbm ESMDA or filtering result from before that date before reading it. See
+> [pylbm.md](pylbm.md) §"Restart / output filename width", §"Restart record
+> layout" and §"A truncated run exits 0".
 
 ---
 

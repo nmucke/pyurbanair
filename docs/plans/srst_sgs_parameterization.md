@@ -230,7 +230,8 @@ no DA-library changes. Checklist for the two Phase 1 parameters
    the backend applies `exp(·)` before writing. No clipping in the DA loop
    (none exists — bounds act only at prior sampling; the failure-resampling
    jitter is unbounded too).
-6. `_PLOTTED_PARAMS` in `src/pyurbanair/plotting.py:55-60`, else invisible
+6. `_PLOTTED_PARAMS` in `libs/evaluation/src/evaluation/scores.py` (moved
+   there from `src/pyurbanair/plotting.py` in WP0.2), else invisible
    in all metrics/figures.
 7. Tests mirroring `tests/test_model_error_parameters.py` (whitelist
    round-trip, per-member file rendering — for uDALES assert the factypes z0

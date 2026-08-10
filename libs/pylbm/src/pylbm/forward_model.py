@@ -7,14 +7,17 @@ from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
-# Largest iteration representable in the LBM filename field (i9.9 in the Fortran
-# sources). Iterations above this overflow to '*' and break output collection.
-MAX_ITERATION = 999_999_999
+# ``MAX_ITERATION`` and ``ITERATION_FIELD_WIDTH`` used to be defined here, as a
+# 9-digit copy that disagreed with the Fortran and with nothing else in the
+# process -- so nothing ever caught it. They now live beside the restart naming
+# in ``.utils.warm_start_utils`` (imported below) and are re-exported from this
+# module for callers that already read them off it.
 
 import numpy as np
 import xarray
 from pylbm.utils import get_lbm_directory_paths
 
+from pyurbanair.base_ensemble_forward_model import ForwardModelRunFailure
 from pyurbanair.base_forward_model import BaseForwardModel
 
 from .stl_to_lbm import stl_to_lbm_geometry
@@ -42,7 +45,9 @@ from .utils.params_utils import (
     write_uvel_time_file,
 )
 from .utils.state_utils import scale_velocity_to_physical
-from .utils.warm_start_utils import (
+from .utils.warm_start_utils import (  # noqa: F401  (MAX_ITERATION re-exported)
+    ITERATION_FIELD_WIDTH,
+    MAX_ITERATION,
     identify_latest_restart_iteration,
     remove_old_restart_files,
     write_restart_file_from_xarray,
@@ -340,17 +345,22 @@ class ForwardModel(BaseForwardModel):
         else:
             nt0 = 0
         # LBM output/restart filenames encode the iteration in a fixed-width
-        # field (currently i9.9). Guard against silently overflowing it: an
-        # overflowed name (out_0000_F*********.nc) is dropped by the collector,
+        # field (i6.6 in the Fortran). Guard against silently overflowing it: an
+        # overflowed name (out_0000_F******.nc) is dropped by the collector,
         # yielding mismatched time dims across members and a concat AlignmentError.
+        # Note the iteration counter ACCUMULATES across warm starts, so a long
+        # rollout reaches the ceiling even when no single window is near it.
         nt1 = nt0 + total_timesteps
         if nt1 > MAX_ITERATION:
             raise ValueError(
                 f"LBM final timestep nt1={nt1} exceeds the maximum representable "
-                f"iteration {MAX_ITERATION} (filenames use a 9-digit field). "
-                "Reduce the run length or widen the i9.9 format in the LBM Fortran "
-                "sources (m_diag/m_saverestart/m_save_uvw/m_readrestart) and the "
-                "matching Python filename formats."
+                f"iteration {MAX_ITERATION} (filenames use a "
+                f"{ITERATION_FIELD_WIDTH}-digit field). The counter accumulates "
+                "across warm starts, so start from a clean experiment directory, "
+                "reduce the run length, or widen the i6.6 format in the LBM "
+                "Fortran sources (m_diag/m_saverestart/m_save_uvw/m_readrestart) "
+                "and ITERATION_FIELD_WIDTH in pylbm.utils.warm_start_utils "
+                "together."
             )
         self._set_infile_value("nt0", nt0)
         self._set_infile_value("nt1", nt1)
@@ -409,13 +419,91 @@ class ForwardModel(BaseForwardModel):
             return [path for _, path in output_files]
 
         # Fallback to expected final file
-        expected_file = self.dirs.output_dir / f"out_0000_F{nt1:09d}.nc"
+        # Same width as the restarts: m_diag writes this name with
+        # ``write(cit,'(a1,i6.6)') 'F', it``.
+        expected_file = (
+            self.dirs.output_dir / f"out_0000_F{nt1:0{ITERATION_FIELD_WIDTH}d}.nc"
+        )
         if expected_file.exists():
             return [expected_file]
 
         raise FileNotFoundError(
             f"No LBM output files found in {self.dirs.output_dir} for timestep range "
             f"[{nt0}, {nt1}]"
+        )
+
+    def _expected_output_count(self) -> int:
+        """How many snapshots a *completed* run of the configured window writes.
+
+        Mirrors ``m_diag.F90``'s dump condition rather than re-deriving the count
+        from ``simulation_time / output_frequency``, because the two only agree
+        on a cold start. The solver iterates ``it = nt0+1, nt1`` and writes when
+
+            mod(it,iout)==0 .or. it==nt1 .or. (it<=iprt1 .or. it>=iprt2) ...
+
+        The third (every-iteration) clause is disabled by the ``iprt1 = "0 nt1+1
+        1"`` line ``_set_scaling_factors`` writes, so what lands on disk is the
+        ``iout`` grid inside ``(nt0, nt1]`` -- which is what
+        ``_get_output_files_for_current_run`` collects -- plus, when ``nt1`` is
+        not itself on that grid, one extra frame at ``nt1``.
+
+        That last term is the warm-start case: ``nt1 - nt0`` is always a multiple
+        of ``iout``, but ``nt0`` is the previous window's final iteration and
+        ``iout = C_l / C_u / output_frequency`` moves with the member's inflow
+        speed, so ``nt0 % iout != 0`` is normal from window 1 onwards and the run
+        legitimately ends one off-grid frame long. (It is the trailing trim in
+        ``run_single`` that drops it again.) On a cold start ``nt0 = 0`` and
+        ``nt1`` is a multiple of ``iout``, so the term vanishes and the count is
+        exactly ``spinup + simulation_time/output_frequency`` outputs.
+        """
+        nt0 = self._get_infile_int_value("nt0", 0)
+        nt1 = self._get_infile_int_value("nt1", self.num_timesteps)
+        iout = max(1, self.output_frequency_timesteps)
+
+        on_grid = nt1 // iout - nt0 // iout
+        final_frame_off_grid = 0 if nt1 % iout == 0 else 1
+        return on_grid + final_frame_off_grid
+
+    def _verify_run_produced_all_output(self, produced: int) -> None:
+        """Fail the run when the solver wrote fewer snapshots than the window needs.
+
+        The LBM's error paths call Fortran ``stop``, which exits **0**. That
+        means ``run()``'s ``check=True`` sees a clean exit and the wrapper is left
+        with a partial run that looks like a successful one: the collector still
+        finds files, so it does not raise, and the trailing trim in ``run_single``
+        only ever *removes* frames, so a short member passes straight through. The
+        mismatch then surfaces windows later as a broadcast/``AlignmentError``
+        when the ensemble is concatenated -- nowhere near the member that caused
+        it. (This is not hypothetical: a member wrote 3 of 48 frames, exited 0,
+        and killed a two-window ESMDA run at the concat.)
+
+        Raising here, at the boundary where the expected frame count is known,
+        turns it into an ordinary member failure: the ensemble runner's
+        ``resample_from_successes`` policy clones the member from a survivor, and
+        a single (non-ensemble) forward run -- which has no failure policy --
+        still fails loudly, right where the truncation happened.
+
+        Only a *shortfall* is an error. A surplus is trimmed by design (see
+        ``_expected_output_count`` on the off-grid final frame), so this must not
+        turn the ordinary warm-start run into a failure.
+
+        Raises:
+            ForwardModelRunFailure: If fewer than the expected snapshots exist.
+        """
+        expected = self._expected_output_count()
+        if produced >= expected:
+            return
+
+        nt0 = self._get_infile_int_value("nt0", 0)
+        nt1 = self._get_infile_int_value("nt1", self.num_timesteps)
+        raise ForwardModelRunFailure(
+            f"The LBM run in {self.dirs.experiment_dir} stopped early: it wrote "
+            f"{produced} of the {expected} expected snapshots for timestep range "
+            f"({nt0}, {nt1}] at iout={self.output_frequency_timesteps}. The binary "
+            "still exited 0, which is the usual signature of a Fortran `stop` "
+            "(missing restart file, dimension mismatch, ...) -- those exit 0, so "
+            "no CalledProcessError is raised. Rerun with "
+            "model.forward_model.verbose=true to see the solver's own message."
         )
 
     def _apply_inflow_settings(self, params: xarray.Dataset) -> None:
@@ -587,7 +675,19 @@ class ForwardModel(BaseForwardModel):
         finally:
             self.spinup_time = saved_spinup_time
 
-        output_files = self._get_output_files_for_current_run()
+        # Check the frame count BEFORE anything reads or trims it: the trims
+        # below only shorten the series, so a truncated run that reaches them is
+        # indistinguishable from a good one and escapes into the ensemble. A
+        # solver that wrote nothing at all is the same failure with produced=0,
+        # so re-raise the collector's FileNotFoundError as one too rather than
+        # letting a second exception type describe the same event.
+        try:
+            output_files = self._get_output_files_for_current_run()
+        except FileNotFoundError as exc:
+            self._verify_run_produced_all_output(0)
+            raise exc  # expected 0 outputs and got 0: a genuine config error
+        self._verify_run_produced_all_output(len(output_files))
+
         state = [xarray.load_dataset(path, engine="netcdf4") for path in output_files]
 
         if len(state) > 1:

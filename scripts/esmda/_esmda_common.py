@@ -19,20 +19,24 @@ in memory in full.
 
 from __future__ import annotations
 
+import logging
 import pathlib
+import re
 
 import numpy as np
 import xarray
 import yaml
 from data_assimilation.interpolation import interpolate_dataarray_at_points
 from data_assimilation.observation_operator import ObservationOperator
+from evaluation.turbulence import probe_spectra
 from omegaconf import OmegaConf
 
 from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_validation_points,
 )
-from pyurbanair.plotting import compute_parameter_metrics, compute_sensor_metrics
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Run-directory loaders (config + persisted truth-access view + sensor sets)
@@ -71,7 +75,6 @@ def build_sensor_sets(cfg) -> dict:
 # Lazy truth-state access (only load the slices that are actually needed)
 # ---------------------------------------------------------------------------
 
-_Z_DIMS = ("z", "zm", "zt")
 _X_COORDS = ("x", "xt", "xm")
 
 
@@ -120,101 +123,6 @@ def open_truth(true_state_path, n_total, x_offset=0.0, start_idx=0, t_offset=0.0
     return ds
 
 
-def select_z_plane(ds, z_level):
-    """Select a single z-layer (kept as a size-1 dim) on every z-like dim present.
-
-    udales staggers the components on different vertical axes (u/v on ``zt``,
-    w on ``zm``); selecting ``z_level`` on each keeps the velocity-magnitude
-    computation aligned while loading only one horizontal plane per variable.
-    """
-    sel = {d: slice(z_level, z_level + 1) for d in _Z_DIMS if d in ds.dims}
-    return ds.isel(sel) if sel else ds
-
-
-def _horizontal_coord(ds, names):
-    for n in names:
-        if n in ds.coords:
-            return np.asarray(ds[n].values, dtype=float)
-    return None
-
-
-def _vel_field_4z(state, n_time, n_z_slices=4):
-    """Velocity-magnitude field on ``n_z_slices`` evenly-spaced z-levels.
-
-    Returns a ``(time, zlev, y, x)`` DataArray on nominal cell-centre coords.
-    Only the selected z-slices (across all time) are read from disk, bounding
-    memory to a small fraction of the full 3-D field. The components are combined
-    by index (matching ``get_velocity_magnitude_field``).
-    """
-    zdim = next((d for d in _Z_DIMS if d in state.dims), None)
-    nz = state.sizes[zdim] if zdim is not None else 1
-    z_idx = np.unique(np.linspace(0, nz - 1, n_z_slices).round().astype(int))
-
-    s = state.isel(time=slice(0, n_time))
-
-    def _sel_var(name):
-        da = s[name]
-        for d in _Z_DIMS:
-            if d in da.dims:
-                da = da.isel({d: z_idx})
-                break
-        return np.asarray(da.values)
-
-    vel = np.sqrt(_sel_var("u") ** 2 + _sel_var("v") ** 2 + _sel_var("w") ** 2)
-
-    coords = {}
-    y = _horizontal_coord(state, ("yt", "y"))
-    x = _horizontal_coord(state, ("xt", "x"))
-    if y is not None and y.size == vel.shape[2]:
-        coords["y"] = y
-    if x is not None and x.size == vel.shape[3]:
-        coords["x"] = x
-    return xarray.DataArray(vel, dims=("time", "zlev", "y", "x"), coords=coords)
-
-
-def streaming_state_rmse(true_state, esmda_state, n_z_slices=4):
-    """Per-timestep RMSE of |U| between truth and the ensemble-mean state.
-
-    Streams over ``n_z_slices`` evenly-spaced z-levels and all time steps rather
-    than materialising the full 4-D velocity field. When the truth and
-    assimilation grids differ, the truth planes are interpolated onto the
-    assimilation grid before differencing.
-    """
-    true_s = (
-        true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
-    )
-    esmda_s = (
-        esmda_state.mean(dim="ensemble")
-        if "ensemble" in esmda_state.dims
-        else esmda_state
-    )
-
-    n_time = min(true_s.sizes["time"], esmda_s.sizes["time"])
-
-    true_vel = _vel_field_4z(true_s, n_time, n_z_slices)
-    esmda_vel = _vel_field_4z(esmda_s, n_time, n_z_slices)
-
-    have_coords = all(
-        "y" in da.coords and "x" in da.coords for da in (true_vel, esmda_vel)
-    )
-    grids_match = (
-        have_coords
-        and true_vel.sizes.get("y") == esmda_vel.sizes.get("y")
-        and true_vel.sizes.get("x") == esmda_vel.sizes.get("x")
-        and np.allclose(true_vel["y"], esmda_vel["y"])
-        and np.allclose(true_vel["x"], esmda_vel["x"])
-    )
-    if not grids_match and have_coords:
-        # Coordinates don't line up -> interpolate the truth onto the assim grid.
-        true_vel = true_vel.interp(y=esmda_vel["y"], x=esmda_vel["x"])
-
-    nz_common = min(true_vel.sizes["zlev"], esmda_vel.sizes["zlev"])
-    diff = np.asarray(true_vel.isel(zlev=slice(0, nz_common)).values) - np.asarray(
-        esmda_vel.isel(zlev=slice(0, nz_common)).values
-    )
-    return np.sqrt(np.nanmean(diff**2, axis=tuple(range(1, diff.ndim))))
-
-
 # ---------------------------------------------------------------------------
 # Sensor time-series extraction (truth vs ensemble at fixed points)
 # ---------------------------------------------------------------------------
@@ -227,8 +135,9 @@ def _sensor_component_timeseries(state, obs_x, obs_y, obs_z, solver_name):
     an ``ObservationOperator``'s solver-specific dim mapping) at the sensor
     locations, keeping any leading dims (``ensemble``, ``time``). Returns a
     DataArray with a leading ``component`` dim: ``(component, ..., time, sensor)``.
-    The velocity magnitude |U| is :func:`sensor_magnitude` of this (used for the
-    sensor figures); the full vector is used for the sensor error metrics.
+    The velocity magnitude |U| is :func:`evaluation.sensors.sensor_magnitude` of
+    this (used for the sensor figures); the full vector is used for the sensor
+    error metrics.
     """
     op = ObservationOperator(
         obs_x=list(np.asarray(obs_x, dtype=float)),
@@ -256,11 +165,6 @@ def _sensor_component_timeseries(state, obs_x, obs_y, obs_z, solver_name):
     )
 
 
-def sensor_magnitude(components):
-    """Velocity magnitude |U| from a ``(component, ...)`` sensor series."""
-    return np.sqrt((components**2).sum("component"))
-
-
 def _concat_sensor_pieces(pieces):
     """Concatenate per-window sensor series along ``time`` for each sensor set."""
     return {
@@ -273,26 +177,82 @@ def _concat_sensor_pieces(pieces):
     }
 
 
-def ensemble_sensor_series(state_paths, sensor_sets, solver_name, sim_time):
+def ensemble_sensor_series(
+    state_paths, sensor_sets, solver_name, sim_time, on_member=None
+):
     """Ensemble per-component ``(u, v, w)`` sensor series across rollout windows.
 
-    Opens each window's full-ensemble state file once and interpolates u/v/w at
-    every sensor set's points (keeping ``component`` + ``ensemble`` + ``time``),
-    rebasing each window's local time onto a single global axis (window ``w``
-    starts at ``w*sim_time``) so it lines up with the truth. Returns
-    ``{name: DataArray(component, ensemble, time, sensor)}``.
+    Interpolates u/v/w at every sensor set's points (keeping ``component`` +
+    ``ensemble`` + ``time``), rebasing each window's local time onto a single
+    global axis (window ``w`` starts at ``w*sim_time``) so it lines up with the
+    truth. Returns ``{name: DataArray(component, ensemble, time, sensor)}``.
+
+    **One member at a time.** A window state file is
+    ``(ensemble, time, z, y, x)`` per component and runs to gigabytes, so it is
+    opened lazily and sliced per member: peak memory is three components of one
+    member's window, not the whole ensemble. (This function used to ``.load()``
+    each file whole -- the last such site in the post-processing stack.) The
+    per-member slice *is* materialised, because the interpolation reads
+    ``.values``; every sensor set is interpolated from that one slice so a
+    second set costs no extra read.
+
+    ``on_member`` is called as ``on_member(window_index, member_index, member)``
+    with that same materialised slice, before it is dropped. It exists so the
+    WP1.4 mean fields can be accumulated inside this pass rather than in a
+    second one: at Barcelona scale the window files total tens of GB and a
+    second full read of them is not affordable, while a callback on a slice
+    already in memory costs no I/O at all. It is only called when the state
+    carries an ``ensemble`` axis -- everything hanging off it is per member.
     """
     pieces = {name: [] for name in sensor_sets}
     for w, path in enumerate(state_paths):
-        ds = xarray.open_dataset(path).load()
-        t = np.asarray(ds["time"].values, dtype=float) if "time" in ds.coords else None
-        for name, (ox, oy, oz) in sensor_sets.items():
-            vel = _sensor_component_timeseries(ds, ox, oy, oz, solver_name)
-            if t is not None and "time" in vel.dims:
-                vel = vel.assign_coords(time=(t - t[0]) + w * sim_time)
-            pieces[name].append(vel)
-        ds.close()
+        with xarray.open_dataset(path) as ds:
+            t = (
+                np.asarray(ds["time"].values, dtype=float)
+                if "time" in ds.coords
+                else None
+            )
+            for name, vel in _window_sensor_series(
+                ds, sensor_sets, solver_name, on_member, w
+            ).items():
+                if t is not None and "time" in vel.dims:
+                    vel = vel.assign_coords(time=(t - t[0]) + w * sim_time)
+                pieces[name].append(vel)
     return _concat_sensor_pieces(pieces)
+
+
+def _window_sensor_series(ds, sensor_sets, solver_name, on_member, window_index):
+    """One window's ``{name: DataArray(component, ensemble, time, sensor)}``.
+
+    Members are read and interpolated one at a time from the lazily-opened
+    ``ds``; every sensor set is interpolated from the member slice already in
+    memory, so a second set costs no extra read, and ``on_member`` (see
+    :func:`ensemble_sensor_series`) sees the same slice.
+    """
+    if "ensemble" not in ds.dims:
+        return {
+            name: _sensor_component_timeseries(ds, ox, oy, oz, solver_name)
+            for name, (ox, oy, oz) in sensor_sets.items()
+        }
+
+    members = {name: [] for name in sensor_sets}
+    for m in range(ds.sizes["ensemble"]):
+        # A slice, not an index: it keeps the ``ensemble`` dim, so the pieces
+        # concatenate back into the layout the whole-file load produced.
+        member = ds[["u", "v", "w"]].isel(ensemble=slice(m, m + 1)).load()
+        for name, (ox, oy, oz) in sensor_sets.items():
+            members[name].append(
+                _sensor_component_timeseries(member, ox, oy, oz, solver_name)
+            )
+        if on_member is not None:
+            on_member(window_index, m, member)
+        # No ``member.close()``: ``.load()``'s result owns no file handle, so
+        # the call would be a no-op that reads as if it released something. The
+        # slice is dropped at the end of the iteration, which is the real thing.
+    return {
+        name: (parts[0] if len(parts) == 1 else xarray.concat(parts, dim="ensemble"))
+        for name, parts in members.items()
+    }
 
 
 def truth_sensor_series(
@@ -327,79 +287,321 @@ def truth_sensor_series(
 
 
 # ---------------------------------------------------------------------------
-# Vector (u,v,w) sensor error metrics
+# High-rate probe records (phase 3: the spectral check)
+#
+# The probe records are written by ``scripts/esmda/run_probe_series.py``, an
+# optional rerun of one window at ~1 s output -- never by the assimilation, whose
+# own cadence (10 s in a 300 s window) is ~30x too coarse for a Welch spectrum.
+# So a run dir *usually* has none, and every helper here treats their absence as
+# the normal case: the metric and figure stages both call in, and both skip their
+# spectral block when they get ``None`` (master-plan invariant 3).
+# ---------------------------------------------------------------------------
+
+_TRUTH_PROBES = "truth_probes.nc"
+_PROBE_STEM = re.compile(r"window_(\d+)_probes")
+
+
+def probe_record_paths(
+    run_dir: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path | None] | None:
+    """``(truth, posterior, prior | None)`` probe records in ``run_dir``.
+
+    The probe rerun covers **one** window, and ``truth_probes.nc`` is a single
+    unversioned file the rerun overwrites, so which window the *truth* record
+    describes is decided by whichever invocation ran last. That makes the truth's
+    ``window_index`` attribute the authority here: the matching posterior record is
+    the only one it may be paired with. Re-probing window 2 after window 1 leaves
+    ``windows/window_1_probes.nc`` on disk beside a window-2 truth, and pairing
+    those would produce a plausible figure and a wrong LSD, so a truth whose window
+    has no posterior record is refused outright rather than fallen back on.
+
+    The fallback to the highest-numbered record applies only to a truth record that
+    carries no ``window_index`` at all (a hand-made or pre-WP3.2 file), and it is
+    logged.
+
+    The prior record is optional by design: prior probe reruns double the rerun
+    cost and only feed figure S4's grey envelope, so ``None`` in the third slot is
+    a normal outcome, not a degradation.
+
+    Returns ``None`` when there is no truth record or no window record at all,
+    which is every run dir that never had a probe rerun.
+    """
+    run_dir = pathlib.Path(run_dir)
+    truth_path = run_dir / _TRUTH_PROBES
+    windows: dict[int, pathlib.Path] = {}
+    for path in sorted((run_dir / "windows").glob("window_*_probes.nc")):
+        match = _PROBE_STEM.fullmatch(path.stem)
+        if match:
+            windows[int(match.group(1))] = path
+    if not truth_path.exists() or not windows:
+        return None
+
+    wanted: int | None = None
+    try:
+        # Metadata only: the attribute is read without touching the series.
+        with xarray.open_dataset(truth_path) as truth:
+            recorded = truth.attrs.get("window_index")
+        wanted = None if recorded is None else int(recorded)
+    except (OSError, TypeError, ValueError) as error:
+        logger.info("Cannot read %s: %s", truth_path.name, error)
+        return None
+
+    if wanted is None:
+        index = max(windows)
+        logger.info(
+            "%s carries no window_index; pairing it with the highest-numbered "
+            "posterior probe record (window %s) -- check that they are from the "
+            "same rerun",
+            _TRUTH_PROBES,
+            index,
+        )
+    elif wanted not in windows:
+        logger.warning(
+            "%s covers window %s but the only posterior probe records are for %s. "
+            "The truth record is overwritten by every rerun, so this is a stale "
+            "pairing rather than a choice: the spectral check is skipped. Re-run "
+            "scripts/esmda/run_probe_series.py for one window, or delete the stale "
+            "window_*_probes.nc",
+            _TRUTH_PROBES,
+            wanted,
+            sorted(windows),
+        )
+        return None
+    else:
+        index = wanted
+    prior_path = windows[index].with_name(f"window_{index}_probes_prior.nc")
+    return truth_path, windows[index], prior_path if prior_path.exists() else None
+
+
+def _same_probe_window(
+    truth: xarray.Dataset, members: xarray.Dataset, path: pathlib.Path
+) -> bool:
+    """Whether a member record describes the same window as the truth record.
+
+    The filename says one thing and the file's own ``window_index`` says another
+    only when something went wrong -- a record moved by hand, or a rerun that wrote
+    a different window than the name it was given. Both are silent failures
+    otherwise: the spectra would be of two different windows of the flow, which
+    still *looks* like a comparison. Records with no ``window_index`` at all pass,
+    since there is nothing to contradict.
+    """
+    theirs = members.attrs.get("window_index")
+    ours = truth.attrs.get("window_index")
+    if theirs is None or ours is None or int(theirs) == int(ours):
+        return True
+    logger.warning(
+        "%s records window %s but %s records window %s; the spectra would compare "
+        "two different windows, so this pairing is refused",
+        path.name,
+        theirs,
+        _TRUTH_PROBES,
+        ours,
+    )
+    return False
+
+
+def probe_spectra_bundle(run_dir: pathlib.Path) -> dict | None:
+    """Matched Welch spectra from the run's probe records, or ``None``.
+
+    The one place the probe records are located, opened and reduced, called by
+    both the metric stage (which turns the bundle into ``spectral_metrics``) and
+    the figure stage (which draws it as S4) -- so the annotated distances in the
+    figure and the numbers in ``run_summary.yaml`` come off the same arrays.
+
+    The records are the small artifact of the rerun (a handful of sensors x a few
+    thousand frames, megabytes), not window state files, so they are read whole;
+    invariant 2 is about the multi-GB state files this never touches.
+
+    ``None``, with the reason logged, when there are no probe records or they
+    cannot be compared -- see :func:`evaluation.turbulence.probe_spectra` for the
+    latter.
+    """
+    paths = probe_record_paths(run_dir)
+    if paths is None:
+        logger.info(
+            "No probe records in %s; the spectral check is skipped (run "
+            "scripts/esmda/run_probe_series.py on this run dir to write them)",
+            run_dir,
+        )
+        return None
+
+    truth_path, posterior_path, prior_path = paths
+    try:
+        with (
+            xarray.open_dataset(truth_path) as truth,
+            xarray.open_dataset(posterior_path) as posterior,
+        ):
+            if not _same_probe_window(truth, posterior, posterior_path):
+                return None
+            if prior_path is None:
+                return probe_spectra(truth, posterior)
+            with xarray.open_dataset(prior_path) as prior:
+                if not _same_probe_window(truth, prior, prior_path):
+                    # The prior only feeds S4's envelope, so a stale one costs
+                    # itself rather than the whole check.
+                    return probe_spectra(truth, posterior)
+                return probe_spectra(truth, posterior, prior)
+    except (OSError, ValueError, KeyError) as error:
+        # A record that exists but cannot be read (a rerun killed mid-write) costs
+        # the spectral block alone, like every other optional artifact here.
+        logger.warning("Cannot read the probe records in %s: %s", run_dir, error)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Observation-space diagnostics (phase 2)
 # ---------------------------------------------------------------------------
 
 
-def _energy_score(members, truth):
-    """Per-timestep energy score, averaged over sensors.
+def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
+    """Per-iteration ``O_N`` from the run's observation-space files, or ``None``.
 
-    The energy score is the multivariate generalization of the CRPS (Gneiting &
-    Raftery 2007): for a vector forecast ensemble ``{v_m}`` and truth ``v``,
+    The one place ``windows/window_{w}_{obs,pred_obs}.nc`` are located, opened
+    and reduced, called by both the metric stage (which turns the bundle into
+    ``esmda_diagnostics``) and the figure stage (which draws it as D3) — so the
+    boxes in the figure and the numbers in ``run_summary.yaml`` come off the
+    same arrays.
 
-        ES = mean_m ||v_m - v|| - 0.5 * mean_{m,m'} ||v_m - v_{m'}||,
+    The files are KB-scale (``N_d × M`` floats per iteration), not window state
+    files, so they are read whole; invariant 2 concerns the multi-GB state files
+    this never touches.
 
-    which reduces to the CRPS in 1-D. It rewards both accuracy (term 1) and a
-    calibrated spread (term 2), in the same |U| units as the velocity.
+    Returns ``{"per_step": [np.ndarray, ...], "num_observations": int,
+    "num_windows": int, "per_window": [np.ndarray (L, M), ...],
+    "window_indices": [int, ...]}``. ``per_step`` pools members across windows,
+    one entry per iteration; ``per_window`` keeps them separate, which is what
+    D3 needs to avoid conflating window 0's cold-start prior with a later
+    window's extrapolated one, and ``window_indices`` says which window each
+    entry is so a dropped one does not silently renumber the rest.
 
-    Args:
-        members: ``(component, ensemble, time, sensor)`` aligned member vectors.
-        truth: ``(component, time, sensor)`` aligned truth vectors.
+    **Bounded by ``truth_access.yaml``'s ``num_windows``**, like every other
+    consumer in ``compute_esmda_metrics``. ``paths.results_dir`` is a fixed,
+    non-timestamped path and the window loop never clears ``windows/``, so a
+    rerun with fewer windows (or a crash partway through one) leaves a previous
+    run's files in place; globbing alone would pool them into this run's
+    diagnostic while every other block in the same ``run_summary.yaml`` covered
+    only the current windows.
 
-    Returns:
-        ``(time,)`` energy score, averaged over the sensors (matching the
-        per-time, over-sensors reduction of ``compute_sensor_metrics``).
+    **And by the run's own ``save_obs_diagnostics``**, read from
+    ``run_info.yaml``. The window-count bound above catches a *shrinking* rerun;
+    it cannot catch one that merely turned the flag off — which
+    ``conf/run_esmda.yaml`` offers as the way to reproduce the pre-phase-2
+    artifact set exactly — because the leftover files then still match this run's
+    window count. Deciding on file existence alone would put the *previous*
+    assimilation's mismatch beside this run's parameter and state metrics, and
+    draw D3 from it. An absent flag (a run dir written before WP2.1) means
+    unknown, not false, and falls through to the files.
+
+    ``None``, with the reason logged, when the run has no such files — every run
+    dir written before WP2.1 or with ``esmda.save_obs_diagnostics=false``.
     """
-    n_time = members.shape[2]
-    es = np.empty(n_time)
-    # Loop over time so the pairwise term never materializes more than
-    # ``(component, ensemble, ensemble, sensor)`` at once.
-    for t in range(n_time):
-        m = members[:, :, t, :]  # (C, E, S)
-        v = truth[:, t, :]  # (C, S)
-        d_truth = np.sqrt(np.sum((m - v[:, None, :]) ** 2, axis=0))  # (E, S)
-        term1 = d_truth.mean(axis=0)  # (S,)
-        diff = m[:, :, None, :] - m[:, None, :, :]  # (C, E, E, S)
-        d_pair = np.sqrt(np.sum(diff**2, axis=0))  # (E, E, S)
-        term2 = 0.5 * d_pair.mean(axis=(0, 1))  # (S,)
-        es[t] = float((term1 - term2).mean())  # average over sensors
-    return es
+    from evaluation.scores import data_mismatch
 
+    run_dir = pathlib.Path(run_dir)
+    windows_dir = run_dir / "windows"
+    configuration = read_yaml(run_dir / "run_info.yaml").get("configuration") or {}
+    if configuration.get("save_obs_diagnostics") is False:
+        if any(windows_dir.glob("window_*_obs.nc")):
+            logger.warning(
+                "Ignoring the observation-space files in %s: this run set "
+                "esmda.save_obs_diagnostics=false, so they are left over from an "
+                "earlier run into the same output dir",
+                windows_dir,
+            )
+        return None
+    expected = read_yaml(run_dir / "truth_access.yaml").get("num_windows")
 
-def vector_sensor_metrics(truth_comp, ensemble_comp):
-    """Full-vector ``(u, v, w)`` sensor error, reduced over sensors per timestep.
-
-    One scalar per sensor per timestep is formed from the whole velocity vector
-    (not just its magnitude), then reduced over sensors:
-
-      * ``rmse(t) = sqrt(mean_s || <v>_ens - v_truth ||^2)`` -- the ensemble-mean
-        vector error, obtained by combining the per-component
-        :func:`compute_sensor_metrics` RMSEs as ``sqrt(sum_c rmse_c**2)`` (so the
-        shared, time-aligning metric is reused unchanged).
-      * ``energy_score(t)`` -- the multivariate CRPS (:func:`_energy_score`) over
-        the aligned member/truth vectors.
-
-    Args:
-        truth_comp: ``(component, time, sensor)`` truth series.
-        ensemble_comp: ``(component, ensemble, time, sensor)`` ensemble series.
-
-    Returns:
-        ``{"rmse": (T,), "energy_score": (T,)}``.
-    """
-    components = [str(c) for c in np.asarray(truth_comp["component"].values)]
-    # Per-component metrics reuse the shared compute_sensor_metrics, which also
-    # time-aligns the truth onto the ensemble axis identically for each
-    # component, so the returned members/truth stack into consistent vectors.
-    per = {
-        c: compute_sensor_metrics(
-            truth_comp.sel(component=c), ensemble_comp.sel(component=c)
+    pairs = []
+    for obs_path in sorted(windows_dir.glob("window_*_obs.nc")):
+        match = re.fullmatch(r"window_(\d+)_obs", obs_path.stem)
+        if not match:
+            continue
+        window = int(match.group(1))
+        if expected is not None and window >= int(expected):
+            logger.warning(
+                "Ignoring %s: window %d is beyond this run's %d window(s), so it "
+                "is left over from an earlier run into the same output dir",
+                obs_path.name,
+                window,
+                int(expected),
+            )
+            continue
+        pred_path = windows_dir / f"window_{window}_pred_obs.nc"
+        if pred_path.exists():
+            pairs.append((window, obs_path, pred_path))
+    if not pairs:
+        logger.info(
+            "No observation-space files in %s; the data-mismatch diagnostic is "
+            "skipped (rerun with esmda.save_obs_diagnostics=true to write them)",
+            run_dir,
         )
-        for c in components
+        return None
+
+    per_window: list[np.ndarray] = []
+    window_indices: list[int] = []
+    n_obs = 0
+    for window, obs_path, pred_path in sorted(pairs):
+        try:
+            with (
+                xarray.open_dataset(obs_path) as obs_ds,
+                xarray.open_dataset(pred_path) as pred_ds,
+            ):
+                obs = obs_ds["obs"].values
+                sigma = obs_ds["obs_error_std"].values
+                pred = pred_ds["pred_obs"].values  # (esmda_step, obs, ensemble)
+                # N_d sets the target band, so windows scored against different
+                # observation counts cannot share one. The first window kept
+                # fixes it; a later mismatch is a stale or reconfigured file and
+                # is dropped rather than silently widening the band.
+                window_n_obs = int(np.size(obs))
+                if n_obs and window_n_obs != n_obs:
+                    logger.warning(
+                        "Ignoring window %d in %s: %d observations against the "
+                        "run's %d, so it cannot share the target band",
+                        window,
+                        run_dir,
+                        window_n_obs,
+                        n_obs,
+                    )
+                    continue
+                # One row per iteration; ``data_mismatch`` validates the shapes.
+                per_window.append(
+                    np.stack(
+                        [
+                            data_mismatch(obs, pred[i], sigma)
+                            for i in range(pred.shape[0])
+                        ]
+                    )
+                )
+                window_indices.append(window)
+                n_obs = window_n_obs
+        except (OSError, ValueError, KeyError) as error:
+            # A window killed mid-write costs itself, not the whole diagnostic.
+            logger.warning(
+                "Cannot read the observation-space files for window %d in %s: %s",
+                window,
+                run_dir,
+                error,
+            )
+
+    if not per_window:
+        return None
+
+    # Windows may in principle differ in iteration count (a config changed
+    # between reruns into one dir); pool over whatever each window actually has
+    # rather than assuming a rectangle.
+    n_steps = max(w.shape[0] for w in per_window)
+    per_step = [
+        np.concatenate([w[i] for w in per_window if w.shape[0] > i])
+        for i in range(n_steps)
+    ]
+    return {
+        "per_step": per_step,
+        "per_window": per_window,
+        "window_indices": window_indices,
+        "num_observations": n_obs,
+        "num_windows": len(per_window),
     }
-    rmse = np.sqrt(np.sum([per[c]["rmse"] ** 2 for c in components], axis=0))  # (T,)
-    members = np.stack([per[c]["members"] for c in components], axis=0)  # (C,E,T,S)
-    truth = np.stack([per[c]["truth"] for c in components], axis=0)  # (C,T,S)
-    return {"rmse": rmse, "energy_score": _energy_score(members, truth)}
 
 
 # ---------------------------------------------------------------------------
@@ -423,38 +625,3 @@ def _to_native(obj):
 def write_yaml(data, path) -> None:
     with open(path, "w") as f:
         yaml.safe_dump(_to_native(data), f, sort_keys=False, default_flow_style=False)
-
-
-def series_stats(arr):
-    """{mean, final, max, min} of a 1-D series, or ``None`` if it has no values.
-
-    ``final`` is the last element (the end-of-rollout value); the rest reduce
-    over the whole series. NaNs are ignored.
-    """
-    a = np.asarray(arr, dtype=float).ravel()
-    finite = a[np.isfinite(a)]
-    if finite.size == 0:
-        return None
-    return {
-        "mean": float(finite.mean()),
-        "final": float(a[-1]) if np.isfinite(a[-1]) else None,
-        "max": float(finite.max()),
-        "min": float(finite.min()),
-    }
-
-
-def parameter_metric_summary(posterior_params, true_params, prior_params):
-    """Per-parameter RMSE/CRPS summary stats (posterior, with a prior reference)."""
-    metrics = compute_parameter_metrics(posterior_params, true_params, prior_params)
-    summary = {}
-    for name, m in metrics.items():
-        entry = {"rmse": series_stats(m["rmse"]), "crps": series_stats(m["crps"])}
-        if "prior_rmse" in m:
-            prior_mean = float(np.nanmean(m["prior_rmse"]))
-            post_mean = float(np.nanmean(m["rmse"]))
-            entry["prior_rmse_mean"] = prior_mean
-            entry["rmse_reduction_vs_prior"] = (
-                float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
-            )
-        summary[name] = entry
-    return summary

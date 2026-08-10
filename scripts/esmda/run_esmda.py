@@ -13,7 +13,12 @@ This is the first stage of a three-script single-run pipeline (see
                                        assembled posterior_params.nc /
                                        prior_params.nc / posterior_state_mean.nc,
                                        the truth state/params, truth_access.yaml
-                                       and run_info.yaml.
+                                       and run_info.yaml. Under
+                                       esmda.save_obs_diagnostics (default true)
+                                       it also writes the per-window
+                                       observation-space arrays
+                                       windows/window_{w}_{obs,pred_obs,
+                                       params_steps}.nc.
   2. scripts/esmda/compute_esmda_metrics.py -- reads those, computes the parameter /
                                        state / sensor metrics and writes
                                        run_summary.yaml.
@@ -70,6 +75,16 @@ Examples::
         params@prior_params=dynamic params@truth_params=dynamic_truth \
         esmda.num_assimilation_windows=3
 """
+
+# mypy: ignore-errors
+# Legacy untyped entry point, waived on the same terms as
+# ``scripts/esmda/_esmda_common.py``: it predates the strict mypy config and has
+# never satisfied it (~15 errors, a couple of them latent rather than cosmetic —
+# see the None/int divisions in the state-summary helpers). It is type-checked
+# transitively whenever a test importing it is committed, which several already
+# do (tests/test_run_esmda.py, tests/test_localization.py,
+# tests/test_run_probe_series.py). Waived wholesale rather than annotated
+# piecemeal; drop this when the file is typed, and fix those divisions then.
 
 import pathlib
 import shutil
@@ -337,6 +352,141 @@ def _streaming_state_summary(path):
         attrs = {k: ds.getncattr(k) for k in ds.ncattrs()}
 
     return xarray.Dataset(data, coords=coords, attrs=attrs)
+
+
+# ---------------------------------------------------------------------------
+# Observation-space diagnostics (phase 2)
+# ---------------------------------------------------------------------------
+
+# The flattened observation vector is built by nested concatenation in
+# ``data_assimilation.observation_operator``: the temporal wrapper concatenates
+# per interval, and inside each interval ``ObservationOperator`` concatenates per
+# state component, each block holding all sensors. So the sensor index is the
+# fastest axis and the interval the slowest:
+#
+#     j = interval * (n_states * n_sensors) + state * n_sensors + sensor
+#
+# ``_obs_index_coords`` decodes that into per-observation labels so the saved
+# arrays are interpretable without re-deriving the layout downstream. Kept here
+# rather than in ``evaluation`` because it reads the operator object, which is
+# data-assimilation machinery the leaf library must not import (see the phase-2
+# plan and the master plan's invariant 5).
+#
+# The dimension is ``obs_index``, not ``obs``: the observation variable is called
+# ``obs``, and a variable whose name equals its dimension is silently promoted to
+# an index coordinate on the netCDF round-trip -- so a file written with an
+# ``obs`` dimension reads back with ``obs`` as a coordinate rather than the data
+# variable the docs describe.
+_OBS_DIM = "obs_index"
+_OBS_ORDERING = (
+    "obs_index j = interval*(n_states*n_sensors) + state*n_sensors + sensor; "
+    "the sensor index is the fastest-varying axis. Under obs.temporal_mode=full "
+    "the slowest axis is the output frame rather than an aggregation interval, "
+    "and obs_interval indexes frames."
+)
+
+
+def _obs_index_coords(obs_op, n_d):
+    """Per-observation ``sensor`` / ``state`` / ``interval`` labels, or ``{}``.
+
+    ``obs_op`` is the observation operator (a ``TemporalObservationOperator`` or
+    a bare ``ObservationOperator``); ``n_d`` the length of the flat observation
+    vector. Returns coordinate arrays keyed on the ``obs_index`` dimension.
+    Degrades to an empty mapping -- the flat index alone -- when the operator
+    does not expose the counts or when ``n_d`` is not a whole number of (state,
+    sensor) blocks, so an unusual operator costs metadata rather than the whole
+    artifact.
+
+    ``obs_interval`` counts aggregation intervals under ``temporal_mode:
+    intervals`` and output *frames* under ``full``; the arithmetic is identical
+    either way, and the file attrs say so.
+    """
+    base = getattr(obs_op, "observation_operator", obs_op)
+    n_sensors = int(getattr(base, "num_sensors", 0))
+    states = list(getattr(base, "obs_states", []) or [])
+    if n_sensors <= 0 or not states:
+        return {}
+
+    block = n_sensors * len(states)
+    if int(n_d) % block != 0:
+        return {}
+
+    j = np.arange(int(n_d))
+    return {
+        "obs_sensor": (_OBS_DIM, (j % n_sensors).astype(int)),
+        "obs_state": (
+            _OBS_DIM,
+            np.asarray(states, dtype=object)[(j // n_sensors) % len(states)],
+        ),
+        "obs_interval": (_OBS_DIM, (j // block).astype(int)),
+    }
+
+
+def _save_obs_diagnostics(
+    windows_dir,
+    window,
+    obs,
+    obs_clean,
+    obs_error_std,
+    pred_obs_history,
+    result_params,
+    obs_op,
+):
+    """Write one window's observation-space arrays (WP2.1).
+
+    Three small files under ``windows/``: the assimilated observations with the
+    noise-free truth projection and the per-observation error std, the predicted
+    observations at every ESMDA iteration, and the per-iteration parameter
+    ensembles. All KB-scale.
+
+    ``pred_obs_history`` is the smoother's ``(N_d, N_e)`` block per iteration --
+    ``num_steps + 1`` of them, entry 0 the prior forecast and entry -1 the
+    posterior forecast. A history of a different length (a smoother variant that
+    does not record every iteration) is still written as-is; the ``esmda_step``
+    coordinate is positional, so the diagnostic downstream reads whatever is
+    there rather than assuming a count.
+    """
+    n_d = int(np.size(obs))
+    coords = _obs_index_coords(obs_op, n_d)
+
+    obs_ds = xarray.Dataset(
+        data_vars={
+            "obs": (_OBS_DIM, np.asarray(obs, dtype=float).ravel()),
+            "obs_clean": (_OBS_DIM, np.asarray(obs_clean, dtype=float).ravel()),
+            "obs_error_std": (
+                _OBS_DIM,
+                np.asarray(obs_error_std, dtype=float).ravel(),
+            ),
+        },
+        coords={_OBS_DIM: np.arange(n_d), **coords},
+    )
+    obs_ds.attrs["ordering"] = _OBS_ORDERING
+    obs_ds["obs"].attrs["long_name"] = "assimilated observation (truth + noise)"
+    obs_ds["obs_clean"].attrs["long_name"] = "noise-free truth projection"
+    obs_ds["obs_error_std"].attrs["long_name"] = "sqrt(diag(C_D)), un-inflated"
+    obs_ds.to_netcdf(windows_dir / f"window_{window}_obs.nc")
+
+    if pred_obs_history:
+        stacked = np.stack([np.asarray(p, dtype=float) for p in pred_obs_history])
+        pred_ds = xarray.Dataset(
+            data_vars={"pred_obs": (("esmda_step", _OBS_DIM, "ensemble"), stacked)},
+            coords={
+                "esmda_step": np.arange(stacked.shape[0]),
+                _OBS_DIM: np.arange(stacked.shape[1]),
+                **coords,
+            },
+        )
+        pred_ds.attrs["ordering"] = _OBS_ORDERING
+        pred_ds.attrs["esmda_step"] = (
+            "iteration index; 0 = prior forecast, -1 = posterior forecast. With "
+            "esmda.final_time_smoothing=true the last entry is PRE-smoothing."
+        )
+        pred_ds.to_netcdf(windows_dir / f"window_{window}_pred_obs.nc")
+
+    # The per-iteration parameter ensembles, before the caller's
+    # ``.isel(esmda_step=-1)`` discards all but the posterior. Kept for debugging;
+    # no diagnostic in this phase reads it.
+    result_params.to_netcdf(windows_dir / f"window_{window}_params_steps.nc")
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +797,13 @@ def run(cfg: DictConfig) -> None:
     esmda.prune_disk_steps = True
     esmda.keep_prior_disk_step = save_prior_state
 
+    # Observation-space diagnostics (WP2.1): have the smoother record the
+    # predicted observations it materializes at each ESMDA iteration, so the
+    # window loop can persist them alongside the observations themselves.
+    # ``.get`` so a config predating the key still composes.
+    save_obs_diagnostics = bool(cfg.esmda.get("save_obs_diagnostics", False))
+    esmda.collect_obs_diagnostics = save_obs_diagnostics
+
     # --- Run ESMDA -----------------------------------------------------------
     # Time the assimilation. ``window_seconds`` is each window's full wall-clock
     # cost (observation extraction + Kalman solve + I/O + extrapolation);
@@ -683,11 +840,11 @@ def run(cfg: DictConfig) -> None:
         window_true_state = open_truth(
             true_state_path, n_total, x_offset, start_idx, t_offset
         ).isel(time=slice(window * n_per_window, (window + 1) * n_per_window))
-        window_obs = jnp.asarray(truth_obs_op(window_true_state))
+        window_obs_clean = jnp.asarray(truth_obs_op(window_true_state))
         window_true_state.close()
         rng_key, subkey = jax.random.split(rng_key)
-        window_obs = window_obs + jnp.sqrt(C_D) @ jax.random.normal(
-            subkey, window_obs.shape
+        window_obs = window_obs_clean + jnp.sqrt(C_D) @ jax.random.normal(
+            subkey, window_obs_clean.shape
         )
 
         # Sample posterior. ``return_state_history=True`` makes the smoother also
@@ -722,6 +879,21 @@ def run(cfg: DictConfig) -> None:
             result_params, state_obj = output
         else:
             result_params, state_obj = output, None
+
+        # Observation-space arrays for this window, written before the
+        # ``esmda_step`` axis is collapsed away below (WP2.1). Off by default in
+        # a config without the key, in which case the artifact set is unchanged.
+        if save_obs_diagnostics:
+            _save_obs_diagnostics(
+                windows_dir,
+                window,
+                window_obs,
+                window_obs_clean,
+                np.sqrt(np.diag(np.asarray(C_D))),
+                esmda.pred_obs_history,
+                result_params,
+                truth_obs_op,
+            )
 
         posterior_params = result_params.isel(esmda_step=-1)
         posterior_params.to_netcdf(windows_dir / f"window_{window}_posterior_params.nc")
@@ -824,6 +996,7 @@ def run(cfg: DictConfig) -> None:
             "final_time": float(final_time),
             "observation_error_std": float(cfg.esmda.obs_error_std),
             "num_esmda_steps": int(cfg.esmda.num_steps),
+            "save_obs_diagnostics": bool(save_obs_diagnostics),
             "seed": int(cfg.esmda.seed),
             "truth_model": str(cfg.truth_model.name),
             "assimilation_model": str(cfg.assim_model.name),

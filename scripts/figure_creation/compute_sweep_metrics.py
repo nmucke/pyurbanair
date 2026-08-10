@@ -42,6 +42,12 @@ Usage::
         --out  pyurbanair/sweep_metrics --models pyudales pylbm
 """
 
+# mypy: ignore-errors
+# Legacy untyped comparison script: it predates the strict mypy config and is
+# only type-checked when a commit happens to touch it. Waived wholesale (as in
+# scripts/esmda/_esmda_common.py) rather than annotated in an unrelated PR;
+# dropping the waiver is its own cleanup.
+
 from __future__ import annotations
 
 import argparse
@@ -53,18 +59,55 @@ import xarray as xr
 import yaml
 from data_assimilation.interpolation import interpolate_dataarray_at_points
 from data_assimilation.observation_operator import ObservationOperator
+from evaluation.scores import (
+    METRICS_VERSION,
+    compute_sensor_metrics,
+    parameter_metric_summary,
+    series_stats,
+)
 from omegaconf import OmegaConf
 
 from pyurbanair.config.hydra_helpers import (
     create_observation_points,
     create_validation_points,
 )
-from pyurbanair.plotting import compute_parameter_metrics, compute_sensor_metrics
 
 # Velocity components plus magnitude; ``vel`` keeps the historical summary key.
 QUANTITIES = ("u", "v", "w", "vel")
 _Q_KEY = {"vel": "vel_magnitude", "u": "u", "v": "v", "w": "w"}
 _X_COORDS = ("x", "xt", "xm")
+
+# Sensor-metric keys that may be carried across the WP1.1 estimator boundary
+# (see ``_carry_forward_sensors``). Every one is estimator-*independent*: a
+# sensor count, or an RMSE of the ensemble mean -- a deterministic error with no
+# pairwise ``M**2`` term, so the fair-estimator switch left it bit-identical.
+#
+# Deliberately an explicit allowlist, not a suffix denylist. The denylist this
+# replaces (``not k.endswith("_crps")``) named a key only the recompute path
+# below ever emits: summaries have carried ``velocity_vector_{rmse,
+# energy_score}`` since ec39233, and neither name ends in ``_crps``, so the
+# biased energy score would have been carried into a file stamped
+# ``metrics_version: 2``.
+#
+# In practice it never was. This branch runs only when ``truth_access.yaml`` is
+# absent, and run_esmda has written that file unconditionally since 5d3b697
+# (two days before ec39233) -- so a run dir that reaches here predates the
+# rename and can only carry ``vel_magnitude_crps``, which the denylist did
+# drop. The allowlist is hardening against the *next* score key, not a repair:
+# it fails closed, dropping anything nobody has vouched for, which is exactly
+# what the denylist did not do.
+_CARRYABLE_SENSOR_KEYS = frozenset(
+    {
+        "num_sensors",
+        # Pre-ec39233 run_esmda summaries, and this script's own recompute path.
+        "vel_magnitude_rmse",
+        "u_rmse",
+        "v_rmse",
+        "w_rmse",
+        # ec39233 onward (compute_esmda_metrics' full-vector sensor block).
+        "velocity_vector_rmse",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -191,20 +234,6 @@ def _truth_series(ta, sensor_sets, solver_name):
 # ---------------------------------------------------------------------------
 
 
-def _series_stats(arr):
-    """{mean, final, max, min} of a 1-D series, or ``None`` if it has no values."""
-    a = np.asarray(arr, dtype=float).ravel()
-    finite = a[np.isfinite(a)]
-    if finite.size == 0:
-        return None
-    return {
-        "mean": float(finite.mean()),
-        "final": float(a[-1]) if np.isfinite(a[-1]) else None,
-        "max": float(finite.max()),
-        "min": float(finite.min()),
-    }
-
-
 def _to_native(obj):
     if isinstance(obj, dict):
         return {k: _to_native(v) for k, v in obj.items()}
@@ -220,23 +249,6 @@ def _to_native(obj):
 def _write_yaml(data, path) -> None:
     with open(path, "w") as f:
         yaml.safe_dump(_to_native(data), f, sort_keys=False, default_flow_style=False)
-
-
-def _parameter_metrics(post, true, prior):
-    """Per-parameter RMSE/CRPS summary + reduction vs prior (library compute)."""
-    metrics = compute_parameter_metrics(post, true, prior)
-    out = {}
-    for name, m in metrics.items():
-        entry = {"rmse": _series_stats(m["rmse"]), "crps": _series_stats(m["crps"])}
-        if "prior_rmse" in m:
-            prior_mean = float(np.nanmean(m["prior_rmse"]))
-            post_mean = float(np.nanmean(m["rmse"]))
-            entry["prior_rmse_mean"] = prior_mean
-            entry["rmse_reduction_vs_prior"] = (
-                float(1.0 - post_mean / prior_mean) if prior_mean > 0 else None
-            )
-        out[name] = entry
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +296,23 @@ def _save_sensor_timeseries(out_run, name, coords, truth_q, prior_q, post_q):
 # ---------------------------------------------------------------------------
 
 
+def _carry_forward_sensors(legacy: dict) -> tuple[dict, list[str]]:
+    """Keep the estimator-independent sensor scores of a pre-WP1.1 summary.
+
+    Returns ``(carried, dropped_keys)``. Everything outside
+    :data:`_CARRYABLE_SENSOR_KEYS` is dropped: those values came from the biased
+    ``M**2`` pairwise estimator and sit ~O(1/M) above the fair ones, so plotting
+    them beside freshly scored runs turns the estimator bias into a spurious
+    trend along the ensemble-size axis the sweeps exist to probe -- and the
+    mixed-version guard cannot catch it once the file is stamped version 2.
+    """
+    carried, dropped = {}, set()
+    for name, entry in legacy.items():
+        carried[name] = {k: v for k, v in entry.items() if k in _CARRYABLE_SENSOR_KEYS}
+        dropped |= {k for k in entry if k not in _CARRYABLE_SENSOR_KEYS}
+    return carried, sorted(dropped)
+
+
 def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     """Compute every metric + time series for one run; returns a short status dict."""
     out_run.mkdir(parents=True, exist_ok=True)
@@ -294,6 +323,13 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     cfg = OmegaConf.load(run_dir / "config.yaml")
 
     metrics: dict = {
+        # Every ensemble score in this file is recomputed below by the current
+        # (fair-estimator) library code. The blocks copied from the run's own
+        # summary are the state RMSE and -- when the sensors cannot be
+        # recomputed -- the estimator-independent sensor keys, neither of which
+        # any estimator change touches. So the marker is unconditionally the
+        # current version.
+        "metrics_version": METRICS_VERSION,
         "configuration": summary.get("configuration", {}),
         "timing": summary.get("timing", {}),
     }
@@ -302,7 +338,7 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
     post_p = xr.open_dataset(run_dir / "posterior_params.nc")
     true_p = xr.open_dataset(run_dir / "true_params.nc")
     prior_p = xr.open_dataset(run_dir / "prior_params.nc")
-    metrics["parameter_metrics"] = _parameter_metrics(post_p, true_p, prior_p)
+    metrics["parameter_metrics"] = parameter_metric_summary(post_p, true_p, prior_p)
     # Copy the (tiny) param files so the comparison script is self-contained.
     for fn in ("posterior_params.nc", "prior_params.nc", "true_params.nc"):
         shutil.copyfile(run_dir / fn, out_run / fn)
@@ -343,8 +379,8 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
             if post_s is not None:
                 for q in QUANTITIES:
                     m = compute_sensor_metrics(truth_s[name][q], post_s[name][q])
-                    entry[f"{_Q_KEY[q]}_rmse"] = _series_stats(m["rmse"])
-                    entry[f"{_Q_KEY[q]}_crps"] = _series_stats(m["crps"])
+                    entry[f"{_Q_KEY[q]}_rmse"] = series_stats(m["rmse"])
+                    entry[f"{_Q_KEY[q]}_crps"] = series_stats(m["crps"])
                 _save_sensor_timeseries(
                     out_run,
                     name,
@@ -355,13 +391,30 @@ def process_run(run_dir: pathlib.Path, out_run: pathlib.Path) -> dict:
                 )
             sensor_metrics[name] = entry
 
-    if not sensor_metrics:
-        # No truth_access (pre-update run): fall back to the base |U| summary.
-        sensor_metrics = summary.get("sensor_metrics", {})
+    if sensor_metrics:
+        metrics["sensor_metrics"] = sensor_metrics
+    else:
+        # No truth_access (pre-update run), so nothing can be recomputed here.
+        # Carry forward only the estimator-independent scores, so the file the
+        # comparison script reads holds no v1-derived pairwise number and the
+        # ``metrics_version: 2`` stamp above stays honest. What was dropped to
+        # earn that stamp is recorded next to the block rather than left to be
+        # inferred from a missing key -- an empty CRPS panel otherwise looks
+        # like a metric that failed rather than one that was withheld.
+        legacy = summary.get("sensor_metrics", {}) or {}
+        carried, dropped = _carry_forward_sensors(legacy)
+        if carried:
+            metrics["sensor_metrics"] = carried
+            metrics["sensor_metrics_provenance"] = {
+                "recomputed": False,
+                "carried_from_metrics_version": int(summary.get("metrics_version", 1)),
+                "dropped_keys": dropped,
+            }
         status["note"] = (
-            "no truth_access.yaml -> base |U| sensor metrics only (re-run ESMDA)"
+            "no truth_access.yaml -> estimator-independent sensor metrics "
+            f"carried over, {len(dropped)} estimator-dependent key(s) omitted "
+            "(re-run ESMDA)"
         )
-    metrics["sensor_metrics"] = sensor_metrics
 
     _write_yaml(metrics, out_run / "metrics.yaml")
     return status
