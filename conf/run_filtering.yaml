@@ -8,6 +8,7 @@
 #   * filtering.mode=state|parameter|joint     which blocks the analysis updates
 #   * filtering/analysis=stochastic            the update math (ETKF/LETKF later)
 #   * filtering/localization=none|correlation|distance
+#   * filtering/state_reduction=none|svd_current|svd_streaming
 #   * filtering/inflation=none|multiplicative|rtps|rtpp
 #   * filtering/evolution=none|random_walk     parameter forecast model
 #   * filtering.num_cycles=N                   one full-weight analysis per cycle
@@ -30,6 +31,8 @@
 #     filtering/evolution=random_walk filtering/inflation=none
 #   python scripts/filtering/run_filtering.py filtering.mode=state \
 #     filtering/localization=correlation
+#   python scripts/filtering/run_filtering.py filtering.mode=state \
+#     filtering/localization=none filtering/state_reduction=svd_current
 defaults:
   - case: xie_and_castro
   # `_self_` before the filtering/* groups so the base `filtering:` scalars below
@@ -38,6 +41,7 @@ defaults:
   - _self_
   - filtering/analysis: stochastic
   - filtering/localization: none
+  - filtering/state_reduction: none
   - filtering/inflation: rtps
   - filtering/evolution: none
   - model@truth_model: pyudales
@@ -89,7 +93,8 @@ ensemble:
     seed: 0
 
 # --- Filtering settings. The filter itself (the `_target_` block) composes the
-# analysis / localization / inflation / evolution selected by the groups above;
+# analysis / localization / state reduction / inflation / evolution selected by
+# the groups above;
 # `filtering.mode` picks which augmented blocks the analysis updates. ---
 filtering:
   # One full-weight analysis per cycle; each cycle forecasts one segment of
@@ -105,6 +110,7 @@ filtering:
   # Defaults; normally set by the filtering/* groups above.
   analysis: stochastic
   localization: null
+  state_reduction: null
   inflation: null
   parameter_evolution: random_walk
   filter:
@@ -113,6 +119,7 @@ filtering:
     mode: ${filtering.mode}
     analysis: ${filtering.analysis}
     localization: ${filtering.localization}
+    state_reduction: ${filtering.state_reduction}
     inflation: ${filtering.inflation}
     parameter_evolution: ${filtering.parameter_evolution}
 

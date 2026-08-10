@@ -20,6 +20,7 @@ import logging
 import os
 import pathlib
 import shutil
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Optional
 
@@ -38,6 +39,7 @@ from data_assimilation.inflation import InflationScheme
 from data_assimilation.io import get_sorted_state_files, load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import sensor_observation_coords
+from data_assimilation.reduction import OnlineStateReduction
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
@@ -74,6 +76,22 @@ class CycleDiagnostics:
     state_spread_posterior: Optional[float] = None
     param_spread_prior: Optional[float] = None
     param_spread_posterior: Optional[float] = None
+    # Provenance for obs_posterior_rmse: "exact" when the appended
+    # predicted-observation rows really are H applied to the analyzed state;
+    # otherwise the name of the approximation they represent.
+    obs_posterior_rmse_kind: str = "exact"
+    analysis_time: Optional[float] = None
+    reduction_rank: Optional[int] = None
+    reduction_available_rank: Optional[int] = None
+    reduction_retained_energy: Optional[float] = None
+    reduction_projection_residual: Optional[float] = None
+    reduction_increment_norm: Optional[float] = None
+    reduction_discarded_increment_fraction: Optional[float] = None
+    reduction_basis_time: Optional[float] = None
+    reduction_basis_updated: Optional[bool] = None
+    reduction_condition_number: Optional[float] = None
+    reduction_spectrum_max: Optional[float] = None
+    reduction_subspace_drift: Optional[float] = None
 
 
 @dataclass
@@ -127,6 +145,9 @@ class BaseFilter:
             analysis; required (or ``inflation``) for the parameter-updating
             modes (``"parameter"``/``"joint"``), whose parameter block
             otherwise collapses silently.
+        state_reduction: Optional current or streaming SVD/POD representation
+            for the physical state block. Supported only by unlocalized
+            ``"state"`` and ``"joint"`` analyses.
         rng_key: PRNG key; defaults to a fresh ``PRNGKey(42)`` per instance.
 
     On-disk mode mirrors the smoother: each cycle's forecast is written to
@@ -148,6 +169,7 @@ class BaseFilter:
         inflation: Optional[InflationScheme] = None,
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
+        state_reduction: Optional[OnlineStateReduction] = None,
     ) -> None:
         if mode not in ("state", "parameter", "joint"):
             raise ValueError(
@@ -187,6 +209,29 @@ class BaseFilter:
             )
         self.localization = localization
         self.inflation = inflation
+
+        if state_reduction is not None and mode == "parameter":
+            raise ValueError(
+                "state_reduction is not applicable to mode='parameter': there "
+                "is no state block in the analysis. Remove state_reduction or "
+                "use mode='state'/'joint'."
+            )
+        if state_reduction is not None and (
+            state_reduction.basis_source != "initial_condition"
+            or state_reduction.snapshot_stride != 1
+        ):
+            raise ValueError(
+                "basis_source/snapshot_stride select which snapshots the ESMDA "
+                "smoother fits; the filter always fits the current cycle's final "
+                "forecast frame, so setting them here would silently do nothing."
+            )
+        if state_reduction is not None and localization is not None:
+            raise ValueError(
+                "state_reduction is incompatible with localization in the "
+                "sequential filter: global POD coefficients have no physical "
+                "coordinates. Remove localization or state_reduction."
+            )
+        self.state_reduction = state_reduction
 
         if mode == "state" and parameter_evolution is not None:
             raise ValueError(
@@ -462,7 +507,20 @@ class BaseFilter:
         pred_obs: jnp.ndarray,
         obs: jnp.ndarray,
     ) -> tuple[xarray.Dataset, Optional[xarray.Dataset], CycleDiagnostics]:
-        """Build the augmented vector, analyze, split back, evolve, diagnose."""
+        """Build the augmented vector, analyze, split back, evolve, diagnose.
+
+        A configured ``state_reduction`` changes only the *analysis
+        representation* of the state block: the rows handed to the analysis are
+        POD coefficients, and the coefficient increment is decoded back onto
+        the physical prior members. Everything else — prior/posterior
+        inflation, the parameter block, the appended observation-space
+        diagnostic rows and the state spreads — stays in physical space. Every
+        inflation scheme rescales rows independently, so inflating the physical
+        augmented array reproduces the unreduced semantics exactly; relaxing
+        coefficient rows would not, because RTPS/RTPP do not commute with a
+        basis rotation.
+        """
+        analysis_started = time.perf_counter()
         obs = jnp.asarray(obs)
         N_d = obs.shape[0]
         if pred_obs.shape[0] != N_d:
@@ -477,10 +535,11 @@ class BaseFilter:
         n_state = 0
         n_param = 0
         flat_params: Optional[xarray.Dataset] = None
+        states_forecast: Optional[jnp.ndarray] = None
         if self.mode in ("state", "joint"):
-            states_flat = self._state_augmentation.flatten(final_state)
-            n_state = states_flat.shape[0]
-            blocks.append(states_flat)
+            states_forecast = self._state_augmentation.flatten(final_state)
+            n_state = states_forecast.shape[0]
+            blocks.append(states_forecast)
         if self.mode in ("parameter", "joint"):
             assert params is not None  # validated in run()
             flat_params = self._param_augmentation.flatten(params)
@@ -488,6 +547,20 @@ class BaseFilter:
             n_param = params_array.shape[0]
             blocks.append(params_array)
         augmented = jnp.concatenate(blocks, axis=0)
+
+        # Fit the basis to the RAW forecast anomalies: before inflation, and
+        # before this cycle's observations influence anything. Validation runs
+        # first and the fit itself is transactional, so one diverged member
+        # cannot poison a streaming basis for the rest of the run.
+        basis_seconds: Optional[float] = None
+        if self.state_reduction is not None:
+            assert states_forecast is not None  # mode='parameter' rejected above
+            basis_started = time.perf_counter()
+            self.state_reduction.fit(
+                states_forecast,
+                row_scales=self.state_reduction.resolve_row_scales(final_state),
+            )
+            basis_seconds = time.perf_counter() - basis_started
 
         # Prior (multiplicative-style) inflation. The predicted-observation
         # anomalies are inflated with the same scheme so the Kalman gain is
@@ -504,12 +577,25 @@ class BaseFilter:
                 pred_obs - pred_obs_mean
             )
 
+        # Encode the (inflated, physical) state block. ``encode`` subtracts the
+        # forecast mean the basis was fitted around, which inflation preserves.
+        analysis_rows = augmented
+        coefficients_prior: Optional[jnp.ndarray] = None
+        if self.state_reduction is not None:
+            coefficients_prior = self.state_reduction.encode(augmented[:n_state])
+            analysis_rows = jnp.concatenate(
+                [coefficients_prior, augmented[n_state:]], axis=0
+            )
+        n_analysis = analysis_rows.shape[0]
+
         # Append the predicted observations as diagnostic rows: their update
         # is the exact posterior in observation space (they ride along without
         # influencing any other row), giving obs_posterior_rmse without a
         # second forecast. They are masked out of localization and stripped
         # before the split below.
-        augmented_ext = jnp.concatenate([augmented, pred_obs], axis=0)
+        augmented_ext = jnp.concatenate([analysis_rows, pred_obs], axis=0)
+        # Localization and state reduction are rejected together at
+        # construction, so these row descriptors always describe physical rows.
         group_ids, localize_mask, row_coords, obs_coords = self._localization_plumbing(
             final_state, n_state, n_param, N_d
         )
@@ -527,8 +613,22 @@ class BaseFilter:
             row_coords=row_coords,
             obs_coords=obs_coords,
         )
-        updated = updated_ext[: n_state + n_param]
-        pred_obs_post = updated_ext[n_state + n_param :]
+        updated = updated_ext[:n_analysis]
+        pred_obs_post = updated_ext[n_analysis:]
+
+        # Decode ONLY the coefficient increment onto the physical prior, so
+        # every member keeps its own projection residual and a zero-gain
+        # analysis leaves the full state numerically unchanged.
+        state_increment: Optional[jnp.ndarray] = None
+        if self.state_reduction is not None:
+            assert coefficients_prior is not None
+            n_coeff = coefficients_prior.shape[0]
+            state_increment = self.state_reduction.decode_increment(
+                updated[:n_coeff] - coefficients_prior
+            )
+            updated = jnp.concatenate(
+                [augmented[:n_state] + state_increment, updated[n_coeff:]], axis=0
+            )
 
         # Posterior (relaxation-style) inflation, e.g. RTPS/RTPP.
         post_mean = jnp.mean(updated, axis=1, keepdims=True)
@@ -569,7 +669,76 @@ class BaseFilter:
                 self.rng_key, evolve_key = jax.random.split(self.rng_key)
                 params = self.parameter_evolution.evolve(params, evolve_key)
 
+        cycle_diag.analysis_time = time.perf_counter() - analysis_started
+        if self.state_reduction is not None:
+            assert states_forecast is not None and state_increment is not None
+            self._record_reduction_diagnostics(
+                cycle_diag,
+                states_forecast=states_forecast,
+                state_increment=state_increment,
+                pred_obs=pred_obs,
+                obs=obs,
+                analysis_key=subkey,
+                basis_seconds=basis_seconds,
+            )
+
         return analysis_state, params, cycle_diag
+
+    def _record_reduction_diagnostics(
+        self,
+        diag: CycleDiagnostics,
+        *,
+        states_forecast: jnp.ndarray,
+        state_increment: jnp.ndarray,
+        pred_obs: jnp.ndarray,
+        obs: jnp.ndarray,
+        analysis_key: jax.Array,
+        basis_seconds: Optional[float],
+    ) -> None:
+        """Fill one cycle's reduction fields (all ``None`` on the full path).
+
+        The discarded-increment fraction never re-runs a full-space analysis:
+        the fit already produced the forecast anomalies' coordinates in the
+        complete (untruncated) basis, ``anomalies = U_full @ C``, and the EnKF
+        increment is ``anomalies @ W`` for an ensemble-space weight matrix
+        ``W``. Applying the analysis to ``C`` itself — a tiny ``(k, N_e)``
+        array whose rows are already centred — yields ``C @ W``, so rows
+        ``[rank:]`` are exactly the part of the update the truncation drops.
+        The fraction is measured in the reduction's own (scaled) norm and is
+        unaffected by prior inflation, which rescales both parts alike.
+        """
+        reduction = self.state_reduction
+        assert reduction is not None
+        diag.reduction_rank = reduction.rank
+        diag.reduction_available_rank = reduction.available_rank
+        diag.reduction_retained_energy = reduction.retained_energy_fraction
+        diag.reduction_projection_residual = reduction.projection_residual(
+            states_forecast
+        )
+        diag.reduction_increment_norm = float(jnp.linalg.norm(state_increment))
+        diag.reduction_basis_time = basis_seconds
+        diag.reduction_basis_updated = reduction.basis_updated
+        condition = reduction.condition_number
+        diag.reduction_condition_number = (
+            None if condition is None else float(condition)
+        )
+        diag.reduction_spectrum_max = reduction.spectrum_max
+        drift = reduction.subspace_drift
+        diag.reduction_subspace_drift = None if drift is None else float(drift)
+
+        coordinates = reduction.fit_coordinates
+        if coordinates is None:
+            return
+        increment_coordinates = (
+            self.analysis(coordinates, pred_obs, obs, self.C_D_diag, analysis_key)
+            - coordinates
+        )
+        full_norm = float(jnp.linalg.norm(increment_coordinates))
+        diag.reduction_discarded_increment_fraction = (
+            float(jnp.linalg.norm(increment_coordinates[reduction.rank :]) / full_norm)
+            if full_norm > 0.0
+            else 0.0
+        )
 
     def _localization_plumbing(
         self,
@@ -649,6 +818,15 @@ class BaseFilter:
         spread term reflects what the model produced, not what the inflation
         chose; the block spreads intentionally use the (possibly inflated)
         analysis anomalies.
+
+        The appended predicted-observation rows take a global ride-along
+        update, so ``obs_posterior_rmse`` is only ``H`` applied to the analyzed
+        state on the unlocalized, unreduced path. Under a state reduction it is
+        computed from the FULL-space observation-row update and is therefore
+        insensitive to truncation (bit-identical to the unreduced filter);
+        under localization the state rows are localized while these rows are
+        not. ``obs_posterior_rmse_kind`` labels which case produced the value
+        so it is never silently compared across configurations.
         """
         N_d = obs.shape[0]
         N_e = pred_obs.shape[1]
@@ -668,8 +846,16 @@ class BaseFilter:
                 return None
             return float(jnp.mean(jnp.std(dev[start : start + size], axis=1, ddof=1)))
 
+        if self.state_reduction is not None:
+            obs_posterior_kind = "unreduced_ride_along"
+        elif self.localization is not None:
+            obs_posterior_kind = "unlocalized_ride_along"
+        else:
+            obs_posterior_kind = "exact"
+
         return CycleDiagnostics(
             cycle=cycle,
+            obs_posterior_rmse_kind=obs_posterior_kind,
             obs_prior_rmse=float(jnp.sqrt(jnp.mean(innovation**2))),
             obs_posterior_rmse=float(
                 jnp.sqrt(jnp.mean((obs - jnp.mean(pred_obs_post, axis=1)) ** 2))
@@ -698,6 +884,7 @@ class EnsembleKalmanFilter(BaseFilter):
         inflation: Optional[InflationScheme] = None,
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
+        state_reduction: Optional[OnlineStateReduction] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -708,5 +895,6 @@ class EnsembleKalmanFilter(BaseFilter):
             localization=localization,
             inflation=inflation,
             parameter_evolution=parameter_evolution,
+            state_reduction=state_reduction,
             rng_key=rng_key,
         )

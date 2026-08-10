@@ -50,11 +50,44 @@ def _overrides(
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
+    "option,target",
+    [
+        ("none", None),
+        ("svd_current", "data_assimilation.reduction.OnlineStateReduction"),
+        ("svd_streaming", "data_assimilation.reduction.StreamingStateReduction"),
+    ],
+)
+def test_filtering_state_reduction_config_composes(
+    option: str, target: Optional[str], compose_test_cfg: Any
+) -> None:
+    """Every reduction-group option mounts into the filter target."""
+    cfg = compose_test_cfg(
+        _overrides("state", 1, [f"filtering/state_reduction={option}"]),
+        config_name="run_filtering",
+    )
+    reduction = cfg.filtering.filter.state_reduction
+    if target is None:
+        assert reduction is None
+    else:
+        assert reduction._target_ == target
+    if option == "svd_streaming":
+        # The exponentially weighted accumulator keeps absorbing directions, so
+        # an energy criterion alone would let the basis grow every cycle.
+        assert reduction.max_rank is not None
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
     "mode,num_cycles,extra",
     [
         pytest.param("joint", 1, None, id="joint"),
         pytest.param("joint", 2, None, id="joint_two_cycles"),
         pytest.param("state", 1, None, id="state"),
+        pytest.param(
+            "state",
+            1,
+            ["filtering/state_reduction=svd_current"],
+            id="state_svd_current",
+        ),
         # Parameter mode needs spread maintenance; the random-walk evolution
         # exercises the parameter forecast model too.
         pytest.param(
@@ -80,6 +113,44 @@ def test_run_filtering(
     assert (out_dir / "run_info.yaml").exists()
     posterior_state = xarray.open_dataset(out_dir / "posterior_state.nc")
     assert posterior_state.sizes["ensemble"] == 2
+    from scripts.esmda._esmda_common import read_yaml
+
+    configuration = read_yaml(out_dir / "run_info.yaml")["configuration"]
+    diagnostics = read_yaml(out_dir / "cycle_diagnostics.yaml")
+    reduction_enabled = bool(extra) and any(
+        override.startswith("filtering/state_reduction=")
+        and not override.endswith("=none")
+        for override in (extra or [])
+    )
+    if not reduction_enabled:
+        # The unreduced default must still write a well-formed run_info and a
+        # complete (all-None) reduction block in the diagnostics schema.
+        assert configuration["state_reduction"] is None
+        assert configuration["state_reduction_resolved_variable_scales"] is None
+        assert diagnostics[0]["reduction_rank"] is None
+        assert diagnostics[0]["reduction_basis_time"] is None
+        assert diagnostics[0]["obs_posterior_rmse_kind"] == "exact"
+        assert diagnostics[0]["analysis_time"] is not None
+    else:
+        reduction = configuration["state_reduction"]
+        assert reduction["_target_"] == (
+            "data_assimilation.reduction.OnlineStateReduction"
+        )
+        assert reduction["whiten"] is False
+        resolved_scales = configuration["state_reduction_resolved_variable_scales"]
+        assert resolved_scales
+        assert set(resolved_scales.values()) == {1.0}
+
+        # Two members leave exactly one statistical mode.
+        assert diagnostics[0]["reduction_rank"] == 1
+        assert diagnostics[0]["reduction_available_rank"] == 1
+        assert diagnostics[0]["analysis_time"] is not None
+        assert diagnostics[0]["reduction_basis_time"] is not None
+        assert diagnostics[0]["reduction_basis_updated"] is True
+        assert diagnostics[0]["reduction_discarded_increment_fraction"] is not None
+        # The observation-space posterior rides along on the full-space update,
+        # so it must be labelled rather than compared with an unreduced run.
+        assert diagnostics[0]["obs_posterior_rmse_kind"] == "unreduced_ride_along"
     if mode != "state":
         posterior = xarray.open_dataset(out_dir / "posterior_params.nc")
         assert "inflow_angle" in posterior.data_vars

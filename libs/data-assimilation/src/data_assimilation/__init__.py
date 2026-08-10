@@ -29,7 +29,7 @@ from data_assimilation.observation_operator import (
     ObservationOperator,
     TemporalObservationOperator,
 )
-from data_assimilation.reduction import OnlineStateReduction
+from data_assimilation.reduction import OnlineStateReduction, StreamingStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing
 from data_assimilation.smoothing.esmda import (
     ParameterESMDA,
@@ -54,6 +54,7 @@ __all__ = [
     "MultiplicativeInflation",
     "ObservationOperator",
     "OnlineStateReduction",
+    "StreamingStateReduction",
     "ParameterESMDA",
     "ParameterEvolution",
     "RandomWalkEvolution",

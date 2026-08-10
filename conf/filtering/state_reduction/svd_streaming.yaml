@@ -1,0 +1,30 @@
+# @package filtering
+# Incremental POD/SVD basis of end-of-cycle forecast anomalies. The compact
+# basis is kept only for this run; historical state snapshots are not retained.
+# Global modes have no physical location, so select filtering/localization=none.
+state_reduction:
+  _target_: data_assimilation.reduction.StreamingStateReduction
+  # Old anomaly-block covariance is multiplied by lambda each accepted update.
+  # lambda=1 gives equal-weight accumulation and always includes the new block.
+  # For lambda<1 the old-block covariance half-life is log(0.5)/log(lambda)
+  # cycles (about 6.58 cycles at 0.9).
+  forgetting_factor: 0.9
+  # Smallest rank whose cumulative squared-singular-value energy reaches this
+  # fraction, followed by the hard rank cap.
+  energy_fraction: 0.99
+  # REQUIRED for a bounded run. The accumulator keeps absorbing new directions,
+  # so an energy criterion alone lets the rank (and the (N_s, rank) basis) grow
+  # every cycle until it dwarfs the ensemble itself. Capping at the ensemble
+  # size keeps the basis the same order of magnitude as the ensemble it
+  # summarises. Set null only for short diagnostic runs.
+  max_rank: 50
+  # Incorporate a finite current anomaly block every N cycles. On skipped
+  # cycles the current in-memory basis is reused.
+  update_every_n_cycles: 1
+  # Optional per-variable finite positive scales; null preserves Euclidean
+  # flattening. Scaling is inverted when a modal increment is decoded.
+  variable_scales: null
+  # Log a warning when the largest principal angle between successive bases
+  # exceeds this many radians (null -> never warn). Diagnostic only: the rank
+  # policy is never silently changed.
+  subspace_warning_threshold: null

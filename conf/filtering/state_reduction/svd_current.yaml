@@ -1,0 +1,20 @@
+# @package filtering
+# Current-cycle POD/SVD projection of the end-of-cycle forecast-state update.
+# The CFD forecast and observation operator remain full-space; only the state
+# block presented to the global analysis is represented in modal coordinates.
+# Global modes have no physical location, so select filtering/localization=none.
+state_reduction:
+  _target_: data_assimilation.reduction.OnlineStateReduction
+  # Filtering uses orthonormal (non-whitened) coefficients. Singular values
+  # select and diagnose the rank but do not scale current-cycle coefficients.
+  whiten: false
+  # Smallest rank whose cumulative squared-singular-value energy reaches this
+  # fraction. Set 1.0 for the full statistical-rank correctness control.
+  energy_fraction: 0.99
+  # Optional hard cap after the energy criterion (null -> no additional cap).
+  # Current-cycle rank is always at most ensemble_size - 1.
+  max_rank: null
+  # Optional mapping from state variable name to a finite positive scale. Each
+  # variable is divided by its scale before fitting/encoding and multiplied by
+  # it when decoding the increment. null preserves Euclidean flattening.
+  variable_scales: null

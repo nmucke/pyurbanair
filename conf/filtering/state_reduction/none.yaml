@@ -1,0 +1,4 @@
+# @package filtering
+# Full-space state analysis (the default). No basis is fitted; numerical
+# filtering behavior remains on the existing unreduced path.
+state_reduction: null

@@ -100,6 +100,7 @@ rather than pulling them from separate files. The table below summarises each.
 | `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
 | `analysis` | (group) | Set by `filtering/analysis` (default `stochastic`). |
 | `localization` | (group) | Set by `filtering/localization` (default `none`). |
+| `state_reduction` | (group) | Set by `filtering/state_reduction` (default `none`); current/streaming SVD requires `mode=state|joint` and global localization. |
 | `inflation` | (group) | Set by `filtering/inflation` (default `rtps`). |
 | `parameter_evolution` | (group) | Set by `filtering/evolution` (default `none`). |
 | `filter` | `EnsembleKalmanFilter` block | The composed filter `_target_`; normally left alone. |
@@ -306,11 +307,22 @@ The sequential-filter counterparts of the `esmda/*` groups. Each file uses
 |---|---|---|
 | [`filtering/analysis/`](../conf/filtering/analysis/) | `stochastic` | `filtering.analysis` — the update math (`StochasticEnKFAnalysis`; ETKF/LETKF will land here) |
 | [`filtering/localization/`](../conf/filtering/localization/) | `none`, `correlation`, `distance` | `filtering.localization` — the same strategies as `esmda/localization` (reused unchanged); `distance` needs `filtering.mode=state\|joint` |
+| [`filtering/state_reduction/`](../conf/filtering/state_reduction/) | `none`, `svd_current`, `svd_streaming` | `filtering.state_reduction` — optional final-forecast-state analysis basis; requires `filtering.mode=state\|joint` and `filtering/localization=none` |
 | [`filtering/inflation/`](../conf/filtering/inflation/) | `rtps`, `none`, `multiplicative`, `rtpp` | `filtering.inflation` — ensemble spread maintenance |
 | [`filtering/evolution/`](../conf/filtering/evolution/) | `none`, `random_walk` | `filtering.parameter_evolution` — the parameters' forecast model between cycles |
 
 See [data_assimilation.md](data_assimilation.md) for the filtering library
 itself (`BaseFilter` / `EnsembleKalmanFilter`, cycle semantics, diagnostics).
+
+`svd_current` refits an orthonormal basis to each cycle's final forecast
+ensemble. Its knobs are `energy_fraction`, `max_rank`, and optional
+`variable_scales`. `svd_streaming` incrementally accumulates those anomaly
+blocks without retaining snapshots and additionally exposes
+`forgetting_factor`, `update_every_n_cycles` and `subspace_warning_threshold`. A forgetting factor below one
+has old-block covariance half-life `log(0.5) / log(forgetting_factor)` cycles;
+one means equal-weight history, not a frozen basis. Both strategies affect only
+the analysis representation—the forward model and observation operator remain
+full-space. The shipped default remains `none`.
 
 ---
 
@@ -550,7 +562,9 @@ observations are extracted with the case's temporal observation operator and
 the filter consumes the whole `(num_cycles, N_d)` batch in one `run()` call.
 
 Mode is the cross product of `filtering.mode=state|parameter|joint` and the
-`filtering/*` groups (§1.8). Truth source (`run.truth_dir`) mirrors
+`filtering/*` groups (§1.8), including optional current/streaming state SVD.
+Reduced state analysis requires `mode=state|joint` and
+`filtering/localization=none`. Truth source (`run.truth_dir`) mirrors
 `run_esmda.py`. Static scalar parameters only — a dynamic (AR(2)) params
 mount fails loudly; time-varying priors stay with the ESMDA smoothers.
 
@@ -560,10 +574,15 @@ Stage 1 of the single-run filtering pipeline (§2.4), orchestrated by
 Saves: `posterior_params.nc` / `posterior_state.nc` (analyzed final-frame
 ensemble), optional `params_history.nc` / `state_history.nc`
 (`run.save_history`), per-cycle `cycle_diagnostics.yaml` (innovation χ²,
-obs-space prior/posterior RMSE, block spreads), `prior_params.nc`,
+obs-space prior/posterior RMSE plus the `obs_posterior_rmse_kind` provenance
+label, block spreads, `analysis_time`, and a stable set of nullable reduction
+diagnostics), `prior_params.nc`,
 `true_params.nc`, `true_state.nc` (inline truth), `truth_access.yaml` (the
 lazy-truth slicing/offsets the metric/figure stages read back), `run_info.yaml`,
-`config.yaml`.
+`config.yaml`. `run_info.yaml.configuration.state_reduction` records the fully
+resolved reduction subtree (or `null`) for benchmark provenance;
+`state_reduction_resolved_variable_scales` records the physical scales actually
+applied after validating the forecast Dataset's variables.
 
 ---
 
