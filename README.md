@@ -53,10 +53,15 @@ pixi shell --environment=dev
 > (which transitively pulls in `tempest-remap` via `nco`). `coreutils` ships
 > `bin/test` as a file while `tempest-remap` ships scripts under `bin/test/`
 > as a directory, so the two clobber each other and the first `pixi install`
-> aborts. The `setup-dev` task runs the install, deletes the conflicting
-> `bin/test` file if needed, and re-runs the install so `tempest-remap` can
-> claim the path. Run it once after cloning; subsequent `pixi install` /
-> `pixi shell` calls work normally.
+> aborts. The `setup-dev` task runs the install, clears whatever occupies
+> `bin/test`, and re-runs the install so `tempest-remap` can claim the path.
+>
+> Use it for *every* install, not just the first. A working env always ends up
+> with tempest-remap's directory at a path `coreutils` still records as its
+> own file, so a later `pixi install` that has to replace `coreutils` -- after
+> a dependency bump, or an upstream rebuild -- aborts trying to unlink a
+> directory. `setup-dev` escalates to a full rebuild in that case; a bare
+> `pixi install -e dev` just fails. See `scripts/setup_dev_env.sh`.
 
 ### LBM specifics
 
