@@ -808,11 +808,12 @@ The state and the parameters are estimated by *different* algorithms over the
 same window of `L` cycles. The high-dimensional state is only ever **filtered**
 — the sequential EnKF of §8, one full-weight analysis per cycle, never
 smoothed. The low-dimensional **parameter trajectory**
-`Θ = [θ_0 … θ_{L-1}]` is **smoothed**: an outer ESMDA loop wraps the entire
-inner filter pass and updates every knot of the trajectory at once.
+`Θ = [θ_0 … θ_{K-1}]` over `K` knots is **smoothed**: an outer ESMDA loop wraps
+the entire inner filter pass and updates every knot of the trajectory at once.
 
 One outer iteration is one inner pass through the window. Cycle `k` forecasts
-its segment under knot `k` of the current trajectory, and the raw predicted
+its segment under the *restriction of the current trajectory to that segment*
+(see "Knots, cycles and the segment restriction" below), and the raw predicted
 observations `d_k = H(x^f_k)` are recorded **before** that cycle's analysis.
 Stacking them cycle-major gives `D ∈ R^{L·N_d × N_e}`, against the stacked
 observation batches `Y ∈ R^{L·N_d}` and the tiled error-variance vector
@@ -845,6 +846,41 @@ Four semantics are pinned by the method and enforced in the code:
   iterations. Set it `False` for independent draws. The *outer*
   perturbed-observation draws always use fresh subkeys.
 
+### Knots, cycles and the segment restriction
+
+The knot grid and the cycle grid are **independent**. `time.seconds_per_knot`
+is the estimated trajectory's *resolution*; `time.simulation_time` is one
+cycle's forecast segment. Cycle `k` is handed the trajectory restricted to
+`[k·Δt_cycle, (k+1)·Δt_cycle]` on the trajectory's own (seconds-valued) clock:
+the value at the segment start, every knot strictly inside the segment, and the
+value at the segment end, on a **segment-local** axis running `[0, Δt_cycle]`.
+The two endpoints are linearly interpolated between the bracketing knots and
+**clamped** outside the knot range (`np.interp` semantics), so a segment past
+the last knot holds it and a one-knot trajectory is constant everywhere.
+
+That Dataset still carries a `time` dimension, and the backends consume it
+natively — the same path `params@prior_params=dynamic` ESMDA already takes:
+pylbm writes it to `uvel_time.dat`, pyudales feeds it through the nudging
+schedule, and the Fortran interpolates between the snapshots. The schedule is
+call-relative (pylbm shifts it onto its continuing `nt0` clock itself), which
+is why the local axis always starts at 0.
+
+**This is a deliberate deviation from the paper.** Its Eq. (6) makes `θ_k`
+piecewise-constant over segment `k`; here the segment ramps linearly between
+its bracketing knots instead, even when the knot spacing equals the cycle
+length. The reason is the truth: the truth trajectory is generated on a knot
+grid and *interpolated by the solver*, so a piecewise-constant estimate would
+be fitting a different model of the forcing than the one that produced the
+data. The knots-decoupled-from-cycles part follows from the same change — once
+a segment is a piece of a continuous trajectory, nothing ties the knot grid to
+the cycle grid.
+
+The cycle length is not inferable from the parameters, so
+`FilterSmoothingESMDA` takes it as `cycle_length` (the entry point sets
+`cycle_length: ${time.simulation_time}`), falling back to
+`forward_model.simulation_time`. A time-varying `params` with neither, or with
+a `time` dimension carrying no coordinate values, is rejected at `run()`.
+
 ### `FilterSmoothingESMDA`
 
 Composition, not a `_BaseESMDA` subclass: the smoother's `_analysis` loop
@@ -857,6 +893,7 @@ trajectory flatten/unflatten, and the outer alpha/RNG bookkeeping.
 fs = FilterSmoothingESMDA(
     observation_operator=obs_op, forward_model=ensemble_model,
     C_D=variance_vector,             # 1-D per-cycle (N_d,) variances
+    cycle_length=300.0,              # seconds one cycle's segment spans
     num_steps=4,                     # outer ESMDA iterations N_a
     alpha=None,                      # default num_steps (equal weights)
     inner_analysis=None,             # default StochasticEnKFAnalysis
@@ -869,15 +906,16 @@ result = fs.run(state=None, params=prior_trajectory,
                 return_history=False)            # -> FilterSmoothingResult
 ```
 
-`params` is the trajectory *prior ensemble* — a Dataset with `time` (knots) and
-`ensemble` dims, sampled from the same `params@prior_params=dynamic` AR(2) and
-harmonic samplers the ESMDA smoothers use, with knot spacing equal to the cycle
-length. `L` is read from `observations.shape[0]` and validated against the
-knot layout; the sampler emits `L+1` knots for an `L`-cycle horizon, and that
-trailing knot rides along in `Θ`, updated only through the prior's temporal
-correlations. Variables without a `time` dim (e.g.
-`vertical_inflow_exponent`) are carried through the forecasts unchanged and
-excluded from the outer update.
+`params` is the trajectory *prior ensemble* — a Dataset with `time` (knots, in
+**seconds**) and `ensemble` dims, sampled from the same
+`params@prior_params=dynamic` AR(2) and harmonic samplers the ESMDA smoothers
+use. The knot count is free: any grid from one knot upward is legal, coarser or
+finer than the cycle, and `L` (read from `observations.shape[0]`) is not
+constrained by it. At the default one-knot-per-cycle spacing the sampler emits
+`L+1` knots for an `L`-cycle horizon; knots past the window's last segment ride
+along in `Θ`, updated only through the prior's temporal correlations. Variables
+without a `time` dim (e.g. `vertical_inflow_exponent`) are carried through the
+forecasts unchanged and excluded from the outer update.
 
 `FilterSmoothingResult` returns the smoothed trajectory ensemble (`params`),
 the filtered end-of-window state from the final pass (`state`), one
@@ -901,14 +939,13 @@ that are **no-ops for every existing configuration**:
 
 | Hook | Default | Override |
 |---|---|---|
-| `_params_for_cycle(cycle, params)` | returns `params` unchanged, so the cycle loop is byte-identical | `_TrajectoryStateFilter` slices knot `cycle` (`isel(time=…, drop=True)`, clamped at the last knot) so each segment runs with its `θ_k` as plain scalar params — no backend change |
+| `_params_for_cycle(cycle, params)` | returns `params` unchanged, so the cycle loop is byte-identical | `_TrajectoryStateFilter` restricts the trajectory to segment `cycle` (interpolated endpoints, interior knots, segment-local time axis) — a schedule the backends already interpolate, so no backend change |
 | `collect_pred_obs` | `False`: nothing recorded, no extra work | `True` rebinds `pred_obs_history = []` at `run()` entry and appends the raw, **pre-inflation** `(N_d, N_e)` `pred_obs` each cycle *before* the analysis |
 
 Both follow the attribute-plumbing pattern of the smoother's
-`collect_obs_diagnostics` (§5). Piecewise-constant `θ_k` over segment `k` is
-the paper's discrete dynamics; `mode="state"` already skips the static-params
+`collect_obs_diagnostics` (§5). `mode="state"` already skips the static-params
 check, so a time-varying params Dataset legally rides through the state-only
-filter.
+filter — and stays time-varying all the way to the solver.
 
 ### `TemporalLocalization`
 
@@ -926,14 +963,16 @@ shared `taper_inflation` is a **time separation**:
 |---|---|---|
 | Temporal | `\|t_row − t_obs\|` | `temporal_radius` (**cycles**, not seconds) |
 
-Coordinates are built by `FilterSmoothingESMDA` on the **cycle index**, so the
+Coordinates are built by `FilterSmoothingESMDA` in **fractional cycles**, so the
 strategy stays geometry-agnostic and the radius does not rescale when
-`time.simulation_time` changes: knot `j` sits at its segment start `t = j`,
-observation batch `k` at its segment end `t = k + 1`, both in the first
-coordinate component with the other two zero. The knot that drove segment `k`
-is therefore exactly `1.0` from its own batch — a radius below 1 excludes
-every observation and freezes the trajectory at the prior. The whole localized
-solve then reuses `localized_update` unchanged.
+`time.simulation_time` changes: knot `j` sits at `t_j = knot_time /
+cycle_length`, observation batch `k` at its segment end `t = k + 1`, both in
+the first coordinate component with the other two zero. With one knot per cycle
+`t_j` is exactly the knot index, as it always was; with a finer grid the knots
+fall between the integers. A knot on a segment boundary is exactly `1.0` from
+that segment's batch — a radius below 1 excludes every observation from those
+knots and freezes them at the prior. The whole localized solve then reuses
+`localized_update` unchanged.
 
 It belongs to the *outer* update only: the inner filter's rows are grid cells
 whose `row_coords` are physical positions, so a `TemporalLocalization` passed
@@ -962,9 +1001,19 @@ paper) slides that window along: after a window's outer loop converges,
 `s = window_shift` cycles. The knots that leave the window are **finalized** —
 never revisited, which is what makes the lag fixed rather than the trajectory
 growing — the overlapping part of the posterior *is* the next window's prior,
-and `s` fresh knots are appended at the leading edge. The state is carried
-along with them, so the next window forecasts from where the previous one had
-already filtered to.
+and as many fresh knots as left are appended at the leading edge. The state is
+carried along with them, so the next window forecasts from where the previous
+one had already filtered to.
+
+All of the sliding is done in **seconds**, since the knot grid need not be the
+cycle grid: the window advances `shift_seconds = s · cycle_length`, and every
+knot before that leaves. One constraint follows and is enforced loudly, up
+front, by both the orchestrator and the run script: `shift_seconds` must be a
+whole number of knot spacings. Otherwise the knot grid drifts out of phase with
+the windows — a different set of knots would leave each time and the finalized
+pieces would stop tiling the horizon. A knot spacing finer than a cycle by an
+integer factor always satisfies it; a spacing *coarser* than a cycle constrains
+`window_shift` instead.
 
 The leading edge is appended by a
 [`ParameterEvolution`](../libs/data-assimilation/src/data_assimilation/filtering/parameter_evolution.py)
@@ -1001,8 +1050,9 @@ only (`run`, `FilterResult.state_history`). It is exported from both
   is **solved** for `L`; passed (what the script does, from
   `filter_smoothing.num_cycles`), it is **validated**, which is the louder
   failure mode. That check and the rest — `num_windows ≥ 1`,
-  `1 ≤ window_shift ≤ L`, a `time` dim on `params`, at least `L` prior knots —
-  all run up front, before the first expensive window.
+  `1 ≤ window_shift ≤ L`, a `time` dim (with coordinates) on `params`, a
+  uniform knot grid and the shift's alignment with it — all run up front,
+  before the first expensive window.
 - **State carry.** Window `w+1` starts from window `w`'s *final consistency
   pass* analysis after cycle `s` — `final_pass.state_history.isel(cycle=s−1)`,
   not the end-of-window state, because the window advanced by only `s` cycles.
@@ -1011,18 +1061,25 @@ only (`run`, `FilterResult.state_history`). It is exported from both
   non-final window with `s < L`; histories are then stripped again
   (non-destructively, via `dataclasses.replace`) unless the caller asked for
   them.
-- **Parameter carry.** Window `w`'s posterior knots `[s:]` become window
-  `w+1`'s prior knots `[:−s]` (positional); the `s` appended knots come from
-  chaining `evolution.evolve` with fresh subkeys, each continuing the incoming
-  knot grid (`t_last + i·Δt`). Static, no-`time` variables carry through
-  unchanged. Member pairing between the carried state and trajectory ensembles
-  is positional in `ensemble` for both, and never reordered.
-- **Finalization and assembly.** When window `w` advances, its posterior knots
-  `[:s]` are finalized and recorded; the last window contributes its whole
-  posterior. `MovingWindowResult.params` is their concatenation along `time` —
-  the full-horizon smoothed trajectory ensemble, `(num_windows − 1)·s +
-  n_knots` knots, i.e. the horizon plus whatever the last window carries past
-  it (an `L+1`-knot prior's trailing knot rides along to the end) — and
+- **Parameter carry.** Window `w`'s posterior knots at `t ≥ shift_seconds`
+  become window `w+1`'s prior, with their times **re-based** by
+  `−shift_seconds` so the next window's clock again starts at its first
+  segment (the inner filter reads segment `k` at `[k·Δt_cycle, (k+1)·Δt_cycle]`
+  on that clock). As many knots as left are appended by chaining
+  `evolution.evolve` with fresh subkeys, each continuing the grid
+  (`t_last + i·Δt`), so the knot count is invariant across windows. With one
+  knot per cycle this is exactly the positional `[s:]` / `[:−s]` slicing it
+  generalizes. Static, no-`time` variables carry through unchanged. Member
+  pairing between the carried state and trajectory ensembles is positional in
+  `ensemble` for both, and never reordered.
+- **Finalization and assembly.** When window `w` advances, the posterior knots
+  before `shift_seconds` are finalized and recorded, put back on the horizon's
+  clock (`+ w·shift_seconds`); the last window contributes its whole posterior.
+  `MovingWindowResult.params` is their concatenation along `time` — the
+  full-horizon smoothed trajectory ensemble,
+  `(num_windows − 1)·(shift_seconds/Δt) + n_knots` knots, i.e. the horizon at
+  the trajectory's own resolution plus whatever the last window carries past it
+  (an `L+1`-knot prior's trailing knot rides along to the end) — and
   `.state` is the last window's filtered end state. `window_results` keeps each
   window's `FilterSmoothingResult` (histories stripped unless
   `return_history`), and one `WindowDiagnostics` per window records `window`,
@@ -1050,9 +1107,12 @@ entry point, modeled on `run_filtering.py`: truth inline or from disk, one
 cycle per `time.simulation_time` segment, per-cycle `(num_cycles, N_d)`
 observation batches. The prior mount is the inverse of the filter's guard — a
 **dynamic (time-varying) prior is required**, sampled once over the whole
-window with `time.seconds_per_knot = time.simulation_time` so knots align with
-cycles (a mismatch fails loudly). Four Hydra groups configure the algorithm,
-all under `# @package filter_smoothing`:
+window. `time.seconds_per_knot` sets that trajectory's resolution and defaults
+to `time.simulation_time` (one knot per cycle) but is free to differ; the
+script validates the *sampled* grid (starts at 0, uniform at the configured
+spacing, reaches the window's end) and, for a moving window, that
+`window_shift · time.simulation_time` is a whole number of knots. Five Hydra
+groups configure the algorithm, all under `# @package filter_smoothing`:
 
 | Group | Options (default first) | Sets |
 |---|---|---|

@@ -454,3 +454,94 @@ run_moving_window(
   configs `conf/filter_smoothing/*`, script
   `scripts/filter_smoothing/run_filter_smoothing.py`. (Rename to
   `WindowedTrajectoryESMDA` if preferred — decide before the first commit.)
+
+---
+
+## 9. Amendment: within-segment interpolation, knots decoupled from cycles
+
+Adopted after Phase 2, superseding §4.2 (`_TrajectoryStateFilter`), the
+"knot spacing = `time.simulation_time`" requirement of §5, and the positional
+carry of §8a wherever they differ. It **changes the numbers** of existing
+configurations, including at the old one-knot-per-cycle spacing — deliberately.
+
+### What changed
+
+1. **Segment restriction instead of knot selection.** `_params_for_cycle` no
+   longer slices knot `k`. Cycle `k` receives the trajectory restricted to
+   `[k·Δt_cycle, (k+1)·Δt_cycle]` on the trajectory's own seconds-valued clock:
+   the linearly interpolated value at the segment start, every knot strictly
+   inside the segment, and the interpolated value at the segment end, re-based
+   onto a segment-local axis `[0, Δt_cycle]`. Outside the knot range the value
+   is **clamped** (`np.interp` semantics), so a segment past the last knot holds
+   it and a one-knot trajectory is constant. The result still carries a `time`
+   dimension, and the backends consume it through the path
+   `params@prior_params=dynamic` ESMDA already uses (`uvel_time.dat` for pylbm,
+   the nudging schedule for pyudales, interpolated by the Fortran); the schedule
+   is call-relative, hence the local axis.
+
+2. **`time.seconds_per_knot` decoupled from `time.simulation_time`.** The knot
+   grid is the estimated trajectory's resolution and nothing else: any grid from
+   one knot upward, coarser or finer than the cycle, is legal. The
+   `num_knots >= num_cycles` guards in `FilterSmoothingESMDA.run` and
+   `run_moving_window`, and the `seconds_per_knot == simulation_time` guard in
+   the run script, are gone; what is validated instead is the *shape* of the
+   sampled grid (origin, uniform spacing, reach).
+
+3. **`cycle_length` is now an explicit input.** Knot times are physical seconds,
+   so placing cycle `k` on the trajectory needs the segment length.
+   `FilterSmoothingESMDA(cycle_length=…)` (config:
+   `cycle_length: ${time.simulation_time}`), falling back to
+   `forward_model.simulation_time`; a time-varying `params` with neither is
+   rejected at `run()`.
+
+4. **Temporal localization in fractional cycles.** Knot `j`'s row coordinate is
+   `knot_time / cycle_length` instead of the knot index `j`. `temporal_radius`
+   stays in cycles, and the mapping reduces to the old integers exactly when the
+   spacing equals the cycle length.
+
+5. **Time-based moving window.** The window advances
+   `shift_seconds = s · cycle_length`; knots before it are finalized, the rest
+   are carried with their times re-based by `−shift_seconds` (so each window's
+   clock again opens at its first segment), and as many knots as left are
+   appended at `t_last + i·Δt`. Finalized knots are put back on the horizon's
+   clock (`+ w·shift_seconds`) when the result is assembled. A new **alignment
+   guard** rejects a `shift_seconds` that is not a whole number of knot
+   spacings — the knot grid would otherwise drift out of phase with the windows,
+   so a different set of knots would leave each time and the finalized pieces
+   would not tile the horizon. At `Δt = cycle_length` every step reduces to the
+   old positional `[:s]` / `[s:]` slicing, and the `num_windows = 1`
+   object-identity path is untouched.
+
+### Why
+
+The paper's Eq. (6) makes `θ_k` piecewise-constant over segment `k`, and §4.2
+implemented exactly that. But the **truth** trajectory in this repo is generated
+on a knot grid that the solver *interpolates* — the same `uvel_time.dat` /
+nudging path — so a piecewise-constant estimate fits a different model of the
+forcing than the one that produced the data. Estimating the trajectory the
+solver actually consumes removes that inconsistency (and the associated
+representation error), at no cost in the outer update: the map `Θ → D` stays as
+linear as it was, and `ParamAugmentation` already handled an arbitrary knot
+count.
+
+Decoupling the grids follows from the same change: once a segment is a piece of
+a continuous trajectory rather than one knot's value, nothing ties the knot
+count to the cycle count. That buys two things the fixed coupling could not —
+a trajectory resolved *finer* than the assimilation cycle (the cycle length is
+set by the observation cadence and the cost of a forecast, not by how fast the
+forcing varies), and a *coarser*, better-conditioned control vector when the
+cycles are short.
+
+### Consequences worth knowing
+
+- Numbers change for every existing filter-smoothing configuration, including
+  `seconds_per_knot == simulation_time`: a segment now ramps between its
+  bracketing knots instead of holding knot `k`.
+- The knot at the window's end is no longer "updated only through prior temporal
+  correlations": it is the last segment's end value, so observations reach it
+  directly.
+- A knot grid coarser than a cycle constrains `window_shift` (the shift must
+  cover whole knots); a grid finer than a cycle by an integer factor never does.
+- Non-uniform grids — which `build_knot_times` emits when the window span is not
+  a multiple of the spacing — are tolerated for a single window and rejected for
+  a moving one.

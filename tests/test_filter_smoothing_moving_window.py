@@ -458,11 +458,13 @@ def test_identity_evolution_shifts_the_posterior_and_repeats_the_last_knot(
     for appended in _theta(next_prior)[kept:]:
         np.testing.assert_allclose(appended, last_carried, rtol=RTOL, atol=ATOL)
 
-    # The knot grid continues at the incoming spacing (1 s here), so knot k of
-    # window 1 is absolute cycle k + s.
+    # Every window runs on its OWN clock: the carried knots are re-based by the
+    # shift so that the next window's first segment again starts at t = 0 (the
+    # inner filter reads segment k at [k*dt, (k+1)*dt]), and the appended knots
+    # continue that grid at the incoming spacing (1 s here).
     np.testing.assert_allclose(
         np.asarray(next_prior["time"].values),
-        np.arange(window_shift, window_shift + num_cycles, dtype=float),
+        np.arange(num_cycles, dtype=float),
         atol=1e-9,
     )
 
@@ -694,26 +696,142 @@ def test_fewer_than_one_window_raises(num_windows: int) -> None:
     assert model.states == []
 
 
-def test_a_window_longer_than_the_trajectory_prior_raises() -> None:
-    """Every cycle of a window needs a knot to forecast with.
+def test_a_window_may_be_longer_than_the_trajectory_prior() -> None:
+    """A knot grid COARSER than the window is legal, not an error.
 
-    The failure mode this guards is subtle: with ``L`` solved out of ``T``, a
-    horizon that is too long silently produces a window longer than the prior,
-    whose extra cycles would then reuse the last knot (the inner filter clamps)
-    and be attributed to a parameter nobody estimated.
+    It used to be rejected, because knot ``k`` backed cycle ``k`` and a missing
+    knot meant a cycle forecasting with a silently reused one. Now the knots are
+    a time grid the segments are read off, so a two-knot trajectory over a
+    five-cycle window is simply a coarse trajectory (its tail clamped at the
+    last knot) — a deliberate configuration, and the only thing standing between
+    it and the old error was the old semantics.
     """
     n_e = 6
     model = _TrajectoryToyModel()
-    with pytest.raises(ValueError):
+    result = run_moving_window(
+        _make_smoother(num_steps=1, seed=226, model=model),
+        state=_initial_state(n_e, seed=227),
+        # Two knots one cycle apart over an L = 5 cycle window (T = 6, s = 1).
+        params=_trajectory_params(_knots(2, n_e, seed=228)),
+        observations=_horizon_observations(6),
+        num_windows=2,
+        window_shift=1,
+    )
+
+    assert model.states != []
+    # The knot count is still invariant across windows, and the assembled
+    # trajectory is one finalized knot plus the last window's two.
+    assert result.params.sizes["time"] == 3
+    np.testing.assert_allclose(
+        np.asarray(result.params["time"].values), [0.0, 1.0, 2.0], atol=1e-9
+    )
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "spacing,window_shift",
+    [(2.0, 1), (2.0, 3), (3.0, 2)],
+)
+def test_a_shift_that_is_not_a_whole_number_of_knots_raises(
+    spacing: float, window_shift: int
+) -> None:
+    """The window must advance whole knots (§8a, generalized).
+
+    With a knot grid coarser than a cycle, a shift of ``s`` cycles can land
+    mid-interval: the knots would then sit at a different offset inside every
+    window, so which of them "leaves" would change from window to window and
+    the finalized pieces would not tile the horizon. Rejected up front, before
+    a single forecast — the misalignment is invisible in the output otherwise.
+    """
+    n_e, num_cycles = 6, 4
+    model = _TrajectoryToyModel()
+    with pytest.raises(ValueError, match="whole number"):
         run_moving_window(
-            _make_smoother(num_steps=1, seed=226, model=model),
-            state=_initial_state(n_e, seed=227),
-            params=_trajectory_params(_knots(2, n_e, seed=228)),
-            observations=_horizon_observations(6),
+            _make_smoother(num_steps=1, seed=240, model=model),
+            state=_initial_state(n_e, seed=241),
+            params=_trajectory_params(_knots(3, n_e, seed=242), spacing=spacing),
+            observations=_horizon_observations(num_cycles + window_shift),
+            num_windows=2,
+            window_shift=window_shift,
+            window_length=num_cycles,
+        )
+    assert model.states == [], "validation must fail before any forecast runs"
+
+
+def test_an_unevenly_spaced_knot_grid_raises() -> None:
+    """The sliding arithmetic needs ONE spacing to continue the grid at."""
+    n_e = 6
+    params = _trajectory_params(_knots(3, n_e, seed=243))
+    params = params.assign_coords(time=np.array([0.0, 1.0, 1.5]))
+    model = _TrajectoryToyModel()
+    with pytest.raises(ValueError, match="evenly spaced"):
+        run_moving_window(
+            _make_smoother(num_steps=1, seed=244, model=model),
+            state=_initial_state(n_e, seed=245),
+            params=params,
+            observations=_horizon_observations(3),
             num_windows=2,
             window_shift=1,
+            window_length=2,
         )
     assert model.states == []
+
+
+def test_coarse_knots_slide_by_whole_knots() -> None:
+    """An ALIGNED coarse grid: one knot leaves per advance, one is appended.
+
+    Knots two cycles apart with ``s = 2`` cycles, so the window advances exactly
+    one knot: the oldest knot is finalized, the rest are carried (re-based onto
+    the next window's clock) and one evolved knot is appended. The knot count is
+    invariant, and the assembled trajectory carries the horizon's own clock —
+    finalized knot of window ``w`` at ``w * s * cycle_length`` — which is what
+    every downstream metric pairs against the truth by.
+    """
+    n_e, num_cycles, num_windows, window_shift, spacing = 8, 4, 3, 2, 2.0
+    total_cycles = num_cycles + (num_windows - 1) * window_shift
+    smoother = _make_smoother(num_steps=1, seed=246, recording=True)
+
+    result = run_moving_window(
+        smoother,
+        state=_initial_state(n_e, seed=247),
+        params=_trajectory_params(_knots(3, n_e, seed=248), spacing=spacing),
+        observations=_horizon_observations(total_cycles),
+        num_windows=num_windows,
+        window_shift=window_shift,
+        window_length=num_cycles,
+        evolution=IdentityEvolution(),
+    )
+
+    for call in smoother.window_calls:
+        assert call["params"].sizes["time"] == 3
+        # Every window's own clock starts at its first segment.
+        np.testing.assert_allclose(
+            np.asarray(call["params"]["time"].values), [0.0, 2.0, 4.0], atol=1e-9
+        )
+
+    # One knot leaves per advance (2 cycles = 1 knot), so the next prior is the
+    # posterior's tail plus one identity-evolved knot.
+    for window in range(num_windows - 1):
+        posterior = _theta(smoother.window_returns[window].params)
+        next_prior = _theta(smoother.window_calls[window + 1]["params"])
+        np.testing.assert_allclose(next_prior[:-1], posterior[1:], rtol=RTOL, atol=ATOL)
+        np.testing.assert_allclose(next_prior[-1], posterior[-1], rtol=RTOL, atol=ATOL)
+
+    # Assembled: 1 finalized knot per advance plus the last window's 3, on the
+    # horizon's clock at the trajectory's own resolution.
+    assert result.params.sizes["time"] == (num_windows - 1) + 3
+    np.testing.assert_allclose(
+        np.asarray(result.params["time"].values),
+        np.arange(5, dtype=float) * spacing,
+        atol=1e-9,
+    )
+    assembled = _theta(result.params)
+    for window in range(num_windows - 1):
+        np.testing.assert_array_equal(
+            assembled[window], _theta(smoother.window_returns[window].params)[0]
+        )
+    np.testing.assert_array_equal(
+        assembled[num_windows - 1 :], _theta(smoother.window_returns[-1].params)
+    )
 
 
 # ---------------------------------------------------------------------------

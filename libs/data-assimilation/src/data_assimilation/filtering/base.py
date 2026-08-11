@@ -393,9 +393,9 @@ class BaseFilter:
         Extension point, identity by default: every cycle forecasts with the
         same parameter ensemble. A subclass whose parameters are a *trajectory*
         over the window (see :class:`~data_assimilation.filter_smoothing.base.\
-_TrajectoryStateFilter`) overrides this to hand the forward model that cycle's
-        knot as plain scalar parameters — the backends never see a ``time``
-        dimension either way.
+_TrajectoryStateFilter`) overrides this to hand the forward model the piece of
+        that trajectory spanning the cycle's segment — a time-varying schedule
+        on a segment-local clock, which the backends already interpolate.
         """
         return params
 

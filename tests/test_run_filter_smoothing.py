@@ -14,6 +14,7 @@ pytest sessions must not run concurrently (auto-memory: serial e2e sessions).
 import pathlib
 from typing import Any, Optional
 
+import numpy as np
 import pytest
 
 
@@ -50,10 +51,12 @@ def _overrides(
         "obs.y_points=[5.0,15.0,5.0,15.0]",
         "obs.z_points=[3.0,3.0,3.0,3.0]",
         "obs.interval_seconds=3.0",
-        # One knot backs exactly one cycle, and the script enforces it. The
-        # entry point ties seconds_per_knot to simulation_time by interpolation,
-        # but conftest's _SMOKE_OVERRIDES pins it to 1.5 (half a cycle), so it
-        # has to be restored here.
+        # The knot spacing is free (it is the trajectory's resolution, not the
+        # cycle length), but conftest's _SMOKE_OVERRIDES pins it to 1.5 — half a
+        # cycle — and the assertions below count knots. Restore the entry
+        # point's own default of one knot per cycle here, and let
+        # test_a_knot_spacing_finer_than_the_cycle_is_valid cover the decoupled
+        # case explicitly.
         "time.seconds_per_knot=3.0",
         *(extra or []),
     ]
@@ -83,8 +86,9 @@ def test_temporal_localization_config_composes(
         #
         # The radius is pinned to its literal value on purpose: it is measured
         # in CYCLES (FilterSmoothingESMDA builds the knot/observation time
-        # coordinates as cycle indices), so a seconds-scaled number here — 900
-        # for a 300 s cycle, say — would exceed every in-window lag and make
+        # coordinates as knot_time / cycle_length), so a seconds-scaled number
+        # here — 900 for a 300 s cycle, say — would exceed every in-window lag
+        # and make
         # `temporal_localization=taper` a silently GLOBAL update, which no
         # other assertion in this suite would notice.
         assert temporal.temporal_radius == pytest.approx(3.0)
@@ -354,22 +358,146 @@ def test_run_filter_smoothing_rejects_a_static_prior(compose_test_cfg: Any) -> N
         run(cfg)
 
 
-def test_run_filter_smoothing_rejects_a_knot_spacing_that_is_not_the_cycle(
-    compose_test_cfg: Any,
-) -> None:
-    """Knot k must back cycle k's segment, so the spacing IS the cycle length.
+def test_the_cycle_length_is_wired_into_the_smoother(compose_test_cfg: Any) -> None:
+    """``cycle_length`` is what puts a cycle on the trajectory's knot axis.
 
-    Fails before any simulation starts: a half-cycle knot spacing would
-    silently re-interpret which parameter drove which forecast.
+    The knot times are physical seconds and the knot grid is free, so the
+    estimator cannot infer where segment ``k`` sits; the entry point ties this
+    to ``time.simulation_time``. A composed config that dropped it would leave
+    every time-varying run failing at the first forecast.
     """
-    from scripts.filter_smoothing.run_filter_smoothing import run
+    import jax.numpy as jnp
+    from hydra.utils import instantiate
 
     cfg = compose_test_cfg(
         _overrides(2, 2, ["time.seconds_per_knot=1.5"]),
         config_name="run_filter_smoothing",
     )
+    assert cfg.filter_smoothing.smoother.cycle_length == pytest.approx(
+        float(cfg.time.simulation_time)
+    )
+    smoother = instantiate(
+        cfg.filter_smoothing.smoother,
+        observation_operator=_stub_observation_operator,
+        forward_model=_StubEnsembleModel(),
+        C_D=jnp.array([0.1]),
+    )
+    assert float(smoother.cycle_length) == pytest.approx(
+        float(cfg.time.simulation_time)
+    )
+
+
+def test_a_knot_spacing_finer_than_the_cycle_is_valid(compose_test_cfg: Any) -> None:
+    """``seconds_per_knot != simulation_time`` is now a configuration, not an error.
+
+    It used to be rejected outright (knot ``k`` backed cycle ``k``). The knot
+    grid is now the trajectory's own resolution, so a half-cycle spacing is a
+    within-segment ramp the backend interpolates. Exercised on the validators
+    directly rather than through ``run``, which would need the solver: it is the
+    validators that used to refuse this.
+    """
+    from scripts.filter_smoothing.run_filter_smoothing import (
+        validate_knot_grid,
+        validate_knot_spacing,
+    )
+
+    cfg = compose_test_cfg(
+        _overrides(2, 2, ["time.seconds_per_knot=1.5"]),
+        config_name="run_filter_smoothing",
+    )
+    sim_time = float(cfg.time.simulation_time)
+    seconds_per_knot = float(cfg.time.seconds_per_knot)
+    num_cycles = int(cfg.filter_smoothing.num_cycles)
+    assert seconds_per_knot != pytest.approx(sim_time)
+
+    validate_knot_spacing(seconds_per_knot, sim_time, num_windows=1, window_shift=1)
+    # ... and with a moving window too: half a cycle divides any whole shift.
+    validate_knot_spacing(seconds_per_knot, sim_time, num_windows=3, window_shift=1)
+
+    # The grid the dynamic sampler emits for this window, checked end to end.
+    from pyurbanair.dynamic_parameters.ar2_relaxation import build_knot_times
+
+    window_time = num_cycles * sim_time
+    knot_times = np.asarray(
+        build_knot_times(0.0, window_time, seconds_per_knot), dtype=float
+    )
+    assert knot_times.size == num_cycles * 2 + 1  # two knots per cycle, plus the end
+    validate_knot_grid(
+        knot_times, seconds_per_knot, sim_time, window_time, num_cycles, num_windows=1
+    )
+
+
+def test_run_filter_smoothing_rejects_a_degenerate_knot_spacing(
+    compose_test_cfg: Any,
+) -> None:
+    """A non-positive spacing is the one thing the knot grid may not be."""
+    from scripts.filter_smoothing.run_filter_smoothing import run
+
+    cfg = compose_test_cfg(
+        _overrides(2, 2, ["time.seconds_per_knot=0.0"]),
+        config_name="run_filter_smoothing",
+    )
     with pytest.raises(ValueError, match="seconds_per_knot"):
         run(cfg)
+
+
+def test_run_filter_smoothing_rejects_a_shift_that_straddles_the_knots(
+    compose_test_cfg: Any,
+) -> None:
+    """A moving window must advance a whole number of knots, checked up front.
+
+    A knot grid COARSER than the shift is the case that bites: with 5 s knots
+    and a 3 s shift the knots sit at a different offset inside every window, so
+    which of them leaves changes from window to window and the finalized pieces
+    stop tiling the horizon. A multi-window run costs hours, so this fails
+    before the truth is simulated.
+    """
+    from scripts.filter_smoothing.run_filter_smoothing import run
+
+    cfg = compose_test_cfg(
+        _overrides(
+            2,
+            2,
+            [
+                "filter_smoothing.num_windows=2",
+                "filter_smoothing.window_shift=1",
+                "time.seconds_per_knot=5.0",
+            ],
+        ),
+        config_name="run_filter_smoothing",
+    )
+    with pytest.raises(ValueError, match="whole number of knots"):
+        run(cfg)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "knot_times,message",
+    [
+        pytest.param([1.0, 2.0, 3.0], "window's origin", id="offset_grid"),
+        pytest.param([0.0, 1.0, 3.0], "not 1s apart", id="uneven_grid"),
+        pytest.param([0.0, 1.0], "spans", id="short_grid"),
+    ],
+)
+def test_validate_knot_grid_rejects_a_grid_the_estimator_would_mis_time(
+    knot_times: list[float], message: str
+) -> None:
+    """The sampled grid is what the estimator reads, so it is what is checked.
+
+    Each case is silent otherwise: an offset grid shifts every segment, an
+    uneven one re-times the trajectory's tail, and a grid that stops short
+    freezes the parameter over the cycles it does not reach.
+    """
+    from scripts.filter_smoothing.run_filter_smoothing import validate_knot_grid
+
+    with pytest.raises(ValueError, match=message):
+        validate_knot_grid(
+            np.asarray(knot_times, dtype=float),
+            seconds_per_knot=1.0,
+            sim_time=1.0,
+            window_time=4.0,
+            num_cycles=4,
+            num_windows=1,
+        )
 
 
 @pytest.mark.parametrize("scalar", ["num_cycles", "num_steps"])  # type: ignore[misc]

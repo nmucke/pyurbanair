@@ -91,15 +91,25 @@ trajectory is re-smoothed. Artifacts then describe the full horizon
 
 The PRIOR must be a DYNAMIC (time-varying) sampler -- the exact inverse of
 run_filtering.py's guard, and the point of the method: what is estimated is a
-whole parameter trajectory, one knot per cycle. Pair with
-``params@prior_params=dynamic``. The trajectory is sampled ONCE over the FIRST
-window's ``num_cycles * time.simulation_time`` span — later windows inherit
-their prior from the previous window's posterior, never from the sampler, which
-is the point of carrying the window forward — so its knots must be spaced one
-cycle apart (``time.seconds_per_knot == time.simulation_time``, the default);
-both the configured spacing and the SAMPLED knot times are validated loudly
-below, and the trajectory length handed to the estimator is derived from the
-sampled prior's ``time`` dim, never from a config literal.
+whole parameter trajectory. Pair with ``params@prior_params=dynamic``. The
+trajectory is sampled ONCE over the FIRST window's
+``num_cycles * time.simulation_time`` span — later windows inherit their prior
+from the previous window's posterior, never from the sampler, which is the point
+of carrying the window forward.
+
+``time.seconds_per_knot`` is the trajectory's RESOLUTION and is a free knob: it
+need not equal the cycle length. Each cycle's forecast is handed the piece of
+the trajectory spanning its segment — the bracketing knots' linear
+interpolation at the segment's edges, plus every knot strictly inside it — as a
+time-varying schedule the backend interpolates natively (the same path
+dynamic-mode ESMDA takes). So the knots may be finer than a cycle (a
+within-segment ramp) or coarser (several cycles share one knot interval). The
+sampled grid is validated loudly below: it must start at the window's origin, be
+evenly spaced at ``time.seconds_per_knot``, and reach the window's end. A MOVING
+window adds one constraint — ``window_shift * time.simulation_time`` must be a
+whole number of knots, checked up front — because it slides the knot grid by
+that many seconds. The trajectory length handed to the estimator is derived from
+the sampled prior's ``time`` dim, never from a config literal.
 
 Examples::
 
@@ -149,6 +159,112 @@ from scripts.esmda._esmda_common import open_truth, truth_x_min, write_yaml
 _TIME_RTOL = 1e-4
 
 
+def validate_knot_spacing(
+    seconds_per_knot: float,
+    sim_time: float,
+    num_windows: int,
+    window_shift: int,
+) -> None:
+    """Check the CONFIGURED knot spacing, before anything is simulated.
+
+    The spacing itself is free — it is the estimated trajectory's resolution,
+    and each cycle forecasts with the piece of the trajectory spanning its
+    segment — so all that is required of it is to be positive. What is *not*
+    free is its relation to a MOVING window: the window slides by
+    ``window_shift * sim_time`` seconds, and unless that is a whole number of
+    knots the grid drifts out of phase with the windows (a different set of
+    knots would leave each time, and the finalized pieces would not tile the
+    horizon). Checked here rather than inside the orchestrator, which only
+    reaches its own copy of this check one expensive window in.
+    """
+    if seconds_per_knot <= 0.0:
+        raise ValueError(
+            f"time.seconds_per_knot must be > 0, got {seconds_per_knot:g}: it is "
+            "the spacing of the estimated parameter trajectory's knots."
+        )
+    if num_windows <= 1:
+        return
+    knots_per_shift = window_shift * sim_time / seconds_per_knot
+    if abs(knots_per_shift - round(knots_per_shift)) > _TIME_RTOL * max(
+        round(knots_per_shift), 1
+    ):
+        raise ValueError(
+            f"A moving window ({num_windows} windows) must advance a whole "
+            f"number of knots: filter_smoothing.window_shift={window_shift} "
+            f"cycle(s) of time.simulation_time={sim_time:g}s is "
+            f"{knots_per_shift:.6g} knots of "
+            f"time.seconds_per_knot={seconds_per_knot:g}s. The knot grid would "
+            "drift out of phase with the windows. Use a knot spacing that "
+            "divides window_shift * simulation_time (any spacing finer than one "
+            "cycle by an integer factor does), or raise window_shift."
+        )
+
+
+def validate_knot_grid(
+    knot_times: np.ndarray,
+    seconds_per_knot: float,
+    sim_time: float,
+    window_time: float,
+    num_cycles: int,
+    num_windows: int,
+) -> None:
+    """Check the SAMPLED knot layout — what the estimator actually consumes.
+
+    The estimator reads the knot times as physical seconds on the window's own
+    clock (cycle ``k`` is the trajectory over ``[k*sim_time, (k+1)*sim_time]``),
+    so the grid must start at that clock's origin, be evenly spaced at
+    ``seconds_per_knot``, and reach the window's end. ``build_knot_times`` emits
+    exactly that, except that it appends an endpoint knot on a SHORT trailing
+    interval when the window span is not a multiple of the spacing — tolerated
+    for a single window (that knot is a legitimate, if unevenly spaced,
+    endpoint), rejected for a moving one, whose sliding arithmetic needs one
+    uniform spacing.
+    """
+    gaps = np.diff(knot_times)
+    atol = _TIME_RTOL * max(seconds_per_knot, 1.0)
+    if abs(float(knot_times[0])) > atol:
+        raise ValueError(
+            f"The sampled prior's first knot is at t={knot_times[0]:g}s, not at "
+            "the window's origin. Cycle k's forecast is the trajectory over "
+            f"[k*{sim_time:g}, (k+1)*{sim_time:g}]s on that clock, so a grid "
+            "that does not start at 0 shifts every segment."
+        )
+    # The regular grid is every gap but the final one, which `build_knot_times`
+    # is allowed to make SHORTER (never longer) than the spacing.
+    regular_gaps = gaps[:-1]
+    tail_gap = float(gaps[-1]) if gaps.size else seconds_per_knot
+    if (
+        regular_gaps.size
+        and not np.allclose(regular_gaps, seconds_per_knot, rtol=_TIME_RTOL, atol=atol)
+    ) or tail_gap > seconds_per_knot + atol:
+        raise ValueError(
+            f"The sampled prior's knots are not {seconds_per_knot:g}s apart: "
+            f"spacings {np.unique(np.round(gaps, 6)).tolist()} vs "
+            f"time.seconds_per_knot={seconds_per_knot:g}. The estimator places "
+            "each cycle's segment on this grid by time, so an unexpected "
+            "spacing silently re-times the whole trajectory."
+        )
+    if gaps.size and abs(tail_gap - seconds_per_knot) > atol and num_windows > 1:
+        raise ValueError(
+            f"The sampled prior's final knot interval is {tail_gap:g}s rather "
+            f"than time.seconds_per_knot={seconds_per_knot:g}s (the window span "
+            f"{window_time:g}s is not a multiple of it), which a MOVING window "
+            "cannot slide: it appends leading-edge knots at one uniform "
+            "spacing. Choose a seconds_per_knot that divides "
+            "filter_smoothing.num_cycles * time.simulation_time."
+        )
+    # ... and the grid must reach the window's end (bar one spacing): the last
+    # segments would otherwise be forecast with a clamped, constant tail.
+    if float(knot_times[-1]) < window_time - seconds_per_knot - atol:
+        raise ValueError(
+            f"The sampled prior's last knot is at t={knot_times[-1]:g}s but the "
+            f"window spans {window_time:g}s ({num_cycles} cycle(s) of "
+            f"{sim_time:g}s): the trajectory is held constant past its last "
+            "knot, so those cycles would be forecast with a frozen parameter. "
+            "Sample the prior over the full window."
+        )
+
+
 def run(cfg: DictConfig) -> None:
     num_cycles = int(cfg.filter_smoothing.num_cycles)
     if num_cycles < 1:
@@ -187,32 +303,26 @@ def run(cfg: DictConfig) -> None:
     domain_x_min = float(cfg.domain.bounds[0][0])
     rng_key = jax.random.PRNGKey(cfg.filter_smoothing.seed)
 
-    # This method estimates a parameter TRAJECTORY: one knot per cycle, all
-    # knots updated jointly by the outer ESMDA loop. That is the inverse of
-    # run_filtering.py's guard (the plain filter refuses a dynamic prior because
-    # it tracks a single scalar), so a static prior is the error case here.
+    # This method estimates a parameter TRAJECTORY: every knot of it updated
+    # jointly by the outer ESMDA loop. That is the inverse of run_filtering.py's
+    # guard (the plain filter refuses a dynamic prior because it tracks a single
+    # scalar), so a static prior is the error case here.
     if "seconds_per_knot" not in list(cfg.prior_params.keys()):
         raise ValueError(
             "prior_params is a static (scalar) sampler, which filter smoothing "
-            "does not support: it estimates a time-varying parameter trajectory "
-            "with one knot per cycle. Use params@prior_params=dynamic (AR(2)), "
-            "or scripts/filtering/run_filtering.py for a tracked scalar."
+            "does not support: it estimates a time-varying parameter trajectory. "
+            "Use params@prior_params=dynamic (AR(2)), or "
+            "scripts/filtering/run_filtering.py for a tracked scalar."
         )
     is_dynamic_truth = "seconds_per_knot" in list(cfg.truth_params.keys())
 
-    # Knot spacing is load-bearing, not decorative: knot k backs cycle k's
-    # forecast segment, so the spacing must BE the segment length. Check the
-    # configured value up front (the actionable knob) — the sampled knot times
-    # are re-checked after sampling, which is what the estimator actually sees.
+    # Knot spacing is the TRAJECTORY's resolution and is free: each cycle
+    # forecasts with the piece of the trajectory spanning its segment (linearly
+    # interpolated at the segment's edges), so the knots may be coarser or finer
+    # than the cycle. What it must not be is degenerate — and the sampled knot
+    # layout is re-checked after sampling, which is what the estimator sees.
     seconds_per_knot = float(cfg.time.seconds_per_knot)
-    if abs(seconds_per_knot - sim_time) > _TIME_RTOL * max(sim_time, 1.0):
-        raise ValueError(
-            f"time.seconds_per_knot={seconds_per_knot:g} must equal "
-            f"time.simulation_time={sim_time:g}: one parameter knot backs exactly "
-            "one cycle's forecast segment. conf/run_filter_smoothing.yaml ties "
-            "the two together by default — override time.simulation_time (which "
-            "changes the cycle length) rather than the knot spacing."
-        )
+    validate_knot_spacing(seconds_per_knot, sim_time, num_windows, window_shift)
 
     # Select which parameters the method estimates (same contract as
     # run_filtering.py / run_esmda.py `params_to_estimate`): null -> every
@@ -345,49 +455,20 @@ def run(cfg: DictConfig) -> None:
     prior_params.to_netcdf(out_dir / "prior_params.nc")
 
     # Validate the SAMPLED knot layout (what the estimator actually consumes),
-    # not just the configured spacing: knot j must sit at the start of cycle j.
-    # `build_knot_times` emits num_cycles+1 knots for a num_cycles*sim_time
-    # horizon — the trailing knot at window_time is legitimate and rides along in
-    # Theta, updated only through the prior's temporal correlations. With a
-    # moving window it is exactly the knot the leading edge is grown from: the
-    # orchestrator seeds each appended knot on the posterior's last one.
+    # not just the configured spacing — see validate_knot_grid.
     knot_times = np.asarray(prior_params["time"].values, dtype=float)
     n_knots = int(knot_times.size)
-    knot_gaps = np.diff(knot_times)
-    if knot_gaps.size and not np.allclose(
-        knot_gaps, sim_time, rtol=_TIME_RTOL, atol=_TIME_RTOL * max(sim_time, 1.0)
-    ):
-        raise ValueError(
-            f"The sampled prior's knots are not one cycle apart: spacings "
-            f"{np.unique(np.round(knot_gaps, 6)).tolist()} vs the cycle length "
-            f"time.simulation_time={sim_time:g}. Knot k must back cycle k's "
-            "forecast segment; set time.seconds_per_knot = time.simulation_time "
-            "and make sure the horizon is an exact multiple of it (an uneven "
-            "final interval appends an extrapolated endpoint knot)."
-        )
-    if n_knots < num_cycles:
-        raise ValueError(
-            f"The sampled prior has {n_knots} knot(s), which does not cover "
-            f"filter_smoothing.num_cycles={num_cycles}: cycles beyond the last "
-            "knot would silently reuse it. Sample the prior over the full "
-            f"{window_time:g}s window."
-        )
-    if n_knots > num_cycles + 1:
-        raise ValueError(
-            f"The sampled prior has {n_knots} knot(s) for {num_cycles} cycle(s) "
-            f"(expected {num_cycles} or {num_cycles + 1}): the trajectory extends "
-            "past the assimilation window, so its trailing knots are never "
-            "constrained by any observation batch. Check time.simulation_time "
-            "and filter_smoothing.num_cycles."
-        )
+    validate_knot_grid(
+        knot_times,
+        seconds_per_knot,
+        sim_time,
+        window_time,
+        num_cycles,
+        num_windows,
+    )
     print(
-        f"Prior trajectory: {n_knots} knot(s) over {window_time:g}s "
-        f"({num_cycles} cycle(s) of {sim_time:g}s)"
-        + (
-            "; the trailing knot is updated only through prior temporal correlation."
-            if n_knots == num_cycles + 1
-            else "."
-        )
+        f"Prior trajectory: {n_knots} knot(s) spaced {seconds_per_knot:g}s over "
+        f"{window_time:g}s ({num_cycles} cycle(s) of {sim_time:g}s)."
     )
 
     # --- Observation operators and per-cycle observations ----------------------

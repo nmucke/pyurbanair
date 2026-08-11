@@ -4,8 +4,10 @@ Covers the Phase 1 deliverables of docs/plans/filter_smoothing_windowed_esmda.md
 §6: the pre-analysis forecast-observation recording hook, the per-iteration
 state reset, the final consistency pass, temporal credit assignment (with and
 without temporal localization), the temporal taper itself, the alpha schedule
-and common random numbers, and the per-cycle knot slicing. Everything runs on
-toy in-memory forward models — no CFD solver.
+and common random numbers, and the per-cycle segment restriction (plan §9: the
+knot grid is independent of the cycle grid, and each cycle forecasts with the
+trajectory restricted to its segment). Everything runs on toy in-memory forward
+models — no CFD solver.
 
 The algorithm's semantics are all about *which* ensemble each inner pass is
 given and *when* an observation is recorded, so the stubs below record every
@@ -35,13 +37,44 @@ from data_assimilation.localization.base import resolve_row_inflation, taper_inf
 # ---------------------------------------------------------------------------
 
 
+def _segment_mean(params: xarray.Dataset, name: str) -> jnp.ndarray:
+    """The stub backends' reading of one segment's parameter schedule.
+
+    A cycle's forecast is handed the trajectory RESTRICTED to that cycle's
+    segment: a ``(time, ensemble)`` schedule on a segment-local clock that a
+    real backend interpolates over the run. These toys have no internal clock,
+    so they collapse the schedule to its **mean over the segment** — the
+    simplest reduction that (a) actually consumes the whole segment rather than
+    one knot of it and (b) keeps the map ``Theta -> D`` LINEAR, which is what
+    lets the linear-Gaussian tests below state an exact posterior.
+
+    Scalar (no-``time``) parameters pass straight through, so the same stub also
+    serves the plain filter, whose ``_params_for_cycle`` is the identity.
+    """
+    variable = params[name]
+    if "time" not in variable.dims:
+        values = jnp.asarray(variable.values)
+        assert values.ndim == 1, f"{name} arrived with shape {values.shape}."
+        return values
+    assert float(variable.coords["time"].values[0]) == 0.0, (
+        "the segment schedule must arrive on a SEGMENT-LOCAL clock starting at "
+        f"0, got {variable.coords['time'].values}"
+    )
+    segment = jnp.asarray(variable.transpose("time", ...).values)
+    return jnp.mean(segment, axis=0)
+
+
 class _TrajectoryToyModel:
-    """``x_{k+1} = decay * x_k + param_effect * theta_k`` over one segment.
+    """``x_{k+1} = decay * x_k + param_effect * mean(theta over segment k)``.
 
     Records every ``(state, params)`` pair it is called with, in call order, so
-    a test can see which initial condition and which trajectory knot each inner
-    pass received. The forecast carries a two-frame ``time`` dimension so the
-    filter's end-of-segment selection (``isel(time=-1)``) is exercised.
+    a test can see which initial condition and which piece of the trajectory
+    each inner pass received. The forecast carries a two-frame ``time``
+    dimension so the filter's end-of-segment selection (``isel(time=-1)``) is
+    exercised.
+
+    The parameter enters through :func:`_segment_mean` — see there for why the
+    segment is averaged rather than sampled at one knot.
 
     ``param_effect=0.0`` makes the forecast blind to the parameters: the map
     ``Theta -> D`` is then constant, which is what isolates the inner PRNG in
@@ -75,13 +108,7 @@ class _TrajectoryToyModel:
         x = jnp.asarray(state["u"].values)  # (N_e, nx)
         x_new = self.decay * x
         if params is not None and self.param_effect:
-            theta = jnp.asarray(params[self.param_name].values)
-            # The cycle's knot must arrive already sliced: a plain scalar
-            # (ensemble,) parameter, exactly what a backend accepts.
-            assert theta.ndim == 1, (
-                f"{self.param_name} arrived with shape {theta.shape}; the inner "
-                "filter must slice one knot per cycle."
-            )
+            theta = _segment_mean(params, self.param_name)
             x_new = x_new + self.param_effect * theta[:, None]
         frames = jnp.stack([x, x_new], axis=1)  # (N_e, 2, nx)
         return xarray.Dataset(
@@ -105,10 +132,11 @@ class _TrajectoryToyModel:
 
 
 class _DelayedParamModel(_TrajectoryToyModel):
-    """``u_{k+1} = s_k``, ``s_{k+1} = theta_k``: a knot is seen one cycle late.
+    """``u_{k+1} = s_k``, ``s_{k+1} = m_k``: a segment is seen one cycle late.
 
-    Only ``u`` is observed, so cycle ``k``'s forecast observation carries
-    ``theta_{k-1}`` and says nothing about ``theta_k``. From a zero-spread
+    ``m_k`` is segment ``k``'s mean parameter (:func:`_segment_mean`). Only
+    ``u`` is observed, so cycle ``k``'s forecast observation carries
+    ``m_{k-1}`` and says nothing about ``m_k``. From a zero-spread
     initial condition, cycle 0's predicted observations are identical across
     members, so its inner analysis has *exactly* zero gain and cannot erase the
     hidden ``s`` in which ``theta_0`` is stored. The last observation of the
@@ -127,11 +155,7 @@ class _DelayedParamModel(_TrajectoryToyModel):
 
         u = jnp.asarray(state["u"].values)  # (N_e, 1)
         s = jnp.asarray(state["s"].values)  # (N_e, 1)
-        theta = jnp.asarray(params[self.param_name].values)
-        assert theta.ndim == 1, (
-            f"{self.param_name} arrived with shape {theta.shape}; the inner "
-            "filter must slice one knot per cycle."
-        )
+        theta = _segment_mean(params, self.param_name)
         u_new = s
         s_new = jnp.broadcast_to(theta[:, None], s.shape)
         return xarray.Dataset(
@@ -201,13 +225,16 @@ def _trajectory_params(
     knots: np.ndarray,
     static: Optional[np.ndarray] = None,
     name: str = "theta",
+    spacing: float = 1.0,
 ) -> xarray.Dataset:
-    """A ``(time, ensemble)`` trajectory prior, knot spacing 1 s.
+    """A ``(time, ensemble)`` trajectory prior on a uniform grid from ``t = 0``.
 
     ``knots`` has shape ``(n_knots, N_e)``. The ``time`` coordinate holds the
-    knots' *segment-start* times (0, 1, 2, …), which is what the temporal
-    localization's row coordinates are built from; with a 1 s cycle the knot
-    index and its time coincide.
+    knots' times in SECONDS — the grid the estimator places each cycle's segment
+    on, and what the temporal localization's row coordinates are built from. The
+    default ``spacing`` equals the toys' 1 s cycle (:data:`_CYCLE_LENGTH`), so
+    knot index and cycle index coincide; pass a different one for a knot grid
+    coarser or finer than the cycle.
     """
     n_knots, n_e = knots.shape
     data_vars: dict[str, Any] = {name: (("time", "ensemble"), jnp.asarray(knots))}
@@ -216,16 +243,24 @@ def _trajectory_params(
     return xarray.Dataset(
         data_vars,
         coords={
-            "time": np.arange(n_knots, dtype=float),
+            "time": np.arange(n_knots, dtype=float) * spacing,
             "ensemble": np.arange(n_e),
         },
     )
+
+
+#: One cycle's forecast segment, in seconds. The toy models have no clock of
+#: their own (and so no ``simulation_time`` for the estimator to read), so every
+#: smoother below is told the cycle length explicitly; 1 s keeps the cycle axis
+#: and the default knot grid numerically identical.
+_CYCLE_LENGTH = 1.0
 
 
 def _smoothing_kwargs(
     forward_model: Any,
     observation_operator: Optional[Any] = None,
     variance: float = 0.01,
+    cycle_length: float = _CYCLE_LENGTH,
 ) -> dict:
     return {
         "observation_operator": (
@@ -235,6 +270,7 @@ def _smoothing_kwargs(
         ),
         "forward_model": forward_model,
         "C_D": jnp.array([variance]),
+        "cycle_length": cycle_length,
     }
 
 
@@ -375,12 +411,14 @@ def test_final_pass_uses_the_returned_trajectory() -> None:
     # vacuously the same statement as "it saw the prior".
     assert not np.allclose(np.asarray(result.params["theta"].values), knots, atol=1e-4)
 
-    final_pass_knots = model.params[-num_cycles:]
-    for cycle, seen in enumerate(final_pass_knots):
+    # The final pass's segments are the POSTERIOR trajectory restricted cycle by
+    # cycle: with one knot per cycle, segment k runs from knot k to knot k+1.
+    final_pass_segments = model.params[-num_cycles:]
+    for cycle, seen in enumerate(final_pass_segments):
         assert seen is not None
         np.testing.assert_allclose(
             np.asarray(seen["theta"].values),
-            np.asarray(result.params["theta"].isel(time=cycle).values),
+            np.asarray(result.params["theta"].isel(time=[cycle, cycle + 1]).values),
             rtol=1e-5,
             atol=1e-6,
         )
@@ -437,12 +475,12 @@ def test_static_parameters_ride_along_and_stay_out_of_the_update() -> None:
 def _credit_assignment_run(
     temporal_localization: Optional[TemporalLocalization],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """One two-cycle delayed-effect window; returns (prior, posterior) theta_0.
+    """One two-cycle delayed-effect window; returns (prior knots, posterior theta_0).
 
     ``y_1 = 3`` is the only informative observation, and it is informative
-    about ``theta_0`` *only through the dynamics* (the hidden ``s`` carries the
-    knot into the next segment). ``y_0`` equals the forecast exactly, so the
-    first cycle contributes no innovation.
+    about ``theta_0`` *only through the dynamics* (the hidden ``s`` carries
+    segment 0's mean into the next segment). ``y_0`` equals the forecast
+    exactly, so the first cycle contributes no innovation.
     """
     n_e, num_cycles = 400, 2
     knots = np.asarray(jax.random.normal(jax.random.PRNGKey(13), (num_cycles + 1, n_e)))
@@ -460,22 +498,36 @@ def _credit_assignment_run(
     )
 
     assert result.params is not None
-    return knots[0], np.asarray(result.params["theta"].isel(time=0).values)
+    return knots, np.asarray(result.params["theta"].isel(time=0).values)
 
 
 def test_last_observation_updates_the_first_knot() -> None:
     """The defining feature (§4.3): credit flows back through the window.
 
-    With a scalar-Gaussian toy in which ``D_1 = theta_0`` exactly, one
-    full-weight ESMDA iteration is the exact Kalman update, so the smoothed
-    mean lands at ``P / (P + R) * y_1`` — essentially ``y_1`` at ``R = 0.01``.
+    The toy is scalar-Gaussian and the map ``Theta -> D`` is linear — segment 0
+    is the ramp from knot 0 to knot 1, so ``D_1 = (theta_0 + theta_1) / 2`` —
+    which makes one full-weight ESMDA iteration the exact Kalman update. It is
+    written out here from the prior ensemble's OWN sample covariances rather
+    than from the population values (``Cov = 1/2``, ``Var = 1/2``, gain
+    ``0.5/0.51``): the update uses the sample gain, and at a few hundred
+    members that differs by a few percent — a discrepancy which would otherwise
+    have to be hidden under a tolerance wide enough to also hide a real bug.
+
     A method that only ever assimilated the *current* cycle's observation into
     the *current* knot would leave this mean at the prior's 0.
     """
-    prior, posterior = _credit_assignment_run(temporal_localization=None)
+    knots, posterior = _credit_assignment_run(temporal_localization=None)
+    prior = knots[0]
 
     assert abs(float(prior.mean())) < 0.2  # the prior knows nothing about y_1
-    assert float(posterior.mean()) == pytest.approx(3.0, abs=0.2)
+
+    segment_mean = 0.5 * (knots[0] + knots[1])
+    covariance = np.cov(np.stack([prior, segment_mean]), ddof=1)
+    gain = covariance[0, 1] / (covariance[1, 1] + 0.01)
+    expected = float(prior.mean()) + gain * (3.0 - float(segment_mean.mean()))
+    assert float(posterior.mean()) == pytest.approx(expected, abs=0.05)
+    # ... and that update really is most of the way to y_1, not a nudge.
+    assert float(posterior.mean()) == pytest.approx(3.0, abs=0.3)
 
 
 def test_tight_temporal_localization_blocks_the_credit() -> None:
@@ -487,7 +539,7 @@ def test_tight_temporal_localization_blocks_the_credit() -> None:
     transition). ``block_grouping=False`` keeps this a per-knot statement —
     with grouping on, knot 0 would share knot 1's observation selection.
     """
-    prior, posterior = _credit_assignment_run(
+    knots, posterior = _credit_assignment_run(
         temporal_localization=TemporalLocalization(
             temporal_radius=0.5,
             tapering_beta=0.5,
@@ -496,7 +548,7 @@ def test_tight_temporal_localization_blocks_the_credit() -> None:
         )
     )
 
-    np.testing.assert_allclose(posterior, prior, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(posterior, knots[0], rtol=1e-5, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +644,58 @@ def test_temporal_block_grouping_shares_one_selection_per_parameter() -> None:
     np.testing.assert_allclose(grouped[n_knots], raw[n_knots], rtol=1e-6)
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "spacing,expected",
+    [(1.0, [0.0, 1.0, 2.0]), (2.0, [0.0, 2.0, 4.0]), (0.5, [0.0, 0.5, 1.0])],
+    ids=["cycle_grid", "coarse", "fine"],
+)
+def test_row_coordinates_are_the_knot_times_in_cycles(
+    spacing: float, expected: list[float]
+) -> None:
+    """Knot ``j`` sits at ``knot_time / cycle_length``, fractional if need be.
+
+    ``temporal_radius`` is measured in CYCLES whatever the knot spacing is, so
+    the coordinates cannot be the knot INDEX once the two grids differ: a
+    half-cycle grid would otherwise place its knots two cycles apart and a
+    two-cycle grid would squeeze them into one, silently rescaling the taper.
+    The middle case reduces to the old integers exactly.
+    """
+    from data_assimilation.filter_smoothing.base import knot_times
+
+    n_e = 4
+    params = _trajectory_params(
+        np.zeros((3, n_e)), static=np.zeros(n_e), spacing=spacing
+    )
+    smoother = FilterSmoothingESMDA(
+        num_steps=1,
+        temporal_localization=TemporalLocalization(temporal_radius=2.0),
+        **_smoothing_kwargs(_TrajectoryToyModel()),
+    )
+
+    update_mask, row_times = smoother._trajectory_row_layout(
+        params, knot_times(params), _CYCLE_LENGTH
+    )
+    # Three trajectory rows then the static one, mirroring the flatten order.
+    np.testing.assert_array_equal(np.asarray(update_mask), [True, True, True, False])
+    np.testing.assert_allclose(np.asarray(row_times), expected + [0.0], atol=1e-9)
+
+    row_coords, obs_coords, _, localize_mask = smoother._localization_plumbing(
+        params,
+        ParamAugmentation(num_time_points=3),
+        update_mask,
+        row_times,
+        num_cycles=2,
+        n_d=1,
+    )
+    assert row_coords is not None and obs_coords is not None
+    np.testing.assert_allclose(
+        np.asarray(row_coords)[:, 0], expected + [0.0], atol=1e-9
+    )
+    # The observation batches stay at their segment ends, in whole cycles.
+    np.testing.assert_allclose(np.asarray(obs_coords)[:, 0], [1.0, 2.0], atol=1e-9)
+    np.testing.assert_array_equal(np.asarray(localize_mask), np.asarray(update_mask))
+
+
 # ---------------------------------------------------------------------------
 # (6) Alpha schedule and common random numbers
 # ---------------------------------------------------------------------------
@@ -658,11 +762,11 @@ def test_common_inner_noise_repeats_the_inner_realization(
 
 
 # ---------------------------------------------------------------------------
-# (7) Per-cycle knot selection
+# (7) Per-cycle segment restriction
 # ---------------------------------------------------------------------------
 
 
-def _inner_filter() -> Any:
+def _inner_filter(cycle_length: Optional[float] = _CYCLE_LENGTH) -> Any:
     from data_assimilation.filter_smoothing.base import _TrajectoryStateFilter
 
     return _TrajectoryStateFilter(
@@ -670,14 +774,17 @@ def _inner_filter() -> Any:
         forward_model=_TrajectoryToyModel(),
         C_D=jnp.array([0.01]),
         mode="state",
+        cycle_length=cycle_length,
     )
 
 
-def test_params_for_cycle_slices_one_knot_and_carries_static_vars() -> None:
-    """Piecewise-constant ``theta_k`` over segment ``k`` (Eq. 6), with a clamp.
+def test_params_for_cycle_restricts_the_trajectory_to_the_segment() -> None:
+    """Cycle ``k`` gets the trajectory over ``[k*dt, (k+1)*dt]``, not one knot.
 
-    The trajectory prior carries one more knot than the window has cycles (the
-    trailing knot is the leading edge of a future moving window), and a static
+    The knot grid here IS the cycle grid, which is the case the old
+    piecewise-constant contract covered — and even here the segment is a
+    two-knot ramp, on a segment-local clock, because that is what the backends
+    interpolate and what the truth trajectory was generated with. A static
     parameter with no ``time`` dimension rides along untouched.
     """
     n_e, n_knots = 5, 3
@@ -686,20 +793,127 @@ def test_params_for_cycle_slices_one_knot_and_carries_static_vars() -> None:
     params = _trajectory_params(knots, static=gamma)
     inner = _inner_filter()
 
-    for cycle in range(n_knots):
-        sliced = inner._params_for_cycle(cycle, params)
-        assert "time" not in sliced.dims
+    for cycle in range(n_knots - 1):
+        segment = inner._params_for_cycle(cycle, params)
+        # Segment-local clock: the schedule a backend receives is call-relative.
         np.testing.assert_allclose(
-            np.asarray(sliced["theta"].values), knots[cycle], rtol=1e-6
+            np.asarray(segment["time"].values), [0.0, _CYCLE_LENGTH], atol=1e-9
         )
-        np.testing.assert_allclose(np.asarray(sliced["gamma"].values), gamma, rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(segment["theta"].values),
+            knots[cycle : cycle + 2],
+            rtol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(segment["gamma"].values), gamma, rtol=1e-6
+        )
 
-    # Beyond the last knot the trajectory is held constant rather than raising.
-    clamped = inner._params_for_cycle(n_knots + 4, params)
-    np.testing.assert_allclose(
-        np.asarray(clamped["theta"].values), knots[-1], rtol=1e-6
-    )
     assert inner._params_for_cycle(0, None) is None
+    # A params Dataset without a trajectory is passed through by identity.
+    static_only = xarray.Dataset(
+        {"gamma": (("ensemble",), jnp.asarray(gamma))},
+        coords={"ensemble": np.arange(n_e)},
+    )
+    assert inner._params_for_cycle(1, static_only) is static_only
+
+
+def test_params_for_cycle_interpolates_inside_a_coarse_knot_interval() -> None:
+    """Knots COARSER than a cycle: every segment gets its own interpolated ramp.
+
+    Two knots 2 cycles apart, so neither cycle has a knot of its own — the old
+    "knot k backs cycle k" reading has nothing to say here. Cycle 0 must ramp
+    from the first knot to the interval's midpoint value and cycle 1 from there
+    to the second knot, which is exactly the trajectory the truth generator
+    would have handed the solver.
+    """
+    inner = _inner_filter()
+    params = _trajectory_params(np.array([[0.0, 10.0], [4.0, 14.0]]), spacing=2.0)
+
+    first = inner._params_for_cycle(0, params)
+    np.testing.assert_allclose(np.asarray(first["time"].values), [0.0, 1.0], atol=1e-9)
+    np.testing.assert_allclose(
+        np.asarray(first["theta"].values), [[0.0, 10.0], [2.0, 12.0]], rtol=1e-6
+    )
+
+    second = inner._params_for_cycle(1, params)
+    np.testing.assert_allclose(np.asarray(second["time"].values), [0.0, 1.0], atol=1e-9)
+    np.testing.assert_allclose(
+        np.asarray(second["theta"].values), [[2.0, 12.0], [4.0, 14.0]], rtol=1e-6
+    )
+
+
+def test_params_for_cycle_keeps_the_knots_inside_a_fine_segment() -> None:
+    """Knots FINER than a cycle: the interior knot survives, at its local time.
+
+    A half-cycle grid, so each segment brackets one interior knot. Collapsing
+    the segment to its endpoints would silently smooth away exactly the
+    resolution a finer ``time.seconds_per_knot`` was configured to buy.
+    """
+    inner = _inner_filter()
+    params = _trajectory_params(
+        np.array([[0.0], [1.0], [4.0], [9.0], [16.0]]), spacing=0.5
+    )
+
+    segment = inner._params_for_cycle(1, params)
+    np.testing.assert_allclose(
+        np.asarray(segment["time"].values), [0.0, 0.5, 1.0], atol=1e-9
+    )
+    np.testing.assert_allclose(
+        np.asarray(segment["theta"].values).ravel(), [4.0, 9.0, 16.0], rtol=1e-6
+    )
+
+
+def test_params_for_cycle_holds_a_single_knot_constant() -> None:
+    """One knot is a legal (constant) trajectory: clamped at both ends."""
+    inner = _inner_filter()
+    params = _trajectory_params(np.array([[2.0, 3.0]]))
+
+    for cycle in (0, 5):
+        segment = inner._params_for_cycle(cycle, params)
+        np.testing.assert_allclose(
+            np.asarray(segment["time"].values), [0.0, _CYCLE_LENGTH], atol=1e-9
+        )
+        np.testing.assert_allclose(
+            np.asarray(segment["theta"].values), [[2.0, 3.0], [2.0, 3.0]], rtol=1e-6
+        )
+
+
+def test_params_for_cycle_clamps_beyond_the_last_knot() -> None:
+    """Past the trajectory's end the value is HELD, never extrapolated.
+
+    A window whose cycles run past its knots (or a segment straddling the end)
+    must freeze at the last knot: linear extrapolation of an AR(2) draw would
+    walk the parameter off to an arbitrary value nothing constrains.
+    """
+    inner = _inner_filter()
+    knots = np.array([[0.0], [1.0]])
+    params = _trajectory_params(knots)
+
+    # Segment 1 straddles the last knot: it opens at it and holds.
+    straddling = inner._params_for_cycle(1, params)
+    np.testing.assert_allclose(
+        np.asarray(straddling["theta"].values).ravel(), [1.0, 1.0], rtol=1e-6
+    )
+    # ... and a segment entirely past the end is constant at the last knot.
+    beyond = inner._params_for_cycle(4, params)
+    np.testing.assert_allclose(
+        np.asarray(beyond["theta"].values).ravel(), [1.0, 1.0], rtol=1e-6
+    )
+
+
+def test_params_for_cycle_needs_a_cycle_length_and_knot_times() -> None:
+    """Both halves of "where is segment k on the trajectory?" are required.
+
+    The knot axis is physical seconds, so neither the cycle length nor the
+    ``time`` coordinate can be inferred; guessing either would silently re-time
+    the whole trajectory rather than fail.
+    """
+    params = _trajectory_params(np.array([[0.0], [1.0]]))
+    with pytest.raises(ValueError, match="cycle_length"):
+        _inner_filter(cycle_length=None)._params_for_cycle(0, params)
+
+    with pytest.raises(ValueError, match="'time' coordinate"):
+        _inner_filter()._params_for_cycle(0, params.drop_vars("time"))
 
 
 def test_base_filter_params_for_cycle_is_the_identity() -> None:

@@ -102,9 +102,11 @@ class WindowLayout(NamedTuple):
         num_windows: ``W`` -- fixed-lag windows the run drove. 1 is the single
             fixed window (the default), where every field below degenerates to
             the plain filtering reading.
-        window_length: ``L`` -- cycles per window, i.e. the number of trajectory
-            knots one outer ESMDA update touches at once. Also the number of
-            per-cycle artifacts that survive on disk, whatever ``W`` is.
+        window_length: ``L`` -- cycles per window, i.e. the number of
+            observation batches one outer ESMDA update assimilates at once (how
+            many trajectory KNOTS it touches is a separate number, set by
+            ``time.seconds_per_knot``). Also the number of per-cycle artifacts
+            that survive on disk, whatever ``W`` is.
         window_shift: ``s`` -- cycles the window slid between windows.
         total_cycles: ``T = L + (W-1)*s`` -- the assimilated horizon, which is
             what ``truth_access.yaml``'s ``num_cycles`` counts.

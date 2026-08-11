@@ -33,7 +33,9 @@
 #                                              how the MOVING window's new
 #                                              leading-edge knot is drawn from
 #                                              the carried one (num_windows>1)
-#   * filter_smoothing.num_cycles=L            cycles (= knots) per window
+#   * filter_smoothing.num_cycles=L            cycles per window (the trajectory's
+#                                              knot count is set separately, by
+#                                              time.seconds_per_knot)
 #   * filter_smoothing.num_windows=W           windows the window slides through
 #                                              (1 -> one fixed window)
 #   * filter_smoothing.window_shift=s          cycles the window slides by
@@ -46,9 +48,10 @@
 # equal to `obs.interval_seconds` to assimilate one observation interval per
 # analysis. Unlike run_filtering.yaml, the PRIOR must be DYNAMIC (time-varying):
 # this method estimates a whole parameter TRAJECTORY, so pair with
-# `params@prior_params=dynamic` (AR(2)) and keep `time.seconds_per_knot` equal to
-# `time.simulation_time` so one knot backs exactly one cycle. The script
-# validates that loudly and derives the trajectory length from the sampled prior.
+# `params@prior_params=dynamic` (AR(2)). `time.seconds_per_knot` sets that
+# trajectory's resolution independently of the cycle length (see below); the
+# script validates the sampled knot grid loudly and derives the trajectory length
+# from it.
 #
 # Examples::
 #
@@ -95,12 +98,18 @@ paths:
   experiment_dir: ${oc.env:PWD}/.temp
   base_results_dir: .temp_lbm
 
-# --- Time-varying parameter knot spacing. Here it is LOAD-BEARING, not just a
-# key the dynamic samplers interpolate: one knot must back exactly one cycle, so
-# the spacing is tied to the per-cycle segment length. The script re-checks the
-# SAMPLED knot times (spacing == cycle length, count covers num_cycles) and fails
-# loudly on a mismatch, so overriding this to anything else is an error, not a
-# silent re-interpretation. ---
+# --- Time-varying parameter knot spacing: the RESOLUTION of the estimated
+# trajectory, and a free knob. It defaults to the cycle length (one knot per
+# assimilation segment, the paper's shape) but is not tied to it: cycle k's
+# forecast is handed the trajectory RESTRICTED to its segment — linearly
+# interpolated at the segment's edges, with every knot strictly inside it carried
+# through — as a time-varying schedule the backend interpolates natively. So a
+# finer spacing resolves within-segment variation and a coarser one ramps a
+# single knot interval across several cycles. Two constraints, both checked
+# loudly by the script: the sampled grid must start at 0, be uniform at this
+# spacing and reach the window's end; and with filter_smoothing.num_windows > 1,
+# `window_shift * time.simulation_time` must be a whole number of knots, since
+# the moving window slides the grid by exactly that many seconds. ---
 time:
   seconds_per_knot: ${time.simulation_time}
 
@@ -132,9 +141,12 @@ ensemble:
 # composes the inner analysis / inner localization / inner inflation and the
 # temporal localization selected by the groups above. ---
 filter_smoothing:
-  # Window length L: cycles per window = knots of the estimated trajectory. Each
-  # cycle forecasts one segment of `time.simulation_time` seconds, so the window
-  # spans num_cycles * time.simulation_time seconds.
+  # Window length L: cycles per window, i.e. observation batches one outer ESMDA
+  # update assimilates at once. Each cycle forecasts one segment of
+  # `time.simulation_time` seconds, so the window spans
+  # num_cycles * time.simulation_time seconds. How many KNOTS the estimated
+  # trajectory has over that span is a separate question, answered by
+  # `time.seconds_per_knot` above (they are equal only at the default spacing).
   num_cycles: 24
   # Number of windows W the fixed-lag window slides through. 1 (the default) is
   # the single fixed window: one run() call over num_cycles cycles, byte for
@@ -193,6 +205,12 @@ filter_smoothing:
   smoother:
     _target_: data_assimilation.filter_smoothing.FilterSmoothingESMDA
     _convert_: all
+    # Seconds one cycle's forecast segment spans — the unit that places a cycle
+    # on the trajectory's (physical, seconds-valued) knot axis, and the unit of
+    # `temporal_localization.temporal_radius`. Always the cycle length; it is a
+    # constructor argument rather than a read off the forward model so the
+    # estimator stays usable with a model that does not expose one.
+    cycle_length: ${time.simulation_time}
     num_steps: ${filter_smoothing.num_steps}
     alpha: ${filter_smoothing.alpha}
     inner_analysis: ${filter_smoothing.inner_analysis}

@@ -11,9 +11,10 @@ does — while the low-dimensional **parameter trajectory**
 One outer iteration (paper Algorithm 1):
 
 1. reset the state ensemble to the window's initial ensemble and run one inner
-   filter pass over the window, forecasting cycle ``k`` with knot ``k`` of the
-   current trajectory and storing each cycle's forecast observations
-   ``d_k = H(x_f_k)`` *before* its analysis (Eq. 6–7);
+   filter pass over the window, forecasting cycle ``k`` with the *restriction of
+   the trajectory to segment ``k``* — a time-varying schedule the backend
+   interpolates natively, not a constant — and storing each cycle's forecast
+   observations ``d_k = H(x_f_k)`` *before* its analysis (Eq. 6–7);
 2. stack them into ``D`` of shape ``(L*N_d, N_e)`` and the observation batches
    into ``Y`` of shape ``(L*N_d,)`` (Eq. 9–10);
 3. apply ONE tempered stochastic Kalman update to the flattened trajectory
@@ -25,6 +26,18 @@ Because ``C_{Theta D}`` spans the whole window, an observation at the end of
 the window can revise a knot at its start, while no observation ever revises a
 past *state*. That asymmetry is the point of the method. A final inner pass
 (§5) makes the returned state consistent with the final trajectory.
+
+**Deviation from the paper, deliberate.** The paper's ``theta_k`` is
+piecewise-constant over segment ``k`` (Eq. 6). Here the knot grid is
+independent of the cycle grid, and each segment's forecast receives the
+trajectory *restricted to that segment* — its endpoints linearly interpolated
+between the bracketing knots, every knot strictly inside it carried through —
+which the backends already consume (``uvel_time.dat`` for pylbm, the nudging
+schedule for pyudales, both interpolated by the Fortran). That matches how the
+truth trajectory is generated: the solver interpolates it, so a
+piecewise-constant estimate would be fitting a different model of the forcing
+than the one that produced the data. It also decouples the trajectory's
+resolution (``time.seconds_per_knot``) from the assimilation cycle length.
 """
 
 import logging
@@ -49,6 +62,72 @@ from data_assimilation.localization.base import BaseLocalization
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
 logger = logging.getLogger(__name__)
+
+# Relative slack of every knot-time comparison (is this knot strictly inside the
+# segment?). The knot axis is built in float32 by the samplers, so an exact
+# comparison against a float64 segment boundary would trip on representation
+# alone.
+_TIME_RTOL = 1e-6
+
+
+def _time_tol(scale: float) -> float:
+    """Absolute slack for a time comparison at the given scale."""
+    return _TIME_RTOL * max(abs(float(scale)), 1.0)
+
+
+def knot_times(params: xarray.Dataset) -> np.ndarray:
+    """The trajectory's knot times, in PHYSICAL SECONDS on its own clock.
+
+    The knot grid is a free choice (``time.seconds_per_knot``), independent of
+    the cycle length, so the segment restriction below cannot infer the knots'
+    positions from their index — it reads them off the ``time`` coordinate the
+    samplers emit (``build_knot_times``). A ``time`` dimension carrying no
+    coordinate values is therefore an error rather than something to fill in.
+    """
+    if "time" not in params.coords:
+        raise ValueError(
+            "The parameter trajectory has a 'time' dimension but no 'time' "
+            "coordinate. Filter smoothing reads the knot times as physical "
+            "seconds (the samplers set them from time.seconds_per_knot); "
+            "without them a segment cannot be located on the trajectory."
+        )
+    times = np.asarray(params.coords["time"].values, dtype=float)
+    if times.ndim != 1 or times.size == 0:
+        raise ValueError(
+            f"The trajectory's 'time' coordinate has shape {times.shape}; a "
+            "1-D, non-empty knot axis is required."
+        )
+    if times.size > 1 and not np.all(np.diff(times) > 0.0):
+        raise ValueError(
+            "The trajectory's knot times are not strictly increasing: "
+            f"{np.asarray(times).tolist()}. The segment restriction "
+            "interpolates between consecutive knots, which needs an ordered "
+            "grid."
+        )
+    return times
+
+
+def _interpolate_knots(
+    times: np.ndarray,
+    values: np.ndarray,
+    targets: np.ndarray,
+) -> np.ndarray:
+    """``np.interp`` of a time-leading array, broadcast over the trailing dims.
+
+    ``values`` is ``(n_knots, ...)`` (typically ``(n_knots, N_e)`` — one
+    trajectory per member), ``targets`` a 1-D array of times. Outside the knot
+    range the value is CLAMPED to the nearest end knot, exactly as
+    :func:`numpy.interp` does: a segment past the last knot holds it, and a
+    single-knot trajectory is constant everywhere.
+    """
+    if times.size == 1:
+        return np.repeat(values[:1], targets.size, axis=0)
+    upper = np.clip(np.searchsorted(times, targets, side="left"), 1, times.size - 1)
+    lower = upper - 1
+    span = times[upper] - times[lower]
+    weight = np.clip((targets - times[lower]) / span, 0.0, 1.0)
+    weight = weight.reshape((targets.size,) + (1,) * (values.ndim - 1))
+    return values[lower] * (1.0 - weight) + values[upper] * weight
 
 
 @dataclass
@@ -109,21 +188,37 @@ class FilterSmoothingResult:
 
 
 class _TrajectoryStateFilter(EnsembleKalmanFilter):
-    """State-only EnKF whose cycle-``k`` forecast uses knot ``k`` of a trajectory.
+    """State-only EnKF whose cycle-``k`` forecast uses SEGMENT ``k`` of a trajectory.
 
     The only difference from the plain EnKF is
     :meth:`~data_assimilation.filtering.base.BaseFilter._params_for_cycle`:
-    the parameter Dataset it carries is a *trajectory* over the window, and
-    each cycle forecasts with its own knot as plain scalar ``(ensemble,)``
-    parameters, so no backend ever sees a ``time`` dimension. Piecewise-constant
-    ``theta_k`` over segment ``k`` is the paper's discrete dynamics (Eq. 6).
+    the parameter Dataset it carries is a *trajectory* over the window, and each
+    cycle forecasts with the piece of it that spans that cycle's segment —
+    ``[k*cycle_length, (k+1)*cycle_length]`` on the trajectory's clock — handed
+    to the backend as a time-varying schedule on a segment-local axis. The
+    backends interpolate such a schedule natively (pylbm writes it to
+    ``uvel_time.dat``, pyudales feeds it through nudging), which is the same code
+    path dynamic-mode ESMDA exercises, so the knot grid is free to be coarser or
+    finer than the cycle.
 
     ``mode="state"`` (enforced by :class:`FilterSmoothingESMDA`) is what makes
     this legal: the parameter block never enters the inner analysis, so the
     trajectory rides through the pass unmodified — it is the *outer* loop's
     control vector — and ``_check_static_params`` (which rejects time-varying
     parameters) is skipped.
+
+    ``cycle_length`` is the number of seconds one cycle's forecast segment
+    spans; without it the cycle index cannot be placed on the trajectory's
+    (physical, seconds-valued) knot axis at all.
     """
+
+    def __init__(
+        self, *args: Any, cycle_length: Optional[float] = None, **kwargs: Any
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.cycle_length: Optional[float] = (
+            None if cycle_length is None else float(cycle_length)
+        )
 
     def _params_for_cycle(
         self,
@@ -132,14 +227,52 @@ class _TrajectoryStateFilter(EnsembleKalmanFilter):
     ) -> Optional[xarray.Dataset]:
         if params is None or "time" not in params.dims:
             return params
-        # Clamp at the final knot: a prior sampled over the window's horizon
-        # emits L+1 knots for L cycles (the trailing knot is the next window's
-        # leading edge), but a caller that supplies exactly L knots must not
-        # index past the end on the last cycle.
-        knot = min(cycle, int(params.sizes["time"]) - 1)
-        # ``drop=True`` removes the scalar ``time`` coordinate; variables
-        # without a ``time`` dimension (static parameters) pass through.
-        return params.isel(time=knot, drop=True)
+        if self.cycle_length is None:
+            raise ValueError(
+                "The inner filter carries a parameter TRAJECTORY but no "
+                "cycle_length, so segment k cannot be located on the knot axis. "
+                "Pass cycle_length= to FilterSmoothingESMDA (the run script "
+                "ties it to time.simulation_time)."
+            )
+        cycle_length = self.cycle_length
+        times = knot_times(params)
+
+        # Segment k spans [k*dt, (k+1)*dt] on the trajectory's own clock. Its
+        # local axis is what the backend sees: the schedule is call-relative
+        # (pylbm shifts it onto its continuing nt0 clock itself), so it always
+        # runs [0, cycle_length].
+        start = cycle * cycle_length
+        end = start + cycle_length
+        tol = _time_tol(cycle_length)
+        # Strictly inside: a knot sitting ON either boundary is already there as
+        # the interpolated endpoint, and repeating it would put a duplicate time
+        # in the backend's schedule.
+        interior = times[(times > start + tol) & (times < end - tol)]
+        targets = np.concatenate(([start], interior, [end]))
+        local = np.concatenate(([0.0], interior - start, [cycle_length]))
+
+        data_vars: dict[str, xarray.DataArray] = {}
+        for name, variable in params.data_vars.items():
+            if "time" not in variable.dims:
+                # Static parameters pass through unchanged (and keep their own
+                # coordinates); they are not part of the trajectory.
+                data_vars[str(name)] = variable
+                continue
+            ordered = variable.transpose("time", ...)
+            segment = _interpolate_knots(
+                times, np.asarray(ordered.values), targets
+            ).astype(variable.dtype, copy=False)
+            data_vars[str(name)] = xarray.DataArray(
+                segment,
+                dims=ordered.dims,
+                coords={
+                    str(dim): params.coords[dim]
+                    for dim in ordered.dims
+                    if dim != "time" and dim in params.coords
+                },
+            ).transpose(*variable.dims)
+
+        return xarray.Dataset(data_vars, attrs=params.attrs).assign_coords(time=local)
 
 
 class FilterSmoothingESMDA:
@@ -160,6 +293,12 @@ class FilterSmoothingESMDA:
             1-D variance vector ``(N_d,)`` (a square diagonal matrix is
             accepted). The stacked window covariance is
             ``tile(C_D, L)`` — the paper's block-diagonal ``R_W``.
+        cycle_length: Seconds one inner cycle's forecast segment spans. It is
+            what places cycle ``k`` on the trajectory's physical knot axis, and
+            the unit the temporal localization's coordinates are expressed in.
+            ``None`` (default) reads ``forward_model.simulation_time``; if that
+            is absent too, a time-varying ``params`` is rejected at
+            :meth:`run`.
         num_steps: Number of outer ESMDA iterations ``N_a``.
         alpha: Tempering weight of each iteration. ``None`` (default) means
             ``num_steps``, the equal-weight schedule ``sum_a 1/alpha_a = 1``
@@ -196,6 +335,7 @@ class FilterSmoothingESMDA:
         observation_operator: Callable[[xarray.Dataset], Any],
         forward_model: BaseEnsembleForwardModel,
         C_D: jnp.ndarray,
+        cycle_length: Optional[float] = None,
         num_steps: int = 4,
         alpha: Optional[float] = None,
         inner_analysis: Optional[AnalysisScheme] = None,
@@ -234,8 +374,28 @@ class FilterSmoothingESMDA:
                 "use a distance/correlation strategy for inner_localization."
             )
 
+        # The cycle length is the trajectory clock's unit: the forward model
+        # already knows how long one of its runs is, so an explicit argument is
+        # only needed when the two differ (or when the model does not expose
+        # it). Resolved here, but a missing value is only fatal for a
+        # time-varying params Dataset — which run() is what sees.
+        resolved_cycle_length = (
+            cycle_length
+            if cycle_length is not None
+            else getattr(forward_model, "simulation_time", None)
+        )
+        if resolved_cycle_length is not None and float(resolved_cycle_length) <= 0.0:
+            raise ValueError(
+                f"cycle_length must be > 0, got {float(resolved_cycle_length)}: it "
+                "is the number of seconds one cycle's forecast segment spans."
+            )
+
         self.observation_operator = observation_operator
         self.forward_model = forward_model
+        #: Seconds one cycle's forecast segment spans (``None`` when unknown).
+        self.cycle_length: Optional[float] = (
+            None if resolved_cycle_length is None else float(resolved_cycle_length)
+        )
         self.num_steps = num_steps
         self.alpha = num_steps if alpha is None else alpha
         self.temporal_localization = temporal_localization
@@ -260,6 +420,7 @@ class FilterSmoothingESMDA:
             mode="state",
             localization=inner_localization,
             inflation=inner_inflation,
+            cycle_length=self.cycle_length,
         )
         # The whole method rests on this: ``D`` must be the forecast
         # observations stored before each analysis (§9, first bullet).
@@ -299,11 +460,14 @@ class FilterSmoothingESMDA:
                 discarded). ``None`` is a legal cold start — each iteration
                 then cold-starts identically.
             params: The prior trajectory ensemble: a Dataset with ``time``
-                (knots) and ``ensemble`` dims, plus optional static
-                (no-``time``) variables. Knot ``k`` is the parameter value of
-                cycle ``k``; the knot count may exceed the cycle count by the
-                trailing knot a windowed prior sampler emits (it rides along in
-                the update through prior temporal correlations only).
+                (knots, in seconds) and ``ensemble`` dims, plus optional static
+                (no-``time``) variables. The knot grid is free — coarser or
+                finer than the cycle length, and of any length from one knot up
+                — because each cycle forecasts with the trajectory restricted
+                to its segment rather than with one knot. Knots outside the
+                window's span (the trailing knot a windowed prior sampler
+                emits) ride along in the update through prior temporal
+                correlations only.
             observations: Array of shape ``(num_cycles, N_d)`` — one batch per
                 cycle, exactly as the sequential filter consumes them.
             return_history: Collect the per-iteration trajectories into
@@ -335,18 +499,25 @@ class FilterSmoothingESMDA:
         if "time" not in params.dims:
             raise ValueError(
                 "params has no 'time' dimension: filter smoothing estimates a "
-                "parameter TRAJECTORY over the window (one knot per cycle). "
-                "Sample a dynamic (time-varying) prior, or use the sequential "
-                "filter for static parameters."
+                "parameter TRAJECTORY over the window. Sample a dynamic "
+                "(time-varying) prior, or use the sequential filter for static "
+                "parameters."
             )
-        num_knots = int(params.sizes["time"])
-        if num_knots < num_cycles:
+        if self.cycle_length is None:
             raise ValueError(
-                f"The trajectory prior has {num_knots} knots but the window "
-                f"has {num_cycles} cycles. Cycles beyond the last knot would "
-                "silently reuse it; sample the prior over the full window "
-                "(seconds_per_knot = one cycle's simulation_time)."
+                "params is a time-varying trajectory but the smoother has no "
+                "cycle_length, so cycle k cannot be placed on the knot axis "
+                "(the knots are physical seconds, the cycles are segments of "
+                "cycle_length seconds). Pass cycle_length= explicitly, or a "
+                "forward model exposing simulation_time."
             )
+        cycle_length = self.cycle_length
+        num_knots = int(params.sizes["time"])
+        if num_knots < 1:
+            raise ValueError("The trajectory prior has no knots to estimate.")
+        # Read (and validate) the knot times once: the row layout places them on
+        # the cycle clock, and the inner filter restricts them per segment.
+        times = knot_times(params)
 
         # Cycle-major stacking of the window system (Eq. 9-10): observation j
         # of cycle k is row ``k * N_d + j`` of Y, of D, and of C_D_stacked.
@@ -356,7 +527,9 @@ class FilterSmoothingESMDA:
         # num_time_points comes from the sampled prior, never from a config
         # literal (same pattern as run_esmda.py's smoother override).
         augmentation = ParamAugmentation(num_time_points=num_knots)
-        update_mask, row_times = self._trajectory_row_layout(params, num_knots)
+        update_mask, row_times = self._trajectory_row_layout(
+            params, times, cycle_length
+        )
         row_coords, obs_coords, group_ids, localize_mask = self._localization_plumbing(
             params, augmentation, update_mask, row_times, num_cycles, n_d
         )
@@ -489,27 +662,31 @@ class FilterSmoothingESMDA:
     def _trajectory_row_layout(
         self,
         params: xarray.Dataset,
-        num_knots: int,
+        knot_seconds: np.ndarray,
+        cycle_length: float,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """``(update_mask, row_times)`` for the flattened trajectory rows.
 
         Mirrors :meth:`~data_assimilation.augmentation.ParamAugmentation.\
-flatten`'s ordering exactly — for each variable in Dataset order, ``num_knots``
-        rows if it has a ``time`` dimension, otherwise one — and labels each
+flatten`'s ordering exactly — for each variable in Dataset order, one row per
+        knot if it has a ``time`` dimension, otherwise one — and labels each
         row with
 
         * whether the outer update may move it (static parameters: no, see the
           class docstring), and
-        * the knot's time, in units of CYCLES: knot ``j`` sits at the start of
-          segment ``j``, so ``t_j = j``. Static rows are masked out of the
-          localized update, so their (unused) time is 0.
+        * the knot's time, in units of CYCLES: ``t_j = knot_seconds[j] /
+          cycle_length``, which is FRACTIONAL for a knot grid that is not the
+          cycle grid (a knot half a cycle in sits at 0.5). With one knot per
+          cycle it is exactly the knot index, as it always was. Static rows are
+          masked out of the localized update, so their (unused) time is 0.
         """
         mask: list[bool] = []
         times: list[float] = []
+        cycle_coords = [float(t) / cycle_length for t in knot_seconds]
         for name in params.data_vars:
             if "time" in params[name].dims:
-                mask.extend([True] * num_knots)
-                times.extend(float(knot) for knot in range(num_knots))
+                mask.extend([True] * len(cycle_coords))
+                times.extend(cycle_coords)
             else:
                 mask.append(False)
                 times.append(0.0)
@@ -539,20 +716,21 @@ flatten`'s ordering exactly — for each variable in Dataset order, ``num_knots`
 
         All ``None`` without a temporal localization (the global update ignores
         them). With one, the coordinates carry TIME in component 0 — knot ``j``
-        at ``t_j = j`` (segment start) and observation batch ``k`` at
+        at its own ``knot_time / cycle_length`` and observation batch ``k`` at
         ``t = k + 1`` (segment end, the time its state is observed), both in
-        units of cycles, so ``temporal_radius`` is a number of cycles. The
-        remaining two components are zero: this is a 1-D geometry reusing the
-        ``(N, 3)`` coordinate contract of the spatial strategies.
+        units of cycles, so ``temporal_radius`` is a number of cycles whatever
+        the knot spacing is. The remaining two components are zero: this is a
+        1-D geometry reusing the ``(N, 3)`` coordinate contract of the spatial
+        strategies.
 
         Consequence of that convention, worth knowing when choosing a radius:
-        the knot that DROVE segment ``k`` sits one full cycle before the
+        the knot at the START of segment ``k`` sits one full cycle before the
         observation of that segment, so a ``temporal_radius`` of 1 cycle keeps
-        only each knot's own observation batch (at maximum taper) and anything
-        below 1 excludes every observation, leaving the trajectory untouched. A
-        useful radius spans several cycles. (Placing the observations at the
-        segment MIDPOINT instead is a one-line change here if the resulting
-        asymmetry ever proves to matter.)
+        only that batch (at maximum taper) and anything below 1 excludes every
+        observation from the knots on the cycle boundaries, leaving them
+        untouched. A useful radius spans several cycles. (Placing the
+        observations at the segment MIDPOINT instead is a one-line change here
+        if the resulting asymmetry ever proves to matter.)
 
         ``localize_mask`` excludes the static rows (they take the global update
         and are restored afterwards anyway), and ``group_ids`` is supplied only

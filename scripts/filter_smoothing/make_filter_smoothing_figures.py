@@ -196,12 +196,14 @@ def make_figures(run_dir: pathlib.Path) -> None:
             if prior_params_path.exists()
             else None
         )
-        # Alternating shading of the knot blocks each window FINALIZED (window
-        # ``w`` fixes knots ``[w*s, (w+1)*s)`` on leaving), which is the only
-        # window structure that is unambiguous on a knot axis -- the window
-        # spans themselves overlap by ``L - s`` cycles and would shade over each
-        # other. ``None`` for a single window, whose knots were all finalized at
-        # once.
+        # Alternating shading of the blocks each window FINALIZED (window ``w``
+        # fixes the knots in ``[w*s*sim_time, (w+1)*s*sim_time)`` seconds on
+        # leaving -- however many knots that is, since the knot grid is set by
+        # time.seconds_per_knot and need not be the cycle grid), which is the
+        # only window structure that is unambiguous on the trajectory's time
+        # axis -- the window spans themselves overlap by ``L - s`` cycles and
+        # would shade over each other. ``None`` for a single window, whose knots
+        # were all finalized at once.
         finalized_edges = (
             [
                 min(w * layout.window_shift, layout.total_cycles) * sim_time

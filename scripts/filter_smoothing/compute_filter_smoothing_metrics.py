@@ -211,8 +211,9 @@ def _trajectory_metrics(
     which is the resolution the method is about -- a trajectory estimate is only
     interesting knot by knot, and a run whose middle knots are sharp while its
     leading edge is still at prior width looks identical in the reduced numbers.
-    Short by construction (one entry per cycle plus the trailing knot), so it
-    costs the summary nothing to carry.
+    One entry per knot of the trajectory (``time.seconds_per_knot`` sets how
+    many that is, independently of the cycle count), and the ``knot`` column is
+    their times in seconds — short enough that it costs the summary nothing.
 
     The prior half is present only when the prior is sampled on the SAME knot
     grid as the posterior. Under a moving window it is not, by design: the prior

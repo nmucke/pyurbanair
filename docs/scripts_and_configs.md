@@ -110,9 +110,9 @@ rather than pulling them from separate files. The table below summarises each.
 
 | Field | Default | Purpose |
 |---|---|---|
-| `num_cycles` | 8 | Number of cycles `L` in the window; each forecasts one segment of `time.simulation_time`. Also the number of parameter knots the outer update estimates (plus the trailing knot). |
+| `num_cycles` | 8 | Number of cycles `L` in the window; each forecasts one segment of `time.simulation_time` and contributes one observation batch. How many parameter *knots* the outer update estimates over that window is a separate number, set by `time.seconds_per_knot` (equal to `L + 1` only at the default one-knot-per-cycle spacing). |
 | `num_windows` | 1 | Number of fixed-lag windows. `1` = the single-window path (byte-identical to Phase 1); `> 1` slides the window and assimilates a horizon of `T = num_cycles + (num_windows - 1) * window_shift` cycles. |
-| `window_shift` | 1 | Cycles `s` the window slides by between windows, `1 <= s <= num_cycles`; `s = num_cycles` makes the windows non-overlapping. The oldest `s` knots are finalized on leaving the window and `s` new ones are appended by `filter_smoothing/evolution`. |
+| `window_shift` | 1 | Cycles `s` the window slides by between windows, `1 <= s <= num_cycles`; `s = num_cycles` makes the windows non-overlapping. The window advances `s * time.simulation_time` **seconds**: the knots before that are finalized on leaving the window and as many new ones are appended by `filter_smoothing/evolution`. That advance must be a whole number of knot spacings (checked up front) or the knot grid drifts out of phase with the windows. |
 | `num_steps` | 4 | Number of outer ESMDA iterations `N_a`; each is one full inner filter pass through the window plus one tempered trajectory update. |
 | `alpha` | `null` | Tempering denominator; `null` = `num_steps` (equal weights, the standard ESMDA schedule). |
 | `seed` | 42 | JAX RNG seed. |
@@ -123,7 +123,7 @@ rather than pulling them from separate files. The table below summarises each.
 | `inner_inflation` | (group) | Set by `filter_smoothing/inner_inflation` (default `rtps`). |
 | `temporal_localization` | (group) | Set by `filter_smoothing/temporal_localization` (default `none`); localizes the **outer** trajectory update in time. |
 | `evolution` | (group) | Set by `filter_smoothing/evolution` (default `none` → `IdentityEvolution`); the `ParameterEvolution` that appends the leading-edge knots when the window moves. Unlike the four keys above it is *not* wired into the `smoother:` node — the estimator knows nothing about sliding windows, so the script hands it to the moving-window orchestrator. Inert when `num_windows: 1`. |
-| `smoother` | `FilterSmoothingESMDA` block | The composed algorithm `_target_`, wiring the four groups plus `num_steps`/`alpha`/`common_inner_noise`; normally left alone. |
+| `smoother` | `FilterSmoothingESMDA` block | The composed algorithm `_target_`, wiring the four groups plus `cycle_length` (`${time.simulation_time}` — what places a cycle on the trajectory's seconds-valued knot axis), `num_steps`/`alpha`/`common_inner_noise`; normally left alone. |
 
 #### `run:`
 
@@ -396,12 +396,14 @@ update and how the trajectory extends when the window moves.
 | [`filter_smoothing/evolution/`](../conf/filter_smoothing/evolution/) | `none`, `random_walk` | `filter_smoothing.evolution` — the `ParameterEvolution` that appends the leading-edge knots when the window moves (`none` → `IdentityEvolution`, i.e. persistence; `random_walk` → `RandomWalkEvolution(std=…)`). Mirrors `filtering/evolution` (§1.8) and is inert when `num_windows: 1` |
 
 `taper.yaml` exposes `temporal_radius` (the truncation, counted in **cycles**
-— the coordinates are cycle indices, so a radius below 1 freezes the
-trajectory; default 3.0), `tapering_beta`, `max_inflation` and
-`block_grouping` (keep `False` — a block shares one observation selection
-across all of a parameter's knots, erasing the temporal taper). The distance
-it tapers on is the separation between a knot (at its segment start) and an
-observation batch (at its segment end), and the taper is symmetric in time —
+— the coordinates are `knot_time / cycle_length`, i.e. cycle indices at the
+default knot spacing and fractional at a finer one, so a radius below 1 freezes
+the knots on the cycle boundaries; default 3.0), `tapering_beta`,
+`max_inflation` and `block_grouping` (keep `False` — a block shares one
+observation selection across all of a parameter's knots, erasing the temporal
+taper). The distance it tapers on is the separation between a knot (at its own
+time) and an observation batch (at its segment end), and the taper is
+symmetric in time —
 a late observation may update an early knot, which is what makes the method a
 smoother; the radius suppresses spurious long-range sampling correlations, not
 causality. `none` (the default) leaves the trajectory update global.
@@ -409,7 +411,8 @@ causality. `none` (the default) leaves the trajectory update global.
 `evolution/random_walk.yaml` exposes the same `std` (scalar or per-parameter
 mapping) as `filtering/evolution/random_walk.yaml`, but the **cadence differs**:
 there it fires once per assimilation cycle, here once per *appended knot*, i.e.
-`window_shift` times per window slide. It is the leading edge's prior spread —
+once for every knot that left the window on that slide (`window_shift` times at
+the default one-knot-per-cycle spacing). It is the leading edge's prior spread —
 `none` copies the carried knot, so the new knot enters with the previous knot's
 posterior spread and the trajectory can tighten faster than the truth drifts.
 Both options are inert when `num_windows: 1`.
@@ -719,12 +722,14 @@ trajectory; every iteration restarts the inner pass from the same initial
 state, and a final pass with the converged trajectory produces the returned
 state. See [data_assimilation.md §9](data_assimilation.md).
 
-With `filter_smoothing.num_windows > 1` that window then **slides**: the
-oldest `window_shift` knots are finalized, the overlapping posterior becomes
-the next window's prior, the state is carried from the final pass's analysis
-after cycle `window_shift`, and `window_shift` leading-edge knots are appended
-per member by `filter_smoothing/evolution`. The assimilated horizon is
-`T = num_cycles + (num_windows - 1) * window_shift` cycles.
+With `filter_smoothing.num_windows > 1` that window then **slides** by
+`window_shift * time.simulation_time` seconds: the knots before that advance
+are finalized, the overlapping posterior becomes the next window's prior (with
+its knot times re-based onto the new window's clock), the state is carried from
+the final pass's analysis after cycle `window_shift`, and as many leading-edge
+knots as left are appended per member by `filter_smoothing/evolution`. The
+assimilated horizon is `T = num_cycles + (num_windows - 1) * window_shift`
+cycles.
 
 Truth generation, per-cycle `(N_d,)` observation batches, obs noise and truth
 source (`run.truth_dir`) are the same as `run_filtering.py`, except that the
@@ -734,12 +739,18 @@ covers them, giving `(T, N_d)` observation batches, while the prior trajectory
 is sampled over `num_cycles` cycles only — the later windows' knots come from
 the previous window's posterior, not from the sampler. The one inverted guard
 is the prior: a **dynamic (time-varying) params mount is required**
-(`params@prior_params=dynamic`), sampled once over that first window with
-`time.seconds_per_knot = time.simulation_time` so its knots align with the
-cycles — a knot spacing or knot count that does not cover `num_cycles` fails
-loudly. The sampler emits `L+1` knots for an `L`-cycle window; the trailing
-knot rides along in the trajectory, updated only through the prior's temporal
-correlations.
+(`params@prior_params=dynamic`), sampled once over that first window at
+`time.seconds_per_knot`. That spacing is the trajectory's resolution and is
+**free** — it defaults to `time.simulation_time` (one knot per cycle) but may
+be coarser or finer, since each cycle forecasts with the trajectory restricted
+to its segment rather than with a single knot (see
+[data_assimilation.md §9](data_assimilation.md)). What is validated loudly is
+the sampled grid — it must start at 0, be uniform at the configured spacing and
+reach the window's end — plus, for a moving window, that
+`window_shift * time.simulation_time` is a whole number of knots. At the
+default spacing the sampler emits `L+1` knots for an `L`-cycle window; the
+trailing knot is the last segment's end value and the leading edge a later
+window grows from.
 
 Mode is the cross product of the `filter_smoothing/*` groups (§1.9) — the inner
 analysis / localization / inflation, the outer temporal localization and the
