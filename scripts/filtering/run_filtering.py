@@ -26,8 +26,12 @@ Mode and machinery are declarative axes (see conf/run_filtering.yaml):
 
   * ``filtering.mode=state|parameter|joint``
         which augmented blocks the analysis updates.
-  * ``filtering/analysis=stochastic``
-        the update math (deterministic ETKF/LETKF land here later).
+  * ``filtering/analysis=stochastic|etkf|etkf_tsvd|letkf|letkf_tsvd``
+        the update math: the perturbed-observation stochastic EnKF, or a
+        deterministic ensemble transform, globally (``etkf*``, which REQUIRES
+        ``filtering/localization=none``) or per block (``letkf*``, which
+        REQUIRES a non-null localization). The ``*_tsvd`` variants additionally
+        truncate weak directions of the whitened observation anomalies.
   * ``filtering/localization=none|correlation|distance``
         reuses the smoother's localization strategies unchanged.
   * ``filtering/state_reduction=none|svd_current|svd_streaming``
@@ -70,6 +74,10 @@ Examples::
         filtering/localization=correlation
     python scripts/filtering/run_filtering.py filtering.mode=state \
         filtering/localization=none filtering/state_reduction=svd_current
+    python scripts/filtering/run_filtering.py filtering.mode=state \
+        filtering/analysis=etkf filtering/localization=none
+    python scripts/filtering/run_filtering.py filtering.mode=state \
+        filtering/analysis=letkf filtering/localization=distance
 """
 
 import dataclasses
@@ -340,6 +348,27 @@ def run(cfg: DictConfig) -> None:
                     str(cfg.run.truth_dir) if cfg.run.truth_dir is not None else None
                 ),
                 "num_truth_frames": int(n_total),
+                # `filter` above is the composed filter class, which stays
+                # `EnsembleKalmanFilter` for every update flavor (the analysis
+                # is injected, not a subclass). The resolved analysis subtree is
+                # therefore the ONLY record of which update math ran, and of its
+                # nested observation-TSVD settings. Never null: the
+                # filtering/analysis group always sets a `_target_`.
+                "analysis": OmegaConf.to_container(
+                    cfg.filtering.analysis, resolve=True
+                ),
+                # The analysis and the localization are a coupled pair (each
+                # analysis declares a localization_policy of optional /
+                # forbidden / required), and the per-block LETKF diagnostics in
+                # cycle_diagnostics.yaml are only interpretable against the
+                # strategy and radius that produced them. Recorded here for the
+                # same reason as `analysis`, in the same fully resolved form;
+                # `null` is a real value (the global update).
+                "localization": (
+                    OmegaConf.to_container(cfg.filtering.localization, resolve=True)
+                    if cfg.filtering.localization is not None
+                    else None
+                ),
                 # Preserve the fully resolved Hydra subtree (including the
                 # implementation target and variable scales) so benchmark
                 # records never need to infer which reduction was run.

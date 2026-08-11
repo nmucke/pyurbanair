@@ -27,9 +27,11 @@ from typing import Any, Callable, Literal, Optional
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
+import numpy as np
 import xarray
 from data_assimilation.augmentation import ParamAugmentation, StateAugmentation
 from data_assimilation.filtering.analysis import (
+    LOCALIZATION_POLICIES,
     AnalysisScheme,
     StochasticEnKFAnalysis,
     validate_variances,
@@ -66,6 +68,21 @@ class CycleDiagnostics:
       the ensemble-mean predicted observations before/after the analysis.
     * spreads: mean per-row ensemble standard deviation of each augmented
       block, before and after the analysis (after any inflation).
+
+    The ``reduction_*``, ``transform_*`` and ``local_*`` groups are additive
+    and nullable: a field is ``None`` on every path where the quantity does not
+    exist, so the schema of ``cycle_diagnostics.yaml`` is the same for every
+    configuration and a reader never has to branch on the analysis scheme. The
+    stochastic analysis leaves both transform groups ``None``; a global
+    ensemble transform fills ``transform_*``; a localized one fills
+    ``local_*``. They are read back off the analysis object by name (see
+    :meth:`BaseFilter._record_transform_diagnostics`), so this module stays
+    independent of the ensemble-transform implementation.
+
+    The ``local_*`` distributions are summarized to scalars on purpose: the
+    underlying per-row/per-block arrays have one entry per state row
+    (``N_s ~ 2e5`` in production) and this record is written every cycle. The
+    full arrays remain on the analysis object for interactive inspection.
     """
 
     cycle: int
@@ -92,6 +109,35 @@ class CycleDiagnostics:
     reduction_condition_number: Optional[float] = None
     reduction_spectrum_max: Optional[float] = None
     reduction_subspace_drift: Optional[float] = None
+    # One global ensemble transform (ETKF). retained == available means the
+    # scientific truncation removed nothing; transform_discarded_spectrum_max
+    # is then 0.0 (nothing was discarded), NOT None (which means "no global
+    # transform ran").
+    transform_available_rank: Optional[int] = None
+    transform_retained_rank: Optional[int] = None
+    transform_retained_energy: Optional[float] = None
+    transform_discarded_spectrum_max: Optional[float] = None
+    # One transform per distinct local observation selection (LETKF). Counts
+    # are per cycle; the rank and active-observation summaries are over the
+    # ACTIVE blocks only (an inactive block computes no transform and leaves
+    # its rows untouched, so it would otherwise drag every minimum to zero).
+    local_num_blocks: Optional[int] = None
+    local_num_active_blocks: Optional[int] = None
+    local_num_updated_rows: Optional[int] = None
+    local_active_obs_min: Optional[int] = None
+    local_active_obs_median: Optional[float] = None
+    local_active_obs_max: Optional[int] = None
+    local_retained_rank_min: Optional[int] = None
+    local_retained_rank_mean: Optional[float] = None
+    local_retained_rank_max: Optional[int] = None
+    local_available_rank_max: Optional[int] = None
+    # The local counterparts of transform_retained_energy /
+    # transform_discarded_spectrum_max. Same convention: 1.0 and 0.0 mean the
+    # truncation ran and discarded nothing, None means no local transform ran.
+    local_retained_energy_min: Optional[float] = None
+    local_retained_energy_mean: Optional[float] = None
+    local_discarded_spectrum_max: Optional[float] = None
+    local_chunk_size: Optional[int] = None
 
 
 @dataclass
@@ -206,6 +252,40 @@ class BaseFilter:
                 f"{type(localization).__name__} requires physical row "
                 "coordinates, which a parameter-only filter cannot supply. "
                 "Distance-based localization needs mode='state' or 'joint'."
+            )
+
+        # Declared analysis capability (see AnalysisScheme.localization_policy):
+        # reject the combination here so a mislabelled config fails before the
+        # first forecast rather than silently running a global update under a
+        # localized name. The policy VALUE is validated too — it is a plain
+        # class attribute, so a typo would otherwise match no branch and
+        # disable the check entirely.
+        #
+        # Deliberately ahead of the state_reduction checks below, which is a
+        # choice of *which message* a config that trips both gets, not a
+        # correctness property: LETKF + state_reduction + localization=None
+        # reports the 'required' policy error. That is the fault the user must
+        # fix either way — dropping the reduction alone would still leave a
+        # LETKF without a localization — whereas the reduction message would
+        # send them to the wrong knob first.
+        policy = analysis.localization_policy
+        if policy not in LOCALIZATION_POLICIES:
+            raise ValueError(
+                f"{type(analysis).__name__}.localization_policy={policy!r} is not "
+                f"one of {LOCALIZATION_POLICIES}."
+            )
+        if policy == "forbidden" and localization is not None:
+            raise ValueError(
+                f"{type(analysis).__name__} declares localization_policy="
+                "'forbidden': it applies one global update and would ignore "
+                f"{type(localization).__name__}. Use a localized analysis "
+                "scheme (e.g. LETKF) or remove the localization strategy."
+            )
+        if policy == "required" and localization is None:
+            raise ValueError(
+                f"{type(analysis).__name__} declares localization_policy="
+                "'required' and has no meaning without one. Configure a "
+                "localization strategy or use the global analysis scheme."
             )
         self.localization = localization
         self.inflation = inflation
@@ -647,6 +727,18 @@ class BaseFilter:
             n_state,
             n_param,
         )
+        # Read before _record_reduction_diagnostics below, which calls the
+        # analysis a SECOND time (on the fit coordinates) and overwrites the
+        # scheme's last-call attributes. Every shipped scheme recomputes the
+        # same transform on that second call (same observations), so no
+        # production configuration can tell the two orderings apart; reading
+        # first is what ties the recorded values to the call that produced this
+        # cycle's posterior rather than to an implementation detail of the
+        # diagnostic. Pinned by test_filtering.py::test_transform_diagnostics_
+        # come_from_the_posterior_producing_call, which makes the two calls
+        # publish different transforms so the ordering is enforced rather than
+        # merely asserted here.
+        self._record_transform_diagnostics(cycle_diag)
 
         # Split the augmented vector back per mode.
         if self.mode in ("state", "joint"):
@@ -739,6 +831,72 @@ class BaseFilter:
             if full_norm > 0.0
             else 0.0
         )
+
+    def _record_transform_diagnostics(self, diag: CycleDiagnostics) -> None:
+        """Fill one cycle's ensemble-transform fields (all ``None`` otherwise).
+
+        Deterministic analyses publish what they actually computed — the
+        observation-space rank they had available, the rank they kept, and (for
+        a localized transform) how many local blocks that took — as attributes
+        of the last call. Without this hook those numbers exist only inside the
+        scheme: they are the resource-gate quantities of
+        ``docs/plans/filtering_state_reduction_and_transforms.md`` §6, and the
+        cost and meaning of a localized analysis are otherwise invisible from
+        its output.
+
+        Read by name rather than by type: any scheme that does not publish
+        these attributes (the stochastic analysis, and any future scheme)
+        leaves both groups ``None``, and this module never imports the
+        ensemble-transform module.
+        """
+        transform = getattr(self.analysis, "last_transform", None)
+        if transform is not None:
+            available = transform.available_rank
+            diag.transform_available_rank = (
+                None if available is None else int(available)
+            )
+            diag.transform_retained_rank = int(transform.retained_rank)
+            energy = transform.retained_energy
+            diag.transform_retained_energy = None if energy is None else float(energy)
+            discarded = jnp.asarray(transform.discarded_spectrum)
+            # 0.0 = the truncation discarded nothing; None (the default) = no
+            # global transform ran at all.
+            diag.transform_discarded_spectrum_max = (
+                float(jnp.max(discarded)) if discarded.size else 0.0
+            )
+
+        local = getattr(self.analysis, "last_diagnostics", None)
+        if local is None:
+            return
+        diag.local_num_blocks = int(local.num_blocks)
+        diag.local_num_active_blocks = int(local.num_active_blocks)
+        diag.local_num_updated_rows = int(local.num_updated_rows)
+        diag.local_chunk_size = int(local.chunk_size)
+
+        # Kept in NumPy: these arrays are per block (one per state row in the
+        # worst case), and summarizing them host-side avoids a device round trip
+        # every cycle for numbers nobody differentiates through.
+        counts = np.asarray(local.active_observation_counts)
+        active_counts = counts[counts > 0]
+        if active_counts.size:
+            diag.local_active_obs_min = int(active_counts.min())
+            diag.local_active_obs_median = float(np.median(active_counts))
+            diag.local_active_obs_max = int(active_counts.max())
+        retained = np.asarray(local.retained_ranks)
+        if retained.size:
+            diag.local_retained_rank_min = int(retained.min())
+            diag.local_retained_rank_mean = float(retained.mean())
+            diag.local_retained_rank_max = int(retained.max())
+        available_ranks = np.asarray(local.available_ranks)
+        if available_ranks.size:
+            diag.local_available_rank_max = int(available_ranks.max())
+        energies = np.asarray(local.retained_energies)
+        if energies.size:
+            diag.local_retained_energy_min = float(energies.min())
+            diag.local_retained_energy_mean = float(energies.mean())
+        block_discarded = np.asarray(local.discarded_spectrum_maxima)
+        if block_discarded.size:
+            diag.local_discarded_spectrum_max = float(block_discarded.max())
 
     def _localization_plumbing(
         self,

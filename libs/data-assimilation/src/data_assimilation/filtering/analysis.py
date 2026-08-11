@@ -17,12 +17,19 @@ does not change.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Literal, Optional
 
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
 from data_assimilation.localization.base import BaseLocalization
+
+LocalizationPolicy = Literal["optional", "forbidden", "required"]
+
+#: Runtime spelling of :data:`LocalizationPolicy`, so a typo in a scheme's
+#: declaration fails loudly in ``BaseFilter.__init__`` instead of quietly
+#: matching none of the checks (type annotations are not enforced at runtime).
+LOCALIZATION_POLICIES: tuple[str, ...] = ("optional", "forbidden", "required")
 
 
 def validate_variances(C_D_diag: jnp.ndarray) -> jnp.ndarray:
@@ -175,7 +182,18 @@ BaseFilter` cycle loop owns time management, augmentation, inflation and
     parameter evolution; the scheme only maps the forecast ensemble to the
     analysis ensemble. New filter flavors (ETKF/LETKF, particle-style updates)
     implement this interface — the cycle loop does not change.
+
+    ``localization_policy`` declares what the scheme can *do* with a
+    localization strategy, and ``BaseFilter`` validates it at construction so an
+    invalid combination fails before the first forecast instead of inside cycle
+    0. ``"optional"`` (the default, inherited by the stochastic analysis)
+    accepts either; ``"forbidden"`` is a global-only scheme such as the ETKF,
+    whose localized counterpart is an explicit LETKF class so a config name
+    cannot promise localization the analysis ignores; ``"required"`` is that
+    LETKF, which has no meaning without a strategy.
     """
+
+    localization_policy: LocalizationPolicy = "optional"
 
     @abstractmethod
     def __call__(

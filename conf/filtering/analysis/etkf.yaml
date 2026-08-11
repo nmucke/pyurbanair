@@ -1,0 +1,21 @@
+# @package filtering
+# Global deterministic ensemble-transform (ETKF) analysis. One symmetric
+# square-root transform per cycle is right-multiplied onto the forecast
+# anomalies, so no perturbed observations are drawn and the posterior sample
+# covariance is the Kalman covariance exactly (given the sample forecast
+# moments) rather than in expectation over a perturbation draw.
+# REQUIRES `filtering/localization=none`: the scheme declares
+# localization_policy="forbidden" and BaseFilter rejects the pair at
+# construction. Use `filtering/analysis=letkf` for a localized deterministic
+# update. Select both groups explicitly rather than relying on whatever
+# `filtering/localization` the defaults list happens to resolve to:
+#   python scripts/filtering/run_filtering.py filtering.mode=state \
+#     filtering/analysis=etkf filtering/localization=none
+# Selected with `filtering/analysis=etkf`.
+analysis:
+  _target_: data_assimilation.filtering.etkf.ETKFAnalysis
+  # Observation-space spectral truncation (nested ObservationTSVD block).
+  # null -> keep every thin-SVD direction of the whitened observation
+  # anomalies, i.e. the untruncated ETKF. Select filtering/analysis=etkf_tsvd
+  # for the truncated variant.
+  tsvd: null

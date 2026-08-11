@@ -1,0 +1,23 @@
+# @package filtering
+# Local deterministic ensemble-transform (LETKF) analysis: the same symmetric
+# square-root kernel as filtering/analysis=etkf, but computed per state block
+# from that block's locally selected observations. The localization strategy
+# supplies the per-observation error inflation (an excluded observation enters
+# with zero weight); the order is localize -> form R_eff -> whiten Y ->
+# ensemble transform.
+# REQUIRES a non-null localization (`filtering/localization=distance` or
+# `correlation`): the scheme declares localization_policy="required" and
+# BaseFilter rejects `none` at construction. That also excludes
+# filtering/state_reduction (global POD modes have no physical coordinates, so
+# the filter already refuses reduction together with any localization).
+#   python scripts/filtering/run_filtering.py filtering.mode=state \
+#     filtering/analysis=letkf filtering/localization=distance
+# Selected with `filtering/analysis=letkf`.
+analysis:
+  _target_: data_assimilation.filtering.etkf.LETKFAnalysis
+  # Observation-space spectral truncation (nested ObservationTSVD block), applied
+  # per block AFTER local selection and whitening. null -> keep every thin-SVD
+  # direction of each block's whitened observation anomalies, i.e. the
+  # untruncated LETKF. Select filtering/analysis=letkf_tsvd for the truncated
+  # variant.
+  tsvd: null

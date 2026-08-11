@@ -18,8 +18,13 @@ an observation-error *inflation matrix* ``E_inf`` of shape ``(N_aug, N_d)``:
   is inflated by ``E_inf ** 2``, reducing its impact);
 * ``E_inf[l, j] == inf``  -> observation ``j`` is excluded from row ``l``.
 
+Anything outside ``[1, inf]`` is undefined by this contract; a non-finite or
+non-positive factor is treated as "excluded" by every local analysis (see
+:func:`active_observations`).
+
 Subclasses implement :meth:`inflation_factors`.  The shared local-analysis
-math lives in :meth:`localized_update`.
+math lives in :meth:`localized_update`; the shared grouping/masking policy in
+:func:`resolve_row_inflation`, which the deterministic LETKF calls too.
 
 Mathematical notes
 ------------------
@@ -87,6 +92,75 @@ def _group_inflation(inflation: jnp.ndarray, group_ids: jnp.ndarray) -> jnp.ndar
         inflation, group_ids, num_segments=num_segments
     )  # (num_segments, N_d)
     return block_min[group_ids]
+
+
+def resolve_row_inflation(
+    inflation: jnp.ndarray,
+    group_ids: Optional[jnp.ndarray],
+    localize_mask: Optional[jnp.ndarray],
+) -> jnp.ndarray:
+    """Per-row observation-error inflation after grouping and masking.
+
+    The single implementation of the ordering every local analysis depends on —
+    :meth:`BaseLocalization.localized_update` (stochastic) and
+    :class:`~data_assimilation.filtering.etkf.LETKFAnalysis` (deterministic)
+    both call it, so the two cannot drift apart:
+
+    1. masked-out rows are set to ``inf`` **before** grouping, so a globally
+       updated row that shares a block id with localized rows cannot pull the
+       block's ``segment_min`` inflation down to ``1`` and silently switch that
+       block to a global update;
+    2. masked-out rows are then set to all ones, which is exactly the global
+       (unlocalized) selection: every observation at full weight, no taper.
+
+    Doing it the other way round is a real, silent failure mode, pinned by
+    ``tests/test_localization.py::\
+test_masked_row_cannot_disable_localization_for_shared_group`` and by its
+    deterministic twin in ``tests/test_filtering_letkf.py``.
+
+    Args:
+        inflation: Raw per-row inflation from
+            :meth:`BaseLocalization.inflation_factors`, shape ``(N_aug, N_d)``.
+        group_ids: Optional block id per augmented row, shape ``(N_aug,)``.
+            ``None`` means every row is its own block.
+        localize_mask: Optional boolean array, shape ``(N_aug,)``. ``False``
+            rows take the global update.
+
+    Returns:
+        Inflation of shape ``(N_aug, N_d)``.
+    """
+    if group_ids is not None:
+        grouping_inflation = inflation
+        if localize_mask is not None:
+            grouping_inflation = jnp.where(localize_mask[:, None], inflation, jnp.inf)
+        inflation = _group_inflation(grouping_inflation, group_ids)
+    if localize_mask is not None:
+        inflation = jnp.where(localize_mask[:, None], inflation, 1.0)
+    return inflation
+
+
+def active_observations(inflation: jnp.ndarray) -> jnp.ndarray:
+    """Which observations a local analysis actually assimilates.
+
+    An observation is active for a row when its inflation factor is finite
+    **and strictly positive**. The finiteness half is the documented exclusion
+    marker (``jnp.inf``); the positivity half is a guard, shared by the
+    stochastic and deterministic local analyses so a custom strategy cannot mean
+    two different things in the two estimators. ``E_inf`` multiplies an
+    observation-error *standard deviation*, so ``E_inf = 0`` would ask for a
+    zero-variance observation — an infinitely trusted measurement, which is
+    outside the ``[1, inf]`` taper contract of
+    :meth:`BaseLocalization.inflation_factors` and is a singular Kalman gain
+    rather than a localization decision. NaN is likewise treated as excluded.
+    No shipped strategy emits either, so this is bit-identical for all of them.
+
+    Args:
+        inflation: Inflation factors, any shape.
+
+    Returns:
+        Boolean array of the same shape.
+    """
+    return jnp.isfinite(inflation) & (inflation > 0.0)
 
 
 def taper_inflation(
@@ -280,24 +354,11 @@ class BaseLocalization(ABC):
             aug_dev, pred_obs_dev, row_coords=row_coords, obs_coords=obs_coords
         )  # (N_aug, N_d)
 
-        # Joint "grid block" update: rows in the same block share one selection
-        # and transition. Masked/global rows are temporarily set to infinity so
-        # they cannot pull a localized block's minimum inflation down to 1 when
-        # a caller accidentally gives both kinds of row the same group id.
-        if group_ids is not None:
-            grouping_inflation = inflation
-            if localize_mask is not None:
-                grouping_inflation = jnp.where(
-                    localize_mask[:, None], inflation, jnp.inf
-                )
-            inflation = _group_inflation(grouping_inflation, group_ids)
-
-        # Force masked-out rows to all-ones inflation so they receive the exact
-        # global update. An all-ones row keeps every observation with no taper,
-        # reducing its solve to the corresponding row of the global Kalman
-        # update with the SAME observation-perturbation realization.
-        if localize_mask is not None:
-            inflation = jnp.where(localize_mask[:, None], inflation, 1.0)
+        # Joint "grid block" update (rows in the same block share one selection
+        # and transition) followed by the all-ones global fallback for masked
+        # rows. The order is load-bearing and shared with the LETKF; see
+        # :func:`resolve_row_inflation`.
+        inflation = resolve_row_inflation(inflation, group_ids, localize_mask)
 
         def update_row(
             aug_row: jnp.ndarray,
@@ -305,8 +366,9 @@ class BaseLocalization(ABC):
             inflation_row: jnp.ndarray,
         ) -> jnp.ndarray:
             # An observation is "active" for this row when its inflation is
-            # finite; an infinite inflation factor means "excluded".
-            active = jnp.isfinite(inflation_row)  # (N_d,) bool
+            # finite and positive; ``inf`` means "excluded" (see
+            # :func:`active_observations`).
+            active = active_observations(inflation_row)  # (N_d,) bool
 
             # E_inf for active observations; placeholder 1.0 for excluded ones
             # (they are decoupled below, so the value is moot).  E_inf scales

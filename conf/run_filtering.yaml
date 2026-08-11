@@ -6,7 +6,10 @@
 #
 # Declarative axes select the mode and machinery:
 #   * filtering.mode=state|parameter|joint     which blocks the analysis updates
-#   * filtering/analysis=stochastic            the update math (ETKF/LETKF later)
+#   * filtering/analysis=stochastic|etkf|etkf_tsvd|letkf|letkf_tsvd
+#                                              the update math. etkf* REQUIRES
+#                                              filtering/localization=none;
+#                                              letkf* REQUIRES a non-null one.
 #   * filtering/localization=none|correlation|distance
 #   * filtering/state_reduction=none|svd_current|svd_streaming
 #   * filtering/inflation=none|multiplicative|rtps|rtpp
@@ -33,6 +36,10 @@
 #     filtering/localization=correlation
 #   python scripts/filtering/run_filtering.py filtering.mode=state \
 #     filtering/localization=none filtering/state_reduction=svd_current
+#   python scripts/filtering/run_filtering.py filtering.mode=state \
+#     filtering/analysis=etkf filtering/localization=none
+#   python scripts/filtering/run_filtering.py filtering.mode=state \
+#     filtering/analysis=letkf filtering/localization=distance
 defaults:
   - case: xie_and_castro
   # `_self_` before the filtering/* groups so the base `filtering:` scalars below

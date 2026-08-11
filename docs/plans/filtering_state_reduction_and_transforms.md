@@ -506,6 +506,47 @@ example `filtering/analysis=etkf_tsvd` and `letkf_tsvd`, while keeping
   both requires local POD bases with spatial support and is a separate project.
 - Add `conf/filtering/analysis/letkf.yaml` and its TSVD-enabled counterpart.
 
+#### Corrections to this section, measured 2026-08-11
+
+Recorded during PR 2 implementation, against the canonical Xie-and-Castro case
+and a completed 60-cycle uDALES filtering run. Where the bullets above conflict
+with the measurements below, the measurements win; the deviations are
+deliberate, not oversights.
+
+1. **`group_ids` deduplication buys nothing on the shipped default.** uDALES is
+   staggered, so `pres`/`u`/`v`/`w` each carry a distinct grid signature
+   (`xt` vs `xm`, `yt` vs `ym`, `zt` vs `zm`) and
+   `StateAugmentation.group_ids` gives each its own id range. Unique state
+   blocks therefore equal `N_s` exactly (230,400 on the working-tree grid),
+   not "roughly one per grid cell". Dedup is worth implementing for clarity
+   and for collocated grids such as pylbm's (3:1 there), but it is **not** a
+   performance lever and the resource gate must not assume it is.
+2. **The binding constraint is the transform's representation, not chunk
+   size.** With `N_d = 12` and `N_e = 50`, an `(n_blocks, N_e, N_e)` tensor is
+   2.30 GB in float32 while the `(n_blocks, N_d, N_d)` form is 133 MB, at
+   roughly one-thirteenth the arithmetic. The local transform must be built
+   from the `min(N_d, N_e)` thin factors and applied in factored form; it must
+   never be assembled at `N_e x N_e`, not even per chunk. Bounded chunking
+   remains, but as a safety bound rather than the mechanism that makes LETKF
+   affordable.
+3. **"Use the thin `Y_w` SVD when `N_d_active < N_e`" cannot be a shape
+   decision.** `N_d_active` varies per block, so any rank that changes array
+   shape is not vectorizable. Fix the rank at `min(N_d, N_e)` and express both
+   observation exclusion and TSVD truncation as zero weights / boolean masks,
+   mirroring the shape-stable decoupling the existing localized stochastic
+   update already uses instead of extracting active submatrices.
+4. **Two facts the plan omits, both favorable.** At `localization_radius=7.5`
+   only ~5% of blocks have any active observation; the rest are provably
+   unchanged and can be partitioned out host-side, since nothing in
+   `data-assimilation` is jitted. And run 1 of the resource table — the
+   localized stochastic baseline — is already measured on this hardware at
+   full size: `analysis_time` mean 1.289 s/cycle over 60 cycles.
+5. **Already satisfied, no new work needed.** `obs_posterior_rmse_kind`
+   provenance exists from PR 1 and already emits `unlocalized_ride_along`
+   under localization; and LETKF-plus-state-reduction is rejected structurally,
+   because `BaseFilter` already refuses `state_reduction` together with any
+   localization and LETKF requires localization.
+
 #### LETKF performance gate
 
 A naive LETKF performs one `N_e x N_e` decomposition per spatial block and can
