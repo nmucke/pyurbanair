@@ -1,0 +1,35 @@
+# @package filter_smoothing
+# Local deterministic LETKF for the INNER state filter (see
+# filter_smoothing/inner_analysis=letkf) with observation-space spectral
+# truncation enabled. Localization and TSVD act on different axes: localization
+# decides WHICH observations reach a block and how strongly, the TSVD decides
+# which directions of that block's already whitened observation anomalies are
+# retained. The order is localize -> form R_eff -> whiten Y -> TSVD -> ensemble
+# transform. Both act inside the window only.
+# REQUIRES a non-null inner localization (localization_policy="required"), as for
+# filter_smoothing/inner_analysis=letkf:
+#   python scripts/filter_smoothing/run_filter_smoothing.py \
+#     filter_smoothing/inner_analysis=letkf_tsvd filter_smoothing/inner_localization=distance
+# Selected with `filter_smoothing/inner_analysis=letkf_tsvd`.
+inner_analysis:
+  _target_: data_assimilation.filtering.etkf.LETKFAnalysis
+  # Nested `_target_` under a `_target_`: recursive instantiation is on and
+  # `_convert_: all` propagates from conf/run_filter_smoothing.yaml, so this node
+  # is instantiated bottom-up into an ObservationTSVD before LETKFAnalysis is
+  # constructed.
+  tsvd:
+    _target_: data_assimilation.filtering.etkf.ObservationTSVD
+    # Apply the scientific truncation in every block. Kept OFF in the letkf.yaml
+    # variant: each block sees at most the ~12 shipped observations and usually
+    # fewer, so expect no benefit here and turn it on only when the per-block
+    # rank/energy diagnostics show persistent local ill-conditioning.
+    enabled: true
+    # Retain the smallest prefix of the block's whitened spectrum whose DISCARDED
+    # tail holds at most (1 - energy_fraction) of the squared singular values.
+    energy_fraction: 0.99
+    # Optional hard cap applied after the energy criterion (null -> no extra
+    # cap). REQUIRES `enabled: true`.
+    max_rank: null
+    # Optional relative singular-value floor (sigma_i > tol * sigma_max); NOT
+    # gated by `enabled`. null -> the dtype- and shape-aware default floor.
+    numerical_tolerance: null

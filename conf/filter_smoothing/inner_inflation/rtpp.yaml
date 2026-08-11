@@ -1,0 +1,8 @@
+# @package filter_smoothing
+# Relaxation to prior perturbations (Zhang et al. 2004) in the inner state
+# filter: posterior anomalies blended member-wise with the prior anomalies,
+# weight `alpha` on the prior.
+# Selected with `filter_smoothing/inner_inflation=rtpp`.
+inner_inflation:
+  _target_: data_assimilation.inflation.RTPP
+  alpha: 0.5

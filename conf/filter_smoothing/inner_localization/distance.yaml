@@ -1,0 +1,25 @@
+# @package filter_smoothing
+# Distance-based localization for the INNER state filter — the same strategy the
+# ESMDA smoother and the EnKF use (conf/esmda/localization/distance.yaml,
+# conf/filtering/localization/distance.yaml), reused unchanged and mounted under
+# `filter_smoothing.inner_localization`. Select with
+# `filter_smoothing/inner_localization=distance`.
+#
+# The inner filter runs in state mode (the trajectory is updated by the outer
+# ESMDA loop, never by a cycle analysis), so every localized row is a state row
+# with physical coordinates. Spatial locality in the window and temporal locality
+# across knots are separate axes: see
+# `filter_smoothing/temporal_localization=taper` for the latter.
+inner_localization:
+  _target_: data_assimilation.localization.distance.DistanceLocalization
+  # Localization radius (truncation distance) in domain length units.
+  localization_radius: 10.0
+  # Fraction of the radius left un-tapered (beta in Eq. 9).
+  tapering_beta: 0.5
+  # Maximum error-variance inflation E_max reached at the radius.
+  max_inflation: 4.0
+  # Grid-block joint analysis: co-located state rows (u/v/w at one cell) share
+  # one observation selection + transition.
+  block_grouping: true
+  # Use only the horizontal (x, y) distance, ignoring vertical separation.
+  horizontal_only: false

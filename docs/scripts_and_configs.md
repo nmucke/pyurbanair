@@ -12,7 +12,7 @@ orientation, then return here for field-level detail.
 
 ### Overview
 
-The configuration tree has exactly **four primary run entry points**, each
+The configuration tree has exactly **five primary run entry points**, each
 self-contained (they inline the shared base rather than pulling separate
 `paths.yaml`/`time.yaml`/`ensemble.yaml` files):
 
@@ -21,6 +21,7 @@ self-contained (they inline the shared base rather than pulling separate
 | [`conf/run_forward_model.yaml`](../conf/run_forward_model.yaml) | `run_forward_model.py` | `case` + single `model@model` mount + single `params` mount |
 | [`conf/run_esmda.yaml`](../conf/run_esmda.yaml) | `run_esmda.py` | same base + `esmda:` scalars + double model mount (`@truth_model`/`@assim_model`) + double params mount (`@truth_params`/`@prior_params`) |
 | [`conf/run_filtering.yaml`](../conf/run_filtering.yaml) | `run_filtering.py` | same base + `filtering:` scalars + the `filtering/*` groups + the same double model/params mounts (static params only) |
+| [`conf/run_filter_smoothing.yaml`](../conf/run_filter_smoothing.yaml) | `run_filter_smoothing.py` | same base + `filter_smoothing:` scalars + the `filter_smoothing/*` groups + the same double model/params mounts (time-varying prior required) |
 | [`conf/compare_models.yaml`](../conf/compare_models.yaml) | `compare_models.py` | same base as `run_forward_model` + `compare:` scalars + an *N-way* model mount (`model@models.<name>`) and named parameter-scenario mounts (`params@parameter_scenarios.<name>`) |
 
 A third entry point, [`conf/neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml),
@@ -104,6 +105,22 @@ rather than pulling them from separate files. The table below summarises each.
 | `inflation` | (group) | Set by `filtering/inflation` (default `rtps`). |
 | `parameter_evolution` | (group) | Set by `filtering/evolution` (default `none`). |
 | `filter` | `EnsembleKalmanFilter` block | The composed filter `_target_`; normally left alone. |
+
+#### `filter_smoothing:` (run_filter_smoothing only)
+
+| Field | Default | Purpose |
+|---|---|---|
+| `num_cycles` | 8 | Number of cycles `L` in the window; each forecasts one segment of `time.simulation_time`. Also the number of parameter knots the outer update estimates (plus the trailing knot). |
+| `num_steps` | 4 | Number of outer ESMDA iterations `N_a`; each is one full inner filter pass through the window plus one tempered trajectory update. |
+| `alpha` | `null` | Tempering denominator; `null` = `num_steps` (equal weights, the standard ESMDA schedule). |
+| `seed` | 42 | JAX RNG seed. |
+| `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors, per cycle). |
+| `common_inner_noise` | `true` | Reuse one inner RNG key across iterations, so the map `Θ → D` is deterministic and the outer cross-covariances are not diluted by fresh Monte Carlo noise. `false` = independent draws. The outer perturbed-observation draws always use fresh subkeys. |
+| `inner_analysis` | (group) | Set by `filter_smoothing/inner_analysis` (default `stochastic`); the same `AnalysisScheme` classes as `filtering/analysis`, and they constrain `inner_localization` the same way (§1.9). |
+| `inner_localization` | (group) | Set by `filter_smoothing/inner_localization` (default `none`). |
+| `inner_inflation` | (group) | Set by `filter_smoothing/inner_inflation` (default `rtps`). |
+| `temporal_localization` | (group) | Set by `filter_smoothing/temporal_localization` (default `none`); localizes the **outer** trajectory update in time. |
+| `smoother` | `FilterSmoothingESMDA` block | The composed algorithm `_target_`, wiring the four groups plus `num_steps`/`alpha`/`common_inner_noise`; normally left alone. |
 
 #### `run:`
 
@@ -358,7 +375,51 @@ full-space. The shipped default remains `none`.
 
 ---
 
-### 1.9 Config group: `neural_surrogate/`
+### 1.9 Config groups: `filter_smoothing/*` (run_filter_smoothing only)
+
+The filter-smoothing entry point's groups. Each file uses
+`# @package filter_smoothing` so it sets the matching `filter_smoothing.*`
+field. Three of the four are the **inner state filter's** knobs — the same
+classes as the corresponding `filtering/*` groups (§1.8), reused unchanged and
+mounted under a different key; the fourth configures the **outer** trajectory
+update.
+
+| Group | Options (default first) | Sets |
+|---|---|---|
+| [`filter_smoothing/inner_analysis/`](../conf/filter_smoothing/inner_analysis/) | `stochastic`, `etkf`, `etkf_tsvd`, `letkf`, `letkf_tsvd` | `filter_smoothing.inner_analysis` — the per-cycle state update math inside the window. Same `localization_policy` contract as `filtering/analysis`: `etkf*` REQUIRES `filter_smoothing/inner_localization=none`, `letkf*` REQUIRES a non-null one |
+| [`filter_smoothing/inner_localization/`](../conf/filter_smoothing/inner_localization/) | `none`, `correlation`, `distance` | `filter_smoothing.inner_localization` — the inner state analysis's localization (the `localization/` strategies reused unchanged) |
+| [`filter_smoothing/inner_inflation/`](../conf/filter_smoothing/inner_inflation/) | `rtps`, `none`, `multiplicative`, `rtpp` | `filter_smoothing.inner_inflation` — the inner filter's spread maintenance |
+| [`filter_smoothing/temporal_localization/`](../conf/filter_smoothing/temporal_localization/) | `none`, `taper` | `filter_smoothing.temporal_localization` — `TemporalLocalization` on the outer, whole-trajectory ESMDA update |
+
+`taper.yaml` exposes `temporal_radius` (the truncation, counted in **cycles**
+— the coordinates are cycle indices, so a radius below 1 freezes the
+trajectory; default 3.0), `tapering_beta`, `max_inflation` and
+`block_grouping` (keep `False` — a block shares one observation selection
+across all of a parameter's knots, erasing the temporal taper). The distance
+it tapers on is the separation between a knot (at its segment start) and an
+observation batch (at its segment end), and the taper is symmetric in time —
+a late observation may update an early knot, which is what makes the method a
+smoother; the radius suppresses spurious long-range sampling correlations, not
+causality. `none` (the default) leaves the trajectory update global.
+
+Because the inner analysis and its localization are a coupled pair, pin both
+groups on the CLI rather than relying on whichever the defaults list resolves
+to, exactly as for `run_filtering.py` (§1.8):
+
+```bash
+python scripts/filter_smoothing/run_filter_smoothing.py \
+    filter_smoothing/inner_analysis=etkf filter_smoothing/inner_localization=none
+python scripts/filter_smoothing/run_filter_smoothing.py \
+    filter_smoothing/inner_analysis=letkf filter_smoothing/inner_localization=distance \
+    filter_smoothing/temporal_localization=taper
+```
+
+See [data_assimilation.md §9](data_assimilation.md) for the algorithm itself
+(inner pass, trajectory stacking, reset semantics, final consistency pass).
+
+---
+
+### 1.10 Config group: `neural_surrogate/`
 
 Five primary configs (not groups) drive the surrogate scripts:
 
@@ -628,6 +689,48 @@ records the resolved localization subtree beside it (`null` for the global
 update): the two are a coupled pair through `localization_policy`, and the
 per-block `local_*` cycle diagnostics only mean anything against the strategy
 and radius that produced them.
+
+#### [`run_filter_smoothing.py`](../scripts/filter_smoothing/run_filter_smoothing.py)
+**Hydra** — config: [`run_filter_smoothing.yaml`](../conf/run_filter_smoothing.yaml)
+
+The filter-smoothing entry point: a sequential EnKF for the state, wrapped in
+an outer ESMDA loop over the **parameter trajectory** of the whole window. Each
+of `filter_smoothing.num_steps` iterations runs one full inner filter pass
+through the `filter_smoothing.num_cycles` cycles — recording each cycle's
+forecast observations *before* its analysis — stacks them into one
+`(L·N_d, N_e)` system and applies one tempered Kalman update to the flattened
+trajectory; every iteration restarts the inner pass from the same initial
+state, and a final pass with the converged trajectory produces the returned
+state. See [data_assimilation.md §9](data_assimilation.md).
+
+Truth generation, per-cycle `(num_cycles, N_d)` observation batches, obs noise
+and truth source (`run.truth_dir`) are the same as `run_filtering.py`. The one
+inverted guard is the prior: a **dynamic (time-varying) params mount is
+required** (`params@prior_params=dynamic`), sampled once over the whole window
+with `time.seconds_per_knot = time.simulation_time` so its knots align with the
+cycles — a knot spacing or knot count that does not cover `num_cycles` fails
+loudly. The sampler emits `L+1` knots for an `L`-cycle window; the trailing
+knot rides along in the trajectory, updated only through the prior's temporal
+correlations.
+
+Mode is the cross product of the `filter_smoothing/*` groups (§1.9) — the inner
+analysis / localization / inflation and the outer temporal localization — with
+`filter_smoothing.num_steps` and `num_cycles`. Phase 1 is a single window; the
+moving-window extension is not implemented. There is no metric/figure pipeline
+counterpart yet (§2.3 / §2.4) — this script's artifacts are the whole output.
+
+Saves: `posterior_params.nc` (the smoothed **trajectory** ensemble, with its
+`time` knot dim), `posterior_state.nc` (the filtered end-of-window ensemble
+from the final consistency pass), `iteration_diagnostics.yaml` (one record per
+outer ESMDA iteration: windowed observation-space RMSE, trajectory spread,
+innovation χ² on the stacked system), `cycle_diagnostics.yaml` (the final
+pass's per-cycle diagnostics, the same `FilterResult` schema as
+`run_filtering.py`'s), `prior_params.nc`, `true_params.nc`, `true_state.nc`
+(inline truth), `truth_access.yaml`, `run_info.yaml`, `config.yaml`. Under
+`run.save_history` (default true) it also writes `params_iterations.nc` — the
+trajectory ensemble at every outer iteration, the artifact that shows the
+smoothing converge — plus the final pass's `params_history.nc` /
+`state_history.nc` over cycles.
 
 ---
 
@@ -1393,6 +1496,7 @@ Brief summary:
 | Switch CFD backend | `model@model=pylbm|pyudales|pypalm|neural_surrogate` (fwd) or `model@truth_model=...` + `model@assim_model=...` (esmda) |
 | Change DA mode | `esmda/smoother=static|state|state_and_parameter|dynamic|state_and_dynamic` |
 | Run a sequential filter (EnKF) instead of ESMDA | [`scripts/filtering/run_filtering.py`](../scripts/filtering/run_filtering.py) — `filtering.mode=state|parameter|joint` + `filtering/*` groups (§1.8) |
+| Filter the state but smooth a parameter *trajectory* over the window | [`scripts/filter_smoothing/run_filter_smoothing.py`](../scripts/filter_smoothing/run_filter_smoothing.py) — `filter_smoothing/*` groups (§1.9), `params@prior_params=dynamic` required |
 | Enable localization | `esmda/localization=correlation|distance` (smoother) or `filtering/localization=...` (filter) + optional field overrides |
 | Enable reduced state update | `esmda/state_reduction=svd` (requires state-bearing smoother, incompatible with localization) |
 | Run the full ESMDA pipeline | [`scripts/run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh) |

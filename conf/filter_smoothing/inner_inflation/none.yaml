@@ -1,0 +1,6 @@
+# @package filter_smoothing
+# No inflation in the inner state filter. Note the trajectory ensemble's spread
+# is maintained by the outer ESMDA tempering (alpha > 1), not by this knob — this
+# only affects the per-cycle state anomalies within a window.
+# Selected with `filter_smoothing/inner_inflation=none`.
+inner_inflation: null
