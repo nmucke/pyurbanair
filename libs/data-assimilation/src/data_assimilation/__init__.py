@@ -9,7 +9,10 @@ from data_assimilation.filter_smoothing import (
     FilterSmoothingESMDA,
     FilterSmoothingResult,
     IterationDiagnostics,
+    MovingWindowResult,
     TemporalLocalization,
+    WindowDiagnostics,
+    run_moving_window,
 )
 from data_assimilation.filtering import (
     AnalysisScheme,
@@ -65,6 +68,7 @@ __all__ = [
     "IterationDiagnostics",
     "InflationScheme",
     "LETKFAnalysis",
+    "MovingWindowResult",
     "MultiplicativeInflation",
     "ObservationOperator",
     "ObservationTSVD",
@@ -82,4 +86,6 @@ __all__ = [
     "TemporalLocalization",
     "TemporalObservationOperator",
     "TimeVaryingParameterESMDA",
+    "WindowDiagnostics",
+    "run_moving_window",
 ]

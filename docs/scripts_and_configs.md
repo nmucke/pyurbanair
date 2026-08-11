@@ -111,6 +111,8 @@ rather than pulling them from separate files. The table below summarises each.
 | Field | Default | Purpose |
 |---|---|---|
 | `num_cycles` | 8 | Number of cycles `L` in the window; each forecasts one segment of `time.simulation_time`. Also the number of parameter knots the outer update estimates (plus the trailing knot). |
+| `num_windows` | 1 | Number of fixed-lag windows. `1` = the single-window path (byte-identical to Phase 1); `> 1` slides the window and assimilates a horizon of `T = num_cycles + (num_windows - 1) * window_shift` cycles. |
+| `window_shift` | 1 | Cycles `s` the window slides by between windows, `1 <= s <= num_cycles`; `s = num_cycles` makes the windows non-overlapping. The oldest `s` knots are finalized on leaving the window and `s` new ones are appended by `filter_smoothing/evolution`. |
 | `num_steps` | 4 | Number of outer ESMDA iterations `N_a`; each is one full inner filter pass through the window plus one tempered trajectory update. |
 | `alpha` | `null` | Tempering denominator; `null` = `num_steps` (equal weights, the standard ESMDA schedule). |
 | `seed` | 42 | JAX RNG seed. |
@@ -120,6 +122,7 @@ rather than pulling them from separate files. The table below summarises each.
 | `inner_localization` | (group) | Set by `filter_smoothing/inner_localization` (default `none`). |
 | `inner_inflation` | (group) | Set by `filter_smoothing/inner_inflation` (default `rtps`). |
 | `temporal_localization` | (group) | Set by `filter_smoothing/temporal_localization` (default `none`); localizes the **outer** trajectory update in time. |
+| `evolution` | (group) | Set by `filter_smoothing/evolution` (default `none` → `IdentityEvolution`); the `ParameterEvolution` that appends the leading-edge knots when the window moves. Unlike the four keys above it is *not* wired into the `smoother:` node — the estimator knows nothing about sliding windows, so the script hands it to the moving-window orchestrator. Inert when `num_windows: 1`. |
 | `smoother` | `FilterSmoothingESMDA` block | The composed algorithm `_target_`, wiring the four groups plus `num_steps`/`alpha`/`common_inner_noise`; normally left alone. |
 
 #### `run:`
@@ -379,10 +382,10 @@ full-space. The shipped default remains `none`.
 
 The filter-smoothing entry point's groups. Each file uses
 `# @package filter_smoothing` so it sets the matching `filter_smoothing.*`
-field. Three of the four are the **inner state filter's** knobs — the same
+field. Three of the five are the **inner state filter's** knobs — the same
 classes as the corresponding `filtering/*` groups (§1.8), reused unchanged and
-mounted under a different key; the fourth configures the **outer** trajectory
-update.
+mounted under a different key; the other two configure the **outer** trajectory
+update and how the trajectory extends when the window moves.
 
 | Group | Options (default first) | Sets |
 |---|---|---|
@@ -390,6 +393,7 @@ update.
 | [`filter_smoothing/inner_localization/`](../conf/filter_smoothing/inner_localization/) | `none`, `correlation`, `distance` | `filter_smoothing.inner_localization` — the inner state analysis's localization (the `localization/` strategies reused unchanged) |
 | [`filter_smoothing/inner_inflation/`](../conf/filter_smoothing/inner_inflation/) | `rtps`, `none`, `multiplicative`, `rtpp` | `filter_smoothing.inner_inflation` — the inner filter's spread maintenance |
 | [`filter_smoothing/temporal_localization/`](../conf/filter_smoothing/temporal_localization/) | `none`, `taper` | `filter_smoothing.temporal_localization` — `TemporalLocalization` on the outer, whole-trajectory ESMDA update |
+| [`filter_smoothing/evolution/`](../conf/filter_smoothing/evolution/) | `none`, `random_walk` | `filter_smoothing.evolution` — the `ParameterEvolution` that appends the leading-edge knots when the window moves (`none` → `IdentityEvolution`, i.e. persistence; `random_walk` → `RandomWalkEvolution(std=…)`). Mirrors `filtering/evolution` (§1.8) and is inert when `num_windows: 1` |
 
 `taper.yaml` exposes `temporal_radius` (the truncation, counted in **cycles**
 — the coordinates are cycle indices, so a radius below 1 freezes the
@@ -402,6 +406,14 @@ a late observation may update an early knot, which is what makes the method a
 smoother; the radius suppresses spurious long-range sampling correlations, not
 causality. `none` (the default) leaves the trajectory update global.
 
+`evolution/random_walk.yaml` exposes the same `std` (scalar or per-parameter
+mapping) as `filtering/evolution/random_walk.yaml`, but the **cadence differs**:
+there it fires once per assimilation cycle, here once per *appended knot*, i.e.
+`window_shift` times per window slide. It is the leading edge's prior spread —
+`none` copies the carried knot, so the new knot enters with the previous knot's
+posterior spread and the trajectory can tighten faster than the truth drifts.
+Both options are inert when `num_windows: 1`.
+
 Because the inner analysis and its localization are a coupled pair, pin both
 groups on the CLI rather than relying on whichever the defaults list resolves
 to, exactly as for `run_filtering.py` (§1.8):
@@ -412,6 +424,10 @@ python scripts/filter_smoothing/run_filter_smoothing.py \
 python scripts/filter_smoothing/run_filter_smoothing.py \
     filter_smoothing/inner_analysis=letkf filter_smoothing/inner_localization=distance \
     filter_smoothing/temporal_localization=taper
+# fixed-lag: 4 windows of num_cycles, sliding by one cycle each time
+python scripts/filter_smoothing/run_filter_smoothing.py \
+    filter_smoothing.num_windows=4 filter_smoothing.window_shift=1 \
+    filter_smoothing/evolution=random_walk
 ```
 
 See [data_assimilation.md §9](data_assimilation.md) for the algorithm itself
@@ -703,20 +719,32 @@ trajectory; every iteration restarts the inner pass from the same initial
 state, and a final pass with the converged trajectory produces the returned
 state. See [data_assimilation.md §9](data_assimilation.md).
 
-Truth generation, per-cycle `(num_cycles, N_d)` observation batches, obs noise
-and truth source (`run.truth_dir`) are the same as `run_filtering.py`. The one
-inverted guard is the prior: a **dynamic (time-varying) params mount is
-required** (`params@prior_params=dynamic`), sampled once over the whole window
-with `time.seconds_per_knot = time.simulation_time` so its knots align with the
+With `filter_smoothing.num_windows > 1` that window then **slides**: the
+oldest `window_shift` knots are finalized, the overlapping posterior becomes
+the next window's prior, the state is carried from the final pass's analysis
+after cycle `window_shift`, and `window_shift` leading-edge knots are appended
+per member by `filter_smoothing/evolution`. The assimilated horizon is
+`T = num_cycles + (num_windows - 1) * window_shift` cycles.
+
+Truth generation, per-cycle `(N_d,)` observation batches, obs noise and truth
+source (`run.truth_dir`) are the same as `run_filtering.py`, except that the
+**truth spans the full horizon while the prior spans the first window**: the
+truth is simulated (or loaded) over all `T` cycles and its sampler's knot grid
+covers them, giving `(T, N_d)` observation batches, while the prior trajectory
+is sampled over `num_cycles` cycles only — the later windows' knots come from
+the previous window's posterior, not from the sampler. The one inverted guard
+is the prior: a **dynamic (time-varying) params mount is required**
+(`params@prior_params=dynamic`), sampled once over that first window with
+`time.seconds_per_knot = time.simulation_time` so its knots align with the
 cycles — a knot spacing or knot count that does not cover `num_cycles` fails
 loudly. The sampler emits `L+1` knots for an `L`-cycle window; the trailing
 knot rides along in the trajectory, updated only through the prior's temporal
 correlations.
 
 Mode is the cross product of the `filter_smoothing/*` groups (§1.9) — the inner
-analysis / localization / inflation and the outer temporal localization — with
-`filter_smoothing.num_steps` and `num_cycles`. Phase 1 is a single window; the
-moving-window extension is not implemented. There is no metric/figure pipeline
+analysis / localization / inflation, the outer temporal localization and the
+leading-edge evolution — with `filter_smoothing.num_steps`, `num_cycles`,
+`num_windows` and `window_shift`. There is no metric/figure pipeline
 counterpart yet (§2.3 / §2.4) — this script's artifacts are the whole output.
 
 Saves: `posterior_params.nc` (the smoothed **trajectory** ensemble, with its
@@ -731,6 +759,21 @@ pass's per-cycle diagnostics, the same `FilterResult` schema as
 trajectory ensemble at every outer iteration, the artifact that shows the
 smoothing converge — plus the final pass's `params_history.nc` /
 `state_history.nc` over cycles.
+
+For `num_windows > 1` the artifact set grows by `window_diagnostics.yaml` (one
+record per window: index, inclusive cycle span, that window's iteration
+diagnostics and its wall clock), and `posterior_params.nc` becomes the
+**assembled full-horizon** trajectory — the knots finalized as each window
+left, concatenated along `time`. Everything else describes the **last** window
+and keeps its single-window shape, so the downstream readers need no change:
+`posterior_state.nc` is its filtered end state, `iteration_diagnostics.yaml` /
+`cycle_diagnostics.yaml` / the histories are its own. `run_info.yaml` records
+the layout that maps them onto the horizon — `num_windows`, `window_shift`,
+`total_cycles`, `seconds_per_window` and `final_pass_first_cycle`
+(`(num_windows - 1) * window_shift`, the last window's offset on the cycle
+axis) — plus the resolved `evolution` subtree, and `truth_access.yaml`'s
+`num_cycles` counts the full horizon's truth blocks. A single-window run writes
+exactly today's set, unchanged.
 
 ---
 
@@ -1497,6 +1540,7 @@ Brief summary:
 | Change DA mode | `esmda/smoother=static|state|state_and_parameter|dynamic|state_and_dynamic` |
 | Run a sequential filter (EnKF) instead of ESMDA | [`scripts/filtering/run_filtering.py`](../scripts/filtering/run_filtering.py) — `filtering.mode=state|parameter|joint` + `filtering/*` groups (§1.8) |
 | Filter the state but smooth a parameter *trajectory* over the window | [`scripts/filter_smoothing/run_filter_smoothing.py`](../scripts/filter_smoothing/run_filter_smoothing.py) — `filter_smoothing/*` groups (§1.9), `params@prior_params=dynamic` required |
+| Slide that window along a longer horizon (fixed lag) | `filter_smoothing.num_windows=<W> filter_smoothing.window_shift=<s>` + `filter_smoothing/evolution=none|random_walk` (§1.9) |
 | Enable localization | `esmda/localization=correlation|distance` (smoother) or `filtering/localization=...` (filter) + optional field overrides |
 | Enable reduced state update | `esmda/state_reduction=svd` (requires state-bearing smoother, incompatible with localization) |
 | Run the full ESMDA pipeline | [`scripts/run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh) |

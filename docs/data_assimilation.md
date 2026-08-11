@@ -797,7 +797,8 @@ See [scripts_and_configs.md](scripts_and_configs.md) §1.8 / §2.1.
 
 **Files:**
 [filter_smoothing/base.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/base.py),
-[filter_smoothing/temporal_localization.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/temporal_localization.py).
+[filter_smoothing/temporal_localization.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/temporal_localization.py),
+[filter_smoothing/moving_window.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/moving_window.py).
 Design record:
 [docs/plans/filter_smoothing_windowed_esmda.md](plans/filter_smoothing_windowed_esmda.md).
 
@@ -950,6 +951,96 @@ parameter", and sharing one observation selection across the block would erase
 the temporal taper along exactly the axis it localizes. The default group
 option is `none` — the global trajectory update.
 
+### Moving window
+
+**File:**
+[filter_smoothing/moving_window.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/moving_window.py)
+
+Everything above estimates one window. The **fixed-lag** formulation (§8 of the
+paper) slides that window along: after a window's outer loop converges,
+`[t_{n-L} … t_n]` becomes `[t_{n-L+s} … t_{n+s}]` for a shift of
+`s = window_shift` cycles. The knots that leave the window are **finalized** —
+never revisited, which is what makes the lag fixed rather than the trajectory
+growing — the overlapping part of the posterior *is* the next window's prior,
+and `s` fresh knots are appended at the leading edge. The state is carried
+along with them, so the next window forecasts from where the previous one had
+already filtered to.
+
+The leading edge is appended by a
+[`ParameterEvolution`](../libs/data-assimilation/src/data_assimilation/filtering/parameter_evolution.py)
+(§8's `IdentityEvolution` / `RandomWalkEvolution`), applied **per member** to
+the last carried knot. This is a deliberate deviation from
+`ParameterTimeSeries.extrapolate`, which the design record originally proposed:
+`extrapolate` rebuilds a *whole-window* prior from a posterior — the
+non-overlapping regime `run_esmda.py` uses — and for e.g. AR(2) synthesizes a
+fresh trajectory, discarding exactly the posterior information the carried
+members hold. `evolve` is the paper's per-member append, and it keeps
+`data_assimilation` free of `pyurbanair` imports.
+
+```python
+result = run_moving_window(
+    smoother,                        # a configured FilterSmoothingESMDA
+    state=x0, params=prior_trajectory,   # window-0 initial state and prior
+    observations=obs_batches,        # the FULL horizon, (T, N_d)
+    num_windows=4, window_shift=1,   # s in [1, L]; s = L -> non-overlapping
+    window_length=None,              # L; None -> solved from the horizon
+    evolution=None,                  # default IdentityEvolution
+    rng_key=None, return_history=False,
+)                                    # -> MovingWindowResult
+```
+
+A pure function, not a class: `FilterSmoothingESMDA` and `filtering/base.py`
+are **unmodified**, and the orchestrator drives them through their public API
+only (`run`, `FilterResult.state_history`). It is exported from both
+`data_assimilation.filter_smoothing` and the package root.
+
+- **Horizon arithmetic.** `T = L + (num_windows − 1)·s`, and window `w`
+  (0-based) consumes observation rows `[w·s, w·s + L)`. The smoother has no
+  window-length attribute — it reads its cycle count from whatever observation
+  batch it is handed — so `L` comes from `window_length`: omitted, the relation
+  is **solved** for `L`; passed (what the script does, from
+  `filter_smoothing.num_cycles`), it is **validated**, which is the louder
+  failure mode. That check and the rest — `num_windows ≥ 1`,
+  `1 ≤ window_shift ≤ L`, a `time` dim on `params`, at least `L` prior knots —
+  all run up front, before the first expensive window.
+- **State carry.** Window `w+1` starts from window `w`'s *final consistency
+  pass* analysis after cycle `s` — `final_pass.state_history.isel(cycle=s−1)`,
+  not the end-of-window state, because the window advanced by only `s` cycles.
+  For `s = L` the two coincide and the orchestrator takes `result.state`
+  directly, which is why history collection is forced on only for a
+  non-final window with `s < L`; histories are then stripped again
+  (non-destructively, via `dataclasses.replace`) unless the caller asked for
+  them.
+- **Parameter carry.** Window `w`'s posterior knots `[s:]` become window
+  `w+1`'s prior knots `[:−s]` (positional); the `s` appended knots come from
+  chaining `evolution.evolve` with fresh subkeys, each continuing the incoming
+  knot grid (`t_last + i·Δt`). Static, no-`time` variables carry through
+  unchanged. Member pairing between the carried state and trajectory ensembles
+  is positional in `ensemble` for both, and never reordered.
+- **Finalization and assembly.** When window `w` advances, its posterior knots
+  `[:s]` are finalized and recorded; the last window contributes its whole
+  posterior. `MovingWindowResult.params` is their concatenation along `time` —
+  the full-horizon smoothed trajectory ensemble, `(num_windows − 1)·s +
+  n_knots` knots, i.e. the horizon plus whatever the last window carries past
+  it (an `L+1`-knot prior's trailing knot rides along to the end) — and
+  `.state` is the last window's filtered end state. `window_results` keeps each
+  window's `FilterSmoothingResult` (histories stripped unless
+  `return_history`), and one `WindowDiagnostics` per window records `window`,
+  the inclusive `first_cycle`/`last_cycle` span, that window's
+  `iteration_diagnostics` and its `window_time`. Reading `obs_rmse` across
+  windows is how one checks that later windows are not steadily harder to fit
+  than the first.
+- **RNG.** The smoother is *not* reset between windows: its key chain advances,
+  so every window draws fresh perturbed observations — common random numbers
+  stay a *within*-window device (see above). The evolution stream is a
+  non-mutating `jax.random.fold_in` of `smoother.rng_key`, derived only when
+  more than one window will actually run.
+- **`num_windows = 1` is the degenerate case** and returns exactly the
+  single-window `run()` result — bit-identical `params` and `state` (nothing is
+  folded from the key, and the single-piece assembly skips the `concat`),
+  merely wrapped in a `MovingWindowResult`. Pinned by a test, so the default
+  config path stays byte-identical to the single-window one.
+
 ### Configuration and run script
 
 [scripts/filter_smoothing/run_filter_smoothing.py](../scripts/filter_smoothing/run_filter_smoothing.py)
@@ -969,14 +1060,16 @@ all under `# @package filter_smoothing`:
 | `filter_smoothing/inner_localization/` | `none`, `correlation`, `distance` | the inner state filter's localization — the `localization/` strategies reused unchanged |
 | `filter_smoothing/inner_inflation/` | `rtps`, `none`, `multiplicative`, `rtpp` | the inner filter's spread maintenance |
 | `filter_smoothing/temporal_localization/` | `none`, `taper` | `TemporalLocalization` on the **outer** trajectory update |
+| `filter_smoothing/evolution/` | `none`, `random_walk` | the `ParameterEvolution` that appends the leading-edge knots when the window moves (`none` → `IdentityEvolution`) |
 
 Scalars in the `filter_smoothing:` block: `num_cycles`, `num_steps`, `alpha`
-(`null` → `num_steps`), `obs_error_std`, `seed`, `common_inner_noise`. See
+(`null` → `num_steps`), `obs_error_std`, `seed`, `common_inner_noise`, plus
+`num_windows` (default 1, the single-window path) and `window_shift`
+(default 1). With `num_windows > 1` the truth is simulated over the full
+horizon `T = L + (num_windows − 1)·s` while the prior trajectory still covers
+the first window only, and the run gains a full-horizon `posterior_params.nc`
+and a `window_diagnostics.yaml`. See
 [scripts_and_configs.md](scripts_and_configs.md) §1.9 / §2.1.
-
-Phase 1 is a **single window**. The moving-window formulation (finalize the
-oldest knot, shift, append a leading-edge knot via the prior sampler's
-`extrapolate`) is designed but not implemented; see §8 of the design record.
 
 ---
 

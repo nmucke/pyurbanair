@@ -335,6 +335,107 @@ formulation for long windows (§9 observation-space cost — `L·N_d` here is sm
 ~12 sensors), parameter-basis reduction over knots, within-segment parameter
 interpolation, deterministic (ETKF) outer update.
 
+## 8a. Phase 2 contract (moving window, as agreed before implementation)
+
+Supersedes the Phase 2 sketch above where they differ. Paper §8: sliding
+window of length `L`, `[t_{n-L} … t_n] → [t_{n-L+1} … t_{n+1}]`; the oldest
+`θ` is **finalized** on leaving the window; the overlapping parameter ensemble
+*is* the next window's prior; the new leading-edge value comes from the
+**parameter evolution model**.
+
+**Deviation from the sketch, with reason:** the leading edge is appended with
+the library's own `ParameterEvolution` (`filtering/parameter_evolution.py` —
+`IdentityEvolution` / `RandomWalkEvolution`, applied per member to the last
+carried knot), *not* `ParameterTimeSeries.extrapolate`. `extrapolate` rebuilds
+a whole-window prior from a posterior (run_esmda's non-overlapping-window
+regime) and for e.g. AR(2) synthesizes a fresh trajectory, which would discard
+the carried members' posterior information; `evolve` is exactly the paper's
+per-member append and keeps `data_assimilation` free of `pyurbanair` imports.
+
+### Orchestrator: `filter_smoothing/moving_window.py`
+
+A pure function (no class state), plus result dataclasses:
+
+```python
+run_moving_window(
+    smoother,                      # a FilterSmoothingESMDA
+    *, state, params, observations,  # window-0 x_0, window-0 trajectory prior,
+                                     # observations over the FULL horizon (T, N_d)
+    num_windows, window_shift=1,     # s in [1, L]; s = L → non-overlapping
+    evolution=None,                  # ParameterEvolution; default IdentityEvolution
+    rng_key=None,                    # evolution draws; default smoother-derived
+    return_history=False,
+) -> MovingWindowResult
+```
+
+- **Horizon**: `T = observations.shape[0]` must equal
+  `L + (num_windows − 1)·s`, with `L = smoother`'s cycles per window
+  (validated loudly). Window `w` (0-based) consumes observation rows
+  `[w·s, w·s + L)`.
+- **State carry**: window `w+1`'s initial ensemble is window `w`'s
+  final-consistency-pass analysis state after cycle `s`:
+  `final_pass.state_history.isel(cycle=s−1)` (drop the `cycle` dim). The
+  orchestrator therefore runs each window with history collection on
+  internally, discarding heavy histories after extraction when the caller
+  didn't ask for them. `s = L` is equivalent to carrying `result.state`.
+- **Parameter carry**: window `w`'s posterior knots `[s:]` (positional) become
+  window `w+1`'s prior knots `[:−s]`; `s` new leading-edge knots are appended
+  by chaining `evolution.evolve` per knot with fresh subkeys, each new knot's
+  `time` coordinate continuing the incoming grid (`t_last + i·Δt`). Static
+  (no-`time`) variables carry through unchanged. Member pairing is positional
+  (`ensemble` index) for both state and params — never reordered.
+- **Finalization**: when window `w` advances, its posterior knots `[:s]` are
+  finalized (paper: "fixed after leaving the window") and recorded; the last
+  window contributes its entire posterior. `MovingWindowResult.params` is the
+  concatenation along `time` — the full-horizon smoothed trajectory ensemble.
+  `MovingWindowResult.state` is the last window's filtered end state;
+  `window_results` keeps each window's `FilterSmoothingResult` (histories
+  stripped unless `return_history`), and per-window `WindowDiagnostics`
+  records the window index, cycle span, and that window's iteration
+  diagnostics.
+- **Degenerate case**: `num_windows = 1` must return exactly the Phase 1
+  `run()` result (bit-identical `params`/`state`), wrapped — pinned by a test.
+- `FilterSmoothingESMDA` and `filtering/base.py` are **not modified**. The
+  orchestrator uses only public API (`run`, `num_cycles` from the observation
+  batches it slices, `FilterResult.state_history`).
+
+### Script & config
+
+- `filter_smoothing.num_windows: 1` (default — byte-identical Phase 1 path)
+  and `filter_smoothing.window_shift: 1` scalars; new group
+  `filter_smoothing/evolution: none|random_walk` mirroring
+  `conf/filtering/evolution/*` (`none` → `IdentityEvolution` at the
+  orchestrator default; `random_walk` → `RandomWalkEvolution(std=…)`).
+- **Truth vs prior horizons differ**: the truth (and its observations) must be
+  simulated over all `T = L + (num_windows−1)·s` cycles, while the prior
+  trajectory is sampled over the *first window only* (`L` cycles, as today).
+  The knot-alignment validation applies to the prior's window, and the truth
+  sampler's knot grid must span the full horizon.
+- Artifacts: `posterior_params.nc` becomes the full-horizon assembled
+  trajectory; `window_diagnostics.yaml` (per window: span + iteration
+  diagnostics); `posterior_state.nc` stays the final filtered state;
+  `run_info.yaml` gains `num_windows`, `window_shift`, `total_cycles`, and
+  per-window timing. Single-window runs keep today's artifact set unchanged.
+
+### Tests
+
+1. `num_windows=1` ≡ Phase 1 `run()` (bit-identical params and state).
+2. Observation slicing: stub records which obs rows each window's inner passes
+   saw; window `w` sees exactly rows `[w·s, w·s+L)`.
+3. State carry: window 2's first-cycle forecast starts from window 1's
+   final-pass analysis after cycle `s` (stub records states; test `s=1` and
+   `s=L`).
+4. Parameter carry + leading edge: with `IdentityEvolution`, window 2's prior
+   knots = window 1's posterior knots shifted, and the appended knot equals
+   the last carried knot; with `RandomWalkEvolution`, the appended knot
+   differs per member and its ensemble spread grows by ~`std`.
+5. Finalization/assembly: `result.params` time axis spans the full horizon;
+   early knots equal the posterior of the window they left.
+6. Validation: `T` mismatch, `window_shift ∉ [1, L]`, `num_windows < 1` raise.
+7. E2E smoke: `num_windows=2, window_shift=1` — artifacts exist,
+   `posterior_params` spans `T` cycles' knots, `window_diagnostics` has 2
+   entries; plus a compose/guard test for the new group and scalars.
+
 ## 9. Decisions taken / open points
 
 - **Static (no-`time`) parameters in the prior Dataset** (e.g.

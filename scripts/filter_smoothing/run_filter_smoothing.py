@@ -43,8 +43,13 @@ The machinery is declarative (see conf/run_filter_smoothing.yaml):
   * ``filter_smoothing/temporal_localization=none|taper``
         localization of the OUTER trajectory update in TIME (|t_knot - t_obs|),
         a separate axis from the spatial inner localization.
+  * ``filter_smoothing/evolution=none|random_walk``
+        how the MOVING window draws its new leading-edge knot from the carried
+        one (unused when ``num_windows=1``).
   * ``filter_smoothing.num_steps=N_a`` outer ESMDA iterations,
     ``filter_smoothing.alpha=null`` -> equal weights (alpha = num_steps).
+  * ``filter_smoothing.num_windows=W``, ``filter_smoothing.window_shift=s``
+        the fixed-lag moving window (see below); ``W=1`` is one fixed window.
 
 and the truth source mirrors run_filtering.py:
 
@@ -53,16 +58,33 @@ and the truth source mirrors run_filtering.py:
                               run_forward_model.py.
 
 One cycle consumes one forecast segment of ``time.simulation_time`` seconds:
-the truth is generated over ``filter_smoothing.num_cycles`` such segments up
-front, each segment's observations are extracted with the case's temporal
-observation operator, and the estimator consumes the resulting
-``(num_cycles, N_d)`` batch matrix in a single ``run()`` call.
+the truth is generated over the whole horizon up front, each segment's
+observations are extracted with the case's temporal observation operator, and
+the estimator consumes the resulting ``(T, N_d)`` batch matrix.
+
+That horizon is ``T = num_cycles + (num_windows - 1) * window_shift`` cycles.
+With the default ``num_windows=1`` it is just ``num_cycles``, and the estimator
+consumes the whole batch in a single ``run()`` call — the single fixed window.
+With ``num_windows>1`` the same estimator is driven by
+``data_assimilation.filter_smoothing.run_moving_window`` over a FIXED-LAG
+window that slides ``window_shift`` cycles at a time (paper §8): window ``w``
+consumes batches ``[w*s, w*s + L)``, its knots older than the shift are
+finalized on leaving the window, its overlapping knots are the next window's
+prior, and ``window_shift`` fresh leading-edge knots are appended per member by
+``filter_smoothing/evolution``. The state ensemble is carried across the seam
+too, so the windows are one continuous filter run — only the parameter
+trajectory is re-smoothed. Artifacts then describe the full horizon
+(``posterior_params.nc``, ``window_diagnostics.yaml``) or the LAST window
+(``posterior_state.nc``, ``iteration_diagnostics.yaml``,
+``cycle_diagnostics.yaml`` and the histories), never a mixture.
 
 The PRIOR must be a DYNAMIC (time-varying) sampler -- the exact inverse of
 run_filtering.py's guard, and the point of the method: what is estimated is a
 whole parameter trajectory, one knot per cycle. Pair with
-``params@prior_params=dynamic``. The trajectory is sampled ONCE over the full
-``num_cycles * time.simulation_time`` horizon, so its knots must be spaced one
+``params@prior_params=dynamic``. The trajectory is sampled ONCE over the FIRST
+window's ``num_cycles * time.simulation_time`` span — later windows inherit
+their prior from the previous window's posterior, never from the sampler, which
+is the point of carrying the window forward — so its knots must be spaced one
 cycle apart (``time.seconds_per_knot == time.simulation_time``, the default);
 both the configured spacing and the SAMPLED knot times are validated loudly
 below, and the trajectory length handed to the estimator is derived from the
@@ -79,6 +101,9 @@ Examples::
         filter_smoothing/inner_analysis=etkf filter_smoothing/inner_localization=none
     python scripts/filter_smoothing/run_filter_smoothing.py \
         filter_smoothing/inner_analysis=letkf filter_smoothing/inner_localization=distance
+    python scripts/filter_smoothing/run_filter_smoothing.py \
+        filter_smoothing.num_cycles=8 filter_smoothing.num_windows=10 \
+        filter_smoothing.window_shift=2 filter_smoothing/evolution=random_walk
 """
 
 import dataclasses
@@ -91,6 +116,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray
+from data_assimilation.filter_smoothing import run_moving_window
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
@@ -119,9 +145,34 @@ def run(cfg: DictConfig) -> None:
     num_steps = int(cfg.filter_smoothing.num_steps)
     if num_steps < 1:
         raise ValueError(f"filter_smoothing.num_steps must be >= 1, got {num_steps}.")
+
+    # Fixed-lag moving window. num_windows=1 is the single fixed window (the
+    # Phase 1 path, taken verbatim below); W>1 slides the L-cycle window
+    # `window_shift` cycles at a time, so the run spans T cycles of truth.
+    num_windows = int(cfg.filter_smoothing.num_windows)
+    if num_windows < 1:
+        raise ValueError(
+            f"filter_smoothing.num_windows must be >= 1, got {num_windows}."
+        )
+    window_shift = int(cfg.filter_smoothing.window_shift)
+    if not 1 <= window_shift <= num_cycles:
+        raise ValueError(
+            f"filter_smoothing.window_shift must be in "
+            f"[1, filter_smoothing.num_cycles={num_cycles}], got {window_shift}. "
+            "A shift of 0 would never advance the window, and a shift longer than "
+            "the window would skip cycles that no window ever assimilates; "
+            f"window_shift={num_cycles} is the non-overlapping regime."
+        )
+    total_cycles = num_cycles + (num_windows - 1) * window_shift
+
     sim_time = float(cfg.time.simulation_time)
     ensemble_size = int(cfg.ensemble.ensemble_size)
-    final_time = sim_time * num_cycles
+    # Two horizons, deliberately distinct: the truth/observations span every
+    # cycle the run will ever assimilate, while the sampled prior trajectory
+    # covers the FIRST window only (window w>0 inherits the previous window's
+    # posterior knots, plus `window_shift` evolved leading-edge ones).
+    window_time = sim_time * num_cycles
+    final_time = sim_time * total_cycles
     domain_x_min = float(cfg.domain.bounds[0][0])
     rng_key = jax.random.PRNGKey(cfg.filter_smoothing.seed)
 
@@ -178,6 +229,8 @@ def run(cfg: DictConfig) -> None:
         # A dynamic (time-varying) truth must span the FULL horizon so its
         # parameter drifts across every cycle, not just the first: sample its
         # knots over final_time (same as run_filtering.py's is_dynamic branch).
+        # With a moving window that horizon is all T cycles, so the truth's knot
+        # grid covers every window — unlike the prior's, which covers the first.
         # A static truth ignores it.
         if is_dynamic_truth:
             truth_sampler = instantiate(truth_params_cfg, simulation_time=final_time)
@@ -220,19 +273,21 @@ def run(cfg: DictConfig) -> None:
     # the degenerate slicings explicitly: zero frames per cycle would feed the
     # observation operator empty segments, and a remainder would be dropped
     # silently.
-    if n_total < num_cycles:
+    if n_total < total_cycles:
         raise ValueError(
             f"The truth provides {n_total} frame(s) within the {final_time:g}s "
-            f"horizon, fewer than filter_smoothing.num_cycles={num_cycles} (each "
-            "cycle needs at least one frame). Increase time.simulation_time, "
-            "reduce filter_smoothing.num_cycles, or point run.truth_dir at a "
-            "longer truth."
+            f"horizon, fewer than the {total_cycles} cycle(s) of the run (each "
+            "cycle needs at least one frame; the horizon is num_cycles="
+            f"{num_cycles} + (num_windows-1)*window_shift = {total_cycles}). "
+            "Increase time.simulation_time, reduce filter_smoothing.num_cycles "
+            "or filter_smoothing.num_windows, or point run.truth_dir at a longer "
+            "truth."
         )
-    n_per_cycle = n_total // num_cycles
-    n_dropped = n_total - n_per_cycle * num_cycles
+    n_per_cycle = n_total // total_cycles
+    n_dropped = n_total - n_per_cycle * total_cycles
     if n_dropped:
         print(
-            f"Truth frames ({n_total}) do not divide evenly into {num_cycles} "
+            f"Truth frames ({n_total}) do not divide evenly into {total_cycles} "
             f"cycles of {n_per_cycle}; the trailing {n_dropped} frame(s) are "
             "not assimilated."
         )
@@ -264,9 +319,12 @@ def run(cfg: DictConfig) -> None:
     )
 
     # --- Prior parameter TRAJECTORY ensemble -----------------------------------
-    # Sampled ONCE over the whole window (not per cycle): the knots ARE the
-    # estimated quantity Theta, and the outer update touches all of them at once.
-    prior_sampler = instantiate(prior_params_cfg, simulation_time=final_time)
+    # Sampled ONCE over the FIRST window (not per cycle, and not over the full
+    # moving-window horizon): the knots ARE the estimated quantity Theta, and the
+    # outer update touches all of them at once. A moving window then carries its
+    # own posterior forward instead of drawing a fresh prior, so `window_time` —
+    # not `final_time` — is what the sampler and the knot checks below see.
+    prior_sampler = instantiate(prior_params_cfg, simulation_time=window_time)
     prior_params = prior_sampler.sample(ensemble_size)
     if "time" not in prior_params.dims:
         raise ValueError(
@@ -278,9 +336,10 @@ def run(cfg: DictConfig) -> None:
     # Validate the SAMPLED knot layout (what the estimator actually consumes),
     # not just the configured spacing: knot j must sit at the start of cycle j.
     # `build_knot_times` emits num_cycles+1 knots for a num_cycles*sim_time
-    # horizon — the trailing knot at final_time is legitimate and rides along in
-    # Theta, updated only through the prior's temporal correlations (it becomes
-    # the leading edge of a future moving window; plan §5/§9).
+    # horizon — the trailing knot at window_time is legitimate and rides along in
+    # Theta, updated only through the prior's temporal correlations. With a
+    # moving window it is exactly the knot the leading edge is grown from: the
+    # orchestrator seeds each appended knot on the posterior's last one.
     knot_times = np.asarray(prior_params["time"].values, dtype=float)
     n_knots = int(knot_times.size)
     knot_gaps = np.diff(knot_times)
@@ -300,7 +359,7 @@ def run(cfg: DictConfig) -> None:
             f"The sampled prior has {n_knots} knot(s), which does not cover "
             f"filter_smoothing.num_cycles={num_cycles}: cycles beyond the last "
             "knot would silently reuse it. Sample the prior over the full "
-            f"{final_time:g}s window."
+            f"{window_time:g}s window."
         )
     if n_knots > num_cycles + 1:
         raise ValueError(
@@ -311,7 +370,7 @@ def run(cfg: DictConfig) -> None:
             "and filter_smoothing.num_cycles."
         )
     print(
-        f"Prior trajectory: {n_knots} knot(s) over {final_time:g}s "
+        f"Prior trajectory: {n_knots} knot(s) over {window_time:g}s "
         f"({num_cycles} cycle(s) of {sim_time:g}s)"
         + (
             "; the trailing knot is updated only through prior temporal correlation."
@@ -324,14 +383,20 @@ def run(cfg: DictConfig) -> None:
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
 
+    # One batch per cycle of the FULL horizon, in cycle order: window w slices
+    # rows [w*window_shift, w*window_shift + num_cycles) out of this, so the
+    # batches are built once and never per window. The horizon arithmetic that
+    # produced `total_cycles` is re-checked against this array by the
+    # orchestrator below (which is handed `window_length=num_cycles` precisely
+    # so it validates T == L + (W-1)*s instead of solving for L).
     obs_rows = []
-    for cycle in range(num_cycles):
+    for cycle in range(total_cycles):
         cycle_truth = open_truth(
             true_state_path, n_total, x_offset, start_idx, t_offset
         ).isel(time=slice(cycle * n_per_cycle, (cycle + 1) * n_per_cycle))
         obs_rows.append(jnp.asarray(truth_obs_op(cycle_truth)))
         cycle_truth.close()
-    observations = jnp.stack(obs_rows, axis=0)  # (num_cycles, N_d)
+    observations = jnp.stack(obs_rows, axis=0)  # (total_cycles, N_d)
 
     obs_error_std = float(cfg.filter_smoothing.obs_error_std)
     C_D_diag = (obs_error_std**2) * jnp.ones(observations.shape[1])
@@ -357,28 +422,80 @@ def run(cfg: DictConfig) -> None:
 
     save_history = bool(cfg.run.get("save_history", True))
     smoother_start = time.perf_counter()
-    result = smoother.run(
-        state=None,  # cold start; the first segment includes the model's spin-up
-        params=prior_params,
-        observations=observations,
-        return_history=save_history,
-    )
+    if num_windows == 1:
+        # Single fixed window: one run() over the whole batch, unchanged.
+        result = smoother.run(
+            state=None,  # cold start; the first segment includes the model's spin-up
+            params=prior_params,
+            observations=observations,
+            return_history=save_history,
+        )
+        posterior_params = result.params
+        posterior_state = result.state
+        window_diagnostics = None
+    else:
+        # Moving window: the same estimator, driven window by window. The
+        # evolution model is the orchestrator's collaborator rather than the
+        # estimator's (the estimator knows nothing about windows sliding), so it
+        # is instantiated here; null -> the orchestrator's IdentityEvolution.
+        evolution = (
+            instantiate(cfg.filter_smoothing.evolution)
+            if cfg.filter_smoothing.evolution is not None
+            else None
+        )
+        rng_key, window_key = jax.random.split(rng_key)
+        window_result = run_moving_window(
+            smoother,
+            state=None,  # cold start; window w>0 inherits window w-1's state
+            params=prior_params,
+            observations=observations,
+            num_windows=num_windows,
+            window_shift=window_shift,
+            # Pass the window length explicitly so the horizon equation is
+            # VALIDATED against the batch rather than solved for L — a truth /
+            # num_cycles mismatch then fails here instead of silently running
+            # windows of the wrong length.
+            window_length=num_cycles,
+            evolution=evolution,
+            rng_key=window_key,
+            return_history=save_history,
+        )
+        # The full-horizon trajectory (every window's finalized knots) and the
+        # last window's filtered end state; everything else below describes that
+        # last window, which is the only one whose per-cycle artifacts survive.
+        posterior_params = window_result.params
+        posterior_state = window_result.state
+        window_diagnostics = window_result.window_diagnostics
+        result = window_result.window_results[-1]
     smoother_seconds = time.perf_counter() - smoother_start
 
     # --- Outputs ----------------------------------------------------------------
     # The smoothed trajectory ensemble and the filtered end-of-window state (the
     # latter always from the final consistency pass), the per-iteration
-    # trajectories when requested, and both diagnostics streams always.
-    if result.params is not None:
-        result.params.to_netcdf(out_dir / "posterior_params.nc")
-    if result.state is not None:
-        result.state.to_netcdf(out_dir / "posterior_state.nc")
+    # trajectories when requested, and both diagnostics streams always. Under a
+    # moving window the trajectory spans the FULL horizon (every window's
+    # finalized knots, assembled) while the state and the per-cycle artifacts
+    # are the last window's — same names, same shapes, one window's worth each.
+    if posterior_params is not None:
+        posterior_params.to_netcdf(out_dir / "posterior_params.nc")
+    if posterior_state is not None:
+        posterior_state.to_netcdf(out_dir / "posterior_state.nc")
     if result.params_history is not None:
         result.params_history.to_netcdf(out_dir / "params_iterations.nc")
     write_yaml(
         [dataclasses.asdict(d) for d in result.iteration_diagnostics],
         out_dir / "iteration_diagnostics.yaml",
     )
+
+    # Moving-window runs only: the per-window record (index, cycle span, that
+    # window's iteration diagnostics, wall clock). `iteration_diagnostics.yaml`
+    # above stays the last window's, so its shape is the same as a single
+    # window's and the downstream stages keep reading it unchanged.
+    if window_diagnostics is not None:
+        write_yaml(
+            [dataclasses.asdict(d) for d in window_diagnostics],
+            out_dir / "window_diagnostics.yaml",
+        )
 
     # The final pass is a plain FilterResult, laid out exactly like
     # run_filtering.py's: its per-cycle diagnostics (and optional histories) are
@@ -396,7 +513,12 @@ def run(cfg: DictConfig) -> None:
     # Persist the truth-access parameters (slicing/offsets + per-cycle frame
     # count) so the downstream metric/figure scripts reconstruct the exact same
     # lazy view of the on-disk truth without re-deriving the horizon logic.
-    # Byte-compatible with run_filtering.py's truth_access.yaml.
+    # Byte-compatible with run_filtering.py's truth_access.yaml — the key set
+    # stays exactly that, including under a moving window, where `num_cycles`
+    # is the number of truth blocks over the FULL horizon (total_cycles; the
+    # same number for the single-window default). The window layout lives in
+    # run_info.yaml instead, whose `final_pass_first_cycle` maps the last
+    # window's cycle k to truth block k + that offset.
     write_yaml(
         {
             "true_state_path": str(true_state_path),
@@ -405,7 +527,7 @@ def run(cfg: DictConfig) -> None:
             "t_offset": float(t_offset),
             "n_total": int(n_total),
             "n_per_cycle": int(n_per_cycle),
-            "num_cycles": int(num_cycles),
+            "num_cycles": int(total_cycles),
             "sim_time": float(sim_time),
             "truth_solver_name": str(cfg.truth_model.solver_name),
             "assim_solver_name": str(cfg.assim_model.solver_name),
@@ -413,11 +535,34 @@ def run(cfg: DictConfig) -> None:
         out_dir / "truth_access.yaml",
     )
 
+    # Per-window wall clock, as the orchestrator measured it. None for the
+    # single-window path, and for a run where any window went unmeasured — a
+    # partially populated list would read as if the missing ones were free.
+    window_seconds: list[float] | None = None
+    if window_diagnostics is not None and all(
+        d.window_time is not None for d in window_diagnostics
+    ):
+        window_seconds = [
+            float(d.window_time)
+            for d in window_diagnostics
+            if d.window_time is not None
+        ]
+
     write_yaml(
         {
             "configuration": {
                 "estimator": type(smoother).__name__,
+                # Cycles per WINDOW (= trajectory knots the outer loop updates
+                # at once), not the run's horizon — that is total_cycles below.
                 "num_cycles": int(num_cycles),
+                "num_windows": int(num_windows),
+                "window_shift": int(window_shift),
+                "total_cycles": int(total_cycles),
+                # Where the last window sits on the horizon's cycle axis. Its
+                # per-cycle artifacts (cycle_diagnostics.yaml, the histories)
+                # are the only ones on disk, so their cycle k is the run's cycle
+                # k + this offset. 0 for a single window.
+                "final_pass_first_cycle": int((num_windows - 1) * window_shift),
                 "num_steps": int(num_steps),
                 # The configured alpha may be null (equal weights); record the
                 # value the estimator resolved it to as well, so a benchmark
@@ -433,6 +578,9 @@ def run(cfg: DictConfig) -> None:
                 "seconds_per_knot": float(seconds_per_knot),
                 "ensemble_size": int(ensemble_size),
                 "simulation_time_per_cycle": float(sim_time),
+                # One window's span, and the full horizon's; equal when
+                # num_windows == 1.
+                "seconds_per_window": float(window_time),
                 "final_time": float(final_time),
                 "observation_error_std": obs_error_std,
                 "seed": int(cfg.filter_smoothing.seed),
@@ -481,17 +629,38 @@ def run(cfg: DictConfig) -> None:
                     if cfg.filter_smoothing.temporal_localization is not None
                     else None
                 ),
+                # How the moving window grew each new leading-edge knot. `null`
+                # is both "identity" and "single window, nothing was appended";
+                # read it against num_windows.
+                "evolution": (
+                    OmegaConf.to_container(cfg.filter_smoothing.evolution, resolve=True)
+                    if cfg.filter_smoothing.evolution is not None
+                    else None
+                ),
             },
             "timing": {
-                # num_steps inner passes plus the final consistency pass, each
-                # of num_cycles forecast segments — that (num_steps + 1) factor
-                # is the method's whole cost story, so break it out.
+                # num_steps inner passes plus the final consistency pass, per
+                # window, each of num_cycles forecast segments — that
+                # (num_steps + 1) * num_windows factor is the method's whole
+                # cost story, so break it out. Note the horizon is only
+                # total_cycles long: an overlapping window (window_shift <
+                # num_cycles) re-forecasts the overlap once per window, which is
+                # exactly what buys each knot its repeated smoothing.
                 "total_seconds": float(smoother_seconds),
-                "num_inner_passes": int(num_steps + 1),
-                "mean_pass_seconds": float(smoother_seconds / (num_steps + 1)),
-                "mean_cycle_seconds": float(
-                    smoother_seconds / max((num_steps + 1) * num_cycles, 1)
+                "num_inner_passes": int((num_steps + 1) * num_windows),
+                "mean_pass_seconds": float(
+                    smoother_seconds / ((num_steps + 1) * num_windows)
                 ),
+                "mean_cycle_seconds": float(
+                    smoother_seconds
+                    / max((num_steps + 1) * num_windows * num_cycles, 1)
+                ),
+                "num_windows": int(num_windows),
+                "mean_window_seconds": float(smoother_seconds / num_windows),
+                # Per-window wall clock (the windows run in sequence, so these
+                # sum to total_seconds bar the setup around them); null for a
+                # single window.
+                "window_seconds": window_seconds,
             },
         },
         out_dir / "run_info.yaml",

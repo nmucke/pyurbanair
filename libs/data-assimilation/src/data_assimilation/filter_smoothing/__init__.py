@@ -8,7 +8,8 @@ trajectory over a window of cycles. See
 derivation.
 
 Re-exported here: the classes a config instantiates
-(``FilterSmoothingESMDA``, ``TemporalLocalization``) and the result types a
+(``FilterSmoothingESMDA``, ``TemporalLocalization``), the moving-window
+orchestrator a run script calls (``run_moving_window``) and the result types a
 caller reads. Deliberately *not* the inner filter subclass
 ``_TrajectoryStateFilter``: it is an implementation detail of the outer loop,
 which builds it itself.
@@ -19,6 +20,11 @@ from data_assimilation.filter_smoothing.base import (
     FilterSmoothingResult,
     IterationDiagnostics,
 )
+from data_assimilation.filter_smoothing.moving_window import (
+    MovingWindowResult,
+    WindowDiagnostics,
+    run_moving_window,
+)
 from data_assimilation.filter_smoothing.temporal_localization import (
     TemporalLocalization,
 )
@@ -27,5 +33,8 @@ __all__ = [
     "FilterSmoothingESMDA",
     "FilterSmoothingResult",
     "IterationDiagnostics",
+    "MovingWindowResult",
     "TemporalLocalization",
+    "WindowDiagnostics",
+    "run_moving_window",
 ]

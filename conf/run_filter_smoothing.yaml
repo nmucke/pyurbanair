@@ -29,7 +29,14 @@
 #   * filter_smoothing/temporal_localization=none|taper
 #                                              localization of the OUTER
 #                                              trajectory update in TIME
+#   * filter_smoothing/evolution=none|random_walk
+#                                              how the MOVING window's new
+#                                              leading-edge knot is drawn from
+#                                              the carried one (num_windows>1)
 #   * filter_smoothing.num_cycles=L            cycles (= knots) per window
+#   * filter_smoothing.num_windows=W           windows the window slides through
+#                                              (1 -> one fixed window)
+#   * filter_smoothing.window_shift=s          cycles the window slides by
 #   * filter_smoothing.num_steps=N_a           outer ESMDA iterations
 # and the truth source (mirrors run_filtering.yaml / run_esmda.yaml):
 #   * run.truth_dir=null   -> simulate truth inline (default)
@@ -54,6 +61,9 @@
 #     filter_smoothing/inner_analysis=etkf filter_smoothing/inner_localization=none
 #   python scripts/filter_smoothing/run_filter_smoothing.py \
 #     filter_smoothing/inner_analysis=letkf filter_smoothing/inner_localization=distance
+#   python scripts/filter_smoothing/run_filter_smoothing.py \
+#     filter_smoothing.num_cycles=8 filter_smoothing.num_windows=10 \
+#     filter_smoothing.window_shift=2 filter_smoothing/evolution=random_walk
 defaults:
   - case: xie_and_castro
   # `_self_` before the filter_smoothing/* groups so the base `filter_smoothing:`
@@ -62,9 +72,10 @@ defaults:
   # params mounts write to their own packages.
   - _self_
   - filter_smoothing/inner_analysis: stochastic
-  - filter_smoothing/inner_localization: none
+  - filter_smoothing/inner_localization: distance
   - filter_smoothing/inner_inflation: rtps
-  - filter_smoothing/temporal_localization: none
+  - filter_smoothing/temporal_localization: taper
+  - filter_smoothing/evolution: none
   - model@truth_model: pyudales
   - model@assim_model: pyudales
   # Deterministic harmonic TRUTH trajectory (anti-inverse-crime: not a draw from
@@ -123,12 +134,33 @@ ensemble:
 filter_smoothing:
   # Window length L: cycles per window = knots of the estimated trajectory. Each
   # cycle forecasts one segment of `time.simulation_time` seconds, so the window
-  # spans num_cycles * time.simulation_time seconds. Phase 1 runs ONE window.
-  num_cycles: 8
+  # spans num_cycles * time.simulation_time seconds.
+  num_cycles: 24
+  # Number of windows W the fixed-lag window slides through. 1 (the default) is
+  # the single fixed window: one run() call over num_cycles cycles, byte for
+  # byte the Phase 1 path. W > 1 turns on the moving window of the paper's §8:
+  # after each window's ESMDA loop converges, the window advances by
+  # `window_shift` cycles — the oldest shifted-out knots are FINALIZED (fixed
+  # once they leave the window), the overlapping knots become the next window's
+  # prior, the carried state ensemble continues from cycle `window_shift` of the
+  # final consistency pass, and `window_shift` fresh leading-edge knots are
+  # appended per member by `filter_smoothing/evolution`.
+  num_windows: 1
+  # Cycles the window slides by per step, s in [1, num_cycles]. s = 1 is the
+  # maximally overlapping fixed lag (every knot is revisited num_cycles times
+  # before it is finalized, at num_windows times the cost of one window);
+  # s = num_cycles is the non-overlapping regime (each cycle assimilated once,
+  # only the carried state and the appended knots link the windows).
+  window_shift: 1
+  # TOTAL horizon: T = num_cycles + (num_windows - 1) * window_shift cycles, so
+  # window w (0-based) consumes observation batches [w*s, w*s + L). The truth is
+  # simulated and observed over all T cycles; the PRIOR trajectory is still
+  # sampled over the first window only (L(+1) knots) — later windows get their
+  # prior from the previous window's posterior, not from the sampler.
   # Outer ESMDA iterations N_a. Each one is a full inner EnKF pass through the
   # window, so the forward-model cost is (num_steps + 1) * num_cycles segments
   # per member — the +1 is the final consistency pass.
-  num_steps: 4
+  num_steps: 2
   # Tempering weight. null -> the estimator defaults to alpha = num_steps (equal
   # weights, the usual ESMDA convention, sum of 1/alpha_i == 1). A scalar
   # override applies the same alpha to every iteration, and the schedule check
@@ -153,6 +185,11 @@ filter_smoothing:
   inner_localization: null
   inner_inflation: null
   temporal_localization: null
+  # Leading-edge parameter evolution for the moving window. Unlike the four keys
+  # above it is NOT a collaborator of the `smoother:` node below: the estimator
+  # knows nothing about windows sliding, so the script instantiates this and
+  # hands it to the moving-window orchestrator. null -> IdentityEvolution.
+  evolution: null
   smoother:
     _target_: data_assimilation.filter_smoothing.FilterSmoothingESMDA
     _convert_: all
