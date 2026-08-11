@@ -744,8 +744,10 @@ correlations.
 Mode is the cross product of the `filter_smoothing/*` groups (§1.9) — the inner
 analysis / localization / inflation, the outer temporal localization and the
 leading-edge evolution — with `filter_smoothing.num_steps`, `num_cycles`,
-`num_windows` and `window_shift`. There is no metric/figure pipeline
-counterpart yet (§2.3 / §2.4) — this script's artifacts are the whole output.
+`num_windows` and `window_shift`.
+
+Stage 1 of the single-run filter-smoothing pipeline (§2.5), orchestrated by
+[`run_filter_smoothing_pipeline.sh`](../scripts/run_filter_smoothing_pipeline.sh).
 
 Saves: `posterior_params.nc` (the smoothed **trajectory** ensemble, with its
 `time` knot dim), `posterior_state.nc` (the filtered end-of-window ensemble
@@ -825,6 +827,26 @@ The metric functions themselves (`streaming_state_rmse`, `select_z_plane`,
 `series_stats`, `vector_sensor_metrics`) live in the
 [`evaluation`](../libs/evaluation/src/evaluation/) library; this module keeps
 only the run-dir-aware extraction they consume.
+
+#### [`_filter_smoothing_common.py`](../scripts/filter_smoothing/_filter_smoothing_common.py)
+
+The filter-smoothing pipeline's glue (§2.5), and deliberately a thin one: it
+re-exports `_filtering_common.py`'s whole per-cycle contract unchanged (the
+inner state filter writes the same artifacts) and adds only what filter
+smoothing has that filtering does not:
+- `window_layout(run_dir, ta)` / `global_cycle_indices(layout)` /
+  `final_window_truth_access(ta, layout)` — resolve the moving window's
+  geometry, name the global cycle indices of the per-cycle artifacts that
+  survived, and re-base the lazy truth view onto that window so every re-exported
+  helper is correct without learning that windows exist.
+- `iteration_diagnostics_series(run_dir)` / `window_iteration_series(run_dir)` /
+  `load_iteration_trajectories(run_dir)` — the outer ESMDA loop's per-iteration
+  and per-window records, and the trajectory ensemble at every iteration.
+
+`load_params_history` is **not** re-exported: filter smoothing's
+`params_history.nc` is the state-only inner pass's record, so its `cycle`
+entries are the same trajectory repeated and renaming `cycle` → `time` would
+collide with the trajectory's own knot dimension.
 
 ---
 
@@ -1351,7 +1373,122 @@ scripts/run_filtering_pipeline.sh filtering.mode=joint filtering.num_cycles=4
 
 ---
 
-### 2.5 Ground-truth artifact utilities
+### 2.5 Filter-smoothing pipeline scripts
+
+The filter-smoothing analogue of §2.3 / §2.4, orchestrated by
+[`run_filter_smoothing_pipeline.sh`](../scripts/run_filter_smoothing_pipeline.sh).
+Stage 1 is
+[`run_filter_smoothing.py`](../scripts/filter_smoothing/run_filter_smoothing.py)
+(§2.1). Because the inner state filter **is** the EnKF, its per-cycle artifacts
+(`state_history.nc`, `cycle_diagnostics.yaml`, the optional
+`_ensemble_states/cycle_*/` tree) are laid out exactly as `run_filtering.py`'s,
+so stages 2 and 3 reuse the filtering pipeline's machinery unchanged — including
+its `cycle_state_source` contract and the `forecast` / `analysis` table in §2.4,
+which apply here verbatim. What is filter-smoothing-specific lives in
+[`_filter_smoothing_common.py`](../scripts/filter_smoothing/_filter_smoothing_common.py):
+the moving window's cycle bookkeeping and the outer ESMDA loop's records.
+
+**Two time axes, and they are not the same one.** The parameter blocks and
+figures cover the smoothed **trajectory**, which spans the full
+`T = num_cycles + (num_windows − 1)·window_shift` cycle horizon. Every state /
+sensor / cycle block covers the per-cycle artifacts, which are the **last
+window's** `L` cycles: each window's inner filter rewrites the same
+`cycle_0 … cycle_{L−1}` directories and the final pass overwrites
+`state_history.nc` whole, so no earlier window's states survive. Handing
+`truth_access.yaml`'s `num_cycles` (which is `T`) to the filtering machinery
+would make it look for cycle directories that were never written, find nothing
+and silently fall back to the analyzed frames on a run that paid the disk for
+the forecasts — so `_filter_smoothing_common.window_layout` reads the layout
+back off `run_info.yaml`'s `configuration.final_pass_first_cycle` (cross-checked
+against `window_diagnostics.yaml`'s own per-window spans, which win on a
+disagreement) and `final_window_truth_access` re-bases the lazy truth view onto
+that window. Every per-cycle number is then labelled with its **global** cycle
+index, and the resolved layout is written to `run_summary.yaml`'s
+`window_layout` block — including a `source` field, so an *assumed* layout (a
+run dir predating the keys) is never mistaken for a recorded one.
+
+`params_history.nc` is deliberately **not** read here: the inner pass is
+state-only, so each of its `cycle` entries is the same whole trajectory
+repeated. `params_iterations.nc` (the trajectory at every outer iteration) is
+the artifact that varies.
+
+#### [`compute_filter_smoothing_metrics.py`](../scripts/filter_smoothing/compute_filter_smoothing_metrics.py)
+**Plain argparse CLI** — usage: `python scripts/filter_smoothing/compute_filter_smoothing_metrics.py --run-dir <dir>`
+
+Stage 2. Reads the artifacts saved by `run_filter_smoothing.py` and writes
+`run_summary.yaml` — the `run_info` metadata augmented with:
+- `metrics_version` — estimator-semantics marker, shared with §2.3 / §2.4.
+- `window_layout` — the window geometry (`num_windows`, `window_length`,
+  `window_shift`, `total_cycles`, `final_pass_first_cycle`, `window_spans`), the
+  `evaluated_cycles` the state/sensor/cycle blocks were scored over, and the
+  `source` the layout was read from.
+- `iteration_metrics` — the outer ESMDA loop's convergence from
+  `iteration_diagnostics.yaml`: summary stats of the per-iteration windowed
+  obs-space RMSE, innovation χ² and trajectory spreads, plus a
+  `<field>_reduction` (`1 − final/first`) for each. `obs_rmse` is measured
+  *before* each iteration's update, so it is the loop's own cost function.
+- `window_metrics` — moving-window runs only: the same per window, with each
+  window's cycle span and wall clock, so a run whose later windows are steadily
+  harder to fit shows it rather than being averaged away.
+- `filter_diagnostics` — the inner filter's per-cycle innovation χ² and
+  observation-space RMSE over the final consistency pass, with the global
+  `cycles` they belong to.
+- `parameter_metrics` — per-parameter RMSE/CRPS of the smoothed trajectory vs
+  the truth trajectory (+ skill vs prior) and the same calibration entries as
+  §2.3.
+- `trajectory_metrics` — the same **per knot** rather than reduced: `knot`
+  times, `rmse`, `crps`, `posterior_std` and (where the prior is comparable)
+  `prior_rmse`, `prior_std`, `contraction_ratio`. `prior_comparable` records
+  whether the prior shares the posterior's knot grid — it does on a
+  single-window run and does *not* on a moving one, where the prior is sampled
+  over the first window only and every later window's prior is the previous
+  window's posterior.
+- `ensemble_health` — duplicate-member counts of the trajectory ensemble,
+  run-wide and per **outer iteration** (`n_unique_per_iteration`, entry 0 the
+  window's prior, from `params_iterations.nc`).
+- `state_metrics`, `sensor_metrics`, `cycle_states`, `sensor_statistics`,
+  `field_metrics` — as in §2.4 (the same code produces them), scored over the
+  window's cycles and labelled with their global indices. `eval_fields.nc` is
+  written beside the summary for the figure stage exactly as it is there.
+
+#### [`make_filter_smoothing_figures.py`](../scripts/filter_smoothing/make_filter_smoothing_figures.py)
+**Plain argparse CLI** — usage: `python scripts/filter_smoothing/make_filter_smoothing_figures.py --run-dir <dir>`
+
+Stage 3. Reads artifacts and writes into the run directory:
+- `parameter_evolution.png` — the prior and smoothed posterior parameter
+  *trajectories* against the truth trajectory, plus the per-cycle `|U|` RMSE.
+  On a moving-window run the alternating shading marks the knot blocks each
+  window finalized on leaving.
+- `parameter_error.png` — per-parameter posterior error per knot.
+- `parameter_marginals.png` (P1) — prior vs posterior marginal per parameter.
+- `iteration_convergence.png` (D4) — the outer ESMDA loop's obs RMSE /
+  innovation χ² / trajectory spread vs iteration, one line per window. The one
+  figure with no filtering counterpart; it reads only the diagnostics YAMLs, so
+  it needs neither the truth nor the metric stage.
+- `rollout_animation.mp4`, `final_state_with_obs.png`,
+  `sensor_timeseries_<set>.png`, `station_profiles.png` (S1), `mean_slices.png`
+  (F1), `sensor_fans.png` (S5), `rank_histogram.png` (D1) — as in §2.4, over the
+  last window's cycles. S5's x-axis carries the window's offset, so its seconds
+  and its cycle boundaries are the **horizon's**, not the window's.
+
+Each figure degrades to a printed skip line when the artifact it reads is
+absent, and a skip never costs the figures after it. The stage also prints the
+window span its state and sensor figures cover, since no PNG says it.
+
+#### [`run_filter_smoothing_pipeline.sh`](../scripts/run_filter_smoothing_pipeline.sh)
+**Shell script** (executable). Runs all three stages in sequence, resolving the
+run dir from `conf/run_filter_smoothing.yaml` with the same Hydra overrides
+forwarded to `run_filter_smoothing.py`.
+
+```bash
+scripts/run_filter_smoothing_pipeline.sh filter_smoothing.num_cycles=8 filter_smoothing.num_steps=4
+scripts/run_filter_smoothing_pipeline.sh filter_smoothing.num_windows=10 \
+    filter_smoothing.window_shift=2 filter_smoothing/evolution=random_walk
+```
+
+---
+
+### 2.6 Ground-truth artifact utilities
 
 Located in [`scripts/adjust_simulations/`](../scripts/adjust_simulations/).
 All are **plain argparse or zero-argument CLIs** — not Hydra.
@@ -1391,7 +1528,7 @@ manageable artifact.
 
 ---
 
-### 2.6 Figure creation pipeline
+### 2.7 Figure creation pipeline
 
 Located in [`scripts/figure_creation/`](../scripts/figure_creation/).
 All are **plain argparse CLIs** unless noted. These scripts operate on already-saved
@@ -1491,7 +1628,7 @@ via env vars: `SIZE`, `TRUTH_DIR`, `TRUTH_MODEL`, `ASSIM_MODEL`,
 
 ---
 
-### 2.7 `figspec/` — shared figure primitives
+### 2.8 `figspec/` — shared figure primitives
 
 Located in [`scripts/figspec/`](../scripts/figspec/). A small internal library
 imported by the block drivers in `figure_creation/`.
@@ -1510,7 +1647,7 @@ live in the `evaluation` library instead:
 
 ---
 
-### 2.8 Neural surrogate scripts
+### 2.9 Neural surrogate scripts
 
 Located in [`scripts/neural_surrogate/`](../scripts/neural_surrogate/).
 Full documentation is in [`docs/neural_surrogates.md`](neural_surrogates.md).
@@ -1545,6 +1682,7 @@ Brief summary:
 | Enable reduced state update | `esmda/state_reduction=svd` (requires state-bearing smoother, incompatible with localization) |
 | Run the full ESMDA pipeline | [`scripts/run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh) |
 | Run the full filtering pipeline | [`scripts/run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh) |
+| Run the full filter-smoothing pipeline | [`scripts/run_filter_smoothing_pipeline.sh`](../scripts/run_filter_smoothing_pipeline.sh) |
 | Train a surrogate | [`scripts/neural_surrogate/train_neural_surrogate.py`](../scripts/neural_surrogate/train_neural_surrogate.py) — see [`docs/neural_surrogates.md`](neural_surrogates.md) |
 | LoRA fine-tune a trained surrogate | [`scripts/neural_surrogate/finetune_neural_surrogate.py`](../scripts/neural_surrogate/finetune_neural_surrogate.py) — see [`docs/neural_surrogates.md` Part F](neural_surrogates.md#part-f--parameter-efficient-fine-tuning-lora--peft) |
 | Understand config groups at a glance | [`conf/README.md`](../conf/README.md) |

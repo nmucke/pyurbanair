@@ -23,10 +23,21 @@ pipeline:
                                        iteration_diagnostics.yaml,
                                        cycle_diagnostics.yaml of the final pass,
                                        truth_access.yaml and run_info.yaml).
-  2. scripts/filtering/compute_filtering_metrics.py -- the per-cycle artifacts
-                                       are laid out exactly as run_filtering.py's,
-                                       so the filtering metric/figure stages read
-                                       this run directory unchanged.
+  2. scripts/filter_smoothing/compute_filter_smoothing_metrics.py -- writes
+                                       run_summary.yaml, and
+  3. scripts/filter_smoothing/make_filter_smoothing_figures.py -- draws the
+                                       figures (see
+                                       scripts/run_filter_smoothing_pipeline.sh).
+                                       The per-cycle artifacts are laid out
+                                       exactly as run_filtering.py's, so those
+                                       two stages reuse the filtering pipeline's
+                                       machinery; what they add is the parameter
+                                       TRAJECTORY, the outer loop's convergence,
+                                       and -- with num_windows > 1 -- the mapping
+                                       from the surviving per-cycle artifacts
+                                       (the last window's) onto the horizon's
+                                       cycle axis, via `final_pass_first_cycle`
+                                       in run_info.yaml below.
 
 The machinery is declarative (see conf/run_filter_smoothing.yaml):
 

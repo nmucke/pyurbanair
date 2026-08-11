@@ -140,6 +140,9 @@ scripts/                           # All top-level executables run from here.
   compute_esmda_metrics.py         # Post-hoc metrics from a finished run dir (argparse)
   make_esmda_figures.py            # Figures from a finished run dir (argparse)
   run_esmda_pipeline.sh            # run_esmda.py → compute_esmda_metrics.py → make_esmda_figures.py
+  run_filtering_pipeline.sh        # the same three stages for filtering/ (EnKF)
+  run_filter_smoothing_pipeline.sh # ...and for filter_smoothing/ (the metric/figure stages
+                                   #   reuse filtering/'s; see docs/scripts_and_configs.md §2.5)
   neural_surrogate/                # Surrogate stack — see docs/neural_surrogates.md
     generate_training_data.py      #   Build training dataset from a CFD ensemble
     train_neural_surrogate.py      #   Train (computes + bakes in normalization stats)
@@ -493,6 +496,17 @@ filter smoother adds, temporal localization) is in
 [docs/data_assimilation.md](data_assimilation.md) §8–§9; the config groups and
 saved artifacts are in
 [docs/scripts_and_configs.md](scripts_and_configs.md) §1.8–§1.9 / §2.1.
+
+Each of the three has a three-stage pipeline driver — run, then metrics
+(`run_summary.yaml`), then figures — sharing one output directory resolved from
+its own entry-point config:
+[`run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh),
+[`run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh) and
+[`run_filter_smoothing_pipeline.sh`](../scripts/run_filter_smoothing_pipeline.sh)
+(§2.3–§2.5 there). Filter smoothing's inner filter *is* the EnKF, so its
+metric/figure stages reuse the filtering ones and add only the parameter
+*trajectory* blocks, the outer loop's convergence, and the moving window's
+cycle bookkeeping.
 
 ### Localization (optional)
 - [localization/base.py](../libs/data-assimilation/src/data_assimilation/localization/base.py)
