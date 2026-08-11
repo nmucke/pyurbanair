@@ -546,7 +546,12 @@ class StreamingStateReduction(OnlineStateReduction):
 
     @property
     def subspace_drift(self) -> Optional[float]:
-        """Largest principal-angle change from the previous accepted basis."""
+        """Largest principal-angle change from the previous accepted basis.
+
+        Resolves large rotations, not small ones: see :meth:`_principal_angle`
+        for the float32 floor below which a value here means "no measurable
+        drift" rather than a trustworthy angle.
+        """
         return self._subspace_drift
 
     def fit(
@@ -721,4 +726,9 @@ class StreamingStateReduction(OnlineStateReduction):
         smallest_cosine = float(
             jnp.clip(jnp.min(cosines[: min(old_rank, new_rank)]), 0.0, 1.0)
         )
+        # acos has an infinite derivative at 1, so a cosine perturbed by k*eps
+        # reads back as an angle of ~sqrt(2*k*eps): in float32 that is a floor of
+        # a few times 1e-3, and it moves with the platform's LAPACK. Small values
+        # here mean "no measurable rotation", not a resolved angle. That is
+        # enough for subspace_warning_threshold, which watches for large drift.
         return math.acos(smallest_cosine)

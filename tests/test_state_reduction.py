@@ -802,7 +802,13 @@ def test_subspace_drift_is_meaningful_when_the_rank_changes() -> None:
     nested.fit(jnp.asarray(basis[:, :8] @ rng.normal(size=(8, 6)).astype(np.float32)))
     assert nested.rank > rank_before
     assert nested.subspace_drift is not None
-    assert nested.subspace_drift < 1e-3
+    # The drift is an acos of a float32 cosine near 1, which resolves nothing
+    # below a few times 1e-3 and moves with the platform's LAPACK: this same
+    # basis reads 3.5e-4 on macOS/Accelerate and 1.5e-3 on Linux/OpenBLAS. The
+    # claim under test is that a rank change alone is not reported as a
+    # rotation, so the threshold sits above that floor and two orders of
+    # magnitude below the pi/2 it has to rule out.
+    assert nested.subspace_drift < 1e-2
 
     # A block in an orthogonal subspace does tilt it, and drift is reported as a
     # real angle rather than being clipped to pi/2 by the rank change alone.
