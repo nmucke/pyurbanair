@@ -317,6 +317,76 @@ _TRUTH_ACCESS = {
     "sim_time": _RUN_SIM_TIME,
 }
 
+# The same horizon as a WINDOWED run records it: ``sim_time`` keeps the ESMDA
+# meaning the ESMDA stages read off this file (seconds per assimilation window),
+# and one window holds several cycles -- one per observation frame -- so the
+# cycle length is its own key. Here three cycles of _RUN_SIM_TIME make one
+# window, which is the ratio the two keys must not be confused across.
+_CYCLES_PER_WINDOW = 3
+_WINDOWED_TRUTH_ACCESS = {
+    "n_per_cycle": _RUN_FRAMES,
+    "num_cycles": _RUN_CYCLES,
+    "sim_time": _RUN_SIM_TIME * _CYCLES_PER_WINDOW,
+    "cycle_seconds": _RUN_SIM_TIME,
+}
+
+
+def test_the_cycle_length_falls_back_to_sim_time_on_a_pre_windowing_run_dir() -> None:
+    # Every filtering run dir written before the windowing refactor has one
+    # ``sim_time`` that IS the cycle length, and no ``cycle_seconds`` at all.
+    # The fallback is what keeps those dirs reading exactly as they did.
+    from scripts.filtering._filtering_common import cycle_seconds
+
+    assert cycle_seconds(_TRUTH_ACCESS) == _RUN_SIM_TIME
+
+
+def test_the_cycle_length_is_the_cycle_key_not_the_window_key_when_both_exist() -> None:
+    # The collision this helper exists for: on a windowed dir both keys are
+    # present and mean different numbers, and reading ``sim_time`` here would
+    # stretch every cycle by the cycles per window -- silently, since the result
+    # is still a plausible time axis.
+    from scripts.filtering._filtering_common import cycle_seconds
+
+    assert cycle_seconds(_WINDOWED_TRUTH_ACCESS) == _RUN_SIM_TIME
+    assert _WINDOWED_TRUTH_ACCESS["sim_time"] != _RUN_SIM_TIME
+
+
+def test_the_windowed_keys_put_the_parameter_history_on_the_cycle_clock(
+    tmp_path: pathlib.Path,
+) -> None:
+    # The site the fallback matters most at: a drifting truth is interpolated
+    # onto this axis, so a cycle clock read as a window clock samples the truth
+    # at the wrong times (and produces a full, plausible, wrong parameter error).
+    from scripts.filtering._filtering_common import load_params_history
+
+    run_dir = _filtering_run_dir(tmp_path, eval_fields=False, run_summary=False)
+    windowed = load_params_history(run_dir, _WINDOWED_TRUTH_ACCESS)
+    legacy = load_params_history(run_dir, _TRUTH_ACCESS)
+
+    # Entry 0 is the prior at t=0 and entry i is cycle (i-1)'s posterior at
+    # ``i * cycle_seconds`` -- the same axis both dirs describe, since the two
+    # runs' cycles are the same length; only the KEY it is read from differs.
+    expected = np.arange(_RUN_CYCLES + 1, dtype=float) * _RUN_SIM_TIME
+    np.testing.assert_allclose(windowed["time"].values, expected)
+    np.testing.assert_allclose(legacy["time"].values, expected)
+
+
+def test_the_windowed_keys_bin_the_forecast_states_by_the_cycle(
+    tmp_path: pathlib.Path,
+) -> None:
+    # ``bin_seconds`` is what makes one bin one cycle in the window statistics.
+    # Read off ``sim_time`` on a windowed dir it would be a window, pooling
+    # several cycles into one bin.
+    from scripts.filtering._filtering_common import cycle_state_source
+
+    run_dir = _filtering_run_dir(
+        tmp_path, forecast_states=True, eval_fields=False, run_summary=False
+    )
+    source = cycle_state_source(run_dir, dict(_WINDOWED_TRUTH_ACCESS))
+
+    assert source.kind == "forecast"
+    assert source.bin_seconds == _RUN_SIM_TIME
+
 
 def test_cycle_state_source_picks_the_forecasts_when_the_run_saved_them(
     tmp_path: pathlib.Path,

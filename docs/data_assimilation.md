@@ -847,11 +847,34 @@ The same label covers the analysis schemes, and the LETKF needs no new value:
 
 [scripts/filtering/run_filtering.py](../scripts/filtering/run_filtering.py) (config
 [conf/run_filtering.yaml](../conf/run_filtering.yaml)) is the entry point:
-truth inline or from disk (as run_esmda.py), one cycle per
-`time.simulation_time` segment, Hydra groups
+truth inline or from disk (as run_esmda.py), Hydra groups
 `filtering/analysis|localization|state_reduction|inflation|evolution`, static scalar
 parameters only (time-varying/AR(2) priors stay with the ESMDA smoothers).
-See [scripts_and_configs.md](scripts_and_configs.md) §1.8 / §2.1.
+
+The run is **windowed like an ESMDA run**, and that is the only reason windows
+exist here: `filtering.num_assimilation_windows` is configured exactly as
+`esmda.num_assimilation_windows` — one window is `time.simulation_time`
+seconds and the horizon is `num_assimilation_windows · time.simulation_time` —
+so a filtering run and an ESMDA run of the same experiment are configured the
+same way and comparable artifact for artifact. **Cycles are derived, not
+configured:** the filter forecasts observation to observation, so one cycle is
+one observation interval (`time.output_frequency` s) ending in one full-weight
+analysis of that single frame (`T = 1` in the serial-sweep machinery of §8.1),
+and cycles per window = observation frames per window =
+`time.simulation_time / time.output_frequency`.
+
+A window is **pure chunking**: it splits the horizon into one `run()` call and
+one set of per-window artifacts each, so RAM and peak disk stay bounded, and it
+changes nothing mathematically. The analyzed state and parameters are carried
+across a boundary exactly as ESMDA carries its own, `BaseFilter.rng_key` is an
+instance attribute mutated in place (so consecutive `run()` calls continue one
+stream — `run()` never resets it), and the per-cycle observation noise is
+drawn for the whole horizon before the window loop. The same horizon run as 1
+window or as `W` windows therefore gives identical posteriors and per-cycle
+diagnostics.
+
+See [scripts_and_configs.md](scripts_and_configs.md) §1.8 / §2.1 for the config
+groups and the (dual-schema) artifact list.
 
 ---
 

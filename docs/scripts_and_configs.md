@@ -99,7 +99,7 @@ rather than pulling them from separate files. The table below summarises each.
 
 | Field | Default | Purpose |
 |---|---|---|
-| `num_cycles` | 2 | Number of filter cycles; each forecasts one segment of `time.simulation_time` and assimilates that segment's observation frames serially (one full-weight analysis per frame). |
+| `num_assimilation_windows` | 2 | Number of assimilation windows, the same unit as `esmda.num_assimilation_windows`: one window is `time.simulation_time` seconds, so the horizon is `num_assimilation_windows * time.simulation_time` and the two entry points are configured identically for like-for-like runs. Cycles are **derived**, not configured: one cycle is one observation interval (`time.output_frequency` s) ending in one full-weight analysis, so a window holds `time.simulation_time / time.output_frequency` of them. Windows are pure computational/IO chunking (one `run()` call and one set of per-window artifacts each) — state, parameters, the filter's PRNG stream and the per-cycle noise draws all carry across a boundary, so a horizon run as 1 window or as `W` is mathematically identical. |
 | `seed` | 42 | JAX RNG seed. |
 | `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors), of ONE observation frame. |
 | `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
@@ -679,9 +679,20 @@ The sequential-filtering (EnKF) entry point. Where ESMDA re-forecasts one
 window `num_steps` times with tempered updates, the filter forecasts one
 segment per cycle and applies ONE full-weight analysis to the end-of-segment
 state/parameters, warm-starting the next cycle from the analyzed state. The
-truth is generated over `filtering.num_cycles` segments up front; per-cycle
-observations are extracted with the case's temporal observation operator and
-the filter consumes the whole `(num_cycles, N_d)` batch in one `run()` call.
+filter forecasts **observation to observation**: one cycle is one observation
+interval (`time.output_frequency` s) assimilating that one frame, so a window
+of `time.simulation_time` holds `time.simulation_time / time.output_frequency`
+cycles and the horizon holds `filtering.num_assimilation_windows` times that.
+The truth is generated over the whole horizon up front; per-cycle observations
+are extracted with the case's temporal observation operator and each window's
+cycles are consumed in one `run()` call.
+
+**Windows are chunking, not mathematics.** A window boundary bounds RAM and
+peak disk (one `run()` call and one set of per-window artifacts each) and
+changes nothing else: state and parameters carry across it exactly as ESMDA
+carries its own, the filter's PRNG stream continues across `run()` calls, and
+the per-cycle observation noise is drawn for the whole horizon before the
+window loop — so the same horizon run as 1 window or as `W` is identical.
 
 Mode is the cross product of `filtering.mode=state|parameter|joint` and the
 `filtering/*` groups (§1.8), including the deterministic ETKF/LETKF analyses
@@ -694,8 +705,20 @@ mount fails loudly; time-varying priors stay with the ESMDA smoothers.
 Stage 1 of the single-run filtering pipeline (§2.4), orchestrated by
 [`run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh).
 
-Saves: `posterior_params.nc` / `posterior_state.nc` (analyzed final-frame
-ensemble), optional `params_history.nc` / `state_history.nc`
+Saves **both schemas from one run**. The ESMDA per-window schema —
+`windows/window_{w}_{prior,posterior}_params.nc`,
+`window_{w}_posterior_state.nc`, `window_{w}_{obs,pred_obs}.nc` and the
+assembled `prior_params.nc` / `posterior_params.nc` /
+`posterior_state_mean.nc` — so the ESMDA metric/figure stages (§2.3) run on a
+filtering run directory unchanged; `window_{w}_pred_obs.nc`'s `esmda_step` axis
+has two entries there, the per-cycle prior `H(x)` and the ride-along posterior,
+stacked over the window's cycles. There is no `window_{w}_prior_state.nc`: a
+filter has no window-long prior rollout (`run_info.yaml`'s
+`configuration.save_prior_state: false` records the absence), so the prior
+halves of `sensor_statistics` and `field_metrics` are simply dropped. Beside
+that, the filtering-native artifacts, accumulated over the whole horizon with
+GLOBAL cycle indices: `posterior_params.nc` / `posterior_state.nc` (analyzed
+final-frame ensemble), optional `params_history.nc` / `state_history.nc`
 (`run.save_history`), per-cycle `cycle_diagnostics.yaml` (innovation χ²,
 obs-space prior/posterior RMSE plus the `obs_posterior_rmse_kind` provenance
 label, block spreads, `analysis_time`, and stable sets of nullable reduction
@@ -705,7 +728,15 @@ chunk size) diagnostics),
 `prior_params.nc`,
 `true_params.nc`, `true_state.nc` (inline truth), `truth_access.yaml` (the
 lazy-truth slicing/offsets the metric/figure stages read back), `run_info.yaml`,
-`config.yaml`. `run_info.yaml.configuration.state_reduction` records the fully
+`config.yaml`. `truth_access.yaml` carries **both geometries**, and the two
+families read different keys: `sim_time` / `n_per_window` / `num_windows` keep
+their ESMDA meanings (seconds per WINDOW and its frame count), while the
+filtering stages take the cycle geometry from `cycle_seconds` / `n_per_cycle`
+(= 1, a cycle is one truth frame) / `num_cycles` (= `W ·` cycles per window)
+through `_filtering_common.cycle_seconds`, which falls back to `sim_time` so
+pre-windowing run dirs — where the two coincided — read exactly as before.
+
+`run_info.yaml.configuration.state_reduction` records the fully
 resolved reduction subtree (or `null`) for benchmark provenance;
 `state_reduction_resolved_variable_scales` records the physical scales actually
 applied after validating the forecast Dataset's variables.
@@ -1389,8 +1420,32 @@ run dir from `conf/run_filtering.yaml` with the same Hydra overrides forwarded t
 `run_filtering.py`.
 
 ```bash
-scripts/run_filtering_pipeline.sh filtering.mode=joint filtering.num_cycles=4
+scripts/run_filtering_pipeline.sh filtering.mode=joint filtering.num_assimilation_windows=4
 ```
+
+**Stage 4 — the ESMDA-schema view (`<run dir>/esmda_view/`).** Because
+`run_filtering.py` also writes the ESMDA per-window artifacts (§2.1), the
+script then runs `compute_esmda_metrics.py` and `make_esmda_figures.py` over
+them, giving a filtering run the ESMDA panels as well — including D3
+(`data_mismatch_decay.png`), which the filtering stages have no counterpart
+for; its two steps are the per-cycle prior and posterior pooled over the
+window's cycles, so the figure's x-axis reads *filter analysis* rather than
+*ESMDA iteration*, and the trend is a single prior→posterior step rather than
+an iteration decay.
+
+Both families write `run_summary.yaml`, `eval_fields.nc` and same-named
+figures, and they describe **different binnings** — the ESMDA stages bin by
+window (`sensor_statistics[*].n_windows == W`), the filtering stages by cycle
+(`n_windows == W ·` cycles per window, plus `cycle_states` and
+`field_metrics.n_cycles`) — so they do not share one directory. `esmda_view/`
+holds symlinks to the artifacts both families read (`config.yaml`,
+`truth_access.yaml`, `run_info.yaml`, the root `*.nc`, `windows/`) and is where
+the ESMDA stages write their own outputs; `run_summary.yaml` and
+`eval_fields.nc` are deliberately *not* linked, since writing through such a
+link is exactly the clobber the directory exists to prevent. The run dir's root
+layout is unchanged, which is what the filtering stages and the sweep tooling
+(`compare_sweep_results.py` globs `*/run_summary.yaml`) read. Stage 4 is
+skipped with a printed line on a run dir that has no window artifacts.
 
 ---
 

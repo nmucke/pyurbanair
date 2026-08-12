@@ -789,6 +789,147 @@ def test_pred_obs_history_holds_the_raw_stacked_frames() -> None:
     )
 
 
+def test_pred_obs_post_history_parallels_pred_obs_history() -> None:
+    """The posterior ride-along rows, entry for entry and shape for shape.
+
+    ``run_filtering.py`` pairs the two histories into the ESMDA-schema
+    ``window_{w}_pred_obs.nc`` (step 0 = prior, step 1 = posterior), so they
+    must be recorded under the SAME gate, one entry per cycle, in the same
+    ``(T*N_obs, N_e)`` layout. The posterior entry must also differ from the
+    prior one — recording the pre-analysis rows twice would make the data
+    mismatch look flat while raising no error anywhere.
+    """
+    n_e, num_cycles = 8, 3
+    H = np.array([[1.0, 0.5]])
+    state = _initial_state(jax.random.PRNGKey(51), n_e, np.zeros(2), np.eye(2))
+    observations = [
+        _labelled_truth_obs(np.array([[0.2], [0.8]]), np.array([0.0, 1.0]))
+        for _ in range(num_cycles)
+    ]
+
+    def _filter() -> EnsembleKalmanFilter:
+        return EnsembleKalmanFilter(
+            observation_operator=_TemporalToyObsOp(H),
+            forward_model=_ToyLinearModel(np.eye(2)),
+            C_D=jnp.array([0.2]),
+            mode="state",
+            rng_key=jax.random.PRNGKey(52),
+        )
+
+    # Default-off: neither history is touched, so the flag stays the only cost.
+    quiet = _filter()
+    quiet.run(state=state, observations=observations)
+    assert quiet.pred_obs_history == []
+    assert quiet.pred_obs_post_history == []
+
+    enkf = _filter()
+    enkf.collect_pred_obs = True
+    enkf.run(state=state, observations=observations)
+
+    assert len(enkf.pred_obs_post_history) == num_cycles
+    for prior, posterior in zip(enkf.pred_obs_history, enkf.pred_obs_post_history):
+        assert posterior.shape == prior.shape == (2, n_e)
+        assert not np.allclose(posterior, prior)
+
+    # Rebound per run() call like ``pred_obs_history``, so a caller running the
+    # same filter over several passes reads that pass's entries alone.
+    enkf.run(state=state, observations=observations[:1])
+    assert len(enkf.pred_obs_post_history) == 1
+
+
+def test_windowing_the_cycle_chain_is_mathematically_inert() -> None:
+    """The same horizon as ONE run() call or as W, identically.
+
+    The window loop in ``scripts/filtering/run_filtering.py`` is computational
+    chunking: it splits the horizon into ``run()`` calls so RAM and peak disk
+    stay bounded, carrying the analyzed state and parameters into the next call
+    exactly as ESMDA carries its own, and relying on ``BaseFilter.rng_key``
+    being an instance attribute the cycle loop mutates in place (``run()``
+    never reseeds it). This pins that whole claim: the posterior state, the
+    posterior parameters and every per-cycle diagnostic must be bit-identical.
+
+    The observations are built ONCE for the horizon, in global cycle order —
+    the script's discipline, and the reason its noise draws do not depend on
+    the window count either.
+    """
+    n_e, num_cycles, cycles_per_window = 10, 6, 3
+    H = np.array([[1.0, 0.5]])
+    state = _initial_state(jax.random.PRNGKey(61), n_e, np.zeros(2), np.eye(2))
+    params = _params_dataset(
+        np.asarray(0.5 + 0.1 * jax.random.normal(jax.random.PRNGKey(62), (n_e,)))
+    )
+
+    # One frame per cycle, exactly as the windowed script builds them.
+    obs_key = jax.random.PRNGKey(63)
+    observations = []
+    for cycle in range(num_cycles):
+        obs_key, subkey = jax.random.split(obs_key)
+        values = 0.4 + 0.1 * np.asarray(jax.random.normal(subkey, (1, 1)))
+        observations.append(_labelled_truth_obs(values, np.array([1.0])))
+
+    def _filter() -> EnsembleKalmanFilter:
+        return EnsembleKalmanFilter(
+            observation_operator=_FinalFrameTemporalToyObsOp(H),
+            forward_model=_ToyLinearModel(np.eye(2), param_effect=0.7),
+            C_D=jnp.array([0.2]),
+            mode="joint",
+            parameter_evolution=RandomWalkEvolution(std=0.05),
+            rng_key=jax.random.PRNGKey(64),
+        )
+
+    single = _filter()
+    single.collect_pred_obs = True
+    whole = single.run(state=state, params=params, observations=observations)
+
+    windowed = _filter()
+    windowed.collect_pred_obs = True
+    carried_state, carried_params = state, params
+    window_results = []
+    windowed_pred_obs: list[np.ndarray] = []
+    windowed_pred_obs_post: list[np.ndarray] = []
+    for first in range(0, num_cycles, cycles_per_window):
+        result = windowed.run(
+            state=carried_state,
+            params=carried_params,
+            observations=observations[first : first + cycles_per_window],
+            return_history=True,
+        )
+        window_results.append(result)
+        # Both histories are rebound per call, which is exactly what per-window
+        # saving wants — read them before the next window overwrites them.
+        windowed_pred_obs.extend(windowed.pred_obs_history)
+        windowed_pred_obs_post.extend(windowed.pred_obs_post_history)
+        carried_state, carried_params = result.state, result.params
+
+    assert whole.state is not None and window_results[-1].state is not None
+    np.testing.assert_array_equal(
+        np.asarray(window_results[-1].state["u"]), np.asarray(whole.state["u"])
+    )
+    assert whole.params is not None and window_results[-1].params is not None
+    np.testing.assert_array_equal(
+        np.asarray(window_results[-1].params["a"]), np.asarray(whole.params["a"])
+    )
+
+    # Per-cycle diagnostics, in global cycle order (the script renumbers the
+    # per-call `cycle` field the same way).
+    windowed_diagnostics = [d for r in window_results for d in r.diagnostics]
+    assert len(windowed_diagnostics) == num_cycles
+    for chunked, reference in zip(windowed_diagnostics, whole.diagnostics):
+        assert chunked.obs_prior_rmse == reference.obs_prior_rmse
+        assert chunked.obs_posterior_rmse == reference.obs_posterior_rmse
+        assert chunked.innovation_chi2 == reference.innovation_chi2
+        assert chunked.state_spread_posterior == reference.state_spread_posterior
+        assert chunked.param_spread_posterior == reference.param_spread_posterior
+
+    # The observation-space histories the per-window artifacts stack are the
+    # same rows in the same order, merely split at the window boundary.
+    assert len(windowed_pred_obs) == num_cycles
+    for chunked, reference in zip(windowed_pred_obs, single.pred_obs_history):
+        np.testing.assert_array_equal(chunked, reference)
+    for chunked, reference in zip(windowed_pred_obs_post, single.pred_obs_post_history):
+        np.testing.assert_array_equal(chunked, reference)
+
+
 def test_C_D_is_checked_against_the_per_frame_observation_vector() -> None:
     """C_D sized for the whole segment (T frames) is rejected.
 

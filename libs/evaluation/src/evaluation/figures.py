@@ -2553,6 +2553,7 @@ def plot_data_mismatch_decay(
     *,
     num_observations: int = 0,
     window_indices: Sequence[int] | None = None,
+    step_label: str = "ESMDA iteration",
 ) -> pathlib.Path | None:
     """D3: per-member ``O_N`` vs ESMDA iteration against the ½ target band.
 
@@ -2572,6 +2573,13 @@ def plot_data_mismatch_decay(
     fitting observation noise. The band's χ² target assumes ``C_D`` includes
     representativeness error, which it does not here — annotated on the figure,
     so the trend and the box heights are read before the absolute placement.
+
+    ``step_label`` names what the step axis counts. It is an ESMDA iteration on
+    an ESMDA run, and the default says so; a sequential filter writing the same
+    observation-space files has a 2-entry axis whose steps are one analysis'
+    prior and posterior pooled over the window's cycles, not iterations of a
+    tempered solve. Only the x-label changes -- the box heights, the band and
+    the tick labels are the same numbers either way.
 
     Returns the path written, or ``None`` when there is nothing to draw (an old
     run dir, or ``esmda.save_obs_diagnostics=false``).
@@ -2672,7 +2680,7 @@ def plot_data_mismatch_decay(
         ax.set_xticks(np.arange(n_steps))
         ax.set_xticklabels(_d3_step_labels(n_steps))
         ax.set_xlim(-0.6, n_steps - 0.4)
-        ax.set_xlabel("ESMDA iteration")
+        ax.set_xlabel(step_label)
         ax.set_ylabel(r"$O_N$")
         ax.set_title("Normalized data mismatch per iteration", loc="left")
 

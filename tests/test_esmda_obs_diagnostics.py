@@ -33,6 +33,7 @@ from evaluation.scores import (
     data_mismatch_target_band,
 )
 from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from omegaconf import DictConfig
 
 from scripts.esmda._esmda_common import obs_diagnostics_bundle
@@ -584,6 +585,65 @@ def test_plot_data_mismatch_decay_boxes_stay_on_their_own_iteration(
         num_observations=200,
     )
     assert written is not None and written.exists()
+
+
+def test_plot_data_mismatch_decay_labels_the_step_axis_as_it_is_told(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The step axis is an ESMDA iteration by default and nothing else changes.
+
+    A windowed sequential filter writes the same observation-space files, and
+    its two steps are one analysis' prior and posterior pooled over the window's
+    cycles -- correct numbers under a wrong noun. The label is therefore a
+    caller's word, defaulted to the ESMDA one so every ESMDA figure is untouched.
+    """
+    rng = np.random.default_rng(7)
+    windows = _decay_windows(rng, (4.0, 0.5))
+
+    figures: list[Figure] = []
+    original = Figure.savefig
+
+    def _spy(self: Figure, *args: object, **kwargs: object) -> object:
+        figures.append(self)
+        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Figure, "savefig", _spy)
+        plot_data_mismatch_decay(windows, tmp_path / "default.png")
+        plot_data_mismatch_decay(
+            windows, tmp_path / "filter.png", step_label="filter analysis"
+        )
+
+    labels = [ax.get_xlabel() for fig in figures for ax in fig.axes]
+    assert labels == ["ESMDA iteration", "filter analysis"]
+    # The tick labels name the same two ends either way -- only the noun moved.
+    assert [t.get_text() for t in figures[0].axes[0].get_xticklabels()] == [
+        t.get_text() for t in figures[1].axes[0].get_xticklabels()
+    ]
+
+
+def test_the_figure_stage_takes_the_step_axis_label_from_the_runner(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Which runner wrote the dir decides the noun; anything else stays ESMDA."""
+    from scripts.esmda._esmda_common import write_yaml
+    from scripts.esmda.make_esmda_figures import _d3_step_label
+
+    for configuration, expected in (
+        ({"smoother": "ESMDA", "num_esmda_steps": 3}, "ESMDA iteration"),
+        ({"filter": "EnsembleKalmanFilter", "mode": "joint"}, "filter analysis"),
+        ({}, "ESMDA iteration"),
+    ):
+        run_dir = tmp_path / str(len(list(tmp_path.iterdir())))
+        run_dir.mkdir()
+        write_yaml({"configuration": configuration}, run_dir / "run_info.yaml")
+        assert _d3_step_label(run_dir) == expected
+
+    # A run dir with no run_info.yaml at all reads as an ESMDA one rather than
+    # raising: this stage's other readers of that file degrade, they never fail.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _d3_step_label(empty) == "ESMDA iteration"
 
 
 def test_plot_data_mismatch_decay_no_ops_without_inputs(

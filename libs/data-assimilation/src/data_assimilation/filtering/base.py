@@ -224,11 +224,14 @@ class BaseFilter:
     #: attribute-plumbing pattern as the smoother's ``collect_obs_diagnostics``:
     #: set it on the instance after construction. When True, :meth:`run`
     #: rebinds :attr:`pred_obs_history` and appends each cycle's RAW
-    #: (pre-inflation) forecast observations *before* the analysis. Off by
+    #: (pre-inflation) forecast observations *before* the analysis, and
+    #: :attr:`pred_obs_post_history` with the matching POSTERIOR rows. Off by
     #: default — nothing is recorded and the cycle loop is unchanged. Used by
     #: the ``filter_smoothing`` outer ESMDA loop, which needs exactly the
     #: forecast observations ``d_k = H(x_f_k)`` stored before ``y_k`` is
-    #: assimilated.
+    #: assimilated, and by ``run_filtering.py``, which pairs the two histories
+    #: into the ESMDA-schema ``window_{w}_pred_obs.nc`` (step 0 = prior,
+    #: step 1 = posterior).
     collect_pred_obs: bool = False
 
     def __init__(
@@ -387,8 +390,11 @@ class BaseFilter:
         self.keep_first_disk_cycle = True
 
         # Per-cycle forecast observations, filled only when the caller sets
-        # ``collect_pred_obs`` (see the class attribute).
+        # ``collect_pred_obs`` (see the class attribute). The ``_post`` twin
+        # holds the same cycles' ride-along POSTERIOR rows, entry for entry and
+        # shape for shape.
         self.pred_obs_history: list[np.ndarray] = []
+        self.pred_obs_post_history: list[np.ndarray] = []
 
         if self.forward_model.save_on_disk:
             self.base_results_dir = self.forward_model.results_dir
@@ -435,6 +441,25 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         """
         if self.collect_pred_obs:
             self.pred_obs_history.append(np.asarray(pred_obs))
+
+    def _record_pred_obs_post(self, pred_obs_post: jnp.ndarray) -> None:
+        """Record one cycle's POSTERIOR observation rows ``(T*N_obs, N_e)``.
+
+        The ride-along rows :meth:`_analysis_cycle` already computes — the
+        exact posterior in observation space on the unlocalized, unreduced path
+        (see :meth:`_cycle_diagnostics` for what the other paths mean) — in the
+        same frame-major layout, and therefore row for row alignable with the
+        matching :attr:`pred_obs_history` entry. Gated on the same
+        ``collect_pred_obs`` flag and appended once per cycle, so the two
+        histories always have equal length.
+
+        Recorded here rather than derived downstream because nothing outside
+        the analysis can reproduce these rows without a second forecast; this
+        is what makes the ESMDA-schema ``pred_obs`` artifact's step-(-1) entry
+        a real posterior mismatch rather than an approximation.
+        """
+        if self.collect_pred_obs:
+            self.pred_obs_post_history.append(np.asarray(pred_obs_post))
 
     def _prepare_pred_obs(self, pred_obs: Any) -> jnp.ndarray:
         """Normalize the operator's output to frames, ``(N_e, T, N_obs)``.
@@ -654,6 +679,7 @@ _TrajectoryStateFilter` does, aggregating them into the single flat frame the
         # the previous pass's list.
         if self.collect_pred_obs:
             self.pred_obs_history = []
+            self.pred_obs_post_history = []
         diagnostics: list[CycleDiagnostics] = []
         params_history: list[xarray.Dataset] = (
             [params] if (return_history and params is not None) else []
@@ -893,6 +919,10 @@ _TrajectoryStateFilter` does, aggregating them into the single flat frame the
         )
         updated = updated_ext[:n_analysis]
         pred_obs_post = updated_ext[n_analysis:]
+        # The posterior twin of the ``_record_pred_obs`` call in ``run``: same
+        # gate, same layout, one entry per cycle. No-op unless the caller opted
+        # in, so the default path is unchanged.
+        self._record_pred_obs_post(pred_obs_post)
 
         # Decode ONLY the coefficient increment onto the physical prior, so
         # every member keeps its own projection residual and a zero-gain

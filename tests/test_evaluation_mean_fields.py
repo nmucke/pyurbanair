@@ -776,6 +776,75 @@ def test_run_summary_carries_the_field_metrics_and_writes_eval_fields(
     assert summary["parameter_metrics"] and summary["sensor_statistics"]
 
 
+def test_eval_fields_names_the_esmda_sampling_when_the_run_dir_does_not(
+    tmp_path: pathlib.Path,
+) -> None:
+    # An ESMDA run dir carries no ``moment_sampling`` key -- its window files ARE
+    # the posterior rollout at every output frame, which is what the stage's own
+    # default sentence says -- so the pass-through must leave that default
+    # standing rather than stamping an empty line over it.
+    from scripts.esmda.compute_esmda_metrics import (
+        _ESMDA_MOMENT_SAMPLING,
+        compute_metrics,
+    )
+
+    run_dir = _full_run_dir(tmp_path)
+    compute_metrics(run_dir)
+
+    with xarray.open_dataset(run_dir / "eval_fields.nc") as fields:
+        assert fields.attrs["moment_sampling"] == _ESMDA_MOMENT_SAMPLING
+        assert fields.attrs["moment_sampling_is_sparse"] == 0
+
+
+def test_the_full_pass_runs_on_a_run_dir_whose_config_has_no_skip_viz(
+    tmp_path: pathlib.Path,
+) -> None:
+    # ``run.skip_viz`` is an ESMDA-config key; the filtering config that writes
+    # these same artifacts may predate it. Absent means "do the full pass" --
+    # anything else costs the state, sensor and field blocks over a knob the run
+    # never had.
+    from scripts.esmda._esmda_common import read_yaml, write_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path)
+    config = read_yaml(run_dir / "config.yaml")
+    del config["run"]
+    write_yaml(config, run_dir / "config.yaml")
+
+    compute_metrics(run_dir)
+
+    assert "field_metrics" in read_yaml(run_dir / "run_summary.yaml")
+
+
+def test_eval_fields_carry_the_run_dirs_own_sampling_line_when_it_records_one(
+    tmp_path: pathlib.Path,
+) -> None:
+    # A windowed FILTERING run writes these same ESMDA-schema artifacts, but its
+    # window files hold the ANALYZED state at every output frame rather than a
+    # free rollout -- so it records its own line in ``truth_access.yaml`` and
+    # this stage carries it into the file S1 and F1 read. The sparsity flag
+    # travels separately: those frames tile the window (one analysis per output
+    # frame), so the moments are a genuine time average and must not be
+    # relabelled "sample-mean".
+    from scripts.esmda._esmda_common import read_yaml, write_yaml
+    from scripts.esmda.compute_esmda_metrics import compute_metrics
+
+    run_dir = _full_run_dir(tmp_path)
+    ta = read_yaml(run_dir / "truth_access.yaml")
+    ta["moment_sampling"] = "the analyzed end-of-cycle state at every frame"
+    ta["moment_sampling_is_sparse"] = False
+    write_yaml(ta, run_dir / "truth_access.yaml")
+
+    compute_metrics(run_dir)
+
+    with xarray.open_dataset(run_dir / "eval_fields.nc") as fields:
+        assert (
+            fields.attrs["moment_sampling"]
+            == "the analyzed end-of-cycle state at every frame"
+        )
+        assert fields.attrs["moment_sampling_is_sparse"] == 0
+
+
 def _constant_state(
     n_ensemble: int | None, n_time: int, values: dict[str, float], n_cells: int = 5
 ) -> xarray.Dataset:

@@ -57,6 +57,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def cycle_seconds(ta: dict) -> float:
+    """The physical length of ONE filter cycle, in seconds, from ``truth_access.yaml``.
+
+    ``sim_time`` used to answer this on its own: a run's cycle was its
+    ``time.simulation_time`` forecast segment and there was nothing else it could
+    mean. A windowed run splits the two apart -- ``sim_time`` keeps its ESMDA
+    meaning (seconds per assimilation WINDOW, which the ESMDA metric/figure
+    stages read off the same file), and a window holds
+    ``sim_time / time.output_frequency`` cycles, one per observation frame. The
+    runner therefore records the cycle length separately as ``cycle_seconds``.
+
+    Every filtering-stage site that needs "how long is a cycle" goes through
+    here, so the two meanings never get crossed: a pre-windowing run dir has no
+    ``cycle_seconds`` and falls back to ``sim_time``, where the two coincide, and
+    reads exactly as it did before.
+    """
+    return float(ta.get("cycle_seconds", ta["sim_time"]))
+
+
 def end_of_cycle_indices(n_per_cycle: int, num_cycles: int) -> list[int]:
     """Truth-frame index of each cycle's last (end-of-segment) frame.
 
@@ -136,16 +155,16 @@ def load_params_history(run_dir: pathlib.Path, ta: dict) -> xarray.Dataset:
     cycle index -- otherwise a *drifting* (time-varying) truth is sampled at the
     wrong times. Relabel ``cycle`` -> ``time`` with physical seconds: the prior
     sits at t=0 and cycle ``c``'s posterior at its end-of-segment time
-    ``(c+1)*sim_time``. For a static (constant) truth the axis is immaterial (the
-    truth interpolates to the same value everywhere), so this is backward
+    ``(c+1)*cycle_seconds``. For a static (constant) truth the axis is immaterial
+    (the truth interpolates to the same value everywhere), so this is backward
     compatible.
     """
     hist = xarray.open_dataset(pathlib.Path(run_dir) / "params_history.nc")
     n = int(hist.sizes["cycle"])
-    sim_time = float(ta["sim_time"])
+    dt_cycle = cycle_seconds(ta)
     # Entry 0 is the prior (t=0); entry i>=1 is cycle (i-1)'s posterior at its
-    # end-of-segment time i*sim_time. So times[i] = i*sim_time.
-    times = np.arange(n, dtype=float) * sim_time
+    # end-of-segment time i*cycle_seconds. So times[i] = i*cycle_seconds.
+    times = np.arange(n, dtype=float) * dt_cycle
     if "time" in hist.coords:
         hist = hist.drop_vars("time")
     return hist.rename({"cycle": "time"}).assign_coords(time=times)
@@ -369,13 +388,13 @@ def cycle_state_source(run_dir: pathlib.Path, ta: dict) -> CycleStates:
     """Pick the per-cycle ensemble states to evaluate (see the module comment)."""
     run_dir = pathlib.Path(run_dir)
     num_cycles = int(ta["num_cycles"])
-    sim_time = float(ta["sim_time"])
+    dt_cycle = cycle_seconds(ta)
 
     paths = _forecast_cycle_paths(run_dir, num_cycles)
     if paths is not None:
         return CycleStates(
             kind="forecast",
-            bin_seconds=sim_time,
+            bin_seconds=dt_cycle,
             num_cycles=num_cycles,
             n_members=len(paths[0]),
             paths=paths,
@@ -471,7 +490,10 @@ def cycle_sensor_series(
         )
 
     assert source.paths is not None  # invariant of kind == "forecast"
-    sim_time = float(ta["sim_time"])
+    # The rebasing below places each segment inside ITS OWN CYCLE on the run's
+    # global clock, so the unit is the cycle length -- not the window length a
+    # windowed run's ``sim_time`` carries.
+    dt_cycle = cycle_seconds(ta)
     pieces: dict = {name: [] for name in sensor_sets}
     for cycle, members in enumerate(source.paths):
         per_member: dict = {name: [] for name in sensor_sets}
@@ -483,7 +505,7 @@ def cycle_sensor_series(
                         f"cannot be placed in cycle {cycle}"
                     )
                 rebased, keep = _rebased_forecast_times(
-                    raw["time"].values, cycle, sim_time
+                    raw["time"].values, cycle, dt_cycle
                 )
                 # ``expand_dims`` after the selection: the per-member files carry
                 # no ensemble axis, and every downstream reduction (and the mean

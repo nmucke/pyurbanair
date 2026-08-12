@@ -140,7 +140,8 @@ scripts/                           # All top-level executables run from here.
   compute_esmda_metrics.py         # Post-hoc metrics from a finished run dir (argparse)
   make_esmda_figures.py            # Figures from a finished run dir (argparse)
   run_esmda_pipeline.sh            # run_esmda.py → compute_esmda_metrics.py → make_esmda_figures.py
-  run_filtering_pipeline.sh        # the same three stages for filtering/ (EnKF)
+  run_filtering_pipeline.sh        # the same stages for filtering/ (EnKF), plus the ESMDA
+                                   #   metric/figure stages over its window artifacts (esmda_view/)
   run_filter_smoothing_pipeline.sh # ...and for filter_smoothing/ (the metric/figure stages
                                    #   reuse filtering/'s; see docs/scripts_and_configs.md §2.5)
   neural_surrogate/                # Surrogate stack — see docs/neural_surrogates.md
@@ -492,7 +493,7 @@ they differ in *what* is updated and *when*:
 | Script | Config | Algorithm |
 |---|---|---|
 | [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py) | [conf/run_esmda.yaml](../conf/run_esmda.yaml) | ESMDA smoothing — re-forecast the window `num_steps` times with tempered updates. Mode = `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`. |
-| [scripts/filtering/run_filtering.py](../scripts/filtering/run_filtering.py) | [conf/run_filtering.yaml](../conf/run_filtering.yaml) | Sequential EnKF — one forecast segment and ONE full-weight analysis per cycle, warm-starting the next. Mode = `filtering.mode=state\|parameter\|joint` × the `filtering/*` groups. |
+| [scripts/filtering/run_filtering.py](../scripts/filtering/run_filtering.py) | [conf/run_filtering.yaml](../conf/run_filtering.yaml) | Sequential EnKF — one observation interval per cycle and ONE full-weight analysis of that frame, warm-starting the next. Mode = `filtering.mode=state\|parameter\|joint` × the `filtering/*` groups × `filtering.num_assimilation_windows` (windows are chunking only). |
 | [scripts/filter_smoothing/run_filter_smoothing.py](../scripts/filter_smoothing/run_filter_smoothing.py) | [conf/run_filter_smoothing.yaml](../conf/run_filter_smoothing.yaml) | Filter smoothing — the EnKF above as the *inner* loop for the state, inside an outer ESMDA loop over the parameter trajectory of the whole window. Mode = the `filter_smoothing/*` groups; requires a time-varying prior. |
 
 Full detail for all three (cycle semantics, the two `BaseFilter` hooks the

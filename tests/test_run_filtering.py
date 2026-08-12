@@ -20,7 +20,7 @@ import pytest
 
 
 def _overrides(
-    mode: str, num_cycles: int, extra: Optional[list[str]] = None
+    mode: str, num_windows: int, extra: Optional[list[str]] = None
 ) -> list[str]:
     return [
         # The barcelona default's STL has no solid cells on the tiny smoke
@@ -35,7 +35,7 @@ def _overrides(
         # test below.
         "params@truth_params=static_truth",
         f"filtering.mode={mode}",
-        f"filtering.num_cycles={num_cycles}",
+        f"filtering.num_assimilation_windows={num_windows}",
         # The global (unlocalized) update; correlation localization is
         # degenerate at 2 members.
         "filtering/localization=none",
@@ -145,10 +145,10 @@ def test_filtering_analysis_config_composes(
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
-    "mode,num_cycles,extra",
+    "mode,num_windows,extra",
     [
         pytest.param("joint", 1, None, id="joint"),
-        pytest.param("joint", 2, None, id="joint_two_cycles"),
+        pytest.param("joint", 2, None, id="joint_two_windows"),
         pytest.param("state", 1, None, id="state"),
         pytest.param(
             "state",
@@ -164,21 +164,90 @@ def test_filtering_analysis_config_composes(
     ],
 )
 def test_run_filtering(
-    mode: str, num_cycles: int, extra: Optional[list[str]], compose_test_cfg: Any
+    mode: str, num_windows: int, extra: Optional[list[str]], compose_test_cfg: Any
 ) -> None:
+    import numpy as np
     import xarray
 
     from scripts.filtering.run_filtering import run
 
     cfg = compose_test_cfg(
-        _overrides(mode, num_cycles, extra), config_name="run_filtering"
+        _overrides(mode, num_windows, extra), config_name="run_filtering"
     )
     run(cfg)
+
+    # Cycles are DERIVED from the observation cadence, not configured: the smoke
+    # shape is a 3 s window written every 1 s, so a window holds three cycles.
+    cycles_per_window = round(
+        float(cfg.time.simulation_time) / float(cfg.time.output_frequency)
+    )
+    num_cycles = num_windows * cycles_per_window
 
     out_dir = pathlib.Path(cfg.paths.results_dir)
     assert (out_dir / "posterior_state.nc").exists()
     assert (out_dir / "cycle_diagnostics.yaml").exists()
     assert (out_dir / "run_info.yaml").exists()
+
+    # The ESMDA-schema per-window artifacts the shared metric/figure stages read
+    # (see the artifact contract). No prior STATE file: a filter has no
+    # window-long prior rollout, and its absence is what run_info explains.
+    windows_dir = out_dir / "windows"
+    truth_times = np.asarray(
+        xarray.open_dataset(out_dir / "true_state.nc")["time"].values, dtype=float
+    )
+    for w in range(num_windows):
+        posterior_state = xarray.open_dataset(
+            windows_dir / f"window_{w}_posterior_state.nc"
+        )
+        # One analyzed frame per cycle, carrying the window's own truth frame
+        # times (the solver's cadence, not a nominal multiple of the window).
+        assert posterior_state.sizes["time"] == cycles_per_window
+        assert posterior_state.sizes["ensemble"] == 2
+        np.testing.assert_allclose(
+            np.asarray(posterior_state["time"].values, dtype=float),
+            truth_times[w * cycles_per_window : (w + 1) * cycles_per_window],
+        )
+        for name in ("prior_params", "posterior_params"):
+            piece = xarray.open_dataset(windows_dir / f"window_{w}_{name}.nc")
+            # A scalar PHYSICAL time coord, so the assembled files carry seconds.
+            assert "time" in piece.coords and piece["time"].shape == ()
+        assert not (windows_dir / f"window_{w}_prior_state.nc").exists()
+
+        obs = xarray.open_dataset(windows_dir / f"window_{w}_obs.nc")
+        n_d = obs.sizes["obs_index"]
+        assert n_d % cycles_per_window == 0
+        # obs_error_std is TILED to the window's full length, not the frame's.
+        assert obs["obs_error_std"].shape == (n_d,)
+        assert np.allclose(
+            obs["obs_error_std"].values, float(cfg.filtering.obs_error_std)
+        )
+        # obs_interval reads as the cycle index within the window.
+        assert set(np.unique(obs["obs_interval"].values)) == set(
+            range(cycles_per_window)
+        )
+        pred = xarray.open_dataset(windows_dir / f"window_{w}_pred_obs.nc")
+        # Two steps: 0 = the stacked per-cycle prior H(x_f), 1 = the posterior.
+        assert pred["pred_obs"].shape == (2, n_d, 2)
+
+    # Assembled, ESMDA-schema: one entry per window on a physical time axis.
+    posterior_params = xarray.open_dataset(out_dir / "posterior_params.nc")
+    if num_windows > 1:
+        assert posterior_params.sizes["time"] == num_windows
+    state_mean = xarray.open_dataset(out_dir / "posterior_state_mean.nc")
+    assert state_mean.sizes["time"] == num_cycles
+    assert "vel_mean" in state_mean.data_vars and "vel_std" in state_mean.data_vars
+    assert "ensemble" not in state_mean.dims
+
+    from scripts.esmda._esmda_common import read_yaml
+
+    truth_access = read_yaml(out_dir / "truth_access.yaml")
+    # ESMDA keys keep their ESMDA meanings; the cycle geometry has its own.
+    assert truth_access["num_windows"] == num_windows
+    assert truth_access["n_per_window"] == cycles_per_window
+    assert truth_access["sim_time"] == float(cfg.time.simulation_time)
+    assert truth_access["cycle_seconds"] == float(cfg.time.output_frequency)
+    assert truth_access["n_per_cycle"] == 1
+    assert truth_access["num_cycles"] == num_cycles
     posterior_state = xarray.open_dataset(out_dir / "posterior_state.nc")
     assert posterior_state.sizes["ensemble"] == 2
     from scripts.esmda._esmda_common import read_yaml
@@ -190,7 +259,15 @@ def test_run_filtering(
     assert configuration["analysis"]["_target_"] == (
         "data_assimilation.filtering.analysis.StochasticEnKFAnalysis"
     )
+    assert configuration["num_assimilation_windows"] == num_windows
+    assert configuration["cycles_per_window"] == cycles_per_window
+    assert configuration["num_cycles"] == num_cycles
+    assert configuration["save_obs_diagnostics"] is True
+    assert configuration["save_prior_state"] is False
     diagnostics = read_yaml(out_dir / "cycle_diagnostics.yaml")
+    # One row per cycle over the WHOLE horizon, numbered globally: the window
+    # boundary is invisible to the filtering stages.
+    assert [row["cycle"] for row in diagnostics] == list(range(num_cycles))
     reduction_enabled = bool(extra) and any(
         override.startswith("filtering/state_reduction=")
         and not override.endswith("=none")
@@ -226,11 +303,15 @@ def test_run_filtering(
         # so it must be labelled rather than compared with an unreduced run.
         assert diagnostics[0]["obs_posterior_rmse_kind"] == "unreduced_ride_along"
     if mode != "state":
-        posterior = xarray.open_dataset(out_dir / "posterior_params.nc")
-        assert "inflow_angle" in posterior.data_vars
-        # History: prior + one entry per cycle.
+        assert "inflow_angle" in posterior_params.data_vars
+        # History: EXACTLY one leading prior plus one entry per cycle over the
+        # horizon — every window's run() prepends the params it was handed, and
+        # the repeats at the window boundaries are dropped.
         history = xarray.open_dataset(out_dir / "params_history.nc")
         assert history.sizes["cycle"] == num_cycles + 1
+        # State history: one analyzed frame per cycle, accumulated over windows.
+        state_history = xarray.open_dataset(out_dir / "state_history.nc")
+        assert state_history.sizes["cycle"] == num_cycles
 
 
 def test_run_filtering_distance_localization(compose_test_cfg: Any) -> None:
@@ -366,9 +447,10 @@ def test_run_filtering_tracks_dynamic_truth(compose_test_cfg: Any) -> None:
     """Mixed mode: a time-varying (dynamic) TRUTH tracked by a static prior.
 
     The filter's scalar estimate tracks a drifting truth. The dynamic truth is
-    sampled over the full num_cycles horizon (so it varies across cycles), and
-    the static prior is analysed/evolved each cycle. Exercises the truth-sampling
-    horizon override and the parameter-block update against a time-varying truth.
+    sampled over the full horizon (num_assimilation_windows windows, so it
+    varies across cycles), and the static prior is analysed/evolved each cycle.
+    Exercises the truth-sampling horizon override and the parameter-block update
+    against a time-varying truth.
     """
     import xarray
 
@@ -390,24 +472,31 @@ def test_run_filtering_tracks_dynamic_truth(compose_test_cfg: Any) -> None:
     run(cfg)
 
     out_dir = pathlib.Path(cfg.paths.results_dir)
-    # The truth params are time-varying and span the full horizon (num_cycles *
-    # simulation_time), so the truth drifts across every cycle.
+    # The truth params are time-varying and span the full horizon
+    # (num_assimilation_windows * simulation_time), so the truth drifts across
+    # every cycle.
     true_params = xarray.open_dataset(out_dir / "true_params.nc")
     assert "time" in true_params["inflow_angle"].dims
     assert (
         float(true_params["time"].max()) >= 2 * float(cfg.time.simulation_time) - 1e-6
     )
-    # The prior/posterior stay static scalars the filter tracks.
+    # The per-window params stay static scalars the filter tracks; the assembled
+    # file's only `time` axis is the one window boundary the pieces were stamped
+    # with, so the drifting truth is interpolated at real seconds.
     posterior = xarray.open_dataset(out_dir / "posterior_params.nc")
-    assert "time" not in posterior["inflow_angle"].dims
+    assert set(posterior["inflow_angle"].dims) == {"ensemble", "time"}
+    assert list(posterior["time"].values) == [
+        float(cfg.time.simulation_time),
+        2 * float(cfg.time.simulation_time),
+    ]
 
 
-def test_run_filtering_rejects_zero_cycles(compose_test_cfg: Any) -> None:
-    """num_cycles < 1 fails before any simulation is started."""
+def test_run_filtering_rejects_zero_windows(compose_test_cfg: Any) -> None:
+    """num_assimilation_windows < 1 fails before any simulation is started."""
     from scripts.filtering.run_filtering import run
 
     cfg = compose_test_cfg(_overrides("joint", 0), config_name="run_filtering")
-    with pytest.raises(ValueError, match="num_cycles"):
+    with pytest.raises(ValueError, match="num_assimilation_windows"):
         run(cfg)
 
 
