@@ -13,6 +13,7 @@ filters share one flattening order and one pinning semantics.
   per-row grid-cell block ids and physical coordinates.
 """
 
+from collections.abc import Mapping
 from typing import Optional
 
 import jax.numpy as jnp
@@ -286,6 +287,28 @@ class StateAugmentation:
             per_var.append(offset + jnp.arange(n_cells, dtype=int))
 
         return jnp.concatenate(per_var)
+
+    def row_scales(
+        self, state: xarray.Dataset, variable_scales: Mapping[str, float]
+    ) -> tuple[jnp.ndarray, dict[str, float]]:
+        """Per-row characteristic scale, in :meth:`flatten` order.
+
+        Returns the ``(N_s,)`` scale vector and the resolved per-variable scales
+        (variables absent from ``variable_scales`` get ``1.0``). Lives here so
+        the flattening order has exactly one owner: a reduction that divides
+        rows by these scales must use the same ordering as :meth:`flatten`.
+        """
+        resolved = {
+            str(name): float(variable_scales.get(str(name), 1.0))
+            for name in sorted(state.data_vars)
+        }
+        rows = [
+            jnp.full(
+                (state[name].size // state[name].sizes["ensemble"],), resolved[name]
+            )
+            for name in sorted(state.data_vars)
+        ]
+        return (jnp.concatenate(rows) if rows else jnp.empty((0,))), resolved
 
     def row_coords(self, state: xarray.Dataset) -> jnp.ndarray:
         """Physical ``(x, y, z)`` coordinate of each flattened state row.

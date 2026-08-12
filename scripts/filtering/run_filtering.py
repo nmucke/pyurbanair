@@ -30,6 +30,9 @@ Mode and machinery are declarative axes (see conf/run_filtering.yaml):
         the update math (deterministic ETKF/LETKF land here later).
   * ``filtering/localization=none|correlation|distance``
         reuses the smoother's localization strategies unchanged.
+  * ``filtering/state_reduction=none|svd_current|svd_streaming``
+        optionally projects only the state-analysis increment onto an SVD/POD
+        basis; reduced analyses require global (``none``) localization.
   * ``filtering/inflation=none|multiplicative|rtps|rtpp``
         ensemble spread maintenance.
   * ``filtering/evolution=none|random_walk``
@@ -65,6 +68,8 @@ Examples::
         filtering/evolution=random_walk filtering/inflation=none
     python scripts/filtering/run_filtering.py filtering.mode=state \
         filtering/localization=correlation
+    python scripts/filtering/run_filtering.py filtering.mode=state \
+        filtering/localization=none filtering/state_reduction=svd_current
 """
 
 import dataclasses
@@ -335,6 +340,19 @@ def run(cfg: DictConfig) -> None:
                     str(cfg.run.truth_dir) if cfg.run.truth_dir is not None else None
                 ),
                 "num_truth_frames": int(n_total),
+                # Preserve the fully resolved Hydra subtree (including the
+                # implementation target and variable scales) so benchmark
+                # records never need to infer which reduction was run.
+                "state_reduction": (
+                    OmegaConf.to_container(cfg.filtering.state_reduction, resolve=True)
+                    if cfg.filtering.state_reduction is not None
+                    else None
+                ),
+                "state_reduction_resolved_variable_scales": (
+                    enkf.state_reduction.resolved_variable_scales
+                    if enkf.state_reduction is not None
+                    else None
+                ),
             },
             "timing": {
                 "filter_total_seconds": float(filter_seconds),

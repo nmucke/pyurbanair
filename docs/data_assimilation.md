@@ -36,7 +36,7 @@ libs/data-assimilation/src/data_assimilation/
   observation_operator.py   # ObservationOperator, TemporalObservationOperator,
                             #   sensor_observation_coords
   interpolation.py          # trilinear grid-to-point interpolation
-  reduction.py              # OnlineStateReduction (SVD/KL reduced update)
+  reduction.py              # Current and streaming SVD/POD state reduction
   augmentation.py           # ParamAugmentation, StateAugmentation — the
                             #   Dataset <-> flat-array transforms shared by
                             #   smoothing and filtering
@@ -411,6 +411,10 @@ iteration** from the current forecast ensemble.
 - `fit(snapshots_flat)` — thin SVD of anomaly matrix; retains the smallest
   rank `r` whose cumulative `∑ σ_i²` reaches `energy_fraction`. Always
   capped by the number of nonzero singular values and by `max_rank` (if set).
+  Snapshots containing non-finite values are rejected (previously they
+  silently produced a NaN basis); the numerical-rank cut on this whitened path
+  is unchanged (`eps · max(shape)`), because `encode` divides by `σ` — see
+  §8's filtering notes for the non-whitened variant.
 - `encode(states_flat)` — `Σ_r⁻¹ Φ_r^T (u − ū)` — whitened coefficients
   `(r, N_e)`.
 - `decode_increment(d_xi)` — `Φ_r Σ_r d_xi` — maps a coefficient increment
@@ -498,11 +502,97 @@ localization applies to state rows and keeps parameter rows global. Localization
 strategies are reused from `localization/` unchanged; distance-based strategies
 need state rows.
 
+### Filtering state reduction
+
+`BaseFilter` optionally accepts a `state_reduction`. It is an analysis-space
+projection, not a reduced forecast: every member still runs through the full
+CFD model, and predicted observations still come from the full forecast
+segment. At each cycle the basis input is the ensemble of **final forecast
+states**, centered across members. In `mode="state"` that state block is
+replaced by modal coefficients; in `mode="joint"` scalar parameter rows remain
+in their existing full representation beside the coefficients. Reduction is
+invalid in `mode="parameter"` and with any localization, because global POD
+modes have no physical coordinates; both combinations fail at construction.
+
+The current-cycle strategy reuses `OnlineStateReduction` with `whiten=False`:
+
+```text
+a = U_r.T @ (x - forecast_mean)
+delta_x = U_r @ delta_a
+```
+
+Only the coefficient **increment** is decoded and added to each member's full
+physical prior. Consequently, a zero-gain update preserves projection
+residuals rather than replacing states by their projections. With all nonzero
+current-ensemble modes retained, the stochastic global update agrees with the
+unreduced filter to normal JAX float32 tolerance. Current rank cannot exceed
+`ensemble_size - 1`.
+
+`StreamingStateReduction` updates an incremental basis from successive finite
+final-state anomaly blocks without storing historical fields. Bound it with
+`max_rank`: the accumulator keeps absorbing new directions, so an
+`energy_fraction` criterion alone lets the retained rank — and the
+`(N_s, rank)` basis — grow every cycle until it dwarfs the ensemble it
+summarises. The shipped `svd_streaming` group therefore caps the rank at the
+ensemble size. Its
+unnormalized accumulator is `C_k = lambda C_{k-1} + B_k B_k.T`; the new block
+always enters at unit weight, including when `lambda=1`. For `lambda < 1`, the
+old-block covariance half-life is `log(0.5) / log(lambda)` cycles. The
+accumulator weight is tracked so absolute spectrum diagnostics remain
+comparable between cycles. `update_every_n_cycles` can reuse the existing basis
+between scheduled updates; the basis itself is in-memory run state and is not
+a restart checkpoint.
+
+On this non-whitened path, numerical rank is cut relative to `sigma_max` at
+`eps * min(N_s, N_samples)` rather than numpy's `eps * max(shape)`: JAX runs
+float32, where scaling by a state size of order `1e5` would discard every mode
+below about one percent of `sigma_max` and quietly turn `energy_fraction=1.0`
+into a truncated basis. The whitened ESMDA path keeps the conservative
+`max(shape)` cut, because `encode` divides by the retained singular values
+there and a mode admitted just above the round-off floor is amplified by
+`1/sigma`. Retained energy is reported against the *full* spectrum on both
+paths, so anything the numerical cut removes shows up as retained energy below
+one.
+
+Both strategies accept optional `variable_scales: {variable: positive_scale}`.
+Each state-variable row is divided by its scale for fitting and encoding, then
+the decoded increment is restored to physical units. Keys must name actual
+state variables and values must be finite and positive. `null` preserves the
+existing Euclidean flattening (and then skips the row arithmetic entirely);
+when conflicting non-empty `units` attributes exist without explicit scales,
+the reduction warns rather than guessing a conversion. Row expansion is
+`StateAugmentation.row_scales`, so the scale vector and the flattened state
+always share one ordering. Inflation and the existing state-spread diagnostics remain
+defined in physical state space.
+
 `FilterResult` is a plain dataclass (`params`, `state`, optional
 `cycle`-concatenated histories, and `diagnostics`: one `CycleDiagnostics` per
-cycle with innovation χ² consistency, observation-space prior/posterior RMSE
-and per-block spreads — the "is the filter diverging/overconfident" signals,
-visible at cycle k instead of at the end).
+cycle with innovation χ² consistency, observation-space prior/posterior RMSE,
+and per-block spreads. Its stable additive reduction fields are `None` on the
+full-space path; reduced cycles also report retained and available rank,
+retained energy, current-anomaly projection residual, decoded-increment norm
+and discarded fraction, basis/total analysis wall time, spectral condition
+indicator, normalized spectrum maximum, whether the basis was rebuilt this
+cycle, and (for streaming) subspace drift. `analysis_time` is recorded on
+*both* paths, so a reduced run's analysis cost is directly comparable with the
+unreduced filter's. Physical state spreads keep their original meaning and
+never report modal-coefficient spread under the existing names.
+
+`reduction_discarded_increment_fraction` costs nothing extra: the fit already
+yields the forecast anomalies' coordinates in the complete untruncated basis
+(`anomalies = U_full @ C`), and the EnKF increment is `anomalies @ W` for an
+ensemble-space weight matrix `W`, so running the analysis on the tiny `(k, N_e)`
+array `C` gives `C @ W`, whose rows `[rank:]` are exactly the discarded part of
+the update. It is measured in the reduction's own (scaled) norm, and it is
+`None` on a streaming cycle whose basis update was skipped by
+`update_every_n_cycles` (there is no current coordinate split to report).
+
+Two caveats on the observation-space diagnostics. The appended predicted-
+observation rows take a *global, full-space* ride-along update, so under a
+reduction `obs_posterior_rmse` is bit-identical to the unreduced filter's and
+says nothing about truncation; `obs_posterior_rmse_kind` records this
+(`exact` | `unreduced_ride_along` | `unlocalized_ride_along`), and reduced runs
+must not be ranked on that value.
 
 ### Spread maintenance
 
@@ -525,7 +615,7 @@ visible at cycle k instead of at the end).
 [conf/run_filtering.yaml](../conf/run_filtering.yaml)) is the entry point:
 truth inline or from disk (as run_esmda.py), one cycle per
 `time.simulation_time` segment, Hydra groups
-`filtering/analysis|localization|inflation|evolution`, static scalar
+`filtering/analysis|localization|state_reduction|inflation|evolution`, static scalar
 parameters only (time-varying/AR(2) priors stay with the ESMDA smoothers).
 See [scripts_and_configs.md](scripts_and_configs.md) §1.8 / §2.1.
 
