@@ -20,15 +20,18 @@ import pytest
 
 
 def _overrides(
-    mode: str, num_windows: int, extra: Optional[list[str]] = None
+    mode: str,
+    num_windows: int,
+    extra: Optional[list[str]] = None,
+    model: str = "pylbm",
 ) -> list[str]:
-    return [
+    ov = [
         # The barcelona default's STL has no solid cells on the tiny smoke
         # domain (the same environment limitation that blocks test_run_esmda);
         # the xie_and_castro cube array voxelizes fine there.
         "case=xie_and_castro",
-        "model@truth_model=pylbm",
-        "model@assim_model=pylbm",
+        f"model@truth_model={model}",
+        f"model@assim_model={model}",
         # Pin a static truth so these stay deterministic static-parameter smoke
         # tests independent of the config's default truth sampler (which is a
         # dynamic drift-tracking truth); the mixed dynamic-truth path has its own
@@ -41,8 +44,6 @@ def _overrides(
         "filtering/localization=none",
         "ensemble.ensemble_size=2",
         "ensemble.num_parallel_processes=2",
-        "truth_model.forward_model.cuda=false",
-        "assim_model.forward_model.cuda=false",
         # The conftest smoke overrides pin a tiny [0,20]^2 domain but do not
         # supply matching sensor coordinates; place the assimilation sensors in
         # the open N-S lanes of that domain (same points as test_run_esmda).
@@ -51,9 +52,20 @@ def _overrides(
         "obs.z_points=[3.0,3.0,3.0,3.0]",
         # No aggregation override here: the sequential filter assimilates every
         # observation frame of a segment serially, so `filtering.interval_seconds`
-        # does not exist (Hydra would reject it).
-        *(extra or []),
+        # does not exist (Hydra would reject it). Thinning the ANALYSES (not
+        # averaging the observations) is `filtering.assimilate_every_n_step`,
+        # which has its own tests at the end of this file.
     ]
+    if model == "pylbm":
+        ov += [
+            "truth_model.forward_model.cuda=false",
+            "assim_model.forward_model.cuda=false",
+        ]
+    # conf/model/pyudales.yaml's nudging depth is scaled to the smoke domain by
+    # the conftest (`_fit_nudging_to_smoke_domain`), so no mount-specific
+    # override is needed here.
+    ov += extra or []
+    return ov
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -518,3 +530,287 @@ def test_run_filtering_rejects_dynamic_prior(compose_test_cfg: Any) -> None:
     )
     with pytest.raises(ValueError, match="time-varying"):
         run(cfg)
+
+
+# ---------------------------------------------------------------------------
+# filtering.assimilate_every_n_step — the analysis stride
+# ---------------------------------------------------------------------------
+
+
+def test_filtering_assimilate_every_n_step_defaults_to_one(
+    compose_test_cfg: Any,
+) -> None:
+    """The stride key ships defaulted to 1, and setting it to 1 changes nothing.
+
+    First half of the n=1 identity guarantee: an unstrided run is configured
+    exactly as it was before the knob existed. (The second half — that the n=1
+    CODE path is the old one — is the tripwire in
+    ``test_run_filtering_assimilate_every_n_step``.)
+    """
+    default_cfg = compose_test_cfg(_overrides("joint", 1), config_name="run_filtering")
+    assert default_cfg.filtering.assimilate_every_n_step == 1
+
+    explicit_cfg = compose_test_cfg(
+        _overrides("joint", 1, ["filtering.assimilate_every_n_step=1"]),
+        config_name="run_filtering",
+    )
+    # The composer hands every call its own isolated output roots, so those are
+    # the one legitimate difference; everything else must match.
+    for cfg in (default_cfg, explicit_cfg):
+        cfg.paths.results_dir = ""
+        cfg.paths.experiment_dir = ""
+        cfg.paths.base_results_dir = ""
+    assert default_cfg == explicit_cfg
+
+
+def test_strided_observation_operator_subsets_the_assimilated_frames() -> None:
+    """The predicted-observation stride: identity at 1, last-of-block above.
+
+    The wrapper is what keeps the predicted observations aligned row for row
+    with the truth-side subset. At stride 1 it is the identity, which is why
+    ``run()`` can simply not build it (see the tripwire below) rather than rely
+    on it being harmless.
+    """
+    import numpy as np
+    import xarray
+
+    from scripts.filtering.run_filtering import _StridedObservationOperator
+
+    frames = xarray.DataArray(
+        np.arange(12.0).reshape(4, 3),
+        dims=("time", "obs"),
+        coords={"time": [1.0, 2.0, 3.0, 4.0]},
+    )
+
+    class _TemporalOp:
+        num_obs = 3
+
+        def __call__(self, state: Any) -> xarray.DataArray:
+            return frames
+
+    # The stub operators ignore it; the wrapper only ever forwards it.
+    unused = xarray.Dataset()
+
+    strided = _StridedObservationOperator(_TemporalOp(), 2)
+    out = strided(unused)
+    # Every 2nd frame, ending on the block's LAST frame — the analysis time.
+    np.testing.assert_array_equal(np.asarray(out["time"].values), [2.0, 4.0])
+    np.testing.assert_array_equal(out.values, frames.values[1::2])
+    # Attribute access is delegated, so the wrapper stays transparent to the
+    # library's operator introspection (sensor_observation_coords et al).
+    assert strided.num_obs == 3
+
+    np.testing.assert_array_equal(
+        _StridedObservationOperator(_TemporalOp(), 1)(unused).values, frames.values
+    )
+
+    # A segment whose frame count the stride does not divide would be subset to
+    # a frame that is NOT the one the analysis updates (the segment's last), and
+    # would still line up with the truth side row for row -- a plausible, wrong
+    # analysis rather than an error. Unstrided, the library's own row check
+    # raises on exactly this, so this one must too.
+    with pytest.raises(ValueError, match="does not divide"):
+        _StridedObservationOperator(_TemporalOp(), 3)(unused)
+
+    class _BareOp:
+        def __call__(self, state: Any) -> Any:
+            return np.arange(3.0)
+
+    # A bare (unlabelled) operator already reduces a segment to its last frame,
+    # so there is nothing to stride and its output is passed through.
+    np.testing.assert_array_equal(
+        _StridedObservationOperator(_BareOp(), 2)(unused), np.arange(3.0)
+    )
+
+
+def test_unstrided_truth_subset_is_the_single_frame_slice() -> None:
+    """At n=1 the cycle's block-plus-stride slice IS the old one-frame slice.
+
+    The truth-side half of the n=1 identity guarantee: ``run()`` now takes a
+    cycle's ``every_n``-frame block and strides it, and at ``every_n = 1`` that
+    composition must be the very same frame the every-observation filter took —
+    so the observation values it perturbs, and therefore the noise draws made
+    against their shape, are unchanged.
+    """
+    import numpy as np
+    import xarray
+
+    truth = xarray.Dataset(
+        {"u": (("time", "x"), np.arange(20.0).reshape(5, 4))},
+        coords={"time": np.arange(5.0)},
+    )
+    for cycle in range(truth.sizes["time"]):
+        block = truth.isel(time=slice(cycle * 1, (cycle + 1) * 1))
+        xarray.testing.assert_identical(
+            block.isel(time=slice(0, None, 1)),
+            truth.isel(time=slice(cycle, cycle + 1)),
+        )
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "every_n,match",
+    [
+        pytest.param(0, "assimilate_every_n_step must be >= 1", id="zero"),
+        pytest.param(2, "does not divide", id="indivisible"),
+    ],
+)
+def test_run_filtering_rejects_bad_stride(
+    every_n: int, match: str, compose_test_cfg: Any
+) -> None:
+    """A bad stride fails at CONFIG time, before any solver is started.
+
+    The smoke shape is a 3 s window written every 1 s, i.e. 3 observation
+    frames per window, which a stride of 2 does not divide: the cycles would
+    not tile the window and the odd frame would be dropped silently.
+    """
+    from scripts.filtering.run_filtering import run
+
+    cfg = compose_test_cfg(
+        _overrides("joint", 1, [f"filtering.assimilate_every_n_step={every_n}"]),
+        config_name="run_filtering",
+    )
+    with pytest.raises(ValueError, match=match):
+        run(cfg)
+    # Nothing ran: the truth is the first thing the script would simulate.
+    assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "every_n,num_windows",
+    [
+        pytest.param(1, 1, id="unstrided"),
+        pytest.param(2, 2, id="stride2"),
+    ],
+)
+def test_run_filtering_assimilate_every_n_step(
+    every_n: int,
+    num_windows: int,
+    compose_test_cfg: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end on uDALES: a stride thins the ANALYSES, not the output.
+
+    The ``unstrided`` case additionally trips a wire on the stride wrapper: at
+    ``assimilate_every_n_step = 1`` the filter must be handed the observation
+    operator object itself, not a wrapper around it, which is what makes a
+    default run bit-identical to the every-observation filter.
+
+    The window is stretched to 4 s (4 observation frames) so that a stride of 2
+    still leaves two cycles per window — enough to read the analysis cadence
+    off the per-window state file rather than infer it.
+    """
+    import numpy as np
+    import xarray
+
+    import scripts.filtering.run_filtering as run_filtering
+    from scripts.esmda._esmda_common import read_yaml
+
+    if every_n == 1:
+
+        def _tripwire(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError(
+                "assimilate_every_n_step=1 must hand the filter the "
+                "observation operator UNWRAPPED (n=1 bit-identity)."
+            )
+
+        monkeypatch.setattr(
+            run_filtering, "_StridedObservationOperator", _tripwire, raising=True
+        )
+
+    cfg = compose_test_cfg(
+        _overrides(
+            "joint",
+            num_windows,
+            [
+                f"filtering.assimilate_every_n_step={every_n}",
+                "time.simulation_time=4.0",
+                # The full-resolution frames the analyses skip live here.
+                "run.ensemble_save_on_disk=true",
+            ],
+            model="pyudales",
+        ),
+        config_name="run_filtering",
+    )
+    run_filtering.run(cfg)
+
+    dt_obs = float(cfg.time.output_frequency)
+    frames_per_window = round(float(cfg.time.simulation_time) / dt_obs)
+    # What an unstrided run would have done, halved by the stride.
+    cycles_per_window = frames_per_window // every_n
+    assert cycles_per_window * every_n == frames_per_window
+    num_cycles = num_windows * cycles_per_window
+    n_obs = len(cfg.obs.states) * len(cfg.obs.x_points)
+
+    out_dir = pathlib.Path(cfg.paths.results_dir)
+    windows_dir = out_dir / "windows"
+    truth_times = np.asarray(
+        xarray.open_dataset(out_dir / "true_state.nc")["time"].values, dtype=float
+    )
+
+    for w in range(num_windows):
+        posterior_state = xarray.open_dataset(
+            windows_dir / f"window_{w}_posterior_state.nc"
+        )
+        # One analyzed frame per CYCLE (not per output frame), at the analysis
+        # times: the last frame of each of the window's every_n-frame blocks.
+        assert posterior_state.sizes["time"] == cycles_per_window
+        analysis_idx = [
+            w * frames_per_window + (c + 1) * every_n - 1
+            for c in range(cycles_per_window)
+        ]
+        np.testing.assert_allclose(
+            np.asarray(posterior_state["time"].values, dtype=float),
+            truth_times[analysis_idx],
+        )
+        if cycles_per_window > 1:
+            # ... i.e. spaced every_n * output_frequency apart. Loose rtol: the
+            # solver lands its output frames on its own timestep grid, so the
+            # frame times are only nominally multiples of output_frequency.
+            np.testing.assert_allclose(
+                np.diff(np.asarray(posterior_state["time"].values, dtype=float)),
+                every_n * dt_obs,
+                rtol=0.05,
+            )
+
+        # The window's flat observation vector covers the ASSIMILATED frames
+        # only, so the stride shortens it by exactly that factor.
+        obs = xarray.open_dataset(windows_dir / f"window_{w}_obs.nc")
+        assert obs.sizes["obs_index"] == cycles_per_window * n_obs
+        assert obs.sizes["obs_index"] * every_n == frames_per_window * n_obs
+        pred = xarray.open_dataset(windows_dir / f"window_{w}_pred_obs.nc")
+        assert pred["pred_obs"].shape == (2, cycles_per_window * n_obs, 2)
+
+    # The forward model still OUTPUTS every output_frequency step: each cycle's
+    # on-disk segment holds the full every_n frames, only the last of which saw
+    # a Kalman step.
+    for cycle in range(num_cycles):
+        for member in range(2):
+            segment = xarray.open_dataset(
+                out_dir / "_ensemble_states" / f"cycle_{cycle}" / f"state_{member}.nc"
+            )
+            assert segment.sizes["time"] == every_n
+
+    diagnostics = read_yaml(out_dir / "cycle_diagnostics.yaml")
+    assert [row["cycle"] for row in diagnostics] == list(range(num_cycles))
+
+    truth_access = read_yaml(out_dir / "truth_access.yaml")
+    # A cycle covers every_n truth frames and analyzes the last of them, which
+    # is exactly what `end_of_cycle_indices` reconstructs from `n_per_cycle`.
+    assert truth_access["n_per_cycle"] == every_n
+    assert truth_access["cycle_seconds"] == every_n * dt_obs
+    # The ESMDA keys keep their ESMDA (truth-block) meanings.
+    assert truth_access["n_per_window"] == frames_per_window
+    assert truth_access["n_total"] == num_windows * frames_per_window
+    assert truth_access["num_cycles"] == num_cycles
+    assert truth_access["sim_time"] == float(cfg.time.simulation_time)
+    # Strided analyses no longer tile the window, so the mean fields taken over
+    # them are a strided sample rather than a time average.
+    assert truth_access["moment_sampling_is_sparse"] is (every_n > 1)
+    if every_n == 1:
+        assert truth_access["moment_sampling"] == run_filtering._MOMENT_SAMPLING
+
+    configuration = read_yaml(out_dir / "run_info.yaml")["configuration"]
+    assert configuration["assimilate_every_n_step"] == every_n
+    assert configuration["cycles_per_window"] == cycles_per_window
+    assert configuration["num_cycles"] == num_cycles
+    assert configuration["seconds_per_cycle"] == every_n * dt_obs

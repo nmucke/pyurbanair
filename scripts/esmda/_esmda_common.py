@@ -123,6 +123,36 @@ def open_truth(true_state_path, n_total, x_offset=0.0, start_idx=0, t_offset=0.0
     return ds
 
 
+def analyzed_truth_frames(true_state, truth_access):
+    """The truth frames the run's assembled posterior state file lines up with.
+
+    ``streaming_state_rmse`` (and the rollout animation) pair frame *k* of the
+    truth with frame *k* of ``posterior_state_mean.nc``, so the two series have
+    to be sampled the same way. They are for an ESMDA run, whose posterior
+    rollout holds every truth frame of the horizon, and for a filtering run that
+    assimilates every observation frame. They are **not** for a filtering run
+    with ``filtering.assimilate_every_n_step = n > 1``: it analyzes one frame per
+    cycle of ``n`` observation frames, so its state file holds ``n_total / n``
+    frames while its truth still holds ``n_total``, and pairing them positionally
+    would score the whole horizon's analyses against the truth's first ``1/n``
+    of it.
+
+    ``truth_access.yaml``'s ``n_per_cycle`` says which truth frames those
+    analyses are: cycle ``c`` owns the block ``[c*n, (c+1)*n)`` and analyzes its
+    last frame, ``(c+1)*n - 1`` -- the stride ``[n-1::n]`` (the same arithmetic
+    ``scripts/filtering/_filtering_common.end_of_cycle_indices`` uses on the
+    filtering side). Selection is lazy, so the multi-GB truth stays on disk.
+
+    A no-op unless the run dir declares ``n_per_cycle > 1``: an ESMDA run dir
+    carries no such key at all and an unstrided filtering run carries 1, so both
+    are returned untouched.
+    """
+    n_per_cycle = int(truth_access.get("n_per_cycle", 1) or 1)
+    if n_per_cycle <= 1 or "time" not in true_state.dims:
+        return true_state
+    return true_state.isel(time=slice(n_per_cycle - 1, None, n_per_cycle))
+
+
 # ---------------------------------------------------------------------------
 # Sensor time-series extraction (truth vs ensemble at fixed points)
 # ---------------------------------------------------------------------------

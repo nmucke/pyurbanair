@@ -609,6 +609,39 @@ def test_the_truth_and_the_ensemble_bin_onto_the_same_frames_under_either_source
     assert truth_bins == [_RUN_FRAMES if forecast_states else 1] * _RUN_CYCLES
 
 
+def test_the_esmda_state_block_pairs_the_truth_with_the_analyzed_frames() -> None:
+    # The same invariant one stage over: the ESMDA metric/figure stages reduce a
+    # filtering run dir too, and their state block pairs truth frame k with
+    # ``posterior_state_mean.nc`` frame k positionally. A run that analyzes one
+    # frame per cycle of ``n_per_cycle`` observation frames keeps every truth
+    # frame, so the two series are that factor apart -- paired raw, the whole
+    # horizon's analyses would be scored against the truth's leading 1/n, which
+    # is a complete, plausible, wrong RMSE rather than an error.
+    from evaluation.turbulence import streaming_state_rmse
+
+    from scripts.esmda._esmda_common import analyzed_truth_frames
+
+    truth = _truth_dataset()
+    # What the per-window state files hold: the last frame of each cycle's
+    # block, and nothing else.
+    analyzed = truth.isel(time=[(c + 1) * _RUN_FRAMES - 1 for c in range(_RUN_CYCLES)])
+
+    selected = analyzed_truth_frames(
+        truth, {"n_per_cycle": _RUN_FRAMES, "num_cycles": _RUN_CYCLES}
+    )
+    np.testing.assert_array_equal(
+        np.asarray(selected["time"].values), np.asarray(analyzed["time"].values)
+    )
+    assert float(np.max(streaming_state_rmse(selected, analyzed))) == 0.0
+    # Not vacuous: the unselected pairing really does score the wrong frames.
+    assert float(np.max(streaming_state_rmse(truth, analyzed))) > 0.0
+
+    # An ESMDA run dir carries no cycle keys at all and an every-frame filtering
+    # run carries 1; both must get their truth back untouched.
+    for unstrided in ({}, {"n_per_cycle": 1}):
+        assert analyzed_truth_frames(truth, unstrided) is truth
+
+
 def test_the_analysis_source_nulls_the_per_cycle_variance_and_keeps_the_mean(
     tmp_path: pathlib.Path,
 ) -> None:

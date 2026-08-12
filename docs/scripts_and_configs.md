@@ -100,6 +100,7 @@ rather than pulling them from separate files. The table below summarises each.
 | Field | Default | Purpose |
 |---|---|---|
 | `num_assimilation_windows` | 2 | Number of assimilation windows, the same unit as `esmda.num_assimilation_windows`: one window is `time.simulation_time` seconds, so the horizon is `num_assimilation_windows * time.simulation_time` and the two entry points are configured identically for like-for-like runs. Cycles are **derived**, not configured: one cycle is one observation interval (`time.output_frequency` s) ending in one full-weight analysis, so a window holds `time.simulation_time / time.output_frequency` of them. Windows are pure computational/IO chunking (one `run()` call and one set of per-window artifacts each) — state, parameters, the filter's PRNG stream and the per-cycle noise draws all carry across a boundary, so a horizon run as 1 window or as `W` is mathematically identical. |
+| `assimilate_every_n_step` | 1 | Analysis **stride**: assimilate only every `n`-th observation frame. `1` is the every-observation filter above; `n > 1` leaves the model's output cadence alone and thins only the analyses, so a cycle becomes `n * time.output_frequency` seconds and a window holds `time.simulation_time / time.output_frequency / n` cycles. The intermediate frames are still simulated and still written (the per-cycle `_ensemble_states/cycle_{k}/` segments hold all `n`); they simply never see a Kalman step, and the analysis is the segment's LAST frame. `n` must divide `time.simulation_time / time.output_frequency` or the run refuses to start. |
 | `seed` | 42 | JAX RNG seed. |
 | `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors), of ONE observation frame. |
 | `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
@@ -683,9 +684,12 @@ filter forecasts **observation to observation**: one cycle is one observation
 interval (`time.output_frequency` s) assimilating that one frame, so a window
 of `time.simulation_time` holds `time.simulation_time / time.output_frequency`
 cycles and the horizon holds `filtering.num_assimilation_windows` times that.
-The truth is generated over the whole horizon up front; per-cycle observations
-are extracted with the case's temporal observation operator and each window's
-cycles are consumed in one `run()` call.
+`filtering.assimilate_every_n_step = n` (default 1) thins that analysis cadence
+without touching the model's output cadence: a cycle spans `n` observation
+intervals, all of them simulated and written, and only the last — the analysis
+time — is assimilated. The truth is generated over the whole horizon up front;
+per-cycle observations are extracted with the case's temporal observation
+operator and each window's cycles are consumed in one `run()` call.
 
 **Windows are chunking, not mathematics.** A window boundary bounds RAM and
 peak disk (one `run()` call and one set of per-window artifacts each) and
@@ -732,9 +736,23 @@ lazy-truth slicing/offsets the metric/figure stages read back), `run_info.yaml`,
 families read different keys: `sim_time` / `n_per_window` / `num_windows` keep
 their ESMDA meanings (seconds per WINDOW and its frame count), while the
 filtering stages take the cycle geometry from `cycle_seconds` / `n_per_cycle`
-(= 1, a cycle is one truth frame) / `num_cycles` (= `W ·` cycles per window)
-through `_filtering_common.cycle_seconds`, which falls back to `sim_time` so
+(= `filtering.assimilate_every_n_step`, the truth frames one cycle covers, of
+which it analyzes the last) / `num_cycles` (= `W ·` cycles per window) through
+`_filtering_common.cycle_seconds`, which falls back to `sim_time` so
 pre-windowing run dirs — where the two coincided — read exactly as before.
+
+Under a stride (`filtering.assimilate_every_n_step > 1`) the ESMDA stages see
+two differently sampled series on one run directory — the truth keeps every
+observation frame while the state artifacts hold one analyzed frame per cycle —
+so the frame-by-frame state block (`state_metrics.vel_magnitude_rmse` and the
+rollout animation) first reduces the truth to those analyzed frames via
+`n_per_cycle` (`_esmda_common.analyzed_truth_frames`, a no-op at `n = 1`); the
+sensor blocks align on the physical time axis and need nothing. What does
+remain by design is the mean-field block: `truth_access.yaml` marks the
+posterior moments `moment_sampling_is_sparse: true` because they are a strided
+sample of each window rather than a within-window time average, while the truth
+moments are still taken over every frame — an honest but unequal sampling, and
+the reason the label is stamped onto `eval_fields.nc` and the figures.
 
 `run_info.yaml.configuration.state_reduction` records the fully
 resolved reduction subtree (or `null`) for benchmark provenance;

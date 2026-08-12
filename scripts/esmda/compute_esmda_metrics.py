@@ -103,6 +103,7 @@ from evaluation.turbulence import (
 )
 
 from scripts.esmda._esmda_common import (
+    analyzed_truth_frames,
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
@@ -1417,14 +1418,21 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
 
     # --- State field |U| RMSE -----------------------------------------------
     # Stream over a few z-slices and all time steps instead of the whole 4-D
-    # field (interpolating onto the assim grid if coords differ).
+    # field (interpolating onto the assim grid if coords differ). The pairing is
+    # positional (truth frame k vs state frame k), so the truth is first reduced
+    # to the frames the state file actually holds -- a no-op for every run dir
+    # whose two series already have the same cadence, see
+    # ``analyzed_truth_frames``.
     posterior_state = xarray.open_dataset(run_dir / "posterior_state_mean.nc")
-    true_state = open_truth(
-        ta["true_state_path"],
-        ta["n_total"],
-        ta["x_offset"],
-        ta["start_idx"],
-        ta["t_offset"],
+    true_state = analyzed_truth_frames(
+        open_truth(
+            ta["true_state_path"],
+            ta["n_total"],
+            ta["x_offset"],
+            ta["start_idx"],
+            ta["t_offset"],
+        ),
+        ta,
     )
     rmse = streaming_state_rmse(true_state, posterior_state)
     summary["state_metrics"] = {"vel_magnitude_rmse": series_stats(rmse)}

@@ -96,6 +96,7 @@ from pyurbanair.config.hydra_helpers import create_observation_points
 from pyurbanair.utils.animation_utils import animate_rollout_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 from scripts.esmda._esmda_common import (
+    analyzed_truth_frames,
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
@@ -221,13 +222,21 @@ def make_figures(run_dir: pathlib.Path) -> None:
 
     # Open the (potentially multi-GB) truth lazily. The plots below each pull
     # only the slice they need: a single z-plane for the animation/final state
-    # and a few z-slices for the streamed error curve.
-    true_state = open_truth(
-        ta["true_state_path"],
-        ta["n_total"],
-        ta["x_offset"],
-        ta["start_idx"],
-        ta["t_offset"],
+    # and a few z-slices for the streamed error curve. Both of those pair the
+    # truth with ``posterior_state_mean.nc`` FRAME BY FRAME, so the truth is
+    # reduced to the frames that file holds -- a no-op unless the run dir says
+    # its state frames are strided (``analyzed_truth_frames``). The sensor
+    # series below re-open the truth in full: they align on the physical time
+    # axis, not on frame index.
+    true_state = analyzed_truth_frames(
+        open_truth(
+            ta["true_state_path"],
+            ta["n_total"],
+            ta["x_offset"],
+            ta["start_idx"],
+            ta["t_offset"],
+        ),
+        ta,
     )
     obs_x, obs_y, obs_z = create_observation_points(cfg.obs)
 

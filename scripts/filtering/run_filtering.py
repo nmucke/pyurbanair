@@ -63,6 +63,18 @@ analysis of that frame, so a window holds
 the horizon holds ``num_assimilation_windows`` times that. Nothing is
 aggregated (see ``docs/data_assimilation.md`` §8).
 
+``filtering.assimilate_every_n_step = n`` (default 1) thins the ANALYSIS
+cadence without touching the model's output cadence: a cycle becomes
+``n * output_frequency`` seconds, its forecast segment still emits one frame
+per ``output_frequency`` (they are on disk, in the per-cycle
+``_ensemble_states/cycle_{k}/`` files, in full), and only the segment's LAST
+frame — the analysis time — is assimilated. The skipped frames simply never
+see a Kalman step, so the ensemble runs ``n`` intervals between analyses. The
+IN-MEMORY histories (``state_history.nc``, the per-window state files) hold
+the analysis-time frames only, at the ``n * output_frequency`` cadence; the
+full-resolution frames live in the on-disk cycle segments. ``n`` must divide
+``simulation_time / output_frequency`` so the cycles still tile a window.
+
 A window is a COMPUTATIONAL boundary only: it bounds RAM and peak disk (one
 ``run()`` call, one set of per-window artifacts) and changes nothing
 mathematically. The analyzed state and parameters are carried into the next
@@ -164,6 +176,25 @@ _MOMENT_SAMPLING = (
     "(one analysis per frame), so the moments carry the analysis increments"
 )
 
+
+def _moment_sampling(every_n: int) -> str:
+    """The ``moment_sampling`` prose for a stride of ``every_n``.
+
+    A strided run analyzes one frame in every ``every_n``, so the analyzed
+    series no longer tiles the window and the moments taken over it are a
+    strided SAMPLE rather than a within-window time average (the caller flags
+    that as ``moment_sampling_is_sparse``).
+    """
+    if every_n == 1:
+        return _MOMENT_SAMPLING
+    return (
+        "the analyzed end-of-cycle state at every "
+        f"{every_n}th observation frame of each window (one analysis per cycle "
+        f"of {every_n} frames), so the moments carry the analysis increments "
+        "and are a strided sample of the window, not a full time average"
+    )
+
+
 # The filter has no ESMDA iteration axis; the two ``esmda_step`` entries of
 # window_{w}_pred_obs.nc are one analysis' before/after, pooled over the
 # window's cycles.
@@ -171,6 +202,66 @@ _ESMDA_STEP_SEMANTICS = (
     "0 = the per-cycle prior forecast H(x_f) stacked over the window's cycles "
     "in cycle order; 1 = the matching ride-along posterior rows"
 )
+
+
+class _StridedObservationOperator:
+    """The assimilation operator restricted to the frames a cycle assimilates.
+
+    With ``filtering.assimilate_every_n_step = n > 1`` a cycle's forecast
+    segment emits ``n`` output frames but only the LAST of them — the analysis
+    time — is assimilated, so the predicted observations handed to the filter
+    must be subset the same way the truth side is
+    (``isel(time=slice(n - 1, None, n))``), row for row. The STRIDE form rather
+    than ``isel(time=-1)`` is deliberate: it stays correct if a cycle ever
+    spans several analysis frames.
+
+    Used ONLY when ``n > 1``. At ``n = 1`` the operator is passed to the filter
+    unchanged, so a default run is bit-identical to one built before this knob
+    existed.
+
+    A bare (non-temporal) ``ObservationOperator`` already reduces a segment to
+    its last frame and returns an unlabelled flat vector, so there is nothing
+    to stride and its output is returned untouched. Attribute access is
+    delegated, which keeps the wrapper transparent to the operator
+    introspection the library does (``sensor_observation_coords`` unwraps one
+    ``observation_operator`` level for distance localization).
+    """
+
+    def __init__(self, operator: Any, stride: int) -> None:
+        self._operator = operator
+        self._stride = int(stride)
+
+    def __call__(self, state: xarray.Dataset) -> Any:
+        obs = self._operator(state)
+        if isinstance(obs, xarray.DataArray) and "time" in obs.dims:
+            # The stride only ends on the segment's LAST frame — the frame
+            # ``BaseFilter._get_final_states`` analyzes — while the frame count
+            # is a whole number of cycles. A segment carrying anything extra
+            # (stale files in the cycle directory, a backend that writes its
+            # cold-start spin-up into cycle 0) would otherwise be silently
+            # subset to the wrong frame and still line up with the truth side
+            # row for row. Unstrided, the library's own row check raises on
+            # exactly this; keep it loud here too.
+            n_frames = int(obs.sizes["time"])
+            if n_frames % self._stride:
+                raise ValueError(
+                    f"The forecast segment produced {n_frames} observation "
+                    f"frame(s), which filtering.assimilate_every_n_step="
+                    f"{self._stride} does not divide, so the analysis frame "
+                    "would not be the segment's last. Check the assimilation "
+                    "model's output cadence and the cycle results directory "
+                    "for stale files."
+                )
+            return obs.isel(time=slice(self._stride - 1, None, self._stride))
+        return obs
+
+    def __getattr__(self, name: str) -> Any:
+        # Private names are never delegated: `self._operator` itself is looked
+        # up through here on a half-initialised instance (unpickling), and
+        # delegating it would recurse forever.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._operator, name)
 
 
 def _save_window_params(
@@ -341,12 +432,37 @@ def run(cfg: DictConfig) -> None:
             "filtering.num_assimilation_windows must be >= 1, got " f"{num_windows}."
         )
     sim_time = float(cfg.time.simulation_time)  # ONE window
-    cycle_seconds = float(cfg.time.output_frequency)  # ONE cycle
-    if cycle_seconds <= 0.0:
+    output_frequency = float(cfg.time.output_frequency)  # the OBSERVATION cadence
+    if output_frequency <= 0.0:
         raise ValueError(
             "time.output_frequency must be > 0: it is the observation cadence, "
-            "which is also the filter's forecast segment (one cycle)."
+            "and (times filtering.assimilate_every_n_step) the filter's "
+            "forecast segment (one cycle)."
         )
+    # How many observation frames one analysis skips over. 1 (the default) is
+    # "assimilate every frame"; n > 1 leaves the model's OUTPUT cadence alone
+    # and only thins the analyses, so a cycle spans n output frames and
+    # assimilates the last of them.
+    every_n = int(cfg.filtering.get("assimilate_every_n_step", 1))
+    if every_n < 1:
+        raise ValueError(
+            "filtering.assimilate_every_n_step must be >= 1 (1 = assimilate "
+            f"every observation frame), got {every_n}."
+        )
+    # Fail at CONFIG time, before any solver runs: a stride that does not
+    # divide the window's frame count would leave a partial cycle at the window
+    # boundary, whose frames would be silently dropped.
+    frames_per_window_nominal = round(sim_time / output_frequency)
+    if frames_per_window_nominal % every_n:
+        raise ValueError(
+            f"filtering.assimilate_every_n_step={every_n} does not divide the "
+            f"{frames_per_window_nominal} observation frame(s) a window holds "
+            f"(time.simulation_time={sim_time:g}s / "
+            f"time.output_frequency={output_frequency:g}s). The strided cycles "
+            "must tile the window exactly; adjust time.simulation_time, "
+            "time.output_frequency or filtering.assimilate_every_n_step."
+        )
+    cycle_seconds = every_n * output_frequency  # ONE cycle
     ensemble_size = int(cfg.ensemble.ensemble_size)
     final_time = sim_time * num_windows
     domain_x_min = float(cfg.domain.bounds[0][0])
@@ -434,46 +550,49 @@ def run(cfg: DictConfig) -> None:
         )
 
     # Truth frames per WINDOW (contiguous, half-open blocks, exactly as
-    # run_esmda.py slices them), and therefore cycles per window: one cycle
-    # assimilates one frame, so the two counts are the same number. Guard the
-    # degenerate slicings explicitly — zero frames per window would leave a
-    # window with nothing to assimilate, and a remainder would be dropped
-    # silently.
-    if n_total < num_windows:
+    # run_esmda.py slices them), and from those the cycles per window: a cycle
+    # covers `every_n` frames and assimilates the last of them, so the two
+    # counts differ by the stride. Guard the degenerate slicings explicitly —
+    # fewer than `every_n` frames per window would leave a window with nothing
+    # to assimilate, and a remainder would be dropped silently.
+    if n_total < num_windows * every_n:
         raise ValueError(
             f"The truth provides {n_total} frame(s) within the {final_time:g}s "
             f"horizon, fewer than filtering.num_assimilation_windows="
-            f"{num_windows} (each window needs at least one observation "
-            "frame). Increase time.simulation_time, reduce "
-            "time.output_frequency or filtering.num_assimilation_windows, or "
-            "point run.truth_dir at a longer truth."
+            f"{num_windows} x filtering.assimilate_every_n_step={every_n} "
+            "(each window needs at least one full cycle of observation "
+            "frames). Increase time.simulation_time, reduce "
+            "time.output_frequency, filtering.num_assimilation_windows or "
+            "filtering.assimilate_every_n_step, or point run.truth_dir at a "
+            "longer truth."
         )
-    cycles_per_window = n_total // num_windows
-    n_dropped = n_total - cycles_per_window * num_windows
+    cycles_per_window = n_total // num_windows // every_n
+    frames_per_window = cycles_per_window * every_n
+    n_dropped = n_total - frames_per_window * num_windows
     if n_dropped:
         print(
             f"Truth frames ({n_total}) do not divide evenly into {num_windows} "
-            f"window(s) of {cycles_per_window}; the trailing {n_dropped} "
-            "frame(s) are not assimilated."
+            f"window(s) of {cycles_per_window} cycle(s) x {every_n} frame(s); "
+            f"the trailing {n_dropped} frame(s) are not assimilated."
         )
     # Everything downstream (truth_access.yaml, the assembled state file) is
-    # written against the frames the run actually assimilates.
-    n_total = cycles_per_window * num_windows
+    # written against the frames the run actually covers.
+    n_total = frames_per_window * num_windows
     num_cycles = cycles_per_window * num_windows
     expected_per_window = round(sim_time / cycle_seconds)
     if cycles_per_window != expected_per_window:
         print(
-            f"The truth provides {cycles_per_window} frame(s) per "
-            f"{sim_time:g}s window, but time.output_frequency="
-            f"{cycle_seconds:g}s implies {expected_per_window}. The "
-            "assimilation model forecasts one output_frequency interval per "
-            "cycle, so the cycles will not tile the window at the truth's "
-            "cadence."
+            f"The truth provides {cycles_per_window} cycle(s) per "
+            f"{sim_time:g}s window, but a cycle of {cycle_seconds:g}s "
+            f"(time.output_frequency x filtering.assimilate_every_n_step) "
+            f"implies {expected_per_window}. The assimilation model forecasts "
+            "one cycle per analysis, so the cycles will not tile the window at "
+            "the truth's cadence."
         )
     print(
         f"{num_windows} window(s) of {sim_time:g}s = {cycles_per_window} "
         f"cycle(s) of {cycle_seconds:g}s each ({num_cycles} cycles over "
-        f"{final_time:g}s)."
+        f"{final_time:g}s, assimilating every {every_n} observation frame(s))."
     )
     true_params.to_netcdf(out_dir / "true_params.nc")
 
@@ -481,13 +600,15 @@ def run(cfg: DictConfig) -> None:
     assim_results_dir = (
         pathlib.Path(cfg.run.results_dir) if cfg.run.results_dir is not None else None
     )
-    # The assimilation ensemble's horizon is ONE CYCLE, i.e. one observation
-    # interval — not `time.simulation_time`, which the model configs interpolate
-    # and which keeps its window meaning everywhere else (the truth model above
-    # is built over the full horizon from the same key). Overriding the
-    # constructor argument here is the same lever run_esmda.py pulls for the
-    # truth model, and it leaves the model's `output_frequency` alone, so every
-    # cycle emits exactly one frame: the one its analysis updates.
+    # The assimilation ensemble's horizon is ONE CYCLE, i.e.
+    # `assimilate_every_n_step` observation intervals — not
+    # `time.simulation_time`, which the model configs interpolate and which
+    # keeps its window meaning everywhere else (the truth model above is built
+    # over the full horizon from the same key). Overriding the constructor
+    # argument here is the same lever run_esmda.py pulls for the truth model,
+    # and it leaves the model's `output_frequency` alone, so a cycle emits one
+    # frame per observation interval — all of them written out, only the last
+    # one (the analysis time) assimilated.
     #
     # The SPIN-UP is untouched by this and still happens exactly once, at the
     # cold start: both backends zero `spinup_time` for a warm start
@@ -525,6 +646,13 @@ def run(cfg: DictConfig) -> None:
     # --- Observation operators and per-cycle observations ----------------------
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
+    # The predicted-observation twin of the truth-side stride: a cycle's segment
+    # emits `every_n` frames, and the filter must only see the one its analysis
+    # assimilates. Wrapped ONLY when the stride bites, so an unstrided run hands
+    # the filter the very same operator object it always did.
+    filter_obs_op: Any = assim_obs_op
+    if every_n > 1:
+        filter_obs_op = _StridedObservationOperator(assim_obs_op, every_n)
 
     obs_error_std = float(cfg.filtering.obs_error_std)
     # Every cycle's observation is built and perturbed HERE, over the whole
@@ -538,10 +666,15 @@ def run(cfg: DictConfig) -> None:
     cycle_times: list[float] = []
     truth_view = open_truth(true_state_path, n_total, x_offset, start_idx, t_offset)
     for cycle in range(num_cycles):
-        # ONE frame per cycle: the filter forecasts observation to observation,
-        # so a cycle's segment is a single output frame and its analysis is that
-        # frame's. Half-open slicing, so no frame is assimilated twice.
-        cycle_truth = truth_view.isel(time=slice(cycle, cycle + 1))
+        # The cycle's truth BLOCK is its `every_n` output frames (half-open, so
+        # no frame is covered twice); the frames it ASSIMILATES are the strided
+        # subset ending on the block's last frame — the analysis time. At
+        # every_n = 1 that block is one frame and the stride is the identity, so
+        # this is exactly the every-frame filter.
+        cycle_block = truth_view.isel(
+            time=slice(cycle * every_n, (cycle + 1) * every_n)
+        )
+        cycle_truth = cycle_block.isel(time=slice(every_n - 1, None, every_n))
         cycle_times.append(float(np.asarray(cycle_truth["time"].values).ravel()[0]))
         cycle_obs_clean = truth_obs_op(cycle_truth)
         rng_key, subkey = jax.random.split(rng_key)
@@ -554,8 +687,9 @@ def run(cfg: DictConfig) -> None:
 
     # Size C_D from the vector ONE analysis consumes: a single observation
     # frame (sensors x observed states). That is a cycle's whole observation
-    # vector here (one frame per cycle), and the library validates C_D per
-    # frame either way, so this stays the per-frame contract.
+    # vector here (one ASSIMILATED frame per cycle, whatever the stride), and
+    # the library validates C_D per frame either way, so this stays the
+    # per-frame contract.
     first_obs = observations[0]
     if isinstance(first_obs, xarray.DataArray):
         n_d = int(first_obs.sizes["obs"])
@@ -576,7 +710,7 @@ def run(cfg: DictConfig) -> None:
         filter_overrides["parameter_evolution"] = None
     enkf = instantiate(
         cfg.filtering.filter,
-        observation_operator=assim_obs_op,
+        observation_operator=filter_obs_op,
         forward_model=ensemble_model,
         C_D=C_D_diag,
         rng_key=filter_key,
@@ -720,12 +854,16 @@ def run(cfg: DictConfig) -> None:
             "start_idx": int(start_idx),
             "t_offset": float(t_offset),
             "n_total": int(n_total),
-            "n_per_window": int(cycles_per_window),
+            # TRUTH frames per window (the contiguous block the shared stages
+            # slice), which is the cycle count times the stride — the two
+            # coincide only at assimilate_every_n_step=1.
+            "n_per_window": int(frames_per_window),
             "num_windows": int(num_windows),
             "sim_time": float(sim_time),
-            # One cycle is one observation frame, so the analyzed frame of cycle
-            # c IS truth frame c (`n_per_cycle=1`).
-            "n_per_cycle": 1,
+            # A cycle covers `assimilate_every_n_step` truth frames and analyzes
+            # the LAST of them, which is exactly the frame
+            # `end_of_cycle_indices` pairs with cycle c: (c+1)*n_per_cycle - 1.
+            "n_per_cycle": int(every_n),
             "num_cycles": int(num_cycles),
             "cycle_seconds": float(cycle_seconds),
             # The assembled parameter files carry a physical (seconds) time axis
@@ -736,9 +874,10 @@ def run(cfg: DictConfig) -> None:
             "assim_solver_name": str(cfg.assim_model.solver_name),
             # What the per-window state files hold, stamped onto the mean-field
             # artifacts by the metric stage: analyzed frames, not a free
-            # rollout, and NOT sparse (they tile the window one per frame).
-            "moment_sampling": _MOMENT_SAMPLING,
-            "moment_sampling_is_sparse": False,
+            # rollout. Unstrided they tile the window one per frame (NOT
+            # sparse); a stride makes them a strided sample of it.
+            "moment_sampling": _moment_sampling(every_n),
+            "moment_sampling_is_sparse": every_n > 1,
         },
         out_dir / "truth_access.yaml",
     )
@@ -754,6 +893,9 @@ def run(cfg: DictConfig) -> None:
                 "ensemble_size": int(ensemble_size),
                 "simulation_time_per_window": float(sim_time),
                 "seconds_per_cycle": float(cycle_seconds),
+                # The analysis stride: a cycle spans this many observation
+                # frames (output_frequency each) and assimilates the last one.
+                "assimilate_every_n_step": int(every_n),
                 "final_time": float(final_time),
                 "observation_error_std": obs_error_std,
                 # The gate the shared observation-space diagnostic reads before

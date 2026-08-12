@@ -861,7 +861,13 @@ configured:** the filter forecasts observation to observation, so one cycle is
 one observation interval (`time.output_frequency` s) ending in one full-weight
 analysis of that single frame (`T = 1` in the serial-sweep machinery of §8.1),
 and cycles per window = observation frames per window =
-`time.simulation_time / time.output_frequency`.
+`time.simulation_time / time.output_frequency`. `filtering.assimilate_every_n_step
+= n` (default 1) is the one knob over that: every `n`-th observation frame is
+assimilated, so a cycle spans `n * time.output_frequency` seconds and a window
+holds `n` times fewer of them — the intermediate frames are still simulated and
+still written out (the per-cycle `_ensemble_states/cycle_{k}/` segments hold all
+`n`), they are just never analyzed, and the analysis is the segment's last
+frame; `n` must divide the window's frame count or the run refuses to start.
 
 A window is **pure chunking**: it splits the horizon into one `run()` call and
 one set of per-window artifacts each, so RAM and peak disk stay bounded, and it

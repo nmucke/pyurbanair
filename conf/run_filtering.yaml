@@ -119,9 +119,10 @@ filtering:
   # `num_assimilation_windows * time.simulation_time`. The cycles are DERIVED,
   # not configured: one cycle is one observation interval
   # (`time.output_frequency` s) ending in one full-weight analysis, so a window
-  # holds `time.simulation_time / time.output_frequency` of them. No
-  # aggregation knobs: the filter assimilates every output frame — aggregation
-  # stays with the ESMDA smoothers and the filter-smoothing hybrid.
+  # holds `time.simulation_time / time.output_frequency` of them (divided by
+  # `assimilate_every_n_step`, below). Still no aggregation knobs: the filter
+  # assimilates individual frames and never averages them — aggregation stays
+  # with the ESMDA smoothers and the filter-smoothing hybrid.
   #
   # A window boundary is a CHUNKING boundary only (one `run()` call and one set
   # of per-window artifacts each, so RAM and peak disk stay bounded): the
@@ -130,6 +131,19 @@ filtering:
   # as 1 window or as W windows gives identical results. Keep W in the ESMDA
   # range (2-10) for comparable runs and readable per-window diagnostics.
   num_assimilation_windows: 2
+  # Analysis STRIDE: assimilate only every n-th observation frame (1 = every
+  # frame, the every-observation filter above; n > 1 thins the analyses without
+  # touching the model's output cadence). A cycle then spans
+  # `n * time.output_frequency` seconds and assimilates the LAST frame of its
+  # segment — the analysis time; the intermediate frames are still SIMULATED
+  # and still written out (they are in the per-cycle
+  # `_ensemble_states/cycle_{k}/` segments in full), they just never see a
+  # Kalman step, so the ensemble runs n intervals between analyses. The
+  # in-memory histories (state_history.nc, the per-window state files) hold the
+  # analysis-time frames only. `n` MUST divide
+  # `time.simulation_time / time.output_frequency` so the cycles still tile a
+  # window; the run refuses to start otherwise.
+  assimilate_every_n_step: 1
   seed: 42
   obs_error_std: 0.25
   # state | parameter | joint. The parameter-updating modes (parameter and
