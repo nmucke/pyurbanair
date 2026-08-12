@@ -1,0 +1,24 @@
+# @package filter_smoothing
+# Local deterministic ensemble-transform (LETKF) analysis for the INNER state
+# filter (see conf/filtering/analysis/letkf.yaml — same class, mounted under
+# `filter_smoothing.inner_analysis`): the same symmetric square-root kernel as
+# filter_smoothing/inner_analysis=etkf, but computed per state block from that
+# block's locally selected observations. The inner localization strategy supplies
+# the per-observation error inflation; the order is localize -> form R_eff ->
+# whiten Y -> ensemble transform.
+#
+# REQUIRES a non-null inner localization
+# (`filter_smoothing/inner_localization=distance` or `correlation`): the scheme
+# declares localization_policy="required" and the inner BaseFilter rejects `none`
+# at construction.
+#   python scripts/filter_smoothing/run_filter_smoothing.py \
+#     filter_smoothing/inner_analysis=letkf filter_smoothing/inner_localization=distance
+# Selected with `filter_smoothing/inner_analysis=letkf`.
+inner_analysis:
+  _target_: data_assimilation.filtering.etkf.LETKFAnalysis
+  # Observation-space spectral truncation (nested ObservationTSVD block), applied
+  # per block AFTER local selection and whitening. null -> keep every thin-SVD
+  # direction of each block's whitened observation anomalies, i.e. the
+  # untruncated LETKF. Select filter_smoothing/inner_analysis=letkf_tsvd for the
+  # truncated variant.
+  tsvd: null

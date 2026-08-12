@@ -204,6 +204,17 @@ class BaseFilter:
     the final cycle is always kept.
     """
 
+    #: Opt-in recording of the per-cycle predicted observations, same
+    #: attribute-plumbing pattern as the smoother's ``collect_obs_diagnostics``:
+    #: set it on the instance after construction. When True, :meth:`run`
+    #: rebinds :attr:`pred_obs_history` and appends each cycle's RAW
+    #: (pre-inflation) forecast observations *before* the analysis. Off by
+    #: default — nothing is recorded and the cycle loop is unchanged. Used by
+    #: the ``filter_smoothing`` outer ESMDA loop, which needs exactly the
+    #: forecast observations ``d_k = H(x_f_k)`` stored before ``y_k`` is
+    #: assimilated.
+    collect_pred_obs: bool = False
+
     def __init__(
         self,
         observation_operator: Callable[[xarray.Dataset], Any],
@@ -352,6 +363,11 @@ class BaseFilter:
         # (mirrors the smoother's prune_disk_steps / keep_prior_disk_step).
         self.prune_disk_cycles = False
         self.keep_first_disk_cycle = True
+
+        # Per-cycle forecast observations, filled only when the caller sets
+        # ``collect_pred_obs`` (see the class attribute).
+        self.pred_obs_history: list[np.ndarray] = []
+
         if self.forward_model.save_on_disk:
             self.base_results_dir = self.forward_model.results_dir
 
@@ -366,6 +382,33 @@ class BaseFilter:
     ) -> Optional[xarray.Dataset]:
         """Run the ensemble over one cycle's segment (None in on-disk mode)."""
         return self.forward_model.run_ensemble(state=state, params=params)
+
+    def _params_for_cycle(
+        self,
+        cycle: int,
+        params: Optional[xarray.Dataset],
+    ) -> Optional[xarray.Dataset]:
+        """The parameters cycle ``cycle``'s forecast is run with.
+
+        Extension point, identity by default: every cycle forecasts with the
+        same parameter ensemble. A subclass whose parameters are a *trajectory*
+        over the window (see :class:`~data_assimilation.filter_smoothing.base.\
+_TrajectoryStateFilter`) overrides this to hand the forward model the piece of
+        that trajectory spanning the cycle's segment — a time-varying schedule
+        on a segment-local clock, which the backends already interpolate.
+        """
+        return params
+
+    def _record_pred_obs(self, pred_obs: jnp.ndarray) -> None:
+        """Record one cycle's raw forecast observations ``(N_d, N_e)``.
+
+        No-op unless ``collect_pred_obs`` is set. ``np.asarray`` copies the
+        block off the JAX device, so a whole window's history never pins
+        accelerator memory (it is KB-scale on the host); mirrors the smoother's
+        ``_record_pred_obs``.
+        """
+        if self.collect_pred_obs:
+            self.pred_obs_history.append(np.asarray(pred_obs))
 
     def _observation_step(
         self,
@@ -499,6 +542,12 @@ class BaseFilter:
 
         num_cycles = int(obs_batches.shape[0])
         analysis_state = state
+        # One history per call, so a caller that runs the same filter over
+        # several passes (the filter_smoothing outer loop) reads that pass's
+        # entries alone. Rebound rather than cleared: the caller may still hold
+        # the previous pass's list.
+        if self.collect_pred_obs:
+            self.pred_obs_history = []
         diagnostics: list[CycleDiagnostics] = []
         params_history: list[xarray.Dataset] = (
             [params] if (return_history and params is not None) else []
@@ -508,7 +557,9 @@ class BaseFilter:
         for cycle in range(num_cycles):
             self._set_cycle_results_dir(cycle)
 
-            forecast = self._forecast_step(state=analysis_state, params=params)
+            forecast = self._forecast_step(
+                state=analysis_state, params=self._params_for_cycle(cycle, params)
+            )
             if params is not None:
                 params = self.forward_model.apply_failure_substitutions_to_params(
                     params
@@ -525,6 +576,12 @@ class BaseFilter:
             final_state = self._get_final_states(
                 state=forecast, results_dir=results_dir
             )
+
+            # Record here, not inside the analysis: these are the forecast
+            # observations before ANY inflation touches them (prior inflation
+            # is applied inside ``_analysis_cycle``) and before ``y_cycle`` is
+            # assimilated.
+            self._record_pred_obs(pred_obs)
 
             analysis_state, params, cycle_diag = self._analysis_cycle(
                 cycle, final_state, params, pred_obs, obs_batches[cycle]

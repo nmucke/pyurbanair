@@ -140,6 +140,9 @@ scripts/                           # All top-level executables run from here.
   compute_esmda_metrics.py         # Post-hoc metrics from a finished run dir (argparse)
   make_esmda_figures.py            # Figures from a finished run dir (argparse)
   run_esmda_pipeline.sh            # run_esmda.py → compute_esmda_metrics.py → make_esmda_figures.py
+  run_filtering_pipeline.sh        # the same three stages for filtering/ (EnKF)
+  run_filter_smoothing_pipeline.sh # ...and for filter_smoothing/ (the metric/figure stages
+                                   #   reuse filtering/'s; see docs/scripts_and_configs.md §2.5)
   neural_surrogate/                # Surrogate stack — see docs/neural_surrogates.md
     generate_training_data.py      #   Build training dataset from a CFD ensemble
     train_neural_surrogate.py      #   Train (computes + bakes in normalization stats)
@@ -475,6 +478,35 @@ def test_something(compose_test_cfg) -> None:
 - Ensemble failures recorded by the underlying ensemble model are
   applied to the params ensemble between forecast and analysis via
   `apply_failure_substitutions_to_params`.
+
+### The three assimilation entry points
+
+ESMDA is not the only one. All three share the observation operator, the
+augmentation layer, the localization machinery and the analysis math above —
+they differ in *what* is updated and *when*:
+
+| Script | Config | Algorithm |
+|---|---|---|
+| [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py) | [conf/run_esmda.yaml](../conf/run_esmda.yaml) | ESMDA smoothing — re-forecast the window `num_steps` times with tempered updates. Mode = `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`. |
+| [scripts/filtering/run_filtering.py](../scripts/filtering/run_filtering.py) | [conf/run_filtering.yaml](../conf/run_filtering.yaml) | Sequential EnKF — one forecast segment and ONE full-weight analysis per cycle, warm-starting the next. Mode = `filtering.mode=state\|parameter\|joint` × the `filtering/*` groups. |
+| [scripts/filter_smoothing/run_filter_smoothing.py](../scripts/filter_smoothing/run_filter_smoothing.py) | [conf/run_filter_smoothing.yaml](../conf/run_filter_smoothing.yaml) | Filter smoothing — the EnKF above as the *inner* loop for the state, inside an outer ESMDA loop over the parameter trajectory of the whole window. Mode = the `filter_smoothing/*` groups; requires a time-varying prior. |
+
+Full detail for all three (cycle semantics, the two `BaseFilter` hooks the
+filter smoother adds, temporal localization) is in
+[docs/data_assimilation.md](data_assimilation.md) §8–§9; the config groups and
+saved artifacts are in
+[docs/scripts_and_configs.md](scripts_and_configs.md) §1.8–§1.9 / §2.1.
+
+Each of the three has a three-stage pipeline driver — run, then metrics
+(`run_summary.yaml`), then figures — sharing one output directory resolved from
+its own entry-point config:
+[`run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh),
+[`run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh) and
+[`run_filter_smoothing_pipeline.sh`](../scripts/run_filter_smoothing_pipeline.sh)
+(§2.3–§2.5 there). Filter smoothing's inner filter *is* the EnKF, so its
+metric/figure stages reuse the filtering ones and add only the parameter
+*trajectory* blocks, the outer loop's convergence, and the moving window's
+cycle bookkeeping.
 
 ### Localization (optional)
 - [localization/base.py](../libs/data-assimilation/src/data_assimilation/localization/base.py)
@@ -927,6 +959,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 | How a solver consumes params | `libs/<solver>/src/<solver>/utils/params_utils.py` |
 | ESMDA Kalman update / variants | [libs/data-assimilation/src/data_assimilation/smoothing/esmda.py](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py) |
 | Which ESMDA mode runs (smoother/prior/windows) | [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py) + [conf/run_esmda.yaml](../conf/run_esmda.yaml), [conf/esmda/smoother/](../conf/esmda/smoother/) |
+| Which assimilation algorithm runs at all (ESMDA / EnKF / filter smoothing) | the three entry points in §6 — `run_esmda.py`, [run_filtering.py](../scripts/filtering/run_filtering.py), [run_filter_smoothing.py](../scripts/filter_smoothing/run_filter_smoothing.py) |
 | How sensors map to grid points | [libs/data-assimilation/src/data_assimilation/observation_operator.py](../libs/data-assimilation/src/data_assimilation/observation_operator.py) |
 | Per-window rollout logic | `run_esmda.py`'s window loop / `run_forward_model.py`'s `run.rollout_steps` loop |
 | Parameter samplers (static + dynamic) | [src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/), [src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/), [conf/params/](../conf/params/) |

@@ -1,0 +1,41 @@
+# @package filter_smoothing
+# Global deterministic ETKF for the INNER state filter (see
+# filter_smoothing/inner_analysis=etkf) with observation-space spectral
+# truncation enabled. The TSVD truncates weak *linear combinations* of the
+# whitened predicted-observation anomalies before the ensemble transform is
+# formed; it never modifies the physical observation-error variances, and it
+# acts only inside the window — the outer trajectory update is untouched.
+# REQUIRES `filter_smoothing/inner_localization=none`
+# (localization_policy="forbidden"), as for filter_smoothing/inner_analysis=etkf:
+#   python scripts/filter_smoothing/run_filter_smoothing.py \
+#     filter_smoothing/inner_analysis=etkf_tsvd filter_smoothing/inner_localization=none
+# Selected with `filter_smoothing/inner_analysis=etkf_tsvd`.
+inner_analysis:
+  _target_: data_assimilation.filtering.etkf.ETKFAnalysis
+  # Nested `_target_` under a `_target_`: recursive instantiation is on and
+  # `_convert_: all` propagates from conf/run_filter_smoothing.yaml, so this node
+  # is instantiated bottom-up into an ObservationTSVD before ETKFAnalysis is
+  # constructed. (A nested node WITHOUT a `_target_` would arrive as a plain dict
+  # instead; cf. conf/params/static.yaml for the same pattern.)
+  tsvd:
+    _target_: data_assimilation.filtering.etkf.ObservationTSVD
+    # Apply the scientific truncation. Kept OFF in the etkf.yaml variant; with
+    # the shipped sensor network (N_d ~ 12) there is little to regularize, so
+    # expect no benefit here and turn it on only when the logged rank/energy
+    # diagnostics show persistent ill-conditioning.
+    enabled: true
+    # Retain the smallest prefix of the whitened spectrum whose DISCARDED tail
+    # holds at most (1 - energy_fraction) of the squared singular values. The cut
+    # is on the suffix rather than a cumulative prefix sum because a float32
+    # prefix sum saturates at 1.0 and would let dtype decide the rank.
+    energy_fraction: 0.99
+    # Optional hard cap applied after the energy criterion (null -> no extra
+    # cap). REQUIRES `enabled: true`: max_rank is part of the scientific
+    # truncation `enabled` gates, so setting it while disabled is rejected at
+    # construction rather than silently ignored.
+    max_rank: null
+    # Optional relative singular-value floor (sigma_i > tol * sigma_max). It
+    # redefines round-off rather than making a scientific choice, so unlike
+    # max_rank it is NOT gated by `enabled`. null -> the dtype- and shape-aware
+    # floor shared with the state reduction.
+    numerical_tolerance: null
