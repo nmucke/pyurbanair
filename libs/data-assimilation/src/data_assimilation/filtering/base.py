@@ -38,7 +38,6 @@ import jax.numpy as jnp
 import jax.scipy.linalg
 import numpy as np
 import xarray
-from tqdm import tqdm
 from data_assimilation.augmentation import ParamAugmentation, StateAugmentation
 from data_assimilation.filtering.analysis import (
     LOCALIZATION_POLICIES,
@@ -52,6 +51,7 @@ from data_assimilation.io import get_sorted_state_files, load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import sensor_observation_coords
 from data_assimilation.reduction import OnlineStateReduction
+from tqdm import tqdm
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
