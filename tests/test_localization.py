@@ -641,3 +641,144 @@ def test_return_state_history_on_disk_raises() -> None:
     obj.forward_model = SimpleNamespace(save_on_disk=True)
     with pytest.raises(ValueError, match="return_state_history"):
         obj._analysis(params=None, observations=None, return_state_history=True)
+
+
+def test_a_zero_inflation_is_excluded_by_both_local_analyses() -> None:
+    """The two local analyses agree on what "not a taper" means.
+
+    ``E_inf`` multiplies an observation-error *standard deviation*, so the
+    documented contract is ``[1, inf]``: ``1`` full weight, larger values a
+    taper, ``inf`` excluded. A custom strategy emitting ``0`` used to mean two
+    incompatible things — the LETKF's whitening excluded it while the
+    stochastic local update built ``C_D_row = 0`` and assimilated it with zero
+    error variance, i.e. an infinitely trusted observation from a localization
+    decision. ``active_observations`` is now the single predicate for both, so
+    a non-positive factor is excluded on both paths.
+
+    No shipped strategy emits one (they all return ``1``, ``>1`` or ``inf``),
+    which is why this harmonization is bit-identical for every configuration
+    the repository actually runs.
+    """
+    from data_assimilation.filtering.etkf import LETKFAnalysis
+    from data_assimilation.localization.base import BaseLocalization
+
+    n_e, n_d = 40, 2
+    keys = jax.random.split(jax.random.PRNGKey(90), 4)
+    augmented = 2.0 + jax.random.normal(keys[0], (3, n_e))
+    pred_obs = jax.random.normal(keys[1], (n_d, n_e))
+    obs = jnp.array([1.0, -1.0])
+    C_D = jnp.diag(jnp.array([0.2, 0.3]))
+
+    class _Prescribed(BaseLocalization):
+        def __init__(self, inflation: jnp.ndarray) -> None:
+            self._inflation = inflation
+
+        def inflation_factors(
+            self,
+            aug_dev: jnp.ndarray,
+            pred_obs_dev: jnp.ndarray,
+            row_coords: Any = None,
+            obs_coords: Any = None,
+        ) -> jnp.ndarray:
+            return self._inflation
+
+    # Observation 0 is spelled "excluded" three ways; observation 1 is kept.
+    spellings = {
+        "infinite": jnp.inf,
+        "zero": 0.0,
+        "negative": -1.0,
+    }
+    aug_dev = augmented - augmented.mean(axis=1, keepdims=True)
+    po_dev = pred_obs - pred_obs.mean(axis=1, keepdims=True)
+
+    stochastic = {}
+    deterministic = {}
+    for name, value in spellings.items():
+        inflation = jnp.asarray([[value, 1.0]] * 3)
+        strategy = _Prescribed(inflation)
+        stochastic[name] = np.asarray(
+            strategy.localized_update(
+                augmented=augmented,
+                aug_dev=aug_dev,
+                pred_obs=pred_obs,
+                pred_obs_dev=po_dev,
+                obs=obs,
+                C_D=C_D,
+                C_D_sqrt=jnp.sqrt(C_D),
+                alpha=1.0,
+                rng_key=jax.random.PRNGKey(91),
+            )
+        )
+        deterministic[name] = np.asarray(
+            LETKFAnalysis()(
+                augmented,
+                pred_obs,
+                obs,
+                jnp.diag(C_D),
+                jax.random.PRNGKey(0),
+                localization=strategy,
+            )
+        )
+
+    for name in ("zero", "negative"):
+        np.testing.assert_allclose(
+            stochastic[name], stochastic["infinite"], rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            deterministic[name], deterministic["infinite"], rtol=1e-5, atol=1e-6
+        )
+
+    # Non-vacuous: keeping observation 0 gives a genuinely different answer, so
+    # "excluded" is a real decision rather than an observation with no effect.
+    kept = _Prescribed(jnp.ones((3, n_d)))
+    assert not np.allclose(
+        np.asarray(
+            kept.localized_update(
+                augmented=augmented,
+                aug_dev=aug_dev,
+                pred_obs=pred_obs,
+                pred_obs_dev=po_dev,
+                obs=obs,
+                C_D=C_D,
+                C_D_sqrt=jnp.sqrt(C_D),
+                alpha=1.0,
+                rng_key=jax.random.PRNGKey(91),
+            )
+        ),
+        stochastic["infinite"],
+        atol=1e-3,
+    )
+
+
+def test_localized_update_and_letkf_share_one_grouping_and_masking_step() -> None:
+    """``resolve_row_inflation`` is the only implementation of that ordering.
+
+    The stochastic local update and the LETKF both need "mask to ``inf``,
+    group, then mask to ones", and the order is load-bearing: applying the mask
+    after the grouping lets a globally updated row drag its block's
+    ``segment_min`` down to one and silently turn a localized block into a
+    global update. It used to exist as two verbatim copies with two separate
+    guarding tests. This pins the *ordering* on the shared helper, so a caller
+    that re-forks it has to reproduce this behaviour to pass — which is the
+    part that can actually be got wrong.
+
+    (An earlier revision also asserted on ``inspect.getsource(...)`` text to
+    catch a second inlined copy. Dropped: a comment mentioning the name
+    satisfied it, a second copy elsewhere in the module did not violate it, and
+    ``getsource`` raises ``OSError`` under import harnesses that do not keep the
+    file on disk. It bought no coverage the ordering assertion below lacks.)
+    """
+    from data_assimilation.localization import base as localization_base
+
+    inflation = jnp.asarray([[3.0, jnp.inf], [1.0, 1.0]])
+    resolved = np.asarray(
+        localization_base.resolve_row_inflation(
+            inflation,
+            group_ids=jnp.asarray([0, 0]),
+            localize_mask=jnp.asarray([True, False]),
+        )
+    )
+    # Row 0 keeps its own selection (the masked row did not join the minimum),
+    # row 1 gets the all-ones global selection.
+    np.testing.assert_array_equal(resolved[0], np.asarray([3.0, np.inf]))
+    np.testing.assert_array_equal(resolved[1], np.asarray([1.0, 1.0]))

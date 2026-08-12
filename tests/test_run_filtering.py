@@ -4,8 +4,13 @@ Mirrors tests/test_run_esmda.py: everything runs under the tiny smoke config
 (conftest ``_SMOKE_OVERRIDES``) with the global (unlocalized) update — the
 default correlation localization is degenerate at this 2-member ensemble size.
 One test per filter mode (state / parameter / joint), plus a multi-cycle run,
-distance localization (purely geometric, so meaningful at 2 members), and the
-mixed drift-tracking path (a dynamic truth tracked by a static prior).
+distance localization (purely geometric, so meaningful at 2 members), the
+deterministic ensemble-transform analyses, and the mixed drift-tracking path (a
+dynamic truth tracked by a static prior).
+
+The compose-only tests (state reduction, analysis scheme) need no solver and
+cover every option of their group; the solver-running tests stay deliberately
+few.
 """
 
 import pathlib
@@ -77,6 +82,67 @@ def test_filtering_state_reduction_config_composes(
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
+    "option,target,localization,truncated",
+    [
+        (
+            "stochastic",
+            "data_assimilation.filtering.analysis.StochasticEnKFAnalysis",
+            "none",
+            None,
+        ),
+        ("etkf", "data_assimilation.filtering.etkf.ETKFAnalysis", "none", False),
+        ("etkf_tsvd", "data_assimilation.filtering.etkf.ETKFAnalysis", "none", True),
+        ("letkf", "data_assimilation.filtering.etkf.LETKFAnalysis", "distance", False),
+        (
+            "letkf_tsvd",
+            "data_assimilation.filtering.etkf.LETKFAnalysis",
+            "distance",
+            True,
+        ),
+    ],
+)
+def test_filtering_analysis_config_composes(
+    option: str,
+    target: str,
+    localization: str,
+    truncated: Optional[bool],
+    compose_test_cfg: Any,
+) -> None:
+    """Every analysis-group option mounts into the filter target.
+
+    Each option is composed with the localization its ``localization_policy``
+    allows (``etkf*`` forbids localization, ``letkf*`` requires it), so the
+    composed config is one BaseFilter would accept. The localization override
+    comes last and therefore wins over the ``none`` pinned in ``_overrides``.
+    """
+    cfg = compose_test_cfg(
+        _overrides(
+            "state",
+            1,
+            [
+                f"filtering/analysis={option}",
+                f"filtering/localization={localization}",
+            ],
+        ),
+        config_name="run_filtering",
+    )
+    analysis = cfg.filtering.filter.analysis
+    assert analysis._target_ == target
+    if truncated is None:
+        # The stochastic analysis takes no TSVD settings at all.
+        assert "tsvd" not in analysis
+    elif not truncated:
+        assert analysis.tsvd is None
+    else:
+        # A nested `_target_` under a `_target_`: recursive instantiation turns
+        # this node into an ObservationTSVD before the analysis is constructed.
+        assert (
+            analysis.tsvd._target_ == "data_assimilation.filtering.etkf.ObservationTSVD"
+        )
+        assert analysis.tsvd.enabled is True
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
     "mode,num_cycles,extra",
     [
         pytest.param("joint", 1, None, id="joint"),
@@ -116,6 +182,12 @@ def test_run_filtering(
     from scripts.esmda._esmda_common import read_yaml
 
     configuration = read_yaml(out_dir / "run_info.yaml")["configuration"]
+    # `filter` stays EnsembleKalmanFilter for every update flavor, so the
+    # analysis subtree is what identifies the update math that ran.
+    assert configuration["filter"] == "EnsembleKalmanFilter"
+    assert configuration["analysis"]["_target_"] == (
+        "data_assimilation.filtering.analysis.StochasticEnKFAnalysis"
+    )
     diagnostics = read_yaml(out_dir / "cycle_diagnostics.yaml")
     reduction_enabled = bool(extra) and any(
         override.startswith("filtering/state_reduction=")
@@ -175,6 +247,117 @@ def test_run_filtering_distance_localization(compose_test_cfg: Any) -> None:
         config_name="run_filtering",
     )
     run(cfg)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "option,localization,target",
+    [
+        pytest.param(
+            "etkf",
+            "none",
+            "data_assimilation.filtering.etkf.ETKFAnalysis",
+            id="etkf",
+        ),
+        pytest.param(
+            "etkf_tsvd",
+            "none",
+            "data_assimilation.filtering.etkf.ETKFAnalysis",
+            id="etkf_tsvd",
+        ),
+        pytest.param(
+            "letkf",
+            "distance",
+            "data_assimilation.filtering.etkf.LETKFAnalysis",
+            id="letkf",
+        ),
+        pytest.param(
+            "letkf_tsvd",
+            "distance",
+            "data_assimilation.filtering.etkf.LETKFAnalysis",
+            id="letkf_tsvd",
+        ),
+    ],
+)
+def test_run_filtering_ensemble_transform(
+    option: str, localization: str, target: str, compose_test_cfg: Any
+) -> None:
+    """Deterministic ensemble-transform analyses end to end.
+
+    All four deterministic options run the solver, covering the full
+    (analysis class) x (TSVD on/off) grid rather than only its diagonal. Each
+    case builds and runs pylbm, so this is the most expensive coverage in the
+    file; it is kept because a nested-``_target_`` TSVD node reaching a real
+    run is exactly the wiring the compose-only tests above cannot prove.
+
+    At the smoke ensemble size (``ensemble.ensemble_size=2``) the forecast
+    anomalies span a single direction, so the transform is well defined — the
+    kernel needs `N_e >= 2`, the zero singular values are damped rather than
+    divided by, and mean preservation is structural — but it is a rank-1
+    posterior covariance. These assert plumbing and provenance only; nothing
+    about filter skill can be read off a 2-member deterministic transform.
+    """
+    from scripts.esmda._esmda_common import read_yaml
+    from scripts.filtering.run_filtering import run
+
+    cfg = compose_test_cfg(
+        _overrides(
+            "joint",
+            1,
+            [
+                f"filtering/analysis={option}",
+                f"filtering/localization={localization}",
+                *(
+                    ["filtering.localization.localization_radius=10.0"]
+                    if localization == "distance"
+                    else []
+                ),
+            ],
+        ),
+        config_name="run_filtering",
+    )
+    run(cfg)
+
+    out_dir = pathlib.Path(cfg.paths.results_dir)
+    configuration = read_yaml(out_dir / "run_info.yaml")["configuration"]
+    # The composed filter class is EnsembleKalmanFilter either way; only the
+    # recorded analysis subtree distinguishes the update math.
+    assert configuration["filter"] == "EnsembleKalmanFilter"
+    assert configuration["analysis"]["_target_"] == target
+    if option.endswith("_tsvd"):
+        assert configuration["analysis"]["tsvd"]["enabled"] is True
+    else:
+        assert configuration["analysis"]["tsvd"] is None
+    # The analysis and the localization are a coupled pair (localization_policy),
+    # and the per-block diagnostics below mean nothing without the strategy that
+    # produced them, so run_info records the resolved localization subtree too.
+    if localization == "none":
+        assert configuration["localization"] is None
+    else:
+        assert configuration["localization"]["localization_radius"] == 10.0
+
+    # The transform diagnostics survive the dataclass -> YAML round trip (they
+    # would not if any reached write_yaml as a JAX scalar: its `_to_native`
+    # converts NumPy, not JAX), and each group is populated exactly on the path
+    # where it exists.
+    cycle = read_yaml(out_dir / "cycle_diagnostics.yaml")[0]
+    transform_fields = [k for k in cycle if k.startswith("transform_")]
+    local_fields = [k for k in cycle if k.startswith("local_")]
+    assert len(transform_fields) == 4 and len(local_fields) == 14
+    if option.startswith("etkf"):
+        assert cycle["transform_retained_rank"] >= 1
+        assert cycle["transform_available_rank"] is not None
+        assert all(cycle[k] is None for k in local_fields)
+    else:
+        assert cycle["local_num_blocks"] >= 1
+        assert cycle["local_num_active_blocks"] >= 1
+        assert cycle["local_chunk_size"] >= 1
+        # The per-block energy readouts are the other half of plan step 5's
+        # four mandated diagnostics; assert them explicitly so they cannot
+        # regress to None while the rank fields keep the test green.
+        assert 0.0 <= cycle["local_retained_energy_min"] <= 1.0
+        assert 0.0 <= cycle["local_retained_energy_mean"] <= 1.0
+        assert cycle["local_discarded_spectrum_max"] >= 0.0
+        assert all(cycle[k] is None for k in transform_fields)
 
 
 def test_run_filtering_tracks_dynamic_truth(compose_test_cfg: Any) -> None:

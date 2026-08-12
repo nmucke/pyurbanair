@@ -356,6 +356,14 @@ they share one active-observation set and one transition matrix. For
 co-located `u/v/w` grid cells (`_state_group_ids`). Masked/global rows are
 excluded from the block minimum, then restored to all-ones inflation.
 
+That mask-then-group-then-restore ordering is `resolve_row_inflation` in the
+same module, and the "is this observation active" predicate is
+`active_observations` (`isfinite(E_inf) & (E_inf > 0)` — `E_inf` scales an error
+*standard deviation*, so `0` is a singular gain, not a localization decision).
+Both are called by `localized_update` **and** by `LETKFAnalysis`, so the
+stochastic and deterministic local analyses cannot drift apart on what a
+localization strategy means.
+
 ### `CorrelationLocalization`
 
 **File:**
@@ -476,9 +484,10 @@ parameter evolution, failure substitution, on-disk `cycle_{k}/` management
 (mirroring the smoother's `step_{i}/` pattern, with `prune_disk_cycles` /
 `keep_first_disk_cycle` knobs) and per-cycle diagnostics. The analysis math is
 an injected `AnalysisScheme` — a pure function of arrays; `EnsembleKalmanFilter`
-is `BaseFilter` composed with the default `StochasticEnKFAnalysis`. New update
-flavors (ETKF/LETKF, particle-style) are new `AnalysisScheme` implementations,
-not new filter classes.
+is `BaseFilter` composed with the default `StochasticEnKFAnalysis`. Update
+flavors are `AnalysisScheme` implementations, not new filter classes: the
+deterministic ETKF/LETKF (see [Analysis schemes](#analysis-schemes)) ship as
+schemes, and a particle-style update would be another.
 
 ```python
 enkf = EnsembleKalmanFilter(
@@ -501,6 +510,107 @@ Correlation localization applies to both blocks, while physical-distance
 localization applies to state rows and keeps parameter rows global. Localization
 strategies are reused from `localization/` unchanged; distance-based strategies
 need state rows.
+
+### Analysis schemes
+
+Selected with `filtering/analysis=<name>` (§1.8 of
+[scripts_and_configs.md](scripts_and_configs.md)):
+
+| Option | Class | Localization |
+|---|---|---|
+| `stochastic` (default) | `StochasticEnKFAnalysis` | `optional` |
+| `etkf` / `etkf_tsvd` | `ETKFAnalysis` | `forbidden` |
+| `letkf` / `letkf_tsvd` | `LETKFAnalysis` | `required` |
+
+`StochasticEnKFAnalysis`
+([filtering/analysis.py](../libs/data-assimilation/src/data_assimilation/filtering/analysis.py))
+draws perturbed observations, sharing its implementation with the ESMDA
+smoother's per-step update. The ensemble-transform family
+([filtering/etkf.py](../libs/data-assimilation/src/data_assimilation/filtering/etkf.py))
+instead computes an ensemble-space weight matrix and right-multiplies the
+forecast anomalies with it, so the posterior sample covariance is the Kalman
+covariance exactly (given the sample forecast moments) rather than in
+expectation over the perturbation draw. The transform uses the *symmetric*
+square root — the unique mean-preserving root, and the one that keeps member
+identity intact so RTPP still blends a member against its own prior
+perturbation. It is stored factored, as `(V, scale, wbar)` applied via
+`X + (X V) diag(scale - 1) V^T`, so the dense `N_e x N_e` matrix is never a
+required intermediate. `ETKFAnalysis` applies one global transform per cycle to
+every augmented row and therefore supports all three modes and the filtering
+state reduction; `LETKFAnalysis` computes one transform per state block from
+that block's locally selected observations.
+
+`LETKFAnalysis` deduplicates those blocks on the canonical per-row **inflation
+vector**, not on `group_ids`: the transform is a function of
+`(pred_obs, obs, C_D, E_inf_row)` alone, so rows in different `group_ids` blocks
+that see the same observation selection share one solve. That distinction is not
+cosmetic on a staggered grid — `pres`/`u`/`v`/`w` each carry their own grid
+signature there, so `group_ids` dedup collapses nothing while inflation-vector
+dedup does. Blocks with no active observation are provably identity and are
+partitioned out host-side rather than solved. The per-cycle counts are in
+`cycle_diagnostics.yaml` (`local_*`, below).
+
+`AnalysisScheme.localization_policy` (`optional` | `forbidden` | `required`) is
+a declarative contract validated in `BaseFilter.__init__`, so a mismatch fails
+before the first forecast instead of silently running a global update under a
+localized config name. `forbidden` is why a localized deterministic analysis is
+the explicit `LETKFAnalysis` class rather than a flag on the ETKF. It also
+settles LETKF-plus-state-reduction structurally: `BaseFilter` already refuses a
+state reduction together with any localization, and LETKF requires one.
+
+**Observation TSVD.** `ObservationTSVD` is nested on the analysis object
+(`ETKFAnalysis(tsvd=ObservationTSVD(...))`), not a separate filter class,
+because it regularizes the transform the analysis already computes. It
+truncates weak *linear combinations* of the whitened predicted-observation
+anomalies `Y_w = R_eff^{-1/2} Y`; it never modifies the physical observation-
+error variances. Knobs: `enabled` (off by default), `energy_fraction`,
+`max_rank`, and a `numerical_tolerance` relative singular-value floor.
+
+`enabled` gates the **scientific** truncation, which is `energy_fraction` and
+`max_rank` together — so `max_rank` with `enabled=false` is rejected at
+construction rather than silently ignored (a cap that cannot fire is a config
+error, and honouring it would make a block spelled `enabled: false` truncate
+anyway). `numerical_tolerance` is *not* gated: it redefines "numerically zero"
+rather than making a scientific choice, so it applies in addition to the
+scientific cut when that is on and **on its own when it is off**.
+
+`energy_fraction` cuts on the **suffix** — retain the smallest prefix whose
+discarded tail holds at most `1 - energy_fraction` of the squared spectrum.
+That form is used because the same criterion runs under a trace in the LETKF
+block loop, where a float32 cumulative *prefix* sum saturates at 1.0 and would
+let dtype decide the rank. `energy_fraction = 1.0` needs no special case in the
+suffix form and has none: the tolerated tail is then exactly zero, so the
+criterion counts every strictly nonzero direction and the numerical cap reduces
+that to the numerically nonzero rank — "retain every numerically nonzero
+direction" is what the general path already computes.
+
+Disabled *and* with `numerical_tolerance` unset — which is what both untruncated
+groups ship, since their whole `tsvd` node is `null` — the kernel retains
+*every* thin-SVD direction rather than truncating at the numerical rank: nothing
+in the transform divides by a singular value (`wbar` weights direction `i` by
+`s_i / ((N_e-1) + s_i**2)`, `W_a` by `sqrt((N_e-1) / ((N_e-1) + s_i**2))`, both
+damped as `s_i -> 0`), so a round-off direction costs essentially nothing while
+an over-eager cut discards real information. Truncation is a retention mask over
+the fixed rank `min(N_d, N_e)`, never a reshape, which is what lets a LETKF
+block loop batch over blocks whose active observation counts differ.
+
+Observation TSVD and the [filtering state reduction](#filtering-state-reduction)
+act on **different axes**: the state SVD chooses a basis for the state rows,
+the observation TSVD truncates directions of the observation anomalies. The same
+holds for TSVD versus localization, which is why their order is fixed:
+
+```text
+localize -> form R_eff -> whiten Y -> TSVD -> ensemble transform
+```
+
+Localization decides which observations reach a block and how strongly
+(`R_eff = diag(E_inf**2 * R)` from `BaseLocalization.inflation_factors`, with
+infinite inflation excluding an observation as a zero weight); the TSVD then
+decides which directions of that already selected and whitened local matrix to
+retain. Neither substitutes for the other. Both TSVD options stay **off by
+default**: with the shipped sensor network (`N_d ~ 12` globally, fewer active
+per local block) there is little to regularize. Turn them on only when the
+logged rank/energy diagnostics show persistent ill-conditioning.
 
 ### Filtering state reduction
 
@@ -578,6 +688,44 @@ cycle, and (for streaming) subspace drift. `analysis_time` is recorded on
 unreduced filter's. Physical state spreads keep their original meaning and
 never report modal-coefficient spread under the existing names.
 
+The ensemble-transform fields follow the same additive, nullable pattern, so
+`cycle_diagnostics.yaml` has one schema for every analysis:
+
+| Group | Filled by | Contents |
+|---|---|---|
+| `transform_*` | `ETKFAnalysis` | `available_rank`, `retained_rank`, `retained_energy`, `discarded_spectrum_max` for the cycle's one global transform |
+| `local_*` | `LETKFAnalysis` | `num_blocks` / `num_active_blocks` / `num_updated_rows`, `active_obs_{min,median,max}`, `retained_rank_{min,mean,max}`, `available_rank_max`, `retained_energy_{min,mean}`, `discarded_spectrum_max`, `chunk_size` |
+
+Both groups are `None` for `StochasticEnKFAnalysis`, which forms no transform.
+The per-block energy readouts are computed inside the traced block loop (they
+are reductions, not host-side rank queries), so the LETKF reports the same four
+mandated TSVD quantities as the global ETKF — available rank, retained rank,
+retained energy, discarded spectrum — with the last three summarized over
+blocks. The zero/one convention is the same in both groups and is deliberately
+distinct from `None`: `transform_discarded_spectrum_max = 0.0` (and
+`local_discarded_spectrum_max = 0.0`, with `local_retained_energy_* = 1.0`)
+means the truncation ran and discarded nothing, whereas `None` means no
+transform of that kind ran at all.
+
+`BaseFilter` reads these off the scheme *by attribute name*
+(`last_transform` / `last_diagnostics`), so `filtering/base.py` never imports
+`filtering/etkf.py` and a future scheme that publishes neither simply leaves both
+groups null. The `local_*` figures are summaries: the per-block arrays behind
+them have one entry per block (`N_s`-order in production) and stay on
+`LETKFAnalysis.last_diagnostics` rather than being written every cycle. The
+rank, energy and active-observation summaries cover the **active** blocks only — a block
+with no active observation computes no transform and returns its rows
+untouched — with the inactive count recoverable as
+`local_num_blocks - local_num_active_blocks`. `local_num_blocks` counts distinct
+*inflation vectors*, not distinct `group_ids` (see the deduplication note under
+[Analysis schemes](#analysis-schemes)).
+
+These are the per-cycle quantities the LETKF resource gate of
+`docs/plans/filtering_state_reduction_and_transforms.md` §6 requires; the
+campaign record is
+[docs/temp/filtering_ensemble_transform_benchmark.md](temp/filtering_ensemble_transform_benchmark.md),
+which is a template with no measurements in it yet.
+
 `reduction_discarded_increment_fraction` costs nothing extra: the fit already
 yields the forecast anomalies' coordinates in the complete untruncated basis
 (`anomalies = U_full @ C`), and the EnKF increment is `anomalies @ W` for an
@@ -593,6 +741,18 @@ reduction `obs_posterior_rmse` is bit-identical to the unreduced filter's and
 says nothing about truncation; `obs_posterior_rmse_kind` records this
 (`exact` | `unreduced_ride_along` | `unlocalized_ride_along`), and reduced runs
 must not be ranked on that value.
+
+The same label covers the analysis schemes, and the LETKF needs no new value:
+
+* global ETKF (`filtering/localization=none`, no reduction) → `exact`. The one
+  global transform is applied to every augmented row, observation rows included,
+  so the value really is `H` applied to the analyzed state.
+* LETKF, like the localized stochastic analysis, → `unlocalized_ride_along`:
+  the state rows are updated block-locally while the appended observation rows
+  keep the global update. Under that label `obs_posterior_rmse` is a
+  global-analysis proxy, **not** `H` applied to the row-wise localized
+  posterior. Do not use it to rank ETKF against LETKF; score the analyzed state
+  against the truth instead.
 
 ### Spread maintenance
 
@@ -778,10 +938,20 @@ truth; see `codebase_guide.md §6` and the script's docstring.
    `(augmented, pred_obs, obs, C_D_diag, rng_key, localization?, ...) ->
    updated augmented`. `BaseFilter` handles everything around it (cycle loop,
    augmentation, inflation, evolution, diagnostics).
-2. Add a YAML option to
+2. Declare `localization_policy` (`optional` | `forbidden` | `required`) on the
+   class if the default `optional` is wrong — a global-only scheme is
+   `forbidden`, a scheme that is meaningless unlocalized is `required`.
+   `BaseFilter.__init__` validates it (and the spelling), so an invalid config
+   fails at construction. A `forbidden` scheme should also reject a non-`None`
+   `localization` in `__call__` for direct callers.
+3. Add a YAML option to
    [conf/filtering/analysis/](../conf/filtering/analysis/)
    (`# @package filtering`, setting `analysis: {_target_: ...}`) and select it
-   with `filtering/analysis=<name>`.
+   with `filtering/analysis=<name>`. State the localization requirement in the
+   file: the option name is the only place a user sees it before construction.
+   Nested settings objects are nested `_target_` blocks (recursive
+   instantiation is on and `_convert_: all` propagates from
+   `conf/run_filtering.yaml`); see `conf/filtering/analysis/etkf_tsvd.yaml`.
 
 ### Adding a new solver to the observation operator
 

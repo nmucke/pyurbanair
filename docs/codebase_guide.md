@@ -527,7 +527,11 @@ def test_something(compose_test_cfg) -> None:
   `_group_inflation` in
   [localization/base.py](../libs/data-assimilation/src/data_assimilation/localization/base.py)
   takes the per-observation min inflation across block members so they share the
-  active-observation set. (Correlation uses `ddof=1` to match the `(N_e-1)`
+  active-observation set; `resolve_row_inflation` (the mask/group ordering around
+  it) and `active_observations` (the shared "assimilate this one?" predicate) in
+  the same file are called by both `localized_update` and the filter's
+  `LETKFAnalysis`, so the stochastic and deterministic local analyses cannot
+  drift apart. (Correlation uses `ddof=1` to match the `(N_e-1)`
   covariance denominator — the ratio is the exact sample correlation.)
 - **Cost note**: `localized_update` is `jax.vmap` over augmented rows
   (`N_aug` small `N_d×N_d` solves). Cheap for parameter variants; for

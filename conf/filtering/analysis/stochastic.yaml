@@ -1,7 +1,9 @@
 # @package filtering
 # Stochastic (perturbed-observation) EnKF analysis — the classic full-weight
 # update, sharing its implementation with the ESMDA smoother's per-step update.
-# Selected with `filtering/analysis=stochastic` (the default). Deterministic
-# square-root analyses (ETKF/LETKF) will be further options of this group.
+# Selected with `filtering/analysis=stochastic` (the default). The deterministic
+# square-root analyses are the etkf / etkf_tsvd / letkf / letkf_tsvd options of
+# this group; this one declares localization_policy="optional", so it composes
+# with any filtering/localization choice.
 analysis:
   _target_: data_assimilation.filtering.analysis.StochasticEnKFAnalysis

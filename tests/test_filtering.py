@@ -8,6 +8,7 @@ schemes. Everything runs on toy in-memory forward models — no CFD solver.
 """
 
 import pathlib
+import types
 from typing import Any, Optional
 
 import jax
@@ -17,7 +18,10 @@ import pytest
 import xarray
 from data_assimilation.filtering import (
     EnsembleKalmanFilter,
+    ETKFAnalysis,
     IdentityEvolution,
+    LETKFAnalysis,
+    ObservationTSVD,
     RandomWalkEvolution,
 )
 from data_assimilation.inflation import RTPP, RTPS, MultiplicativeInflation
@@ -1132,3 +1136,245 @@ def test_random_walk_evolution_adds_configured_noise() -> None:
     )
     with pytest.raises(ValueError, match=">= 0"):
         RandomWalkEvolution(std=-0.1)
+
+
+# ---------------------------------------------------------------------------
+# Ensemble-transform cycle diagnostics
+#
+# The transform diagnostics exist only as attributes of the last analysis call;
+# without the filter reading them back, nothing outside the scheme can see the
+# resource-gate quantities of docs/plans/filtering_state_reduction_and_
+# transforms.md §6. These tests pin the additive/nullable contract: a field is
+# populated exactly on the path where it means something, and None everywhere
+# else, so cycle_diagnostics.yaml has one schema for every analysis.
+# ---------------------------------------------------------------------------
+
+_TRANSFORM_FIELDS = (
+    "transform_available_rank",
+    "transform_retained_rank",
+    "transform_retained_energy",
+    "transform_discarded_spectrum_max",
+)
+_LOCAL_FIELDS = (
+    "local_num_blocks",
+    "local_num_active_blocks",
+    "local_num_updated_rows",
+    "local_active_obs_min",
+    "local_active_obs_median",
+    "local_active_obs_max",
+    "local_retained_rank_min",
+    "local_retained_rank_mean",
+    "local_retained_rank_max",
+    "local_available_rank_max",
+    "local_retained_energy_min",
+    "local_retained_energy_mean",
+    "local_discarded_spectrum_max",
+    "local_chunk_size",
+)
+
+
+def test_the_declared_diagnostic_groups_cover_every_field() -> None:
+    """The two tuples above must stay the whole of their prefix groups.
+
+    They drive every ``_assert_all_none`` below, so a field added to
+    ``CycleDiagnostics`` but not listed here would silently lose its null-path
+    coverage — which is how the per-block energy readouts were once absent from
+    both this file and docs/data_assimilation.md while the rank fields kept the
+    suite green.
+    """
+    import dataclasses
+
+    from data_assimilation.filtering.base import CycleDiagnostics
+
+    names = [f.name for f in dataclasses.fields(CycleDiagnostics)]
+    assert tuple(n for n in names if n.startswith("transform_")) == _TRANSFORM_FIELDS
+    assert tuple(n for n in names if n.startswith("local_")) == _LOCAL_FIELDS
+
+
+def _assert_all_none(diag: Any, fields: tuple[str, ...]) -> None:
+    unset = {name: getattr(diag, name) for name in fields}
+    assert unset == dict.fromkeys(fields, None)
+
+
+def _transform_diag_filter(analysis: Any, localization: Any, **overrides: Any) -> Any:
+    """One state-mode cycle on the toy model; returns its CycleDiagnostics.
+
+    ``H`` deliberately repeats one row, so the whitened observation anomalies
+    have available rank 1 out of a fixed ``min(N_d, N_e) = 2`` — the rank
+    diagnostics then distinguish "kept every thin direction" from "truncated to
+    the informative one" instead of both reading 2.
+    """
+    n_e = 16
+    state = _initial_state(
+        jax.random.PRNGKey(101), n_e, np.array([1.0, -0.5]), 0.4 * np.eye(2)
+    )
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_ToyObsOp(np.array([[1.0, 0.0], [1.0, 0.0]])),
+        forward_model=_ToyLinearModel(np.array([[0.9, 0.2], [-0.1, 0.8]])),
+        C_D=jnp.array([0.1, 0.1]),
+        mode="state",
+        analysis=analysis,
+        localization=localization,
+        rng_key=jax.random.PRNGKey(102),
+        **overrides,
+    )
+    result = enkf.run(state=state, observations=jnp.array([[1.0, 1.0]]))
+    return result.diagnostics[0]
+
+
+def test_stochastic_analysis_leaves_every_transform_diagnostic_null() -> None:
+    """The default scheme forms no transform, so both groups stay None.
+
+    This is the "one stable schema" half of the contract: a stochastic run's
+    cycle_diagnostics.yaml carries the same keys as an ETKF's, all null.
+    """
+    diag = _transform_diag_filter(analysis=None, localization=None)
+    _assert_all_none(diag, _TRANSFORM_FIELDS)
+    _assert_all_none(diag, _LOCAL_FIELDS)
+
+
+def test_global_etkf_records_untruncated_transform_diagnostics() -> None:
+    """TSVD off: every thin direction retained, and available_rank says so."""
+    diag = _transform_diag_filter(analysis=ETKFAnalysis(), localization=None)
+
+    # Fixed rank min(N_d, N_e) = 2 retained; only one direction is informative.
+    assert diag.transform_retained_rank == 2
+    assert diag.transform_available_rank == 1
+    assert diag.transform_retained_energy == pytest.approx(1.0, abs=1e-5)
+    # 0.0, not None: the truncation ran and discarded nothing.
+    assert diag.transform_discarded_spectrum_max == 0.0
+    _assert_all_none(diag, _LOCAL_FIELDS)
+
+
+def test_global_etkf_tsvd_records_the_truncation_it_applied() -> None:
+    """TSVD on: retained rank drops to the available rank, and the largest
+    discarded singular value is recorded (here the round-off direction)."""
+    diag = _transform_diag_filter(
+        analysis=ETKFAnalysis(tsvd=ObservationTSVD(enabled=True)), localization=None
+    )
+
+    assert diag.transform_retained_rank == 1
+    assert diag.transform_available_rank == 1
+    assert diag.transform_retained_energy == pytest.approx(1.0, abs=1e-5)
+    assert diag.transform_discarded_spectrum_max == pytest.approx(0.0, abs=1e-4)
+    _assert_all_none(diag, _LOCAL_FIELDS)
+
+
+def test_letkf_records_local_block_diagnostics() -> None:
+    """All-ones localization: one block, every row updated, all obs active."""
+    diag = _transform_diag_filter(
+        analysis=LETKFAnalysis(), localization=_AllOnesLocalization()
+    )
+
+    # Two state rows plus the two appended predicted-observation rows; every one
+    # of them sees the same all-ones selection, so they share a single block.
+    assert diag.local_num_blocks == 1
+    assert diag.local_num_active_blocks == 1
+    assert diag.local_num_updated_rows == 4
+    assert diag.local_active_obs_min == 2
+    assert diag.local_active_obs_median == 2.0
+    assert diag.local_active_obs_max == 2
+    assert diag.local_retained_rank_min == diag.local_retained_rank_max == 2
+    assert diag.local_retained_rank_mean == pytest.approx(2.0)
+    assert diag.local_available_rank_max == 1
+    # The per-block energy readouts, the local counterparts of
+    # transform_retained_energy / transform_discarded_spectrum_max: with the
+    # TSVD off the single block keeps everything, so 1.0 and 0.0 — values that
+    # mean "the truncation ran and discarded nothing", not "not collected".
+    assert diag.local_retained_energy_min == pytest.approx(1.0, abs=1e-5)
+    assert diag.local_retained_energy_mean == pytest.approx(1.0, abs=1e-5)
+    assert diag.local_discarded_spectrum_max == pytest.approx(0.0, abs=1e-4)
+    assert diag.local_chunk_size is not None and diag.local_chunk_size >= 1
+    # A localized transform is not a global one; the global group stays null.
+    _assert_all_none(diag, _TRANSFORM_FIELDS)
+
+
+def test_letkf_local_summaries_exclude_blocks_with_no_active_observation() -> None:
+    """A row outside every localization radius forms its own inactive block.
+
+    It computes no transform and is returned untouched, so it must not enter the
+    active-observation or rank summaries — otherwise every recorded minimum
+    would be zero and the gate's worst-block question unanswerable.
+    """
+    n_e = 24
+    signal = jax.random.normal(jax.random.PRNGKey(103), (n_e,))
+    state = xarray.Dataset(
+        {"u": (("ensemble", "x"), jnp.stack([signal, 0.5 * signal], axis=1))},
+        coords={"ensemble": np.arange(n_e), "x": [0.0, 10.0]},
+    )
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_CoordinateToyObsOp(np.array([[1.0, 0.0]])),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.array([0.1]),
+        mode="state",
+        analysis=LETKFAnalysis(),
+        localization=DistanceLocalization(
+            localization_radius=0.1, max_inflation=1.0, block_grouping=False
+        ),
+        rng_key=jax.random.PRNGKey(104),
+    )
+    result = enkf.run(state=state, observations=jnp.array([[2.0]]))
+    diag = result.diagnostics[0]
+
+    # The far row is excluded; the near row and the appended observation row
+    # (masked to the global update) both see the single sensor.
+    assert diag.local_num_blocks == 2
+    assert diag.local_num_active_blocks == 1
+    assert diag.local_num_updated_rows == 2
+    assert diag.local_active_obs_min == 1  # not 0: the inactive block is excluded
+    assert diag.local_active_obs_max == 1
+    assert result.state is not None
+    np.testing.assert_allclose(
+        np.asarray(result.state["u"][:, 1]), np.asarray(state["u"][:, 1]), atol=1e-6
+    )
+
+
+class _CountingTransformAnalysis:
+    """Zero-gain analysis stub publishing a DIFFERENT transform on each call.
+
+    Only the diagnostic contract matters here — the stub returns the augmented
+    ensemble unchanged — so the two calls per reduced cycle become
+    distinguishable, which no real scheme's are.
+    """
+
+    localization_policy = "optional"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_transform: Any = None
+
+    def __call__(self, augmented: Any, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        self.last_transform = types.SimpleNamespace(
+            available_rank=self.calls,
+            retained_rank=self.calls,
+            retained_energy=float(self.calls),
+            discarded_spectrum=jnp.zeros(0),
+        )
+        return augmented
+
+
+def test_transform_diagnostics_come_from_the_posterior_producing_call() -> None:
+    """Under a state reduction the analysis runs TWICE per cycle.
+
+    ``_record_reduction_diagnostics`` calls it a second time on the fit
+    coordinates, overwriting ``last_transform``. In production both calls see
+    the same observations and recompute the same transform, so the ordering
+    inside ``_analysis_cycle`` is invisible to every other test; the stub above
+    makes it visible, so the recorded values are pinned to the call that
+    actually produced the cycle's posterior rather than to a diagnostic's
+    implementation detail.
+    """
+    analysis = _CountingTransformAnalysis()
+    diag = _transform_diag_filter(
+        analysis=analysis,
+        localization=None,
+        state_reduction=OnlineStateReduction(energy_fraction=1.0, whiten=False),
+    )
+
+    # The second (diagnostic) call really happens — otherwise this test would
+    # pass for the wrong reason.
+    assert analysis.calls == 2
+    assert diag.transform_retained_rank == 1
+    assert diag.transform_available_rank == 1
+    assert diag.transform_retained_energy == pytest.approx(1.0)

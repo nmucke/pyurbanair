@@ -1,0 +1,50 @@
+# @package filtering
+# Local deterministic LETKF (see filtering/analysis=letkf) with observation-space
+# spectral truncation enabled. Localization and TSVD act on different axes:
+# localization decides WHICH observations reach a block and how strongly, the
+# TSVD decides which directions of that block's already whitened observation
+# anomalies are retained. The order is therefore
+# localize -> form R_eff -> whiten Y -> TSVD -> ensemble transform.
+# REQUIRES a non-null localization (localization_policy="required"), as for
+# filtering/analysis=letkf:
+#   python scripts/filtering/run_filtering.py filtering.mode=state \
+#     filtering/analysis=letkf_tsvd filtering/localization=distance
+# Selected with `filtering/analysis=letkf_tsvd`.
+analysis:
+  _target_: data_assimilation.filtering.etkf.LETKFAnalysis
+  # Nested `_target_` under a `_target_`: recursive instantiation is on and
+  # `_convert_: all` propagates from conf/run_filtering.yaml, so this node is
+  # instantiated bottom-up into an ObservationTSVD before LETKFAnalysis is
+  # constructed. (A nested node WITHOUT a `_target_` would arrive as a plain
+  # dict instead; cf. conf/params/static.yaml for the same pattern.)
+  tsvd:
+    _target_: data_assimilation.filtering.etkf.ObservationTSVD
+    # Apply the scientific truncation in every block. Kept OFF in the letkf.yaml
+    # variant: each block sees at most the ~12 shipped observations and usually
+    # fewer, so expect no benefit here and turn it on only when the per-block
+    # rank/energy diagnostics show persistent local ill-conditioning.
+    enabled: true
+    # Retain the smallest prefix of the block's whitened spectrum whose
+    # DISCARDED tail holds at most (1 - energy_fraction) of the squared singular
+    # values. The cut is on the suffix rather than a cumulative prefix sum
+    # because a float32 prefix sum saturates at 1.0 and would let dtype decide
+    # the rank -- which matters more here, where the same criterion runs under a
+    # trace for every block. 1.0 needs no special case in this form: the
+    # tolerated tail is then exactly zero, so the criterion counts every
+    # strictly nonzero direction and the numerical cap reduces it to the
+    # numerically nonzero rank. Truncation drops update directions; it never
+    # adds any.
+    energy_fraction: 0.99
+    # Optional hard cap applied after the energy criterion (null -> no extra
+    # cap). The rank is in any case at most min(N_d, N_e), and per block at most
+    # the number of active observations. REQUIRES `enabled: true`: max_rank is
+    # part of the scientific truncation `enabled` gates, so setting it while
+    # disabled is rejected at construction rather than silently ignored.
+    max_rank: null
+    # Optional relative singular-value floor (sigma_i > tol * sigma_max), so a
+    # run can retune "numerically zero" without touching energy_fraction. It
+    # redefines round-off rather than making a scientific choice, so unlike
+    # max_rank it is NOT gated by `enabled`: it applies in addition to the
+    # energy criterion here, and on its own under `enabled: false`. null -> the
+    # dtype- and shape-aware floor shared with the state reduction.
+    numerical_tolerance: null

@@ -98,7 +98,7 @@ rather than pulling them from separate files. The table below summarises each.
 | `seed` | 42 | JAX RNG seed. |
 | `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors). |
 | `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
-| `analysis` | (group) | Set by `filtering/analysis` (default `stochastic`). |
+| `analysis` | (group) | Set by `filtering/analysis` (default `stochastic`); `etkf*`/`letkf*` are the deterministic ensemble transforms and constrain `localization` (§1.8). |
 | `localization` | (group) | Set by `filtering/localization` (default `none`). |
 | `state_reduction` | (group) | Set by `filtering/state_reduction` (default `none`); current/streaming SVD requires `mode=state|joint` and global localization. |
 | `inflation` | (group) | Set by `filtering/inflation` (default `rtps`). |
@@ -305,7 +305,7 @@ The sequential-filter counterparts of the `esmda/*` groups. Each file uses
 
 | Group | Options (default first) | Sets |
 |---|---|---|
-| [`filtering/analysis/`](../conf/filtering/analysis/) | `stochastic` | `filtering.analysis` — the update math (`StochasticEnKFAnalysis`; ETKF/LETKF will land here) |
+| [`filtering/analysis/`](../conf/filtering/analysis/) | `stochastic`, `etkf`, `etkf_tsvd`, `letkf`, `letkf_tsvd` | `filtering.analysis` — the update math: perturbed-observation `StochasticEnKFAnalysis`, or a deterministic `ETKFAnalysis` (global) / `LETKFAnalysis` (per block). `etkf*` REQUIRES `filtering/localization=none`; `letkf*` REQUIRES a non-null localization |
 | [`filtering/localization/`](../conf/filtering/localization/) | `none`, `correlation`, `distance` | `filtering.localization` — the same strategies as `esmda/localization` (reused unchanged); `distance` needs `filtering.mode=state\|joint` |
 | [`filtering/state_reduction/`](../conf/filtering/state_reduction/) | `none`, `svd_current`, `svd_streaming` | `filtering.state_reduction` — optional final-forecast-state analysis basis; requires `filtering.mode=state\|joint` and `filtering/localization=none` |
 | [`filtering/inflation/`](../conf/filtering/inflation/) | `rtps`, `none`, `multiplicative`, `rtpp` | `filtering.inflation` — ensemble spread maintenance |
@@ -313,6 +313,38 @@ The sequential-filter counterparts of the `esmda/*` groups. Each file uses
 
 See [data_assimilation.md](data_assimilation.md) for the filtering library
 itself (`BaseFilter` / `EnsembleKalmanFilter`, cycle semantics, diagnostics).
+
+The analysis options carry a declared `localization_policy` that
+`BaseFilter.__init__` enforces, so an unusable pair fails before the first
+forecast rather than running a global update under a localized name:
+`stochastic` is `optional`, `etkf*` `forbidden`, `letkf*` `required`. Selecting
+a non-default analysis therefore means selecting its localization too — pin both
+groups on the CLI rather than relying on whichever `filtering/localization` the
+defaults list resolves to:
+
+```bash
+python scripts/filtering/run_filtering.py filtering.mode=state \
+    filtering/analysis=etkf filtering/localization=none
+python scripts/filtering/run_filtering.py filtering.mode=state \
+    filtering/analysis=letkf filtering/localization=distance
+```
+
+The `*_tsvd` variants enable an observation-space truncated SVD, nested on the
+analysis object as an `ObservationTSVD` block (`enabled`, `energy_fraction`,
+`max_rank`, `numerical_tolerance`). `enabled` gates the *scientific* truncation
+— `energy_fraction` and `max_rank` — so `max_rank` with `enabled: false` is
+rejected at construction rather than silently ignored; `numerical_tolerance`
+only redefines "numerically zero" and therefore applies either way. It
+truncates weak linear combinations of the
+*whitened observation anomalies* — a different axis from
+`filtering/state_reduction`, which acts on state rows — and never touches the
+physical observation-error variances. In `etkf`/`letkf` the whole `tsvd` node is
+`null` rather than a disabled block, so turning truncation on there means
+selecting the `*_tsvd` group, not overriding a leaf under a null node. `letkf*`
+also excludes a state reduction, since the filter already refuses reduction
+together with any localization. See
+[data_assimilation.md](data_assimilation.md) for the transform math and the
+`localize -> R_eff -> whiten -> TSVD -> transform` ordering.
 
 `svd_current` refits an orthonormal basis to each cycle's final forecast
 ensemble. Its knobs are `energy_fraction`, `max_rank`, and optional
@@ -562,9 +594,10 @@ observations are extracted with the case's temporal observation operator and
 the filter consumes the whole `(num_cycles, N_d)` batch in one `run()` call.
 
 Mode is the cross product of `filtering.mode=state|parameter|joint` and the
-`filtering/*` groups (§1.8), including optional current/streaming state SVD.
-Reduced state analysis requires `mode=state|joint` and
-`filtering/localization=none`. Truth source (`run.truth_dir`) mirrors
+`filtering/*` groups (§1.8), including the deterministic ETKF/LETKF analyses
+and optional current/streaming state SVD. Reduced state analysis requires
+`mode=state|joint` and `filtering/localization=none`; `filtering/analysis` also
+constrains the localization choice (§1.8). Truth source (`run.truth_dir`) mirrors
 `run_esmda.py`. Static scalar parameters only — a dynamic (AR(2)) params
 mount fails loudly; time-varying priors stay with the ESMDA smoothers.
 
@@ -575,14 +608,26 @@ Saves: `posterior_params.nc` / `posterior_state.nc` (analyzed final-frame
 ensemble), optional `params_history.nc` / `state_history.nc`
 (`run.save_history`), per-cycle `cycle_diagnostics.yaml` (innovation χ²,
 obs-space prior/posterior RMSE plus the `obs_posterior_rmse_kind` provenance
-label, block spreads, `analysis_time`, and a stable set of nullable reduction
-diagnostics), `prior_params.nc`,
+label, block spreads, `analysis_time`, and stable sets of nullable reduction
+(`reduction_*`) and ensemble-transform (`transform_*` for a global ETKF,
+`local_*` for a LETKF's per-block counts, ranks, retained/discarded energy and
+chunk size) diagnostics),
+`prior_params.nc`,
 `true_params.nc`, `true_state.nc` (inline truth), `truth_access.yaml` (the
 lazy-truth slicing/offsets the metric/figure stages read back), `run_info.yaml`,
 `config.yaml`. `run_info.yaml.configuration.state_reduction` records the fully
 resolved reduction subtree (or `null`) for benchmark provenance;
 `state_reduction_resolved_variable_scales` records the physical scales actually
 applied after validating the forecast Dataset's variables.
+`run_info.yaml.configuration.analysis` records the fully resolved analysis
+subtree (its `_target_` and any nested `ObservationTSVD` settings). It is never
+`null`, and it is the only record of which update math ran: `configuration.filter`
+stays `EnsembleKalmanFilter` for the ETKF and LETKF too, because the analysis is
+injected rather than subclassed. `run_info.yaml.configuration.localization`
+records the resolved localization subtree beside it (`null` for the global
+update): the two are a coupled pair through `localization_policy`, and the
+per-block `local_*` cycle diagnostics only mean anything against the strategy
+and radius that produced them.
 
 ---
 
