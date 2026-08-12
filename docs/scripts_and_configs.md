@@ -598,7 +598,7 @@ What makes it a controlled comparison:
   on each model's own grid, so they carry no regridding bias. They are drawn
   twice: raw per-frame, and smoothed by a *sliding* window of the observation
   operator's `obs.interval_seconds` length reduced by `obs.aggregation_mode` —
-  the same suppression of sub-interval fluctuation `TemporalObservationOperator`
+  the same suppression of sub-interval fluctuation `AggregateObservations`
   applies, without the arbitrary phase of its disjoint bin grid. Skipped when
   `obs.interval_seconds` is unset. The window is centred and rounded to an *odd*
   frame count (an even centred window sits half a frame left of centre, and since

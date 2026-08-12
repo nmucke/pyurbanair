@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import xarray
 from data_assimilation.observation_operator import (
+    AggregateObservations,
     ObservationOperator,
     TemporalObservationOperator,
 )
@@ -219,15 +220,36 @@ def create_observation_operator(
         solver_name=solver_name,
     )
 
+    # No temporal_mode (or null) -> the bare spatial operator, for configs that
+    # observe instantaneous state and never look at the time dimension.
     if ("temporal_mode" not in obs) or (obs["temporal_mode"] is None):
         return operator
 
-    return TemporalObservationOperator(
-        operator,
-        mode=obs["temporal_mode"],
-        interval_seconds=obs.get("interval_seconds"),
-        aggregation_mode=obs.get("aggregation_mode", "mean"),
-    )
+    if obs["temporal_mode"] != "full":
+        raise ValueError(
+            f"Invalid obs.temporal_mode '{obs['temporal_mode']}'. The temporal "
+            "operator now always returns full time-resolved observations; "
+            "temporal aggregation moved to AggregateObservations. Set "
+            "obs.temporal_mode=full and configure obs.interval_seconds (and "
+            "obs.aggregation_mode) instead."
+        )
+
+    return TemporalObservationOperator(operator)
+
+
+def create_aggregate_observations(obs_cfg: Any) -> AggregateObservations | None:
+    """Build the observation aggregator, or None for full-resolution assimilation.
+
+    ``obs.interval_seconds`` absent or null means the data assimilation
+    assimilates the full time-resolved observation vector.
+    """
+    obs = _plain(obs_cfg)
+    interval_seconds = obs.get("interval_seconds")
+    if interval_seconds is None:
+        return None
+    # A null aggregation_mode in the config means "use the default".
+    mode = obs.get("aggregation_mode") or "mean"
+    return AggregateObservations(interval_seconds=float(interval_seconds), mode=mode)
 
 
 def create_C_D(num_obs: int, obs_error_std: float) -> jnp.ndarray:

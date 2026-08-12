@@ -51,13 +51,13 @@ from dataclasses import dataclass, replace
 from typing import Optional
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import xarray
 from data_assimilation.filter_smoothing.base import (
     FilterSmoothingESMDA,
     FilterSmoothingResult,
     IterationDiagnostics,
+    ObservationInput,
     knot_times,
 )
 from data_assimilation.filtering.parameter_evolution import (
@@ -130,7 +130,7 @@ def run_moving_window(
     *,
     state: Optional[xarray.Dataset] = None,
     params: Optional[xarray.Dataset] = None,
-    observations: Optional[jnp.ndarray] = None,
+    observations: Optional[ObservationInput] = None,
     num_windows: int = 1,
     window_shift: int = 1,
     window_length: Optional[int] = None,
@@ -154,8 +154,11 @@ FilterSmoothingESMDA` to run once per window. It is *not* reset between
             not over the horizon. Later windows' priors are built from it by
             the carry (the knots past ``shift_seconds``, re-based, plus as many
             evolved knots as left), so the knot count stays fixed.
-        observations: Array of shape ``(T, N_d)`` over the full horizon, one
-            batch per cycle. Window ``w`` consumes rows ``[w*s, w*s + L)``.
+        observations: One batch per cycle over the full horizon — a list/tuple
+            of ``T`` time-resolved ``("time", "obs")`` DataArrays, or the flat
+            ``(T, N_d)`` array they reduce to. Window ``w`` consumes rows
+            ``[w*s, w*s + L)`` of the flattened batches, which are normalized
+            (and so aggregated) ONCE here rather than per window.
         num_windows: Number of windows. ``1`` is the plain single-window run.
         window_shift: ``s``, the number of cycles the window advances between
             runs, in ``[1, L]``. ``s = L`` gives non-overlapping windows.
@@ -193,12 +196,10 @@ IdentityEvolution` (persistence: the new knot equals the last carried one, and
         )
     if observations is None:
         raise ValueError("observations must be provided.")
-    obs_batches = jnp.asarray(observations)
-    if obs_batches.ndim != 2:
-        raise ValueError(
-            "observations must have shape (num_cycles, N_d) — one batch per "
-            f"cycle of the FULL horizon — got shape {obs_batches.shape}."
-        )
+    # Flatten (and aggregate) the horizon's batches once, through the
+    # smoother's own normalization, so a cycle is never aggregated again when
+    # the windows that overlap it re-consume it.
+    obs_batches = smoother.observation_batches(observations)
     if num_windows < 1:
         raise ValueError(f"num_windows must be >= 1, got {num_windows}.")
     if window_shift < 1:

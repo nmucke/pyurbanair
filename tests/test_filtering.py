@@ -28,6 +28,7 @@ from data_assimilation.inflation import RTPP, RTPS, MultiplicativeInflation
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.localization.correlation import CorrelationLocalization
 from data_assimilation.localization.distance import DistanceLocalization
+from data_assimilation.observation_operator import AggregateObservations
 from data_assimilation.reduction import OnlineStateReduction, StreamingStateReduction
 
 
@@ -141,6 +142,39 @@ class _ToyObsOp:
     def __call__(self, state: xarray.Dataset) -> jnp.ndarray:
         x = jnp.asarray(state["u"].isel(time=-1).values)  # (N_e, nx)
         return x @ self.H.T  # (N_e, N_d)
+
+
+class _TemporalToyObsOp:
+    """Time-resolved twin of ``_ToyObsOp``: y_t = H x_t for EVERY frame.
+
+    Returns the labelled DataArray a ``TemporalObservationOperator`` produces
+    (dims ``("ensemble", "time", "obs")``, or ``("time", "obs")`` for one
+    member read back from disk), so the filter's aggregate-and-flatten path is
+    exercised end to end.
+    """
+
+    def __init__(self, H: np.ndarray) -> None:
+        self.H = jnp.asarray(H)  # (N_d, nx)
+
+    def __call__(self, state: xarray.Dataset) -> xarray.DataArray:
+        x = jnp.asarray(state["u"].values)  # (..., time, nx)
+        values = np.asarray(jnp.einsum("...i,di->...d", x, self.H))
+        dims = (
+            ("ensemble", "time", "obs") if "ensemble" in state.dims else ("time", "obs")
+        )
+        return xarray.DataArray(
+            values,
+            dims=dims,
+            coords={"time": np.asarray(state["time"].values, dtype=float)},
+        )
+
+
+class _MeanToyObsOp(_ToyObsOp):
+    """Pre-aggregated flat operator: y = H (mean over the segment's frames)."""
+
+    def __call__(self, state: xarray.Dataset) -> jnp.ndarray:
+        x = jnp.asarray(state["u"].values)  # (N_e, time, nx)
+        return jnp.mean(x, axis=-2) @ self.H.T
 
 
 class _CoordinateToyObsOp(_ToyObsOp):
@@ -555,6 +589,132 @@ def test_time_varying_params_rejected() -> None:
     )
     with pytest.raises(NotImplementedError, match="Time-varying"):
         enkf.run(params=params, observations=jnp.ones((2, 1)))
+
+
+# ---------------------------------------------------------------------------
+# Labelled (time-resolved) observations and interval aggregation
+# ---------------------------------------------------------------------------
+
+
+def _labelled_truth_obs(values: np.ndarray, times: np.ndarray) -> xarray.DataArray:
+    """One cycle's time-resolved truth observations, ("time", "obs")."""
+    return xarray.DataArray(
+        values, dims=("time", "obs"), coords={"time": np.asarray(times, dtype=float)}
+    )
+
+
+def _aggregated_filter(forward_model: Any, **overrides: Any) -> EnsembleKalmanFilter:
+    return EnsembleKalmanFilter(
+        observation_operator=_TemporalToyObsOp(np.array([[1.0, 0.5]])),
+        aggregate_observations=AggregateObservations(interval_seconds=2.0),
+        forward_model=forward_model,
+        C_D=jnp.array([0.2]),
+        mode="state",
+        rng_key=jax.random.PRNGKey(30),
+        **overrides,
+    )
+
+
+def test_labelled_observations_with_aggregation_match_the_pre_aggregated_run(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A list of per-cycle DataArrays + aggregator == the legacy flat run.
+
+    Both the real and the predicted observations go through the aggregation,
+    so a filter fed raw frames whose interval mean is ``y`` must reproduce,
+    cycle for cycle, the filter fed the pre-aggregated ``y`` by an operator
+    that already returns the interval mean. The on-disk path (per-member
+    DataArrays concatenated along "ensemble" before aggregating) is held to
+    the same result.
+    """
+    n_e, num_cycles = 12, 3
+    state = _initial_state(jax.random.PRNGKey(29), n_e, np.zeros(2), np.eye(2))
+    means = np.array([[0.5], [0.2], [-0.4]])
+    # Two frames per cycle straddling the mean: aggregating them must recover
+    # `means` exactly, so any difference below is the aggregation path itself.
+    labelled = [
+        _labelled_truth_obs(
+            np.stack([means[k] - 0.3, means[k] + 0.3], axis=0), np.array([0.0, 1.0])
+        )
+        for k in range(num_cycles)
+    ]
+
+    aggregated = _aggregated_filter(_ToyLinearModel(np.eye(2)))
+    aggregated.collect_pred_obs = True
+    labelled_result = aggregated.run(state=state, observations=labelled)
+
+    legacy = EnsembleKalmanFilter(
+        observation_operator=_MeanToyObsOp(np.array([[1.0, 0.5]])),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.array([0.2]),
+        mode="state",
+        rng_key=jax.random.PRNGKey(30),
+    )
+    legacy.collect_pred_obs = True
+    legacy_result = legacy.run(state=state, observations=jnp.asarray(means))
+
+    assert labelled_result.state is not None and legacy_result.state is not None
+    np.testing.assert_allclose(
+        labelled_result.state["u"], legacy_result.state["u"], rtol=1e-6, atol=1e-6
+    )
+    # Recorded predicted observations keep the flat (N_d, N_e) shape the
+    # filter_smoothing outer loop consumes.
+    assert len(aggregated.pred_obs_history) == num_cycles
+    for recorded, expected in zip(aggregated.pred_obs_history, legacy.pred_obs_history):
+        assert recorded.shape == (1, n_e)
+        np.testing.assert_allclose(recorded, expected, rtol=1e-6, atol=1e-6)
+
+    on_disk = _aggregated_filter(_OnDiskToyLinearModel(np.eye(2), tmp_path)).run(
+        state=state, observations=labelled
+    )
+    assert on_disk.state is not None
+    np.testing.assert_allclose(
+        on_disk.state["u"], legacy_result.state["u"], rtol=1e-5, atol=2e-5
+    )
+
+
+def test_labelled_observations_without_aggregation_assimilate_every_frame() -> None:
+    """No aggregator -> the flattened time-resolved vector is assimilated.
+
+    The two frames per cycle become two observations (time-major), which C_D
+    and the predicted observations must match — the full-resolution mode.
+    """
+    n_e = 12
+    state = _initial_state(jax.random.PRNGKey(31), n_e, np.zeros(2), np.eye(2))
+    observations = [_labelled_truth_obs(np.array([[0.2], [0.8]]), np.array([0.0, 1.0]))]
+
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_TemporalToyObsOp(np.array([[1.0, 0.5]])),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.array([0.2, 0.2]),
+        mode="state",
+        rng_key=jax.random.PRNGKey(32),
+    )
+    enkf.collect_pred_obs = True
+    result = enkf.run(state=state, observations=observations)
+
+    assert result.state is not None
+    assert enkf.pred_obs_history[0].shape == (2, n_e)
+
+
+def test_aggregated_observation_length_is_checked_against_C_D() -> None:
+    """A C_D sized for one interval rejects a two-interval observation."""
+    state = _initial_state(jax.random.PRNGKey(33), 6, np.zeros(2), np.eye(2))
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_TemporalToyObsOp(np.array([[1.0, 0.5]])),
+        aggregate_observations=AggregateObservations(interval_seconds=1.0),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.array([0.2]),
+        mode="state",
+        rng_key=jax.random.PRNGKey(34),
+    )
+    with pytest.raises(ValueError, match="C_D"):
+        enkf.run(
+            state=state,
+            observations=[
+                _labelled_truth_obs(np.array([[0.2], [0.8]]), np.array([0.0, 1.0]))
+            ],
+        )
 
 
 # ---------------------------------------------------------------------------

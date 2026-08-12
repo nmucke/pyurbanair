@@ -9,11 +9,13 @@ tempered weight); the analysis math itself is shared with the smoother (see
 
 Observation-time semantics: one cycle assimilates one observation batch. The
 observation operator is applied to the whole forecast segment, so with the
-config-default ``TemporalObservationOperator(mode="intervals")`` and one
-interval per segment the batch is the segment's interval mean — an
-observation *of the segment*, assimilated into the end-of-segment state.
-This is an observation-operator choice (H and y agree by construction), not
-an approximation error.
+config-default ``TemporalObservationOperator`` and an
+``AggregateObservations`` of one interval per segment the batch is the
+segment's interval mean — an observation *of the segment*, assimilated into
+the end-of-segment state. Real and predicted observations pass through the
+same aggregation (see :meth:`BaseFilter._get_observations`), so H and y agree
+by construction; this is an observation-space choice, not an approximation
+error.
 """
 
 import logging
@@ -22,7 +24,7 @@ import pathlib
 import shutil
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
@@ -40,7 +42,11 @@ from data_assimilation.filtering.parameter_evolution import ParameterEvolution
 from data_assimilation.inflation import InflationScheme
 from data_assimilation.io import get_sorted_state_files, load_dataset
 from data_assimilation.localization.base import BaseLocalization
-from data_assimilation.observation_operator import sensor_observation_coords
+from data_assimilation.observation_operator import (
+    AggregateObservations,
+    flatten_observations,
+    sensor_observation_coords,
+)
 from data_assimilation.reduction import OnlineStateReduction
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
@@ -167,8 +173,13 @@ class BaseFilter:
     scheme is a pure function of arrays (see :class:`AnalysisScheme`).
 
     Args:
-        observation_operator: Maps a forecast segment to the flat predicted-
-            observation vector (typically a ``TemporalObservationOperator``).
+        observation_operator: Maps a forecast segment to its predicted
+            observations. A ``TemporalObservationOperator`` returns them
+            time-resolved as a DataArray; anything returning a plain
+            ``(N_e, N_d)`` array is used as-is.
+        aggregate_observations: Optional interval aggregation applied to BOTH
+            the predicted and the real observations, so the two always live in
+            the same space. ``None`` assimilates the full time-resolved vector.
         forward_model: Any ensemble forward model; its configured horizon is
             the cycle's forecast segment (set it to the observation interval).
         C_D: Diagonal observation-error covariance as a 1-D variance vector
@@ -227,12 +238,14 @@ class BaseFilter:
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
+        aggregate_observations: Optional[AggregateObservations] = None,
     ) -> None:
         if mode not in ("state", "parameter", "joint"):
             raise ValueError(
                 f"mode must be 'state', 'parameter' or 'joint', got {mode!r}."
             )
         self.observation_operator = observation_operator
+        self.aggregate_observations = aggregate_observations
         self.forward_model = forward_model
         self.analysis = analysis
         self.mode: FilterMode = mode
@@ -410,6 +423,20 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         if self.collect_pred_obs:
             self.pred_obs_history.append(np.asarray(pred_obs))
 
+    def _get_observations(self, observations: Any) -> jnp.ndarray:
+        """Bring observations into the flat space the analysis works in.
+
+        A plain array is passed through untouched (pre-flattened input is the
+        caller's responsibility); a labelled DataArray is optionally aggregated
+        and then flattened time-major. Real and predicted observations both go
+        through here, which is what keeps them in the same space.
+        """
+        if not isinstance(observations, xarray.DataArray):
+            return jnp.asarray(observations)
+        if self.aggregate_observations is not None:
+            observations = self.aggregate_observations(observations)
+        return jnp.asarray(flatten_observations(observations))
+
     def _observation_step(
         self,
         state: Optional[xarray.Dataset] = None,
@@ -417,20 +444,28 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
     ) -> jnp.ndarray:
         """Predicted observations for the current forecast, shape (N_e, N_d)."""
         if state is not None:
-            return jnp.asarray(self.observation_operator(state))
+            return self._get_observations(self.observation_operator(state))
         if results_dir is not None:
             file_list = get_sorted_state_files(pathlib.Path(results_dir))
             if not file_list:
                 raise FileNotFoundError(
                     f"No state_*.nc files found in results directory: {results_dir}"
                 )
-            return jnp.stack(
-                [
-                    jnp.asarray(self.observation_operator(load_dataset(f)))
-                    for f in file_list
-                ],
-                axis=0,
-            )
+            members = [self.observation_operator(load_dataset(f)) for f in file_list]
+            if isinstance(members[0], xarray.DataArray):
+                # Aggregate/flatten ONCE over the stacked ensemble, so the
+                # interval-count consistency check sees one call per cycle
+                # (as on the in-memory path) rather than one per member.
+                # ``join="override"``: per-member time coords are not
+                # bit-identical, and the default outer join would silently
+                # union the axes and NaN-pad the observations (same convention
+                # as ``_get_final_states`` below).
+                return self._get_observations(
+                    xarray.concat(members, dim="ensemble", join="override").transpose(
+                        "ensemble", "time", "obs"
+                    )
+                )
+            return jnp.stack([jnp.asarray(member) for member in members], axis=0)
         raise ValueError("Either state or results_dir must be provided.")
 
     def _get_final_states(
@@ -500,7 +535,7 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
-        observations: Optional[jnp.ndarray] = None,
+        observations: Optional[Union[jnp.ndarray, Sequence[xarray.DataArray]]] = None,
         *,
         return_history: bool = False,
     ) -> FilterResult:
@@ -512,9 +547,12 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
             params: Ensemble parameters; required for ``mode="parameter"`` /
                 ``"joint"``, optional (carried through unmodified) for
                 ``mode="state"``.
-            observations: Array of shape ``(num_cycles, N_d)`` — one
-                observation batch per cycle, each consumed exactly once (a
-                filter has no MDA schedule).
+            observations: One observation batch per cycle, each consumed
+                exactly once (a filter has no MDA schedule). Either a
+                list/tuple of per-cycle DataArrays with dims ``("time",
+                "obs")`` and a cycle-local seconds time coordinate — each one
+                aggregated and flattened like the predicted observations — or
+                an already-flat ``(num_cycles, N_d)`` array.
             return_history: Collect per-cycle analyzed params/state into
                 ``cycle``-concatenated history Datasets.
 
@@ -523,12 +561,20 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         """
         if observations is None:
             raise ValueError("observations must be provided.")
-        obs_batches = jnp.asarray(observations)
+        if isinstance(observations, (list, tuple)):
+            if not observations:
+                raise ValueError("observations must contain at least one cycle.")
+            obs_batches = jnp.stack(
+                [self._get_observations(o) for o in observations], axis=0
+            )
+        else:
+            obs_batches = self._get_observations(observations)
         if obs_batches.ndim != 2:
             raise ValueError(
                 "observations must have shape (num_cycles, N_d) — one batch "
                 f"per cycle — got shape {obs_batches.shape}. For a single "
-                "cycle pass a (1, N_d) array."
+                "cycle pass a (1, N_d) array, or a one-element list of "
+                'per-cycle ("time", "obs") DataArrays.'
             )
         if obs_batches.shape[1] != self.C_D_diag.shape[0]:
             raise ValueError(
@@ -1100,9 +1146,11 @@ class EnsembleKalmanFilter(BaseFilter):
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
+        aggregate_observations: Optional[AggregateObservations] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
+            aggregate_observations=aggregate_observations,
             forward_model=forward_model,
             C_D=C_D,
             analysis=StochasticEnKFAnalysis() if analysis is None else analysis,

@@ -70,8 +70,11 @@ and the truth source mirrors run_filtering.py:
 
 One cycle consumes one forecast segment of ``time.simulation_time`` seconds:
 the truth is generated over the whole horizon up front, each segment's
-observations are extracted with the case's temporal observation operator, and
-the estimator consumes the resulting ``(T, N_d)`` batch matrix.
+time-resolved observations are extracted with the case's temporal observation
+operator, and the estimator consumes that list of ``T`` labelled batches —
+aggregating each into the interval means it assimilates through the same path
+as the predicted observations (``obs.interval_seconds``; null assimilates every
+frame).
 
 That horizon is ``T = num_cycles + (num_windows - 1) * window_shift`` cycles.
 With the default ``num_windows=1`` it is just ``num_cycles``, and the estimator
@@ -131,6 +134,7 @@ import dataclasses
 import pathlib
 import sys
 import time
+from typing import Any
 
 import hydra
 import jax
@@ -138,12 +142,14 @@ import jax.numpy as jnp
 import numpy as np
 import xarray
 from data_assimilation.filter_smoothing import run_moving_window
+from data_assimilation.observation_operator import flatten_observations
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
 from pyurbanair.config.hydra_helpers import (
     clean_outputs,
+    create_aggregate_observations,
     create_observation_operator,
     filter_parameter_config,
 )
@@ -474,28 +480,49 @@ def run(cfg: DictConfig) -> None:
     # --- Observation operators and per-cycle observations ----------------------
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
+    # Interval aggregation of the observation space (null obs.interval_seconds
+    # -> full-resolution assimilation). Deliberately ONE instance, shared
+    # between the C_D sizing below and the estimator, so its interval-count
+    # consistency check spans both.
+    aggregate_obs = create_aggregate_observations(cfg.obs)
+
+    obs_error_std = float(cfg.filter_smoothing.obs_error_std)
 
     # One batch per cycle of the FULL horizon, in cycle order: window w slices
-    # rows [w*window_shift, w*window_shift + num_cycles) out of this, so the
+    # batches [w*window_shift, w*window_shift + num_cycles) out of this, so the
     # batches are built once and never per window. The horizon arithmetic that
-    # produced `total_cycles` is re-checked against this array by the
+    # produced `total_cycles` is re-checked against this list by the
     # orchestrator below (which is handed `window_length=num_cycles` precisely
     # so it validates T == L + (W-1)*s instead of solving for L).
-    obs_rows = []
+    #
+    # Each batch stays a time-resolved ("time", "obs") DataArray: the estimator
+    # aggregates and flattens it through the SAME path as the predicted
+    # observations, so the two always live in one space. The synthetic error is
+    # therefore drawn per RAW frame (and added labelled, keeping the time
+    # coordinate the aggregator bins on).
+    observations: list[Any] = []
     for cycle in range(total_cycles):
         cycle_truth = open_truth(
             true_state_path, n_total, x_offset, start_idx, t_offset
         ).isel(time=slice(cycle * n_per_cycle, (cycle + 1) * n_per_cycle))
-        obs_rows.append(jnp.asarray(truth_obs_op(cycle_truth)))
+        cycle_obs = truth_obs_op(cycle_truth)
         cycle_truth.close()
-    observations = jnp.stack(obs_rows, axis=0)  # (total_cycles, N_d)
+        rng_key, subkey = jax.random.split(rng_key)
+        noise = np.asarray(jax.random.normal(subkey, tuple(cycle_obs.shape)))
+        observations.append(cycle_obs + obs_error_std * noise)
 
-    obs_error_std = float(cfg.filter_smoothing.obs_error_std)
-    C_D_diag = (obs_error_std**2) * jnp.ones(observations.shape[1])
-    rng_key, subkey = jax.random.split(rng_key)
-    observations = observations + obs_error_std * jax.random.normal(
-        subkey, observations.shape
-    )
+    # C_D is sized from what the estimator actually assimilates: one cycle's
+    # AGGREGATED, flattened batch (obs_error_std**2 per observation, unchanged).
+    first_batch = observations[0]
+    if isinstance(first_batch, xarray.DataArray):
+        if aggregate_obs is not None:
+            first_batch = aggregate_obs(first_batch)
+        n_d = int(flatten_observations(first_batch).size)
+    else:
+        # obs.temporal_mode null: the bare spatial operator already returns the
+        # flat observation vector of the cycle's final frame.
+        n_d = int(np.asarray(first_batch).size)
+    C_D_diag = (obs_error_std**2) * jnp.ones(n_d)
 
     # --- Estimator --------------------------------------------------------------
     # The `smoother:` node in conf/run_filter_smoothing.yaml already interpolates
@@ -510,6 +537,7 @@ def run(cfg: DictConfig) -> None:
         forward_model=ensemble_model,
         C_D=C_D_diag,
         rng_key=smoother_key,
+        aggregate_observations=aggregate_obs,
     )
 
     save_history = bool(cfg.run.get("save_history", True))

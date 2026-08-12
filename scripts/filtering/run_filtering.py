@@ -51,11 +51,12 @@ and the truth source mirrors run_esmda.py:
 
 One cycle consumes one forecast segment of ``time.simulation_time`` seconds:
 the truth is generated over ``filtering.num_cycles`` such segments up front,
-each segment's observations are extracted with the case's temporal
-observation operator, and the filter consumes the resulting
-``(num_cycles, N_d)`` batch matrix in a single ``run()`` call. To assimilate
-one observation interval per analysis (the plan's default cadence), set
-``time.simulation_time`` equal to ``obs.interval_seconds``.
+each segment's time-resolved observations are extracted with the case's
+temporal observation operator, and the filter consumes the resulting list of
+per-cycle observation DataArrays in a single ``run()`` call — aggregating each
+one (``obs.interval_seconds``) exactly like the predicted observations. To
+assimilate one observation interval per analysis (the plan's default cadence),
+set ``time.simulation_time`` equal to ``obs.interval_seconds``.
 
 The PRIOR must be a static scalar sampler (the filter estimates the parameter
 value *now*, re-tracked each cycle; a time-varying/AR(2) posterior stays with
@@ -91,12 +92,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray
+from data_assimilation.observation_operator import flatten_observations
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
 from pyurbanair.config.hydra_helpers import (
     clean_outputs,
+    create_aggregate_observations,
     create_observation_operator,
     filter_parameter_config,
 )
@@ -250,21 +253,38 @@ def run(cfg: DictConfig) -> None:
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
 
-    obs_rows = []
+    aggregate_obs = create_aggregate_observations(cfg.obs)
+
+    obs_error_std = float(cfg.filtering.obs_error_std)
+    observations: list[Any] = []
     for cycle in range(num_cycles):
         cycle_truth = open_truth(
             true_state_path, n_total, x_offset, start_idx, t_offset
         ).isel(time=slice(cycle * n_per_cycle, (cycle + 1) * n_per_cycle))
-        obs_rows.append(jnp.asarray(truth_obs_op(cycle_truth)))
+        cycle_obs = truth_obs_op(cycle_truth)
+        # Perturb every RAW frame (before any aggregation), keeping the labels:
+        # the filter aggregates and flattens each cycle's DataArray itself.
+        rng_key, subkey = jax.random.split(rng_key)
+        cycle_obs = cycle_obs + obs_error_std * np.asarray(
+            jax.random.normal(subkey, cycle_obs.shape)
+        )
+        observations.append(cycle_obs)
         cycle_truth.close()
-    observations = jnp.stack(obs_rows, axis=0)  # (num_cycles, N_d)
 
-    obs_error_std = float(cfg.filtering.obs_error_std)
-    C_D_diag = (obs_error_std**2) * jnp.ones(observations.shape[1])
-    rng_key, subkey = jax.random.split(rng_key)
-    observations = observations + obs_error_std * jax.random.normal(
-        subkey, observations.shape
-    )
+    # Size C_D from the vector the filter actually assimilates: the first
+    # cycle's aggregated, flattened observations. The aggregator instance is
+    # shared with the filter, so its interval-count consistency check spans
+    # this sizing call as well.
+    first_obs = observations[0]
+    if isinstance(first_obs, xarray.DataArray):
+        if aggregate_obs is not None:
+            first_obs = aggregate_obs(first_obs)
+        n_d = int(flatten_observations(first_obs).size)
+    else:
+        # obs.temporal_mode null: the bare spatial operator already returns the
+        # flat observation vector of the cycle's final frame.
+        n_d = int(np.asarray(first_obs).size)
+    C_D_diag = (obs_error_std**2) * jnp.ones(n_d)
 
     # --- Filter ----------------------------------------------------------------
     rng_key, filter_key = jax.random.split(rng_key)
@@ -278,6 +298,7 @@ def run(cfg: DictConfig) -> None:
     enkf = instantiate(
         cfg.filtering.filter,
         observation_operator=assim_obs_op,
+        aggregate_observations=aggregate_obs,
         forward_model=ensemble_model,
         C_D=C_D_diag,
         rng_key=filter_key,

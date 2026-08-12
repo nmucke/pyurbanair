@@ -86,7 +86,7 @@ obs:
   validation_z_points: [2.0, 2.0, 2.0, 20.0]
 
   states: [u, v]
-  temporal_mode: intervals
+  temporal_mode: full
   interval_seconds: 60.0
   aggregation_mode: mean
 

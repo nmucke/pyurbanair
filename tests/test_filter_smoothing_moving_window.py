@@ -38,12 +38,15 @@ from data_assimilation.filter_smoothing import (
     MovingWindowResult,
     run_moving_window,
 )
+from data_assimilation.filter_smoothing.base import ObservationInput
 from data_assimilation.filtering.parameter_evolution import (
     IdentityEvolution,
     RandomWalkEvolution,
 )
+from data_assimilation.observation_operator import AggregateObservations
 
 from tests.test_filter_smoothing import (
+    _cycle_observations,
     _scalar_state,
     _smoothing_kwargs,
     _trajectory_params,
@@ -90,7 +93,7 @@ class _RecordingSmoother(FilterSmoothingESMDA):
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
-        observations: Optional[jnp.ndarray] = None,
+        observations: Optional[ObservationInput] = None,
         *,
         return_history: bool = False,
     ) -> Any:
@@ -323,6 +326,53 @@ def test_each_window_consumes_its_own_observation_rows(window_shift: int) -> Non
     np.testing.assert_allclose(
         smoother.window_calls[-1]["observations"][-1], horizon[-1], rtol=RTOL
     )
+
+
+def test_labelled_horizon_batches_are_aggregated_once_and_then_sliced() -> None:
+    """A time-resolved horizon is normalized up front, not per window.
+
+    Overlapping windows re-consume the same cycles, so aggregating inside each
+    window would put a cycle through the aggregator once per window that covers
+    it. The orchestrator therefore flattens the horizon ONCE (through the
+    smoother's own normalization) and slices flat rows out of it — which is also
+    what keeps the recorded per-window batches identical to the flat-array run.
+    """
+    n_e, num_cycles, num_windows, window_shift = 6, 2, 3, 1
+    total_cycles = num_cycles + (num_windows - 1) * window_shift
+    # Three frames per cycle inside one 2 s interval: cycle k aggregates to k+0.5,
+    # i.e. exactly the flat horizon the other tests use.
+    labelled = [
+        _cycle_observations(
+            [cycle + 0.0, cycle + 0.5, cycle + 1.0],
+        )
+        for cycle in range(total_cycles)
+    ]
+    smoother = _make_smoother(
+        num_steps=1,
+        seed=206,
+        recording=True,
+        aggregate_observations=AggregateObservations(interval_seconds=2.0),
+    )
+
+    run_moving_window(
+        smoother,
+        state=_initial_state(n_e, seed=207),
+        params=_trajectory_params(_knots(num_cycles, n_e, seed=208)),
+        observations=labelled,
+        num_windows=num_windows,
+        window_shift=window_shift,
+    )
+
+    horizon = np.asarray(_horizon_observations(total_cycles))
+    assert len(smoother.window_calls) == num_windows
+    for window, call in enumerate(smoother.window_calls):
+        start = window * window_shift
+        np.testing.assert_allclose(
+            call["observations"],
+            horizon[start : start + num_cycles],
+            rtol=RTOL,
+            atol=ATOL,
+        )
 
 
 # ---------------------------------------------------------------------------

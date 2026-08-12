@@ -43,7 +43,7 @@ resolution (``time.seconds_per_knot``) from the assimilation cycle length.
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
@@ -58,10 +58,20 @@ from data_assimilation.filtering.analysis import AnalysisScheme, stochastic_enkf
 from data_assimilation.filtering.base import EnsembleKalmanFilter, FilterResult
 from data_assimilation.inflation import InflationScheme
 from data_assimilation.localization.base import BaseLocalization
+from data_assimilation.observation_operator import (
+    AggregateObservations,
+    flatten_observations,
+)
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
 logger = logging.getLogger(__name__)
+
+#: What :meth:`FilterSmoothingESMDA.run` accepts as observations: one
+#: time-resolved ``("time", "obs")`` DataArray per cycle (aggregated and
+#: flattened by the estimator itself), or the flat ``(num_cycles, N_d)`` array
+#: those reduce to.
+ObservationInput = Union[Sequence[xarray.DataArray], np.ndarray, jnp.ndarray]
 
 # Relative slack of every knot-time comparison (is this knot strictly inside the
 # segment?). The knot axis is built in float32 by the samplers, so an exact
@@ -283,10 +293,11 @@ class FilterSmoothingESMDA:
     is precisely what this method replaces with an inner filter pass.
 
     Args:
-        observation_operator: Maps one cycle's forecast segment to the flat
-            predicted-observation vector — the *same* per-segment operator the
+        observation_operator: Maps one cycle's forecast segment to that cycle's
+            predicted observations — the *same* per-segment operator the
             sequential filter takes (typically a
-            ``TemporalObservationOperator`` with one interval per segment).
+            ``TemporalObservationOperator``, whose time-resolved output the
+            inner filter aggregates and flattens).
         forward_model: Any ensemble forward model; its configured horizon is
             one cycle's forecast segment.
         C_D: Diagonal observation-error covariance of ONE cycle's batch, as a
@@ -321,6 +332,12 @@ class FilterSmoothingESMDA:
             random numbers). Set False for independent draws per iteration.
             The *outer* perturbed-observation draws always use fresh subkeys.
         rng_key: PRNG key; defaults to a fresh ``PRNGKey(42)`` per instance.
+        aggregate_observations: Optional interval aggregator applied to BOTH
+            the real observations (here, once per cycle, in
+            :meth:`observation_batches`) and the predicted ones (inside the
+            inner filter, which is handed this same object, so it aggregates
+            what its own operator produced). ``None`` (default) assimilates the
+            full time-resolved observation vector.
 
     Static (no-``time``) parameters in the trajectory Dataset are carried
     through every forecast unchanged and **excluded from the outer update**:
@@ -344,6 +361,7 @@ class FilterSmoothingESMDA:
         temporal_localization: Optional[TemporalLocalization] = None,
         common_inner_noise: bool = True,
         rng_key: Optional[jax.Array] = None,
+        aggregate_observations: Optional[AggregateObservations] = None,
     ) -> None:
         if num_steps < 1:
             raise ValueError(f"num_steps must be >= 1, got {num_steps}.")
@@ -400,6 +418,9 @@ class FilterSmoothingESMDA:
         self.alpha = num_steps if alpha is None else alpha
         self.temporal_localization = temporal_localization
         self.common_inner_noise = common_inner_noise
+        #: Interval aggregator of the observation space (``None`` -> the full
+        #: time-resolved vector). Shared with the inner filter below.
+        self.aggregate_observations = aggregate_observations
 
         # Default the PRNG key here (not in the signature): a default argument
         # would be evaluated at import time -- initializing the JAX backend as
@@ -421,6 +442,11 @@ class FilterSmoothingESMDA:
             localization=inner_localization,
             inflation=inner_inflation,
             cycle_length=self.cycle_length,
+            # The PREDICTED observations are aggregated where they are produced
+            # (the inner filter's observation step); the real ones are
+            # aggregated once by this class before the batches are handed down
+            # already flat -- see observation_batches.
+            aggregate_observations=aggregate_observations,
         )
         # The whole method rests on this: ``D`` must be the forecast
         # observations stored before each analysis (§9, first bullet).
@@ -440,6 +466,63 @@ class FilterSmoothingESMDA:
         return self._inner
 
     # ------------------------------------------------------------------
+    # Observations
+    # ------------------------------------------------------------------
+
+    def _get_observations(self, observations: Any) -> jnp.ndarray:
+        """One cycle's observations as the flat vector the update consumes.
+
+        A plain array is returned as it is: pre-flattened input is the caller's
+        responsibility (and is what the inner filter receives, see
+        :meth:`observation_batches`). A time-resolved ``("time", "obs")``
+        DataArray goes through the aggregator — the same one the predicted
+        observations go through — and is flattened time-major.
+        """
+        if not isinstance(observations, xarray.DataArray):
+            return jnp.asarray(observations)
+        if self.aggregate_observations is not None:
+            observations = self.aggregate_observations(observations)
+        return jnp.asarray(flatten_observations(observations))
+
+    def observation_batches(self, observations: Any) -> jnp.ndarray:
+        """``(num_cycles, N_d)`` flat batches from either accepted input form.
+
+        Takes an :data:`ObservationInput` — typed loosely so the guards below
+        can reject what a caller might plausibly pass instead.
+
+        The real observations are aggregated HERE, once per cycle, and the
+        inner filter is then handed the resulting flat array — which its own
+        ``_get_observations`` passes straight through. So a cycle's
+        observations are aggregated exactly once no matter how many inner
+        passes the outer loop runs, while the inner filter still aggregates the
+        predicted observations *it* produces (a different array every pass).
+
+        Public because the moving-window orchestrator normalizes the horizon's
+        batches once, up front, before slicing windows out of them.
+        """
+        if isinstance(observations, xarray.DataArray):
+            raise ValueError(
+                "observations is a single DataArray; filter smoothing consumes "
+                "one batch PER CYCLE. Pass a list/tuple of per-cycle "
+                "('time', 'obs') DataArrays, or the flat (num_cycles, N_d) "
+                "array they reduce to."
+            )
+        if isinstance(observations, (list, tuple)):
+            if not observations:
+                raise ValueError("observations must contain at least one cycle.")
+            batches = jnp.stack(
+                [self._get_observations(cycle) for cycle in observations]
+            )
+        else:
+            batches = jnp.asarray(observations)
+        if batches.ndim != 2:
+            raise ValueError(
+                "observations must have shape (num_cycles, N_d) — one batch "
+                f"per cycle — got shape {batches.shape}."
+            )
+        return batches
+
+    # ------------------------------------------------------------------
     # The outer loop
     # ------------------------------------------------------------------
 
@@ -447,7 +530,7 @@ class FilterSmoothingESMDA:
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
-        observations: Optional[jnp.ndarray] = None,
+        observations: Optional[ObservationInput] = None,
         *,
         return_history: bool = False,
     ) -> FilterSmoothingResult:
@@ -468,8 +551,11 @@ class FilterSmoothingESMDA:
                 window's span (the trailing knot a windowed prior sampler
                 emits) ride along in the update through prior temporal
                 correlations only.
-            observations: Array of shape ``(num_cycles, N_d)`` — one batch per
-                cycle, exactly as the sequential filter consumes them.
+            observations: One batch per cycle, exactly as the sequential filter
+                consumes them: either a list/tuple of time-resolved
+                ``("time", "obs")`` DataArrays (aggregated by
+                ``aggregate_observations`` and flattened here) or the flat
+                ``(num_cycles, N_d)`` array they reduce to.
             return_history: Collect the per-iteration trajectories into
                 ``params_history`` and pass through to the final inner pass's
                 own histories.
@@ -484,12 +570,9 @@ class FilterSmoothingESMDA:
             )
         if observations is None:
             raise ValueError("observations must be provided.")
-        obs_batches = jnp.asarray(observations)
-        if obs_batches.ndim != 2:
-            raise ValueError(
-                "observations must have shape (num_cycles, N_d) — one batch "
-                f"per cycle — got shape {obs_batches.shape}."
-            )
+        # Aggregated (if configured) and flattened once, at entry: everything
+        # below — the inner passes included — sees flat per-cycle batches.
+        obs_batches = self.observation_batches(observations)
         num_cycles, n_d = (int(obs_batches.shape[0]), int(obs_batches.shape[1]))
         if n_d != int(self.C_D_diag.shape[0]):
             raise ValueError(

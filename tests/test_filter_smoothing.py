@@ -31,6 +31,7 @@ from data_assimilation.filter_smoothing import (
 )
 from data_assimilation.filtering import EnsembleKalmanFilter
 from data_assimilation.localization.base import resolve_row_inflation, taper_inflation
+from data_assimilation.observation_operator import AggregateObservations
 
 # ---------------------------------------------------------------------------
 # Toy forward models and observation operators
@@ -934,3 +935,143 @@ def test_base_filter_params_for_cycle_is_the_identity() -> None:
     assert enkf._params_for_cycle(0, params) is params
     assert enkf._params_for_cycle(3, params) is params
     assert enkf._params_for_cycle(0, None) is None
+
+
+# ---------------------------------------------------------------------------
+# (8) Observation aggregation
+# ---------------------------------------------------------------------------
+
+
+def _cycle_observations(
+    values: Any, cadence: float = 0.5, num_obs: int = 1
+) -> xarray.DataArray:
+    """One cycle's time-resolved batch: dims ``("time", "obs")``, in seconds.
+
+    ``values`` is flattened into ``(n_frames, num_obs)``; the frames are laid
+    out on a uniform ``cadence`` grid starting at ``t = 0``, which is what the
+    aggregator bins on.
+    """
+    frames = np.asarray(values, dtype=float).reshape(-1, num_obs)
+    return xarray.DataArray(
+        frames,
+        dims=("time", "obs"),
+        coords={"time": np.arange(frames.shape[0], dtype=float) * cadence},
+    )
+
+
+def test_the_aggregator_is_shared_with_the_inner_filter() -> None:
+    """One aggregator instance, applied to the real AND predicted observations.
+
+    The inner filter is what sees ``H(x)``, so it must be handed the very same
+    object: two equally-configured instances would each build their own
+    interval-count state, and the misalignment guard would then not span both
+    halves of the innovation.
+    """
+    aggregate = AggregateObservations(interval_seconds=2.0)
+    smoother = FilterSmoothingESMDA(
+        num_steps=1,
+        aggregate_observations=aggregate,
+        **_smoothing_kwargs(_TrajectoryToyModel()),
+    )
+    assert smoother.aggregate_observations is aggregate
+    assert smoother._inner.aggregate_observations is aggregate
+
+    # Absent by default: the estimator then assimilates whatever the operator
+    # produced, at full resolution.
+    plain = FilterSmoothingESMDA(
+        num_steps=1, **_smoothing_kwargs(_TrajectoryToyModel())
+    )
+    assert plain.aggregate_observations is None
+    assert plain._inner.aggregate_observations is None
+
+
+def test_per_cycle_dataarrays_are_aggregated_and_flattened() -> None:
+    """A list of labelled batches becomes the ``(num_cycles, N_d)`` matrix."""
+    smoother = FilterSmoothingESMDA(
+        num_steps=1,
+        aggregate_observations=AggregateObservations(interval_seconds=2.0),
+        **_smoothing_kwargs(_TrajectoryToyModel()),
+    )
+    batches = smoother.observation_batches(
+        [
+            _cycle_observations([1.0, 2.0, 3.0]),
+            _cycle_observations([4.0, 5.0, 6.0]),
+        ]
+    )
+    # Three frames within one 2 s interval -> one mean per cycle.
+    np.testing.assert_allclose(np.asarray(batches), [[2.0], [5.0]], rtol=1e-6)
+
+
+def test_without_an_aggregator_every_frame_is_assimilated() -> None:
+    """No aggregator -> the full time-resolved vector, time-major."""
+    smoother = FilterSmoothingESMDA(
+        num_steps=1, **_smoothing_kwargs(_TrajectoryToyModel())
+    )
+    batches = smoother.observation_batches(
+        [_cycle_observations([[1.0, 2.0], [3.0, 4.0]], num_obs=2)]
+    )
+    # [t0: obs0 obs1, t1: obs0 obs1] — the layout localization's sensor tiling
+    # assumes.
+    np.testing.assert_allclose(np.asarray(batches), [[1.0, 2.0, 3.0, 4.0]], rtol=1e-6)
+
+
+def test_flat_batches_pass_through_unaggregated() -> None:
+    """The legacy ``(num_cycles, N_d)`` array is the caller's own layout.
+
+    That is what keeps the low-level tests above array-shaped — and what lets
+    this class hand its already-flattened batches down to the inner filter
+    without them being aggregated a second time.
+    """
+    smoother = FilterSmoothingESMDA(
+        num_steps=1,
+        aggregate_observations=AggregateObservations(interval_seconds=2.0),
+        **_smoothing_kwargs(_TrajectoryToyModel()),
+    )
+    batches = smoother.observation_batches(jnp.array([[1.0], [2.0]]))
+    np.testing.assert_allclose(np.asarray(batches), [[1.0], [2.0]], rtol=1e-6)
+
+    # A single DataArray is ambiguous (one cycle? the whole window?) and is
+    # rejected rather than guessed at.
+    with pytest.raises(ValueError, match="one batch PER CYCLE"):
+        smoother.observation_batches(_cycle_observations([1.0, 2.0]))
+
+    with pytest.raises(ValueError, match=r"\(num_cycles, N_d\)"):
+        smoother.observation_batches(jnp.array([1.0, 2.0]))
+
+
+def test_labelled_and_flat_observations_give_the_same_run() -> None:
+    """``run`` on the DataArrays == ``run`` on what they aggregate to.
+
+    The toy operator returns arrays, so the *predicted* observations pass
+    through untouched either way and this isolates the real ones: aggregating
+    them at the entry to ``run`` must be exactly equivalent to being handed the
+    aggregated batches, once — not once per inner pass.
+    """
+    n_e, num_cycles, num_steps = 8, 2, 2
+    state = _scalar_state(
+        np.asarray(jax.random.normal(jax.random.PRNGKey(700), (n_e,)))
+    )
+    knots = np.asarray(jax.random.normal(jax.random.PRNGKey(701), (num_cycles, n_e)))
+
+    def _run(
+        observations: Any, aggregate: Optional[AggregateObservations]
+    ) -> np.ndarray:
+        smoother = FilterSmoothingESMDA(
+            num_steps=num_steps,
+            rng_key=jax.random.PRNGKey(702),
+            aggregate_observations=aggregate,
+            **_smoothing_kwargs(_TrajectoryToyModel()),
+        )
+        result = smoother.run(
+            state=state,
+            params=_trajectory_params(knots),
+            observations=observations,
+        )
+        return np.asarray(result.params["theta"].values)
+
+    labelled = _run(
+        [_cycle_observations([1.0, 2.0, 3.0]), _cycle_observations([4.0, 5.0, 6.0])],
+        AggregateObservations(interval_seconds=2.0),
+    )
+    flat = _run(jnp.array([[2.0], [5.0]]), None)
+    np.testing.assert_allclose(labelled, flat, rtol=1e-6, atol=1e-6)

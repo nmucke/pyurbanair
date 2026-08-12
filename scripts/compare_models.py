@@ -18,8 +18,8 @@ Written into the run directory:
   * ``sensor_timeseries_<set>.png`` -- u/v/w/|U| at the assimilation and the
                                       held-out validation sensors, one line per model.
   * ``sensor_rolling_<set>.png``    -- the same sensors smoothed by a sliding
-                                      window of the observation operator's
-                                      ``obs.interval_seconds`` length.
+                                      window of the assimilation's aggregation
+                                      length, ``obs.interval_seconds``.
   * ``sensor_metrics_<set>.png`` / ``sensor_metrics.csv`` -- rolling-window
                                       bias, MAE, RMSE, correlation, and spread
                                       ratio against the reference.
@@ -786,8 +786,9 @@ def rolling_aggregate(
 ) -> xarray.DataArray:
     """Smooth a sensor series with a sliding window of the observation length.
 
-    The observation operator (``TemporalObservationOperator``, ``mode="intervals"``)
-    reduces each ``interval_seconds`` window to one number by ``aggregation_mode``.
+    The assimilation's aggregator (``AggregateObservations``) reduces each
+    ``interval_seconds`` window of the time-resolved observations to one number
+    by ``aggregation_mode``.
     Here the *same window length and reduction* slide over every frame instead of
     tiling disjoint bins, so the result is a smooth curve on the original time
     axis rather than a staircase -- it shows the same suppression of sub-interval
@@ -840,9 +841,9 @@ def plot_sensor_rolling(
     """Sliding-window sensor observations, one model per colour.
 
     The smoothed curve is drawn over a faint copy of the raw per-frame series, so
-    the sub-interval fluctuation the observation operator averages away stays
-    visible behind it. ``|U|`` is formed from the *smoothed* components, matching
-    the operator's order (aggregate, then observe).
+    the sub-interval fluctuation the assimilation averages away stays visible
+    behind it. ``|U|`` is formed from the *smoothed* components, matching the
+    assimilation's order (observe each component, aggregate, then combine).
     """
     sx, sy, sz = sensor_points
     names = list(smoothed)
@@ -2076,9 +2077,9 @@ def _run_scenario(
     # Sensor series: interpolated at the physical points on each model's own grid
     # (using that backend's solver-specific dim mapping), so no regridding bias
     # enters the comparison.
-    # The observation operator never sees the per-frame series: in `intervals`
-    # mode it reduces each `interval_seconds` window to one number. Draw that
-    # view too, as a sliding window of the same length and reduction.
+    # The assimilation never sees the per-frame series: its aggregator reduces
+    # each `interval_seconds` window to one number. Draw that view too, as a
+    # sliding window of the same length and reduction.
     interval_seconds = cfg.obs.get("interval_seconds")
     aggregation_mode = str(cfg.obs.get("aggregation_mode") or "mean")
     if interval_seconds is None:

@@ -38,6 +38,7 @@ Source tree:
 ```
 libs/data-assimilation/src/data_assimilation/
   observation_operator.py   # ObservationOperator, TemporalObservationOperator,
+                            #   AggregateObservations, flatten_observations,
                             #   sensor_observation_coords
   interpolation.py          # trilinear grid-to-point interpolation
   reduction.py              # Current and streaming SVD/POD state reduction
@@ -112,33 +113,53 @@ variable block**.
 
 ### `TemporalObservationOperator`
 
-Wraps `ObservationOperator` with time aggregation over the window's
-`time` dimension. Constructor args:
+Wraps `ObservationOperator` and applies it to *every frame* of the window's
+`time` dimension. Takes only the base operator; it performs **no
+aggregation**. `__call__` returns an `xarray.DataArray` — dims
+`("time", "obs")` for a single state, `("ensemble", "time", "obs")` for an
+ensemble — carrying the state's seconds-valued `time` coordinate. The `obs`
+axis has length `num_sensors * len(obs_states)` with the base operator's
+layout (`[all_sensors_for_var0, all_sensors_for_var1, ...]`).
 
-- `mode`: one of `"mean"`, `"median"`, `"max"`, `"min"`, `"full"`,
-  `"intervals"`.
-- `interval_seconds`: required when `mode="intervals"`.
-- `aggregation_mode`: aggregation function applied within each interval
-  (`"mean"` default). Only used when `mode="intervals"`.
+Temporal aggregation is *not* the operator's job anymore: it lives in
+`AggregateObservations` and is performed inside the DA classes (see below),
+so the raw time-resolved observations stay available to whichever method
+wants them.
 
-**`"intervals"` (the config default).** Frames are binned by their `time`
-coordinate (in seconds) into contiguous `interval_seconds`-wide windows:
-frame at time `t` belongs to bin `floor((t - t0) / interval_seconds)`.
-All frames in a bin are aggregated with `aggregation_mode`, then the
-per-sensor vectors are concatenated across bins. The total observation
-count is `num_intervals * num_sensors * len(obs_states)` and is not known
-until the first call (the operator detects `_num_intervals` lazily).
+### `AggregateObservations`
 
-**`"full"` mode.** Each time step contributes its own observation block;
-the output length is `T * num_sensors * len(obs_states)`. `_num_time_steps`
-is either passed at construction or detected from the first call.
+A standalone callable `AggregateObservations(interval_seconds, mode="mean")`
+that maps an observation DataArray (dims `(..., "time", "obs")`) to an
+aggregated one. Frames are binned by their `time` coordinate (in seconds)
+into contiguous `interval_seconds`-wide bins — frame at time `t` belongs to
+bin `floor((t - t0) / interval_seconds)` — and reduced within each bin with
+`mode` (`"mean"`, `"median"`, `"max"`, `"min"`). The output keeps the dims,
+with `time` re-labelled to the interval start times. Bins are **absolute**:
+an empty interval raises (a silent gap would misalign the flattened vector),
+and the interval count is fixed by the first call — a later call producing a
+different count raises, because `C_D` is sized from the first window.
+
+It is an **optional constructor input to the DA classes**
+(`aggregate_observations=` on the ESMDA smoothers, `BaseFilter` /
+`EnsembleKalmanFilter`, and `FilterSmoothingESMDA`). Each class routes both
+the real observations and the predicted observations `H(x)` through one
+`_get_observations` path: optional aggregation, then the module-level
+`flatten_observations` helper — a time-major flatten (`("time", "obs") →
+(T·num_obs,)`, ensemble inputs to `(N_e, T·num_obs)`), which reproduces the
+historical `[interval0 block, interval1 block, ...]` vector layout. With
+`aggregate_observations=None` the full time-resolved vector is assimilated.
 
 The physical (x, y, z) position of each observation in the flattened
-vector is the sensor location, independent of which variable or interval it
-belongs to — because the sensor is the innermost axis. This ordering is
-exploited by `_BaseESMDA._observation_coords` when building coordinates for
-distance-based localization (observation `j` lives at sensor
+vector is the sensor location, independent of which variable, frame, or
+interval it belongs to — because the sensor is the innermost axis. This
+ordering is exploited by `_BaseESMDA._observation_coords` when building
+coordinates for distance-based localization (observation `j` lives at sensor
 `j % num_sensors`).
+
+Aggregating *observations* (this class) instead of *states* (the old
+operator modes) is exactly equivalent for `"mean"` — the operator is linear
+in the state — and differs slightly for `median`/`max`/`min`; `mean` is the
+default everywhere.
 
 ---
 
@@ -481,10 +502,10 @@ analysis to the state *at the end of the segment* and/or the parameters, and
 warm-start the next cycle from the analyzed state. Each observation batch is
 consumed exactly once — there is no MDA schedule. The observation operator is
 applied to the whole segment, so with the config-default
-`TemporalObservationOperator(mode="intervals")` and one interval per segment
-the batch is the segment's interval mean — an observation *of the segment*,
-assimilated into the end-of-segment state (an operator choice, not an
-approximation error).
+`AggregateObservations` (interval mean, passed as `aggregate_observations=`)
+and one interval per segment the batch is the segment's interval mean — an
+observation *of the segment*, assimilated into the end-of-segment state (an
+aggregation choice, not an approximation error).
 
 ### `BaseFilter` / `EnsembleKalmanFilter`
 
@@ -1220,10 +1241,13 @@ for window in range(cfg.esmda.num_assimilation_windows):
     prior_state = posterior_state  # warm-start next window
 ```
 
-`create_observation_operator` builds a `TemporalObservationOperator` (mode
-`"intervals"` by default) wrapping an `ObservationOperator` using the
-case's `obs_x/y/z_points`. `create_C_D` produces the diagonal
-`σ² I` error covariance. The script also constructs validation sensors
+`create_observation_operator` builds a `TemporalObservationOperator`
+(time-resolved xarray output) wrapping an `ObservationOperator` using the
+case's `obs_x/y/z_points`; `create_aggregate_observations` builds the
+optional `AggregateObservations` from `obs.interval_seconds` /
+`obs.aggregation_mode`, which the script passes to the DA class. `create_C_D`
+produces the diagonal `σ² I` error covariance, sized from the aggregated
+first-window observation vector. The script also constructs validation sensors
 (never assimilated; scored as held-out check) and handles inline vs. on-disk
 truth; see `codebase_guide.md §6` and the script's docstring.
 

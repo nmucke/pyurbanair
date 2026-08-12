@@ -38,8 +38,10 @@ from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.localization.correlation import CorrelationLocalization
 from data_assimilation.localization.distance import DistanceLocalization
 from data_assimilation.observation_operator import (
+    AggregateObservations,
     ObservationOperator,
     TemporalObservationOperator,
+    flatten_observations,
 )
 from data_assimilation.reduction import OnlineStateReduction, StreamingStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing
@@ -52,6 +54,7 @@ from data_assimilation.smoothing.esmda import (
 )
 
 __all__ = [
+    "AggregateObservations",
     "AnalysisScheme",
     "BaseFilter",
     "BaseLocalization",
@@ -87,5 +90,6 @@ __all__ = [
     "TemporalObservationOperator",
     "TimeVaryingParameterESMDA",
     "WindowDiagnostics",
+    "flatten_observations",
     "run_moving_window",
 ]

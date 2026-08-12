@@ -301,8 +301,10 @@ def test_obs_index_coords_matches_the_operator_flattening() -> None:
     and checks the decoded labels select the right entries.
     """
     from data_assimilation.observation_operator import (
+        AggregateObservations,
         ObservationOperator,
         TemporalObservationOperator,
+        flatten_observations,
     )
 
     n_sensors, states = 3, ["u", "v"]
@@ -313,9 +315,8 @@ def test_obs_index_coords_matches_the_operator_flattening() -> None:
         obs_states=states,
         solver_name="pylbm",
     )
-    operator = TemporalObservationOperator(
-        base, mode="intervals", interval_seconds=1.0, aggregation_mode="mean"
-    )
+    operator = TemporalObservationOperator(base)
+    aggregate = AggregateObservations(interval_seconds=1.0, mode="mean")
 
     # u = 100*interval + sensor, v = u + 10, constant within an interval, so
     # every flat entry is self-identifying.
@@ -330,7 +331,8 @@ def test_obs_index_coords_matches_the_operator_flattening() -> None:
         coords={"time": times, "z": [0.0], "y": [0.0], "x": x},
     )
 
-    flat = np.asarray(operator(state)).ravel()
+    # The runner's own path: operator -> aggregation -> time-major flatten.
+    flat = flatten_observations(aggregate(operator(state)))
     coords = _obs_index_coords(operator, flat.size)
     assert set(coords) == {"obs_sensor", "obs_state", "obs_interval"}
 
