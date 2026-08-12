@@ -38,6 +38,7 @@ import jax.numpy as jnp
 import jax.scipy.linalg
 import numpy as np
 import xarray
+from tqdm import tqdm
 from data_assimilation.augmentation import ParamAugmentation, StateAugmentation
 from data_assimilation.filtering.analysis import (
     LOCALIZATION_POLICIES,
@@ -686,7 +687,12 @@ _TrajectoryStateFilter` does, aggregating them into the single flat frame the
         )
         state_history: list[xarray.Dataset] = []
 
-        for cycle in range(num_cycles):
+        pbar = tqdm(
+            range(num_cycles),
+            desc="Filter cycles",
+            unit="cycle",
+        )
+        for cycle in pbar:
             self._set_cycle_results_dir(cycle)
 
             forecast = self._forecast_step(
@@ -740,7 +746,7 @@ _TrajectoryStateFilter` does, aggregating them into the single flat frame the
                     params_history.append(params)
 
             self._prune_cycle_results_dir(cycle, num_cycles)
-            logger.info("Filter cycle %d completed", cycle)
+            # logger.info("Filter cycle %d completed", cycle)
 
         return FilterResult(
             params=params,
