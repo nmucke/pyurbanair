@@ -150,7 +150,7 @@ common=(
   # instead — only then are the truth_params overrides below actually used.
   "run.truth_dir=${TRUTH_DIR}" "run.truth_start_time=${TRUTH_START}"
   run.skip_viz=false
-  obs.interval_seconds=5.0
+  esmda.interval_seconds=5.0
   # Always 4 vertical levels, regardless of SIZE (overrides the per-size domain).
   domain.nz=4
   truth_params.correlation_length=30

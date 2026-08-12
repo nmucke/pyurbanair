@@ -19,7 +19,8 @@ Written into the run directory:
                                       held-out validation sensors, one line per model.
   * ``sensor_rolling_<set>.png``    -- the same sensors smoothed by a sliding
                                       window of the assimilation's aggregation
-                                      length, ``obs.interval_seconds``.
+                                      length,
+                                      ``compare.analysis.interval_seconds``.
   * ``sensor_metrics_<set>.png`` / ``sensor_metrics.csv`` -- rolling-window
                                       bias, MAE, RMSE, correlation, and spread
                                       ratio against the reference.
@@ -2080,12 +2081,12 @@ def _run_scenario(
     # The assimilation never sees the per-frame series: its aggregator reduces
     # each `interval_seconds` window to one number. Draw that view too, as a
     # sliding window of the same length and reduction.
-    interval_seconds = cfg.obs.get("interval_seconds")
-    aggregation_mode = str(cfg.obs.get("aggregation_mode") or "mean")
+    interval_seconds = cfg.compare.analysis.get("interval_seconds")
+    aggregation_mode = str(cfg.compare.analysis.get("aggregation_mode") or "mean")
     if interval_seconds is None:
         print(
-            "obs.interval_seconds is unset; skipping the sliding-window "
-            "sensor figures."
+            "compare.analysis.interval_seconds is unset; skipping the "
+            "sliding-window sensor figures."
         )
 
     sensor_rmse: dict[str, dict[str, float]] = {}
@@ -2331,8 +2332,8 @@ def _compare_parameter_scenarios_within_model(
     )
 
     sensor_sets = build_sensor_sets(cfg)
-    interval_seconds = cfg.obs.get("interval_seconds")
-    aggregation_mode = str(cfg.obs.get("aggregation_mode") or "mean")
+    interval_seconds = cfg.compare.analysis.get("interval_seconds")
+    aggregation_mode = str(cfg.compare.analysis.get("aggregation_mode") or "mean")
     sensor_rmse: dict[str, dict[str, float]] = {}
     metric_rows: list[dict] = []
     solver_name = str(cfg.models[model_name].solver_name)

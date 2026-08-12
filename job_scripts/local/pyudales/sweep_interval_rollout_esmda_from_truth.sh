@@ -1,5 +1,5 @@
 #!/bin/bash
-# Thin wrapper: LOCAL sweep over the observation interval (obs.interval_seconds,
+# Thin wrapper: LOCAL sweep over the observation interval (esmda.interval_seconds,
 # the time-aggregation bin width) for the pyudales backend.
 #
 # Delegates to the shared engine ../sweep_base.sh, which defines the canonical

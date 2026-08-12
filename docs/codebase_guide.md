@@ -448,10 +448,13 @@ def test_something(compose_test_cfg) -> None:
   configs use coordinate-based, built by `create_observation_operator` /
   `create_observation_points` in `hydra_helpers.py`.
 - Variable→dim mapping handles each backend's staggered grids.
-- `TemporalObservationOperator` wraps it with time aggregation:
-  `mean | median | max | min | full | intervals`. `intervals` is the
-  config default — observations are binned by their `time` coordinate (in
-  seconds) into `interval_seconds`-wide windows and aggregated within each.
+- `TemporalObservationOperator` wraps it and applies it per output frame,
+  returning a time-resolved labelled xarray. Interval aggregation lives in
+  `AggregateObservations` (same module), an optional input to the DA classes:
+  observations are binned by their `time` coordinate (in seconds) into
+  `interval_seconds`-wide windows and aggregated within each — configured on
+  the run config's algorithm node (`esmda.interval_seconds` /
+  `aggregation_mode`, likewise `filtering.*` and `filter_smoothing.*`).
 
 ### ESMDA
 - `BaseSmoothing` ([libs/data-assimilation/src/data_assimilation/smoothing/base.py](../libs/data-assimilation/src/data_assimilation/smoothing/base.py))

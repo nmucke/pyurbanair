@@ -161,6 +161,13 @@ operator modes) is exactly equivalent for `"mean"` — the operator is linear
 in the state — and differs slightly for `median`/`max`/`min`; `mean` is the
 default everywhere.
 
+Because aggregation is a DA choice rather than an operator argument, its two
+knobs live on the run config's algorithm node — `esmda.interval_seconds` /
+`esmda.aggregation_mode` (and `filtering.*` / `filter_smoothing.*`), right next
+to `obs_error_std` — not in the case's `obs:` block, which carries only
+observation-operator arguments. `create_aggregate_observations` (§11) reads
+them; a null `interval_seconds` means full-resolution assimilation.
+
 ---
 
 ## 3. Interpolation
@@ -1244,8 +1251,10 @@ for window in range(cfg.esmda.num_assimilation_windows):
 `create_observation_operator` builds a `TemporalObservationOperator`
 (time-resolved xarray output) wrapping an `ObservationOperator` using the
 case's `obs_x/y/z_points`; `create_aggregate_observations` builds the
-optional `AggregateObservations` from `obs.interval_seconds` /
-`obs.aggregation_mode`, which the script passes to the DA class. `create_C_D`
+optional `AggregateObservations` from the run config's algorithm node
+(`esmda.interval_seconds` / `esmda.aggregation_mode`; `filtering.*` and
+`filter_smoothing.*` for the other two entry points — aggregation is a DA
+choice, not an operator argument), which the script passes to the DA class. `create_C_D`
 produces the diagonal `σ² I` error covariance, sized from the aggregated
 first-window observation vector. The script also constructs validation sensors
 (never assimilated; scored as held-out check) and handles inline vs. on-disk

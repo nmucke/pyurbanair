@@ -69,7 +69,7 @@ SPINUP_TIME="${SPINUP_TIME:-50.0}"             # constant-inflow plateau before 
 # sweep_base.sh), so a one-off run reproduces a sweep's fixed point. The ensemble
 # and interval sweep launchers still override these per job via the environment.
 ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-64}"
-INTERVAL_SECONDS="${INTERVAL_SECONDS:-10.0}"   # obs.interval_seconds: time-aggregation bin width [s]
+INTERVAL_SECONDS="${INTERVAL_SECONDS:-10.0}"   # esmda.interval_seconds: time-aggregation bin width [s]
 
 # --- Dynamic (time-varying) parameter settings ------------------------------
 # The smoother and parameter groups that make the inflow parameters time-varying,

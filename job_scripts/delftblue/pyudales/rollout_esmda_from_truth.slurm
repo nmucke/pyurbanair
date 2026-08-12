@@ -48,7 +48,7 @@ NY="${NY:-40}"
 NZ="${NZ:-16}"
 ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-96}"
 NUM_ESMDA_STEPS="${NUM_ESMDA_STEPS:-3}"
-INTERVAL_SECONDS="${INTERVAL_SECONDS:-20.0}"   # obs.interval_seconds: time-aggregation bin width [s]
+INTERVAL_SECONDS="${INTERVAL_SECONDS:-20.0}"   # esmda.interval_seconds: time-aggregation bin width [s]
 # Optional extra RESULTS_DIR suffix so launchers running several configurations
 # at the SAME grid/ensemble/steps/interval (e.g. the state-estimation methods
 # sweep) do not collide.
@@ -100,7 +100,7 @@ pixi run -e "${ENV}" -- python -u \
     ensemble.ensemble_size="${ENSEMBLE_SIZE}" \
     ensemble.num_parallel_processes="${NUM_PARALLEL}" \
     esmda.num_steps="${NUM_ESMDA_STEPS}" \
-    obs.interval_seconds="${INTERVAL_SECONDS}" \
+    esmda.interval_seconds="${INTERVAL_SECONDS}" \
     "hydra.run.dir=${RESULTS_DIR}" \
     "${EXTRA_FLAGS[@]}" \
     "$@"

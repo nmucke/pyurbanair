@@ -368,7 +368,7 @@ def _streaming_state_summary(path):
 # time-major, and within each time entry ``ObservationOperator`` concatenates per
 # state component, each block holding all sensors. So the sensor index is the
 # fastest axis and the time entry (an aggregation interval when
-# ``obs.interval_seconds`` is set, otherwise an output frame) the slowest:
+# ``esmda.interval_seconds`` is set, otherwise an output frame) the slowest:
 #
 #     j = interval * (n_states * n_sensors) + state * n_sensors + sensor
 #
@@ -386,8 +386,9 @@ def _streaming_state_summary(path):
 _OBS_DIM = "obs_index"
 _OBS_ORDERING = (
     "obs_index j = interval*(n_states*n_sensors) + state*n_sensors + sensor; "
-    "the sensor index is the fastest-varying axis. Without obs.interval_seconds "
-    "the slowest axis is the output frame rather than an aggregation interval, "
+    "the sensor index is the fastest-varying axis. Without "
+    "esmda.interval_seconds the slowest axis is the output frame rather than "
+    "an aggregation interval, "
     "and obs_interval indexes frames."
 )
 
@@ -403,7 +404,8 @@ def _obs_index_coords(obs_op, n_d):
     sensor) blocks, so an unusual operator costs metadata rather than the whole
     artifact.
 
-    ``obs_interval`` counts aggregation intervals when ``obs.interval_seconds``
+    ``obs_interval`` counts aggregation intervals when
+    ``esmda.interval_seconds``
     is set and output *frames* when it is not; the arithmetic is identical
     either way, and the file attrs say so.
     """
@@ -782,7 +784,7 @@ def run(cfg: DictConfig) -> None:
     # Interval aggregation (or None for full-resolution assimilation). ONE
     # instance, shared between the C_D sizing below and the smoother, so its
     # interval-count consistency check spans the truth and the forecasts.
-    aggregate_obs = create_aggregate_observations(cfg.obs)
+    aggregate_obs = create_aggregate_observations(cfg.esmda)
 
     # --- Observation error covariance ---------
     # Truth frames sit on a uniform grid over [0, sim_time*num_windows); each

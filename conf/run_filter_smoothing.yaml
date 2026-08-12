@@ -45,9 +45,9 @@
 #   * run.truth_dir=<path> -> load a state.nc/params.nc artifact
 #
 # One cycle = one forecast segment of `time.simulation_time` seconds; set it
-# equal to `obs.interval_seconds` to assimilate one observation interval per
-# analysis. Unlike run_filtering.yaml, the PRIOR must be DYNAMIC (time-varying):
-# this method estimates a whole parameter TRAJECTORY, so pair with
+# equal to `filter_smoothing.interval_seconds` to assimilate one observation
+# interval per analysis. Unlike run_filtering.yaml, the PRIOR must be DYNAMIC
+# (time-varying): this method estimates a whole parameter TRAJECTORY, so pair with
 # `params@prior_params=dynamic` (AR(2)). `time.seconds_per_knot` sets that
 # trajectory's resolution independently of the cycle length (see below); the
 # script validates the sampled knot grid loudly and derives the trajectory length
@@ -185,6 +185,12 @@ filter_smoothing:
   alpha: null
   seed: 42
   obs_error_std: 0.25
+  # Observation aggregation: each cycle's time-resolved observations are binned
+  # into contiguous `interval_seconds`-wide intervals and reduced within each by
+  # `aggregation_mode` (mean|median|max|min) before the update sees them. null
+  # `interval_seconds` -> full-resolution assimilation (every output frame).
+  interval_seconds: 30.0
+  aggregation_mode: mean
   # Common random numbers across the outer iterations: the inner stochastic
   # analysis (and any inflation noise) reuse ONE key per window, so the map
   # Theta -> D is pseudo-deterministic and the ESMDA cross-covariances are not

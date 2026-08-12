@@ -73,8 +73,8 @@ the truth is generated over the whole horizon up front, each segment's
 time-resolved observations are extracted with the case's temporal observation
 operator, and the estimator consumes that list of ``T`` labelled batches —
 aggregating each into the interval means it assimilates through the same path
-as the predicted observations (``obs.interval_seconds``; null assimilates every
-frame).
+as the predicted observations (``filter_smoothing.interval_seconds``; null
+assimilates every frame).
 
 That horizon is ``T = num_cycles + (num_windows - 1) * window_shift`` cycles.
 With the default ``num_windows=1`` it is just ``num_cycles``, and the estimator
@@ -480,11 +480,12 @@ def run(cfg: DictConfig) -> None:
     # --- Observation operators and per-cycle observations ----------------------
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
-    # Interval aggregation of the observation space (null obs.interval_seconds
+    # Interval aggregation of the observation space (null
+    # filter_smoothing.interval_seconds
     # -> full-resolution assimilation). Deliberately ONE instance, shared
     # between the C_D sizing below and the estimator, so its interval-count
     # consistency check spans both.
-    aggregate_obs = create_aggregate_observations(cfg.obs)
+    aggregate_obs = create_aggregate_observations(cfg.filter_smoothing)
 
     obs_error_std = float(cfg.filter_smoothing.obs_error_std)
 

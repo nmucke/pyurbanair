@@ -54,9 +54,9 @@ the truth is generated over ``filtering.num_cycles`` such segments up front,
 each segment's time-resolved observations are extracted with the case's
 temporal observation operator, and the filter consumes the resulting list of
 per-cycle observation DataArrays in a single ``run()`` call — aggregating each
-one (``obs.interval_seconds``) exactly like the predicted observations. To
-assimilate one observation interval per analysis (the plan's default cadence),
-set ``time.simulation_time`` equal to ``obs.interval_seconds``.
+one (``filtering.interval_seconds``) exactly like the predicted observations.
+To assimilate one observation interval per analysis (the plan's default
+cadence), set ``time.simulation_time`` equal to ``filtering.interval_seconds``.
 
 The PRIOR must be a static scalar sampler (the filter estimates the parameter
 value *now*, re-tracked each cycle; a time-varying/AR(2) posterior stays with
@@ -253,7 +253,7 @@ def run(cfg: DictConfig) -> None:
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
 
-    aggregate_obs = create_aggregate_observations(cfg.obs)
+    aggregate_obs = create_aggregate_observations(cfg.filtering)
 
     obs_error_std = float(cfg.filtering.obs_error_std)
     observations: list[Any] = []

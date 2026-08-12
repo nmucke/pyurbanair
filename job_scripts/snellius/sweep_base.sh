@@ -57,7 +57,7 @@ ESMDA_STEPS=(
   "4   24:00:00"
 )
 # Observation-interval sweep: "INTERVAL_SECONDS TIME", at the fixed grid +
-# ensemble + steps below. obs.interval_seconds is the temporal-aggregation bin
+# ensemble + steps below. esmda.interval_seconds is the temporal-aggregation bin
 # width; cost is ~flat across intervals (same number of ensemble forward solves).
 INTERVAL_SECONDS_LIST=(
   "10   16:00:00"

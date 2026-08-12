@@ -807,7 +807,7 @@ _E2E_OVERRIDES = [
     "obs.x_points=[2.5,2.5,18.0,18.0]",
     "obs.y_points=[5.0,15.0,5.0,15.0]",
     "obs.z_points=[3.0,3.0,3.0,3.0]",
-    "obs.interval_seconds=3.0",
+    "esmda.interval_seconds=3.0",
     "truth_model.forward_model.cuda=false",
     "assim_model.forward_model.cuda=false",
 ]

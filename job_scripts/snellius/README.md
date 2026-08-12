@@ -163,7 +163,7 @@ snellius/
   `sbatch`-able too.
 - the four sweep wrappers (domain / ensemble / esmda_steps / interval) are thin
   and identical across folders — they delegate to `../sweep_base.sh` with the
-  sibling `.slurm`. The `interval` sweep varies `obs.interval_seconds` (the
+  sibling `.slurm`. The `interval` sweep varies `esmda.interval_seconds` (the
   observation temporal-aggregation bin width) at a fixed grid + ensemble + steps.
 
 Run a sweep with one backend (submits one job per point), or the same sweep

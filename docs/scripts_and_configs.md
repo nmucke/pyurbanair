@@ -38,7 +38,9 @@ cross-model score. In addition to snapshots and sensor series it writes
 time-windowed fluid-cell mean/spread maps, STL-derived upstream/canopy/wake
 profiles, PDFs/CDFs, sensor spectra/autocorrelations, and wake-recovery metrics.
 `compare.analysis` controls the statistical window, compact full-height grid,
-wall-cell exclusion, distribution sampling, and wake-recovery threshold. Its
+wall-cell exclusion, distribution sampling, wake-recovery threshold, and the
+sensor-series smoothing window (`interval_seconds` / `aggregation_mode`, this
+script's own copy of the assimilation's aggregation knobs). Its
 regions are inferred from the selected STL and assume the dominant flow is in
 the +x direction.
 
@@ -87,6 +89,8 @@ rather than pulling them from separate files. The table below summarises each.
 | `num_assimilation_windows` | 3 | Number of sequential assimilation windows (1 = single window). |
 | `seed` | 42 | JAX RNG seed. |
 | `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors). |
+| `interval_seconds` | 30.0 | Width of the observation-aggregation intervals (s): the time-resolved observations are binned into contiguous intervals of this length and reduced within each before the update sees them. `null` = full-resolution assimilation (every output frame). |
+| `aggregation_mode` | `mean` | Reduction applied within each interval: `mean` \| `median` \| `max` \| `min`. |
 | `localization` | `null` | Set by the `esmda/localization` group; `null` = global (unlocalized) update. |
 | `state_reduction` | `null` | Set by the `esmda/state_reduction` group; `null` = full-space update. |
 | `final_time_smoothing` | `false` | Post-loop Kalman update of the full trajectory (requires `state_reduction`). |
@@ -98,6 +102,8 @@ rather than pulling them from separate files. The table below summarises each.
 | `num_cycles` | 2 | Number of filter cycles; each forecasts one segment of `time.simulation_time` and applies ONE full-weight analysis. |
 | `seed` | 42 | JAX RNG seed. |
 | `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors). |
+| `interval_seconds` | 30.0 | Width of the observation-aggregation intervals (s): the time-resolved observations are binned into contiguous intervals of this length and reduced within each before the update sees them. `null` = full-resolution assimilation (every output frame). |
+| `aggregation_mode` | `mean` | Reduction applied within each interval: `mean` \| `median` \| `max` \| `min`. |
 | `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
 | `analysis` | (group) | Set by `filtering/analysis` (default `stochastic`); `etkf*`/`letkf*` are the deterministic ensemble transforms and constrain `localization` (§1.8). |
 | `localization` | (group) | Set by `filtering/localization` (default `none`). |
@@ -117,6 +123,8 @@ rather than pulling them from separate files. The table below summarises each.
 | `alpha` | `null` | Tempering denominator; `null` = `num_steps` (equal weights, the standard ESMDA schedule). |
 | `seed` | 42 | JAX RNG seed. |
 | `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors, per cycle). |
+| `interval_seconds` | 30.0 | Width of the observation-aggregation intervals (s): the time-resolved observations are binned into contiguous intervals of this length and reduced within each before the update sees them. `null` = full-resolution assimilation (every output frame). |
+| `aggregation_mode` | `mean` | Reduction applied within each interval: `mean` \| `median` \| `max` \| `min`. |
 | `common_inner_noise` | `true` | Reuse one inner RNG key across iterations, so the map `Θ → D` is deterministic and the outer cross-covariances are not diluted by fresh Monte Carlo noise. `false` = independent draws. The outer perturbed-observation draws always use fresh subkeys. |
 | `inner_analysis` | (group) | Set by `filter_smoothing/inner_analysis` (default `stochastic`); the same `AnalysisScheme` classes as `filtering/analysis`, and they constrain `inner_localization` the same way (§1.9). |
 | `inner_localization` | (group) | Set by `filter_smoothing/inner_localization` (default `none`). |
@@ -158,7 +166,10 @@ Benchmark staggered cube array (Xie & Castro 2008). Default case.
   three CFD backends.
 - **Sensors** (`obs.mode: points`): 6 assimilation sensors in open N-S lanes at street level
   (`z=2 m`), plus 2 held-out validation sensors. States observed: `u, v`.
-  Aggregation: `mean` over `interval_seconds=60.0` intervals.
+  The case block holds observation-*operator* arguments only; observation
+  aggregation is a DA knob and lives on the run configs' algorithm node
+  (`esmda.interval_seconds` / `esmda.aggregation_mode`, and the `filtering.*` /
+  `filter_smoothing.*` equivalents).
 - **Time**: `simulation_time=300 s`, `output_frequency=2 s`, `spinup_time=50 s` per window.
 
 #### [`case/barcelona.yaml`](../conf/case/barcelona.yaml)
@@ -173,7 +184,6 @@ Real Barcelona urban geometry (~900 × 870 × 85 m domain).
   classifier (~30+ min on 422k facets).
 - **Sensors**: 6 assimilation sensors on a 3×2 grid at `z=3 m` (street-canyon level),
   verified ≥ 6 m from any building. States observed: `u, v, w`.
-  Aggregation: `mean` over `interval_seconds=30.0` intervals.
 - **Time**: `simulation_time=1200 s`, `output_frequency=10 s`, `spinup_time=500 s` per window.
 
 ---
@@ -596,11 +606,12 @@ What makes it a controlled comparison:
   does **not** extrapolate on that path), so targets are clamped per component.
 - Sensor series use `_sensor_component_timeseries` at the physical sensor points
   on each model's own grid, so they carry no regridding bias. They are drawn
-  twice: raw per-frame, and smoothed by a *sliding* window of the observation
-  operator's `obs.interval_seconds` length reduced by `obs.aggregation_mode` —
-  the same suppression of sub-interval fluctuation `AggregateObservations`
-  applies, without the arbitrary phase of its disjoint bin grid. Skipped when
-  `obs.interval_seconds` is unset. The window is centred and rounded to an *odd*
+  twice: raw per-frame, and smoothed by a *sliding* window of
+  `compare.analysis.interval_seconds` length reduced by
+  `compare.analysis.aggregation_mode` — the same suppression of sub-interval
+  fluctuation the assimilation's `AggregateObservations` applies, without the
+  arbitrary phase of its disjoint bin grid. Skipped when
+  `compare.analysis.interval_seconds` is unset. The window is centred and rounded to an *odd*
   frame count (an even centred window sits half a frame left of centre, and since
   the count comes from each model's own cadence that would put a spurious
   relative phase shift between the compared curves). Aggregating the sensor

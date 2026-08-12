@@ -87,8 +87,6 @@ obs:
 
   states: [u, v]
   temporal_mode: full
-  interval_seconds: 60.0
-  aggregation_mode: mean
 
 time:
   # Per-window simulation horizon for this geometry (seconds). One assimilation

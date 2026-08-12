@@ -1,5 +1,5 @@
 #!/bin/bash
-# Thin wrapper: LOCAL sweep over observation interval (obs.interval_seconds) for
+# Thin wrapper: LOCAL sweep over observation interval (esmda.interval_seconds) for
 # the neural-surrogate backend.
 #
 # Delegates to the shared engine ../sweep_base.sh, which defines the canonical

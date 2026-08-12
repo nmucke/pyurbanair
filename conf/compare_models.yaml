@@ -82,6 +82,13 @@ compare:
   analysis:
     statistics_window_seconds: 30.0
     max_statistics_windows: 4
+    # Sensor-series smoothing: the time-resolved sensor traces are also drawn
+    # (and scored) after reducing a sliding `interval_seconds`-wide window to one
+    # number by `aggregation_mode` (mean|median|max|min) — the view the data
+    # assimilation entry points assimilate. null `interval_seconds` -> skip the
+    # smoothed panels and score the full-resolution series only.
+    interval_seconds: 30.0
+    aggregation_mode: mean
     # Vertical profiles/wake diagnostics use this smaller grid to keep the
     # additional full-height interpolation compact.
     profile_grid:

@@ -143,7 +143,7 @@ makes "the exact same thing" enforceable rather than copy-pasted.
 
 Note the **grid resolution `NX`/`NY`/`NZ` is NOT here** — it is a sweep parameter
 and lives in each runner (defaulted, env-overridable). Likewise `ENSEMBLE_SIZE`,
-`NUM_ESMDA_STEPS` and `INTERVAL_SECONDS` (the `obs.interval_seconds` bin width).
+`NUM_ESMDA_STEPS` and `INTERVAL_SECONDS` (the `esmda.interval_seconds` bin width).
 
 ### `sweep_base.sh` — canonical swept values (one place, all backends)
 
@@ -152,7 +152,7 @@ Defines the four value lists used by every backend:
 - `RESOLUTIONS` — coarse → ground-truth grid (`25 20 8` … `100 80 32`).
 - `ENSEMBLE_SIZES` — `8 16 32 64`, at a fixed grid.
 - `ESMDA_STEPS` — `1 2 4 8`, at a fixed grid + ensemble.
-- `INTERVAL_SECONDS_LIST` — `10 20 30 60`, the `obs.interval_seconds`
+- `INTERVAL_SECONDS_LIST` — `10 20 30 60`, the `esmda.interval_seconds`
   time-aggregation bin width, at a fixed grid + ensemble + steps.
 
 Plus the `FIXED_*` values for the dimensions each sweep holds constant. Edit

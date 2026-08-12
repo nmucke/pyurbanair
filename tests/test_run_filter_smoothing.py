@@ -50,7 +50,7 @@ def _overrides(
         "obs.x_points=[2.5,2.5,18.0,18.0]",
         "obs.y_points=[5.0,15.0,5.0,15.0]",
         "obs.z_points=[3.0,3.0,3.0,3.0]",
-        "obs.interval_seconds=3.0",
+        "filter_smoothing.interval_seconds=3.0",
         # The knot spacing is free (it is the trajectory's resolution, not the
         # cycle length), but conftest's _SMOKE_OVERRIDES pins it to 1.5 — half a
         # cycle — and the assertions below count knots. Restore the entry

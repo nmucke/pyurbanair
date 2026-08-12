@@ -230,25 +230,29 @@ def create_observation_operator(
             f"Invalid obs.temporal_mode '{obs['temporal_mode']}'. The temporal "
             "operator now always returns full time-resolved observations; "
             "temporal aggregation moved to AggregateObservations. Set "
-            "obs.temporal_mode=full and configure obs.interval_seconds (and "
-            "obs.aggregation_mode) instead."
+            "obs.temporal_mode=full and configure interval_seconds (and "
+            "aggregation_mode) on the run config's algorithm node "
+            "(esmda/filtering/filter_smoothing) instead."
         )
 
     return TemporalObservationOperator(operator)
 
 
-def create_aggregate_observations(obs_cfg: Any) -> AggregateObservations | None:
+def create_aggregate_observations(cfg: Any) -> AggregateObservations | None:
     """Build the observation aggregator, or None for full-resolution assimilation.
 
-    ``obs.interval_seconds`` absent or null means the data assimilation
-    assimilates the full time-resolved observation vector.
+    Reads ``interval_seconds`` / ``aggregation_mode`` off the run config's
+    algorithm node (``esmda`` / ``filtering`` / ``filter_smoothing``):
+    aggregation is a data-assimilation choice, not an observation-operator
+    argument. An absent or null ``interval_seconds`` means the data
+    assimilation assimilates the full time-resolved observation vector.
     """
-    obs = _plain(obs_cfg)
-    interval_seconds = obs.get("interval_seconds")
+    node = _plain(cfg)
+    interval_seconds = node.get("interval_seconds")
     if interval_seconds is None:
         return None
     # A null aggregation_mode in the config means "use the default".
-    mode = obs.get("aggregation_mode") or "mean"
+    mode = node.get("aggregation_mode") or "mean"
     return AggregateObservations(interval_seconds=float(interval_seconds), mode=mode)
 
 
