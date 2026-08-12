@@ -19,9 +19,11 @@
 #   * run.truth_dir=null   -> simulate truth inline (default)
 #   * run.truth_dir=<path> -> load a state.nc/params.nc artifact
 #
-# One cycle = one forecast segment of `time.simulation_time` seconds; set it
-# equal to `filtering.interval_seconds` to assimilate one observation interval
-# per analysis. The PRIOR must be STATIC (pair with params@prior_params=static):
+# One cycle = one forecast segment of `time.simulation_time` seconds, whose
+# observation frames are assimilated SERIALLY — one full-weight analysis each,
+# in time order — so the segment length sets how many observations a cycle
+# assimilates. Unlike the smoothers, the filter never aggregates them.
+# The PRIOR must be STATIC (pair with params@prior_params=static):
 # the filter estimates a scalar it re-tracks each cycle, so a time-varying (AR(2))
 # posterior stays with run_esmda.py. The TRUTH may be dynamic
 # (params@truth_params=dynamic_truth) -- the filter then tracks a drifting truth,
@@ -104,17 +106,14 @@ ensemble:
 # the groups above;
 # `filtering.mode` picks which augmented blocks the analysis updates. ---
 filtering:
-  # One full-weight analysis per cycle; each cycle forecasts one segment of
-  # `time.simulation_time` seconds.
+  # Each cycle forecasts one segment of `time.simulation_time` seconds and
+  # assimilates that segment's observation frames one at a time (one
+  # full-weight analysis per frame, in time order). No aggregation knobs: the
+  # filter assimilates every output frame — aggregation stays with the ESMDA
+  # smoothers and the filter-smoothing hybrid.
   num_cycles: 250
   seed: 42
   obs_error_std: 0.25
-  # Observation aggregation: each cycle's time-resolved observations are binned
-  # into contiguous `interval_seconds`-wide intervals and reduced within each by
-  # `aggregation_mode` (mean|median|max|min) before the analysis sees them. null
-  # `interval_seconds` -> full-resolution assimilation (every output frame).
-  interval_seconds: 30.0
-  aggregation_mode: mean
   # state | parameter | joint. The parameter-updating modes (parameter and
   # joint) REQUIRE spread maintenance (filtering/evolution=random_walk or a
   # filtering/inflation option) — the filter refuses silently-collapsing

@@ -454,7 +454,8 @@ def test_something(compose_test_cfg) -> None:
   observations are binned by their `time` coordinate (in seconds) into
   `interval_seconds`-wide windows and aggregated within each — configured on
   the run config's algorithm node (`esmda.interval_seconds` /
-  `aggregation_mode`, likewise `filtering.*` and `filter_smoothing.*`).
+  `aggregation_mode`, likewise `filter_smoothing.*`). The sequential filter
+  takes no aggregator: it assimilates every frame of a segment serially.
 
 ### ESMDA
 - `BaseSmoothing` ([libs/data-assimilation/src/data_assimilation/smoothing/base.py](../libs/data-assimilation/src/data_assimilation/smoothing/base.py))

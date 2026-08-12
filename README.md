@@ -278,8 +278,10 @@ stored.
 
 Where ESMDA re-assimilates a whole window at once, `run_filtering.py` runs a
 **cycled Ensemble Kalman Filter**: each cycle forecasts one segment of
-`time.simulation_time` seconds (set it to `filtering.interval_seconds` to assimilate
-one observation interval per analysis) and applies a single full-weight analysis.
+`time.simulation_time` seconds and assimilates that segment's observation
+frames serially — one full-weight analysis per frame, in time order, with no
+aggregation (the segment length therefore sets how many observations a cycle
+assimilates).
 The mode is `filtering.mode=state | parameter | joint`, and the analysis math /
 localization / inflation / parameter-evolution are picked by the `filtering/*`
 groups. The **prior must be static** (`params@prior_params=static`) — the filter

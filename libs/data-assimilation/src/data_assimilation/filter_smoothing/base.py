@@ -220,15 +220,51 @@ class _TrajectoryStateFilter(EnsembleKalmanFilter):
     ``cycle_length`` is the number of seconds one cycle's forecast segment
     spans; without it the cycle index cannot be placed on the trajectory's
     (physical, seconds-valued) knot axis at all.
+
+    The second difference is the observation space. The plain filter assimilates
+    every observation frame of a segment serially, one analysis each; this
+    hybrid instead assimilates ONE batch per cycle — the paper's ``d_k`` — so
+    :meth:`_prepare_pred_obs` aggregates (when an aggregator is configured) and
+    flattens the operator's time-resolved output into a single frame. The real
+    observations arrive already flat from
+    :meth:`FilterSmoothingESMDA.observation_batches`, so both halves of the
+    innovation live in that same aggregated space and every inner cycle runs the
+    filter's ``T = 1`` path.
     """
 
     def __init__(
-        self, *args: Any, cycle_length: Optional[float] = None, **kwargs: Any
+        self,
+        *args: Any,
+        cycle_length: Optional[float] = None,
+        aggregate_observations: Optional[AggregateObservations] = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.cycle_length: Optional[float] = (
             None if cycle_length is None else float(cycle_length)
         )
+        #: Interval aggregator of the PREDICTED observations (the real ones are
+        #: aggregated once, by the outer estimator). ``None`` -> the full
+        #: time-resolved vector, still as one batch per cycle.
+        self.aggregate_observations = aggregate_observations
+
+    def _prepare_pred_obs(self, pred_obs: Any) -> jnp.ndarray:
+        """One cycle's predicted observations as a single ``(N_e, 1, N_d)`` frame.
+
+        Overrides the filter's per-frame normalization: a labelled
+        ``("ensemble", "time", "obs")`` DataArray is optionally aggregated and
+        then flattened time-major — the historical ``[interval0 block,
+        interval1 block, ...]`` layout the stacked window system ``D`` is built
+        from — and presented to the cycle loop as the one frame it assimilates.
+        Anything the operator already returns as an array is left to the base
+        implementation.
+        """
+        if not isinstance(pred_obs, xarray.DataArray):
+            return super()._prepare_pred_obs(pred_obs)
+        if self.aggregate_observations is not None:
+            pred_obs = self.aggregate_observations(pred_obs)
+        flat = jnp.asarray(flatten_observations(pred_obs))  # (N_e, N_d)
+        return flat[:, None, :]
 
     def _params_for_cycle(
         self,
@@ -443,9 +479,12 @@ class FilterSmoothingESMDA:
             inflation=inner_inflation,
             cycle_length=self.cycle_length,
             # The PREDICTED observations are aggregated where they are produced
-            # (the inner filter's observation step); the real ones are
-            # aggregated once by this class before the batches are handed down
-            # already flat -- see observation_batches.
+            # (the inner filter's _prepare_pred_obs override, which is why the
+            # aggregator lives on _TrajectoryStateFilter rather than on the
+            # plain filter -- that one assimilates every frame serially and
+            # aggregates nothing); the real ones are aggregated once by this
+            # class before the batches are handed down already flat -- see
+            # observation_batches.
             aggregate_observations=aggregate_observations,
         )
         # The whole method rests on this: ``D`` must be the forecast

@@ -28,7 +28,6 @@ from data_assimilation.inflation import RTPP, RTPS, MultiplicativeInflation
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.localization.correlation import CorrelationLocalization
 from data_assimilation.localization.distance import DistanceLocalization
-from data_assimilation.observation_operator import AggregateObservations
 from data_assimilation.reduction import OnlineStateReduction, StreamingStateReduction
 
 
@@ -149,8 +148,8 @@ class _TemporalToyObsOp:
 
     Returns the labelled DataArray a ``TemporalObservationOperator`` produces
     (dims ``("ensemble", "time", "obs")``, or ``("time", "obs")`` for one
-    member read back from disk), so the filter's aggregate-and-flatten path is
-    exercised end to end.
+    member read back from disk), so the filter's per-frame path — and with it
+    the serial sweep — is exercised end to end.
     """
 
     def __init__(self, H: np.ndarray) -> None:
@@ -167,14 +166,6 @@ class _TemporalToyObsOp:
             dims=dims,
             coords={"time": np.asarray(state["time"].values, dtype=float)},
         )
-
-
-class _MeanToyObsOp(_ToyObsOp):
-    """Pre-aggregated flat operator: y = H (mean over the segment's frames)."""
-
-    def __call__(self, state: xarray.Dataset) -> jnp.ndarray:
-        x = jnp.asarray(state["u"].values)  # (N_e, time, nx)
-        return jnp.mean(x, axis=-2) @ self.H.T
 
 
 class _CoordinateToyObsOp(_ToyObsOp):
@@ -592,7 +583,7 @@ def test_time_varying_params_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Labelled (time-resolved) observations and interval aggregation
+# Labelled (time-resolved) observations and the serial per-frame sweep
 # ---------------------------------------------------------------------------
 
 
@@ -603,108 +594,213 @@ def _labelled_truth_obs(values: np.ndarray, times: np.ndarray) -> xarray.DataArr
     )
 
 
-def _aggregated_filter(forward_model: Any, **overrides: Any) -> EnsembleKalmanFilter:
+class _FinalFrameTemporalToyObsOp(_TemporalToyObsOp):
+    """Labelled operator emitting exactly ONE frame: the segment's last.
+
+    The single-frame twin of ``_ToyObsOp``: same numbers, but returned as the
+    ``("ensemble", "time", "obs")`` DataArray a ``TemporalObservationOperator``
+    produces, so the labelled path can be held to the flat one bit for bit.
+    """
+
+    def __call__(self, state: xarray.Dataset) -> xarray.DataArray:
+        return super().__call__(state.isel(time=[-1]))
+
+
+def _single_frame_filter(
+    forward_model: Any, observation_operator: Any
+) -> EnsembleKalmanFilter:
     return EnsembleKalmanFilter(
-        observation_operator=_TemporalToyObsOp(np.array([[1.0, 0.5]])),
-        aggregate_observations=AggregateObservations(interval_seconds=2.0),
+        observation_operator=observation_operator,
         forward_model=forward_model,
         C_D=jnp.array([0.2]),
         mode="state",
         rng_key=jax.random.PRNGKey(30),
-        **overrides,
     )
 
 
-def test_labelled_observations_with_aggregation_match_the_pre_aggregated_run(
+def test_one_frame_per_cycle_matches_the_legacy_flat_run(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A list of per-cycle DataArrays + aggregator == the legacy flat run.
+    """T = 1 is the legacy path, bit for bit.
 
-    Both the real and the predicted observations go through the aggregation,
-    so a filter fed raw frames whose interval mean is ``y`` must reproduce,
-    cycle for cycle, the filter fed the pre-aggregated ``y`` by an operator
-    that already returns the interval mean. The on-disk path (per-member
-    DataArrays concatenated along "ensemble" before aggregating) is held to
-    the same result.
+    A one-frame ``("time", "obs")`` DataArray per cycle against a one-frame
+    labelled operator must reproduce — exactly, RNG draws included — the run
+    fed the flat ``(num_cycles, N_d)`` array by an array-returning operator.
+    That equality is what makes the serial sweep a strict generalization: every
+    existing configuration takes the ``T = 1`` branch. The on-disk path (per-
+    member DataArrays concatenated along "ensemble") is held to the same
+    result, to float tolerance rather than bit-identity because it round-trips
+    through NetCDF.
     """
     n_e, num_cycles = 12, 3
+    H = np.array([[1.0, 0.5]])
     state = _initial_state(jax.random.PRNGKey(29), n_e, np.zeros(2), np.eye(2))
-    means = np.array([[0.5], [0.2], [-0.4]])
-    # Two frames per cycle straddling the mean: aggregating them must recover
-    # `means` exactly, so any difference below is the aggregation path itself.
+    values = np.array([[0.5], [0.2], [-0.4]])
     labelled = [
-        _labelled_truth_obs(
-            np.stack([means[k] - 0.3, means[k] + 0.3], axis=0), np.array([0.0, 1.0])
-        )
+        _labelled_truth_obs(values[k][None, :], np.array([1.0]))
         for k in range(num_cycles)
     ]
 
-    aggregated = _aggregated_filter(_ToyLinearModel(np.eye(2)))
-    aggregated.collect_pred_obs = True
-    labelled_result = aggregated.run(state=state, observations=labelled)
-
-    legacy = EnsembleKalmanFilter(
-        observation_operator=_MeanToyObsOp(np.array([[1.0, 0.5]])),
-        forward_model=_ToyLinearModel(np.eye(2)),
-        C_D=jnp.array([0.2]),
-        mode="state",
-        rng_key=jax.random.PRNGKey(30),
+    frames = _single_frame_filter(
+        _ToyLinearModel(np.eye(2)), _FinalFrameTemporalToyObsOp(H)
     )
+    frames.collect_pred_obs = True
+    labelled_result = frames.run(state=state, observations=labelled)
+
+    legacy = _single_frame_filter(_ToyLinearModel(np.eye(2)), _ToyObsOp(H))
     legacy.collect_pred_obs = True
-    legacy_result = legacy.run(state=state, observations=jnp.asarray(means))
+    legacy_result = legacy.run(state=state, observations=jnp.asarray(values))
 
     assert labelled_result.state is not None and legacy_result.state is not None
-    np.testing.assert_allclose(
-        labelled_result.state["u"], legacy_result.state["u"], rtol=1e-6, atol=1e-6
+    np.testing.assert_array_equal(
+        np.asarray(labelled_result.state["u"]), np.asarray(legacy_result.state["u"])
     )
+    for labelled_diag, legacy_diag in zip(
+        labelled_result.diagnostics, legacy_result.diagnostics
+    ):
+        assert labelled_diag.obs_prior_rmse == legacy_diag.obs_prior_rmse
+        assert labelled_diag.obs_posterior_rmse == legacy_diag.obs_posterior_rmse
+        assert labelled_diag.innovation_chi2 == legacy_diag.innovation_chi2
+        assert (
+            labelled_diag.state_spread_posterior == legacy_diag.state_spread_posterior
+        )
     # Recorded predicted observations keep the flat (N_d, N_e) shape the
     # filter_smoothing outer loop consumes.
-    assert len(aggregated.pred_obs_history) == num_cycles
-    for recorded, expected in zip(aggregated.pred_obs_history, legacy.pred_obs_history):
+    assert len(frames.pred_obs_history) == num_cycles
+    for recorded, expected in zip(frames.pred_obs_history, legacy.pred_obs_history):
         assert recorded.shape == (1, n_e)
-        np.testing.assert_allclose(recorded, expected, rtol=1e-6, atol=1e-6)
+        np.testing.assert_array_equal(recorded, expected)
 
-    on_disk = _aggregated_filter(_OnDiskToyLinearModel(np.eye(2), tmp_path)).run(
-        state=state, observations=labelled
-    )
+    on_disk = _single_frame_filter(
+        _OnDiskToyLinearModel(np.eye(2), tmp_path), _FinalFrameTemporalToyObsOp(H)
+    ).run(state=state, observations=labelled)
     assert on_disk.state is not None
     np.testing.assert_allclose(
         on_disk.state["u"], legacy_result.state["u"], rtol=1e-5, atol=2e-5
     )
 
 
-def test_labelled_observations_without_aggregation_assimilate_every_frame() -> None:
-    """No aggregator -> the flattened time-resolved vector is assimilated.
+def test_every_frame_of_a_segment_is_assimilated_serially() -> None:
+    """T frames = T full-weight analyses, so information accumulates.
 
-    The two frames per cycle become two observations (time-major), which C_D
-    and the predicted observations must match — the full-resolution mode.
+    ``A = I`` makes both frames of the segment carry the SAME predicted
+    observation, and both are observed with the same ``y``: assimilating the
+    pair must therefore leave less posterior spread than assimilating one of
+    them, which a single analysis of a length-2 stacked vector would not do
+    either (that would be one update against two perfectly correlated rows).
     """
-    n_e = 12
+    n_e = 400
+    H = np.array([[1.0, 0.5]])
     state = _initial_state(jax.random.PRNGKey(31), n_e, np.zeros(2), np.eye(2))
-    observations = [_labelled_truth_obs(np.array([[0.2], [0.8]]), np.array([0.0, 1.0]))]
+    y = np.array([[0.2]])
 
+    serial = EnsembleKalmanFilter(
+        observation_operator=_TemporalToyObsOp(H),  # both frames of the segment
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.array([0.2]),
+        mode="state",
+        rng_key=jax.random.PRNGKey(32),
+    )
+    serial.collect_pred_obs = True
+    serial_result = serial.run(
+        state=state,
+        observations=[
+            _labelled_truth_obs(np.repeat(y, 2, axis=0), np.array([0.0, 1.0]))
+        ],
+    )
+    single = _single_frame_filter(_ToyLinearModel(np.eye(2)), _ToyObsOp(H))
+    single_result = single.run(state=state, observations=jnp.asarray(y))
+
+    assert serial_result.state is not None and single_result.state is not None
+    serial_spread = float(np.std(np.asarray(serial_result.state["u"]), axis=0).mean())
+    single_spread = float(np.std(np.asarray(single_result.state["u"]), axis=0).mean())
+    assert serial_spread < single_spread
+    # Both frames' rows ride along the whole sweep, so the history holds the
+    # segment's frames stacked frame-major.
+    assert serial.pred_obs_history[0].shape == (2, n_e)
+
+
+def test_an_uninformative_frame_leaves_the_ensemble_unchanged() -> None:
+    """obs == the ensemble-mean prediction with a huge C_D is a no-op.
+
+    The deterministic transform makes the statement exact (no perturbation
+    draw): each frame's analysis must reduce to the identity, so a whole
+    multi-frame sweep of such frames returns the forecast untouched. It is the
+    guard against a sweep that "assimilates" the same information repeatedly.
+    """
+    n_e = 16
+    H = np.array([[1.0, 0.5]])
+    state = _initial_state(jax.random.PRNGKey(35), n_e, np.zeros(2), np.eye(2))
+    forecast = _ToyLinearModel(np.eye(2)).run_ensemble(state=state)
+    pred_obs_mean = float(np.mean(np.asarray(_ToyObsOp(H)(forecast))))
+
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_TemporalToyObsOp(H),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.array([1e10]),
+        analysis=ETKFAnalysis(),
+        mode="state",
+        rng_key=jax.random.PRNGKey(36),
+    )
+    result = enkf.run(
+        state=state,
+        observations=[
+            _labelled_truth_obs(np.full((2, 1), pred_obs_mean), np.array([0.0, 1.0]))
+        ],
+    )
+
+    assert result.state is not None
+    np.testing.assert_allclose(
+        np.asarray(result.state["u"]),
+        np.asarray(forecast["u"].isel(time=-1)),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_pred_obs_history_holds_the_raw_stacked_frames() -> None:
+    """``(T*N_obs, N_e)``, frame-major, and BEFORE prior inflation."""
+    n_e = 8
+    H = np.array([[1.0, 0.5]])
+    state = _initial_state(jax.random.PRNGKey(37), n_e, np.zeros(2), np.eye(2))
+
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_TemporalToyObsOp(H),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.array([0.2]),
+        mode="state",
+        inflation=MultiplicativeInflation(1.5),
+        rng_key=jax.random.PRNGKey(38),
+    )
+    enkf.collect_pred_obs = True
+    enkf.run(
+        state=state,
+        observations=[
+            _labelled_truth_obs(np.array([[0.2], [0.8]]), np.array([0.0, 1.0]))
+        ],
+    )
+
+    forecast = _ToyLinearModel(np.eye(2)).run_ensemble(state=state)
+    expected = np.asarray(_TemporalToyObsOp(H)(forecast))  # (N_e, T, N_obs)
+    recorded = enkf.pred_obs_history[0]
+    assert recorded.shape == (2, n_e)
+    np.testing.assert_allclose(
+        recorded, expected.transpose(1, 2, 0).reshape(-1, n_e), rtol=1e-6, atol=1e-6
+    )
+
+
+def test_C_D_is_checked_against_the_per_frame_observation_vector() -> None:
+    """C_D sized for the whole segment (T frames) is rejected.
+
+    The serial sweep assimilates one frame at a time, so ``C_D`` is that one
+    frame's error covariance — a vector sized for the stacked segment is the
+    natural mistake and must fail loudly instead of misaligning the sweep.
+    """
+    state = _initial_state(jax.random.PRNGKey(33), 6, np.zeros(2), np.eye(2))
     enkf = EnsembleKalmanFilter(
         observation_operator=_TemporalToyObsOp(np.array([[1.0, 0.5]])),
         forward_model=_ToyLinearModel(np.eye(2)),
         C_D=jnp.array([0.2, 0.2]),
-        mode="state",
-        rng_key=jax.random.PRNGKey(32),
-    )
-    enkf.collect_pred_obs = True
-    result = enkf.run(state=state, observations=observations)
-
-    assert result.state is not None
-    assert enkf.pred_obs_history[0].shape == (2, n_e)
-
-
-def test_aggregated_observation_length_is_checked_against_C_D() -> None:
-    """A C_D sized for one interval rejects a two-interval observation."""
-    state = _initial_state(jax.random.PRNGKey(33), 6, np.zeros(2), np.eye(2))
-    enkf = EnsembleKalmanFilter(
-        observation_operator=_TemporalToyObsOp(np.array([[1.0, 0.5]])),
-        aggregate_observations=AggregateObservations(interval_seconds=1.0),
-        forward_model=_ToyLinearModel(np.eye(2)),
-        C_D=jnp.array([0.2]),
         mode="state",
         rng_key=jax.random.PRNGKey(34),
     )

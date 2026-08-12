@@ -139,15 +139,21 @@ an empty interval raises (a silent gap would misalign the flattened vector),
 and the interval count is fixed by the first call — a later call producing a
 different count raises, because `C_D` is sized from the first window.
 
-It is an **optional constructor input to the DA classes**
-(`aggregate_observations=` on the ESMDA smoothers, `BaseFilter` /
-`EnsembleKalmanFilter`, and `FilterSmoothingESMDA`). Each class routes both
-the real observations and the predicted observations `H(x)` through one
-`_get_observations` path: optional aggregation, then the module-level
+It is an **optional constructor input to the DA classes that assimilate one
+batch at a time**: `aggregate_observations=` on the ESMDA smoothers and on
+`FilterSmoothingESMDA` (which passes it to its inner `_TrajectoryStateFilter`,
+§9). Each routes both the real observations and the predicted observations
+`H(x)` through one path: optional aggregation, then the module-level
 `flatten_observations` helper — a time-major flatten (`("time", "obs") →
 (T·num_obs,)`, ensemble inputs to `(N_e, T·num_obs)`), which reproduces the
 historical `[interval0 block, interval1 block, ...]` vector layout. With
-`aggregate_observations=None` the full time-resolved vector is assimilated.
+`aggregate_observations=None` the full time-resolved vector is assimilated as
+one batch.
+
+The **sequential filter does not aggregate at all** (`BaseFilter` /
+`EnsembleKalmanFilter` take no such argument): it assimilates every frame of a
+segment serially, one full-weight analysis each — see [§8 Cycle
+semantics](#cycle-semantics).
 
 The physical (x, y, z) position of each observation in the flattened
 vector is the sensor location, independent of which variable, frame, or
@@ -163,9 +169,10 @@ default everywhere.
 
 Because aggregation is a DA choice rather than an operator argument, its two
 knobs live on the run config's algorithm node — `esmda.interval_seconds` /
-`esmda.aggregation_mode` (and `filtering.*` / `filter_smoothing.*`), right next
-to `obs_error_std` — not in the case's `obs:` block, which carries only
-observation-operator arguments. `create_aggregate_observations` (§11) reads
+`esmda.aggregation_mode` (and `filter_smoothing.*`), right next to
+`obs_error_std` — not in the case's `obs:` block, which carries only
+observation-operator arguments. `run_filtering.yaml` has no such keys, because
+the filter aggregates nothing. `create_aggregate_observations` (§11) reads
 them; a null `interval_seconds` means full-resolution assimilation.
 
 ---
@@ -504,15 +511,40 @@ Design record: [docs/temp/da_filtering_module_plan.md](temp/da_filtering_module_
 ### Cycle semantics
 
 A filter's unit of work is a **cycle**: forecast the ensemble over one segment
-(the forward model's configured horizon), apply ONE full-weight (`alpha = 1`)
-analysis to the state *at the end of the segment* and/or the parameters, and
-warm-start the next cycle from the analyzed state. Each observation batch is
-consumed exactly once — there is no MDA schedule. The observation operator is
-applied to the whole segment, so with the config-default
-`AggregateObservations` (interval mean, passed as `aggregate_observations=`)
-and one interval per segment the batch is the segment's interval mean — an
-observation *of the segment*, assimilated into the end-of-segment state (an
-aggregation choice, not an approximation error).
+(the forward model's configured horizon), assimilate that segment's
+observations into the state *at the end of the segment* and/or the parameters,
+and warm-start the next cycle from the analyzed state. Each observation is
+consumed exactly once — there is no MDA schedule.
+
+The observation operator is applied to the whole segment, so a cycle carries
+`T` time-resolved observation **frames** (one per output frame), and the filter
+assimilates them **serially**: one full-weight (`alpha = 1`) analysis per
+frame, in time order — an asynchronous/serial EnKF. Nothing is aggregated
+(unlike the smoothers, the filter takes no `aggregate_observations`).
+
+What that means concretely, per cycle:
+
+- each frame's `(num_sensors × num_states)` vector gets its own analysis of the
+  same end-of-segment augmented state, through the ensemble cross-covariances.
+  `C_D` is therefore the error covariance of **one frame**, not of a segment;
+- the *other* frames' predicted observations are appended as ride-along rows of
+  the augmented matrix, so every analysis updates them too: frame `t` is
+  assimilated against predictions that already reflect frames `0…t-1`, and the
+  observation-space posterior diagnostics cover every frame;
+- everything that belongs to the cycle rather than to an observation happens
+  **once**: the state-reduction basis fit, prior and posterior inflation
+  (posterior inflation relaxes toward the pre-sweep prior anomalies), the
+  localization plumbing, and the parameter evolution. `obs_prior_rmse` /
+  `obs_posterior_rmse` / `innovation_chi2` are measured on the stacked
+  `(T·N_obs,)` system with `tile(C_D, T)`; `obs_posterior_rmse_kind` keeps its
+  meaning unchanged (the appended rows still ride along). The `transform_*` /
+  `local_*` diagnostics report the **last** frame's transform;
+- the RNG splits once per cycle; with `T = 1` that subkey is used directly, and
+  only a genuine sweep splits it into per-frame keys.
+
+`T = 1` — one frame per cycle, and every flat `(num_cycles, N_d)` observation
+array — is the degenerate case: exactly the single full-weight analysis per
+cycle the filter has always applied, bit for bit.
 
 ### `BaseFilter` / `EnsembleKalmanFilter`
 
@@ -529,12 +561,14 @@ schemes, and a particle-style update would be another.
 ```python
 enkf = EnsembleKalmanFilter(
     observation_operator=obs_op, forward_model=ensemble_model,
-    C_D=variance_vector,            # 1-D (N_d,) variances (diag matrix accepted)
+    C_D=variance_vector,            # 1-D (N_obs,) per-FRAME variances
     mode="joint",                   # "state" | "parameter" | "joint"
     localization=None, inflation=RTPS(0.6), parameter_evolution=None,
 )
 result = enkf.run(state=None, params=prior_params,
-                  observations=obs_batches,      # (num_cycles, N_d)
+                  # one ("time", "obs") DataArray per cycle (T frames each,
+                  # assimilated serially), or a flat (num_cycles, N_obs) array
+                  observations=observations,
                   return_history=True)           # -> FilterResult
 ```
 
@@ -959,16 +993,17 @@ schedule; unlike a free scalar override, an `alpha` that breaks
 `sum_a 1/alpha_a = 1` is **rejected at construction** rather than silently
 tempering the likelihood by `num_steps / alpha`.
 
-### The two `BaseFilter` hooks
+### The three `BaseFilter` hooks
 
-The inner pass is the existing filter, reached through two additions to
+The inner pass is the existing filter, reached through three extension points in
 [filtering/base.py](../libs/data-assimilation/src/data_assimilation/filtering/base.py)
 that are **no-ops for every existing configuration**:
 
 | Hook | Default | Override |
 |---|---|---|
 | `_params_for_cycle(cycle, params)` | returns `params` unchanged, so the cycle loop is byte-identical | `_TrajectoryStateFilter` restricts the trajectory to segment `cycle` (interpolated endpoints, interior knots, segment-local time axis) — a schedule the backends already interpolate, so no backend change |
-| `collect_pred_obs` | `False`: nothing recorded, no extra work | `True` rebinds `pred_obs_history = []` at `run()` entry and appends the raw, **pre-inflation** `(N_d, N_e)` `pred_obs` each cycle *before* the analysis |
+| `_prepare_pred_obs(raw)` | normalizes the operator's output to the segment's frames, `(N_e, T, N_obs)`, which the filter then assimilates serially | `_TrajectoryStateFilter` aggregates (`aggregate_observations`, held on it rather than on the plain filter) and flattens to ONE batch, `(N_e, 1, N_d)` — the paper's `d_k`, matching the flat real batches `observation_batches` produces, so every inner cycle runs the filter's `T = 1` path |
+| `collect_pred_obs` | `False`: nothing recorded, no extra work | `True` rebinds `pred_obs_history = []` at `run()` entry and appends the raw, **pre-inflation** `(T·N_obs, N_e)` `pred_obs` each cycle *before* the analysis — `(N_d, N_e)` here, since the hybrid's inner cycles are `T = 1` |
 
 Both follow the attribute-plumbing pattern of the smoother's
 `collect_obs_diagnostics` (§5). `mode="state"` already skips the static-params
@@ -1252,9 +1287,10 @@ for window in range(cfg.esmda.num_assimilation_windows):
 (time-resolved xarray output) wrapping an `ObservationOperator` using the
 case's `obs_x/y/z_points`; `create_aggregate_observations` builds the
 optional `AggregateObservations` from the run config's algorithm node
-(`esmda.interval_seconds` / `esmda.aggregation_mode`; `filtering.*` and
-`filter_smoothing.*` for the other two entry points — aggregation is a DA
-choice, not an operator argument), which the script passes to the DA class. `create_C_D`
+(`esmda.interval_seconds` / `esmda.aggregation_mode`, and
+`filter_smoothing.*` — aggregation is a DA choice, not an operator argument;
+`run_filtering.py` has no such keys, its filter assimilating every frame
+serially), which the script passes to the DA class. `create_C_D`
 produces the diagonal `σ² I` error covariance, sized from the aggregated
 first-window observation vector. The script also constructs validation sensors
 (never assimilated; scored as held-out check) and handles inline vs. on-disk

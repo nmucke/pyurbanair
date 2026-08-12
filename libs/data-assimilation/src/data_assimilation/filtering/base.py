@@ -1,21 +1,28 @@
 """Sequential filter cycle loop (BaseFilter) and the composed EnKF.
 
 A filter's unit of work is a **cycle**: forecast the ensemble to the next
-observation time, apply one full-weight analysis to the state/parameters at
-that time, continue from the analyzed state. This inverts the ESMDA
-smoother's loop (which re-forecasts the same window ``num_steps`` times with
-tempered weight); the analysis math itself is shared with the smoother (see
-:mod:`data_assimilation.filtering.analysis`).
+observation time, assimilate that segment's observations into the
+state/parameters at that time, continue from the analyzed state. This inverts
+the ESMDA smoother's loop (which re-forecasts the same window ``num_steps``
+times with tempered weight); the analysis math itself is shared with the
+smoother (see :mod:`data_assimilation.filtering.analysis`).
 
-Observation-time semantics: one cycle assimilates one observation batch. The
-observation operator is applied to the whole forecast segment, so with the
-config-default ``TemporalObservationOperator`` and an
-``AggregateObservations`` of one interval per segment the batch is the
-segment's interval mean — an observation *of the segment*, assimilated into
-the end-of-segment state. Real and predicted observations pass through the
-same aggregation (see :meth:`BaseFilter._get_observations`), so H and y agree
-by construction; this is an observation-space choice, not an approximation
-error.
+Observation-time semantics: the observation operator is applied to the whole
+forecast segment, so one cycle carries ``T`` time-resolved observation frames
+— and the filter assimilates them ONE AT A TIME, in time order, within the
+cycle: a serial (asynchronous) EnKF. Each frame's ``(num_sensors x
+num_states)`` vector gets its own full-weight analysis of the end-of-segment
+augmented state through the ensemble cross-covariances, and the remaining
+frames' predicted observations are appended as ride-along rows, so every
+analysis sees what the earlier frames already did. ``T = 1`` — one frame per
+cycle, and every flat ``(num_cycles, N_d)`` input — is the degenerate case:
+exactly the one full-weight analysis per cycle the filter has always applied.
+
+The sequential filter does **not** aggregate observations: interval
+aggregation (``AggregateObservations``) is a smoother-side choice, kept by the
+ESMDA smoothers and by ``FilterSmoothingESMDA`` (whose inner filter aggregates
+in its own ``_prepare_pred_obs`` override). Here every frame the operator
+produced is assimilated, so H and y agree frame by frame by construction.
 """
 
 import logging
@@ -42,11 +49,7 @@ from data_assimilation.filtering.parameter_evolution import ParameterEvolution
 from data_assimilation.inflation import InflationScheme
 from data_assimilation.io import get_sorted_state_files, load_dataset
 from data_assimilation.localization.base import BaseLocalization
-from data_assimilation.observation_operator import (
-    AggregateObservations,
-    flatten_observations,
-    sensor_observation_coords,
-)
+from data_assimilation.observation_operator import sensor_observation_coords
 from data_assimilation.reduction import OnlineStateReduction
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
@@ -167,25 +170,27 @@ class FilterResult:
 class BaseFilter:
     """Sequential ensemble filter: the cycle loop around an analysis scheme.
 
-    The filter owns time management (one forecast per observation batch),
-    augmentation (which blocks enter the analysis, per ``mode``), inflation,
-    parameter evolution, failure substitution, and diagnostics; the analysis
-    scheme is a pure function of arrays (see :class:`AnalysisScheme`).
+    The filter owns time management (one forecast per cycle), augmentation
+    (which blocks enter the analysis, per ``mode``), inflation, parameter
+    evolution, failure substitution, and diagnostics; the analysis scheme is a
+    pure function of arrays (see :class:`AnalysisScheme`). Within a cycle the
+    segment's observation frames are assimilated serially, one full-weight
+    analysis each (see :meth:`_analysis_cycle`).
 
     Args:
         observation_operator: Maps a forecast segment to its predicted
             observations. A ``TemporalObservationOperator`` returns them
-            time-resolved as a DataArray; anything returning a plain
-            ``(N_e, N_d)`` array is used as-is.
-        aggregate_observations: Optional interval aggregation applied to BOTH
-            the predicted and the real observations, so the two always live in
-            the same space. ``None`` assimilates the full time-resolved vector.
+            time-resolved as a ``("ensemble", "time", "obs")`` DataArray;
+            anything returning a plain ``(N_e, N_obs)`` array is treated as a
+            single frame.
         forward_model: Any ensemble forward model; its configured horizon is
-            the cycle's forecast segment (set it to the observation interval).
-        C_D: Diagonal observation-error covariance as a 1-D variance vector
-            (the honest contract for the diagonal assumption). A square
-            diagonal matrix is accepted and reduced to its diagonal.
-        analysis: The update math applied once, at full weight, per cycle.
+            the cycle's forecast segment.
+        C_D: Diagonal observation-error covariance of ONE observation frame,
+            as a 1-D variance vector (the honest contract for the diagonal
+            assumption). A square diagonal matrix is accepted and reduced to
+            its diagonal.
+        analysis: The update math applied once, at full weight, per
+            observation frame.
         mode: Which blocks the analysis updates. ``"state"``: the flattened
             end-of-segment state (params, if any, are carried unmodified);
             ``"parameter"``: the flattened params only (analyzed params apply
@@ -238,18 +243,22 @@ class BaseFilter:
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
-        aggregate_observations: Optional[AggregateObservations] = None,
     ) -> None:
         if mode not in ("state", "parameter", "joint"):
             raise ValueError(
                 f"mode must be 'state', 'parameter' or 'joint', got {mode!r}."
             )
         self.observation_operator = observation_operator
-        self.aggregate_observations = aggregate_observations
         self.forward_model = forward_model
         self.analysis = analysis
         self.mode: FilterMode = mode
 
+        # One FRAME's error covariance, not one cycle's: the serial sweep hands
+        # the analysis one frame's (num_sensors x num_states) vector at a time,
+        # so C_D is sized by the observation operator's per-frame output and
+        # does NOT grow with the number of frames in a segment. (It used to be
+        # the covariance of the whole aggregated batch, which for a one-interval
+        # aggregation was the same vector — hence the unchanged configs.)
         C_D = jnp.asarray(C_D)
         if C_D.ndim == 2:
             # Convenience: accept the smoother's (N_d, N_d) diagonal matrix
@@ -413,7 +422,11 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         return params
 
     def _record_pred_obs(self, pred_obs: jnp.ndarray) -> None:
-        """Record one cycle's raw forecast observations ``(N_d, N_e)``.
+        """Record one cycle's raw forecast observations ``(T*N_obs, N_e)``.
+
+        The cycle's frames stacked frame-major, exactly as the serial sweep
+        appends them. For the ``T = 1`` cycles the ``filter_smoothing`` outer
+        loop runs this is the ``(N_d, N_e)`` block it has always consumed.
 
         No-op unless ``collect_pred_obs`` is set. ``np.asarray`` copies the
         block off the JAX device, so a whole window's history never pins
@@ -423,28 +436,41 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         if self.collect_pred_obs:
             self.pred_obs_history.append(np.asarray(pred_obs))
 
-    def _get_observations(self, observations: Any) -> jnp.ndarray:
-        """Bring observations into the flat space the analysis works in.
+    def _prepare_pred_obs(self, pred_obs: Any) -> jnp.ndarray:
+        """Normalize the operator's output to frames, ``(N_e, T, N_obs)``.
 
-        A plain array is passed through untouched (pre-flattened input is the
-        caller's responsibility); a labelled DataArray is optionally aggregated
-        and then flattened time-major. Real and predicted observations both go
-        through here, which is what keeps them in the same space.
+        A ``TemporalObservationOperator`` returns a labelled ``("ensemble",
+        "time", "obs")`` DataArray, one entry per output frame of the segment;
+        a bare operator (or a toy one) returns a plain ``(N_e, N_obs)`` array,
+        which *is* one frame and is treated as ``T = 1``.
+
+        The hook exists so a subclass can put the predicted observations into a
+        different observation space before the analysis sees them — that is
+        exactly what :class:`~data_assimilation.filter_smoothing.base.\
+_TrajectoryStateFilter` does, aggregating them into the single flat frame the
+        hybrid's outer ESMDA assimilates.
         """
-        if not isinstance(observations, xarray.DataArray):
-            return jnp.asarray(observations)
-        if self.aggregate_observations is not None:
-            observations = self.aggregate_observations(observations)
-        return jnp.asarray(flatten_observations(observations))
+        if isinstance(pred_obs, xarray.DataArray):
+            return jnp.asarray(pred_obs.transpose("ensemble", "time", "obs").values)
+        frames = jnp.asarray(pred_obs)
+        if frames.ndim == 2:
+            return frames[:, None, :]
+        if frames.ndim != 3:
+            raise ValueError(
+                "Predicted observations must be (N_e, N_obs) for a single "
+                f"frame or (N_e, T, N_obs) for a segment, got shape "
+                f"{frames.shape}."
+            )
+        return frames
 
     def _observation_step(
         self,
         state: Optional[xarray.Dataset] = None,
         results_dir: Optional[pathlib.Path] = None,
     ) -> jnp.ndarray:
-        """Predicted observations for the current forecast, shape (N_e, N_d)."""
+        """Predicted observations for the current forecast, ``(N_e, T, N_obs)``."""
         if state is not None:
-            return self._get_observations(self.observation_operator(state))
+            return self._prepare_pred_obs(self.observation_operator(state))
         if results_dir is not None:
             file_list = get_sorted_state_files(pathlib.Path(results_dir))
             if not file_list:
@@ -453,20 +479,43 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
                 )
             members = [self.observation_operator(load_dataset(f)) for f in file_list]
             if isinstance(members[0], xarray.DataArray):
-                # Aggregate/flatten ONCE over the stacked ensemble, so the
-                # interval-count consistency check sees one call per cycle
-                # (as on the in-memory path) rather than one per member.
+                # Convert ONCE over the stacked ensemble, so a subclass hook
+                # that carries per-call state (the hybrid's interval-count
+                # consistency check) sees one call per cycle, as on the
+                # in-memory path, rather than one per member.
                 # ``join="override"``: per-member time coords are not
                 # bit-identical, and the default outer join would silently
                 # union the axes and NaN-pad the observations (same convention
                 # as ``_get_final_states`` below).
-                return self._get_observations(
+                return self._prepare_pred_obs(
                     xarray.concat(members, dim="ensemble", join="override").transpose(
                         "ensemble", "time", "obs"
                     )
                 )
-            return jnp.stack([jnp.asarray(member) for member in members], axis=0)
+            return self._prepare_pred_obs(
+                jnp.stack([jnp.asarray(member) for member in members], axis=0)
+            )
         raise ValueError("Either state or results_dir must be provided.")
+
+    def _cycle_observations(self, observations: Any) -> jnp.ndarray:
+        """One cycle's real observations as frames, ``(T, N_obs)``.
+
+        A labelled ``("time", "obs")`` DataArray keeps its frames; a plain
+        ``(N_obs,)`` vector is the single frame of a legacy flat batch. No
+        aggregation happens here (or anywhere else in this class) — every frame
+        is assimilated, in time order.
+        """
+        if isinstance(observations, xarray.DataArray):
+            return jnp.asarray(observations.transpose("time", "obs").values)
+        frames = jnp.asarray(observations)
+        if frames.ndim == 1:
+            return frames[None, :]
+        if frames.ndim != 2:
+            raise ValueError(
+                "Each cycle's observations must be (N_obs,) for a single frame "
+                f'or a ("time", "obs") DataArray, got shape {frames.shape}.'
+            )
+        return frames
 
     def _get_final_states(
         self,
@@ -547,12 +596,12 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
             params: Ensemble parameters; required for ``mode="parameter"`` /
                 ``"joint"``, optional (carried through unmodified) for
                 ``mode="state"``.
-            observations: One observation batch per cycle, each consumed
-                exactly once (a filter has no MDA schedule). Either a
+            observations: One segment of observations per cycle, each frame
+                consumed exactly once (a filter has no MDA schedule). Either a
                 list/tuple of per-cycle DataArrays with dims ``("time",
-                "obs")`` and a cycle-local seconds time coordinate — each one
-                aggregated and flattened like the predicted observations — or
-                an already-flat ``(num_cycles, N_d)`` array.
+                "obs")`` and a cycle-local seconds time coordinate — whose ``T``
+                frames are assimilated serially, in time order — or a flat
+                ``(num_cycles, N_obs)`` array, one frame per cycle.
             return_history: Collect per-cycle analyzed params/state into
                 ``cycle``-concatenated history Datasets.
 
@@ -564,22 +613,33 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         if isinstance(observations, (list, tuple)):
             if not observations:
                 raise ValueError("observations must contain at least one cycle.")
+            # One (T, N_obs) block per cycle. Cycles whose frame counts differ
+            # fail loudly right here, at the stack: the analysis is sized per
+            # frame, but the cycle loop assumes one common T.
             obs_batches = jnp.stack(
-                [self._get_observations(o) for o in observations], axis=0
+                [self._cycle_observations(o) for o in observations], axis=0
             )
         else:
-            obs_batches = self._get_observations(observations)
-        if obs_batches.ndim != 2:
+            obs_batches = jnp.asarray(observations)
+        if obs_batches.ndim == 2:
+            # The legacy flat input: one already-flat batch per cycle IS one
+            # frame per cycle, so it takes the T == 1 path — bit-identical to
+            # the single analysis this filter applied before the sweep existed.
+            obs_batches = obs_batches[:, None, :]
+        if obs_batches.ndim != 3:
             raise ValueError(
-                "observations must have shape (num_cycles, N_d) — one batch "
-                f"per cycle — got shape {obs_batches.shape}. For a single "
-                "cycle pass a (1, N_d) array, or a one-element list of "
-                'per-cycle ("time", "obs") DataArrays.'
+                "observations must have shape (num_cycles, N_obs) — one frame "
+                "per cycle — or (num_cycles, T, N_obs), got shape "
+                f"{obs_batches.shape}. For a single cycle pass a (1, N_obs) "
+                'array, or a one-element list of per-cycle ("time", "obs") '
+                "DataArrays."
             )
-        if obs_batches.shape[1] != self.C_D_diag.shape[0]:
+        if obs_batches.shape[2] != self.C_D_diag.shape[0]:
             raise ValueError(
-                f"Observation batches have N_d={obs_batches.shape[1]} but C_D "
-                f"has {self.C_D_diag.shape[0]} variances."
+                f"Observation frames have N_obs={obs_batches.shape[2]} but C_D "
+                f"has {self.C_D_diag.shape[0]} variances. C_D is the error "
+                "covariance of ONE frame (sensors x observed states); the "
+                "frames of a segment are assimilated one at a time."
             )
         if self.mode in ("parameter", "joint"):
             if params is None:
@@ -616,9 +676,16 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
                 else None
             )
 
-            pred_obs = self._observation_step(
+            # (N_e, T, N_obs) -> the segment's frames stacked frame-major,
+            # (T*N_obs, N_e): frame t occupies rows [t*N_obs, (t+1)*N_obs),
+            # which is the layout the serial sweep and the appended ride-along
+            # rows both index by. T == 1 makes this exactly the old ``.T``.
+            pred_obs_frames = self._observation_step(
                 state=forecast, results_dir=results_dir
-            ).T  # (N_d, N_e)
+            )
+            pred_obs = jnp.transpose(pred_obs_frames, (1, 2, 0)).reshape(
+                -1, pred_obs_frames.shape[0]
+            )
             final_state = self._get_final_states(
                 state=forecast, results_dir=results_dir
             )
@@ -690,7 +757,15 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         pred_obs: jnp.ndarray,
         obs: jnp.ndarray,
     ) -> tuple[xarray.Dataset, Optional[xarray.Dataset], CycleDiagnostics]:
-        """Build the augmented vector, analyze, split back, evolve, diagnose.
+        """Build the augmented vector, sweep the frames, split back, evolve, diagnose.
+
+        The cycle's ``T`` observation frames are assimilated SERIALLY (see
+        :meth:`_assimilate_frames`): one full-weight analysis each, in time
+        order, all of them updating the same end-of-segment augmented state
+        through the ensemble cross-covariances. Everything around the sweep
+        happens once per cycle — the basis fit, prior and posterior inflation,
+        the localization plumbing, the parameter evolution — because they are
+        properties of the cycle's forecast, not of an individual observation.
 
         A configured ``state_reduction`` changes only the *analysis
         representation* of the state block: the rows handed to the analysis are
@@ -702,16 +777,24 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         augmented array reproduces the unreduced semantics exactly; relaxing
         coefficient rows would not, because RTPS/RTPP do not commute with a
         basis rotation.
+
+        Args:
+            pred_obs: The segment's predicted observations, ``(T*N_obs, N_e)``,
+                frame-major.
+            obs: The segment's real observations, ``(T, N_obs)``.
         """
         analysis_started = time.perf_counter()
         obs = jnp.asarray(obs)
-        N_d = obs.shape[0]
+        num_frames, N_obs = int(obs.shape[0]), int(obs.shape[1])
+        N_d = num_frames * N_obs
         if pred_obs.shape[0] != N_d:
             raise ValueError(
-                f"Predicted observations have N_d={pred_obs.shape[0]} but the "
-                f"observation batch has N_d={N_d}. This usually indicates a "
-                "mismatch between the observation operator and the supplied "
-                "observations, or stale files in the cycle results directory."
+                f"Predicted observations have {pred_obs.shape[0]} rows but the "
+                f"observation segment has T={num_frames} frames of N_obs="
+                f"{N_obs} ({N_d} rows). This usually indicates a mismatch "
+                "between the observation operator and the supplied "
+                "observations (a different number of output frames per "
+                "segment), or stale files in the cycle results directory."
             )
 
         blocks: list[jnp.ndarray] = []
@@ -775,21 +858,33 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         # is the exact posterior in observation space (they ride along without
         # influencing any other row), giving obs_posterior_rmse without a
         # second forecast. They are masked out of localization and stripped
-        # before the split below.
+        # before the split below. With T > 1 frames they are ALSO how the sweep
+        # works: frame t's own rows are the predicted observations of its
+        # analysis, and the other frames' rows are carried along the update, so
+        # each frame is assimilated against what the earlier ones already did.
         augmented_ext = jnp.concatenate([analysis_rows, pred_obs], axis=0)
         # Localization and state reduction are rejected together at
         # construction, so these row descriptors always describe physical rows.
+        # Sized with the PER-FRAME observation count (one analysis sees one
+        # frame) but with all T*N_obs appended rows, whose mask/coords entries
+        # are the same for every frame — the sensors do not move in time.
         group_ids, localize_mask, row_coords, obs_coords = self._localization_plumbing(
-            final_state, n_state, n_param, N_d
+            final_state, n_state, n_param, N_obs, N_d
         )
 
+        # One split per cycle, as before. With a single frame the subkey is used
+        # DIRECTLY, so the classic one-analysis-per-cycle path draws exactly the
+        # perturbations it always did; only a genuine sweep (T > 1) splits it
+        # further, giving each frame its own independent draw.
         self.rng_key, subkey = jax.random.split(self.rng_key)
-        updated_ext = self.analysis(
+        frame_keys = (
+            [subkey] if num_frames == 1 else list(jax.random.split(subkey, num_frames))
+        )
+        updated_ext = self._assimilate_frames(
             augmented_ext,
-            pred_obs,
+            n_analysis,
             obs,
-            self.C_D_diag,
-            subkey,
+            frame_keys,
             localization=self.localization,
             group_ids=group_ids,
             localize_mask=localize_mask,
@@ -820,15 +915,20 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
             dev_post = self.inflation.inflate_posterior(dev_prior, dev_post)
             updated = post_mean + dev_post
 
+        # The observation-space diagnostics are over the cycle's FRAMES: the
+        # stacked (T*N_obs,) observation vector against the stacked forecast /
+        # posterior rows, which for T == 1 is exactly today's per-cycle
+        # statistic.
         cycle_diag = self._cycle_diagnostics(
             cycle,
-            obs,
+            obs.reshape(-1),
             pred_obs_forecast,
             pred_obs_post,
             dev_prior,
             dev_post,
             n_state,
             n_param,
+            num_frames,
         )
         # Read before _record_reduction_diagnostics below, which calls the
         # analysis a SECOND time (on the fit coordinates) and overwrites the
@@ -841,6 +941,10 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         # come_from_the_posterior_producing_call, which makes the two calls
         # publish different transforms so the ordering is enforced rather than
         # merely asserted here.
+        #
+        # A scheme publishes the transform of its LAST call, so with T > 1 the
+        # recorded transform_* / local_* values describe the sweep's final
+        # frame (T == 1: the cycle's only analysis, unchanged).
         self._record_transform_diagnostics(cycle_diag)
 
         # Split the augmented vector back per mode.
@@ -873,11 +977,50 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
                 state_increment=state_increment,
                 pred_obs=pred_obs,
                 obs=obs,
-                analysis_key=subkey,
+                frame_keys=frame_keys,
                 basis_seconds=basis_seconds,
             )
 
         return analysis_state, params, cycle_diag
+
+    def _assimilate_frames(
+        self,
+        rows: jnp.ndarray,
+        obs_offset: int,
+        obs: jnp.ndarray,
+        frame_keys: Sequence[jax.Array],
+        **plumbing: Any,
+    ) -> jnp.ndarray:
+        """The serial sweep: one full-weight analysis per observation frame.
+
+        ``rows`` is ``[analysis rows | predicted-observation frames]``, with
+        frame ``t``'s ``N_obs`` predicted-observation rows at
+        ``[obs_offset + t*N_obs, obs_offset + (t+1)*N_obs)``. Frame ``t``'s
+        analysis uses those rows *as they currently are* — already updated by
+        frames ``0..t-1`` — as its predicted observations, and updates every row
+        of the array, so the state, the parameters and all the frames'
+        observation-space rows advance together. That is what makes the sweep a
+        serial (asynchronous) EnKF rather than T independent updates, and what
+        keeps the appended rows a posterior observation-space diagnostic for
+        every frame, not just the last one.
+
+        The same helper serves the reduction's discarded-increment diagnostic
+        (see :meth:`_record_reduction_diagnostics`), which must reproduce this
+        sweep exactly — same frames, same order, same keys — for its difference
+        to measure the truncation and nothing else.
+        """
+        num_frames, n_obs = int(obs.shape[0]), int(obs.shape[1])
+        for frame in range(num_frames):
+            start = obs_offset + frame * n_obs
+            rows = self.analysis(
+                rows,
+                rows[start : start + n_obs],
+                obs[frame],
+                self.C_D_diag,
+                frame_keys[frame],
+                **plumbing,
+            )
+        return rows
 
     def _record_reduction_diagnostics(
         self,
@@ -887,7 +1030,7 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         state_increment: jnp.ndarray,
         pred_obs: jnp.ndarray,
         obs: jnp.ndarray,
-        analysis_key: jax.Array,
+        frame_keys: Sequence[jax.Array],
         basis_seconds: Optional[float],
     ) -> None:
         """Fill one cycle's reduction fields (all ``None`` on the full path).
@@ -901,6 +1044,12 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         ``[rank:]`` are exactly the part of the update the truncation drops.
         The fraction is measured in the reduction's own (scaled) norm and is
         unaffected by prior inflation, which rescales both parts alike.
+
+        With a multi-frame cycle the weight matrix is the sweep's composition,
+        so the coordinates go through the SAME :meth:`_assimilate_frames` call
+        — with the frames appended as ride-along rows, so they evolve exactly
+        as they did in the real sweep, and with the same per-frame keys. The
+        appended rows are stripped again before the norms are taken.
         """
         reduction = self.state_reduction
         assert reduction is not None
@@ -924,10 +1073,14 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         coordinates = reduction.fit_coordinates
         if coordinates is None:
             return
-        increment_coordinates = (
-            self.analysis(coordinates, pred_obs, obs, self.C_D_diag, analysis_key)
-            - coordinates
+        n_coordinates = coordinates.shape[0]
+        swept = self._assimilate_frames(
+            jnp.concatenate([coordinates, pred_obs], axis=0),
+            n_coordinates,
+            obs,
+            frame_keys,
         )
+        increment_coordinates = swept[:n_coordinates] - coordinates
         full_norm = float(jnp.linalg.norm(increment_coordinates))
         diag.reduction_discarded_increment_fraction = (
             float(jnp.linalg.norm(increment_coordinates[reduction.rank :]) / full_norm)
@@ -1006,7 +1159,8 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         final_state: xarray.Dataset,
         n_state: int,
         n_param: int,
-        n_d: int,
+        n_obs: int,
+        n_appended: int,
     ) -> tuple[
         Optional[jnp.ndarray],
         Optional[jnp.ndarray],
@@ -1020,6 +1174,13 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         (correlation), but receive the exact global update for physical-distance
         localization. The appended diagnostic predicted-observation rows are
         always masked to the global update.
+
+        Two observation counts, because one analysis sees one frame while the
+        appended block holds all of them: ``n_obs`` is the PER-FRAME count that
+        sizes ``obs_coords`` (every frame observes the same sensors, so one
+        frame's coordinates serve them all), ``n_appended = T * n_obs`` the
+        number of ride-along rows the row-wise descriptors must cover. They are
+        equal on the ``T = 1`` path.
         """
         if self.localization is None:
             return None, None, None, None
@@ -1031,7 +1192,7 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
             mask_blocks.append(
                 jnp.full((n_param,), self.localization.localizes_parameters, dtype=bool)
             )
-        mask_blocks.append(jnp.zeros(n_d, dtype=bool))
+        mask_blocks.append(jnp.zeros(n_appended, dtype=bool))
         localize_mask = jnp.concatenate(mask_blocks)
 
         group_ids = None
@@ -1045,7 +1206,7 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
             if n_param:
                 id_blocks.append(offset + jnp.arange(n_param, dtype=int))
                 offset += n_param
-            id_blocks.append(offset + jnp.arange(n_d, dtype=int))
+            id_blocks.append(offset + jnp.arange(n_appended, dtype=int))
             group_ids = jnp.concatenate(id_blocks)
 
         row_coords = None
@@ -1054,10 +1215,10 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
             # mode='parameter' is rejected at construction, so state rows exist.
             state_coords = self._state_augmentation.row_coords(final_state)
             row_coords = jnp.concatenate(
-                [state_coords, jnp.zeros((n_param + n_d, 3))], axis=0
+                [state_coords, jnp.zeros((n_param + n_appended, 3))], axis=0
             )  # non-state rows are masked out above
             obs_coords = jnp.asarray(
-                sensor_observation_coords(self.observation_operator, n_d)
+                sensor_observation_coords(self.observation_operator, n_obs)
             )
 
         return group_ids, localize_mask, row_coords, obs_coords
@@ -1072,8 +1233,17 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         dev_post: jnp.ndarray,
         n_state: int,
         n_param: int,
+        num_frames: int = 1,
     ) -> CycleDiagnostics:
         """Innovation statistics and block spreads for one cycle.
+
+        Every observation-space quantity is over the cycle's ``num_frames``
+        frames stacked together — ``obs`` is the ``(T*N_obs,)`` vector, and
+        ``pred_obs`` / ``pred_obs_post`` the matching ``(T*N_obs, N_e)`` rows —
+        so ``obs_prior_rmse``, ``obs_posterior_rmse`` and ``innovation_chi2``
+        answer "how well did this cycle fit the observations it assimilated?".
+        ``C_D`` is per frame, so the stacked system's error covariance is
+        ``tile(C_D_diag, T)``, the block-diagonal repetition of it.
 
         ``pred_obs`` must be the raw forecast (pre-inflation) so the chi2
         spread term reflects what the model produced, not what the inflation
@@ -1082,12 +1252,14 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
 
         The appended predicted-observation rows take a global ride-along
         update, so ``obs_posterior_rmse`` is only ``H`` applied to the analyzed
-        state on the unlocalized, unreduced path. Under a state reduction it is
-        computed from the FULL-space observation-row update and is therefore
-        insensitive to truncation (bit-identical to the unreduced filter);
-        under localization the state rows are localized while these rows are
-        not. ``obs_posterior_rmse_kind`` labels which case produced the value
-        so it is never silently compared across configurations.
+        state on the unlocalized, unreduced path — and that is unchanged by the
+        serial sweep, whose every frame updates all of those rows too. Under a
+        state reduction it is computed from the FULL-space observation-row
+        update and is therefore insensitive to truncation (bit-identical to the
+        unreduced filter); under localization the state rows are localized while
+        these rows are not. ``obs_posterior_rmse_kind`` labels which case
+        produced the value so it is never silently compared across
+        configurations.
         """
         N_d = obs.shape[0]
         N_e = pred_obs.shape[1]
@@ -1095,7 +1267,7 @@ _TrajectoryStateFilter`) overrides this to hand the forward model the piece of
         innovation = obs - jnp.mean(pred_obs, axis=1)
         pred_obs_dev = pred_obs - jnp.mean(pred_obs, axis=1, keepdims=True)
         C_DD = jnp.dot(pred_obs_dev, pred_obs_dev.T) / (N_e - 1)
-        S = C_DD + jnp.diag(self.C_D_diag)
+        S = C_DD + jnp.diag(jnp.tile(self.C_D_diag, num_frames))
         chi2 = float(
             innovation
             @ jax.scipy.linalg.cho_solve(jax.scipy.linalg.cho_factor(S), innovation)
@@ -1146,11 +1318,9 @@ class EnsembleKalmanFilter(BaseFilter):
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
-        aggregate_observations: Optional[AggregateObservations] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
-            aggregate_observations=aggregate_observations,
             forward_model=forward_model,
             C_D=C_D,
             analysis=StochasticEnKFAnalysis() if analysis is None else analysis,

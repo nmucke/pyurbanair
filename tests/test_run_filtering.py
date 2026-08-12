@@ -49,7 +49,9 @@ def _overrides(
         "obs.x_points=[2.5,2.5,18.0,18.0]",
         "obs.y_points=[5.0,15.0,5.0,15.0]",
         "obs.z_points=[3.0,3.0,3.0,3.0]",
-        "filtering.interval_seconds=3.0",
+        # No aggregation override here: the sequential filter assimilates every
+        # observation frame of a segment serially, so `filtering.interval_seconds`
+        # does not exist (Hydra would reject it).
         *(extra or []),
     ]
 

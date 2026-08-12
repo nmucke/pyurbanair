@@ -99,11 +99,9 @@ rather than pulling them from separate files. The table below summarises each.
 
 | Field | Default | Purpose |
 |---|---|---|
-| `num_cycles` | 2 | Number of filter cycles; each forecasts one segment of `time.simulation_time` and applies ONE full-weight analysis. |
+| `num_cycles` | 2 | Number of filter cycles; each forecasts one segment of `time.simulation_time` and assimilates that segment's observation frames serially (one full-weight analysis per frame). |
 | `seed` | 42 | JAX RNG seed. |
-| `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors). |
-| `interval_seconds` | 30.0 | Width of the observation-aggregation intervals (s): the time-resolved observations are binned into contiguous intervals of this length and reduced within each before the update sees them. `null` = full-resolution assimilation (every output frame). |
-| `aggregation_mode` | `mean` | Reduction applied within each interval: `mean` \| `median` \| `max` \| `min`. |
+| `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors), of ONE observation frame. |
 | `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
 | `analysis` | (group) | Set by `filtering/analysis` (default `stochastic`); `etkf*`/`letkf*` are the deterministic ensemble transforms and constrain `localization` (§1.8). |
 | `localization` | (group) | Set by `filtering/localization` (default `none`). |
@@ -168,8 +166,9 @@ Benchmark staggered cube array (Xie & Castro 2008). Default case.
   (`z=2 m`), plus 2 held-out validation sensors. States observed: `u, v`.
   The case block holds observation-*operator* arguments only; observation
   aggregation is a DA knob and lives on the run configs' algorithm node
-  (`esmda.interval_seconds` / `esmda.aggregation_mode`, and the `filtering.*` /
-  `filter_smoothing.*` equivalents).
+  (`esmda.interval_seconds` / `esmda.aggregation_mode` and the
+  `filter_smoothing.*` equivalents; `run_filtering.yaml` has none — the
+  sequential filter assimilates every frame serially).
 - **Time**: `simulation_time=300 s`, `output_frequency=2 s`, `spinup_time=50 s` per window.
 
 #### [`case/barcelona.yaml`](../conf/case/barcelona.yaml)
