@@ -18,7 +18,7 @@ forward_model:
   ncpu: 1
   save_only_last_timestep: false
   verbose: false
-  boundary_condition: inflow_outflow # periodic #
+  boundary_condition: inflow_outflow # periodic #  
   # Sub-grid-scale closure, written to &NAMSUBGRID as a mutually exclusive switch
   # set (the chosen one .true., the others .false.), so the closure comes from
   # this config rather than from whatever the case's namoptions template ships.
@@ -96,11 +96,11 @@ forward_model:
   # `enabled: false` (the default) is a strict no-op — namoptions stays
   # byte-identical and no driver files are written.
   inlet_turbulence:
-    enabled: false
-    intensity: 0.1        # u'_rms / |U_mean(z)|; v' and w' get 0.7x this
-    length_scale_y: 25.0  # m — spanwise integral length scale of the eddies
-    length_scale_z: 25.0  # m — vertical (defaults ~ building height; calibrate)
-    length_scale_x: 50.0  # m — streamwise; sets the AR(1) time scale via Taylor
+    enabled: true
+    intensity: 0.05        # u'_rms / |U_mean(z)|; v' and w' get 0.7x this
+    length_scale_y: 6.0  # m — spanwise integral length scale of the eddies
+    length_scale_z: 6.0  # m — vertical (defaults ~ building height; calibrate)
+    length_scale_x: 6.0  # m — streamwise; sets the AR(1) time scale via Taylor
     time_step: 0.5        # s — &DRIVER dtdriver. Injected turbulence is
                           #     band-limited to ~1/(2*dtdriver) because the
                           #     solver interpolates linearly between records.

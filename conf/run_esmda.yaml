@@ -42,12 +42,12 @@ defaults:
   # override them (esmda.localization etc.). The model / params mounts write to
   # their own packages, so their position relative to `_self_` is immaterial.
   - _self_
-  - esmda/localization: none
+  - esmda/localization: correlation
   - esmda/state_reduction: none
   - esmda/smoother: dynamic
-  - model@truth_model: pypalm
-  - model@assim_model: pypalm
-  - params@truth_params: dynamic_truth
+  - model@truth_model: pyudales
+  - model@assim_model: pyudales
+  - params@truth_params: dynamic_sine
   - params@prior_params: dynamic
 
 # --- Output roots (everything mutable lands under .temp/). This run mounts two
@@ -93,7 +93,7 @@ params_to_estimate:
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
 ensemble:
-  ensemble_size: 30
+  ensemble_size: 50
   num_parallel_processes: 8
   num_cpus_per_process: 1
   failure:
@@ -108,7 +108,7 @@ ensemble:
 # esmda/state_reduction=none|svd) that override `esmda.localization` /
 # `esmda.state_reduction` below. ---
 esmda:
-  num_steps: 3
+  num_steps: 4
   alpha: ${.num_steps}
   num_assimilation_windows: 2
   seed: 42

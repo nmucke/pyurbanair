@@ -67,7 +67,7 @@ defaults:
   # tracks with a STATIC scalar prior it re-analyses each cycle. The prior MUST
   # be static (params@prior_params=static) -- a dynamic prior belongs to the
   # ESMDA smoothers. Set params@truth_params=static_truth for a constant truth.
-  - params@truth_params: dynamic_truth
+  - params@truth_params: dynamic_sine
   - params@prior_params: static
 
 # --- Output roots (everything mutable lands under .temp/). Two model mounts
@@ -85,7 +85,7 @@ paths:
 # with the script's explicit static-only error instead of a missing-key one),
 # and keeps shared overrides (tests) portable across the run_* entry points. ---
 time:
-  seconds_per_knot: 60.0
+  seconds_per_knot: 30.0
 
 # --- Which parameters the filter estimates (same contract as run_esmda.yaml
 # `params_to_estimate`: a list -> that subset of the sampler configs' params,
@@ -101,7 +101,7 @@ params_to_estimate:
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
 ensemble:
-  ensemble_size: 32
+  ensemble_size: 50
   num_parallel_processes: 8
   num_cpus_per_process: 1
   failure:
@@ -130,7 +130,7 @@ filtering:
   # observation-noise draws are all carried across it, so the same horizon run
   # as 1 window or as W windows gives identical results. Keep W in the ESMDA
   # range (2-10) for comparable runs and readable per-window diagnostics.
-  num_assimilation_windows: 2
+  num_assimilation_windows: 3
   # Analysis STRIDE: assimilate only every n-th observation frame (1 = every
   # frame, the every-observation filter above; n > 1 thins the analyses without
   # touching the model's output cadence). A cycle then spans
@@ -145,7 +145,7 @@ filtering:
   # window; the run refuses to start otherwise.
   assimilate_every_n_step: 1
   seed: 42
-  obs_error_std: 0.25
+  obs_error_std: 0.1
   # state | parameter | joint. The parameter-updating modes (parameter and
   # joint) REQUIRE spread maintenance (filtering/evolution=random_walk or a
   # filtering/inflation option) — the filter refuses silently-collapsing
