@@ -664,8 +664,7 @@ def test_one_frame_per_cycle_matches_the_legacy_flat_run(
         assert (
             labelled_diag.state_spread_posterior == legacy_diag.state_spread_posterior
         )
-    # Recorded predicted observations keep the flat (N_d, N_e) shape the
-    # filter_smoothing outer loop consumes.
+    # Recorded predicted observations keep the flat (N_d, N_e) shape.
     assert len(frames.pred_obs_history) == num_cycles
     for recorded, expected in zip(frames.pred_obs_history, legacy.pred_obs_history):
         assert recorded.shape == (1, n_e)
@@ -952,6 +951,305 @@ def test_C_D_is_checked_against_the_per_frame_observation_vector() -> None:
                 _labelled_truth_obs(np.array([[0.2], [0.8]]), np.array([0.0, 1.0]))
             ],
         )
+
+
+# ---------------------------------------------------------------------------
+# assimilate_every_n_step: thin the ANALYSES, not the observations
+# ---------------------------------------------------------------------------
+
+
+class _MultiFrameToyModel(_ToyLinearModel):
+    """``_ToyLinearModel`` emitting ``num_frames`` frames per forecast segment.
+
+    One propagation step per output frame, so the frames genuinely differ and
+    a test can tell WHICH of them an analysis used.
+    """
+
+    def __init__(self, A: np.ndarray, num_frames: int) -> None:
+        super().__init__(A)
+        self.num_frames = num_frames
+
+    def run_ensemble(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+    ) -> xarray.Dataset:
+        assert state is not None
+        x = jnp.asarray(state["u"].values)  # (N_e, nx)
+        frames = []
+        for _ in range(self.num_frames):
+            x = x @ self.A.T
+            frames.append(x)
+        stacked = jnp.stack(frames, axis=1)  # (N_e, T, nx)
+        return xarray.Dataset(
+            {"u": (("ensemble", "time", "x"), stacked)},
+            coords={
+                "ensemble": np.arange(stacked.shape[0]),
+                "time": np.arange(1, self.num_frames + 1, dtype=float),
+                "x": np.arange(stacked.shape[2]),
+            },
+        )
+
+
+class _StridedObservationOperator:
+    """``scripts/filtering/run_filtering.py``'s ORIGINAL stride mechanism.
+
+    Kept here as a fixture — the script drops it in favour of
+    ``BaseFilter.assimilate_every_n_step`` — so the library knob can be pinned
+    against the mechanism it replaces: wrap the operator, subset its labelled
+    output to ``[n-1::n]``, and hand the filter the truth's matching strided
+    frames. Anything the knob computes differently would show up as a
+    difference against this.
+    """
+
+    def __init__(self, operator: Any, stride: int) -> None:
+        self._operator = operator
+        self._stride = int(stride)
+
+    def __call__(self, state: xarray.Dataset) -> Any:
+        obs = self._operator(state)
+        if isinstance(obs, xarray.DataArray) and "time" in obs.dims:
+            return obs.isel(time=slice(self._stride - 1, None, self._stride))
+        return obs
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._operator, name)
+
+
+_STRIDE_A = np.array([[1.0, 0.2], [0.0, 1.0]])
+
+
+def _stride_filter(
+    num_frames: int,
+    stride: int,
+    *,
+    wrapped: bool = False,
+    seed: int = 70,
+) -> EnsembleKalmanFilter:
+    """An EnKF over a ``num_frames``-frame segment, strided by knob or wrapper."""
+    operator: Any = _TemporalToyObsOp(np.array([[1.0, 0.5]]))
+    if wrapped:
+        operator = _StridedObservationOperator(operator, stride)
+    enkf = EnsembleKalmanFilter(
+        observation_operator=operator,
+        forward_model=_MultiFrameToyModel(_STRIDE_A, num_frames),
+        C_D=jnp.array([0.2]),
+        mode="state",
+        rng_key=jax.random.PRNGKey(seed),
+    )
+    if not wrapped:
+        enkf.assimilate_every_n_step = stride
+    return enkf
+
+
+def _stride_batches(values: np.ndarray) -> list[xarray.DataArray]:
+    """``(num_cycles, T, 1)`` values as one labelled batch per cycle."""
+    return [
+        _labelled_truth_obs(cycle, np.arange(1, cycle.shape[0] + 1, dtype=float))
+        for cycle in values
+    ]
+
+
+def test_a_stride_matches_the_wrapped_operator_mechanism() -> None:
+    """The knob == the script's old wrapper + double-sliced truth, bit for bit.
+
+    The stride used to live in ``run_filtering.py`` as an operator wrapper
+    (predicted side) plus an ``isel(time=slice(n-1, None, n))`` on the truth
+    (real side). Lifting it into the filter must change nothing about the
+    analysis: same frames, same order, same PRNG draws — which is what lets the
+    script delete its wrapper without re-tuning a single run.
+    """
+    n_e, num_cycles, num_frames, stride = 12, 3, 4, 2
+    state = _initial_state(jax.random.PRNGKey(71), n_e, np.zeros(2), np.eye(2))
+    values = np.asarray(
+        jax.random.normal(jax.random.PRNGKey(72), (num_cycles, num_frames, 1))
+    )
+
+    knob = _stride_filter(num_frames, stride)
+    knob.collect_pred_obs = True
+    knob_result = knob.run(state=state, observations=_stride_batches(values))
+
+    wrapper = _stride_filter(num_frames, stride, wrapped=True)
+    wrapper.collect_pred_obs = True
+    wrapper_result = wrapper.run(
+        # The truth-side half of the old mechanism.
+        state=state,
+        observations=_stride_batches(values[:, stride - 1 :: stride]),
+    )
+
+    assert knob_result.state is not None and wrapper_result.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(knob_result.state["u"]), np.asarray(wrapper_result.state["u"])
+    )
+    for analysed, reference in zip(knob_result.diagnostics, wrapper_result.diagnostics):
+        assert analysed.obs_prior_rmse == reference.obs_prior_rmse
+        assert analysed.obs_posterior_rmse == reference.obs_posterior_rmse
+        assert analysed.innovation_chi2 == reference.innovation_chi2
+    for analysed, reference in zip(knob.pred_obs_history, wrapper.pred_obs_history):
+        np.testing.assert_array_equal(analysed, reference)
+
+    # Negative control: the OTHER subset of the same frames is a different
+    # filter, so the equality above is not "any stride matches any stride".
+    leading = _stride_filter(num_frames, stride, wrapped=True)
+    leading_result = leading.run(
+        state=state, observations=_stride_batches(values[:, 0::stride])
+    )
+    assert leading_result.state is not None
+    assert not np.allclose(
+        np.asarray(leading_result.state["u"]), np.asarray(knob_result.state["u"])
+    )
+
+
+def test_a_stride_records_full_frames_but_analyses_the_strided_rows() -> None:
+    """Frames history full-resolution, flat histories on the analysed rows.
+
+    The split ``run_filtering``'s per-window artifacts depend on: the labelled
+    frames keep every frame the operator produced (so a caller reading them
+    back does not lose frames to the stride), while the flat prior/posterior
+    blocks hold only the rows an analysis actually touched (so they stay
+    row-alignable with each other).
+    """
+    n_e, num_cycles, num_frames, stride = 8, 2, 4, 2
+    state = _initial_state(jax.random.PRNGKey(73), n_e, np.zeros(2), np.eye(2))
+    values = np.asarray(
+        jax.random.normal(jax.random.PRNGKey(74), (num_cycles, num_frames, 1))
+    )
+
+    enkf = _stride_filter(num_frames, stride)
+    enkf.collect_pred_obs = True
+    result = enkf.run(state=state, observations=_stride_batches(values))
+
+    assert len(enkf.pred_obs_frames_history) == num_cycles
+    for frames in enkf.pred_obs_frames_history:
+        assert frames is not None and frames.sizes["time"] == num_frames
+    assert len(enkf.pred_obs_history) == num_cycles
+    for prior, posterior in zip(enkf.pred_obs_history, enkf.pred_obs_post_history):
+        assert prior.shape == (num_frames // stride, n_e)
+        assert posterior.shape == prior.shape
+    # The recorded prior rows ARE the strided subset of the full frames.
+    for frames, prior in zip(enkf.pred_obs_frames_history, enkf.pred_obs_history):
+        assert frames is not None
+        full = np.asarray(frames.transpose("ensemble", "time", "obs").values)
+        np.testing.assert_allclose(
+            prior,
+            full[:, stride - 1 :: stride, :].transpose(1, 2, 0).reshape(-1, n_e),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+    # One diagnostic per cycle, over the analysed frames only.
+    assert len(result.diagnostics) == num_cycles
+
+
+def test_a_stride_of_one_is_the_unstrided_filter() -> None:
+    """The default is the identity, down to the PRNG state."""
+    n_e, num_cycles, num_frames = 8, 2, 3
+    state = _initial_state(jax.random.PRNGKey(75), n_e, np.zeros(2), np.eye(2))
+    values = np.asarray(
+        jax.random.normal(jax.random.PRNGKey(76), (num_cycles, num_frames, 1))
+    )
+
+    strided = _stride_filter(num_frames, 1)
+    strided_result = strided.run(state=state, observations=_stride_batches(values))
+    plain = _stride_filter(num_frames, 1)
+    del plain.assimilate_every_n_step  # back to the class default
+    plain_result = plain.run(state=state, observations=_stride_batches(values))
+
+    assert strided_result.state is not None and plain_result.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(strided_result.state["u"]), np.asarray(plain_result.state["u"])
+    )
+    np.testing.assert_array_equal(
+        np.asarray(strided.rng_key), np.asarray(plain.rng_key)
+    )
+
+
+def test_a_stride_that_does_not_divide_the_cycles_frames_is_rejected() -> None:
+    """Loud, up front, and naming both numbers.
+
+    A stride that does not tile the batch would leave the last analysis on some
+    interior frame instead of the segment's own final one — the frame the state
+    analysis actually updates — which is invisible in the output.
+    """
+    state = _initial_state(jax.random.PRNGKey(77), 6, np.zeros(2), np.eye(2))
+    enkf = _stride_filter(3, 2)
+    with pytest.raises(ValueError, match="assimilate_every_n_step=2"):
+        enkf.run(
+            state=state,
+            observations=_stride_batches(np.zeros((1, 3, 1))),
+        )
+
+    enkf.assimilate_every_n_step = 0
+    with pytest.raises(ValueError, match=">= 1"):
+        enkf.run(state=state, observations=_stride_batches(np.zeros((1, 4, 1))))
+
+
+def test_pred_obs_frames_history_keeps_the_operators_labelled_output() -> None:
+    """The third history: ``H(x_f)`` with its TIME axis still attached.
+
+    The flat ``(T*N_obs, N_e)`` block has lost the time coordinate, so a caller
+    that has to re-express the predicted observations in another space cannot
+    reconstruct them from it. Recorded under the same gate as the other two, one entry per
+    cycle, and ``None`` for an operator with nothing to label — so the indices
+    stay aligned entry for entry.
+    """
+    n_e, num_cycles = 8, 2
+    H = np.array([[1.0, 0.5]])
+    state = _initial_state(jax.random.PRNGKey(70), n_e, np.zeros(2), np.eye(2))
+    observations = [
+        _labelled_truth_obs(np.array([[0.2], [0.8]]), np.array([0.0, 1.0]))
+        for _ in range(num_cycles)
+    ]
+
+    def _filter(observation_operator: Any) -> EnsembleKalmanFilter:
+        return EnsembleKalmanFilter(
+            observation_operator=observation_operator,
+            forward_model=_ToyLinearModel(np.eye(2)),
+            C_D=jnp.array([0.2]),
+            mode="state",
+            rng_key=jax.random.PRNGKey(71),
+        )
+
+    # Default-off: the history stays empty, so the flag remains the only cost.
+    quiet = _filter(_TemporalToyObsOp(H))
+    quiet.run(state=state, observations=observations)
+    assert quiet.pred_obs_frames_history == []
+
+    labelled = _filter(_TemporalToyObsOp(H))
+    labelled.collect_pred_obs = True
+    labelled.run(state=state, observations=observations)
+
+    assert len(labelled.pred_obs_frames_history) == num_cycles
+    forecast = _ToyLinearModel(np.eye(2)).run_ensemble(state=state)
+    expected = _TemporalToyObsOp(H)(forecast)
+    frames = labelled.pred_obs_frames_history[0]
+    assert isinstance(frames, xarray.DataArray)
+    assert frames.dims == ("ensemble", "time", "obs")
+    np.testing.assert_allclose(
+        np.asarray(frames.transpose("ensemble", "time", "obs").values),
+        np.asarray(expected),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    # The same rows the flat history holds, before the time axis was folded in.
+    np.testing.assert_allclose(
+        np.asarray(frames.values).transpose(1, 2, 0).reshape(-1, n_e),
+        labelled.pred_obs_history[0],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    # Rebound per call, like the other histories.
+    labelled.run(state=state, observations=observations[:1])
+    assert len(labelled.pred_obs_frames_history) == 1
+
+    # An operator returning a plain array has no time labels to keep: the
+    # placeholder is what holds the index alignment.
+    plain = _filter(_ToyObsOp(H))
+    plain.collect_pred_obs = True
+    plain.run(state=state, observations=jnp.asarray(np.array([[0.2], [0.8]])))
+    assert plain.pred_obs_frames_history == [None, None]
+    assert len(plain.pred_obs_history) == num_cycles
 
 
 # ---------------------------------------------------------------------------

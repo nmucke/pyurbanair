@@ -122,7 +122,7 @@ filtering:
   # holds `time.simulation_time / time.output_frequency` of them (divided by
   # `assimilate_every_n_step`, below). Still no aggregation knobs: the filter
   # assimilates individual frames and never averages them — aggregation stays
-  # with the ESMDA smoothers and the filter-smoothing hybrid.
+  # with the ESMDA smoothers.
   #
   # A window boundary is a CHUNKING boundary only (one `run()` call and one set
   # of per-window artifacts each, so RAM and peak disk stay bounded): the

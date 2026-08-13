@@ -23,6 +23,7 @@ import logging
 import pathlib
 import re
 
+import jax
 import numpy as np
 import xarray
 import yaml
@@ -151,6 +152,106 @@ def analyzed_truth_frames(true_state, truth_access):
     if n_per_cycle <= 1 or "time" not in true_state.dims:
         return true_state
     return true_state.isel(time=slice(n_per_cycle - 1, None, n_per_cycle))
+
+
+# ---------------------------------------------------------------------------
+# Observation noise (shared by the assimilation entry points)
+# ---------------------------------------------------------------------------
+
+# Folded into the run's seed to open the observation-noise stream. Folding
+# (rather than splitting) makes the stream independent of how many OTHER keys a
+# script derives, and of the order it derives them in -- which is what lets
+# run_esmda and run_filtering see the same perturbed observations for the same
+# case + seed. The constant only has to be stable;
+# its value is arbitrary.
+_OBSERVATION_NOISE_STREAM = 1_000_003
+
+
+def observation_noise_key(seed):
+    """The base PRNG key of a run's observation-noise stream.
+
+    ``seed`` is the entry point's configured seed (``esmda.seed``,
+    ``filtering.seed``). Every entry point derives
+    the same base key from the same seed, and :func:`perturb_observations`
+    derives each frame's draw from it by GLOBAL frame index -- so the perturbed
+    observation stream of a case is a function of ``(seed, horizon)`` alone.
+    """
+    return jax.random.fold_in(jax.random.PRNGKey(int(seed)), _OBSERVATION_NOISE_STREAM)
+
+
+def perturb_observations(observations, obs_error_std, base_key, first_frame=0):
+    """Add i.i.d. observation noise to time-resolved truth observations.
+
+    Frame ``i`` of ``observations`` is perturbed with
+    ``obs_error_std * normal(fold_in(base_key, first_frame + i))``, i.e. its
+    draw is a function of its GLOBAL frame index on the horizon and of nothing
+    else. Two consequences, and they are the reason this helper exists:
+
+    * **Window/cycle slicing is inert.** Perturbing the whole horizon at once
+      and perturbing it in chunks (passing each chunk's first global frame
+      index as ``first_frame``) produce the identical numbers, so how a script
+      chunks its observation loop can never change the realization.
+    * **Entry points agree.** No ``jax.random.split`` chain is involved, so the
+      stream does not shift when a script derives one more (or one fewer) key
+      of its own before the observations are built.
+
+    Args:
+        observations: The CLEAN observations, either a labelled DataArray with
+            a ``time`` dimension (dims in any order) or a plain array whose
+            first axis is time. An input without a ``time`` dimension is one
+            frame.
+        obs_error_std: Standard deviation of the per-entry Gaussian noise (the
+            square root of ``C_D``'s diagonal).
+        base_key: The stream's base key, from :func:`observation_noise_key`.
+        first_frame: Global index of the FIRST frame of ``observations``, so a
+            per-window/per-cycle slice keeps the horizon's numbering.
+
+    Returns:
+        The perturbed observations, in the same form as the input (a DataArray
+        keeps its dims, coords and attrs). The input is never modified, so the
+        caller keeps the clean observations to record alongside them.
+    """
+    std = float(obs_error_std)
+    labelled = isinstance(observations, xarray.DataArray)
+    if labelled and "time" in observations.dims:
+        # Move time to the front, perturb frame by frame, move it back: the
+        # draw must depend on the frame index alone, never on where the time
+        # axis happens to sit.
+        dims = list(observations.dims)
+        ordered = observations.transpose("time", *[d for d in dims if d != "time"])
+        values = np.asarray(ordered.values, dtype=float)
+        noisy = values + _frame_noise(values, std, base_key, first_frame)
+        return ordered.copy(data=noisy).transpose(*dims)
+    if labelled:
+        # No time axis: the whole array is one frame.
+        values = np.asarray(observations.values, dtype=float)
+        noisy = values + _frame_noise(values[None, ...], std, base_key, first_frame)[0]
+        return observations.copy(data=noisy)
+
+    values = np.asarray(observations, dtype=float)
+    if values.ndim == 0:
+        raise ValueError(
+            "observations must hold at least one frame; got a scalar. Pass the "
+            "clean observation frames (a ('time', 'obs') DataArray, or an "
+            "array whose first axis is time)."
+        )
+    return values + _frame_noise(values, std, base_key, first_frame)
+
+
+def _frame_noise(values, obs_error_std, base_key, first_frame):
+    """``obs_error_std * normal(...)`` for a ``(T, ...)`` stack, per frame."""
+    return np.stack(
+        [
+            obs_error_std
+            * np.asarray(
+                jax.random.normal(
+                    jax.random.fold_in(base_key, int(first_frame) + frame),
+                    values.shape[1:],
+                )
+            )
+            for frame in range(values.shape[0])
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------

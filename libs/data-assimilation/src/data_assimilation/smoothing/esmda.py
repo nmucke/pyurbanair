@@ -460,21 +460,41 @@ sensor_observation_coords` (shared with the filtering package); see its
 class ParameterESMDA(_BaseESMDA):
     """Parameter-only ESMDA smoothing."""
 
-    def _one_step(
+    def update_params_from_pred_obs(
         self,
         params: xarray.Dataset,
+        pred_obs: jnp.ndarray,
         obs: jnp.ndarray,
-        state: Optional[xarray.Dataset] = None,
+        *,
         group_ids: Optional[jnp.ndarray] = None,
-    ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
+    ) -> xarray.Dataset:
+        """ONE tempered ESMDA update of the parameters, given ``H(x)`` already.
+
+        The analysis half of :meth:`_one_step`, with the forecast half — the
+        forward model, the observation operator, the on-disk step directories —
+        left out, so the update can be read (and overridden) without the
+        forecast plumbing around it.
+
+        Args:
+            params: Prior parameter ensemble, scalar ``(ensemble,)`` variables
+                (a time-varying trajectory goes through the
+                :class:`TimeVaryingParameterESMDA` override, which flattens it
+                first).
+            pred_obs: ``(N_d, N_e)`` predicted observations, in the same
+                observation space as ``obs``.
+            obs: ``(N_d,)`` observations, already aggregated and flattened.
+            group_ids: Optional block id per parameter row. ``None`` (default)
+                with block grouping enabled gives each parameter its own
+                block; ignored when the localization does not ask for the
+                block analysis.
+
+        Returns:
+            The updated parameter Dataset, on ``params``' own coordinates.
+        """
         obs = jnp.asarray(obs)
+        pred_obs = jnp.asarray(pred_obs)
         param_names = list(params.data_vars.keys())
         N_e = params.sizes["ensemble"]
-
-        pred_obs = self._observation_step(
-            state=state, results_dir=self._results_dir_or_none()
-        )
-        pred_obs = jnp.asarray(pred_obs).T
 
         if pred_obs.ndim != 2 or pred_obs.shape[1] != N_e:
             raise ValueError(
@@ -483,7 +503,6 @@ class ParameterESMDA(_BaseESMDA):
                 "This usually indicates stale or unexpected files in the ESMDA "
                 "results step directory."
             )
-        self._record_pred_obs(pred_obs)
 
         params_array = jnp.array([params[name].values for name in param_names])
 
@@ -505,7 +524,28 @@ class ParameterESMDA(_BaseESMDA):
             for i, name in enumerate(param_names)
         }
 
-        return None, xarray.Dataset(data_vars=updated_data_vars, coords=params.coords)
+        return xarray.Dataset(data_vars=updated_data_vars, coords=params.coords)
+
+    def _one_step(
+        self,
+        params: xarray.Dataset,
+        obs: jnp.ndarray,
+        state: Optional[xarray.Dataset] = None,
+        group_ids: Optional[jnp.ndarray] = None,
+    ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
+        obs = jnp.asarray(obs)
+
+        pred_obs = self._observation_step(
+            state=state, results_dir=self._results_dir_or_none()
+        )
+        pred_obs = jnp.asarray(pred_obs).T
+        self._record_pred_obs(pred_obs)
+
+        # Polymorphic: the time-varying variant's override flattens the
+        # trajectory around this same update.
+        return None, self.update_params_from_pred_obs(
+            params, pred_obs, obs, group_ids=group_ids
+        )
 
 
 class TimeVaryingParameterESMDA(ParameterESMDA):
@@ -582,23 +622,35 @@ ParamAugmentation` for the flattening semantics.
         """Reverse :meth:`_flatten_time_varying_params`."""
         return self._param_augmentation.unflatten(flat_params, original_params)
 
-    def _one_step(
+    def update_params_from_pred_obs(
         self,
         params: xarray.Dataset,
+        pred_obs: jnp.ndarray,
         obs: jnp.ndarray,
-        state: Optional[xarray.Dataset] = None,
+        *,
         group_ids: Optional[jnp.ndarray] = None,
-    ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
+    ) -> xarray.Dataset:
+        """The parameter update wrapped in the per-knot flatten/unflatten.
+
+        ``params`` is the trajectory Dataset: each time-varying variable is
+        expanded into its ``{name}_{t}`` knots (and any static variable rides
+        along as a single row) before the update, and rebuilt afterwards.
+        ``group_ids`` therefore describes the FLATTENED rows, in
+        :meth:`~data_assimilation.augmentation.ParamAugmentation.flatten`'s
+        order.
+        """
+        self._check_num_time_points(params)
         flat_params = self._flatten_time_varying_params(params)
         # Group ids built from the true name->knot mapping (grouping this
-        # parameter's time knots), passed down so the block update never has to
-        # re-parse the flattened names.
-        knot_group_ids = self._time_varying_group_ids(params)
-        _, updated_flat = super()._one_step(
-            flat_params, obs, state, group_ids=knot_group_ids
+        # parameter's time knots), so the block update never has to re-parse the
+        # flattened names. A caller that already built them (with the same
+        # mapping) passes them in instead.
+        if group_ids is None:
+            group_ids = self._time_varying_group_ids(params)
+        updated_flat = super().update_params_from_pred_obs(
+            flat_params, pred_obs, obs, group_ids=group_ids
         )
-        updated_params = self._unflatten_params(updated_flat, params)
-        return None, updated_params
+        return self._unflatten_params(updated_flat, params)
 
 
 class StateAndParameterESMDA(_BaseESMDA):

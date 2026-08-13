@@ -67,9 +67,6 @@ pixi run -e dev pre-commit      # black + isort + mypy on staged files
   mode = `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`).
 - Sequential filtering (EnKF): `python scripts/filtering/run_filtering.py ...`
   (mode = `filtering.mode=state|parameter|joint` × the `filtering/*` groups).
-- Filter smoothing (inner EnKF state filter + outer ESMDA over the parameter
-  trajectory): `python scripts/filter_smoothing/run_filter_smoothing.py ...`
-  (mode = the `filter_smoothing/*` groups; needs `params@prior_params=dynamic`).
 
 ## Workflow rules
 

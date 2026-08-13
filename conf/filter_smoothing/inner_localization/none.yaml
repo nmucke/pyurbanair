@@ -1,7 +1,0 @@
-# @package filter_smoothing
-# No localization inside the window: the inner state filter's cycle analyses use
-# the global (unlocalized) update. Independent of
-# `filter_smoothing/temporal_localization`, which localizes the OUTER trajectory
-# update in time.
-# Selected with `filter_smoothing/inner_localization=none` (the default).
-inner_localization: null

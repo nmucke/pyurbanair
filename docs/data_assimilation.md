@@ -9,7 +9,7 @@ is kept brief here; the guide is the primary source for it.
 
 ## 1. Purpose and scope
 
-The library implements ensemble data assimilation in JAX, in three flavors:
+The library implements ensemble data assimilation in JAX, in two flavors:
 
 * **Smoothing** — Ensemble Smoother with Multiple Data Assimilation (ESMDA):
   per assimilation window, the whole window is re-forecast `num_steps` times
@@ -19,12 +19,8 @@ The library implements ensemble data assimilation in JAX, in three flavors:
   ensemble is forecast one segment and ONE full-weight analysis updates the
   end-of-segment state and/or parameters, which warm-start the next cycle
   (§8).
-* **Filter smoothing** — a hybrid of the two: the state is filtered
-  sequentially exactly as above, while the low-dimensional *parameter
-  trajectory* over a window of `L` cycles is smoothed by an outer ESMDA loop
-  wrapped around the whole inner filter pass (§9).
 
-All three are **solver-agnostic**: they take any `BaseEnsembleForwardModel` (see
+Both are **solver-agnostic**: they take any `BaseEnsembleForwardModel` (see
 [base_ensemble_forward_model.py](../src/pyurbanair/base_ensemble_forward_model.py))
 so the same classes cover pylbm, pyudales, pypalm, and the neural surrogate.
 They share one analysis implementation, one augmentation (flatten/unflatten)
@@ -61,11 +57,6 @@ libs/data-assimilation/src/data_assimilation/
                             #   FilterResult, CycleDiagnostics
     parameter_evolution.py  # ParameterEvolution, IdentityEvolution,
                             #   RandomWalkEvolution
-  filter_smoothing/
-    base.py                 # FilterSmoothingESMDA (outer ESMDA loop over the
-                            #   parameter trajectory), _TrajectoryStateFilter,
-                            #   FilterSmoothingResult, IterationDiagnostics
-    temporal_localization.py  # TemporalLocalization (knot-time vs obs-time taper)
 ```
 
 ---
@@ -140,9 +131,8 @@ and the interval count is fixed by the first call — a later call producing a
 different count raises, because `C_D` is sized from the first window.
 
 It is an **optional constructor input to the DA classes that assimilate one
-batch at a time**: `aggregate_observations=` on the ESMDA smoothers and on
-`FilterSmoothingESMDA` (which passes it to its inner `_TrajectoryStateFilter`,
-§9). Each routes both the real observations and the predicted observations
+batch at a time**: `aggregate_observations=` on the ESMDA smoothers. Each
+routes both the real observations and the predicted observations
 `H(x)` through one path: optional aggregation, then the module-level
 `flatten_observations` helper — a time-major flatten (`("time", "obs") →
 (T·num_obs,)`, ensemble inputs to `(N_e, T·num_obs)`), which reproduces the
@@ -169,10 +159,10 @@ default everywhere.
 
 Because aggregation is a DA choice rather than an operator argument, its two
 knobs live on the run config's algorithm node — `esmda.interval_seconds` /
-`esmda.aggregation_mode` (and `filter_smoothing.*`), right next to
+`esmda.aggregation_mode`, right next to
 `obs_error_std` — not in the case's `obs:` block, which carries only
 observation-operator arguments. `run_filtering.yaml` has no such keys, because
-the filter aggregates nothing. `create_aggregate_observations` (§11) reads
+the filter aggregates nothing. `create_aggregate_observations` (§10) reads
 them; a null `interval_seconds` means full-resolution assimilation.
 
 ---
@@ -884,355 +874,12 @@ groups and the (dual-schema) artifact list.
 
 ---
 
-## 9. Filter smoothing — windowed parameter-trajectory ESMDA
-
-**Files:**
-[filter_smoothing/base.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/base.py),
-[filter_smoothing/temporal_localization.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/temporal_localization.py),
-[filter_smoothing/moving_window.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/moving_window.py).
-Design record:
-[docs/plans/filter_smoothing_windowed_esmda.md](plans/filter_smoothing_windowed_esmda.md).
-
-### What the algorithm is
-
-The state and the parameters are estimated by *different* algorithms over the
-same window of `L` cycles. The high-dimensional state is only ever **filtered**
-— the sequential EnKF of §8, one full-weight analysis per cycle, never
-smoothed. The low-dimensional **parameter trajectory**
-`Θ = [θ_0 … θ_{K-1}]` over `K` knots is **smoothed**: an outer ESMDA loop wraps
-the entire inner filter pass and updates every knot of the trajectory at once.
-
-One outer iteration is one inner pass through the window. Cycle `k` forecasts
-its segment under the *restriction of the current trajectory to that segment*
-(see "Knots, cycles and the segment restriction" below), and the raw predicted
-observations `d_k = H(x^f_k)` are recorded **before** that cycle's analysis.
-Stacking them cycle-major gives `D ∈ R^{L·N_d × N_e}`, against the stacked
-observation batches `Y ∈ R^{L·N_d}` and the tiled error-variance vector
-`jnp.tile(C_D_diag, L)`. One tempered stochastic update of the flattened
-trajectory closes the iteration — the shared
-[`stochastic_enkf_update`](../libs/data-assimilation/src/data_assimilation/filtering/analysis.py)
-with `alpha = num_steps`, i.e. the exact ESMDA per-step update of §5 applied to
-parameters only. Because the update sees the whole window's observations at
-once, an observation late in the window can move an early knot through the
-ensemble cross-covariance — the smoothing property the sequential filter
-structurally cannot have, obtained without ever smoothing the state.
-
-Four semantics are pinned by the method and enforced in the code:
-
-- **Reset between iterations.** Every inner pass is handed the *identical*
-  initial state; the analyzed state trajectory of the previous iteration is
-  discarded. Only `Θ` carries information across iterations. (A `state=None`
-  cold start is legal — each iteration then cold-starts identically.)
-- **Forecast, not analysis, observations.** `D` is recorded before the cycle's
-  analysis and before prior inflation, so it is `H` of the forecast the current
-  trajectory produced, not of an already-updated state.
-- **Final consistency pass.** After the last iteration one more inner pass runs
-  with the final `Θ`; its `FilterResult` is what the returned filtered state
-  and per-cycle diagnostics come from, so state and parameters are always
-  mutually consistent.
-- **Common random numbers** (`common_inner_noise=True`, the default). The inner
-  stochastic analysis and any inflation noise reuse one RNG key per window
-  across iterations, so the map `Θ → D` is deterministic and the outer
-  cross-covariances are not diluted by fresh Monte Carlo noise between
-  iterations. Set it `False` for independent draws. The *outer*
-  perturbed-observation draws always use fresh subkeys.
-
-### Knots, cycles and the segment restriction
-
-The knot grid and the cycle grid are **independent**. `time.seconds_per_knot`
-is the estimated trajectory's *resolution*; `time.simulation_time` is one
-cycle's forecast segment. Cycle `k` is handed the trajectory restricted to
-`[k·Δt_cycle, (k+1)·Δt_cycle]` on the trajectory's own (seconds-valued) clock:
-the value at the segment start, every knot strictly inside the segment, and the
-value at the segment end, on a **segment-local** axis running `[0, Δt_cycle]`.
-The two endpoints are linearly interpolated between the bracketing knots and
-**clamped** outside the knot range (`np.interp` semantics), so a segment past
-the last knot holds it and a one-knot trajectory is constant everywhere.
-
-That Dataset still carries a `time` dimension, and the backends consume it
-natively — the same path `params@prior_params=dynamic` ESMDA already takes:
-pylbm writes it to `uvel_time.dat`, pyudales feeds it through the nudging
-schedule, and the Fortran interpolates between the snapshots. The schedule is
-call-relative (pylbm shifts it onto its continuing `nt0` clock itself), which
-is why the local axis always starts at 0.
-
-**This is a deliberate deviation from the paper.** Its Eq. (6) makes `θ_k`
-piecewise-constant over segment `k`; here the segment ramps linearly between
-its bracketing knots instead, even when the knot spacing equals the cycle
-length. The reason is the truth: the truth trajectory is generated on a knot
-grid and *interpolated by the solver*, so a piecewise-constant estimate would
-be fitting a different model of the forcing than the one that produced the
-data. The knots-decoupled-from-cycles part follows from the same change — once
-a segment is a piece of a continuous trajectory, nothing ties the knot grid to
-the cycle grid.
-
-The cycle length is not inferable from the parameters, so
-`FilterSmoothingESMDA` takes it as `cycle_length` (the entry point sets
-`cycle_length: ${time.simulation_time}`), falling back to
-`forward_model.simulation_time`. A time-varying `params` with neither, or with
-a `time` dimension carrying no coordinate values, is rejected at `run()`.
-
-### `FilterSmoothingESMDA`
-
-Composition, not a `_BaseESMDA` subclass: the smoother's `_analysis` loop
-re-forecasts the whole window from one initial condition, which is precisely
-what this method replaces. It owns an inner `_TrajectoryStateFilter` (a
-`mode="state"` `EnsembleKalmanFilter`), a `ParamAugmentation` for the
-trajectory flatten/unflatten, and the outer alpha/RNG bookkeeping.
-
-```python
-fs = FilterSmoothingESMDA(
-    observation_operator=obs_op, forward_model=ensemble_model,
-    C_D=variance_vector,             # 1-D per-cycle (N_d,) variances
-    cycle_length=300.0,              # seconds one cycle's segment spans
-    num_steps=4,                     # outer ESMDA iterations N_a
-    alpha=None,                      # default num_steps (equal weights)
-    inner_analysis=None,             # default StochasticEnKFAnalysis
-    inner_localization=None, inner_inflation=None,
-    temporal_localization=None,
-    common_inner_noise=True,
-)
-result = fs.run(state=None, params=prior_trajectory,
-                observations=obs_batches,        # (num_cycles, N_d)
-                return_history=False)            # -> FilterSmoothingResult
-```
-
-`params` is the trajectory *prior ensemble* — a Dataset with `time` (knots, in
-**seconds**) and `ensemble` dims, sampled from the same
-`params@prior_params=dynamic` AR(2) and harmonic samplers the ESMDA smoothers
-use. The knot count is free: any grid from one knot upward is legal, coarser or
-finer than the cycle, and `L` (read from `observations.shape[0]`) is not
-constrained by it. At the default one-knot-per-cycle spacing the sampler emits
-`L+1` knots for an `L`-cycle horizon; knots past the window's last segment ride
-along in `Θ`, updated only through the prior's temporal correlations. Variables
-without a `time` dim (e.g. `vertical_inflow_exponent`) are carried through the
-forecasts unchanged and excluded from the outer update.
-
-`FilterSmoothingResult` returns the smoothed trajectory ensemble (`params`),
-the filtered end-of-window state from the final pass (`state`), one
-`IterationDiagnostics` record per outer iteration (windowed observation-space
-RMSE of `mean(D)` vs `Y`, trajectory spread, innovation χ² on the stacked
-system), the final pass's whole `FilterResult` (`final_pass`), and — under
-`return_history=True` — the per-iteration trajectories (`params_history`). The
-inner filter is reachable as the `inner_filter` property for the knobs that
-live on it (`prune_disk_cycles` / `keep_first_disk_cycle`).
-
-As in `_BaseESMDA`, `alpha` defaults to `num_steps` for the equal-weight
-schedule; unlike a free scalar override, an `alpha` that breaks
-`sum_a 1/alpha_a = 1` is **rejected at construction** rather than silently
-tempering the likelihood by `num_steps / alpha`.
-
-### The three `BaseFilter` hooks
-
-The inner pass is the existing filter, reached through three extension points in
-[filtering/base.py](../libs/data-assimilation/src/data_assimilation/filtering/base.py)
-that are **no-ops for every existing configuration**:
-
-| Hook | Default | Override |
-|---|---|---|
-| `_params_for_cycle(cycle, params)` | returns `params` unchanged, so the cycle loop is byte-identical | `_TrajectoryStateFilter` restricts the trajectory to segment `cycle` (interpolated endpoints, interior knots, segment-local time axis) — a schedule the backends already interpolate, so no backend change |
-| `_prepare_pred_obs(raw)` | normalizes the operator's output to the segment's frames, `(N_e, T, N_obs)`, which the filter then assimilates serially | `_TrajectoryStateFilter` aggregates (`aggregate_observations`, held on it rather than on the plain filter) and flattens to ONE batch, `(N_e, 1, N_d)` — the paper's `d_k`, matching the flat real batches `observation_batches` produces, so every inner cycle runs the filter's `T = 1` path |
-| `collect_pred_obs` | `False`: nothing recorded, no extra work | `True` rebinds `pred_obs_history = []` at `run()` entry and appends the raw, **pre-inflation** `(T·N_obs, N_e)` `pred_obs` each cycle *before* the analysis — `(N_d, N_e)` here, since the hybrid's inner cycles are `T = 1` |
-
-Both follow the attribute-plumbing pattern of the smoother's
-`collect_obs_diagnostics` (§5). `mode="state"` already skips the static-params
-check, so a time-varying params Dataset legally rides through the state-only
-filter — and stays time-varying all the way to the solver.
-
-### `TemporalLocalization`
-
-**File:**
-[filter_smoothing/temporal_localization.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/temporal_localization.py)
-
-A third `BaseLocalization` strategy (§6), and the localization axis of the
-*outer* trajectory update. `requires_coordinates = True`,
-`localizes_parameters = True`, `block_grouping` supported (knots of one
-parameter share a block, via `ParamAugmentation.group_ids` — the same
-convention as `TimeVaryingParameterESMDA`). The abstract distance fed to the
-shared `taper_inflation` is a **time separation**:
-
-| Strategy | `distance` | `truncation` |
-|---|---|---|
-| Temporal | `\|t_row − t_obs\|` | `temporal_radius` (**cycles**, not seconds) |
-
-Coordinates are built by `FilterSmoothingESMDA` in **fractional cycles**, so the
-strategy stays geometry-agnostic and the radius does not rescale when
-`time.simulation_time` changes: knot `j` sits at `t_j = knot_time /
-cycle_length`, observation batch `k` at its segment end `t = k + 1`, both in
-the first coordinate component with the other two zero. With one knot per cycle
-`t_j` is exactly the knot index, as it always was; with a finer grid the knots
-fall between the integers. A knot on a segment boundary is exactly `1.0` from
-that segment's batch — a radius below 1 excludes every observation from those
-knots and freezes them at the prior. The whole localized solve then reuses
-`localized_update` unchanged.
-
-It belongs to the *outer* update only: the inner filter's rows are grid cells
-whose `row_coords` are physical positions, so a `TemporalLocalization` passed
-as `inner_localization` would taper by `|x − t|`. `FilterSmoothingESMDA`
-refuses that pairing at construction.
-
-The taper is deliberately **symmetric in time** — a late observation may still
-update an early knot, which is the entire point of smoothing the trajectory.
-What it suppresses is spurious long-range sampling correlation between distant
-knots and observations, not causality. Config defaults
-([conf/filter_smoothing/temporal_localization/taper.yaml](../conf/filter_smoothing/temporal_localization/taper.yaml)):
-`temporal_radius=3.0` cycles, `tapering_beta=0.5`, `max_inflation=4.0`,
-`block_grouping=False` — keep it `False`: a group block is "all knots of one
-parameter", and sharing one observation selection across the block would erase
-the temporal taper along exactly the axis it localizes. The default group
-option is `none` — the global trajectory update.
-
-### Moving window
-
-**File:**
-[filter_smoothing/moving_window.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/moving_window.py)
-
-Everything above estimates one window. The **fixed-lag** formulation (§8 of the
-paper) slides that window along: after a window's outer loop converges,
-`[t_{n-L} … t_n]` becomes `[t_{n-L+s} … t_{n+s}]` for a shift of
-`s = window_shift` cycles. The knots that leave the window are **finalized** —
-never revisited, which is what makes the lag fixed rather than the trajectory
-growing — the overlapping part of the posterior *is* the next window's prior,
-and as many fresh knots as left are appended at the leading edge. The state is
-carried along with them, so the next window forecasts from where the previous
-one had already filtered to.
-
-All of the sliding is done in **seconds**, since the knot grid need not be the
-cycle grid: the window advances `shift_seconds = s · cycle_length`, and every
-knot before that leaves. One constraint follows and is enforced loudly, up
-front, by both the orchestrator and the run script: `shift_seconds` must be a
-whole number of knot spacings. Otherwise the knot grid drifts out of phase with
-the windows — a different set of knots would leave each time and the finalized
-pieces would stop tiling the horizon. A knot spacing finer than a cycle by an
-integer factor always satisfies it; a spacing *coarser* than a cycle constrains
-`window_shift` instead.
-
-The leading edge is appended by a
-[`ParameterEvolution`](../libs/data-assimilation/src/data_assimilation/filtering/parameter_evolution.py)
-(§8's `IdentityEvolution` / `RandomWalkEvolution`), applied **per member** to
-the last carried knot. This is a deliberate deviation from
-`ParameterTimeSeries.extrapolate`, which the design record originally proposed:
-`extrapolate` rebuilds a *whole-window* prior from a posterior — the
-non-overlapping regime `run_esmda.py` uses — and for e.g. AR(2) synthesizes a
-fresh trajectory, discarding exactly the posterior information the carried
-members hold. `evolve` is the paper's per-member append, and it keeps
-`data_assimilation` free of `pyurbanair` imports.
-
-```python
-result = run_moving_window(
-    smoother,                        # a configured FilterSmoothingESMDA
-    state=x0, params=prior_trajectory,   # window-0 initial state and prior
-    observations=obs_batches,        # the FULL horizon, (T, N_d)
-    num_windows=4, window_shift=1,   # s in [1, L]; s = L -> non-overlapping
-    window_length=None,              # L; None -> solved from the horizon
-    evolution=None,                  # default IdentityEvolution
-    rng_key=None, return_history=False,
-)                                    # -> MovingWindowResult
-```
-
-A pure function, not a class: `FilterSmoothingESMDA` and `filtering/base.py`
-are **unmodified**, and the orchestrator drives them through their public API
-only (`run`, `FilterResult.state_history`). It is exported from both
-`data_assimilation.filter_smoothing` and the package root.
-
-- **Horizon arithmetic.** `T = L + (num_windows − 1)·s`, and window `w`
-  (0-based) consumes observation rows `[w·s, w·s + L)`. The smoother has no
-  window-length attribute — it reads its cycle count from whatever observation
-  batch it is handed — so `L` comes from `window_length`: omitted, the relation
-  is **solved** for `L`; passed (what the script does, from
-  `filter_smoothing.num_cycles`), it is **validated**, which is the louder
-  failure mode. That check and the rest — `num_windows ≥ 1`,
-  `1 ≤ window_shift ≤ L`, a `time` dim (with coordinates) on `params`, a
-  uniform knot grid and the shift's alignment with it — all run up front,
-  before the first expensive window.
-- **State carry.** Window `w+1` starts from window `w`'s *final consistency
-  pass* analysis after cycle `s` — `final_pass.state_history.isel(cycle=s−1)`,
-  not the end-of-window state, because the window advanced by only `s` cycles.
-  For `s = L` the two coincide and the orchestrator takes `result.state`
-  directly, which is why history collection is forced on only for a
-  non-final window with `s < L`; histories are then stripped again
-  (non-destructively, via `dataclasses.replace`) unless the caller asked for
-  them.
-- **Parameter carry.** Window `w`'s posterior knots at `t ≥ shift_seconds`
-  become window `w+1`'s prior, with their times **re-based** by
-  `−shift_seconds` so the next window's clock again starts at its first
-  segment (the inner filter reads segment `k` at `[k·Δt_cycle, (k+1)·Δt_cycle]`
-  on that clock). As many knots as left are appended by chaining
-  `evolution.evolve` with fresh subkeys, each continuing the grid
-  (`t_last + i·Δt`), so the knot count is invariant across windows. With one
-  knot per cycle this is exactly the positional `[s:]` / `[:−s]` slicing it
-  generalizes. Static, no-`time` variables carry through unchanged. Member
-  pairing between the carried state and trajectory ensembles is positional in
-  `ensemble` for both, and never reordered.
-- **Finalization and assembly.** When window `w` advances, the posterior knots
-  before `shift_seconds` are finalized and recorded, put back on the horizon's
-  clock (`+ w·shift_seconds`); the last window contributes its whole posterior.
-  `MovingWindowResult.params` is their concatenation along `time` — the
-  full-horizon smoothed trajectory ensemble,
-  `(num_windows − 1)·(shift_seconds/Δt) + n_knots` knots, i.e. the horizon at
-  the trajectory's own resolution plus whatever the last window carries past it
-  (an `L+1`-knot prior's trailing knot rides along to the end) — and
-  `.state` is the last window's filtered end state. `window_results` keeps each
-  window's `FilterSmoothingResult` (histories stripped unless
-  `return_history`), and one `WindowDiagnostics` per window records `window`,
-  the inclusive `first_cycle`/`last_cycle` span, that window's
-  `iteration_diagnostics` and its `window_time`. Reading `obs_rmse` across
-  windows is how one checks that later windows are not steadily harder to fit
-  than the first.
-- **RNG.** The smoother is *not* reset between windows: its key chain advances,
-  so every window draws fresh perturbed observations — common random numbers
-  stay a *within*-window device (see above). The evolution stream is a
-  non-mutating `jax.random.fold_in` of `smoother.rng_key`, derived only when
-  more than one window will actually run.
-- **`num_windows = 1` is the degenerate case** and returns exactly the
-  single-window `run()` result — bit-identical `params` and `state` (nothing is
-  folded from the key, and the single-piece assembly skips the `concat`),
-  merely wrapped in a `MovingWindowResult`. Pinned by a test, so the default
-  config path stays byte-identical to the single-window one.
-
-### Configuration and run script
-
-[scripts/filter_smoothing/run_filter_smoothing.py](../scripts/filter_smoothing/run_filter_smoothing.py)
-(config
-[conf/run_filter_smoothing.yaml](../conf/run_filter_smoothing.yaml)) is the
-entry point, modeled on `run_filtering.py`: truth inline or from disk, one
-cycle per `time.simulation_time` segment, per-cycle `(num_cycles, N_d)`
-observation batches. The prior mount is the inverse of the filter's guard — a
-**dynamic (time-varying) prior is required**, sampled once over the whole
-window. `time.seconds_per_knot` sets that trajectory's resolution and defaults
-to `time.simulation_time` (one knot per cycle) but is free to differ; the
-script validates the *sampled* grid (starts at 0, uniform at the configured
-spacing, reaches the window's end) and, for a moving window, that
-`window_shift · time.simulation_time` is a whole number of knots. Five Hydra
-groups configure the algorithm, all under `# @package filter_smoothing`:
-
-| Group | Options (default first) | Sets |
-|---|---|---|
-| `filter_smoothing/inner_analysis/` | `stochastic`, `etkf`, `etkf_tsvd`, `letkf`, `letkf_tsvd` | the inner state analysis — the same `AnalysisScheme` classes as `filtering/analysis` (§8), with the same `localization_policy` validation against the inner localization |
-| `filter_smoothing/inner_localization/` | `none`, `correlation`, `distance` | the inner state filter's localization — the `localization/` strategies reused unchanged |
-| `filter_smoothing/inner_inflation/` | `rtps`, `none`, `multiplicative`, `rtpp` | the inner filter's spread maintenance |
-| `filter_smoothing/temporal_localization/` | `none`, `taper` | `TemporalLocalization` on the **outer** trajectory update |
-| `filter_smoothing/evolution/` | `none`, `random_walk` | the `ParameterEvolution` that appends the leading-edge knots when the window moves (`none` → `IdentityEvolution`) |
-
-Scalars in the `filter_smoothing:` block: `num_cycles`, `num_steps`, `alpha`
-(`null` → `num_steps`), `obs_error_std`, `seed`, `common_inner_noise`, plus
-`num_windows` (default 1, the single-window path) and `window_shift`
-(default 1). With `num_windows > 1` the truth is simulated over the full
-horizon `T = L + (num_windows − 1)·s` while the prior trajectory still covers
-the first window only, and the run gains a full-horizon `posterior_params.nc`
-and a `window_diagnostics.yaml`. See
-[scripts_and_configs.md](scripts_and_configs.md) §1.9 / §2.1.
-
----
-
-## 10. Configuration
+## 9. Configuration
 
 All smoother configuration is via Hydra groups under
 [conf/esmda/](../conf/esmda/); the filter's equivalents live under
 [conf/filtering/](../conf/filtering/) (see §8 and
-[scripts_and_configs.md §1.8](scripts_and_configs.md)) and the filter
-smoother's under [conf/filter_smoothing/](../conf/filter_smoothing/) (see §9 and
-[scripts_and_configs.md §1.9](scripts_and_configs.md)).
+[scripts_and_configs.md §1.8](scripts_and_configs.md)).
 
 ### `esmda/smoother` group
 
@@ -1287,7 +934,7 @@ The `state_reduction` key is consumed by `state.yaml`,
 
 ---
 
-## 11. End-to-end run
+## 10. End-to-end run
 
 A run uses the library as follows (very brief; see
 [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py),
@@ -1316,10 +963,10 @@ for window in range(cfg.esmda.num_assimilation_windows):
 (time-resolved xarray output) wrapping an `ObservationOperator` using the
 case's `obs_x/y/z_points`; `create_aggregate_observations` builds the
 optional `AggregateObservations` from the run config's algorithm node
-(`esmda.interval_seconds` / `esmda.aggregation_mode`, and
-`filter_smoothing.*` — aggregation is a DA choice, not an operator argument;
-`run_filtering.py` has no such keys, its filter assimilating every frame
-serially), which the script passes to the DA class. `create_C_D`
+(`esmda.interval_seconds` / `esmda.aggregation_mode` — aggregation is a DA
+choice, not an operator argument; `run_filtering.py` has no such keys, its
+filter assimilating every frame serially), which the script passes to the DA
+class. `create_C_D`
 produces the diagonal `σ² I` error covariance, sized from the aggregated
 first-window observation vector. The script also constructs validation sensors
 (never assimilated; scored as held-out check) and handles inline vs. on-disk
@@ -1345,7 +992,7 @@ truth; see `codebase_guide.md §6` and the script's docstring.
 
 ---
 
-## 12. Extension recipes
+## 11. Extension recipes
 
 ### Adding a new ESMDA variant
 

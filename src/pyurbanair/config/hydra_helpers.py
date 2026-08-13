@@ -232,7 +232,7 @@ def create_observation_operator(
             "temporal aggregation moved to AggregateObservations. Set "
             "obs.temporal_mode=full and configure interval_seconds (and "
             "aggregation_mode) on the run config's algorithm node "
-            "(esmda/filtering/filter_smoothing) instead."
+            "(esmda/filtering) instead."
         )
 
     return TemporalObservationOperator(operator)
@@ -242,7 +242,7 @@ def create_aggregate_observations(cfg: Any) -> AggregateObservations | None:
     """Build the observation aggregator, or None for full-resolution assimilation.
 
     Reads ``interval_seconds`` / ``aggregation_mode`` off the run config's
-    algorithm node (``esmda`` / ``filtering`` / ``filter_smoothing``):
+    algorithm node (``esmda`` / ``filtering``):
     aggregation is a data-assimilation choice, not an observation-operator
     argument. An absent or null ``interval_seconds`` means the data
     assimilation assimilates the full time-resolved observation vector.

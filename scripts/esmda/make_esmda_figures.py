@@ -441,11 +441,11 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # realized noisy observations are not persisted before WP2.1, so the band
     # S5 draws is the clean truth +/- sigma_o and the figure says so itself.
     #
-    # Three keys, one number: the same scalar lives under whichever entry point
-    # wrote the run dir, and this stage now runs on all three (a windowed
-    # filtering run writes these artifacts too). The order is the config's own
-    # -- an ESMDA run has only the first -- so nothing changes for them, and the
-    # other two get the envelope rather than a bare fan.
+    # Two keys, one number: the same scalar lives under whichever entry point
+    # wrote the run dir, and this stage runs on both (a windowed filtering run
+    # writes these artifacts too). The order is the config's own -- an ESMDA run
+    # has only the first -- so nothing changes for them, and a filtering run
+    # gets the envelope rather than a bare fan.
     # ``make_filtering_figures.py`` already reads its own key this way.
     obs_error_std = next(
         (
@@ -453,7 +453,6 @@ def make_figures(run_dir: pathlib.Path) -> None:
             for key in (
                 "esmda.obs_error_std",
                 "filtering.obs_error_std",
-                "filter_smoothing.obs_error_std",
             )
             if (value := OmegaConf.select(cfg, key, default=None)) is not None
         ),

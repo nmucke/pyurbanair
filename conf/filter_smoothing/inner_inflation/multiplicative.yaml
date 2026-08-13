@@ -1,9 +1,0 @@
-# @package filter_smoothing
-# Fixed multiplicative prior inflation in the inner state filter: forecast
-# anomalies (and, consistently, the predicted-observation anomalies) scaled by
-# `factor` before each cycle analysis. The recorded forecast observations D that
-# feed the outer trajectory update are taken RAW, before this inflation.
-# Selected with `filter_smoothing/inner_inflation=multiplicative`.
-inner_inflation:
-  _target_: data_assimilation.inflation.MultiplicativeInflation
-  factor: 1.05
