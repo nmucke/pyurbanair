@@ -74,7 +74,7 @@ forward_model:
     enabled: false
     initial_seed: false
     dt_disturb: 5.0        # s; interval between perturbation injections
-    amplitude: 10.25        # m/s; PALM's disturbance_amplitude
+    amplitude: 0.25        # m/s; PALM's disturbance_amplitude
     begin: null            # inflow_disturbance_begin, grid pts; null -> PALM auto (min(10, nx/2))
     end: null              # inflow_disturbance_end, grid pts; null -> PALM auto (min(100, 3nx/4))
     level_b: null          # disturbance_level_b, m; null -> PALM auto (zu(3))
