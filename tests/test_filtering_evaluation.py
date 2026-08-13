@@ -317,6 +317,76 @@ _TRUTH_ACCESS = {
     "sim_time": _RUN_SIM_TIME,
 }
 
+# The same horizon as a WINDOWED run records it: ``sim_time`` keeps the ESMDA
+# meaning the ESMDA stages read off this file (seconds per assimilation window),
+# and one window holds several cycles -- one per observation frame -- so the
+# cycle length is its own key. Here three cycles of _RUN_SIM_TIME make one
+# window, which is the ratio the two keys must not be confused across.
+_CYCLES_PER_WINDOW = 3
+_WINDOWED_TRUTH_ACCESS = {
+    "n_per_cycle": _RUN_FRAMES,
+    "num_cycles": _RUN_CYCLES,
+    "sim_time": _RUN_SIM_TIME * _CYCLES_PER_WINDOW,
+    "cycle_seconds": _RUN_SIM_TIME,
+}
+
+
+def test_the_cycle_length_falls_back_to_sim_time_on_a_pre_windowing_run_dir() -> None:
+    # Every filtering run dir written before the windowing refactor has one
+    # ``sim_time`` that IS the cycle length, and no ``cycle_seconds`` at all.
+    # The fallback is what keeps those dirs reading exactly as they did.
+    from scripts.filtering._filtering_common import cycle_seconds
+
+    assert cycle_seconds(_TRUTH_ACCESS) == _RUN_SIM_TIME
+
+
+def test_the_cycle_length_is_the_cycle_key_not_the_window_key_when_both_exist() -> None:
+    # The collision this helper exists for: on a windowed dir both keys are
+    # present and mean different numbers, and reading ``sim_time`` here would
+    # stretch every cycle by the cycles per window -- silently, since the result
+    # is still a plausible time axis.
+    from scripts.filtering._filtering_common import cycle_seconds
+
+    assert cycle_seconds(_WINDOWED_TRUTH_ACCESS) == _RUN_SIM_TIME
+    assert _WINDOWED_TRUTH_ACCESS["sim_time"] != _RUN_SIM_TIME
+
+
+def test_the_windowed_keys_put_the_parameter_history_on_the_cycle_clock(
+    tmp_path: pathlib.Path,
+) -> None:
+    # The site the fallback matters most at: a drifting truth is interpolated
+    # onto this axis, so a cycle clock read as a window clock samples the truth
+    # at the wrong times (and produces a full, plausible, wrong parameter error).
+    from scripts.filtering._filtering_common import load_params_history
+
+    run_dir = _filtering_run_dir(tmp_path, eval_fields=False, run_summary=False)
+    windowed = load_params_history(run_dir, _WINDOWED_TRUTH_ACCESS)
+    legacy = load_params_history(run_dir, _TRUTH_ACCESS)
+
+    # Entry 0 is the prior at t=0 and entry i is cycle (i-1)'s posterior at
+    # ``i * cycle_seconds`` -- the same axis both dirs describe, since the two
+    # runs' cycles are the same length; only the KEY it is read from differs.
+    expected = np.arange(_RUN_CYCLES + 1, dtype=float) * _RUN_SIM_TIME
+    np.testing.assert_allclose(windowed["time"].values, expected)
+    np.testing.assert_allclose(legacy["time"].values, expected)
+
+
+def test_the_windowed_keys_bin_the_forecast_states_by_the_cycle(
+    tmp_path: pathlib.Path,
+) -> None:
+    # ``bin_seconds`` is what makes one bin one cycle in the window statistics.
+    # Read off ``sim_time`` on a windowed dir it would be a window, pooling
+    # several cycles into one bin.
+    from scripts.filtering._filtering_common import cycle_state_source
+
+    run_dir = _filtering_run_dir(
+        tmp_path, forecast_states=True, eval_fields=False, run_summary=False
+    )
+    source = cycle_state_source(run_dir, dict(_WINDOWED_TRUTH_ACCESS))
+
+    assert source.kind == "forecast"
+    assert source.bin_seconds == _RUN_SIM_TIME
+
 
 def test_cycle_state_source_picks_the_forecasts_when_the_run_saved_them(
     tmp_path: pathlib.Path,
@@ -537,6 +607,39 @@ def test_the_truth_and_the_ensemble_bin_onto_the_same_frames_under_either_source
     # Not vacuously equal: the forecast source really does resolve the cycle,
     # and the analysis source really does hold one frame of it.
     assert truth_bins == [_RUN_FRAMES if forecast_states else 1] * _RUN_CYCLES
+
+
+def test_the_esmda_state_block_pairs_the_truth_with_the_analyzed_frames() -> None:
+    # The same invariant one stage over: the ESMDA metric/figure stages reduce a
+    # filtering run dir too, and their state block pairs truth frame k with
+    # ``posterior_state_mean.nc`` frame k positionally. A run that analyzes one
+    # frame per cycle of ``n_per_cycle`` observation frames keeps every truth
+    # frame, so the two series are that factor apart -- paired raw, the whole
+    # horizon's analyses would be scored against the truth's leading 1/n, which
+    # is a complete, plausible, wrong RMSE rather than an error.
+    from evaluation.turbulence import streaming_state_rmse
+
+    from scripts.esmda._esmda_common import analyzed_truth_frames
+
+    truth = _truth_dataset()
+    # What the per-window state files hold: the last frame of each cycle's
+    # block, and nothing else.
+    analyzed = truth.isel(time=[(c + 1) * _RUN_FRAMES - 1 for c in range(_RUN_CYCLES)])
+
+    selected = analyzed_truth_frames(
+        truth, {"n_per_cycle": _RUN_FRAMES, "num_cycles": _RUN_CYCLES}
+    )
+    np.testing.assert_array_equal(
+        np.asarray(selected["time"].values), np.asarray(analyzed["time"].values)
+    )
+    assert float(np.max(streaming_state_rmse(selected, analyzed))) == 0.0
+    # Not vacuous: the unselected pairing really does score the wrong frames.
+    assert float(np.max(streaming_state_rmse(truth, analyzed))) > 0.0
+
+    # An ESMDA run dir carries no cycle keys at all and an every-frame filtering
+    # run carries 1; both must get their truth back untouched.
+    for unstrided in ({}, {"n_per_cycle": 1}):
+        assert analyzed_truth_frames(truth, unstrided) is truth
 
 
 def test_the_analysis_source_nulls_the_per_cycle_variance_and_keeps_the_mean(

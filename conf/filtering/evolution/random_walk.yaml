@@ -7,4 +7,4 @@
 # Selected with `filtering/evolution=random_walk`.
 parameter_evolution:
   _target_: data_assimilation.filtering.parameter_evolution.RandomWalkEvolution
-  std: 0.05
+  std: 0.5

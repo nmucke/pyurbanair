@@ -101,6 +101,7 @@ import jax.numpy as jnp
 import netCDF4
 import numpy as np
 import xarray
+from data_assimilation.observation_operator import flatten_observations
 from data_assimilation.smoothing.esmda import StateAndParameterESMDA
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
@@ -109,6 +110,7 @@ from tqdm import tqdm
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
 from pyurbanair.config.hydra_helpers import (
     clean_outputs,
+    create_aggregate_observations,
     create_observation_operator,
     filter_parameter_config,
 )
@@ -362,10 +364,11 @@ def _streaming_state_summary(path):
 # ---------------------------------------------------------------------------
 
 # The flattened observation vector is built by nested concatenation in
-# ``data_assimilation.observation_operator``: the temporal wrapper concatenates
-# per interval, and inside each interval ``ObservationOperator`` concatenates per
+# ``data_assimilation.observation_operator``: ``flatten_observations`` is
+# time-major, and within each time entry ``ObservationOperator`` concatenates per
 # state component, each block holding all sensors. So the sensor index is the
-# fastest axis and the interval the slowest:
+# fastest axis and the time entry (an aggregation interval when
+# ``esmda.interval_seconds`` is set, otherwise an output frame) the slowest:
 #
 #     j = interval * (n_states * n_sensors) + state * n_sensors + sensor
 #
@@ -383,8 +386,9 @@ def _streaming_state_summary(path):
 _OBS_DIM = "obs_index"
 _OBS_ORDERING = (
     "obs_index j = interval*(n_states*n_sensors) + state*n_sensors + sensor; "
-    "the sensor index is the fastest-varying axis. Under obs.temporal_mode=full "
-    "the slowest axis is the output frame rather than an aggregation interval, "
+    "the sensor index is the fastest-varying axis. Without "
+    "esmda.interval_seconds the slowest axis is the output frame rather than "
+    "an aggregation interval, "
     "and obs_interval indexes frames."
 )
 
@@ -400,8 +404,9 @@ def _obs_index_coords(obs_op, n_d):
     sensor) blocks, so an unusual operator costs metadata rather than the whole
     artifact.
 
-    ``obs_interval`` counts aggregation intervals under ``temporal_mode:
-    intervals`` and output *frames* under ``full``; the arithmetic is identical
+    ``obs_interval`` counts aggregation intervals when
+    ``esmda.interval_seconds``
+    is set and output *frames* when it is not; the arithmetic is identical
     either way, and the file attrs say so.
     """
     base = getattr(obs_op, "observation_operator", obs_op)
@@ -423,6 +428,24 @@ def _obs_index_coords(obs_op, n_d):
         ),
         "obs_interval": (_OBS_DIM, (j // block).astype(int)),
     }
+
+
+def _flatten_obs(observations, aggregate_obs):
+    """Aggregate + flatten one block of observations into the DA's flat vector.
+
+    The script-side twin of ``BaseSmoothing._get_observations``: the smoother
+    is handed the raw time-resolved DataArray (and the SAME aggregator
+    instance, so its interval-count consistency check spans both), but ``C_D``
+    and the persisted per-window observation files are sized/written in the
+    flat aggregated space the assimilation actually works in. A bare
+    (non-temporal) observation operator returns plain arrays, which pass
+    through untouched.
+    """
+    if not isinstance(observations, xarray.DataArray):
+        return np.asarray(observations)
+    if aggregate_obs is not None:
+        observations = aggregate_obs(observations)
+    return flatten_observations(observations)
 
 
 def _save_obs_diagnostics(
@@ -758,17 +781,22 @@ def run(cfg: DictConfig) -> None:
     # --- Observation operator -----------------------------------------------------------
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
+    # Interval aggregation (or None for full-resolution assimilation). ONE
+    # instance, shared between the C_D sizing below and the smoother, so its
+    # interval-count consistency check spans the truth and the forecasts.
+    aggregate_obs = create_aggregate_observations(cfg.esmda)
 
     # --- Observation error covariance ---------
     # Truth frames sit on a uniform grid over [0, sim_time*num_windows); each
     # window owns exactly `n_per_window` of them. Size C_D from the first such
-    # block so it matches every window's observation vector (and the per-window
+    # block -- aggregated and flattened exactly as the assimilation will see it
+    # -- so it matches every window's observation vector (and the per-window
     # count the assimilation model emits). Opened lazily and sliced, so only the
     # first window's frames are read.
     truth_first_window = open_truth(
         true_state_path, n_total, x_offset, start_idx, t_offset
     ).isel(time=slice(0, n_per_window))
-    obs = jnp.asarray(truth_obs_op(truth_first_window))
+    obs = _flatten_obs(truth_obs_op(truth_first_window), aggregate_obs)
     truth_first_window.close()
     C_D = jnp.diag((cfg.esmda.obs_error_std**2) * jnp.ones(obs.shape[0]))
 
@@ -787,6 +815,7 @@ def run(cfg: DictConfig) -> None:
         forward_model=ensemble_model,
         C_D=C_D,
         rng_key=esmda_key,
+        aggregate_observations=aggregate_obs,
         **smoother_overrides,
     )
     include_state = isinstance(esmda, StateAndParameterESMDA)
@@ -843,11 +872,17 @@ def run(cfg: DictConfig) -> None:
         window_true_state = open_truth(
             true_state_path, n_total, x_offset, start_idx, t_offset
         ).isel(time=slice(window * n_per_window, (window + 1) * n_per_window))
-        window_obs_clean = jnp.asarray(truth_obs_op(window_true_state))
+        window_obs_clean = truth_obs_op(window_true_state)
         window_true_state.close()
+        # Perturb every RAW frame with obs_error_std and hand the smoother the
+        # time-resolved observations (coords intact -- the aggregator bins on
+        # the time coordinate). Under interval-mean aggregation the aggregated
+        # noise is then milder than C_D says, which is deliberate (the
+        # assimilation stays mildly conservative); with no aggregation the two
+        # agree exactly.
         rng_key, subkey = jax.random.split(rng_key)
-        window_obs = window_obs_clean + jnp.sqrt(C_D) @ jax.random.normal(
-            subkey, window_obs_clean.shape
+        window_obs = window_obs_clean + float(cfg.esmda.obs_error_std) * np.asarray(
+            jax.random.normal(subkey, window_obs_clean.shape)
         )
 
         # Sample posterior. ``return_state_history=True`` makes the smoother also
@@ -887,11 +922,13 @@ def run(cfg: DictConfig) -> None:
         # ``esmda_step`` axis is collapsed away below (WP2.1). Off by default in
         # a config without the key, in which case the artifact set is unchanged.
         if save_obs_diagnostics:
+            # Persisted in the FLAT aggregated space -- the space ``pred_obs``
+            # lives in and the metric/figure stages read.
             _save_obs_diagnostics(
                 windows_dir,
                 window,
-                window_obs,
-                window_obs_clean,
+                _flatten_obs(window_obs, aggregate_obs),
+                _flatten_obs(window_obs_clean, aggregate_obs),
                 np.sqrt(np.diag(np.asarray(C_D))),
                 esmda.pred_obs_history,
                 result_params,

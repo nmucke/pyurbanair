@@ -14,22 +14,32 @@
 #   * filtering/state_reduction=none|svd_current|svd_streaming
 #   * filtering/inflation=none|multiplicative|rtps|rtpp
 #   * filtering/evolution=none|random_walk     parameter forecast model
-#   * filtering.num_cycles=N                   one full-weight analysis per cycle
+#   * filtering.num_assimilation_windows=W     the horizon, in windows
 # and the truth source (mirrors run_esmda.yaml):
 #   * run.truth_dir=null   -> simulate truth inline (default)
 #   * run.truth_dir=<path> -> load a state.nc/params.nc artifact
 #
-# One cycle = one forecast segment of `time.simulation_time` seconds; set it
-# equal to `obs.interval_seconds` to assimilate one observation interval per
-# analysis. The PRIOR must be STATIC (pair with params@prior_params=static): the
-# filter estimates a scalar it re-tracks each cycle, so a time-varying (AR(2))
+# The filter forecasts OBSERVATION TO OBSERVATION: one cycle = one observation
+# interval of `time.output_frequency` seconds, ending in one full-weight
+# analysis of that frame. Unlike the smoothers, the filter never aggregates.
+# Windows are the same unit as ESMDA's (`esmda.num_assimilation_windows`), so
+# the two entry points are configured identically for like-for-like runs: one
+# window = `time.simulation_time` seconds, the horizon is
+# `num_assimilation_windows * simulation_time`, and the cycles per window are
+# DERIVED as `simulation_time / output_frequency`. Windows are purely
+# computational/IO chunking (one `run()` call and one set of per-window
+# artifacts each) — the cycle chain is carried across them unchanged, so a
+# horizon run as 1 window and as W windows is mathematically identical.
+# The PRIOR must be STATIC (pair with params@prior_params=static):
+# the filter estimates a scalar it re-tracks each cycle, so a time-varying (AR(2))
 # posterior stays with run_esmda.py. The TRUTH may be dynamic
 # (params@truth_params=dynamic_truth) -- the filter then tracks a drifting truth,
 # its scalar estimate following the truth's per-cycle value (the default here).
 #
 # Examples::
 #
-#   python scripts/filtering/run_filtering.py filtering.mode=joint filtering.num_cycles=4
+#   python scripts/filtering/run_filtering.py filtering.mode=joint \
+#     filtering.num_assimilation_windows=4
 #   python scripts/filtering/run_filtering.py filtering.mode=parameter \
 #     filtering/evolution=random_walk filtering/inflation=none
 #   python scripts/filtering/run_filtering.py filtering.mode=state \
@@ -57,7 +67,7 @@ defaults:
   # tracks with a STATIC scalar prior it re-analyses each cycle. The prior MUST
   # be static (params@prior_params=static) -- a dynamic prior belongs to the
   # ESMDA smoothers. Set params@truth_params=static_truth for a constant truth.
-  - params@truth_params: dynamic_truth
+  - params@truth_params: dynamic_sine
   - params@prior_params: static
 
 # --- Output roots (everything mutable lands under .temp/). Two model mounts
@@ -75,7 +85,7 @@ paths:
 # with the script's explicit static-only error instead of a missing-key one),
 # and keeps shared overrides (tests) portable across the run_* entry points. ---
 time:
-  seconds_per_knot: 60.0
+  seconds_per_knot: 30.0
 
 # --- Which parameters the filter estimates (same contract as run_esmda.yaml
 # `params_to_estimate`: a list -> that subset of the sampler configs' params,
@@ -104,16 +114,43 @@ ensemble:
 # the groups above;
 # `filtering.mode` picks which augmented blocks the analysis updates. ---
 filtering:
-  # One full-weight analysis per cycle; each cycle forecasts one segment of
-  # `time.simulation_time` seconds.
-  num_cycles: 250
+  # Assimilation windows, exactly as `esmda.num_assimilation_windows`: one
+  # window spans `time.simulation_time` seconds, so the experiment horizon is
+  # `num_assimilation_windows * time.simulation_time`. The cycles are DERIVED,
+  # not configured: one cycle is one observation interval
+  # (`time.output_frequency` s) ending in one full-weight analysis, so a window
+  # holds `time.simulation_time / time.output_frequency` of them (divided by
+  # `assimilate_every_n_step`, below). Still no aggregation knobs: the filter
+  # assimilates individual frames and never averages them — aggregation stays
+  # with the ESMDA smoothers.
+  #
+  # A window boundary is a CHUNKING boundary only (one `run()` call and one set
+  # of per-window artifacts each, so RAM and peak disk stay bounded): the
+  # analyzed state, the parameters, the filter's PRNG stream and the per-cycle
+  # observation-noise draws are all carried across it, so the same horizon run
+  # as 1 window or as W windows gives identical results. Keep W in the ESMDA
+  # range (2-10) for comparable runs and readable per-window diagnostics.
+  num_assimilation_windows: 3
+  # Analysis STRIDE: assimilate only every n-th observation frame (1 = every
+  # frame, the every-observation filter above; n > 1 thins the analyses without
+  # touching the model's output cadence). A cycle then spans
+  # `n * time.output_frequency` seconds and assimilates the LAST frame of its
+  # segment — the analysis time; the intermediate frames are still SIMULATED
+  # and still written out (they are in the per-cycle
+  # `_ensemble_states/cycle_{k}/` segments in full), they just never see a
+  # Kalman step, so the ensemble runs n intervals between analyses. The
+  # in-memory histories (state_history.nc, the per-window state files) hold the
+  # analysis-time frames only. `n` MUST divide
+  # `time.simulation_time / time.output_frequency` so the cycles still tile a
+  # window; the run refuses to start otherwise.
+  assimilate_every_n_step: 1
   seed: 42
-  obs_error_std: 0.25
+  obs_error_std: 0.1
   # state | parameter | joint. The parameter-updating modes (parameter and
   # joint) REQUIRE spread maintenance (filtering/evolution=random_walk or a
   # filtering/inflation option) — the filter refuses silently-collapsing
   # configurations at construction.
-  mode: parameter
+  mode: joint
   # Defaults; normally set by the filtering/* groups above.
   analysis: stochastic
   localization: null
@@ -131,6 +168,10 @@ filtering:
     parameter_evolution: ${filtering.parameter_evolution}
 
 run:
+  # Read by the shared ESMDA metric/figure stages when they are pointed at a
+  # filtering run directory (they gate their state/sensor/field blocks on it);
+  # the filtering-specific stages ignore it.
+  skip_viz: false
   results_dir: null
   # When true, ensemble forecasts are written to disk (one NetCDF per member,
   # per cycle, under cycle_{k}/ dirs) instead of one in-memory ensemble Dataset.

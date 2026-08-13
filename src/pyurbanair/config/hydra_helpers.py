@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import xarray
 from data_assimilation.observation_operator import (
+    AggregateObservations,
     ObservationOperator,
     TemporalObservationOperator,
 )
@@ -219,15 +220,40 @@ def create_observation_operator(
         solver_name=solver_name,
     )
 
+    # No temporal_mode (or null) -> the bare spatial operator, for configs that
+    # observe instantaneous state and never look at the time dimension.
     if ("temporal_mode" not in obs) or (obs["temporal_mode"] is None):
         return operator
 
-    return TemporalObservationOperator(
-        operator,
-        mode=obs["temporal_mode"],
-        interval_seconds=obs.get("interval_seconds"),
-        aggregation_mode=obs.get("aggregation_mode", "mean"),
-    )
+    if obs["temporal_mode"] != "full":
+        raise ValueError(
+            f"Invalid obs.temporal_mode '{obs['temporal_mode']}'. The temporal "
+            "operator now always returns full time-resolved observations; "
+            "temporal aggregation moved to AggregateObservations. Set "
+            "obs.temporal_mode=full and configure interval_seconds (and "
+            "aggregation_mode) on the run config's algorithm node "
+            "(esmda/filtering) instead."
+        )
+
+    return TemporalObservationOperator(operator)
+
+
+def create_aggregate_observations(cfg: Any) -> AggregateObservations | None:
+    """Build the observation aggregator, or None for full-resolution assimilation.
+
+    Reads ``interval_seconds`` / ``aggregation_mode`` off the run config's
+    algorithm node (``esmda`` / ``filtering``):
+    aggregation is a data-assimilation choice, not an observation-operator
+    argument. An absent or null ``interval_seconds`` means the data
+    assimilation assimilates the full time-resolved observation vector.
+    """
+    node = _plain(cfg)
+    interval_seconds = node.get("interval_seconds")
+    if interval_seconds is None:
+        return None
+    # A null aggregation_mode in the config means "use the default".
+    mode = node.get("aggregation_mode") or "mean"
+    return AggregateObservations(interval_seconds=float(interval_seconds), mode=mode)
 
 
 def create_C_D(num_obs: int, obs_error_std: float) -> jnp.ndarray:

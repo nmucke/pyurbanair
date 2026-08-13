@@ -2553,6 +2553,7 @@ def plot_data_mismatch_decay(
     *,
     num_observations: int = 0,
     window_indices: Sequence[int] | None = None,
+    step_label: str = "ESMDA iteration",
 ) -> pathlib.Path | None:
     """D3: per-member ``O_N`` vs ESMDA iteration against the ½ target band.
 
@@ -2572,6 +2573,13 @@ def plot_data_mismatch_decay(
     fitting observation noise. The band's χ² target assumes ``C_D`` includes
     representativeness error, which it does not here — annotated on the figure,
     so the trend and the box heights are read before the absolute placement.
+
+    ``step_label`` names what the step axis counts. It is an ESMDA iteration on
+    an ESMDA run, and the default says so; a sequential filter writing the same
+    observation-space files has a 2-entry axis whose steps are one analysis'
+    prior and posterior pooled over the window's cycles, not iterations of a
+    tempered solve. Only the x-label changes -- the box heights, the band and
+    the tick labels are the same numbers either way.
 
     Returns the path written, or ``None`` when there is nothing to draw (an old
     run dir, or ``esmda.save_obs_diagnostics=false``).
@@ -2672,7 +2680,7 @@ def plot_data_mismatch_decay(
         ax.set_xticks(np.arange(n_steps))
         ax.set_xticklabels(_d3_step_labels(n_steps))
         ax.set_xlim(-0.6, n_steps - 0.4)
-        ax.set_xlabel("ESMDA iteration")
+        ax.set_xlabel(step_label)
         ax.set_ylabel(r"$O_N$")
         ax.set_title("Normalized data mismatch per iteration", loc="left")
 
@@ -2753,104 +2761,3 @@ def _spans_decades(values: np.ndarray, decades: float) -> bool:
     if finite.size == 0 or np.any(finite <= 0.0):
         return False
     return bool(np.log10(finite.max() / finite.min()) >= decades)
-
-
-# ---------------------------------------------------------------------------
-# D4 -- outer-iteration convergence (filter smoothing)
-# ---------------------------------------------------------------------------
-
-# The order the panels are drawn in when a run records them, and what each one
-# is called on the y-axis. Anything a caller supplies that is not listed here is
-# drawn after these, under its own raw name -- a new diagnostic is then visible
-# without this map having to know about it first.
-_D4_PANELS = {
-    "obs_rmse": "windowed obs RMSE",
-    "innovation_chi2": r"innovation $\chi^2$",
-    "param_spread_prior": "trajectory spread (prior)",
-    "param_spread_posterior": "trajectory spread (posterior)",
-}
-
-
-def plot_iteration_convergence(
-    per_window: Sequence[dict[str, Sequence[float]]],
-    output_path: str | pathlib.Path,
-    *,
-    window_labels: Sequence[int] | None = None,
-) -> pathlib.Path | None:
-    """D4: the outer ESMDA loop's diagnostics vs iteration, one line per window.
-
-    ``per_window`` is one ``{field: values-per-iteration}`` mapping per
-    assimilation window (a single-window run passes a one-element list);
-    ``window_labels`` says which window each entry is, so a run whose window 1
-    could not be read labels its lines 0 and 2 rather than silently renumbering
-    them. One panel per field, sharing the iteration axis.
-
-    What the panels are for: ``obs_rmse`` is the loop's cost function -- it is
-    measured on the stacked window system *before* each iteration's update, so a
-    healthy run's line descends. The trajectory spread falling far faster than
-    the RMSE across the same iterations is the classic ESMDA over-fitting
-    signature, which is why they are drawn against a shared x-axis rather than
-    summarised separately.
-
-    Returns the path written, or ``None`` when no window carries a usable
-    series (a run dir whose diagnostics were never written).
-    """
-    windows = [w for w in (per_window or []) if w]
-    usable = [
-        i
-        for i, w in enumerate(windows)
-        if any(_finite(np.asarray(v, dtype=float)).size for v in w.values())
-    ]
-    if not usable:
-        logger.info("plot_iteration_convergence: no usable iteration diagnostics")
-        return None
-
-    windows = [windows[i] for i in usable]
-    labels = [(window_labels[i] if window_labels is not None else i) for i in usable]
-
-    known = [f for f in _D4_PANELS if any(f in w for w in windows)]
-    extra = sorted({f for w in windows for f in w} - set(_D4_PANELS))
-    fields = known + extra
-    colors = _step_colors(len(windows))
-
-    with _styled():
-        fig, axes = plt.subplots(
-            len(fields),
-            1,
-            figsize=(8.0, 2.6 * len(fields)),
-            squeeze=False,
-            sharex=True,
-            constrained_layout=True,
-        )
-        for row, field in enumerate(fields):
-            ax = axes[row][0]
-            for w, window in enumerate(windows):
-                values = _finite_or_nan(window.get(field))
-                if values is None:
-                    continue
-                ax.plot(
-                    np.arange(values.size),
-                    values,
-                    color=colors[w],
-                    linewidth=1.8,
-                    marker="o",
-                    markersize=4,
-                    label=f"window {labels[w]}",
-                )
-            ax.set_ylabel(_D4_PANELS.get(field, field))
-            ax.margins(x=0.02)
-        axes[-1][0].set_xlabel("Outer ESMDA iteration")
-        # One legend for the whole figure, and only when there is something to
-        # tell apart: a single-window run's lone "window 0" entry is noise.
-        if len(windows) > 1:
-            axes[0][0].legend(loc="best", fontsize=8, ncol=2)
-        fig.suptitle("Outer ESMDA convergence")
-        return save_png(fig, output_path, transparent=False)
-
-
-def _finite_or_nan(values: Sequence[float] | None) -> np.ndarray | None:
-    """``values`` as a float array, or ``None`` when it holds nothing finite."""
-    if values is None:
-        return None
-    array = np.asarray(list(values), dtype=float)
-    return array if array.size and np.any(np.isfinite(array)) else None

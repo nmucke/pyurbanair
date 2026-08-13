@@ -168,7 +168,7 @@ Canonical sweep value lists (edit here once for all backends):
 | `domain`   | grid resolutions, e.g. `60x80x32` (ground-truth ratio `25:20:8`, coarse → GT) |
 | `ensemble` | sizes `8 16 32 64 96` at fixed `60x80x16` |
 | `steps`    | ESMDA iterations `1 2 3 4` at fixed grid + ensemble |
-| `interval` | `obs.interval_seconds` values `10 20 30 60` (s) at fixed grid + ensemble + steps |
+| `interval` | `esmda.interval_seconds` values `10 20 30 60` (s) at fixed grid + ensemble + steps |
 
 Each backend folder holds four thin wrappers that delegate to `sweep_base.sh`:
 

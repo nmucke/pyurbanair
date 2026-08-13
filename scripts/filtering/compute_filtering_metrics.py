@@ -108,6 +108,7 @@ from scripts.filtering._filtering_common import (
     CycleStates,
     build_sensor_sets,
     cycle_diagnostics_series,
+    cycle_seconds,
     cycle_sensor_series,
     cycle_state_source,
     ensemble_cycle_sensor_series,
@@ -365,7 +366,7 @@ def _cycle_evaluation_blocks(
         # analysis source's frames are the end-of-cycle ones, carried on a cycle
         # index rather than on seconds, but they still sample this stretch of
         # the run and that is what figure F1 annotates.
-        time_span=(0.0, int(source.num_cycles) * float(ta["sim_time"])),
+        time_span=(0.0, int(source.num_cycles) * cycle_seconds(ta)),
         # ...and the span alone is exactly what would mislead: under the default
         # source those frames are ONE per cycle, so the TKE and <u'w'> the same
         # file carries are an across-cycle variance rather than resolved
@@ -426,7 +427,7 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         # onto the estimate's x-axis; see compute_parameter_metrics). A static
         # truth is constant, so the label is a no-op for it.
         if ta and "time" not in posterior_params.dims:
-            final_time = float(ta["sim_time"]) * int(ta["num_cycles"])
+            final_time = cycle_seconds(ta) * int(ta["num_cycles"])
             posterior_params = posterior_params.expand_dims(time=[final_time])
         summary["parameter_metrics"] = parameter_metric_summary(
             posterior_params, true_params, prior_params

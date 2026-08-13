@@ -166,217 +166,241 @@ class ObservationOperator:
 
 
 class TemporalObservationOperator:
-    """Observation operator for the data assimilation with temporal averaging."""
+    """Observation operator returning time-resolved observations as an xarray.
 
-    def __init__(
-        self,
-        observation_operator: ObservationOperator,
-        mode: str = "mean",
-        num_time_steps: int | None = None,
-        interval_seconds: float | None = None,
-        aggregation_mode: str = "mean",
-    ):
+    Wraps an :class:`ObservationOperator` and applies it to every frame of the
+    state's ``time`` dimension, keeping the result labelled so downstream code
+    (aggregation, persistence) can still see which frame each observation came
+    from. Temporal aggregation is NOT done here -- it lives in
+    :class:`AggregateObservations`, which the data assimilation classes apply to
+    both the real and the predicted observations through one shared path.
+    """
+
+    def __init__(self, observation_operator: ObservationOperator):
         """
         Initialize the temporal observation operator.
 
         Args:
-            observation_operator: ObservationOperator.
-            mode: Mode to use for temporal aggregation.
-                Valid modes are "mean", "median", "max", "min", "full",
-                "intervals".
-            num_time_steps: Number of time steps in the state. Optional; if
-                not provided for "full" mode, it is detected from the first
-                observed state.
-            interval_seconds: Length of each aggregation interval in seconds.
-                Required when mode is "intervals". Observations are binned by
-                their ``time`` coordinate (in seconds): all frames whose time
-                falls in ``[t0 + k*interval_seconds, t0 + (k+1)*interval_seconds)``
-                are aggregated together.
-            aggregation_mode: Aggregation function to apply within each
-                interval. Must be one of "mean", "median", "max", "min".
-                Only used when mode is "intervals".
+            observation_operator: ObservationOperator applied per time frame.
         """
         self.observation_operator = observation_operator
-        self.mode = mode
 
-        self.mode_mapping = {
-            "mean": lambda state: state.mean(dim="time"),
-            "median": lambda state: state.median(dim="time"),
-            "max": lambda state: state.max(dim="time"),
-            "min": lambda state: state.min(dim="time"),
-        }
-
-        valid_modes = set(self.mode_mapping.keys()) | {"full", "intervals"}
-        if mode not in valid_modes:
-            raise ValueError(f"Invalid mode '{mode}'. Must be one of {valid_modes}.")
-
-        if mode == "full":
-            self._num_time_steps = num_time_steps  # None is OK; set lazily
-
-        if mode == "intervals":
-            if interval_seconds is None:
-                raise ValueError(
-                    "interval_seconds must be provided when mode is 'intervals'."
-                )
-            if interval_seconds <= 0:
-                raise ValueError(
-                    f"interval_seconds must be positive, got {interval_seconds}."
-                )
-            if aggregation_mode not in self.mode_mapping:
-                raise ValueError(
-                    f"Invalid aggregation_mode '{aggregation_mode}'. "
-                    f"Must be one of {list(self.mode_mapping.keys())}."
-                )
-            self.interval_seconds = float(interval_seconds)
-            self.aggregation_mode = aggregation_mode
-            self._num_intervals: int | None = None
-
-    @property
-    def num_obs(self) -> int:
-        """Number of observations produced by the operator."""
-        if self.mode == "full":
-            if self._num_time_steps is None:
-                raise RuntimeError(
-                    "num_obs is not available until the operator has been "
-                    "called at least once (number of time steps is unknown)."
-                )
-            return self.observation_operator.num_obs * self._num_time_steps
-        if self.mode == "intervals":
-            if self._num_intervals is None:
-                raise RuntimeError(
-                    "num_obs is not available until the operator has been "
-                    "called at least once (number of intervals is unknown)."
-                )
-            return self._num_intervals * self.observation_operator.num_obs
-        return self.observation_operator.num_obs
-
-    def _observation_single(self, state: xarray.Dataset) -> np.ndarray:
-        """Apply observation operator to one state with temporal aggregation.
+    def _observation_single(self, state: xarray.Dataset) -> xarray.DataArray:
+        """Apply observation operator to one state, frame by frame.
 
         Args:
-            state: xarray Dataset with time dimension.
+            state: xarray Dataset with a time dimension.
 
         Returns:
-            Observation vector. Length is ``num_sensors * num_states`` for
-            aggregation modes, or ``num_sensors * num_states * num_time_steps``
-            for "full" mode.
+            DataArray with dims ("time", "obs"); "obs" has length
+            ``num_sensors * len(obs_states)`` with the sensor index innermost.
         """
-        if self.mode == "full":
-            num_time_steps = state.sizes["time"]
-            if self._num_time_steps is None:
-                self._num_time_steps = num_time_steps
-            obs_per_time = []
-            for t in range(num_time_steps):
-                state_t = state.isel(time=t)
-                obs_per_time.append(
-                    self.observation_operator._observation_single(state_t)
-                )
-            return np.concatenate(obs_per_time)
-
-        if self.mode == "intervals":
-            if "time" not in state.coords:
-                raise ValueError(
-                    "mode 'intervals' requires a 'time' coordinate (in seconds) "
-                    "on the state."
-                )
-            time_values = np.asarray(state["time"].values, dtype=float)
-            if time_values.size == 0:
-                raise ValueError("State has no time steps to aggregate.")
-
-            # Bin each frame by its time coordinate (seconds): frame t belongs
-            # to interval floor((t - t0) / interval_seconds). Frames are emitted
-            # at a uniform cadence, so each populated bin holds the frames whose
-            # time falls in [t0 + k*dt, t0 + (k+1)*dt).
-            bin_indices = np.floor(
-                (time_values - time_values[0]) / self.interval_seconds
-            ).astype(int)
-
-            # Bin against the ABSOLUTE interval range spanned by the window, not
-            # just the populated bins. Iterating only over np.unique(bin_indices)
-            # would make element k of the returned vector "the k-th populated
-            # interval" rather than "absolute interval k" -- if the model output
-            # ever skips an interval (irregular cadence, a short window, a
-            # missing frame), predicted and real observations would silently
-            # misalign and shift the whole innovation vector.
-            num_intervals = (
-                int(
-                    np.floor((time_values[-1] - time_values[0]) / self.interval_seconds)
-                )
-                + 1
+        if "time" not in state.dims:
+            raise ValueError(
+                "TemporalObservationOperator requires a state with a 'time' "
+                "dimension."
             )
-            if self._num_intervals is None:
-                self._num_intervals = num_intervals
-            elif num_intervals != self._num_intervals:
-                # The observation vector length (and hence C_D, sized from the
-                # first window) is fixed by the first call's interval count. A
-                # later window with a different number of absolute intervals --
-                # a short final window, a changed output cadence -- would
-                # silently return a mismatched-length vector.
-                raise ValueError(
-                    f"Interval count changed between calls: first call produced "
-                    f"{self._num_intervals} intervals, this one produced "
-                    f"{num_intervals}. The observation vector length must stay "
-                    "constant across windows (C_D is sized from the first "
-                    "window); check the output cadence and window length."
-                )
 
-            agg_fn = self.mode_mapping[self.aggregation_mode]
-            obs_per_interval = []
-            for b in range(num_intervals):
-                frame_ids = np.nonzero(bin_indices == b)[0]
-                if frame_ids.size == 0:
-                    # A silent gap here would misalign every subsequent element
-                    # of the observation vector against absolute interval index,
-                    # rather than raising loudly.
-                    raise ValueError(
-                        f"Absolute interval {b} (of {num_intervals}, "
-                        f"interval_seconds={self.interval_seconds}) has no frames. "
-                        "Output cadence is irregular or a frame is missing, so "
-                        "absolute-interval alignment cannot be guaranteed; check "
-                        "the model output cadence and window length."
-                    )
-                interval_state = state.isel(time=frame_ids)
-                aggregated = agg_fn(interval_state)
-                obs_per_interval.append(
-                    self.observation_operator._observation_single(aggregated)
-                )
+        num_time_steps = state.sizes["time"]
+        obs_per_time = [
+            self.observation_operator._observation_single(state.isel(time=t))
+            for t in range(num_time_steps)
+        ]
+        obs_values = np.stack(obs_per_time, axis=0)  # (time, obs)
 
-            return np.concatenate(obs_per_interval)
+        if "time" in state.coords:
+            time_values = np.asarray(state["time"].values, dtype=float)
+        else:
+            # No time coordinate to carry (rare; interval aggregation needs one,
+            # and will complain loudly downstream). Fall back to frame indices.
+            time_values = np.arange(num_time_steps, dtype=float)
 
-        # Aggregation path (mean, median, max, min)
-        state_avg = self.mode_mapping[self.mode](state)
-        obs_values = self.observation_operator(state_avg)
+        return xarray.DataArray(
+            obs_values,
+            dims=("time", "obs"),
+            coords={"time": time_values},
+        )
 
-        return obs_values
-
-    def _observation_ensemble(self, states: xarray.Dataset) -> np.ndarray:
+    def _observation_ensemble(self, states: xarray.Dataset) -> xarray.DataArray:
         """Apply observation operator to each ensemble member.
 
         Args:
             states: xarray Dataset with ensemble and time dimensions.
 
         Returns:
-            Matrix of shape (ensemble, num_obs).
+            DataArray with dims ("ensemble", "time", "obs").
         """
-        ensemble_size = states.sizes["ensemble"]
-        observations_list = []
-        for i in range(ensemble_size):
-            observations_list.append(self._observation_single(states.isel(ensemble=i)))
-        return np.stack(observations_list, axis=0)
+        members = [
+            self._observation_single(states.isel(ensemble=i))
+            for i in range(states.sizes["ensemble"])
+        ]
+        observations = xarray.concat(members, dim="ensemble")
+        return observations.transpose("ensemble", "time", "obs")
 
-    def __call__(self, state: xarray.Dataset) -> np.ndarray:
+    def __call__(self, state: xarray.Dataset) -> xarray.DataArray:
         """Apply the observation operator to a state or ensemble of states.
 
         Args:
-            state: xarray Dataset with time dimension, optionally with ensemble dimension.
+            state: xarray Dataset with a time dimension, optionally with an
+                ensemble dimension.
 
         Returns:
-            Observation vector or matrix.
+            DataArray with dims ("time", "obs"), or ("ensemble", "time", "obs")
+            when the state carries an ensemble dimension. The "time" dimension
+            carries the state's (seconds-valued) time coordinate.
         """
         if "ensemble" in state.dims:
             return self._observation_ensemble(state)
         else:
             return self._observation_single(state)
+
+
+class AggregateObservations:
+    """Aggregate time-resolved observations into fixed-length time intervals.
+
+    Applied by the data assimilation classes to BOTH the real observations and
+    the predicted observations ``H(x)``, so the two always live in the same
+    space. Aggregating observations rather than states is identical for the
+    (default) "mean" mode, since the observation operator is linear in the
+    state.
+    """
+
+    def __init__(self, interval_seconds: float, mode: str = "mean"):
+        """
+        Initialize the observation aggregator.
+
+        Args:
+            interval_seconds: Length of each aggregation interval in seconds.
+                Frames are binned by their ``time`` coordinate (in seconds):
+                all frames whose time falls in
+                ``[t0 + k*interval_seconds, t0 + (k+1)*interval_seconds)``
+                are aggregated together.
+            mode: Aggregation function applied within each interval. Must be
+                one of "mean", "median", "max", "min".
+        """
+        if interval_seconds <= 0:
+            raise ValueError(
+                f"interval_seconds must be positive, got {interval_seconds}."
+            )
+
+        self.mode_mapping = {
+            "mean": lambda obs: obs.mean(dim="time"),
+            "median": lambda obs: obs.median(dim="time"),
+            "max": lambda obs: obs.max(dim="time"),
+            "min": lambda obs: obs.min(dim="time"),
+        }
+        if mode not in self.mode_mapping:
+            raise ValueError(
+                f"Invalid mode '{mode}'. "
+                f"Must be one of {list(self.mode_mapping.keys())}."
+            )
+
+        self.interval_seconds = float(interval_seconds)
+        self.mode = mode
+        self._num_intervals: int | None = None
+
+    def __call__(self, observations: xarray.DataArray) -> xarray.DataArray:
+        """Aggregate observations over absolute ``interval_seconds`` bins.
+
+        Args:
+            observations: DataArray with dims (..., "time", "obs") and a
+                seconds-valued "time" coordinate.
+
+        Returns:
+            DataArray with the same dims, where "time" now holds one entry per
+            interval with coordinate ``t0 + k * interval_seconds`` (the
+            interval's start time).
+        """
+        if "time" not in observations.dims:
+            raise ValueError(
+                "AggregateObservations requires observations with a 'time' "
+                "dimension."
+            )
+        if "time" not in observations.coords:
+            raise ValueError(
+                "AggregateObservations requires a 'time' coordinate (in "
+                "seconds) on the observations."
+            )
+        time_values = np.asarray(observations["time"].values, dtype=float)
+        if time_values.size == 0:
+            raise ValueError("Observations have no time steps to aggregate.")
+
+        # Bin each frame by its time coordinate (seconds): frame t belongs to
+        # interval floor((t - t0) / interval_seconds). Frames are emitted at a
+        # uniform cadence, so each populated bin holds the frames whose time
+        # falls in [t0 + k*dt, t0 + (k+1)*dt).
+        bin_indices = np.floor(
+            (time_values - time_values[0]) / self.interval_seconds
+        ).astype(int)
+
+        # Bin against the ABSOLUTE interval range spanned by the window, not
+        # just the populated bins. Iterating only over np.unique(bin_indices)
+        # would make element k of the returned vector "the k-th populated
+        # interval" rather than "absolute interval k" -- if the model output
+        # ever skips an interval (irregular cadence, a short window, a missing
+        # frame), predicted and real observations would silently misalign and
+        # shift the whole innovation vector.
+        num_intervals = (
+            int(np.floor((time_values[-1] - time_values[0]) / self.interval_seconds))
+            + 1
+        )
+        if self._num_intervals is None:
+            self._num_intervals = num_intervals
+        elif num_intervals != self._num_intervals:
+            # The observation vector length (and hence C_D, sized from the first
+            # window) is fixed by the first call's interval count. A later
+            # window with a different number of absolute intervals -- a short
+            # final window, a changed output cadence -- would silently return a
+            # mismatched-length vector.
+            raise ValueError(
+                f"Interval count changed between calls: first call produced "
+                f"{self._num_intervals} intervals, this one produced "
+                f"{num_intervals}. The observation vector length must stay "
+                "constant across windows (C_D is sized from the first "
+                "window); check the output cadence and window length."
+            )
+
+        agg_fn = self.mode_mapping[self.mode]
+        obs_per_interval = []
+        for b in range(num_intervals):
+            frame_ids = np.nonzero(bin_indices == b)[0]
+            if frame_ids.size == 0:
+                # A silent gap here would misalign every subsequent element of
+                # the observation vector against absolute interval index, rather
+                # than raising loudly.
+                raise ValueError(
+                    f"Absolute interval {b} (of {num_intervals}, "
+                    f"interval_seconds={self.interval_seconds}) has no frames. "
+                    "Output cadence is irregular or a frame is missing, so "
+                    "absolute-interval alignment cannot be guaranteed; check "
+                    "the model output cadence and window length."
+                )
+            obs_per_interval.append(agg_fn(observations.isel(time=frame_ids)))
+
+        aggregated = xarray.concat(obs_per_interval, dim="time")
+        # Label each interval by its start time so the output stays a valid
+        # input to another aggregation / to persistence.
+        aggregated = aggregated.assign_coords(
+            time=time_values[0] + np.arange(num_intervals) * self.interval_seconds
+        )
+        return cast(xarray.DataArray, aggregated.transpose(*observations.dims))
+
+
+def flatten_observations(obs: xarray.DataArray) -> np.ndarray:
+    """Flatten labelled observations into the time-major array the DA uses.
+
+    ``("time", "obs")`` becomes ``(T * num_obs,)`` and
+    ``("ensemble", "time", "obs")`` becomes ``(N_e, T * num_obs)``. The layout
+    is time-major -- ``[t0: var0 sensors..., var1 sensors..., t1: ...]`` -- so
+    the sensor index stays the innermost axis and
+    :func:`sensor_observation_coords` keeps mapping observation ``j`` to sensor
+    ``j % num_sensors``.
+    """
+    if "ensemble" in obs.dims:
+        values = np.asarray(obs.transpose("ensemble", "time", "obs").values)
+        return values.reshape(values.shape[0], -1)
+    values = np.asarray(obs.transpose("time", "obs").values)
+    return values.reshape(-1)
 
 
 def sensor_observation_coords(observation_operator: Any, n_d: int) -> np.ndarray:

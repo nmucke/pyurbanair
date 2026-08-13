@@ -434,7 +434,7 @@ def test_parameter_esmda_runs_with_correlation_localization(
             "obs.x_points=[2.5,2.5,18.0,18.0]",
             "obs.y_points=[5.0,15.0,5.0,15.0]",
             "obs.z_points=[3.0,3.0,3.0,3.0]",
-            "obs.interval_seconds=3.0",
+            "esmda.interval_seconds=3.0",
             "truth_model.forward_model.nudging_config.nnudge_meters=4.0",
             "assim_model.forward_model.nudging_config.nnudge_meters=4.0",
         ],

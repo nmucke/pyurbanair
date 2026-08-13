@@ -5,6 +5,7 @@ the global Kalman update, the time-varying flatten/unflatten round-trip and its
 block grouping, and the constructor validation added in the code review.
 """
 
+import pathlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,7 +16,12 @@ import pytest
 import xarray
 from data_assimilation.localization.correlation import CorrelationLocalization
 from data_assimilation.localization.distance import DistanceLocalization
-from data_assimilation.observation_operator import ObservationOperator
+from data_assimilation.observation_operator import (
+    AggregateObservations,
+    ObservationOperator,
+    TemporalObservationOperator,
+    flatten_observations,
+)
 from data_assimilation.smoothing.esmda import (
     ParameterESMDA,
     StateAndParameterESMDA,
@@ -36,6 +42,174 @@ def _dummy_obs_op() -> ObservationOperator:
 
 def _forward_model(save_on_disk: bool = False) -> SimpleNamespace:
     return SimpleNamespace(save_on_disk=save_on_disk, results_dir=None)
+
+
+# ---------------------------------------------------------------------------
+# Observation aggregation: the real and the predicted observations share one path
+# ---------------------------------------------------------------------------
+
+
+_N_SENSORS = 2
+_TIMES = np.array([0.0, 1.0, 2.0, 3.0])
+
+
+def _temporal_obs_op() -> Any:
+    """A time-resolved operator over ``_N_SENSORS`` sensors of ``u``.
+
+    ``Any`` because the smoothers annotate ``observation_operator`` as the bare
+    :class:`ObservationOperator` even though the temporal wrapper is what every
+    caller passes.
+    """
+    return TemporalObservationOperator(
+        ObservationOperator(
+            obs_ids_x=list(range(_N_SENSORS)),
+            obs_ids_y=[0] * _N_SENSORS,
+            obs_ids_z=[0] * _N_SENSORS,
+            obs_states=["u"],
+            solver_name="pylbm",
+        )
+    )
+
+
+def _obs_state(n_e: int | None = None) -> xarray.Dataset:
+    """A state whose value at (member, frame, sensor) is self-identifying."""
+    sensors = np.arange(_N_SENSORS, dtype=float)
+    field = 10.0 * _TIMES[:, None] + sensors[None, :]  # (time, sensor)
+    coords = {"time": _TIMES, "z": [0.0], "y": [0.0], "x": sensors}
+    if n_e is None:
+        return xarray.Dataset(
+            {"u": (("time", "z", "y", "x"), field[:, None, None, :])}, coords=coords
+        )
+    members = field[None, :, :] + 100.0 * np.arange(n_e, dtype=float)[:, None, None]
+    return xarray.Dataset(
+        {"u": (("ensemble", "time", "z", "y", "x"), members[:, :, None, None, :])},
+        coords={"ensemble": np.arange(n_e), **coords},
+    )
+
+
+def _smoother_with_aggregation(
+    aggregate: AggregateObservations | None,
+) -> ParameterESMDA:
+    """Bare smoother carrying only what the observation path needs."""
+    smoother = ParameterESMDA.__new__(ParameterESMDA)
+    smoother.observation_operator = _temporal_obs_op()
+    smoother.aggregate_observations = aggregate
+    return smoother
+
+
+def test_get_observations_passes_a_flat_array_through() -> None:
+    """A pre-flattened vector is the caller's responsibility, not re-aggregated."""
+    smoother = _smoother_with_aggregation(AggregateObservations(interval_seconds=2.0))
+    flat = np.array([1.0, 2.0, 3.0])
+    np.testing.assert_allclose(np.asarray(smoother._get_observations(flat)), flat)
+
+
+def test_get_observations_aggregates_then_flattens_time_major() -> None:
+    """Interval means, flattened time-major so the sensor stays the fast axis."""
+    smoother = _smoother_with_aggregation(AggregateObservations(interval_seconds=2.0))
+    observed = _temporal_obs_op()(_obs_state())
+
+    flat = np.asarray(smoother._get_observations(observed))
+    # Frames 0/1 and 2/3 average to 10*t means of 5 and 25, plus the sensor id.
+    np.testing.assert_allclose(flat, [5.0, 6.0, 25.0, 26.0])
+
+    # Without an aggregator the full time-resolved vector is assimilated.
+    full = np.asarray(_smoother_with_aggregation(None)._get_observations(observed))
+    np.testing.assert_allclose(full, flatten_observations(observed))
+    assert full.size == _TIMES.size * _N_SENSORS
+
+
+def test_observation_step_puts_predictions_in_the_observation_space() -> None:
+    """``H(x)`` is aggregated and flattened exactly like the real observations."""
+    n_e = 3
+    aggregate = AggregateObservations(interval_seconds=2.0)
+    smoother = _smoother_with_aggregation(aggregate)
+
+    pred_obs = np.asarray(smoother._observation_step(state=_obs_state(n_e=n_e)))
+    assert pred_obs.shape == (n_e, 4)
+    # Member m offsets every entry by 100*m; row 0 is the single-member answer.
+    expected = np.array([5.0, 6.0, 25.0, 26.0]) + 100.0 * np.arange(n_e)[:, None]
+    np.testing.assert_allclose(pred_obs, expected)
+
+
+def test_observation_step_disk_path_matches_the_in_memory_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Per-member files are stacked before aggregation, giving the same (N_e, N_d)."""
+    n_e = 3
+    state = _obs_state(n_e=n_e)
+    for member in range(n_e):
+        state.isel(ensemble=member, drop=True).to_netcdf(
+            tmp_path / f"state_{member}.nc"
+        )
+
+    in_memory = _smoother_with_aggregation(
+        AggregateObservations(interval_seconds=2.0)
+    )._observation_step(state=state)
+    on_disk = _smoother_with_aggregation(
+        AggregateObservations(interval_seconds=2.0)
+    )._observation_step(results_dir=tmp_path)
+
+    np.testing.assert_allclose(np.asarray(on_disk), np.asarray(in_memory))
+
+
+def test_observation_step_disk_path_tolerates_jittered_member_time_axes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Members whose time coords differ in the last bits still stack, not union.
+
+    A backend can write per-member time coordinates that are equal only to
+    float precision. Under xarray's default (outer) join those axes would be
+    UNIONED and the observations padded with NaN -- a silently longer, NaN-poisoned
+    innovation vector rather than an error.
+    """
+    n_e = 3
+    state = _obs_state(n_e=n_e)
+    for member in range(n_e):
+        one = state.isel(ensemble=member, drop=True)
+        one = one.assign_coords(time=_TIMES + member * 1e-9)
+        one.to_netcdf(tmp_path / f"state_{member}.nc")
+
+    smoother = _smoother_with_aggregation(AggregateObservations(interval_seconds=2.0))
+    on_disk = np.asarray(smoother._observation_step(results_dir=tmp_path))
+
+    assert on_disk.shape == (n_e, 4)
+    assert np.isfinite(on_disk).all()
+
+
+def test_aggregate_observations_is_forwarded_by_the_constructor() -> None:
+    """The smoothers take the aggregator as a constructor keyword (hydra wiring)."""
+    aggregate = AggregateObservations(interval_seconds=30.0)
+    static = ParameterESMDA(
+        observation_operator=_dummy_obs_op(),
+        forward_model=_forward_model(),
+        C_D=jnp.diag(jnp.ones(1)),
+        aggregate_observations=aggregate,
+    )
+    assert static.aggregate_observations is aggregate
+
+    # Through the time-varying constructor's explicit signature...
+    dynamic = TimeVaryingParameterESMDA(
+        observation_operator=_dummy_obs_op(),
+        forward_model=_forward_model(),
+        C_D=jnp.diag(jnp.ones(1)),
+        num_time_points=2,
+        aggregate_observations=aggregate,
+    )
+    assert dynamic.aggregate_observations is aggregate
+
+    # ...and through the state-bearing variants' ``**kwargs`` chain.
+    joint = StateAndParameterESMDA(
+        observation_operator=_dummy_obs_op(),
+        forward_model=_forward_model(),
+        C_D=jnp.diag(jnp.ones(1)),
+        aggregate_observations=aggregate,
+    )
+    assert joint.aggregate_observations is aggregate
+
+    # Absent -> full-resolution assimilation, and resolvable on an instance
+    # built without ``__init__`` (the array-level tests below do that).
+    assert ParameterESMDA.__new__(ParameterESMDA).aggregate_observations is None
 
 
 # ---------------------------------------------------------------------------

@@ -5,15 +5,6 @@ Public API re-exported here so consumers can import from the package root
 layout do not break callers. See ``docs/data_assimilation.md``.
 """
 
-from data_assimilation.filter_smoothing import (
-    FilterSmoothingESMDA,
-    FilterSmoothingResult,
-    IterationDiagnostics,
-    MovingWindowResult,
-    TemporalLocalization,
-    WindowDiagnostics,
-    run_moving_window,
-)
 from data_assimilation.filtering import (
     AnalysisScheme,
     BaseFilter,
@@ -38,8 +29,10 @@ from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.localization.correlation import CorrelationLocalization
 from data_assimilation.localization.distance import DistanceLocalization
 from data_assimilation.observation_operator import (
+    AggregateObservations,
     ObservationOperator,
     TemporalObservationOperator,
+    flatten_observations,
 )
 from data_assimilation.reduction import OnlineStateReduction, StreamingStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing
@@ -52,6 +45,7 @@ from data_assimilation.smoothing.esmda import (
 )
 
 __all__ = [
+    "AggregateObservations",
     "AnalysisScheme",
     "BaseFilter",
     "BaseLocalization",
@@ -62,13 +56,9 @@ __all__ = [
     "ETKFAnalysis",
     "EnsembleKalmanFilter",
     "FilterResult",
-    "FilterSmoothingESMDA",
-    "FilterSmoothingResult",
     "IdentityEvolution",
-    "IterationDiagnostics",
     "InflationScheme",
     "LETKFAnalysis",
-    "MovingWindowResult",
     "MultiplicativeInflation",
     "ObservationOperator",
     "ObservationTSVD",
@@ -83,9 +73,7 @@ __all__ = [
     "StateAndParameterESMDA",
     "StateAndTimeVaryingParameterESMDA",
     "StochasticEnKFAnalysis",
-    "TemporalLocalization",
     "TemporalObservationOperator",
     "TimeVaryingParameterESMDA",
-    "WindowDiagnostics",
-    "run_moving_window",
+    "flatten_observations",
 ]

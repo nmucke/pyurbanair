@@ -49,7 +49,7 @@ RESOLUTIONS=(
 ENSEMBLE_SIZES=( 8 16 32 64 96 )
 # ESMDA-steps sweep (iterations per window), at the fixed grid + ensemble below.
 ESMDA_STEPS=( 1 2 3 4 )
-# Observation-interval sweep (obs.interval_seconds, [s]), at the fixed grid +
+# Observation-interval sweep (esmda.interval_seconds, [s]), at the fixed grid +
 # ensemble + steps below. The interval is the time-aggregation bin width: truth
 # observations are binned into interval-wide windows and aggregated within each,
 # so larger bins fold more frames into each observation.

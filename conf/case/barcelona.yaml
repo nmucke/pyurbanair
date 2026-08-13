@@ -70,9 +70,7 @@ obs:
   z_points: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
 
   states: [u, v, w]
-  temporal_mode: intervals
-  interval_seconds: 30.0
-  aggregation_mode: mean
+  temporal_mode: full
 
 time:
   # Per-window simulation horizon for this geometry (seconds). One assimilation

@@ -14,11 +14,12 @@ from data_assimilation.filtering.analysis import stochastic_enkf_update
 from data_assimilation.io import load_dataset as _load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import (
+    AggregateObservations,
     ObservationOperator,
     sensor_observation_coords,
 )
 from data_assimilation.reduction import OnlineStateReduction
-from data_assimilation.smoothing.base import BaseSmoothing
+from data_assimilation.smoothing.base import BaseSmoothing, Observations
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 
@@ -31,7 +32,13 @@ def _block_grouping_enabled(localization: Optional[BaseLocalization]) -> bool:
 
 
 class _BaseESMDA(BaseSmoothing):
-    """Shared ESMDA logic for parameter-only and joint state-parameter variants."""
+    """Shared ESMDA logic for parameter-only and joint state-parameter variants.
+
+    ``aggregate_observations`` (forwarded to :class:`~data_assimilation.\
+smoothing.base.BaseSmoothing`) is applied to the real observations and to
+    every ``H(x)``, so ``C_D`` must be sized for the *aggregated* observation
+    vector.
+    """
 
     #: Whether this smoother can supply physical row coordinates to a
     #: coordinate-based localization (distance strategy).  Only the state-bearing
@@ -49,8 +56,13 @@ class _BaseESMDA(BaseSmoothing):
         alpha: Optional[float] = None,
         rng_key: Optional[jax.Array] = None,
         localization: Optional[BaseLocalization] = None,
+        aggregate_observations: Optional[AggregateObservations] = None,
     ) -> None:
-        super().__init__(observation_operator, forward_model)
+        super().__init__(
+            observation_operator,
+            forward_model,
+            aggregate_observations=aggregate_observations,
+        )
 
         # ``C_D_sqrt = sqrt(C_D)`` (element-wise) and ``jnp.diag(C_D)`` in the
         # localized update are only correct for a diagonal covariance. Validate
@@ -308,12 +320,16 @@ sensor_observation_coords` (shared with the filtering package); see its
     def _analysis(
         self,
         params: xarray.Dataset,
-        observations: jnp.ndarray,
+        observations: Observations,
         state: Optional[xarray.Dataset] = None,
         return_params_history: bool = False,
         return_state_history: bool = False,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the ESMDA analysis loop.
+
+        ``observations`` is the window's time-resolved observation DataArray
+        (or an already flattened vector); it is converted ONCE here, and
+        everything below works on the flat ``(N_d,)`` array.
 
         Iterated joint estimation: the forecast at iteration ``i`` starts from
         the *current* initial-condition estimate. For the state-bearing variants
@@ -339,6 +355,11 @@ sensor_observation_coords` (shared with the filtering package); see its
                 "(results_dir=None) to collect the state history."
             )
 
+        # Aggregate + flatten the real observations once (a plain array passes
+        # through). The predicted observations take the same path inside
+        # ``_observation_step``, so the two always live in the same space.
+        obs = self._get_observations(observations)
+
         initial_state = state
 
         # One history per call, so a multi-window caller reading it after each
@@ -360,7 +381,7 @@ sensor_observation_coords` (shared with the filtering package); see its
 
             updated_state, params = self._one_step(
                 params=params,
-                obs=observations,
+                obs=obs,
                 state=state,
             )
 
@@ -412,7 +433,7 @@ sensor_observation_coords` (shared with the filtering package); see its
         # Optional post-loop trajectory smoothing (state-bearing variants with
         # final_time_smoothing enabled; no-op otherwise). Reuses the final
         # forecast — no extra forward solve — and never touches the params.
-        state = self._final_time_smoothing_step(state, observations)
+        state = self._final_time_smoothing_step(state, obs)
 
         if return_state_history:
             state_history.append(state)
@@ -439,21 +460,41 @@ sensor_observation_coords` (shared with the filtering package); see its
 class ParameterESMDA(_BaseESMDA):
     """Parameter-only ESMDA smoothing."""
 
-    def _one_step(
+    def update_params_from_pred_obs(
         self,
         params: xarray.Dataset,
+        pred_obs: jnp.ndarray,
         obs: jnp.ndarray,
-        state: Optional[xarray.Dataset] = None,
+        *,
         group_ids: Optional[jnp.ndarray] = None,
-    ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
+    ) -> xarray.Dataset:
+        """ONE tempered ESMDA update of the parameters, given ``H(x)`` already.
+
+        The analysis half of :meth:`_one_step`, with the forecast half — the
+        forward model, the observation operator, the on-disk step directories —
+        left out, so the update can be read (and overridden) without the
+        forecast plumbing around it.
+
+        Args:
+            params: Prior parameter ensemble, scalar ``(ensemble,)`` variables
+                (a time-varying trajectory goes through the
+                :class:`TimeVaryingParameterESMDA` override, which flattens it
+                first).
+            pred_obs: ``(N_d, N_e)`` predicted observations, in the same
+                observation space as ``obs``.
+            obs: ``(N_d,)`` observations, already aggregated and flattened.
+            group_ids: Optional block id per parameter row. ``None`` (default)
+                with block grouping enabled gives each parameter its own
+                block; ignored when the localization does not ask for the
+                block analysis.
+
+        Returns:
+            The updated parameter Dataset, on ``params``' own coordinates.
+        """
         obs = jnp.asarray(obs)
+        pred_obs = jnp.asarray(pred_obs)
         param_names = list(params.data_vars.keys())
         N_e = params.sizes["ensemble"]
-
-        pred_obs = self._observation_step(
-            state=state, results_dir=self._results_dir_or_none()
-        )
-        pred_obs = jnp.asarray(pred_obs).T
 
         if pred_obs.ndim != 2 or pred_obs.shape[1] != N_e:
             raise ValueError(
@@ -462,7 +503,6 @@ class ParameterESMDA(_BaseESMDA):
                 "This usually indicates stale or unexpected files in the ESMDA "
                 "results step directory."
             )
-        self._record_pred_obs(pred_obs)
 
         params_array = jnp.array([params[name].values for name in param_names])
 
@@ -484,7 +524,28 @@ class ParameterESMDA(_BaseESMDA):
             for i, name in enumerate(param_names)
         }
 
-        return None, xarray.Dataset(data_vars=updated_data_vars, coords=params.coords)
+        return xarray.Dataset(data_vars=updated_data_vars, coords=params.coords)
+
+    def _one_step(
+        self,
+        params: xarray.Dataset,
+        obs: jnp.ndarray,
+        state: Optional[xarray.Dataset] = None,
+        group_ids: Optional[jnp.ndarray] = None,
+    ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
+        obs = jnp.asarray(obs)
+
+        pred_obs = self._observation_step(
+            state=state, results_dir=self._results_dir_or_none()
+        )
+        pred_obs = jnp.asarray(pred_obs).T
+        self._record_pred_obs(pred_obs)
+
+        # Polymorphic: the time-varying variant's override flattens the
+        # trajectory around this same update.
+        return None, self.update_params_from_pred_obs(
+            params, pred_obs, obs, group_ids=group_ids
+        )
 
 
 class TimeVaryingParameterESMDA(ParameterESMDA):
@@ -508,6 +569,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         rng_key: Optional[jax.Array] = None,
         pin_initial_time_point: bool = False,
         localization: Optional[BaseLocalization] = None,
+        aggregate_observations: Optional[AggregateObservations] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -517,6 +579,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
             alpha=alpha,
             rng_key=rng_key,
             localization=localization,
+            aggregate_observations=aggregate_observations,
         )
         self.num_time_points = num_time_points
         # When True, ``t=0`` of every time-varying parameter is excluded
@@ -559,23 +622,35 @@ ParamAugmentation` for the flattening semantics.
         """Reverse :meth:`_flatten_time_varying_params`."""
         return self._param_augmentation.unflatten(flat_params, original_params)
 
-    def _one_step(
+    def update_params_from_pred_obs(
         self,
         params: xarray.Dataset,
+        pred_obs: jnp.ndarray,
         obs: jnp.ndarray,
-        state: Optional[xarray.Dataset] = None,
+        *,
         group_ids: Optional[jnp.ndarray] = None,
-    ) -> tuple[Optional[xarray.Dataset], xarray.Dataset]:
+    ) -> xarray.Dataset:
+        """The parameter update wrapped in the per-knot flatten/unflatten.
+
+        ``params`` is the trajectory Dataset: each time-varying variable is
+        expanded into its ``{name}_{t}`` knots (and any static variable rides
+        along as a single row) before the update, and rebuilt afterwards.
+        ``group_ids`` therefore describes the FLATTENED rows, in
+        :meth:`~data_assimilation.augmentation.ParamAugmentation.flatten`'s
+        order.
+        """
+        self._check_num_time_points(params)
         flat_params = self._flatten_time_varying_params(params)
         # Group ids built from the true name->knot mapping (grouping this
-        # parameter's time knots), passed down so the block update never has to
-        # re-parse the flattened names.
-        knot_group_ids = self._time_varying_group_ids(params)
-        _, updated_flat = super()._one_step(
-            flat_params, obs, state, group_ids=knot_group_ids
+        # parameter's time knots), so the block update never has to re-parse the
+        # flattened names. A caller that already built them (with the same
+        # mapping) passes them in instead.
+        if group_ids is None:
+            group_ids = self._time_varying_group_ids(params)
+        updated_flat = super().update_params_from_pred_obs(
+            flat_params, pred_obs, obs, group_ids=group_ids
         )
-        updated_params = self._unflatten_params(updated_flat, params)
-        return None, updated_params
+        return self._unflatten_params(updated_flat, params)
 
 
 class StateAndParameterESMDA(_BaseESMDA):

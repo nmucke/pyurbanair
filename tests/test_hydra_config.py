@@ -1,6 +1,7 @@
 import sys
 
 import pytest
+from data_assimilation.observation_operator import TemporalObservationOperator
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
@@ -191,8 +192,7 @@ def test_observation_helpers_use_explicit_mode() -> None:
             "+obs.y_max=35.0",
             "+obs.n_per_axis=2",
             "+obs.z=2.0",
-            "obs.temporal_mode=mean",
-            "obs.aggregation_mode=null",
+            "obs.temporal_mode=full",
         ]
     )
 
@@ -208,6 +208,6 @@ def test_observation_helpers_use_explicit_mode() -> None:
         (35.0, 5.0, 2.0),
         (35.0, 35.0, 2.0),
     ]
-    assert obs_op.mode == "mean"
+    assert isinstance(obs_op, TemporalObservationOperator)
     assert obs_op.observation_operator.num_sensors == 4
     assert obs_op.observation_operator.dim_mapping["u"]["x"] == "xm"

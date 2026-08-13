@@ -33,6 +33,7 @@ from evaluation.scores import (
     data_mismatch_target_band,
 )
 from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from omegaconf import DictConfig
 
 from scripts.esmda._esmda_common import obs_diagnostics_bundle
@@ -301,8 +302,10 @@ def test_obs_index_coords_matches_the_operator_flattening() -> None:
     and checks the decoded labels select the right entries.
     """
     from data_assimilation.observation_operator import (
+        AggregateObservations,
         ObservationOperator,
         TemporalObservationOperator,
+        flatten_observations,
     )
 
     n_sensors, states = 3, ["u", "v"]
@@ -313,9 +316,8 @@ def test_obs_index_coords_matches_the_operator_flattening() -> None:
         obs_states=states,
         solver_name="pylbm",
     )
-    operator = TemporalObservationOperator(
-        base, mode="intervals", interval_seconds=1.0, aggregation_mode="mean"
-    )
+    operator = TemporalObservationOperator(base)
+    aggregate = AggregateObservations(interval_seconds=1.0, mode="mean")
 
     # u = 100*interval + sensor, v = u + 10, constant within an interval, so
     # every flat entry is self-identifying.
@@ -330,7 +332,8 @@ def test_obs_index_coords_matches_the_operator_flattening() -> None:
         coords={"time": times, "z": [0.0], "y": [0.0], "x": x},
     )
 
-    flat = np.asarray(operator(state)).ravel()
+    # The runner's own path: operator -> aggregation -> time-major flatten.
+    flat = flatten_observations(aggregate(operator(state)))
     coords = _obs_index_coords(operator, flat.size)
     assert set(coords) == {"obs_sensor", "obs_state", "obs_interval"}
 
@@ -584,6 +587,65 @@ def test_plot_data_mismatch_decay_boxes_stay_on_their_own_iteration(
     assert written is not None and written.exists()
 
 
+def test_plot_data_mismatch_decay_labels_the_step_axis_as_it_is_told(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The step axis is an ESMDA iteration by default and nothing else changes.
+
+    A windowed sequential filter writes the same observation-space files, and
+    its two steps are one analysis' prior and posterior pooled over the window's
+    cycles -- correct numbers under a wrong noun. The label is therefore a
+    caller's word, defaulted to the ESMDA one so every ESMDA figure is untouched.
+    """
+    rng = np.random.default_rng(7)
+    windows = _decay_windows(rng, (4.0, 0.5))
+
+    figures: list[Figure] = []
+    original = Figure.savefig
+
+    def _spy(self: Figure, *args: object, **kwargs: object) -> object:
+        figures.append(self)
+        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Figure, "savefig", _spy)
+        plot_data_mismatch_decay(windows, tmp_path / "default.png")
+        plot_data_mismatch_decay(
+            windows, tmp_path / "filter.png", step_label="filter analysis"
+        )
+
+    labels = [ax.get_xlabel() for fig in figures for ax in fig.axes]
+    assert labels == ["ESMDA iteration", "filter analysis"]
+    # The tick labels name the same two ends either way -- only the noun moved.
+    assert [t.get_text() for t in figures[0].axes[0].get_xticklabels()] == [
+        t.get_text() for t in figures[1].axes[0].get_xticklabels()
+    ]
+
+
+def test_the_figure_stage_takes_the_step_axis_label_from_the_runner(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Which runner wrote the dir decides the noun; anything else stays ESMDA."""
+    from scripts.esmda._esmda_common import write_yaml
+    from scripts.esmda.make_esmda_figures import _d3_step_label
+
+    for configuration, expected in (
+        ({"smoother": "ESMDA", "num_esmda_steps": 3}, "ESMDA iteration"),
+        ({"filter": "EnsembleKalmanFilter", "mode": "joint"}, "filter analysis"),
+        ({}, "ESMDA iteration"),
+    ):
+        run_dir = tmp_path / str(len(list(tmp_path.iterdir())))
+        run_dir.mkdir()
+        write_yaml({"configuration": configuration}, run_dir / "run_info.yaml")
+        assert _d3_step_label(run_dir) == expected
+
+    # A run dir with no run_info.yaml at all reads as an ESMDA one rather than
+    # raising: this stage's other readers of that file degrade, they never fail.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _d3_step_label(empty) == "ESMDA iteration"
+
+
 def test_plot_data_mismatch_decay_no_ops_without_inputs(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -805,7 +867,7 @@ _E2E_OVERRIDES = [
     "obs.x_points=[2.5,2.5,18.0,18.0]",
     "obs.y_points=[5.0,15.0,5.0,15.0]",
     "obs.z_points=[3.0,3.0,3.0,3.0]",
-    "obs.interval_seconds=3.0",
+    "esmda.interval_seconds=3.0",
     "truth_model.forward_model.cuda=false",
     "assim_model.forward_model.cuda=false",
 ]

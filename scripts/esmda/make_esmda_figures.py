@@ -48,6 +48,14 @@ invariant 5).
 Honors ``run.skip_viz`` (set in the saved config): a no-op when true, mirroring
 the old in-script behaviour.
 
+Also runs on a **windowed filtering** run directory, which writes these same
+artifacts in the ESMDA schema (``scripts/run_filtering_pipeline.sh`` points it
+at ``<run dir>/esmda_view/`` so the two families' same-named outputs never
+collide). Everything that differs there is read defensively rather than
+branched on: a missing ``run.skip_viz`` / ``is_dynamic``, the observation-error
+scalar under its own config key, and the D3 step-axis label (see
+``_d3_step_label``).
+
 Usage::
 
     python scripts/esmda/make_esmda_figures.py --run-dir <esmda output dir>
@@ -88,6 +96,7 @@ from pyurbanair.config.hydra_helpers import create_observation_points
 from pyurbanair.utils.animation_utils import animate_rollout_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 from scripts.esmda._esmda_common import (
+    analyzed_truth_frames,
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
@@ -166,17 +175,45 @@ def _rank_counts(summary: dict) -> dict:
     return counts
 
 
+def _d3_step_label(run_dir: pathlib.Path) -> str:
+    """What D3's step axis counts on this run, out of ``run_info.yaml``.
+
+    The observation-space files are written by the ESMDA runner and by the
+    windowed sequential filter, and their ``esmda_step`` axis is positional in
+    both -- prior first, posterior last -- which is why every reader of it is
+    length-agnostic. What differs is the meaning of a step: ESMDA's are the
+    iterations of one tempered solve, while the filter's two rows are the prior
+    and posterior of its per-cycle analyses, pooled over the window's cycles. So
+    the axis is labelled from the runner that wrote the dir (``configuration``
+    carries ``smoother`` for ESMDA and ``filter`` for the filter), and anything
+    unrecognised keeps the ESMDA label -- this stage's own default.
+    """
+    configuration = read_yaml(run_dir / "run_info.yaml").get("configuration") or {}
+    if configuration.get("filter") and not configuration.get("smoother"):
+        return "filter analysis"
+    return "ESMDA iteration"
+
+
 def make_figures(run_dir: pathlib.Path) -> None:
     """Draw every figure from the saved artifacts in ``run_dir``."""
     cfg = load_run_config(run_dir)
-    if cfg.run.skip_viz:
+    # ``select``, not ``cfg.run.skip_viz``: this stage also runs on the
+    # ESMDA-schema artifacts a windowed FILTERING run writes, and a filtering
+    # config saved before that knob was added to conf/run_filtering.yaml carries
+    # no ``run.skip_viz``. Absent means "draw them", which is what such a run dir
+    # wants; an ESMDA config always has the key, so this is a no-op for them.
+    if bool(OmegaConf.select(cfg, "run.skip_viz", default=False)):
         print(f"run.skip_viz is set; no figures generated for {run_dir}")
         return
 
     ta = read_yaml(run_dir / "truth_access.yaml")
     num_windows = int(ta["num_windows"])
     sim_time = float(ta["sim_time"])
-    is_dynamic = bool(ta["is_dynamic"])
+    # Defaulted rather than indexed for the same reason: every run dir the ESMDA
+    # runner wrote records it, and a run dir that does not gets the conservative
+    # reading (no window shading on the parameter plots) instead of a KeyError
+    # that would cost every figure below.
+    is_dynamic = bool(ta.get("is_dynamic", False))
 
     posterior_params = xarray.open_dataset(run_dir / "posterior_params.nc")
     prior_params = xarray.open_dataset(run_dir / "prior_params.nc")
@@ -185,13 +222,21 @@ def make_figures(run_dir: pathlib.Path) -> None:
 
     # Open the (potentially multi-GB) truth lazily. The plots below each pull
     # only the slice they need: a single z-plane for the animation/final state
-    # and a few z-slices for the streamed error curve.
-    true_state = open_truth(
-        ta["true_state_path"],
-        ta["n_total"],
-        ta["x_offset"],
-        ta["start_idx"],
-        ta["t_offset"],
+    # and a few z-slices for the streamed error curve. Both of those pair the
+    # truth with ``posterior_state_mean.nc`` FRAME BY FRAME, so the truth is
+    # reduced to the frames that file holds -- a no-op unless the run dir says
+    # its state frames are strided (``analyzed_truth_frames``). The sensor
+    # series below re-open the truth in full: they align on the physical time
+    # axis, not on frame index.
+    true_state = analyzed_truth_frames(
+        open_truth(
+            ta["true_state_path"],
+            ta["n_total"],
+            ta["x_offset"],
+            ta["start_idx"],
+            ta["t_offset"],
+        ),
+        ta,
     )
     obs_x, obs_y, obs_z = create_observation_points(cfg.obs)
 
@@ -395,7 +440,24 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # which S5 degrades on (no envelope) rather than inventing a width. The
     # realized noisy observations are not persisted before WP2.1, so the band
     # S5 draws is the clean truth +/- sigma_o and the figure says so itself.
-    obs_error_std = OmegaConf.select(cfg, "esmda.obs_error_std", default=None)
+    #
+    # Two keys, one number: the same scalar lives under whichever entry point
+    # wrote the run dir, and this stage runs on both (a windowed filtering run
+    # writes these artifacts too). The order is the config's own -- an ESMDA run
+    # has only the first -- so nothing changes for them, and a filtering run
+    # gets the envelope rather than a bare fan.
+    # ``make_filtering_figures.py`` already reads its own key this way.
+    obs_error_std = next(
+        (
+            value
+            for key in (
+                "esmda.obs_error_std",
+                "filtering.obs_error_std",
+            )
+            if (value := OmegaConf.select(cfg, key, default=None)) is not None
+        ),
+        None,
+    )
     fans = run_dir / "sensor_fans.png"
     _note_skipped(
         fans,
@@ -460,6 +522,7 @@ def make_figures(run_dir: pathlib.Path) -> None:
                 decay,
                 num_observations=mismatch["num_observations"],
                 window_indices=mismatch["window_indices"],
+                step_label=_d3_step_label(run_dir),
             ),
         )
 

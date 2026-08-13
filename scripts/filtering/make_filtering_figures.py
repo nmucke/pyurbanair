@@ -85,6 +85,7 @@ from pyurbanair.utils.animation_utils import animate_rollout_state
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 from scripts.filtering._filtering_common import (
     build_sensor_sets,
+    cycle_seconds,
     cycle_sensor_series,
     cycle_state_source,
     ensemble_velocity_mean_std,
@@ -171,7 +172,10 @@ def make_figures(run_dir: pathlib.Path) -> None:
     ta = read_yaml(run_dir / "truth_access.yaml")
     # The physical length of one forecast segment, i.e. one cycle. Only the S5
     # cycle boundaries need it, and only on a source whose series carry seconds.
-    sim_time = float(ta["sim_time"])
+    # Never ``sim_time`` directly: on a windowed run that key is the WINDOW
+    # length (see ``cycle_seconds``), which would stretch every boundary by the
+    # cycles per window.
+    dt_cycle = cycle_seconds(ta)
 
     true_params = xarray.open_dataset(run_dir / "true_params.nc")
 
@@ -308,7 +312,7 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # is the fan's legend, below), because it decides what the fan's x-axis
     # MEANS. Under ``forecast`` the series carry real seconds on the run's
     # global clock, so the axis is a time and the cycle boundaries sit at
-    # ``k * sim_time``. Under ``analysis`` they carry an integer CYCLE INDEX
+    # ``k * dt_cycle``. Under ``analysis`` they carry an integer CYCLE INDEX
     # instead -- one frame per cycle, and ``state_history.nc`` does not record
     # the analyzed frames' physical times -- while ``plot_sensor_fans`` labels
     # any axis it is handed "Time [s]". Handing it the raw indices would print
@@ -316,7 +320,7 @@ def make_figures(run_dir: pathlib.Path) -> None:
     #
     # But those indices are not unlabelled frames either: the filter analyzes the
     # END of each forecast segment, so cycle ``k``'s analyzed frame is the state
-    # at ``(k+1) * sim_time``. Rebasing onto that is what ``load_params_history``
+    # at ``(k+1) * dt_cycle``. Rebasing onto that is what ``load_params_history``
     # already does for the parameter axis in this same pipeline, and it makes the
     # "Time [s]" label true, puts the two sources on one physical clock, and
     # leaves the cycle boundaries meaning what they mean everywhere else. So the
@@ -329,12 +333,12 @@ def make_figures(run_dir: pathlib.Path) -> None:
         and fan_times is not None
         and fan_times.size == source.num_cycles
     ):
-        fan_times = (np.arange(source.num_cycles, dtype=float) + 1.0) * sim_time
+        fan_times = (np.arange(source.num_cycles, dtype=float) + 1.0) * dt_cycle
     elif source.kind == "analysis":
         fan_times = None
     if fan_times is not None and source.num_cycles > 1:
         cycle_edges = list(
-            np.linspace(0.0, sim_time * source.num_cycles, source.num_cycles + 1)
+            np.linspace(0.0, dt_cycle * source.num_cycles, source.num_cycles + 1)
         )
 
     # --- WP1.5 evaluation figures --------------------------------------------

@@ -36,8 +36,8 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 # * ``nx``/``ny`` must stay EVEN (PALM's poisfft rejects an odd number of grid
 #   points along a cyclic direction, PAC0071/PAC0072).
 # * ``simulation_time`` is pinned to 3.0 by the e2e tests' own
-#   ``obs.interval_seconds=3.0``; one interval is the minimum the interval-mode
-#   observation operator can score.
+#   ``<algorithm>.interval_seconds=3.0`` (esmda/filtering); one
+#   interval is the minimum the aggregator can score.
 # * ``output_frequency`` 1.0 -> 4 frames per window. Time interpolation and the
 #   temporal observation operator need more than a single frame.
 # * ``ensemble_size`` 2 — the ESMDA update needs >=2 members.

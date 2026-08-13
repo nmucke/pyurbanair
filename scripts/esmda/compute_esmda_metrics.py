@@ -50,6 +50,14 @@ run_esmda.py, augmented with:
                               columns) are written beside it as
                               ``eval_fields.nc`` for the figure stage.
 
+Also runs on a **windowed filtering** run directory, which writes these same
+artifacts in the ESMDA schema (``scripts/run_filtering_pipeline.sh`` points it
+at ``<run dir>/esmda_view/`` so the two families' same-named outputs never
+collide). Nothing branches on which runner wrote the dir: the two things that
+differ -- an absent ``run.skip_viz`` and a run dir that names its own
+``moment_sampling`` -- are read defensively, and every block below is the same
+reduction over the same files.
+
 Usage::
 
     python scripts/esmda/compute_esmda_metrics.py --run-dir <esmda output dir>
@@ -66,6 +74,7 @@ from typing import NamedTuple
 
 import numpy as np
 import xarray
+from omegaconf import OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise)
 
@@ -94,6 +103,7 @@ from evaluation.turbulence import (
 )
 
 from scripts.esmda._esmda_common import (
+    analyzed_truth_frames,
     build_sensor_sets,
     ensemble_sensor_series,
     load_run_config,
@@ -1394,21 +1404,35 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
     # both open the (potentially multi-GB) truth, so -- matching run_esmda.py's
     # old in-script behaviour -- they are skipped under run.skip_viz (the fast
     # path for large sweeps), exactly as the figures are.
-    if cfg.run.skip_viz:
+    #
+    # ``select``, not ``cfg.run.skip_viz``: this stage also runs on the
+    # ESMDA-schema artifacts a windowed FILTERING run writes, and a filtering
+    # config saved before that knob was added to conf/run_filtering.yaml carries
+    # no ``run.skip_viz`` at all. Absent means "do the full pass", which is what
+    # every such run dir wants; an ESMDA config always has the key, so this is a
+    # no-op for them.
+    if bool(OmegaConf.select(cfg, "run.skip_viz", default=False)):
         write_yaml(summary, run_dir / "run_summary.yaml")
         print(f"Saved run summary in {run_dir / 'run_summary.yaml'}")
         return
 
     # --- State field |U| RMSE -----------------------------------------------
     # Stream over a few z-slices and all time steps instead of the whole 4-D
-    # field (interpolating onto the assim grid if coords differ).
+    # field (interpolating onto the assim grid if coords differ). The pairing is
+    # positional (truth frame k vs state frame k), so the truth is first reduced
+    # to the frames the state file actually holds -- a no-op for every run dir
+    # whose two series already have the same cadence, see
+    # ``analyzed_truth_frames``.
     posterior_state = xarray.open_dataset(run_dir / "posterior_state_mean.nc")
-    true_state = open_truth(
-        ta["true_state_path"],
-        ta["n_total"],
-        ta["x_offset"],
-        ta["start_idx"],
-        ta["t_offset"],
+    true_state = analyzed_truth_frames(
+        open_truth(
+            ta["true_state_path"],
+            ta["n_total"],
+            ta["x_offset"],
+            ta["start_idx"],
+            ta["t_offset"],
+        ),
+        ta,
     )
     rmse = streaming_state_rmse(true_state, posterior_state)
     summary["state_metrics"] = {"vel_magnitude_rmse": series_stats(rmse)}
@@ -1540,6 +1564,20 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
         truth_collector,
         prior_collector if prior_series is not None else None,
         time_span=(0.0, num_windows * sim_time),
+        # WHICH frames the moments were taken over, when the run dir says so.
+        # An ESMDA run never does -- the key is absent from its
+        # ``truth_access.yaml``, ``None`` reaches ``_eval_fields_dataset`` and
+        # the ``_ESMDA_MOMENT_SAMPLING`` line is stamped exactly as before. A
+        # windowed FILTERING run writes these ESMDA-schema artifacts too, and
+        # its window files hold the ANALYZED end-of-cycle state at every output
+        # frame rather than a free rollout, so the default sentence would be
+        # wrong in one word; it records its own line instead. Not sparse there
+        # either (one analysis per output frame, so the frames tile the window),
+        # which is why the flag is read separately rather than derived from the
+        # line beside it -- see scripts/filtering/compute_filtering_metrics.py,
+        # whose analysis source IS sparse and says so.
+        moment_sampling=ta.get("moment_sampling"),
+        moment_sampling_is_sparse=bool(ta.get("moment_sampling_is_sparse", False)),
     )
     if field_metrics is not None:
         summary["field_metrics"] = field_metrics

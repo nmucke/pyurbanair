@@ -123,7 +123,7 @@ pixi run -e "${ENV}" -- python -u \
     ensemble.ensemble_size="${ENSEMBLE_SIZE}" \
     ensemble.num_parallel_processes="${NUM_PARALLEL}" \
     esmda.num_steps="${NUM_ESMDA_STEPS}" \
-    obs.interval_seconds="${INTERVAL_SECONDS}" \
+    esmda.interval_seconds="${INTERVAL_SECONDS}" \
     "hydra.run.dir=${RESULTS_DIR}" \
     "${EXTRA_FLAGS[@]}" \
     "$@"
