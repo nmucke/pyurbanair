@@ -138,7 +138,7 @@ def _interpolate_knots(
     span = times[upper] - times[lower]
     weight = np.clip((targets - times[lower]) / span, 0.0, 1.0)
     weight = weight.reshape((targets.size,) + (1,) * (values.ndim - 1))
-    return np.asarray(values[lower] * (1.0 - weight) + values[upper] * weight)
+    return values[lower] * (1.0 - weight) + values[upper] * weight
 
 
 def params_for_segment(
@@ -571,14 +571,6 @@ class FilterSmoothing:
         Returns:
             A :class:`FilterSmoothingResult`.
         """
-        if params is None:
-            # Every mode needs them: the smoother estimates them and the filter
-            # forecasts with them. Caught here with the hybrid's own message
-            # rather than deep inside the smoother's flattening.
-            raise ValueError(
-                "params must be provided: the ESMDA phase estimates the "
-                "parameter ensemble and the filter phase forecasts with it."
-            )
         batches = self._validate_observations(observations)
 
         # --- ESMDA phase ------------------------------------------------
@@ -714,14 +706,9 @@ class FilterSmoothing:
                 if joint:
                     # The segment's constant approximation of the schedule; the
                     # correction is what the filter has learned on top of it.
-                    # The re-attach keeps `attrs` on the applied params: xarray
-                    # binary ops drop them, while the two helpers above (and the
-                    # state path) preserve them.
                     schedule = trajectory_values_at(theta, midpoint)
                     seg_params = (
-                        schedule
-                        if correction is None
-                        else (schedule + correction).assign_attrs(schedule.attrs)
+                        schedule if correction is None else schedule + correction
                     )
                 else:
                     seg_params = params_for_segment(theta, t_start, t_end)
