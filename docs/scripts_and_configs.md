@@ -738,6 +738,16 @@ does not hold; the semantics travel in the file's attrs), and
 `applied_params_history.nc`/`esmda_params_history.nc` (joint+dynamic: what
 each segment was actually forecast with; the per-window MDA iterates).
 
+Stage 1 of the hybrid pipeline, orchestrated by
+[`run_filter_smoothing_pipeline.sh`](../scripts/run_filter_smoothing_pipeline.sh):
+structurally `run_filtering_pipeline.sh` with the hybrid runner — the
+filtering metric/figure stages run at the run-dir root (per-cycle binning;
+`mode=state` writes no `params_history.nc` and the stages skip those panels)
+and the ESMDA stages run over the window artifacts in the same
+`esmda_view/` symlink construction. D3 there reads the FILTER phase's
+`window_{w}_pred_obs.nc`; the MDA loop's own `window_{w}_esmda_pred_obs.nc`
+is read by no shared stage.
+
 ---
 
 ### 2.2 Shared script libraries
@@ -1530,6 +1540,7 @@ Brief summary:
 | Enable reduced state update | `esmda/state_reduction=svd` (requires state-bearing smoother, incompatible with localization) |
 | Run the full ESMDA pipeline | [`scripts/run_esmda_pipeline.sh`](../scripts/run_esmda_pipeline.sh) |
 | Run the full filtering pipeline | [`scripts/run_filtering_pipeline.sh`](../scripts/run_filtering_pipeline.sh) |
+| Run the full filter-smoothing (hybrid) pipeline | [`scripts/run_filter_smoothing_pipeline.sh`](../scripts/run_filter_smoothing_pipeline.sh) |
 | Train a surrogate | [`scripts/neural_surrogate/train_neural_surrogate.py`](../scripts/neural_surrogate/train_neural_surrogate.py) — see [`docs/neural_surrogates.md`](neural_surrogates.md) |
 | LoRA fine-tune a trained surrogate | [`scripts/neural_surrogate/finetune_neural_surrogate.py`](../scripts/neural_surrogate/finetune_neural_surrogate.py) — see [`docs/neural_surrogates.md` Part F](neural_surrogates.md#part-f--parameter-efficient-fine-tuning-lora--peft) |
 | Understand config groups at a glance | [`conf/README.md`](../conf/README.md) |
