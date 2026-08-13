@@ -46,19 +46,28 @@ and ``filtering.num_assimilation_windows`` count. Inside it the two halves see
 the SAME per-cycle observations, built once, in global cycle order, before the
 window loop:
 
-  * the FILTER consumes them as they are: one cycle is one observation interval
-    (``time.output_frequency`` s), one frame, one full-weight analysis. A window
-    therefore holds ``simulation_time / output_frequency`` cycles, DERIVED and
-    validated to divide evenly, never configured. v1 pins the analysis stride
-    (run_filtering's ``assimilate_every_n_step``) to 1, so there is exactly one
-    observation product rather than two differently sampled ones.
+  * the FILTER consumes them as they are: one cycle is
+    ``filtering.assimilate_every_n_step`` observation intervals
+    (``time.output_frequency`` s each), of which only the LAST frame — the
+    analysis time — is assimilated, exactly as in run_filtering.py (the
+    intermediate frames are still simulated and still written). A window
+    therefore holds ``simulation_time / (output_frequency * every_n)`` cycles,
+    DERIVED and validated to divide evenly, never configured.
   * the SMOOTHER consumes their concatenation over the window, aggregated by its
     own ``AggregateObservations`` into ``esmda.interval_seconds`` bins. That
     aggregation happens INSIDE the smoother, as it does in run_esmda.py; nothing
     in the filter phase aggregates anything.
 
+  Under a stride the thinning applies to BOTH halves identically — the real
+  batches keep only each cycle's analysis frame, and both DA instances get the
+  same ``_StridedObservationOperator`` wrapper so their predicted observations
+  are subset row for row — which is what keeps the run at exactly ONE
+  observation product (``esmda.interval_seconds`` must then be coarse enough
+  that every aggregation bin still contains a strided frame, or the smoother's
+  aggregator raises on the empty bin).
+
 THE OBSERVATION CLOCK IS WINDOW-LOCAL AND NOMINAL. Each cycle's batch is
-ASSIGNED the time coordinate ``(local_cycle + 1) * output_frequency`` — the
+ASSIGNED the time coordinate ``(local_cycle + 1) * cycle_seconds`` — the
 nominal END of its forecast segment on the window clock — rather than keeping
 the truth's own frame times. Two reasons, both load-bearing:
 
@@ -70,10 +79,11 @@ the truth's own frame times. Two reasons, both load-bearing:
     Semantically, truth frame ``l`` IS the frame the cycle-``l`` analysis
     consumes at the END of its forecast segment; the nominal clock states that
     convention explicitly instead of hoping the raw coordinates imply it.
-  * the filter's forward model integrates EXACTLY ``output_frequency`` seconds
-    per cycle, so nominal bounds keep the trajectory restriction
-    (``params_for_segment``) in lockstep with what the model actually runs —
-    truth-cadence jitter must not stretch the parameter schedule.
+  * the filter's forward model integrates EXACTLY ``cycle_seconds`` (=
+    ``output_frequency`` x the stride) per cycle, so nominal bounds keep the
+    trajectory restriction (``params_for_segment``) in lockstep with what the
+    model actually runs — truth-cadence jitter must not stretch the parameter
+    schedule.
 
 The nominal clock is the axis run_esmda.py's per-window trajectory prior
 already lives on (knots on ``[0, simulation_time]``), which is exactly the
@@ -162,13 +172,14 @@ from scripts.esmda.run_esmda import (  # noqa: E402
 )
 from scripts.filtering.run_filtering import (  # noqa: E402
     _ESMDA_STEP_SEMANTICS,
-    _MOMENT_SAMPLING,
     _collect_window_cycle_dirs,
     _flat_obs_vector,
+    _moment_sampling,
     _save_window_obs_diagnostics,
     _save_window_params,
     _save_window_state,
     _stack_cycle_pred_obs,
+    _StridedObservationOperator,
     _window_staging_dir,
 )
 
@@ -199,13 +210,6 @@ _ESMDA_PRED_OBS_SEMANTICS = (
     "(esmda.interval_seconds bins), so its obs/obs_clean/obs_error_std "
     "variables are carried alongside rather than being read from that file."
 )
-
-# What the per-window state files hold, stamped onto the mean-field artifacts by
-# the shared metric stage. Identical to an unstrided filtering run's: one
-# analyzed frame per observation frame, tiling the window (NOT a sparse sample).
-# Imported rather than restated so the two runs' figures cannot drift apart.
-_MOMENT_SAMPLING_HYBRID = _MOMENT_SAMPLING
-
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -300,12 +304,24 @@ def run(cfg: DictConfig) -> None:
             f"{num_windows}."
         )
     sim_time = float(cfg.time.simulation_time)  # ONE window
-    cycle_seconds = float(cfg.time.output_frequency)  # ONE cycle == ONE obs frame
-    if cycle_seconds <= 0.0:
+    output_frequency = float(cfg.time.output_frequency)
+    if output_frequency <= 0.0:
         raise ValueError(
             "time.output_frequency must be > 0: it is the observation cadence "
-            "and therefore the filter's forecast segment (one cycle)."
+            "the filter's forecast segments are built from."
         )
+    # The filter's analysis stride, exactly as in run_filtering.py: a cycle
+    # spans `every_n` observation intervals, all of them simulated and written,
+    # and only the LAST frame — the analysis time — is assimilated. The stride
+    # thins BOTH halves' observations here (see the obs loop below), so the run
+    # still has exactly one observation product.
+    every_n = int(cfg.filtering.get("assimilate_every_n_step", 1))
+    if every_n < 1:
+        raise ValueError(
+            "filtering.assimilate_every_n_step must be >= 1 (1 = assimilate "
+            f"every observation frame), got {every_n}."
+        )
+    cycle_seconds = every_n * output_frequency  # ONE cycle
     # The filter's cycles must tile the window exactly: the smoother assimilates
     # the whole window and the filter the same frames one at a time, so a
     # partial cycle at the boundary would leave the two halves scoring different
@@ -316,10 +332,11 @@ def run(cfg: DictConfig) -> None:
         sim_time - cycles_per_window_nominal * cycle_seconds
     ) > 1e-9 * max(sim_time, cycle_seconds):
         raise ValueError(
-            f"time.output_frequency={cycle_seconds:g}s does not divide "
-            f"time.simulation_time={sim_time:g}s, so the filter's cycles would "
-            "not tile the assimilation window. Adjust time.simulation_time or "
-            "time.output_frequency."
+            f"One cycle is time.output_frequency x "
+            f"filtering.assimilate_every_n_step = {cycle_seconds:g}s, which "
+            f"does not divide time.simulation_time={sim_time:g}s, so the "
+            "filter's cycles would not tile the assimilation window. Adjust "
+            "time.simulation_time, time.output_frequency or the stride."
         )
     ensemble_size = int(cfg.ensemble.ensemble_size)
     final_time = sim_time * num_windows
@@ -449,15 +466,16 @@ def run(cfg: DictConfig) -> None:
             "time.output_frequency or num_assimilation_windows, or point "
             "run.truth_dir at a longer truth."
         )
-    cycles_per_window = n_total // num_windows
-    n_dropped = n_total - cycles_per_window * num_windows
+    cycles_per_window = n_total // num_windows // every_n
+    frames_per_window = cycles_per_window * every_n
+    n_dropped = n_total - frames_per_window * num_windows
     if n_dropped:
         print(
             f"Truth frames ({n_total}) do not divide evenly into {num_windows} "
-            f"window(s) of {cycles_per_window} cycle(s); the trailing "
-            f"{n_dropped} frame(s) are not assimilated."
+            f"window(s) of {cycles_per_window} cycle(s) x {every_n} frame(s); "
+            f"the trailing {n_dropped} frame(s) are not assimilated."
         )
-    n_total = cycles_per_window * num_windows
+    n_total = frames_per_window * num_windows
     num_cycles = cycles_per_window * num_windows
     if cycles_per_window != cycles_per_window_nominal:
         # A hard error, not a warning: the batches are placed on the NOMINAL
@@ -466,17 +484,18 @@ def run(cfg: DictConfig) -> None:
         # be silently assimilated at the wrong times (and the trajectory
         # restricted to the wrong segments) rather than merely sampled oddly.
         raise ValueError(
-            f"The truth provides {cycles_per_window} frame(s) per {sim_time:g}s "
-            f"window, but time.output_frequency={cycle_seconds:g}s implies "
+            f"The truth provides {cycles_per_window} cycle(s) of "
+            f"{every_n} frame(s) per {sim_time:g}s window, but "
+            f"time.output_frequency={output_frequency:g}s x "
+            f"filtering.assimilate_every_n_step={every_n} implies "
             f"{cycles_per_window_nominal}. The hybrid requires the truth's "
-            "output cadence to match time.output_frequency (one observation "
-            "frame per filter cycle); regenerate the truth or point "
-            "run.truth_dir at one with the matching cadence."
+            "output cadence to match time.output_frequency; regenerate the "
+            "truth or point run.truth_dir at one with the matching cadence."
         )
     print(
         f"{num_windows} window(s) of {sim_time:g}s = {cycles_per_window} "
         f"cycle(s) of {cycle_seconds:g}s each ({num_cycles} cycles over "
-        f"{final_time:g}s)."
+        f"{final_time:g}s, assimilating every {every_n} observation frame(s))."
     )
     true_params.to_netcdf(out_dir / "true_params.nc")
 
@@ -553,6 +572,15 @@ def run(cfg: DictConfig) -> None:
     # --- Observation operators and the per-cycle observations ------------------
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
+    # The predicted-observation twin of the truth-side stride, for BOTH halves
+    # (run_filtering.py's wrapper): the filter's cycle forecast emits `every_n`
+    # frames and the smoother's window forecast every frame of the window,
+    # while the real observations below keep only the strided subset — so each
+    # half's H(x) must be subset the same way, row for row. Wrapped only when
+    # the stride bites, so an unstrided run hands both halves the very same
+    # operator object it always did.
+    if every_n > 1:
+        assim_obs_op = _StridedObservationOperator(assim_obs_op, every_n)
     # Interval aggregation for the SMOOTHER ONLY. ONE instance, shared between
     # the C_D sizing below and the smoother, so its interval-count consistency
     # check spans the truth and the forecasts (run_esmda.py's contract).
@@ -569,10 +597,18 @@ def run(cfg: DictConfig) -> None:
     truth_view = open_truth(true_state_path, n_total, x_offset, start_idx, t_offset)
     for cycle in range(num_cycles):
         window_of_cycle = cycle // cycles_per_window
-        # One frame per cycle (the stride is pinned to 1 in v1), taken as a
-        # half-open one-frame slice so the frame keeps its `time` dimension and
-        # the operator returns a labelled ("time", "obs") batch.
-        cycle_truth = truth_view.isel(time=slice(cycle, cycle + 1))
+        # The cycle's truth BLOCK is its `every_n` output frames (half-open, so
+        # no frame is covered twice); the frames it ASSIMILATES are the strided
+        # subset ending on the block's last frame — the analysis time
+        # (run_filtering.py's stride slicing, verbatim). At every_n = 1 the
+        # block is one frame and the stride is the identity. The SMOOTHER later
+        # assimilates the concatenation of exactly these strided batches, so
+        # the stride thins both halves' observations identically and the run
+        # keeps one observation product.
+        cycle_block = truth_view.isel(
+            time=slice(cycle * every_n, (cycle + 1) * every_n)
+        )
+        cycle_truth = cycle_block.isel(time=slice(every_n - 1, None, every_n))
         cycle_times.append(float(np.asarray(cycle_truth["time"].values).ravel()[0]))
         cycle_obs_clean = truth_obs_op(cycle_truth)
         if not isinstance(cycle_obs_clean, xarray.DataArray):
@@ -905,8 +941,9 @@ def run(cfg: DictConfig) -> None:
             "n_per_window": int(cycles_per_window),
             "num_windows": int(num_windows),
             "sim_time": float(sim_time),
-            # One frame per cycle: the analysis frame IS the cycle's only frame.
-            "n_per_cycle": 1,
+            # The truth frames one cycle covers, of which it assimilates the
+            # last (run_filtering.py's key, same meaning).
+            "n_per_cycle": int(every_n),
             "num_cycles": int(num_cycles),
             "cycle_seconds": float(cycle_seconds),
             # The assembled parameter files carry a physical (seconds) time axis
@@ -916,11 +953,12 @@ def run(cfg: DictConfig) -> None:
             "is_dynamic": True,
             "truth_solver_name": str(cfg.truth_model.solver_name),
             "assim_solver_name": str(cfg.assim_model.solver_name),
-            # Analyzed frames, one per observation frame: they tile the window,
-            # so the moments over them are a true within-window average carrying
-            # the analysis increments (never sparse — the stride is pinned to 1).
-            "moment_sampling": _MOMENT_SAMPLING_HYBRID,
-            "moment_sampling_is_sparse": False,
+            # One analyzed frame per cycle. Unstrided they tile the window;
+            # under a stride they are a sparse sample of it, flagged exactly as
+            # run_filtering.py flags its own (the prose comes from the same
+            # helper, so the two runs' figure labels cannot drift apart).
+            "moment_sampling": _moment_sampling(every_n),
+            "moment_sampling_is_sparse": every_n > 1,
         },
         out_dir / "truth_access.yaml",
     )
@@ -941,9 +979,9 @@ def run(cfg: DictConfig) -> None:
                 "ensemble_size": int(ensemble_size),
                 "simulation_time_per_window": float(sim_time),
                 "seconds_per_cycle": float(cycle_seconds),
-                # v1 pins the filter's analysis stride; recorded so a hybrid run
-                # dir reads like a filtering one to the shared stages.
-                "assimilate_every_n_step": 1,
+                # The filter's analysis stride; recorded so a hybrid run dir
+                # reads like a filtering one to the shared stages.
+                "assimilate_every_n_step": int(every_n),
                 "final_time": float(final_time),
                 "observation_error_std": obs_error_std,
                 "num_esmda_steps": int(cfg.esmda.num_steps),

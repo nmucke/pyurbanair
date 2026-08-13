@@ -49,17 +49,16 @@
 # siblings count — so the horizon is
 # `filter_smoothing.num_assimilation_windows * time.simulation_time`. Inside a
 # window the SMOOTHER sees the whole window at once (aggregated into
-# `esmda.interval_seconds` bins) while the FILTER forecasts observation to
-# observation: one cycle is one observation interval (`time.output_frequency`
-# s), so a window holds `simulation_time / output_frequency` cycles, DERIVED
-# rather than configured. That count must divide evenly or the run refuses to
-# start.
-#
-# There is deliberately NO `assimilate_every_n_step` here (run_filtering.yaml's
-# analysis stride): v1 pins it to 1. A strided filter would assimilate a
-# thinned frame set while the smoother assimilated the full window, i.e. two
-# different observation products out of one truth, and the two would have to be
-# built and reconciled separately.
+# `esmda.interval_seconds` bins) while the FILTER forecasts cycle by cycle: one
+# cycle is `filtering.assimilate_every_n_step` observation intervals
+# (`time.output_frequency` s each), of which only the last frame — the analysis
+# time — is assimilated, exactly as in run_filtering.yaml. A window holds
+# `simulation_time / (output_frequency * assimilate_every_n_step)` cycles,
+# DERIVED rather than configured; that count must divide evenly or the run
+# refuses to start. Under a stride the thinning applies to BOTH halves (the
+# smoother assimilates the same strided frames), so the run keeps exactly one
+# observation product — `esmda.interval_seconds` must then stay coarse enough
+# that every aggregation bin contains a strided frame.
 #
 # Examples::
 #
@@ -199,6 +198,12 @@ filtering:
   # `parameter` is deliberately not offered: without a state update the filter
   # would only re-estimate what the smoother just estimated.
   mode: joint
+  # Analysis STRIDE, run_filtering.yaml's knob with the same meaning: a cycle
+  # spans this many observation intervals and assimilates only the last frame
+  # (the intermediate frames are still simulated and written). Here it thins
+  # the SMOOTHER's observations too — both halves see the same strided frames,
+  # keeping one observation product. Must divide the window's frame count.
+  assimilate_every_n_step: 1
   # Defaults; normally set by the filtering/* groups above.
   analysis: stochastic
   localization: null

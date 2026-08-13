@@ -153,10 +153,9 @@ def test_filter_smoothing_composes(
     assert "obs_error_std" not in cfg.esmda
     assert "obs_error_std" not in cfg.filtering
 
-    # v1 pins the filter's analysis stride, so run_filtering.yaml's knob is
-    # deliberately NOT exposed here (a strided filter alongside a whole-window
-    # smoother would need two separate observation products).
-    assert "assimilate_every_n_step" not in cfg.filtering
+    # run_filtering.yaml's analysis stride, same meaning, default 1. Under a
+    # stride the thinning applies to BOTH halves (one observation product).
+    assert cfg.filtering.assimilate_every_n_step == 1
 
     # Aggregation is a SMOOTHER-only knob; the filter assimilates raw frames.
     assert cfg.esmda.interval_seconds == 3.0
@@ -339,6 +338,33 @@ def test_run_filter_smoothing_rejects_indivisible_cycles(
     assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
 
 
+def test_run_filter_smoothing_rejects_bad_stride(compose_test_cfg: Any) -> None:
+    """The stride must be >= 1 and divide the window's frame count.
+
+    Both are config-time failures, before any solver starts: an indivisible
+    stride would leave a partial cycle at the window boundary (the same
+    guarantee run_filtering.py enforces), and the check runs on the nominal
+    geometry so no truth rollout is paid first.
+    """
+    from scripts.filter_smoothing.run_filter_smoothing import run
+
+    cfg = compose_test_cfg(
+        _overrides("dynamic", "joint", 1, ["filtering.assimilate_every_n_step=0"]),
+        config_name="run_filter_smoothing",
+    )
+    with pytest.raises(ValueError, match="must be >= 1"):
+        run(cfg)
+
+    # The smoke window holds 3 frames; a stride of 2 cannot tile it.
+    cfg = compose_test_cfg(
+        _overrides("dynamic", "joint", 1, ["filtering.assimilate_every_n_step=2"]),
+        config_name="run_filter_smoothing",
+    )
+    with pytest.raises(ValueError, match="does not divide"):
+        run(cfg)
+    assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
+
+
 def test_nominal_window_clock_yields_exact_segment_bounds() -> None:
     """The PRODUCTION observation geometry composes with ``segment_bounds``.
 
@@ -398,25 +424,31 @@ def test_nominal_window_clock_yields_exact_segment_bounds() -> None:
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
-    "smoother,mode,num_windows",
+    "smoother,mode,num_windows,every_n",
     [
         # The trajectory path with no parameter correction: the filter forecasts
         # each segment with the MDA trajectory restricted to it and updates the
         # state alone.
-        pytest.param("dynamic", "state", 1, id="state_dynamic"),
+        pytest.param("dynamic", "state", 1, 1, id="state_dynamic"),
         # The exact-reduction path: a static MDA posterior makes the filter
         # phase one plain joint-EnKF pass over the window's cycles. Two windows,
         # so the prior carry (posterior -> next prior) is exercised.
-        pytest.param("static", "joint", 2, id="joint_static"),
+        pytest.param("static", "joint", 2, 1, id="joint_static"),
         # The correction-on-the-ESMDA-schedule path: a trajectory posterior plus
         # a joint parameter update, per segment. Two windows, so the dynamic
         # carry (extrapolate -> next prior) and the per-window reset of the
         # correction are both exercised.
-        pytest.param("dynamic", "joint", 2, id="joint_dynamic"),
+        pytest.param("dynamic", "joint", 2, 1, id="joint_dynamic"),
+        # The analysis stride: one cycle spans the smoke window's three frames
+        # and assimilates only the last — BOTH halves see that one strided
+        # frame per window (one observation product), the trajectory is
+        # restricted to the full-window segment, and the strided observation
+        # operator wraps both DA instances.
+        pytest.param("dynamic", "state", 2, 3, id="state_dynamic_strided"),
     ],
 )
 def test_run_filter_smoothing(
-    smoother: str, mode: str, num_windows: int, compose_test_cfg: Any
+    smoother: str, mode: str, num_windows: int, every_n: int, compose_test_cfg: Any
 ) -> None:
     import numpy as np
     import xarray
@@ -425,14 +457,22 @@ def test_run_filter_smoothing(
     from scripts.filter_smoothing.run_filter_smoothing import run
 
     cfg = compose_test_cfg(
-        _overrides(smoother, mode, num_windows), config_name="run_filter_smoothing"
+        _overrides(
+            smoother,
+            mode,
+            num_windows,
+            [f"filtering.assimilate_every_n_step={every_n}"],
+        ),
+        config_name="run_filter_smoothing",
     )
     run(cfg)
 
-    # Cycles are DERIVED from the observation cadence, not configured: the smoke
-    # shape is a 3 s window written every 1 s, so a window holds three cycles.
-    cycles_per_window = round(
-        float(cfg.time.simulation_time) / float(cfg.time.output_frequency)
+    # Cycles are DERIVED from the observation cadence and the stride, not
+    # configured: the smoke shape is a 3 s window written every 1 s, so a
+    # window holds three cycles unstrided and one at every_n=3.
+    cycles_per_window = (
+        round(float(cfg.time.simulation_time) / float(cfg.time.output_frequency))
+        // every_n
     )
     num_cycles = num_windows * cycles_per_window
     n_sensors = len(cfg.obs.x_points)
@@ -456,6 +496,9 @@ def test_run_filter_smoothing(
     truth_times = np.asarray(
         xarray.open_dataset(out_dir / "true_state.nc")["time"].values, dtype=float
     )
+    # The analyzed frames are each cycle's LAST truth frame (the analysis
+    # time); unstrided that is every frame.
+    analysis_times = truth_times[every_n - 1 :: every_n]
     for w in range(num_windows):
         # The window state is the FILTER's analyzed series — one frame per
         # cycle, on the window's own truth frame times — occupying the slots an
@@ -467,7 +510,7 @@ def test_run_filter_smoothing(
         assert posterior_state.sizes["ensemble"] == 2
         np.testing.assert_allclose(
             np.asarray(posterior_state["time"].values, dtype=float),
-            truth_times[w * cycles_per_window : (w + 1) * cycles_per_window],
+            analysis_times[w * cycles_per_window : (w + 1) * cycles_per_window],
         )
         # A hybrid has no window-long prior rollout, exactly as a filter has
         # none; run_info records the absence.
@@ -540,10 +583,10 @@ def test_run_filter_smoothing(
     assert truth_access["num_windows"] == num_windows
     assert truth_access["n_per_window"] == cycles_per_window
     assert truth_access["sim_time"] == float(cfg.time.simulation_time)
-    assert truth_access["cycle_seconds"] == float(cfg.time.output_frequency)
-    assert truth_access["n_per_cycle"] == 1
+    assert truth_access["cycle_seconds"] == every_n * float(cfg.time.output_frequency)
+    assert truth_access["n_per_cycle"] == every_n
     assert truth_access["num_cycles"] == num_cycles
-    assert truth_access["moment_sampling_is_sparse"] is False
+    assert truth_access["moment_sampling_is_sparse"] is (every_n > 1)
 
     configuration = read_yaml(out_dir / "run_info.yaml")["configuration"]
     assert configuration["hybrid"] == "FilterSmoothing"
@@ -557,7 +600,7 @@ def test_run_filter_smoothing(
     assert configuration["cycles_per_window"] == cycles_per_window
     assert configuration["num_cycles"] == num_cycles
     assert configuration["num_esmda_steps"] == num_steps
-    assert configuration["assimilate_every_n_step"] == 1
+    assert configuration["assimilate_every_n_step"] == every_n
     assert configuration["save_obs_diagnostics"] is True
     assert configuration["save_prior_state"] is False
     assert configuration["num_observations_per_frame"] == n_obs_frame

@@ -957,10 +957,13 @@ Entry point:
 composes the existing `esmda/*` and `filtering/*` groups (smoother restricted
 to `static`/`dynamic`) plus a small `filter_smoothing:` node, and instantiates
 **two** ensemble forward-model stacks — the smoother's with the window
-horizon, the filter's with `simulation_time` = one observation interval — so
-each collaborator forecasts on its own clock. `filtering.assimilate_every_n_step`
-is pinned to 1 here (a stride would give the two phases inconsistent
-observation products).
+horizon, the filter's with `simulation_time` = one cycle — so each
+collaborator forecasts on its own clock. `filtering.assimilate_every_n_step`
+works as in a pure filtering run (a cycle spans `n` observation intervals and
+assimilates only the last frame), with one hybrid-specific rule: the thinning
+applies to BOTH phases — the smoother assimilates the same strided frames,
+and both DA instances share the strided observation-operator wrapper — so the
+run keeps exactly one observation product.
 
 > Historical note: an earlier, different filter-smoothing algorithm (an outer
 > ESMDA whose *forecast operator* was an inner EnKF pass, updating the whole

@@ -36,6 +36,12 @@
 #     different questions on purpose: "what did the filter run with" vs "what
 #     did the smoother estimate".
 #
+# Because the MDA posterior is the hybrid's parameter estimate, stage 4's
+# parameter figures — rollout_time_evolution.png (prior AND posterior parameter
+# evolution against the truth), parameter_error.png, parameter_marginals.png —
+# are also COPIED from esmda_view/ to the run root, so a hybrid run dir shows
+# its parameter story without descending into the view.
+#
 # The ESMDA-schema view (`<run dir>/esmda_view/`)
 # ----------------------------------------------
 # Same construction, and same reason, as run_filtering_pipeline.sh's: both
@@ -112,6 +118,19 @@ if [ -f "${RUN_DIR}/posterior_state_mean.nc" ] && [ -d "${RUN_DIR}/windows" ]; t
   pixi run -e dev python scripts/esmda/compute_esmda_metrics.py --run-dir "${ESMDA_VIEW}"
   pixi run -e dev python scripts/esmda/make_esmda_figures.py --run-dir "${ESMDA_VIEW}"
   echo "ESMDA-schema view of this run: ${ESMDA_VIEW}"
+
+  # Surface the ESMDA-schema PARAMETER figures at the run root. The hybrid's
+  # parameter story is the MDA posterior, and these are its prior/posterior
+  # panels (rollout_time_evolution.png draws the prior AND posterior parameter
+  # evolution against the truth); the root-level filtering figures only cover
+  # the filter's own params_history, which mode=state does not even write.
+  # Copied rather than symlinked so the root stays self-contained; the names
+  # collide with nothing the filtering stages write.
+  for fig in rollout_time_evolution.png parameter_error.png parameter_marginals.png; do
+    if [ -f "${ESMDA_VIEW}/${fig}" ]; then
+      cp "${ESMDA_VIEW}/${fig}" "${RUN_DIR}/${fig}"
+    fi
+  done
 else
   echo "No window artifacts in ${RUN_DIR}; skipping the ESMDA-schema stages"
 fi

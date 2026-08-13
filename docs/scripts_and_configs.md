@@ -116,8 +116,11 @@ rather than pulling them from separate files. The table below summarises each.
 The hybrid's own node holds only what is a property of the EXPERIMENT rather
 than of either algorithm; everything algorithm-specific stays on the reused
 `esmda:` / `filtering:` nodes above (with `filtering.mode` restricted to
-`state | joint`, and no `assimilate_every_n_step` — v1 pins the analysis
-stride to 1 so the two halves see one observation product).
+`state | joint`). `filtering.assimilate_every_n_step` keeps its filtering
+meaning, with one hybrid-specific rule: the stride thins BOTH halves'
+observations — the smoother assimilates the same strided frames — so the run
+keeps one observation product (`esmda.interval_seconds` must stay coarse
+enough that no aggregation bin is emptied).
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -746,7 +749,11 @@ filtering metric/figure stages run at the run-dir root (per-cycle binning;
 and the ESMDA stages run over the window artifacts in the same
 `esmda_view/` symlink construction. D3 there reads the FILTER phase's
 `window_{w}_pred_obs.nc`; the MDA loop's own `window_{w}_esmda_pred_obs.nc`
-is read by no shared stage.
+is read by no shared stage. The view's parameter figures
+(`rollout_time_evolution.png` — the prior AND posterior parameter evolution
+against the truth — `parameter_error.png`, `parameter_marginals.png`) are
+copied to the run root, since the MDA posterior is the hybrid's parameter
+estimate and mode=state writes no root-level parameter figure of its own.
 
 ---
 
