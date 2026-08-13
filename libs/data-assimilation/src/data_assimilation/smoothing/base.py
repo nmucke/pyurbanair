@@ -131,6 +131,7 @@ class BaseSmoothing:
         state: Optional[xarray.Dataset] = None,
         return_params_history: bool = False,
         return_state_history: bool = False,
+        final_forecast: bool = True,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the analysis."""
         raise NotImplementedError
@@ -142,12 +143,17 @@ class BaseSmoothing:
         observations: Optional[Observations] = None,
         return_params_history: bool = False,
         return_state_history: bool = False,
+        final_forecast: bool = True,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the analysis.
 
         ``observations`` is the time-resolved DataArray the observation
         operator returns (aggregated and flattened inside ``_analysis``) or an
         already flattened vector.
+
+        ``final_forecast=False`` skips the posterior forward pass after the
+        analysis loop and returns the updated params alone -- for callers (the
+        filter-smoothing hybrid) that produce the posterior state themselves.
         """
         return self._analysis(
             state=state,
@@ -155,4 +161,5 @@ class BaseSmoothing:
             observations=observations,
             return_params_history=return_params_history,
             return_state_history=return_state_history,
+            final_forecast=final_forecast,
         )

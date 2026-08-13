@@ -324,6 +324,7 @@ sensor_observation_coords` (shared with the filtering package); see its
         state: Optional[xarray.Dataset] = None,
         return_params_history: bool = False,
         return_state_history: bool = False,
+        final_forecast: bool = True,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the ESMDA analysis loop.
 
@@ -346,7 +347,23 @@ sensor_observation_coords` (shared with the filtering package); see its
         is what makes the state estimate matter — but it means the analyzed field
         is integrated directly, so it must be a usable warm-start state for the
         forward model (as the cross-window carry-over already assumes).
+
+        With ``final_forecast=False`` the loop's updates run unchanged but the
+        posterior forward pass is skipped: the updated params are returned
+        alone (in both save modes) and ``pred_obs_history`` holds only the
+        ``num_steps`` pre-update entries. In on-disk mode the
+        ``step_{num_steps}/`` directory (pre-created by ``__init__`` alongside
+        the others) is left empty, and ``forward_model.results_dir`` is left
+        where the loop's last iteration pointed it. Used by the
+        filter-smoothing hybrid, which produces the posterior state with a
+        sequential filter instead.
         """
+        if not final_forecast and return_state_history:
+            raise ValueError(
+                "return_state_history requires the final forecast: with "
+                "final_forecast=False there is no posterior state to close "
+                "the history with."
+            )
         if return_state_history and self.forward_model.save_on_disk:
             raise ValueError(
                 "return_state_history is not supported in on-disk save mode: "
@@ -411,32 +428,36 @@ sensor_observation_coords` (shared with the filtering package); see its
 
             logger.info("ESMDA step %d completed", i)
 
-        # Final forecast from the analyzed initial condition + updated params.
-        self._set_step_results_dir(self.num_steps)
-        state = self._forecast_step(state=initial_state, params=params)
+        if final_forecast:
+            # Final forecast from the analyzed initial condition + updated
+            # params.
+            self._set_step_results_dir(self.num_steps)
+            state = self._forecast_step(state=initial_state, params=params)
 
-        # Close the observation-space history with the POSTERIOR forecast: the
-        # in-loop appends only cover the num_steps prior/intermediate forecasts,
-        # and the posterior is the one the run is judged on. Recorded here --
-        # before ``_final_time_smoothing_step``, which is a second Kalman update
-        # of the trajectory rather than a forecast (see its docstring), so its
-        # own predicted observations are a different object and stay out.
-        if self.collect_obs_diagnostics:
-            self._record_pred_obs(
-                jnp.asarray(
-                    self._observation_step(
-                        state=state, results_dir=self._results_dir_or_none()
-                    )
-                ).T
-            )
+            # Close the observation-space history with the POSTERIOR forecast:
+            # the in-loop appends only cover the num_steps prior/intermediate
+            # forecasts, and the posterior is the one the run is judged on.
+            # Recorded here -- before ``_final_time_smoothing_step``, which is
+            # a second Kalman update of the trajectory rather than a forecast
+            # (see its docstring), so its own predicted observations are a
+            # different object and stay out.
+            if self.collect_obs_diagnostics:
+                self._record_pred_obs(
+                    jnp.asarray(
+                        self._observation_step(
+                            state=state, results_dir=self._results_dir_or_none()
+                        )
+                    ).T
+                )
 
-        # Optional post-loop trajectory smoothing (state-bearing variants with
-        # final_time_smoothing enabled; no-op otherwise). Reuses the final
-        # forecast — no extra forward solve — and never touches the params.
-        state = self._final_time_smoothing_step(state, obs)
+            # Optional post-loop trajectory smoothing (state-bearing variants
+            # with final_time_smoothing enabled; no-op otherwise). Reuses the
+            # final forecast — no extra forward solve — and never touches the
+            # params.
+            state = self._final_time_smoothing_step(state, obs)
 
-        if return_state_history:
-            state_history.append(state)
+            if return_state_history:
+                state_history.append(state)
 
         # Build return values
         result_params = (
@@ -444,6 +465,9 @@ sensor_observation_coords` (shared with the filtering package); see its
             if return_params_history
             else params
         )
+
+        if not final_forecast:
+            return result_params
 
         if self.forward_model.save_on_disk:
             return result_params

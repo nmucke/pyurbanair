@@ -162,7 +162,7 @@ knobs live on the run config's algorithm node — `esmda.interval_seconds` /
 `esmda.aggregation_mode`, right next to
 `obs_error_std` — not in the case's `obs:` block, which carries only
 observation-operator arguments. `run_filtering.yaml` has no such keys, because
-the filter aggregates nothing. `create_aggregate_observations` (§10) reads
+the filter aggregates nothing. `create_aggregate_observations` (§11) reads
 them; a null `interval_seconds` means full-resolution assimilation.
 
 ---
@@ -874,7 +874,106 @@ groups and the (dual-schema) artifact list.
 
 ---
 
-## 9. Configuration
+## 9. Filter smoothing — the ESMDA × filter hybrid
+
+[filter_smoothing/base.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/base.py)
+composes the two families above instead of picking one. Per assimilation
+window:
+
+1. **ESMDA phase** — a *parameter-only* smoother (`ParameterESMDA` or
+   `TimeVaryingParameterESMDA`; the state-bearing variants are rejected) runs
+   its MDA loop over the whole window exactly as in §5, but with the new
+   `final_forecast=False` seam: the posterior forward pass after the loop is
+   skipped, and the call returns the updated parameter ensemble alone. (With
+   the default `final_forecast=True` the seam is inert — byte-identical to the
+   pre-seam behavior. When skipped, the smoother's `pred_obs_history` holds
+   only the `num_steps` pre-update entries — there is **no** posterior entry —
+   and the pre-created `step_{num_steps}/` directory stays empty.)
+2. **Filter phase** — a sequential filter (§8, `mode="state"` or `"joint"`;
+   `"parameter"` is rejected) produces the posterior state by filtering the
+   window with the ESMDA-estimated parameters. The filter consumes the **full
+   raw per-frame observations**, never the smoother's aggregated product —
+   aggregation exists only inside the ESMDA phase, via its own
+   `aggregate_observations`, exactly as in a plain ESMDA run.
+
+```python
+hybrid = FilterSmoothing(smoother=<ParameterESMDA>, filter=<EnsembleKalmanFilter>)
+result = hybrid.run(state=..., params=prior, observations=[...], return_history=True)
+```
+
+`run()` takes one labelled `("time", "obs")` DataArray per filter cycle with
+time coordinates on the window clock (seconds); it concatenates them on `time`
+for the smoother and hands them to the filter raw. Each collaborator keeps its
+own `C_D` from construction (smoother: window-aggregated diagonal; filter:
+one frame's variances).
+
+How the filter is driven depends on the ESMDA posterior:
+
+* **Static parameters** — one plain `filter.run(state, params=theta,
+  observations)` over the window, exactly as `run_filtering.py` uses the
+  filter. Nothing hybrid-specific.
+* **Time-varying trajectory** — the filter's forward model forecasts one
+  observation interval at a time and restarts its clock at 0 each cycle
+  (which is also why `run_filtering.py` rejects dynamic priors), so the
+  whole-window schedule cannot be handed over as-is. The hybrid loops the
+  segments itself — one single-cycle `filter.run(...)` per segment, segment
+  boundaries derived from the observation time coordinates — which is
+  numerically identical to one multi-cycle call (`run()` never resets
+  `rng_key`, and warm starts chain through `result.state`):
+  * `mode="state"`: the segment forecast uses `params_for_segment(theta,
+    t0, t1)` — the trajectory restricted to the segment (endpoints
+    interpolated, interior knots kept, time re-based to segment-local
+    `[0, t1 − t0]`); the parameters ride through the analysis unmodified.
+  * `mode="joint"` — *correction on the ESMDA schedule*: the hybrid keeps a
+    static correction `c` (initially zero). Segment `k` forecasts with
+    `e_k + c` where `e_k = trajectory_values_at(theta, midpoint of segment
+    k)` (a time-dim-free Dataset, so the filter's static-params contract
+    holds); after the joint update, `c = posterior_k − e_k`. ESMDA sets the
+    dynamic shape; the filter accumulates a persistent correction. With a
+    static `theta` this reduces *exactly* to standard joint filtering. The
+    segment **midpoint** is a fixed convention (the best constant
+    approximation of the schedule over the segment), not a knob — and note
+    the approximation it implies: the forecast holds the parameter constant
+    within each segment, which loses within-segment schedule variation when
+    `time.seconds_per_knot < time.output_frequency`.
+
+`FilterSmoothingResult` carries `esmda_params` (the MDA posterior — what seeds
+the next window's prior), `state` (the filter's analyzed end-of-window frame —
+the next window's warm start), `params` (joint mode: the final carried
+`e_k + c`; state mode: `None`), the per-cycle `CycleDiagnostics` renumbered
+`0..L−1`, and optional histories (`esmda_step`- and `cycle`-concatenated).
+
+Two couplings worth knowing: the ESMDA phase of window `w+1` starts from the
+*filtered* state of window `w`, so its model error includes the filter's
+increments (intended — that is the point of the hybrid); and the joint
+correction `c` deliberately resets at each window boundary — the ESMDA
+posterior alone seeds the next prior/extrapolation, and the per-window
+`window_{w}_filter_params.nc` artifact preserves what the filter had learned.
+
+Entry point:
+[scripts/filter_smoothing/run_filter_smoothing.py](../scripts/filter_smoothing/run_filter_smoothing.py)
+(config
+[conf/run_filter_smoothing.yaml](../conf/run_filter_smoothing.yaml)), which
+composes the existing `esmda/*` and `filtering/*` groups (smoother restricted
+to `static`/`dynamic`) plus a small `filter_smoothing:` node, and instantiates
+**two** ensemble forward-model stacks — the smoother's with the window
+horizon, the filter's with `simulation_time` = one cycle — so each
+collaborator forecasts on its own clock. `filtering.assimilate_every_n_step`
+works as in a pure filtering run (a cycle spans `n` observation intervals and
+assimilates only the last frame), with one hybrid-specific rule: the thinning
+applies to BOTH phases — the smoother assimilates the same strided frames,
+and both DA instances share the strided observation-operator wrapper — so the
+run keeps exactly one observation product.
+
+> Historical note: an earlier, different filter-smoothing algorithm (an outer
+> ESMDA whose *forecast operator* was an inner EnKF pass, updating the whole
+> knot trajectory against stacked per-cycle observations) was removed in
+> `0e3291c`; see `docs/plans/filter_smoothing_windowed_esmda.md` for its
+> design record. This section describes its replacement.
+
+---
+
+## 10. Configuration
 
 All smoother configuration is via Hydra groups under
 [conf/esmda/](../conf/esmda/); the filter's equivalents live under
@@ -934,7 +1033,7 @@ The `state_reduction` key is consumed by `state.yaml`,
 
 ---
 
-## 10. End-to-end run
+## 11. End-to-end run
 
 A run uses the library as follows (very brief; see
 [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py),
@@ -992,7 +1091,7 @@ truth; see `codebase_guide.md §6` and the script's docstring.
 
 ---
 
-## 11. Extension recipes
+## 12. Extension recipes
 
 ### Adding a new ESMDA variant
 
