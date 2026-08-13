@@ -12,7 +12,7 @@ orientation, then return here for field-level detail.
 
 ### Overview
 
-The configuration tree has exactly **four primary run entry points**, each
+The configuration tree has exactly **five primary run entry points**, each
 self-contained (they inline the shared base rather than pulling separate
 `paths.yaml`/`time.yaml`/`ensemble.yaml` files):
 
@@ -21,6 +21,7 @@ self-contained (they inline the shared base rather than pulling separate
 | [`conf/run_forward_model.yaml`](../conf/run_forward_model.yaml) | `run_forward_model.py` | `case` + single `model@model` mount + single `params` mount |
 | [`conf/run_esmda.yaml`](../conf/run_esmda.yaml) | `run_esmda.py` | same base + `esmda:` scalars + double model mount (`@truth_model`/`@assim_model`) + double params mount (`@truth_params`/`@prior_params`) |
 | [`conf/run_filtering.yaml`](../conf/run_filtering.yaml) | `run_filtering.py` | same base + `filtering:` scalars + the `filtering/*` groups + the same double model/params mounts (static params only) |
+| [`conf/run_filter_smoothing.yaml`](../conf/run_filter_smoothing.yaml) | `run_filter_smoothing.py` | same base + a `filter_smoothing:` node for the shared knobs + BOTH the `esmda:` and `filtering:` nodes (each with its groups) — the hybrid drives one parameter-only smoother and one filter per window |
 | [`conf/compare_models.yaml`](../conf/compare_models.yaml) | `compare_models.py` | same base as `run_forward_model` + `compare:` scalars + an *N-way* model mount (`model@models.<name>`) and named parameter-scenario mounts (`params@parameter_scenarios.<name>`) |
 
 A third entry point, [`conf/neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml),
@@ -79,7 +80,7 @@ rather than pulling them from separate files. The table below summarises each.
 | `failure.jitter_scale` | 0.05 | Relative std of Gaussian jitter applied to donor params when resampling. |
 | `failure.seed` | 0 | RNG seed for the resampling draw. |
 
-#### `esmda:` (run_esmda only)
+#### `esmda:` (run_esmda; run_filter_smoothing reuses the node)
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -94,7 +95,7 @@ rather than pulling them from separate files. The table below summarises each.
 | `state_reduction` | `null` | Set by the `esmda/state_reduction` group; `null` = full-space update. |
 | `final_time_smoothing` | `false` | Post-loop Kalman update of the full trajectory (requires `state_reduction`). |
 
-#### `filtering:` (run_filtering only)
+#### `filtering:` (run_filtering; run_filter_smoothing reuses the node)
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -109,6 +110,20 @@ rather than pulling them from separate files. The table below summarises each.
 | `inflation` | (group) | Set by `filtering/inflation` (default `rtps`). |
 | `parameter_evolution` | (group) | Set by `filtering/evolution` (default `none`). |
 | `filter` | `EnsembleKalmanFilter` block | The composed filter `_target_`; normally left alone. |
+
+#### `filter_smoothing:` (run_filter_smoothing only)
+
+The hybrid's own node holds only what is a property of the EXPERIMENT rather
+than of either algorithm; everything algorithm-specific stays on the reused
+`esmda:` / `filtering:` nodes above (with `filtering.mode` restricted to
+`state | joint`, and no `assimilate_every_n_step` — v1 pins the analysis
+stride to 1 so the two halves see one observation product).
+
+| Field | Default | Purpose |
+|---|---|---|
+| `num_assimilation_windows` | 2 | Horizon in windows of `time.simulation_time` seconds, the same unit as both siblings'. Unlike a pure filtering run's, a window boundary here is NOT purely computational: the MDA restarts on the next window's prior (extrapolated for a dynamic trajectory) and the joint correction resets, so `W` is a real modelling choice. |
+| `seed` | 42 | JAX RNG seed feeding the truth noise, the smoother, and the filter. |
+| `obs_error_std` | 0.25 | Observation-error std of ONE frame; the filter's `C_D` is exactly that, the smoother's is the same value tiled over the window's aggregated vector. |
 
 #### `run:`
 
@@ -685,6 +700,43 @@ records the resolved localization subtree beside it (`null` for the global
 update): the two are a coupled pair through `localization_policy`, and the
 per-block `local_*` cycle diagnostics only mean anything against the strategy
 and radius that produced them.
+
+#### [`run_filter_smoothing.py`](../scripts/filter_smoothing/run_filter_smoothing.py)
+**Hydra** — config: [`run_filter_smoothing.yaml`](../conf/run_filter_smoothing.yaml)
+
+The filter-smoothing HYBRID entry point (algorithm:
+[data_assimilation.md §9](data_assimilation.md#9-filter-smoothing--the-esmda--filter-hybrid)).
+Per window a parameter-only ESMDA (`esmda/smoother=static|dynamic`; the
+state-bearing smoothers are rejected) runs its MDA loop with
+`final_forecast=False` — no posterior forward pass — and the sequential filter
+(`filtering.mode=state|joint`) then produces the window's state from the same
+raw per-cycle observations, forecasting with the ESMDA-estimated parameters
+(joint mode additionally carries a parameter correction on the ESMDA
+schedule, reset at each window boundary). The script owns the experiment: it
+instantiates **two assimilation model stacks** — the smoother's with the
+window horizon, the filter's with `simulation_time = time.output_frequency`
+(one cycle) — with separate `_ensemble_states/{esmda,filter}` roots, builds
+the per-cycle observations once over the whole horizon on a window-local
+clock (each window's batches run over `(0, simulation_time]`, which is the
+axis the trajectory prior lives on and the segment bounds are derived from),
+and sizes the two observation covariances separately (per-frame for the
+filter, aggregated-window for the smoother).
+
+Saves both siblings' schemas, like `run_filtering.py`: the ESMDA per-window
+schema (`windows/window_{w}_{prior,posterior}_params.nc` — the posterior IS
+the MDA posterior — `window_{w}_posterior_state.nc` from the filter's
+analyzed frames, `window_{w}_{obs,pred_obs}.nc`, the assembled
+`prior_params.nc`/`posterior_params.nc`/`posterior_state_mean.nc`), the
+filtering-native artifacts with global cycle indices (`posterior_state.nc`,
+`cycle_diagnostics.yaml`, `params_history.nc`/`state_history.nc` under
+`run.save_history`), and three hybrid-specific ones:
+`windows/window_{w}_filter_params.nc` (joint mode's corrected parameters),
+`windows/window_{w}_esmda_pred_obs.nc` (the MDA iterations' predicted
+observations on the smoother's AGGREGATED axis — `esmda.num_steps` entries
+with **no posterior entry**, so run_esmda's "entry −1 = posterior" convention
+does not hold; the semantics travel in the file's attrs), and
+`applied_params_history.nc`/`esmda_params_history.nc` (joint+dynamic: what
+each segment was actually forecast with; the per-window MDA iterates).
 
 ---
 
