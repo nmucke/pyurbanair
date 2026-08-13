@@ -888,7 +888,7 @@ window:
    the default `final_forecast=True` the seam is inert — byte-identical to the
    pre-seam behavior. When skipped, the smoother's `pred_obs_history` holds
    only the `num_steps` pre-update entries — there is **no** posterior entry —
-   and no `step_{num_steps}/` directory is written.)
+   and the pre-created `step_{num_steps}/` directory stays empty.)
 2. **Filter phase** — a sequential filter (§8, `mode="state"` or `"joint"`;
    `"parameter"` is rejected) produces the posterior state by filtering the
    window with the ESMDA-estimated parameters. The filter consumes the **full

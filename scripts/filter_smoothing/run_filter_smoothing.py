@@ -57,17 +57,30 @@ window loop:
     aggregation happens INSIDE the smoother, as it does in run_esmda.py; nothing
     in the filter phase aggregates anything.
 
-THE OBSERVATION CLOCK IS WINDOW-LOCAL. Each cycle's observation frame carries
-``truth_time - window * simulation_time`` as its ``time`` coordinate, so every
-window's batches run over ``(0, simulation_time]`` and reset at the boundary.
-This is the same convention run_esmda.py already uses for the parameter
-trajectory (each window's prior/posterior knots live on ``[0, simulation_time]``),
-and the hybrid needs the two on ONE clock: it derives the filter's forecast
-segment boundaries from these very time coordinates and evaluates the ESMDA
-trajectory on them. Truth frame ``l`` of a window sits at the END of forecast
-segment ``l`` (the truth's first frame is at ``t = output_frequency``, not 0),
-so the segments tile ``[0, simulation_time]`` exactly. The absolute offset is
-harmless to the smoother's aggregator, which bins relative to its first frame.
+THE OBSERVATION CLOCK IS WINDOW-LOCAL AND NOMINAL. Each cycle's batch is
+ASSIGNED the time coordinate ``(local_cycle + 1) * output_frequency`` — the
+nominal END of its forecast segment on the window clock — rather than keeping
+the truth's own frame times. Two reasons, both load-bearing:
+
+  * both backends rebase their post-spin-up frames to START at t = 0 (pylbm
+    ``assign_coords(time=arange(N)*output_frequency)``, pyudales
+    ``time - time[0]``), so the raw coordinate of a window's first frame is
+    0.0 (window 0) or off the nominal grid by the truth's accumulated cadence
+    drift (later windows) — both of which ``segment_bounds`` rightly rejects.
+    Semantically, truth frame ``l`` IS the frame the cycle-``l`` analysis
+    consumes at the END of its forecast segment; the nominal clock states that
+    convention explicitly instead of hoping the raw coordinates imply it.
+  * the filter's forward model integrates EXACTLY ``output_frequency`` seconds
+    per cycle, so nominal bounds keep the trajectory restriction
+    (``params_for_segment``) in lockstep with what the model actually runs —
+    truth-cadence jitter must not stretch the parameter schedule.
+
+The nominal clock is the axis run_esmda.py's per-window trajectory prior
+already lives on (knots on ``[0, simulation_time]``), which is exactly the
+alignment the hybrid needs. It is inert to the smoother's aggregator (which
+bins relative to its first frame) and to the filter itself (which consumes
+batches positionally). PHYSICAL frame times are kept separately in
+``cycle_times`` and used for the artifacts.
 
 ARTIFACTS. Written in BOTH downstream schemas from one run, exactly as
 run_filtering.py does, so neither pipeline needs a hybrid-specific reader:
@@ -148,6 +161,7 @@ from scripts.esmda.run_esmda import (  # noqa: E402
     _save_assembled_outputs,
 )
 from scripts.filtering.run_filtering import (  # noqa: E402
+    _ESMDA_STEP_SEMANTICS,
     _MOMENT_SAMPLING,
     _collect_window_cycle_dirs,
     _flat_obs_vector,
@@ -162,13 +176,10 @@ from scripts.filtering.run_filtering import (  # noqa: E402
 # Semantics recorded in the artifacts
 # ---------------------------------------------------------------------------
 
-# The two entries of the FILTERING-schema window_{w}_pred_obs.nc. Identical to
-# run_filtering.py's, because the file is produced by the same writer from the
-# same per-cycle lists: the hybrid's filter phase is an ordinary filter run.
-_ESMDA_STEP_SEMANTICS = (
-    "0 = the per-cycle prior forecast H(x_f) stacked over the window's cycles "
-    "in cycle order; 1 = the matching ride-along posterior rows"
-)
+# The two entries of the FILTERING-schema window_{w}_pred_obs.nc are
+# run_filtering.py's `_ESMDA_STEP_SEMANTICS`, imported above: the file is
+# produced by the same writer from the same per-cycle lists, because the
+# hybrid's filter phase is an ordinary filter run.
 
 # The entries of the hybrid-only window_{w}_esmda_pred_obs.nc. Spelled out at
 # length because it is precisely where the hybrid departs from run_esmda.py's
@@ -201,24 +212,26 @@ _MOMENT_SAMPLING_HYBRID = _MOMENT_SAMPLING
 # ---------------------------------------------------------------------------
 
 
-def _to_window_clock(observations: Any, offset_seconds: float) -> Any:
-    """Rebase one observation frame's ``time`` coordinate onto the window clock.
+def _nominal_window_clock(
+    observations: Any, local_cycle: int, cycle_seconds: float
+) -> Any:
+    """Place one cycle's batch on the NOMINAL window clock.
 
-    The truth is simulated (or loaded) on ONE global axis over the whole
-    horizon, but everything the hybrid does inside a window — the ESMDA
-    trajectory prior, the segment bounds it derives from these coordinates, the
-    assimilation model's own local clock — lives on ``[0, simulation_time]``.
-    Subtracting the window's start is what puts them all on one axis.
-
-    ``offset_seconds`` is the window's NOMINAL start (``window * simulation_time``)
-    rather than the window's first frame time: the frames sit at the ENDS of the
-    forecast segments, so the first one is one interval in, and rebasing on it
-    would shift the whole window a segment early.
+    The batch's ``T`` frames are assigned times tiling the cycle's forecast
+    segment, ending exactly at its nominal end ``(local_cycle + 1) *
+    cycle_seconds`` (with the v1-pinned one frame per cycle, that single value).
+    The truth's own frame times are deliberately NOT used: both backends rebase
+    their frames to start at t = 0 and carry cadence jitter, so the raw
+    coordinates neither mark the segment ENDS the analyses consume nor stay on
+    the grid the filter's forward model (which integrates exactly
+    ``cycle_seconds`` per cycle) and the window-local trajectory prior live on.
+    See the module docstring; physical frame times live in ``cycle_times``.
     """
-    return observations.assign_coords(
-        time=np.asarray(observations["time"].values, dtype=float)
-        - float(offset_seconds)
+    num_frames = int(observations.sizes["time"])
+    frame_times = float(local_cycle) * cycle_seconds + (
+        np.arange(1, num_frames + 1, dtype=float) * (cycle_seconds / num_frames)
     )
+    return observations.assign_coords(time=frame_times)
 
 
 def _save_window_esmda_pred_obs(
@@ -447,12 +460,18 @@ def run(cfg: DictConfig) -> None:
     n_total = cycles_per_window * num_windows
     num_cycles = cycles_per_window * num_windows
     if cycles_per_window != cycles_per_window_nominal:
-        print(
+        # A hard error, not a warning: the batches are placed on the NOMINAL
+        # window clock and the filter's forward model integrates exactly
+        # `cycle_seconds` per cycle, so a truth whose cadence disagrees would
+        # be silently assimilated at the wrong times (and the trajectory
+        # restricted to the wrong segments) rather than merely sampled oddly.
+        raise ValueError(
             f"The truth provides {cycles_per_window} frame(s) per {sim_time:g}s "
             f"window, but time.output_frequency={cycle_seconds:g}s implies "
-            f"{cycles_per_window_nominal}. The filter forecasts one cycle per "
-            "analysis, so the cycles will not tile the window at the truth's "
-            "cadence."
+            f"{cycles_per_window_nominal}. The hybrid requires the truth's "
+            "output cadence to match time.output_frequency (one observation "
+            "frame per filter cycle); regenerate the truth or point "
+            "run.truth_dir at one with the matching cadence."
         )
     print(
         f"{num_windows} window(s) of {sim_time:g}s = {cycles_per_window} "
@@ -468,18 +487,39 @@ def run(cfg: DictConfig) -> None:
     # each, therefore — the `simulation_time` override on the filter's is the
     # same lever run_filtering.py pulls (`run_filtering.py:610-624`), and it
     # leaves the model's `output_frequency` alone so a cycle emits exactly one
-    # frame. Both are prepared, exactly as the truth and assimilation models
-    # already are in the siblings; `prepare` is idempotent per backend.
+    # frame.
+    #
+    # Each stack gets its OWN `temp_dir` subtree. The backends nest their
+    # experiment dir AND the per-member `ensemble_experiments/{NNN}` copies
+    # under `temp_dir`, so two same-config stacks sharing the default would
+    # clobber each other: the second constructor re-copies the case files over
+    # the first's (for pyudales that overwrites RUN/runtime with the filter's
+    # one-cycle horizon, so every ESMDA window forecast would come up short and
+    # fail the frame-count check), and the shared member dirs would mix the
+    # two halves' warm-start carry/restart files — a filter cycle would warm-
+    # start its subgrid state from whatever MDA window rollout last wrote
+    # there. Distinct subtrees make the two stacks as independent as the two
+    # scripts they were lifted from. (The truth model keeps the base
+    # `experiment_dir`, as in the siblings — it finishes before either stack
+    # is built.)
     assim_results_dir = (
         pathlib.Path(cfg.run.results_dir) if cfg.run.results_dir is not None else None
     )
+    stack_temp_root = pathlib.Path(cfg.paths.experiment_dir)
+    esmda_temp_dir = stack_temp_root / "filter_smoothing_esmda"
+    filter_temp_dir = stack_temp_root / "filter_smoothing_filter"
+    esmda_temp_dir.mkdir(parents=True, exist_ok=True)
+    filter_temp_dir.mkdir(parents=True, exist_ok=True)
     esmda_assim_model = instantiate(
-        cfg.assim_model.forward_model, results_dir=assim_results_dir
+        cfg.assim_model.forward_model,
+        results_dir=assim_results_dir,
+        temp_dir=esmda_temp_dir,
     )
     instantiate(cfg.assim_model.prepare, forward_model=esmda_assim_model)
     filter_assim_model = instantiate(
         cfg.assim_model.forward_model,
         results_dir=assim_results_dir,
+        temp_dir=filter_temp_dir,
         simulation_time=cycle_seconds,
     )
     instantiate(cfg.assim_model.prepare, forward_model=filter_assim_model)
@@ -548,12 +588,18 @@ def run(cfg: DictConfig) -> None:
         cycle_obs = cycle_obs_clean + obs_error_std * np.asarray(
             jax.random.normal(subkey, cycle_obs_clean.shape)
         )
-        # Onto the window clock (see the module docstring): the offset is the
-        # window's nominal start, so every window's batches run over
-        # (0, sim_time] and the forecast segments tile [0, sim_time].
-        offset = window_of_cycle * sim_time
-        observations.append(_to_window_clock(cycle_obs, offset))
-        observations_clean.append(_to_window_clock(cycle_obs_clean, offset))
+        # Onto the nominal window clock (see the module docstring): batch l of
+        # a window ends at (l + 1) * cycle_seconds, so every window's batches
+        # run over (0, sim_time] and the forecast segments tile [0, sim_time]
+        # exactly, independent of the truth's own (0-based, jittered) frame
+        # coordinates.
+        local_cycle = cycle - window_of_cycle * cycles_per_window
+        observations.append(
+            _nominal_window_clock(cycle_obs, local_cycle, cycle_seconds)
+        )
+        observations_clean.append(
+            _nominal_window_clock(cycle_obs_clean, local_cycle, cycle_seconds)
+        )
     truth_view.close()
 
     # --- Two observation-error covariances ------------------------------------
@@ -981,7 +1027,12 @@ def run(cfg: DictConfig) -> None:
     # Assemble the ESMDA-schema, downstream-facing outputs from the per-window
     # files. `is_dynamic` selects the REBASE: a dynamic trajectory's window-local
     # knot axis is shifted onto the global one, while the static case's scalar
-    # per-window coords are concatenated as they are (already physical).
+    # per-window coords are concatenated as they are (already physical). On the
+    # dynamic path the rebase also touches the window STATE files, whose frames
+    # already carry physical truth times — `(t - t[0]) + w*sim_time` is then a
+    # no-op for an on-grid truth and, for a jittered one, snaps each window's
+    # start back onto the nominal grid (removing accumulated cadence drift),
+    # which is benign for every downstream reader.
     _save_assembled_outputs(
         out_dir, windows_dir, num_windows, sim_time, is_dynamic=is_dynamic_prior
     )

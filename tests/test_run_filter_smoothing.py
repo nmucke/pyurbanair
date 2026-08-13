@@ -339,6 +339,59 @@ def test_run_filter_smoothing_rejects_indivisible_cycles(
     assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
 
 
+def test_nominal_window_clock_yields_exact_segment_bounds() -> None:
+    """The PRODUCTION observation geometry composes with ``segment_bounds``.
+
+    The truth's raw frame coordinates are 0-based and cadence-jittered (both
+    backends rebase their post-spin-up frames to start at t = 0), which
+    ``segment_bounds`` rightly rejects — the raw first frame of every window
+    ends its segment at 0.0 or below the previous window's end. The script's
+    ``_nominal_window_clock`` re-labels each cycle's batch with the nominal END
+    of its forecast segment, and this test pins that composition at the unit
+    level with realistic (jittered) truth times, so the e2e solver runs are
+    not the only guard on it.
+    """
+    import numpy as np
+    import xarray
+    from data_assimilation.filter_smoothing import segment_bounds
+
+    from scripts.filter_smoothing.run_filter_smoothing import _nominal_window_clock
+
+    cycle_seconds = 2.5
+    # Truth frames as the backends emit them: first at 0.0, later frames off
+    # the nominal grid by cadence jitter (values from a real uDALES truth).
+    raw_times = [0.0, 2.515311, 4.999622, 7.487478]
+    batches = [
+        _nominal_window_clock(
+            xarray.DataArray(
+                np.zeros((1, 3)),
+                dims=("time", "obs"),
+                coords={"time": [raw_times[k]], "obs": np.arange(3)},
+            ),
+            k,
+            cycle_seconds,
+        )
+        for k in range(len(raw_times))
+    ]
+    assert segment_bounds(batches) == [
+        (k * cycle_seconds, (k + 1) * cycle_seconds) for k in range(len(raw_times))
+    ]
+
+    # A multi-frame batch tiles its segment and still ends on the nominal grid.
+    two_frames = _nominal_window_clock(
+        xarray.DataArray(
+            np.zeros((2, 3)),
+            dims=("time", "obs"),
+            coords={"time": [0.0, 1.2], "obs": np.arange(3)},
+        ),
+        3,
+        cycle_seconds,
+    )
+    np.testing.assert_allclose(
+        np.asarray(two_frames["time"].values), [3 * 2.5 + 1.25, 4 * 2.5]
+    )
+
+
 # ---------------------------------------------------------------------------
 # End-to-end smoke runs (pylbm; CI, serially)
 # ---------------------------------------------------------------------------

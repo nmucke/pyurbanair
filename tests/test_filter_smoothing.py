@@ -798,6 +798,90 @@ def test_dynamic_state_mode_chains_the_warm_start_across_segments() -> None:
     )
 
 
+class _IdentityParameterESMDA(ParameterESMDA):
+    """A smoother whose analysis is a pass-through: ``__call__`` returns the prior.
+
+    Lets a test drive the PUBLIC ``FilterSmoothing.run`` path with an exactly
+    chosen posterior trajectory — a real MDA update would move the knots
+    individually, which is precisely what the constant-trajectory equivalence
+    test below must avoid.
+    """
+
+    def __call__(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+        observations: Optional[Any] = None,
+        return_params_history: bool = False,
+        return_state_history: bool = False,
+        final_forecast: bool = True,
+    ) -> xarray.Dataset:
+        assert params is not None
+        return params
+
+
+def test_dynamic_constant_trajectory_is_bitwise_one_multi_cycle_filter_run() -> None:
+    """The per-segment loop is a re-arrangement of the filter, not a new filter.
+
+    ``_run_dynamic`` claims that chaining L single-segment ``filter.run`` calls
+    is numerically identical to one L-cycle call (the rng stream continues and
+    the warm starts chain). Pinned here bitwise: a CONSTANT trajectory makes
+    every per-segment restriction carry the same per-member drive as the full
+    trajectory (the toy reduces params to their knot mean, and with knots at
+    ``[0, horizon]`` every segment weight is an exact binary fraction, so the
+    interpolated knot values are bitwise the member values), so the hybrid's
+    dynamic path against an identically seeded standalone filter run over the
+    same batches must agree to the last bit — any rng-stream or warm-start
+    divergence would show as O(1) differences.
+    """
+    batches = _observation_batches()
+    horizon = _NUM_CYCLES * _CYCLE_SECONDS
+    member_values = np.asarray(_static_prior()["a"].values, dtype=float)
+    constant_trajectory = xarray.Dataset(
+        {"a": (("time", "ensemble"), np.stack([member_values, member_values]))},
+        coords={"time": np.array([0.0, horizon]), "ensemble": np.arange(_N_E)},
+    )
+
+    hybrid_model = _ToyEnsembleModel(num_frames=_CYCLE_FRAMES)
+    hybrid = FilterSmoothing(
+        smoother=_IdentityParameterESMDA(
+            observation_operator=_obs_op(),
+            forward_model=_ToyEnsembleModel(num_frames=_WINDOW_FRAMES),
+            C_D=jnp.diag(jnp.full(_WINDOW_FRAMES * _N_SENSORS, _OBS_VARIANCE)),
+            num_steps=2,
+            rng_key=jax.random.PRNGKey(0),
+        ),
+        filter=_filter(hybrid_model, "state", seed=7),
+    )
+    result = hybrid.run(
+        state=_initial_state(),
+        params=constant_trajectory,
+        observations=batches,
+    )
+
+    # Reference: ONE multi-cycle run of an identically seeded standalone
+    # filter handed the SAME trajectory (state mode passes params through to
+    # every forecast unmodified).
+    ref_model = _ToyEnsembleModel(num_frames=_CYCLE_FRAMES)
+    reference = _filter(ref_model, "state", seed=7).run(
+        state=_initial_state(),
+        params=constant_trajectory,
+        observations=batches,
+    )
+
+    assert result.state is not None and reference.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(result.state["u"].values),
+        np.asarray(reference.state["u"].values),
+    )
+    # The forecasts themselves were bitwise identical too, segment by segment.
+    for hybrid_state, ref_state in zip(hybrid_model.states_seen, ref_model.states_seen):
+        np.testing.assert_array_equal(
+            np.asarray(hybrid_state["u"].values),  # type: ignore[index]
+            np.asarray(ref_state["u"].values),  # type: ignore[index]
+        )
+
+
 def test_dynamic_joint_mode_carries_the_correction_on_the_esmda_schedule() -> None:
     """Segment k's prior is ``e_k + c``, with ``c = posterior_{k-1} - e_{k-1}``."""
     knots = np.array([0.0, 10.0])

@@ -350,10 +350,13 @@ sensor_observation_coords` (shared with the filtering package); see its
 
         With ``final_forecast=False`` the loop's updates run unchanged but the
         posterior forward pass is skipped: the updated params are returned
-        alone (in both save modes), ``pred_obs_history`` holds only the
-        ``num_steps`` pre-update entries, and no ``step_{num_steps}/``
-        directory is written. Used by the filter-smoothing hybrid, which
-        produces the posterior state with a sequential filter instead.
+        alone (in both save modes) and ``pred_obs_history`` holds only the
+        ``num_steps`` pre-update entries. In on-disk mode the
+        ``step_{num_steps}/`` directory (pre-created by ``__init__`` alongside
+        the others) is left empty, and ``forward_model.results_dir`` is left
+        where the loop's last iteration pointed it. Used by the
+        filter-smoothing hybrid, which produces the posterior state with a
+        sequential filter instead.
         """
         if not final_forecast and return_state_history:
             raise ValueError(
