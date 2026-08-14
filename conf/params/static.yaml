@@ -6,10 +6,18 @@ parameters:
     _target_: pyurbanair.static_parameters.Normal
     mean: 0.0
     std: 10.0
+  # Kept identical to the AR(2) prior's external distribution for this parameter
+  # (conf/params/dynamic.yaml `external_parameters.velocity_magnitude`), so a
+  # filter run (static prior, required) and a smoother run (dynamic prior) pose
+  # the SAME inverse problem. That match is exact at every knot: the AR(2)
+  # window-0 draw is x_ext + Sigma_ext * z with z ~ N(0, 1) stationary, so its
+  # marginal is this Normal; the only remaining difference is that the dynamic
+  # members vary smoothly in time while these stay constant. `inflow_angle`
+  # above already matches. Change the two together.
   velocity_magnitude:
     _target_: pyurbanair.static_parameters.Normal
-    mean: 5.0
-    std: 1.0
+    mean: 7.5
+    std: 0.5
     min: 0.1
   # Model-error compensation knobs (docs/esmda_model_error_parameters.md). Tight
   # priors: each extra free parameter risks an underdetermined inverse / ensemble

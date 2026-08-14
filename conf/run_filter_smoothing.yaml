@@ -116,7 +116,7 @@ paths:
 # ESMDA schedule by ONE constant per forecast segment (the segment midpoint), so
 # knots finer than a cycle are averaged away by that approximation. ---
 time:
-  seconds_per_knot: 60.0
+  seconds_per_knot: 30.0
 
 # --- Which parameters are estimated (same contract as run_esmda.yaml /
 # run_filtering.yaml: a list -> that subset of the sampler configs' params,
@@ -128,7 +128,7 @@ params_to_estimate:
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
 ensemble:
-  ensemble_size: 50
+  ensemble_size: 40
   num_parallel_processes: 8
   num_cpus_per_process: 1
   failure:
@@ -150,19 +150,19 @@ filter_smoothing:
   # the ESMDA loop restarts on the next window's prior (extrapolated from this
   # window's posterior for a dynamic trajectory) and the joint correction is
   # reset, so W is a real modelling choice.
-  num_assimilation_windows: 2
+  num_assimilation_windows: 3
   seed: 42
   # Diagonal observation-error standard deviation of ONE observation frame. The
   # filter's C_D is exactly that; the smoother's is the same value tiled over
   # the window's AGGREGATED observation vector.
-  obs_error_std: 0.25
+  obs_error_std: 0.1
 
 # --- The smoother half. `esmda.smoother` is the one mode-specific block
 # (selected by the `esmda/smoother` group); everything else here is shared
 # wiring the group files interpolate. The window/seed/obs-error knobs live on
 # `filter_smoothing:` above rather than being duplicated here. ---
 esmda:
-  num_steps: 4
+  num_steps: 2
   alpha: ${.num_steps}
   # Observation aggregation for the SMOOTHER ONLY: the window's time-resolved
   # observations are binned into contiguous `interval_seconds`-wide intervals
@@ -197,7 +197,7 @@ filtering:
   #            exactly to the standard joint EnKF.
   # `parameter` is deliberately not offered: without a state update the filter
   # would only re-estimate what the smoother just estimated.
-  mode: joint
+  mode: state
   # Analysis STRIDE, run_filtering.yaml's knob with the same meaning: a cycle
   # spans this many observation intervals and assimilates only the last frame
   # (the intermediate frames are still simulated and written). Here it thins

@@ -10,14 +10,15 @@ profiles:
   inflow_angle:
     waveform: sine
     offset: 0.0
-    amplitude: 30.0
-    # frequency: 0.0033333333333333335  # 300 s period
-    frequency: 0.0016666666666666666  # 600 s period
+    amplitude: 20.0
+    frequency: 0.0033333333333333335  # 300 s period
+    # frequency: 0.0016666666666666666  # 600 s period
   velocity_magnitude:
     waveform: sine
     offset: 7.5
     amplitude: 1.0
-    frequency: 0.0033333333333333335  # 240 s period
+    # frequency: 0.0033333333333333335  # 240 s period
+    frequency: 0.006666666666666667  # 150 s period
     min: 0.1
 static_parameters:
   vertical_inflow_exponent:

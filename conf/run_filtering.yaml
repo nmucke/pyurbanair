@@ -189,7 +189,7 @@ run:
   # Off by default: the files are `assimilate_every_n_step` times the size of
   # the window's analyzed states, and a window's worth is held in memory while
   # it runs.
-  save_forecast_history: false
+  save_forecast_history: true
   # Truth source: null -> simulate inline (default); a path -> load a
   # state.nc/params.nc artifact written by run_forward_model.py.
   truth_dir: null
