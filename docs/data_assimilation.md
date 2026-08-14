@@ -740,7 +740,8 @@ always share one ordering. Inflation and the existing state-spread diagnostics r
 defined in physical state space.
 
 `FilterResult` is a plain dataclass (`params`, `state`, optional
-`cycle`-concatenated histories, and `diagnostics`: one `CycleDiagnostics` per
+`cycle`-concatenated histories, the optional `time`-concatenated
+`forecast_history` (§8, *Run script*), and `diagnostics`: one `CycleDiagnostics` per
 cycle with innovation χ² consistency, observation-space prior/posterior RMSE,
 and per-block spreads. Its stable additive reduction fields are `None` on the
 full-space path; reduced cycles also report retained and available rank,
@@ -858,6 +859,12 @@ holds `n` times fewer of them — the intermediate frames are still simulated an
 still written out (the per-cycle `_ensemble_states/cycle_{k}/` segments hold all
 `n`), they are just never analyzed, and the analysis is the segment's last
 frame; `n` must divide the window's frame count or the run refuses to start.
+Those intermediate frames are also available *without* the on-disk mode:
+`BaseFilter.collect_forecast_frames` (`run.save_forecast_history=true` in the
+script) fills `FilterResult.forecast_history` with every output frame of every
+segment, `time`-concatenated. They are the **forecast** (prior) frames, so read
+against the analyzed frames of the same run they show the ensemble drifting
+from the truth between analyses and being pulled back at each one.
 
 A window is **pure chunking**: it splits the horizon into one `run()` call and
 one set of per-window artifacts each, so RAM and peak disk stay bounded, and it

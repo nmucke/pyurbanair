@@ -240,6 +240,8 @@ def _solid_state_path(
     """
     if source.kind == "forecast" and source.paths:
         return pathlib.Path(source.paths[0][0])
+    if source.window_paths:
+        return pathlib.Path(source.window_paths[0])
     history_path = run_dir / "state_history.nc"
     return history_path if history_path.exists() else None
 
