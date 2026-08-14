@@ -180,6 +180,16 @@ run:
   # state_history.nc; the state history holds final frames only, so it stays
   # small). Per-cycle diagnostics (cycle_diagnostics.yaml) are always saved.
   save_history: true
+  # Also save the FORECAST frames at the model's full output cadence — every
+  # `time.output_frequency` step, including the `assimilate_every_n_step - 1`
+  # per cycle no analysis touches — as
+  # windows/window_{w}_forecast_state.nc, on the run's physical time axis. Read
+  # against the analyzed frames of the same window they show the ensemble
+  # drifting from the truth between analyses and being corrected at each one.
+  # Off by default: the files are `assimilate_every_n_step` times the size of
+  # the window's analyzed states, and a window's worth is held in memory while
+  # it runs.
+  save_forecast_history: false
   # Truth source: null -> simulate inline (default); a path -> load a
   # state.nc/params.nc artifact written by run_forward_model.py.
   truth_dir: null

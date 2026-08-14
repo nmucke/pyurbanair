@@ -177,11 +177,72 @@ def _write_forecast_tree(
             )
 
 
+def _window_forecast_state(
+    window: int, n_members: int, frames_per_window: int
+) -> xarray.Dataset:
+    """One window's ``window_{w}_forecast_state.nc``.
+
+    What ``run.save_forecast_history=true`` writes: the whole window's forecast
+    frames for every member, ``(ensemble, time, ...)``, already carrying the
+    truth's own frame times — the writer rebases them there, so nothing
+    downstream has to.
+    """
+    times = np.arange(
+        window * frames_per_window, (window + 1) * frames_per_window, dtype=float
+    )
+    return _with_blanking(
+        _velocity_dataset(
+            ("ensemble", "time", "z", "y", "x"),
+            {
+                "ensemble": n_members,
+                "time": frames_per_window,
+                "z": _N_CELLS,
+                "y": _N_CELLS,
+                "x": _N_CELLS,
+            },
+            300 + window,
+            {
+                "ensemble": np.arange(n_members),
+                "time": times,
+                "z": _AXIS,
+                "y": _AXIS,
+                "x": _AXIS,
+            },
+        )
+    )
+
+
+def _write_window_forecast_files(
+    run_dir: pathlib.Path,
+    n_members: int,
+    num_windows: int,
+    *,
+    windows: list[int] | None = None,
+) -> None:
+    """The ``windows/window_{w}_forecast_state.nc`` set, whole or partial."""
+    windows_dir = run_dir / "windows"
+    windows_dir.mkdir(parents=True, exist_ok=True)
+    frames_per_window = _RUN_TOTAL // num_windows
+    for window in range(num_windows) if windows is None else windows:
+        _window_forecast_state(window, n_members, frames_per_window).to_netcdf(
+            windows_dir / f"window_{window}_forecast_state.nc"
+        )
+
+
+def _read_truth_access(run_dir: pathlib.Path) -> dict:
+    """``truth_access.yaml`` as the two stages read it back."""
+    from scripts.esmda._esmda_common import read_yaml
+
+    return read_yaml(run_dir / "truth_access.yaml")
+
+
 def _filtering_run_dir(
     tmp_path: pathlib.Path,
     *,
     n_members: int = 4,
     forecast_states: bool = False,
+    window_forecast_states: bool = False,
+    num_windows: int = 1,
     with_params: bool = True,
     with_params_history: bool = True,
     with_ensemble_axis: bool = True,
@@ -257,6 +318,10 @@ def _filtering_run_dir(
             "sim_time": _RUN_SIM_TIME,
             "truth_solver_name": "pylbm",
             "assim_solver_name": "pylbm",
+            # The window geometry only the per-window forecast artifact needs
+            # (the other sources are indexed by cycle).
+            "num_windows": num_windows,
+            "n_per_window": _RUN_TOTAL // num_windows,
         },
         run_dir / "truth_access.yaml",
     )
@@ -269,6 +334,8 @@ def _filtering_run_dir(
 
     if forecast_states:
         _write_forecast_tree(run_dir, n_members)
+    if window_forecast_states:
+        _write_window_forecast_files(run_dir, n_members, num_windows)
 
     # The filter's parameter artifacts: a SCALAR estimate per member (no time
     # axis -- the metric stage is the thing that labels it with the run's end
@@ -468,6 +535,134 @@ def test_cycle_state_source_falls_back_when_the_cycles_hold_different_member_cou
     assert "different member counts per cycle" in caplog.text
 
 
+def test_cycle_state_source_picks_the_window_forecasts_without_the_on_disk_tree(
+    tmp_path: pathlib.Path,
+) -> None:
+    # ``run.save_forecast_history=true`` carries the same frames as the on-disk
+    # tree in one file per window, so a run that saved them must be scored as a
+    # ``forecast`` -- same kind, same bin unit, same truth pairing -- and not
+    # dropped to the analyzed frames just because the per-member tree is absent.
+    from scripts.filtering._filtering_common import cycle_state_source
+
+    run_dir = _filtering_run_dir(
+        tmp_path, window_forecast_states=True, eval_fields=False, run_summary=False
+    )
+
+    source = cycle_state_source(run_dir, _read_truth_access(run_dir))
+
+    assert source.kind == "forecast"
+    assert source.bin_seconds == _RUN_SIM_TIME
+    assert source.num_cycles == _RUN_CYCLES
+    assert source.n_members == 4
+    assert source.paths is None
+    assert source.window_paths is not None and len(source.window_paths) == 1
+    assert "full output cadence" in source.description
+
+
+def test_the_on_disk_forecast_tree_is_preferred_over_the_window_artifact(
+    tmp_path: pathlib.Path,
+) -> None:
+    # Both hold the same frames, so the choice is only about which route runs;
+    # keeping the per-member tree first is what makes a run that has always had
+    # it score exactly as it did before the artifact existed.
+    from scripts.filtering._filtering_common import cycle_state_source
+
+    run_dir = _filtering_run_dir(
+        tmp_path,
+        forecast_states=True,
+        window_forecast_states=True,
+        eval_fields=False,
+        run_summary=False,
+    )
+
+    source = cycle_state_source(run_dir, _read_truth_access(run_dir))
+
+    assert source.paths is not None
+    assert source.window_paths is None
+
+
+def test_cycle_state_source_falls_back_when_a_window_forecast_file_is_missing(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Same reasoning as the missing cycle above: a partial set would score one
+    # window over the full horizon and another over none of it.
+    from scripts.filtering._filtering_common import cycle_state_source
+
+    run_dir = _filtering_run_dir(
+        tmp_path, eval_fields=False, run_summary=False, num_windows=3
+    )
+    _write_window_forecast_files(run_dir, 4, 3, windows=[0, 2])  # window 1 never landed
+
+    with caplog.at_level("WARNING"):
+        source = cycle_state_source(run_dir, _read_truth_access(run_dir))
+
+    assert source.kind == "analysis"
+    assert "2 of 3 window forecast artifacts" in caplog.text
+
+
+def test_cycle_state_source_falls_back_when_a_window_forecast_file_is_short(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The frames are paired with the truth's per-cycle blocks POSITIONALLY, so a
+    # window file that does not tile its window would slide every statistic by
+    # the difference and still produce a full summary.
+    from scripts.filtering._filtering_common import cycle_state_source
+
+    run_dir = _filtering_run_dir(
+        tmp_path, window_forecast_states=True, eval_fields=False, run_summary=False
+    )
+    path = run_dir / "windows" / "window_0_forecast_state.nc"
+    short = xarray.open_dataset(path).isel(time=slice(0, _RUN_TOTAL - 1)).load()
+    path.unlink()
+    short.to_netcdf(path)
+
+    with caplog.at_level("WARNING"):
+        source = cycle_state_source(run_dir, _read_truth_access(run_dir))
+
+    assert source.kind == "analysis"
+    assert "truth frame(s)" in caplog.text
+
+
+def test_the_window_forecast_route_feeds_the_collector_one_cycle_at_a_time(
+    tmp_path: pathlib.Path,
+) -> None:
+    # ``on_member`` is how the mean fields are accumulated inside the sensor
+    # pass, and its first argument is a CYCLE index on the on-disk route. One
+    # window holding several cycles must not turn that into a window index: the
+    # collector would then report the run's chunk count as the window count and
+    # average over cycle boundaries it is supposed to resolve.
+    from scripts.filtering._filtering_common import (
+        build_sensor_sets,
+        cycle_sensor_series,
+        cycle_state_source,
+        load_run_config,
+    )
+
+    run_dir = _filtering_run_dir(
+        tmp_path, window_forecast_states=True, eval_fields=False, run_summary=False
+    )
+    ta = _read_truth_access(run_dir)
+    source = cycle_state_source(run_dir, ta)
+    seen: list[tuple[int, int, int]] = []
+    cycle_sensor_series(
+        run_dir,
+        ta,
+        source,
+        build_sensor_sets(load_run_config(run_dir)),
+        on_member=lambda cycle, member, state: seen.append(
+            (cycle, member, int(state.sizes["time"]))
+        ),
+    )
+
+    # One chunk per (cycle, member), each holding exactly the cycle's frames --
+    # from ONE file covering all three cycles.
+    assert sorted(seen) == sorted(
+        (cycle, member, _RUN_FRAMES)
+        for cycle in range(_RUN_CYCLES)
+        for member in range(4)
+    )
+
+
 def test_forecast_cycle_paths_sort_the_members_numerically_not_lexically(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -564,9 +759,11 @@ def test_rebased_forecast_times_drop_exactly_the_cold_start_lead_in() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("forecast_states", [True, False])  # type: ignore[misc]
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "route", ["on_disk_forecast", "window_forecast", "analysis"]
+)
 def test_the_truth_and_the_ensemble_bin_onto_the_same_frames_under_either_source(
-    tmp_path: pathlib.Path, forecast_states: bool
+    tmp_path: pathlib.Path, route: str
 ) -> None:
     # Every number in ``sensor_statistics`` is a truth statistic scored against
     # a member statistic over the same cycle, so the two series have to bin the
@@ -585,7 +782,8 @@ def test_the_truth_and_the_ensemble_bin_onto_the_same_frames_under_either_source
 
     run_dir = _filtering_run_dir(
         tmp_path,
-        forecast_states=forecast_states,
+        forecast_states=route == "on_disk_forecast",
+        window_forecast_states=route == "window_forecast",
         eval_fields=False,
         run_summary=False,
     )
@@ -604,9 +802,10 @@ def test_the_truth_and_the_ensemble_bin_onto_the_same_frames_under_either_source
     truth_bins = _per_bin(truth_series["assimilation"])
     assert len(truth_bins) == _RUN_CYCLES
     assert truth_bins == _per_bin(ensemble_series["assimilation"])
-    # Not vacuously equal: the forecast source really does resolve the cycle,
-    # and the analysis source really does hold one frame of it.
-    assert truth_bins == [_RUN_FRAMES if forecast_states else 1] * _RUN_CYCLES
+    # Not vacuously equal: both forecast routes really do resolve the cycle, and
+    # the analysis source really does hold one frame of it.
+    expected = 1 if route == "analysis" else _RUN_FRAMES
+    assert truth_bins == [expected] * _RUN_CYCLES
 
 
 def test_the_esmda_state_block_pairs_the_truth_with_the_analyzed_frames() -> None:

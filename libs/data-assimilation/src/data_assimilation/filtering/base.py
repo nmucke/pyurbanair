@@ -23,9 +23,12 @@ aggregation (``AggregateObservations``) is a smoother-side choice, kept by the
 ESMDA smoothers. Here every frame the operator produced is assimilated, so H
 and y agree frame by frame by construction.
 
-One additive facility is inert by default: an ``assimilate_every_n_step`` that
-thins the ANALYSES within a cycle without thinning what the operator produces
-or what is recorded (see the attribute).
+Two additive facilities are inert by default: an ``assimilate_every_n_step``
+that thins the ANALYSES within a cycle without thinning what the operator
+produces or what is recorded, and a ``collect_forecast_frames`` that keeps
+every output frame of every forecast segment — the free run *between* those
+analyses — alongside the analysis-time frames the cycle histories hold (see
+the attributes).
 """
 
 import logging
@@ -162,6 +165,12 @@ class FilterResult:
     parameters. Histories are ``cycle``-concatenated Datasets, present only
     when ``return_history=True`` (``params_history`` additionally holds the
     prior as its first entry).
+
+    ``forecast_history`` is the odd one out and deliberately so: it is
+    ``time``-concatenated (every output frame of every cycle's segment, not one
+    entry per cycle), it holds the un-analyzed FORECAST rather than an
+    analysis, and it is gated on :attr:`BaseFilter.collect_forecast_frames`
+    rather than on ``return_history``.
     """
 
     params: Optional[xarray.Dataset]
@@ -169,6 +178,7 @@ class FilterResult:
     diagnostics: list[CycleDiagnostics]
     params_history: Optional[xarray.Dataset] = None
     state_history: Optional[xarray.Dataset] = None
+    forecast_history: Optional[xarray.Dataset] = None
 
 
 class BaseFilter:
@@ -252,6 +262,29 @@ class BaseFilter:
     #: instance after construction. ``1`` (the default) is the identity —
     #: nothing below it runs, and every pre-existing path is bit-identical.
     assimilate_every_n_step: int = 1
+
+    #: Keep EVERY output frame of every cycle's forecast segment, not just the
+    #: analysis-time frame the cycle histories hold. With
+    #: :attr:`assimilate_every_n_step` ``= n > 1`` a cycle spans ``n`` output
+    #: frames and only the last one is analysed, so ``state_history`` shows the
+    #: ensemble at the analysis times ALONE; this fills
+    #: :attr:`FilterResult.forecast_history` with all of them, which is what
+    #: makes "the ensemble drifts away from the truth between analyses, then the
+    #: analysis pulls it back" visible rather than inferred.
+    #:
+    #: What is recorded is the raw FORECAST: the segment as the model produced
+    #: it, before this cycle's analysis and before any inflation. Cycle ``k``'s
+    #: segment is therefore the free run from cycle ``k-1``'s analysis, and at
+    #: an analysis time this history holds the PRIOR while ``state_history``
+    #: holds the posterior of that same frame — the pair carries the whole
+    #: sawtooth, and neither duplicates the other.
+    #:
+    #: Same attribute-plumbing pattern as ``collect_pred_obs`` (set it on the
+    #: instance after construction) and independent of ``return_history``. Off
+    #: by default, and NOT free when on: it holds ``n`` times the state
+    #: history's ensemble frames for the whole ``run()`` call, and in on-disk
+    #: mode it re-reads each cycle's member files in full.
+    collect_forecast_frames: bool = False
 
     def __init__(
         self,
@@ -642,6 +675,43 @@ class BaseFilter:
             return xarray.concat(members, dim="ensemble", join="override")
         raise ValueError("Either state or results_dir must be provided.")
 
+    def _get_segment_states(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        results_dir: Optional[pathlib.Path] = None,
+    ) -> xarray.Dataset:
+        """The WHOLE forecast segment: every output frame the model wrote.
+
+        The full-resolution twin of :meth:`_get_final_states`, and the only
+        place the frames a strided analysis skips over are kept (see
+        :attr:`collect_forecast_frames`). A model that emits a single frame per
+        segment gets a ``time`` axis of length one, so the return shape does not
+        depend on the cadence.
+
+        The frames keep the model's own (cycle-local) ``time`` coordinate: the
+        filter has no global clock — it is handed one segment at a time — so
+        rebasing onto the run's axis is the caller's job (``run_filtering.py``
+        does it from the truth's frame times when it writes the artifact).
+        """
+        if state is not None:
+            return state if "time" in state.dims else state.expand_dims("time")
+        if results_dir is not None:
+            state_files = get_sorted_state_files(pathlib.Path(results_dir))
+            if not state_files:
+                raise FileNotFoundError(
+                    f"No state_*.nc files found in results directory: {results_dir}"
+                )
+            members = []
+            for f in state_files:
+                member = load_dataset(f)
+                members.append(
+                    member if "time" in member.dims else member.expand_dims("time")
+                )
+            # ``join="override"``: per-member time coords are not bit-identical
+            # (same convention as _get_final_states / _observation_step above).
+            return xarray.concat(members, dim="ensemble", join="override")
+        raise ValueError("Either state or results_dir must be provided.")
+
     def _set_cycle_results_dir(self, cycle: int) -> None:
         """Point the forward model's results directory at the given cycle."""
         if self.forward_model.save_on_disk:
@@ -785,6 +855,9 @@ class BaseFilter:
             [params] if (return_history and params is not None) else []
         )
         state_history: list[xarray.Dataset] = []
+        # One entry per cycle, each the whole segment (see
+        # ``collect_forecast_frames``); empty and never appended to otherwise.
+        forecast_history: list[xarray.Dataset] = []
 
         pbar = tqdm(
             range(num_cycles),
@@ -822,6 +895,13 @@ class BaseFilter:
             final_state = self._get_final_states(
                 state=forecast, results_dir=results_dir
             )
+            # Before the analysis, and before pruning takes the cycle's
+            # directory away: these are the forecast frames themselves, the
+            # ``n - 1`` per cycle no analysis ever touches included.
+            if self.collect_forecast_frames:
+                forecast_history.append(
+                    self._get_segment_states(state=forecast, results_dir=results_dir)
+                )
 
             # Record here, not inside the analysis: these are the forecast
             # observations before ANY inflation touches them (prior inflation
@@ -862,6 +942,15 @@ class BaseFilter:
             state_history=(
                 xarray.concat(state_history, dim="cycle", join="override")
                 if state_history
+                else None
+            ),
+            # Concatenated along TIME, not cycle: the segments tile the run's
+            # clock at the model's output cadence, so the cycle boundaries are
+            # not a dimension of the result — every ``assimilate_every_n_step``-th
+            # frame is an analysis time, the rest are the free run between them.
+            forecast_history=(
+                xarray.concat(forecast_history, dim="time", join="override")
+                if forecast_history
                 else None
             ),
         )

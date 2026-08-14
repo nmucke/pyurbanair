@@ -100,7 +100,7 @@ rather than pulling them from separate files. The table below summarises each.
 | Field | Default | Purpose |
 |---|---|---|
 | `num_assimilation_windows` | 2 | Number of assimilation windows, the same unit as `esmda.num_assimilation_windows`: one window is `time.simulation_time` seconds, so the horizon is `num_assimilation_windows * time.simulation_time` and the two entry points are configured identically for like-for-like runs. Cycles are **derived**, not configured: one cycle is one observation interval (`time.output_frequency` s) ending in one full-weight analysis, so a window holds `time.simulation_time / time.output_frequency` of them. Windows are pure computational/IO chunking (one `run()` call and one set of per-window artifacts each) — state, parameters, the filter's PRNG stream and the per-cycle noise draws all carry across a boundary, so a horizon run as 1 window or as `W` is mathematically identical. |
-| `assimilate_every_n_step` | 1 | Analysis **stride**: assimilate only every `n`-th observation frame. `1` is the every-observation filter above; `n > 1` leaves the model's output cadence alone and thins only the analyses, so a cycle becomes `n * time.output_frequency` seconds and a window holds `time.simulation_time / time.output_frequency / n` cycles. The intermediate frames are still simulated and still written (the per-cycle `_ensemble_states/cycle_{k}/` segments hold all `n`); they simply never see a Kalman step, and the analysis is the segment's LAST frame. `n` must divide `time.simulation_time / time.output_frequency` or the run refuses to start. |
+| `assimilate_every_n_step` | 1 | Analysis **stride**: assimilate only every `n`-th observation frame. `1` is the every-observation filter above; `n > 1` leaves the model's output cadence alone and thins only the analyses, so a cycle becomes `n * time.output_frequency` seconds and a window holds `time.simulation_time / time.output_frequency / n` cycles. The intermediate frames are still simulated and still written (the per-cycle `_ensemble_states/cycle_{k}/` segments hold all `n`); they simply never see a Kalman step, and the analysis is the segment's LAST frame. `n` must divide `time.simulation_time / time.output_frequency` or the run refuses to start. `run.save_forecast_history=true` writes those intermediate frames as ordinary window artifacts too (§2.1), without the on-disk ensemble mode. |
 | `seed` | 42 | JAX RNG seed. |
 | `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors), of ONE observation frame. |
 | `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
@@ -140,6 +140,7 @@ enough that no aggregation bin is emptied).
 | `truth_dir` | `null` | Path to a saved `state.nc`/`params.nc` truth artifact; `null` = simulate inline. |
 | `truth_start_time` | `null` | Drop truth frames before this time (seconds) and rebase. |
 | `save_prior_state` | `false` (esmda only) | Persist the per-window prior ensemble state (large; off by default). |
+| `save_forecast_history` | `false` (filtering only) | Also persist each window's FORECAST frames at the model's full output cadence (`windows/window_{w}_forecast_state.nc`), including the frames a `filtering.assimilate_every_n_step > 1` analysis skips. `n`× the analyzed states in size; off by default. |
 
 ---
 
@@ -623,7 +624,11 @@ cycles and the horizon holds `filtering.num_assimilation_windows` times that.
 `filtering.assimilate_every_n_step = n` (default 1) thins that analysis cadence
 without touching the model's output cadence: a cycle spans `n` observation
 intervals, all of them simulated and written, and only the last — the analysis
-time — is assimilated. The truth is generated over the whole horizon up front;
+time — is assimilated. `run.save_forecast_history=true` keeps every one of
+those frames in the run's artifacts (see the artifact list below), which is how
+the ensemble's drift *between* analyses is read off a strided run without
+turning on the on-disk ensemble mode. The truth is generated over the whole
+horizon up front;
 per-cycle observations are extracted with the case's temporal observation
 operator and each window's cycles are consumed in one `run()` call.
 
@@ -655,7 +660,15 @@ has two entries there, the per-cycle prior `H(x)` and the ride-along posterior,
 stacked over the window's cycles. There is no `window_{w}_prior_state.nc`: a
 filter has no window-long prior rollout (`run_info.yaml`'s
 `configuration.save_prior_state: false` records the absence), so the prior
-halves of `sensor_statistics` and `field_metrics` are simply dropped. Beside
+halves of `sensor_statistics` and `field_metrics` are simply dropped. With
+`run.save_forecast_history=true` each window additionally gets
+`window_{w}_forecast_state.nc` — the window's FORECAST frames at the model's
+full output cadence (every `time.output_frequency` step, the ones a stride
+skips included), on the same physical time axis as the other window files, so
+the analyzed frames read against it as the correction. It is
+`filtering.assimilate_every_n_step` times the size of the analyzed states and
+is off by default; `run_info.yaml`'s `configuration.save_forecast_history`
+records whether it is there. Beside
 that, the filtering-native artifacts, accumulated over the whole horizon with
 GLOBAL cycle indices: `posterior_params.nc` / `posterior_state.nc` (analyzed
 final-frame ensemble), optional `params_history.nc` / `state_history.nc`
@@ -1249,6 +1262,7 @@ which they came from:
 | Source | When | What you get |
 |---|---|---|
 | `forecast` | `run.ensemble_save_on_disk=true` | Every member's full forecast segment, kept under `_ensemble_states/cycle_{k}/state_{m}.nc` and never pruned. Cycle *k*'s forecast is the ensemble rolled out from cycle *k−1*'s analysis under its analyzed parameters — the exact analogue of an ESMDA window file, and out-of-sample. Within-cycle variance and real resolved turbulence. |
+| `forecast` (per-window) | `run.save_forecast_history=true` | The same frames from `windows/window_{w}_forecast_state.nc` — one `(ensemble, time, …)` file per window, already on the run's physical clock — so a run gets the full-cadence evaluation without the per-member on-disk tree. Same `kind`, same scoring, same truth pairing; only the access route and the `description` differ. Used when the on-disk segments are absent. |
 | `analysis` | default | `state_history.nc` alone: **one** analyzed frame per cycle. Every block still runs, but the per-cycle *variance* statistic is null (a `ddof=1` variance of one sample) and the TKE / `<u'w'>` moments are taken *across* cycles, so they carry the analysis increments — read those panels as an upper bound. |
 
 Both are frame-matched against the truth by the same contract, so the statistics

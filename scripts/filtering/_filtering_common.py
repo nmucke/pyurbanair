@@ -278,6 +278,14 @@ def cycle_diagnostics_series(run_dir: pathlib.Path) -> dict:
 #     verification object. Resolved in time, so the window statistics get a real
 #     within-cycle variance and the mean fields get real resolved turbulence.
 #
+#     The same frames reach the evaluation from ``run.save_forecast_history=true``
+#     without the on-disk ensemble mode: the per-window
+#     ``windows/window_{w}_forecast_state.nc`` artifact holds every member's
+#     every frame, already on the run's physical clock. It is the same kind
+#     (``"forecast"``) because it is the same object scored the same way; only
+#     the access route differs (``window_paths`` instead of ``paths``), and the
+#     ``description`` says which route ran.
+#
 #   ANALYSIS (the default). Only ``state_history.nc`` exists: ONE analyzed frame
 #     per cycle. Every reduction still works -- a cycle is then a one-frame
 #     window -- but two things degrade, and both are recorded rather than hidden:
@@ -317,8 +325,13 @@ class CycleStates(NamedTuple):
             binning uses. Can be short of ``truth_access.yaml``'s count when the
             history was not saved and only the final analyzed frame survives.
         n_members: Ensemble size, read from metadata alone.
-        paths: ``forecast`` only -- ``paths[k][m]`` is member ``m``'s forecast
-            file for cycle ``k``. ``None`` for ``analysis``.
+        paths: The on-disk ``forecast`` route only -- ``paths[k][m]`` is member
+            ``m``'s forecast file for cycle ``k``. ``None`` otherwise.
+        window_paths: The per-window ``forecast`` route only (see
+            ``run.save_forecast_history``) -- ``window_paths[w]`` is window
+            ``w``'s full-cadence forecast artifact, an ``(ensemble, time, ...)``
+            file on the run's physical clock. ``None`` otherwise. Exactly one of
+            ``paths`` / ``window_paths`` is set on a ``forecast`` source.
         description: One line naming the source and its caveat. It reaches the
             reader by three routes, and all three are needed: the log, the run
             summary's ``cycle_states`` block, and ``eval_fields.nc``'s
@@ -332,6 +345,7 @@ class CycleStates(NamedTuple):
     n_members: int
     paths: list[list[pathlib.Path]] | None
     description: str
+    window_paths: list[pathlib.Path] | None = None
 
 
 def _forecast_cycle_paths(
@@ -384,6 +398,40 @@ def _forecast_cycle_paths(
     return cycles
 
 
+def _window_forecast_paths(
+    run_dir: pathlib.Path, ta: dict
+) -> list[pathlib.Path] | None:
+    """The per-window full-cadence forecast artifacts, or ``None`` if unusable.
+
+    Written by ``run_filtering.py`` under ``run.save_forecast_history=true``:
+    one ``(ensemble, time, ...)`` file per window, holding every frame the
+    assimilation model wrote — the ones a
+    ``filtering.assimilate_every_n_step > 1`` analysis skips included — already
+    on the truth's physical time axis, so nothing here rebases them.
+
+    All-or-nothing across windows and, within a window, over the frame count:
+    a partial or short set would score different windows over different
+    horizons in one statistic, which is worse than falling back to the analyzed
+    frames.
+    """
+    num_windows = int(ta.get("num_windows", 1))
+    windows_dir = pathlib.Path(run_dir) / "windows"
+    paths = [windows_dir / f"window_{w}_forecast_state.nc" for w in range(num_windows)]
+    present = [path for path in paths if path.is_file()]
+    if len(present) != num_windows:
+        if present:
+            logger.warning(
+                "Only %d of %d window forecast artifacts are present under %s; "
+                "the evaluation blocks fall back to the per-cycle analyzed "
+                "frames rather than scoring windows over different horizons",
+                len(present),
+                num_windows,
+                windows_dir,
+            )
+        return None
+    return paths
+
+
 def cycle_state_source(run_dir: pathlib.Path, ta: dict) -> CycleStates:
     """Pick the per-cycle ensemble states to evaluate (see the module comment)."""
     run_dir = pathlib.Path(run_dir)
@@ -402,6 +450,39 @@ def cycle_state_source(run_dir: pathlib.Path, ta: dict) -> CycleStates:
                 "on-disk ensemble forecasts (_ensemble_states/cycle_*/state_*.nc): "
                 "every frame of every cycle's forecast segment"
             ),
+        )
+
+    window_paths = _window_forecast_paths(run_dir, ta)
+    if window_paths is not None:
+        with xarray.open_dataset(window_paths[0]) as first:
+            n_members = int(first.sizes["ensemble"]) if "ensemble" in first.dims else 0
+            n_frames = int(first.sizes.get("time", 0))
+        expected_frames = int(ta["n_per_window"])
+        if n_members and n_frames == expected_frames:
+            return CycleStates(
+                kind="forecast",
+                bin_seconds=dt_cycle,
+                num_cycles=num_cycles,
+                n_members=n_members,
+                paths=None,
+                window_paths=window_paths,
+                description=(
+                    "per-window ensemble forecasts "
+                    "(windows/window_*_forecast_state.nc): every frame of every "
+                    "cycle's forecast segment, at the model's full output cadence"
+                ),
+            )
+        # A window file that does not tile its window cannot be paired with the
+        # truth's per-cycle blocks frame for frame, and pairing it anyway would
+        # slide every statistic. Say which number is wrong and fall through.
+        logger.warning(
+            "%s holds %d frame(s) for %d member(s) but the window covers %d "
+            "truth frame(s); the evaluation blocks fall back to the per-cycle "
+            "analyzed frames",
+            window_paths[0],
+            n_frames,
+            n_members,
+            expected_frames,
         )
 
     # ``load_analyzed_states`` is the authority on what the analysis path will
@@ -476,7 +557,8 @@ def cycle_sensor_series(
     (master-plan invariant 2).
 
     The time axis is what :attr:`CycleStates.bin_seconds` promises: real seconds
-    rebased onto the run's global clock for ``forecast``, an integer cycle index
+    on the run's global clock for ``forecast`` (rebased per segment on the
+    on-disk route, already global on the per-window one), an integer cycle index
     for ``analysis``.
     """
     solver_name = str(ta["assim_solver_name"])
@@ -488,6 +570,55 @@ def cycle_sensor_series(
         return dict(
             _window_sensor_series(states, sensor_sets, solver_name, on_member, 0)
         )
+
+    if source.window_paths is not None:
+        # The per-window artifact: one ESMDA-shaped ``(ensemble, time, ...)``
+        # file per window, already on the run's physical clock, so there is
+        # nothing to rebase — only to slice, member at a time, exactly as the
+        # ESMDA extraction slices a window file.
+        n_per_cycle = int(ta["n_per_cycle"])
+        pieces = {name: [] for name in sensor_sets}
+        first_cycle = 0
+        for path in source.window_paths:
+            with xarray.open_dataset(path) as ds:
+                n_cycles_here = int(ds.sizes["time"]) // n_per_cycle
+                per_member: dict = {name: [] for name in sensor_sets}
+                for member_index in range(int(ds.sizes["ensemble"])):
+                    member = (
+                        ds[["u", "v", "w"]]
+                        .isel(ensemble=slice(member_index, member_index + 1))
+                        .load()
+                    )
+                    for name, (ox, oy, oz) in sensor_sets.items():
+                        per_member[name].append(
+                            _sensor_component_timeseries(
+                                member, ox, oy, oz, solver_name
+                            )
+                        )
+                    if on_member is not None:
+                        # Fed one CYCLE at a time, so the collector's chunk
+                        # index counts cycles here exactly as it does on the
+                        # on-disk route below — a window is not a unit any
+                        # consumer of this callback knows about.
+                        for cycle in range(n_cycles_here):
+                            on_member(
+                                first_cycle + cycle,
+                                member_index,
+                                member.isel(
+                                    time=slice(
+                                        cycle * n_per_cycle,
+                                        (cycle + 1) * n_per_cycle,
+                                    )
+                                ),
+                            )
+                for name, parts in per_member.items():
+                    pieces[name].append(
+                        parts[0]
+                        if len(parts) == 1
+                        else xarray.concat(parts, dim="ensemble")
+                    )
+                first_cycle += n_cycles_here
+        return _concat_sensor_pieces(pieces)
 
     assert source.paths is not None  # invariant of kind == "forecast"
     # The rebasing below places each segment inside ITS OWN CYCLE on the run's

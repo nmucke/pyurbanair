@@ -549,6 +549,9 @@ def test_filtering_assimilate_every_n_step_defaults_to_one(
     """
     default_cfg = compose_test_cfg(_overrides("joint", 1), config_name="run_filtering")
     assert default_cfg.filtering.assimilate_every_n_step == 1
+    # The full-resolution forecast artifact is the stride's companion knob and
+    # ships off: it is `n` times the size of the analyzed states.
+    assert default_cfg.run.save_forecast_history is False
 
     explicit_cfg = compose_test_cfg(
         _overrides("joint", 1, ["filtering.assimilate_every_n_step=1"]),
@@ -726,6 +729,9 @@ def test_run_filtering_assimilate_every_n_step(
                 "time.simulation_time=4.0",
                 # The full-resolution frames the analyses skip live here.
                 "run.ensemble_save_on_disk=true",
+                # ... and, with this on, in a per-window artifact too. Both
+                # sources are checked against each other below.
+                "run.save_forecast_history=true",
             ],
             model="pyudales",
         ),
@@ -772,6 +778,31 @@ def test_run_filtering_assimilate_every_n_step(
                 rtol=0.05,
             )
 
+        # The forecast artifact is the same window at the model's FULL output
+        # cadence: every output frame, at the truth's own frame times, whatever
+        # the analysis stride.
+        forecast_state = xarray.open_dataset(
+            windows_dir / f"window_{w}_forecast_state.nc"
+        )
+        assert forecast_state.sizes["time"] == frames_per_window
+        np.testing.assert_allclose(
+            np.asarray(forecast_state["time"].values, dtype=float),
+            truth_times[w * frames_per_window : (w + 1) * frames_per_window],
+        )
+        # They are the FORECAST frames: at an analysis time the artifact holds
+        # the prior of the analysis whose posterior the state file holds, so the
+        # two differ exactly where a Kalman step happened.
+        analysed_frame = posterior_state["u"].isel(time=0)
+        assert not np.allclose(
+            np.asarray(
+                forecast_state["u"]
+                .isel(time=every_n - 1)
+                .transpose(*analysed_frame.dims)
+                .values
+            ),
+            np.asarray(analysed_frame.values),
+        )
+
         # The window's flat observation vector covers the ASSIMILATED frames
         # only, so the stride shortens it by exactly that factor.
         obs = xarray.open_dataset(windows_dir / f"window_{w}_obs.nc")
@@ -784,11 +815,28 @@ def test_run_filtering_assimilate_every_n_step(
     # on-disk segment holds the full every_n frames, only the last of which saw
     # a Kalman step.
     for cycle in range(num_cycles):
+        forecast_state = xarray.open_dataset(
+            windows_dir / f"window_{cycle // cycles_per_window}_forecast_state.nc"
+        )
+        local = cycle % cycles_per_window
         for member in range(2):
             segment = xarray.open_dataset(
                 out_dir / "_ensemble_states" / f"cycle_{cycle}" / f"state_{member}.nc"
             )
             assert segment.sizes["time"] == every_n
+            # ... and the per-window forecast artifact holds exactly those
+            # frames, member for member: the two routes to the full-resolution
+            # forecast (on disk during the run, in memory through the filter)
+            # must not disagree.
+            recorded = forecast_state["u"].isel(
+                ensemble=member, time=slice(local * every_n, (local + 1) * every_n)
+            )
+            np.testing.assert_allclose(
+                np.asarray(recorded.transpose(*segment["u"].dims).values),
+                np.asarray(segment["u"].values),
+                rtol=1e-6,
+                atol=1e-6,
+            )
 
     diagnostics = read_yaml(out_dir / "cycle_diagnostics.yaml")
     assert [row["cycle"] for row in diagnostics] == list(range(num_cycles))

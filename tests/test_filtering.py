@@ -1253,6 +1253,132 @@ def test_pred_obs_frames_history_keeps_the_operators_labelled_output() -> None:
 
 
 # ---------------------------------------------------------------------------
+# collect_forecast_frames: the frames BETWEEN the analyses
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_frames_hold_the_free_run_between_analyses() -> None:
+    """Every output frame of every segment, and they really are the FORECAST.
+
+    ``state_history`` shows the ensemble at the analysis times alone — under a
+    stride, one frame in every ``n`` — so "the ensemble drifts away from the
+    truth between analyses, then the analysis pulls it back" is invisible in it.
+    The recorded frames are what makes that readable, which requires two things
+    of them: cycle ``k``'s segment continues from cycle ``k-1``'s ANALYSIS (it
+    is the free run the analysis launched, not an independent rollout), and its
+    last frame is the PRIOR of cycle ``k``'s analysis, not the posterior
+    ``state_history`` already holds.
+    """
+    n_e, num_cycles, num_frames, stride = 8, 3, 4, 4
+    state = _initial_state(jax.random.PRNGKey(78), n_e, np.zeros(2), np.eye(2))
+    values = np.asarray(
+        jax.random.normal(jax.random.PRNGKey(79), (num_cycles, num_frames, 1))
+    )
+    batches = _stride_batches(values)
+
+    plain = _stride_filter(num_frames, stride)
+    plain_result = plain.run(state=state, observations=batches, return_history=True)
+    recording = _stride_filter(num_frames, stride)
+    recording.collect_forecast_frames = True
+    result = recording.run(state=state, observations=batches, return_history=True)
+
+    # Recording is a pure observer: same analyses, same PRNG stream.
+    assert plain_result.forecast_history is None
+    assert plain_result.state is not None and result.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(plain_result.state["u"]), np.asarray(result.state["u"])
+    )
+    np.testing.assert_array_equal(
+        np.asarray(plain.rng_key), np.asarray(recording.rng_key)
+    )
+
+    frames = result.forecast_history
+    assert frames is not None
+    # Full resolution: every frame of every segment, stride or no stride.
+    assert frames.sizes["time"] == num_cycles * num_frames
+    assert frames.sizes["ensemble"] == n_e
+    assert result.state_history is not None
+    assert result.state_history.sizes["cycle"] == num_cycles
+
+    forecast = np.asarray(frames.transpose("ensemble", "time", "x")["u"].values)
+    analysed = np.asarray(
+        result.state_history.transpose("cycle", "ensemble", "x")["u"].values
+    )
+    for cycle in range(num_cycles):
+        prior = forecast[:, (cycle + 1) * num_frames - 1]
+        assert not np.allclose(prior, analysed[cycle])
+        if cycle:
+            np.testing.assert_allclose(
+                forecast[:, cycle * num_frames],
+                analysed[cycle - 1] @ np.asarray(_STRIDE_A).T,
+                rtol=1e-6,
+                atol=1e-6,
+            )
+
+
+def test_forecast_frames_are_rebound_per_run_and_off_by_default() -> None:
+    """Default: nothing recorded. On: one call's frames, not two calls' worth."""
+    n_e, num_frames = 6, 2
+    state = _initial_state(jax.random.PRNGKey(80), n_e, np.zeros(2), np.eye(2))
+    values = np.asarray(jax.random.normal(jax.random.PRNGKey(81), (2, num_frames, 1)))
+
+    enkf = _stride_filter(num_frames, 1)
+    assert (
+        enkf.run(state=state, observations=_stride_batches(values)).forecast_history
+        is None
+    )
+
+    enkf.collect_forecast_frames = True
+    first = enkf.run(state=state, observations=_stride_batches(values))
+    second = enkf.run(state=state, observations=_stride_batches(values[:1]))
+    assert first.forecast_history is not None and second.forecast_history is not None
+    assert first.forecast_history.sizes["time"] == 2 * num_frames
+    assert second.forecast_history.sizes["time"] == num_frames
+
+
+def test_forecast_frames_agree_on_the_in_memory_and_on_disk_paths(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The segment reader keeps the same frames however the forecast was held.
+
+    On-disk mode is where the frames would otherwise be lost to pruning, and it
+    is the mode production runs use, so its reader is the one that has to agree
+    with the in-memory path frame for frame — not just at the analysis times.
+    """
+    n_e = 10
+    state = _initial_state(jax.random.PRNGKey(82), n_e, np.zeros(2), np.eye(2))
+    common: Any = dict(
+        observation_operator=_ToyObsOp(np.array([[1.0, 0.5]])),
+        C_D=jnp.array([0.2]),
+        mode="state",
+        rng_key=jax.random.PRNGKey(83),
+    )
+    observations = jnp.array([[0.5], [0.3]])
+
+    in_memory = EnsembleKalmanFilter(forward_model=_ToyLinearModel(_STRIDE_A), **common)
+    in_memory.collect_forecast_frames = True
+    memory_result = in_memory.run(state=state, observations=observations)
+    on_disk = EnsembleKalmanFilter(
+        forward_model=_OnDiskToyLinearModel(_STRIDE_A, tmp_path), **common
+    )
+    on_disk.collect_forecast_frames = True
+    disk_result = on_disk.run(state=state, observations=observations)
+
+    assert memory_result.forecast_history is not None
+    assert disk_result.forecast_history is not None
+    memory_frames = memory_result.forecast_history.transpose("ensemble", "time", "x")
+    disk_frames = disk_result.forecast_history.transpose("ensemble", "time", "x")
+    # Two cycles of the toy model's two-frame segment.
+    assert memory_frames.sizes["time"] == 4
+    np.testing.assert_allclose(
+        np.asarray(disk_frames["u"].values),
+        np.asarray(memory_frames["u"].values),
+        rtol=1e-5,
+        atol=2e-5,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Reduced physical-state analyses
 # ---------------------------------------------------------------------------
 

@@ -75,6 +75,14 @@ the analysis-time frames only, at the ``n * output_frequency`` cadence; the
 full-resolution frames live in the on-disk cycle segments. ``n`` must divide
 ``simulation_time / output_frequency`` so the cycles still tile a window.
 
+``run.save_forecast_history=true`` additionally writes those full-resolution
+frames as ordinary window artifacts (``windows/window_{w}_forecast_state.nc``,
+one per window, on the run's physical time axis) without needing
+``run.ensemble_save_on_disk``. They are the FORECAST (prior) frames, so read
+against the analyzed frames of the same window they show the ensemble drifting
+away from the truth between analyses and being pulled back at each one. Off by
+default: the artifact is ``n`` times the size of the window's analyzed states.
+
 A window is a COMPUTATIONAL boundary only: it bounds RAM and peak disk (one
 ``run()`` call, one set of per-window artifacts) and changes nothing
 mathematically. The analyzed state and parameters are carried into the next
@@ -299,6 +307,41 @@ def _save_window_state(
     if "ensemble" in ds.dims:
         # Ensemble-first, matching the ESMDA window files the downstream
         # streaming readers were written against.
+        ds = ds.transpose("ensemble", "time", ...)
+    ds.to_netcdf(path)
+
+
+def _save_window_forecast_state(
+    forecast_history: xarray.Dataset, path: pathlib.Path, frame_times: Sequence[float]
+) -> None:
+    """One window's FORECAST frames at the model's full output cadence.
+
+    ``forecast_history`` is the window ``run()``'s ``time``-concatenated
+    forecast segments: every frame the assimilation model wrote, the
+    ``assimilate_every_n_step - 1`` frames per cycle that no analysis touches
+    included. Its own time coordinate is the per-cycle model clock repeated once
+    per cycle (the filter is handed one segment at a time and has no global
+    clock), so it is replaced by the window's truth frame times — the same
+    drop-and-rebase :func:`_save_window_state` does for the analyzed frames, and
+    what puts the two files on one axis.
+
+    The count check is the loud half of that rebase: a segment carrying anything
+    extra (a backend writing its cold-start spin-up into cycle 0, stale files in
+    a cycle directory) would otherwise be silently relabelled with the wrong
+    times, and every frame after it would be off by the difference.
+    """
+    n_frames = int(forecast_history.sizes["time"])
+    if n_frames != len(frame_times):
+        raise ValueError(
+            f"The window's forecast segments hold {n_frames} frame(s) but the "
+            f"window covers {len(frame_times)} truth frame(s), so the frames "
+            "cannot be put on the truth's time axis. Check the assimilation "
+            "model's output cadence (one frame per time.output_frequency) and "
+            "the cycle results directories for stale files."
+        )
+    ds = forecast_history.assign_coords(time=np.asarray(frame_times, dtype=float))
+    if "ensemble" in ds.dims:
+        # Ensemble-first, like every other window state file.
         ds = ds.transpose("ensemble", "time", ...)
     ds.to_netcdf(path)
 
@@ -664,6 +707,10 @@ def run(cfg: DictConfig) -> None:
     observations: list[Any] = []
     observations_clean: list[Any] = []
     cycle_times: list[float] = []
+    # Every OUTPUT frame's time, not just the analysis times: the axis the
+    # optional full-resolution forecast artifact is written on (`cycle_times` is
+    # its every-`every_n`-th entry).
+    frame_times: list[float] = []
     truth_view = open_truth(true_state_path, n_total, x_offset, start_idx, t_offset)
     for cycle in range(num_cycles):
         # The cycle's truth BLOCK is its `every_n` output frames (half-open, so
@@ -676,6 +723,9 @@ def run(cfg: DictConfig) -> None:
         )
         cycle_truth = cycle_block.isel(time=slice(every_n - 1, None, every_n))
         cycle_times.append(float(np.asarray(cycle_truth["time"].values).ravel()[0]))
+        frame_times.extend(
+            float(t) for t in np.asarray(cycle_block["time"].values).ravel()
+        )
         cycle_obs_clean = truth_obs_op(cycle_truth)
         rng_key, subkey = jax.random.split(rng_key)
         cycle_obs = cycle_obs_clean + obs_error_std * np.asarray(
@@ -722,6 +772,11 @@ def run(cfg: DictConfig) -> None:
     # ride-along rows the analysis already computes) posterior forecast
     # observations; no extra forward solve.
     enkf.collect_pred_obs = True
+    # The full-resolution forecast frames (every time.output_frequency step, not
+    # just the analysis times). Opt-in: the artifact is `every_n` times the
+    # window's analyzed states, and the filter holds a window's worth in memory.
+    save_forecast_history = bool(cfg.run.get("save_forecast_history", False))
+    enkf.collect_forecast_frames = save_forecast_history
 
     save_history = bool(cfg.run.get("save_history", True))
 
@@ -785,6 +840,15 @@ def run(cfg: DictConfig) -> None:
                 result.params,
                 windows_dir / f"window_{window}_posterior_params.nc",
                 (window + 1) * sim_time,
+            )
+        if save_forecast_history:
+            assert result.forecast_history is not None  # collect_forecast_frames
+            _save_window_forecast_state(
+                result.forecast_history,
+                windows_dir / f"window_{window}_forecast_state.nc",
+                frame_times[
+                    first_cycle * every_n : (first_cycle + cycles_per_window) * every_n
+                ],
             )
 
         # Observation space. ``obs_error_std`` is TILED to the window's full
@@ -906,6 +970,11 @@ def run(cfg: DictConfig) -> None:
                 # windows/window_{w}_prior_state.nc is deliberately absent and
                 # the prior halves of the state diagnostics are skipped.
                 "save_prior_state": False,
+                # Whether windows/window_{w}_forecast_state.nc exists: the
+                # window's forecast frames at the model's FULL output cadence
+                # (every time.output_frequency step, analysed or not), against
+                # which the analyzed frames read as the correction.
+                "save_forecast_history": bool(save_forecast_history),
                 "esmda_step_semantics": _ESMDA_STEP_SEMANTICS,
                 "seed": int(cfg.filtering.seed),
                 "truth_model": str(cfg.truth_model.name),
