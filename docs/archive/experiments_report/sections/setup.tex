@@ -1,0 +1,87 @@
+\section{Experimental design common to all campaigns}
+\label{sec:setup}
+
+All experiments were produced by the three driver campaigns under
+\code{presentations/isda\_new/experiments/} (\code{esmda/}, \code{filtering/},
+\code{filter\_smoothing/}) and share one physical set-up. The three campaigns differ only
+in the assimilation algorithm and in which knobs are swept. This section records the
+shared configuration once so that the method sections can focus on results.
+
+\subsection{Case, domain and models}
+\begin{itemize}[nosep]
+  \item \textbf{Geometry}: Xie \& Castro (2008) staggered-cube urban array,
+        \code{examples/xie\_and\_castro/xie\_castro\_2008\_STL.stl}.
+  \item \textbf{Domain}: $40\times60\times16$ cells over
+        $x\in[-20,40]$, $y\in[0,80]$, $z\in[0,32]$~m (2~m resolution).
+  \item \textbf{Assimilation model}: uDALES (\code{pyudales}) with Vreman closure in every run.
+  \item \textbf{Truth model}: either uDALES (\emph{matched model}, primary case) or PALM
+        (\code{pypalm}, \emph{model-error} case). Truth trajectories are stored in
+        \code{experiments/truth\_states/true\_state\_<truth>\_<case>.nc}.
+  \item \textbf{Boundary-condition cases}:
+        \code{inflow} = laminar inlet (\code{inlet\_turbulence.enabled=false});
+        \code{inflow\_turb} = synthetic turbulent inlet (intensity 0.05, length scale 6~m);
+        \code{periodic} = periodic lateral boundaries.
+  \item \textbf{Time}: 3 assimilation windows $\times$ 120~s $=$ 360~s; 50~s spin-up;
+        model output every 2~s.
+\end{itemize}
+
+\subsection{Parameters, truth and prior}
+Two time-varying inflow parameters are estimated (one knot per 30~s, i.e.\ 15 knots over
+360~s); the vertical inflow exponent is a static nuisance parameter.
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+Parameter & Truth (deterministic sinusoid) & Prior (AR(2) relaxation, $L_\mathrm{corr}=200$~s) \\
+\midrule
+Inflow angle $\alpha$ & $20^\circ\sin(2\pi t/300\,\mathrm{s})$ & $\mathcal N(0^\circ, 10^\circ)$ \\
+Velocity magnitude $\Umag$ & $7.5 + 1.0\,\sin(2\pi t/150\,\mathrm{s})$~m/s & $\mathcal N(7.5, 0.5)$~m/s \\
+Vertical exponent & $0.25$ (constant) & $\mathcal N(0.25, 0.05)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+A climatological (prior-only) angle estimate therefore scores $\approx 17$--$20^\circ$
+RMSE; that is the baseline every ``reduction vs.\ prior'' is measured against.
+
+\subsection{Observations}
+\begin{itemize}[nosep]
+  \item \textbf{Assimilated sensors} (6, all at $z=2$~m): $(10,20)$, $(10,60)$, $(20,10)$,
+        $(20,50)$, $(30,30)$, $(30,70)$; observed components $u$ and $v$;
+        $\sigma_\mathrm{obs}=0.1$~m/s.
+  \item \textbf{Validation sensors} (4, never assimilated): $(2,30,2)$, $(20,55,2)$,
+        $(17,30,2)$ and one elevated sensor $(10,30,20)$.
+  \item \textbf{Ensemble}: $N=50$ members, 10 parallel processes.
+  \item \textbf{Localization} (\code{loccorrelation}): correlation-based localization
+        (truncation 0.35, tapering $\beta=0.5$, max inflation 8, block grouping);
+        \code{locnone} = no localization.
+\end{itemize}
+
+\subsection{Naming convention}
+Run folders are named
+\code{<truth>\_to\_<assim>\_w3\_<loc>[\_obs<interval>]\_<case>[\_state\_infl<none|rtps>]}, where
+\code{w3} = three windows, \code{obs7p5/obs15/obs30} = observation aggregation interval in
+seconds (ESMDA and filter smoothing only), and the optional \code{\_state\_infl*} suffix marks
+state-only filtering runs with the given inflation.
+
+\subsection{Metrics}
+\begin{description}[nosep]
+  \item[Parameter RMSE / CRPS] ensemble-mean error and CRPS of each parameter against truth,
+        averaged over knots (``mean'') or at the last knot (``final''). \emph{Reduction vs.\
+        prior} is relative to the same run's own prior ensemble.
+  \item[Sensor vector RMSE] $\sqrt{\sum_{c\in\{u,v,w\}}\mathrm{RMSE}_c^2}$ of the ensemble
+        mean at the assimilated (\emph{assim}) or held-out (\emph{valid}) sensors. Note that
+        figure legends print a \emph{magnitude-only} $\Umag$ RMSE, which is systematically
+        smaller than the vector RMSE quoted in the tables.
+  \item[Energy score (ES)] multivariate CRPS of the sensor velocity vector.
+  \item[State RMSE] domain-wide RMSE of $\Umag$ of the ensemble mean vs.\ truth.
+  \item[Data mismatch $O_N$] (ESMDA) normalised observation misfit; the noise floor is
+        $O_N=1/2$.
+  \item[Calibration] $z$-score standard deviation of parameter errors (1.03 expected for
+        $N=50$; $\gg 1$ = overconfident), contraction ratio (posterior/prior spread),
+        rank histograms, innovation $\chi^2$ (filters; 1 = calibrated), and field hit rate
+        $q$ (fraction of grid points where truth lies inside the ensemble envelope).
+\end{description}
+
+\subsection{Compute}
+Each campaign was driven sequentially by \code{\_chain*/chain\_progress.tsv}. Approximate
+wall time per method (all runs of one truth model): ESMDA 8--13~h, filtering 7--9~h,
+filter smoothing 11--17~h; individual runs take 1--2.5~h on 10 processes.

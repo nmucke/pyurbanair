@@ -1,0 +1,179 @@
+\section{Conclusions: which method for which problem}
+\label{sec:conclusions}
+
+This section condenses Sections~\ref{sec:esmda}--\ref{sec:cmp} into three
+decision aids: a decision tree (Fig.~\ref{fig:concl:tree}) that answers ``which method
+should I run for this problem'', a technique-effect chart (Fig.~\ref{fig:concl:effects})
+that shows what each individual technique buys, and a storyboard
+(Fig.~\ref{fig:concl:story}) that reads the whole campaign as a ladder of increasing
+problem complexity and the method complexity needed to keep up. All numbers are the
+matched-cell values of Table~\ref{tab:cmp:master-ud} and
+Table~\ref{tab:cmp:master-palm} (uDALES assimilation model, $N=50$, obs interval 15~s
+where applicable); ``valid'' is the held-out-sensor vector RMSE in m/s, $\alpha$ the
+inflow-angle RMSE in degrees, $\chi^2$ the mean innovation $\chi^2$.
+
+\subsection{Decision tree}
+
+The tree is read top-down. The first split is the flow regime (what the inflow looks
+like and whether there is an inflow at all), the second is whether the model is
+trusted (matched twin vs.\ model error), the third is the goal (state vs.\ parameters).
+Each leaf gives the recommended configuration, the number that justifies it, and the
+one caveat that must be carried along.
+
+\begin{figure}[p]
+\centering
+\begin{adjustbox}{max width=\textwidth,max height=0.93\textheight}
+\begin{forest}
+  for tree={
+    draw, rounded corners=2pt, align=left, font=\footnotesize,
+    edge={-{Latex[length=2mm]}, thick},
+    inner sep=3pt,
+    parent anchor=east, child anchor=west, grow'=east, anchor=west,
+    forked edges, l sep=7mm, s sep=1.5mm,
+  },
+  where level=0{fill=black!8, font=\small\bfseries}{},
+  where level=1{fill=blue!8, font=\footnotesize\bfseries}{},
+  where level=2{fill=orange!10}{},
+  where level=3{fill=green!8}{},
+  [{Urban-airflow DA problem\\(6 ground sensors, $u$,$v$, $\sigma_{\rm obs}=0.1$)}
+    [{Laminar inflow\\(smooth, phase-locked)}
+      [{Matched model}
+        [{\textbf{State focus}\\EnKF joint$+$RTPS, \emph{no} localization\\valid \good{0.319}, $\chi^2$ 0.99\\\emph{loc.\ hurts here: $+$23\,\%}}]
+        [{\textbf{Parameter focus}\\$\alpha$: joint EnKF, no loc.\ \good{3.9$^\circ$}\\$\Umag$: only smoothers move it\\(ESMDA 0.53, hybrid 0.51 vs prior 0.92)\\\emph{ESMDA state drifts out of phase}}]
+      ]
+      [{Model error\\\bad{no result}: PALM truth\\diverged in all 3 campaigns}]
+    ]
+    [{Turbulent inflow\\(synthetic inlet turbulence)}
+      [{Matched model}
+        [{\textbf{State focus}\\ESMDA (loc, 15--30\,s)\\valid \good{0.365} $<$ assim 0.401\\\emph{overconfident: $z_{\rm par}$ 4.6}\\\emph{if calibration matters: joint EnKF,}\\\emph{valid 0.559, $\chi^2$ 1.04}}]
+        [{\textbf{Parameter focus}\\ESMDA or hybrid (loc)\\$\alpha$ \good{2.3$^\circ$} / 2.6$^\circ$, $\Umag$ 0.37 / 0.43\\joint EnKF: $\alpha$ 3.4$^\circ$ but $\Umag$ $\approx$ prior\\\emph{obs interval 30\,s best calibrated}}]
+      ]
+      [{Model error (PALM truth)}
+        [{\textbf{State focus}\\all methods 1.30--1.43\\joint EnKF$+$loc \good{1.297}\\\emph{$\chi^2$ 14: uncalibrated}}]
+        [{\textbf{Parameter focus}\\ESMDA $\alpha$ 7.1$^\circ$, hybrid 6.9$^\circ$\\\emph{posterior confidently biased}\\\emph{($z=12$ at final knot)}}]
+      ]
+    ]
+    [{Periodic / no inflow\\(chaotic, no forcing signal)}
+      [{Matched model}
+        [{\textbf{State focus}\\hybrid or EnKF state$+$RTPS,\\localization \emph{mandatory}\\valid \good{1.25} / 1.26 (vs 2.4 w/o loc)\\$\chi^2$ 1.8 / 0.92, $q$ 0.87}]
+        [{\textbf{Parameter focus}\\\bad{do not estimate}\\$\alpha$ 13--15$^\circ$ for every method\\joint EnKF diverges ($\Umag$ 4.2 m/s)\\\emph{inflow parameters are unidentifiable}}]
+      ]
+      [{Model error (PALM truth)}
+        [{\textbf{State focus}\\hybrid \good{1.70--1.88}\\ESMDA 1.9--2.1, joint EnKF \bad{diverges}\\\emph{field RMSE 4$\times$ matched case}}]
+        [{\textbf{Parameter focus}\\\bad{unidentifiable}, and updates\\move away from truth}]
+      ]
+    ]
+  ]
+\end{forest}
+\end{adjustbox}
+\caption{Decision tree. Split 1: flow regime; split 2: matched twin vs.\ model error;
+split 3: goal. Leaves give the recommended configuration (method, localization,
+inflation), the justifying number (validation vector RMSE or parameter RMSE) and the
+caveat in italics. Numbers from Tables~\ref{tab:cmp:master-ud} and
+\ref{tab:cmp:master-palm}.}
+\label{fig:concl:tree}
+\end{figure}
+
+\subsection{What each technique buys}
+
+Figure~\ref{fig:concl:effects} isolates every technique or condition that was varied,
+as paired runs that differ in exactly that one setting. Three regularities stand out.
+\begin{itemize}[nosep]
+  \item \textbf{Localization is regime-dependent.} It is a $-$47 to $-$69\,\% gain on
+        \code{periodic} for every filter and improves calibration in all eight filter
+        pairs, but it \emph{hurts} accuracy on laminar inflow ($+$16/$+$23\,\%) where the
+        true correlations are long-range and phase-locked. The one ``red'' arrow for the
+        periodic hybrid angle is an artefact: the unlocalized run reports a better mean
+        angle from a collapsed ensemble ($z_{\rm pool}$ 41).
+  \item \textbf{RTPS buys calibration, not accuracy; joint estimation buys accuracy.}
+        RTPS halves std$(z)$ ($-$43 to $-$59\,\%) with $\le$22\,\% accuracy change; adding
+        joint parameter estimation cuts validation RMSE by 19--41\,\% and the angle error
+        by 73--83\,\% on the two inflow cases --- and breaks the periodic case ($+$23/$+$55\,\%).
+  \item \textbf{Model error dominates everything else.} Switching the truth to PALM
+        raises validation RMSE by 130--280\,\% and the angle error by 170--230\,\% on the
+        turbulent case, more than any technique can recover; all posteriors become
+        overconfident (std$(z)$ $\times$3--4).
+\end{itemize}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth,height=0.95\textheight,keepaspectratio]{conclusions/technique_effects.png}
+\caption{Effect of each technique / condition, as paired runs differing in one setting
+(open circle = before, filled circle = after; green = improvement, red = regression;
+log axes). Columns: validation vector RMSE, inflow-angle RMSE, and calibration at the
+validation sensors (std of the $z$-score, 1 = calibrated). ``n/a'' marks state-only runs
+whose parameters are never updated. Generated by
+\code{scripts/make\_conclusion\_figures.py} from the matched comparison data.}
+\label{fig:concl:effects}
+\end{figure}
+
+\subsection{Storyboard: complexity of the problem vs.\ complexity of the method}
+
+\begin{landscape}
+\begin{figure}[p]
+\centering
+\begin{adjustbox}{max width=\linewidth,max height=0.85\textheight}
+\begin{tikzpicture}[
+  font=\footnotesize,
+  station/.style={draw, rounded corners=3pt, fill=#1, minimum width=4.6cm, text width=4.4cm, align=center, inner sep=4pt, thick},
+  card/.style={draw=black!40, rounded corners=2pt, fill=white, text width=4.4cm, align=left, inner sep=4pt, font=\scriptsize},
+  lab/.style={font=\scriptsize\bfseries, text=black!60, align=right},
+  arr/.style={-{Latex[length=3mm]}, line width=1.4pt, black!70},
+]
+% road
+\draw[line width=6pt, black!15, rounded corners=8pt] (0,0) -- (5.4,0) -- (10.8,0) -- (16.2,0);
+% stations
+\node[station=green!15]  (s1) at (0,0)    {\textbf{1. Laminar inflow}\\matched twin};
+\node[station=yellow!25] (s2) at (5.4,0)  {\textbf{2. Turbulent inflow}\\matched twin};
+\node[station=orange!25] (s3) at (10.8,0)  {\textbf{3. Periodic / no inflow}\\matched twin};
+\node[station=red!20]    (s4) at (16.2,0) {\textbf{4. Model error}\\PALM truth, uDALES model};
+\foreach \a/\b in {s1/s2, s2/s3, s3/s4} \draw[arr] (\a) -- (\b);
+% problem cards (above)
+\node[lab, anchor=east] at (-1.3,2.2) {WHAT MAKES\\IT HARD};
+\node[card, above=0.4cm of s1] (p1) {Smooth, phase-locked flow. A wrong inflow phase cannot be corrected by parameters alone: ESMDA fits window~0 to the noise floor, then stalls at $O_N\approx 18$ and drifts out of phase (valid 0.75).};
+\node[card, above=0.4cm of s2] (p2) {Chaotic small scales on top of a strong forcing signal. Ensemble spread now covers the truth; the boundary-condition parameters are identifiable but the state is noisy.};
+\node[card, above=0.4cm of s3] (p3) {No inflow signal at all: the flow is driven by its own turbulence. Inflow parameters are unidentifiable ($\alpha$ 13--15$^\circ$ for all methods); spurious long-range correlations wreck an unlocalized update (valid 2.4--3.7).};
+\node[card, above=0.4cm of s4] (p4) {Truth generated by a different solver. Observations still fit (obs RMSE $\approx\sigma_{\rm obs}$) but the field does not: valid 1.3--1.4 turbulent, 1.7--2.1 periodic; field RMSE 4$\times$; every posterior overconfident.};
+% remedy cards (below)
+\node[lab, anchor=east] at (-1.3,-2.2) {WHAT IT\\TAKES};
+\node[card, below=0.4cm of s1] (r1) {\textbf{Sequential state update.} EnKF joint$+$RTPS, \emph{no} localization: valid \good{0.32}, $\alpha$ 3.9$^\circ$, $\chi^2$ 0.99.\\[2pt]Techniques: RTPS (calibration), joint estimation ($-$41\,\% valid).};
+\node[card, below=0.4cm of s2] (r2) {\textbf{Parameter smoother is enough.} ESMDA$+$loc: valid \good{0.37}, $\alpha$ \good{2.3$^\circ$}, $\Umag$ 0.37; generalises to the unobserved $z=20$ m sensor.\\[2pt]Techniques: localization ($-$10\,\%), 30 s obs interval for calibration.};
+\node[card, below=0.4cm of s3] (r3) {\textbf{Localized state filter; stop estimating parameters.} Hybrid or EnKF state$+$RTPS with correlation localization: valid \good{1.25}, $\chi^2$ 1.8/0.9, $q$ 0.87.\\[2pt]Techniques: localization ($-$47 to $-$58\,\%), RTPS; joint EnKF diverges.};
+\node[card, below=0.4cm of s4] (r4) {\textbf{Robustness over accuracy.} Filter smoothing stays bounded where joint EnKF diverges (periodic: 1.7 vs 3.7; $\Umag$ 1.2 vs 21 m/s); joint EnKF$+$loc best on turbulent (1.30).\\[2pt]Open: representativeness error, inflation of parameters.};
+% method complexity axis
+\draw[-{Latex[length=3mm]}, line width=1pt, black!60] (-2.0,-4.4) -- (18.4,-4.4); \node[font=\scriptsize\bfseries, black!60, anchor=west] at (-2.0,-5.0) {increasing method complexity $\rightarrow$};
+\node[font=\scriptsize, black!60] at (0,-4.7)    {state filter $+$ inflation};
+\node[font=\scriptsize, black!60] at (5.4,-4.7)  {$+$ parameter smoother};
+\node[font=\scriptsize, black!60] at (10.8,-4.7)  {$+$ localization, drop parameters};
+\node[font=\scriptsize, black!60] at (16.2,-4.7) {$+$ hybrid smoother/filter};
+\draw[-{Latex[length=3mm]}, line width=1pt, black!60] (-2.0,3.7) -- (18.4,3.7); \node[font=\scriptsize\bfseries, black!60, anchor=west] at (-2.0,4.3) {increasing problem complexity $\rightarrow$};
+\node[font=\scriptsize, black!60] at (0,3.4)    {phase-locked};
+\node[font=\scriptsize, black!60] at (5.4,3.4)  {chaotic, forced};
+\node[font=\scriptsize, black!60] at (10.8,3.4)  {chaotic, unforced};
+\node[font=\scriptsize, black!60] at (16.2,3.4) {chaotic $+$ wrong model};
+\end{tikzpicture}
+\end{adjustbox}
+\caption{Storyboard. Left to right the problem gets harder (top axis); each station lists
+what makes it hard (top card) and the minimum method that copes with it (bottom card),
+so that the bottom axis is the method-complexity ladder. Numbers are validation vector
+RMSE [m/s], inflow-angle RMSE and calibration from Section~\ref{sec:cmp}.}
+\label{fig:concl:story}
+\end{figure}
+\end{landscape}
+
+\subsection{Bottom line}
+\begin{enumerate}[nosep]
+  \item \textbf{No single method wins.} The ranking of ESMDA, joint EnKF and the hybrid on
+        held-out sensors reverses between the three regimes; the regime, not the knob,
+        decides.
+  \item \textbf{Parameters are recoverable only when an inflow signal exists}, and
+        $\Umag$ only by the smoother-based methods (ESMDA, hybrid).
+  \item \textbf{Localization and inflation are regime-dependent tools}: mandatory on
+        periodic, neutral on turbulent inflow, harmful on laminar inflow (localization).
+  \item \textbf{Calibration and accuracy are anti-correlated across methods}: the
+        RTPS filters are calibrated ($\chi^2\approx1$) but not the most accurate; ESMDA
+        and the hybrid are most accurate on turbulent inflow but overconfident.
+  \item \textbf{Model error is the real frontier}: it compresses all methods to
+        valid $\approx$1.3--1.4 and makes every posterior overconfident; the hybrid is
+        the only method that never diverges under it.
+\end{enumerate}

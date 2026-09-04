@@ -1,0 +1,515 @@
+% Long \code{} run names are unbreakable; \sloppy keeps them from producing
+% overfull boxes.  Scoped to this section only.
+\begingroup
+\sloppy
+
+\section{Filter smoothing (hybrid)}
+\label{sec:fs}
+
+\input{sections/filter_smoothing_tables}
+
+\subsection{Method and experiment matrix}
+\label{sec:fs:matrix}
+
+Filter smoothing splits the two estimation problems between two estimators
+inside every assimilation window. \textbf{Parameters} are updated by
+\code{TimeVaryingParameterESMDA} (three MDA steps, \code{num\_time\_points=1},
+\code{pin\_initial\_time\_point=true}) run against \emph{aggregated}
+observations: the mean over bins of \code{esmda.interval\_seconds}.
+\textbf{State} is updated by a stochastic \code{EnsembleKalmanFilter}
+(\code{filtering.mode=state}, \code{StochasticEnKFAnalysis}, RTPS inflation
+$\alpha = 0.6$) that assimilates \emph{every} $2$~s cycle. The smoother is
+called with \code{final\_forecast=False}, so the window posterior state comes
+from the filter, not from the last MDA iteration. Everything else --- domain,
+ensemble size $N = 50$, $\sigma_{\mathrm{obs}} = 0.1$, three $120$~s windows to
+$t = 360$~s, six assimilated and four validation sensors, $15$ parameter knots,
+the AR(2) climatological prior --- is the shared setup of Section~\ref{sec:setup}.
+
+Two knobs are swept on top of the three boundary-condition cases: localization
+on/off (\code{loccorrelation} with truncation $0.35$, tapering $\beta = 0.5$,
+max inflation $8$, applied to \emph{both} the filter and the smoother, versus
+\code{locnone}), and the \textbf{ESMDA aggregation interval}
+$\Delta t_{\mathrm{E}} = $ \code{esmda.interval\_seconds} $\in \{7.5, 15,
+30\}$~s.
+
+\begin{quote}
+\textbf{\bad{Caveat on the method knob.}} $\Delta t_{\mathrm{E}}$ changes
+\emph{only} the width of the bin the smoother averages observations over ($192$,
+$96$ and $48$ aggregated observations per window). \textbf{The EnKF still
+assimilates every $2$~s cycle in all \HybNumRuns{} runs.} This is not an
+observation-frequency study and must not be read as one
+(\S\ref{sec:fs:interval}).
+\end{quote}
+
+\begin{table}[H]
+  \centering
+  \caption{Filter smoothing: the \HybNumRuns{} experiments, their run IDs and
+  the run directories under
+  \code{presentations/isda\_new/} \code{experiments/filter\_smoothing/}. IDs are
+  assigned by sorting the directory names alphabetically; the directory name is
+  given here and nowhere else in this section. \code{loc} is
+  \code{loccorrelation} (on) or \code{locnone} (off). Reference run of each
+  case: H11, H12, H13.}
+  \label{tab:fs:matrix}
+  \HybMatrixTable
+\end{table}
+
+\subsection{Master results}
+\label{sec:fs:master}
+
+\begin{table}[H]
+  \centering
+  \caption{Filter smoothing: all \HybNumRuns{} runs, uDALES-truth block first.
+  ``assim''/``valid'' are the vector RMSEs at the six assimilated and four
+  validation sensors; ``field $\Umag$'' is the volume velocity-magnitude RMSE;
+  $\alpha$ and $\Umag$ are parameter RMSEs with the reduction vs prior in
+  parentheses; $\chi^2$ is the mean innovation chi-square over the $180$ cycles
+  ($1$ = calibrated); $z_{\mathrm{par}}$ is the pooled parameter $z$-score
+  standard deviation ($1$ = calibrated, $\gg 1$ = overconfident); $q$ is the
+  field hit rate, undefined for PALM truth because truth and model live on
+  different grids. Bold marks the best value per column within each truth
+  block.}
+  \label{tab:fs:master}
+  \HybMasterTable
+\end{table}
+
+Read Table~\ref{tab:fs:master} case by case, not row by row: the boundary
+condition, not the tuning, decides what works. State and observation
+performance is best on \code{periodic} (assimilated-sensor vector RMSE
+$0.31$, field hit rate up to $0.867$, $\chi^2 \approx 1.8$); parameter recovery
+is best on \code{inflow\_turb} ($\alpha$ RMSE down to $1.94^\circ$, an $88\%$
+reduction vs prior); and no run is good at both. The laminar \code{inflow} case,
+which reads as the easy one, is the worst calibrated of the three. The
+$\Delta t_{\mathrm{E}}$ column moves almost nothing --- as it must, given the
+caveat above. Localization off buys a lower mean $\alpha$ error on
+\code{periodic} while wrecking every other column, which is the signature of a
+collapsed ensemble rather than a better estimate. Under PALM truth the sensor
+fit degrades by roughly a factor of $2$--$3$ and both parameter reductions turn
+negative on \code{periodic}.
+
+\subsection{Results by case}
+\label{sec:fs:cases}
+
+All three subsections use the reference run of the case: uDALES truth,
+localization on, $\Delta t_{\mathrm{E}} = 15$~s.
+
+\subsubsection{Laminar inflow (\code{inflow})}
+\label{sec:fs:inflow}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{filter_smoothing/valid_H11.png}
+  \caption{H11 (uDALES truth, \code{inflow}, localization on,
+  $\Delta t_{\mathrm{E}} = 15$~s): validation sensor~0 ($z = 2$~m), validation
+  sensor~3 ($z = 20$~m) and the all-validation-sensor error panel. The x-axis is
+  the \emph{cycle index} ($0$--$180$, $2$~s per cycle), not seconds as in the
+  ESMDA and filtering sensor figures. The 50 members are visually
+  indistinguishable from their mean --- the ensemble has collapsed --- and the
+  mean sits below the truth for long stretches, a bias rather than noise.}
+  \label{fig:fs:valid_H11}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.92\textwidth]{filter_smoothing/parerr_H11.png}
+  \caption{H11: per-knot parameter error, inflow angle $\alpha$ above and
+  velocity magnitude $\Umag$ below (blue RMSE, orange CRPS, shaded band =
+  window~2). This figure is in seconds. Window~1 is converged to below
+  $1.5^\circ$; the error then grows monotonically to $15.8^\circ$ at
+  $t = 300$~s, and RMSE and CRPS nearly coincide throughout --- an ensemble with
+  no spread left to score.}
+  \label{fig:fs:parerr_H11}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\textwidth]{filter_smoothing/marginals_H11.png}
+  \caption{H11: prior and posterior marginals at the final parameter knot (14 of
+  15), $\alpha$ left and $\Umag$ right; dashed line = truth ($18.8^\circ$,
+  $8.08$~m/s). The posterior overshoots to $28^\circ$ and $9.1$~m/s with a
+  spread far too narrow to cover the truth ($z = -2.60$ and $-4.80$).}
+  \label{fig:fs:marginals_H11}
+\end{figure}
+
+\begin{itemize}[nosep]
+  \item \textbf{State.} Assimilated-sensor vector RMSE $0.506$, validation
+        $0.593$, field $\Umag$ RMSE $0.486$ (H11; $0.524$/$0.620$/$0.438$
+        without localization, H18). This is the \emph{worst} non-periodic
+        validation result in the uDALES block --- the hybrid does not win the
+        easy case.
+  \item \textbf{Parameters.} $\alpha$ RMSE $5.81^\circ$ ($66\%$ reduction vs
+        prior) and $\Umag$ RMSE $0.616$~m/s ($24\%$). The run-mean looks
+        respectable only because window~1 is nearly perfect; by the final knot
+        the angle error is $9.57^\circ$ (Fig.~\ref{fig:fs:parerr_H11}).
+  \item \textbf{Calibration.} \bad{The worst of the three cases:} $\chi^2 =
+        13.3$, pooled $z = 10.6$, field hit rate $q = 0.433$ (the lowest in the
+        table), and contraction ratios $0.32$/$0.35$. The rank histogram
+        (Fig.~\ref{fig:fs:rank}, left) puts $68\%$ of the validation ranks in the
+        two end bins against a uniform expectation of $4\%$.
+  \item \textbf{Mechanism.} The smooth laminar flow gives the filter almost
+        nothing to correct, the ensemble contracts, and it then cannot track the
+        parameter drift. Only $\Delta t_{\mathrm{E}} = 15$~s was run for this
+        case, so there is no interval sweep here.
+\end{itemize}
+
+\subsubsection{Turbulent inflow (\code{inflow\_turb})}
+\label{sec:fs:inflowturb}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{filter_smoothing/valid_H12.png}
+  \caption{H12 (uDALES truth, \code{inflow\_turb}, localization on,
+  $\Delta t_{\mathrm{E}} = 15$~s): validation sensors~0 and~3 plus the error
+  panel; x-axis in cycle index ($2$~s per cycle). The ensemble keeps a visible
+  spread and tracks the fluctuating $1.0$--$2.1$~m/s ground signal cycle by
+  cycle; on-figure magnitude-only RMSE $0.367$ against a vector RMSE of $0.497$
+  in Table~\ref{tab:fs:master}.}
+  \label{fig:fs:valid_H12}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.92\textwidth]{filter_smoothing/parerr_H12.png}
+  \caption{H12: per-knot $\alpha$ and $\Umag$ error (seconds on the x-axis).
+  Unlike \code{inflow} the error stays bounded across all three windows and a
+  healthy RMSE--CRPS gap survives to the end: this is the only case in which the
+  parameters are genuinely recovered.}
+  \label{fig:fs:parerr_H12}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\textwidth]{filter_smoothing/marginals_H12.png}
+  \caption{H12: final-knot marginals. The posterior lands at $15.2^\circ$
+  against a truth of $18.8^\circ$ --- much closer than either other case --- but
+  the spread is so narrow that $z = 3.59$; $\Umag$ overshoots to $8.8$~m/s
+  ($z = -6.28$). The final knot is the worst knot in every run.}
+  \label{fig:fs:marginals_H12}
+\end{figure}
+
+\begin{itemize}[nosep]
+  \item \textbf{Parameters --- the one case that works.} $\alpha$ RMSE
+        \good{$1.94$--$3.45^\circ$} across the four matched-model runs
+        ($82$--$88\%$ reduction vs prior), bounded in every window;
+        $\Umag$ RMSE $0.365$--$0.512$~m/s ($37$--$54\%$).
+  \item \textbf{State --- the best of the sweep.} H19 (localization off) has the
+        lowest validation vector RMSE ($0.441$), the lowest assimilated-sensor
+        RMSE ($0.256$) and the lowest field $\Umag$ RMSE ($0.430$) in the whole
+        uDALES block.
+  \item \textbf{Calibration --- mid-range and clearly imperfect.}
+        $\chi^2 = 3.27$--$3.68$, pooled $z = 5.01$--$9.06$, $q = 0.498$--$0.728$,
+        validation rank-edge fraction $0.28$--$0.34$. Under-dispersive, but
+        nothing like \code{inflow}.
+  \item \textbf{Localization is close to a wash here.} It helps the angle
+        ($2.61^\circ$ on, $3.45^\circ$ off) and the pooled $z$ ($5.01$ vs
+        $9.06$); it costs on the sensors ($0.497$ vs $0.441$) and on the hit
+        rate ($0.535$ vs $0.728$).
+\end{itemize}
+
+\subsubsection{Periodic boundaries (\code{periodic})}
+\label{sec:fs:periodic}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{filter_smoothing/valid_H13.png}
+  \caption{H13 (uDALES truth, \code{periodic}, localization on,
+  $\Delta t_{\mathrm{E}} = 15$~s): validation sensors~0 and~3 plus the error
+  panel; x-axis in cycle index. This is the honest limitation of the best-state
+  run: at sensors that were never assimilated the ensemble median is damped and
+  the truth leaves the ensemble repeatedly (on-figure magnitude RMSE $0.688$),
+  even though the assimilated sensors are fitted to $0.314$ vector RMSE.}
+  \label{fig:fs:valid_H13}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.92\textwidth]{filter_smoothing/parerr_H13.png}
+  \caption{H13: per-knot $\alpha$ and $\Umag$ error (seconds on the x-axis). The
+  angle error never falls decisively below the $16.6^\circ$ climatological prior
+  and ends at $25.8^\circ$ --- worse than the prior. The forcing is not
+  identifiable from six near-ground sensors under periodic lateral boundaries.}
+  \label{fig:fs:parerr_H13}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\textwidth]{filter_smoothing/marginals_H13.png}
+  \caption{H13: final-knot marginals. The prior mean sits at $+2^\circ$ against a
+  truth of $18.8^\circ$ and the update moves the posterior to $-6^\circ$, i.e.\
+  \emph{away} from the truth ($z = 3.52$); $\Umag$ barely moves ($z = 1.32$).
+  This is the figure that forbids presenting \code{periodic} as a
+  parameter-estimation success.}
+  \label{fig:fs:marginals_H13}
+\end{figure}
+
+\begin{itemize}[nosep]
+  \item \textbf{State --- the best in the section.} Assimilated-sensor vector
+        RMSE $0.309$--$0.314$ with localization; field $\Umag$ RMSE
+        $1.018$--$1.023$. Validation is the weak side ($1.229$--$1.271$): the
+        held-out sensors sit in a flow the six assimilated ones do not constrain.
+  \item \textbf{Calibration --- also the best in the section.} $\chi^2 = 1.80$,
+        $1.81$, $1.91$ for $\Delta t_{\mathrm{E}} = 7.5/15/30$~s; pooled $z$ down
+        to $2.59$ (H15); $q = 0.867$ for H13 with $q_u = 0.952$, $q_v = 0.917$,
+        $q_w = 0.731$; validation rank-edge fraction $0.09$--$0.10$, by far the
+        closest to uniform anywhere in the sweep.
+  \item \bad{\textbf{Parameters --- a failure.}} $\alpha$ RMSE $13.4$--$14.7^\circ$,
+        i.e.\ a $12$--$18\%$ reduction against a $16.4$--$16.7^\circ$
+        climatological prior, with a final-knot error of $25.8^\circ$ for H13;
+        $\Umag$ improves by $7$--$10\%$.
+  \item \textbf{And it is unidentifiability, not non-convergence.} The smoother
+        drives its normalized data mismatch onto target on this case and the
+        posterior observation RMSE reaches $0.053$ against
+        $\sigma_{\mathrm{obs}} = 0.1$: it fits the aggregated observations almost
+        perfectly with the \emph{wrong} boundary-condition parameters. The right
+        framing for \code{periodic} is \emph{state estimation under an
+        unidentifiable forcing}.
+\end{itemize}
+
+\subsection{Model error (PALM truth)}
+\label{sec:fs:modelerror}
+
+Rows H2--H10 of Table~\ref{tab:fs:master} replace the uDALES truth by PALM while
+keeping uDALES as the assimilation model, so the ensemble carries genuine
+structural model error.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{filter_smoothing/modelerror_valid_inflow_turb.png}
+  \caption{H12 (uDALES truth) versus H2 (PALM truth) on \code{inflow\_turb} at
+  identical settings: validation sensor~0 and the validation-error panel, x-axis
+  in cycle index. Under model error the ensemble is flat and stays near
+  $1.3$~m/s while the truth swings between $0.5$ and $3.0$~m/s; the on-figure
+  magnitude RMSE rises from $0.367$ to $0.974$.}
+  \label{fig:fs:modelerror}
+\end{figure}
+
+\begin{itemize}[nosep]
+  \item \textbf{\code{inflow\_turb} is the presentable half.} The angle still
+        drops to $6.89$--$8.89^\circ$ ($39$--$57\%$ reduction vs prior) and
+        $\Umag$ to $0.414$--$0.485$~m/s ($36$--$45\%$); field $\Umag$ RMSE
+        ($0.987$--$1.28$) is about twice the matched-model value. But the
+        calibration is the worst in the section: $\chi^2 = 33.3$--$43.3$, pooled
+        $z = 10.5$--$15.5$, validation rank-edge fraction $0.67$--$0.80$.
+  \item \bad{\textbf{\code{periodic} loses the field entirely.}} Field $\Umag$
+        RMSE jumps to $4.16$--$4.27$ against $1.02$ for matched model --- a
+        factor of $4$ --- and validation vector RMSE to $1.70$--$1.88$ from
+        $1.25$, while the assimilated sensors are still fitted ($0.568$--$0.623$).
+        The filter absorbs structural error into the state and the boundary
+        condition instead of correcting it.
+  \item \textbf{The parameter update reverses sign.} On every PALM
+        \code{periodic} run $\Umag$ ends \emph{worse} than its prior ($-19$ to
+        $-35\%$) and the angle reduction is $2$--$13\%$ (and $-15\%$ without
+        localization) --- the classic model-error signature.
+  \item \textbf{The worst run of the sweep is H10} (model error, \code{periodic},
+        localization off): $\chi^2 = 49.0$, pooled $z = 102$, field $\Umag$ RMSE
+        $4.62$, validation $2.63$, both parameters worse than prior.
+  \item The field hit rate $q$ is undefined for the whole PALM block: truth and
+        assimilation model are on different grids, so only sensor-space and
+        parameter metrics are comparable across the two truth blocks.
+\end{itemize}
+
+\subsection{Sensitivities}
+\label{sec:fs:sens}
+
+\subsubsection{Localization}
+\label{sec:fs:loc}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.86\textwidth]{filter_smoothing/localization_parerr_periodic.png}
+  \caption{Localization on/off on \code{periodic} at matched settings: H13 (top
+  pair) versus H20 (bottom pair), $\alpha$ above $\Umag$ within each pair;
+  seconds on the x-axis. In H20 the RMSE and CRPS curves lie on top of each other
+  at every knot --- the textbook signature of a collapsed ensemble, whose lower
+  mean angle error is an artefact of near-zero spread rather than a better
+  estimate.}
+  \label{fig:fs:loc}
+\end{figure}
+
+Five matched pairs differ only by localization (H11/H18, H12/H19, H13/H20,
+H2/H9, H3/H10 in Table~\ref{tab:fs:master}). The effect is strongly
+case-dependent, and on \code{periodic} it has opposite signs for the parameters
+and for everything else.
+
+\begin{itemize}[nosep]
+  \item \code{inflow}: localization helps the angle ($5.81^\circ$ vs
+        $7.87^\circ$) and the calibration (pooled $z$ $10.6$ vs $15.7$) and is
+        neutral on the sensors ($0.593$ vs $0.620$ validation).
+  \item \code{inflow\_turb}: a wash, as listed in \S\ref{sec:fs:inflowturb}.
+  \item \code{periodic}: \bad{turning localization off reports a better mean
+        angle error ($8.89^\circ$ vs $14.58^\circ$) that must not be believed.}
+        The same run has $\chi^2 = 23.1$ (vs $1.81$), pooled $z = 41.5$ (vs
+        $2.67$), $\Umag$ \emph{worse} than its prior ($-27\%$), validation vector
+        RMSE $42\%$ worse ($1.766$ vs $1.246$), field $\Umag$ RMSE $50\%$ worse
+        ($1.529$ vs $1.019$) and a validation rank-edge fraction of $0.625$ vs
+        $0.095$.
+  \item Under model error localization is unambiguously necessary: dropping it
+        takes pooled $z$ from $2.97$ to $102$ on \code{periodic} and degrades
+        every state metric.
+\end{itemize}
+
+\subsubsection{ESMDA aggregation interval}
+\label{sec:fs:interval}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\textwidth]{filter_smoothing/interval_parerr_inflow_turb.png}
+  \caption{H16, H12 and H14 (uDALES truth, \code{inflow\_turb}, localization on,
+  $\Delta t_{\mathrm{E}} = 7.5$, $15$, $30$~s): the inflow-angle error panel of
+  each run, seconds on the x-axis. Note the differing vertical scales. Finer
+  aggregation bins retain more information for the smoother --- the trend is
+  real but only about $1^\circ$ wide, an order of magnitude smaller than the
+  differences between cases.}
+  \label{fig:fs:interval}
+\end{figure}
+
+Twelve runs form four $7.5/15/30$~s sweeps (two cases $\times$ two truth models).
+Because only the smoother's aggregation bin changes --- the filter assimilates
+every $2$~s in every row --- the observed sensitivity is exactly what that
+implies.
+
+\begin{itemize}[nosep]
+  \item \textbf{State metrics are essentially inert.} \code{inflow\_turb} with
+        uDALES truth: field $\Umag$ RMSE $0.539/0.533/0.548$, validation
+        $0.471/0.497/0.487$. \code{periodic}: field $1.018/1.019/1.023$,
+        validation $1.229/1.246/1.271$. Every spread is under $4\%$.
+  \item \textbf{Parameters show a small monotone trend on \code{inflow\_turb}}:
+        $\alpha$ RMSE $1.94/2.61/2.86^\circ$ (Fig.~\ref{fig:fs:interval}).
+  \item \textbf{On \code{periodic} even the parameters barely move}:
+        $13.4/14.6/14.7^\circ$, all within noise of the climatological prior.
+  \item Under model error the trend is not even monotone (\code{inflow\_turb}:
+        $8.63/6.96/8.89^\circ$; \code{periodic}: $14.5/15.7/18.2^\circ$),
+        consistent with model error dominating the aggregation width.
+\end{itemize}
+
+\subsection{Calibration}
+\label{sec:fs:calibration}
+
+\begin{table}[H]
+  \centering
+  \caption{Filter smoothing: calibration diagnostics for the \HybNumOk{}
+  completed runs. $z_\bullet$ are parameter $z$-score standard deviations
+  ($1$ = calibrated); $c_\bullet$ are mean posterior/prior spread contraction
+  ratios; $q$ is the field hit rate with its per-component values; ``edge frac''
+  is the fraction of pooled validation-sensor ranks falling in the two extreme
+  bins, against a uniform expectation of $0.039$ for $N = 50$.}
+  \label{tab:fs:calib}
+  \HybCalibTable
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{filter_smoothing/rank_hist_cases.png}
+  \caption{Posterior rank histograms of the truth within the 50-member ensemble
+  for the three reference runs H11, H12 and H13 (top row: assimilated sensors,
+  $N = 4320$; bottom row: validation sensors, $N = 2880$). Dashed line =
+  uniform, grey band = $\pm 2\sigma$. \code{inflow} is violently U-shaped (end
+  bins about $4\times$ uniform): gross under-dispersion. \code{inflow\_turb} is
+  moderately U-shaped. \code{periodic} is near-uniform on the assimilated
+  sensors with only a mild U on the validation sensors.}
+  \label{fig:fs:rank}
+\end{figure}
+
+Three facts stand out of Table~\ref{tab:fs:calib}.
+
+\begin{enumerate}[nosep]
+  \item \textbf{Every run is parameter-overconfident.} The pooled $z$-score
+        standard deviation ranges from \HybZMin{} to \HybZMax{} where $1$ is
+        calibrated; even the best run (H15) is off by a factor of $2.6$.
+        \bad{No ``well-calibrated parameters'' claim can be supported by these
+        runs.}
+  \item \textbf{The ordering ``\code{inflow} easy $\rightarrow$ \code{periodic}
+        hard'' is false for calibration.} \code{inflow} has the worst $\chi^2$
+        ($13.3$--$15.0$), the worst hit rate ($0.433$) and the worst rank-edge
+        fraction ($0.68$--$0.73$); \code{periodic} with localization has the best
+        of all three ($\chi^2 \approx 1.8$, $q$ up to $0.867$, edge fraction
+        $0.09$). Difficulty for the state and difficulty for the parameters are
+        anti-correlated here.
+  \item \textbf{The vertical component is the weak one.} Where $q$ resolves by
+        component, $q_u$ is $0.92$--$0.95$ everywhere, whereas $q_w$ ranges from
+        $0.217$ (\code{inflow}) to $0.731$ (H13). $q_v$ is the most
+        case-sensitive ($0.143$ to $0.917$).
+\end{enumerate}
+
+\subsection{Failed runs and cost}
+\label{sec:fs:failed}
+
+Two of the \HybNumRuns{} directories, H1 and H8 --- the only two PALM-truth
+\code{inflow} runs --- contain only \code{config.yaml}, \code{hydra/} and an
+empty \code{windows/}. Both failed for the same reason, recorded in
+\code{\_logs/*.log}: PALM produced only $52$ of the $180$ expected $2$~s 3D
+output frames, i.e.\ it diverged after roughly $104$~s of a $360$~s truth
+trajectory, and \code{pypalm.forward\_model.\_fit\_output\_window} refused to pad
+the missing $128$ frames. The failure happens while generating the truth
+trajectory, before any assimilation, so this is a PALM stability problem in the
+laminar-inflow configuration (disturbances and initial seeding both off), not a
+data-assimilation failure; it is independent of the localization setting, and
+the matched-model \code{inflow} runs and the PALM \code{inflow\_turb} and
+\code{periodic} runs are unaffected.
+
+Cost is flat: \HybWallMin--\HybWallMax~h per run across all \HybNumOk{}
+completed runs (\HybCycleMin--\HybCycleMax~s per $2$~s cycle at $N = 50$ with
+$10$ parallel processes), with \code{periodic} slightly cheaper than the two
+inflow cases. Neither the case, the localization setting nor
+$\Delta t_{\mathrm{E}}$ changes the cost measurably, and all $50$ members remain
+distinct in every run.
+
+\subsection{Takeaways}
+\label{sec:fs:takeaways}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Both halves, neither best.} On \code{periodic} at matched
+        settings the hybrid H13 fits the assimilated sensors to $0.314$ vector
+        RMSE against $1.091$ for ESMDA-only (E13), and keeps $\Umag$ parameter
+        RMSE at $0.756$~m/s against $4.221$~m/s for the joint EnKF (F11). It does
+        \emph{not} beat ESMDA-only on parameters ($14.58^\circ$ vs $13.62^\circ$)
+        and is statistically indistinguishable from a state-only EnKF with RTPS
+        on the state ($1.246$ vs $1.261$ validation; $1.019$ vs $1.029$ field
+        $\Umag$); its advantage over that baseline is that it also returns a
+        boundary-condition estimate. Section~\ref{sec:cmp} settles the ranking.
+  \item \good{\textbf{Parameters work on \code{inflow\_turb} only.}} $\alpha$
+        RMSE $1.94$--$3.45^\circ$ ($82$--$88\%$ reduction vs prior) across all
+        four matched-model runs, bounded in every window, at a validation vector
+        RMSE of $0.441$--$0.497$.
+  \item \bad{\textbf{Periodic forcing is unidentifiable.}} $12$--$18\%$ reduction
+        vs prior, a final-knot error of $25.8^\circ$ and a posterior that moves
+        away from the truth --- even though the smoother fits the aggregated
+        observations to $0.053$ against $\sigma_{\mathrm{obs}} = 0.1$.
+  \item \bad{\textbf{The interval knob is a placebo}} for the state: it changes
+        only the smoother's aggregation bin, and state metrics move by under
+        $4\%$ across $7.5/15/30$~s. It buys about $1^\circ$ of angle accuracy on
+        \code{inflow\_turb} and nothing measurable elsewhere.
+  \item \textbf{Localization keeps the ensemble alive.} A better parameter number
+        without it is a red flag: H20 reports $8.89^\circ$ vs H13's $14.58^\circ$
+        from an ensemble with $\chi^2 = 23.1$ and pooled $z = 41.5$, and pays
+        $42\%$ on validation sensors. Under model error, localization off pushes
+        pooled $z$ to $102$.
+  \item \textbf{Model error costs a factor of four.} PALM truth on
+        \code{periodic} gives field $\Umag$ RMSE $4.16$--$4.27$ versus $1.02$
+        matched, and both parameters end worse than their prior on every such
+        run, while the observation fit stays at $\sigma_{\mathrm{obs}}$.
+  \item \textbf{The easy case is the worst calibrated.} Every run is
+        parameter-overconfident (pooled $z$ \HybZMin--\HybZMax), and laminar
+        \code{inflow} --- not \code{periodic} --- has the worst $\chi^2$
+        ($13.3$--$15.0$) and the worst hit rate ($0.433$). Cost is a flat
+        \HybWallMin--\HybWallMax~h per run throughout.
+\end{enumerate}
+
+\clearpage
+\subsection{Appendix: all runs}
+\label{sec:fs:appendix}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[height=0.80\textheight]{filter_smoothing/parerr_grid_all.png}
+  \caption{Inflow-angle error per knot for all \HybNumOk{} completed runs
+  (same order as Table~\ref{tab:fs:master}; blue RMSE, orange CRPS, shaded
+  band = window~2, seconds on the x-axis). \textbf{Vertical scales differ between
+  panels.} Two patterns read at a glance: the \code{inflow\_turb} panels stay
+  flat on a scale that tops out below $8^\circ$ while every \code{periodic}
+  panel needs $15$--$35^\circ$, and in the localization-off panels the RMSE and
+  CRPS curves collapse onto each other.}
+  \label{fig:fs:grid}
+\end{figure}
+
+\endgroup

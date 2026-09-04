@@ -1,0 +1,561 @@
+% ESMDA section.
+% Tables are auto-generated: experiments_report/scripts/extract_esmda.py
+%   -> sections/esmda_tables.tex (\EsmdaMatrixTable, \EsmdaMasterTable, \EsmdaCalibTable)
+% Figures are auto-generated: experiments_report/scripts/make_esmda_figures.py
+%   -> figures/esmda/
+
+\begingroup\sloppy
+
+\section{ESMDA}
+\label{sec:esmda}
+
+\input{sections/esmda_tables}
+
+\subsection{Method and experiment matrix}
+\label{sec:esmda-method}
+
+ESMDA is run here as \code{TimeVaryingParameterESMDA} with
+\code{joint\_state\_and\_parameter: false}, i.e.\ a \emph{parameter-only}
+smoother. The state is never touched by the analysis: it improves only because
+the forward model is re-run over the whole window with better boundary
+parameters. Each of the three \SI{120}{\second} windows is solved with 3 ESMDA
+iterations at inflation $\alpha_i = 3$ --- four forward ensemble passes per
+window --- and is warm-started from the previous window's final state. The
+control vector is the pair of time-varying inflow parameters $\alpha$ and
+$\Umag$ on 15 harmonic knots (\SI{30}{\second} per knot, window boundaries
+sharing a knot); \code{pin\_initial\_time\_point: true}, and the static vertical
+inflow exponent is not estimated. Observations are time-mean aggregates of $u$
+and $v$ over the observation interval, so the observation count per window is
+$N_d = 192 / 96 / 48$ at $\Delta t_{\mathrm{obs}} = 7.5 / 15 / \SI{30}{\second}$.
+
+Two knobs are swept. The \textbf{observation interval} is the method knob of
+this section; localization on/off is the shared knob. Localization was varied
+only at $\Delta t_{\mathrm{obs}} = \SI{15}{\second}$ and the interval only on
+\code{inflow\_turb} and \code{periodic}, so the twenty configurations of
+Table~\ref{tab:esmda-matrix} form a cross, not a full grid. The reference run of
+each case is uDALES truth with localization on at
+$\Delta t_{\mathrm{obs}} = \SI{15}{\second}$: E11 (\code{inflow}),
+E12 (\code{inflow\_turb}), E13 (\code{periodic}).
+
+One ESMDA-specific diagnostic is quoted throughout and appears in no table: the
+normalised data mismatch $O_N$ (median over members) after each iteration, whose
+nominal target is $1/2$. Every run is flagged \code{underfit\_final: true} with
+\code{caveat: no\_representativeness\_error}, so only the \emph{trend} across
+iterations is meaningful, and $O_N$ is not comparable between observation
+intervals because $N_d$ differs.
+
+\EsmdaMatrixTable
+
+\subsection{Master results}
+\label{sec:esmda-master}
+
+\EsmdaMasterTable
+
+Table~\ref{tab:esmda-master} collects every run. Read as a block it says four
+things. First, the \emph{case} dominates every knob: with uDALES truth the
+$\alpha$ RMSE is 2.31--\SI{2.45}{\degree} on \code{inflow\_turb},
+7.59--\SI{7.74}{\degree} on \code{inflow} and 12.9--\SI{14.8}{\degree} on
+\code{periodic}, while localization and the observation interval move it by
+tenths of a degree. Second, that ordering \emph{inverts} the naive one: the
+physically harder turbulent-inlet case is the one ESMDA does best on, because
+there the boundary forcing --- and hence the estimated parameters --- is what
+the sensors actually see. Third, the truth model matters almost as much as the
+case: the same \code{inflow\_turb} configuration under PALM truth only reaches
+6.62--\SI{7.83}{\degree}, and the field $\Umag$ RMSE degrades from
+$\approx 0.37$ to $\approx 1.05$. Fourth, ESMDA \good{generalises at least as
+well as it fits} wherever it works at all --- on E12 the validation vector RMSE
+(0.365) is \emph{below} the assimilation vector RMSE (0.401), the expected
+signature of correcting a global boundary condition rather than local state.
+
+Two cautions on reading the table. The reduction-vs-prior percentages are
+relative to each run's own re-drawn prior (\SI{14.6}{\degree} to
+\SI{20.3}{\degree} of $\alpha$ RMSE across the set), so they compare rows within
+this section but must never be carried across methods. And on \code{periodic}
+the 18--22\,\% ``reduction'' is a spread reduction, not a bias reduction
+(Section~\ref{sec:esmda-periodic}).
+
+\subsection{Results by case}
+\label{sec:esmda-cases}
+
+This subsection uses uDALES truth only; PALM truth is
+Section~\ref{sec:esmda-modelerror}.
+
+\subsubsection{Laminar inflow (\code{inflow})}
+\label{sec:esmda-inflow}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{esmda/valid_E11.png}
+\caption{E11 (uDALES truth, \code{inflow}, localization on,
+$\Delta t_{\mathrm{obs}} = \SI{15}{\second}$): validation sensors 0
+($z = \SI{2}{\meter}$) and 3 ($z = \SI{20}{\meter}$, never observed at that
+height) and the pooled validation error. The ensemble tracks truth almost
+exactly for the first \SI{120}{\second}, then loses phase: the error rises from
+$< 0.2$ to $1.7$ around $t \approx \SI{190}{\second}$ and the ensemble spread
+does not cover the gap.}
+\label{fig:esmda-valid-E11}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.92\textwidth]{esmda/perr_E11.png}
+\caption{E11: per-knot parameter error, inflow angle above and velocity
+magnitude below (RMSE of the ensemble mean and CRPS of the ensemble). The shaded
+band is assimilation window~1. The angle error is small at the start and end of
+the record and largest in the middle windows, mirroring the sensor phase error
+of Figure~\ref{fig:esmda-valid-E11}.}
+\label{fig:esmda-perr-E11}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.82\textwidth]{esmda/marg_E11.png}
+\caption{E11: final-knot ($t = \SI{360}{\second}$) prior and posterior marginals
+of $\alpha$ (truth \SI{19.0}{\degree}) and $\Umag$ (truth
+\SI{8.09}{\meter\per\second}). The annotated $z$ is
+$(\theta^\ast - \bar\theta^a)/\sigma^a$: the angle lands on truth ($z = 0.07$)
+while the velocity magnitude over-corrects to $\approx
+\SI{8.97}{\meter\per\second}$ ($z = -4.51$).}
+\label{fig:esmda-marg-E11}
+\end{figure}
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{State.} Partial success. Assimilation vector RMSE 0.665,
+        validation 0.748, field $\Umag$ RMSE 0.477. The failure mode is a
+        \emph{phase} error, not an amplitude error: up to $t \approx
+        \SI{120}{\second}$ both validation sensors sit on truth, after which the
+        ensemble reproduces the right shape roughly \SI{20}{\second} late
+        (Figure~\ref{fig:esmda-valid-E11}).
+  \item \textbf{Parameters.} $\alpha$ is recovered well
+        (\SI{7.74}{\degree} RMSE, 61\,\% reduction vs prior) and the final-knot
+        posterior sits on truth (Figure~\ref{fig:esmda-marg-E11}), but $\Umag$
+        over-corrects: \SI{0.529}{\meter\per\second} RMSE, 31\,\% reduction, and
+        a final knot $+2.33$ prior-$\sigma$ above truth.
+  \item \textbf{Where it stalls.} Window~0 fits essentially to the noise floor,
+        but the pooled mismatch then flattens:
+        $46.8 \to 21.0 \to 18.1 \to 17.5$, with the last two iterations barely
+        moving. \bad{The problem is not the first window} --- it is that the
+        warm-started state entering windows~1 and~2 carries an error that
+        boundary parameters cannot repair. This is the honest motivation for a
+        sequential state filter: here the parameters are already close to right
+        and the state is not.
+  \item \textbf{Calibration.} Badly over-confident: pooled parameter
+        $z$-score std 12.1 against 1.03 expected, and half the validation-sensor
+        rank mass in the two outer bins (edge fraction 0.50 against 0.04).
+        Contraction is 0.30 ($\alpha$) / 0.37 ($\Umag$), so the data \emph{are}
+        informative --- the ensemble simply shrinks too far.
+\end{itemize}
+
+\subsubsection{Turbulent inflow (\code{inflow\_turb})}
+\label{sec:esmda-inflowturb}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{esmda/valid_E12.png}
+\caption{E12 (uDALES truth, \code{inflow\_turb}, localization on,
+$\Delta t_{\mathrm{obs}} = \SI{15}{\second}$): validation sensors 0 and 3 and
+the pooled validation error. The elevated sensor~3 is tracked over the full
+\SI{360}{\second} although every assimilated observation is at
+$z = \SI{2}{\meter}$; the error stays near 0.25 with no drift.}
+\label{fig:esmda-valid-E12}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.92\textwidth]{esmda/perr_E12.png}
+\caption{E12: per-knot parameter error. The angle error stays between
+\SI{0.8}{\degree} and \SI{4.1}{\degree} over all 15 knots and falls in the last
+window, against a prior RMSE of \SI{17.8}{\degree}; compare the
+\SI{1}{\degree}--\SI{15}{\degree} range of the PALM-truth runs in
+Figure~\ref{fig:esmda-grid-palm}.}
+\label{fig:esmda-perr-E12}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.82\textwidth]{esmda/marg_E12.png}
+\caption{E12: final-knot marginals. The angle posterior is tight and centred on
+truth ($z = -0.26$); the velocity magnitude is equally tight but centred
+\SI{0.47}{\meter\per\second} high at \SI{8.56}{\meter\per\second}
+($z = -4.60$) --- the systematic $\Umag$ bias described in the text.}
+\label{fig:esmda-marg-E12}
+\end{figure}
+
+This is the case where ESMDA works, and the best run of the section.
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{State.} Best in the uDALES block on every sensor metric:
+        assimilation vector RMSE 0.401, validation \good{0.365}, field $\Umag$
+        RMSE 0.372. Validation \emph{below} assimilation, and the never-observed
+        $z = \SI{20}{\meter}$ sensor tracked over the full record
+        (Figure~\ref{fig:esmda-valid-E12}).
+  \item \textbf{Parameters.} $\alpha$ RMSE \SI{2.31}{\degree} from a
+        \SI{17.8}{\degree} prior --- an \good{87\,\% reduction} (87\,\% on CRPS
+        as well) --- and $\Umag$ RMSE 0.369 (53\,\%), both the best in the set.
+        The mismatch is the only one in the section that marches monotonically
+        towards its target, $33.7 \to 4.9 \to 2.6 \to 2.4$.
+  \item \textbf{The one blemish is $\Umag$.} The final-knot posterior is
+        $+1.43$ prior-$\sigma$ above truth (Figure~\ref{fig:esmda-marg-E12}),
+        and this high bias is \textbf{systematic}: the final-knot normalised
+        error is positive in every uDALES-truth run with an inlet
+        ($+0.78$ to $+5.93$), while $\alpha$ is essentially unbiased
+        ($-0.69$ to $+0.19$). The most plausible reading is that the ensemble
+        compensates for unmodelled sub-grid and state error by raising the inlet
+        speed.
+  \item \textbf{Calibration.} Still over-confident --- pooled $z$-score std 4.6,
+        validation rank edge fraction 0.58 --- but the best-calibrated
+        \emph{informative} run of the section. Contraction 0.24 / 0.36.
+  \item \textbf{Field skill is not uniform.} The pooled hit rate is 0.62, made
+        of $u = 0.94$ but $v = 0.30$: the streamwise component is captured, the
+        cross-stream one largely is not, even in the best run.
+\end{itemize}
+
+\subsubsection{Periodic boundaries (\code{periodic})}
+\label{sec:esmda-periodic}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{esmda/valid_E13.png}
+\caption{E13 (uDALES truth, \code{periodic}, localization on,
+$\Delta t_{\mathrm{obs}} = \SI{15}{\second}$): validation sensors 0 and 3 and
+the pooled validation error. The ensemble mean is a nearly flat, climatological
+line against a chaotic truth; individual members are turbulent but mutually
+decorrelated, so the mean averages them away while the spread stays wide.}
+\label{fig:esmda-valid-E13}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.92\textwidth]{esmda/perr_E13.png}
+\caption{E13: per-knot parameter error. Note the $y$ scale: the angle error is
+an order of magnitude above Figure~\ref{fig:esmda-perr-E12} and shows no
+downward trend within or across windows.}
+\label{fig:esmda-perr-E13}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.82\textwidth]{esmda/marg_E13.png}
+\caption{E13: final-knot marginals. The posterior has barely contracted, and
+what movement there is goes the wrong way: the angle posterior sits near
+$-\SI{8}{\degree}$ against a truth of \SI{19.0}{\degree} ($z = 4.45$).}
+\label{fig:esmda-marg-E13}
+\end{figure}
+
+Here ESMDA does essentially nothing, and the reason is a \emph{parameterization}
+failure rather than an algorithmic one: with periodic lateral boundaries there
+is no inlet, so $\alpha$ and $\Umag$ no longer control what the sensors see. The
+sensitivity of the observations to the estimated parameters is close to zero and
+the ESMDA gain has nothing to work with.
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{State.} Validation vector RMSE 1.408 and field $\Umag$ RMSE
+        1.040, roughly $4\times$ and $3\times$ the E12 values. The ensemble mean
+        is climatology (Figure~\ref{fig:esmda-valid-E13}); any state-updating
+        method that beats climatology beats ESMDA here by default.
+  \item \textbf{Parameters.} The mismatch is \bad{flat}:
+        $37.3 \to 36.2 \to 36.7 \to 37.2$, numerically unchanged over three
+        iterations (and equally flat at the other two intervals and without
+        localization). Contraction stays at 0.67 / 0.74 against 0.24 / 0.36 on
+        E12 --- the textbook signature of an unidentifiable parameter.
+  \item \textbf{The parameters move the wrong way.} The nominal 18\,\% and
+        9\,\% ``reductions'' in Table~\ref{tab:esmda-master} are spread
+        reductions: the final-knot $\alpha$ posterior sits $-2.64$
+        prior-$\sigma$ from truth (Figure~\ref{fig:esmda-marg-E13}), and $-3.10$
+        / $-2.32$ at \SI{7.5}{\second} / \SI{30}{\second}.
+  \item \textbf{Calibration is ``good'' for the wrong reason.} E13 has one of
+        the lowest pooled $z$-score std values in the section (2.6, beaten only
+        by the equally inert E15) and a validation rank edge fraction of 0.00.
+        That is not skill: an ensemble that never
+        updates keeps its prior spread, and a wide enough spread always covers
+        the truth. Calibration statistics must be read together with the
+        contraction ratio.
+\end{itemize}
+
+\subsection{Model error (PALM truth)}
+\label{sec:esmda-modelerror}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.63\textwidth]{esmda/valid_modelerror_E12_E2.png}
+\caption{Matched versus model-error on the turbulent-inflow case: validation
+sensors 0 and 3 for E12 (uDALES truth, above) and E2 (PALM truth, below), both
+with localization on at $\Delta t_{\mathrm{obs}} = \SI{15}{\second}$. Against
+PALM truth the uDALES ensemble produces a smooth, plausible, but largely
+decorrelated signal: the validation error is roughly four times larger and no
+longer shrinks where the ensemble is confident.}
+\label{fig:esmda-modelerror}
+\end{figure}
+
+The eight completed PALM-truth runs are an internally consistent model-error
+story, and they fail the way theory predicts.
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{The mismatch stalls high and early.} On E2 the pooled median
+        goes $50.1 \to 32.6 \to 30.2 \to 30.1$: iterations 2 and 3 buy almost
+        nothing, and the posterior still misses the data by
+        $\sqrt{2 O_N} \approx 7.8\,\sigma_{\mathrm{obs}}$ against
+        $2.2\,\sigma_{\mathrm{obs}}$ on the matched E12. Without localization
+        (E9) the mismatch \emph{increases} after the first iteration,
+        $49.4 \to 32.4 \to 33.6 \to 35.0$.
+  \item \textbf{The posterior becomes confidently wrong.} At the final knot the
+        E2 $\alpha$ posterior is a tight violin near \SI{3.8}{\degree} against a
+        truth of \SI{19.0}{\degree} ($z = 12.2$), with a contraction ratio of
+        0.24 --- as confident as the matched run and much further from truth.
+        $\alpha$ RMSE is \SI{7.12}{\degree} (58\,\% reduction against 87\,\%
+        matched) and validation vector RMSE 1.377 against 0.365.
+  \item \textbf{The sensor fit is insensitive to everything.} Across all eight
+        PALM runs the assimilation vector RMSE is 1.42--1.58 regardless of case,
+        interval or localization: once the forward model is structurally wrong,
+        the achievable sensor fit is set by the model discrepancy, not by the
+        assimilation configuration (Figure~\ref{fig:esmda-modelerror}).
+  \item \textbf{Periodic plus model error is the worst corner of the set.} All
+        four PALM/\code{periodic} runs \bad{degrade $\Umag$ relative to their
+        prior} ($-10$ to $-36\,\%$), and E3 also degrades $\alpha$
+        ($-10\,\%$, \SI{22.4}{\degree} RMSE) --- the single worst run anywhere
+        in this section. Their field $\Umag$ RMSE (4.01--4.49) is four times the
+        uDALES/\code{periodic} value, most of which is the truth-model
+        difference rather than the assimilation.
+  \item \textbf{No laminar PALM row exists} (Section~\ref{sec:esmda-failed}), so
+        the model-error study covers only \code{inflow\_turb} and
+        \code{periodic}.
+\end{itemize}
+
+\subsection{Sensitivities}
+\label{sec:esmda-sensitivities}
+
+\subsubsection{Localization}
+\label{sec:esmda-localization}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.6\textwidth]{esmda/marg_loc_E13_E20.png}
+\caption{Final-knot marginals on \code{periodic} with localization on (E13,
+above) and off (E20, below). Without localization the posterior collapses to a
+sliver at \SI{7.46}{\meter\per\second}, $z = 43.3$ from truth: confident
+nonsense produced by spurious correlations where the parameters carry no
+signal.}
+\label{fig:esmda-loc}
+\end{figure}
+
+Localization was varied only at $\Delta t_{\mathrm{obs}} = \SI{15}{\second}$,
+giving five matched pairs (E11/E18, E12/E19, E13/E20 with uDALES truth; E2/E9,
+E3/E10 with PALM truth). Its importance is \emph{opposite-signed} across cases:
+a mild accuracy knob where the parameters are identifiable, a safety net where
+they are not.
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{\code{inflow\_turb} (E12 vs E19):} a small, consistent gain.
+        $\alpha$ RMSE is unchanged (2.31 vs \SI{2.45}{\degree}), but $\Umag$
+        RMSE improves $0.439 \to 0.369$, validation vector RMSE
+        $0.407 \to 0.365$, and $\Umag$ calibration improves markedly
+        (std$(z)$ $10.2 \to 5.8$).
+  \item \textbf{\code{inflow} (E11 vs E18):} almost no effect on $\alpha$
+        (7.74 vs \SI{7.59}{\degree}) but a large one on $\Umag$
+        (0.529 vs 0.671; 31\,\% vs 18\,\% reduction). Without localization the
+        final-knot $\Umag$ over-corrects to $+5.93$ prior-$\sigma$.
+  \item \textbf{\code{periodic} (E13 vs E20):} localization is
+        \good{load-bearing}. Without it the parameter $z$-score std explodes to
+        \bad{91.9} ($\alpha$) and \bad{88.8} ($\Umag$) against 2.3 / 2.8, the
+        contraction ratio drops to 0.19 from 0.67 / 0.74, and the final-knot
+        $\Umag$ posterior is pinned at \SI{7.46}{\meter\per\second} with
+        $z = 43.3$ (Figure~\ref{fig:esmda-loc}). Validation vector RMSE also
+        degrades, $1.408 \to 1.671$, and the field hit rate falls
+        $0.71 \to 0.58$.
+  \item \textbf{PALM truth (E3 vs E10):} the same pattern, amplified --- on
+        \code{periodic} the parameter $z$-score std goes to \bad{173}
+        ($\alpha$) and \bad{327} ($\Umag$) without localization, against
+        3.3 / 2.8 with it.
+\end{itemize}
+
+Localization is therefore best sold as \emph{insurance against spurious
+correlations when the sensitivity is weak}, not as an accuracy knob.
+
+\subsubsection{Observation interval}
+\label{sec:esmda-obsinterval}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{esmda/perr_obsinterval_E16_E12_E14.png}
+\caption{Observation-interval sweep on \code{inflow\_turb} with uDALES truth and
+localization on: per-knot inflow-angle error for E16 (\SI{7.5}{\second}),
+E12 (\SI{15}{\second}) and E14 (\SI{30}{\second}). The knot-mean RMSE differs by
+\SI{0.11}{\degree} across a fourfold change in data volume; the densest setting
+is the worst of the three.}
+\label{fig:esmda-obsinterval}
+\end{figure}
+
+The sweep exists for \code{inflow\_turb} and \code{periodic}, with localization
+on, for both truth models. Because observations are time-mean aggregates, a
+shorter interval means more --- but noisier and more correlated --- data.
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Accuracy is flat, and slightly worse when denser.} On
+        \code{inflow\_turb} with uDALES truth, $\alpha$ RMSE is
+        $2.42 / 2.31 / \SI{2.35}{\degree}$ and validation vector RMSE
+        $0.422 / 0.365 / 0.366$ at $7.5 / 15 / \SI{30}{\second}$
+        (Figure~\ref{fig:esmda-obsinterval}). \textbf{``More data'' is not a
+        defensible claim here.}
+  \item \textbf{Calibration improves monotonically with a longer interval.}
+        $\alpha$ std$(z)$ falls $5.2 \to 3.0 \to 2.3$ and $\Umag$ std$(z)$
+        $7.0 \to 5.8 \to 5.4$; the validation rank edge fraction falls
+        $0.75 \to 0.58 \to 0.25$. \SI{30}{\second} is the best-calibrated
+        setting and \SI{15}{\second} the lowest-error one.
+  \item \textbf{\SI{7.5}{\second} is worst on both counts}, and its mismatch
+        also stalls higher, $O_N = 4.8$ against 2.4 / 2.0 (values at different
+        $N_d$, so only the stalling is meaningful). This is consistent with
+        correlated aggregation error being effectively double-counted at short
+        intervals.
+  \item \textbf{On \code{periodic} the interval changes nothing:} $\alpha$ RMSE
+        $12.9 / 13.6 / \SI{13.6}{\degree}$ and a flat mismatch at every
+        interval. Under PALM truth it is equally flat
+        (7.83 / 7.12 / \SI{7.44}{\degree} on \code{inflow\_turb}).
+\end{itemize}
+
+\subsection{Calibration}
+\label{sec:esmda-calibration}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{esmda/rank_E11_E12_E13.png}
+\caption{Rank of the truth within the posterior ensemble at the assimilated
+(top) and validation (bottom) sensors, for the three reference runs E11, E12 and
+E13. The dashed line is uniform and the grey band its $\pm 2\sigma$ range. E11
+and E12 are strongly U-shaped --- the truth falls outside the ensemble far more
+often than a calibrated ensemble allows, even in the best run of the section ---
+whereas E13 looks flat only because its posterior never left the prior.}
+\label{fig:esmda-rank}
+\end{figure}
+
+\EsmdaCalibTable
+
+Table~\ref{tab:esmda-calib} gives the full diagnostics.
+
+\paragraph{ESMDA is systematically over-confident.} A calibrated 50-member
+ensemble has parameter $z$-score std 1.03 (\code{expected\_std} in every
+summary). The smallest value anywhere in the section is 2.5 --- and it belongs
+to E15, a periodic run whose posterior barely moved. Among the runs that
+actually learn something, the best is E12 at 4.6, and the informative laminar
+runs sit near 12--14. \bad{ESMDA should not be compared on RMSE alone.}
+
+\paragraph{Rank histograms agree.} For E12 the assimilation panel puts 37 of 144
+cases in the lowest rank bin and 49 in the highest where uniform would be 14
+(Figure~\ref{fig:esmda-rank}). The validation rank edge fraction --- the share
+of the 51-bin histogram in the two outer bins, 0.04 when calibrated --- is
+0.25--0.75 across the informative uDALES runs and 0.67--0.92 on the
+PALM-truth turbulent-inflow runs.
+
+\paragraph{The ensemble never collapses at the member level.} All 18 completed
+runs report 50 unique members in all three windows, with
+\code{min\_over\_median\_pairwise} between 0.18 and 0.38. The over-confidence
+lives in the posterior spread, not in member degeneracy, and no run triggered
+the failure-resampling path.
+
+\paragraph{Field skill is not uniform across components.}
+\code{field\_metrics} is written only for uDALES-truth runs. The streamwise
+component is captured well everywhere ($u$ hit rate 0.88--0.94 in all ten runs),
+but the cross-stream component is highly variable: $v = 0.30$ on E12 and 0.21 on
+E20, against 0.83 on E14 and 0.88 on E17. Pooled hit rates span 0.58--0.84. Do
+not claim uniform field skill.
+
+\subsection{Failed runs and cost}
+\label{sec:esmda-failed}
+
+Two of the twenty configured runs, E1 and E8 (PALM truth, \code{inflow},
+$\Delta t_{\mathrm{obs}} = \SI{15}{\second}$, localization on and off), produced
+only a \code{config.yaml} and a \code{hydra/} directory --- no
+\code{run\_summary.yaml} and no figures. Both died in the \emph{truth} run,
+before any assimilation started; the two logs are identical in substance:
+
+\begin{quote}\small\ttfamily\raggedright
+PALM produced only 52 of 180 expected 3D outputs (128 missing). PALM terminates
+with exit 0 on its own numerical divergence, so this most likely means the run
+diverged and stopped early. Refusing to pad 128 frames by repeating the last
+one.
+\end{quote}
+
+\noindent
+raised as \code{CalledProcessError} on \code{palm (urban\_run)} from
+\code{pypalm/\allowbreak forward\_model.py:\allowbreak\ \_fit\_output\_window}. The distinguishing
+setting is \code{inlet\_turbulence.enabled=false} together with
+\code{initial\_seed=false}: PALM was asked to run an inflow/outflow case with no
+inlet perturbation at all, and diverged after $\approx \SI{104}{\second}$ of the
+\SI{120}{\second} window. The consequence is structural --- there is no
+laminar-inflow row in the PALM-truth block, so a complete three-case
+model-error comparison cannot be drawn.
+
+\paragraph{Cost.} Wall time is 1.73--2.36\,h per run (last column of
+Table~\ref{tab:esmda-master}), i.e.\ four forward ensemble passes per window and
+three times the forward evaluations of a single-pass filter. The spread is
+driven by the solver, not the algorithm: the uDALES/\code{periodic} runs are
+cheapest (1.73--1.80\,h) simply because uDALES runs faster there, and the most
+expensive run is E2 at 2.36\,h.
+
+\subsection{Takeaways}
+\label{sec:esmda-takeaways}
+
+\begin{itemize}[leftmargin=1.6em]
+  \item \textbf{Identifiability decides everything.} With a turbulent inlet and
+        matched models ESMDA cuts $\alpha$ error by 87\,\%
+        ($17.8 \to \SI{2.31}{\degree}$) using three analyses in
+        \SI{360}{\second}; with a laminar inlet 61\,\%; with periodic boundaries
+        the parameters stop being physical controls and the reduction collapses
+        to an 18\,\% spread reduction.
+  \item \textbf{The ordering inverts.} The physically harder turbulent-inlet
+        case is the one ESMDA does best on, because there the boundary forcing
+        is what the sensors actually see.
+  \item \textbf{Generalisation beats fitting.} On E12 the validation vector
+        RMSE (0.365) is below the assimilation one (0.401) and the never-observed
+        \SI{20}{\meter} sensor is tracked. Correcting a global boundary condition
+        carries no ``fits the observed sensors, fails elsewhere'' penalty.
+  \item \textbf{Over-confident throughout.} The pooled parameter $z$-score std
+        is 2.5--12.1 wherever localization is on, where 1.03 is calibrated; rank histograms are U-shaped
+        everywhere, and the final-knot $\Umag$ posterior is above truth in every
+        uDALES-truth run with an inlet, by $+0.78$ to $+5.93$ prior-$\sigma$.
+  \item \textbf{Model error buys confidence.} Under PALM truth the
+        mismatch stalls at $\approx 7.8\,\sigma_{\mathrm{obs}}$ instead of 2.2,
+        the final-knot $\alpha$ posterior sits at \SI{3.8}{\degree} against truth
+        \SI{19.0}{\degree} with $z = 12.2$, and the sensor fit saturates at
+        1.42--1.58 regardless of any assimilation setting.
+  \item \textbf{Knobs matter less.} Localization buys
+        $\approx 10\,\%$ of validation vector RMSE where parameters are
+        identifiable but prevents outright collapse where they are not
+        ($z$-score std 92 or 327 without it). Denser observations do not help and
+        slightly hurt: \SI{7.5}{\second} is the worst interval on both accuracy
+        and calibration.
+  \item \textbf{The state is missing.} On \code{inflow}
+        the parameters are already close to right while the state drifts out of
+        phase after \SI{120}{\second}, and on \code{periodic} the ensemble mean
+        is climatology. Both are arguments for a method that updates the state,
+        which is what the following sections test.
+\end{itemize}
+
+\subsection{Appendix: all runs}
+\label{sec:esmda-appendix}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth,height=0.92\textheight,keepaspectratio]%
+{esmda/perr_grid_udales.png}
+\caption{Per-knot parameter error (inflow angle above, velocity magnitude below
+in each tile) for all ten uDALES-truth runs, ordered by case and then by ID.
+Each tile carries its own ID, case and knob setting. Note that the $y$ scales
+differ by up to an order of magnitude between tiles; the shaded band is
+assimilation window~1.}
+\label{fig:esmda-grid-udales}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth,height=0.92\textheight,keepaspectratio]%
+{esmda/perr_grid_palm.png}
+\caption{Per-knot parameter error for all eight PALM-truth runs, laid out as in
+Figure~\ref{fig:esmda-grid-udales} (E1 and E8, the laminar-inflow pair, failed;
+see Section~\ref{sec:esmda-failed}). Even on the turbulent-inflow runs the
+inflow-angle error never falls below $\approx \SI{1}{\degree}$ and peaks near
+\SI{15}{\degree}, against \SI{0.8}{\degree}--\SI{4.1}{\degree} in the matched
+E12.}
+\label{fig:esmda-grid-palm}
+\end{figure}
+
+\endgroup
