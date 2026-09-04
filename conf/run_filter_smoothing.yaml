@@ -150,7 +150,7 @@ filter_smoothing:
   # the ESMDA loop restarts on the next window's prior (extrapolated from this
   # window's posterior for a dynamic trajectory) and the joint correction is
   # reset, so W is a real modelling choice.
-  num_assimilation_windows: 3
+  num_assimilation_windows: 2
   seed: 42
   # Diagonal observation-error standard deviation of ONE observation frame. The
   # filter's C_D is exactly that; the smoother's is the same value tiled over
@@ -170,7 +170,7 @@ esmda:
   # update sees them. null -> the smoother assimilates every frame. The FILTER
   # never aggregates (it assimilates one frame per cycle), so this knob moves
   # the smoother's observation vector alone.
-  interval_seconds: 30.0
+  interval_seconds: 15.0
   aggregation_mode: mean
   # Defaults; normally set by the esmda/localization and esmda/state_reduction
   # groups (both default to `none` above).

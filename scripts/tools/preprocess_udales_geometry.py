@@ -39,7 +39,7 @@ from hydra.utils import instantiate
 
 from pyudales.forward_model import save_precomputed_geometry
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CONF_DIR = PROJECT_ROOT / "conf"
 
 

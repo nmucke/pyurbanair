@@ -1,0 +1,53 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{adjustbox}
+\usepackage{microtype}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.misc,calc,fit,backgrounds}
+\usepackage[edges]{forest}
+\usepackage{pdflscape}
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black}
+\graphicspath{{figures/}}
+\captionsetup{font=small,labelfont=bf}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\good}[1]{\textcolor{green!50!black}{#1}}
+\newcommand{\bad}[1]{\textcolor{red!70!black}{#1}}
+\newcommand{\Umag}{|U|}
+
+\title{ISDA 2026 experiments --- results overview\\
+\large ESMDA, sequential filtering (EnKF), and filter smoothing on the Xie \& Castro urban case}
+\author{Generated from \code{presentations/isda\_new/experiments/}}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\clearpage
+
+\input{sections/setup}
+\clearpage
+\input{sections/esmda}
+\clearpage
+\input{sections/filtering}
+\clearpage
+\input{sections/filter_smoothing}
+\clearpage
+\input{sections/comparison}
+\clearpage
+\input{sections/conclusions}
+
+\end{document}

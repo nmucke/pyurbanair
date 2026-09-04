@@ -1,0 +1,567 @@
+\begingroup\sloppy
+\section{Sequential filtering (EnKF)}
+\label{sec:filtering}
+
+\input{sections/filtering_tables}
+
+\subsection{Method and experiment matrix}
+\label{sec:filt-matrix}
+
+Sequential filtering runs the stochastic ensemble Kalman filter
+(\code{StochasticEnKFAnalysis}, driver
+\code{scripts/filtering/run\_filtering.py}) on the shared set-up of
+\S\ref{sec:setup}. The 360\,s window is cut into $3\times60 = 180$ cycles of
+$2$\,s and an analysis is performed at \emph{every} cycle
+(\code{assimilate\_every\_n\_step=1}), so each run contains 180 sequential
+updates against the 6 assimilated sensors. This is the only campaign in the
+report that assimilates at the model output cadence, and the only one whose
+state vector is updated: ESMDA and filter smoothing correct parameters and
+re-integrate, the filter corrects the flow field in place.
+
+Two method knobs are swept on top of the shared \code{loccorrelation} /
+\code{locnone} localization switch:
+\begin{itemize}[nosep]
+  \item \textbf{mode} --- \code{state} (the parameter ensemble is frozen at its
+        static prior and only the state is updated) or \code{joint} (state and
+        the two inflow parameters are updated together, with
+        \code{RandomWalkEvolution}, \code{std}$=0.5$, propagating the parameters
+        between cycles).
+  \item \textbf{inflation} --- \code{none} or RTPS (relaxation to prior spread,
+        $\alpha=0.6$).
+\end{itemize}
+Only three of the four combinations were run: \code{state,none},
+\code{state,RTPS} and \code{joint,RTPS}. Mode and inflation are read from
+\code{\_logs/<run>.args}; they are \emph{not} both recoverable from
+\code{run\_summary.yaml:configuration}. The directory-name suffix is
+load-bearing: every directory \emph{without} a \code{\_state\_infl*} suffix is
+\code{joint,RTPS}.
+
+Table~\ref{tab:filt-matrix} lists the 21 run directories with their IDs
+\code{F1}--\code{F21}. Nineteen completed; the two PALM-truth laminar-inflow
+runs failed in the truth simulation (\S\ref{sec:filt-failed}). Folder names
+appear here and nowhere else in this section.
+
+\begin{table}[H]
+\centering
+\caption{Sequential filtering: the 21 run directories of the
+\code{filtering/} campaign, with the IDs used throughout this section. \emph{loc} \code{corr} $=$ \code{loccorrelation},
+\code{none} $=$ \code{locnone}; \emph{mode} and \emph{inflation} are read from
+\code{\_logs/<run>.args}.}
+\label{tab:filt-matrix}
+\FiltMatrixTable
+\end{table}
+
+\subsection{Master results}
+\label{sec:filt-master}
+
+\begin{table}[H]
+\centering
+\caption{Sequential filtering: master results for all 21 runs, uDALES-truth
+block first. \emph{assim}/\emph{valid} are the velocity \emph{vector} RMSE of
+the ensemble mean at the 6 assimilated and the 4 validation sensors, averaged
+over the 180 cycles; \emph{field $\Umag$} is the domain-wide $\Umag$ RMSE.
+Parameter columns give the mean RMSE with the reduction vs.\ prior in
+parentheses; state-only rows carry the untouched static prior and are printed
+in italics with a dagger ($^\dagger$) and no reduction. $\chi^2$ is the mean
+innovation $\chi^2$ (1 $=$ calibrated), $z_\mathrm{par}$ the pooled parameter
+$z$-score standard deviation (1.03 expected), $q$ the posterior field hit rate
+(absent for PALM truth), and \emph{wall} the filter-loop time. Bold marks the
+best value in each column within a truth block; parameter columns are bolded
+over the joint runs only.}
+\label{tab:filt-master}
+\FiltMasterTable
+\end{table}
+
+Read the table case by case rather than column by column: the three
+boundary-condition cases differ by an order of magnitude in every error metric,
+so the bold entries in the uDALES block are almost all laminar-inflow rows and
+say little about the harder cases. Within a case the ordering is stable: adding
+RTPS improves both accuracy and calibration, adding joint parameter estimation
+improves accuracy on the two inflow cases and degrades it on \code{periodic},
+and localization flips sign with case difficulty (\S\ref{sec:filt-loc}). The
+assim/valid ratio is $2$--$6\times$ everywhere: the filter always fits its own
+sensors better than it generalises, and no configuration removes that gap. Three
+reading caveats apply throughout:
+\begin{itemize}[nosep]
+  \item The tables use the sensor \emph{vector} RMSE. The figure legends print
+        a magnitude-only $\Umag$ RMSE, which is roughly a factor two smaller;
+        where a legend value is quoted below it is labelled ``$\Umag$ RMSE''.
+  \item The tabulated parameter RMSE is reduced over three posterior evaluation
+        points, one per assimilation window (\code{z\_score.n}$=3$ in every
+        summary). The per-cycle error curves of \S\ref{sec:filt-cases} are
+        sampled at all 180 cycles and average higher, because they include the
+        transient after each window restart; the two are not interchangeable.
+  \item The reduction-vs-prior percentages are relative to each run's
+        \emph{own} prior. For joint runs that is the random-walk-widened
+        forecast prior ($\approx 30^\circ$ for $\alpha$), not the static prior
+        ($19.29^\circ$), so they may not be compared across modes.
+\end{itemize}
+
+\subsection{Results by case}
+\label{sec:filt-cases}
+
+This subsection uses only the uDALES-truth runs, and for each case the
+\textbf{reference run}: \code{loccorrelation}, \code{joint,RTPS}.
+
+\subsubsection{Laminar inflow (\code{inflow})}
+\label{sec:filt-case-inflow}
+
+Reference run \code{F7}. Figures~\ref{fig:filt-valid-F7},
+\ref{fig:filt-parerr-F7} and \ref{fig:filt-marg-F7}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{filtering/valid_F7.png}
+\caption{\code{F7} (uDALES truth, \code{inflow}, loc, \code{joint,RTPS}) at two
+validation sensors --- sensor 0 at ground level and sensor 3 ten cells above
+the observed $z=2$ plane --- with the aggregate validation-sensor error panel
+beneath. Black dashed $=$ truth, thick blue $=$ ensemble mean, thin blue $=$
+the 50 members. The ensemble tracks the $\pm 1$\,m/s oscillation at the
+elevated sensor even though nothing is observed there; legend values are
+$\Umag$ RMSE ($0.205$), not the vector RMSE of Table~\ref{tab:filt-master}.}
+\label{fig:filt-valid-F7}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{filtering/parerr_F7.png}
+\caption{\code{F7}: per-cycle inflow-angle (top) and $\Umag$ (bottom)
+parameter error. The angle error oscillates instead of decaying: the posterior
+follows the truth sine with a lag rather than converging onto it, which is what
+Fig.~\ref{fig:filt-marg-F7} shows at a single instant. The legend means are
+over all 180 cycles and are larger than the three-knot RMSE of
+Table~\ref{tab:filt-master}.}
+\label{fig:filt-parerr-F7}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{filtering/marginals_F7.png}
+\caption{\code{F7}: prior and posterior parameter marginals at the final knot.
+The angle posterior is tight around $\approx 13^\circ$ against a truth of
+$18.9^\circ$ ($z = 2.91$) --- confidently wrong at that instant --- while
+$\Umag$ is well centred ($z = 0.37$) but no sharper than its prior. The
+``prior'' shown is the random-walk-widened forecast prior.}
+\label{fig:filt-marg-F7}
+\end{figure}
+
+\begin{itemize}[nosep]
+  \item \textbf{State.} \code{F7} reaches assim vector RMSE $0.155$, valid
+        $0.394$ and field $\Umag$ RMSE $0.247$ --- and is \good{beaten on all
+        three} by its unlocalized twin \code{F13} ($0.144$ / $0.319$ /
+        $0.221$), the best run of the whole campaign. This is the one case
+        where localization is a regression (\S\ref{sec:filt-loc}).
+  \item \textbf{Parameters.} The inflow angle is genuinely recovered:
+        $5.26^\circ$ for \code{F7} and $3.90^\circ$ for \code{F13}, against a
+        static-prior baseline of $19.29^\circ$. Velocity magnitude barely
+        moves: $0.910$\,m/s and $0.818$\,m/s against a prior $0.919$\,m/s.
+  \item \textbf{Calibration.} Both are well calibrated in observation space
+        ($\chi^2 = 0.90$ and $0.99$, rank-histogram edge fraction $0.019$ and
+        $0.034$ against a uniform $2/51 = 0.039$), but the \emph{parameter}
+        ensemble is not: $z_\mathrm{par} = 1.76$ and $2.23$ against an expected
+        $1.03$. Fig.~\ref{fig:filt-marg-F7} shows the mechanism --- a narrow
+        posterior sitting $5$--$6^\circ$ off the truth.
+\end{itemize}
+
+\subsubsection{Turbulent inflow (\code{inflow\_turb})}
+\label{sec:filt-case-turb}
+
+Reference run \code{F9}. Figures~\ref{fig:filt-valid-F9},
+\ref{fig:filt-parerr-F9} and \ref{fig:filt-marg-F9}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{filtering/valid_F9.png}
+\caption{\code{F9} (uDALES truth, \code{inflow\_turb}, loc, \code{joint,RTPS})
+at validation sensors 0 and 3, with the error panel beneath. The synthetic
+inlet turbulence adds fine-scale structure the ground sensor cannot follow
+cycle-by-cycle, while the elevated sensor still tracks the slow envelope;
+$\Umag$ validation RMSE $0.313$.}
+\label{fig:filt-valid-F9}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{filtering/parerr_F9.png}
+\caption{\code{F9}: per-cycle parameter error. The angle error is sawtoothed by
+the window restarts, rising through each window and dropping at the restart;
+the three tabulated evaluation points sample this curve far more coarsely,
+which is why Table~\ref{tab:filt-master} reports $3.36^\circ$ where the legend
+mean over all 180 cycles is larger.}
+\label{fig:filt-parerr-F9}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{filtering/marginals_F9.png}
+\caption{\code{F9}: final-knot marginals. This is the best-calibrated parameter
+posterior in the campaign: the angle ensemble brackets the truth
+($z = 0.86$, posterior mean $\approx 17^\circ$ against $18.9^\circ$) and
+$\Umag$ is centred ($z = -0.20$).}
+\label{fig:filt-marg-F9}
+\end{figure}
+
+\begin{itemize}[nosep]
+  \item \textbf{State.} Uniformly worse than laminar in absolute terms --- assim
+        $0.206$, valid $0.559$, field $\Umag$ RMSE $0.422$ --- but here the
+        reference run is the best of its case, and localization helps
+        ($-10\%$ on valid vs.\ \code{F16}).
+  \item \textbf{Parameters.} \code{F9} gives the \good{best inflow-angle
+        recovery of the campaign}, $3.36^\circ$ mean RMSE with CRPS
+        $1.35^\circ$. Its unlocalized twin \code{F16} is markedly less stable:
+        final-cycle assim RMSE $0.717$ against a mean of $0.260$, final-cycle
+        $\chi^2$ of $4.33$, and a $\Umag$ parameter RMSE ($0.955$\,m/s) that is
+        \bad{worse than the static prior} ($0.919$\,m/s).
+  \item \textbf{Calibration.} \code{F9} is the only run in the campaign whose
+        parameter ensemble is calibrated: $z_\mathrm{par} = 0.74$ against
+        $1.03$ expected, with $\chi^2 = 1.04$ and a validation edge fraction of
+        $0.039$ --- exactly the uniform value. \code{F16}, by contrast, has
+        $z_\mathrm{par} = 3.29$.
+\end{itemize}
+
+\subsubsection{Periodic boundaries (\code{periodic})}
+\label{sec:filt-case-periodic}
+
+Reference run \code{F11}. Figures~\ref{fig:filt-valid-F11},
+\ref{fig:filt-parerr-F11} and \ref{fig:filt-marg-F11}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{filtering/valid_F11.png}
+\caption{\code{F11} (uDALES truth, \code{periodic}, loc, \code{joint,RTPS}) at
+validation sensors 0 and 3. The truth starts from rest, so the first
+$\approx$40--50\,s carries no assimilation information. After $t \approx
+200$\,s the ensemble mean at the elevated sensor sits well below the truth and
+the error panel roughly doubles; $\Umag$ validation RMSE $1.03$.}
+\label{fig:filt-valid-F11}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{filtering/parerr_F11.png}
+\caption{\code{F11}: per-cycle parameter error. Unlike
+Figs.~\ref{fig:filt-parerr-F7} and \ref{fig:filt-parerr-F9} the angle error
+never comes back down inside a window --- it wanders between $\approx 6$ and
+$30^\circ$ for the whole run. This is a parameter-space divergence, not a lag.}
+\label{fig:filt-parerr-F11}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{filtering/marginals_F11.png}
+\caption{\code{F11}: final-knot marginals. Both posteriors are very wide and
+badly placed --- the angle sits near $7^\circ$ against a truth of
+$19.1^\circ$, and the $\Umag$ posterior is centred near $4.3$\,m/s against a
+truth of $8.1$\,m/s with \bad{members below zero}. The Gaussian EnKF update is
+unbounded and nothing constrains the magnitude to be positive.}
+\label{fig:filt-marg-F11}
+\end{figure}
+
+\begin{itemize}[nosep]
+  \item \textbf{State.} The hard case by a wide margin: \code{F11} reaches
+        valid $1.551$ and field $\Umag$ RMSE $1.733$, four to eight times the
+        laminar values. It is nevertheless the best \emph{joint} periodic run:
+        its unlocalized twin \code{F19} gives valid $3.653$ and field $2.951$.
+  \item \textbf{Parameters.} \bad{Neither parameter is recovered.} The angle
+        RMSE is $19.03^\circ$, indistinguishable from the static-prior
+        $19.29^\circ$, and $\Umag$ reaches $4.221$\,m/s against a prior
+        $0.919$\,m/s. The posterior parameter spread ($5.25$) is three to five
+        times that of any other uDALES-truth run.
+  \item \textbf{Calibration.} Observation-space calibration is fine
+        ($\chi^2 = 1.85$, edge $0.125$) and the field hit rate is the highest
+        of any uDALES run ($q = 0.887$) --- but only because the ensemble is
+        very wide (posterior state spread $1.112$ vs.\ $0.314$ for \code{F13}).
+        $q$ must always be read next to the spread, and here it is not evidence
+        of skill.
+  \item \textbf{Joint estimation is harmful here.} The state-only reference
+        \code{F12} (\code{state,RTPS}, loc) beats \code{F11} on valid
+        ($1.261$ vs.\ $1.551$) and on field $\Umag$ RMSE ($1.029$ vs.\
+        $1.733$). Freezing the parameters is the better choice on this case.
+\end{itemize}
+
+\subsection{Model error (PALM truth)}
+\label{sec:filt-modelerror}
+
+Six runs assimilate a PALM-generated truth with a uDALES ensemble, so the error
+is structural rather than parametric. Two of them (\code{F1}, \code{F4},
+laminar inflow) failed in the truth simulation, leaving \code{inflow\_turb} and
+\code{periodic}. Fig.~\ref{fig:filt-modelerror} puts the usable model-error run
+next to its matched-model equivalent.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{filtering/valid_modelerror_inflow_turb.png}
+\caption{Model-error signature on \code{inflow\_turb}: \code{F9} (uDALES truth,
+left) and \code{F2} (PALM truth, right), both loc, \code{joint,RTPS}, at the
+same two validation sensors. The PALM ensemble follows the slow envelope but
+misses the fine-scale excursions of the truth entirely --- the ground sensor
+peaks near $2.5$--$3$\,m/s are never reproduced. $\Umag$ validation RMSE
+$0.313$ vs.\ $0.761$.}
+\label{fig:filt-modelerror}
+\end{figure}
+
+\begin{itemize}[nosep]
+  \item \textbf{\code{inflow\_turb} is usable and costs a factor $2$--$2.5$.}
+        \code{F2} reaches valid $1.297$ and field $\Umag$ RMSE $1.151$, against
+        $0.559$ and $0.422$ for the matched-model \code{F9}; in the figure
+        legends, $\Umag$ validation RMSE $0.761$ vs.\ $0.313$. Localization
+        helps clearly (\code{F5}~$\to$~\code{F2}: valid $1.891 \to 1.297$,
+        field $1.582 \to 1.151$).
+  \item \textbf{The angle is still partly recovered.} $11.11^\circ$ for
+        \code{F2} and $13.37^\circ$ for \code{F5} --- a real but much weaker
+        signal than the $3.4$--$5.3^\circ$ obtained against a uDALES truth.
+  \item \textbf{Model error cannot be inflated away.} Even the best model-error
+        run keeps $\chi^2 = 14.1$ and a validation edge fraction of $0.326$
+        with RTPS \emph{and} localization active. The filter has no
+        representation of structural error, so the innovations stay far outside
+        the assumed observation-error covariance.
+  \item \textbf{\code{periodic} under model error is a divergence, not a
+        result.} \code{F3} reports an angle RMSE of $\mathbf{138.5^\circ}$ and
+        a $\Umag$ RMSE of $\mathbf{21.3}$\,m/s against a truth near
+        $7.5$\,m/s, with $z_\mathrm{par} = 14.9$; \code{F6} is only marginally
+        less bad ($43.68^\circ$, $6.09$\,m/s, $\chi^2 = 40.0$). Neither should
+        be quoted other than as a failure case.
+  \item \textbf{No field-level metrics.} \code{field\_metrics} --- and hence
+        $q$ --- is absent from all four PALM-truth summaries, so the hit-rate
+        column is empty for that block.
+\end{itemize}
+
+\subsection{Sensitivities}
+\label{sec:filt-sens}
+
+\subsubsection{Localization}
+\label{sec:filt-loc}
+
+Table~\ref{tab:filt-loc} isolates correlation localization by pairing runs that
+differ only in \code{filtering/localization}.
+
+\begin{table}[H]
+\centering
+\caption{Sequential filtering: effect of turning localization on, holding
+truth, case and method knob fixed. $\Delta$ is the change in mean validation
+vector RMSE (negative $=$ better).}
+\label{tab:filt-loc}
+\FiltLocTable
+\end{table}
+
+\begin{itemize}[nosep]
+  \item \textbf{Localization inverts with case difficulty.} It is a \bad{clear
+        regression} on laminar inflow ($+16\%$ state-only, $+23\%$ joint), a
+        small gain on \code{inflow\_turb} ($-2\%$ / $-10\%$), and a large gain
+        on \code{periodic} ($-47\%$ / $-58\%$) and on the PALM model-error case
+        ($-31\%$).
+  \item \textbf{The likely reason.} With 50 members and 6 sensors the laminar
+        flow has genuine long-range correlations --- a single inflow direction
+        controls the whole domain --- and tapering destroys them. On the harder
+        cases the same long-range correlations are largely spurious.
+  \item \textbf{It always improves calibration.} $\chi^2$ falls in \emph{all
+        eight} pairs, including the two where accuracy worsens. Localization
+        reliably suppresses spurious long-range correlations; whether that buys
+        skill depends on whether the suppressed correlations were spurious.
+  \item \textbf{Cost.} On the two inflow cases localization adds $5$--$7\%$ to
+        the filter loop ($1.18 \to 1.26$\,h and $1.21 \to 1.27$\,h); on
+        \code{periodic} the localized runs are in fact shorter, so the overhead
+        is within run-to-run scatter.
+\end{itemize}
+
+\subsubsection{Inflation and mode}
+\label{sec:filt-knob}
+
+The method-knob ladder is \code{state,none} $\to$ \code{state,RTPS} $\to$
+\code{joint,RTPS}. Table~\ref{tab:filt-ladder} walks it for all three cases at
+\code{locnone}, and Fig.~\ref{fig:filt-ladder} shows the laminar rungs at the
+elevated validation sensor.
+
+\begin{table}[H]
+\centering
+\caption{Sequential filtering: the method-knob ladder \code{state,none} $\to$
+\code{state,RTPS} $\to$ \code{joint,RTPS}, uDALES truth, localization off.
+$^\dagger$ marks the carried static prior of the state-only rungs.
+\emph{edge} is the validation rank-histogram mass in the two end bins (uniform
+$= 0.039$).}
+\label{tab:filt-ladder}
+\FiltLadderTable
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{filtering/ladder_inflow.png}
+\caption{The three ladder rungs on \code{inflow} at the elevated validation
+sensor (sensor 3, $z=20$, ten cells above the observed plane), with each run's
+validation error panel beneath. In \code{F14} and \code{F15} the ensemble mean
+is nearly flat against an oscillating truth; only the joint run \code{F13}
+reproduces the oscillation. Legend values are $\Umag$ RMSE: $0.305 \to 0.285
+\to 0.166$.}
+\label{fig:filt-ladder}
+\end{figure}
+
+\paragraph{Rung 1 $\to$ 2 (add RTPS).} \good{Buys calibration everywhere,
+accuracy only on the inflow cases.} $\chi^2$ falls $3.98 \to 0.95$ on
+\code{inflow}, $8.79 \to 1.82$ on \code{inflow\_turb} and $27.7 \to 14.1$ on
+\code{periodic}; edge fraction falls $0.212 \to 0.024$, $0.342 \to 0.103$ and
+$0.598 \to 0.479$. Accuracy follows on the inflow cases (valid $0.570 \to
+0.539$ and $0.991 \to 0.772$) but not on \code{periodic}, where valid moves
+only $2.391 \to 2.362$ and the field $\Umag$ RMSE actually \bad{worsens}
+($1.968 \to 2.061$). On \code{inflow} the effect on the \emph{final} cycle is
+much larger than on the mean: validation vector RMSE $1.456 \to 0.663$, and the
+posterior state spread stops collapsing ($0.198 \to 0.423$).
+
+\paragraph{Rung 2 $\to$ 3 (add joint parameter estimation).} \good{The largest
+single accuracy gain on the inflow cases}, and a \bad{regression on
+\code{periodic}}. Valid falls $0.539 \to 0.319$ ($-41\%$) on \code{inflow} and
+$0.772 \to 0.624$ ($-19\%$) on \code{inflow\_turb}, with the inflow angle
+dropping from the carried prior $19.29^\circ$ to $3.90^\circ$ and $4.88^\circ$
+respectively. On \code{periodic} the same step takes valid $2.362 \to 3.653$
+and field $\Umag$ RMSE $2.061 \to 2.951$ while leaving the angle at
+$19.12^\circ$, i.e.\ no better than not estimating it at all. Joint estimation
+is not universally safe: it helps exactly where the parameters are identifiable
+from the 6 sensors, and injects noise where they are not.
+
+\subsection{Calibration}
+\label{sec:filt-calib}
+
+\begin{table}[H]
+\centering
+\caption{Sequential filtering: calibration and spread diagnostics for the 19
+completed runs. $z_\alpha$, $z_{\Umag}$ and $z_\mathrm{pool}$ are parameter
+$z$-score standard deviations ($1.03$ expected); \emph{contr.} is the
+posterior/prior parameter spread ratio; $q$, $q_u$, $q_v$, $q_w$ are posterior
+field hit rates; \emph{edge} is the validation rank-histogram mass in the two
+end bins of the 51-bin histogram (uniform $= 0.039$). The state-only rows share
+identical parameter columns by construction --- their parameter ensemble is
+never updated.}
+\label{tab:filt-calib}
+\FiltCalibTable
+\end{table}
+
+Table~\ref{tab:filt-calib} collects every calibration diagnostic;
+Fig.~\ref{fig:filt-rank} shows the rank histograms of the three reference runs.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{filtering/rank_cases.png}
+\caption{Rank histograms of the three reference runs \code{F7}, \code{F9} and
+\code{F11} (assimilated sensors on top, validation sensors below), all
+\code{joint,RTPS} with localization. The dashed line is the uniform
+expectation with its $\pm 2\sigma$ band (stepped, because the first plotted bar
+aggregates six ranks). \code{F9} (centre) has the flattest validation
+histogram, matching its edge fraction of $0.039$; \code{F7} (left) is
+under-populated at high ranks and \code{F11} (right) has a rising right tail
+--- both mild compared with the uninflated runs of
+Table~\ref{tab:filt-calib}.}
+\label{fig:filt-rank}
+\end{figure}
+
+\begin{itemize}[nosep]
+  \item \textbf{The three calibration measures agree.} Every run with
+        $\chi^2 \le 2$ has an edge fraction below $0.13$; every run with
+        $\chi^2 > 10$ has an edge fraction above $0.30$. Either can be used to
+        rank the runs.
+  \item \textbf{Which knob fixes calibration is case-specific.} RTPS does it on
+        \code{inflow} ($\chi^2$ $3.98 \to 0.95$); on \code{periodic} only
+        localization does ($14.05 \to 1.76$). Neither is universally
+        sufficient, and on the PALM-truth runs neither is enough
+        (\S\ref{sec:filt-modelerror}).
+  \item \textbf{Parameter ensembles are overconfident almost everywhere.} Only
+        \code{F9} sits near the expected $z_\mathrm{pool} = 1.03$ (it is
+        $0.74$). The laminar joint runs are mildly overconfident ($1.76$,
+        $2.23$), the periodic and PALM ones grossly so ($11.5$ for \code{F19},
+        $23.0$ for \code{F6}). A narrow posterior on a wrong value is the
+        recurring failure mode.
+  \item \textbf{Read $q$ with the spread column.} \code{F12} and \code{F11}
+        report the two highest hit rates of any uDALES run ($0.832$, $0.887$)
+        while carrying four to eight times the field $\Umag$ RMSE of the
+        laminar runs; their posterior state spread is two to three times
+        \code{F13}'s. A wide ensemble makes a tolerance-based hit rate easy to
+        satisfy.
+  \item \textbf{Ensemble health is fine everywhere.} All 19 completed runs keep
+        $50/50$ unique members. The \code{min\_over\_median\_pairwise}
+        diversity is exactly $0.0146$ for \emph{every} state-only run --- their
+        parameter ensembles are identical, so the statistic is too --- and
+        $0.10$--$0.26$ for the joint runs.
+  \item \textbf{Fitting the observations proves nothing.} Posterior
+        observation-space RMSE is far below prior in every run, including the
+        diverged ones: $0.161 \to 0.072$ for \code{F13} and $0.833 \to 0.129$
+        for \code{F3}, whose angle RMSE is $138.5^\circ$.
+\end{itemize}
+
+\subsection{Failed runs and cost}
+\label{sec:filt-failed}
+
+\code{F1} and \code{F4} (PALM truth, laminar \code{inflow}) contain only
+\code{config.yaml} and an empty \code{windows/} directory. Both exited
+\code{rc=1} after $\approx 200$\,s with the same error in \code{\_logs/*.log}:
+PALM produced only 52 of the 180 expected 3D outputs, and the driver refuses to
+pad the missing 128 frames. The traceback is in
+\code{pypalm/forward\_model.py:\_fit\_output\_window}, reached from the truth
+generation call in \code{run\_filtering.py} --- this is the PALM \emph{truth}
+simulation diverging before any assimilation, not a DA failure. PALM's laminar
+\code{inflow\_outflow} configuration is unstable at these settings; the
+turbulent-inlet and periodic PALM runs, which use different boundary
+treatments, completed normally. The consequence is that there is \textbf{no
+model-error result for the easiest case}, so no claim of the form ``model error
+on the laminar case'' is supported by this campaign.
+
+Cost is essentially flat: $1.01$--$1.28$\,h of filter loop per run
+(Table~\ref{tab:filt-master}), i.e.\ $20.2$--$25.6$\,s per assimilation cycle
+for 50 members $\times$ 180 cycles, and $1.38$--$1.67$\,h of driver wall time
+once truth generation and post-processing are included. The 19 completed runs
+total $29.8$\,h of driver wall. Localization is the only knob with a measurable
+overhead ($5$--$7\%$ on the inflow cases); mode and inflation are free.
+
+\subsection{Takeaways}
+\label{sec:filt-takeaways}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Inflation fixes calibration, joint estimation fixes accuracy.}
+        On \code{inflow}, RTPS takes $\chi^2$ from $3.98$ to $0.95$ and the
+        edge fraction from $0.212$ to $0.024$ while barely moving validation
+        RMSE ($0.570 \to 0.539$); adding joint estimation then takes it to
+        $0.319$ and the angle from $19.29^\circ$ to $3.90^\circ$.
+  \item \textbf{Localization helps where the problem is hard.} It costs $+16\%$
+        / $+23\%$ validation RMSE on laminar inflow but buys $-47\%$ / $-58\%$
+        on \code{periodic} and $-31\%$ on the PALM model-error case, and
+        improves $\chi^2$ in all eight paired comparisons regardless.
+  \item \textbf{Joint estimation is not universally safe.} On \code{periodic},
+        state-only$+$RTPS$+$loc (\code{F12}) gives valid $1.261$ and field
+        $\Umag$ RMSE $1.029$, while joint$+$RTPS$+$loc (\code{F11}) gives
+        $1.551$ and $1.733$, with $\Umag$ members driven below zero by the
+        unbounded Gaussian update.
+  \item \textbf{Only the inflow direction is recovered.} The angle falls to
+        $3.36^\circ$ at best; velocity magnitude moves at most $0.919 \to
+        0.818$\,m/s and is worse than its own prior in \code{F16}.
+  \item \textbf{One well-calibrated parameter ensemble out of nineteen.} Only
+        \code{F9} reaches $z_\mathrm{par} \approx 1$; everywhere else the
+        parameter posterior is confidently wrong, and the field hit rate $q$ is
+        highest precisely in the runs whose ensembles are widest.
+  \item \textbf{Model error costs a factor $2$--$2.5$ and cannot be inflated
+        away.} \code{F2} has validation vector RMSE $1.297$ against $0.559$ for
+        the matched-model \code{F9}, and keeps $\chi^2 = 14.1$ with RTPS and
+        localization active.
+  \item \textbf{The laminar model-error case is missing.} Both PALM laminar
+        truth runs diverged, so the cheapest model-error comparison in the
+        design does not exist.
+\end{enumerate}
+
+\subsection{Appendix: all runs}
+\label{sec:filt-appendix}
+
+Fig.~\ref{fig:filt-parerr-grid} shows the inflow-angle error of every joint run
+in the campaign, on a common time axis, so the three per-case figures of
+\S\ref{sec:filt-cases} can be placed in context.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{filtering/parerr_grid_joint.png}
+\caption{Per-cycle inflow-angle error for all ten joint runs: uDALES truth in
+the first three rows, PALM truth in the last two, localization off on the left
+and on on the right. The vertical scales differ by more than an order of
+magnitude --- the uDALES-truth inflow cases stay below $\approx 15^\circ$, the
+uDALES-truth periodic runs reach $30^\circ$, and \code{F3} sits at
+$130$--$150^\circ$ for the whole run without ever recovering. Legend means are
+over 180 cycles and are larger than the three-knot RMSE of
+Table~\ref{tab:filt-master}.}
+\label{fig:filt-parerr-grid}
+\end{figure}
+
+\endgroup

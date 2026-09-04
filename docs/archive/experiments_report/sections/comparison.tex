@@ -1,0 +1,790 @@
+% Long \code{} run names are unbreakable; \sloppy keeps them from producing
+% overfull boxes. Scoped to this section only.
+\begingroup
+\sloppy
+
+\section{Cross-method comparison}
+\label{sec:cmp}
+
+\input{sections/comparison_tables}
+
+\subsection{What is compared --- and what cannot be}
+\label{sec:cmp:scope}
+
+Sections~\ref{sec:esmda-takeaways}, \ref{sec:filt-takeaways} and
+\ref{sec:fs:takeaways} each rank variants \emph{within} one campaign. This
+section puts the three campaigns on one axis. The comparison is organised
+around \emph{matched cells}: a cell is one
+(truth model, boundary-condition case, localization) triple, and every method
+that was run at those settings supplies one row of it. Five method variants
+appear:
+
+\begin{description}[nosep,leftmargin=2.2em,style=nextline]
+  \item[ESMDA (IDs \code{E*})] the parameter smoother of \S\ref{sec:esmda}; one
+        analysis per window, three MDA steps, state never updated
+        (\code{obs15} runs only).
+  \item[EnKF state, no infl.\ (IDs \code{F*})] a stochastic EnKF updating the
+        state every \SI{2}{\second} with no inflation.
+  \item[EnKF state$+$RTPS (IDs \code{F*})] the same with RTPS inflation
+        ($\alpha = 0.6$).
+  \item[EnKF joint$+$RTPS (IDs \code{F*})] the same filter with the parameters
+        appended to the state vector.
+  \item[Filter smoothing (IDs \code{H*})] the hybrid of \S\ref{sec:fs}: ESMDA
+        parameters $+$ EnKF state inside every window (\code{obs15} runs only).
+\end{description}
+
+Every run keeps the ID it was given in Sections~\ref{sec:esmda}--\ref{sec:fs};
+the ID columns of Tables~\ref{tab:cmp:master-ud}--\ref{tab:cmp:obsinterval} are
+the map back to those sections, and the folder names are listed only in the
+experiment-matrix table of each method section.
+
+That gives $45$ matched cells; $39$ produced a \code{run\_summary.yaml} and $6$
+did not (see \S\ref{sec:cmp:caveats}). The observation interval is held at
+\SI{15}{\second} wherever a campaign sweeps it, so the master tables are a
+clean method contrast; the sweep itself is compared separately in
+Table~\ref{tab:cmp:obsinterval}.
+
+\paragraph{Four things that are \emph{not} comparable across campaigns.}
+These caveats are load-bearing: several apparent method differences below are
+partly definitional, and the text flags them where they bite.
+
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item \textbf{The observation stream is not the same.} ESMDA assimilates
+        \emph{aggregated} observations --- $96$ values per window at
+        $\Delta t_{\mathrm{obs}} = \SI{15}{\second}$ (6 sensors $\times$ 2
+        components $\times$ 8 bins). Both filters assimilate the \emph{raw}
+        stream, $12$ values every \SI{2}{\second}, i.e.\ $720$ values per
+        window. The hybrid does both. ESMDA is therefore working from less
+        data by construction, and any ESMDA win below is a win in spite of
+        that.
+  \item \textbf{``Reduction vs.\ prior'' has three different meanings}, so
+        only \emph{absolute} parameter RMSE is quoted here. For ESMDA and the
+        hybrid the baseline is that run's own re-drawn climatological prior
+        ($14.5$--$19.0^\circ$ on the angle). For joint filtering it is the
+        random-walk-widened \emph{forecast} prior ($\approx 29$--$30^\circ$).
+        For state-only filtering the parameter ensemble is never touched, so
+        the reduction is exactly zero and the reported RMSE is the static
+        prior ($19.29^\circ$, $0.919$~m/s) --- those entries are printed in
+        italics with a dagger and are excluded from the ``best'' bolding.
+  \item \textbf{The observation-interval knob means different things.} In the
+        ESMDA campaign \code{obs7p5/15/30} changes the number of assimilated
+        observations ($192/96/48$ per window). In the filter-smoothing
+        campaign it changes only the \emph{smoother's} aggregation bin; the
+        filter still assimilates every \SI{2}{\second} regardless. The two
+        sweeps are not the same experiment.
+  \item \textbf{Calibration is measured with different instruments.} The
+        filters and the hybrid report an innovation $\chi^2$; ESMDA has no
+        sequential innovation and reports a normalised data mismatch $O_N$
+        instead, so its $\chi^2$ column is empty everywhere. The one
+        diagnostic all five share is the $z$-score standard deviation
+        (parameters and validation sensors), and that is what the calibration
+        discussion leans on.
+\end{enumerate}
+
+Everything else follows the conventions of \S\ref{sec:setup}: sensor RMSEs are
+the 3-component \emph{velocity-vector} RMSE
+(\code{sensor\_metrics.*.velocity\_vector\_rmse.mean}), \emph{field $\Umag$} is
+\code{state\_metrics.vel\_magnitude\_rmse.mean}, $q$ is the field hit rate, and
+figure legends print a magnitude-only $\Umag$ error that is roughly half the
+tabulated vector RMSE.
+
+\subsection{Master comparison tables}
+\label{sec:cmp:master}
+
+\begin{table}[H]
+  \centering
+  \caption{Matched-model comparison (uDALES truth). Rows are method variants
+  within one (case, localization) cell; bold marks the best value in each
+  column \emph{within that cell}. $z_{\mathrm{par}}$ is the pooled parameter
+  $z$-score std and $z_{\mathrm{val}}$ the validation-sensor
+  $\Umag$ $z$-score std (both $1.03$ when calibrated); $q$ is the field hit
+  rate. $\dagger$ marks carried-prior entries: state-only filters never update
+  the parameter ensemble, so those numbers are the static prior, not a
+  posterior. Two readings deserve care --- the \emph{assim} column rewards
+  methods that update state directly at the sensors and is a fit diagnostic
+  rather than a skill measure (\S\ref{sec:cmp:generalisation}), and a high $q$
+  can be bought with a diverging ensemble (\S\ref{sec:cmp:calibration}).}
+  \label{tab:cmp:master-ud}
+  \CmpMasterUDALES
+\end{table}
+
+\begin{table}[H]
+  \centering
+  \caption{Model-error comparison (PALM truth, uDALES assimilation model).
+  Same layout as Table~\ref{tab:cmp:master-ud}; \code{field\_metrics} is not
+  written for PALM-truth runs, hence the empty $q$ column. Both laminar
+  \code{inflow} cells are empty because the PALM truth generation itself
+  diverged in all three campaigns.}
+  \label{tab:cmp:master-palm}
+  \CmpMasterPALM
+\end{table}
+
+\begin{table}[H]
+  \centering
+  \caption{Fit versus generalisation. \emph{valid/assim} is the ratio of
+  held-out to assimilated velocity-vector RMSE: a value near $1$ means the
+  method is as good away from the sensors as at them, and a large value means
+  the fit is local. This is the sharpest structural difference between the
+  parameter smoother and the state filters.}
+  \label{tab:cmp:gap}
+  \CmpGapTable
+\end{table}
+
+\begin{table}[H]
+  \centering
+  \caption{Observation-interval sweeps, ESMDA versus filter smoothing
+  (correlation localization throughout). Recall caveat~3 of
+  \S\ref{sec:cmp:scope}: the same column heading denotes a change in the
+  assimilated observation count for ESMDA but only a change in the smoother's
+  aggregation bin for the hybrid. The sequential-filtering campaign has no
+  such sweep.}
+  \label{tab:cmp:obsinterval}
+  \CmpObsIntervalTable
+\end{table}
+
+\begin{table}[H]
+  \centering
+  \caption{Cost. \emph{analyses} counts Kalman/MDA updates over the whole
+  \SI{360}{\second} run; \emph{obs per analysis} is the number of scalar
+  observations each update sees; \emph{window passes} is how many times the
+  \SI{120}{\second} window is integrated by the full ensemble per assimilation
+  window. Wall-time statistics are over all completed runs of that method
+  (both truth models and all cases), so they mix solver speeds --- the
+  periodic uDALES runs are intrinsically the fastest. The last column
+  normalises by the joint-EnKF mean.}
+  \label{tab:cmp:cost}
+  \CmpCostTable
+\end{table}
+
+\subsection{Summary figures}
+\label{sec:cmp:figures}
+
+\subsubsection{State at the validation sensors}
+\label{sec:cmp:fig-state}
+
+Figures~\ref{fig:cmp:valid-ud-inflow}--\ref{fig:cmp:valid-noloc} put the
+per-run sensor figures of Sections~\ref{sec:esmda}--\ref{sec:fs} side by side.
+Every panel triple is the same crop: ground sensor $0$ at $(2,30,2)$, the
+elevated sensor $3$ at $(10,30,20)$ --- the held-out sensor furthest from any
+observation --- and the per-cycle $\Umag$ error. Two reading rules apply
+throughout. \emph{(i)} The filter-smoothing column is plotted against
+\emph{cycle index} ($0$--$180$, \SI{2}{\second} per cycle) while the ESMDA and
+EnKF columns are plotted against seconds ($0$--$360$); the physical duration is
+identical and the curves are not redrawn. \emph{(ii)} The panel legends print a
+magnitude-only $\Umag$ RMSE, roughly half the velocity-\emph{vector} RMSE
+quoted in the label strips and in the tables; the two must never be compared
+directly.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_valid_ud_inflow.png}
+  \caption{Held-out sensors, uDALES truth, laminar \code{inflow}, localization
+  on: E11 (ESMDA), F7 (EnKF joint$+$RTPS), H11 (filter smoothing). The joint
+  filter (middle) is the only column whose ensemble stays wide enough to
+  bracket the truth; both smoother-based columns collapse onto a narrow,
+  phase-shifted mean --- the laminar case where the boundary parameters cannot
+  express the interior error. \emph{x-axis:} seconds for E11/F7, cycle index
+  for H11.}
+  \label{fig:cmp:valid-ud-inflow}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_valid_ud_inflow_turb.png}
+  \caption{Held-out sensors, uDALES truth, \code{inflow\_turb}, localization
+  on: E12, F9, H12. This is the case where the ordering reverses. E12 tracks
+  the elevated sensor with a narrow, slightly low-biased ensemble; F9 has a
+  visibly wider ensemble that brackets the truth but whose mean is flatter;
+  H12 sits between them. \emph{x-axis:} seconds for E12/F9, cycle index for
+  H12.}
+  \label{fig:cmp:valid-ud-turb}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_valid_ud_periodic.png}
+  \caption{Held-out sensors, uDALES truth, \code{periodic}, localization on:
+  E13, F11, H13. All three columns show the spin-up transient of the periodic
+  configuration and a mean that never recovers the truth amplitude; F11's
+  ensemble is the widest, which is what buys it the highest hit rate $q$
+  despite the worst field RMSE (\S\ref{sec:cmp:calibration}).
+  \emph{x-axis:} seconds for E13/F11, cycle index for H13.}
+  \label{fig:cmp:valid-ud-periodic}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_valid_ud_stateonly.png}
+  \caption{The state-only companions of
+  Figures~\ref{fig:cmp:valid-ud-inflow}--\ref{fig:cmp:valid-ud-periodic}:
+  F8 (laminar \code{inflow}), F10 (\code{inflow\_turb}) and F12
+  (\code{periodic}), all EnKF state$+$RTPS with localization on. They are shown
+  separately because a fourth column would push the axis labels below legibility
+  at \code{\textbackslash textwidth}. The ensembles are the widest of any
+  variant --- RTPS is doing its job --- but the mean carries no
+  boundary-condition information, so the elevated sensor is tracked worst of
+  all here. All three x-axes are in seconds.}
+  \label{fig:cmp:valid-stateonly}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_valid_palm_inflow_turb.png}
+  \caption{Model error: held-out sensors, PALM truth, \code{inflow\_turb},
+  localization on: E2, F2, H2. Compare with
+  Figure~\ref{fig:cmp:valid-ud-turb}, the matched-model version of the same
+  cell. The truth trace is visibly outside the ensemble for long stretches in
+  all three columns --- the state floor of \S\ref{sec:cmp:modelerror} at a
+  single sensor. \emph{x-axis:} seconds for E2/F2, cycle index for H2.}
+  \label{fig:cmp:valid-palm-turb}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_valid_palm_periodic.png}
+  \caption{Model error: held-out sensors, PALM truth, \code{periodic},
+  localization on: E3, F3, H3. F3 is the divergent run of
+  Table~\ref{tab:cmp:master-palm} ($\alpha$ RMSE $138.50^\circ$): its ensemble
+  overshoots the truth by a factor $\approx 3$ from $t \approx \SI{40}{\second}$
+  onwards and never returns. H3 stays bounded.
+  \emph{x-axis:} seconds for E3/F3, cycle index for H3.}
+  \label{fig:cmp:valid-palm-periodic}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_valid_ud_noloc.png}
+  \caption{Localization off, uDALES truth: \code{inflow\_turb} (top row: E19,
+  F16, H19) and \code{periodic} (bottom row: E20, F19, H20). The counterparts
+  with localization on are Figures~\ref{fig:cmp:valid-ud-turb}
+  and~\ref{fig:cmp:valid-ud-periodic}. On \code{inflow\_turb} switching
+  localization off costs little; on \code{periodic} it is the difference
+  between a tracked and an untracked sensor for every method.
+  \emph{x-axis:} seconds for the E and F columns, cycle index for the H
+  column.}
+  \label{fig:cmp:valid-noloc}
+\end{figure}
+
+\subsubsection{Parameter estimation}
+\label{sec:cmp:fig-params}
+
+Figures~\ref{fig:cmp:paramerr-ud}--\ref{fig:cmp:marg-palm} show the same three
+parameter-estimating methods on the same axes. The state-only EnKF runs are
+omitted: their parameter ensemble is never updated, so every panel would be the
+flat static prior ($19.29^\circ$, $0.919$~m/s). Unlike the sensor figures, the
+parameter-error panels are in seconds for \emph{all} three methods. The
+marginals carry one asymmetry that must be read carefully: ESMDA and the hybrid
+resolve the boundary condition on a $15$-knot spline and their ``final knot''
+is knot $14$ of $15$, whereas the joint EnKF carries only $3$ knots in its
+state vector and its final knot is knot $2$ of $3$ --- the panels are the same
+quantity at a coarser temporal resolution.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_param_error_ud.png}
+  \caption{Parameter-error time series, uDALES truth, localization on: inflow
+  angle $\alpha$ (upper panel of each pair) and velocity magnitude $\Umag$
+  (lower). Rows are the three cases; columns are ESMDA (E11/E12/E13), EnKF
+  joint$+$RTPS (F7/F9/F11) and filter smoothing (H11/H12/H13). The
+  smoother-based columns step once per assimilation window and the filter
+  column updates continuously, which is why only the middle column is a rough
+  trace. The $\Umag$ row of F7/F9 is the clearest single view of the result of
+  \S\ref{sec:cmp:params}: the joint filter's magnitude error never leaves the
+  prior band.}
+  \label{fig:cmp:paramerr-ud}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_param_error_palm.png}
+  \caption{Parameter-error time series under model error (PALM truth,
+  localization on): \code{inflow\_turb} (E2, F2, H2) and \code{periodic}
+  (E3, F3, H3). Same layout as Figure~\ref{fig:cmp:paramerr-ud}. The
+  \code{periodic} row of F3 shows the divergence directly: the angle error
+  saturates near $150^\circ$ within \SI{40}{\second} and the magnitude error
+  near $20$~m/s, while E3 and H3 stay in the $10$--$30^\circ$ band.}
+  \label{fig:cmp:paramerr-palm}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_marginals_ud.png}
+  \caption{Final-knot prior (grey) and posterior (blue) marginals, uDALES
+  truth, localization on; dashed line is the truth. Same rows and columns as
+  Figure~\ref{fig:cmp:paramerr-ud}. On both inflow cases every posterior has
+  contracted sharply, and on \code{inflow\_turb} the ESMDA and hybrid angle
+  posteriors sit on the truth line while their $\Umag$ posteriors sit visibly
+  above it ($z = -4.60$ and $-6.28$) --- contracted \emph{and} displaced, the
+  over-confidence of \S\ref{sec:cmp:calibration}. On \code{periodic} the
+  posteriors have barely contracted and have moved away from the truth.}
+  \label{fig:cmp:marg-ud}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_marginals_palm.png}
+  \caption{Final-knot marginals under model error (PALM truth, localization
+  on), same layout as Figure~\ref{fig:cmp:paramerr-palm}. The posteriors are as
+  narrow as in the matched case but are displaced from the truth line: the
+  ``confidently wrong'' behaviour of \S\ref{sec:cmp:modelerror}. F3's angle
+  posterior has left the plotted prior range entirely.}
+  \label{fig:cmp:marg-palm}
+\end{figure}
+
+\subsubsection{Aggregate metrics}
+\label{sec:cmp:fig-aggregate}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_accuracy.png}
+  \caption{Held-out-sensor velocity-vector RMSE (left) and domain field
+  $\Umag$ RMSE (right) for every matched cell. Missing bars are
+  configurations that were not run (the uninflated state-only filter exists
+  only at localization off, and no state-only variant was run for PALM truth).
+  Note that the ordering flips between cases: EnKF joint$+$RTPS wins on
+  laminar \code{inflow}, ESMDA on \code{inflow\_turb}, and filter smoothing on
+  \code{periodic}.}
+  \label{fig:cmp:accuracy}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_parameters.png}
+  \caption{Parameter recovery, plotted as lollipops \emph{from the static
+  climatological prior} (dashed line, $19.29^\circ$ and $0.919$~m/s) on a
+  logarithmic axis --- a stem pointing down is an improvement on climatology,
+  one pointing up is a degradation. Only the three parameter-estimating
+  methods appear; state-only filters sit exactly on the dashed line by
+  construction. The inflow angle is recoverable on \code{inflow} and
+  \code{inflow\_turb} by all three; the velocity magnitude is only improved by
+  the two \emph{smoother}-based methods, while the joint filter leaves it at
+  the prior in the matched cases and drives it far past the prior on
+  \code{periodic} and under model error.}
+  \label{fig:cmp:parameters}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_calibration.png}
+  \caption{Calibration on a logarithmic axis, all matched cells (UD $=$ uDALES
+  truth, PA $=$ PALM truth). Dashed lines mark the calibrated values
+  ($\chi^2 = 1$; $\mathrm{std}(z) = 1.03$ for $N = 50$). ESMDA is absent
+  from the top panel because it reports no innovation $\chi^2$
+  (caveat~4, \S\ref{sec:cmp:scope}); state-only filters are absent from the
+  bottom panel because their parameter $z$ is a prior, not a posterior. The
+  RTPS-inflated filters are the only variants close to calibrated, and they
+  are precisely the variants with the least parameter skill.}
+  \label{fig:cmp:calibration}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{comparison/cmp_generalisation.png}
+  \caption{Fit versus generalisation: assimilated-sensor RMSE (horizontal)
+  against held-out-sensor RMSE (vertical), log--log, one marker per completed
+  run. Points on the dashed $1{:}1$ line generalise as well as they fit;
+  points far above it fit the six assimilated sensors much better than the
+  four held-out ones. ESMDA (blue circles) sits on or below the line on
+  \code{inflow\_turb}; every filter variant sits well above it. Black marker
+  edges denote correlation localization.}
+  \label{fig:cmp:generalisation}
+\end{figure}
+
+\subsection{Discussion}
+\label{sec:cmp:discussion}
+
+\subsubsection{State accuracy: the winner changes with the case, not with the
+method}
+\label{sec:cmp:state}
+
+No method is best everywhere, and the ranking is not even stable in sign.
+Figure~\ref{fig:cmp:accuracy} is the whole result in one panel pair; reading
+held-out-sensor RMSE off Table~\ref{tab:cmp:master-ud} (localization on,
+matched model):
+
+\begin{itemize}[nosep]
+  \item \code{inflow} (laminar): joint EnKF F7 $0.394$ $<$ hybrid H11 $0.593$
+        $<$ EnKF state$+$RTPS F8 $0.626$ $<$ ESMDA E11 $0.748$. The filter wins
+        by $47\%$ over the smoother.
+  \item \code{inflow\_turb}: ESMDA E12 $0.365$ $<$ hybrid H12 $0.497$ $<$ joint
+        EnKF F9 $0.559$ $<$ EnKF state$+$RTPS F10 $0.753$. The smoother wins by
+        $35\%$ over the joint filter --- the ordering has \emph{reversed}.
+  \item \code{periodic}: hybrid H13 $1.246$ $\approx$ EnKF state$+$RTPS F12
+        $1.261$ $<$ ESMDA E13 $1.408$ $<$ joint EnKF F11 $1.551$.
+\end{itemize}
+
+The domain field tells the same story with the same reversals: field $\Umag$
+RMSE is $0.247$ (F7) on laminar, $0.372$ (E12) on \code{inflow\_turb} and
+$1.019$ (H13) on \code{periodic}. Figures~\ref{fig:cmp:valid-ud-inflow},
+\ref{fig:cmp:valid-ud-turb} and~\ref{fig:cmp:valid-ud-periodic} show the same
+three orderings at the held-out sensors themselves.
+
+The mechanism is the one the individual sections each identified from their
+own side. Where the boundary forcing is the dominant control on the interior
+flow --- the turbulent inlet --- correcting the forcing propagates everywhere
+and beats correcting local state. Where the interior flow is dominated by a
+phase error the boundary parameters cannot express (laminar inflow, whose
+parameters ESMDA cannot pin down: \S\ref{sec:esmda}) or by internal dynamics
+that are not driven by the inlet at all (periodic lateral boundaries), a state
+filter that simply nudges the field wins or ties. \good{The practical
+consequence is that the choice between a parameter smoother and a state filter
+is a statement about which error source dominates, not a statement about which
+algorithm is better.}
+
+One number in Table~\ref{tab:cmp:master-ud} should \emph{not} be read as skill:
+the assimilated-sensor RMSE. The filters update the state directly at those six
+sensors, so they beat ESMDA in that column in all $10$ cells where
+they compete --- by a factor $1.9$ on \code{inflow\_turb} (F9 $0.206$ vs.\
+E12 $0.401$) and $3.5$ on \code{periodic} (F12 $0.315$ vs.\ E13 $1.091$) ---
+while losing
+the held-out column in the first of those. It is a fit diagnostic;
+\S\ref{sec:cmp:generalisation} treats the gap as the quantity of interest.
+
+\subsubsection{Parameter identifiability is a property of the case, and of
+\emph{which} parameter}
+\label{sec:cmp:params}
+
+Figure~\ref{fig:cmp:parameters} separates two claims that are easy to conflate.
+
+\paragraph{The inflow angle is recoverable on both inflow cases, by all three
+parameter-estimating methods.} On \code{inflow\_turb} with localization the
+angle RMSE is $2.31^\circ$ (E12), $2.61^\circ$ (H12) and $3.36^\circ$ (F9)
+against a $\approx 17$--$19^\circ$ climatological prior; without localization,
+$2.45$ / $3.45$ / $4.88^\circ$ (E19 / H19 / F16). On laminar \code{inflow} the
+ordering inverts --- joint EnKF $3.90^\circ$ (F13, no loc) and $5.26^\circ$
+(F7, loc) beat the hybrid ($7.87$ / $5.81^\circ$) and ESMDA ($7.59$ /
+$7.74^\circ$)
+--- consistent with the laminar case being where the smoother stalls on phase
+drift while the filter still extracts directional information from the raw
+\SI{2}{\second} stream.
+
+\paragraph{The velocity magnitude is only recovered by the smoother-based
+methods.} Against the $0.919$~m/s static prior, ESMDA E12 reaches $0.369$~m/s
+and the hybrid H12 $0.433$~m/s on \code{inflow\_turb} with localization
+($0.439$ and $0.365$ without, E19 and H19), while the joint EnKF reports
+$0.912$ (F9) and $0.955$~m/s (F16) --- i.e.\ no improvement at all, and a
+slight degradation without localization. The lower row of each column pair in
+Figure~\ref{fig:cmp:paramerr-ud} shows this directly: F7 and F9 never leave the
+prior band. The tempered, three-step MDA update extracts the magnitude; the
+single linear Kalman step appended to a state vector does not. \bad{Worse, the
+joint filter's magnitude update is actively unsafe where the parameter is
+unidentifiable}: on \code{periodic} it reaches $4.221$~m/s (F11, matched) and
+$21.276$~m/s (F3, PALM truth), against $0.756$ (H13) and $1.157$~m/s (H3) for
+the hybrid at the same settings. The unbounded Gaussian update drives members
+to physically impossible inflow speeds, and the state follows (field $\Umag$
+RMSE $1.733$ vs.\ $1.019$).
+
+\paragraph{On \code{periodic} nothing works, and that is a property of the
+observation network.} All three parameter-estimating methods (E13, F11, H13)
+land within $13.6$--$19.0^\circ$ of a $\approx 16.6^\circ$ prior; the bottom
+row of Figure~\ref{fig:cmp:marg-ud} shows why --- the posteriors have barely
+contracted. Six near-ground sensors
+under periodic lateral boundaries do not constrain an inflow direction that no
+longer drives the flow. The correct conclusion is not ``use a different
+estimator'' but ``do not estimate this parameter in this configuration''.
+
+\subsubsection{Generalisation to held-out and elevated sensors}
+\label{sec:cmp:generalisation}
+
+Table~\ref{tab:cmp:gap} and Figure~\ref{fig:cmp:generalisation} isolate the one
+difference that is structural rather than case-dependent.
+
+\begin{itemize}[nosep]
+  \item \textbf{ESMDA generalises essentially perfectly}: valid/assim
+        $= 0.89$--$1.48$ over all ten matched cells, and \emph{below one} on
+        both \code{inflow\_turb} cells (E12 $0.91$, E19 $0.89$) and both PALM
+        \code{inflow\_turb} cells (E2 $0.97$, E9 $0.94$) --- it is more
+        accurate at
+        the four sensors it never saw than at the six it fitted. A global
+        boundary-condition correction has no local overfitting mode.
+  \item \textbf{Every filter variant fits locally}: valid/assim
+        $= 2.2$--$4.9$ on matched-model cells, i.e.\ held-out error is two to
+        five times the fitted error. RTPS makes this \emph{worse}, not better
+        (laminar, no loc: F14 $2.41 \rightarrow$ F15 $3.44$), because inflation
+        buys
+        calibration at the sensors without adding any information away from
+        them.
+  \item \textbf{The hybrid inherits the smoother's behaviour on the inflow
+        cases and the filter's on periodic}: $1.17$--$1.83$ on \code{inflow}
+        and \code{inflow\_turb}, but $3.96$ (H13) on \code{periodic} with
+        localization --- exactly the case where its parameter half has nothing
+        to contribute and only the filter half is doing work.
+\end{itemize}
+
+Figure~\ref{fig:cmp:valid-ud-turb} shows what this looks like at the elevated
+$z = \SI{20}{\meter}$ validation sensor, the one furthest from any
+observation. All three methods track it; the difference is in the ensemble.
+E12 produces a narrow ensemble whose mean follows the truth but sits
+systematically below it in the second half; F9 produces a much wider ensemble
+that brackets truth but whose mean is flatter; H12 is intermediate. The
+state-only companion F10 (Figure~\ref{fig:cmp:valid-stateonly}) is the extreme
+of the same trade: the widest ensemble of all and the worst held-out mean. That is the accuracy/calibration trade-off of
+\S\ref{sec:cmp:calibration} made visible at a single sensor.
+
+\subsubsection{Calibration: the well-calibrated methods are the ones with no
+parameter skill}
+\label{sec:cmp:calibration}
+
+This is the least comfortable result of the comparison
+(Figure~\ref{fig:cmp:calibration}).
+
+\begin{itemize}[nosep]
+  \item \textbf{Innovation $\chi^2$}: the RTPS-inflated filters are close to
+        calibrated on five of the six matched cells ($0.92$--$1.82$), the one
+        exception being \code{periodic} without localization (F21, $14.05$).
+        The hybrid, whose filter half is the \emph{same} EnKF with the
+        \emph{same} RTPS, reports $13.26$ / $14.96$ on laminar (H11 / H18),
+        $3.68$ / $3.43$ on \code{inflow\_turb} (H12 / H19) and $1.81$ / $23.06$
+        on \code{periodic} (H13 / H20): the
+        smoother's parameter update injects an error that the filter then has
+        to absorb, and it shows up as an inflated innovation. Removing
+        inflation is worse still ($3.98$, $8.79$, $27.72$).
+  \item \textbf{Validation-sensor $z$}: same ordering. The RTPS-inflated filters are
+        honest ($0.83$--$1.48$ on matched cells except periodic without
+        localization; the uninflated filter F20 reaches $7.00$), ESMDA
+        is over-confident ($1.32$--$7.82$), the hybrid most of all
+        ($1.40$--$11.25$). Figure~\ref{fig:cmp:marg-ud} shows the same
+        over-confidence on the parameters: the E and H posteriors are the
+        narrowest and the furthest from the truth line.
+  \item \textbf{Parameter $z$}: no method is calibrated. The joint EnKF is
+        closest ($0.74$--$3.29$ on five of six matched cells, $11.54$ for F19
+        on the sixth) but, as
+        \S\ref{sec:cmp:params} showed, its parameter ensemble is wide precisely
+        because it is not learning the magnitude. ESMDA spans
+        $2.58$--$89.85$ and the hybrid $2.67$--$41.51$; without localization
+        both can reach three digits ($263.32$ for E10 on PALM
+        \code{periodic}, $101.80$ for H10).
+  \item \textbf{Hit rate $q$ is not a skill measure.} The highest matched-model
+        $q$ in the whole set, $0.887$, belongs to F11 (joint EnKF,
+        \code{periodic}) --- the same run with field $\Umag$ RMSE $1.733$ and a
+        $4.221$~m/s parameter error. A diverging ensemble covers the truth.
+        Read $q$ next to a RMSE column, never alone.
+\end{itemize}
+
+The common cause is the same one every section flagged individually: every run
+uses $\sigma_{\mathrm{obs}} = 0.1$~m/s with
+\code{caveat: no\_representativeness\_error}. An observation error that
+excludes model representativeness makes the analysis too confident in all
+three algorithms; it is a configuration property, not a property of any one
+method.
+
+\subsubsection{Robustness to model error}
+\label{sec:cmp:modelerror}
+
+Switching the truth model to PALM costs a factor $3$--$4$ in held-out RMSE for
+every method, and --- more importantly --- \emph{compresses the methods
+together}. On \code{inflow\_turb} with localization the matched-model spread
+is $0.365$--$0.753$ (a factor $2.1$ between best and worst); under model error
+it is $1.297$--$1.429$ (a factor $1.10$). The ordering also changes: F2
+($1.297$) now edges out E2 ($1.377$) and H2 ($1.429$), a reversal of the
+matched result. Figure~\ref{fig:cmp:valid-palm-turb} is the sensor-level view
+of that compression: the three columns are barely distinguishable. \bad{Once representativeness error dominates,
+the choice of assimilation algorithm stops mattering for state accuracy.}
+
+Parameter estimates do not degrade gracefully --- they become
+\emph{confidently wrong}. On PALM \code{inflow\_turb} all three methods report
+$6.6$--$11.1^\circ$ angle RMSE, which looks like partial success, but with
+pooled parameter $z$ of $12.49$ (E2) and $12.44$ (H2); E2's data mismatch
+stalls at $O_N = 30.1$ instead of descending to E12's matched-model $2.37$ (and
+at $57.4$ on PALM \code{periodic}). The posterior is narrow and displaced ---
+Figure~\ref{fig:cmp:marg-palm}.
+
+Where the methods do separate under model error is stability. On PALM
+\code{periodic} with localization the joint EnKF F3 diverges outright --- angle
+RMSE $138.50^\circ$, magnitude $21.276$~m/s, held-out RMSE $4.072$, validation
+$z$ of $42.50$ --- while the hybrid H3 stays bounded ($15.69^\circ$,
+$1.157$~m/s, held-out $1.751$, $z = 1.85$) and ESMDA E3 lands in between
+($22.42^\circ$, $1.090$~m/s, $2.133$). Figures~\ref{fig:cmp:valid-palm-periodic}
+and~\ref{fig:cmp:paramerr-palm} show the divergence itself. \good{Splitting the parameter update off
+into a tempered smoother is what prevents the blow-up}: three damped MDA steps
+against $96$ aggregated observations cannot move the parameters as far in one
+window as $60$ untempered Kalman updates can. That robustness, not accuracy, is
+the strongest argument for the hybrid in this set.
+
+The field is beyond repair in the periodic model-error corner regardless of
+method: field $\Umag$ RMSE is $4.01$--$5.91$ against $\approx 1.02$ matched.
+
+\subsubsection{Cost}
+\label{sec:cmp:cost}
+
+Table~\ref{tab:cmp:cost} gives the accounting. Per \SI{360}{\second} run on 10
+parallel processes, the sequential filters cost $1.01$--$1.28$~h, ESMDA
+$1.77$--$2.36$~h ($1.77\times$ the joint-filter mean) and filter smoothing
+$2.35$--$2.96$~h ($2.28\times$). The driver is the number of times the ensemble
+must re-integrate each window: one pass for a filter, four for ESMDA (prior
+$+$ three MDA steps), and effectively four for the hybrid, which runs both.
+
+Cost and accuracy are not aligned, and they are not anti-aligned either:
+
+\begin{itemize}[nosep]
+  \item On laminar \code{inflow} the \emph{cheapest} method is also the best
+        on every accuracy column: joint EnKF F13, held-out $0.319$ at
+        $1.19$~h. There is no case for paying $2.4\times$ for the hybrid here.
+  \item On \code{inflow\_turb} the best held-out RMSE ($0.365$) costs
+        $2.30$~h with ESMDA E12, against $0.559$ at $1.27$~h with the joint
+        filter F9 --- a $35\%$ accuracy gain for an $81\%$ cost increase, plus
+        the parameter estimate.
+  \item On \code{periodic} the hybrid H13 ($1.246$ at $2.38$~h) is
+        statistically indistinguishable from EnKF state$+$RTPS F12 ($1.261$ at
+        $1.01$~h) on the state. The extra $1.4$~h buys only a bounded
+        parameter estimate --- worth it if the boundary condition is a
+        deliverable, not otherwise.
+\end{itemize}
+
+The wall-time ranges in Table~\ref{tab:cmp:cost} mix cases and truth models and
+are therefore contaminated by solver speed (uDALES is fastest on the periodic
+configuration); the within-cell comparisons above are the reliable ones.
+
+\subsubsection{Which method for which regime}
+\label{sec:cmp:recommend}
+
+\begin{description}[leftmargin=2.4em,style=nextline]
+  \item[Matched model, forcing-dominated flow (\code{inflow\_turb}) ---
+        \good{ESMDA} (E12).] Best held-out RMSE ($0.365$), best field
+        ($0.372$), best parameters ($2.31^\circ$, $0.369$~m/s), generalises
+        better than it fits, and cheaper than the hybrid. Accept that it is
+        over-confident ($z_{\mathrm{val}} = 2.71$) --- if the ensemble spread
+        is a deliverable, take H12 instead and pay $27\%$ more wall time for
+        $z_{\mathrm{val}} = 2.36$ and $0.497$ held-out.
+  \item[Matched model, laminar inflow --- \good{EnKF joint$+$RTPS} (F13).]
+        Best on every accuracy column, best calibrated ($\chi^2 =
+        0.90$--$0.99$, $z_{\mathrm{val}} = 0.83$--$0.88$), cheapest, and it
+        recovers the angle ($3.90^\circ$) which the smoother cannot here. Do not expect the
+        magnitude ($0.818$--$0.910$~m/s, essentially the prior). Run it
+        \emph{without} localization: localization costs $24\%$ of held-out
+        RMSE on this case. Figure~\ref{fig:cmp:valid-noloc} shows the
+        localization-off cells of the other two cases, where the sign of the
+        effect is the opposite.
+  \item[Matched model, periodic --- \good{EnKF state$+$RTPS} (F12), or
+        \good{filter smoothing} (H13) if a boundary estimate is required.] They
+        tie on the state ($1.261$ vs.\ $1.246$ held-out; $1.029$ vs.\ $1.019$
+        field). \bad{Do not use the joint EnKF here} (F11): it degrades both
+        the state ($1.733$ field) and the parameters ($4.221$~m/s). Use
+        localization: it is worth $47$--$58\%$ of held-out RMSE on this case.
+  \item[Model error (PALM truth) --- \good{ESMDA or filter smoothing,
+        with localization; parameters not trustworthy}.] All methods collapse
+        onto a $1.30$--$1.43$ held-out floor on \code{inflow\_turb}, so pick on
+        stability rather than accuracy. \bad{Avoid the joint EnKF on periodic}
+        (F3, divergence). Localization is mandatory: without it the hybrid's
+        pooled parameter $z$ reaches $101.80$ (H10) and ESMDA's $263.32$
+        (E10).
+  \item[If you need both a state and a boundary-condition estimate and cannot
+        tune per case --- \good{filter smoothing}.] Scoring each method by its
+        \emph{regret} --- how much worse its held-out RMSE is than the best
+        method in the same cell --- gives, over the ten matched cells: hybrid
+        median $+10.2\%$, worst case $+94\%$; ESMDA median $+6.2\%$,
+        worst case $+136\%$; joint EnKF median $+53.0\%$, worst case $+133\%$;
+        EnKF state$+$RTPS median $+68.7\%$. \good{ESMDA has the best
+        typical regret and the hybrid the best worst case}, and the hybrid is
+        the only variant that returns a usable estimate of \emph{both} halves
+        in all three matched cases. If one configuration has to serve all
+        regimes, that combination is the argument for it.
+\end{description}
+
+\subsubsection{Open issues and caveats}
+\label{sec:cmp:caveats}
+
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item \textbf{Unequal information.} The ESMDA rows work from $96$
+        aggregated observations per window; the filter rows from $720$ raw
+        ones. No run controls for this, so the ESMDA-versus-filter contrast
+        confounds \emph{algorithm} with \emph{observation processing}. The
+        turbulent-inflow result (ESMDA best on held-out sensors from less
+        data) is robust to the confound in sign; the laminar result (filter
+        best) is not.
+  \item \textbf{The two observation-interval sweeps are different
+        experiments} (caveat~3, \S\ref{sec:cmp:scope}), and they disagree:
+        ESMDA's angle RMSE on \code{inflow\_turb} is flat across
+        $7.5/15/30$~s ($2.42/2.31/2.35^\circ$) while the hybrid's is monotone
+        ($1.94/2.61/2.86^\circ$). Both effects are $\leq 1^\circ$, an
+        order of magnitude below the case-to-case differences, and the state
+        metrics move by under $4\%$ in both campaigns. Neither sweep supports a
+        recommendation.
+  \item \textbf{One seed per configuration.} Every run uses \code{seed=42} and
+        no configuration was repeated. Differences below roughly $10\%$ ---
+        for example H13 $1.246$ versus F12 $1.261$ on
+        \code{periodic} --- are not resolvable, and are described as ties
+        above.
+  \item \textbf{Six of $45$ matched cells are empty.} Both PALM-truth
+        \code{inflow} cells failed in all three campaigns, at PALM truth
+        generation rather than in assimilation, so the laminar model-error
+        comparison does not exist. Two of the three columns of
+        Table~\ref{tab:cmp:master-palm} are therefore missing a row that the
+        matched table has.
+  \item \textbf{Calibration is compared across instruments.} ESMDA
+        contributes no $\chi^2$ and the filters contribute no $O_N$; the
+        cross-method calibration statement rests on the $z$-scores alone.
+        Every run also carries
+        \code{caveat: no\_representativeness\_error}, so the absolute
+        over-confidence is common-mode and only the \emph{ordering} between
+        methods should be read from Figure~\ref{fig:cmp:calibration}.
+  \item \textbf{Two RMSE definitions are in circulation.} The tables use the
+        3-component vector RMSE; every figure produced by the run drivers
+        (including the panels of Figure~\ref{fig:cmp:valid-ud-turb}) prints a
+        magnitude-only $\Umag$ RMSE that is roughly half as large. They rank
+        identically but must never be quoted side by side.
+  \item \textbf{Wall times are not a clean cost model.} They mix truth models,
+        cases and solver speeds, and all runs shared the same 10-process
+        machine sequentially rather than being benchmarked in isolation.
+  \item \textbf{The state-only rows are incomplete by design.} The filtering
+        campaign ran state-only variants only for uDALES truth, and the
+        uninflated variant only at \code{locnone}, so several cells of
+        Table~\ref{tab:cmp:master-ud} compare four methods and others five.
+\end{enumerate}
+
+\subsection{At a glance}
+\label{sec:cmp:glance}
+
+\begin{table}[H]
+  \centering
+  \caption{Method $\times$ regime verdicts, matched model and localization on unless stated.
+  \good{Green} = recommended for that regime, \bad{red} = avoid. Entries in
+  black are usable but dominated by another method at equal or lower cost.
+  Verdicts follow Tables~\ref{tab:cmp:master-ud}--\ref{tab:cmp:cost}.}
+  \label{tab:cmp:glance}
+  \footnotesize
+  \begin{adjustbox}{max width=\textwidth}
+  \begin{tabular}{@{}l llll@{}}
+  \toprule
+  method & \code{inflow} (laminar) & \code{inflow\_turb} & \code{periodic}
+  & PALM truth (model error) \\
+  \midrule
+  ESMDA
+    & E11: stalls, $0.748$ held-out
+    & \good{E12: best, $0.365$, $2.31^\circ$}
+    & E13: flat, $1.408$, $13.62^\circ$
+    & \good{E2/E3: state OK, params wrong} \\
+  EnKF state, no infl.
+    & \bad{F14: $\chi^2 = 3.98$}
+    & \bad{F17: $\chi^2 = 8.79$}
+    & \bad{F20: $\chi^2 = 27.7$}
+    & not run \\
+  EnKF state$+$RTPS
+    & F8: calibrated, no params
+    & F10: dominated, $0.753$
+    & \good{F12: ties best state, $1.261$}
+    & not run \\
+  EnKF joint$+$RTPS
+    & \good{F13 (no loc): best, $0.319$, $3.90^\circ$}
+    & F9: angle only, $3.36^\circ$
+    & \bad{F11: degrades state \& params}
+    & \bad{F3: diverges on periodic} \\
+  Filter smoothing
+    & H11: dominated, $0.593$
+    & H12: close 2nd, $0.497$, $2.61^\circ$
+    & \good{H13: best state $+$ safe params}
+    & \good{H2/H3: most stable, $2.28\times$} \\
+  \bottomrule
+  \end{tabular}
+  \end{adjustbox}
+\end{table}
+
+\noindent
+Condensed to one sentence: \good{on this case the dominant error source
+selects the method} --- boundary forcing $\rightarrow$ ESMDA, interior
+phase error $\rightarrow$ joint EnKF, unidentifiable forcing $\rightarrow$
+state-only EnKF or filter smoothing, model error $\rightarrow$ nothing
+recovers the parameters and the state floor is method-independent --- and
+\bad{no method in this set is simultaneously accurate and calibrated}.
+
+\endgroup

@@ -87,5 +87,6 @@
     "additionalDirectories": [
       "/export/scratch1/ntm/pyurbanair"
     ]
-  }
+  },
+  "outputStyle": "Concise"
 }
