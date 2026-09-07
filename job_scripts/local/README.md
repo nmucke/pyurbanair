@@ -24,6 +24,13 @@ local/
 ├── common.sh          # shared defaults + COMMON_RUN_FLAGS (sourced by every runner)
 ├── sweep_base.sh      # shared sweep engine + canonical value lists
 ├── eval_sweep.sh      # post-process a runs folder -> metrics + comparison figures
+├── experiments/       # DA-method comparison campaigns (see its own README):
+│   │                  #   one driver per method, driving the scripts/run_*_pipeline.sh
+│   │                  #   wrappers over shared axes (windows x localization x
+│   │                  #   observation interval x inflow)
+│   ├── settings.sh    # the one knob file for all three campaigns
+│   ├── campaign_lib.sh
+│   └── run_{esmda,filtering,filter_smoothing}_experiments.sh
 ├── pylbm/             # GPU backend (cuda pixi env, single process)
 │   ├── rollout_esmda_from_truth.sh
 │   ├── sweep_domain_rollout_esmda_from_truth.sh
