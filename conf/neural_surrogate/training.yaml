@@ -144,6 +144,15 @@ dataset:
   cache: false
   dtype: float32
   pushforward_steps: 7
+  # Backward history window H: how many CONSECUTIVE PAST frames (t-H+1 … t) each
+  # sample feeds the model, pre-flattened oldest-first into (H*C, *grid) -- the
+  # mirror image of `pushforward_steps`, which is the FORWARD rollout horizon.
+  # Must equal the architecture's `num_history_steps` (the train script
+  # cross-checks it and stamps the value into the saved config.yaml). 1 = the
+  # classic one-step input and is byte-identical to the pre-history behaviour.
+  # H > 1 costs the first H-1 anchors of every trajectory (a sample needs H past
+  # frames), so a trajectory needs at least pushforward_steps + H snapshots.
+  num_history_steps: 1
   # SDF / ∇SDF geometry features (see neural_surrogates.sdf). Selects which extra
   # channels the dataset ships alongside the `blanking` mask, computed once per
   # geometry at init: `none` (off), `sdf` (clamped signed distance only, +1),

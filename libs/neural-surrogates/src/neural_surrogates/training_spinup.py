@@ -13,7 +13,9 @@ The two pieces:
 
 * :func:`write_initial_state_files` streams the last frame of each member's
   training trajectory to its own ``state_{i}.nc`` under a directory ESMDA reads
-  per member (so the full ensemble never sits in RAM — peak is one frame).
+  per member (so the full ensemble never sits in RAM — peak is one frame). A
+  history-conditioned surrogate asks for ``num_history_steps`` frames instead,
+  and gets the last ``num_history_steps`` of the trajectory.
 * :func:`anchor_prior_params` shifts each member's sampled prior so its first
   time step matches that member's training sample's final inflow, preserving the
   prior draw's shape (the AR(2) anomaly) while pinning its level — exactly what
@@ -99,6 +101,7 @@ def write_initial_state_files(
     n_members: int,
     out_dir: str | pathlib.Path,
     frame: int = -1,
+    num_history_steps: int = 1,
 ) -> pathlib.Path:
     """Stream each member's window-0 initial state to ``out_dir/state_{i}.nc``.
 
@@ -110,16 +113,53 @@ def write_initial_state_files(
     start, so the directory can be handed straight to ESMDA as the window-0
     initial state. The raw (un-collocated) frame is written; the forward model
     collocates it to the regular grid on warm start, as before.
+
+    A *history-conditioned* surrogate (``num_history_steps = H > 1``) needs the
+    ``H`` frames ending at ``frame`` instead of the single one, so that its
+    input buffer is seeded with real history rather than a repeated snapshot.
+    Those frames are then written with the ``time`` dimension kept (length
+    ``H``, oldest first) — the same ``state_{i}.nc`` contract, since the forward
+    model takes the last ``H`` frames of whatever it is warm-started with. Peak
+    memory is ``H`` frames. ``H == 1`` writes exactly the single squeezed frame
+    it always has.
     """
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     n_samples = len(state_files)
+    num_history_steps = int(num_history_steps)
+    if num_history_steps < 1:
+        raise ValueError(f"num_history_steps must be >= 1, got {num_history_steps}.")
     for i in range(n_members):
         sample_index, _ = member_sample_index(i, n_samples)
         with xr.open_dataset(state_files[sample_index]) as ds:
-            snapshot = ds.isel(time=frame).load()
+            if num_history_steps == 1:
+                snapshot = ds.isel(time=frame).load()
+            else:
+                snapshot = ds.isel(
+                    time=_history_slice(
+                        ds.sizes["time"],
+                        frame,
+                        num_history_steps,
+                        state_files[sample_index],
+                    )
+                ).load()
         snapshot.to_netcdf(out_dir / f"state_{i}.nc")
     return out_dir
+
+
+def _history_slice(
+    t_len: int, frame: int, num_history_steps: int, source: pathlib.Path
+) -> slice:
+    """The ``num_history_steps`` frames ending at ``frame`` (inclusive)."""
+    end = frame if frame >= 0 else t_len + frame
+    start = end - num_history_steps + 1
+    if start < 0:
+        raise ValueError(
+            f"training sample {source} has {t_len} time steps, too few to seed "
+            f"num_history_steps={num_history_steps} frames ending at frame="
+            f"{frame}."
+        )
+    return slice(start, end + 1)
 
 
 def anchor_prior_params(

@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from hydra.utils import instantiate
 from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 
 def run(cfg: DictConfig) -> None:
@@ -35,10 +35,23 @@ def run(cfg: DictConfig) -> None:
     train_loader = build_loader(cfg, train_ds, train=True)
     val_loader = build_loader(cfg, val_ds, train=False)
 
+    # Backward history window H: the dataset ships the H most recent frames
+    # flattened oldest-first, and the architecture widens its stem to
+    # H * n_state_channels to consume them. The dataset node is the canonical
+    # place to set it, so mirror it onto the architecture -- unless that node
+    # sets the key itself, in which case it wins (and the cross-check below
+    # catches the disagreement). Legacy configs carry neither key; `.get(..., 1)`
+    # keeps them on the one-step path.
+    num_history_steps = int(cfg.dataset.get("num_history_steps", 1))
+    arch_history_kwargs: dict = {}
+    if cfg.architecture.get("num_history_steps") is None:
+        arch_history_kwargs["num_history_steps"] = num_history_steps
+
     model = instantiate(
         cfg.architecture,
         n_state_channels=len(cfg.dataset.state_vars),
         n_params=len(train_ds.param_names),
+        **arch_history_kwargs,
     ).to(dtype=dtype)
 
     # Cross-check the SDF-feature modes: a model whose stem was widened for a
@@ -62,6 +75,20 @@ def run(cfg: DictConfig) -> None:
             "SDF clamp mismatch: architecture.sdf_clamp_cells="
             f"{model.sdf_clamp_cells} but dataset.sdf_clamp_cells="
             f"{train_ds.sdf_clamp_cells}; they must match."
+        )
+
+    # Same spirit for the history window: a stem widened for H past frames must
+    # be paired with a dataset that ships exactly H of them, or the model trains
+    # on a mis-sliced input (or dies at cat time). Both default to 1, so this is
+    # a no-op for standard, pre-history runs.
+    model_history = int(getattr(model, "num_history_steps", 1))
+    dataset_history = int(getattr(train_ds, "num_history_steps", 1))
+    if model_history != dataset_history:
+        raise ValueError(
+            "history-window mismatch: architecture.num_history_steps="
+            f"{model_history} but dataset.num_history_steps={dataset_history}. "
+            "The stem is widened to num_history_steps * n_state_channels, so "
+            "the two must select the same window (set both to the same value)."
         )
 
     print(
@@ -104,6 +131,13 @@ def run(cfg: DictConfig) -> None:
 
     out_dir = Path("model_weights") / cfg.model_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Stamp the resolved history window under BOTH nodes before saving: the
+    # forward model rebuilds the net from the `architecture` node alone, while
+    # the eval / fine-tune scripts read the `dataset` node, and either may have
+    # inherited the value implicitly above.
+    with open_dict(cfg):
+        cfg.dataset.num_history_steps = dataset_history
+        cfg.architecture.num_history_steps = model_history
     OmegaConf.save(cfg, out_dir / "config.yaml")
 
     trainer = instantiate(

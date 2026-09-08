@@ -220,6 +220,12 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         fine-tune script flips this to ``False`` only when
         ``recompute_normalization=true`` will install fresh stats over the
         inherited ones anyway.
+    num_history_steps:
+        Accepted for signature parity with the next-step architectures (so a
+        Hydra node carrying the key instantiates), but only ``1`` is supported:
+        the frozen Tadpole AE encodes exactly ``C`` state channels (+ geometry)
+        per crop, so a history-flattened input would need a different (and
+        re-pretrained) encoder. ``> 1`` raises :class:`NotImplementedError`.
     """
 
     def __init__(
@@ -241,8 +247,18 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         skip_pretrained_load: bool = False,
         subnetwork_cfg: dict | None = None,
         require_ae_state_stats: bool = True,
+        num_history_steps: int = 1,
     ) -> None:
         super().__init__()
+
+        if int(num_history_steps) != 1:
+            raise NotImplementedError(
+                "TadpoleTimeStepper does not support state history "
+                f"(num_history_steps={num_history_steps}). The frozen AE "
+                "encoder is pre-trained on exactly C state channels (+ the "
+                "geometry block) per crop; use a plain next-step architecture "
+                "(UNetConvNeXt / P3D / UPT / SimpleConv) for H > 1."
+            )
 
         try:
             from neural_surrogates.architectures._tadpole.model.dft import TadpoleDFT
@@ -289,6 +305,10 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
 
         self.n_state_channels = int(n_state_channels)
         self.n_params = int(n_params)
+        # History is not supported here (see above); the attributes exist so the
+        # trainer / forward model can read them uniformly across architectures.
+        self.num_history_steps = 1
+        self.n_input_state_channels = self.n_state_channels
         self.size = size
         self.latent_type = latent_type
         self.encoder_crop_size = int(encoder_crop_size)

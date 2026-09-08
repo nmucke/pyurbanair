@@ -30,3 +30,10 @@ max_degree: 32
 # transsolver (required) or {kv_seqlen: 32} for linformer.
 attention_type: dot_product
 # attention_kwargs: {num_slices: 32}
+
+# State history: number of past frames fed to the model. The dataset ships them
+# pre-flattened along the channel axis (oldest first), so only the input stem
+# widens -- the output stays `n_state_channels`. Must match
+# dataset.num_history_steps. Default 1 -> existing checkpoints load
+# byte-identically.
+# num_history_steps: 1

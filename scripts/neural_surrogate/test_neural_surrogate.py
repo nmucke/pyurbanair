@@ -48,21 +48,34 @@ def _load_trajectory(
 @torch.no_grad()
 def _rollout(
     model: torch.nn.Module,
-    initial_state: torch.Tensor,
+    truth: torch.Tensor,
     params: torch.Tensor,
     geometry: torch.Tensor,
     n_steps: int,
     device: torch.device,
+    num_history_steps: int = 1,
 ) -> torch.Tensor:
-    pred = torch.empty((n_steps + 1, *initial_state.shape), dtype=initial_state.dtype)
-    pred[0] = initial_state
-    state = initial_state.unsqueeze(0).to(device)
+    """Autoregressive rollout seeded from the ground truth.
+
+    A one-step network (``num_history_steps == 1``) is seeded with ``truth[0]``
+    and predicts ``t = 1 … n_steps``. A history-conditioned network needs ``H``
+    frames before it can predict, so it is seeded with the ground-truth window
+    ``truth[0:H]`` (flattened oldest-first into the channel axis) and predicts
+    from ``t = H`` onward; ``pred[0:H]`` is set to that same window so the
+    returned trajectory keeps the ground truth's length and time indexing.
+    """
+    H = num_history_steps
+    C = truth.shape[1]
+    grid = truth.shape[2:]
+    pred = torch.empty((n_steps + 1, *truth.shape[1:]), dtype=truth.dtype)
+    pred[:H] = truth[:H]
+    state = truth[:H].reshape(1, H * C, *grid).to(device)
     geom = geometry.unsqueeze(0).to(device)
-    for t in range(n_steps):
+    for t in range(H - 1, n_steps):
         param_t = params[t].unsqueeze(0).to(device)
         next_state = model(state, param_t, geom)
         pred[t + 1] = next_state[0].cpu()
-        state = next_state
+        state = next_state if H == 1 else torch.cat([state[:, C:], next_state], dim=1)
     return pred
 
 
@@ -200,13 +213,26 @@ def run(cfg: DictConfig) -> None:
     dtype = getattr(torch, train_cfg.dataset.dtype)
     device = torch.device(cfg.device)
 
-    test_ds = instantiate(train_cfg.dataset, split="test", dtype=dtype)
+    # How many past frames the trained network consumes (H). Legacy configs
+    # predate the key -> the classic one-step surrogate.
+    num_history_steps = int(train_cfg.dataset.get("num_history_steps", 1))
 
+    test_ds = instantiate(
+        train_cfg.dataset,
+        split="test",
+        dtype=dtype,
+        **({} if num_history_steps == 1 else {"num_history_steps": num_history_steps}),
+    )
+
+    arch_overrides: dict = {}
+    if num_history_steps != 1 and "num_history_steps" not in train_cfg.architecture:
+        arch_overrides["num_history_steps"] = num_history_steps
     model = (
         instantiate(
             train_cfg.architecture,
             n_state_channels=len(train_cfg.dataset.state_vars),
             n_params=len(test_ds.param_names),
+            **arch_overrides,
         )
         .to(dtype=dtype)
         .to(device)
@@ -226,7 +252,8 @@ def run(cfg: DictConfig) -> None:
     T = truth.shape[0]
     print(
         f"loaded trajectory {cfg.sample_idx}  "
-        f"shape={tuple(truth.shape)}  param_names={test_ds.param_names}"
+        f"shape={tuple(truth.shape)}  param_names={test_ds.param_names}  "
+        f"num_history_steps={num_history_steps}"
     )
 
     plt.figure()
@@ -244,11 +271,12 @@ def run(cfg: DictConfig) -> None:
 
     pred = _rollout(
         model=model,
-        initial_state=truth[0],
+        truth=truth,
         params=params,
         geometry=geometry,
         n_steps=T - 1,
         device=device,
+        num_history_steps=num_history_steps,
     )
 
     out_dir = Path(cfg.output_dir)

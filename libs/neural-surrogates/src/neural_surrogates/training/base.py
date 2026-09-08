@@ -83,6 +83,15 @@ class BaseTraining:
         # prefixes its state-dict keys with `_orig_mod.`, so saving/loading
         # must go through the unwrapped module (parameters are shared).
         self._eager_model = self.model
+        # Backward history window the architecture was built with. With H > 1 the
+        # model consumes the H most recent frames pre-flattened oldest-first as
+        # ``(B, H*C, *grid)`` while still predicting a single ``(B, C, *grid)``
+        # frame, so the pushforward rollout must *roll* that window forward
+        # rather than replace it wholesale (see ``_advance_history``). Read off
+        # the eager module -- ``torch.compile`` wraps it -- and defaulted to 1 so
+        # architectures predating the knob keep the one-step behaviour exactly.
+        self.num_history_steps = int(getattr(self._eager_model, "num_history_steps", 1))
+        self.n_state_channels = getattr(self._eager_model, "n_state_channels", None)
         if compile_model:
             # Inductor's CUDA backend generates triton kernels; without a
             # working triton, compilation raises mid-epoch. Fall back to
@@ -347,6 +356,27 @@ class BaseTraining:
         pred = self.model(state, params_i, geometry, geom_features=feat)
         return pred
 
+    def _advance_history(self, state: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
+        """Roll the model input one step forward inside a pushforward rollout.
+
+        With the default ``num_history_steps == 1`` the model input *is* the
+        previous prediction, so this returns ``pred`` itself -- byte-identical to
+        the pre-history ``state = self._model_forward(...)``. With H > 1 the
+        input is the H most recent frames flattened oldest-first, so drop the
+        oldest ``C`` channels and append the fresh prediction: the window keeps
+        its width and the newest frame stays last (``state[:, -C:]``), which is
+        the layout the architectures' residual base and normalisation assume.
+        """
+        if self.num_history_steps == 1:
+            return pred
+        if self.n_state_channels is None:
+            raise ValueError(
+                f"model advertises num_history_steps={self.num_history_steps} "
+                "but no n_state_channels; the rollout cannot tell the history "
+                "frames apart without it."
+            )
+        return torch.cat([state[:, self.n_state_channels :], pred], dim=1)
+
     def _forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         """One pushforward rollout + loss on a transition batch.
 
@@ -355,6 +385,13 @@ class BaseTraining:
         through the unroll; the final ``g = grad_unroll_steps`` calls carry
         gradients (``g = 1`` is the pure pushforward trick). The very last step
         and its loss are delegated to the subclass hook :meth:`_final_loss`.
+
+        Under a history window (``num_history_steps > 1``) ``state`` is the
+        flattened ``(B, H*C, *grid)`` window rather than a single frame, so each
+        step feeds its prediction back through :meth:`_advance_history` instead
+        of replacing the input outright; ``_final_loss`` still receives whatever
+        the model consumes and compares its ``(B, C, *grid)`` output to
+        ``state_next``.
 
         Two separate autocast contexts on purpose: autocast caches its weight
         casts and clears the cache on exit. Running the no_grad pushforward in
@@ -367,10 +404,14 @@ class BaseTraining:
         with torch.no_grad():
             with self._autocast():
                 for i in range(K - g):
-                    state = self._model_forward(state, params[:, i, :], geometry)
+                    state = self._advance_history(
+                        state, self._model_forward(state, params[:, i, :], geometry)
+                    )
         with self._autocast():
             for i in range(K - g, K - 1):
-                state = self._model_forward(state, params[:, i, :], geometry)
+                state = self._advance_history(
+                    state, self._model_forward(state, params[:, i, :], geometry)
+                )
             return self._final_loss(state, state_next, params, geometry)
 
     def _final_loss(

@@ -76,10 +76,18 @@ class TransitionDataset(Dataset):
     ``K-1`` no-grad steps starting at ``state_n`` and computes loss against
     ``state_next`` (Brandstetter et al.'s pushforward trick).
 
+    ``num_history_steps`` (``H``) selects the *backward* window fed to the
+    model: each sample stacks the ``H`` snapshots ``t-H+1 … t`` onto
+    ``state_n``'s channel axis, so anchors start at ``t = H-1`` and a
+    trajectory contributes ``T - K - (H-1)`` samples. ``H=1`` (the default)
+    is the single-frame behaviour, byte for byte.
+
     Each item is a `dict` of `torch.Tensor`:
 
-    - ``state_n``    — ``(C, *grid)``  velocity channels stacked from `state_vars`,
-      at trajectory time ``t``.
+    - ``state_n``    — ``(H*C, *grid)``  velocity channels stacked from
+      `state_vars` for the history window ``t-H+1 … t``, **oldest first**, so
+      the snapshot at ``t`` is the last ``C`` channels. ``H=1`` gives the
+      plain ``(C, *grid)`` snapshot at ``t``.
     - ``state_next`` — ``(C, *grid)``  the snapshot at trajectory time ``t + K``.
     - ``params_n``   — ``(K, P)``      parameter values at steps ``t, t+1, …, t+K-1``;
       scalar params are broadcast along time.
@@ -112,7 +120,7 @@ class TransitionDataset(Dataset):
 
     State snapshots are read lazily from netCDF on each ``__getitem__``
     via ``xr.open_dataset(..., cache=cache).isel(time=...)`` so only the
-    two endpoint slices (``t`` and ``t+K``) leave disk per sample;
+    sample's own slices (the ``H`` history frames and ``t+K``) leave disk;
     intermediate ground-truth states are never read — the pushforward
     unroll feeds the model its own predictions instead. With
     ``cache=False`` (default) nothing accumulates between calls; with
@@ -134,11 +142,14 @@ class TransitionDataset(Dataset):
         cache: bool = False,
         dtype: torch.dtype = torch.float32,
         pushforward_steps: int = 1,
+        num_history_steps: int = 1,
         sdf_features: bool | str = "none",
         sdf_clamp_cells: float = 32.0,
     ) -> None:
         if pushforward_steps < 1:
             raise ValueError(f"pushforward_steps must be >= 1, got {pushforward_steps}")
+        if num_history_steps < 1:
+            raise ValueError(f"num_history_steps must be >= 1, got {num_history_steps}")
         self.root = Path(root_dir)
         self.split = split
         self.state_vars = tuple(state_vars)
@@ -146,6 +157,11 @@ class TransitionDataset(Dataset):
         self.cache = cache
         self.dtype = dtype
         self.pushforward_steps = int(pushforward_steps)
+        # ``num_history_steps`` (``H``) is the *backward* window: each sample
+        # carries the H snapshots ``t-H+1 … t`` flattened into ``state_n``'s
+        # channel axis (oldest first). ``H=1`` is the original single-frame
+        # behaviour, byte for byte.
+        self.num_history_steps = int(num_history_steps)
         # Optional SDF / ∇SDF geometry features (see neural_surrogates.sdf).
         # ``sdf_features`` selects which channels: "none" (off), "sdf" (clamped
         # SDF only), "grad" (unit-gradient only) or "both"; ``True``/``False``
@@ -266,7 +282,8 @@ class TransitionDataset(Dataset):
     def set_pushforward_steps(self, pushforward_steps: int) -> None:
         """Switch the rollout horizon ``K`` and rebuild the sample index.
 
-        A trajectory with ``T`` saved steps contributes ``T - K`` samples, so
+        A trajectory with ``T`` saved steps contributes ``T - K - (H-1)``
+        samples (``H`` = ``num_history_steps``, held fixed here), so
         changing ``K`` changes both which targets are produced and how many
         samples the split has. Used by the trainer to ramp the horizon up over
         epochs (the pushforward curriculum). When a ``DataLoader`` uses worker
@@ -276,17 +293,21 @@ class TransitionDataset(Dataset):
         k = int(pushforward_steps)
         if k < 1:
             raise ValueError(f"pushforward_steps must be >= 1, got {k}")
+        h = self.num_history_steps
         for state_path, t_len in zip(self._state_files, self._traj_lengths):
-            if t_len < k + 1:
+            if t_len < k + h:
                 raise ValueError(
                     f"trajectory {state_path.name} has {t_len} time steps; "
-                    f"need at least pushforward_steps + 1 = {k + 1}"
+                    f"need at least pushforward_steps + num_history_steps = "
+                    f"{k + h} (pushforward_steps={k}, num_history_steps={h})"
                 )
         self.pushforward_steps = k
+        # Anchors start at ``t = H-1`` so every sample has a full backward
+        # window; the horizon still cuts ``K`` steps off the end.
         self._index = [
             (traj, t)
             for traj, t_len in enumerate(self._traj_lengths)
-            for t in range(t_len - k)
+            for t in range(h - 1, t_len - k)
         ]
 
     @staticmethod
@@ -359,15 +380,21 @@ class TransitionDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         traj, t = self._index[idx]
         K = self.pushforward_steps
+        H = self.num_history_steps
         ds = self._get_state_ds(traj)
-        snap = ds.isel(time=[t, t + K])
+        # One read for the whole sample: the H history frames t-H+1 … t
+        # (oldest first) followed by the target frame at t+K.
+        snap = ds.isel(time=list(range(t - H + 1, t + 1)) + [t + K])
         channels = np.stack(
             [np.asarray(snap[v].values) for v in self.state_vars], axis=1
         )
-        pair = torch.from_numpy(channels).to(self.dtype)
+        frames = torch.from_numpy(channels).to(self.dtype)
         item = {
-            "state_n": pair[0],
-            "state_next": pair[1],
+            # (H*C, *grid): history flattened onto the channel axis, oldest
+            # first, so the frame at t is the last C channels. At H=1 this is
+            # the plain (C, *grid) snapshot as before.
+            "state_n": frames[:H].flatten(0, 1),
+            "state_next": frames[H],
             "params_n": self._params[traj][t : t + K],
             "geometry": self.geometry_for(traj),
         }

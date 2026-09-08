@@ -37,7 +37,6 @@ single-step patch objective.
 from __future__ import annotations
 
 import torch
-
 from neural_surrogates.training.base import BaseTraining
 
 

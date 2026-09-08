@@ -53,3 +53,8 @@ fine_checkpoint: true
 
 # Coarse-grid divergence-cleaning projection (Eq 8) is an identity stub; off.
 divergence_projection: false
+
+# State history is NOT supported by the domain-decomposed wrapper: the patch
+# tiling / coarse pooling assume C state channels per block, so anything but the
+# default 1 raises NotImplementedError. Must match dataset.num_history_steps.
+# num_history_steps: 1

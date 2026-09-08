@@ -34,13 +34,11 @@ from kappamodules.attention import (
     LinformerAttention1d,
     TranssolverAttention,
 )
-from torch import nn
-
 from neural_surrogates.architectures._upt.approximator import Approximator
 from neural_surrogates.architectures._upt.decoder import DecoderPerceiver
 from neural_surrogates.architectures._upt.encoder import EncoderSupernodes
 from neural_surrogates.architectures._upt.supernode_pooling import SupernodePooling
-
+from torch import nn
 
 # Selectable self-attention implementations for the encoder / approximator /
 # decoder transformer stacks. All are the ``...1d`` (token-sequence) variants
@@ -171,6 +169,15 @@ class UPT(nn.Module):
         channel count (the decoder still emits ``n_state_channels``). The
         default ``0`` keeps the encoder ``input_dim`` -- and hence the state
         dict -- identical to a model built without this argument.
+    num_history_steps:
+        Number of past state frames ``H`` fed to the model. They arrive
+        pre-flattened along the channel axis, oldest first, so ``state`` is
+        ``(B, H*C, nz, ny, nx)`` and the newest frame is ``state[:, -C:]``. Only
+        the per-point input features widen (``feat_dim`` counts ``H*C`` state
+        channels); the decoder still emits ``C``, the normalisation buffers stay
+        length ``C`` (tiled ``H`` times on the input features) and
+        ``predict_residual`` adds the newest frame. The default ``1`` is the
+        historical single-frame behaviour and keeps the state dict identical.
     attention_type:
         Self-attention implementation used by the encoder / approximator /
         decoder transformer stacks (the perceiver cross-attention tails are
@@ -183,6 +190,12 @@ class UPT(nn.Module):
         ``{"num_slices": 32}`` for ``transsolver`` (required) or
         ``{"kv_seqlen": 32}`` for ``linformer``.
     """
+
+    # Registered as buffers only when ``normalize`` is set (see ``__init__``);
+    # declared here so a type checker resolves them as tensors rather than
+    # ``Tensor | Module`` at the ``_tile_history`` call sites.
+    state_mean: torch.Tensor
+    state_std: torch.Tensor
 
     def __init__(
         self,
@@ -208,6 +221,8 @@ class UPT(nn.Module):
         predict_residual: bool = True,
         # --- extra input-only channels ---
         extra_in_channels: int = 0,
+        # --- history conditioning ---
+        num_history_steps: int = 1,
         # --- attention ---
         attention_type: str = "dot_product",
         attention_kwargs: dict | None = None,
@@ -219,9 +234,17 @@ class UPT(nn.Module):
             )
         if extra_in_channels < 0:
             raise ValueError("extra_in_channels must be >= 0")
+        if int(num_history_steps) < 1:
+            raise ValueError(f"num_history_steps must be >= 1, got {num_history_steps}")
 
         self.n_state_channels = n_state_channels
         self.n_params = n_params
+        # History conditioning: the H past frames arrive pre-flattened along the
+        # channel axis (oldest first), so only the per-point input features
+        # widen. H=1 leaves the encoder ``input_dim`` -- and hence the whole
+        # state dict -- identical to a model built without this argument.
+        self.num_history_steps = int(num_history_steps)
+        self.n_input_state_channels = self.num_history_steps * n_state_channels
         self.dim = dim
         self.num_latent_tokens = num_latent_tokens
         self.num_supernodes = num_supernodes
@@ -263,7 +286,7 @@ class UPT(nn.Module):
         # ``input_dim`` -- and hence the whole state dict -- is byte-identical to a
         # model built without this argument, so existing checkpoints load.
         feat_dim = (
-            n_state_channels
+            self.n_input_state_channels
             + self.extra_in_channels
             + (n_params if cond_dim is None else 0)
         )
@@ -326,6 +349,19 @@ class UPT(nn.Module):
 
     # -- normalisation -----------------------------------------------------
 
+    def _tile_history(self, buffer: torch.Tensor) -> torch.Tensor:
+        """Repeat a length-``C`` per-channel statistic ``H`` times.
+
+        The normalisation buffers stay length ``C`` (so checkpoints and
+        :meth:`set_normalization` are unaffected by history); the per-point
+        input features carry ``H*C`` state channels, so the stats are tiled to
+        match right where they are used. With ``H=1`` the buffer is returned
+        unchanged.
+        """
+        if self.num_history_steps == 1:
+            return buffer
+        return buffer.repeat(self.num_history_steps)
+
     @torch.no_grad()
     def set_normalization(
         self,
@@ -362,9 +398,7 @@ class UPT(nn.Module):
 
     # -- geometry-derived helpers ------------------------------------------
 
-    def _grid_coords(
-        self, d: int, h: int, w: int, device, dtype
-    ) -> torch.Tensor:
+    def _grid_coords(self, d: int, h: int, w: int, device, dtype) -> torch.Tensor:
         """Integer ``(z, y, x)`` cell coordinates, ``(D*H*W, ndim)``, cached."""
         key = (d, h, w, device, dtype)
         coords = self._coords_cache.get(key)
@@ -443,9 +477,13 @@ class UPT(nn.Module):
         # Standardise the state channels and inflow params before the network
         # (see ``normalize``). With identity buffers this is a no-op.
         if self.normalize:
-            feat_in = (flat - self.state_mean.view(1, 1, -1)) / self.state_std.view(
-                1, 1, -1
-            )
+            # Per-channel stats are length C; with history each point carries H
+            # stacked frames, so the buffers are tiled H times right here (they
+            # stay length C -- checkpoints and ``set_normalization`` depend on
+            # it). H=1 tiles to a no-op.
+            feat_in = (
+                flat - self._tile_history(self.state_mean).view(1, 1, -1)
+            ) / self._tile_history(self.state_std).view(1, 1, -1)
             params_in = (params - self.param_mean.view(1, -1)) / self.param_std.view(
                 1, -1
             )
@@ -494,18 +532,23 @@ class UPT(nn.Module):
             if not self.predict_residual:
                 pred = pred + self.state_mean.view(1, 1, -1)
 
-        # scatter back to the grid; obstacle cells stay 0
-        out = state.new_zeros(b, c, d * h * w)
+        # scatter back to the grid; obstacle cells stay 0. The decoder emits C
+        # channels regardless of how many history frames went in.
+        c_out = self.n_state_channels
+        out = state.new_zeros(b, c_out, d * h * w)
         # pred may be half under autocast while out follows the input dtype;
         # index_put won't cast, so match out's dtype explicitly (no-op otherwise).
         out[:, :, fluid_idx] = pred.transpose(1, 2).to(out.dtype)  # (B, C, N) placed
-        out = out.reshape(b, c, d, h, w)
+        out = out.reshape(b, c_out, d, h, w)
 
         # Residual prediction: the network output is the change applied to the
         # current state. Obstacle cells stay 0 (the residual there is 0 and the
         # input state is masked), so the final geometry multiply is unaffected.
         if self.predict_residual:
-            out = out + state
+            # Residual base = the NEWEST history frame (the flattened layout is
+            # oldest-first, so it is the last C channels). At H=1 that is the
+            # whole ``state``, i.e. the historical behaviour.
+            out = out + state[:, -c_out:]
         return out
 
     # -- forward -----------------------------------------------------------
@@ -549,9 +592,8 @@ class UPT(nn.Module):
 
         if shared:
             # fast path: one point set / supernode graph for the whole batch
-            return (
-                self._run(state, params, mask0, coords, extra)
-                * geometry.unsqueeze(1)
+            return self._run(state, params, mask0, coords, extra) * geometry.unsqueeze(
+                1
             )
 
         # documented fallback: rebuild per sample (rare; geometry not shared)

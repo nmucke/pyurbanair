@@ -24,3 +24,10 @@ partition_size: 1
 # (default 32). Default `none` -> existing checkpoints load byte-identically.
 # sdf_features: both  # none | sdf | grad | both
 # sdf_clamp_cells: 32
+
+# State history: number of past frames fed to the model. The dataset ships them
+# pre-flattened along the channel axis (oldest first), so only the input stem
+# widens -- the output stays `n_state_channels`. Must match
+# dataset.num_history_steps. Default 1 -> existing checkpoints load
+# byte-identically.
+# num_history_steps: 1

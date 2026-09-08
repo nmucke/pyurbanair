@@ -26,8 +26,11 @@ def _plot_batch(
     batch: dict[str, torch.Tensor],
     param_names: tuple[str, ...],
     out_dir: Path,
+    n_state_channels: int,
 ) -> None:
-    state_n = batch["state_n"]
+    # ``state_n`` carries the history window flattened onto the channel axis
+    # (oldest first); plot the newest frame, which is its last C channels.
+    state_n = batch["state_n"][:, -n_state_channels:]
     state_next = batch["state_next"]
     params = batch["params_n"]
     geometry = batch["geometry"][0]
@@ -97,10 +100,12 @@ def run(cfg: argparse.Namespace) -> None:
         cache=cfg.cache,
         dtype=dtype,
         pushforward_steps=cfg.pushforward_steps,
+        num_history_steps=cfg.num_history_steps,
     )
     print(
         f"split='{cfg.split}'  trajectories={len(dataset._state_files)}  "
         f"samples={len(dataset)}  pushforward_steps={cfg.pushforward_steps}  "
+        f"num_history_steps={cfg.num_history_steps}  "
         f"param_names={dataset.param_names}"
     )
     geometry = dataset.geometry_for(0)
@@ -121,7 +126,8 @@ def run(cfg: argparse.Namespace) -> None:
         print(f"\nbatch {i}:")
         print(
             f"  state_n     shape={tuple(batch['state_n'].shape)}     "
-            f"dtype={batch['state_n'].dtype}"
+            f"dtype={batch['state_n'].dtype}  "
+            f"(H*C = {cfg.num_history_steps} * {len(cfg.state_vars)})"
         )
         print(
             f"  state_next  shape={tuple(batch['state_next'].shape)}  "
@@ -141,7 +147,7 @@ def run(cfg: argparse.Namespace) -> None:
 
     out_dir = Path(cfg.plot_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    _plot_batch(last_batch, dataset.param_names, out_dir)
+    _plot_batch(last_batch, dataset.param_names, out_dir, len(cfg.state_vars))
     print(f"\nplots written to {out_dir}/")
 
 
@@ -163,6 +169,7 @@ def main() -> None:
     p.add_argument(
         "--pushforward-steps", dest="pushforward_steps", type=int, default=10
     )
+    p.add_argument("--num-history-steps", dest="num_history_steps", type=int, default=1)
     p.add_argument("--plot-dir", dest="plot_dir", default=".temp/dataloading")
     run(p.parse_args())
 
