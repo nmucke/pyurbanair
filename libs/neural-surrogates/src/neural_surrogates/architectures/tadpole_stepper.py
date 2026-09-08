@@ -785,7 +785,10 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             [torch.zeros_like(t) for t in res[0]],
             [torch.zeros_like(t) for t in res[1]],
         ]
-        recon = dft.decoder(latent, zres, **enc_kwargs)
+        # Same contiguous decoder input as the DFT path and the plain AE (see the
+        # notes in ``model/dft.py`` / ``model/autoencoder.py``): the parity below
+        # is bit-exact only if all three paths hit the same kernels.
+        recon = dft.decoder(latent.contiguous(), zres, **enc_kwargs)
         recon_pad = rearrange(
             recon,
             "(B C U V W) 1 Xc Yc Zc -> B C (U Xc) (V Yc) (W Zc)",

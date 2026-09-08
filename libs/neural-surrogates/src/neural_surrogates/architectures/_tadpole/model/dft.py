@@ -241,6 +241,13 @@ class TadpoleDFT(Module):
                 V=v,
                 W=w,
             )
+        # pyurbanair: canonicalise the decoder input to a CONTIGUOUS tensor. The
+        # fold-back rearrange above is a permuted view whenever U/V/W > 1, while
+        # the plain autoencoder (``model/autoencoder.py``, ``latent_sample``) and
+        # ``TadpoleTimeStepper._ae_reference_recon`` hand the decoder a
+        # contiguous latent. Layout-dependent kernel selection rounds differently
+        # on some CPUs, which would break the bit-exact identity-at-init parity.
+        x = x.contiguous()
         if self.max_internal_batchsize is not None and x.shape[0] > self.max_internal_batchsize:
             n_chunks = (x.shape[0] // self.max_internal_batchsize) + 1
             x_chunks = torch.chunk(x, chunks=n_chunks, dim=0)

@@ -135,10 +135,18 @@ class TadpoleAutoencoder(Module):
         self.max_internal_batchsize = max_internal_batchsize
         
     def latent_sample(self, dist: DiagonalGaussianDistribution) -> torch.Tensor:
+        # pyurbanair: hand the decoder a CONTIGUOUS latent. ``dist.mode()`` /
+        # ``dist.sample()`` are strided views into the encoder's (mean, logvar)
+        # tensor; the DFT path (``model/dft.py``) reaches the decoder with a
+        # fresh contiguous tensor instead. Kernel selection can depend on the
+        # input layout, and on some CPUs (observed on AVX-512 CI runners) the two
+        # layouts round differently, breaking the bit-exact identity-at-init
+        # parity between the autoencoder and the DFT. Canonicalising here keeps
+        # every path on the same kernels; the copy is a small latent.
         if self.latent_type == "sample":
-            return dist.sample()
+            return dist.sample().contiguous()
         elif self.latent_type == "mode":
-            return dist.mode()
+            return dist.mode().contiguous()
         else:
             raise ValueError(f"Unknown latent_type: {self.latent_type}")
 

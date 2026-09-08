@@ -487,8 +487,14 @@ def test_ae_dir_handoff_reconstruction_parity(tmp_path: Path) -> None:
         ae_recon = ae(state, geom)
         ref = stepper._ae_reference_recon(state, geom)
         out = stepper(state, params, geom)
-    assert torch.allclose(ae_recon, ref, atol=1e-6)
-    assert torch.allclose(ae_recon, out, atol=1e-6)
+    # Unlike the zero-init parity tests above, this AE has a *random* decoder
+    # final layer, so its output genuinely depends on the latent and the check
+    # is sensitive to last-bit kernel rounding. All three paths now hand the
+    # decoder a contiguous latent (see model/dft.py), which makes them bit-exact
+    # on the dev box; the tolerance leaves float32 headroom for other CPUs.
+    assert torch.allclose(ae_recon, ref, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(ae_recon, out, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(ref, out, rtol=1e-5, atol=1e-5)
 
     # ... and the parity above is non-trivial: the geometry injection really is
     # applied on the stepper's (skip-wrapped) encoder path.
