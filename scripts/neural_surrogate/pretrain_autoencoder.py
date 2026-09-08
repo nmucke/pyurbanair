@@ -11,6 +11,11 @@ Artifacts land in ``model_weights/<model_name>/``: the full ``TadpoleAE``
 autoencoder's ``save_separate_weights`` -- the natural handoff format for plan 03
 (AE -> time-stepper) and for HF-style reuse.
 
+The optional adversarial (GAN) extension is off unless the config carries a
+``discriminator:`` block (it ships as ``null``); when present, this script builds
+the critic with the *architecture's* own channel/geometry contract so the two can
+never disagree, and hands it plus its own optimizer to the trainer.
+
     pixi run -e dev python scripts/neural_surrogate/pretrain_autoencoder.py \
         dataset.root_dir=training_data/pylbm_barcelona model_name=tadpole_ae_s
 """
@@ -107,6 +112,49 @@ def run(cfg: DictConfig) -> None:
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"total model parameters={num_params:,} (trainable={num_trainable:,})")
 
+    # Optional adversarial (GAN) extension: built ONLY when the config carries a
+    # `discriminator` block, so the default (`discriminator: null`) path below is
+    # exactly the pure-VAE call it has always been -- no critic, no second
+    # optimizer, no extra trainer kwargs.
+    adv_kwargs: dict = {}
+    disc_cfg = cfg.get("discriminator")
+    if disc_cfg is not None:
+        if cfg.get("disc_optimizer") is None:
+            raise ValueError(
+                "a `discriminator` block needs a `disc_optimizer` block: the "
+                "critic's loss is adversarial to the autoencoder's, so the two "
+                "must never share an optimizer (or its moments)."
+            )
+        # Channel/geometry contract is read off the BUILT model, not the config,
+        # so the critic can never disagree with the autoencoder about how many
+        # channels the working-space field has. The paper pairs the critic with a
+        # same-size autoencoder, so `size` defaults to the architecture's.
+        disc_size = disc_cfg.get("size", cfg.architecture.size)
+        discriminator = instantiate(
+            disc_cfg,
+            size=disc_size,
+            n_state_channels=model.n_state_channels,
+            encode_geometry=model.encode_geometry,
+            sdf_features=model.sdf_feature_mode,
+        ).to(dtype=dtype)
+        disc_params = sum(p.numel() for p in discriminator.parameters())
+        print(
+            f"adversarial loss ON: discriminator size={disc_size} "
+            f"parameters={disc_params:,} "
+            f"(in_channels={discriminator.n_input_channels})"
+        )
+        adv_kwargs = dict(
+            discriminator=discriminator,
+            disc_optimizer=instantiate(
+                cfg.disc_optimizer, params=discriminator.parameters()
+            ),
+            adv_weight=cfg.loss.adv_weight,
+            adv_start_step=cfg.loss.adv_start_step,
+            adv_ramp_steps=cfg.loss.adv_ramp_steps,
+            adaptive_adv_weight=cfg.loss.adaptive_adv_weight,
+            disc_recon_threshold=cfg.loss.get("disc_recon_threshold"),
+        )
+
     # Per-channel standardisation stats over the training split's fluid cells.
     # Stored as model buffers (travel with the checkpoint); param stats are empty
     # for a snapshot AE and ignored by TadpoleAE.set_normalization.
@@ -134,6 +182,7 @@ def run(cfg: DictConfig) -> None:
         weights_path=out_dir / "weights.pt",
         kl_weight=cfg.loss.kl_weight,
         geometry_recon_weight=cfg.loss.geometry_recon_weight,
+        **adv_kwargs,
     )
     trainer.fit()
 

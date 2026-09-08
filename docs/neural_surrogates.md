@@ -1653,8 +1653,7 @@ state reconstruction; `kl_weight` (β) defaults tiny (latent-diffusion
 convention). `kl_weight=0` + `latent_type="mode"` degrades to a plain
 deterministic AE — the "AE core" of the staged scope, one config knob away. The
 per-term breakdown (`recon` / `geom` / `kl`) lands in `metrics.csv` via
-`_aux_terms`. The **adversarial (GAN) loss** is a scoped optional extension
-(`architecture/_tadpole/discriminator.py` is vendored for it) — not yet wired.
+`_aux_terms`.
 
 **Deterministic validation.** Under `latent_type: "sample"` the training loss
 samples the latent (VAE-proper), but the trainer's validation path forces the AE
@@ -1663,6 +1662,77 @@ duration of `_validate`, restoring after). Validation loss is therefore
 noise-free, so best-weights selection and patience-based early stopping ride on a
 stable signal rather than sampling jitter — the val curve is reproducible across
 runs at a fixed checkpoint.
+
+### 28b. `TadpoleDiscriminator` — the optional adversarial (GAN) loss
+
+MSE is minimised by the conditional **mean**, so a pure MSE+KL autoencoder blurs
+away exactly the small-scale structure urban flow lives on (shear layers, wakes,
+the sharp gradients hugging building faces). The VQGAN / latent-diffusion fix is
+a **patch critic**: a small 3-D convolutional discriminator that scores local
+patches of the reconstruction and adds an adversarial term rewarding texture the
+pixel loss cannot see.
+[architectures/tadpole_discriminator.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_discriminator.py)
+wraps the vendored `P3DDiscriminator` (a P3D encoder backbone + a `1x1x1` conv to
+one channel, so it emits a logit **map** `(B, 1, d, h, w)`, downsampled by 16;
+the paper's scalar "belief" is that map's mean). It is **off by default**
+(`discriminator: null`) and the default path is byte-identical to the pure-VAE
+loss above — no critic, no second optimizer, no extra `metrics.csv` columns.
+
+**The critic is conditioned on geometry.** Its input is the AE's *working-space*
+field with the geometry block concatenated as extra channels:
+`n_input_channels = n_state_channels + (1 + n_sdf_feature_channels)`. Both the
+real and the fake pass are given the **true** geometry block — never the
+reconstructed one, which would let the AE hide flow errors behind a distorted
+obstacle field. The trainer settles the channel contract once at construction and
+fails loudly (naming both counts) on a mismatch; the pre-train script injects
+`n_state_channels` / `encode_geometry` / `sdf_features` from the *built model*, so
+the critic and the AE cannot disagree.
+
+> **Deliberate deviation from upstream — do not "fix" it back.** Tadpole
+> (Appendix C.1) feeds its critic the same *folded, single-channel* crops the
+> encoder sees (`(B, C, X, Y, Z) → (B*C, 1, 64³)`, `in_channels=1`), so its
+> discriminator never sees state and geometry — or even two velocity components —
+> together. We deliberately do **not** fold: obstacle-adjacent sharpness is the
+> artefact an urban-flow AE gets wrong, and scoring each channel in isolation
+> makes that structurally invisible. Everything else follows the paper.
+
+Per training step (a standard 1:1 alternating update):
+
+```
+loss += coeff * hinge_g_loss(D(fake))            # generator side, in _loss
+coeff = ramp * adv_weight * lambda
+                                                 # then, after the AE's step:
+d_loss = hinge_d_loss(D(real), D(fake))          # _after_optimizer_step, detached pair
+```
+
+| Knob | Default | What it does |
+|---|---|---|
+| `adv_weight` | `1.0e-4` | **Maximum** adversarial scale (paper: "a maximum scale value of 1e-4"). |
+| `adv_start_step` | `1000` | Term is exactly zero and the critic is not updated before this **global optimizer step**. |
+| `adv_ramp_steps` | `1000` | Linear ramp 0→1 over this many further steps (`0` = step on at full strength). |
+| `adaptive_adv_weight` | `true` | Esser et al. (2021) gradient balancing: `lambda = ‖∂recon/∂w_out‖ / ‖∂adv/∂w_out‖`, clamped to `[0, 1]`, so the effective coefficient lives in `[0, adv_weight]` and needs no per-dataset tuning. Costs two `torch.autograd.grad` probes per step. |
+| `disc_recon_threshold` | `null` | Optional upstream gate: update the critic only once the masked L2 recon is below this (upstream uses `1e-3`, tied to *their* normalisation — hence off here). Costs a host sync per step. |
+
+Warm-up is counted in **optimizer steps, not epochs** — the paper specifies
+iterations, and our snapshot corpora differ in size by more than an order of
+magnitude, so an epoch is not a portable unit. The counter is persisted in
+`checkpoint.pt`, so a resumed run continues the schedule rather than restarting
+the warm-up; the critic, its optimizer and its `GradScaler` are persisted too, and
+a checkpoint predating the extension still resumes (the keys are simply absent).
+The adversarial term is **never** part of the validation loss: it would make the
+val curve jump at the warm-up boundary and stop being a comparable yardstick for
+best-weight selection. `adv` / `adv_w` / `d` join `metrics.csv` when the critic is
+configured.
+
+`BaseTraining` gained exactly one thing for this: a no-op
+`_after_optimizer_step(batch)` hook called once per optimizer step, where the
+critic takes its turn. Every other trainer is unaffected.
+
+**AMP caveat.** The adaptive weight probes gradients on the *unscaled* losses,
+which is exact under the default `amp_dtype: bfloat16` (where `GradScaler` is
+constructed disabled). Under **fp16** loss scaling those probes could underflow
+and collapse `lambda` to its fallback — set `adaptive_adv_weight: false` if you
+must run the adversarial path under fp16.
 
 ### 29. Config + script + artifacts
 
@@ -1715,12 +1785,13 @@ the padded tiles also inflate the logged `kl` metric. Pick `encoder_crop_size`
 | Piece | File |
 |---|---|
 | `TadpoleAE` wrapper | [architectures/tadpole_ae.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_ae.py) |
+| `TadpoleDiscriminator` + GAN loss helpers | [architectures/tadpole_discriminator.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_discriminator.py) |
 | Vendored autoencoder subtree | [architectures/_tadpole/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/) |
 | `SnapshotDataset` / `snapshot_collate` | [datasets/snapshot.py](../libs/neural-surrogates/src/neural_surrogates/datasets/snapshot.py) |
 | `AutoencoderTrainer` | [training/autoencoder.py](../libs/neural-surrogates/src/neural_surrogates/training/autoencoder.py) |
 | Config | [conf/neural_surrogate/pretrain_autoencoder.yaml](../conf/neural_surrogate/pretrain_autoencoder.yaml) |
 | Run script | [scripts/neural_surrogate/pretrain_autoencoder.py](../scripts/neural_surrogate/pretrain_autoencoder.py) |
-| Tests | [test_autoencoder_pretraining.py](../tests/test_autoencoder_pretraining.py) |
+| Tests | [test_autoencoder_pretraining.py](../tests/test_autoencoder_pretraining.py), [test_tadpole_discriminator.py](../tests/test_tadpole_discriminator.py), [test_autoencoder_adversarial.py](../tests/test_autoencoder_adversarial.py) |
 
 ---
 

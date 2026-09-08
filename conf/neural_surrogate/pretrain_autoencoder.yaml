@@ -47,6 +47,33 @@ architecture:
   max_internal_batchsize: null
   normalize: true
 
+# Optional adversarial (GAN) loss. A pure MSE+KL autoencoder reconstructs the
+# conditional MEAN, so it blurs away exactly the small-scale structure urban flow
+# lives on (shear layers, wakes, the sharp gradients hugging building faces); the
+# VQGAN/latent-diffusion fix is a patch critic that scores local patches of the
+# reconstruction and rewards texture the pixel loss cannot see. `null` = the pure
+# VAE path (default, unchanged): no critic, no second optimizer, no extra
+# metrics.csv columns. Turn it on only if the reconstructions come out too smooth
+# -- it adds GAN-tuning risk (mode collapse, a critic that outruns the AE) to an
+# otherwise well-behaved objective.
+discriminator: null
+# discriminator:
+#   _target_: neural_surrogates.TadpoleDiscriminator
+#   # Paper (Appendix C.1) pairs the critic with a SAME-SIZE autoencoder; leave
+#   # this unset and the script copies architecture.size. Set it to shrink the
+#   # critic (e.g. S against a B autoencoder) if D memory is the constraint.
+#   # size: S
+#   # n_state_channels / encode_geometry / sdf_features are injected by the
+#   # script from the architecture block so the D always sees exactly the same
+#   # channels as the AE (a mismatch is a construction-time error in the trainer).
+# disc_optimizer:
+#   # The critic gets its OWN optimizer (Appendix C.3 lists it with its own LR):
+#   # its loss is adversarial to the AE's, so the two must never share moments.
+#   _target_: torch.optim.AdamW
+#   lr: 5.0e-5
+#   betas: [0.9, 0.999]
+#   weight_decay: 1.0e-15
+
 # VAE loss weights (the reconstruction metric itself is MSE, set in the script).
 loss:
   # β: KL weight. Tiny by default (latent-diffusion convention). 0 with
@@ -55,6 +82,39 @@ loss:
   # Weight on reconstructing the geometry/SDF channels (only when
   # encode_geometry: true); keeps the total loss dominated by state recon.
   geometry_recon_weight: 0.1
+  # -- adversarial knobs; all inert while `discriminator: null` --------------- #
+  # MAXIMUM adversarial scale (paper: a gradient-based scale strategy with a
+  # maximum scale value of 1e-4). The coefficient actually applied each step is
+  #   ramp * adv_weight * lambda
+  # with lambda in [0, 1] from the adaptive gradient balancing below, so the
+  # effective weight lives in [0, 1e-4] -- deliberately small: the adversarial
+  # term is a texture prior on top of reconstruction, not a competing objective.
+  adv_weight: 1.0e-4
+  # Warm-up counted in GLOBAL OPTIMIZER STEPS, not epochs -- our snapshot corpora
+  # differ in size by more than an order of magnitude, so an epoch is not a
+  # portable unit (and the paper specifies iterations). The adversarial term is
+  # exactly zero and the critic is not updated before `adv_start_step`, so the AE
+  # learns to reconstruct before a critic starts pushing it; the coefficient then
+  # ramps linearly from 0 to full over `adv_ramp_steps` further steps (full
+  # strength at ~step 2000 with the defaults). `adv_ramp_steps: 0` = step on at
+  # full strength. The counter is persisted in checkpoint.pt, so resume continues
+  # the schedule instead of restarting the warm-up.
+  adv_start_step: 1000
+  adv_ramp_steps: 1000
+  # Esser et al. (2021) gradient balancing: scale the adversarial term by
+  # ||d recon/d decoder_out|| / ||d adv/d decoder_out||, so the critic can never
+  # out-gradient reconstruction and the weight needs no per-dataset tuning. Costs
+  # two extra torch.autograd.grad probes per step. Set false (fixed
+  # coefficient = ramp * adv_weight) to save that, or when running under fp16
+  # loss scaling -- see the AMP note in training/autoencoder.py.
+  adaptive_adv_weight: true
+  # Optional upstream-style gate: only update the critic once the masked L2
+  # reconstruction loss is BELOW this, so a strong critic cannot overpower an
+  # untrained AE. Upstream uses 1e-3, but that threshold is tied to their state
+  # normalisation, not ours -- hence null (no gate) by default; pick a value from
+  # a pure-VAE run's `train_recon` curve if the critic runs away. Reading it costs
+  # a host<->device sync per step, so leave it null unless you need it.
+  disc_recon_threshold: null
 
 # AE trainer. Shares BaseTraining machinery (amp, warmup+cosine LR, grad clip,
 # early stopping, checkpoint/resume, metrics.csv) but has NO pushforward
