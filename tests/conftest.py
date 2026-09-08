@@ -241,6 +241,10 @@ def surrogate_model_dir_factory() -> Callable[..., pathlib.Path]:
     carrying the trained ``domain`` and ``time`` so the forward model can
     derive its trained grid and output frequency. No real data or training
     needed — callers point the surrogate at the returned folder.
+
+    ``num_history_steps`` (how many past frames the network consumes) is only
+    written — under both ``architecture`` and ``dataset``, as the trainer does —
+    when it differs from the default of 1, so the default folder is unchanged.
     """
     import torch
     from hydra.utils import instantiate
@@ -254,6 +258,7 @@ def surrogate_model_dir_factory() -> Callable[..., pathlib.Path]:
         state_vars: Sequence[str] = ("u", "v", "w"),
         param_vars: Sequence[str] = ("inflow_angle", "velocity_magnitude"),
         architecture: dict | None = None,
+        num_history_steps: int = 1,
     ) -> pathlib.Path:
         architecture = architecture or {
             "_target_": "neural_surrogates.UNetConvNeXt",
@@ -263,6 +268,10 @@ def surrogate_model_dir_factory() -> Callable[..., pathlib.Path]:
             "kernel_size": 3,
             "expansion": 2,
         }
+        # A one-step surrogate (the default) writes exactly the config the
+        # trainer has always written; the key only appears for H > 1.
+        if num_history_steps != 1:
+            architecture = {**architecture, "num_history_steps": num_history_steps}
         root_dir = tmp_path / "training_data"
         root_dir.mkdir(parents=True, exist_ok=True)
         OmegaConf.save(
@@ -280,6 +289,11 @@ def surrogate_model_dir_factory() -> Callable[..., pathlib.Path]:
                         "root_dir": str(root_dir),
                         "state_vars": list(state_vars),
                         "param_vars": list(param_vars),
+                        **(
+                            {}
+                            if num_history_steps == 1
+                            else {"num_history_steps": num_history_steps}
+                        ),
                     },
                 }
             ),

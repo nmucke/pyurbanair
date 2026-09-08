@@ -100,6 +100,10 @@ dataset:
   param_vars: null
   sdf_features: null
   sdf_clamp_cells: null
+  # Backward history window: also filled from the pretrained config (the stem is
+  # widened to num_history_steps * n_state_channels, so the fine-tune data must
+  # ship exactly the window the pretrained model consumes). Leave it null.
+  num_history_steps: null
   cache: false
   dtype: float32
   pushforward_steps: 1

@@ -130,7 +130,22 @@ class P3D(nn.Module):
         and positional encodings straight in. The default ``0`` keeps the stem
         (and the whole state dict) byte-identical to a standard P3D, so a plain
         (non-DD) model and its existing checkpoints are unaffected.
+    num_history_steps:
+        Number of past state frames ``H`` fed to the model. They arrive
+        pre-flattened along the channel axis, oldest first, so ``state`` is
+        ``(B, H*C, nz, ny, nx)`` and the newest frame is ``state[:, -C:]``. Only
+        the stem widens (``in_channels`` counts ``H*C`` state channels);
+        ``channel_size_out`` stays ``C``, the normalisation buffers stay length
+        ``C`` (tiled ``H`` times at the input) and ``predict_residual`` adds the
+        newest frame. The default ``1`` is the historical single-frame
+        behaviour and keeps the state dict byte-identical.
     """
+
+    # Registered as buffers only when ``normalize`` is set (see ``__init__``);
+    # declared here so a type checker resolves them as tensors rather than
+    # ``Tensor | Module`` at the ``_tile_history`` call sites.
+    state_mean: torch.Tensor
+    state_std: torch.Tensor
 
     def __init__(
         self,
@@ -149,6 +164,7 @@ class P3D(nn.Module):
         sdf_features: bool | str = "none",
         sdf_clamp_cells: float = 32.0,
         extra_in_channels: int = 0,
+        num_history_steps: int = 1,
     ) -> None:
         super().__init__()
 
@@ -181,6 +197,9 @@ class P3D(nn.Module):
         if extra_in_channels < 0:
             raise ValueError("extra_in_channels must be >= 0")
 
+        if int(num_history_steps) < 1:
+            raise ValueError(f"num_history_steps must be >= 1, got {num_history_steps}")
+
         # torch.compile hint honoured by neural_surrogates.Trainer: P3D's
         # internal window padding (P3DStage.maybe_pad) computes pad sizes from
         # `x.shape % window_size`, so dynamo introduces symbolic spatial dims
@@ -194,6 +213,12 @@ class P3D(nn.Module):
 
         self.n_state_channels = n_state_channels
         self.n_params = n_params
+        # History conditioning: the H past frames arrive pre-flattened along the
+        # channel axis (oldest first), so only the stem widens. H=1 leaves the
+        # upstream net's ``channel_size`` -- and the whole state dict --
+        # byte-identical to a model built without this argument.
+        self.num_history_steps = int(num_history_steps)
+        self.n_input_state_channels = self.num_history_steps * n_state_channels
         self.size = size
         self.param_conditioning = param_conditioning
         self.normalize = normalize
@@ -240,7 +265,7 @@ class P3D(nn.Module):
         # enabled, plus one channel per param in the channel-conditioning mode,
         # plus any raw extra (DD context/positional). Order at the stem is
         # [state, geometry, sdf features, param channels, extra].
-        in_channels = n_state_channels + 1
+        in_channels = self.n_input_state_channels + 1
         in_channels += self.n_geom_feature_channels
         if param_conditioning == "channels":
             in_channels += n_params
@@ -279,6 +304,18 @@ class P3D(nn.Module):
                 module.dropout_prob = 0.0
 
     # -- normalisation -----------------------------------------------------
+
+    def _tile_history(self, buffer: torch.Tensor) -> torch.Tensor:
+        """Repeat a length-``C`` per-channel statistic ``H`` times.
+
+        The normalisation buffers stay length ``C`` (so checkpoints and
+        :meth:`set_normalization` are unaffected by history); the stem input
+        carries ``H*C`` state channels, so the stats are tiled to match right
+        where they are used. With ``H=1`` the buffer is returned unchanged.
+        """
+        if self.num_history_steps == 1:
+            return buffer
+        return buffer.repeat(self.num_history_steps)
 
     @torch.no_grad()
     def set_normalization(
@@ -464,7 +501,13 @@ class P3D(nn.Module):
 
         if self.normalize:
             ch = (1, -1) + (1,) * (state.dim() - 2)
-            x = (state - self.state_mean.view(ch)) / self.state_std.view(ch)
+            # Per-channel stats are length C; with history the stem input holds
+            # H stacked frames, so the buffers are tiled H times right here (the
+            # buffers stay length C -- existing checkpoints and
+            # ``set_normalization`` depend on it). H=1 tiles to a no-op.
+            in_mean = self._tile_history(self.state_mean)
+            in_std = self._tile_history(self.state_std)
+            x = (state - in_mean.view(ch)) / in_std.view(ch)
             x = x * geometry
             if self.n_params > 0:
                 params = (params - self.param_mean) / self.param_std
@@ -487,7 +530,7 @@ class P3D(nn.Module):
                 feat = feat.expand(state.shape[0], *feat.shape[1:])
             pieces.append(feat)
         if self.param_conditioning == "channels" and self.n_params > 0:
-            b, _, d, h, w = state.shape
+            b, d, h, w = state.shape[0], *state.shape[-3:]
             params_b = params[:, :, None, None, None].expand(b, self.n_params, d, h, w)
             pieces.append(params_b.to(dtype=x.dtype))
         elif self.param_conditioning == "native" and self.n_params > 0:
@@ -516,6 +559,9 @@ class P3D(nn.Module):
             if not self.predict_residual:
                 out = out + self.state_mean.view(ch)
         if self.predict_residual:
-            out = state + out
+            # Residual base = the NEWEST history frame (the flattened layout is
+            # oldest-first, so it is the last C channels). At H=1 that is the
+            # whole ``state``, i.e. the historical behaviour.
+            out = state[:, -self.n_state_channels :] + out
 
         return out * geometry

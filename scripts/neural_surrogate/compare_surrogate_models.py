@@ -55,11 +55,13 @@ class LoadedModel:
         model: torch.nn.Module,
         dataset: TransitionDataset,
         dtype: torch.dtype,
+        num_history_steps: int = 1,
     ) -> None:
         self.name = name
         self.model = model
         self.dataset = dataset
         self.dtype = dtype
+        self.num_history_steps = num_history_steps
         self.n_params = sum(p.numel() for p in model.parameters())
 
 
@@ -76,21 +78,33 @@ def _load_model(
     every model can be pointed at one shared evaluation dataset; ``None`` keeps
     each model's own training dataset. SDF features are forced off -- the rollout
     only needs the geometry mask (SDF-consuming models self-compute the features
-    at inference), and skipping the EDT keeps dataset construction fast.
+    at inference), and skipping the EDT keeps dataset construction fast. Only
+    those keys are overridden, so ``num_history_steps`` (how many past frames
+    the network consumes) survives from the saved config; it is also re-asserted
+    explicitly below so a config that recorded it on the dataset alone still
+    reaches the architecture.
     """
     train_cfg = OmegaConf.load(model_dir / "config.yaml")
     dtype = getattr(torch, train_cfg.dataset.dtype)
+    # Legacy configs predate the key -> the classic one-step surrogate.
+    num_history_steps = int(train_cfg.dataset.get("num_history_steps", 1))
 
     ds_overrides: dict = dict(split=split, dtype=dtype, sdf_features="none")
+    if num_history_steps != 1:
+        ds_overrides["num_history_steps"] = num_history_steps
     if data_root is not None:
         ds_overrides["root_dir"] = data_root
     dataset = instantiate(train_cfg.dataset, **ds_overrides)
 
+    arch_overrides: dict = {}
+    if num_history_steps != 1 and "num_history_steps" not in train_cfg.architecture:
+        arch_overrides["num_history_steps"] = num_history_steps
     model = (
         instantiate(
             train_cfg.architecture,
             n_state_channels=len(train_cfg.dataset.state_vars),
             n_params=len(dataset.param_names),
+            **arch_overrides,
         )
         .to(dtype=dtype)
         .to(device)
@@ -102,9 +116,10 @@ def _load_model(
     print(
         f"[{name}] loaded {train_cfg.architecture._target_.split('.')[-1]} "
         f"({sum(p.numel() for p in model.parameters()):,} params) "
-        f"on {Path(str(root)).name}/{split}"
+        f"on {Path(str(root)).name}/{split} "
+        f"(num_history_steps={num_history_steps})"
     )
-    return LoadedModel(name, model, dataset, dtype)
+    return LoadedModel(name, model, dataset, dtype, num_history_steps)
 
 
 def _load_trajectory(
@@ -124,21 +139,34 @@ def _load_trajectory(
 @torch.no_grad()
 def _rollout(
     model: torch.nn.Module,
-    initial_state: torch.Tensor,
+    truth: torch.Tensor,
     params: torch.Tensor,
     geometry: torch.Tensor,
     n_steps: int,
     device: torch.device,
+    num_history_steps: int = 1,
 ) -> torch.Tensor:
-    pred = torch.empty((n_steps + 1, *initial_state.shape), dtype=initial_state.dtype)
-    pred[0] = initial_state
-    state = initial_state.unsqueeze(0).to(device)
+    """Autoregressive rollout seeded from the ground truth.
+
+    A one-step network (``num_history_steps == 1``) is seeded with ``truth[0]``
+    and predicts ``t = 1 … n_steps``. A history-conditioned network is seeded
+    with the ground-truth window ``truth[0:H]`` (flattened oldest-first into the
+    channel axis) and predicts from ``t = H`` onward; ``pred[0:H]`` holds that
+    same window, so every model's trajectory keeps the truth's length and time
+    indexing and the plots/metrics stay comparable across models.
+    """
+    H = num_history_steps
+    C = truth.shape[1]
+    grid = truth.shape[2:]
+    pred = torch.empty((n_steps + 1, *truth.shape[1:]), dtype=truth.dtype)
+    pred[:H] = truth[:H]
+    state = truth[:H].reshape(1, H * C, *grid).to(device)
     geom = geometry.unsqueeze(0).to(device)
-    for t in range(n_steps):
+    for t in range(H - 1, n_steps):
         param_t = params[t].unsqueeze(0).to(device)
         next_state = model(state, param_t, geom)
         pred[t + 1] = next_state[0].cpu()
-        state = next_state
+        state = next_state if H == 1 else torch.cat([state[:, C:], next_state], dim=1)
     return pred
 
 
@@ -379,16 +407,18 @@ def run(cfg: DictConfig) -> None:
             t0 = time.perf_counter()
             pred = _rollout(
                 model=m.model,
-                initial_state=truth[0],
+                truth=truth,
                 params=params,
                 geometry=geometry,
                 n_steps=T - 1,
                 device=device,
+                num_history_steps=m.num_history_steps,
             )
             if device.type == "cuda":
                 torch.cuda.synchronize()
             elapsed = time.perf_counter() - t0
-            ms_per_step = 1e3 * elapsed / max(T - 1, 1)
+            # A history-conditioned rollout predicts T - H frames, not T - 1.
+            ms_per_step = 1e3 * elapsed / max(T - m.num_history_steps, 1)
             timing[m.name].append(ms_per_step)
 
             met = _metrics(pred, truth)

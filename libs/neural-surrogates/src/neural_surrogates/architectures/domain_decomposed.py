@@ -101,6 +101,13 @@ class DomainDecomposed(nn.Module):
         ``training.yaml`` drive a DD model exactly as it drives a plain
         ``UNetConvNeXt``. ``None`` keeps the preset's own
         ``decomposition.periodic_axes``.
+    num_history_steps:
+        Accepted for signature parity with the next-step architectures (so a
+        Hydra node carrying the key instantiates), but only ``1`` is supported:
+        the decomposition's patch tiling, coarse pooling and fine-net chunking
+        all assume ``C`` state channels per block, so a history-flattened
+        ``(B, H*C, ...)`` input would need the whole DD pipeline reworked.
+        ``> 1`` raises :class:`NotImplementedError`.
     """
 
     domain_flexible = True
@@ -116,10 +123,24 @@ class DomainDecomposed(nn.Module):
         periodic_axes: Sequence[str] | None = None,
         fine_chunk_size: int | None = None,
         fine_checkpoint: bool = False,
+        num_history_steps: int = 1,
     ) -> None:
         super().__init__()
+        if int(num_history_steps) != 1:
+            raise NotImplementedError(
+                "DomainDecomposed does not support state history "
+                f"(num_history_steps={num_history_steps}). The patch tiling, "
+                "coarse pooling and fine-net chunking all assume C state "
+                "channels per block; use a plain next-step architecture "
+                "(UNetConvNeXt / P3D / UPT / SimpleConv) for H > 1."
+            )
         self.n_state_channels = n_state_channels
         self.n_params = n_params
+        # History is not supported here (see above); the attributes exist so the
+        # trainer / forward model can read them uniformly across architectures.
+        # ``num_history_steps`` is deliberately NOT forwarded to the sub-nets.
+        self.num_history_steps = 1
+        self.n_input_state_channels = n_state_channels
         self.divergence_projection = bool(divergence_projection)
         # Patch-batch streaming knobs for large grids: cap the per-call fine-net
         # block count (transient working set) and/or recompute its activations in

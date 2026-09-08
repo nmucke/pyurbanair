@@ -18,6 +18,7 @@ class SimpleConv(nn.Module):
         n_params: int,
         kernel_size: int = 3,
         extra_in_channels: int = 0,
+        num_history_steps: int = 1,
     ) -> None:
         super().__init__()
         if n_params > n_state_channels:
@@ -27,15 +28,23 @@ class SimpleConv(nn.Module):
             )
         if extra_in_channels < 0:
             raise ValueError("extra_in_channels must be >= 0")
+        if int(num_history_steps) < 1:
+            raise ValueError(f"num_history_steps must be >= 1, got {num_history_steps}")
         self.n_state_channels = n_state_channels
         self.n_params = n_params
+        # History conditioning: ``state`` arrives pre-flattened as
+        # ``(B, H*C, ...)`` (oldest frame first), so only the input stem widens;
+        # the output stays ``C`` channels. H=1 is the historical behaviour and
+        # leaves the state dict byte-identical.
+        self.num_history_steps = int(num_history_steps)
+        self.n_input_state_channels = self.num_history_steps * n_state_channels
         # ``extra_in_channels`` are raw input-only channels (e.g. a coarse-context
         # field + positional encoding fed by the domain-decomposition wrapper).
         # They widen the input stem but NOT the output: with the default 0 the
         # stem and state-dict are byte-identical to the original.
         self.extra_in_channels = int(extra_in_channels)
         self.conv = nn.Conv3d(
-            in_channels=n_state_channels + 1 + self.extra_in_channels,
+            in_channels=self.n_input_state_channels + 1 + self.extra_in_channels,
             out_channels=n_state_channels,
             kernel_size=kernel_size,
             padding=kernel_size // 2,

@@ -766,8 +766,13 @@ def run(cfg: DictConfig) -> None:
         jitter = float(spinup_cfg.get("initial_param_jitter_scale", 0.0))
         state_files, param_files = list_split_samples(root, split)
 
+        # A history-conditioned surrogate is seeded with the last H training
+        # frames per member instead of a single snapshot (H = 1: unchanged).
         initial_state_dir = write_initial_state_files(
-            state_files, ensemble_size, out_dir / "_initial_states"
+            state_files,
+            ensemble_size,
+            out_dir / "_initial_states",
+            num_history_steps=getattr(assim_model, "num_history_steps", 1),
         )
         prior_params = anchor_prior_params(
             prior_params, param_files, ensemble_size, jitter

@@ -32,6 +32,7 @@ from __future__ import annotations
 import copy
 import logging
 import pathlib
+import warnings
 from importlib import import_module
 from typing import Any, Optional, Sequence
 
@@ -46,6 +47,31 @@ from .geometry import nonzero_fluid_mask, solid_c_fluid_mask, stl_to_fluid_mask
 logger = logging.getLogger(__name__)
 
 _BOUNDS_ATOL = 1e-6
+
+# The "seeded a history-conditioned surrogate by repeating a single frame"
+# warning is a property of the run, not of the individual member/window, so it
+# is emitted once per process rather than once per rollout (an ESMDA run would
+# otherwise print it per member per window).
+_REPEAT_SEEDING_WARNED = False
+
+
+def _warn_repeat_seeding(num_history_steps: int, n_available: int) -> None:
+    """Warn (once per process) that history was seeded by frame repetition."""
+    global _REPEAT_SEEDING_WARNED
+    if _REPEAT_SEEDING_WARNED:
+        return
+    _REPEAT_SEEDING_WARNED = True
+    warnings.warn(
+        f"neural surrogate trained with num_history_steps={num_history_steps} "
+        f"but only {n_available} initial frame(s) are available; the oldest "
+        "available frame is repeated to fill the history buffer. The first "
+        "predictions therefore see an artificially frozen history -- supply a "
+        "warm start carrying at least num_history_steps time steps (see "
+        "neural_surrogates.training_spinup.write_initial_state_files) to avoid "
+        "it.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 def _clone_backend_forward_model(
@@ -242,14 +268,28 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         else:
             from hydra.utils import instantiate
 
+            # The architecture node written by train_neural_surrogate.py already
+            # carries ``num_history_steps``; pass the dataset's value through
+            # only for a (non-default) config that recorded it on the dataset
+            # alone, so legacy H=1 configs stay a plain two-kwarg instantiate.
+            history_kwargs: dict[str, Any] = {}
+            trained_history = int(trained.get("num_history_steps", 1))
+            if trained_history != 1 and "num_history_steps" not in architecture:
+                history_kwargs["num_history_steps"] = trained_history
             self.model = instantiate(
                 architecture,
                 n_state_channels=len(self.state_vars),
                 n_params=len(self.param_vars),
+                **history_kwargs,
             )
         self._load_weights(weights_path, allow_uninitialized_weights)
         self.model = self.model.to(device=self.device, dtype=self.torch_dtype)
         self.model.eval()
+
+        # How many past frames the network consumes per step (H). H == 1 is the
+        # classic one-step surrogate: the rollout then behaves exactly as before.
+        self.num_history_steps = int(getattr(self.model, "num_history_steps", 1))
+        self.n_state_channels = len(self.state_vars)
 
         # The domain check needs ``self.model`` to detect whether the network is
         # domain-flexible (decomposes the grid internally), so it runs after the
@@ -290,6 +330,8 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         resolved: dict[str, Any] = {
             "architecture": train_cfg.architecture,
             "state_vars": tuple(train_cfg.dataset.state_vars),
+            # Legacy configs predate the key; H=1 is the historic behaviour.
+            "num_history_steps": int(train_cfg.dataset.get("num_history_steps", 1)),
         }
         weights = model_dir / "weights.pt"
         if weights.exists():
@@ -678,7 +720,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         sim_name: Optional[str],
         member_index: int = 0,
     ) -> xr.Dataset:
-        """Return a single-snapshot template carrying coords + initial field.
+        """Return the template carrying coords + the initial field(s).
 
         On a warm start the supplied ``state`` is used. On a cold start the
         field is produced by the CFD spin-up backend. The ``training_data``
@@ -687,6 +729,14 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         in as the initial ``state`` — so a cold start in that mode is an error.
         The field is collocated to the regular grid the network expects (see
         :meth:`_to_regular_grid`) before it is returned.
+
+        For a one-step network (``num_history_steps == 1``) the result is a
+        single snapshot, exactly as before. A history-conditioned network needs
+        the ``H`` most recent frames instead, so the template then keeps a
+        ``time`` dimension of length ``H`` (oldest first); every consumer of the
+        template (:meth:`_build_geometry`, :meth:`_assemble_output`) already
+        reduces it with ``isel(time=-1)``, and :meth:`_stack_history` is the one
+        place that reads the whole window.
         """
         if state is not None:
             snap = state
@@ -712,7 +762,32 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 )
 
         snap = self._to_regular_grid(snap)
-        return snap.isel(time=-1) if "time" in snap.dims else snap
+        return self._history_window(snap)
+
+    def _history_window(self, snap: xr.Dataset) -> xr.Dataset:
+        """Reduce a (possibly multi-frame) field to the network's input window.
+
+        ``H == 1`` collapses to the last frame — byte-identical to the
+        single-snapshot template the surrogate has always used. ``H > 1`` keeps
+        the last ``H`` frames (oldest first). When fewer than ``H`` frames are
+        supplied (a single spin-up snapshot, a legacy per-member ``state_i.nc``)
+        the oldest available frame is repeated to fill the window and a warning
+        is emitted once — see :func:`_warn_repeat_seeding`.
+        """
+        H = self.num_history_steps
+        if H == 1:
+            return snap.isel(time=-1) if "time" in snap.dims else snap
+        if "time" not in snap.dims:
+            _warn_repeat_seeding(H, 1)
+            return xr.concat([snap] * H, dim="time", join="override")
+        n_available = snap.sizes["time"]
+        if n_available >= H:
+            return snap.isel(time=slice(n_available - H, n_available))
+        _warn_repeat_seeding(H, n_available)
+        oldest = snap.isel(time=slice(0, 1))
+        return xr.concat(
+            [oldest] * (H - n_available) + [snap], dim="time", join="override"
+        )
 
     def run_single(
         self,
@@ -733,10 +808,12 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
     ) -> list[xr.Dataset]:
         """Roll the network forward for a batch of members at once.
 
-        Each ``templates[b]`` is a single-snapshot initial field already on
-        the regular grid the network expects (i.e. the output of
-        :meth:`_get_template_and_initial_state`), and ``params[b]`` is that
-        member's parameter dataset. The members share the trained network, so
+        Each ``templates[b]`` is the initial field already on the regular grid
+        the network expects (i.e. the output of
+        :meth:`_get_template_and_initial_state`) — a single snapshot, or the
+        last ``num_history_steps`` frames for a history-conditioned network —
+        and ``params[b]`` is that member's parameter dataset. The members share
+        the trained network, so
         their rollouts run as a single batched forward pass per step (batch
         dimension = member) rather than one Python loop per member — this is
         where the ensemble gets its speed-up once the (parallel) spin-up has
@@ -787,8 +864,8 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         schedule = torch.stack(
             [self._param_schedule(p, n_internal) for p in params], dim=0
         )
-        # (n_members, C, *grid)
-        initial = torch.stack([self._stack_state(t) for t in templates], dim=0)
+        # (n_members, H * C, *grid) -- H frames oldest-first (H == 1: (n, C, ...))
+        initial = torch.stack([self._stack_history(t) for t in templates], dim=0)
         current = initial.to(self.device)
 
         # SDF/geometry features are a pure function of the (static) geometry, so
@@ -812,16 +889,25 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         member_frames: list[list[Optional[np.ndarray]]] = [
             [None] * len(emit_steps) for _ in range(n_members)
         ]
+        n_channels = self.n_state_channels
         with torch.no_grad():
             for k in range(n_internal):
                 param_k = schedule[:, k, :]
                 if geom_features is None:
-                    current = self.model(current, param_k, geom)
+                    pred = self.model(current, param_k, geom)
                 else:
-                    current = self.model(current, param_k, geom, geom_features)
+                    pred = self.model(current, param_k, geom, geom_features)
+                # Shift the history window: drop the oldest frame, append the
+                # prediction. H == 1 degenerates to the historic wholesale
+                # replacement (same tensor, same op order).
+                current = (
+                    pred
+                    if self.num_history_steps == 1
+                    else torch.cat([current[:, n_channels:], pred], dim=1)
+                )
                 pos = emit_at.get(k + 1)
                 if pos is not None:
-                    step_np = current.cpu().numpy()
+                    step_np = pred.cpu().numpy()
                     for b in range(n_members):
                         member_frames[b][pos] = step_np[b]
 
@@ -846,6 +932,23 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             [np.asarray(snapshot[v].values) for v in self.state_vars], axis=0
         )
         return torch.from_numpy(channels).to(self.torch_dtype)
+
+    def _stack_history(self, snapshot: xr.Dataset) -> torch.Tensor:
+        """Stack the network's input window into ``(H * C, *grid)``.
+
+        Frames are ordered oldest-first and flattened into the channel axis, so
+        the newest frame is ``tensor[-C:]`` — the layout the history-conditioned
+        architectures expect. ``H == 1`` is a plain :meth:`_stack_state` of the
+        single-snapshot template.
+        """
+        H = self.num_history_steps
+        if H == 1:
+            single = snapshot.isel(time=-1) if "time" in snapshot.dims else snapshot
+            return self._stack_state(single)
+        window = self._history_window(snapshot)
+        return torch.cat(
+            [self._stack_state(window.isel(time=t)) for t in range(H)], dim=0
+        )
 
     def _assemble_output(
         self, template: xr.Dataset, frames: list[np.ndarray]

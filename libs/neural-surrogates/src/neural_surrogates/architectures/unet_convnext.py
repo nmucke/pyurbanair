@@ -72,16 +72,12 @@ class _ConvNeXtBlock3d(nn.Module):
                     channels,
                     channels,
                     kernel_size=k3,
-                    padding=tuple(
-                        0 if per else p for p, per in zip(pads, periodic)
-                    ),
+                    padding=tuple(0 if per else p for p, per in zip(pads, periodic)),
                     groups=channels,
                 )
             )
             self._dw_circ_specs.append(
-                _circular_spec(
-                    tuple(p if per else 0 for p, per in zip(pads, periodic))
-                )
+                _circular_spec(tuple(p if per else 0 for p, per in zip(pads, periodic)))
             )
         self.dwconv = convs[0] if len(convs) == 1 else nn.Sequential(*convs)
         self.norm = nn.GroupNorm(norm_groups, channels)
@@ -108,9 +104,7 @@ class _ConvNeXtBlock3d(nn.Module):
 
     def _dwconv_forward(self, x: torch.Tensor) -> torch.Tensor:
         convs = (
-            self.dwconv
-            if isinstance(self.dwconv, nn.Sequential)
-            else (self.dwconv,)
+            self.dwconv if isinstance(self.dwconv, nn.Sequential) else (self.dwconv,)
         )
         for conv, spec in zip(convs, self._dw_circ_specs):
             if spec is not None:
@@ -235,7 +229,22 @@ class UNetConvNeXt(nn.Module):
         per-patch context and positional encodings straight in. The default
         ``0`` keeps the stem (and hence the whole state dict) byte-identical
         to a model built without this argument, so existing checkpoints load.
+    num_history_steps:
+        Number of past state frames ``H`` fed to the model. The dataset ships
+        them pre-flattened along the channel axis, oldest first, so ``state``
+        is ``(B, H*C, nz, ny, nx)`` and the newest frame is ``state[:, -C:]``.
+        Only the stem widens (``H*C + 1 + extra``); the head still emits ``C``
+        channels, the normalisation buffers stay length ``C`` (tiled ``H`` times
+        at the input) and the residual is taken against the newest frame. The
+        default ``1`` is the historical single-frame behaviour and keeps the
+        state dict byte-identical.
     """
+
+    # Registered as buffers only when ``normalize`` is set (see ``__init__``);
+    # declared here so a type checker resolves them as tensors rather than
+    # ``Tensor | Module`` at the ``_tile_history`` call sites.
+    state_mean: torch.Tensor
+    state_std: torch.Tensor
 
     def __init__(
         self,
@@ -254,6 +263,7 @@ class UNetConvNeXt(nn.Module):
         residual: bool = False,
         periodic_axes: Sequence[str] = (),
         extra_in_channels: int = 0,
+        num_history_steps: int = 1,
     ) -> None:
         super().__init__()
         if len(channel_mults) != len(depths):
@@ -266,8 +276,15 @@ class UNetConvNeXt(nn.Module):
 
         if extra_in_channels < 0:
             raise ValueError("extra_in_channels must be >= 0")
+        if int(num_history_steps) < 1:
+            raise ValueError(f"num_history_steps must be >= 1, got {num_history_steps}")
         self.n_state_channels = n_state_channels
         self.n_params = n_params
+        # History conditioning: the H past frames arrive pre-flattened along the
+        # channel axis (oldest first), so only the stem widens. H=1 leaves the
+        # whole state dict byte-identical to a model built without this argument.
+        self.num_history_steps = int(num_history_steps)
+        self.n_input_state_channels = self.num_history_steps * n_state_channels
         self.normalize = normalize
         self.residual = residual
         self.extra_in_channels = int(extra_in_channels)
@@ -298,7 +315,7 @@ class UNetConvNeXt(nn.Module):
             cond_dim = param_embed_dim
 
         self.stem = nn.Conv3d(
-            n_state_channels + 1 + self.extra_in_channels,
+            self.n_input_state_channels + 1 + self.extra_in_channels,
             channels[0],
             kernel_size=3,
             padding=tuple(0 if per else 1 for per in self._periodic),
@@ -343,6 +360,18 @@ class UNetConvNeXt(nn.Module):
 
         self.head = nn.Conv3d(channels[0], n_state_channels, kernel_size=1)
 
+    def _tile_history(self, buffer: torch.Tensor) -> torch.Tensor:
+        """Repeat a length-``C`` per-channel statistic ``H`` times.
+
+        The normalisation buffers stay length ``C`` (so checkpoints and
+        :meth:`set_normalization` are unaffected by history); the stem input
+        carries ``H*C`` channels, so the stats are tiled to match right where
+        they are used. With ``H=1`` the buffer is returned unchanged.
+        """
+        if self.num_history_steps == 1:
+            return buffer
+        return buffer.repeat(self.num_history_steps)
+
     def set_normalization(
         self,
         state_mean,
@@ -358,9 +387,7 @@ class UNetConvNeXt(nn.Module):
         by zero.
         """
         if not self.normalize:
-            print(
-                "UNetConvNeXt(normalize=False): ignoring normalization stats"
-            )
+            print("UNetConvNeXt(normalize=False): ignoring normalization stats")
             return
 
         def _fill(buffer: torch.Tensor, values) -> None:
@@ -379,10 +406,14 @@ class UNetConvNeXt(nn.Module):
             _fill(self.param_mean, param_mean)
             _fill(self.param_std, param_std)
         self.state_std.copy_(
-            torch.where(self.state_std > 0, self.state_std, torch.ones_like(self.state_std))
+            torch.where(
+                self.state_std > 0, self.state_std, torch.ones_like(self.state_std)
+            )
         )
         self.param_std.copy_(
-            torch.where(self.param_std > 0, self.param_std, torch.ones_like(self.param_std))
+            torch.where(
+                self.param_std > 0, self.param_std, torch.ones_like(self.param_std)
+            )
         )
 
     def _pad_to_multiple(
@@ -434,7 +465,13 @@ class UNetConvNeXt(nn.Module):
 
         if self.normalize:
             ch = (1, -1) + (1,) * (state.dim() - 2)
-            x = (state - self.state_mean.view(ch)) / self.state_std.view(ch)
+            # The stats are per-channel over C; with history the input carries
+            # H stacked frames, so the length-C buffers are tiled H times at the
+            # use site (the buffers themselves stay length C -- checkpoints and
+            # ``set_normalization`` depend on it). H=1 tiles to a no-op.
+            in_mean = self._tile_history(self.state_mean)
+            in_std = self._tile_history(self.state_std)
+            x = (state - in_mean.view(ch)) / in_std.view(ch)
             x = x * geometry
             if self.n_params > 0:
                 params = (params - self.param_mean) / self.param_std
@@ -485,7 +522,10 @@ class UNetConvNeXt(nn.Module):
             if not self.residual:
                 x = x + self.state_mean.view(ch)
         if self.residual:
-            x = state + x
+            # The residual base is the NEWEST history frame (the flattened
+            # layout is oldest-first, so it is the last C channels). At H=1 this
+            # is the whole ``state``, i.e. the historical behaviour.
+            x = state[:, -self.n_state_channels :] + x
 
         x = geometry * x
 

@@ -24,6 +24,11 @@ interiors), which only the model owns. ``pushforward_steps`` is still
 accepted and the ``t``/``t+K`` delta is produced for completeness, but the
 ``delta_target`` is then simply ``interior(S_{t+K}) - interior(S_t)`` and
 carries the caveat above.
+
+``num_history_steps > 1`` (a backward window on the input, see
+``TransitionDataset``) is likewise **not** supported here and raises
+``NotImplementedError``: the item schema and the domain-decomposed model both
+assume a single ``C``-channel block per patch.
 """
 
 from __future__ import annotations
@@ -52,6 +57,8 @@ class PatchTransitionDataset(TransitionDataset):
     root_dir, split, state_vars, param_vars, geometry_var, cache, dtype,
     pushforward_steps:
         Forwarded verbatim to :class:`TransitionDataset`.
+    num_history_steps:
+        Accepted for config compatibility; must be ``1`` (see Scope above).
     decomposition:
         Either a ready :class:`DomainDecomposition` or a ``dict`` of its
         constructor kwargs (e.g. ``{"interior_size": 4, "halo": 2, ...}``).
@@ -91,8 +98,21 @@ class PatchTransitionDataset(TransitionDataset):
         cache: bool = False,
         dtype: torch.dtype = torch.float32,
         pushforward_steps: int = 1,
+        num_history_steps: int = 1,
         decomposition: DomainDecomposition | dict | None = None,
     ) -> None:
+        # The kwarg is accepted so a Hydra dataset node carrying the canonical
+        # ``num_history_steps`` can instantiate this class, but a backward
+        # window is not modelled per patch (the patch item schema is built
+        # around a single ``t`` block, and the domain-decomposed model's
+        # channel bookkeeping assumes ``C``).
+        if num_history_steps != 1:
+            raise NotImplementedError(
+                "PatchTransitionDataset does not support a state history: "
+                f"got num_history_steps={num_history_steps}, only 1 is "
+                "supported. Use TransitionDataset (mode=standard) for "
+                "history-conditioned training."
+            )
         super().__init__(
             root_dir=root_dir,
             split=split,
@@ -102,6 +122,7 @@ class PatchTransitionDataset(TransitionDataset):
             cache=cache,
             dtype=dtype,
             pushforward_steps=pushforward_steps,
+            num_history_steps=num_history_steps,
         )
 
         if decomposition is None:

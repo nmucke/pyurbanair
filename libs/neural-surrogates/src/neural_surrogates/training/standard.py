@@ -23,6 +23,10 @@ class Trainer(BaseTraining):
         geometry: torch.Tensor,
     ) -> torch.Tensor:
         K = params.shape[1]
+        # ``state`` is whatever the model consumes -- a single frame, or the
+        # flattened (B, H*C, *grid) history window -- while the prediction and
+        # the target are always a single (B, C, *grid) frame, so the masked
+        # comparison below is history-agnostic.
         pred = self._model_forward(state, params[:, K - 1, :], geometry)
         if self.mask_loss:
             # uDALES targets carry junk values inside obstacles, which would

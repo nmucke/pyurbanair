@@ -16,3 +16,10 @@ sdf_clamp_cells: 32
 # right after the geometry mask -- `sdf` (+1), `grad` (+3) or `both` (+4).
 # Must match dataset.sdf_features (same mode) and dataset.sdf_clamp_cells
 # (default 32). `none` -> existing checkpoints load byte-identically.
+
+# State history: number of past frames fed to the model. The dataset ships them
+# pre-flattened along the channel axis (oldest first), so only the input stem
+# widens -- the output stays `n_state_channels`. Must match
+# dataset.num_history_steps. Default 1 -> existing checkpoints load
+# byte-identically.
+# num_history_steps: 1

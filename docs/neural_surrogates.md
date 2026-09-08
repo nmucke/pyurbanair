@@ -327,11 +327,12 @@ unroll the model forward. A split with `N` trajectories of length `T`
 produces `N · (T − K)` samples; shuffling a `DataLoader` over it samples
 uniformly across all transition windows and all trajectories. With `K=1`
 this reduces to one-step transition pairs (the original behavior); see
-§10 for how the trainer uses `K>1`. Each item is a dict:
+§10 for how the trainer uses `K>1`. `num_history_steps` (`H`, default `1`)
+is the mirror-image *backward* window — see below. Each item is a dict:
 
 | Key          | Shape       | Notes |
 |---|---|---|
-| `state_n`    | `(C, *grid)` | velocity channels stacked in `state_vars` order, at time `t` |
+| `state_n`    | `(H·C, *grid)` | velocity channels stacked in `state_vars` order, for the history window `t−H+1 … t` flattened onto the channel axis **oldest first** (`H = num_history_steps`, default `1` → the plain `(C, *grid)` snapshot at `t`) |
 | `state_next` | `(C, *grid)` | snapshot at time `t + K` — the pushforward target |
 | `params_n`   | `(K, P)`    | inflow params at steps `t, …, t+K-1`; scalar params (e.g. uDALES `pressure_gradient_magnitude`) are broadcast along `time` |
 | `geometry`   | `(*grid,)`  | binary mask: `1` = fluid, `0` = obstacle. The item's *trajectory's* mask; equal masks are content-deduped to one shared tensor at init |
@@ -342,6 +343,37 @@ The geometry mask is read from each state file's `geometry_var`
 match the `1`-is-fluid convention). For backends that don't ship one,
 the fallback marks fluid cells as those with a non-zero stacked state in
 that trajectory's first snapshot; ground-and-building cells stay 0.
+
+#### State history (`num_history_steps`)
+
+`num_history_steps` (`H`, default `1`) is the **backward** window — the
+mirror image of `pushforward_steps` (`K`, the forward horizon). With
+`H>1` each sample carries the `H` consecutive snapshots `t−H+1 … t`
+instead of the single snapshot at `t`; `state_next`, `params_n`,
+`geometry` and `geom_features` are unchanged.
+
+The window is **pre-flattened onto the channel axis, oldest first**, so
+`state_n` is `(H·C, *grid)` with channel order `[u,v,w @ t−H+1, …, u,v,w
+@ t]` — the newest frame is always the last `C` channels, `state_n[-C:]`.
+That one convention is what the architectures take as their residual base
+(§7), what the trainer's ring buffer appends to (§10) and what the
+forward model's rollout buffer holds (§12); nothing downstream ever sees
+a time axis. `transition_collate` is shape-agnostic and stacks it to
+`(B, H·C, *grid)`.
+
+Anchors start at `t = H−1` so every sample has a full window: a
+trajectory of length `T` contributes `T − K − (H−1)` samples (the window
+trims the front, the horizon still trims the back) and needs at least
+`K + H` snapshots — a shorter one raises a `ValueError` naming both
+knobs. `set_pushforward_steps` rebuilds the index with the same offset,
+so `H` survives the pushforward curriculum (§10).
+
+`H=1` reproduces the historyless item byte for byte (same keys, same
+tensors, same `len()`), so existing configs and checkpoints are
+unaffected. `PatchTransitionDataset` accepts the key but raises
+`NotImplementedError` for `H>1` — its per-patch item schema and the
+domain-decomposed model both assume one `C`-channel block (§14) — and
+`SnapshotDataset` is unaffected.
 
 #### Multi-geometry splits (`TrajectoryBatchSampler`)
 
@@ -402,9 +434,10 @@ see the SDF plan in [docs/plans/sdf_features_plan.md](plans/sdf_features_plan.md
 `__init__` only walks each state file to read `ds.sizes["time"]` (metadata
 only) so it can build the flat `(traj, t)` index. Parameters and the
 static geometry mask are loaded eagerly (both are small). State
-snapshots are read lazily on each `__getitem__` via
-`xr.open_dataset(..., cache=cache).isel(time=[t, t+K])` — only the two
-endpoint snapshots ever leave disk per sample, regardless of `K`. The
+snapshots are read lazily on each `__getitem__` via a single
+`xr.open_dataset(..., cache=cache).isel(...)` covering that sample's own
+slices (`[t, t+K]`, or the `H` history frames plus `t+K`) — only those
+ever leave disk per sample, regardless of `K`. The
 intermediate ground-truth states are never read because the pushforward
 unroll feeds the model its own predictions in their place.
 
@@ -412,7 +445,7 @@ The `cache` constructor flag (`cache: bool = False`) is threaded straight
 into xarray:
 
 - `cache=False` (default) — every `.values` read goes to disk; only the
-  two slices for the current pair are materialized; nothing accumulates.
+  current sample's own slices are materialized; nothing accumulates.
   Use this for large datasets that don't fit in RAM.
 - `cache=True` — xarray keeps every read slice in memory, so after one
   epoch all visited trajectories are resident and subsequent epochs are
@@ -433,6 +466,8 @@ shape of the first few batches, and writes three diagnostic plots into
 
 - `states.png` — `|u|` at the mid-z slice for the first 4 batch items, with
   `state_n` on top and `state_next` on the bottom on a shared color scale.
+  Under `--num-history-steps N` the top row is `state_n`'s **newest** frame
+  (its last `C` channels) and the printed `state_n` shape is annotated `H*C`.
 - `params.png` — scatter of the batch's `(inflow_angle, velocity_magnitude)`
   pairs.
 - `geometry.png` — one subplot per vertical (z) level, white = fluid,
@@ -469,6 +504,28 @@ All architectures share the contract
 concatenated to the state along the channel dimension at the stem; how
 parameters enter depends on the architecture.
 
+**State history (`num_history_steps`).** Every next-step architecture —
+`SimpleConv`, `UNetConvNeXt`, `P3D`, `UPT` — takes `num_history_steps`
+(`H`, default `1`) as a trailing keyword argument and exposes
+`self.num_history_steps` and `self.n_input_state_channels = H ·
+n_state_channels`. The `H` past frames arrive **pre-flattened onto the
+channel axis, oldest first** (§6), so `state` is `(B, H·C, *grid)` and
+the newest frame is `state[:, -C:]`; the architectures never see a time
+axis. Only the **input** widens — `SimpleConv.conv` / `UNetConvNeXt.stem`
+/ P3D's `in_channels` / UPT's `feat_dim` count `H·C` state channels —
+while the output head still emits `n_state_channels`. The z-score buffers
+`state_mean` / `state_std` also stay length `C`, so `set_normalization`
+and existing checkpoints are untouched and `_normalization_signature`
+needs no history key; each architecture tiles them `H`× at its one input
+use site. Residual-predicting models add the **newest** frame
+(`state[:, -C:] + out`), and the geometry mask broadcasts over the whole
+`H·C` input. `H=1` gives an identical state dict and a bit-identical
+forward output versus a model built without the argument. The dataset and
+the model must agree: the train script cross-checks
+`dataset.num_history_steps` against `architecture.num_history_steps` and
+fails loud (§10). `DomainDecomposed` (§14) and `TadpoleTimeStepper` (§31)
+accept the key but raise `NotImplementedError` for `H>1`.
+
 **SDF geometry features (P3D).** `P3D` accepts an optional `sdf_features` mode
 (`none` | `sdf` | `grad` | `both`, default `none`) that widens the stem by the
 selected channels, inserted right after the mask: stem order `[state, geometry,
@@ -503,7 +560,8 @@ no feature channels.
 Single `Conv3d` layer over `(state ⊕ geometry)` along the channel dim.
 
 - **Input channels**: `n_state_channels + 1` — the state channels stacked
-  in `state_vars` order, with the binary geometry mask appended.
+  in `state_vars` order, with the binary geometry mask appended
+  (`num_history_steps · n_state_channels + 1` under a history window, §7).
 - **Output channels**: `n_state_channels` — one channel per state var.
 - **Parameter injection**: each inflow parameter is broadcast-added to a
   distinct output channel (param `i` → channel `i`). If
@@ -532,7 +590,9 @@ delta-state structure.
 
 #### `UNetConvNeXt`
 
-- **Stem**: `Conv3d(n_state_channels + 1, base_channels, 3)`.
+- **Stem**: `Conv3d(n_state_channels + 1, base_channels, 3)` — widened to
+  `num_history_steps · n_state_channels + 1 + extra_in_channels` when
+  either knob is set (§7, §14).
 - **Encoder**: for each level `i`, a stage of `depths[i]` ConvNeXt
   blocks at `base_channels · channel_mults[i]`, then a stride-2 `Conv3d`
   to the next stage's channel count. Each pre-downsample activation is
@@ -697,6 +757,21 @@ and increments it by one every `pushforward_epochs_per_step` epochs up to
 the dataset's `pushforward_steps`. This lets the model first learn one-step
 transitions before being exposed to its own compounding errors.
 
+**State history.** `BaseTraining` reads the backward window off the eager
+model (`num_history_steps` and `n_state_channels`, both `getattr`-defaulted
+so a pre-history architecture stays on the one-step path). There is no new
+trainer config key — the window is a property of the architecture. The
+pushforward rollout then *rolls* its input instead of replacing it:
+`_advance_history(state, pred)` returns `pred` itself at `H=1`
+(byte-identical to the old `state = self._model_forward(...)`) and otherwise
+`cat([state[:, C:], pred], dim=1)` — drop the oldest frame, append the
+prediction, so the newest frame stays last. It is called at both rollout
+sites (the `no_grad` prefix steps and the gradient-bearing ones). Nothing
+else moves: `state_n` is still 5-D, so the `channels_last_3d` cast and the
+geometry `expand` are unaffected, and both `_final_loss` hooks compare a
+`(B, C, *grid)` prediction against `state_next` regardless of `H`.
+`PatchTrainer` only ever sees `H=1` (§14).
+
 **LR schedule.** When `lr_warmup_epochs` is set the optimizer's LR ramps
 linearly from `lr_warmup_start` to its configured peak over the warmup
 window, then cosine-anneals down to `lr_min` over the remaining epochs.
@@ -735,11 +810,18 @@ augmentation, and config structure.
 3. `instantiate(cfg.dataloader, dataset=...)` for each, forcing
    `shuffle=False` on val.
 4. `instantiate(cfg.architecture, n_state_channels=len(cfg.dataset.state_vars),
-   n_params=len(train_ds.param_names))` → model.
+   n_params=len(train_ds.param_names))` → model. `dataset.num_history_steps`
+   is the canonical history window and is mirrored onto the architecture
+   here unless the architecture node sets the key itself; the two are then
+   cross-checked and a mismatch raises, exactly like the SDF cross-check.
 5. Save the resolved Hydra config to
    `model_weights/<model_name>/config.yaml`. `model_name` is a top-level
    config field (default `unet_convnext_small`); override on the CLI
-   with `model_name=...`.
+   with `model_name=...`. The resolved `num_history_steps` is stamped
+   under **both** `dataset:` and `architecture:` first, because the
+   forward model (§12) rebuilds the net from the `architecture` node
+   alone while the eval (§11) and fine-tune (§23) scripts read it back
+   off `dataset`.
 6. `instantiate(cfg.trainer, model=..., train_loader=..., val_loader=...,
    optimizer=instantiate(cfg.optimizer, params=model.parameters()),
    loss_fn=instantiate(cfg.loss),
@@ -753,7 +835,8 @@ augmentation, and config structure.
 Every runtime object — architecture, dataset, dataloader, optimizer,
 loss, trainer — is constructed via `hydra.utils.instantiate` against a
 `_target_` block. Only `n_state_channels` and `n_params` stay explicit
-because they're derived from the dataset, not the architecture preset.
+because they're derived from the dataset, not the architecture preset
+(plus `num_history_steps`, when only the dataset declares it).
 
 ### Config and CLI
 
@@ -803,6 +886,15 @@ pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
     architecture.kernel_size=5
 ```
 
+The architecture presets ship `num_history_steps` **commented out** (like
+`sdf_features`), so a history run sets it on both nodes and the
+architecture side needs Hydra's append form:
+
+```bash
+pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
+    +architecture.num_history_steps=3 dataset.num_history_steps=3
+```
+
 ### 11. Autoregressive rollout on the test split
 
 [scripts/neural_surrogate/test_neural_surrogate.py](../scripts/neural_surrogate/test_neural_surrogate.py)
@@ -810,7 +902,14 @@ loads `model_weights/<model_name>/config.yaml`, re-instantiates the
 architecture and `TransitionDataset` from it, restores `weights.pt`, and
 steps the model from `truth[0]` for `T - 1` steps so the predicted
 trajectory matches the test trajectory length. At each step the
-ground-truth `params_n` for that time index is fed in. The script is
+ground-truth `params_n` for that time index is fed in. A
+history-conditioned model (`num_history_steps = H > 1`, read back from the
+saved config with a legacy-safe default of `1`) is instead seeded with the
+ground-truth window `truth[0:H]` and predicts from `t = H` onward, with
+`pred[0:H] = truth[0:H]` — so the returned trajectory keeps the truth's
+length and time indexing and every plot and metric below indexes
+identically (the first `H` per-step RMSE values are then exactly zero).
+The script is
 Hydra-driven via
 [conf/neural_surrogate/testing.yaml](../conf/neural_surrogate/testing.yaml)
 and takes `model_dir`, `sample_idx`, `device`, and `output_dir` (default
@@ -859,7 +958,12 @@ alone. The config is
 
 Because the rollout only feeds `(state, params, geometry)`, SDF-consuming
 models (P3D) self-compute their features at inference; the dataset is
-built with `sdf_features=none` to skip the init-time EDT.
+built with `sdf_features=none` to skip the init-time EDT. Only
+`split` / `dtype` / `sdf_features` (and `root_dir`) are overridden on each
+saved `dataset:` node, so a model's own `num_history_steps` survives —
+models with different history windows can be compared in one run, each
+seeded from `truth[0:H]` as in §11, and `ms_per_step` divides by the
+`T − H` frames actually predicted.
 
 Outputs in `${output_dir}/` (default `model_comparison/`):
 
@@ -920,12 +1024,47 @@ Key behaviours:
 | **Spin-up / collocation** | With `spinup_source: forward_model` a cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. With `spinup_source: training_data` the surrogate runs **no** spin-up of its own — the assimilation is warm-started from training snapshots loaded by `run_esmda` (see below), so a cold start (`state is None`) raises. |
 | **Geometry** | When `stl_path` is set the geometry channel is voxelised from the STL onto the grid ([geometry.py](../libs/neural-surrogates/src/neural_surrogates/geometry.py)); otherwise it falls back to the non-zero-state convention used by `TransitionDataset`. |
 | **Parameters** | Time-varying inflow params are interpolated onto the internal step times in the trained `param_vars` order; scalar params are broadcast. |
+| **State history** | `num_history_steps` (`H`) is read **off the built network** — there is no forward-model config knob. The rollout buffer is `(B, H·C, *grid)`, oldest first; each step feeds it to the net, appends the `(B, C, *grid)` prediction, drops the oldest frame, and **emits the prediction** rather than the wider buffer. `_output_schedule()` (`n_internal`, `emit_steps`) is unchanged, so a history rollout emits exactly as many frames as an `H=1` one and substepping stays orthogonal. At `H=1` it is the historic loop, tensor for tensor. Seeding policy below. |
 
 `NeuralSurrogateEnsembleForwardModel`
 ([ensemble_forward_model.py](../libs/neural-surrogates/src/neural_surrogates/ensemble_forward_model.py))
 clones each member by sharing the (stateless) network and cloning the
 spin-up backend into its own experiment directory via that backend's
 `create_new_forward_model` helper.
+
+**Seeding a history-conditioned rollout.** `_get_template_and_initial_state`
+returns a single snapshot at `H=1`, as always; at `H>1` it returns the same
+template but with a `time` dimension of length `H` (oldest first), and
+`_stack_history` is the only reader of the whole window — `_build_geometry`
+and `_assemble_output` already reduce a template with `isel(time=-1)`. What
+lands in the window is decided by `_history_window`:
+
+- the field carries `≥ H` time frames → the **last `H`**, oldest first;
+- fewer than `H` (or no `time` dim at all) → the **oldest available frame
+  is repeated** to fill the buffer, with a `RuntimeWarning` emitted **once
+  per process** (an ESMDA run would otherwise print it per member per
+  window).
+
+Repeat-seeding is correct but degraded — the first predictions see a
+frozen, zero-tendency history — so treat the first `~H` frames of such a
+rollout as transient. Two operational cases hit it:
+
+- **A CFD cold start.** A spin-up backend configured with
+  `simulation_time = output_frequency` hands over exactly one post-spin-up
+  frame, so any `H>1` takes the repeat path. Raise the spin-up backend's
+  `simulation_time` to at least `H · output_frequency` and the surrogate
+  picks up the last `H` frames of its trajectory automatically.
+- **A short ESMDA window.** Windows after the first warm-start from the
+  previous window's forecast; a window shorter than `H` output frames
+  carries fewer than `H` of them, so the oldest is repeated again. Keep
+  `simulation_time / output_frequency ≥ num_history_steps` per
+  assimilation window.
+
+`NeuralSurrogateEnsembleForwardModel` needed no functional change: both
+`_spinup_templates` and `_warm_start_templates` already hand the forward
+model the member's *whole* state, `time` dimension included, and let it
+reduce the window — so a per-member `state_{i}.nc` may now legitimately
+hold several time steps.
 
 ### Config and usage
 
@@ -964,6 +1103,16 @@ value (the AR(2) draw's shape is kept; only its level is pinned). The known `t=0
 is then pinned in the smoother for window 0. The surrogate forward model itself
 holds **no** training-data logic — it only rolls a provided warm-start state
 forward — so the two pieces (loading + anchoring) live entirely in `run_esmda`.
+
+For a history-conditioned surrogate the same helper writes the **last `H`**
+frames per member instead of the last one (`time` kept, oldest first;
+`H=1` still writes the byte-identical single squeezed frame), and
+`run_esmda` passes `getattr(assim_model, "num_history_steps", 1)` through —
+so every non-surrogate assimilation model keeps the old path, and window 0
+is seeded with **real** history rather than a repeated snapshot.
+`anchor_prior_params` is unchanged: the prior is still anchored to the
+sample's value at `frame`, i.e. to the *newest* seeded frame — the one the
+first prediction steps off.
 
 The `pyudales_neural_surrogate` case in
 [tests/test_run_esmda.py](../tests/test_run_esmda.py)
@@ -1068,6 +1217,19 @@ The default `0` / `None` keeps the stem (and the whole state dict)
 `UNetConvNeXt` checkpoints still load. `set_normalization` on the wrapper
 forwards the train-split statistics to **both** inner nets (a no-op for a net
 built with `normalize=False`).
+
+`DomainDecomposed` also accepts `num_history_steps` (§7) — so a Hydra node
+carrying the canonical key instantiates, and the trainer / forward model can
+read the attribute uniformly — but raises `NotImplementedError` for anything
+but `1`: the patch tiling, the coarse average-pooling and the fine-net
+chunking all assume `C` state channels per block, and the fine net's
+`extra_in_channels = n_state_channels + n_pos` context contract is written
+against a single frame. The key is deliberately **not** forwarded to the
+sub-nets, so `fine_net.num_history_steps == 1`. For `H>1` use a plain
+next-step architecture with `mode=standard`; `PatchTransitionDataset` rejects
+a history window too (§6). `TadpoleTimeStepper` (§31) rejects it for the same
+class of reason — its frozen, pre-trained AE encodes exactly `C` state
+channels (plus the geometry block) per crop.
 
 ### 15. The key design property — it's a drop-in architecture
 

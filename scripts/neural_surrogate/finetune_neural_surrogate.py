@@ -181,6 +181,9 @@ def run(cfg: DictConfig) -> None:
     pre_param_vars = _as_list(pre_cfg.dataset.get("param_vars"))
     pre_sdf_features = pre_cfg.dataset.get("sdf_features", "none")
     pre_sdf_clamp = pre_cfg.dataset.get("sdf_clamp_cells", 32.0)
+    # Backward history window the pretrained stem was widened for. Configs
+    # written before the knob existed carry neither key -> 1 (one-step input).
+    pre_history = int(pre_cfg.dataset.get("num_history_steps", 1))
     if pre_state_vars is None:
         raise ValueError(
             f"pretrained config {pre_cfg_path} has no dataset.state_vars; cannot "
@@ -197,6 +200,9 @@ def run(cfg: DictConfig) -> None:
     cfg.dataset.state_vars = pre_state_vars
     cfg.dataset.sdf_features = pre_sdf_features
     cfg.dataset.sdf_clamp_cells = pre_sdf_clamp
+    # The fine-tune data must ship exactly the history window the pretrained
+    # stem consumes, so this comes from the pretrained config too.
+    cfg.dataset.num_history_steps = pre_history
     if cfg.dataset.get("param_vars") is None and pre_param_vars is not None:
         cfg.dataset.param_vars = pre_param_vars
 
@@ -230,7 +236,15 @@ def run(cfg: DictConfig) -> None:
         )
 
     # --- 2. Build the architecture. n_state_channels / n_params come from the
-    # (cross-checked) dataset, exactly as in train_neural_surrogate.py.
+    # (cross-checked) dataset, exactly as in train_neural_surrogate.py. The
+    # history window is mirrored onto the architecture node unless that node
+    # already sets it (a config written by the current train script does), in
+    # which case it wins and the cross-check below catches a disagreement.
+    def _history_kwargs(node: DictConfig | None) -> dict:
+        if node is not None and node.get("num_history_steps") is not None:
+            return {}
+        return {"num_history_steps": pre_history}
+
     if is_dft:
         # DFT: instantiate the stepper node fresh, pointing it at the AE dir so it
         # loads encoder.pt/decoder.pt (load-before-skip-wrap) and inherits the AE's
@@ -248,6 +262,7 @@ def run(cfg: DictConfig) -> None:
             cfg.architecture,
             n_state_channels=len(pre_state_vars),
             n_params=len(train_ds.param_names),
+            **_history_kwargs(cfg.architecture),
         ).to(dtype=dtype)
         _check_ae_stepper_match(pre_cfg.architecture, model)
         print(f"built TadpoleTimeStepper (size={model.size}) on AE {pretrained_dir}")
@@ -256,6 +271,7 @@ def run(cfg: DictConfig) -> None:
             arch_node,
             n_state_channels=len(pre_state_vars),
             n_params=len(train_ds.param_names),
+            **_history_kwargs(arch_node),
         ).to(dtype=dtype)
 
         weights_path = pretrained_dir / "weights.pt"
@@ -266,6 +282,21 @@ def run(cfg: DictConfig) -> None:
         # CPU-resident model.
         model.load_state_dict(torch.load(weights_path, map_location="cpu"))
         print(f"loaded pretrained weights from {weights_path}")
+
+    # Cross-check the history window (same spirit as the state_vars / SDF checks
+    # above and the one in train_neural_surrogate.py): a stem widened for H past
+    # frames must be fed exactly H of them. Both sides default to 1, so this is a
+    # no-op for pre-history models.
+    model_history = int(getattr(model, "num_history_steps", 1))
+    dataset_history = int(getattr(train_ds, "num_history_steps", 1))
+    if model_history != dataset_history:
+        raise ValueError(
+            "history-window mismatch: architecture.num_history_steps="
+            f"{model_history} but fine-tune dataset.num_history_steps="
+            f"{dataset_history} (pretrained config says {pre_history}); the "
+            "stem is widened to num_history_steps * n_state_channels, so the "
+            "two must select the same window."
+        )
 
     # --- 3. Normalization. DFT installs the fine-tune dataset's PARAM stats and
     # inherits the AE's state stats (unless recompute_normalization recomputes
@@ -369,6 +400,11 @@ def run(cfg: DictConfig) -> None:
             "architecture": arch_node,
         }
     cfg.dataset.param_vars = list(train_ds.param_names)
+    # Record the history window under BOTH nodes, exactly as the train script
+    # does: the forward model rebuilds the net from `architecture` alone, while a
+    # further fine-tune reads it back off `dataset`.
+    cfg.dataset.num_history_steps = dataset_history
+    cfg.architecture.num_history_steps = model_history
     cfg.pretrained = pretrained_block
     OmegaConf.save(cfg, out_dir / "config.yaml")
 

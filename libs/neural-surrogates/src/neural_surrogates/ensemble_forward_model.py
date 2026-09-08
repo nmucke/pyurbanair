@@ -126,7 +126,11 @@ class NeuralSurrogateEnsembleForwardModel(BaseEnsembleForwardModel):
         """Run all members' spin-ups in parallel and collocate the results.
 
         Returns one regular-grid initial-field template per member, ready to
-        seed the batched network rollout.
+        seed the batched network rollout. The member's *whole* spin-up
+        trajectory is handed to the forward model (not just its last frame) so a
+        history-conditioned surrogate can seed its buffer from the last
+        ``num_history_steps`` spin-up frames; the forward model reduces the
+        window (see ``_history_window``).
         """
         spinup_ensemble = self._get_spinup_ensemble()
         # Spin-up uses the constant (t=0) inflow, matching the single-model
@@ -162,7 +166,14 @@ class NeuralSurrogateEnsembleForwardModel(BaseEnsembleForwardModel):
         params: Optional[xarray.Dataset],
         sim_name: Optional[str],
     ) -> list[xarray.Dataset]:
-        """Collocate per-member provided states into rollout templates."""
+        """Collocate per-member provided states into rollout templates.
+
+        The member state is passed through whole: a per-member ``state_{i}.nc``
+        may carry several time steps (``training_spinup.write_initial_state_files``
+        writes ``num_history_steps`` of them for a history-conditioned
+        surrogate), and the forward model takes the last ``num_history_steps``
+        frames from it.
+        """
         self._last_failure_substitutions = {}
         templates: list[xarray.Dataset] = []
         for i in range(self.ensemble_size):
