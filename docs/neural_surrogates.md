@@ -129,8 +129,19 @@ these differences:
   pool's `manifest.csv` (mesh-bounds fallback for pools without one; the
   bounds under-span the domain when buildings sit inset from its edges); at
   `geometry.resolution` (metres), `nx`/`ny` are rounded UP to a multiple of
-  16 by extending the domain (the mesh stays anchored at the origin, the
-  slack is open fluid). The vertical extent is the fixed
+  16 by extending the domain (the mesh is never moved, the slack is open
+  fluid). The extra cells are distributed around the geometry: in **x**,
+  `geometry.upstream_padding` / `geometry.downstream_padding` (m, each rounded
+  up to whole cells, `0.0` = off) are inflow fetch in front of the mesh and
+  wake behind it — `nx` covers geometry + fetch + wake rounded up to a
+  multiple of 16, and the rounding slack tops up the wake, so both knobs are
+  minima; in **y**, `geometry.lateral_padding` is applied to BOTH sides (the
+  two are not distinguishable — `inflow_angle` crosses either way — so they
+  share one knob) with the rounding slack split evenly over them on top (an
+  odd count leaves the spare cell at the far side). The domain window moves rather
+  than the mesh — lower `bounds` go negative, and all three backends shift the
+  geometry and un-shift the output coordinates accordingly. The vertical
+  extent is the fixed
   `geometry.z_size` for every geometry; `nz = z_size / resolution` must
   itself be a multiple of 16. Geometries whose tallest building reaches
   `z_size` are dropped from the pool with a warning (pylbm SIGFPEs when
@@ -146,7 +157,9 @@ these differences:
   `precomputed_geom_dir=None`; pylbm recompiles per grid; for pypalm the
   turbulent-inflow `input_block_size` is clamped to 2·(nx/ncpu) when the
   PALM default (30) exceeds it (error TUI0019 otherwise).
-- **Extra outputs.** `geometries.csv` (per-sample geometry + grid manifest)
+- **Extra outputs.** `geometries.csv` (per-sample geometry + grid manifest,
+  including `x0_domain_m` / `y0_domain_m` — the domain's lower bounds in the
+  mesh frame, i.e. where the geometry sits inside the padded domain)
   and `geometries/` (copies of every STL used); each state file carries
   `geometry_stl` / `geometry_source` / `resolution_m` attrs.
 - **ncpu must divide every sampled `nx`** (pypalm/pyudales slab
