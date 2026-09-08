@@ -48,6 +48,12 @@ architecture:
   encode_geometry: true
   sdf_features: none
   sdf_clamp_cells: 32
+  # Geometry-branch conditioning (must mirror the AE -- cross-checked). null =
+  # today's behaviour. A mapping (e.g. `{width: 32}`) loads the AE's frozen
+  # `geometry_branch.pt` and injects its features into the encoder/decoder
+  # projections + the subnetwork's spatial FiLM; it requires
+  # `encode_geometry: false` (the two are mutually exclusive).
+  geometry_branch: null
   # Cap on folded crops processed at once (bound memory); null = all together.
   max_internal_batchsize: null
   normalize: true

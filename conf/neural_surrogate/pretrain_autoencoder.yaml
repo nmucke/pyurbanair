@@ -36,12 +36,34 @@ architecture:
   # (state channels only).
   encode_geometry: true
   # SDF / ∇SDF geometry features appended alongside the encoded mask (requires
-  # encode_geometry: true): none | sdf (+1) | grad (+3) | both (+4). Must match
-  # dataset.sdf_features (the script cross-checks it) and dataset.sdf_clamp_cells.
+  # encode_geometry: true, or a geometry_branch -- they feed the branch instead):
+  # none | sdf (+1) | grad (+3) | both (+4). Must match dataset.sdf_features (the
+  # script cross-checks it) and dataset.sdf_clamp_cells.
   sdf_features: sdf
   sdf_clamp_cells: 32
+  # Geometry BRANCH: the alternative to folding geometry through the encoder.
+  # null (default) = today's behaviour, byte-identical. A block here builds a
+  # small conv net that turns [mask, SDF...] into features at strides
+  # (1, 2, 4, 16); zero-init 1x1x1 projections inside the encoder/decoder add
+  # them at the conv stem's stride 1/2/4 points, their mirror in the decoder's
+  # up-path, and (level 3) the decoder's latent input. Geometry then CONDITIONS
+  # the autoencoder instead of being encoded and reconstructed: no geometry
+  # channels in the working space, no geometry recon term, and latent capacity
+  # stays on the flow. Mutually exclusive with encode_geometry (set it false);
+  # sdf_features stays available and feeds the branch. Because every projection
+  # is zero-init the model reconstructs exactly as it would with the branch
+  # disconnected, so training starts from the unconditioned AE. The branch is
+  # saved next to encoder.pt/decoder.pt as geometry_branch.pt (the plan-03
+  # stepper loads it frozen).
+  geometry_branch: null
+  # geometry_branch:
+  #   # Base feature width; per-level widths default to (w, 2w, 4w, 8w). Pass
+  #   # out_dims: [.., .., .., ..] to set all four explicitly.
+  #   width: 32
   # Pretrained init: none (random) | hf (thuerey-group/Tadpole weights for this
   # size; needs huggingface_hub) | {encoder: path, decoder: path} (local files).
+  # In geometry_branch mode the load is non-strict but still fails loud unless
+  # the ONLY missing keys are the zero-init geom_proj / geom_latent_proj ones.
   pretrained: none
   # Cap on folded crops processed at once (bound memory); null = all together.
   max_internal_batchsize: null

@@ -71,13 +71,16 @@ import xarray as xr
 from generate_random_geometries_training_data import (
     _POOL_SOURCES,
     _SUPPORTED_MODELS,
+    MANIFEST_COLUMNS,
     GeometrySpec,
     Sample,
     _build_geometry_pool,
     _resolve_nz,
+    _resolve_padding,
     _resolve_path,
     _stage_udales_case,
     _validate_ncpu,
+    manifest_row,
 )
 from generate_training_data import (
     _attach_blanking,
@@ -102,27 +105,27 @@ def _read_manifest(path: pathlib.Path) -> list[dict[str, str]]:
 
 
 def _append_manifest_rows(path: pathlib.Path, samples: list[Sample]) -> None:
-    """Append new train rows to geometries.csv without rewriting the header."""
+    """Append new train rows to geometries.csv without rewriting the header.
+
+    The header is checked first: a folder written before the domain-padding
+    change carries the old columns *and* the old domain frame (all padding
+    behind the mesh, none in front), so appending to it would mix two
+    incompatible geometry conventions into one dataset.
+    """
+    with open(path, newline="") as f:
+        header = next(csv.reader(f), [])
+    if tuple(header) != MANIFEST_COLUMNS:
+        raise ValueError(
+            f"{path} has columns {header}, expected {list(MANIFEST_COLUMNS)}. "
+            "This folder predates the domain-padding change (y padding is now "
+            "split over both sides and x carries an upstream fetch), so its "
+            "samples sit on a different domain frame than new ones would. "
+            "Regenerate the dataset instead of extending it."
+        )
     with open(path, "a", newline="") as f:
         writer = csv.writer(f)
         for s in samples:
-            g = s.geom
-            writer.writerow(
-                [
-                    s.split,
-                    f"{s.local_idx:04d}",
-                    g.stl_path.name,
-                    g.lx,
-                    g.ly,
-                    g.z_max,
-                    g.nx,
-                    g.ny,
-                    g.nz,
-                    g.bounds[0][1],
-                    g.bounds[1][1],
-                    g.bounds[2][1],
-                ]
-            )
+            writer.writerow(manifest_row(s))
 
 
 def _assign_train_geometries(
@@ -265,7 +268,16 @@ def run(
     nz = _resolve_nz(z_size, resolution)
     stl_dir = _resolve_path(geom_cfg.stl_dir)
     print(f"Scanning geometry pool {stl_dir} (resolution={resolution:g} m)")
-    pool = _build_geometry_pool(stl_dir, resolution=resolution, z_size=z_size, nz=nz)
+    upstream_padding, downstream_padding, lateral_padding = _resolve_padding(geom_cfg)
+    pool = _build_geometry_pool(
+        stl_dir,
+        resolution=resolution,
+        z_size=z_size,
+        nz=nz,
+        upstream_padding=upstream_padding,
+        downstream_padding=downstream_padding,
+        lateral_padding=lateral_padding,
+    )
     eligible: list[GeometrySpec] = [
         g for g in pool if g.stl_path.name not in heldout_stls
     ]

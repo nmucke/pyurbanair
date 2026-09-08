@@ -17,7 +17,11 @@ a :class:`~neural_surrogates.datasets.snapshot.SnapshotDataset` batch:
   cells carry no signal;
 * the geometry/SDF channels (present only when the model encodes geometry) get
   their own small weight so the total loss stays dominated by state
-  reconstruction;
+  reconstruction. In **geometry-branch** mode (``TadpoleAE(geometry_branch=...)``)
+  there are no geometry channels at all -- geometry conditions the
+  encoder/decoder instead of being reconstructed -- so that term is identically
+  zero and the objective degenerates to masked state recon + KL, no config
+  change needed;
 * ``kl_weight`` (β) defaults tiny (latent-diffusion convention); ``kl_weight=0``
   with ``latent_type="mode"`` degrades gracefully to a plain deterministic
   autoencoder -- the "AE core" of the staged scope, one config knob away.
@@ -166,8 +170,10 @@ class AutoencoderTrainer(BaseTraining):
 
         # How many channels does the critic want on top of the state block, and
         # where do they come from? ``target``/``recon`` already carry the AE's
-        # geometry block when it encodes geometry; when it does not, a critic
-        # that still wants a mask gets it from the raw ``geometry`` argument.
+        # geometry block when it encodes geometry; when it does not -- a
+        # geometry-blind AE, or one conditioned through a geometry branch, both
+        # of which have ``n_geometry_channels == 0`` -- a critic that still wants
+        # a mask gets it from the raw ``geometry`` argument (``"mask"``).
         expected = int(getattr(self.discriminator, "n_input_channels"))
         available = int(getattr(self._eager_model, "n_geometry_channels", 0))
         extra = expected - self._n_state_channels

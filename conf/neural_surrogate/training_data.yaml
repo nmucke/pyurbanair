@@ -42,21 +42,46 @@ training_data:
     # Grid spacing in metres, identical in x, y and z. Per geometry, nx/ny are
     # derived from the physical domain size (the pool's manifest.csv, with a
     # mesh-bounds fallback) and rounded UP to a multiple of 16 cells — the
-    # domain is extended (never the mesh), so the extra strip is open fluid
-    # at the far x/y ends.
-    resolution: 2.0
+    # domain is extended (never the mesh), so the extra cells are open fluid.
+    # They are placed around the geometry, not just behind it:
+    #   x — `upstream_padding` / `downstream_padding` below go in FRONT of and
+    #       BEHIND the geometry, and the rounding slack tops up the wake;
+    #   y — `lateral_padding` on both sides, plus the rounding slack split
+    #       evenly over them (an odd cell count leaves the spare cell at the
+    #       far side).
+    resolution: 4.0
+
+    # Open fluid (metres, each rounded up to a whole number of cells) inserted
+    # in front of and behind the geometry in x, the streamwise direction:
+    #   upstream_padding   — inflow fetch, so the inlet profile has room to
+    #                        develop instead of being imposed on the first row
+    #                        of buildings;
+    #   downstream_padding — wake, so the last row does not sit on the outlet;
+    #   lateral_padding    — applied to BOTH y sides, so the lateral boundaries
+    #                        are clear of the buildings whichever way the
+    #                        inflow_angle blows (the two sides are not
+    #                        distinguishable, hence one knob rather than two).
+    # All three are MINIMA: nx/ny cover geometry + padding rounded up to a
+    # multiple of 16, and the rounding slack tops up the wake in x and is split
+    # evenly over the two sides in y. All cost compute — at resolution 4.0 m
+    # every 64 m is 16 extra cells, and lateral_padding is charged twice (both
+    # sides). All 0.0 keeps the pre-knob behaviour: every spare cell behind the
+    # geometry in x, only the rounding slack centred in y.
+    upstream_padding: 32.0
+    downstream_padding: 32.0
+    lateral_padding: 16.0
 
     # Fixed vertical domain extent (m), shared by ALL sampled geometries.
     # z_size / resolution must itself be a multiple of 16. Geometries whose
     # tallest building reaches z_size are dropped from the pool with a
     # warning (pylbm SIGFPEs when buildings pierce the domain top).
-    z_size: 32.0
+    z_size: 64.0
 
   # Generation horizon (seconds) — set here, NOT inherited from the case, so
   # the dataset's time setup is controlled entirely by this file.
-  simulation_time: 500.0
-  output_frequency: 10.0
-  spinup_time: 100.0
+  simulation_time: 1000.0
+  output_frequency: 5.0
+  spinup_time: 200.0
   seed: 0
 
   # Backend-specific constant forcing. uDALES needs a streamwise pressure
@@ -65,7 +90,7 @@ training_data:
   # pylbm). Canonical value matches conf/params/static.yaml.
   pressure_gradient_magnitude: 0.0041912
 
-  num_parallel_processes: 1
+  num_parallel_processes: 2
 
   # The sampler has three parts:
   #   seconds_per_knot: knot spacing of each parameter trajectory; a knot is

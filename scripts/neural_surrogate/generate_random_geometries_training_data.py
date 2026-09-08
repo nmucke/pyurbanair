@@ -7,6 +7,14 @@ geometry; the grid is derived per geometry from the STL's physical extent at
 the configured resolution (nx/ny rounded up to a multiple of 16 by extending
 the domain) with a fixed, shared vertical extent `z_size`.
 
+The extra span is placed around the mesh rather than only behind it. In x the
+configurable fetch and wake (`training_data.geometry.upstream_padding` /
+`downstream_padding`, m) go in front of and behind the geometry, with the
+rounding slack added to the wake; in y `lateral_padding` is applied to BOTH
+sides and the slack is split evenly over them. The mesh is never moved — the
+domain window is, via non-zero lower `bounds` (all three backends shift the
+geometry and the output coordinates accordingly).
+
 Splits are geometry-disjoint: `num_val` + `num_test` geometries are held out
 of the training pool (one simulation each); the remaining geometries serve
 `num_train` simulations, re-drawn (with fresh parameter trajectories) when
@@ -81,11 +89,19 @@ class GeometrySpec:
     nx: int
     ny: int
     nz: int
-    bounds: tuple[tuple[float, float], ...]  # ((0, nx*r), (0, ny*r), (0, z_size))
+    # ((x0, x1), (y0, y1), (0, z_size)) [m]. x0/y0 are <= 0: the mesh frame is
+    # anchored at the origin and the domain is widened around it.
+    bounds: tuple[tuple[float, float], ...]
 
     @property
     def name(self) -> str:
         return self.stl_path.stem
+
+    @property
+    def domain_size(self) -> tuple[float, float, float]:
+        """Physical domain extent (lx, ly, lz) in metres."""
+        (x0, x1), (y0, y1), (z0, z1) = self.bounds
+        return (x1 - x0, y1 - y0, z1 - z0)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -103,14 +119,34 @@ def _resolve_path(path_str: str) -> pathlib.Path:
     return path if path.is_absolute() else pathlib.Path.cwd() / path
 
 
-def _grid_cells(extent_m: float, resolution_m: float) -> int:
-    """Smallest multiple of 16 whose span covers `extent_m` at `resolution_m`.
+def _cover_cells(extent_m: float, resolution_m: float) -> int:
+    """Cells needed to span `extent_m` at `resolution_m`.
 
     The inner `round` absorbs float artifacts (640.0 / 2.0 -> 320.0000...) so
-    an exact fit is not bumped a whole 16-cell block up.
+    an exact fit is not bumped a whole cell up.
     """
-    n_cover = math.ceil(round(extent_m / resolution_m, 6))
+    return int(math.ceil(round(extent_m / resolution_m, 6)))
+
+
+def _grid_cells(extent_m: float, resolution_m: float, *, extra_cells: int = 0) -> int:
+    """Smallest multiple of 16 covering `extent_m` plus `extra_cells` of padding."""
+    n_cover = _cover_cells(extent_m, resolution_m) + extra_cells
     return max(16, int(math.ceil(n_cover / 16)) * 16)
+
+
+def _axis_window(
+    resolution_m: float, *, n_cells: int, front_cells: int
+) -> tuple[float, float]:
+    """Domain interval for one axis, with `front_cells` cells before the mesh.
+
+    The STL frame is anchored at 0, so the domain runs from `-front_cells * r`
+    over `n_cells` cells and whatever padding is not in front ends up behind
+    the mesh. Offsets are whole cells on purpose: a fractional shift would move
+    every cell centre off the STL's own raster frame and change how the
+    buildings voxelize.
+    """
+    lo = -front_cells * resolution_m
+    return (lo, lo + n_cells * resolution_m)
 
 
 def _resolve_nz(z_size: float, resolution: float) -> int:
@@ -168,6 +204,9 @@ def _build_geometry_pool(
     resolution: float,
     z_size: float,
     nz: int,
+    upstream_padding: float = 0.0,
+    downstream_padding: float = 0.0,
+    lateral_padding: float = 0.0,
 ) -> list[GeometrySpec]:
     """Scan the pool dir, derive per-geometry grids, drop too-tall geometries.
 
@@ -176,7 +215,30 @@ def _build_geometry_pool(
     buildings sit inset from the domain edges. Without a manifest entry it
     falls back to the mesh's far bounds corner (the pool contract anchors
     the domain frame at the origin).
+
+    `upstream_padding` / `downstream_padding` (m, each rounded up to whole
+    cells) are open fluid inserted in front of and behind the mesh in x —
+    inflow fetch, so the boundary profile is not imposed on the first row of
+    buildings, and wake, so the last row does not sit on the outlet.
+    `lateral_padding` is the same thing on BOTH y sides (the flow crosses
+    laterally either way as `inflow_angle` changes sign, so the two sides are
+    not distinguishable and share one knob). All three are minima: the slack
+    from rounding up to a multiple of 16 is added to the wake in x and split
+    evenly over the two sides in y. The mesh stays where it is; the domain's
+    lower bound goes negative and the backend shifts the geometry.
     """
+    for knob, value in (
+        ("upstream_padding", upstream_padding),
+        ("downstream_padding", downstream_padding),
+        ("lateral_padding", lateral_padding),
+    ):
+        if value < 0:
+            raise ValueError(
+                f"training_data.geometry.{knob} must be >= 0, got {value}."
+            )
+    front_x = _cover_cells(upstream_padding, resolution)
+    back_x = _cover_cells(downstream_padding, resolution)
+    side_y = _cover_cells(lateral_padding, resolution)
     stl_paths = sorted(stl_dir.glob("*.stl"))
     if not stl_paths:
         raise FileNotFoundError(
@@ -202,8 +264,16 @@ def _build_geometry_pool(
         if z_max >= z_size:
             excluded.append((stl_path.stem, z_max))
             continue
-        nx = _grid_cells(lx, resolution)
-        ny = _grid_cells(ly, resolution)
+        # x: fetch in front, wake behind, and the slack the 16-multiple
+        # rounding adds on top of both goes to the wake — which is where a
+        # longer domain is actually wanted.
+        nx = _grid_cells(lx, resolution, extra_cells=front_x + back_x)
+        # y: `lateral_padding` on both sides, then the rounding slack on top
+        # of it split evenly over the two; an odd cell count leaves the extra
+        # cell at the far side.
+        ny = _grid_cells(ly, resolution, extra_cells=2 * side_y)
+        slack_y = ny - _cover_cells(ly, resolution) - 2 * side_y
+        front_y = side_y + slack_y // 2
         pool.append(
             GeometrySpec(
                 stl_path=stl_path,
@@ -214,8 +284,8 @@ def _build_geometry_pool(
                 ny=ny,
                 nz=nz,
                 bounds=(
-                    (0.0, nx * resolution),
-                    (0.0, ny * resolution),
+                    _axis_window(resolution, n_cells=nx, front_cells=front_x),
+                    _axis_window(resolution, n_cells=ny, front_cells=front_y),
                     (0.0, z_size),
                 ),
             )
@@ -317,43 +387,73 @@ def _stage_udales_case(
     return case_dir
 
 
+# `x0_domain_m` / `y0_domain_m` are the domain's lower bounds in the mesh frame
+# (<= 0): together with the extents they say where the geometry sits inside the
+# padded domain.
+MANIFEST_COLUMNS = (
+    "split",
+    "sample",
+    "stl_file",
+    "lx_stl_m",
+    "ly_stl_m",
+    "z_max_m",
+    "nx",
+    "ny",
+    "nz",
+    "lx_domain_m",
+    "ly_domain_m",
+    "lz_domain_m",
+    "x0_domain_m",
+    "y0_domain_m",
+)
+
+
+def manifest_row(sample: Sample) -> list:
+    """One `geometries.csv` row.
+
+    Shared with extend_training_data.py, which appends rows under the header
+    written here, so the two cannot drift apart.
+    """
+    g = sample.geom
+    lx_domain, ly_domain, lz_domain = g.domain_size
+    return [
+        sample.split,
+        f"{sample.local_idx:04d}",
+        g.stl_path.name,
+        g.lx,
+        g.ly,
+        g.z_max,
+        g.nx,
+        g.ny,
+        g.nz,
+        lx_domain,
+        ly_domain,
+        lz_domain,
+        g.bounds[0][0],
+        g.bounds[1][0],
+    ]
+
+
 def _write_geometry_manifest(path: pathlib.Path, samples: list[Sample]) -> None:
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            [
-                "split",
-                "sample",
-                "stl_file",
-                "lx_stl_m",
-                "ly_stl_m",
-                "z_max_m",
-                "nx",
-                "ny",
-                "nz",
-                "lx_domain_m",
-                "ly_domain_m",
-                "lz_domain_m",
-            ]
-        )
+        writer.writerow(list(MANIFEST_COLUMNS))
         for s in samples:
-            g = s.geom
-            writer.writerow(
-                [
-                    s.split,
-                    f"{s.local_idx:04d}",
-                    g.stl_path.name,
-                    g.lx,
-                    g.ly,
-                    g.z_max,
-                    g.nx,
-                    g.ny,
-                    g.nz,
-                    g.bounds[0][1],
-                    g.bounds[1][1],
-                    g.bounds[2][1],
-                ]
-            )
+            writer.writerow(manifest_row(s))
+
+
+def _resolve_padding(geom_cfg: DictConfig) -> tuple[float, float, float]:
+    """Read the `(upstream, downstream, lateral)` padding knobs, in metres.
+
+    Absent/null means no padding on that side; all three at 0.0 is the
+    pre-knob behaviour of packing every spare cell behind the mesh in x and
+    splitting only the rounding slack in y.
+    """
+    values = []
+    for knob in ("upstream_padding", "downstream_padding", "lateral_padding"):
+        value = OmegaConf.select(geom_cfg, knob)
+        values.append(0.0 if value is None else float(value))
+    return (values[0], values[1], values[2])
 
 
 def _validate_ncpu(cfg: DictConfig, samples: list[Sample]) -> None:
@@ -403,11 +503,28 @@ def run(cfg: DictConfig) -> None:
     resolution = float(geom_cfg.resolution)
     z_size = float(geom_cfg.z_size)
     nz = _resolve_nz(z_size, resolution)
+    upstream_padding, downstream_padding, lateral_padding = _resolve_padding(geom_cfg)
 
     # --- Geometry pool + split plan ---------------------------------------
     stl_dir = _resolve_path(geom_cfg.stl_dir)
-    print(f"Scanning geometry pool {stl_dir} (resolution={resolution:g} m)")
-    pool = _build_geometry_pool(stl_dir, resolution=resolution, z_size=z_size, nz=nz)
+    print(
+        f"Scanning geometry pool {stl_dir} (resolution={resolution:g} m, "
+        f"fetch {upstream_padding:g} m = "
+        f"{_cover_cells(upstream_padding, resolution)} cells, "
+        f"wake >= {downstream_padding:g} m = "
+        f"{_cover_cells(downstream_padding, resolution)} cells, "
+        f"lateral >= {lateral_padding:g} m = "
+        f"{_cover_cells(lateral_padding, resolution)} cells per side)"
+    )
+    pool = _build_geometry_pool(
+        stl_dir,
+        resolution=resolution,
+        z_size=z_size,
+        nz=nz,
+        upstream_padding=upstream_padding,
+        downstream_padding=downstream_padding,
+        lateral_padding=lateral_padding,
+    )
 
     rng = np.random.default_rng(int(td.seed))
     train_ids, val_ids, test_ids = _assign_split_geometries(
@@ -525,10 +642,13 @@ def run(cfg: DictConfig) -> None:
     t0 = _time.time()
     for group_num, (stl_path, group) in enumerate(groups.items()):
         geom = group[0].geom
+        dom_x, dom_y, dom_z = geom.domain_size
         print(
             f"[{group_num + 1}/{len(groups)}] {geom.name}: {len(group)} sim(s), "
             f"grid {geom.nx}x{geom.ny}x{geom.nz}, domain "
-            f"{geom.bounds[0][1]:g}x{geom.bounds[1][1]:g}x{geom.bounds[2][1]:g} m "
+            f"{dom_x:g}x{dom_y:g}x{dom_z:g} m, fetch {-geom.bounds[0][0]:g} m / "
+            f"wake {geom.bounds[0][1] - geom.lx:g} m, lateral "
+            f"{-geom.bounds[1][0]:g}/{geom.bounds[1][1] - geom.ly:g} m "
             f"(STL {geom.lx:g}x{geom.ly:g} m, z_max {geom.z_max:g} m)"
         )
         # A fresh scratch dir per geometry: sequential reuse of member

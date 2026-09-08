@@ -30,6 +30,17 @@ init -- the single most informative test of the DFT wiring. Note this is *not*
 ``state_next == state`` (that only holds for a perfectly-reconstructing AE, a
 training outcome, not a wiring invariant).
 
+Geometry branch
+---------------
+With ``geometry_branch={...}`` the geometry is no longer folded through the
+encoder as extra channels: a small (frozen, pre-trained) ``GeometryBranch``
+turns the geometry block into a 4-level feature pyramid that is *added* into the
+frozen encoder/decoder through their zero-init 1x1x1 projections, and into the
+latent subnetwork through a zero-init spatial FiLM. Every injection is zero at
+init, so the identity-at-init invariant below holds in branch mode too (with
+:meth:`_ae_reference_recon` applying the same branch features, since the
+projections belong to the frozen AE).
+
 Residual convention
 --------------------
 Output is ``state_next = dft_state * mask`` -- the DFT directly predicts the next
@@ -43,13 +54,21 @@ from __future__ import annotations
 
 import os
 import warnings
+from typing import TYPE_CHECKING
 
 import torch
 from neural_surrogates.architectures._tadpole_field_io import _TadpoleFieldIO
 from neural_surrogates.sdf import n_sdf_feature_channels, normalize_sdf_mode
 from torch import nn
 
+if TYPE_CHECKING:  # heavy/optional import: only needed for the annotations below
+    from neural_surrogates.architectures.tadpole_geometry_branch import GeometryBranch
+
 _SIZES = ("S", "B", "L")
+
+# Total spatial stride of the Tadpole encoder (a 16^3 crop -> a 1^3 latent), i.e.
+# the stride of the geometry branch's level-3 feature.
+_LATENT_STRIDE = 16
 
 # Subnetwork geometry per model size. ``latent_mult`` is the encoder's latent
 # channel count Cl (= hidden_size * 2**(len(depth)//2): 256 / 512 / 1024 for
@@ -85,6 +104,12 @@ class ParamConditionedSubnetwork(nn.Module):
       ``SequentialModel``, and the module tree is identical to a param-free
       build.
 
+    ``geom_cond_dim > 0`` (geometry-branch mode) additionally builds a
+    **spatial** FiLM: a zero-init ``Conv3d(geom_cond_dim, 2 * in_dim, 1)`` maps
+    the branch's stride-16 feature map (on the latent grid) to a per-token
+    ``(scale, shift)`` applied as ``x * (1 + scale) + shift`` *after* the param
+    FiLM. ``geom_cond_dim == 0`` (default) builds nothing (the no-op rule).
+
     Because ``SequentialModel``'s output projection is zero-initialised, the
     subnetwork's *total* output is exactly ``0`` at init regardless of the
     conditioning branch -- the DFT already carries the identity via
@@ -104,6 +129,7 @@ class ParamConditionedSubnetwork(nn.Module):
         film_hidden: int = 128,
         use_checkpoint: bool = False,
         in_context_patches: int = -1,
+        geom_cond_dim: int = 0,
     ) -> None:
         super().__init__()
         try:
@@ -153,8 +179,21 @@ class ParamConditionedSubnetwork(nn.Module):
             nn.init.zeros_(self.param_mlp[-1].weight)
             nn.init.zeros_(self.param_mlp[-1].bias)
 
+        # Spatial (per-token) FiLM from the geometry branch's latent-grid
+        # feature. Built only in geometry-branch mode (no-op rule) and zero-init,
+        # so it is the identity at construction.
+        self.geom_cond_dim = int(geom_cond_dim)
+        self.geom_film: nn.Conv3d | None = None
+        if self.geom_cond_dim > 0:
+            self.geom_film = nn.Conv3d(self.geom_cond_dim, 2 * in_dim, kernel_size=1)
+            nn.init.zeros_(self.geom_film.weight)
+            nn.init.zeros_(self.geom_film.bias)
+
     def forward(
-        self, x: torch.Tensor, params: torch.Tensor | None = None
+        self,
+        x: torch.Tensor,
+        params: torch.Tensor | None = None,
+        geom_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # x: (B, in_dim, X', Y', Z') folded latent tokens.
         if self.param_mlp is not None and params is not None:
@@ -165,6 +204,11 @@ class ParamConditionedSubnetwork(nn.Module):
                 x = x * (1.0 + scale.reshape(view)) + shift.reshape(view)
             else:  # "token": additive param embedding
                 x = x + cond.reshape(view)
+        if self.geom_film is not None and geom_cond is not None:
+            # geom_cond: (B, geom_cond_dim, X', Y', Z') on the same latent grid.
+            g = self.geom_film(geom_cond)
+            scale, shift = g.chunk(2, dim=1)
+            x = x * (1.0 + scale) + shift
         return self.seqmodel(x)
 
 
@@ -202,8 +246,26 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         :meth:`set_normalization`; state stats inherited from the AE).
     encode_geometry:
         Append the geometry mask (+ SDF channels) as extra folded channels.
+        Mutually exclusive with ``geometry_branch``.
     sdf_features / sdf_clamp_cells:
-        SDF geometry-feature selection (see ``TadpoleAE``).
+        SDF geometry-feature selection (see ``TadpoleAE``). Allowed with either
+        ``encode_geometry`` or ``geometry_branch`` (in branch mode the SDF
+        channels feed the branch instead of the encoder).
+    geometry_branch:
+        ``None`` (default) = today's behaviour. A mapping (e.g. ``{"width": 32}``)
+        switches on **geometry-branch conditioning**: a small
+        :class:`~neural_surrogates.architectures.tadpole_geometry_branch.GeometryBranch`
+        (built as ``GeometryBranch(in_channels=1 + n_sdf, **geometry_branch)``)
+        maps the geometry block to a 4-level feature pyramid that is injected
+        into the frozen encoder/decoder through their zero-init projections and
+        into the latent subnetwork through a zero-init spatial FiLM. The branch
+        is part of the frozen AE: it is loaded from
+        ``<pretrained_ae_dir>/geometry_branch.pt`` (fail loud if missing, unless
+        ``skip_pretrained_load``) and frozen. In branch mode geometry is no
+        longer folded through the encoder (``encode_geometry`` must be ``False``,
+        ``n_geometry_channels == 0``) and it is not reconstructed -- the branch
+        *conditions* the AE rather than being predicted by it. Must match the
+        pre-trained AE (cross-checked by the fine-tune script).
     skip_pretrained_load:
         Build encoder/decoder randomly and skip reading the AE dir -- used at
         ESMDA deploy time, where the merged ``weights.pt`` already carries every
@@ -248,6 +310,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         subnetwork_cfg: dict | None = None,
         require_ae_state_stats: bool = True,
         num_history_steps: int = 1,
+        geometry_branch: dict | None = None,
     ) -> None:
         super().__init__()
 
@@ -320,20 +383,48 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         # (the repo no-op rule) so the module tree matches a param-free build.
         self.param_conditioning = param_conditioning if self.n_params > 0 else "none"
 
+        # The geometry branch and the folded geometry channels are two mutually
+        # exclusive ways of getting geometry into the (same) frozen AE: in branch
+        # mode geometry conditions the encoder/decoder through their zero-init
+        # projections instead of riding along as extra folded channels.
+        # ``is not None`` (not truthiness) so an empty mapping means "branch with
+        # default kwargs", exactly as ``TadpoleAE`` reads the same knob.
+        self.geometry_branch_cfg = (
+            dict(geometry_branch) if geometry_branch is not None else None
+        )
+        if self.geometry_branch_cfg is not None and self.encode_geometry:
+            raise ValueError(
+                "geometry_branch and encode_geometry are mutually exclusive: in "
+                "branch mode the geometry is fed to the branch (and injected into "
+                "the frozen encoder/decoder), not folded through the encoder as "
+                "extra reconstructed channels. Set encode_geometry=false."
+            )
+
         self.sdf_feature_mode = normalize_sdf_mode(sdf_features)
         self.sdf_features_enabled = self.sdf_feature_mode != "none"
         self.sdf_clamp_cells = float(sdf_clamp_cells)
         self.n_geom_feature_channels = n_sdf_feature_channels(self.sdf_feature_mode)
-        if self.sdf_features_enabled and not self.encode_geometry:
+        if self.sdf_features_enabled and not (
+            self.encode_geometry or self.geometry_branch_cfg is not None
+        ):
             raise ValueError(
-                "sdf_features requires encode_geometry=True (the SDF channels are "
-                "appended alongside the encoded geometry mask)."
+                "sdf_features requires encode_geometry=True or a geometry_branch "
+                "(the SDF channels ride alongside the encoded geometry mask, or "
+                "feed the geometry branch)."
             )
+        # Zero in branch mode (encode_geometry is False there): the working input
+        # is the state channels only, and the geometry is never reconstructed.
         self.n_geometry_channels = (
             1 + self.n_geom_feature_channels if self.encode_geometry else 0
         )
         # Folded channel count the DFT reshapes the latent for.
         input_channels = self.n_state_channels + self.n_geometry_channels
+
+        # Build (and load + freeze) the geometry branch before the subnetwork /
+        # DFT: both need its feature dims.
+        branch = self._build_geometry_branch(pretrained_ae_dir, skip_pretrained_load)
+        self.geometry_branch: GeometryBranch | None = branch
+        geom_in_dims = None if branch is None else tuple(branch.out_dims)
 
         # Build the param-conditioned latent subnetwork (or none).
         sub_module: nn.Module | None = None
@@ -353,6 +444,9 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
                 in_dim=input_channels * table["latent_mult"],
                 n_params=self.n_params,
                 param_conditioning=self.param_conditioning,
+                # Spatial FiLM from the branch's stride-16 (latent-grid) feature;
+                # 0 => no module at all (no-op rule).
+                geom_cond_dim=0 if geom_in_dims is None else int(geom_in_dims[3]),
                 **cfg,
             )
 
@@ -374,6 +468,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             latent_type=latent_type,
             encoder_crop_size=self.encoder_crop_size,
             max_internal_batchsize=max_internal_batchsize,
+            geom_in_dims=geom_in_dims,
         )
 
         # Standardisation buffers (identity until set_normalization). param
@@ -389,6 +484,100 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
                 self._load_ae_state_stats(
                     pretrained_ae_dir, require=require_ae_state_stats
                 )
+
+    # -- geometry branch ---------------------------------------------------- #
+
+    def _build_geometry_branch(
+        self, pretrained_ae_dir: str | None, skip_pretrained_load: bool
+    ) -> GeometryBranch | None:
+        """Build, load and freeze the (pre-trained) geometry branch, or ``None``.
+
+        The branch is part of the frozen autoencoder -- it was trained *with* the
+        encoder/decoder projections it feeds -- so a mismatched (randomly
+        initialised) branch would silently feed the frozen AE features it has
+        never seen. Missing ``geometry_branch.pt`` therefore raises, exactly like
+        the missing-state-stats case above; ``skip_pretrained_load`` (the ESMDA
+        deploy build, where the merged ``weights.pt`` carries the branch as a
+        submodule) is the only sanctioned way past it.
+        """
+        if self.geometry_branch_cfg is None:
+            return None
+        try:
+            from neural_surrogates.architectures.tadpole_geometry_branch import (
+                GeometryBranch,
+            )
+        except ImportError as exc:  # pragma: no cover - exercised only when absent
+            raise ImportError(
+                "geometry_branch requires neural_surrogates.architectures."
+                "tadpole_geometry_branch.GeometryBranch."
+            ) from exc
+
+        branch = GeometryBranch(
+            in_channels=1 + self.n_geom_feature_channels, **self.geometry_branch_cfg
+        )
+        if pretrained_ae_dir is not None and not skip_pretrained_load:
+            path = os.path.join(pretrained_ae_dir, "geometry_branch.pt")
+            if not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"TadpoleTimeStepper: no geometry_branch.pt at {path!r}. The "
+                    "geometry branch is part of the frozen AE (it was pre-trained "
+                    "together with the encoder/decoder projections that consume "
+                    "its features), so a random branch would feed the frozen AE "
+                    "out-of-distribution conditioning. Point pretrained_ae_dir at "
+                    "an AE exported with geometry_branch=... , or drop the "
+                    "geometry_branch knob."
+                )
+            branch.load_state_dict(
+                torch.load(path, map_location="cpu", weights_only=True)
+            )
+        # Frozen like the rest of the AE (the fine-tune script's
+        # `trainable_modules` never lists it, so it stays frozen end to end).
+        for p in branch.parameters():
+            p.requires_grad = False
+        return branch
+
+    def _geom_branch_kwargs(
+        self,
+        state: torch.Tensor,
+        geometry: torch.Tensor,
+        geom_features: torch.Tensor | None,
+    ) -> dict:
+        """``{}`` (no branch) or ``{"geom_feats": [...], "geom_cond": ...}``.
+
+        The features are computed once per call on the padded grid: the folded
+        pyramid for the encoder/decoder projections and the unfolded stride-16
+        level for the subnetwork's spatial FiLM.
+        """
+        if self.geometry_branch is None:
+            return {}
+        feats = self._branch_features(geometry, geom_features, state)
+        if feats is None:  # pragma: no cover - defensive (branch is not None here)
+            return {}
+        # Only the state channels are folded in branch mode
+        # (n_geometry_channels == 0), so the fold expands over C == n_state_channels.
+        return {
+            "geom_feats": self._fold_geom_feats(feats, self.n_state_channels),
+            "geom_cond": feats[3],
+        }
+
+    def _check_geom_cond_grid(
+        self, geom_cond: torch.Tensor, x_pad: torch.Tensor
+    ) -> None:
+        """The FiLM feature must live on the DFT's *unfolded* latent grid.
+
+        The DFT reshapes the folded latents back to ``(U Xl) (V Yl) (W Zl)``,
+        which is the padded grid divided by the encoder's total stride (16), and
+        that is exactly the branch's level-3 stride -- a mismatch here means the
+        branch pyramid and the encoder disagree and would broadcast silently."""
+        expected = tuple(int(s) // _LATENT_STRIDE for s in x_pad.shape[2:])
+        got = tuple(int(s) for s in geom_cond.shape[2:])
+        if got != expected:
+            raise ValueError(
+                f"geometry branch level-3 feature has spatial shape {got} but the "
+                f"DFT's latent grid is {expected} (padded grid "
+                f"{tuple(int(s) for s in x_pad.shape[2:])} / {_LATENT_STRIDE}); the "
+                "branch's stride-16 level must match the encoder's total stride."
+            )
 
     # -- pretrained state-stat inheritance --------------------------------- #
 
@@ -496,11 +685,27 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         folded = rearrange(
             x, "B C (U Xc) (V Yc) (W Zc) -> (B C U V W) 1 Xc Yc Zc", U=u, V=v, W=w
         )
-        return self.dft.encoder(folded, latent_type=latent_type or self.latent_type)
+        # The encoder/decoder only take the folded pyramid; ``geom_cond`` is
+        # the subnetwork's business (and the subnetwork is bypassed here).
+        branch = self._geom_branch_kwargs(state, geometry, geom_features)
+        enc_kwargs = {k: v for k, v in branch.items() if k == "geom_feats"}
+        return self.dft.encoder(
+            folded, latent_type=latent_type or self.latent_type, **enc_kwargs
+        )
 
-    def decode(self, latent: torch.Tensor, residuals) -> torch.Tensor:
-        """Decode folded latents (+ skip residuals) to folded crops."""
-        return self.dft.decoder(latent, residuals)
+    def decode(
+        self,
+        latent: torch.Tensor,
+        residuals: list,
+        geom_feats: list[torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Decode folded latents (+ skip residuals) to folded crops.
+
+        ``geom_feats`` is the folded geometry-branch pyramid (what
+        :meth:`_geom_branch_kwargs` returns); pass it in branch mode so the
+        decoder's projections see the same conditioning :meth:`encode` used."""
+        dec_kwargs = {} if geom_feats is None else {"geom_feats": geom_feats}
+        return self.dft.decoder(latent, residuals, **dec_kwargs)
 
     # -- forward ----------------------------------------------------------- #
 
@@ -523,7 +728,10 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         x = self._assemble_working_input(state, geometry, geom_features)
         x_pad, orig = self._pad_to_crop_multiple(x)
         p = self._zscore_params(params)
-        recon_pad = self.dft(x_pad, params=p)
+        branch = self._geom_branch_kwargs(state, geometry, geom_features)
+        if branch:
+            self._check_geom_cond_grid(branch["geom_cond"], x_pad)
+        recon_pad = self.dft(x_pad, params=p, **branch)
         d, h, w = orig
         recon = recon_pad[..., :d, :h, :w]
         dft_state = self._denormalize_state(recon[:, : self.n_state_channels])
@@ -565,14 +773,22 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             V=fv,
             W=fw,
         )
-        latent, res = dft.encoder(folded, latent_type=dft.latent_type)
+        # The geometry-branch projections live INSIDE the frozen encoder/decoder,
+        # so they are part of the AE reference reconstruction (only the DFT's own
+        # additions -- the subnetwork and the gamma skips -- are bypassed here).
+        branch = self._geom_branch_kwargs(state, geometry, geom_features)
+        enc_kwargs = {k: v for k, v in branch.items() if k == "geom_feats"}
+        latent, res = dft.encoder(folded, latent_type=dft.latent_type, **enc_kwargs)
         # Zero the skip residuals so the decoder is the plain (skip-free) decoder
         # regardless of the trained gamma scales -> the pure-AE reconstruction.
         zres = [
             [torch.zeros_like(t) for t in res[0]],
             [torch.zeros_like(t) for t in res[1]],
         ]
-        recon = dft.decoder(latent, zres)
+        # Same contiguous decoder input as the DFT path and the plain AE (see the
+        # notes in ``model/dft.py`` / ``model/autoencoder.py``): the parity below
+        # is bit-exact only if all three paths hit the same kernels.
+        recon = dft.decoder(latent.contiguous(), zres, **enc_kwargs)
         recon_pad = rearrange(
             recon,
             "(B C U V W) 1 Xc Yc Zc -> B C (U Xc) (V Yc) (W Zc)",

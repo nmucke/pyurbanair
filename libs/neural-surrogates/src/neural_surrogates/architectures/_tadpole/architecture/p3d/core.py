@@ -1,8 +1,22 @@
+"""P3D encoder / decoder cores (vendored from Tadpole).
+
+pyurbanair edit -- **geometry-branch conditioning**. Both cores take an optional
+``geom_in_dims`` (the 4 ``GeometryBranch.out_dims``) which they forward to their
+conv stem / up-path (levels 0/1/2 at strides 1/2/4, see ``conv.py``), and
+:class:`P3DDecoder` additionally owns ``geom_latent_proj``: the zero-init
+``1x1x1`` conv that adds the level-3 feature (stride 16 == the latent grid) to
+the decoder's **latent input**, before the transformer decoder. ``forward``
+gained a ``geom_feats=None`` argument carrying the folded branch features.
+
+With ``geom_in_dims=None`` (the default) nothing is created and the behaviour --
+including the ``state_dict`` key set -- is upstream's.
+"""
+
 import torch
 from collections import OrderedDict
 from typing import Optional, Sequence, Union
 from diffusers import ModelMixin
-from .conv import ConditionedEncoder3D, ConditionedDecoder3D
+from .conv import ConditionedEncoder3D, ConditionedDecoder3D, _zero_proj
 from .transformer import P3DTransformerEncoder, P3DTransformerDecoder
 
 
@@ -26,6 +40,7 @@ class P3DEncoder(ModelMixin):
         ckpt_path: Optional[str] = None,
         ckpt_prefix: str = "model.encoder.",
         in_channels: int = 1,
+        geom_in_dims: Optional[Sequence[int]] = None,
     ):
         super().__init__()
         # "hidden_size must be equal to the last element of feature_embedding_dim"
@@ -47,6 +62,7 @@ class P3DEncoder(ModelMixin):
             embedding_dim=time_embedding_dim,
             num_groups=num_groups,
             repetitions=repetitions,
+            geom_in_dims=geom_in_dims,
         )
         self.latent_size = self.transformer_encoder.latent_size
         if ckpt_path is not None:
@@ -55,9 +71,10 @@ class P3DEncoder(ModelMixin):
     def forward(
         self,
         x: torch.Tensor,
+        geom_feats=None,
     ):
         ## Conv encoding
-        x = self.conv_encoder(x)
+        x = self.conv_encoder(x, geom_feats)
         x = self.transformer_encoder(x)
         ## Sequence Modeling
         return x
@@ -92,6 +109,7 @@ class P3DDecoder(ModelMixin):
         ckpt_path: Optional[str] = None,
         ckpt_prefix: str = "model.decoder.",
         out_channels: int = 1,
+        geom_in_dims: Optional[Sequence[int]] = None,
     ):
         super().__init__()
         self.transformer_decoder = P3DTransformerDecoder(
@@ -114,14 +132,21 @@ class P3DDecoder(ModelMixin):
             features_first_layer=feature_embedding_dim[-1],
             num_groups=num_groups,
             repetitions=repetitions,
+            geom_in_dims=geom_in_dims,
         )
+        # pyurbanair: level-3 (stride 16) conditioning of the latent input.
+        self.geom_latent_proj = None
+        if geom_in_dims is not None:
+            self.geom_latent_proj = _zero_proj(geom_in_dims[3], self.latent_size)
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, prefix=ckpt_prefix)
 
-    def forward(self, x):
+    def forward(self, x, geom_feats=None):
         # region partition
+        if geom_feats is not None and self.geom_latent_proj is not None:
+            x = x + self.geom_latent_proj(geom_feats[3])
         x = self.transformer_decoder(x)
-        reconstructed = self.conv_decoder(x)
+        reconstructed = self.conv_decoder(x, geom_feats)
         return reconstructed
     
     def init_from_ckpt(self, 
