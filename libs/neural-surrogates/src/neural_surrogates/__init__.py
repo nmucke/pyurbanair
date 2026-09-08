@@ -6,6 +6,7 @@ from neural_surrogates.architectures import (
     ParamConditionedSubnetwork,
     SimpleConv,
     TadpoleAE,
+    TadpoleDiscriminator,
     TadpoleTimeStepper,
     UNetConvNeXt,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "P3D",
     "DomainDecomposed",
     "TadpoleAE",
+    "TadpoleDiscriminator",
     "TadpoleTimeStepper",
     "ParamConditionedSubnetwork",
     "DomainDecomposition",

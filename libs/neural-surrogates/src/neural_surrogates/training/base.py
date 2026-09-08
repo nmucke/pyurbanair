@@ -468,11 +468,16 @@ class BaseTraining:
                 )
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            self._after_optimizer_step(batch)
             total = total + loss.detach()
             n += 1
             self._accumulate_terms(term_sums)
         self._train_terms = self._mean_terms(term_sums, n)
         return (total / max(n, 1)).item()
+
+    def _after_optimizer_step(self, batch: dict[str, torch.Tensor]) -> None:
+        """Hook for a second optimizer that must step after the main one (the AE's
+        adversarial discriminator). No-op for every other trainer."""
 
     @torch.no_grad()
     def _validate(self) -> float:

@@ -380,6 +380,15 @@ def _shrink_for_cpu(cfg) -> None:
     cfg.trainer.cudnn_benchmark = False
     cfg.trainer.tf32 = False
     cfg.trainer.resume = False
+    # The script cross-checks architecture.sdf_features against
+    # dataset.sdf_features and refuses a mismatch, so follow whichever mode the
+    # shipped config selects rather than pinning one here: this test is about the
+    # end-to-end pre-training path, not about which SDF channels are configured,
+    # and SnapshotDataset derives those channels from the geometry on the fly so
+    # every mode works on the tiny fixture. (Pinning a mode would make the test
+    # fail whenever someone retunes the shipped architecture block.)
+    cfg.dataset.sdf_features = cfg.architecture.sdf_features
+    cfg.dataset.sdf_clamp_cells = cfg.architecture.sdf_clamp_cells
 
 
 def test_pretrain_end_to_end(tmp_path, monkeypatch):
