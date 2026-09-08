@@ -48,6 +48,9 @@ job_scripts/
 │
 └── local/             # workstation (no SLURM, sequential runs)
     ├── common.sh, sweep_base.sh, eval_sweep.sh
+    ├── experiments/   # DA-method campaigns (drive the three pipeline wrappers)
+    │   ├── settings.sh, campaign_lib.sh
+    │   └── run_{esmda,filtering,filter_smoothing}_experiments.sh
     ├── pylbm/   pyudales/   pypalm/
     │   ├── rollout_esmda_from_truth.sh
     │   └── sweep_{domain,ensemble,esmda_steps,interval}_rollout_esmda_from_truth.sh
@@ -439,6 +442,41 @@ bash job_scripts/local/neural_surrogate/sweep_ensemble_rollout_esmda_from_truth.
 LOCAL_MAX_PARALLEL=8 bash job_scripts/local/pyudales/sweep_domain_rollout_esmda_from_truth.sh
 ```
 
+### `experiments/` — DA-method comparison campaigns
+
+Full README: [job_scripts/local/experiments/README.md](../job_scripts/local/experiments/README.md)
+
+The one folder here that does **not** call `run_esmda.py` directly: it drives
+the three **pipeline** wrappers (`scripts/run_{esmda,filtering,filter_smoothing}_pipeline.sh`),
+so every run in a campaign is assimilated, scored and plotted in one go. One
+driver per method, all sweeping the same axes with the same constants, so the
+three methods' run dirs are comparable:
+
+```bash
+DRY_RUN=1 bash job_scripts/local/experiments/run_esmda_experiments.sh   # print the plan
+bash job_scripts/local/experiments/run_filtering_experiments.sh
+NUM_WINDOWS_LIST="2 4 8" bash job_scripts/local/experiments/run_filter_smoothing_experiments.sh
+```
+
+[`experiments/settings.sh`](../job_scripts/local/experiments/settings.sh) is the
+single knob file (edit it, or export the same names). The swept axes are
+`TRUTH_MODEL_LIST` (`pyudales` — no model error — and/or `pypalm`, a cross-model
+truth against the uDALES ensemble), `NUM_WINDOWS_LIST`, `LOCALIZATION_LIST`
+(`none`/`correlation`), `OBS_INTERVAL_LIST` (`esmda.interval_seconds`;
+smoother-side only — the filter never aggregates) and `INFLOW_LIST`
+(`inflow` / `inflow_turb` / `periodic`, applied to both model mounts, mapped per
+backend since uDALES' digital-filter inlet and PALM's random inflow
+disturbances are different mechanisms); `SIMULATION_TIME`, the assimilation
+backend and the ensemble/observation-error knobs are constants shared by all
+three.
+
+Runs land in `${RESULTS_ROOT:-/export/scratch2/ntm/experiments}/<method>/<truth>_to_<assim>_<axes>` with
+`_logs/{<id>.log,<id>.args,<id>.ok,progress.tsv}` beside them; a finished run is
+skipped on re-run, a failed one is recorded and the campaign continues.
+`NUM_LANES` (default 1) runs concurrently, each with its own
+`paths.experiment_dir` — sharing the uDALES scratch tree between runs corrupts
+both.
+
 ### `eval_sweep.sh` — post-processing
 
 [`job_scripts/local/eval_sweep.sh`](../job_scripts/local/eval_sweep.sh) runs the
@@ -526,6 +564,8 @@ Writes into the run dir: `truth_probes.nc`, `windows/window_{w}_probes.nc` and
 | Domain sweep (all three backends) | `for m in pyudales pylbm pypalm; do bash job_scripts/local/$m/sweep_domain_rollout_esmda_from_truth.sh; done` |
 | Ensemble sweep (neural surrogate) | `bash job_scripts/local/neural_surrogate/sweep_ensemble_rollout_esmda_from_truth.sh` |
 | Enable localization for one run | `USE_LOCALIZATION=true bash job_scripts/local/pyudales/rollout_esmda_from_truth.sh` |
+| DA-method campaign (ESMDA / filtering / hybrid) | `bash job_scripts/local/experiments/run_esmda_experiments.sh` |
+| Preview a campaign without running it | `DRY_RUN=1 bash job_scripts/local/experiments/run_filtering_experiments.sh` |
 | Post-process sweep → figures | `bash job_scripts/local/eval_sweep.sh /path/to/runs` |
 | High-rate probe series for one window | `python scripts/esmda/run_probe_series.py probes.run_dir=/path/to/esmda_run` |
 
