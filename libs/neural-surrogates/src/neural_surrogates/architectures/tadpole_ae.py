@@ -40,6 +40,20 @@ What the wrapper adds around the raw autoencoder
   intended for the multi-geometry foundation-model regime where geometry varies,
   and ``encode_geometry=False`` (state channels only) is the A/B / single-geometry
   escape hatch.
+* **Geometry branch** (``geometry_branch={...}``, off by default): the
+  alternative to folding. A small
+  :class:`~neural_surrogates.architectures.tadpole_geometry_branch.GeometryBranch`
+  maps the geometry block to features at strides ``(1, 2, 4, 16)``, which are
+  added -- through **zero-initialised** ``1x1x1`` projections living inside the
+  vendored encoder/decoder -- at the conv stem's stride 1/2/4 points, at the
+  mirrored stride 4/2/1 points of the decoder's conv up-path, and (level 3) at
+  the decoder's latent input. Geometry is then **conditioning, not content**: it
+  is neither folded nor reconstructed, so ``n_geometry_channels == 0`` and the
+  working space carries the state channels only. ``encode_geometry`` must be off
+  in this mode (the two are mutually exclusive), while ``sdf_features`` stays
+  available -- those channels feed the branch. Because every projection is
+  zero-init, a freshly built branch-mode AE reconstructs *exactly* what it would
+  with the branch disconnected.
 * **Padding.** Each spatial dim is zero-padded up to a multiple of
   ``encoder_crop_size`` so the autoencoder tiles cleanly into
   ``encoder_crop_size``-sized crops, then the reconstruction is cropped back.
@@ -107,7 +121,14 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         Which signed-distance-field channels to append alongside the geometry
         mask when ``encode_geometry=True``: ``"none"`` / ``"sdf"`` (+1) /
         ``"grad"`` (+3) / ``"both"`` (+4) (``True``/``False`` alias
-        ``"both"``/``"none"``). Requires ``encode_geometry=True``.
+        ``"both"``/``"none"``). Requires ``encode_geometry=True`` **or**
+        ``geometry_branch`` (in branch mode they feed the branch instead).
+    geometry_branch:
+        ``None`` (default, no-op) or a mapping of
+        :class:`~neural_surrogates.architectures.tadpole_geometry_branch.GeometryBranch`
+        kwargs minus ``in_channels`` (e.g. ``{"width": 32}``), which is derived as
+        ``1 + n_sdf_feature_channels(sdf_features)``. Requires
+        ``encode_geometry=False`` -- see the module docstring.
     sdf_clamp_cells:
         Clamp radius ``L`` (cells) for the normalised SDF channel; must match the
         dataset's value (the pre-train script cross-checks it).
@@ -129,6 +150,7 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         sdf_features: bool | str = "none",
         sdf_clamp_cells: float = 32.0,
         normalize: bool = True,
+        geometry_branch: dict | None = None,
     ) -> None:
         super().__init__()
 
@@ -170,18 +192,46 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         self.sdf_features_enabled = self.sdf_feature_mode != "none"
         self.sdf_clamp_cells = float(sdf_clamp_cells)
         self.n_geom_feature_channels = n_sdf_feature_channels(self.sdf_feature_mode)
-        if self.sdf_features_enabled and not self.encode_geometry:
+        if geometry_branch is not None and self.encode_geometry:
+            raise ValueError(
+                "geometry_branch and encode_geometry are mutually exclusive: the "
+                "branch conditions the encoder/decoder on geometry instead of "
+                "folding and reconstructing it. Set encode_geometry=False."
+            )
+        if (
+            self.sdf_features_enabled
+            and not self.encode_geometry
+            and (geometry_branch is None)
+        ):
             raise ValueError(
                 "sdf_features requires encode_geometry=True (the SDF channels are "
-                "appended alongside the encoded geometry mask)."
+                "appended alongside the encoded geometry mask) or a geometry_branch "
+                "(they feed the branch)."
             )
 
         # Extra folded channels the encoder also reconstructs when encoding the
         # geometry: the mask (+1) and any SDF channels. Zero when encode_geometry
-        # is off (state channels only).
+        # is off (state channels only) -- which includes branch mode, where
+        # geometry never enters the working space at all.
         self.n_geometry_channels = (
             1 + self.n_geom_feature_channels if self.encode_geometry else 0
         )
+
+        # Geometry branch: built only when requested, so the default module tree
+        # (and hence every existing checkpoint) is untouched. Its in_channels is
+        # the raw geometry block's width: the mask plus any SDF channels.
+        self.geometry_branch = None
+        geom_in_dims = None
+        if geometry_branch is not None:
+            from neural_surrogates.architectures.tadpole_geometry_branch import (
+                GeometryBranch,
+            )
+
+            self.geometry_branch = GeometryBranch(
+                in_channels=1 + self.n_geom_feature_channels,
+                **dict(geometry_branch),
+            )
+            geom_in_dims = self.geometry_branch.out_dims
 
         weight_encoder, weight_decoder = self._resolve_pretrained(pretrained, size)
 
@@ -196,6 +246,7 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
             latent_type=latent_type,
             encoder_crop_size=self.encoder_crop_size,
             max_internal_batchsize=max_internal_batchsize,
+            geom_in_dims=geom_in_dims,
         )
 
         # Standardisation statistics (identity until set_normalization is called);
@@ -290,12 +341,22 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         folded = rearrange(
             x, "B C (U Xc) (V Yc) (W Zc) -> (B C U V W) 1 Xc Yc Zc", U=u, V=v, W=w
         )
-        return self.ae.encoder(folded, latent_type or self.latent_type)
+        geom_feats = self._branch_features(geometry, geom_features, state)
+        if geom_feats is not None:
+            geom_feats = self._fold_geom_feats(geom_feats, c)
+        return self.ae.encoder(folded, latent_type or self.latent_type, geom_feats)
 
-    def decode(self, latent: torch.Tensor) -> torch.Tensor:
+    def decode(
+        self, latent: torch.Tensor, geom_feats: list[torch.Tensor] | None = None
+    ) -> torch.Tensor:
         """Decode folded latents back to folded single-channel crops (the inverse
-        of :meth:`encode`'s fold is left to the caller / plan 03)."""
-        return self.ae.decoder(latent)
+        of :meth:`encode`'s fold is left to the caller / plan 03).
+
+        ``geom_feats`` are the folded branch features (from
+        :meth:`_branch_features` + :meth:`_fold_geom_feats`); ``None`` -- the
+        default and the only possibility outside branch mode -- leaves the
+        decoder unconditioned."""
+        return self.ae.decoder(latent, geom_feats)
 
     # -- forward ----------------------------------------------------------- #
 
@@ -321,7 +382,14 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         """
         x = self._assemble_working_input(state, geometry, geom_features)
         x_pad, orig = self._pad_to_crop_multiple(x)
-        recon_pad, kl_elem = self.ae(x_pad, return_kl_element=True)
+        # Geometry-branch features (None outside branch mode) are folded over the
+        # SAME channel count the autoencoder folds -- state channels only there.
+        geom_feats = self._branch_features(geometry, geom_features, state)
+        if geom_feats is not None:
+            geom_feats = self._fold_geom_feats(geom_feats, x_pad.shape[1])
+        recon_pad, kl_elem = self.ae(
+            x_pad, return_kl_element=True, geom_feats=geom_feats
+        )
         d, h, w = orig
         recon = recon_pad[..., :d, :h, :w]
 

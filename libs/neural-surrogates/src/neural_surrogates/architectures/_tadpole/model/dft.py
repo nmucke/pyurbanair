@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.nn import Module
 from torch.utils.checkpoint import checkpoint
-from typing import Union, Literal,Dict,Optional,Literal
+from typing import Union, Literal,Dict,Optional,Literal,Sequence,List
 from collections import OrderedDict
 from ..architecture.p3d import _KLP3DEncoder,_P3DDecoder
 from ..architecture.p3d.skip_wrapper  import KLP3DEncoderSkip,P3DDecoderSkip
@@ -65,6 +65,7 @@ class TadpoleDFT(Module):
                 latent_type: Literal["sample", "mode"] = "sample",
                 encoder_crop_size: Optional[int] = None,
                 max_internal_batchsize: Optional[int] = None,
+                geom_in_dims: Optional[Sequence[int]] = None,
                 ):
         """
         Tadpole Dynamic Fine-Tuning (DFT) Model
@@ -82,13 +83,24 @@ class TadpoleDFT(Module):
             latent_type (Literal["sample", "mode"]): How to sample from the latent distribution, either "sample" or "mode". Default is "sample".
             encoder_crop_size (Optional[int]): Size to crop input for encoder. If None, no cropping will be applied and the entire input will be processed as a single crop. Default is None.
             max_internal_batchsize (Optional[int]): Maximum batch size for internal processing. If None, all crops will be processed in a single batch. Default is None.
+            geom_in_dims (Optional[Sequence[int]]): pyurbanair addition -- the four
+                channel counts of a ``GeometryBranch``'s feature pyramid (strides
+                1/2/4/16). When given, the encoder/decoder build zero-init 1x1x1
+                projections that add those features into their conv stem / up-path
+                (and the decoder's latent input). ``None`` (default) creates
+                nothing, so the module tree is byte-identical to upstream.
         """
         super().__init__()
 
         # build encoder and decoder
         assert size in ["S", "B", "L"], "size must be one of 'S', 'B', 'L'"
-        self.encoder = _KLP3DEncoder(size)
-        self.decoder = _P3DDecoder(size)
+        # Only forward ``geom_in_dims`` when a geometry branch is actually wired
+        # up: the no-op path must construct the encoder/decoder exactly as before
+        # (identical state_dict keys, so HF/AE weights keep loading strictly).
+        geom_kwargs = {} if geom_in_dims is None else {"geom_in_dims": tuple(geom_in_dims)}
+        self.geom_in_dims = None if geom_in_dims is None else tuple(geom_in_dims)
+        self.encoder = _KLP3DEncoder(size, **geom_kwargs)
+        self.decoder = _P3DDecoder(size, **geom_kwargs)
         if weight_encoder is not None:
             self.encoder.load_state_dict(load_weights(weight_encoder, "encoder"))
         if weight_decoder is not None:
@@ -148,7 +160,23 @@ class TadpoleDFT(Module):
             raise ValueError(f"Unknown latent_type: {self.latent_type}")
 
 
-    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    def forward(self,
+                x: torch.Tensor,
+                params: Optional[torch.Tensor] = None,
+                geom_feats: Optional[List[torch.Tensor]] = None,
+                geom_cond: Optional[torch.Tensor] = None,
+                ) -> torch.Tensor:
+        """Encode -> latent subnetwork -> decode.
+
+        ``params`` is pyurbanair's parameter conditioning (forwarded to the
+        subnetwork). ``geom_feats`` / ``geom_cond`` are the geometry-branch
+        additions: ``geom_feats`` is the list of four FOLDED feature maps handed
+        to the encoder/decoder projections (batch dim == the folded batch), and
+        ``geom_cond`` the UNFOLDED stride-16 feature on the latent grid handed to
+        the subnetwork's spatial FiLM. All three default to ``None``, which
+        reproduces the upstream forward exactly (the kwargs are only forwarded
+        when set, so a subnetwork / encoder that does not take them is untouched).
+        """
         # x: (B, C, X, Y, Z)
         c = x.shape[1]
         u = x.shape[2] // self.encoder_crop_size
@@ -164,17 +192,37 @@ class TadpoleDFT(Module):
             V=v,
             W=w,
         )
+        sub_kwargs = {}
+        if params is not None:
+            sub_kwargs["params"] = params
+        if geom_cond is not None:
+            sub_kwargs["geom_cond"] = geom_cond
         if self.max_internal_batchsize is not None and x.shape[0] > self.max_internal_batchsize:
-            x_chunks = torch.chunk(x, chunks=(x.shape[0] // self.max_internal_batchsize) + 1, dim=0)
+            n_chunks = (x.shape[0] // self.max_internal_batchsize) + 1
+            x_chunks = torch.chunk(x, chunks=n_chunks, dim=0)
+            # The geometry features share x's folded batch dim, so they chunk
+            # identically (same dim size => same split sizes).
+            geom_chunks = (
+                None
+                if geom_feats is None
+                else [torch.chunk(f, chunks=n_chunks, dim=0) for f in geom_feats]
+            )
             encoded_chunks = []
             res_chunks = []
-            for x_chunk in x_chunks:
-                encoded_chunk, res_chunk = self.encoder(x_chunk, latent_type=self.latent_type)
+            for i, x_chunk in enumerate(x_chunks):
+                enc_kwargs = (
+                    {}
+                    if geom_chunks is None
+                    else {"geom_feats": [f[i] for f in geom_chunks]}
+                )
+                encoded_chunk, res_chunk = self.encoder(x_chunk, latent_type=self.latent_type, **enc_kwargs)
                 encoded_chunks.append(encoded_chunk)
                 res_chunks.append(res_chunk)
             x = torch.cat(encoded_chunks, dim=0)
         else:
-            x, res = self.encoder(x,latent_type=self.latent_type)
+            geom_chunks = None
+            enc_kwargs = {} if geom_feats is None else {"geom_feats": geom_feats}
+            x, res = self.encoder(x,latent_type=self.latent_type, **enc_kwargs)
         if self.subnetwork is not None:
             x = rearrange(
                 x,
@@ -184,7 +232,7 @@ class TadpoleDFT(Module):
                 V=v,
                 W=w,
             )
-            x = self.latent_residual_scale * x + self.subnetwork(x, *args, **kwargs)
+            x = self.latent_residual_scale * x + self.subnetwork(x, **sub_kwargs)
             x = rearrange(
                 x,
                 "B (C Cl) (U Xl) (V Yl) (W Zl) -> (B C U V W) Cl Xl Yl Zl",
@@ -194,14 +242,21 @@ class TadpoleDFT(Module):
                 W=w,
             )
         if self.max_internal_batchsize is not None and x.shape[0] > self.max_internal_batchsize:
-            x_chunks = torch.chunk(x, chunks=(x.shape[0] // self.max_internal_batchsize) + 1, dim=0)
+            n_chunks = (x.shape[0] // self.max_internal_batchsize) + 1
+            x_chunks = torch.chunk(x, chunks=n_chunks, dim=0)
             decoded_chunks = []
-            for x_chunk in x_chunks:
-                decoded_chunk = self.decoder(x_chunk, res_chunks.pop(0))
+            for i, x_chunk in enumerate(x_chunks):
+                dec_kwargs = (
+                    {}
+                    if geom_chunks is None
+                    else {"geom_feats": [f[i] for f in geom_chunks]}
+                )
+                decoded_chunk = self.decoder(x_chunk, res_chunks.pop(0), **dec_kwargs)
                 decoded_chunks.append(decoded_chunk)
             x = torch.cat(decoded_chunks, dim=0)
         else:
-            x = self.decoder(x, res)
+            dec_kwargs = {} if geom_feats is None else {"geom_feats": geom_feats}
+            x = self.decoder(x, res, **dec_kwargs)
         x = rearrange(
             x,
             "(B C U V W) 1 Xc Yc Zc -> B C (U Xc) (V Yc) (W Zc)",

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import hydra
 import numpy as np
@@ -67,9 +68,10 @@ def _check_ae_stepper_match(ae_arch: DictConfig, model) -> None:
     state statistics, so the geometry/SDF/size contract the encoder was trained
     under must match exactly (same spirit as the SDF cross-check in the train and
     pretrain scripts). Checked: ``size``, ``encode_geometry``, ``sdf_features``
-    (normalised), ``sdf_clamp_cells`` and ``normalize`` (an AE trained with
+    (normalised), ``sdf_clamp_cells``, ``normalize`` (an AE trained with
     ``normalize: false`` must not pair with a ``normalize: true`` stepper -- the
-    frozen encoder would then see a differently-scaled distribution).
+    frozen encoder would then see a differently-scaled distribution) and
+    ``geometry_branch`` (both null, or the exact same branch config).
 
     ``encoder_crop_size`` is deliberately NOT cross-checked: it only controls how
     the field is tiled into crops for the (conv + windowed-attention) encoder, and
@@ -113,6 +115,27 @@ def _check_ae_stepper_match(ae_arch: DictConfig, model) -> None:
         raise ValueError(
             f"sdf_clamp_cells mismatch: AE={ae_arch.get('sdf_clamp_cells')} but "
             f"stepper={model.sdf_clamp_cells}; they must match."
+        )
+
+    # The geometry branch is part of the frozen AE (the stepper loads its
+    # geometry_branch.pt and its features feed the encoder/decoder projections
+    # that travel in encoder.pt/decoder.pt), so the two configs must be either
+    # both off or the exact same branch.
+    # Normalise both sides through OmegaConf so a DictConfig / ListConfig value
+    # (Hydra) compares equal to the plain dict the stepper stored.
+    def _plain_branch(node: Any) -> Any:
+        if not node:
+            return None
+        return OmegaConf.to_container(OmegaConf.create(node), resolve=True)
+
+    ae_branch = _plain_branch(ae_arch.get("geometry_branch"))
+    stepper_branch = _plain_branch(model.geometry_branch_cfg)
+    if ae_branch != stepper_branch:
+        raise ValueError(
+            f"geometry_branch mismatch: AE={ae_branch!r} but "
+            f"stepper={model.geometry_branch_cfg!r}; both must be null, or the "
+            "same branch config (the stepper loads the AE's geometry_branch.pt "
+            "and the encoder/decoder projections it was trained with)."
         )
 
 

@@ -1,3 +1,16 @@
+"""Skip-connection wrappers around the P3D encoder/decoder (vendored from Tadpole).
+
+pyurbanair edit -- **geometry-branch conditioning**. These wrappers re-implement
+the cores' forwards over the *same* sub-modules, so they repeat the injection
+points of ``conv.py`` / ``core.py`` verbatim: encoder levels 0/1/2 after
+``feature_embed`` / ``downsampling_layers[0]`` / the last downsampling; decoder
+level 2 at the conv input, level 1 after the first upsampling, level 0 before
+``decompress``; and level 3 (stride 16) on the decoder's latent input through the
+core's own ``geom_latent_proj`` (taken by reference, exactly as ``to_latent`` is).
+Every ``forward`` gained a trailing ``geom_feats=None``; passing ``None`` is
+upstream's behaviour and no wrapper creates parameters of its own.
+"""
+
 from torch import nn
 from .conv import ConditionedEncoder3D, ConditionedDecoder3D
 from .transformer import P3DTransformerEncoder, P3DTransformerDecoder
@@ -17,15 +30,18 @@ class ConvEncoderSkip(nn.Module):
         super().__init__()
         self.conv_encoder = conv_encoder
 
-    def forward(self, x):
+    def forward(self, x, geom_feats=None):
         x = self.conv_encoder.feature_embed(x)
+        x = self.conv_encoder._add_geom(x, geom_feats, 0)
         res_list = [x]
         x = self.conv_encoder.downsampling_layers[0](x)
+        x = self.conv_encoder._add_geom(x, geom_feats, 1)
         for i in range(self.conv_encoder.num_downsampling_layers - 1):
             for j in range(self.conv_encoder.repetitions):
                 x = self.conv_encoder.blocks[i * self.conv_encoder.repetitions + j](x)
             res_list.append(x)
             x = self.conv_encoder.downsampling_layers[i + 1](x)
+        x = self.conv_encoder._add_geom(x, geom_feats, 2)
         # res_list.append(x)
         return x, res_list
 
@@ -42,8 +58,10 @@ class ConvDecoderSkip(nn.Module):
         self.scales = nn.Parameter(torch.zeros(self.conv_decoder.num_upsampling_layers))
         self.use_checkpoint = use_checkpoint
 
-    def forward(self, x, encoder_outputs):
+    def forward(self, x, encoder_outputs, geom_feats=None):
+        x = self.conv_decoder._add_geom(x, geom_feats, 2)
         x = self.conv_decoder.upsampling_layers[0](x)
+        x = self.conv_decoder._add_geom(x, geom_feats, 1)
         x += encoder_outputs[::-1][0] * self.scales[0]
         for i in range(self.conv_decoder.num_upsampling_layers - 1):
             for j in range(self.conv_decoder.repetitions):
@@ -53,6 +71,7 @@ class ConvDecoderSkip(nn.Module):
                     x = self.conv_decoder.blocks[i * self.conv_decoder.repetitions + j](x)
             x = self.conv_decoder.upsampling_layers[i + 1](x)
             x += encoder_outputs[::-1][i + 1] * self.scales[i + 1]
+        x = self.conv_decoder._add_geom(x, geom_feats, 0)
         x = self.conv_decoder.decompress(x)
         return x
 
@@ -128,9 +147,10 @@ class P3DEncoderSkip(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        geom_feats=None,
     ):
         ## Conv encoding
-        x, res_conv = self.conv_encoder(x)
+        x, res_conv = self.conv_encoder(x, geom_feats)
         x, res_transformer = self.transformer_encoder(x)
         ## Sequence Modeling
         return x, [res_conv, res_transformer]
@@ -146,16 +166,22 @@ class P3DDecoderSkip(nn.Module):
         super().__init__()
         self.conv_decoder = ConvDecoderSkip(decoder.conv_decoder,use_checkpoint=use_checkpoint)
         self.transformer_decoder = P3DTransformerDecoderSkip(decoder.transformer_decoder,use_checkpoint=use_checkpoint)
+        # Level-3 (latent-grid) conditioning lives on the wrapped core; take it by
+        # reference so the wrapper's state dict carries it, as with `to_latent`.
+        self.geom_latent_proj = getattr(decoder, "geom_latent_proj", None)
 
     def forward(
         self,
         x: torch.Tensor,
         encoder_residuals: list,
+        geom_feats=None,
     ):
+        if geom_feats is not None and self.geom_latent_proj is not None:
+            x = x + self.geom_latent_proj(geom_feats[3])
         ## Sequence Modeling
         x = self.transformer_decoder(x, encoder_residuals[1])
         ## Conv decoding
-        x = self.conv_decoder(x, encoder_residuals[0])
+        x = self.conv_decoder(x, encoder_residuals[0], geom_feats)
         return x
 
 
@@ -178,14 +204,19 @@ class KLP3DEncoderSkip(nn.Module):
         latent_type: Literal["sample", 
                             "mode", 
                             "distribution",
-                            "mean_std"] = "sample"
+                            "mean_std"] = "sample",
+        geom_feats=None,
     ) -> Union[torch.Tensor, DiagonalGaussianDistribution]:
         ## Conv encoding
         if self.use_checkpoint:
-            x, res_conv = checkpoint(self.conv_encoder, x)
+            # `geom_feats` rides along as a plain (non-tensor) argument: the
+            # recomputed segment still produces gradients for the projections'
+            # parameters, only not for the branch features themselves -- which is
+            # exactly the DFT setting, where the branch is frozen.
+            x, res_conv = checkpoint(self.conv_encoder, x, geom_feats)
             x, res_transformer = checkpoint(self.transformer_encoder, x)
         else:
-            x, res_conv = self.conv_encoder(x)
+            x, res_conv = self.conv_encoder(x, geom_feats)
             x, res_transformer = self.transformer_encoder(x)
         if latent_type=="mean_std":
             return x, [res_conv, res_transformer]

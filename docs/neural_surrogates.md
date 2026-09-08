@@ -1599,11 +1599,16 @@ Only the autoencoder subtree is vendored (like `_upt/`), **not** an external
 `tadpole` dependency: upstream's `requirements.txt` pulls in `torchfsm` (its
 online data-generation dep, unused here) → `vape4d`, an unnecessary,
 resolution-risky chain the AE path never imports. The vendored files are
-byte-for-byte upstream except one edit — the `GIFt` import (upstream's
-integer-rank LoRA library, used only by a branch we never take; we drive LoRA
-through PEFT) is made optional. Preserving the exact subtree keeps every internal
-relative import valid **and** the encoder/decoder `state_dict` keys identical, so
-the HF `thuerey-group/Tadpole` weights still load. Runtime deps
+byte-for-byte upstream except **two** documented pyurbanair edits: (1) the `GIFt`
+import (upstream's integer-rank LoRA library, used only by a branch we never
+take; we drive LoRA through PEFT) is made optional, and (2) the optional
+**geometry-branch projections** in `architecture/p3d/{conv,core,kl,skip_wrapper}.py`
+and `model/{autoencoder,dft}.py` (each of those files' module docstrings states
+its own injection points). The projections are created **only** when the caller
+passes `geom_in_dims`, so on the default path nothing is added. Preserving the
+exact subtree keeps every internal relative import valid **and** the
+encoder/decoder `state_dict` keys identical, so the HF `thuerey-group/Tadpole`
+weights still load strictly. Runtime deps
 (`diffusers`/`timm`/`einops`) are the `neural_surrogates[tadpole]` extra, imported
 lazily inside `TadpoleAE.__init__` so `import neural_surrogates` stays light.
 
@@ -1613,10 +1618,53 @@ What the wrapper adds:
 |---|---|
 | **Normalization** | `normalize=True` z-scores each state channel with buffered training stats (`set_normalization`, saved with the weights) — the same contract as `P3D`/`UPT`, so the pre-train script's `get_normalization_stats` path just works. Standardising *before* the autoencoder folds channels into the batch makes each folded **state** crop ~`N(0,1)`, matching Tadpole's pre-training statistics (this is what the HF warm start relies on). The geometry-block channels are fed **raw** (see below), so on those few auxiliary channels the HF encoder sees out-of-distribution inputs — acceptable: they carry a bounded, near-constant geometry cue (not primary flow statistics) that the encoder adapts to during continued pre-training. |
 | **Geometry** | Input is masked (`state * geometry`, obstacles zeroed) like `P3D`. With `encode_geometry=True` the mask (`{0,1}`) and, if `sdf_features` is on, the SDF channels (`[-1,1]`) are appended **raw** (already bounded; a 0/1 mask has no mean/std to standardise) as **extra folded encoder channels**, and *reconstructed* — on purpose: recon loss on the state alone would let the encoder discard geometry from the latent, so making it reconstruct the geometry block is the supervision that forces geometry *into* the latent, which is what the plan-03 DFT attends over. On a single-geometry corpus this re-encodes a constant per snapshot (intended for the multi-geometry regime; use `encode_geometry=False` for state-only / single-geometry). |
-| **SDF features** | `sdf_features` (`none`/`sdf`/`grad`/`both`) appends the clamped-SDF / gradient channels alongside the encoded mask; requires `encode_geometry=True` and must match the dataset's mode + `sdf_clamp_cells` (the script cross-checks). |
+| **SDF features** | `sdf_features` (`none`/`sdf`/`grad`/`both`) appends the clamped-SDF / gradient channels alongside the encoded mask; requires `encode_geometry=True` **or** a `geometry_branch` (in branch mode the same channels feed the branch instead of the encoder), and must match the dataset's mode + `sdf_clamp_cells` (the script cross-checks). |
+| **Geometry branch** | `geometry_branch: {width: 32}` (default `null`) switches geometry from *content* to *conditioning* — see below. |
 | **Padding** | Each spatial dim is zero-padded up to a multiple of `encoder_crop_size` (which must be a multiple of 16 — the encoder's total downsampling) so the field tiles cleanly, then the reconstruction is cropped back. |
 | **Params** | Deliberately **not** an AE input — physical params condition dynamics, not single-snapshot appearance (they enter in plan 03). `n_params` is accepted for signature parity and ignored. |
 | **Pretrained** | `pretrained`: `none` (random) / `hf` (`thuerey-group/Tadpole` weights for the size, via `huggingface_hub`) / `{encoder, decoder}` local paths. |
+
+**Geometry branch (`geometry_branch`, off by default).** The alternative to
+folding. `GeometryBranch`
+([architectures/tadpole_geometry_branch.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_geometry_branch.py))
+is a small trainable conv net (strided conv → GroupNorm → GELU → conv per level)
+that maps the raw geometry block `[mask, (sdf, ∇sdf)]` — on the **padded** grid —
+to four feature maps at strides `(1, 2, 4, 16)` with widths
+`(w, 2w, 4w, 8w)` by default. Those strides are exactly the resolutions the
+vendored P3D stack exposes, and each level is added through a **zero-initialised
+`1×1×1` `Conv3d`** at a matching point:
+
+| Level (stride) | Encoder | Decoder |
+|---|---|---|
+| 0 (1) | after `feature_embed` | just before `decompress` (after the last upsampling) |
+| 1 (2) | after `downsampling_layers[0]` | after `upsampling_layers[0]` |
+| 2 (4) | after the last `downsampling_layers` | at the conv up-path's input |
+| 3 (16 = latent grid) | — | the decoder's **latent input**, before the transformer decoder (`geom_latent_proj`) |
+
+The projections live **inside** the vendored encoder/decoder, so they travel in
+`encoder.pt` / `decoder.pt`; the branch itself is a separate module saved as
+`geometry_branch.pt` (§29). In this mode geometry is **neither folded nor
+reconstructed**: the working space is the state channels only
+(`n_geometry_channels == 0`), there is no geometry recon term (the trainer's
+`geom` term is identically zero, no config change needed), and latent capacity
+stays on the flow — "condition, don't predict". `encode_geometry` must therefore
+be `False`: setting both **raises** (they are mutually exclusive). `sdf_features`
+stays available and feeds the branch.
+
+Because every projection is zero-init, a freshly built branch-mode AE
+reconstructs *exactly* what it would with the branch disconnected, so training
+starts from the unconditioned AE. That also makes the warm start usable: with
+`geometry_branch` set, `encoder.pt`/`decoder.pt` (or the HF weights) are loaded
+**non-strictly**, and the load then fails loud unless the *only* missing keys are
+the zero-init `geom_proj` / `geom_latent_proj` ones and nothing is unexpected —
+so a genuinely mismatched checkpoint is still rejected.
+
+> **First-step gotcha (harmless).** With a *randomly* initialised AE
+> (`pretrained: none`), upstream zero-inits the transformer decoder's
+> `final_layer.out_proj`, so at the very first optimizer step everything upstream
+> of it — the encoder-side projections and the decoder's latent-input projection
+> — receives exactly zero gradient. It resolves as soon as that layer moves; with
+> a pretrained warm start it never occurs.
 
 `forward(state, geometry, geom_features=None, *, return_kl_element=False,
 working_space=False)`: by default returns the **physical-units** state
@@ -1765,7 +1813,11 @@ pixi run -e dev python scripts/neural_surrogate/pretrain_autoencoder.py \
 Artifacts in `model_weights/<name>/`: `weights.pt` (full `TadpoleAE` state dict —
 our standard), plus `encoder.pt` / `decoder.pt` via `save_separate_weights` (the
 handoff format for plan 03 and HF-style reuse), and `config.yaml` /
-`checkpoint.pt` / `metrics.csv` as usual.
+`checkpoint.pt` / `metrics.csv` as usual. In geometry-branch mode one more file
+sits next to them — `geometry_branch.pt`, a plain `torch.save` of the branch's
+`state_dict` (the encoder/decoder projections it feeds already travel inside
+`encoder.pt`/`decoder.pt`). It is written **only** in branch mode, so a standard
+run's artifact set is unchanged, and it is what `TadpoleTimeStepper` loads (§31).
 
 **Batching default.** The shipped default is `batch_sampler: null` — the plain
 shuffled `DataLoader`, which honours `dataloader.batch_size` / `shuffle` /
@@ -1799,12 +1851,13 @@ the padded tiles also inflate the logged `kl` metric. Pick `encoder_crop_size`
 |---|---|
 | `TadpoleAE` wrapper | [architectures/tadpole_ae.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_ae.py) |
 | `TadpoleDiscriminator` + GAN loss helpers | [architectures/tadpole_discriminator.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_discriminator.py) |
+| `GeometryBranch` | [architectures/tadpole_geometry_branch.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_geometry_branch.py) |
 | Vendored autoencoder subtree | [architectures/_tadpole/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/) |
 | `SnapshotDataset` / `snapshot_collate` | [datasets/snapshot.py](../libs/neural-surrogates/src/neural_surrogates/datasets/snapshot.py) |
 | `AutoencoderTrainer` | [training/autoencoder.py](../libs/neural-surrogates/src/neural_surrogates/training/autoencoder.py) |
 | Config | [conf/neural_surrogate/pretrain_autoencoder.yaml](../conf/neural_surrogate/pretrain_autoencoder.yaml) |
 | Run script | [scripts/neural_surrogate/pretrain_autoencoder.py](../scripts/neural_surrogate/pretrain_autoencoder.py) |
-| Tests | [test_autoencoder_pretraining.py](../tests/test_autoencoder_pretraining.py), [test_tadpole_discriminator.py](../tests/test_tadpole_discriminator.py), [test_autoencoder_adversarial.py](../tests/test_autoencoder_adversarial.py) |
+| Tests | [test_autoencoder_pretraining.py](../tests/test_autoencoder_pretraining.py), [test_tadpole_discriminator.py](../tests/test_tadpole_discriminator.py), [test_autoencoder_adversarial.py](../tests/test_autoencoder_adversarial.py), [test_tadpole_geometry_branch.py](../tests/test_tadpole_geometry_branch.py) |
 
 ---
 
@@ -1842,6 +1895,39 @@ What the wrapper adds around `TadpoleDFT`:
 | **Param conditioning** (our addition; Tadpole has none) | `param_conditioning="film"` (default): the (z-scored) params `(B, P)` drive a small MLP with a **zero-initialised** output layer producing per-channel `(scale, shift)` applied to the latent tokens as `x*(1+scale)+shift`. `"token"`: an additive (adaLN-style) zero-init param embedding. `"none"` or `n_params==0`: **no** conditioning module at all (repo no-op rule) — the module tree is byte-identical to a param-free build. |
 | **Normalization** | State stats are **inherited** from the AE (read from `<ae_dir>/weights.pt`) so the frozen encoder sees its pre-training distribution; `set_normalization` installs the fine-tune split's **param** stats (used to z-score params before conditioning). Buffers travel with the checkpoint. **Fail-loud:** if the AE dir's `weights.pt` is missing or lacks `state_mean`/`state_std`, loading the stats now **raises** (repo convention) rather than silently continuing with identity zeros/ones — the only exception is an explicit `recompute_normalization` opt-out, which will overwrite the stats anyway. |
 | **Geometry** | Masked like `P3D` (`state * geometry`); with `encode_geometry=True` the mask (+SDF) channels ride through the frozen encoder exactly as in pre-training, so the latent tokens the sub-network attends over carry geometry. Output geometry channels are discarded (geometry is static). Cross-checked against the AE (must match). |
+| **Geometry branch** | `geometry_branch: {width: 32}` (default `null`): the AE's pre-trained branch is reused, **frozen**, and its features condition the frozen enc/dec and the latent sub-network — see below. Mutually exclusive with `encode_geometry`; cross-checked against the AE. |
+
+**Geometry branch.** With `geometry_branch={...}` the stepper reuses the AE's
+branch instead of folding geometry: it builds `GeometryBranch(in_channels=1 +
+n_sdf, **geometry_branch)`, loads `<pretrained_ae_dir>/geometry_branch.pt` (a
+plain `state_dict`; **fail loud** if absent, since a random branch would feed the
+frozen AE conditioning it has never seen) and **freezes** it — the branch is part
+of the frozen AE, exactly like `encoder.pt`/`decoder.pt`, and the fine-tune
+script's `trainable_modules` never lists it. `skip_pretrained_load` (the ESMDA
+deploy build) is the only sanctioned way past the load, because the merged
+`weights.pt` already carries the branch as a submodule. The four features are
+injected in two places:
+
+* **enc/dec projections** — the same zero-init `1×1×1` convs as in the AE (§26),
+  which arrive already trained inside `encoder.pt`/`decoder.pt`; the folded
+  feature pyramid is chunked alongside `x` when `max_internal_batchsize` bites;
+* **spatial FiLM on the latent sub-network** — `ParamConditionedSubnetwork`
+  gains a zero-init `Conv3d(out_dims[3], 2 * in_dim, 1)` (`geom_cond_dim > 0`;
+  `0` builds nothing) that maps the *unfolded* level-3 feature, on the latent
+  grid, to a **per-token** `(scale, shift)` applied as `x * (1 + scale) + shift`
+  after the existing param FiLM. The stepper checks that this feature's grid is
+  the padded grid / 16 before handing it over.
+
+The enc/dec projections are frozen along with the encoder/decoder they live in
+(and the `tadpole_encdec` LoRA preset skips them — they are `1×1×1` convs), so
+during DFT fine-tuning the **only trainable geometry path is the FiLM**.
+
+Only the **state** crops are folded in branch mode (`n_geometry_channels == 0`),
+so the sub-network already reads and writes `C * Cl` channels and only state
+crops are decoded — "condition, don't predict". `encode_geometry` must be
+`False`; setting both raises. **Footgun:** `dft.yaml` ships `encode_geometry:
+true`, so a branch-mode run must pass `architecture.encode_geometry=false`
+explicitly (and match the AE, which the cross-check below enforces).
 
 **Residual convention.** Output is `state_next = dft_state * mask` — the DFT
 *directly* predicts the next state (it morphs its own reconstruction toward
@@ -1858,7 +1944,9 @@ pure-AE reconstruction cheaply (same encode/decode with the sub-network bypassed
 and skip residuals zeroed), and the unit test asserts `stepper(state) ==
 stepper._ae_reference_recon(state, geometry)` **exactly** (0.0 in practice) — the
 single most informative test of the DFT wiring (it proves every zero-init and the
-skip gating are correct). This is *not* `state_next == state`: that holds only for
+skip gating are correct). This holds in branch mode too: the enc/dec projections
+belong to the frozen AE, so `_ae_reference_recon` applies the *same* branch
+features, and the only new DFT-side addition — the spatial FiLM — is zero-init. This is *not* `state_next == state`: that holds only for
 a perfectly-reconstructing AE, a **training** outcome, not a wiring invariant.
 
 ### 32. Training path — `finetune_mode=dft`
@@ -1877,9 +1965,11 @@ next-step model. It also sets `lora.target_preset: tadpole_encdec` and a
 it: instantiates `cfg.architecture` fresh with `n_state_channels` /`n_params` from
 the fine-tune dataset and `pretrained_ae_dir = pretrained_model_dir`;
 **cross-checks** the AE's `size` / `encode_geometry` / `sdf_features` /
-`sdf_clamp_cells` / `normalize` flag (from the AE `config.yaml`) against the stepper
-and **fails loud** on a mismatch — so an AE trained with `normalize: false` can no
-longer silently pair with a `normalize: true` stepper; installs the fine-tune
+`sdf_clamp_cells` / `normalize` / `geometry_branch` (from the AE `config.yaml`)
+against the stepper and **fails loud** on a mismatch — so an AE trained with
+`normalize: false` can no longer silently pair with a `normalize: true` stepper,
+and a stepper cannot pick up an AE's `geometry_branch.pt` under a different branch
+config (both sides must be `null`, or the exact same mapping); installs the fine-tune
 split's param stats via `set_normalization`
 (state stats inherited from the AE); freezes everything, injects LoRA on
 `dft.encoder`/`dft.decoder` via the `tadpole_encdec` preset, and unfreezes the
@@ -1936,4 +2026,5 @@ unaffected. Deterministic rollouts use `latent_type="mode"` (the default).
 | `tadpole_encdec` LoRA preset | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
 | Config + `finetune_mode` group | [conf/neural_surrogate/finetuning.yaml](../conf/neural_surrogate/finetuning.yaml), [conf/neural_surrogate/finetune_mode/dft.yaml](../conf/neural_surrogate/finetune_mode/dft.yaml) |
 | Run script (DFT dispatch) | [scripts/neural_surrogate/finetune_neural_surrogate.py](../scripts/neural_surrogate/finetune_neural_surrogate.py) |
-| Tests | [test_ae_to_timestepper.py](../tests/test_ae_to_timestepper.py) |
+| `GeometryBranch` (shared with the AE) | [architectures/tadpole_geometry_branch.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_geometry_branch.py) |
+| Tests | [test_ae_to_timestepper.py](../tests/test_ae_to_timestepper.py), [test_tadpole_stepper_geometry_branch.py](../tests/test_tadpole_stepper_geometry_branch.py) |

@@ -1,6 +1,15 @@
+"""KL (VAE) head on the P3D encoder (vendored from Tadpole).
+
+pyurbanair edit -- **geometry-branch conditioning**: ``geom_in_dims`` is passed
+through to :class:`P3DEncoder` (which owns the stride-1/2/4 projections in its
+conv stem, see ``conv.py``) and ``forward`` gained a ``geom_feats=None``
+argument. Default (``None``) behaviour, including the ``state_dict`` key set, is
+upstream's.
+"""
+
 import torch
 import numpy as np
-from typing import Literal, Union
+from typing import Literal, Optional, Sequence, Union
 from .core import P3DEncoder
 
 
@@ -89,6 +98,7 @@ class KLP3DEncoder(P3DEncoder):
         repetitions=1,
         ckpt_path=None,
         ckpt_prefix="model.encoder.",
+        geom_in_dims: Optional[Sequence[int]] = None,
     ):
         super().__init__(
             window_size,
@@ -106,6 +116,7 @@ class KLP3DEncoder(P3DEncoder):
             repetitions,
             ckpt_path,
             ckpt_prefix,
+            geom_in_dims=geom_in_dims,
         )
         self.to_latent = torch.nn.Conv3d(
             self.latent_size, self.latent_size * 2, kernel_size=1
@@ -114,8 +125,9 @@ class KLP3DEncoder(P3DEncoder):
     def forward(self, x: torch.Tensor, latent_type: Literal["sample", 
                                                             "mode", 
                                                             "distribution",
-                                                            "mean_std"] = "sample") -> Union[torch.Tensor, DiagonalGaussianDistribution]:
-        x=self.to_latent(super().forward(x))
+                                                            "mean_std"] = "sample",
+                geom_feats=None) -> Union[torch.Tensor, DiagonalGaussianDistribution]:
+        x=self.to_latent(super().forward(x, geom_feats))
         if latent_type=="mean_std":
             return x
         dist = DiagonalGaussianDistribution(x)

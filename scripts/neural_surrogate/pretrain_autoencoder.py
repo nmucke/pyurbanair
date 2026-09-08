@@ -9,7 +9,9 @@ Artifacts land in ``model_weights/<model_name>/``: the full ``TadpoleAE``
 ``weights.pt`` (our standard, plus ``config.yaml`` / ``checkpoint.pt`` /
 ``metrics.csv`` as usual), and ``encoder.pt`` / ``decoder.pt`` via the
 autoencoder's ``save_separate_weights`` -- the natural handoff format for plan 03
-(AE -> time-stepper) and for HF-style reuse.
+(AE -> time-stepper) and for HF-style reuse -- plus ``geometry_branch.pt`` when
+the architecture runs in geometry-branch mode (the branch is a separate module;
+its zero-init projections travel inside encoder.pt / decoder.pt).
 
 The optional adversarial (GAN) extension is off unless the config carries a
 ``discriminator:`` block (it ships as ``null``); when present, this script builds
@@ -50,9 +52,11 @@ def run(cfg: DictConfig) -> None:
     ).to(dtype=dtype)
 
     # Cross-check the SDF-feature modes: a model whose stem encodes a specific set
-    # of SDF channels must be paired with a dataset that ships exactly those (and
-    # at the same clamp radius). Both default to "none", so this is a no-op for
-    # standard runs.
+    # of SDF channels -- or whose geometry branch is fed them -- must be paired
+    # with a dataset that ships exactly those (and at the same clamp radius). Both
+    # default to "none", so this is a no-op for standard runs. The check is on the
+    # MODE alone, so it covers both consumers (folded stem / branch); which one is
+    # in play is the architecture's business.
     model_mode = getattr(model, "sdf_feature_mode", "none")
     dataset_mode = getattr(train_ds, "sdf_feature_mode", "none")
     if model_mode != dataset_mode:
@@ -130,12 +134,18 @@ def run(cfg: DictConfig) -> None:
         # channels the working-space field has. The paper pairs the critic with a
         # same-size autoencoder, so `size` defaults to the architecture's.
         disc_size = disc_cfg.get("size", cfg.architecture.size)
+        # In geometry-branch mode the AE's working space has NO geometry channels,
+        # but the critic should still judge the flow in the presence of its
+        # obstacles: give it the bare mask (the trainer's "mask" source feeds it
+        # from the raw geometry argument). Outside branch mode this is exactly the
+        # architecture's own contract, unchanged.
+        branch_mode = getattr(model, "geometry_branch", None) is not None
         discriminator = instantiate(
             disc_cfg,
             size=disc_size,
             n_state_channels=model.n_state_channels,
-            encode_geometry=model.encode_geometry,
-            sdf_features=model.sdf_feature_mode,
+            encode_geometry=model.encode_geometry or branch_mode,
+            sdf_features="none" if branch_mode else model.sdf_feature_mode,
         ).to(dtype=dtype)
         disc_params = sum(p.numel() for p in discriminator.parameters())
         print(
@@ -191,6 +201,12 @@ def run(cfg: DictConfig) -> None:
     model.ae.save_separate_weights(
         str(out_dir / "encoder.pt"), str(out_dir / "decoder.pt")
     )
+    # The geometry branch is a separate module (the encoder/decoder only carry its
+    # zero-init projections), so it needs its own handoff file -- written ONLY in
+    # branch mode, so a standard run's artifact set is unchanged.
+    if getattr(model, "geometry_branch", None) is not None:
+        torch.save(model.geometry_branch.state_dict(), out_dir / "geometry_branch.pt")
+        print("geometry branch saved to geometry_branch.pt")
     print(f"config, best weights and encoder/decoder saved to {out_dir}")
 
 
