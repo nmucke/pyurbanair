@@ -1941,6 +1941,28 @@ What the wrapper adds around `TadpoleDFT`:
 | **Geometry** | Masked like `P3D` (`state * geometry`); with `encode_geometry=True` the mask (+SDF) channels ride through the frozen encoder exactly as in pre-training, so the latent tokens the sub-network attends over carry geometry. Output geometry channels are discarded (geometry is static). Cross-checked against the AE (must match). |
 | **Geometry branch** | `geometry_branch: {width: 32}` (default `null`): the AE's pre-trained branch is reused, **frozen**, and its features condition the frozen enc/dec and the latent sub-network — see below. Mutually exclusive with `encode_geometry`; cross-checked against the AE. |
 
+**Optional state mixing on DFT skips.** Set
+`architecture.skip_mixing: {width: 32, levels: [4, 8]}` to add one pointwise
+bottleneck adapter at each selected spatial stride (`1`, `2`, `4`, `8`). The
+adapter concatenates aligned state-variable features, applies per-voxel
+LayerNorm, a `1×1×1` projection to `width`, GELU, and a zero-initialized `1×1×1`
+projection back to the original feature count. Its correction is split by state
+and added as `decoder + gamma * skip + mixer(all_state_skips)`. It bypasses the
+zero-initialized gamma so its output projection receives gradients immediately;
+only the final projection starts at zero. Geometry channels are excluded, though
+geometry-branch conditioning already present in state features is retained.
+
+The default `null` creates no adapters and preserves the original execution and
+checkpoint keys. Enabling mixing requires no AE retraining; adapters train fully
+through the `skip_mixing` entry in `trainable_modules`, and are saved in merged
+`weights.pt` with their architecture config. Start with strides `[4, 8]`; adding
+`[1, 2]` increases activation memory and compute. All three spatial modes are
+supported. States are gathered per region before mixing, independent of the
+encoder/decoder batch chunk limit. With mixing enabled, local mode also uses
+`encode`/`decode`'s full-grid latent plus `SpatialResiduals` contract (otherwise
+local mode retains its original crop-folded contract). No extra spatial halo is
+needed for these pointwise adapters.
+
 **Geometry branch.** With `geometry_branch={...}` the stepper reuses the AE's
 branch instead of folding geometry: it builds `GeometryBranch(in_channels=1 +
 n_sdf, **geometry_branch)`, loads `<pretrained_ae_dir>/geometry_branch.pt` (a
@@ -2002,7 +2024,8 @@ architecture to the pretrained config), `dft.yaml` declares the architecture
 `subnetwork`), because `pretrained_model_dir` here is the **AE** dir, not a
 next-step model. It also sets `lora.target_preset: tadpole_encdec` and a
 `trainable_modules` list (the NEW modules trained *fully*, not via LoRA):
-`subnetwork`, `latent_residual_scale`, and the γ skip `scales`.
+`subnetwork`, `latent_residual_scale`, the γ skip `scales`, and optional
+`skip_mixing` adapters.
 
 `finetune_neural_surrogate.py` dispatches on the presence of the inline
 `cfg.architecture` node (dft.yaml sets it; `lora_nextstep` does not). In DFT mode
@@ -2044,7 +2067,7 @@ model_weights/<name>/
 
 `weights.pt` is the **sole source of truth** for this mode. Unlike a pure-LoRA
 next-step fine-tune, the fully-trained NEW modules (`subnetwork`, the γ skip
-`scales`, `latent_residual_scale`) live **only** in the merged `weights.pt`, not in
+`scales`, `latent_residual_scale`, and optional `skip_mixing`) live **only** in the merged `weights.pt`, not in
 `adapter/` — which holds just the encoder/decoder LoRA deltas. So `adapter/` alone
 cannot reconstruct the trained model here; it is **provenance-only** (a portable
 record of the LoRA half). This matters for the resume-without-best-weights WARNING

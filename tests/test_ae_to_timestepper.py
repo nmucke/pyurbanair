@@ -391,6 +391,10 @@ def _make_ae_model_dir(
         sdf_clamp_cells=sdf_clamp_cells,
         normalize=True,
     )
+    # Simulate a trained decoder: its default zero head blocks upstream gradients.
+    torch.nn.init.normal_(
+        ae.ae.decoder.transformer_decoder.final_layer.out_proj.weight, std=0.01
+    )
     ae.set_normalization([0.1, 0.2, 0.3], [1.0, 1.1, 1.2])
 
     model_dir = root / "model_weights" / "tadpole_ae_base"
@@ -597,7 +601,9 @@ def _shrink_dft_for_cpu(cfg) -> None:
     dft.yaml owns the trainer/dataset block shape; these keys match
     lora_nextstep.yaml (the DFT trainer reuses the same Trainer)."""
     cfg.dataset.pushforward_steps = 1
+    cfg.batch_sampler = None
     cfg.dataloader.batch_size = 2
+    cfg.dataloader.drop_last = False
     cfg.dataloader.num_workers = 0
     cfg.trainer.num_epochs = 2
     cfg.trainer.device = "cpu"
@@ -612,7 +618,8 @@ def _shrink_dft_for_cpu(cfg) -> None:
 
 
 @pytest.mark.parametrize("spatial_mode", ["local", "global", "halo"])
-def test_dft_finetune_end_to_end(tmp_path, monkeypatch, spatial_mode):
+@pytest.mark.parametrize("skip_mixing", [False, True])
+def test_dft_finetune_end_to_end(tmp_path, monkeypatch, spatial_mode, skip_mixing):
     """compose finetuning.yaml (finetune_mode=dft) -> run -> exported dir loads
     into NeuralSurrogateForwardModel + rolls out a finite trajectory."""
     data_dir = tmp_path / "data"
@@ -632,6 +639,9 @@ def test_dft_finetune_end_to_end(tmp_path, monkeypatch, spatial_mode):
         ],
     )
     _shrink_dft_for_cpu(cfg)
+
+    if skip_mixing:
+        cfg.architecture.skip_mixing = {"width": 8, "levels": [4, 8]}
 
     # The dft finetune_mode bundles Trainer + MSELoss (like lora_nextstep).
     assert cfg.trainer._target_.split(".")[-1] == "Trainer"
@@ -665,6 +675,13 @@ def test_dft_finetune_end_to_end(tmp_path, monkeypatch, spatial_mode):
     )
     fresh.load_state_dict(torch.load(out / "weights.pt"))
     assert isinstance(fresh, TadpoleTimeStepper)
+    if skip_mixing:
+        assert saved.architecture.skip_mixing.width == 8
+        assert fresh.skip_mixing is not None
+        for adapter in fresh.skip_mixing.adapters.values():
+            assert torch.count_nonzero(adapter.output_proj.weight) > 0
+    else:
+        assert fresh.skip_mixing is None
 
     # and the exported dir drops into NeuralSurrogateForwardModel + rolls out.
     from neural_surrogates import NeuralSurrogateForwardModel
