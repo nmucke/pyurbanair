@@ -13,6 +13,10 @@ autoencoder's ``save_separate_weights`` -- the natural handoff format for plan 0
 the architecture runs in geometry-branch mode (the branch is a separate module;
 its zero-init projections travel inside encoder.pt / decoder.pt).
 
+That split export is written at every checkpoint as well as once after ``fit()``,
+so a run killed mid-training (walltime, OOM, SIGKILL) still leaves a loadable
+handoff set next to its ``checkpoint.pt`` instead of only the full ``weights.pt``.
+
 The optional adversarial (GAN) extension is off unless the config carries a
 ``discriminator:`` block (it ships as ``null``); when present, this script builds
 the critic with the *architecture's* own channel/geometry contract so the two can
@@ -25,6 +29,7 @@ never disagree, and hands it plus its own optimizer to the trainer.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import hydra
 import numpy as np
@@ -32,6 +37,27 @@ import torch
 from hydra.utils import instantiate
 from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
 from omegaconf import DictConfig, OmegaConf
+
+
+def _export_handoff_weights(model: Any, out_dir: Path) -> None:
+    """Write the plan-03 handoff files for the model's CURRENT weights.
+
+    ``encoder.pt`` / ``decoder.pt`` via the autoencoder's own
+    ``save_separate_weights`` (single source of truth for what a split export
+    holds), plus ``geometry_branch.pt`` in branch mode -- the branch is a
+    separate module, so it needs its own file; the encoder/decoder only carry
+    its zero-init projections. Written ONLY in branch mode, so a standard run's
+    artifact set is unchanged.
+
+    Called at every checkpoint *and* once after ``fit()``. The per-checkpoint
+    export is the same epoch's weights the checkpoint itself stores; the final
+    call overwrites it with the best-val weights the trainer reloaded.
+    """
+    model.ae.save_separate_weights(
+        str(out_dir / "encoder.pt"), str(out_dir / "decoder.pt")
+    )
+    if getattr(model, "geometry_branch", None) is not None:
+        torch.save(model.geometry_branch.state_dict(), out_dir / "geometry_branch.pt")
 
 
 def run(cfg: DictConfig) -> None:
@@ -203,18 +229,28 @@ def run(cfg: DictConfig) -> None:
         geometry_recon_weight=cfg.loss.geometry_recon_weight,
         **adv_kwargs,
     )
+    # Tie the split export to the checkpoint cadence: a run that never reaches the
+    # post-fit() export below (walltime, OOM, Ctrl-C) otherwise leaves an AE dir
+    # that `finetune_mode=dft` cannot load -- the stepper reads encoder.pt /
+    # decoder.pt, not weights.pt. Wrapping the trainer's bound `_save_checkpoint`
+    # keeps the shared trainer untouched (the same spirit as AutoencoderTrainer's
+    # own read-back-and-rewrite override) and inherits `checkpoint_every` for free.
+    _save_checkpoint = trainer._save_checkpoint
+
+    def _save_checkpoint_and_export(*args: Any, **kwargs: Any) -> None:
+        _save_checkpoint(*args, **kwargs)
+        _export_handoff_weights(model, out_dir)
+        print(f"  saved encoder/decoder handoff weights to {out_dir}")
+
+    trainer._save_checkpoint = _save_checkpoint_and_export
+
     trainer.fit()
 
-    # Also export encoder/decoder separately -- the handoff format for plan 03 and
-    # for sharing/HF-style reuse. Uses the best-val weights the trainer reloaded.
-    model.ae.save_separate_weights(
-        str(out_dir / "encoder.pt"), str(out_dir / "decoder.pt")
-    )
-    # The geometry branch is a separate module (the encoder/decoder only carry its
-    # zero-init projections), so it needs its own handoff file -- written ONLY in
-    # branch mode, so a standard run's artifact set is unchanged.
+    # Final export -- same files, now from the best-val weights the trainer
+    # reloaded into the model (overwriting the last checkpoint's epoch-current
+    # export). The handoff format for plan 03 and for sharing/HF-style reuse.
+    _export_handoff_weights(model, out_dir)
     if getattr(model, "geometry_branch", None) is not None:
-        torch.save(model.geometry_branch.state_dict(), out_dir / "geometry_branch.pt")
         print("geometry branch saved to geometry_branch.pt")
     print(f"config, best weights and encoder/decoder saved to {out_dir}")
 
