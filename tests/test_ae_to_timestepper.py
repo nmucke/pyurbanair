@@ -611,7 +611,8 @@ def _shrink_dft_for_cpu(cfg) -> None:
     cfg.trainer.resume = False
 
 
-def test_dft_finetune_end_to_end(tmp_path, monkeypatch):
+@pytest.mark.parametrize("spatial_mode", ["local", "global", "halo"])
+def test_dft_finetune_end_to_end(tmp_path, monkeypatch, spatial_mode):
     """compose finetuning.yaml (finetune_mode=dft) -> run -> exported dir loads
     into NeuralSurrogateForwardModel + rolls out a finite trajectory."""
     data_dir = tmp_path / "data"
@@ -624,6 +625,8 @@ def test_dft_finetune_end_to_end(tmp_path, monkeypatch):
         [
             "model_name=tadpole_stepper_ft_test",
             "architecture.encoder_crop_size=16",
+            f"architecture.spatial_mode={spatial_mode}",
+            "architecture.sdf_features=none",
             "lora.rank=4",
             "lora.alpha=8",
         ],
@@ -645,6 +648,7 @@ def test_dft_finetune_end_to_end(tmp_path, monkeypatch):
     assert (out / "config.yaml").exists()
 
     saved = OmegaConf.load(out / "config.yaml")
+    assert saved.architecture.spatial_mode == spatial_mode
     assert saved.architecture._target_.split(".")[-1] == "TadpoleTimeStepper"
     # ESMDA deploy must not depend on the AE dir existing: the exported config
     # rebuilds the net from the merged weights alone.

@@ -442,7 +442,14 @@ Unlike `lora_nextstep` (architecture read from the pretrained `model_dir`),
 architecture **inline** — its `pretrained_model_dir` is the **AE** dir, and the
 script instantiates the stepper fresh with `pretrained_ae_dir` set to it. It also
 carries a `lora.target_preset: tadpole_encdec` and a `trainable_modules` list (the
-sub-network + γ skips + `latent_residual_scale`, trained fully, not via LoRA). See
+sub-network + γ skips + `latent_residual_scale`, trained fully, not via LoRA).
+Both `pretrain_autoencoder.yaml` and `finetune_mode/dft.yaml` expose
+`architecture.spatial_mode: local | global | halo` (default `local`),
+`encoder_crop_size` (tile/core size), and `halo_size` (context cells per side,
+default 16). Global processing pads only to stride 16. Halo processing retains
+one full-domain latent time-stepper and crops overlapping decoder outputs to
+their central cores. These settings travel with the exported architecture and
+need not match between AE pretraining and DFT. See
 [neural_surrogates.md §31–34](neural_surrogates.md#part-g--autoencoder--time-stepper-tadpole-dft).
 
 ---

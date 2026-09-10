@@ -12,6 +12,9 @@ Same conventions as ``test_autoencoder_pretraining.py``: ``importorskip`` for th
 vendored autoencoder's runtime deps, CPU, ``CROP = 16`` and tiny smoke shapes.
 """
 
+# The isolated pre-commit mypy environment does not install pytest's typing.
+# mypy: disallow-untyped-decorators=false
+
 from __future__ import annotations
 
 import csv
@@ -398,6 +401,76 @@ def test_discriminator_is_conditioned_on_true_geometry() -> None:
         torch.testing.assert_close(stash[:, C:], target[:, C:])
     # ... and the real pass is the target's own state block
     torch.testing.assert_close(real[:, :C], target[:, :C])
+
+
+@pytest.mark.parametrize(
+    "encode_geometry, sdf_features, disc_kwargs",
+    [
+        (True, "both", {}),
+        (False, "none", {"encode_geometry": True}),
+        (False, "none", {"encode_geometry": False}),
+    ],
+)
+def test_adversarial_loss_ignores_solid_state_values(
+    encode_geometry: bool,
+    sdf_features: str,
+    disc_kwargs: dict[str, Any],
+) -> None:
+    """Solid perturbations cannot reach either critic pass or its gradients."""
+    torch.manual_seed(0)
+    model = _ae(encode_geometry=encode_geometry, sdf_features=sdf_features)
+    disc = _disc(model, **disc_kwargs)
+    disc.eval()
+    trainer = _adversarial_trainer(model, disc, [_batch()])
+    trainer._aux_terms = {}
+    mask = torch.ones(2, 1, *GRID)
+    mask[0, :, :4] = 0
+    mask[1, :, -4:] = 0
+    target = torch.randn(2, C + model.n_geometry_channels, *GRID)
+    if encode_geometry:
+        target[:, C : C + 1] = mask
+    recon = torch.randn_like(target).requires_grad_()
+
+    seen: list[Tensor] = []
+
+    def _record(_module: Module, args: tuple[Any, ...]) -> None:
+        seen.append(args[0].detach().clone())
+
+    disc.register_forward_pre_hook(_record)
+    state_loss = torch.zeros(())
+    term = trainer._adversarial_generator_term(recon, target, mask, state_loss)
+    (grad,) = torch.autograd.grad(term, recon)
+    real, fake = trainer._adv_real, trainer._adv_fake
+    assert real is not None and fake is not None
+    assert not real.requires_grad and not fake.requires_grad
+    torch.testing.assert_close(real[:, :C], target[:, :C] * mask)
+    torch.testing.assert_close(fake[:, :C], recon[:, :C] * mask)
+    torch.testing.assert_close(seen[0], fake)
+    expected_geom = target[:, C:] if encode_geometry else mask
+    if disc.n_input_channels > C:
+        for value in (real, fake):
+            torch.testing.assert_close(value[:, C:], expected_geom)
+
+    perturbed = recon.detach().clone()
+    perturbed[:, :C] += 1000.0 * (1 - mask)
+    # Reconstructed geometry must also have no influence on the critic.
+    perturbed[:, C:] += 1000.0
+    perturbed.requires_grad_()
+    changed_term = trainer._adversarial_generator_term(
+        perturbed, target, mask, state_loss
+    )
+    (changed_grad,) = torch.autograd.grad(changed_term, perturbed)
+    assert torch.equal(term, changed_term)
+    assert torch.equal(seen[0], seen[1])
+    assert torch.equal(grad, changed_grad)
+    assert torch.count_nonzero(grad[:, :C] * (1 - mask)) == 0
+    assert torch.count_nonzero(grad[:, :C] * mask) > 0
+    assert torch.count_nonzero(grad[:, C:]) == 0
+
+    trainer._after_optimizer_step({})
+    assert len(seen) == 4  # two generator passes, then discriminator real/fake
+    torch.testing.assert_close(seen[2], real)
+    torch.testing.assert_close(seen[3], fake)
 
 
 # --------------------------------------------------------------------------- #

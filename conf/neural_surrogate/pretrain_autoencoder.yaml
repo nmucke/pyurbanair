@@ -24,7 +24,14 @@ architecture:
   # Upstream size S/B/L (8.8M / 38.1M / 152.1M params; latent compression
   # 16/8/4). n_state_channels is injected by the script from dataset.state_vars.
   size: S
-  # Spatial crop the field is tiled into internally. MUST be a multiple of 16
+  # local: independent tiles (existing behavior); global: whole rectangular field;
+  # halo: overlapping tiles, retaining their central cores. All modes encode
+  # each state channel independently. Global pads only to the encoder stride 16.
+  spatial_mode: local
+  # Extra context on EACH side of a halo tile, in cells (multiple of 16).
+  # Used only by spatial_mode=halo; encoder_crop_size then sets the core size.
+  halo_size: 16
+  # Local tile / halo core size (ignored in global mode). MUST be a multiple of 16
   # (the encoder's total downsampling). Pick one that divides the trained grid
   # to avoid padding; the model zero-pads to a multiple of it otherwise.
   encoder_crop_size: 64

@@ -426,7 +426,9 @@ class AutoencoderTrainer(BaseTraining):
         assert self.discriminator is not None
         c = self._n_state_channels
         geom_block = self._adv_geometry_block(target, mask)
-        state_fake, state_real = recon[:, :c], target[:, :c]
+        # Match the true fluid support on both passes: solid-cell decoder values
+        # must neither identify fakes nor receive adversarial gradients.
+        state_fake, state_real = recon[:, :c] * mask, target[:, :c] * mask
         if geom_block is None:
             fake, real = state_fake, state_real
         else:

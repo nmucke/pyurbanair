@@ -1620,7 +1620,7 @@ What the wrapper adds:
 | **Geometry** | Input is masked (`state * geometry`, obstacles zeroed) like `P3D`. With `encode_geometry=True` the mask (`{0,1}`) and, if `sdf_features` is on, the SDF channels (`[-1,1]`) are appended **raw** (already bounded; a 0/1 mask has no mean/std to standardise) as **extra folded encoder channels**, and *reconstructed* — on purpose: recon loss on the state alone would let the encoder discard geometry from the latent, so making it reconstruct the geometry block is the supervision that forces geometry *into* the latent, which is what the plan-03 DFT attends over. On a single-geometry corpus this re-encodes a constant per snapshot (intended for the multi-geometry regime; use `encode_geometry=False` for state-only / single-geometry). |
 | **SDF features** | `sdf_features` (`none`/`sdf`/`grad`/`both`) appends the clamped-SDF / gradient channels alongside the encoded mask; requires `encode_geometry=True` **or** a `geometry_branch` (in branch mode the same channels feed the branch instead of the encoder), and must match the dataset's mode + `sdf_clamp_cells` (the script cross-checks). |
 | **Geometry branch** | `geometry_branch: {width: 32}` (default `null`) switches geometry from *content* to *conditioning* — see below. |
-| **Padding** | Each spatial dim is zero-padded up to a multiple of `encoder_crop_size` (which must be a multiple of 16 — the encoder's total downsampling) so the field tiles cleanly, then the reconstruction is cropped back. |
+| **Spatial processing** | `spatial_mode: local` preserves independent tiles; `global` processes each whole rectangular field; `halo` uses overlapping encoder/decoder tiles and keeps central cores. Local/halo pad to `encoder_crop_size`; global pads only to stride 16. See below. |
 | **Params** | Deliberately **not** an AE input — physical params condition dynamics, not single-snapshot appearance (they enter in plan 03). `n_params` is accepted for signature parity and ignored. |
 | **Pretrained** | `pretrained`: `none` (random) / `hf` (`thuerey-group/Tadpole` weights for the size, via `huggingface_hub`) / `{encoder, decoder}` local paths. |
 
@@ -1675,6 +1675,47 @@ the trainer needs to split the state / geometry loss without recomputing the
 assembled input. `encode(...)` / `decode(...)` passthroughs are exposed for plan
 03 and analysis. Sizes `S`/`B`/`L` (8.8M/38.1M/152.1M params; latent compression
 16/8/4).
+
+#### Spatial processing (AE and DFT)
+
+Both wrappers expose the same architecture settings, saved with the model:
+
+| Setting | Meaning |
+|---|---|
+| `spatial_mode: local` | Default and legacy behavior: encode/decode independent tiles, each `encoder_crop_size` cells wide. |
+| `spatial_mode: global` | Encode/decode each state channel over the whole rectangular domain. Pad each axis only to a multiple of 16; `encoder_crop_size` is unused. This uses more memory and retains the backbone's existing windowed attention. |
+| `spatial_mode: halo` | Encode overlapping tiles with `halo_size` cells of context on each side, assemble the central latent cores, then decode overlapping latent neighborhoods and retain only central output cores. `encoder_crop_size` sets the core size. |
+| `halo_size` | Default 16; nonnegative multiple of 16, used only in halo mode. Zero gives tiles without overlap. Boundary halos are clipped at the padded domain edge. |
+
+In **every DFT mode**, the latent time-stepping network runs **once over the
+assembled full-domain latent grid**, joining all state variables. Halo mode
+uses neighboring **evolved** latents during decoding, together with the
+corresponding encoder skips and geometry features. It does not run independent
+time-steppers on overlapping patches. Geometry folding and the separate branch
+are supported in all three modes; geometry stays static.
+
+Halo processing trades extra computation for spatial context. It is a
+finite-context approximation, not an exact reproduction of global processing:
+normalization and attention depend on the region being processed. In particular,
+larger halos should be evaluated on seam errors and rollout quality rather than
+assumed equivalent to global processing. `max_internal_batchsize` limits the
+encoder/decoder batch, not the full-grid latent transform or all saved training
+activations.
+
+For example, set these in `pretrain_autoencoder.yaml` or `finetune_mode/dft.yaml`:
+
+```yaml
+architecture:
+  spatial_mode: halo  # local | global | halo
+  encoder_crop_size: 32
+  halo_size: 16
+```
+
+AE and DFT may use different spatial modes without changing weight shapes or
+re-pretraining the AE. Their geometry configuration must still agree. A DFT
+starts from the AE reconstruction **under its selected processing mode**;
+changing the mode can change that reconstruction. Old configs without these
+keys retain local processing and the same state-dict keys.
 
 ### 27. `SnapshotDataset` — single time slices
 
@@ -1747,7 +1788,10 @@ reconstructed one, which would let the AE hide flow errors behind a distorted
 obstacle field. The trainer settles the channel contract once at construction and
 fails loudly (naming both counts) on a mismatch; the pre-train script injects
 `n_state_channels` / `encode_geometry` / `sdf_features` from the *built model*, so
-the critic and the AE cannot disagree.
+the critic and the AE cannot disagree. Both real and reconstructed state
+channels are zeroed inside solids before either critic pass; geometry/SDF
+conditioning remains unmasked, and adversarial gradients act only on fluid
+state cells.
 
 > **Deliberate deviation from upstream — do not "fix" it back.** Tadpole
 > (Appendix C.1) feeds its critic the same *folded, single-channel* crops the
