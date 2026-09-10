@@ -4,19 +4,23 @@ from neural_surrogates.architectures import (
     UPT,
     DomainDecomposed,
     GeometryBranch,
+    LatentEncoding,
     ParamConditionedSubnetwork,
     SimpleConv,
     TadpoleAE,
     TadpoleDiscriminator,
+    TadpoleLatentGenerator,
     TadpoleTimeStepper,
     UNetConvNeXt,
 )
 from neural_surrogates.datasets import (
     PatchTransitionDataset,
     SnapshotDataset,
+    SnapshotHistoryDataset,
     TrajectoryBatchSampler,
     TransitionDataset,
     snapshot_collate,
+    snapshot_history_collate,
 )
 from neural_surrogates.dd_loss import DomainDecompositionLoss
 from neural_surrogates.decomposition import DomainDecomposition
@@ -40,6 +44,8 @@ __all__ = [
     "TrajectoryBatchSampler",
     "SnapshotDataset",
     "snapshot_collate",
+    "SnapshotHistoryDataset",
+    "snapshot_history_collate",
     "DomainDecompositionLoss",
     "BaseTraining",
     "PatchTrainer",
@@ -56,6 +62,8 @@ __all__ = [
     "GeometryBranch",
     "TadpoleTimeStepper",
     "ParamConditionedSubnetwork",
+    "TadpoleLatentGenerator",
+    "LatentEncoding",
     "DomainDecomposition",
     "NeuralSurrogateForwardModel",
     "NeuralSurrogateEnsembleForwardModel",
