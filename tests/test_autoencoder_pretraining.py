@@ -391,7 +391,8 @@ def _shrink_for_cpu(cfg) -> None:
     cfg.dataset.sdf_clamp_cells = cfg.architecture.sdf_clamp_cells
 
 
-def test_pretrain_end_to_end(tmp_path, monkeypatch):
+@pytest.mark.parametrize("spatial_mode", ["local", "global", "halo"])
+def test_pretrain_end_to_end(tmp_path, monkeypatch, spatial_mode):
     data_dir = tmp_path / "data"
     _write_dataset(data_dir)
 
@@ -401,6 +402,7 @@ def test_pretrain_end_to_end(tmp_path, monkeypatch):
             overrides=[
                 f"dataset.root_dir={data_dir}",
                 "model_name=tadpole_ae_test",
+                f"architecture.spatial_mode={spatial_mode}",
             ],
         )
     OmegaConf.set_struct(cfg, False)
@@ -425,6 +427,7 @@ def test_pretrain_end_to_end(tmp_path, monkeypatch):
         assert col in header, f"missing metrics column {col!r} in {header}"
 
     saved = OmegaConf.load(out / "config.yaml")
+    assert saved.architecture.spatial_mode == spatial_mode
     assert saved.architecture._target_.split(".")[-1] == "TadpoleAE"
 
     # weights.pt reloads into a fresh TadpoleAE (built from the saved config) and

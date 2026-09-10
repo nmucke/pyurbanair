@@ -58,6 +58,12 @@ from typing import TYPE_CHECKING
 
 import torch
 from neural_surrogates.architectures._tadpole_field_io import _TadpoleFieldIO
+from neural_surrogates.architectures._tadpole_spatial import (
+    SpatialResiduals,
+    decode_spatial,
+    encode_spatial,
+    validate_spatial_mode,
+)
 from neural_surrogates.sdf import n_sdf_feature_channels, normalize_sdf_mode
 from torch import nn
 
@@ -237,6 +243,13 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         ``"mode"`` (deterministic latent, the default here) or ``"sample"``.
     encoder_crop_size:
         Spatial crop the field is tiled into (positive multiple of 16).
+    spatial_mode:
+        ``local`` (default), ``global`` or ``halo``; the same spatial encoder/
+        decoder policy as :class:`TadpoleAE`. Every mode runs the latent
+        subnetwork once on the full assembled domain.
+    halo_size:
+        Context width in cells, a nonnegative multiple of 16 (halo mode only);
+        ``encoder_crop_size`` sets the central core size.
     max_internal_batchsize:
         Cap on folded crops processed at once (``None`` = together).
     predict_residual:
@@ -311,6 +324,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         require_ae_state_stats: bool = True,
         num_history_steps: int = 1,
         geometry_branch: dict | None = None,
+        spatial_mode: str = "local",
+        halo_size: int = 16,
     ) -> None:
         super().__init__()
 
@@ -375,6 +390,9 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         self.size = size
         self.latent_type = latent_type
         self.encoder_crop_size = int(encoder_crop_size)
+        validate_spatial_mode(spatial_mode, halo_size)
+        self.spatial_mode = spatial_mode
+        self.halo_size = halo_size
         self.max_internal_batchsize = max_internal_batchsize
         self.normalize = bool(normalize)
         self.predict_residual = bool(predict_residual)
@@ -676,11 +694,30 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         *,
         latent_type: str | None = None,
     ):
-        """Folded latent + skip residuals for one working-space input."""
+        """Folded latent + skip residuals for one working-space input.
+
+        Global/halo mode returns a full-grid latent of shape
+        ``(B*Cin, Cl, Dpad/16, Hpad/16, Wpad/16)`` and a ``SpatialResiduals``
+        context holding each encoder patch's multiscale skips. Pass both to
+        :meth:`decode`; local mode keeps the original crop-folded contract.
+        """
         from einops import rearrange
 
         x = self._assemble_working_input(state, geometry, geom_features)
         x, _ = self._pad_to_crop_multiple(x)
+        if self.spatial_mode != "local":
+            branch = self._geom_branch_kwargs(state, geometry, geom_features)
+            latent, residuals, _ = encode_spatial(
+                self.dft,
+                x,
+                self.spatial_mode,
+                self.encoder_crop_size,
+                self.halo_size,
+                branch.get("geom_feats"),
+                dft=True,
+                latent_type=latent_type,
+            )
+            return latent, residuals
         _, _, u, v, w = self._fold_dims(x)
         folded = rearrange(
             x, "B C (U Xc) (V Yc) (W Zc) -> (B C U V W) 1 Xc Yc Zc", U=u, V=v, W=w
@@ -696,16 +733,74 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
     def decode(
         self,
         latent: torch.Tensor,
-        residuals: list,
+        residuals: list | SpatialResiduals,
         geom_feats: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Decode folded latents (+ skip residuals) to folded crops.
 
         ``geom_feats`` is the folded geometry-branch pyramid (what
         :meth:`_geom_branch_kwargs` returns); pass it in branch mode so the
-        decoder's projections see the same conditioning :meth:`encode` used."""
+        decoder's projections see the same conditioning :meth:`encode` used.
+        In global/halo mode these features have full padded grids and batch
+        ``B*Cin``, and the output is ``(B*Cin, 1, Dpad, Hpad, Wpad)``.
+        """
+        if self.spatial_mode != "local":
+            if not isinstance(residuals, SpatialResiduals):
+                raise ValueError(
+                    "global/halo decode requires the SpatialResiduals from encode"
+                )
+            return decode_spatial(
+                self.dft,
+                latent,
+                self.spatial_mode,
+                self.encoder_crop_size,
+                self.halo_size,
+                geom_feats,
+                residuals=residuals,
+            )
         dec_kwargs = {} if geom_feats is None else {"geom_feats": geom_feats}
         return self.dft.decoder(latent, residuals, **dec_kwargs)
+
+    def _spatial_recon(
+        self,
+        x: torch.Tensor,
+        branch: dict,
+        params: torch.Tensor | None = None,
+        *,
+        reference: bool = False,
+    ) -> torch.Tensor:
+        """Evolve one assembled latent grid between contextual enc/dec passes."""
+        latent, residuals, _ = encode_spatial(
+            self.dft,
+            x,
+            self.spatial_mode,
+            self.encoder_crop_size,
+            self.halo_size,
+            branch.get("geom_feats"),
+            dft=True,
+        )
+        if not reference and self.dft.subnetwork is not None:
+            b, c = x.shape[:2]
+            grid = latent.reshape(b, c * latent.shape[1], *latent.shape[2:])
+            kwargs = {}
+            if params is not None:
+                kwargs["params"] = params
+            if "geom_cond" in branch:
+                kwargs["geom_cond"] = branch["geom_cond"]
+            grid = self.dft.latent_residual_scale * grid + self.dft.subnetwork(
+                grid, **kwargs
+            )
+            latent = grid.reshape_as(latent)
+        return decode_spatial(
+            self.dft,
+            latent,
+            self.spatial_mode,
+            self.encoder_crop_size,
+            self.halo_size,
+            branch.get("geom_feats"),
+            residuals=residuals,
+            zero_skips=reference,
+        ).reshape_as(x)
 
     # -- forward ----------------------------------------------------------- #
 
@@ -731,7 +826,11 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         branch = self._geom_branch_kwargs(state, geometry, geom_features)
         if branch:
             self._check_geom_cond_grid(branch["geom_cond"], x_pad)
-        recon_pad = self.dft(x_pad, params=p, **branch)
+        recon_pad = (
+            self.dft(x_pad, params=p, **branch)
+            if self.spatial_mode == "local"
+            else self._spatial_recon(x_pad, branch, p)
+        )
         d, h, w = orig
         recon = recon_pad[..., :d, :h, :w]
         dft_state = self._denormalize_state(recon[:, : self.n_state_channels])
@@ -759,6 +858,13 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
 
         x = self._assemble_working_input(state, geometry, geom_features)
         x_pad, orig = self._pad_to_crop_multiple(x)
+
+        if self.spatial_mode != "local":
+            branch = self._geom_branch_kwargs(state, geometry, geom_features)
+            recon = self._spatial_recon(x_pad, branch, reference=True)
+            d, h, w = orig
+            recon = recon[:, : self.n_state_channels, :d, :h, :w]
+            return self._denormalize_state(recon) * self._batched_mask(geometry, state)
 
         dft = self.dft
         c = x_pad.shape[1]

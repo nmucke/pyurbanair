@@ -79,14 +79,23 @@ def run(cfg: DictConfig) -> None:
     # forward is padding and the reconstruction is dominated by padded cells before
     # the crop-back. Pick random_crop_size as a multiple of encoder_crop_size.
     crop = train_ds.random_crop_size
-    enc_crop = int(model.encoder_crop_size)
+    global_spatial = getattr(model, "spatial_mode", "local") == "global"
+    enc_crop = 16 if global_spatial else int(model.encoder_crop_size)
+    padding_name = (
+        "encoder stride" if global_spatial else "architecture.encoder_crop_size"
+    )
+    padding_advice = (
+        "Use a grid or crop whose dimensions are multiples of 16."
+        if global_spatial
+        else "Pick an encoder_crop_size that divides the grid, or crop to a multiple."
+    )
     if crop is not None and int(crop) < enc_crop:
         print(
             f"WARNING: dataset.random_crop_size={crop} < "
-            f"architecture.encoder_crop_size={enc_crop}: every crop is zero-padded "
+            f"{padding_name}={enc_crop}: every crop is zero-padded "
             f"{crop}->{enc_crop} per spatial dim (wasted compute, padding-dominated "
             "reconstruction). Set random_crop_size to a multiple of "
-            "encoder_crop_size."
+            f"{padding_name}."
         )
     elif crop is None:
         # Full-field path: the model tiles each grid into encoder_crop_size cubes
@@ -102,10 +111,10 @@ def run(cfg: DictConfig) -> None:
             offenders = [int(d) for d in shape if int(d) % enc_crop != 0]
             print(
                 f"WARNING: full-field grid {shape} has dim(s) {offenders} not a "
-                f"multiple of architecture.encoder_crop_size={enc_crop}: those axes "
+                f"multiple of {padding_name}={enc_crop}: those axes "
                 "are zero-padded up to the next multiple every forward (wasted "
-                "compute, and the padded tiles inflate the logged KL metric). Pick "
-                "an encoder_crop_size that divides the grid, or crop to a multiple."
+                "compute, and the padded tiles affect the logged KL metric). "
+                f"{padding_advice}"
             )
 
     print(

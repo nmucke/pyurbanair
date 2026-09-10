@@ -29,6 +29,13 @@ architecture:
   # the AE config.yaml; the script fails loud on a mismatch). n_state_channels /
   # n_params are injected by the script from the fine-tune dataset.
   size: S
+  # local: independent tiles (existing behavior); global: whole rectangular field;
+  # halo: overlapping encoder/decoder tiles with central-core outputs. The
+  # latent time-stepper still runs once over the full latent grid in every mode.
+  spatial_mode: local
+  # Extra context on EACH side of a halo tile, in cells (multiple of 16).
+  # Used only by spatial_mode=halo; encoder_crop_size then sets the core size.
+  halo_size: 16
   # The AE export dir (encoder.pt / decoder.pt / weights.pt). Filled from
   # `pretrained_model_dir` by the script; re-stamped to null + skip_pretrained_load
   # in the SAVED config so ESMDA rebuilds the net from the merged weights alone.
@@ -40,8 +47,8 @@ architecture:
   param_conditioning: film
   # Deterministic latent for rollouts (identity-at-init parity holds in "mode").
   latent_type: mode
-  # Spatial crop the field is tiled into (multiple of 16). Match the AE's grid /
-  # crop; the model zero-pads to a multiple of it otherwise.
+  # Local tile / halo core size (multiple of 16, ignored in global mode).
+  # It may differ from pretraining. Local/halo pad to a multiple of this size.
   encoder_crop_size: 64
   # Geometry / SDF handling -- MUST mirror the AE (cross-checked). The stepper
   # feeds the same geometry block through the frozen encoder the AE was trained on.

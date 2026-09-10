@@ -54,11 +54,11 @@ What the wrapper adds around the raw autoencoder
   available -- those channels feed the branch. Because every projection is
   zero-init, a freshly built branch-mode AE reconstructs *exactly* what it would
   with the branch disconnected.
-* **Padding.** Each spatial dim is zero-padded up to a multiple of
-  ``encoder_crop_size`` so the autoencoder tiles cleanly into
-  ``encoder_crop_size``-sized crops, then the reconstruction is cropped back.
-  (The upstream fold requires spatial dims divisible by the crop size; anything
-  smaller becomes a single crop.)
+* **Spatial processing.** ``local`` preserves independent crops; ``global``
+  processes the whole domain per channel; ``halo`` uses overlapping encoder and
+  decoder context around central cores. Local/halo zero-pad to a multiple of
+  ``encoder_crop_size``; global pads only to the encoder stride (16). Outputs
+  are cropped back to the original domain in every mode.
 
 Reconstruction target / loss space
 -----------------------------------
@@ -77,6 +77,11 @@ from __future__ import annotations
 
 import torch
 from neural_surrogates.architectures._tadpole_field_io import _TadpoleFieldIO
+from neural_surrogates.architectures._tadpole_spatial import (
+    decode_spatial,
+    encode_spatial,
+    validate_spatial_mode,
+)
 from neural_surrogates.sdf import n_sdf_feature_channels, normalize_sdf_mode
 from torch import nn
 
@@ -107,6 +112,14 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         multiple of 16 (the encoder's total downsampling; smaller values make the
         upstream decoder over-upsample). Choose one that divides the grid to
         avoid padding, or rely on the padding fallback.
+    spatial_mode:
+        ``local`` (default): independent tiles; ``global``: whole rectangular
+        domain per channel; ``halo``: encode expanded tiles, assemble central
+        latents, decode with neighboring latent context, and retain tile cores.
+        Global pads only to stride 16; local/halo pad to ``encoder_crop_size``.
+    halo_size:
+        Halo width in cells, a nonnegative multiple of 16 (halo mode only).
+        ``encoder_crop_size`` remains the central core size. Zero disables overlap.
     max_internal_batchsize:
         Cap on how many folded crops the autoencoder processes at once (chunks
         the internal batch to bound memory); ``None`` processes them together.
@@ -151,6 +164,8 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         sdf_clamp_cells: float = 32.0,
         normalize: bool = True,
         geometry_branch: dict | None = None,
+        spatial_mode: str = "local",
+        halo_size: int = 16,
     ) -> None:
         super().__init__()
 
@@ -185,6 +200,9 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         self.size = size
         self.latent_type = latent_type
         self.encoder_crop_size = int(encoder_crop_size)
+        validate_spatial_mode(spatial_mode, halo_size)
+        self.spatial_mode = spatial_mode
+        self.halo_size = halo_size
         self.normalize = normalize
         self.encode_geometry = bool(encode_geometry)
 
@@ -332,9 +350,25 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         """Latent for one working-space input (state z-scored + geometry block).
 
         ``latent_type`` overrides the module's ``latent_type`` for this call
-        (e.g. ``"mode"`` for a deterministic latent in analysis)."""
+        (e.g. ``"mode"`` for a deterministic latent in analysis). In global/halo
+        mode the returned shape is ``(B*Cin, Cl, Dpad/16, Hpad/16, Wpad/16)``;
+        halo overlap is discarded when assembling this full-grid latent."""
         x = self._assemble_working_input(state, geometry, geom_features)
         x, _ = self._pad_to_crop_multiple(x)
+        if self.spatial_mode != "local":
+            features = self._branch_features(geometry, geom_features, state)
+            if features is not None:
+                features = self._fold_geom_feats(features, x.shape[1])
+            latent, _, _ = encode_spatial(
+                self.ae,
+                x,
+                self.spatial_mode,
+                self.encoder_crop_size,
+                self.halo_size,
+                features,
+                latent_type=latent_type,
+            )
+            return latent
         b, c, u, v, w = self._fold_dims(x)
         from einops import rearrange
 
@@ -355,7 +389,19 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         ``geom_feats`` are the folded branch features (from
         :meth:`_branch_features` + :meth:`_fold_geom_feats`); ``None`` -- the
         default and the only possibility outside branch mode -- leaves the
-        decoder unconditioned."""
+        decoder unconditioned. In global/halo mode both latents and features
+        have full padded spatial grids (batch folded over B*Cin only), and this
+        returns ``(B*Cin, 1, Dpad, Hpad, Wpad)``. Halo decoding extracts latent
+        context and retains central cores, matching :meth:`forward`."""
+        if self.spatial_mode != "local":
+            return decode_spatial(
+                self.ae,
+                latent,
+                self.spatial_mode,
+                self.encoder_crop_size,
+                self.halo_size,
+                geom_feats,
+            )
         return self.ae.decoder(latent, geom_feats)
 
     # -- forward ----------------------------------------------------------- #
@@ -387,9 +433,21 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         geom_feats = self._branch_features(geometry, geom_features, state)
         if geom_feats is not None:
             geom_feats = self._fold_geom_feats(geom_feats, x_pad.shape[1])
-        recon_pad, kl_elem = self.ae(
-            x_pad, return_kl_element=True, geom_feats=geom_feats
-        )
+        if self.spatial_mode == "local":
+            recon_pad, kl_elem = self.ae(
+                x_pad, return_kl_element=True, geom_feats=geom_feats
+            )
+        else:
+            latent, _, kl_elem = encode_spatial(
+                self.ae,
+                x_pad,
+                self.spatial_mode,
+                self.encoder_crop_size,
+                self.halo_size,
+                geom_feats,
+                return_kl=return_kl_element,
+            )
+            recon_pad = self.decode(latent, geom_feats).reshape_as(x_pad)
         d, h, w = orig
         recon = recon_pad[..., :d, :h, :w]
 

@@ -28,8 +28,9 @@ batch, in the same ``(B C U V W)`` order as the state fold) -- and
 :meth:`_TadpoleFieldIO._assemble_working_input` then returns the **state channels
 only**.
 
-The behaviour on the default (no-branch) path is byte-identical to the original
-``TadpoleAE`` methods -- this module is a pure extraction, not a rewrite.
+The default local path preserves the original ``TadpoleAE`` field IO. Global
+mode pads only to stride 16; global/halo geometry features fold over channels
+while retaining the whole spatial grid for the contextual patch runner.
 """
 
 from __future__ import annotations
@@ -50,6 +51,8 @@ class _TadpoleFieldIO:
     # mixin type-checks against the shared contract without creating class-level
     # defaults that would shadow the hosts' buffers/attrs.
     encoder_crop_size: int
+    spatial_mode: str
+    halo_size: int
     normalize: bool
     encode_geometry: bool
     sdf_features_enabled: bool
@@ -83,10 +86,11 @@ class _TadpoleFieldIO:
     def _pad_to_crop_multiple(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, tuple[int, int, int]]:
-        """Zero-pad ``(D, H, W)`` up to a multiple of ``encoder_crop_size`` so the
-        autoencoder tiles cleanly; return the padded tensor and the original
-        spatial shape for cropping the reconstruction back."""
-        mult = self.encoder_crop_size
+        """Zero-pad to the tile multiple (local/halo) or stride 16 (global).
+
+        Return the padded tensor and original shape for cropping back.
+        """
+        mult = 16 if self.spatial_mode == "global" else self.encoder_crop_size
         d, h, w = x.shape[-3:]
         pad_d, pad_h, pad_w = ((mult - s % mult) % mult for s in (d, h, w))
         if pad_d or pad_h or pad_w:
@@ -232,7 +236,17 @@ class _TadpoleFieldIO:
         # can return a fresh view, which would make an identity key miss every
         # time. `geom_features` is part of the key too -- it also feeds the block.
         cache_key = (geometry, geom_features)
-        shape_key = (state.shape[0],) + tuple(state.shape[2:]) + (state.dtype,)
+        shape_key = (
+            (state.shape[0],)
+            + tuple(state.shape[2:])
+            + (
+                state.dtype,
+                state.device,
+                self.spatial_mode,
+                self.encoder_crop_size,
+                self.halo_size,
+            )
+        )
         trainable = any(p.requires_grad for p in branch.parameters())
         if not trainable:
             cached = self._branch_cache
@@ -266,9 +280,17 @@ class _TadpoleFieldIO:
         level's stride (read off level 0, which is at stride 1) and the feature
         dimension kept. The single geometry feature is shared by all
         ``n_channels`` folded state channels, so it is expanded over ``C``:
-        result ``(B*C*U*V*W, F, Xc/s, Yc/s, Zc/s)``."""
+        result ``(B*C*U*V*W, F, Xc/s, Yc/s, Zc/s)`` in local mode.
+        Global/halo instead return ``(B*C, F, X/s, Y/s, Z/s)`` so the spatial
+        runner can extract consistent context at each level.
+        """
         from einops import rearrange
 
+        if self.spatial_mode != "local":
+            return [
+                f.unsqueeze(1).expand(-1, n_channels, -1, -1, -1, -1).flatten(0, 1)
+                for f in feats
+            ]
         cs = self.encoder_crop_size
         grid = feats[0].shape[2]
         folded: list[torch.Tensor] = []
