@@ -41,15 +41,15 @@ from hydra.utils import instantiate
 from neural_surrogates import LatentEncoding, TadpoleAE, TadpoleLatentGenerator
 from omegaconf import OmegaConf
 
-STATE_VARS = ("u", "v", "w")
-CROP = 16
-C, P, HP = 3, 2, 4
+# The fabricated AE export (+ its architecture node) is shared with the
+# trainer / deploy tests through the fixtures module.
+from tests._latent_generator_fixtures import CROP, NET, STATE_VARS, C
+from tests._latent_generator_fixtures import ae_arch as _ae_arch
+from tests._latent_generator_fixtures import make_ae_export as _make_ae_export
+
+P, HP = 2, 4
 GRID = (16, 16, 32)
 RECT_GRID = (16, 24, 40)  # not a multiple of CROP along y/x -> padding
-
-# The tiny velocity net used throughout: D=768 (3 channels x Cl=256 for size S)
-# stays as the token width (hidden_size=None -> D), only depth/heads shrink.
-NET = dict(n_layers=1, num_heads=2, film_hidden=8, time_embed_dim=8)
 
 MODES = ("local", "global", "halo")
 GEOMS = ("fold", "branch")
@@ -59,72 +59,6 @@ GEOMS = ("fold", "branch")
 def _seed():
     torch.manual_seed(7)
     yield
-
-
-def _ae_arch(spatial_mode: str, geometry: str, latent_type: str = "mode") -> dict:
-    arch: dict[str, Any] = {
-        "_target_": "neural_surrogates.TadpoleAE",
-        "size": "S",
-        "encoder_crop_size": CROP,
-        "latent_type": latent_type,
-        "normalize": True,
-        "sdf_clamp_cells": 8.0,
-        "spatial_mode": spatial_mode,
-        "halo_size": 16,
-    }
-    if geometry == "fold":
-        arch.update(encode_geometry=True, sdf_features="both", geometry_branch=None)
-    else:
-        arch.update(
-            encode_geometry=False,
-            sdf_features="sdf",
-            geometry_branch={"width": 8},
-        )
-    return arch
-
-
-def _make_ae_export(
-    root: Path, spatial_mode: str, geometry: str, *, latent_type: str = "mode"
-) -> Path:
-    """Fabricate a ``pretrain_autoencoder.py``-shaped AE export (weights.pt +
-    config.yaml) for one spatial mode x geometry path. Zero-init heads are
-    randomised so the parity checks cannot pass vacuously."""
-    arch = _ae_arch(spatial_mode, geometry, latent_type)
-    kwargs = {k: v for k, v in arch.items() if k != "_target_"}
-    ae = TadpoleAE(n_state_channels=C, **kwargs)
-    with torch.no_grad():
-        raw: Any = ae.ae
-        torch.nn.init.normal_(
-            raw.decoder.transformer_decoder.final_layer.out_proj.weight, std=0.05
-        )
-        if geometry == "branch":
-            projections = (
-                list(raw.encoder.conv_encoder.geom_proj)
-                + list(raw.decoder.conv_decoder.geom_proj)
-                + [raw.decoder.geom_latent_proj]
-            )
-            for proj in projections:
-                torch.nn.init.normal_(proj.weight, std=0.05)
-    ae.set_normalization([0.1, -0.2, 0.3], [1.0, 1.5, 0.7])
-
-    model_dir = root / "model_weights" / f"ae_{spatial_mode}_{geometry}"
-    model_dir.mkdir(parents=True)
-    torch.save(ae.state_dict(), model_dir / "weights.pt")
-    OmegaConf.save(
-        OmegaConf.create(
-            {
-                "architecture": arch,
-                "dataset": {
-                    "root_dir": str(root / "ae_data"),
-                    "state_vars": list(STATE_VARS),
-                    "sdf_features": arch["sdf_features"],
-                    "sdf_clamp_cells": 8.0,
-                },
-            }
-        ),
-        model_dir / "config.yaml",
-    )
-    return model_dir
 
 
 def _reference_ae(ae_dir: Path) -> TadpoleAE:

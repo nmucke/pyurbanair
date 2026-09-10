@@ -26,6 +26,7 @@ from neural_surrogates.dd_loss import DomainDecompositionLoss
 from neural_surrogates.decomposition import DomainDecomposition
 from neural_surrogates.ensemble_forward_model import NeuralSurrogateEnsembleForwardModel
 from neural_surrogates.forward_model import NeuralSurrogateForwardModel
+from neural_surrogates.generative_spinup import GenerativeSpinup
 from neural_surrogates.sdf import (
     n_sdf_feature_channels,
     normalize_sdf_mode,
@@ -34,6 +35,7 @@ from neural_surrogates.sdf import (
 from neural_surrogates.training import (
     AutoencoderTrainer,
     BaseTraining,
+    LatentFlowMatchingTrainer,
     PatchTrainer,
     Trainer,
 )
@@ -51,6 +53,7 @@ __all__ = [
     "PatchTrainer",
     "Trainer",
     "AutoencoderTrainer",
+    "LatentFlowMatchingTrainer",
     "architectures",
     "SimpleConv",
     "UNetConvNeXt",
@@ -67,6 +70,7 @@ __all__ = [
     "DomainDecomposition",
     "NeuralSurrogateForwardModel",
     "NeuralSurrogateEnsembleForwardModel",
+    "GenerativeSpinup",
     "sdf_features",
     "n_sdf_feature_channels",
     "normalize_sdf_mode",

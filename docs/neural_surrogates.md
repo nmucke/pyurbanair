@@ -1034,7 +1034,7 @@ Key behaviours:
 |---|---|
 | **Trained step size** | The network always advances at its trained cadence (`trained_output_frequency`). To honour a requested `output_frequency` that differs, the rollout emits a frame at the internal step closest to each requested output time — so the result lands on the requested grid whether or not the two cadences divide evenly. A requested cadence *finer* than the trained step (the surrogate can't emit between steps) raises. |
 | **Domain check** | The requested `(nx, ny, nz, bounds)` must equal `trained_domain`; a mismatch raises (the network only applies to its training grid). |
-| **Spin-up / collocation** | With `spinup_source: forward_model` a cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. With `spinup_source: training_data` the surrogate runs **no** spin-up of its own — the assimilation is warm-started from training snapshots loaded by `run_esmda` (see below), so a cold start (`state is None`) raises. |
+| **Spin-up / collocation** | With `spinup_source: forward_model` a cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. With `spinup_source: training_data` the surrogate runs **no** spin-up of its own — the assimilation is warm-started from training snapshots loaded by `run_esmda` (see below), so a cold start (`state is None`) raises. With `spinup_source: generative` a cold start is **sampled** from a trained latent generator conditioned on the member's current parameters (see "Generative spin-up" below); the CFD backend is neither built nor run. |
 | **Geometry** | When `stl_path` is set the geometry channel is voxelised from the STL onto the grid ([geometry.py](../libs/neural-surrogates/src/neural_surrogates/geometry.py)); otherwise it falls back to the non-zero-state convention used by `TransitionDataset`. |
 | **Parameters** | Time-varying inflow params are interpolated onto the internal step times in the trained `param_vars` order; scalar params are broadcast. |
 | **State history** | `num_history_steps` (`H`) is read **off the built network** — there is no forward-model config knob. The rollout buffer is `(B, H·C, *grid)`, oldest first; each step feeds it to the net, appends the `(B, C, *grid)` prediction, drops the oldest frame, and **emits the prediction** rather than the wider buffer. `_output_schedule()` (`n_internal`, `emit_steps`) is unchanged, so a history rollout emits exactly as many frames as an `H=1` one and substepping stays orthogonal. At `H=1` it is the historic loop, tensor for tensor. Seeding policy below. |
@@ -1132,6 +1132,57 @@ The `pyudales_neural_surrogate` case in
 builds a throwaway `model_dir` (random weights, trained domain == the test
 grid) via the `surrogate_model_dir_factory` fixture, exercising the full
 load-from-folder path without needing a real checkpoint.
+
+**Generative spin-up (`spinup_source: generative`).** Plan 07 phase 4
+([docs/neural_surrogate_plans/07_latent_flow_matching_spinup.md](neural_surrogate_plans/07_latent_flow_matching_spinup.md) §4).
+The cold-start field is *sampled* from a trained `TadpoleLatentGenerator`
+artifact by
+[`neural_surrogates.generative_spinup.GenerativeSpinup`](../libs/neural-surrogates/src/neural_surrogates/generative_spinup.py),
+configured by the nested `forward_model.generative_spinup` block (`model_dir`,
+`template_path`, `seed`, `sample_batch_size`, `num_sampling_steps`,
+`save_diagnostics`; the paths default to `null` and are validated at
+construction only in this mode). Key behaviours:
+
+- *Explicit template.* `template_path` is a NetCDF with the canonical coords
+  and an explicit `blanking` mask; it is canonicalised through
+  `_to_regular_grid`, reduced to one frame, and validated against the
+  artifact's `generator.physical_schema` (state order/dims, grid shape,
+  spacing/bounds, mask convention, `supported_geometries` fingerprint = shape +
+  fluid-cell count). Its velocity values are never used and obstacles are never
+  inferred from generated zeros; an unsupported geometry raises.
+- *Conditioning.* Each member's **current** parameters in the saved
+  `param_vars` order — first knot of a time-varying schedule, the scalar for a
+  static one, `default_params` for an omitted one (else raise) — repeated `Hp`
+  times as a constant history. The rollout itself still uses the full schedule.
+- *Common random numbers.* Member `i`'s latent noise is seeded by
+  `seed * 1_000_003 + i` and drawn on CPU before batching, so it is identical
+  across `sample_batch_size` settings and across ESMDA iterations; a parameter
+  update changes the sample only through the conditioning.
+- *Regenerate on every cold call.* `run_single(state=None)` and
+  `run_ensemble(state=None)` sample afresh each time (bounded batches of
+  `sample_batch_size`, then the usual warm path → `rollout_batched`); the CFD
+  spin-up ensemble is never constructed, `clone_for_member` shares the handle,
+  `prepare_neural_surrogate` is a no-op, and a config-node
+  `spinup_forward_model` is left un-instantiated (`dirs` raises
+  `AttributeError`, so the ensemble base uses its own `temp_dir`).
+- *ESMDA lifecycle* (`run_esmda.py`): window 0 stays a cold start
+  (`state_input=None`), nothing is pre-generated to `_initial_states`, the
+  prior is not anchored and `pin_initial_from_spinup` stays `False` — so every
+  ESMDA iteration and the final posterior forecast regenerate from the updated
+  parameters while the `t=0` knot stays inferable. Later windows carry the
+  posterior state forward (no generation; boundary pinning unchanged). A
+  state-bearing smoother (`esmda/smoother=state|state_and_parameter|state_and_dynamic`)
+  is rejected before any forecast. `save_diagnostics: true` writes every
+  generated snapshot under `<out_dir>/_generated_states/window_<w>/call_<k>/member_<i>.nc`
+  (write-only; never read back). Generator failures raise with the member and
+  its conditioning — there is no CFD fallback.
+- `H > 1` steppers get the single generated frame repeated (the existing
+  repeat-seeding warning); state-history generation is out of scope.
+
+Tests: [tests/test_generative_spinup.py](../tests/test_generative_spinup.py)
+(an instrumented stub generator injected through `GenerativeSpinup._load_model`,
+a real `ParameterESMDA`/`TimeVaryingParameterESMDA` lifecycle, and a full
+`run_esmda.run` smoke run from a disk truth).
 
 ### Extending
 

@@ -10,11 +10,21 @@ concrete trainers differ only in how a batch becomes a loss:
   the model's per-patch intermediates.
 * :class:`AutoencoderTrainer` -- snapshot (V)AE reconstruction + KL loss (no
   rollout / pushforward), for Tadpole-style pre-training.
+* :class:`LatentFlowMatchingTrainer` -- conditional flow-matching MSE in a
+  frozen AE's latent space (plan 07 generative spin-up); deterministic,
+  separately-seeded validation.
 """
 
 from neural_surrogates.training.autoencoder import AutoencoderTrainer
 from neural_surrogates.training.base import BaseTraining
+from neural_surrogates.training.flow_matching import LatentFlowMatchingTrainer
 from neural_surrogates.training.patch import PatchTrainer
 from neural_surrogates.training.standard import Trainer
 
-__all__ = ["BaseTraining", "Trainer", "PatchTrainer", "AutoencoderTrainer"]
+__all__ = [
+    "BaseTraining",
+    "Trainer",
+    "PatchTrainer",
+    "AutoencoderTrainer",
+    "LatentFlowMatchingTrainer",
+]

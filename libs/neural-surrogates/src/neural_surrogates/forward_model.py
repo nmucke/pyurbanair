@@ -25,6 +25,10 @@ Design notes / requirements honoured here:
   geometry channel is voxelised from it onto the simulation grid;
   otherwise it falls back to the non-zero-state convention used by
   :class:`~neural_surrogates.datasets.transition.TransitionDataset`.
+* **Generative spin-up.** With ``spinup_source="generative"`` a cold start
+  is *sampled* from a trained latent generator conditioned on the member's
+  current parameters (:mod:`neural_surrogates.generative_spinup`), so no CFD
+  backend is needed at all; the sample is regenerated on every cold call.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ import logging
 import pathlib
 import warnings
 from importlib import import_module
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, cast
 
 import numpy as np
 import torch
@@ -42,6 +46,7 @@ import xarray as xr
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
+from .generative_spinup import GenerativeSpinup
 from .geometry import nonzero_fluid_mask, solid_c_fluid_mask, stl_to_fluid_mask
 
 logger = logging.getLogger(__name__)
@@ -104,7 +109,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
 
     def __init__(
         self,
-        spinup_forward_model: BaseForwardModel,
+        spinup_forward_model: Any,
         nx: int,
         ny: int,
         nz: int,
@@ -128,6 +133,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         spinup_source: str = "forward_model",
         geometry_var: str = "blanking",
         rollout_batch_size: Optional[int] = None,
+        generative_spinup: Optional[dict[str, Any]] = None,
     ) -> None:
         """Initialise the surrogate.
 
@@ -180,7 +186,11 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 state. A cold start (``state is None``) is therefore rejected in
                 this mode. The flag is kept so the ensemble can skip cloning the
                 (unused) CFD backend per member and ``prepare`` can skip
-                compiling it.
+                compiling it. ``"generative"`` samples the cold-start field from
+                a trained latent generator (:class:`GenerativeSpinup`)
+                conditioned on the member's current parameters; the CFD
+                backend is neither built nor run, and every cold call
+                regenerates the field from the parameters it is given.
             geometry_var: State variable holding the per-cell obstacle
                 indicator (``"blanking"``). When present on the initial-field
                 template the geometry channel is built from it directly,
@@ -191,6 +201,12 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 split a large ensemble into chunks of this size, trading a small
                 amount of throughput for a lower peak GPU memory footprint (the
                 fix for the rollout OOM on large ensembles / high resolution).
+            generative_spinup: The ``generative_spinup`` config block
+                (``model_dir``, ``template_path``, ``seed``,
+                ``sample_batch_size``, ``num_sampling_steps``; an optional
+                ``save_diagnostics`` flag is consumed by the caller). Required
+                when ``spinup_source == "generative"`` and ignored otherwise,
+                so every other mode is unaffected by its presence.
         """
         super().__init__(results_dir=results_dir)
 
@@ -234,10 +250,10 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         self.torch_dtype = getattr(torch, dtype)
 
         self.spinup_source = spinup_source
-        if spinup_source not in ("forward_model", "training_data"):
+        if spinup_source not in ("forward_model", "training_data", "generative"):
             raise ValueError(
-                f"spinup_source must be 'forward_model' or 'training_data', "
-                f"got {spinup_source!r}."
+                f"spinup_source must be 'forward_model', 'training_data' or "
+                f"'generative', got {spinup_source!r}."
             )
         self.geometry_var = geometry_var
         if rollout_batch_size is not None and rollout_batch_size < 1:
@@ -253,13 +269,28 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
 
         # With ``_recursive_: false`` on the Hydra config the spin-up backend
         # arrives as an un-instantiated node; build it here (in memory, so its
-        # final field can seed the rollout).
+        # final field can seed the rollout). The generative source never touches
+        # the CFD backend, so a config node is left un-built (``None``): a
+        # generative surrogate must not require a CFD executable, case dir or
+        # preprocessing. An already-built backend object is kept as-is.
+        self.spinup_forward_model: Any
         if isinstance(spinup_forward_model, BaseForwardModel):
             self.spinup_forward_model = spinup_forward_model
+        elif spinup_source == "generative":
+            self.spinup_forward_model = None
         else:
             from hydra.utils import instantiate
 
             self.spinup_forward_model = instantiate(spinup_forward_model)
+
+        # The generative sampler is a lightweight handle: it loads its weights
+        # and template on the first cold start. Members of an ensemble share
+        # it read-only (see clone_for_member).
+        self._generative_spinup: Optional[GenerativeSpinup] = None
+        if spinup_source == "generative":
+            self._generative_spinup = self._build_generative_spinup(
+                generative_spinup, device=device, dtype=dtype
+            )
 
         # Build the network if a config node was passed, otherwise use it
         # directly. The channel/param counts are derived from the var lists.
@@ -380,6 +411,47 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 f"model_dir with a complete config.yaml (got model_dir="
                 f"{model_dir!r}) or supply these explicitly."
             )
+
+    def _build_generative_spinup(
+        self,
+        block: Optional[dict[str, Any]],
+        device: str,
+        dtype: str,
+    ) -> GenerativeSpinup:
+        """Build the :class:`GenerativeSpinup` handle from its config block.
+
+        ``model_dir`` / ``template_path`` default to ``null`` in
+        ``conf/model/neural_surrogate.yaml`` (a ``???`` would break every
+        composition that never uses generative mode), so they are validated
+        here instead. ``save_diagnostics`` is a run-script concern and is
+        dropped before the handle is built; the surrogate's own
+        ``default_params`` are passed through so a parameter the assimilation
+        does not vary is conditioned on its constant fallback.
+        """
+        from omegaconf import OmegaConf
+
+        if block is None:
+            raise ValueError(
+                "spinup_source='generative' requires the generative_spinup "
+                "config block (model_dir, template_path, ...)."
+            )
+        if OmegaConf.is_config(block):
+            block = cast(dict[str, Any], OmegaConf.to_container(block, resolve=True))
+        settings: dict[str, Any] = dict(block)
+        settings.pop("save_diagnostics", None)
+        for key in ("model_dir", "template_path"):
+            if settings.get(key) is None:
+                raise ValueError(
+                    f"spinup_source='generative' requires generative_spinup.{key} "
+                    "(it defaults to null in conf/model/neural_surrogate.yaml)."
+                )
+        return GenerativeSpinup(
+            device=device,
+            dtype=dtype,
+            default_params=self.default_params,
+            geometry_var=self.geometry_var,
+            **settings,
+        )
 
     # -- construction-time validation --------------------------------------
 
@@ -591,6 +663,16 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 da = da.isel(time=-1)
             mask = 1.0 - np.asarray(da.values, dtype=np.float64)
             return torch.from_numpy(mask).to(device=self.device, dtype=self.torch_dtype)
+        if self.spinup_source == "generative":
+            # A generated snapshot always carries the template's mask, and the
+            # fallbacks below either need the (absent) CFD backend or would
+            # infer obstacles from generated zeros -- both forbidden here.
+            raise RuntimeError(
+                "spinup_source='generative' requires the geometry variable "
+                f"'{self.geometry_var}' on the initial-state template (have "
+                f"{tuple(template.data_vars)}); obstacles are never inferred "
+                "from the state or a CFD backend in this mode."
+            )
         template_var = template[self.state_vars[0]]
         if "time" in template_var.dims:
             template_var = template_var.isel(time=-1)
@@ -723,7 +805,8 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         """Return the template carrying coords + the initial field(s).
 
         On a warm start the supplied ``state`` is used. On a cold start the
-        field is produced by the CFD spin-up backend. The ``training_data``
+        field is produced by the CFD spin-up backend, or sampled from the
+        latent generator for ``spinup_source="generative"``. The ``training_data``
         spin-up source has no cold start of its own — the caller
         (``scripts/esmda/run_esmda.py``) loads the training snapshots and passes them
         in as the initial ``state`` — so a cold start in that mode is an error.
@@ -747,6 +830,14 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 "caller (scripts/esmda/run_esmda.py / neural_surrogates.training_spinup). "
                 "Got state=None."
             )
+        elif self.spinup_source == "generative":
+            # Cold start: sample the field from the member's CURRENT parameters
+            # (first knot of a time-varying schedule). Regenerated on every
+            # call, so an updated parameter ensemble gets a freshly conditioned
+            # initial state at its next forecast.
+            assert self._generative_spinup is not None
+            snap = self._generative_spinup.generate([params], [member_index])[0]
+            self._validate_generated_snapshot(snap)
         else:
             # Cold start: bootstrap with the CFD backend that produced the data.
             self.spinup_forward_model.spinup_time = self.spinup_time
@@ -763,6 +854,55 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
 
         snap = self._to_regular_grid(snap)
         return self._history_window(snap)
+
+    def _validate_generated_snapshot(self, snap: xr.Dataset) -> None:
+        """Check a generated snapshot against the surrogate's own contract.
+
+        The generator validated the snapshot against *its* schema; this checks
+        it against the *stepper's*: every ``state_vars`` channel present on the
+        canonical ``(z, y, x)`` dims at the requested ``(nz, ny, nx)`` with the
+        requested cell spacing, so a generator/stepper mismatch fails here
+        rather than inside the rollout.
+        """
+        from omegaconf import OmegaConf
+
+        expected = {"z": self.nz, "y": self.ny, "x": self.nx}
+        for var in self.state_vars:
+            if var not in snap.data_vars:
+                raise ValueError(
+                    f"generated snapshot lacks state variable '{var}' "
+                    f"(surrogate state_vars={self.state_vars})."
+                )
+            if tuple(snap[var].dims) != ("z", "y", "x"):
+                raise ValueError(
+                    f"generated snapshot variable '{var}' has dims "
+                    f"{snap[var].dims}, expected ('z', 'y', 'x')."
+                )
+        for dim, n in expected.items():
+            if int(snap.sizes[dim]) != n:
+                raise ValueError(
+                    f"generated snapshot has {snap.sizes[dim]} cells along "
+                    f"'{dim}', the surrogate runs on {n}."
+                )
+        bounds = np.asarray(
+            (
+                OmegaConf.to_container(self.bounds)
+                if OmegaConf.is_config(self.bounds)
+                else self.bounds
+            ),
+            dtype=float,
+        )
+        for axis, dim in enumerate("xyz"):
+            coord = np.asarray(snap[dim].values, dtype=float)
+            if coord.size < 2:
+                continue
+            spacing = (bounds[axis, 1] - bounds[axis, 0]) / expected[dim]
+            if not np.allclose(np.diff(coord), spacing, rtol=1e-4, atol=_BOUNDS_ATOL):
+                raise ValueError(
+                    f"generated snapshot '{dim}' spacing {np.diff(coord).mean():.6g} "
+                    f"does not match the surrogate's cell spacing {spacing:.6g} "
+                    f"(bounds {bounds[axis].tolist()}, n={expected[dim]})."
+                )
 
     def _history_window(self, snap: xr.Dataset) -> xr.Dataset:
         """Reduce a (possibly multi-frame) field to the network's input window.
@@ -984,7 +1124,17 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
     @property
     def dirs(self) -> Any:
         """Expose the spin-up backend's dirs so the ensemble base can find
-        its temp directory."""
+        its temp directory.
+
+        Raises ``AttributeError`` when there is no backend (generative mode
+        with an un-built config node), so ``hasattr(model, "dirs")`` is False
+        and the ensemble base falls back to its own ``temp_dir``.
+        """
+        if self.spinup_forward_model is None:
+            raise AttributeError(
+                "NeuralSurrogateForwardModel has no spin-up backend (and hence "
+                f"no dirs) with spinup_source={self.spinup_source!r}."
+            )
         return self.spinup_forward_model.dirs
 
     def clone_for_member(
@@ -1000,10 +1150,13 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         warm-starts every window from provided states), so per-member experiment
         directories serve no purpose — the template's backend is shared instead
         of cloned. This skips building (and renaming namoptions for) one CFD
-        ForwardModel per member.
+        ForwardModel per member. ``generative`` mode likewise never runs the
+        backend; its members additionally share the (read-only)
+        :class:`GenerativeSpinup` handle, so the weights and template are
+        loaded once per process.
         """
         clone = copy.copy(self)
-        if self.spinup_source != "training_data":
+        if self.spinup_source not in ("training_data", "generative"):
             clone.spinup_forward_model = _clone_backend_forward_model(
                 self.spinup_forward_model, experiment_base_dir, experiment_name
             )

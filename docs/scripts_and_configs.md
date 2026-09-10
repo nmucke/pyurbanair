@@ -218,8 +218,11 @@ same four top-level keys: `name`, `solver_name`, `forward_model._target_`,
   physics and parameter meaning as pyudales's periodic nudging. See
   [docs/pypalm.md §8](pypalm.md).
 - **neural_surrogate**: `model_dir` (checkpoint folder written by `train_neural_surrogate.py`),
-  `spinup_source: forward_model|training_data` (cold-start source),
-  `spinup_forward_model` (a nested uDALES config for the CFD cold start),
+  `spinup_source: forward_model|training_data|generative` (cold-start source),
+  `spinup_forward_model` (a nested uDALES config for the CFD cold start; left
+  un-built under `generative`), `generative_spinup` (`model_dir` /
+  `template_path` / `seed` / `sample_batch_size` / `num_sampling_steps` /
+  `save_diagnostics`; `null` defaults, validated only when generative),
   `default_params` (constant fallbacks for params the caller omits),
   `_recursive_: false` (surrogate builds its spin-up backend itself).
   Uses `solver_name: pylbm` (regular-grid observation mapping) regardless of the

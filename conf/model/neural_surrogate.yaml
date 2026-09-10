@@ -54,7 +54,26 @@ forward_model:
   #                     (see the model-level `training_data_spinup` block below);
   #                     the surrogate itself never runs a spin-up in this mode, so
   #                     a cold start (state is None) is an error.
+  #   generative     -> sample the cold-start field from a trained latent
+  #                     generator (train_latent_generator.py artifact) conditioned
+  #                     on each member's CURRENT parameters; regenerated on every
+  #                     cold forward call, so ESMDA re-conditions the initial
+  #                     state after each parameter update. Needs the
+  #                     `generative_spinup` block below; the CFD backend is
+  #                     neither built nor run.
   spinup_source: training_data
+
+  # --- generative spin-up (spinup_source: generative) ------------------------
+  # model_dir / template_path default to null rather than ??? so every config
+  # that never uses generative mode still composes; the surrogate validates
+  # them at construction when spinup_source is generative.
+  generative_spinup:
+    model_dir: null          # train_latent_generator.py artifact (config.yaml + weights.pt)
+    template_path: null      # NetCDF with canonical coords + an explicit `blanking` mask
+    seed: 0                  # base seed; member i's noise is seeded by (seed, i)
+    sample_batch_size: 8     # members sampled per generator call (memory bound)
+    num_sampling_steps: null # Euler steps; null -> the artifact's validated default
+    save_diagnostics: false  # run_esmda: write generated snapshots under _generated_states/
 
   # --- spin-up backend (produces the cold-start initial condition) ---------
   spinup_forward_model:
