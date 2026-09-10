@@ -442,7 +442,12 @@ Unlike `lora_nextstep` (architecture read from the pretrained `model_dir`),
 architecture **inline** — its `pretrained_model_dir` is the **AE** dir, and the
 script instantiates the stepper fresh with `pretrained_ae_dir` set to it. It also
 carries a `lora.target_preset: tadpole_encdec` and a `trainable_modules` list (the
-sub-network + γ skips + `latent_residual_scale`, trained fully, not via LoRA).
+sub-network + γ skips + `latent_residual_scale` + optional `skip_mixing`,
+trained fully, not via LoRA).
+DFT additionally exposes `architecture.skip_mixing: null`; set it to
+`{width: 32, levels: [4, 8]}` to enable zero-initialized pointwise state mixing
+alongside the gated skips. Levels select spatial strides from `[1, 2, 4, 8]`.
+This is a DFT-only option; no matching AE setting or retraining is required.
 Both `pretrain_autoencoder.yaml` and `finetune_mode/dft.yaml` expose
 `architecture.spatial_mode: local | global | halo` (default `local`),
 `encoder_crop_size` (tile/core size), and `halo_size` (context cells per side,

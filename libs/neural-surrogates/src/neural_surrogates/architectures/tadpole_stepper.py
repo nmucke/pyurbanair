@@ -250,6 +250,10 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
     halo_size:
         Context width in cells, a nonnegative multiple of 16 (halo mode only);
         ``encoder_crop_size`` sets the central core size.
+    skip_mixing:
+        Optional mapping with ``width`` (default 32) and ``levels`` (spatial
+        strides, default [4, 8]). Adds zero-init pointwise state mixing alongside
+        the gated skips. None preserves the existing model and execution path.
     max_internal_batchsize:
         Cap on folded crops processed at once (``None`` = together).
     predict_residual:
@@ -326,6 +330,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         geometry_branch: dict | None = None,
         spatial_mode: str = "local",
         halo_size: int = 16,
+        skip_mixing: dict | None = None,
     ) -> None:
         super().__init__()
 
@@ -489,6 +494,24 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             geom_in_dims=geom_in_dims,
         )
 
+        from .tadpole_skip_mixing import TadpoleSkipMixing
+
+        self.skip_mixing: TadpoleSkipMixing | None = None
+        if skip_mixing is not None:
+            from ._tadpole.architecture.p3d import P3D_Configs
+
+            backbone = P3D_Configs(size)
+            self.skip_mixing = TadpoleSkipMixing(
+                self.n_state_channels,
+                input_channels,
+                (
+                    *backbone["feature_embedding_dim"][:2],
+                    backbone["hidden_size"],
+                    2 * backbone["hidden_size"],
+                ),
+                **dict(skip_mixing),
+            )
+
         # Standardisation buffers (identity until set_normalization). param
         # buffers use max(n_params, 1) so the zero-param case stays valid.
         if normalize:
@@ -574,7 +597,11 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         # Only the state channels are folded in branch mode
         # (n_geometry_channels == 0), so the fold expands over C == n_state_channels.
         return {
-            "geom_feats": self._fold_geom_feats(feats, self.n_state_channels),
+            "geom_feats": (
+                [f.repeat_interleave(self.n_state_channels, dim=0) for f in feats]
+                if self.skip_mixing is not None
+                else self._fold_geom_feats(feats, self.n_state_channels)
+            ),
             "geom_cond": feats[3],
         }
 
@@ -698,14 +725,15 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
 
         Global/halo mode returns a full-grid latent of shape
         ``(B*Cin, Cl, Dpad/16, Hpad/16, Wpad/16)`` and a ``SpatialResiduals``
-        context holding each encoder patch's multiscale skips. Pass both to
-        :meth:`decode`; local mode keeps the original crop-folded contract.
+        context holding each encoder patch's multiscale skips. Enabled skip
+        mixing uses this contract in local mode too. Pass both to
+        :meth:`decode`; local mode without mixing keeps the crop-folded contract.
         """
         from einops import rearrange
 
         x = self._assemble_working_input(state, geometry, geom_features)
         x, _ = self._pad_to_crop_multiple(x)
-        if self.spatial_mode != "local":
+        if self.spatial_mode != "local" or self.skip_mixing is not None:
             branch = self._geom_branch_kwargs(state, geometry, geom_features)
             latent, residuals, _ = encode_spatial(
                 self.dft,
@@ -741,13 +769,14 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         ``geom_feats`` is the folded geometry-branch pyramid (what
         :meth:`_geom_branch_kwargs` returns); pass it in branch mode so the
         decoder's projections see the same conditioning :meth:`encode` used.
-        In global/halo mode these features have full padded grids and batch
+        In global/halo mode (or with skip mixing enabled) these features have
+        full padded grids and batch
         ``B*Cin``, and the output is ``(B*Cin, 1, Dpad, Hpad, Wpad)``.
         """
-        if self.spatial_mode != "local":
+        if self.spatial_mode != "local" or self.skip_mixing is not None:
             if not isinstance(residuals, SpatialResiduals):
                 raise ValueError(
-                    "global/halo decode requires the SpatialResiduals from encode"
+                    "spatial/mixed decode requires the SpatialResiduals from encode"
                 )
             return decode_spatial(
                 self.dft,
@@ -757,6 +786,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
                 self.halo_size,
                 geom_feats,
                 residuals=residuals,
+                skip_mixing=self.skip_mixing,
             )
         dec_kwargs = {} if geom_feats is None else {"geom_feats": geom_feats}
         return self.dft.decoder(latent, residuals, **dec_kwargs)
@@ -800,6 +830,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             branch.get("geom_feats"),
             residuals=residuals,
             zero_skips=reference,
+            skip_mixing=self.skip_mixing,
         ).reshape_as(x)
 
     # -- forward ----------------------------------------------------------- #
@@ -828,7 +859,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             self._check_geom_cond_grid(branch["geom_cond"], x_pad)
         recon_pad = (
             self.dft(x_pad, params=p, **branch)
-            if self.spatial_mode == "local"
+            if self.spatial_mode == "local" and self.skip_mixing is None
             else self._spatial_recon(x_pad, branch, p)
         )
         d, h, w = orig
@@ -859,7 +890,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         x = self._assemble_working_input(state, geometry, geom_features)
         x_pad, orig = self._pad_to_crop_multiple(x)
 
-        if self.spatial_mode != "local":
+        if self.spatial_mode != "local" or self.skip_mixing is not None:
             branch = self._geom_branch_kwargs(state, geometry, geom_features)
             recon = self._spatial_recon(x_pad, branch, reference=True)
             d, h, w = orig

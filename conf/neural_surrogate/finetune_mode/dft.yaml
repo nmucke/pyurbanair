@@ -43,6 +43,10 @@ architecture:
   # "default" builds the param-conditioned latent transformer (zero-init); None
   # gives a pure frozen AE (no time-stepping increment).
   subnetwork: default
+  # Optional state-only residual adapters alongside the gated DFT skips.
+  # Enable with: architecture.skip_mixing='{width: 32, levels: [4, 8]}'
+  # Levels are spatial strides: 1, 2, 4, 8; null preserves existing checkpoints.
+  skip_mixing: null
   # film (adaLN scale/shift, default) | token (additive param embedding) | none.
   param_conditioning: film
   # Deterministic latent for rollouts (identity-at-init parity holds in "mode").
@@ -87,10 +91,11 @@ lora:
   modules_to_save: []
 
 # Fully-trained NEW modules (not LoRA): the latent subnetwork + param
-# conditioning, the latent residual scale, and the two gamma skip scales. Matched
+# conditioning, the latent residual scale, skip mixers, and gamma skip scales. Matched
 # against the (base-relative) parameter names by the finetune script.
 trainable_modules:
   - subnetwork
   - latent_residual_scale
+  - skip_mixing
   - dft.decoder.conv_decoder.scales
   - dft.decoder.transformer_decoder.scales

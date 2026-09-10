@@ -58,11 +58,13 @@ class ConvDecoderSkip(nn.Module):
         self.scales = nn.Parameter(torch.zeros(self.conv_decoder.num_upsampling_layers))
         self.use_checkpoint = use_checkpoint
 
-    def forward(self, x, encoder_outputs, geom_feats=None):
+    def forward(self, x, encoder_outputs, geom_feats=None, skip_additions=None):
         x = self.conv_decoder._add_geom(x, geom_feats, 2)
         x = self.conv_decoder.upsampling_layers[0](x)
         x = self.conv_decoder._add_geom(x, geom_feats, 1)
         x += encoder_outputs[::-1][0] * self.scales[0]
+        if skip_additions is not None and skip_additions[-1] is not None:
+            x = x + skip_additions[-1]
         for i in range(self.conv_decoder.num_upsampling_layers - 1):
             for j in range(self.conv_decoder.repetitions):
                 if self.use_checkpoint:
@@ -71,6 +73,8 @@ class ConvDecoderSkip(nn.Module):
                     x = self.conv_decoder.blocks[i * self.conv_decoder.repetitions + j](x)
             x = self.conv_decoder.upsampling_layers[i + 1](x)
             x += encoder_outputs[::-1][i + 1] * self.scales[i + 1]
+            if skip_additions is not None and skip_additions[-i - 2] is not None:
+                x = x + skip_additions[-i - 2]
         x = self.conv_decoder._add_geom(x, geom_feats, 0)
         x = self.conv_decoder.decompress(x)
         return x
@@ -116,7 +120,7 @@ class P3DTransformerDecoderSkip(nn.Module):
         self.scales = nn.Parameter(torch.zeros(len(self.transformer.upsamples)))
         self.use_checkpoint = use_checkpoint
 
-    def forward(self, x, encoder_outputs):
+    def forward(self, x, encoder_outputs, skip_additions=None):
         # decoder: reverse order except the first (which is up1_0 and decoder_level_0)
         for i, (upsample, decoder_level) in enumerate(
             zip(self.transformer.upsamples, self.transformer.decoder_levels)
@@ -124,6 +128,8 @@ class P3DTransformerDecoderSkip(nn.Module):
             #            print(f"decoder_level input shape: {x.shape}")
             x = upsample(x)
             x += encoder_outputs[::-1][i] * self.scales[i]
+            if skip_additions is not None and skip_additions[-i - 1] is not None:
+                x = x + skip_additions[-i - 1]
             #            print(f"upsample output shape: {x.shape}")
             if self.use_checkpoint:
                 x = checkpoint(decoder_level, x)
@@ -175,13 +181,20 @@ class P3DDecoderSkip(nn.Module):
         x: torch.Tensor,
         encoder_residuals: list,
         geom_feats=None,
+        skip_additions=None,
     ):
         if geom_feats is not None and self.geom_latent_proj is not None:
             x = x + self.geom_latent_proj(geom_feats[3])
         ## Sequence Modeling
-        x = self.transformer_decoder(x, encoder_residuals[1])
+        x = self.transformer_decoder(
+            x, encoder_residuals[1],
+            None if skip_additions is None else skip_additions[1],
+        )
         ## Conv decoding
-        x = self.conv_decoder(x, encoder_residuals[0], geom_feats)
+        x = self.conv_decoder(
+            x, encoder_residuals[0], geom_feats,
+            None if skip_additions is None else skip_additions[0],
+        )
         return x
 
 

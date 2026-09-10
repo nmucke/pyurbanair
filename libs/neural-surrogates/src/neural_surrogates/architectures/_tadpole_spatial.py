@@ -15,6 +15,8 @@ from typing import Any, Sequence
 
 import torch
 
+from .tadpole_skip_mixing import TadpoleSkipMixing
+
 STRIDE = 16
 
 
@@ -63,6 +65,8 @@ def regions_for(shape: Sequence[int], mode: str, crop: int, halo: int) -> list[R
     if mode == "global":
         whole = tuple(slice(0, n) for n in shape)
         return [Region(whole, whole)]
+    if mode == "local":
+        halo = 0
     return [
         Region(
             tuple(slice(s, s + crop) for s in start),
@@ -158,6 +162,7 @@ def decode_spatial(
     *,
     residuals: SpatialResiduals | None = None,
     zero_skips: bool = False,
+    skip_mixing: TadpoleSkipMixing | None = None,
 ) -> torch.Tensor:
     """Decode with neighboring latent context and keep only each central core."""
     shape = tuple(n * STRIDE for n in latent.shape[2:])
@@ -169,6 +174,11 @@ def decode_spatial(
     output = latent.new_zeros(latent.shape[0], 1, *shape)
     limit = model.max_internal_batchsize or latent.shape[0]
     for i, region in enumerate(regions):
+        additions = (
+            skip_mixing(residuals.skips[i])
+            if skip_mixing is not None and residuals is not None and not zero_skips
+            else None
+        )
         pieces = []
         for start in range(0, latent.shape[0], limit):
             stop = start + limit
@@ -188,7 +198,13 @@ def decode_spatial(
                     ]
                     for level in residuals.skips[i]
                 ]
-                decoded = model.decoder(patch, skips, geom_feats=geom)
+                extra = {}
+                if additions is not None:
+                    extra["skip_additions"] = [
+                        [None if t is None else t[start:stop] for t in level]
+                        for level in additions
+                    ]
+                decoded = model.decoder(patch, skips, geom_feats=geom, **extra)
             pieces.append(decoded[region.slices(relative=True)])
         output[region.destination()] = torch.cat(pieces)
     return output
