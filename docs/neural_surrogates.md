@@ -1638,7 +1638,7 @@ What the wrapper adds:
 | **Geometry** | Input is masked (`state * geometry`, obstacles zeroed) like `P3D`. With `encode_geometry=True` the mask (`{0,1}`) and, if `sdf_features` is on, the SDF channels (`[-1,1]`) are appended **raw** (already bounded; a 0/1 mask has no mean/std to standardise) as **extra folded encoder channels**, and *reconstructed* — on purpose: recon loss on the state alone would let the encoder discard geometry from the latent, so making it reconstruct the geometry block is the supervision that forces geometry *into* the latent, which is what the plan-03 DFT attends over. On a single-geometry corpus this re-encodes a constant per snapshot (intended for the multi-geometry regime; use `encode_geometry=False` for state-only / single-geometry). |
 | **SDF features** | `sdf_features` (`none`/`sdf`/`grad`/`both`) appends the clamped-SDF / gradient channels alongside the encoded mask; requires `encode_geometry=True` **or** a `geometry_branch` (in branch mode the same channels feed the branch instead of the encoder), and must match the dataset's mode + `sdf_clamp_cells` (the script cross-checks). |
 | **Geometry branch** | `geometry_branch: {width: 32}` (default `null`) switches geometry from *content* to *conditioning* — see below. |
-| **Spatial processing** | `spatial_mode: local` preserves independent tiles; `global` processes each whole rectangular field; `halo` uses overlapping encoder/decoder tiles and keeps central cores. Local/halo pad to `encoder_crop_size`; global pads only to stride 16. See below. |
+| **Spatial processing** | `spatial_mode: local` preserves independent tiles; `global` processes each whole rectangular field; `halo` uses overlapping encoder/decoder tiles and keeps central cores. `encoder_crop_size` accepts a scalar or an anisotropic `[z, y, x]` shape; local/halo pad each axis to its tile size, while global pads only to stride 16. See below. |
 | **Params** | Deliberately **not** an AE input — physical params condition dynamics, not single-snapshot appearance (they enter in plan 03). `n_params` is accepted for signature parity and ignored. |
 | **Pretrained** | `pretrained`: `none` (random) / `hf` (`thuerey-group/Tadpole` weights for the size, via `huggingface_hub`) / `{encoder, decoder}` local paths. |
 
@@ -1700,9 +1700,9 @@ Both wrappers expose the same architecture settings, saved with the model:
 
 | Setting | Meaning |
 |---|---|
-| `spatial_mode: local` | Default and legacy behavior: encode/decode independent tiles, each `encoder_crop_size` cells wide. |
+| `spatial_mode: local` | Default and legacy behavior: encode/decode independent tiles. `encoder_crop_size` is either a scalar for cubic tiles or `[z, y, x]` for anisotropic tiles; every entry must be a multiple of 16. |
 | `spatial_mode: global` | Encode/decode each state channel over the whole rectangular domain. Pad each axis only to a multiple of 16; `encoder_crop_size` is unused. This uses more memory and retains the backbone's existing windowed attention. |
-| `spatial_mode: halo` | Encode overlapping tiles with `halo_size` cells of context on each side, assemble the central latent cores, then decode overlapping latent neighborhoods and retain only central output cores. `encoder_crop_size` sets the core size. |
+| `spatial_mode: halo` | Encode overlapping tiles with `halo_size` cells of context on each side, assemble the central latent cores, then decode overlapping latent neighborhoods and retain only central output cores. `encoder_crop_size` sets the per-axis core shape. |
 | `halo_size` | Default 16; nonnegative multiple of 16, used only in halo mode. Zero gives tiles without overlap. Boundary halos are clipped at the padded domain edge. |
 
 In **every DFT mode**, the latent time-stepping network runs **once over the
@@ -1725,7 +1725,7 @@ For example, set these in `pretrain_autoencoder.yaml` or `finetune_mode/dft.yaml
 ```yaml
 architecture:
   spatial_mode: halo  # local | global | halo
-  encoder_crop_size: 32
+  encoder_crop_size: [16, 32, 32]  # (z, y, x); scalar 32 remains valid
   halo_size: 16
 ```
 
@@ -1900,12 +1900,13 @@ so on grids ≥ ~2.1M cells the default `cell_budget: 4194304` silently drops th
 per-trajectory batch size to 1. Size `cell_budget` from a known-good
 single-geometry run (`batch_size * cells_per_sample`).
 
-The pre-train script also **warns** when the encoder tiling wastes compute on
-padding: if `random_crop_size` is smaller than `encoder_crop_size`, or (on the
-full-field path) any grid dim is not a multiple of `encoder_crop_size`, those
-axes are zero-padded up to the next multiple every forward — wasted compute, and
-the padded tiles also inflate the logged `kl` metric. Pick `encoder_crop_size`
-(a multiple of 16) to divide the grid, or crop to a multiple of it.
+The pre-train script also **warns** when encoder tiling wastes compute on
+padding. It derives each actual dataset crop shape (a scalar `random_crop_size`
+is clipped independently to each grid axis), then checks it against the scalar
+or `[z, y, x]` `encoder_crop_size`. Non-divisible axes are zero-padded to their
+next tile multiple every forward; this wastes compute and the padded tiles also
+inflate the logged `kl` metric. Choose each tile dimension as a multiple of 16
+that divides its corresponding grid or dataset-crop dimension.
 
 ### 30. File map
 
@@ -2164,7 +2165,7 @@ transition datasets are lenient:
 | **Pairing** | State and parameter files are paired by sample id (the `sample_XXXX` stem), never by sorted position. A state sample without a param partner, or a param sample without a state partner, raises. |
 | **Time coordinates** | Both files must carry a `time` coordinate (no alignment by index); the two must agree per sample (`allclose`), be finite and strictly increasing. Parameter values must be finite and the resolved variable set identical across samples. |
 | **Cadence** | The median saved `dt` over every trajectory is stored as `history_dt_seconds`; every `dt` must lie within `cadence_rtol` (default `0.05`) of it, else the error names the sample and the step. Real corpora are slightly non-uniform (`pyudales_idealized` saves at 0, 4.85, 9.92, 15.00, … s), so an exact check would reject valid data while a loose one would let a mixed-cadence corpus train a generator whose `Hp` rows span an ill-defined duration. `Hp` samples span `(Hp-1) * history_dt_seconds` (12 × 5 s → 55 s). |
-| **Anchors** | Anchors start at `t = Hp-1` so every history is fully recorded; a trajectory shorter than `Hp` raises. With `constant_prehistory=True` anchors start at `t = 0` and the missing leading rows repeat the first recorded row — valid **only** when the data's provenance guarantees the forcing was constant at those values before the first saved time (e.g. a constant-forcing spin-up ending exactly at the first save). The flag lives in the training config (and the artifact's `data_provenance`) so the choice is explicit and auditable. `time_stride` thins the *anchors* only; histories always use contiguous saved steps. |
+| **Anchors** | Anchors start at `t = Hp-1` so every history is fully recorded; a trajectory shorter than `Hp` raises. With `constant_prehistory=True` anchors start at `t = 0` and the missing leading rows repeat the first recorded row — valid **only** when the data's provenance guarantees the forcing was constant at those values before the first saved time (e.g. a constant-forcing spin-up ending exactly at the first save). The flag lives in the training config (and the artifact's `data_provenance`) so the choice is explicit and auditable, and the training script *verifies* it against the corpus' own `config.yaml` rather than taking it on trust: `time.spinup_time` must be recorded and be at least `(Hp-1) * history_dt_seconds` (the repeated plateau must fit inside the constant-forcing spin-up), the split must share one first saved time (state and parameter times are already identical per sample), and the verdict is written to `data_provenance.verified_prehistory`. `time_stride` thins the *anchors* only; histories always use contiguous saved steps. |
 | **Shared reader** | The `(T, P)` per-trajectory parameter table is read by `load_param_table(param_path, t_len, param_vars, dtype) -> (Tensor, names)` in [datasets/_params.py](../libs/neural-surrogates/src/neural_surrogates/datasets/_params.py), hoisted from `TransitionDataset._load_params` (which is now a thin wrapper — same broadcasting of scalars, same length check, same error messages; behaviour unchanged and tested). |
 
 The per-trajectory `_params` tables are kept exactly as `TransitionDataset`
@@ -2394,9 +2395,9 @@ omitted ones must be documented constants) and the `physical_metadata` block
 
 | Block | Keys (defaults) |
 |---|---|
-| `architecture` | `_target_: neural_surrogates.TadpoleLatentGenerator`; `param_history_steps: 12` (`Hp`); `hidden_size: null` (→ `D`); `n_layers: 4`; `num_heads: 8`; `time_embed_dim: 64`; `film_hidden: 128`; `num_sampling_steps: 50`; `latent_eps: 1.0e-6`; `max_latent_tokens: 4096` (`null` = unlimited). `n_state_channels` / `n_params` / `pretrained_ae_dir` are injected by the script. |
+| `architecture` | `_target_: neural_surrogates.TadpoleLatentGenerator`; `param_history_steps: 12` (`Hp`); `hidden_size: null` (→ `D`); `n_layers: 4`; `num_heads: 8`; `time_embed_dim: 64`; `film_hidden: 128`; `mlp_ratio: 4`; `normalize: true`; `num_sampling_steps: 50`; `latent_eps: 1.0e-6`; `max_latent_tokens: 4096` (`null` = unlimited). `n_state_channels` / `n_params` / `pretrained_ae_dir` are injected by the script. The export stamps the *resolved* `hidden_size`, `mlp_ratio` and `normalize` so the deploy rebuild never depends on the defaults of the day. |
 | `dataset` | `_target_: neural_surrogates.SnapshotHistoryDataset`; `state_vars: [u, v, w]` (must equal the AE export's `dataset.state_vars`); `param_vars: ???`; `param_history_steps: ${architecture.param_history_steps}` (the two can never disagree); `time_stride: 1`; `random_crop_size: null`; `sdf_features: null` / `sdf_clamp_cells: null` (inherited from the AE export — an explicit value must agree); `constant_prehistory: false`; `cadence_rtol: 0.05`; `cache`, `dtype`. |
-| `physical_metadata` | `units` (one entry per state **and** parameter variable — a missing one refuses the run), `geometry_mask_convention` (`"blanking: 1 = obstacle; model fluid mask = 1 - blanking"`), `coordinate_order: [z, y, x]` (anything else is rejected), `boundary_conditions: ???` (free text), `constant_forcing_notes: ""` (parameters held constant across the corpus, i.e. not in `param_vars`). Recorded verbatim in the artifact. |
+| `physical_metadata` | `units` (one entry per state **and** parameter variable — a missing one refuses the run), `geometry_mask_convention` (must be *exactly* `neural_surrogates.generative_spinup.MASK_CONVENTION`, `"blanking: 1 = obstacle; model fluid mask = 1 - blanking"` — the one polarity the deploy side applies, so any other value is refused rather than exported), `coordinate_order: [z, y, x]` (anything else is rejected; the state files' own spatial dims must be in that order too, in either the canonical `z/y/x` or the backend `zt/yt/xt` spelling), `boundary_conditions: ???` (free text), `constant_forcing_notes: ""` (parameters held constant across the corpus, i.e. not in `param_vars`). Recorded verbatim in the artifact. |
 | `latent_stats` | `max_batches: 50` train batches drawn with a **seeded shuffle** (`seed: 0`) so a multi-geometry corpus contributes several trajectories rather than the first one in file order; `null` = the whole split. |
 | `trainer` | `_target_: neural_surrogates.LatentFlowMatchingTrainer`; the usual `BaseTraining` knobs (`amp: true` / `amp_dtype: bfloat16` wrap the velocity net only), `resume: true`, `val_seed: 0`. |
 | `optimizer` | `torch.optim.AdamW`, `lr: 1.0e-4`, `weight_decay: 1.0e-2` — handed only the `requires_grad` (velocity-net) parameters. |
@@ -2455,13 +2456,18 @@ generator:
     geometry_mask_convention: "blanking: 1 = obstacle; model fluid mask = 1 - blanking"
     coordinate_order: [z, y, x]
     grid: {nz, ny, nx, dz, dy, dx, bounds: [[x0, x1], [y0, y1], [z0, z1]], dims, first_center}
-    supported_geometries: [{shape: [nz, ny, nx], fluid_cells: <int>}, ...]   # train-split unique geometries
+    # train-split unique geometries; mask_sha256 = sha256 of the uint8 fluid
+    # mask in (z, y, x) order, so a relocation of the same obstacles (identical
+    # shape AND fluid_cells) is not mistaken for a trained geometry
+    supported_geometries: [{shape: [nz, ny, nx], fluid_cells: <int>, mask_sha256: <sha256>}, ...]
     boundary_conditions: "<free text>"
     constant_forcing_notes: "<free text>"
   ae_fingerprint: <sha256 of the AE export's weights.pt>
   ae_dir: <provenance path of the AE export>
   sampling: {num_steps: 50}               # the validated Euler step count
-  data_provenance: {root_dir, split, n_train, n_val, constant_prehistory, cadence_rtol,
+  data_provenance: {root_dir, split, n_train, n_val, constant_prehistory,
+                    verified_prehistory: {spinup_time, required_seconds, first_saved_time} | null,
+                    cadence_rtol,
                     training_data_config: {domain, time}}   # the corpus config.yaml blocks, if any
   latent_stats: {max_batches, seed, n_channels}
 ```
@@ -2601,6 +2607,7 @@ forward_model:
     seed: 0                  # base seed; member i's noise is seeded by (seed, i)
     sample_batch_size: 8     # members sampled per generator call (memory bound)
     num_sampling_steps: null # Euler steps; null -> the artifact's validated default
+    expected_units: null     # optional {variable: unit} map asserted against the artifact
     save_diagnostics: false  # run_esmda: write generated snapshots under _generated_states/
 ```
 
@@ -2615,12 +2622,14 @@ instance read-only across members.
 
 | Concern | Behaviour |
 |---|---|
-| **Template requirements** | `template_path` is a NetCDF carrying the canonical coordinates and an explicit obstacle mask (`blanking`); its velocity values are **never** used, obstacles are never inferred from generated zeros, and a training snapshot may serve (for its metadata only). It is canonicalised through `_to_regular_grid`, reduced to its last frame, and validated against the artifact's `generator.physical_schema`: every `state_vars` variable and the mask present on `coordinate_order` dims; grid shape equal to `grid.n{z,y,x}`; cell spacing within `1e-4` relative of `grid.d{z,y,x}`; coordinates inside `grid.bounds`; a binary mask; and the geometry fingerprint (shape + fluid-cell count) present in `supported_geometries` — an unseen geometry is rejected rather than sampled blindly (initial scope is a validated supported geometry/grid). Only the state variables and the mask are kept, so no stale template variable leaks into generated states; the fluid mask (`1 - blanking`) and, for an AE with SDF feature channels, its SDF features are computed once and cached. The schema's `geometry_mask_convention` must name the `geometry_var`. |
+| **Template requirements** | `template_path` is a NetCDF carrying the canonical coordinates and an explicit obstacle mask (`blanking`); its velocity values are **never** used, obstacles are never inferred from generated zeros, and a training snapshot may serve (for its metadata only). It is canonicalised through `_to_regular_grid`, reduced to its last frame, and validated against the artifact's `generator.physical_schema`: every `state_vars` variable and the mask present on `coordinate_order` dims; grid shape equal to `grid.n{z,y,x}`; cell spacing within `1e-4` relative of `grid.d{z,y,x}`; coordinates inside `grid.bounds`; a binary mask; and the geometry fingerprint — shape, fluid-cell count **and** `geometry_fingerprint(fluid)` (sha256 of the uint8 mask in `(z, y, x)`) — present in `supported_geometries`, so an unseen geometry is rejected rather than sampled blindly, including a relocation of the same obstacles, which matches on shape and cell count alone (initial scope is a validated supported geometry/grid; an artifact whose entries predate `mask_sha256` is refused and must be re-exported). Only the state variables and the mask are kept, so no stale template variable leaks into generated states; the fluid mask (`1 - blanking`) and, for an AE with SDF feature channels, its SDF features are computed once and cached. |
+| **Mask polarity and units** | The schema's `geometry_mask_convention` must equal `MASK_CONVENTION` (`"blanking: 1 = obstacle; model fluid mask = 1 - blanking"`) *exactly* — the same constant the training script refuses to deviate from — and must name the `geometry_var`, so an artifact can never carry a polarity opposite to the `1 - blanking` the deployment applies. The schema's `units` must cover **every** state and parameter variable (the error lists the missing names), and the optional `expected_units` constructor kwarg / config key states the deployment's own convention: every variable listed there must match the artifact's unit, so a generator trained on `deg` cannot be driven with `rad`. |
+| **Conditioning schema on the model** | After the strict `load_state_dict`, the loader calls `model.set_conditioning_schema(param_vars, history_dt_seconds)` from the artifact's `physical_schema`, and every `sample` call restates `param_names` / `history_dt_seconds` for the model to re-check (order-sensitive names, cadence within `1e-6` relative). `params_hist` is a bare `(B, Hp, P)` tensor, so nothing else would catch a reordered conditioning vector or a history saved at another cadence; supplying a claim to a model with **no** schema installed raises rather than passing silently. |
 | **Current-first-knot conditioning** | `current_param_vector(params, member)` reads each member's **current** value of every `param_vars` entry in the saved order: the first knot (`isel(time=0)`) of a time-varying schedule, the scalar of a static one, `default_params` for a variable the params omit — else it raises naming the member and the variable; non-finite values raise. The physical rollout itself still uses the full parameter schedule. |
 | **Constant history** | The cold start has no history, so `constant_history(values, hp)` repeats the current vector `Hp` times, `(Hp, P)` — the `constant_prehistory` convention of the training dataset (§35). This is the case the acceptance study must cover separately (§39). |
 | **Per-member seeded noise / common random numbers** | Member `i`'s base noise `(D, Zl, Yl, Xl)` is drawn on CPU from its own `torch.Generator` seeded `_member_seed(seed, i) = seed * 1_000_003 + i` — a function of the configured seed and the **stable ensemble index** only, never of the batch position or composition. So member `i` sees the same latent noise across `sample_batch_size` settings and across ESMDA iterations, and a parameter update changes its sample *only* through the conditioning, keeping unrelated Monte Carlo noise out of the assimilation map. Distinct members get distinct noise; no member is ever reset to a shared draw. |
 | **Regeneration on every cold forecast** | Nothing about a generated state is cached: every `generate(member_params, member_indices)` call samples afresh from the members' current parameters, in chunks of `sample_batch_size`, via `model.sample(params_hist, geometry, geom_features, initial_noise=noise, num_steps=self.num_sampling_steps)` (`num_sampling_steps` = the configured override, else the artifact's `generator.sampling.num_steps`). The output is shape-checked, re-masked (obstacle cells zero is an invariant of the class), finite-checked and written onto a deep copy of the template as one canonical `(z, y, x)` snapshot per member. A generator failure raises with the member indices and their conditioning values — there is **no** CFD fallback. |
-| **Single-member path** | `_get_template_and_initial_state(state=None)` with `spinup_source == "generative"` calls `generate([params], [member_index])`, runs `_validate_generated_snapshot` (every `state_vars` channel on `(z, y, x)` at the surrogate's `(nz, ny, nx)` with its cell spacing — a generator/stepper mismatch fails here rather than inside the rollout), then continues through the normal `_to_regular_grid` / `_history_window` path, so single forward runs work too. An explicit `state` always takes the warm path. The geometry channel must come from the mask on the (generated) template: the CFD-backend and non-zero-state fallbacks are forbidden in this mode and raise. |
+| **Single-member path** | `_get_template_and_initial_state(state=None)` with `spinup_source == "generative"` calls `generate([params], [member_index])` (`member_index` defaults to `None`, which falls back to member 0 — right for a genuine single-model run — and warns once per process that an ensemble caller must pass a stable index, since otherwise every member would share one noise draw), runs `_validate_generated_snapshot` (every `state_vars` channel on `(z, y, x)` at the surrogate's `(nz, ny, nx)` with its cell spacing — a generator/stepper mismatch fails here rather than inside the rollout), then continues through the normal `_to_regular_grid` / `_history_window` path, so single forward runs work too. An explicit `state` always takes the warm path. The geometry channel comes from the mask on the (generated) template, or — if the state carries none — from an explicit `stl_path`, voxelised as in every other mode; only the CFD-backend and non-zero-state fallbacks are forbidden here (they need the absent backend, or would infer obstacles from generated zeros) and raise. |
 | **Ensemble path** | `run_ensemble(state=None)` takes `_generative_templates` before `_spinup_templates`: one `generate` call over all members with `member_indices = range(ensemble_size)`, in the parent process; each snapshot then takes the **warm** path (same canonicalisation and history handling as the single member) and the batched `rollout_batched` follows. The CFD spin-up ensemble is never constructed and `_last_failure_substitutions` is empty (nothing to resample). |
 | **No CFD anywhere** | The constructor accepts `generative`; a config-node `spinup_forward_model` is left **un-instantiated** (`None`) so a generator needs no CFD executable, case dir or preprocessing; `dirs` raises `AttributeError` so the ensemble base falls back to its own `temp_dir`; `clone_for_member` shares the backend (none) and the `GenerativeSpinup` handle; `prepare_neural_surrogate` is a no-op (as for `training_data`). |
 | **Diagnostics** | Setting `generator.diagnostics_dir` makes every `generate` call write its snapshots to `<diagnostics_dir>/call_<k>/member_<i>.nc` (`k` restarts at 0 whenever the directory changes). Write-only: nothing ever reads them back as an initial state. |

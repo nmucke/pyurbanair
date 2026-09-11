@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import xarray as xr
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
@@ -56,6 +57,7 @@ from tests._latent_generator_fixtures import (
     fixture_inputs,
     load_run,
     train_tiny_generator,
+    write_history_dataset,
 )
 
 
@@ -139,6 +141,8 @@ def test_train_end_to_end_exports_self_contained_generator(
     assert arch.ae_kwargs.latent_type == "mode"
     assert arch.ae_kwargs.spatial_mode == spatial_mode
     assert arch.hidden_size == C * 256
+    # Stamped alongside hidden_size: both shape the velocity net's tensors.
+    assert arch.mlp_ratio == 4 and arch.normalize is True
     assert saved.dataset.sdf_features == ("both" if geometry == "fold" else "sdf")
     assert float(saved.dataset.sdf_clamp_cells) == 8.0
 
@@ -173,6 +177,13 @@ def test_train_end_to_end_exports_self_contained_generator(
     assert supported[0]["shape"] == [nz, ny, nx]
     n_obstacle = (nz // 2) * (ny // 2 - ny // 4) * (nx // 2 - nx // 4)
     assert supported[0]["fluid_cells"] == nz * ny * nx - n_obstacle
+    # The mask itself identifies the geometry, not just its cell count.
+    from neural_surrogates.generative_spinup import geometry_fingerprint
+
+    blank = xr.load_dataset(
+        Path(saved.dataset.root_dir) / "state" / "train" / "sample_0000.nc"
+    )["blanking"].values
+    assert supported[0]["mask_sha256"] == geometry_fingerprint(1.0 - blank)
     assert schema.boundary_conditions == "synthetic test corpus"
     assert schema.constant_forcing_notes == ""
     assert len(gen.ae_fingerprint) == 64
@@ -181,6 +192,7 @@ def test_train_end_to_end_exports_self_contained_generator(
     assert prov.split == "train"
     assert prov.n_train == 2 * (6 - HP + 1) and prov.n_val == 6 - HP + 1
     assert prov.constant_prehistory is False
+    assert prov.verified_prehistory is None  # nothing to verify with the flag off
     assert prov.training_data_config.time.output_frequency == DT
     assert gen.latent_stats.max_batches == 2 and gen.latent_stats.seed == 0
 
@@ -360,6 +372,75 @@ def test_attention_budget_rejects_before_training(tmp_path):
     assert not (tmp_path / "model_weights" / "latent_generator_test").exists()
 
 
+def test_attention_budget_is_checked_on_the_val_split_too(tmp_path):
+    """A val-only grid over the budget must fail up front, not at the first
+    validation pass: the val loader forwards the same velocity net."""
+    ae_dir, _ = fixture_inputs(tmp_path)
+    data_dir = tmp_path / "data_big_val"
+    write_history_dataset(data_dir, splits={"train": 2}, grid=GRID)
+    write_history_dataset(data_dir, splits={"val": 1}, grid=(32, 16, 32), seed=7)
+    # batch 2 x (1,1,2) = 4 latent tokens on train, x (2,1,2) = 8 on val.
+    cfg = compose_generator_cfg(
+        ae_dir, data_dir, tmp_path, values={"architecture.max_latent_tokens": 5}
+    )
+    with pytest.raises(ValueError, match="latent attention budget.*val split"):
+        load_run()(cfg)
+    assert not (tmp_path / "model_weights" / "latent_generator_test").exists()
+
+
+def test_constant_prehistory_is_gated_on_corpus_provenance(tmp_path):
+    """The repeated leading history is a claim about the DATA, so it is checked
+    against the corpus' own constant-forcing spin-up."""
+    ae_dir, data_dir = fixture_inputs(tmp_path)  # writes time.spinup_time: 0.0
+    run = load_run()
+    values: dict[str, Any] = {
+        "dataset.constant_prehistory": True,
+        "trainer.num_epochs": 1,
+    }
+
+    # (a) The spin-up is shorter than the plateau the flag invents.
+    with pytest.raises(ValueError, match="at least as long as the repeated plateau"):
+        run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
+
+    # (b) A corpus that records no spin-up at all cannot vouch for anything.
+    data_cfg = OmegaConf.load(data_dir / "config.yaml")
+    data_cfg.time.pop("spinup_time")
+    OmegaConf.save(data_cfg, data_dir / "config.yaml")
+    with pytest.raises(ValueError, match="time.spinup_time"):
+        run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
+
+    # (c) An adequate spin-up trains, and the verdict is recorded.
+    data_cfg.time.spinup_time = (HP - 1) * DT
+    OmegaConf.save(data_cfg, data_dir / "config.yaml")
+    run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
+    model_dir = tmp_path / "model_weights" / "latent_generator_test"
+    prov = OmegaConf.load(model_dir / "config.yaml").generator.data_provenance
+    assert prov.constant_prehistory is True
+    assert prov.verified_prehistory.spinup_time == (HP - 1) * DT
+    assert prov.verified_prehistory.required_seconds == (HP - 1) * DT
+    assert prov.verified_prehistory.first_saved_time == 0.0
+    # Anchors now start at t = 0 (Hp-1 more per trajectory).
+    assert prov.n_train == 2 * 6
+
+
+def test_transposed_corpus_is_rejected_before_export(tmp_path):
+    """A corpus saved (x, y, z) would be trained and deployed on silently
+    swapped axes -- every tensor here is positional."""
+    ae_dir, _ = fixture_inputs(tmp_path)
+    data_dir = tmp_path / "data_xyz"
+    write_history_dataset(data_dir, grid=(16, 16, 16))
+    for path in sorted((data_dir / "state").rglob("sample_*.nc")):
+        xr.load_dataset(path).transpose("time", "x", "y", "z").to_netcdf(path)
+    cfg = compose_generator_cfg(
+        ae_dir, data_dir, tmp_path, values={"trainer.num_epochs": 1}
+    )
+    with pytest.raises(ValueError, match="coordinate_order"):
+        load_run()(cfg)
+    assert not (
+        tmp_path / "model_weights" / "latent_generator_test" / "config.yaml"
+    ).exists()
+
+
 def test_state_vars_mismatch_with_ae_raises(tmp_path):
     ae_dir, data_dir = fixture_inputs(tmp_path)
     cfg = compose_generator_cfg(ae_dir, data_dir, tmp_path)
@@ -380,6 +461,11 @@ def test_required_inputs_fail_loud(tmp_path):
     cfg = compose_generator_cfg(ae_dir, data_dir, tmp_path)
     cfg.physical_metadata.units.pop("velocity_magnitude")
     with pytest.raises(ValueError, match="units lacks"):
+        run(cfg)
+    cfg = compose_generator_cfg(ae_dir, data_dir, tmp_path)
+    # The mask polarity is the deploy side's canonical constant, not free text.
+    cfg.physical_metadata.geometry_mask_convention = "blanking: 0 = obstacle"
+    with pytest.raises(ValueError, match="geometry_mask_convention must be exactly"):
         run(cfg)
     cfg = compose_generator_cfg(ae_dir, data_dir, tmp_path)
     cfg.physical_metadata.boundary_conditions = "???"

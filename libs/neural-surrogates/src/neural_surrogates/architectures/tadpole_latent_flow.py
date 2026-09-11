@@ -339,6 +339,7 @@ class TadpoleLatentGenerator(nn.Module):
         self.hidden_size = h
         self.n_layers = int(n_layers)
         self.num_heads = heads
+        self.mlp_ratio = int(mlp_ratio)
         self.cond_dim = self.param_history_steps * self.n_params + self.time_embed_dim
         self.velocity_net = ParamConditionedSubnetwork(
             in_dim=d,
@@ -358,6 +359,14 @@ class TadpoleLatentGenerator(nn.Module):
         self.register_buffer("latent_stats_installed", torch.tensor(False))
         self.register_buffer("param_mean", torch.zeros(self.n_params))
         self.register_buffer("param_std", torch.ones(self.n_params))
+
+        # -- physical conditioning schema ------------------------------------ #
+        # Plain attributes, NOT buffers: they are provenance the artifact's
+        # config.yaml owns (the training script installs them before export and
+        # the deploy loader re-installs them from physical_schema), so they must
+        # not travel in -- or widen -- weights.pt's strict state dict.
+        self.param_names: tuple[str, ...] | None = None
+        self.history_dt_seconds: float | None = None
 
     # Buffer annotations for the type checker (registered above).
     latent_mean: torch.Tensor
@@ -844,6 +853,89 @@ class TadpoleLatentGenerator(nn.Module):
             state = self.ae._denormalize_state(recon)
             return state * cond.mask.to(state)
 
+    # -- conditioning schema ------------------------------------------------- #
+
+    def set_conditioning_schema(
+        self, param_names: Sequence[str], history_dt_seconds: float | None
+    ) -> None:
+        """Install the physical meaning of the ``params_hist`` columns.
+
+        ``params_hist`` is a bare ``(B, Hp, P)`` tensor: reordering its columns
+        or feeding it a history saved at another cadence is invisible to every
+        shape check, yet conditions the flow on something else entirely. The
+        training script installs the dataset's ordered ``param_names`` and
+        median saved cadence before exporting, and the deployment loader
+        re-installs them from the artifact's ``physical_schema``, so a caller
+        that states its own schema (see :meth:`sample` / :meth:`velocity`) is
+        checked against the one the weights were trained with.
+
+        ``history_dt_seconds=None`` records "cadence unknown"; a caller that
+        then supplies one raises rather than being silently accepted.
+        """
+        names = tuple(str(n) for n in param_names)
+        if len(names) != self.n_params:
+            raise ValueError(
+                f"param_names has {len(names)} entries {list(names)} but the "
+                f"model conditions on n_params={self.n_params} columns."
+            )
+        if history_dt_seconds is not None:
+            dt = float(history_dt_seconds)
+            if not math.isfinite(dt) or dt <= 0:
+                raise ValueError(
+                    f"history_dt_seconds must be a positive, finite number or "
+                    f"None, got {history_dt_seconds!r}."
+                )
+            self.history_dt_seconds = dt
+        else:
+            self.history_dt_seconds = None
+        self.param_names = names
+
+    def _check_conditioning_schema(
+        self,
+        param_names: Sequence[str] | None,
+        history_dt_seconds: float | None,
+        what: str,
+    ) -> None:
+        """Validate a caller-supplied schema against the installed one.
+
+        Supplying nothing skips the check (the training path, which owns the
+        dataset the schema came from). Supplying something while no schema is
+        installed is an error, not a pass: there would be nothing to check the
+        claim against.
+        """
+        if param_names is None and history_dt_seconds is None:
+            return
+        if self.param_names is None:
+            raise ValueError(
+                f"{what}: a conditioning schema was supplied (param_names="
+                f"{None if param_names is None else list(param_names)}, "
+                f"history_dt_seconds={history_dt_seconds!r}) but this model "
+                "carries none; call set_conditioning_schema(...) first (the "
+                "deployment loader does it from the artifact's physical_schema)."
+            )
+        if param_names is not None:
+            given = tuple(str(n) for n in param_names)
+            if given != self.param_names:
+                raise ValueError(
+                    f"{what}: param_names {list(given)} do not match the model's "
+                    f"conditioning schema {list(self.param_names)} (order "
+                    "matters -- params_hist columns are positional)."
+                )
+        if history_dt_seconds is not None:
+            dt = float(history_dt_seconds)
+            if self.history_dt_seconds is None:
+                raise ValueError(
+                    f"{what}: history_dt_seconds={dt!r} was supplied but the "
+                    "model's schema records no cadence to check it against."
+                )
+            if abs(dt - self.history_dt_seconds) > 1e-6 * abs(self.history_dt_seconds):
+                raise ValueError(
+                    f"{what}: history_dt_seconds={dt:.6g} s does not match the "
+                    f"model's trained cadence {self.history_dt_seconds:.6g} s; "
+                    f"Hp={self.param_history_steps} rows would span a different "
+                    "physical duration."
+                )
+
     # -- velocity ----------------------------------------------------------- #
 
     def _check_params_hist(self, params_hist: torch.Tensor, b: int) -> None:
@@ -872,12 +964,19 @@ class TadpoleLatentGenerator(nn.Module):
         tau: torch.Tensor,
         params_hist: torch.Tensor,
         cond: LatentEncoding,
+        *,
+        param_names: Sequence[str] | None = None,
+        history_dt_seconds: float | None = None,
     ) -> torch.Tensor:
         """Flow velocity ``dz/dtau`` at ``(z, tau)`` -> ``(B, D, Zl, Yl, Xl)``.
 
         ``params_hist`` is in **raw physical units** (z-scored here); ``tau`` is
         ``(B,)``. Raises when ``B * Zl*Yl*Xl`` exceeds ``max_latent_tokens``.
+        ``param_names`` / ``history_dt_seconds`` state what the columns of
+        ``params_hist`` mean and are checked against the installed schema (see
+        :meth:`set_conditioning_schema`).
         """
+        self._check_conditioning_schema(param_names, history_dt_seconds, "velocity")
         if z.dim() != 5 or z.shape[1] != self.state_latent_dim:
             raise ValueError(
                 f"z must be (B, {self.state_latent_dim}, Zl, Yl, Xl), got "
@@ -952,14 +1051,20 @@ class TadpoleLatentGenerator(nn.Module):
         initial_noise: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         num_steps: int | None = None,
+        param_names: Sequence[str] | None = None,
+        history_dt_seconds: float | None = None,
     ) -> torch.Tensor:
         """Generate physical states ``(B, C, d, h, w)`` for ``params_hist``.
 
         Explicit Euler from ``tau = 0`` to ``1`` in fp32 (autocast disabled),
         then :meth:`decode_latents`. Pass ``initial_noise`` ``(B, D, Zl, Yl,
         Xl)`` for reproducible per-member noise **or** a ``generator`` -- never
-        both.
+        both. ``param_names`` / ``history_dt_seconds`` state what the caller
+        believes the ``params_hist`` columns and their spacing are; they are
+        checked once here against the installed schema (see
+        :meth:`set_conditioning_schema`) rather than per Euler step.
         """
+        self._check_conditioning_schema(param_names, history_dt_seconds, "sample")
         if initial_noise is not None and generator is not None:
             raise ValueError("pass either initial_noise or generator, not both")
         self._require_latent_stats("sample")

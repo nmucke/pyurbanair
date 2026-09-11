@@ -66,7 +66,7 @@ def _write_sample(
     if param_times is None:
         param_times = times
     dims = ("time", "z", "y", "x")
-    state = {
+    state: dict[str, tuple] = {
         v: (dims, rng.standard_normal((t_len, nz, ny, nx)).astype("f4"))
         for v in STATE_VARS
     }

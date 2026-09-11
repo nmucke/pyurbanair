@@ -15,6 +15,7 @@ only exercised by one strict-reload sampling smoke test.
 from __future__ import annotations
 
 import pathlib
+import warnings
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -31,7 +32,13 @@ from neural_surrogates import (
     UNetConvNeXt,
 )
 from neural_surrogates import ensemble_forward_model as ens_mod
-from neural_surrogates.generative_spinup import _member_seed, constant_history
+from neural_surrogates import forward_model as fm_mod
+from neural_surrogates.generative_spinup import (
+    MASK_CONVENTION,
+    _member_seed,
+    constant_history,
+    geometry_fingerprint,
+)
 from omegaconf import OmegaConf
 
 from pyurbanair.base_forward_model import BaseForwardModel
@@ -76,9 +83,19 @@ class _StubGenerator(torch.nn.Module):
         # A parameter so weights.pt / strict load are non-trivial.
         self.scale = torch.nn.Parameter(torch.ones(()))
         self.calls: list[dict[str, Any]] = []
+        self.param_names: Optional[tuple[str, ...]] = None
+        self.history_dt_seconds: Optional[float] = None
 
     def latent_grid_for(self, grid):
         return tuple(-(-int(s) // LATENT_STRIDE) for s in grid)
+
+    def set_conditioning_schema(self, param_names, history_dt_seconds) -> None:
+        """The real generator's schema hook (plain attributes, no buffers)."""
+        assert len(tuple(param_names)) == self.n_params
+        self.param_names = tuple(str(n) for n in param_names)
+        self.history_dt_seconds = (
+            None if history_dt_seconds is None else float(history_dt_seconds)
+        )
 
     def sample(
         self,
@@ -89,9 +106,16 @@ class _StubGenerator(torch.nn.Module):
         initial_noise=None,
         generator=None,
         num_steps=None,
+        param_names=None,
+        history_dt_seconds=None,
     ):
         assert initial_noise is not None, "GenerativeSpinup must pass per-member noise"
         assert generator is None
+        # GenerativeSpinup always restates the conditioning schema; a stub that
+        # had one installed checks it exactly like the real model would.
+        if self.param_names is not None and param_names is not None:
+            assert tuple(param_names) == self.param_names
+            assert history_dt_seconds == self.history_dt_seconds
         b = params_hist.shape[0]
         assert params_hist.shape == (b, self.param_history_steps, self.n_params)
         assert torch.isfinite(params_hist).all()
@@ -108,6 +132,8 @@ class _StubGenerator(torch.nn.Module):
                 "geometry": geometry.detach().cpu().clone(),
                 "geom_features": geom_features,
                 "num_steps": num_steps,
+                "param_names": param_names,
+                "history_dt_seconds": history_dt_seconds,
                 "batch": b,
             }
         )
@@ -205,11 +231,20 @@ def _write_artifact(
     saved_num_steps: int = 7,
     spacing_override: Optional[dict] = None,
     stub: Optional[_StubGenerator] = None,
+    units: Optional[dict] = None,
+    convention: str = MASK_CONVENTION,
+    mask_sha256: Optional[str] = None,
 ) -> pathlib.Path:
     """A ``train_latent_generator.py``-shaped artifact around the stub."""
     nz, ny, nx = grid
+    fluid = 1.0 - _blanking(grid)
     if fluid_cells is None:
-        fluid_cells = int((1.0 - _blanking(grid)).sum())
+        fluid_cells = int(fluid.sum())
+    if mask_sha256 is None:
+        mask_sha256 = geometry_fingerprint(fluid)
+    if units is None:
+        units = {v: "m/s" for v in state_vars}
+        units.update({p: ("deg" if p == "inflow_angle" else "m/s") for p in param_vars})
     grid_block = {
         "nz": nz,
         "ny": ny,
@@ -234,12 +269,16 @@ def _write_artifact(
                 "param_vars": list(param_vars),
                 "param_history_steps": hp,
                 "history_dt_seconds": 5.0,
-                "units": {"u": "m/s", "inflow_angle": "deg"},
-                "geometry_mask_convention": "blanking: 1 = obstacle; fluid = 1 - blanking",
+                "units": dict(units),
+                "geometry_mask_convention": convention,
                 "coordinate_order": ["z", "y", "x"],
                 "grid": grid_block,
                 "supported_geometries": [
-                    {"shape": [nz, ny, nx], "fluid_cells": fluid_cells}
+                    {
+                        "shape": [nz, ny, nx],
+                        "fluid_cells": fluid_cells,
+                        "mask_sha256": mask_sha256,
+                    }
                 ],
             },
             "ae_fingerprint": "deadbeef",
@@ -301,6 +340,14 @@ def _first_knots(params: xr.Dataset) -> np.ndarray:
 def _gs(artifact, **kw) -> GenerativeSpinup:
     model_dir, template = artifact
     return GenerativeSpinup(model_dir, template, **kw)
+
+
+def _warnings_about_member_index(call) -> list:
+    """Run ``call`` and return the member-index warnings it emitted."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        call()
+    return [w for w in caught if "member_index" in str(w.message)]
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +544,99 @@ def test_unsupported_geometry_raises(tmp_path, inject_stub) -> None:
         GenerativeSpinup(model_dir, template).generate([_params()], [0])
 
 
+def test_relocated_obstacles_with_same_fluid_count_raise(tmp_path, inject_stub) -> None:
+    """Shape + fluid-cell count are not an identity: a DIFFERENT obstacle layout
+    with the same counts is a geometry the generator never saw."""
+    model_dir = _write_artifact(tmp_path / "m")
+    template = _write_template(tmp_path / "t.nc")
+    with xr.open_dataset(template) as ds:
+        moved = ds.load()
+    original = moved["blanking"].values
+    flat = np.zeros(original.size, dtype=original.dtype)
+    flat[: int(original.sum())] = 1.0  # same obstacle cells, packed elsewhere
+    relocated = flat.reshape(original.shape)
+    assert relocated.sum() == original.sum()
+    assert not np.array_equal(relocated, original)
+    moved["blanking"] = (moved["blanking"].dims, relocated)
+    moved.to_netcdf(template.with_name("moved.nc"))
+
+    gs = GenerativeSpinup(model_dir, template.with_name("moved.nc"))
+    with pytest.raises(ValueError, match="mask_sha256"):
+        gs.generate([_params()], [0])
+    # The unchanged template still passes, so the check is not vacuous.
+    GenerativeSpinup(model_dir, template).generate([_params()], [0])
+
+
+def test_supported_geometry_without_fingerprint_is_refused(
+    tmp_path, inject_stub
+) -> None:
+    """A pre-fingerprint artifact cannot be identified and is not trusted."""
+    model_dir = _write_artifact(tmp_path / "m")
+    cfg = OmegaConf.load(model_dir / "config.yaml")
+    cfg.generator.physical_schema.supported_geometries = [
+        {"shape": [NZ, NY, NX], "fluid_cells": int((1.0 - _blanking()).sum())}
+    ]
+    OmegaConf.save(cfg, model_dir / "config.yaml")
+    template = _write_template(tmp_path / "t.nc")
+    with pytest.raises(ValueError, match="re-export"):
+        GenerativeSpinup(model_dir, template).generate([_params()], [0])
+
+
+def test_geometry_fingerprint_is_layout_sensitive() -> None:
+    fluid = 1.0 - _blanking()
+    assert geometry_fingerprint(fluid) == geometry_fingerprint(fluid.astype("f4"))
+    rolled = np.roll(fluid, 1, axis=2)
+    assert geometry_fingerprint(rolled) != geometry_fingerprint(fluid)
+    with pytest.raises(ValueError, match="binary"):
+        geometry_fingerprint(fluid * 0.5)
+    with pytest.raises(ValueError, match="3D"):
+        geometry_fingerprint(fluid[0])
+
+
+# ---------------------------------------------------------------------------
+# Mask convention + units
+# ---------------------------------------------------------------------------
+
+
+def test_inverted_mask_convention_is_rejected(tmp_path, inject_stub) -> None:
+    model_dir = _write_artifact(
+        tmp_path / "m",
+        convention="blanking: 0 = obstacle; model fluid mask = blanking",
+    )
+    template = _write_template(tmp_path / "t.nc")
+    with pytest.raises(ValueError, match="canonical"):
+        GenerativeSpinup(model_dir, template).generate([_params()], [0])
+
+
+def test_incomplete_units_are_rejected(tmp_path, inject_stub) -> None:
+    model_dir = _write_artifact(
+        tmp_path / "m", units={"u": "m/s", "inflow_angle": "deg"}
+    )
+    template = _write_template(tmp_path / "t.nc")
+    with pytest.raises(ValueError, match=r"units .*lacks an entry for.*'v'"):
+        GenerativeSpinup(model_dir, template).generate([_params()], [0])
+
+
+def test_expected_units_must_match_the_artifact(tmp_path, inject_stub) -> None:
+    model_dir = _write_artifact(tmp_path / "m")
+    template = _write_template(tmp_path / "t.nc")
+    with pytest.raises(ValueError, match="expected_units"):
+        GenerativeSpinup(
+            model_dir, template, expected_units={"inflow_angle": "rad"}
+        ).generate([_params()], [0])
+    # A variable the artifact does not know about is a mismatch too.
+    with pytest.raises(ValueError, match="expected_units"):
+        GenerativeSpinup(
+            model_dir, template, expected_units={"nonexistent": "m/s"}
+        ).generate([_params()], [0])
+    # The matching map passes and leaves the artifact's units in the schema.
+    gs = GenerativeSpinup(
+        model_dir, template, expected_units={"inflow_angle": "deg", "u": "m/s"}
+    )
+    gs.generate([_params()], [0])
+    assert gs._ensure_schema()["units"]["velocity_magnitude"] == "m/s"
+
+
 def test_state_var_dims_mismatch_raises(tmp_path, inject_stub) -> None:
     model_dir = _write_artifact(tmp_path / "m")
     template = _write_template(tmp_path / "t.nc")
@@ -536,6 +676,19 @@ def test_real_loader_strict_load_and_sampling_steps(artifact) -> None:
     gs2 = _gs(artifact, num_sampling_steps=3)
     gs2.generate([_params()], [0])
     assert gs2._model.calls[-1]["num_steps"] == 3
+
+
+def test_loader_installs_conditioning_schema_and_restates_it(artifact) -> None:
+    """The artifact's ordered param_vars + cadence are installed on the model
+    and handed back to every ``sample`` call for re-validation."""
+    gs = _gs(artifact)
+    gs.generate([_params()], [0])
+    model = gs._model
+    assert model.param_names == PARAM_VARS
+    assert model.history_dt_seconds == 5.0
+    call = model.calls[-1]
+    assert tuple(call["param_names"]) == PARAM_VARS
+    assert call["history_dt_seconds"] == 5.0
 
 
 def test_strict_load_rejects_mismatched_weights(tmp_path) -> None:
@@ -700,6 +853,53 @@ def test_forward_model_geometry_requires_mask_in_generative_mode(
         model._build_geometry(snap.drop_vars("blanking"))
 
 
+def test_generative_mode_falls_back_to_the_explicit_stl(
+    artifact, inject_stub, tmp_path
+) -> None:
+    """Without a mask on the state, an explicit ``stl_path`` is still a faithful
+    geometry source (only the CFD-backend / non-zero-state guesses are banned)."""
+    trimesh = pytest.importorskip("trimesh")
+    from neural_surrogates.geometry import stl_to_fluid_mask
+
+    box = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    box.apply_translation((NX / 2, NY / 2, NZ / 2))
+    stl_path = tmp_path / "box.stl"
+    box.export(stl_path)
+
+    model = _make_model(artifact, stl_path=stl_path)
+    snap = model._generative_spinup.generate([_params()], [0])[0].drop_vars("blanking")
+    geom = model._build_geometry(snap).cpu().numpy()
+    np.testing.assert_array_equal(geom, stl_to_fluid_mask(stl_path, snap["u"]))
+    assert geom.min() == 0.0 and geom.max() == 1.0  # the box really carved cells
+    # ... and the warm-start rollout runs through that geometry.
+    out = model.run_single(state=snap, params=_params())
+    assert out.sizes["time"] == 3
+    # Without an stl_path the same maskless state is still refused.
+    with pytest.raises(RuntimeError, match="never inferred"):
+        _make_model(artifact)._build_geometry(snap)
+
+
+def test_generative_cold_start_without_member_index_warns_once(
+    artifact, inject_stub, monkeypatch
+) -> None:
+    monkeypatch.setattr(fm_mod, "_MEMBER_INDEX_WARNED", False)
+    model = _make_model(artifact)
+    with pytest.warns(RuntimeWarning, match="stable per-member index"):
+        model.run_single(state=None, params=_params())
+    # It fell back to member 0 rather than refusing the single-model run.
+    assert torch.equal(
+        inject_stub.calls[-1]["noise"][0], model._generative_spinup._member_noise(0)
+    )
+    # Once per process, and never for an explicitly indexed call.
+    assert not _warnings_about_member_index(
+        lambda: model.run_single(state=None, params=_params())
+    )
+    monkeypatch.setattr(fm_mod, "_MEMBER_INDEX_WARNED", False)
+    assert not _warnings_about_member_index(
+        lambda: model.run_single(state=None, params=_params(), member_index=2)
+    )
+
+
 def test_forward_model_rejects_generated_snapshot_off_its_domain(
     artifact, inject_stub, monkeypatch
 ) -> None:
@@ -773,6 +973,23 @@ def test_ensemble_cold_start_generates_all_members_without_spinup_ensemble(
     for member in ensemble.ensemble_forward_models:
         assert member.spinup_forward_model is None
         assert member._generative_spinup is gs
+
+
+def test_ensemble_path_passes_member_indices_and_never_warns(
+    artifact, inject_stub, tmp_path, monkeypatch
+) -> None:
+    """``_generative_templates`` seeds every member explicitly, so the
+    single-model fallback warning must not fire on the ensemble path."""
+    monkeypatch.setattr(fm_mod, "_MEMBER_INDEX_WARNED", False)
+    ensemble = _ensemble(artifact, tmp_path, monkeypatch)
+    assert not _warnings_about_member_index(
+        lambda: ensemble.run_ensemble(state=None, params=_ensemble_params())
+    )
+    assert fm_mod._MEMBER_INDEX_WARNED is False
+    gs = ensemble.forward_model._generative_spinup
+    noise = inject_stub.calls[-1]["noise"]
+    for i in range(ensemble.ensemble_size):
+        assert torch.equal(noise[i], gs._member_noise(i))
 
 
 def test_ensemble_batches_by_sample_batch_size(

@@ -13,7 +13,13 @@ latent space of a FROZEN, pre-trained ``TadpoleAE`` -- on a
 * the physical conditioning contract -- ordered ``param_vars``, ``Hp``, the
   saved cadence, units, mask convention, coordinate order, grid and the
   supported training geometries -- is REQUIRED and recorded verbatim under
-  ``generator.physical_schema`` so deployment can never substitute another;
+  ``generator.physical_schema`` so deployment can never substitute another
+  (each supported geometry carries the sha256 of its fluid mask, so a
+  relocation of the same obstacles cannot pass as a trained one, and the mask
+  convention must be the canonical ``MASK_CONVENTION`` polarity);
+* ``dataset.constant_prehistory`` is a claim about the DATA, so it is verified
+  against the corpus' own ``config.yaml`` (the constant-forcing spin-up must
+  cover the repeated plateau) and the verdict recorded in the artifact;
 * the latent-attention budget is checked BEFORE training (naive attention
   allocates ``B * heads * N * N`` latent tokens; a physical-cell budget alone
   does not bound it);
@@ -42,13 +48,14 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Sequence
 
 import hydra
 import numpy as np
 import torch
 import xarray as xr
 from hydra.utils import instantiate
+from neural_surrogates.generative_spinup import MASK_CONVENTION, geometry_fingerprint
 from neural_surrogates.sdf import normalize_sdf_mode
 from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
 from omegaconf import DictConfig, OmegaConf
@@ -56,6 +63,12 @@ from omegaconf.errors import MissingMandatoryValue
 
 # Bump when the meaning of the cached latent statistics changes.
 _LATENT_STATS_VERSION = 1
+
+# On-disk spatial dim name -> canonical axis. The corpora write cell-centred
+# coordinates either plainly (pylbm / the surrogate's own output) or with the
+# backend's ``*t`` suffix (pyudales), and `_to_regular_grid` renames the latter
+# onto the former at deploy time.
+_CELL_CENTRE_DIMS = {"z": "z", "y": "y", "x": "x", "zt": "z", "yt": "y", "xt": "x"}
 
 
 def _plain(node: Any) -> Any:
@@ -127,10 +140,20 @@ def _validated_physical_metadata(cfg: DictConfig) -> dict:
             f"physical_metadata.coordinate_order must be [z, y, x] (the axis "
             f"order of every (C, *grid) tensor here), got {order}."
         )
+    # The mask polarity is not a free-text note: deployment applies exactly
+    # MASK_CONVENTION, so an artifact may not claim a different one (it would
+    # invert the fluid mask at sampling time).
+    convention = str(meta["geometry_mask_convention"])
+    if convention != MASK_CONVENTION:
+        raise ValueError(
+            f"physical_metadata.geometry_mask_convention must be exactly "
+            f"{MASK_CONVENTION!r} (the one polarity the generator and the "
+            f"generative spin-up speak), got {convention!r}."
+        )
     return meta
 
 
-def _grid_metadata(state_path: Path, state_var: str) -> dict:
+def _grid_metadata(state_path: Path, state_var: str, order: Sequence[str]) -> dict:
     """``{nz, ny, nx, dz, dy, dx, bounds, dims, first_center}`` off a state file.
 
     Read from the FIRST state variable's spatial coordinates -- not from the
@@ -140,6 +163,14 @@ def _grid_metadata(state_path: Path, state_var: str) -> dict:
     (1.0 for index-only coordinates); ``bounds`` are the cell EDGES (centres
     +- half a spacing), ordered ``[[x0, x1], [y0, y1], [z0, z1]]`` as in the
     training-data domain block.
+
+    The file's spatial dims must appear in ``order`` (the validated
+    ``physical_metadata.coordinate_order``): every ``(C, *grid)`` tensor in this
+    stack is positional, so a corpus stored ``(x, y, z)`` would be trained,
+    recorded and deployed with silently transposed axes. Cell-centre dims are
+    accepted in both the canonical (``z``/``y``/``x``) and the backend ``*t``
+    (``zt``/``yt``/``xt``) spelling, exactly as
+    ``NeuralSurrogateForwardModel._to_regular_grid`` renames them.
     """
     with xr.open_dataset(state_path) as ds:
         da = ds[state_var]
@@ -148,6 +179,17 @@ def _grid_metadata(state_path: Path, state_var: str) -> dict:
             raise ValueError(
                 f"{state_path.name}: state var {state_var!r} has spatial dims "
                 f"{dims}; expected exactly three (z, y, x)."
+            )
+        canonical = [_CELL_CENTRE_DIMS.get(d) for d in dims]
+        if canonical != [str(a) for a in order]:
+            raise ValueError(
+                f"{state_path.name}: state var {state_var!r} has spatial dims "
+                f"{dims}, which is not the declared "
+                f"physical_metadata.coordinate_order {[str(a) for a in order]} "
+                f"(cell-centre dims may also be spelled "
+                f"{sorted(set(_CELL_CENTRE_DIMS) - set('zyx'))}). Every tensor "
+                "here is positional, so a transposed corpus would train and "
+                "deploy on silently swapped axes."
             )
         sizes = [int(da.sizes[d]) for d in dims]
         spacing: list[float] = []
@@ -180,6 +222,59 @@ def _grid_metadata(state_path: Path, state_var: str) -> dict:
         # Provenance for the numbers above: on-disk dim names + first centres.
         "dims": dims,
         "first_center": [z0, y0, x0],
+    }
+
+
+def _verified_prehistory(train_ds: Any, root: Path) -> Optional[dict]:
+    """Provenance gate for ``dataset.constant_prehistory`` (plan 07 §1).
+
+    Repeating the first recorded parameter row for the missing leading history
+    is only legitimate when the corpus really was forced at those values before
+    its first save. That is a claim about the DATA, so it is checked against the
+    corpus' own ``config.yaml``: the constant-forcing spin-up must be at least
+    as long as the plateau it stands in for, ``(Hp - 1) * history_dt_seconds``.
+    Returns the record written to ``generator.data_provenance``; ``None`` when
+    the flag is off (anchors then start at ``t = Hp-1`` and no history is
+    invented).
+    """
+    if not train_ds.constant_prehistory:
+        return None
+    hp = int(train_ds.param_history_steps)
+    required = (hp - 1) * float(train_ds.history_dt_seconds)
+    time_block = _training_data_provenance(root).get("time") or {}
+    spinup = time_block.get("spinup_time")
+    if spinup is None:
+        raise ValueError(
+            f"dataset.constant_prehistory=true needs the corpus' own "
+            f"{root / 'config.yaml'} to record time.spinup_time: the repeated "
+            "leading history is only valid if the forcing really was constant "
+            "at the first saved values before the first save, and nothing else "
+            "in the corpus states that. Set constant_prehistory=false or "
+            "regenerate the data with its config."
+        )
+    spinup = float(spinup)
+    if spinup + 1e-9 < required:
+        raise ValueError(
+            f"dataset.constant_prehistory=true requires a constant-forcing "
+            f"spin-up at least as long as the repeated plateau: "
+            f"time.spinup_time={spinup:g} s < (Hp - 1) * history_dt_seconds = "
+            f"({hp} - 1) * {train_ds.history_dt_seconds:g} = {required:g} s. The "
+            "invented rows would reach back before the constant forcing began."
+        )
+    # State and parameter times are validated element-wise by the dataset, so
+    # one number describes both; across trajectories they must agree too, or
+    # 'the first saved time' is not a single, auditable instant.
+    firsts = sorted({round(float(t[0]), 9) for t in train_ds._times})
+    if len(firsts) != 1:
+        raise ValueError(
+            f"dataset.constant_prehistory=true requires one common first saved "
+            f"time across the split, got {firsts}; the spin-up duration cannot "
+            "vouch for the plateau of every trajectory otherwise."
+        )
+    return {
+        "spinup_time": spinup,
+        "required_seconds": required,
+        "first_saved_time": firsts[0],
     }
 
 
@@ -250,29 +345,27 @@ def _resolve_ae_inherited_dataset_settings(cfg: DictConfig, ae_cfg: DictConfig) 
         )
 
 
-def _check_attention_budget(model: Any, train_ds: Any, train_loader: Any) -> None:
+def _check_attention_budget(model: Any, ds: Any, loader: Any, split: str) -> None:
     """Refuse the run if any trajectory's batch exceeds ``max_latent_tokens``.
 
     ``B`` is the per-trajectory batch the loader will actually form (the
     ``TrajectoryBatchSampler``'s cell-budgeted size, else the DataLoader's), and
     ``N = prod(latent_grid_for(grid))`` the latent tokens per sample -- the
     same product ``velocity()`` re-checks per call, evaluated here for every
-    grid up front so the failure comes before an epoch is burned."""
+    grid up front so the failure comes before an epoch is burned. Run on BOTH
+    splits: validation forwards the same velocity net, and a val-only grid that
+    blows the budget would otherwise surface only at the first epoch's end."""
     budget = model.max_latent_tokens
     if budget is None:
         return
-    sampler = train_loader.batch_sampler
+    sampler = loader.batch_sampler
     from torch.utils.data import BatchSampler
 
     custom = sampler is not None and not isinstance(sampler, BatchSampler)
     worst: tuple[int, tuple[int, ...], int, int] | None = None
-    for traj in range(len(train_ds._state_files)):
-        grid = tuple(train_ds.grid_shape(traj))
-        b = (
-            int(sampler._batch_size_for(traj))
-            if custom
-            else int(train_loader.batch_size)
-        )
+    for traj in range(len(ds._state_files)):
+        grid = tuple(ds.grid_shape(traj))
+        b = int(sampler._batch_size_for(traj)) if custom else int(loader.batch_size)
         n = int(math.prod(model.latent_grid_for(grid)))
         if worst is None or b * n > worst[0]:
             worst = (b * n, grid, b, n)
@@ -280,15 +373,15 @@ def _check_attention_budget(model: Any, train_ds: Any, train_loader: Any) -> Non
     tokens, grid, b, n = worst
     if tokens > budget:
         raise ValueError(
-            f"latent attention budget exceeded before training: grid {grid} "
-            f"gives {n} latent tokens per sample x batch {b} = {tokens} > "
-            f"architecture.max_latent_tokens={budget} (naive attention allocates "
-            "B*heads*N*N). Reduce the batch size / cell_budget or the domain, or "
-            "raise the budget after profiling."
+            f"latent attention budget exceeded before training on the {split} "
+            f"split: grid {grid} gives {n} latent tokens per sample x batch {b} "
+            f"= {tokens} > architecture.max_latent_tokens={budget} (naive "
+            "attention allocates B*heads*N*N). Reduce the batch size / "
+            "cell_budget or the domain, or raise the budget after profiling."
         )
     print(
-        f"latent attention budget OK: worst grid {grid} -> {b} x {n} = {tokens} "
-        f"tokens <= {budget}"
+        f"latent attention budget OK ({split}): worst grid {grid} -> {b} x {n} = "
+        f"{tokens} tokens <= {budget}"
     )
 
 
@@ -407,6 +500,7 @@ def _stamp_export_config(
     ae_dir: Path,
     physical: dict,
     provenance: dict,
+    prehistory: Optional[dict],
 ) -> None:
     """Rewrite ``cfg`` into the self-contained artifact config (in place)."""
     cfg.architecture.skip_pretrained_load = True
@@ -414,13 +508,25 @@ def _stamp_export_config(
     cfg.architecture.ae_kwargs = model.ae_kwargs
     # Resolved width (null -> D rounded up); idempotent on reload.
     cfg.architecture.hidden_size = int(model.hidden_size)
+    # Stamped like hidden_size: both shape the velocity net's tensors, so the
+    # deploy rebuild must not depend on the defaults of the day.
+    cfg.architecture.mlp_ratio = int(model.mlp_ratio)
+    cfg.architecture.normalize = bool(model.normalize)
     cfg.dataset.param_vars = list(train_ds.param_names)
     cfg.dataset.state_vars = list(train_ds.state_vars)
 
     root = Path(train_ds.root)
-    grid = _grid_metadata(train_ds._state_files[0], train_ds.state_vars[0])
+    grid = _grid_metadata(
+        train_ds._state_files[0], train_ds.state_vars[0], physical["coordinate_order"]
+    )
+    # Shape + fluid-cell count do not identify a geometry (relocating the
+    # obstacles preserves both), so each entry also carries the mask's hash.
     supported = [
-        {"shape": [int(s) for s in g.shape], "fluid_cells": int(g.sum().item())}
+        {
+            "shape": [int(s) for s in g.shape],
+            "fluid_cells": int(g.sum().item()),
+            "mask_sha256": geometry_fingerprint(g),
+        }
         for g in train_ds._geometries
     ]
     cfg.generator = {
@@ -449,6 +555,9 @@ def _stamp_export_config(
             "n_train": int(len(train_ds)),
             "n_val": int(len(val_ds)),
             "constant_prehistory": bool(train_ds.constant_prehistory),
+            # What the constant_prehistory claim was checked against (null when
+            # the flag is off); see _verified_prehistory.
+            "verified_prehistory": prehistory,
             "cadence_rtol": float(train_ds.cadence_rtol),
             "training_data_config": _training_data_provenance(root),
         },
@@ -525,6 +634,9 @@ def run(cfg: DictConfig) -> Any:
         f"history_dt={train_ds.history_dt_seconds:.4g}s  "
         f"geometries={len(train_ds._geometries)}"
     )
+    prehistory = _verified_prehistory(train_ds, Path(train_ds.root))
+    if prehistory is not None:
+        print(f"constant_prehistory verified against the corpus: {prehistory}")
 
     # -- model ---------------------------------------------------------------- #
     model = instantiate(
@@ -548,8 +660,15 @@ def run(cfg: DictConfig) -> Any:
     print(
         f"param normalization set: mean={np.round(p_mean, 4)} std={np.round(p_std, 4)}"
     )
+    # The physical meaning of the params_hist columns, carried on the model
+    # itself so sample()/velocity() can re-check a caller's claim (deployment
+    # re-installs the same schema from the exported physical_schema).
+    model.set_conditioning_schema(
+        train_ds.param_names, float(train_ds.history_dt_seconds)
+    )
 
-    _check_attention_budget(model, train_ds, train_loader)
+    _check_attention_budget(model, train_ds, train_loader, "train")
+    _check_attention_budget(model, val_ds, val_loader, "val")
 
     # -- trainer (before the stats pass: it shares the batch preparation) ----- #
     out_dir = Path(cfg.paths.output_dir) / cfg.model_name
@@ -568,7 +687,9 @@ def run(cfg: DictConfig) -> Any:
     provenance = _install_latent_stats(cfg, model, trainer, train_ds, out_dir)
 
     # -- export config first, so a killed run still leaves a loadable schema --- #
-    _stamp_export_config(cfg, model, train_ds, val_ds, ae_dir, physical, provenance)
+    _stamp_export_config(
+        cfg, model, train_ds, val_ds, ae_dir, physical, provenance, prehistory
+    )
     OmegaConf.save(cfg, out_dir / "config.yaml")
 
     trainer.fit()

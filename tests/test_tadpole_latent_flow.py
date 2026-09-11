@@ -303,6 +303,65 @@ def test_attention_budget_raises_with_context(tmp_path):
     assert v_pred.shape == v_target.shape
 
 
+def test_conditioning_schema_is_installed_and_validated(tmp_path):
+    """``params_hist`` is a bare tensor: only the installed schema can catch a
+    reordered conditioning vector or a history saved at another cadence."""
+    ae_dir = _make_ae_export(tmp_path, "local", "branch")
+    m = _generator(ae_dir).eval()
+    _install_nontrivial_latent_stats(m)
+    _, geom, params_hist = _inputs(b=1)
+    feats = _sdf_feats(m, geom)
+    names = ("inflow_angle", "velocity_magnitude")
+    dt = 5.0
+
+    # (a) Nothing installed: a supplied claim has nothing to check against.
+    assert m.param_names is None and m.history_dt_seconds is None
+    with pytest.raises(ValueError, match="carries none"):
+        m.sample(params_hist, geom, feats, num_steps=1, param_names=names)
+    with pytest.raises(ValueError, match="carries none"):
+        m.sample(params_hist, geom, feats, num_steps=1, history_dt_seconds=dt)
+
+    # (b) The schema must describe the P conditioning columns.
+    with pytest.raises(ValueError, match="n_params"):
+        m.set_conditioning_schema((*names, "extra"), dt)
+    with pytest.raises(ValueError, match="history_dt_seconds"):
+        m.set_conditioning_schema(names, 0.0)
+    m.set_conditioning_schema(names, dt)
+    assert m.param_names == names and m.history_dt_seconds == dt
+    # Provenance, not weights: nothing widens the strict state dict.
+    assert not [k for k in m.state_dict() if "param_names" in k or "history_dt" in k]
+
+    # (c) Order-sensitive names, cadence within 1e-6 relative.
+    with pytest.raises(ValueError, match="order matters"):
+        m.sample(params_hist, geom, feats, num_steps=1, param_names=names[::-1])
+    with pytest.raises(ValueError, match="trained cadence"):
+        m.sample(params_hist, geom, feats, num_steps=1, history_dt_seconds=5.001)
+    out = m.sample(
+        params_hist,
+        geom,
+        feats,
+        num_steps=1,
+        param_names=names,
+        history_dt_seconds=dt * (1 + 1e-9),
+    )
+    assert out.shape == (1, C, *GRID)
+
+    # (d) velocity() takes (and checks) the same claim.
+    cond = m.geometry_condition(geom, feats, batch_size=1)
+    z = torch.zeros(1, m.state_latent_dim, *m.latent_grid_for(GRID))
+    tau = torch.zeros(1)
+    with pytest.raises(ValueError, match="order matters"):
+        m.velocity(z, tau, params_hist, cond, param_names=names[::-1])
+    with pytest.raises(ValueError, match="trained cadence"):
+        m.velocity(z, tau, params_hist, cond, history_dt_seconds=1.0)
+    v = m.velocity(z, tau, params_hist, cond, param_names=names, history_dt_seconds=dt)
+    assert v.shape == z.shape
+    # A model whose schema records no cadence refuses a cadence claim.
+    m.set_conditioning_schema(names, None)
+    with pytest.raises(ValueError, match="no cadence"):
+        m.sample(params_hist, geom, feats, num_steps=1, history_dt_seconds=dt)
+
+
 def test_encode_and_sample_require_installed_latent_stats(tmp_path):
     ae_dir = _make_ae_export(tmp_path, "local", "branch")
     m = _generator(ae_dir).eval()

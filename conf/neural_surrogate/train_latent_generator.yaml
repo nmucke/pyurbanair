@@ -60,6 +60,11 @@ architecture:
   # Hidden width of the FiLM MLP that maps [z-scored history, tau embedding]
   # to the per-layer conditioning.
   film_hidden: 128
+  # Transformer feed-forward expansion factor (hidden_size * mlp_ratio).
+  mlp_ratio: 4
+  # Z-score params_hist with the buffered parameter statistics (state stats
+  # always stay the frozen AE's, latent stats are always applied).
+  normalize: true
   # Default Euler step count for `sample()` (recorded under generator.sampling;
   # sweep 25/50/100 in the acceptance study before trusting it).
   num_sampling_steps: 50
@@ -103,6 +108,10 @@ dataset:
   # the missing leading history -- valid ONLY when the data's provenance
   # guarantees the forcing was constant at those values before the first saved
   # time (e.g. a constant-forcing spin-up ending exactly at the first save).
+  # The script VERIFIES that claim against the corpus' own config.yaml: it
+  # requires time.spinup_time >= (Hp - 1) * history_dt_seconds (the repeated
+  # plateau must fit inside the constant-forcing spin-up) and one common first
+  # saved time, and records the verdict under generator.data_provenance.
   constant_prehistory: false
   # Every saved dt must lie within this relative tolerance of the split's
   # median cadence (pyudales_idealized saves at 0, 4.85, 9.92, 15.00, ... s).

@@ -59,6 +59,34 @@ _BOUNDS_ATOL = 1e-6
 # otherwise print it per member per window).
 _REPEAT_SEEDING_WARNED = False
 
+# Likewise once per process: a generative cold start called without a stable
+# member index (see :func:`_warn_missing_member_index`).
+_MEMBER_INDEX_WARNED = False
+
+
+def _warn_missing_member_index() -> None:
+    """Warn (once per process) that a generative cold start fell back to 0.
+
+    ``member_index`` seeds the per-member latent noise, so an ensemble caller
+    that leaves it unset would give every member the *same* draw -- a collapsed
+    initial ensemble that ESMDA cannot spread. A genuine single-model run has
+    exactly one member and 0 is the right index, so this is a warning rather
+    than an error; the ensemble path passes indices explicitly and never
+    reaches it.
+    """
+    global _MEMBER_INDEX_WARNED
+    if _MEMBER_INDEX_WARNED:
+        return
+    _MEMBER_INDEX_WARNED = True
+    warnings.warn(
+        "generative cold start without a member_index: falling back to 0. That "
+        "is correct for a single-model run, but an ensemble caller MUST pass a "
+        "stable per-member index (NeuralSurrogateEnsembleForwardModel does), or "
+        "every member would be seeded with the same latent noise.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
 
 def _warn_repeat_seeding(num_history_steps: int, n_available: int) -> None:
     """Warn (once per process) that history was seeded by frame repetition."""
@@ -424,9 +452,11 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         ``conf/model/neural_surrogate.yaml`` (a ``???`` would break every
         composition that never uses generative mode), so they are validated
         here instead. ``save_diagnostics`` is a run-script concern and is
-        dropped before the handle is built; the surrogate's own
-        ``default_params`` are passed through so a parameter the assimilation
-        does not vary is conditioned on its constant fallback.
+        dropped before the handle is built; every remaining key (including the
+        optional ``expected_units`` map the deployment asserts against the
+        artifact's) reaches :class:`GenerativeSpinup` as-is, and the surrogate's
+        own ``default_params`` are passed through so a parameter the
+        assimilation does not vary is conditioned on its constant fallback.
         """
         from omegaconf import OmegaConf
 
@@ -663,15 +693,18 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 da = da.isel(time=-1)
             mask = 1.0 - np.asarray(da.values, dtype=np.float64)
             return torch.from_numpy(mask).to(device=self.device, dtype=self.torch_dtype)
-        if self.spinup_source == "generative":
-            # A generated snapshot always carries the template's mask, and the
-            # fallbacks below either need the (absent) CFD backend or would
-            # infer obstacles from generated zeros -- both forbidden here.
+        if self.spinup_source == "generative" and self.stl_path is None:
+            # A generated snapshot always carries the template's mask; of the
+            # fallbacks below only the explicit STL is admissible here, since
+            # the others need the (absent) CFD backend or would infer obstacles
+            # from generated zeros. With an stl_path we fall through to the
+            # voxelisation, exactly as in the other modes.
             raise RuntimeError(
                 "spinup_source='generative' requires the geometry variable "
                 f"'{self.geometry_var}' on the initial-state template (have "
-                f"{tuple(template.data_vars)}); obstacles are never inferred "
-                "from the state or a CFD backend in this mode."
+                f"{tuple(template.data_vars)}) or an explicit stl_path; "
+                "obstacles are never inferred from the state or a CFD backend "
+                "in this mode."
             )
         template_var = template[self.state_vars[0]]
         if "time" in template_var.dims:
@@ -800,7 +833,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         state: Optional[xr.Dataset],
         params: Optional[xr.Dataset],
         sim_name: Optional[str],
-        member_index: int = 0,
+        member_index: Optional[int] = None,
     ) -> xr.Dataset:
         """Return the template carrying coords + the initial field(s).
 
@@ -834,8 +867,13 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             # Cold start: sample the field from the member's CURRENT parameters
             # (first knot of a time-varying schedule). Regenerated on every
             # call, so an updated parameter ensemble gets a freshly conditioned
-            # initial state at its next forecast.
+            # initial state at its next forecast. An unset member_index is the
+            # single-model case (index 0) and is warned about once, because for
+            # an ensemble it would mean one shared noise draw.
             assert self._generative_spinup is not None
+            if member_index is None:
+                _warn_missing_member_index()
+                member_index = 0
             snap = self._generative_spinup.generate([params], [member_index])[0]
             self._validate_generated_snapshot(snap)
         else:
@@ -934,7 +972,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         state: Optional[xr.Dataset] = None,
         params: Optional[xr.Dataset] = None,
         sim_name: Optional[str] = "state",
-        member_index: int = 0,
+        member_index: Optional[int] = None,
     ) -> xr.Dataset:
         template = self._get_template_and_initial_state(
             state, params, sim_name, member_index

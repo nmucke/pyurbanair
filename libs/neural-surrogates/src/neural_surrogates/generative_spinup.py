@@ -32,6 +32,7 @@ Design points, in order of importance:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import pathlib
 from typing import Any, Optional, Sequence, cast
@@ -48,6 +49,37 @@ _SPACING_RTOL = 1e-4
 #: bounds: cell-centred coordinates must lie inside the bounds, with the first
 #: and last within one cell of the respective edge.
 _BOUNDS_ATOL = 1e-6
+
+#: The ONE mask polarity the whole plan-07 stack speaks. The training script
+#: writes exactly this string into the artifact (it refuses a config that says
+#: anything else) and the loader below compares for equality, so an artifact
+#: can never carry a different polarity than the one the deployment applies:
+#: a silently inverted mask would sample the flow inside the buildings.
+MASK_CONVENTION = "blanking: 1 = obstacle; model fluid mask = 1 - blanking"
+
+
+def geometry_fingerprint(mask: Any) -> str:
+    """sha256 of a binary **fluid** mask, in ``(z, y, x)`` order.
+
+    Shape and fluid-cell count do not identify a geometry: relocating the
+    obstacles leaves both unchanged while producing a domain the generator has
+    never seen. The training script hashes every train-split mask into
+    ``supported_geometries`` and :meth:`GenerativeSpinup._check_supported_geometry`
+    hashes the deployment template the same way, so only the very same obstacle
+    layout is accepted.
+    """
+    arr = np.asarray(mask, dtype=np.float64)
+    if arr.ndim != 3:
+        raise ValueError(
+            f"geometry fingerprint needs a 3D (z, y, x) mask, got shape {arr.shape}."
+        )
+    if not np.all(np.isin(arr, (0.0, 1.0))):
+        raise ValueError(
+            "geometry fingerprint needs a binary fluid mask (values in {0, 1})."
+        )
+    return hashlib.sha256(
+        np.ascontiguousarray(arr, dtype=np.uint8).tobytes()
+    ).hexdigest()
 
 
 def _member_seed(seed: int, member_index: int) -> int:
@@ -116,6 +148,11 @@ class GenerativeSpinup:
             params dataset omits; a parameter absent from both raises.
         geometry_var: Name of the obstacle-indicator variable on the template
             (``1`` = obstacle; the model's fluid mask is ``1 - geometry_var``).
+        expected_units: Optional ``{variable: unit}`` map the *deployment*
+            asserts: every listed variable's unit must equal the artifact's.
+            The artifact's own units are always required to cover every state
+            and parameter variable; this adds the caller's expectation on top,
+            so a generator trained in ``deg`` cannot be driven with ``rad``.
     """
 
     def __init__(
@@ -129,6 +166,7 @@ class GenerativeSpinup:
         dtype: str = "float32",
         default_params: Optional[dict[str, float]] = None,
         geometry_var: str = "blanking",
+        expected_units: Optional[dict[str, str]] = None,
     ) -> None:
         if model_dir is None or template_path is None:
             raise ValueError(
@@ -155,6 +193,11 @@ class GenerativeSpinup:
         self.torch_dtype = getattr(torch, dtype)
         self.default_params = dict(default_params) if default_params else {}
         self.geometry_var = geometry_var
+        self.expected_units = (
+            {str(k): str(v) for k, v in dict(expected_units).items()}
+            if expected_units
+            else None
+        )
 
         # Optional diagnostics: when set, every generate() call writes its
         # snapshots under ``<diagnostics_dir>/call_<k>/member_<i>.nc``. These
@@ -165,7 +208,7 @@ class GenerativeSpinup:
         # Lazily populated, immutable once set.
         self._config: Any = None
         self._schema: Optional[dict[str, Any]] = None
-        self._model: Optional[torch.nn.Module] = None
+        self._model: Any = None
         self._template: Optional[xr.Dataset] = None
         self._geometry: Optional[torch.Tensor] = None  # (1, *grid) fluid mask
         self._geom_features: Optional[torch.Tensor] = None  # (1, F, *grid)
@@ -226,24 +269,74 @@ class GenerativeSpinup:
             if sampling.get("num_steps") is not None
             else None
         )
-        convention = str(schema.get("geometry_mask_convention", "blanking"))
+        convention = str(schema.get("geometry_mask_convention", ""))
+        if convention != MASK_CONVENTION:
+            raise ValueError(
+                f"generator geometry_mask_convention {convention!r} is not the "
+                f"canonical {MASK_CONVENTION!r}; the deployment applies exactly "
+                "that polarity, so an artifact stating another one would invert "
+                "the fluid mask (sampling the flow inside the obstacles)."
+            )
         if self.geometry_var not in convention:
             raise ValueError(
                 f"generator geometry_mask_convention {convention!r} does not "
                 f"refer to the template mask variable {self.geometry_var!r}; "
                 "the deployment mask would not match the training one."
             )
+        schema["units"] = self._validated_units(schema, cfg_path)
         self._config = cfg
         self._schema = schema
         return schema
+
+    def _validated_units(self, schema: dict[str, Any], cfg_path: Any) -> dict[str, str]:
+        """The artifact's ``units`` map, complete and (optionally) as expected.
+
+        The physical values the deployment feeds the generator are only
+        meaningful in the units it was trained on, so the artifact must state a
+        unit for EVERY state and parameter variable, and an explicit
+        ``expected_units`` (the caller's own convention) must agree with it.
+        """
+        raw = schema.get("units") or {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"generator.physical_schema.units in {cfg_path} must be a "
+                f"{{variable: unit}} map, got {type(raw).__name__}."
+            )
+        units = {str(k): str(v) for k, v in raw.items() if v not in (None, "")}
+        needed = (*schema["state_vars"], *schema["param_vars"])
+        missing = [name for name in needed if name not in units]
+        if missing:
+            raise ValueError(
+                f"generator.physical_schema.units in {cfg_path} lacks an entry "
+                f"for {missing}; every state and parameter variable needs a unit "
+                "before its values can be fed to the generator."
+            )
+        if self.expected_units:
+            wrong = {
+                name: (units.get(name), unit)
+                for name, unit in self.expected_units.items()
+                if units.get(name) != unit
+            }
+            if wrong:
+                raise ValueError(
+                    "generator units do not match the configured expected_units "
+                    f"(variable: artifact vs expected): {wrong}."
+                )
+        return units
 
     def _load_model(self, cfg: Any, schema: dict[str, Any]) -> torch.nn.Module:
         """Rebuild the generator from the artifact and load its weights strictly.
 
         The seam tests replace to inject an instrumented stub: the returned
-        module must expose ``sample``, ``param_history_steps``, ``n_params``,
-        ``n_state_channels``, ``state_latent_dim``, ``latent_grid_for`` and
-        ``ae`` (for the optional SDF-feature hook).
+        module must expose ``sample``, ``set_conditioning_schema``,
+        ``param_history_steps``, ``n_params``, ``n_state_channels``,
+        ``state_latent_dim``, ``latent_grid_for`` and ``ae`` (for the optional
+        SDF-feature hook).
+
+        The artifact's conditioning schema is installed on the rebuilt model
+        right after the weights: the ordered ``param_vars`` and the saved
+        cadence are physical contracts no tensor shape encodes, so every
+        :meth:`generate` call can have the model re-check them.
         """
         from hydra.utils import instantiate
 
@@ -257,9 +350,13 @@ class GenerativeSpinup:
             _convert_="all",
         )
         model.load_state_dict(torch.load(weights, map_location="cpu"), strict=True)
+        dt = schema.get("history_dt_seconds")
+        model.set_conditioning_schema(  # type: ignore[operator]
+            schema["param_vars"], None if dt is None else float(dt)
+        )
         return model
 
-    def _ensure_model(self) -> torch.nn.Module:
+    def _ensure_model(self) -> Any:
         if self._model is not None:
             return self._model
         schema = self._ensure_schema()
@@ -406,22 +503,35 @@ class GenerativeSpinup:
 
         Unseen geometries need a held-out evaluation before they can be
         trusted (plan 07 §4), so anything not in ``supported_geometries`` is
-        rejected here rather than sampled blindly.
+        rejected here rather than sampled blindly. Identity is the full
+        :func:`geometry_fingerprint` -- shape and fluid-cell count alone are
+        satisfied by any relocation of the same obstacles.
         """
         supported = schema.get("supported_geometries") or []
         shape = tuple(int(s) for s in fluid.shape)
         fluid_cells = int(round(float(fluid.sum())))
+        fingerprint = geometry_fingerprint(fluid)
         for entry in supported:
-            entry_shape = tuple(int(s) for s in entry.get("shape", ()))
-            entry_cells = entry.get("fluid_cells")
-            if entry_shape == shape and (
-                entry_cells is None or int(entry_cells) == fluid_cells
+            if entry.get("mask_sha256") is None:
+                raise ValueError(
+                    f"the generator artifact at {self.model_dir} has a "
+                    f"supported_geometries entry without a 'mask_sha256' "
+                    f"({entry}); re-export it with a current "
+                    "train_latent_generator.py so the deployment geometry can "
+                    "be identified by its mask, not only by its cell count."
+                )
+            if (
+                tuple(int(s) for s in entry.get("shape", ())) == shape
+                and int(entry["fluid_cells"]) == fluid_cells
+                and str(entry["mask_sha256"]) == fingerprint
             ):
                 return
         raise ValueError(
-            f"template geometry (shape={shape}, fluid_cells={fluid_cells}) is not "
-            f"among the generator's supported_geometries {supported}; unseen "
-            "geometries need a held-out evaluation before deployment."
+            f"template {self.template_path} carries a geometry (shape={shape}, "
+            f"fluid_cells={fluid_cells}, mask_sha256={fingerprint}) the generator "
+            f"was not trained on; supported_geometries = {supported}. Unseen "
+            "geometries -- including a relocation of the same obstacles -- need "
+            "a held-out evaluation before deployment."
         )
 
     # -- public properties -------------------------------------------------
@@ -519,8 +629,8 @@ class GenerativeSpinup:
         regardless of which members share a batch and of the batch size.
         """
         model = self._ensure_model()
-        latent_grid = tuple(model.latent_grid_for(self.grid_shape))  # type: ignore[operator]
-        shape = (int(model.state_latent_dim), *latent_grid)  # type: ignore[arg-type]
+        latent_grid = tuple(model.latent_grid_for(self.grid_shape))
+        shape = (int(model.state_latent_dim), *latent_grid)
         gen = torch.Generator().manual_seed(_member_seed(self.seed, member_index))
         return torch.randn(shape, generator=gen, dtype=torch.float32)
 
@@ -581,12 +691,17 @@ class GenerativeSpinup:
             )
             try:
                 with torch.no_grad():
-                    out = model.sample(  # type: ignore[operator]
+                    out = model.sample(
                         params_hist,
                         geometry,
                         geom_features,
                         initial_noise=noise,
                         num_steps=self.num_sampling_steps,
+                        # The conditioning columns and their spacing are stated
+                        # again here so the model re-checks them against the
+                        # schema it was loaded with (see _load_model).
+                        param_names=self.param_vars,
+                        history_dt_seconds=self.history_dt_seconds,
                     )
             except Exception as exc:
                 conditioning = {

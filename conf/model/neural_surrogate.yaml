@@ -73,6 +73,11 @@ forward_model:
     seed: 0                  # base seed; member i's noise is seeded by (seed, i)
     sample_batch_size: 8     # members sampled per generator call (memory bound)
     num_sampling_steps: null # Euler steps; null -> the artifact's validated default
+    # Optional {variable: unit} map asserted against the artifact's own units
+    # (which must already cover every state and param variable): state what this
+    # deployment feeds the generator and a unit change fails loud instead of
+    # silently conditioning on e.g. radians. null = trust the artifact.
+    expected_units: null
     save_diagnostics: false  # run_esmda: write generated snapshots under _generated_states/
 
   # --- spin-up backend (produces the cold-start initial condition) ---------
