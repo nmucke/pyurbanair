@@ -93,6 +93,41 @@ def test_encoder_crop_size_must_be_multiple_of_16():
         _ae(encoder_crop_size=8)
 
 
+@pytest.mark.parametrize(
+    "crop",
+    [(16, 32), (16, 32, 8), (16, 32, 32, 64), (16, 32.0, 32)],
+)
+def test_anisotropic_encoder_crop_size_is_validated(crop):
+    with pytest.raises(ValueError, match="encoder_crop_size"):
+        _ae(encoder_crop_size=crop)
+
+
+def test_anisotropic_tiles_fold_across_the_full_batch():
+    """Each axis uses its own tile extent without padding the thin z axis."""
+    ae = _ae(
+        encode_geometry=False,
+        encoder_crop_size=(16, 32, 32),
+        latent_type="mode",
+    ).eval()
+    state, geom = _inputs(b=2, grid=(16, 32, 64))
+    working = ae._assemble_working_input(state, geom, None)
+    padded, original = ae._pad_to_crop_multiple(working)
+    assert original == (16, 32, 64)
+    assert padded.shape[-3:] == (16, 32, 64)
+
+    encoder_inputs = []
+    hook = ae.ae.encoder.register_forward_pre_hook(
+        lambda _, args: encoder_inputs.append(tuple(args[0].shape))
+    )
+    with torch.no_grad():
+        recon = ae(state, geom)
+    hook.remove()
+
+    # B=2, C=3, tiles=1*1*2 are folded into one internal batch.
+    assert encoder_inputs == [(12, 1, 16, 32, 32)]
+    assert recon.shape == state.shape
+
+
 def test_padding_round_trip_non_divisible_grid():
     """A grid not divisible by the crop size is padded internally and cropped
     back, so the reconstruction matches the (odd) input shape."""

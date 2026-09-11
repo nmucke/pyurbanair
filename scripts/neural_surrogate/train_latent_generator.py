@@ -55,6 +55,7 @@ import numpy as np
 import torch
 import xarray as xr
 from hydra.utils import instantiate
+from neural_surrogates.architectures._tadpole_crop import crop_size_config_value
 from neural_surrogates.generative_spinup import MASK_CONVENTION, geometry_fingerprint
 from neural_surrogates.sdf import normalize_sdf_mode
 from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
@@ -422,7 +423,7 @@ def _latent_stats_provenance(cfg: DictConfig, model: Any, train_ds: Any) -> dict
         "version": _LATENT_STATS_VERSION,
         "ae_fingerprint": model.ae_fingerprint,
         "spatial_mode": model.spatial_mode,
-        "encoder_crop_size": int(model.encoder_crop_size),
+        "encoder_crop_size": crop_size_config_value(model.encoder_crop_size),
         "halo_size": int(model.halo_size),
         "root_dir": str(Path(train_ds.root).resolve()),
         "split": str(train_ds.split),

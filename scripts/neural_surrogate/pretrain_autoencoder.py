@@ -100,29 +100,36 @@ def run(cfg: DictConfig) -> None:
             f"{train_ds.sdf_clamp_cells}; they must match."
         )
 
-    # Warn on a wasteful crop/encoder pairing: a random crop SMALLER than the
-    # encoder crop size is zero-padded up to it inside the model, so most of every
-    # forward is padding and the reconstruction is dominated by padded cells before
-    # the crop-back. Pick random_crop_size as a multiple of encoder_crop_size.
+    # Warn on wasteful dataset-crop / encoder-tile pairings. The dataset clips
+    # its scalar random crop independently to each grid dimension; the model then
+    # pads each resulting axis to its corresponding encoder tile size.
     crop = train_ds.random_crop_size
     global_spatial = getattr(model, "spatial_mode", "local") == "global"
-    enc_crop = 16 if global_spatial else int(model.encoder_crop_size)
+    enc_crop = (16, 16, 16) if global_spatial else model.encoder_crop_size
     padding_name = (
         "encoder stride" if global_spatial else "architecture.encoder_crop_size"
     )
     padding_advice = (
         "Use a grid or crop whose dimensions are multiples of 16."
         if global_spatial
-        else "Pick an encoder_crop_size that divides the grid, or crop to a multiple."
+        else "Pick per-axis tile sizes that divide the grid or dataset crop."
     )
-    if crop is not None and int(crop) < enc_crop:
-        print(
-            f"WARNING: dataset.random_crop_size={crop} < "
-            f"{padding_name}={enc_crop}: every crop is zero-padded "
-            f"{crop}->{enc_crop} per spatial dim (wasted compute, padding-dominated "
-            "reconstruction). Set random_crop_size to a multiple of "
-            f"{padding_name}."
-        )
+    if crop is not None:
+        crop_shapes = {
+            tuple(min(int(crop), int(dim)) for dim in geometry.shape)
+            for geometry in train_ds._geometries
+        }
+        for shape in sorted(crop_shapes):
+            padded = tuple(
+                size + (tile - size % tile) % tile
+                for size, tile in zip(shape, enc_crop)
+            )
+            if padded != shape:
+                print(
+                    f"WARNING: dataset crop shape {shape} is not divisible by "
+                    f"{padding_name}={enc_crop}: every crop is zero-padded to "
+                    f"{padded} before encoding (wasted compute). {padding_advice}"
+                )
     elif crop is None:
         # Full-field path: the model tiles each grid into encoder_crop_size cubes
         # and zero-pads any dim that is not a multiple of it. Padding tiles waste
@@ -131,10 +138,12 @@ def run(cfg: DictConfig) -> None:
         bad_shapes = {
             tuple(g.shape)
             for g in train_ds._geometries
-            if any(int(d) % enc_crop != 0 for d in g.shape)
+            if any(int(d) % tile != 0 for d, tile in zip(g.shape, enc_crop))
         }
         for shape in sorted(bad_shapes):
-            offenders = [int(d) for d in shape if int(d) % enc_crop != 0]
+            offenders = [
+                int(d) for d, tile in zip(shape, enc_crop) if int(d) % tile != 0
+            ]
             print(
                 f"WARNING: full-field grid {shape} has dim(s) {offenders} not a "
                 f"multiple of {padding_name}={enc_crop}: those axes "

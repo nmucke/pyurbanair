@@ -276,6 +276,23 @@ def test_encoder_crop_size_must_be_multiple_of_16():
         _stepper(encoder_crop_size=8)
 
 
+def test_anisotropic_encoder_tiles_run_through_dft():
+    model = _stepper(encoder_crop_size=(16, 16, 32)).eval()
+    model.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
+    state, params, geom = _inputs(grid=(16, 16, 32))
+    encoder_inputs = []
+    hook = model.dft.encoder.register_forward_pre_hook(
+        lambda _, args: encoder_inputs.append(tuple(args[0].shape))
+    )
+    with torch.no_grad():
+        result = model(state, params, geom)
+    hook.remove()
+
+    # Three state channels plus one folded geometry channel, one tile each.
+    assert encoder_inputs == [(4, 1, 16, 16, 32)]
+    assert result.shape == state.shape
+
+
 def test_sdf_geom_features_precompute_matches_recompute():
     """M6 correctness: passing precomputed ``geom_features`` yields output
     byte-identical to letting the stepper recompute the SDF transform inside

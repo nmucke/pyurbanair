@@ -155,6 +155,21 @@ def test_fold_shapes_across_levels() -> None:
         assert f.shape == (n_crops, dim, *([max(CROP // stride, 1)] * 3))
 
 
+def test_fold_shapes_with_anisotropic_tiles() -> None:
+    tile = (16, 16, 32)
+    grid = (16, 32, 64)
+    ae = _branch_ae(encoder_crop_size=tile)
+    state = torch.randn(2, C, *grid)
+    geom = torch.ones(2, *grid)
+    folded = ae._fold_geom_feats(_feats(ae, geom, state), C)
+    n_tiles = 2 * C * 1 * 2 * 2
+    for feature, dim, stride in zip(
+        folded, _branch(ae).out_dims, GeometryBranch.strides
+    ):
+        expected_tile = tuple(size // stride for size in tile)
+        assert feature.shape == (n_tiles, dim, *expected_tile)
+
+
 # --------------------------------------------------------------------------- #
 # Construction contract.
 # --------------------------------------------------------------------------- #

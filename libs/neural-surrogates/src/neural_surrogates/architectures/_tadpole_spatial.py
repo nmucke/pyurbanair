@@ -15,6 +15,7 @@ from typing import Any, Sequence
 
 import torch
 
+from ._tadpole_crop import CropShape
 from .tadpole_skip_mixing import TadpoleSkipMixing
 
 STRIDE = 16
@@ -61,7 +62,9 @@ class SpatialResiduals:
     skips: list[list[list[torch.Tensor]]]
 
 
-def regions_for(shape: Sequence[int], mode: str, crop: int, halo: int) -> list[Region]:
+def regions_for(
+    shape: Sequence[int], mode: str, crop: CropShape, halo: int
+) -> list[Region]:
     if mode == "global":
         whole = tuple(slice(0, n) for n in shape)
         return [Region(whole, whole)]
@@ -69,13 +72,13 @@ def regions_for(shape: Sequence[int], mode: str, crop: int, halo: int) -> list[R
         halo = 0
     return [
         Region(
-            tuple(slice(s, s + crop) for s in start),
+            tuple(slice(s, s + size) for s, size in zip(start, crop)),
             tuple(
-                slice(max(0, s - halo), min(n, s + crop + halo))
-                for s, n in zip(start, shape)
+                slice(max(0, s - halo), min(n, s + size + halo))
+                for s, n, size in zip(start, shape, crop)
             ),
         )
-        for start in product(*(range(0, n, crop) for n in shape))
+        for start in product(*(range(0, n, size) for n, size in zip(shape, crop)))
     ]
 
 
@@ -94,7 +97,7 @@ def encode_spatial(
     model: Any,
     x: torch.Tensor,
     mode: str,
-    crop: int,
+    crop: CropShape,
     halo: int,
     features: list[torch.Tensor] | None = None,
     *,
@@ -156,7 +159,7 @@ def decode_spatial(
     model: Any,
     latent: torch.Tensor,
     mode: str,
-    crop: int,
+    crop: CropShape,
     halo: int,
     features: list[torch.Tensor] | None = None,
     *,

@@ -90,6 +90,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
 import torch
+from neural_surrogates.architectures._tadpole_crop import CropShape
 from neural_surrogates.architectures._tadpole_spatial import (
     STRIDE,
     decode_spatial,
@@ -304,7 +305,7 @@ class TadpoleLatentGenerator(nn.Module):
 
         # Inherited spatial policy (recorded in ae_kwargs; immutable here).
         self.spatial_mode: str = self.ae.spatial_mode
-        self.encoder_crop_size: int = self.ae.encoder_crop_size
+        self.encoder_crop_size: CropShape = self.ae.encoder_crop_size
         self.halo_size: int = self.ae.halo_size
 
         # Latent bookkeeping: Cl per folded channel, D generated state channels,
@@ -606,9 +607,16 @@ class TadpoleLatentGenerator(nn.Module):
     # -- latent grid bookkeeping -------------------------------------------- #
 
     def _padded_shape(self, grid: Sequence[int]) -> tuple[int, int, int]:
-        mult = STRIDE if self.spatial_mode == "global" else self.encoder_crop_size
+        multiples = (
+            (STRIDE, STRIDE, STRIDE)
+            if self.spatial_mode == "global"
+            else self.encoder_crop_size
+        )
         d, h, w = (int(s) for s in grid)
-        return tuple(s + (mult - s % mult) % mult for s in (d, h, w))  # type: ignore[return-value]
+        return tuple(
+            size + (multiple - size % multiple) % multiple
+            for size, multiple in zip((d, h, w), multiples)
+        )  # type: ignore[return-value]
 
     def latent_grid_for(self, grid: Sequence[int]) -> tuple[int, int, int]:
         """Latent grid ``(Zl, Yl, Xl)`` for a physical grid ``(d, h, w)``."""

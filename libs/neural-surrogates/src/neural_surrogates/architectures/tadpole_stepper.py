@@ -57,6 +57,7 @@ import warnings
 from typing import TYPE_CHECKING
 
 import torch
+from neural_surrogates.architectures._tadpole_crop import CropSize, normalize_crop_size
 from neural_surrogates.architectures._tadpole_field_io import _TadpoleFieldIO
 from neural_surrogates.architectures._tadpole_spatial import (
     SpatialResiduals,
@@ -242,7 +243,9 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
     latent_type:
         ``"mode"`` (deterministic latent, the default here) or ``"sample"``.
     encoder_crop_size:
-        Spatial crop the field is tiled into (positive multiple of 16).
+        Internal tile size: one integer for cubic tiles or a ``(z, y, x)``
+        sequence for anisotropic tiles. Every entry must be a positive multiple
+        of 16.
     spatial_mode:
         ``local`` (default), ``global`` or ``halo``; the same spatial encoder/
         decoder policy as :class:`TadpoleAE`. Every mode runs the latent
@@ -316,7 +319,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         subnetwork: str | None = "default",
         param_conditioning: str = "film",
         latent_type: str = "mode",
-        encoder_crop_size: int = 64,
+        encoder_crop_size: CropSize = 64,
         max_internal_batchsize: int | None = None,
         predict_residual: bool = True,
         normalize: bool = True,
@@ -358,11 +361,6 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             raise ValueError(
                 f"latent_type must be 'sample' or 'mode', got {latent_type!r}"
             )
-        if encoder_crop_size < 16 or encoder_crop_size % 16 != 0:
-            raise ValueError(
-                "encoder_crop_size must be a positive multiple of 16, got "
-                f"{encoder_crop_size}"
-            )
         if param_conditioning not in ("film", "token", "none"):
             raise ValueError(
                 "param_conditioning must be 'film', 'token' or 'none', got "
@@ -394,7 +392,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         self.n_input_state_channels = self.n_state_channels
         self.size = size
         self.latent_type = latent_type
-        self.encoder_crop_size = int(encoder_crop_size)
+        self.encoder_crop_size = normalize_crop_size(encoder_crop_size)
         validate_spatial_mode(spatial_mode, halo_size)
         self.spatial_mode = spatial_mode
         self.halo_size = halo_size
@@ -899,10 +897,10 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
 
         dft = self.dft
         c = x_pad.shape[1]
-        cs = dft.encoder_crop_size
-        fu = max(x_pad.shape[2] // cs, 1)
-        fv = max(x_pad.shape[3] // cs, 1)
-        fw = max(x_pad.shape[4] // cs, 1)
+        cd, ch, cw = dft.encoder_crop_size
+        fu = max(x_pad.shape[2] // cd, 1)
+        fv = max(x_pad.shape[3] // ch, 1)
+        fw = max(x_pad.shape[4] // cw, 1)
         folded = rearrange(
             x_pad,
             "B C (U Xc) (V Yc) (W Zc) -> (B C U V W) 1 Xc Yc Zc",

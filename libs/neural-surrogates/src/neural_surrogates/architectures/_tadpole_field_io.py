@@ -42,6 +42,8 @@ import torch
 import torch.nn.functional as F
 from neural_surrogates.sdf import sdf_features as compute_sdf_features
 
+from ._tadpole_crop import CropShape
+
 
 class _TadpoleFieldIO:
     """Mask / normalise / assemble / pad helpers shared by the Tadpole wrappers."""
@@ -50,7 +52,7 @@ class _TadpoleFieldIO:
     # its ``__init__``; declared here (annotation only, no assignment) so this
     # mixin type-checks against the shared contract without creating class-level
     # defaults that would shadow the hosts' buffers/attrs.
-    encoder_crop_size: int
+    encoder_crop_size: CropShape
     spatial_mode: str
     halo_size: int
     normalize: bool
@@ -90,9 +92,14 @@ class _TadpoleFieldIO:
 
         Return the padded tensor and original shape for cropping back.
         """
-        mult = 16 if self.spatial_mode == "global" else self.encoder_crop_size
+        multiples = (
+            (16, 16, 16) if self.spatial_mode == "global" else self.encoder_crop_size
+        )
         d, h, w = x.shape[-3:]
-        pad_d, pad_h, pad_w = ((mult - s % mult) % mult for s in (d, h, w))
+        pad_d, pad_h, pad_w = (
+            (multiple - size % multiple) % multiple
+            for size, multiple in zip((d, h, w), multiples)
+        )
         if pad_d or pad_h or pad_w:
             x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
         return x, (d, h, w)
@@ -158,11 +165,11 @@ class _TadpoleFieldIO:
         return x * self.state_std.view(ch) + self.state_mean.view(ch)
 
     def _fold_dims(self, x: torch.Tensor) -> tuple[int, int, int, int, int]:
-        cs = self.encoder_crop_size
+        cd, ch, cw = self.encoder_crop_size
         b, c = x.shape[0], x.shape[1]
-        u = max(x.shape[2] // cs, 1)
-        v = max(x.shape[3] // cs, 1)
-        w = max(x.shape[4] // cs, 1)
+        u = max(x.shape[2] // cd, 1)
+        v = max(x.shape[3] // ch, 1)
+        w = max(x.shape[4] // cw, 1)
         return b, c, u, v, w
 
     def _expand_geometry(
@@ -291,15 +298,19 @@ class _TadpoleFieldIO:
                 f.unsqueeze(1).expand(-1, n_channels, -1, -1, -1, -1).flatten(0, 1)
                 for f in feats
             ]
-        cs = self.encoder_crop_size
-        grid = feats[0].shape[2]
+        crop_shape = self.encoder_crop_size
+        grid = feats[0].shape[2:]
         folded: list[torch.Tensor] = []
         for f in feats:
-            stride = max(grid // f.shape[2], 1)
-            crop = max(cs // stride, 1)
-            u = max(f.shape[2] // crop, 1)
-            v = max(f.shape[3] // crop, 1)
-            w = max(f.shape[4] // crop, 1)
+            strides = tuple(
+                max(full // level, 1) for full, level in zip(grid, f.shape[2:])
+            )
+            cd, ch, cw = (
+                max(size // stride, 1) for size, stride in zip(crop_shape, strides)
+            )
+            u = max(f.shape[2] // cd, 1)
+            v = max(f.shape[3] // ch, 1)
+            w = max(f.shape[4] // cw, 1)
             t = rearrange(
                 f, "B F (U Xc) (V Yc) (W Zc) -> B U V W F Xc Yc Zc", U=u, V=v, W=w
             )
@@ -317,7 +328,9 @@ class _TadpoleFieldIO:
     # -- normalisation-buffer install helper ------------------------------- #
 
     @staticmethod
-    def _to_buffer(buf: torch.Tensor, value, eps: float | None = None) -> torch.Tensor:
+    def _to_buffer(
+        buf: torch.Tensor, value: Any, eps: float | None = None
+    ) -> torch.Tensor:
         """Coerce ``value`` to ``buf``'s dtype/device/shape (optionally floored)."""
         t = torch.as_tensor(
             np.asarray(value), dtype=buf.dtype, device=buf.device

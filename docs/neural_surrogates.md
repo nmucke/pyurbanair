@@ -1729,6 +1729,9 @@ architecture:
   halo_size: 16
 ```
 
+For a `16 × 64 × 64` field, `[16, 32, 32]` produces `1 × 2 × 2` tiles per
+channel with no padding; scalar `32` would pad the z axis from 16 to 32.
+
 AE and DFT may use different spatial modes without changing weight shapes or
 re-pretraining the AE. Their geometry configuration must still agree. A DFT
 starts from the AE reconstruction **under its selected processing mode**;
