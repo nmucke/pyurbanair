@@ -1,6 +1,6 @@
 # Plan 07 — Conditional latent flow matching for generative spin-up
 
-**Status: proposed; revised 2026-09-10 after code review and user clarification.**
+**Status: implemented on feat/latent-flow-matching-spinup (2026-09-10); §3 statistical acceptance on real data not yet run.**
 
 **Goal.** Generate a statistically developed flow state conditioned on geometry
 and inflow parameters, then start a surrogate rollout without CFD spin-up.

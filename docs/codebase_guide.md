@@ -783,6 +783,12 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   [scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py)
   (streamed in f64 over fluid cells only) and **baked into the checkpoint** via
   `model.set_normalization(...)`, so no separate stats file is needed at inference.
+- The Tadpole track (`TadpoleAE` pre-training, the `TadpoleTimeStepper` DFT
+  fine-tune, and the `TadpoleLatentGenerator` / `spinup_source: generative`
+  cold start that samples the window-0 field instead of running a CFD spin-up)
+  is documented in [docs/neural_surrogates.md](neural_surrogates.md) Parts G–I;
+  the generative spin-up contract (regeneration on every cold forecast, no
+  initial-knot pinning, joint-state smoothers rejected) is Part I, §40.
 
 ## 8. Adding a new component — recipes
 
