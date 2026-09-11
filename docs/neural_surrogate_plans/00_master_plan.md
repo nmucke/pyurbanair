@@ -71,6 +71,7 @@ custom layer).
 | 3 | [03_ae_to_timestepper.md](03_ae_to_timestepper.md) | `TadpoleTimeStepper` wrapper around `TadpoleDFT` (params/geometry/SDF conditioning, our forward contract), fine-tune path from a pre-trained autoencoder to a next-step predictor, ESMDA integration. | 1, 2 |
 | 4 | [04_bayesian_lora.md](04_bayesian_lora.md) | `BaLoRALinear`/`BaLoRAConv3d` as PEFT custom layers, ELBO trainer hook, deterministic + sampling inference modes, ensemble/DA weight-sampling design. | 1 (and 3 for the Tadpole path) |
 | 5 | [05_latent_space_pretraining_extensions.md](05_latent_space_pretraining_extensions.md) | Research report + plan for extended `TadpoleAE` trainings: JEPA-inspired geometry-conditioned latent prediction, masked "flow given geometry" inpainting, denoising/free-bits/near-wall upgrades, temporal latent regularizers, and the latent-evaluation harness (geometry-held-out splits, probes, RankMe). Extends 2, feeds 3; phases E0–E5. | 2 (and 3 for the warm-start payoff) |
+| 7 | [07_latent_flow_matching_spinup.md](07_latent_flow_matching_spinup.md) | Conditional latent flow matching for **generative spin-up**: `SnapshotHistoryDataset` (+ shared `load_param_table`), `TadpoleLatentGenerator` (frozen `TadpoleAE` + full-width velocity net), `LatentFlowMatchingTrainer`, `conf/neural_surrogate/train_latent_generator.yaml`, `scripts/neural_surrogate/train_latent_generator.py`, `neural_surrogates.generative_spinup.GenerativeSpinup` and `spinup_source: generative` (cold start regenerated from each member's current parameters on every ESMDA forecast). Status: implemented (phases 1–4) on `feat/latent-flow-matching-spinup`; statistical acceptance on real data pending. Docs: `docs/neural_surrogates.md` Part I. | 2 (and 3 for deployment) |
 
 ## Implementation order and rationale
 
@@ -149,6 +150,8 @@ conf/neural_surrogate/pretrain_autoencoder.yaml  # NEW: Tadpole-style (V)AE pre-
 conf/neural_surrogate/finetuning.yaml            # NEW: all fine-tuning; mode group selects
                                                  #   lora_nextstep | dft (AE→predictor)
                                                  #   and lora.variant: standard | balora
+conf/neural_surrogate/train_latent_generator.yaml  # NEW (plan 07): latent flow-matching generator
+                                                   #   for generative spin-up (frozen AE)
 ```
 
 Both new entry points follow the `def run(cfg)` + thin `@hydra.main` wrapper

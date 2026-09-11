@@ -1,0 +1,225 @@
+# @package _global_
+#
+# Conditional latent flow matching for generative spin-up (plan 07): trains a
+# `TadpoleLatentGenerator` -- a flow-matching velocity network in the latent
+# space of a FROZEN, pre-trained `TadpoleAE` -- with the
+# `LatentFlowMatchingTrainer` on a `SnapshotHistoryDataset` split, and writes a
+# self-contained `model_weights/<model_name>/` export (config.yaml + full
+# weights.pt incl. the frozen `ae.*` weights, checkpoint.pt, metrics.csv,
+# latent_stats.pt). Entry point:
+#   scripts/neural_surrogate/train_latent_generator.py
+#
+#   pixi run -e dev python scripts/neural_surrogate/train_latent_generator.py \
+#     pretrained_ae_dir=model_weights/tadpole_ae_s \
+#     dataset.root_dir=training_data/pyudales_idealized \
+#     'dataset.param_vars=[inflow_angle,velocity_magnitude,pressure_gradient_magnitude]' \
+#     physical_metadata.boundary_conditions='...' model_name=latent_generator_s
+#
+# Like pretrain_autoencoder.yaml this has no `mode` group: one trainer +
+# architecture pairing, everything inline. Three things are REQUIRED and fail
+# loud when left at `???`: the AE export dir, the ordered conditioning schema
+# (`dataset.param_vars`) and the physical metadata block -- the generator
+# artifact records all of them so deployment can never substitute a different
+# convention (plan 07 §1).
+
+defaults:
+  - _self_
+
+# Where the trained generator lands: <paths.output_dir>/<model_name>/.
+model_name: latent_generator_s
+
+# A `pretrain_autoencoder.py` export (config.yaml + weights.pt). Its
+# `architecture` node supplies the frozen AE's kwargs (size, spatial_mode,
+# encoder_crop_size, halo_size, encode_geometry / geometry_branch, sdf_features,
+# ...), its weights.pt is loaded strictly, and its `dataset.state_vars` must
+# equal `dataset.state_vars` below (checked by the script). The AE must have a
+# geometry path (encode_geometry: true OR a geometry_branch) to condition on.
+pretrained_ae_dir: ???
+
+architecture:
+  _target_: neural_surrogates.TadpoleLatentGenerator
+  # n_state_channels / n_params are injected by the script from the dataset;
+  # pretrained_ae_dir from the top-level key above. The export stamps this node
+  # with `skip_pretrained_load: true`, `pretrained_ae_dir: null` and the resolved
+  # `ae_kwargs` inline, so deployment rebuilds without the AE dir.
+  # Parameter-history length Hp: `params_hist` is (B, Hp, P), oldest first,
+  # spanning (Hp - 1) * history_dt_seconds (12 x 5 s saves = 55 s). The dataset
+  # block interpolates it so the two can never disagree.
+  param_history_steps: 12
+  # Velocity-net width. null -> D = n_state_channels * Cl (Cl = 256/512/1024
+  # for AE size S/B/L), rounded UP to a multiple of num_heads. An explicit value
+  # BELOW D is rejected: the final Linear(hidden, D) would confine every
+  # velocity to a fixed subspace the flow could never leave (plan 07 §2). The
+  # DFT stepper's fixed subnetwork widths are deliberately NOT inherited.
+  hidden_size: null
+  n_layers: 4
+  num_heads: 8
+  # Width of the sinusoidal embedding of the flow time tau (even). tau is an
+  # artificial integration coordinate in [0, 1], unrelated to physical time.
+  time_embed_dim: 64
+  # Hidden width of the FiLM MLP that maps [z-scored history, tau embedding]
+  # to the per-layer conditioning.
+  film_hidden: 128
+  # Transformer feed-forward expansion factor (hidden_size * mlp_ratio).
+  mlp_ratio: 4
+  # Z-score params_hist with the buffered parameter statistics (state stats
+  # always stay the frozen AE's, latent stats are always applied).
+  normalize: true
+  # Default Euler step count for `sample()` (recorded under generator.sampling;
+  # sweep 25/50/100 in the acceptance study before trusting it).
+  num_sampling_steps: 50
+  # Floor for the per-channel latent standard deviations (near-constant latent
+  # channels are floored here and reported when the stats are computed).
+  latent_eps: 1.0e-6
+  # Latent-attention budget: the velocity net's naive global attention
+  # allocates B * heads * N * N with N = Zl*Yl*Xl latent tokens per sample. The
+  # script rejects the run up front if any trajectory's batch would exceed
+  # B * N > max_latent_tokens; `velocity()` re-checks every call. A physical
+  # cell budget alone (batch_sampler.cell_budget) does not bound this. Profile
+  # the intended domains before raising it. null = unlimited.
+  max_latent_tokens: 4096
+
+dataset:
+  _target_: neural_surrogates.SnapshotHistoryDataset
+  root_dir: ???
+  # Ordered state variables; must equal the AE export's dataset.state_vars.
+  state_vars:
+    - u
+    - v
+    - w
+  # REQUIRED, ORDERED conditioning schema: the columns of params_hist, in this
+  # order, and the order the deploy side reads a member's current values in.
+  # Include EVERY varying forcing parameter needed to distinguish target
+  # states; omitted ones must be documented constants (constant_forcing_notes).
+  param_vars: ???
+  param_history_steps: ${architecture.param_history_steps}
+  # Sample every Nth time slice as an ANCHOR (1 = every frame); histories
+  # always use contiguous saved steps regardless.
+  time_stride: 1
+  # Full snapshots only (plan 07 v1): a global latent generator trained on
+  # relocated crops needs its own assessment. The dataset raises otherwise.
+  random_crop_size: null
+  # null = inherit from the AE export (the frozen encoder was trained on those
+  # exact geometry channels / clamp radius). An explicit value must match it.
+  sdf_features: null
+  sdf_clamp_cells: null
+  # Anchors start at t = Hp-1 so every history is fully recorded. true lets
+  # anchors start at t = 0 and repeats the first recorded parameter row for
+  # the missing leading history -- valid ONLY when the data's provenance
+  # guarantees the forcing was constant at those values before the first saved
+  # time (e.g. a constant-forcing spin-up ending exactly at the first save).
+  # The script VERIFIES that claim against the corpus' own config.yaml: it
+  # requires time.spinup_time >= (Hp - 1) * history_dt_seconds (the repeated
+  # plateau must fit inside the constant-forcing spin-up) and one common first
+  # saved time, and records the verdict under generator.data_provenance.
+  constant_prehistory: false
+  # Every saved dt must lie within this relative tolerance of the split's
+  # median cadence (pyudales_idealized saves at 0, 4.85, 9.92, 15.00, ... s).
+  cadence_rtol: 0.05
+  cache: false
+  dtype: float32
+
+# REQUIRED physical metadata, recorded verbatim in the artifact's
+# generator.physical_schema (plan 07 §1). Source files carry no units, so they
+# must be stated here; the script refuses a run whose units miss a state or
+# parameter variable. Fill the `???` entries for your corpus.
+physical_metadata:
+  # One entry per state var AND per param var.
+  units:
+    u: "m/s"
+    v: "m/s"
+    w: "m/s"
+    inflow_angle: "deg"
+    velocity_magnitude: "m/s"
+    pressure_gradient_magnitude: "m/s^2"
+  # How the on-disk `blanking` variable maps to the model's fluid mask.
+  geometry_mask_convention: "blanking: 1 = obstacle; model fluid mask = 1 - blanking"
+  # Axis order of every (C, *grid) tensor the generator consumes / emits.
+  coordinate_order: [z, y, x]
+  # Free text: inflow / outflow / lateral / top BCs the training runs used
+  # (e.g. "uDALES: periodic y, inflow-outflow x, free-slip top").
+  boundary_conditions: ???
+  # Free text: forcing parameters held constant across the corpus and their
+  # values (parameters NOT in dataset.param_vars); "" when there are none.
+  constant_forcing_notes: ""
+
+# Representative pass estimating the raw per-channel latent mean/std the flow
+# is trained in (accumulated in float64 over batch + spatial axes, fp32
+# encoding). `max_batches` train batches drawn with a seeded shuffle (so a
+# multi-geometry corpus contributes several trajectories, not the first one
+# only); null = the whole train split. Cached to <model_dir>/latent_stats.pt
+# keyed on AE fingerprint / spatial policy / dataset identity and reused on
+# resume -- never recomputed from already-normalised latents.
+latent_stats:
+  max_batches: 50
+  seed: 0
+
+# Flow-matching trainer. Shares BaseTraining machinery (amp, warmup+cosine LR,
+# grad clip, early stopping, checkpoint/resume, metrics.csv) but has NO
+# pushforward curriculum, and `mask_loss` is irrelevant: the fp32 MSE runs
+# over every state-latent channel at every latent position (padded ones
+# included -- no voxel mask is meaningful in latent space).
+trainer:
+  _target_: neural_surrogates.LatentFlowMatchingTrainer
+  num_epochs: 200
+  device: cuda
+  patience: 20
+  # bf16 autocast wraps the velocity net only; the frozen encoder, geometry
+  # conditioning and latent statistics always run in fp32 inside the model.
+  amp: true
+  amp_dtype: bfloat16
+  compile_model: false
+  channels_last: false
+  cudnn_benchmark: true
+  tf32: true
+  lr_warmup_epochs: 5
+  lr_warmup_start: 1.0e-6
+  lr_min: 1.0e-6
+  grad_clip_norm: 1.0
+  resume: true
+  checkpoint_every: 5
+  # Seed of the validation RNG: every validation pass re-seeds its own
+  # generator from it, so the flow noise / flow times (and, with the
+  # non-shuffling val loader, the examples and their order) are identical
+  # across epochs and runs -- the val loss is a fixed yardstick, not a draw.
+  val_seed: 0
+
+# Only the trainable velocity-net parameters are handed to the optimizer (the
+# script filters on requires_grad; the trainer asserts it).
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+
+# Trajectory-bucketed batch sampler (see pretrain_autoencoder.yaml for the full
+# contract). pyudales_idealized is a MULTI-GEOMETRY corpus, so it ships ON:
+# every batch is drawn from one trajectory (one grid / geometry), and it
+# REPLACES dataloader.batch_size / shuffle / drop_last (dead knobs below). For
+# a single-geometry corpus set `batch_sampler: null` to use the plain shuffled
+# DataLoader; the script refuses a null sampler on a multi-geometry split.
+batch_sampler:
+  _target_: neural_surrogates.TrajectoryBatchSampler
+  batch_size: 4
+  # Physical-cell budget per batch (bounds the frozen encoder's memory); the
+  # latent-attention budget above is checked separately by the script.
+  cell_budget: 393216
+  shuffle: true
+  drop_last: true
+  seed: 0
+
+dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: 4
+  shuffle: true
+  drop_last: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  # Ship the (shared) geometry mask + SDF features once per batch; params_hist
+  # is stacked to (B, Hp, P).
+  collate_fn:
+    _target_: neural_surrogates.snapshot_history_collate
+    _partial_: true
+
+paths:
+  output_dir: model_weights

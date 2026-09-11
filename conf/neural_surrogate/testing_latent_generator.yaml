@@ -1,0 +1,88 @@
+# @package _global_
+#
+# Statistical acceptance of a trained latent generator (plan 07 §3 / phase 3):
+# compares held-out REAL states, frozen-AE RECONSTRUCTIONS of those states and
+# GENERATED states under matched geometry + parameter history (plus the
+# constant-history cold-start case), sweeps the Euler step count, probes the
+# conditioning (shuffled / omitted history), and declares tolerances relative
+# to the AE baseline and held-out sampling variability. Entry point:
+#   scripts/neural_surrogate/test_latent_generator.py
+#
+#   pixi run -e dev python scripts/neural_surrogate/test_latent_generator.py \
+#     model_dir=model_weights/latent_generator_s \
+#     output_dir=model_weights/latent_generator_s/acceptance
+#
+# Outputs in output_dir: metrics.csv (long: source, metric, component, level,
+# value), summary.json (scalars + the tolerance block + acceptance), figures
+# (profiles / histograms / spectra / divergence / step sweep) and report.md.
+
+# A train_latent_generator.py export (config.yaml + weights.pt).
+model_dir: ???
+output_dir: ???
+device: cpu
+
+data:
+  # null -> the artifact's dataset.root_dir (the corpus it was trained on);
+  # set to evaluate on another corpus with the same schema.
+  root_dir: null
+  # Held-out split: never the artifact's training split.
+  split: test
+  # Snapshots evaluated, spread round-robin over the split's trajectories.
+  # Peak memory ~ sampling.num_noise_seeds x (snapshots in the largest
+  # trajectory) x snapshot bytes: one trajectory group is held at a time.
+  max_snapshots: 64
+  seed: 0
+
+sampling:
+  # Euler step counts swept (metrics + wall time + peak memory each). The
+  # artifact's own generator.sampling.num_steps is the PRIMARY count used for
+  # every other comparison (recorded as chosen_sampling_steps in summary.json).
+  num_steps_sweep: [25, 50, 100]
+  # Independent noise draws per conditioning (diversity; pooled for the
+  # distribution statistics).
+  num_noise_seeds: 4
+  # Members per sample() call -- the deployment shape the timing / memory
+  # benchmark runs at.
+  batch_size: 4
+
+conditioning:
+  # Cold-start case: the snapshot's LAST parameter row repeated Hp times.
+  constant_history: true
+  # Histories permuted across the evaluated snapshots (wrong conditioning).
+  shuffled_history: true
+  # History replaced by the training-set mean parameter vector (no conditioning).
+  omitted_history: true
+
+# Rollout transients through a trained time stepper for every initial-state
+# source (real / AE / generated / constant-history): kinetic energy and RMS
+# per step under the mean parameter vector. Off by default -- needs a
+# finetune_mode=dft export whose param schema matches the generator's.
+rollout:
+  enabled: false
+  stepper_model_dir: null
+  num_steps: 20
+
+divergence:
+  # Only central differences are implemented (stencil-valid fluid cells: all
+  # six face neighbours fluid).
+  stencil: central
+
+# Distribution statistics: values per component kept from each source (fluid
+# cells, subsampled) and the fixed shared histogram bins.
+distribution:
+  max_values: 200000
+  n_bins: 64
+
+# Held-out variability: bootstrap resamples behind the tolerance scales.
+bootstrap:
+  n_resamples: 200
+
+# Declared tolerances (see aggregate_report in
+# neural_surrogates.generator_evaluation). generated-vs-real must lie within
+# factor x max(AE-recon-vs-real, held-out bootstrap spread); diversity across
+# noise seeds must reach diversity_min_ratio of the real pairwise spread.
+acceptance:
+  profile_rmse_factor: 2.0
+  w1_factor: 2.0
+  divergence_factor: 3.0
+  diversity_min_ratio: 0.25

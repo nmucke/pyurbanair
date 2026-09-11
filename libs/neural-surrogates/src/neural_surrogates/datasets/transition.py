@@ -15,6 +15,7 @@ from typing import Sequence
 import numpy as np
 import torch
 import xarray as xr
+from neural_surrogates.datasets._params import load_param_table
 from neural_surrogates.sdf import normalize_sdf_mode
 from neural_surrogates.sdf import sdf_features as compute_sdf_features
 from torch.utils.data import Dataset, default_collate
@@ -321,26 +322,10 @@ class TransitionDataset(Dataset):
         t_len: int,
         param_vars: Sequence[str] | None,
     ) -> tuple[torch.Tensor, tuple[str, ...]]:
-        with xr.open_dataset(param_path) as ds:
-            names = tuple(param_vars) if param_vars is not None else tuple(ds.data_vars)
-            cols = []
-            for name in names:
-                arr = np.asarray(ds[name].values)
-                if arr.ndim == 0:
-                    cols.append(np.full((t_len,), float(arr)))
-                elif arr.ndim == 1:
-                    if arr.shape[0] != t_len:
-                        raise ValueError(
-                            f"param '{name}' in {param_path.name} has length "
-                            f"{arr.shape[0]}, expected {t_len}"
-                        )
-                    cols.append(arr.astype(np.float64))
-                else:
-                    raise ValueError(
-                        f"param '{name}' in {param_path.name} has unsupported "
-                        f"shape {arr.shape}; expected scalar or 1-D over time"
-                    )
-        return torch.from_numpy(np.stack(cols, axis=-1)).to(self.dtype), names
+        """``(T, P)`` param table + resolved names; see
+        :func:`neural_surrogates.datasets._params.load_param_table` (the shared
+        reader this delegates to)."""
+        return load_param_table(param_path, t_len, param_vars, self.dtype)
 
     def _load_geometry(self, state_path: Path) -> torch.Tensor:
         with xr.open_dataset(state_path) as ds:
