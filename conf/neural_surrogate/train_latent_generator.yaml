@@ -34,7 +34,7 @@ model_name: latent_generator_s
 # ...), its weights.pt is loaded strictly, and its `dataset.state_vars` must
 # equal `dataset.state_vars` below (checked by the script). The AE must have a
 # geometry path (encode_geometry: true OR a geometry_branch) to condition on.
-pretrained_ae_dir: ???
+pretrained_ae_dir: tadpole_ae_s
 
 architecture:
   _target_: neural_surrogates.TadpoleLatentGenerator
@@ -81,7 +81,7 @@ architecture:
 
 dataset:
   _target_: neural_surrogates.SnapshotHistoryDataset
-  root_dir: ???
+  root_dir: training_data/pyudales_idealized
   # Ordered state variables; must equal the AE export's dataset.state_vars.
   state_vars:
     - u
@@ -91,7 +91,9 @@ dataset:
   # order, and the order the deploy side reads a member's current values in.
   # Include EVERY varying forcing parameter needed to distinguish target
   # states; omitted ones must be documented constants (constant_forcing_notes).
-  param_vars: ???
+  param_vars: 
+    - inflow_angle
+    - velocity_magnitude
   param_history_steps: ${architecture.param_history_steps}
   # Sample every Nth time slice as an ANCHOR (1 = every frame); histories
   # always use contiguous saved steps regardless.
@@ -112,7 +114,7 @@ dataset:
   # requires time.spinup_time >= (Hp - 1) * history_dt_seconds (the repeated
   # plateau must fit inside the constant-forcing spin-up) and one common first
   # saved time, and records the verdict under generator.data_provenance.
-  constant_prehistory: false
+  constant_prehistory: true
   # Every saved dt must lie within this relative tolerance of the split's
   # median cadence (pyudales_idealized saves at 0, 4.85, 9.92, 15.00, ... s).
   cadence_rtol: 0.05
@@ -138,7 +140,11 @@ physical_metadata:
   coordinate_order: [z, y, x]
   # Free text: inflow / outflow / lateral / top BCs the training runs used
   # (e.g. "uDALES: periodic y, inflow-outflow x, free-slip top").
-  boundary_conditions: ???
+  boundary_conditions: "uDALES inflow-outflow (BCxm=2): synthetic-turbulence inlet at x-min
+    (intensity 0.25, L=12 m), convective outflow at x-max; periodic in y (BCym=1);
+    pressure top allowing vertical velocity (BCtopm=3); immersed-boundary no-slip walls
+    from the xie_and_castro STL + ground; sponge nudging to a power-law inflow profile
+    (tnudge=15 s, 16 m, interior nudging on)."
   # Free text: forcing parameters held constant across the corpus and their
   # values (parameters NOT in dataset.param_vars); "" when there are none.
   constant_forcing_notes: ""
@@ -212,7 +218,7 @@ dataloader:
   batch_size: 4
   shuffle: true
   drop_last: true
-  num_workers: 8
+  num_workers: 4
   pin_memory: true
   persistent_workers: true
   # Ship the (shared) geometry mask + SDF features once per batch; params_hist

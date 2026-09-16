@@ -23,17 +23,17 @@ defaults:
   # group) but leaves the architecture to the pretrained config. Must sit AFTER
   # `_self_` so it overrides the inline `trainer._target_` below. Plan 03 adds:
   # `dft` (autoencoder -> time-stepper).
-  - /neural_surrogate/finetune_mode@_global_: lora_nextstep
+  - /neural_surrogate/finetune_mode@_global_: dft
 
 # Pretrained source: a model_dir written by train_neural_surrogate.py. Its
 # config.yaml supplies the `architecture` node and the state_vars / param_vars /
 # sdf_features the fine-tuned model must match (the script cross-checks the
 # fine-tune dataset against them and fails loud on a mismatch).
-pretrained_model_dir: ???
+pretrained_model_dir: model_weights/tadpole_ae_s_new
 
 # Where the fine-tuned model lands: model_weights/<model_name>/ (standard layout
 # + an adapter/ subdir). Must be set explicitly.
-model_name: ???
+model_name: dft_s
 
 lora:
   # standard LoRA (PEFT) today; `balora` (plan 04) raises NotImplementedError.
@@ -73,7 +73,7 @@ trainer:
   tf32: true
   # No pushforward curriculum by default for a short fine-tune; set
   # pushforward_epochs_per_step to enable it, and dataset.pushforward_steps > 1.
-  pushforward_epochs_per_step: null
+  pushforward_epochs_per_step: 5
   pushforward_start_steps: 1
   lr_warmup_epochs: 3
   lr_warmup_start: 1.0e-6
@@ -87,13 +87,13 @@ trainer:
 optimizer:
   _target_: torch.optim.AdamW
   # LoRA tolerates ~10x the full-FT LR; no weight decay on adapter weights.
-  lr: 1.0e-3
+  lr: 5.0e-4
   weight_decay: 0.0
 
 dataset:
   _target_: neural_surrogates.TransitionDataset
   # The NEW (fine-tune) data root.
-  root_dir: ???
+  root_dir: training_data/pyudales_idealized
   # state_vars / param_vars / sdf_features / sdf_clamp_cells are filled from the
   # pretrained config by the script (single source of truth); leave them null.
   state_vars: null
@@ -106,18 +106,33 @@ dataset:
   num_history_steps: null
   cache: false
   dtype: float32
-  pushforward_steps: 1
+  pushforward_steps: 5
 
-# Optional trajectory-bucketed batch sampler (multi-geometry fine-tune data). See
-# training.yaml for the full contract; null keeps the plain shuffled DataLoader.
-batch_sampler: null
+# Trajectory-bucketed batch sampler. REQUIRED for a multi-geometry fine-tune root
+# (one grid + geometry per trajectory, e.g. pyudales_idealized): plain shuffled
+# batching mixes grids that cannot be stacked, and `transition_collate` fails
+# loud on it. Null keeps the plain shuffled DataLoader -- correct only for a
+# single-geometry root (barcelona / xie_and_castro). See training.yaml for the
+# full argument contract; `cell_budget` is the memory knob -- a trajectory on N
+# cells gets batches of max(1, cell_budget // N), which is what keeps GPU memory
+# flat across the pool's 6.5x spread in cell count (61k .. 401k here). The value
+# below mirrors the AE pre-training run on this same root; lower it first if the
+# fine-tune OOMs (the pushforward curriculum grows activations at epoch
+# `pushforward_epochs_per_step`, so a run can fit at first and OOM later).
+batch_sampler:
+  _target_: neural_surrogates.TrajectoryBatchSampler
+  batch_size: 2
+  cell_budget: 393216
+  shuffle: true
+  drop_last: true
+  seed: 0
 
 dataloader:
   _target_: torch.utils.data.DataLoader
   batch_size: 4
   shuffle: true
   drop_last: true
-  num_workers: 4
+  num_workers: 16
   pin_memory: true
   persistent_workers: true
   collate_fn:

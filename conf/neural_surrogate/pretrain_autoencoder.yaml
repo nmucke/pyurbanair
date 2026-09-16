@@ -17,7 +17,7 @@ defaults:
   - _self_
 
 # Where the pre-trained model lands: model_weights/<model_name>/.
-model_name: tadpole_ae_s
+model_name: tadpole_ae_s_new 
 
 architecture:
   _target_: neural_surrogates.TadpoleAE
@@ -44,12 +44,12 @@ architecture:
   # Encode the geometry mask (+ SDF channels, if any) as extra folded channels so
   # their latents are available to the plan-03 DFT sub-network. false = A/B it
   # (state channels only).
-  encode_geometry: true
+  encode_geometry: false
   # SDF / ∇SDF geometry features appended alongside the encoded mask (requires
   # encode_geometry: true, or a geometry_branch -- they feed the branch instead):
   # none | sdf (+1) | grad (+3) | both (+4). Must match dataset.sdf_features (the
   # script cross-checks it) and dataset.sdf_clamp_cells.
-  sdf_features: sdf
+  sdf_features: both
   sdf_clamp_cells: 32
   # Geometry BRANCH: the alternative to folding geometry through the encoder.
   # null (default) = today's behaviour, byte-identical. A block here builds a
@@ -65,11 +65,11 @@ architecture:
   # disconnected, so training starts from the unconditioned AE. The branch is
   # saved next to encoder.pt/decoder.pt as geometry_branch.pt (the plan-03
   # stepper loads it frozen).
-  geometry_branch: null
-  # geometry_branch:
-  #   # Base feature width; per-level widths default to (w, 2w, 4w, 8w). Pass
-  #   # out_dims: [.., .., .., ..] to set all four explicitly.
-  #   width: 32
+  # geometry_branch: null
+  geometry_branch:
+    # Base feature width; per-level widths default to (w, 2w, 4w, 8w). Pass
+    # out_dims: [.., .., .., ..] to set all four explicitly.
+    width: 32
   # Pretrained init: none (random) | hf (thuerey-group/Tadpole weights for this
   # size; needs huggingface_hub) | {encoder: path, decoder: path} (local files).
   # In geometry_branch mode the load is non-strict but still fails loud unless
@@ -102,15 +102,15 @@ discriminator: null
 #   # The critic gets its OWN optimizer (Appendix C.3 lists it with its own LR):
 #   # its loss is adversarial to the AE's, so the two must never share moments.
 #   _target_: torch.optim.AdamW
-#   lr: 5.0e-5
+#   lr: 1.0e-4
 #   betas: [0.9, 0.999]
-#   weight_decay: 1.0e-15
+#   weight_decay: 1.0e-8
 
 # VAE loss weights (the reconstruction metric itself is MSE, set in the script).
 loss:
   # β: KL weight. Tiny by default (latent-diffusion convention). 0 with
   # latent_type: mode degrades to a plain deterministic autoencoder.
-  kl_weight: 1.0e-6
+  kl_weight: 1.0e-3
   # Weight on reconstructing the geometry/SDF channels (only when
   # encode_geometry: true); keeps the total loss dominated by state recon.
   geometry_recon_weight: 0.1
@@ -154,7 +154,7 @@ loss:
 trainer:
   _target_: neural_surrogates.AutoencoderTrainer
   num_epochs: 200
-  device: cpu
+  device: cuda
   patience: 20
   amp: true
   amp_dtype: bfloat16
@@ -177,7 +177,7 @@ trainer:
 optimizer:
   _target_: torch.optim.AdamW
   lr: 1.0e-4
-  weight_decay: 1.0e-8
+  weight_decay: 1.0e-6
 
 dataset:
   _target_: neural_surrogates.SnapshotDataset
@@ -193,11 +193,11 @@ dataset:
   # crop diversity per epoch, smaller batches. null = full field (and the
   # shared-geometry collate fast path). A multiple of encoder_crop_size avoids
   # in-model padding.
-  random_crop_size: null
+  random_crop_size: 64
   cache: false
   dtype: float32
   # Must match architecture.sdf_features / sdf_clamp_cells.
-  sdf_features: sdf
+  sdf_features: both
   sdf_clamp_cells: 32
 
 # Optional trajectory-bucketed batch sampler.
@@ -220,21 +220,26 @@ dataset:
 # become dead knobs, neutralised in training/data_utils.py), batches never mix
 # trajectories, and on grids >= ~2.1M cells cell_budget: 4194304 silently drops
 # the per-trajectory batch size to 1 (max(1, cell_budget // cells_per_sample)).
-batch_sampler: null
-# batch_sampler:
-#   _target_: neural_surrogates.TrajectoryBatchSampler
-#   batch_size: 2
-#   cell_budget: 4194304
-#   shuffle: true
-#   drop_last: true
-#   seed: 0
+# batch_sampler: null
+batch_sampler:
+  _target_: neural_surrogates.TrajectoryBatchSampler
+  batch_size: 8
+  # Bounds cells/batch, which is what actually sets peak GPU memory here: a
+  # train step (AE + critic, bf16 autocast) costs ~30 GiB per 1e6 batch cells,
+  # so the 24 GiB card tops out around 6e5. At 393216 the small grids run the
+  # full batch 4 and the largest (16x112x224) drops to 1, for a ~12 GiB peak.
+  # This is the knob to raise on a bigger card / lower if you still OOM.
+  cell_budget: 393216
+  shuffle: true
+  drop_last: true
+  seed: 0
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 2
+  batch_size: 8
   shuffle: true
   drop_last: true
-  num_workers: 4
+  num_workers: 16
   pin_memory: true
   persistent_workers: true
   # Ship the (shared) geometry mask + SDF features once per batch; falls back to

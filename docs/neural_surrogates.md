@@ -930,8 +930,27 @@ identically (the first `H` per-step RMSE values are then exactly zero).
 The script is
 Hydra-driven via
 [conf/neural_surrogate/testing.yaml](../conf/neural_surrogate/testing.yaml)
-and takes `model_dir`, `sample_idx`, `device`, and `output_dir` (default
-`${model_dir}/rollout_${sample_idx}`).
+and takes `model_dir`, `sample_idx`, `device`, `output_dir` (default
+`${model_dir}/rollout_${sample_idx}`) and `tke_window`.
+
+Besides the velocity error the rollout is scored on **resolved turbulent
+kinetic energy**, because the two fail independently: a surrogate can track
+`|u|` closely while carrying too little (the usual failure — a diffused,
+over-smooth rollout) or too much fluctuation, and nothing in the RMSE separates
+that from a phase drift. `k = 0.5*sum_i var(u_i)` is formed per frame by
+[`evaluation.turbulence.rolling_tke`](../libs/evaluation/src/evaluation/turbulence.py)
+from a sliding Reynolds average of `tke_window` saved frames. `null` (the
+default) resolves to a fifth of the rollout, floored at 8 frames — short enough
+that the per-step curve is a curve and the animation's TKE panel moves, long
+enough that each variance is a measurement rather than its own sampling scatter.
+A window spanning the whole rollout gives the pass-long Reynolds average
+instead, which makes `k` one static field (the per-step panel then goes flat and
+says nothing the headline scalar does not). Every TKE statistic
+is taken over **fluid cells only** (the dataset's geometry mask): the solid
+cells the solver holds at rest carry no turbulence, and leaving them in would
+dilute the error by whatever fraction of the domain the buildings occupy. The
+TKE is *resolved only* — the subgrid contribution is not in the saved fields and
+is not negligible inside a canopy.
 
 Outputs in `${output_dir}/`:
 
@@ -940,7 +959,14 @@ Outputs in `${output_dir}/`:
 | `trajectory.pt` | `{"truth": (T, C, *grid), "pred": (T, C, *grid)}` torch tensors |
 | `rollout.png` | mid-z `|u|` slices at evenly-spaced times: truth / pred / `|err|` rows |
 | `rmse.png` | per-step RMSE vs ground truth across the rollout |
-| `rollout.mp4` | three-panel animation (truth, pred, `|err|`) of mid-z `|u|`, all `T` steps. Falls back to `rollout.gif` when ffmpeg is missing. |
+| `tke_error.png` | domain-mean `k` (truth vs pred) and the per-step spatial `k` error (MAE + RMSE) over the rollout |
+| `rollout.mp4` | four-panel animation (truth, pred, `|err|`, per-cell TKE `\|Δk\|`) of `|u|` z-slices, all `T` steps. Falls back to `rollout.gif` when ffmpeg is missing. |
+
+The scalar the whole diagnostic reduces to — the mean TKE error over the entire
+domain and time span, with its RMSE, bias and the truth's own mean `k` for scale
+— is printed alongside the overall velocity RMSE at the end of the run. A state
+whose `state_vars` carry no velocity component skips TKE with a message rather
+than failing.
 
 All slice plots index the z-axis (first spatial dim of the `(C, nz, ny, nx)`
 state tensor), matching the convention used in

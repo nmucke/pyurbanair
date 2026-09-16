@@ -22,7 +22,10 @@ defaults:
   - _self_
 
 training_data:
-  num_train: 250
+  # Small single-geometry fine-tune set: every other knob below is kept
+  # identical to training_data/pyudales_idealized/config.yaml (the pre-training
+  # corpus), so only the geometry and the sample count differ.
+  num_train: 20
   num_val: 5
   num_test: 5
 
@@ -30,7 +33,16 @@ training_data:
 
   # --- Geometry source --------------------------------------------------
   geometry:
-    source: idealized
+    # Single fixed geometry (generate_training_data.py): conf/case/
+    # xie_and_castro.yaml is merged over the composed config, so the domain
+    # (nx/ny/nz + bounds) comes from the CASE, not from the resolution /
+    # z_size / *_padding knobs below — those stay inert here, kept at the
+    # pyudales_idealized values so this file still documents that dataset.
+    # Note the case grid is 1.5 x 1.33 x 1.33 m over z in [0, 32], finer and
+    # shallower than the 4 m isotropic / z = 64 m pool grid; and uDALES sets
+    # nprocx = ncpu, which must divide itot = 40 (so ncpu in
+    # 1/2/4/5/8/10/20/40, NOT the 16 that conf/model/pyudales.yaml carries).
+    source: xie_and_castro
 
     # Pool + per-backend case-template locations, derived from `source`.
     # Only consumed for the pool sources (idealized/realistic); the named

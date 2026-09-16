@@ -24,6 +24,7 @@ from evaluation.turbulence import (
     MomentAccumulator,
     colocate_components,
     evenly_spaced_levels,
+    rolling_tke,
 )
 
 
@@ -170,6 +171,129 @@ def test_accumulator_ignores_an_empty_chunk() -> None:
     accumulator.update(np.ones((3, 2)))
     accumulator.update(np.ones((0, 2)))
     assert list(accumulator.count()) == [3, 3]
+
+
+# ---------------------------------------------------------------------------
+# rolling_tke
+# ---------------------------------------------------------------------------
+
+
+def _direct_windowed_tke(
+    fields: Sequence[np.ndarray], width: int, ddof: int = 1
+) -> np.ndarray:
+    """The estimator spelled out frame by frame, windows slid in at the ends."""
+    n_time = fields[0].shape[0]
+    lo = np.clip(np.arange(n_time) - width // 2, 0, n_time - width)
+    return np.stack(
+        [
+            0.5 * sum(f[start : start + width].var(axis=0, ddof=ddof) for f in fields)
+            for start in lo
+        ]
+    )
+
+
+def test_rolling_tke_over_the_whole_record_is_the_accumulators_tke() -> None:
+    # The two are the same estimator viewed differently, so a run's mean-field
+    # TKE and a rollout diagnostic's frame-0 TKE must not disagree.
+    rng = np.random.default_rng(10)
+    fields = [rng.normal(size=(40, 3, 4)) + 5.0 for _ in range(3)]
+
+    accumulator = MomentAccumulator()
+    accumulator.update(*fields)
+    rolled = rolling_tke(*fields)
+
+    assert rolled.shape == fields[0].shape
+    assert np.allclose(rolled, accumulator.tke()[None])
+
+
+def test_rolling_tke_matches_a_direct_sliding_variance() -> None:
+    rng = np.random.default_rng(11)
+    fields = [rng.normal(size=(37, 5)) * scale for scale in (1.0, 2.0, 0.5)]
+
+    assert np.allclose(rolling_tke(*fields, window=9), _direct_windowed_tke(fields, 9))
+
+
+def test_rolling_tke_keeps_the_window_width_at_both_ends() -> None:
+    # A truncated window would estimate the first and last frames from fewer
+    # samples and make the curve noisier there for no physical reason. The
+    # window slides inward instead, so the ends repeat the value of the first
+    # (last) fully-interior frame.
+    rng = np.random.default_rng(12)
+    fields = [rng.normal(size=(20, 2)) for _ in range(3)]
+
+    rolled = rolling_tke(*fields, window=7)
+    assert np.allclose(rolled[0], rolled[3])
+    assert np.allclose(rolled[-1], rolled[-4])
+
+
+def test_rolling_tke_deletes_casewise_and_reports_nan_where_nothing_is_finite() -> None:
+    rng = np.random.default_rng(13)
+    u, v, w = (rng.normal(size=(12, 2)) for _ in range(3))
+    u[4, 0] = np.nan
+
+    rolled = rolling_tke(u, v, w)
+    kept = np.ones(12, dtype=bool)
+    kept[4] = False
+    # The masked frame is dropped from EVERY component at that cell, not just u.
+    assert np.allclose(
+        rolled[0, 0], 0.5 * sum(f[kept, 0].var(ddof=1) for f in (u, v, w))
+    )
+    assert np.allclose(rolled[0, 1], 0.5 * sum(f[:, 1].var(ddof=1) for f in (u, v, w)))
+
+    solid = np.full((12, 2), np.nan)
+    assert np.all(np.isnan(rolling_tke(solid, solid)))
+
+
+def test_rolling_tke_is_null_where_the_window_holds_no_sample() -> None:
+    # window=1 leaves n - ddof = 0: no variance is measurable and the honest
+    # answer is nan rather than the zero the arithmetic would produce.
+    rng = np.random.default_rng(14)
+    fields = [rng.normal(size=(6, 2)) for _ in range(3)]
+    assert np.all(np.isnan(rolling_tke(*fields, window=1)))
+    assert np.allclose(rolling_tke(*fields, window=1, ddof=0), 0.0)
+
+
+def test_rolling_tke_survives_the_offset_that_defeats_the_naive_form() -> None:
+    # The running sums are the `q - s^2/n` form MomentAccumulator's docstring
+    # rules out; shifting by the record mean first is what makes it safe, and
+    # this is the regime that catches its absence (naive: ~4e-2 relative error).
+    rng = np.random.default_rng(15)
+    field = rng.normal(size=(360, 2)) * 1e-3 + 1e4
+
+    rolled = rolling_tke(field)
+    assert np.allclose(rolled[0], 0.5 * field.var(axis=0, ddof=1), rtol=1e-8)
+
+
+def test_rolling_tke_leaves_its_inputs_alone_and_accumulates_in_float64() -> None:
+    # It shifts and squares each component in place to keep one trajectory-sized
+    # array alive at a time, so "in place" must mean its own copy -- a caller
+    # whose fields came back centred and squared would be a silent disaster --
+    # and a float32 field (what the surrogate rollouts carry) must not drag the
+    # accumulation down to float32 with it.
+    rng = np.random.default_rng(16)
+    fields = [(rng.normal(size=(20, 3)) + 5.0).astype(np.float32) for _ in range(3)]
+    originals = [f.copy() for f in fields]
+
+    rolled = rolling_tke(*fields)
+
+    assert rolled.dtype == np.float64
+    assert all(np.array_equal(f, o) for f, o in zip(fields, originals))
+    exact = 0.5 * sum(f.astype(np.float64).var(axis=0, ddof=1) for f in fields)
+    assert np.allclose(rolled[0], exact)
+
+
+def test_rolling_tke_rejects_arguments_it_cannot_form_a_moment_from() -> None:
+    field = np.zeros((4, 2))
+    with pytest.raises(ValueError, match="at least one component"):
+        rolling_tke()
+    with pytest.raises(ValueError, match="share one shape"):
+        rolling_tke(field, np.zeros((4, 3)))
+    with pytest.raises(ValueError, match="leading time axis"):
+        rolling_tke(np.array(1.0))  # 0-d: a bare frame, no time axis to window
+    with pytest.raises(ValueError, match="at least one frame"):
+        rolling_tke(field, window=0)
+    with pytest.raises(ValueError, match="ddof must be non-negative"):
+        rolling_tke(field, ddof=-1)
 
 
 def test_evenly_spaced_levels_span_the_column_and_never_repeat() -> None:

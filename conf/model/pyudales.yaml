@@ -15,7 +15,7 @@ forward_model:
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
-  ncpu: 1
+  ncpu: 4
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow # periodic #
@@ -97,10 +97,10 @@ forward_model:
   # byte-identical and no driver files are written.
   inlet_turbulence:
     enabled: true
-    intensity: 0.05        # u'_rms / |U_mean(z)|; v' and w' get 0.7x this
-    length_scale_y: 6.0  # m — spanwise integral length scale of the eddies
-    length_scale_z: 6.0  # m — vertical (defaults ~ building height; calibrate)
-    length_scale_x: 6.0  # m — streamwise; sets the AR(1) time scale via Taylor
+    intensity: 0.25        # u'_rms / |U_mean(z)|; v' and w' get 0.7x this
+    length_scale_y: 12.0  # m — spanwise integral length scale of the eddies
+    length_scale_z: 12.0  # m — vertical (defaults ~ building height; calibrate)
+    length_scale_x: 12.0  # m — streamwise; sets the AR(1) time scale via Taylor
     time_step: 0.5        # s — &DRIVER dtdriver. Injected turbulence is
                           #     band-limited to ~1/(2*dtdriver) because the
                           #     solver interpolates linearly between records.

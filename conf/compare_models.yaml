@@ -89,6 +89,16 @@ compare:
     # smoothed panels and score the full-resolution series only.
     interval_seconds: 30.0
     aggregation_mode: mean
+    # Sliding Reynolds-average window (seconds, rounded to whole frames on the
+    # common time axis) behind the resolved-TKE error figure, the animation's
+    # TKE columns and the `field_tke_mae_z<h>` summary columns. null = a fifth
+    # of the run, floored at 8 frames -- short enough that the per-step curve is
+    # a curve and the animation's TKE columns move, long enough that each
+    # variance is a measurement rather than its own scatter. No default in
+    # seconds suits every case here (xie_and_castro writes 24 frames a window,
+    # barcelona 30 at a 4x coarser cadence), hence the fraction. Set a window
+    # spanning the whole run for the pass-long Reynolds average instead.
+    tke_window_seconds: null
     # Vertical profiles/wake diagnostics use this smaller grid to keep the
     # additional full-height interpolation compact.
     profile_grid:

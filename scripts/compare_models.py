@@ -14,7 +14,10 @@ Written into the run directory:
   * ``state_snapshots_z<h>.png``    -- |U| at height ``h``, models x snapshot times.
   * ``state_difference_z<h>.png``   -- the same, as (model - reference).
   * ``field_rmse.png``              -- |U| RMSE against the reference over time.
-  * ``state_animation.mp4``         -- |U| animation, models x heights.
+  * ``field_tke_error.png``         -- resolved-TKE error against the reference
+                                      over time, per height, over fluid cells.
+  * ``state_animation.mp4``         -- |U| animation, models x heights, plus a
+                                      per-cell TKE-error column per model.
   * ``sensor_timeseries_<set>.png`` -- u/v/w/|U| at the assimilation and the
                                       held-out validation sensors, one line per model.
   * ``sensor_rolling_<set>.png``    -- the same sensors smoothed by a sliding
@@ -45,6 +48,15 @@ Written into the run directory:
   * ``within_model/<model>/``       -- the same core state/sensor diagnostics,
                                       comparing parameter scenarios within one
                                       solver.
+
+Resolved turbulent kinetic energy is scored alongside |U| because the two fail
+independently: a solver (or a surrogate) can sit close to the reference field
+while carrying the wrong amount of fluctuation, and nothing in the |U| RMSE
+separates that from a phase drift. ``k`` is formed per frame from a sliding
+Reynolds average (``compare.analysis.tke_window_seconds``, ``null`` = the whole
+run) and reported three ways: a time-mean scalar per height in ``summary.csv``
+(``field_tke_mae_z<h>``), a per-step spatial error curve, and a per-grid-point
+error column in the animation.
 
 The backends live on different (partly staggered) grids, so every field figure is
 drawn after interpolating each model onto one common cell-centred grid
@@ -77,6 +89,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray
 from evaluation.sensors import sensor_magnitude
+from evaluation.turbulence import rolling_tke
 from hydra.utils import instantiate
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
@@ -716,13 +729,128 @@ def plot_field_rmse(
     return time_means
 
 
+def tke_window_frames(times: np.ndarray, window_seconds: float | None) -> int:
+    """``compare.analysis.tke_window_seconds`` as a frame count on ``times``.
+
+    ``None`` (the config default) is a fifth of the record, floored at 8 frames
+    and capped at its length, because the cases here run from a 24-frame window
+    to a few hundred and no single number in seconds suits both. Both halves of
+    that are deliberate. The *fraction* is what keeps the per-step error curve a
+    curve: averaging over the whole run makes ``k`` one static field, so the
+    curve goes flat and the animation's TKE column stops moving — that pass-long
+    view is what :class:`evaluation.turbulence.MomentAccumulator` is for, and it
+    is still reachable by configuring a window at or above the run length. The
+    *floor* is the other side of the trade: a variance over fewer than ~8 frames
+    is mostly its own sampling scatter.
+    """
+    n_time = int(times.size)
+    if window_seconds is None:
+        return max(1, min(max(8, n_time // 5), n_time))
+    if float(window_seconds) <= 0.0:
+        raise ValueError("compare.analysis.tke_window_seconds must be positive or null")
+    cadence = float(np.median(np.diff(times))) if times.size > 1 else 1.0
+    return max(1, min(int(round(float(window_seconds) / cadence)), n_time))
+
+
+def field_tke(fields: dict[str, xarray.Dataset], window: int) -> dict[str, np.ndarray]:
+    """Per-frame resolved TKE ``k(time, height, y, x)`` for every model.
+
+    Resolved only, like every second moment in this repository: the subgrid
+    contribution is not in these fields and is not negligible inside a canopy.
+    One model at a time, because ``rolling_tke`` holds several copies of the
+    trajectory while it forms the running sums.
+    """
+    return {
+        name: rolling_tke(
+            *(np.asarray(field[component].values) for component in ("u", "v", "w")),
+            window=window,
+        )
+        for name, field in fields.items()
+    }
+
+
+def plot_field_tke_error(
+    tke: dict[str, np.ndarray],
+    reference: str,
+    heights: np.ndarray,
+    masks: np.ndarray,
+    times: np.ndarray,
+    window_label: str,
+    output_path: pathlib.Path,
+) -> dict[str, dict[str, float]]:
+    """Per-height spatial TKE error against the reference over time.
+
+    The companion to :func:`plot_field_rmse`: the velocity RMSE says how far the
+    instantaneous field has drifted, this says whether the model carries the
+    right amount of fluctuation while it drifts. Fluid cells only, as everywhere
+    else here, and the reference's own domain-mean ``k`` is drawn behind the
+    curves so the error can be read against the level it is an error on.
+
+    Returns ``{"z<height>": {model: time-mean spatial MAE}}``, the reference
+    included at 0.0 (it is the baseline), so the summary table gets a column per
+    height for every model.
+    """
+    others = [name for name in tke if name != reference]
+    colors = _model_colors(list(tke))
+
+    fig, axes = plt.subplots(
+        len(heights), 1, figsize=(9, 2.8 * len(heights)), squeeze=False, sharex=True
+    )
+    time_means: dict[str, dict[str, float]] = {}
+    for row, height in enumerate(heights):
+        ax = axes[row, 0]
+        mask = masks[row]
+        if not np.any(mask):  # a plane that the buildings (plus walls) fill
+            ax.set_title(
+                f"z = {height:.1f} m — no fluid cells", loc="left", fontsize=10
+            )
+            time_means[f"z{height:.0f}"] = {name: float("nan") for name in tke}
+            continue
+        reference_cells = tke[reference][:, row][:, mask]  # (time, fluid cell)
+        time_means[f"z{height:.0f}"] = {reference: 0.0}
+        for name in others:
+            error = tke[name][:, row][:, mask] - reference_cells
+            mae = np.nanmean(np.abs(error), axis=-1)
+            ax.plot(times, mae, color=colors[name], lw=1.8, label=name)
+            time_means[f"z{height:.0f}"][name] = float(np.nanmean(mae))
+        ax.plot(
+            times,
+            np.nanmean(reference_cells, axis=-1),
+            color="0.5",
+            lw=1.0,
+            ls="--",
+            label=f"{reference} mean k",
+        )
+        ax.set_ylabel("k MAE [m²/s²]")
+        ax.set_title(f"z = {height:.1f} m", loc="left", fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(bottom=0.0)
+        if row == 0:
+            ax.legend(loc="best", fontsize=8)
+    axes[-1, 0].set_xlabel("time [s]")
+    fig.suptitle(
+        f"Resolved-TKE error against {reference} ({window_label}, fluid cells)"
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    return time_means
+
+
 def animate_states(
     fields: dict[str, xarray.Dataset],
     heights: np.ndarray,
     output_path: pathlib.Path,
     fps: int,
+    tke_error: dict[str, np.ndarray] | None = None,
 ) -> pathlib.Path:
-    """Animate |U|: one column per model, one row per height, shared colour scale."""
+    """Animate |U| and, when given, the per-cell TKE error: rows are heights.
+
+    The first ``len(fields)`` columns are each model's |U| on one shared colour
+    scale. ``tke_error`` maps a non-reference model to its signed
+    ``k - k_reference`` field ``(time, height, y, x)``; each becomes one further
+    column, drawn as ``|Δk|`` on a second scale shared by those columns.
+    """
     import matplotlib.animation as animation
 
     names = list(fields)
@@ -732,34 +860,60 @@ def animate_states(
     }  # (time, height, y, x)
     vmax = float(np.nanmax([np.nanmax(f) for f in frames.values()]))
 
+    # (column title, frames, vmax, cmap). Squared quantities have far heavier
+    # tails than |U| does, so the TKE columns are scaled to a high percentile
+    # rather than to their maximum -- a single hot cell would otherwise flatten
+    # every panel that shares the scale.
+    columns = [(name, frames[name], vmax, "viridis") for name in names]
+    if tke_error:
+        errors = {name: np.abs(values) for name, values in tke_error.items()}
+        k_max = (
+            max(float(np.nanpercentile(values, 99.0)) for values in errors.values())
+            or 1.0
+        )
+        columns += [
+            (f"{name}\nTKE |Δk|", errors[name], k_max, "magma") for name in errors
+        ]
+
     fig, axes = plt.subplots(
         len(heights),
-        len(names),
-        figsize=(3.4 * len(names), 3.1 * len(heights)),
+        len(columns),
+        figsize=(3.4 * len(columns), 3.1 * len(heights)),
         squeeze=False,
         constrained_layout=True,
     )
     images = []
     for row in range(len(heights)):
-        for col, name in enumerate(names):
+        for col, (title, values, top, cmap) in enumerate(columns):
             ax = axes[row, col]
-            im = ax.imshow(frames[name][0, row], origin="lower", vmin=0.0, vmax=vmax)
+            im = ax.imshow(
+                values[0, row], origin="lower", vmin=0.0, vmax=top, cmap=cmap
+            )
             ax.set_xticks([])
             ax.set_yticks([])
             if row == 0:
-                ax.set_title(name)
+                ax.set_title(title, fontsize=9)
             if col == 0:
                 ax.set_ylabel(f"z={heights[row]:.0f} m")
-            images.append((im, name, row))
-    fig.colorbar(images[0][0], ax=axes, fraction=0.02, label="|U| [m/s]")
-    suptitle = fig.suptitle(f"|U|   t={times[0]:.0f} s")
+            images.append((im, values, row))
+    n_state = len(names)
+    fig.colorbar(images[0][0], ax=axes[:, :n_state], fraction=0.02, label="|U| [m/s]")
+    if len(columns) > n_state:
+        fig.colorbar(
+            images[n_state][0],
+            ax=axes[:, n_state:],
+            fraction=0.02,
+            label="|Δk| [m²/s²]",
+        )
+    quantities = "|U|" if len(columns) == n_state else "|U| and resolved-TKE error"
+    suptitle = fig.suptitle(f"{quantities}   t={times[0]:.0f} s")
 
     def update(frame: int) -> list:
         artists: list = [suptitle]
-        for im, name, row in images:
-            im.set_array(frames[name][frame, row])
+        for im, values, row in images:
+            im.set_array(values[frame, row])
             artists.append(im)
-        suptitle.set_text(f"|U|   t={times[frame]:.0f} s")
+        suptitle.set_text(f"{quantities}   t={times[frame]:.0f} s")
         return artists
 
     # h264 rejects odd frame dimensions, and the panel grid above sizes the
@@ -1977,6 +2131,28 @@ def _run_scenario(
         )
     field_rmse = plot_field_rmse(fields, reference, heights, out_dir / "field_rmse.png")
 
+    # Resolved TKE: whether a model carries the right amount of fluctuation,
+    # which the instantaneous |U| error above cannot separate from the drift.
+    tke_window = tke_window_frames(times, analysis.get("tke_window_seconds"))
+    window_label = f"{tke_window}-frame window" + (
+        " = whole run" if tke_window == times.size else ""
+    )
+    tke = field_tke(fields, tke_window)
+    field_tke_error = plot_field_tke_error(
+        tke,
+        reference,
+        heights,
+        masks,
+        times,
+        window_label,
+        out_dir / "field_tke_error.png",
+    )
+    tke_error = {
+        name: values - tke[reference]
+        for name, values in tke.items()
+        if name != reference
+    }
+
     # Full-height statistics use a deliberately coarser grid than the field
     # snapshots. This keeps regional profiles and wake diagnostics inexpensive
     # even when the visual comparison grid is high resolution.
@@ -2071,7 +2247,11 @@ def _run_scenario(
 
     if cfg.compare.animate:
         anim_path = animate_states(
-            fields, heights, out_dir / "state_animation.mp4", int(cfg.compare.fps)
+            fields,
+            heights,
+            out_dir / "state_animation.mp4",
+            int(cfg.compare.fps),
+            tke_error=tke_error,
         )
         print(f"Saved animation -> {anim_path}")
 
@@ -2181,6 +2361,10 @@ def _run_scenario(
                 for height_tag, values in field_rmse.items()
             },
             **{
+                f"field_tke_mae_{height_tag}": round(values[key], 5)
+                for height_tag, values in field_tke_error.items()
+            },
+            **{
                 f"sensor_rmse_{set_name}": round(values[key], 4)
                 for set_name, values in sensor_rmse.items()
             },
@@ -2255,6 +2439,24 @@ def _compare_parameter_scenarios_within_model(
     field_rmse = plot_field_rmse(
         fields, reference_scenario, heights, output_dir / "field_rmse.png"
     )
+
+    # Resolved TKE: whether a model carries the right amount of fluctuation,
+    # which the instantaneous |U| error above cannot separate from the drift.
+    tke_window = tke_window_frames(times, analysis.get("tke_window_seconds"))
+    window_label = f"{tke_window}-frame window" + (
+        " = whole run" if tke_window == times.size else ""
+    )
+    tke = field_tke(fields, tke_window)
+    field_tke_error = plot_field_tke_error(
+        tke,
+        reference_scenario,
+        heights,
+        masks,
+        times,
+        window_label,
+        output_dir / "field_tke_error.png",
+    )
+    # No animation on this path, so the per-cell error field is not carried.
 
     profile_x = _cell_centres(
         float(cfg.domain.bounds[0][0]),
@@ -2422,6 +2624,10 @@ def _compare_parameter_scenarios_within_model(
             **{
                 f"field_rmse_{height_tag}": round(values[scenario], 4)
                 for height_tag, values in field_rmse.items()
+            },
+            **{
+                f"field_tke_mae_{height_tag}": round(values[scenario], 5)
+                for height_tag, values in field_tke_error.items()
             },
             **{
                 f"sensor_rmse_{set_name}": round(values[scenario], 4)
