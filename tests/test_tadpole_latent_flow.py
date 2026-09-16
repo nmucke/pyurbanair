@@ -616,6 +616,57 @@ def test_sampling_noise_is_per_member_and_batch_invariant(tmp_path, geometry):
     assert shared.shape == (3, C, *GRID)
 
 
+def test_decode_spatial_mode_override(tmp_path):
+    """``decode_latents(spatial_mode=)`` / ``sample(decode_spatial_mode=)``
+    change only the decoder's patching: ``None`` is the trained mode exactly,
+    ``global`` decodes the two x-tiles of GRID jointly (a different field), and
+    a tiled override on a grid padded only to stride 16 is refused."""
+    ae_dir = _make_ae_export(tmp_path / "local", "local", "fold")
+    m = _generator(ae_dir).eval()
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
+    state, geom, params_hist = _inputs(b=2)
+    enc = m.encode_latents(state, geom)
+    assert enc.z is not None
+    trained = m.decode_latents(enc.z, enc)
+    torch.testing.assert_close(
+        m.decode_latents(enc.z, enc, spatial_mode="local"), trained, atol=0, rtol=0
+    )
+    global_dec = m.decode_latents(enc.z, enc, spatial_mode="global")
+    assert global_dec.shape == trained.shape
+    assert torch.isfinite(global_dec).all()
+    assert torch.count_nonzero(global_dec * (1 - geom.unsqueeze(1))) == 0
+    assert not torch.allclose(global_dec, trained)
+
+    noise = torch.randn(2, m.state_latent_dim, *m.latent_grid_for(GRID))
+    sampled = m.sample(
+        params_hist,
+        geom,
+        initial_noise=noise,
+        num_steps=2,
+        decode_spatial_mode="global",
+    )
+    assert not torch.allclose(
+        sampled, m.sample(params_hist, geom, initial_noise=noise, num_steps=2)
+    )
+    with pytest.raises(ValueError, match="spatial_mode"):
+        m.decode_latents(enc.z, enc, spatial_mode="patchwise")
+
+    g_dir = _make_ae_export(tmp_path / "global", "global", "fold")
+    g = _generator(g_dir).eval()
+    _install_nontrivial_latent_stats(g)
+    _, rect_geom, _ = _inputs(b=1, grid=RECT_GRID)
+    cond = g.geometry_condition(rect_geom)
+    z = torch.zeros(1, g.state_latent_dim, *g.latent_grid_for(RECT_GRID))
+    assert g.decode_latents(z, cond, spatial_mode="global").shape[2:] == RECT_GRID
+    # With the fixtures' cubic crop 16 every stride-16 grid tiles; a wider crop
+    # (as real AEs use) leaves the (16, 32, 48) padded grid untileable in x.
+    assert g.decode_latents(z, cond, spatial_mode="local").shape[2:] == RECT_GRID
+    g.encoder_crop_size = (16, 32, 32)
+    with pytest.raises(ValueError, match="not a multiple"):
+        g.decode_latents(z, cond, spatial_mode="local")
+
+
 # --------------------------------------------------------------------------- #
 # 7. Self-contained reload (deploy path) + Hydra round trip.
 # --------------------------------------------------------------------------- #

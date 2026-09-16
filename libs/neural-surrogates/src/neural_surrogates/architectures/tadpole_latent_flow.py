@@ -95,6 +95,7 @@ from neural_surrogates.architectures._tadpole_spatial import (
     STRIDE,
     decode_spatial,
     encode_spatial,
+    validate_spatial_mode,
 )
 from neural_surrogates.architectures.tadpole_ae import TadpoleAE
 from neural_surrogates.architectures.tadpole_stepper import ParamConditionedSubnetwork
@@ -826,9 +827,41 @@ class TadpoleLatentGenerator(nn.Module):
 
     # -- decoding ----------------------------------------------------------- #
 
-    def decode_latents(self, z: torch.Tensor, cond: LatentEncoding) -> torch.Tensor:
+    def _resolve_decode_mode(self, mode: str | None, latent_grid: Sequence[int]) -> str:
+        """The spatial mode :meth:`decode_latents` runs the frozen decoder in.
+
+        ``None`` inherits the AE's trained ``spatial_mode``. An override changes
+        the DECODER only -- the latent grid (and so the flow model's input)
+        stays the trained mode's: ``global`` decodes the whole latent grid at
+        once, ``local`` / ``halo`` tile it into ``encoder_crop_size`` cores,
+        which needs the padded grid to be a multiple of the crop size (always
+        true when the AE was trained in local or halo mode)."""
+        if mode is None:
+            return self.spatial_mode
+        validate_spatial_mode(mode, self.halo_size)
+        if mode != "global":
+            padded = tuple(int(n) * STRIDE for n in latent_grid)
+            if any(n % c for n, c in zip(padded, self.encoder_crop_size)):
+                raise ValueError(
+                    f"decode spatial_mode={mode!r} tiles the padded grid {padded} "
+                    f"into encoder_crop_size {tuple(self.encoder_crop_size)}, but "
+                    f"it is not a multiple (the AE pads for "
+                    f"spatial_mode={self.spatial_mode!r})"
+                )
+        return mode
+
+    def decode_latents(
+        self,
+        z: torch.Tensor,
+        cond: LatentEncoding,
+        *,
+        spatial_mode: str | None = None,
+    ) -> torch.Tensor:
         """Normalised state latents ``(B, D, Zl, Yl, Xl)`` -> physical state
-        ``(B, C, d, h, w)`` on the original grid, obstacle cells zeroed."""
+        ``(B, C, d, h, w)`` on the original grid, obstacle cells zeroed.
+
+        ``spatial_mode`` overrides the decoder's spatial processing for this
+        call (see :meth:`_resolve_decode_mode`); ``None`` keeps the AE's."""
         expected = self.latent_grid_for(cond.orig_shape)
         if z.dim() != 5 or z.shape[1] != self.state_latent_dim:
             raise ValueError(
@@ -836,6 +869,7 @@ class TadpoleLatentGenerator(nn.Module):
                 f"{tuple(z.shape)}"
             )
         self._check_latent_grid(z, expected, "z")
+        mode = self._resolve_decode_mode(spatial_mode, expected)
         b = z.shape[0]
         c, cl = self.n_state_channels, self.latent_channels
         with self._autocast_off(z.device):
@@ -857,7 +891,7 @@ class TadpoleLatentGenerator(nn.Module):
             decoded = decode_spatial(
                 self.ae.ae,
                 folded,
-                self.spatial_mode,
+                mode,
                 self.encoder_crop_size,
                 self.halo_size,
                 cond.decoder_geom_feats,
@@ -1067,6 +1101,7 @@ class TadpoleLatentGenerator(nn.Module):
         num_steps: int | None = None,
         param_names: Sequence[str] | None = None,
         history_dt_seconds: float | None = None,
+        decode_spatial_mode: str | None = None,
     ) -> torch.Tensor:
         """Generate physical states ``(B, C, d, h, w)`` for ``params_hist``.
 
@@ -1077,6 +1112,8 @@ class TadpoleLatentGenerator(nn.Module):
         believes the ``params_hist`` columns and their spacing are; they are
         checked once here against the installed schema (see
         :meth:`set_conditioning_schema`) rather than per Euler step.
+        ``decode_spatial_mode`` overrides the decoder's spatial processing
+        (``None``: the AE's trained mode; see :meth:`_resolve_decode_mode`).
         """
         self._check_conditioning_schema(param_names, history_dt_seconds, "sample")
         if initial_noise is not None and generator is not None:
@@ -1098,6 +1135,7 @@ class TadpoleLatentGenerator(nn.Module):
             geometry, geom_features, batch_size=b, device=device
         )
         latent_grid = self.latent_grid_for(cond.orig_shape)
+        self._resolve_decode_mode(decode_spatial_mode, latent_grid)
         assert cond.geom_cond is not None
         self._check_latent_grid(cond.geom_cond, latent_grid, "geometry conditioning")
         shape = (b, self.state_latent_dim, *latent_grid)
@@ -1115,4 +1153,4 @@ class TadpoleLatentGenerator(nn.Module):
             for i in range(steps):
                 tau = torch.full((b,), i * dt, device=device, dtype=torch.float32)
                 z = z + dt * self.velocity(z, tau, params_hist, cond)
-            return self.decode_latents(z, cond)
+            return self.decode_latents(z, cond, spatial_mode=decode_spatial_mode)

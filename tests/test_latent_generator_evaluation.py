@@ -439,6 +439,11 @@ def test_acceptance_script_end_to_end(tmp_path):
         "step_sweep.png",
     ):
         assert (out_dir / name).exists(), name
+    assert summary["decode_spatial_mode"] == summary["ae_spatial_mode"]
+    assert summary["state_slice_figures"]
+    for name in summary["state_slice_figures"]:
+        assert name.startswith("states_traj"), name
+        assert (out_dir / name).exists(), name
 
     with (out_dir / "summary.json").open() as f:
         loaded = json.load(f)
@@ -549,10 +554,13 @@ def test_acceptance_script_reports_per_grid_and_padding_bands(tmp_path):
     )
     out_dir = tmp_path / "acceptance_multi"
     summary = _load_eval_run()(
-        _compose_eval_cfg(model_dir, out_dir, f"data.root_dir={multi}")
+        _compose_eval_cfg(
+            model_dir, out_dir, f"data.root_dir={multi}", "spatial_mode=global"
+        )
     )
 
     assert summary["grids"] == ["16x16x32", "24x16x32"]
+    assert summary["decode_spatial_mode"] == "global"
     assert {tuple(g["shape"]) for g in summary["geometries"]} == {
         (16, 16, 32),
         (24, 16, 32),

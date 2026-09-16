@@ -275,6 +275,7 @@ def _ae_reconstruct(
     features: torch.Tensor | None,
     batch_size: int,
     device: torch.device,
+    decode_spatial_mode: str | None = None,
 ) -> np.ndarray:
     """``decode_latents(encode_latents(state))`` in ``batch_size`` chunks."""
     out = []
@@ -284,7 +285,8 @@ def _ae_reconstruct(
         enc = model.encode_latents(
             chunk, _expand(geometry, b, device), _expand(features, b, device)
         )
-        out.append(model.decode_latents(enc.z, enc).float().cpu().numpy())
+        recon = model.decode_latents(enc.z, enc, spatial_mode=decode_spatial_mode)
+        out.append(recon.float().cpu().numpy())
     return np.concatenate(out, axis=0)
 
 
@@ -299,6 +301,7 @@ def _generate(
     num_steps: int,
     batch_size: int,
     device: torch.device,
+    decode_spatial_mode: str | None = None,
 ) -> np.ndarray:
     """``sample()`` for ``params_hist`` ``(B, Hp, P)`` in ``batch_size`` chunks
     with one seeded generator (noise is a deterministic function of ``seed``
@@ -316,6 +319,7 @@ def _generate(
             num_steps=int(num_steps),
             param_names=model.param_names,
             history_dt_seconds=model.history_dt_seconds,
+            decode_spatial_mode=decode_spatial_mode,
         )
         out.append(sample.float().cpu().numpy())
     return np.concatenate(out, axis=0)
@@ -339,6 +343,7 @@ def _benchmark_sampling(
     num_steps: int,
     batch_size: int,
     device: torch.device,
+    decode_spatial_mode: str | None = None,
 ) -> dict[str, float]:
     """Wall time / peak memory of one ``sample()`` at the deployment shape
     (``batch_size`` members of one geometry)."""
@@ -359,6 +364,7 @@ def _benchmark_sampling(
         num_steps=int(num_steps),
         param_names=model.param_names,
         history_dt_seconds=model.history_dt_seconds,
+        decode_spatial_mode=decode_spatial_mode,
     )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -704,6 +710,94 @@ def _plot_divergence(scalars: dict[str, dict[str, float]], path: Path) -> None:
     plt.close(fig)
 
 
+def _plot_state_slices(
+    rows: list[tuple[str, np.ndarray]],
+    fluid: np.ndarray,
+    spacing: tuple[float, float, float],
+    components: list[str],
+    z_level: int,
+    y_level: int,
+    title: str,
+    path: Path,
+) -> None:
+    """Physical-space slices of individual ``(C, nz, ny, nx)`` states, one row
+    per ``(label, state)``: every component and ``|u|`` on the horizontal plane
+    ``z_level``, then ``|u|`` on the vertical x-z plane ``y_level``. Colour
+    limits are fixed per column from the FIRST row (the real snapshot), so a
+    generated state that over- or under-shoots shows up as saturation;
+    obstacles are grey."""
+    dz, dy, dx = spacing
+    nz, ny, nx = fluid.shape
+    columns: list[tuple[str, Any, np.ndarray, list[float]]] = []
+    xy_extent = [0.0, nx * dx, 0.0, ny * dy]
+    xz_extent = [0.0, nx * dx, 0.0, nz * dz]
+    for ci, name in enumerate(components):
+        columns.append(
+            (
+                f"{name} (z={z_level})",
+                lambda s, ci=ci: s[ci, z_level],
+                fluid[z_level],
+                xy_extent,
+            )
+        )
+    columns.append(
+        (
+            f"|u| (z={z_level})",
+            lambda s: np.linalg.norm(s[:, z_level], axis=0),
+            fluid[z_level],
+            xy_extent,
+        )
+    )
+    columns.append(
+        (
+            f"|u| (y={y_level})",
+            lambda s: np.linalg.norm(s[:, :, y_level], axis=0),
+            fluid[:, y_level],
+            xz_extent,
+        )
+    )
+
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("#c8c8c8")
+    fig, axes = plt.subplots(
+        len(rows),
+        len(columns),
+        figsize=(3.0 * len(columns), 1.9 * len(rows) + 1.0),
+        squeeze=False,
+        layout="constrained",
+    )
+    for c, (col_title, extract, mask, extent) in enumerate(columns):
+        ref = extract(rows[0][1])[mask]
+        ref = ref[np.isfinite(ref)]
+        if ref.size:
+            vmin, vmax = (float(v) for v in np.percentile(ref, [1.0, 99.0]))
+        else:
+            vmin, vmax = 0.0, 1.0
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+        for r, (label, state) in enumerate(rows):
+            ax = axes[r, c]
+            arr = np.where(mask, extract(state), np.nan)
+            im = ax.imshow(
+                arr,
+                origin="lower",
+                extent=extent,
+                vmin=vmin,
+                vmax=vmax,
+                cmap=cmap,
+                interpolation="nearest",
+            )
+            if r == 0:
+                ax.set_title(col_title, fontsize=9)
+            if c == 0:
+                ax.set_ylabel(label, fontsize=8)
+            ax.tick_params(labelsize=6)
+        fig.colorbar(im, ax=axes[:, c].tolist(), location="bottom", shrink=0.9)
+    fig.suptitle(title, fontsize=10)
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
 def _plot_sweep(sweep: list[dict[str, Any]], path: Path) -> None:
     steps = [s["num_steps"] for s in sweep]
     panels = [
@@ -773,6 +867,8 @@ def _write_report(summary: dict[str, Any], path: Path) -> None:
         f"{summary['n_trajectories']} trajectories; grids: {summary['grids']}",
         f"- chosen sampling steps (primary): {summary['chosen_sampling_steps']}; "
         f"noise seeds per conditioning: {summary['num_noise_seeds']}",
+        f"- decoder spatial_mode: {summary['decode_spatial_mode']} (AE trained "
+        f"{summary['ae_spatial_mode']}; applies to AE recon and generated states)",
         f"- Hp = {summary['param_history_steps']}, params = {summary['param_vars']}",
         f"- device: {summary['device']}",
         "",
@@ -878,6 +974,7 @@ def _write_report(summary: dict[str, Any], path: Path) -> None:
         + [f"spectra{sfx}.png" for sfx in suffixes]
         + ["histograms.png", "divergence.png", "step_sweep.png"]
         + ([] if isinstance(roll, str) else ["rollout_transients.png"])
+        + list(summary["state_slice_figures"])
     )
     lines += ["", "Figures: " + ", ".join(figures), ""]
     path.write_text("\n".join(lines))
@@ -913,6 +1010,15 @@ def run(cfg: DictConfig) -> dict[str, Any]:
     param_vars = [str(v) for v in schema.param_vars]
     primary_steps = int(train_cfg.generator.sampling.num_steps)
     hp = int(model.param_history_steps)
+    # Decoder spatial processing for AE recon AND every generated state (the
+    # encoder and the latent grid stay in the AE's trained mode).
+    decode_mode = (
+        model.spatial_mode if cfg.spatial_mode is None else str(cfg.spatial_mode)
+    )
+    if decode_mode not in ("local", "global", "halo"):
+        raise ValueError(
+            f"spatial_mode must be null, 'local', 'global' or 'halo', got {decode_mode!r}"
+        )
 
     root = cfg.data.root_dir or train_cfg.dataset.root_dir
     train_split = str(train_cfg.generator.data_provenance.split)
@@ -933,7 +1039,8 @@ def run(cfg: DictConfig) -> dict[str, Any]:
     if n_snapshots == 0:
         raise ValueError(f"split {cfg.data.split!r} under {root} has no snapshots")
     print(
-        f"loaded generator from {model_dir} (Hp={hp}, primary steps={primary_steps}) on {device}; "
+        f"loaded generator from {model_dir} (Hp={hp}, primary steps={primary_steps}, "
+        f"decode spatial_mode={decode_mode!r}, trained {model.spatial_mode!r}) on {device}; "
         f"evaluating {n_snapshots} snapshots over {len(selection)} trajectories of split "
         f"{cfg.data.split!r}"
     )
@@ -971,8 +1078,10 @@ def run(cfg: DictConfig) -> dict[str, Any]:
     grids_seen: dict[str, int] = {}
     grid_spacings: dict[str, tuple[float, float, float]] = {}
     rollout_inputs: dict[str, list[tuple[np.ndarray, torch.Tensor, np.ndarray]]] = {}
+    state_cfg = cfg.state_plots
+    state_slice_figures: list[str] = []
 
-    for traj, ts in selection.items():
+    for traj_i, (traj, ts) in enumerate(selection.items()):
         geometry = dataset.geometry_for(traj)
         features = dataset.geom_features_for(traj)
         fluid = geometry.numpy().astype(bool)
@@ -1012,7 +1121,9 @@ def run(cfg: DictConfig) -> dict[str, Any]:
         store.add("real", grid_key, _metrics(real_np, fluid, stencil))
         real_spread.append(ge.pairwise_rms_distance(real_np, fluid))
 
-        ae = _ae_reconstruct(model, real, geometry, features, batch_size, device)
+        ae = _ae_reconstruct(
+            model, real, geometry, features, batch_size, device, decode_mode
+        )
         store.add("ae_recon", grid_key, _metrics(ae, fluid, stencil))
 
         sources_this: dict[str, np.ndarray] = {"real": real_np, "ae_recon": ae}
@@ -1028,6 +1139,7 @@ def run(cfg: DictConfig) -> dict[str, Any]:
                     num_steps=primary_steps,
                     batch_size=batch_size,
                     device=device,
+                    decode_spatial_mode=decode_mode,
                 )
             )
         gen_stack = np.stack(gen_seeds)  # (S, B, C, *grid)
@@ -1050,6 +1162,7 @@ def run(cfg: DictConfig) -> dict[str, Any]:
                     num_steps=primary_steps,
                     batch_size=batch_size,
                     device=device,
+                    decode_spatial_mode=decode_mode,
                 )
                 for s in range(n_seeds)
             ]
@@ -1073,6 +1186,7 @@ def run(cfg: DictConfig) -> dict[str, Any]:
                 num_steps=primary_steps,
                 batch_size=batch_size,
                 device=device,
+                decode_spatial_mode=decode_mode,
             )
             store.add(
                 "generated_shuffled_history", grid_key, _metrics(shuf, fluid, stencil)
@@ -1087,6 +1201,7 @@ def run(cfg: DictConfig) -> dict[str, Any]:
                 num_steps=primary_steps,
                 batch_size=batch_size,
                 device=device,
+                decode_spatial_mode=decode_mode,
             )
             store.add(
                 "generated_omitted_history", grid_key, _metrics(omit, fluid, stencil)
@@ -1107,6 +1222,7 @@ def run(cfg: DictConfig) -> dict[str, Any]:
                     num_steps=steps,
                     batch_size=batch_size,
                     device=device,
+                    decode_spatial_mode=decode_mode,
                 )
             store.add(
                 f"generated_steps{steps}", grid_key, _metrics(fields, fluid, stencil)
@@ -1120,6 +1236,7 @@ def run(cfg: DictConfig) -> dict[str, Any]:
                     num_steps=steps,
                     batch_size=batch_size,
                     device=device,
+                    decode_spatial_mode=decode_mode,
                 )
 
         if any(padded_axes):
@@ -1131,6 +1248,40 @@ def run(cfg: DictConfig) -> dict[str, Any]:
                     padding.setdefault(source, {}).update(
                         {f"{grid_key}:{k}": v for k, v in res.items()}
                     )
+        # Physical-space snapshots: the real state, its AE reconstruction and
+        # individual fully generated draws (true and constant history).
+        if bool(state_cfg.enabled) and traj_i < int(state_cfg.max_trajectories):
+            n_gen = min(int(state_cfg.num_generated), n_seeds)
+            z_level = state_cfg.z_level
+            y_level = state_cfg.y_level
+            z_level = grid[0] // 4 if z_level is None else int(z_level)
+            y_level = grid[1] // 2 if y_level is None else int(y_level)
+            for i, t in enumerate(ts[: int(state_cfg.snapshots_per_trajectory)]):
+                slice_rows = [
+                    (SOURCE_LABELS["real"], real_np[i]),
+                    (SOURCE_LABELS["ae_recon"], ae[i]),
+                ]
+                slice_rows += [
+                    (f"generated, seed {s}", gen_stack[s, i]) for s in range(n_gen)
+                ]
+                if bool(cfg.conditioning.constant_history):
+                    slice_rows += [
+                        (f"const history, seed {s}", const_stack[s, i])
+                        for s in range(n_gen)
+                    ]
+                name = f"states_traj{traj}_t{t}.png"
+                _plot_state_slices(
+                    slice_rows,
+                    fluid,
+                    spacing,
+                    components,
+                    z_level,
+                    y_level,
+                    f"Trajectory {traj}, snapshot t={t} (grid {grid_key}, "
+                    f"{primary_steps} Euler steps, {decode_mode} decoding)",
+                    out_dir / name,
+                )
+                state_slice_figures.append(name)
         if bool(cfg.rollout.enabled):
             for source, fields in sources_this.items():
                 rollout_inputs.setdefault(source, []).append((fields, geometry, fluid))
@@ -1358,6 +1509,8 @@ def run(cfg: DictConfig) -> dict[str, Any]:
         "num_steps_sweep": sweep_steps,
         "num_noise_seeds": n_seeds,
         "sampling_batch_size": batch_size,
+        "decode_spatial_mode": decode_mode,
+        "ae_spatial_mode": str(model.spatial_mode),
         "param_history_steps": hp,
         "param_vars": param_vars,
         "state_vars": components,
@@ -1376,6 +1529,7 @@ def run(cfg: DictConfig) -> dict[str, Any]:
             else "n/a (grid is a multiple of the AE padding multiple)"
         ),
         "rollout": rollout,
+        "state_slice_figures": state_slice_figures,
         **verdict,
     }
     with (out_dir / "summary.json").open("w") as f:
