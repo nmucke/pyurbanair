@@ -10,6 +10,7 @@ config overrides so the run is CPU-fast.
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 from pathlib import Path
 
@@ -76,6 +77,9 @@ def _shrink_dd(cfg) -> None:
     cfg.dataset.pushforward_steps = 1
     cfg.dataloader.batch_size = 2
     cfg.dataloader.num_workers = 0
+    if cfg.get("batch_sampler") is not None:
+        cfg.batch_sampler.batch_size = 2
+        cfg.batch_sampler.drop_last = False
     cfg.architecture.decomposition.interior_size = 4
     cfg.architecture.decomposition.halo = 2
     cfg.architecture.decomposition.taper = 1
@@ -168,6 +172,10 @@ def test_dd_training_paths(
 
     out = tmp_path / "model_weights" / model_name
     assert (out / "weights.pt").exists()
+    with (out / "metrics.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert float(rows[0]["train_loss"]) > 0
     saved = OmegaConf.load(out / "config.yaml")
     assert saved.trainer._target_.split(".")[-1] == expect_trainer
     assert saved.loss._target_.split(".")[-1] == expect_loss
