@@ -45,5 +45,5 @@ jobs:
         # Use portable transports for this single-host smoke suite.
         env:
           OMPI_MCA_pml: ob1
-          OMPI_MCA_btl: self,tcp
+          OMPI_MCA_btl: self,sm,tcp
         run: pixi run -e dev py.test

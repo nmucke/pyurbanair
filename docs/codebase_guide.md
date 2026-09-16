@@ -441,7 +441,7 @@ def test_something(compose_test_cfg) -> None:
 ```
 
 The [CI workflow](../.github/workflows/ci.yml) selects Open MPI's `ob1` PML
-with `self,tcp` BTLs for its test step.
+with `self,sm,tcp` BTLs for its Open MPI 5 test environment.
 UCX's network-port probing can raise `SIGFPE` during MPI startup on hosted
 runners when the Fortran solvers enable floating-point traps. These CI-only
 settings avoid that startup path while keeping solver traps enabled; local
