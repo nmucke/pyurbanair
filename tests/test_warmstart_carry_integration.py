@@ -7,11 +7,13 @@ the SGS TKE) must carry actual turbulence from the cold run, which is precisely
 what removes the per-window re-spin-up bias.
 """
 
+from collections.abc import Callable
+from pathlib import Path
+
 import numpy as np
-import pytest
-from hydra import compose, initialize
-from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
+from numpy.typing import NDArray
+from omegaconf import DictConfig
 from pyudales.utils.warm_start_utils import _carry_dir, fetch_carry
 from scipy.io import FortranFile
 
@@ -26,7 +28,7 @@ from pyurbanair.config.hydra_helpers import clean_outputs
 EKM_RECORD = 8
 
 
-def _read_record(path, idx):
+def _read_record(path: str | Path, idx: int) -> NDArray[np.float64]:
     records = []
     with FortranFile(str(path), "r") as f:
         try:
@@ -37,66 +39,52 @@ def _read_record(path, idx):
     return records[idx]
 
 
-def test_warm_start_reuses_carry_subgrid_fields():
-    # Compose with the Hydra runtime config registered so paths.yaml's
-    # ``${hydra:runtime.cwd}`` resolves under a bare compose() (no hydra.main).
-    with initialize(version_base=None, config_path="../conf"):
-        cfg = compose(
-            config_name="run_forward_model",
-            overrides=[
-                # Tiny smoke shape (formerly the +scale=test overlay).
-                "domain.nx=20",
-                "domain.ny=20",
-                "domain.nz=4",
-                "domain.bounds=[[0.0,20.0],[0.0,20.0],[0.0,10.0]]",
-                "time.simulation_time=3.0",
-                "time.output_frequency=1.0",
-                "ensemble.ensemble_size=2",
-                "ensemble.num_parallel_processes=1",
-                "model=pyudales",
-                "params=static",
-                "time.spinup_time=2.0",
-                # The config's nudging height is set for the real 32 m domain
-                # and leaves no nudged level in the 10 m shape above (see
-                # conftest's _fit_nudging_to_smoke_domain, which does this for
-                # the tests that compose through the shared helper).
-                "model.forward_model.nudging_config.nnudge_meters=4.0",
-            ],
-            return_hydra_config=True,
-        )
-        HydraConfig.instance().set_config(cfg)
+def test_warm_start_reuses_carry_subgrid_fields(
+    compose_test_cfg: Callable[..., DictConfig],
+) -> None:
+    # Use the shared smoke grid, isolated output paths and single-rank restart
+    # layout. Production MPI and inlet settings are not part of this contract.
+    cfg = compose_test_cfg(
+        overrides=[
+            "model=pyudales",
+            "params=static",
+            "time.spinup_time=2.0",
+            "model.forward_model.closure=smagorinsky",
+            "model.forward_model.verbose=true",
+        ],
+    )
 
-        true_params = instantiate(cfg.params).sample(1).isel(ensemble=0, drop=True)
+    true_params = instantiate(cfg.params).sample(1).isel(ensemble=0, drop=True)
 
-        fm = instantiate(cfg.model.forward_model)
-        instantiate(cfg.model.prepare, forward_model=fm)
-        clean_outputs(cfg.model.name, fm)
+    fm = instantiate(cfg.model.forward_model)
+    instantiate(cfg.model.prepare, forward_model=fm)
+    clean_outputs(cfg.model.name, fm)
 
-        # --- Cold start: must produce a carry with real subgrid fields ---
-        cold_state = fm(params=true_params)
-        assert cold_state is not None
-        carry_dir = _carry_dir(fm.dirs)
-        assert carry_dir.exists(), "cold start did not persist a warmstart carry"
-        carry_files = list(carry_dir.glob(f"initd*_000_000.{fm.dirs.experiment_name}"))
-        assert carry_files, "carry directory has no restart file"
+    # --- Cold start: must produce a carry with real subgrid fields ---
+    cold_state = fm(params=true_params)
+    assert cold_state is not None
+    carry_dir = _carry_dir(fm.dirs)
+    assert carry_dir.exists(), "cold start did not persist a warmstart carry"
+    carry_files = list(carry_dir.glob(f"initd*_000_000.{fm.dirs.experiment_name}"))
+    assert carry_files, "carry directory has no restart file"
 
-        # The cold-start tiny template (barely-evolved subgrid state) vs the
-        # carry (real subgrid state from the full run): the carry's eddy
-        # viscosity must be non-trivial and clearly differ from the template's.
-        fm._ensure_warmstart_template()
-        template_ekm = _read_record(fm.warmstart_template_file, EKM_RECORD)
-        carry_ekm = _read_record(carry_files[0], EKM_RECORD)
-        assert np.any(carry_ekm != 0.0), "carry eddy viscosity is all zero"
-        assert not np.allclose(carry_ekm, template_ekm), (
-            "carry subgrid state matches the cold-start template — the real "
-            "fields are not being reused"
-        )
+    # The cold-start tiny template (barely-evolved subgrid state) vs the
+    # carry (real subgrid state from the full run): the carry's eddy
+    # viscosity must be non-trivial and clearly differ from the template's.
+    fm._ensure_warmstart_template()
+    template_ekm = _read_record(fm.warmstart_template_file, EKM_RECORD)
+    carry_ekm = _read_record(carry_files[0], EKM_RECORD)
+    assert np.any(carry_ekm != 0.0), "carry eddy viscosity is all zero"
+    assert not np.allclose(carry_ekm, template_ekm), (
+        "carry subgrid state matches the cold-start template — the real "
+        "fields are not being reused"
+    )
 
-        # The carry is fetchable for the next warm start.
-        assert fetch_carry(fm.dirs) is not None
+    # The carry is fetchable for the next warm start.
+    assert fetch_carry(fm.dirs) is not None
 
-        # --- Warm start from the cold state: completes and refreshes the carry ---
-        warm_state = fm(params=true_params, state=cold_state)
-        assert warm_state is not None
-        assert warm_state.sizes["time"] == cold_state.sizes["time"]
-        assert _carry_dir(fm.dirs).exists()
+    # --- Warm start from the cold state: completes and refreshes the carry ---
+    warm_state = fm(params=true_params, state=cold_state)
+    assert warm_state is not None
+    assert warm_state.sizes["time"] == cold_state.sizes["time"]
+    assert _carry_dir(fm.dirs).exists()

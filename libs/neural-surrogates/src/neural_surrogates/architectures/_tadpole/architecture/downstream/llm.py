@@ -1,6 +1,7 @@
 from typing import Union, Sequence
 from einops import rearrange
 from functools import lru_cache
+
 # ``HyperAttention`` (attention_method="hyper") pulls in a Triton flash-attention
 # kernel and ``create_mamba_block`` (attention_method="mamba") pulls in
 # ``mamba_ssm``. Neither is installed in this env, and pyurbanair only ever
@@ -305,6 +306,7 @@ class SequentialModel(nn.Module):
         in_context_patches (int): Patch size for in-context learning. -1 for full sequence.
         init_zero_proj (bool): Whether to initialize output projection as zeros.
     """
+
     def __init__(
         self,
         in_dim,
@@ -315,7 +317,7 @@ class SequentialModel(nn.Module):
         n_layers=2,
         attention_method="hyper",
         in_context_patches=-1,
-        init_zero_proj=True, ### Please be extremely careful when setting this to True, you need to make sure SequentialModel is the last part of the whole model, otherwise the model will not learn anything
+        init_zero_proj=True,  ### Please be extremely careful when setting this to True, you need to make sure SequentialModel is the last part of the whole model, otherwise the model will not learn anything
         use_conv_proj=False,
     ):
         """
@@ -328,7 +330,13 @@ class SequentialModel(nn.Module):
         self.in_context_patches = in_context_patches
         self.use_conv_proj = use_conv_proj
         if use_conv_proj:
-            self.input_proj = nn.Conv3d(in_dim, hidden_size, kernel_size=3,padding="same",padding_mode="circular")
+            self.input_proj = nn.Conv3d(
+                in_dim,
+                hidden_size,
+                kernel_size=3,
+                padding="same",
+                padding_mode="circular",
+            )
         else:
             self.input_proj = nn.Linear(in_dim, hidden_size)
         self.out_proj = nn.Linear(hidden_size, in_dim)
@@ -396,45 +404,19 @@ class SequentialModel(nn.Module):
             nn.init.zeros_(self.out_proj.weight)
             nn.init.zeros_(self.out_proj.bias)
 
-    def forward_context(self, xx, mem, offset=0):
-        """
-        Process a patch of the sequence with memory for in-context learning.
-
-        Args:
-            xx (Tensor): Input patch of shape [N, L, C].
-            mem (list or None): Memory states for each layer.
-            offset (int): Offset for overlapping patches.
-
-        Returns:
-            Tuple[Tensor, Any]: Output tensor and (optionally updated) memory.
-        """
-        N, _, _ = xx.shape  # Get batch size N
-        classification_mode = True  # Always use classification mode (add cls_token)
-        if classification_mode:
-            # Concatenate cls_token to the end of the sequence for each sample
-            xx = torch.cat([xx, self.cls_token.repeat(N, 1, 1)], dim=1)  # N L+1 C
-        base_len = xx.shape[1]  # Length of the sequence (including cls_token)
-        keep_len = base_len * 2  # Number of tokens to keep in memory
-        new_mem = []  # Placeholder for new memory states
-
-        for idx, layer in enumerate(self.layers):
-            if not mem:
-                # If no memory, use current input
-                xx_i = xx
+    def _forward_layers(self, x):
+        """Run all transformer blocks, optionally with activation checkpointing."""
+        residual = None
+        for i, block in enumerate(self.layers):
+            if self.use_checkpoint:
+                x, residual = checkpoint.checkpoint(
+                    block, x, residual, use_reentrant=False
+                )
             else:
-                # Otherwise, concatenate memory and current input, with offset
-                xx_i = torch.cat(
-                    [mem[idx][:, : mem[idx].shape - offset], xx[offset:]], dim=1
-                )[:, -keep_len:]  # Only keep the last keep_len tokens
-            if classification_mode:
-                # Store memory (excluding the last token, which is cls_token)
-                new_mem.append(xx_i[:-1].detach())
-            else:
-                new_mem.append(xx_i.detach())
-            # Pass through the layer and keep only the last base_len tokens
-            xx = layer(xx_i)[:, -base_len:]  # N L D
-
-        return xx, mem  # Return output and memory (memory is not updated here)
+                x, residual = block(x, residual)
+            if i == len(self.layers) - 1 and residual is not None:
+                x = x + residual
+        return x
 
     def forward(self, x):
         """
@@ -464,45 +446,43 @@ class SequentialModel(nn.Module):
         x = x + torch.tensor(pos_embed).to(x)
         # Concatenate cls_token to the end of the sequence for each sample
         x = torch.cat([x, self.cls_token.repeat(n, 1, 1)], dim=1)
-        residual = None  # For storing residuals in checkpoint mode
-        
         # If not using in-context patches, or patch size is too large
         if self.in_context_patches <= 0 or self.in_context_patches >= x.shape[1]:
-            if self.use_checkpoint:
-                # Use gradient checkpointing to save memory
-                for i, blk in enumerate(self.layers):
-                    x, residual = checkpoint.checkpoint(blk, x, residual)
-                    # On last layer, add residual if exists
-                    if i == len(self.layers) - 1:
-                        x = (x + residual) if residual is not None else x
-            else:
-                # Standard forward through each layer
-                for i, blk in enumerate(self.layers):
-                    x, residual = blk(x, residual)
-                    # On last layer, add residual if exists
-                    if i == len(self.layers) - 1:
-                        x = (x + residual) if residual is not None else x
+            x = self._forward_layers(x)
         else:
-            # Use sliding window in-context patching
-            mem = None  # Memory for each layer
-            all_ys = []  # Store outputs for all patches
-            start = 0  # Start index for patch
-            all_cls = []  # Store cls_token outputs for all patches
-            while start < x.shape[1] - 1:
-                # Get a patch of the sequence
-                xx = x[:, start : start + self.in_context_patches]
-                # Forward through context window, update memory
-                ss, mem = self.forward_context(
-                    xx, mem, offset=self.in_context_patches // 2
+            # Sliding local-attention windows. Overlapping token predictions are
+            # averaged so every spatial token survives and the output can be
+            # reshaped to the original grid. The shared cls token gives each
+            # window the same learned global-summary slot.
+            spatial = x[:, :-1]
+            n_tokens = spatial.shape[1]
+            window = int(self.in_context_patches)
+            stride = max(1, window // 2)
+            starts = list(range(0, max(1, n_tokens - window + 1), stride))
+            last_start = max(0, n_tokens - window)
+            if starts[-1] != last_start:
+                starts.append(last_start)
+            summed = torch.zeros_like(spatial)
+            counts = torch.zeros(
+                (1, n_tokens, 1), dtype=spatial.dtype, device=spatial.device
+            )
+            for start in starts:
+                stop = min(start + window, n_tokens)
+                xx = torch.cat(
+                    [spatial[:, start:stop], self.cls_token.repeat(n, 1, 1)],
+                    dim=1,
                 )
-                all_ys.append(ss)  # Store all outputs
-                all_cls.append(ss[:, -1:])  # Store cls_token output
-                start += self.in_context_patches // 2  # Move window forward
-            _ = torch.cat(all_ys, dim=1)  # (Unused) Concatenate all outputs
-            x = torch.cat(all_cls, dim=1)  # Concatenate all cls_token outputs
-            x = x.mean(dim=1, keepdims=True)  # Average over all patches
-        # Remove the cls_token before output projection
-        x = x[:, :-1]
+                yy = self._forward_layers(xx)[:, :-1]
+                # Avoid in-place writes so autograd retains every window path.
+                left = torch.zeros_like(spatial[:, :start])
+                right = torch.zeros_like(spatial[:, stop:])
+                summed = summed + torch.cat([left, yy, right], dim=1)
+                counts[:, start:stop] += 1
+            x = summed / counts.clamp_min(1)
+        # Remove the cls token from the full-sequence path. The windowed path
+        # already contains only spatial tokens.
+        if x.shape[1] == h * w * d + 1:
+            x = x[:, :-1]
 
         # Project back to input dimension
         x = self.out_proj(x)

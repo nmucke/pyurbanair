@@ -456,6 +456,11 @@ architecture comes from the pretrained `model_dir`.
 | [`finetune_mode/dft.yaml`](../conf/neural_surrogate/finetune_mode/dft.yaml) | `neural_surrogates.Trainer` | `torch.nn.MSELoss` |
 
 Both entries sit **after** `_self_` so they override the inline `trainer._target_`.
+Both fine-tuning and latent-generator training expose `trainer.compile_dynamic`
+alongside `compile_model`; `null` keeps the trainer/model default. The latent
+generator also exposes `architecture.use_checkpoint` for its velocity transformer
+and a `loss` target (MSE by default). Its `dataset.dtype` must remain `float32`;
+mixed precision is controlled by the trainer's AMP settings.
 Unlike `lora_nextstep` (architecture read from the pretrained `model_dir`),
 `dft` (plan 03: autoencoder → time-stepper) declares the `TadpoleTimeStepper`
 architecture **inline** — its `pretrained_model_dir` is the **AE** dir, and the
@@ -463,9 +468,14 @@ script instantiates the stepper fresh with `pretrained_ae_dir` set to it. It als
 carries a `lora.target_preset: tadpole_encdec` and a `trainable_modules` list (the
 sub-network + γ skips + `latent_residual_scale` + optional `skip_mixing`,
 trained fully, not via LoRA).
-DFT additionally exposes `architecture.skip_mixing: null`; set it to
-`{width: 32, levels: [4, 8]}` to enable zero-initialized pointwise state mixing
-alongside the gated skips. Levels select spatial strides from `[1, 2, 4, 8]`.
+`architecture.subnetwork_cfg` exposes the DFT transformer's existing overrides,
+including `use_checkpoint`. Optional `in_context_patches` uses overlapping
+windows of flattened spatial tokens with full-grid output; the default `-1`
+retains global attention.
+DFT additionally exposes `architecture.skip_mixing`, currently configured as
+`{width: 32, levels: [4, 8]}` for zero-initialized pointwise state mixing
+alongside the gated skips; set it to `null` to disable it. Levels select spatial
+strides from `[1, 2, 4, 8]`.
 This is a DFT-only option; no matching AE setting or retraining is required.
 Both `pretrain_autoencoder.yaml` and `finetune_mode/dft.yaml` expose
 `architecture.spatial_mode: local | global | halo` (default `local`),
@@ -475,6 +485,14 @@ one full-domain latent time-stepper and crops overlapping decoder outputs to
 their central cores. These settings travel with the exported architecture and
 need not match between AE pretraining and DFT. See
 [neural_surrogates.md §31–34](neural_surrogates.md#part-h--autoencoder--time-stepper-tadpole-dft).
+
+Latent-generator exports record grid metadata per supported geometry, so
+deployment can select any trained geometry/grid pair instead of only the first
+training grid. Training checks history cadence across train/validation and
+prehistory provenance in both splits; acceptance repeats those checks for the
+selected corpus. Resume validates a saved semantic signature before replacing
+`config.yaml`, and preserves newer best weights even when the periodic checkpoint
+is older. See [neural_surrogates.md §38–40](neural_surrogates.md#38-config--script--artifacts).
 
 ---
 

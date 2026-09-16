@@ -406,6 +406,12 @@ def _shrink_for_cpu(cfg) -> None:
     cfg.architecture.encoder_crop_size = CROP
     cfg.dataloader.batch_size = 2
     cfg.dataloader.num_workers = 0
+    if cfg.get("batch_sampler") is not None:
+        # The shipped multi-geometry sampler replaces dataloader.batch_size.
+        # Keep the tiny fixture's four snapshots per trajectory instead of
+        # dropping each trajectory as shorter than the production batch size.
+        cfg.batch_sampler.batch_size = 2
+        cfg.batch_sampler.drop_last = False
     cfg.trainer.num_epochs = 2
     cfg.trainer.device = "cpu"
     cfg.trainer.amp = False

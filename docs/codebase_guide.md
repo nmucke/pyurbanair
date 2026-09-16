@@ -419,7 +419,10 @@ behavior:
 
 Every fixture applies the smoke shape (`_SMOKE_OVERRIDES` in
 [tests/conftest.py](../tests/conftest.py): the smallest domain / shortest window /
-2-member ensemble). Override anything per-test:
+2-member ensemble) and isolates each run's output paths in pytest's temporary
+root. uDALES mounts default to one MPI rank and no synthetic inlet turbulence;
+explicit caller overrides retain control of those settings. Inlet tests opt in
+with length scales appropriate to their grid. Override anything per-test:
 
 ```python
 def test_something(compose_test_cfg) -> None:
@@ -436,6 +439,14 @@ def test_something(compose_test_cfg) -> None:
     )
     run(cfg)
 ```
+
+The [CI workflow](../.github/workflows/ci.yml) selects Open MPI's `ob1` PML
+with `self,sm,tcp` BTLs for its Open MPI 5 test environment.
+UCX's network-port probing can raise `SIGFPE` during MPI startup on hosted
+runners when the Fortran solvers enable floating-point traps. These CI-only
+settings avoid that startup path while keeping solver traps enabled; local
+and HPC transport selection is unchanged. See the
+[Open MPI transport documentation](https://docs.open-mpi.org/en/main/tuning-apps/networking/tcp.html).
 
 ## 6. Data assimilation flow
 

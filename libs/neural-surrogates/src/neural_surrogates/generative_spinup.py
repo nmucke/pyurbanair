@@ -421,8 +421,12 @@ class GenerativeSpinup:
                     f"template variable '{name}' has dims {snap[name].dims}, "
                     f"expected the generator's coordinate order {dims}."
                 )
-        self._check_grid(snap, schema)
-
+        # Legacy artifacts declare one global grid and historically report a
+        # grid mismatch before attempting geometry identity. Current artifacts
+        # select a mask+grid pair below.
+        supported = schema.get("supported_geometries") or []
+        if not any(entry.get("grid") is not None for entry in supported):
+            self._check_grid(snap, schema)
         blanking = np.asarray(snap[self.geometry_var].values, dtype=np.float64)
         if not np.all(np.isin(blanking, (0.0, 1.0))):
             raise ValueError(
@@ -430,7 +434,12 @@ class GenerativeSpinup:
                 "indicator (1 = obstacle), got values outside {0, 1}."
             )
         fluid = 1.0 - blanking
-        self._check_supported_geometry(fluid, schema)
+        # Current artifacts attach the physical grid to each supported mask.
+        # Select the pair together: the same voxel mask can legitimately occur
+        # on two domains with different spacing/bounds.  Legacy single-grid
+        # artifacts have no per-entry grid and continue to use schema.grid.
+        matched_grid = self._check_supported_geometry(snap, fluid, schema)
+        self._check_grid(snap, schema, grid=matched_grid)
 
         # Keep only what the generated snapshot must carry: the state variables
         # (overwritten per member) and the mask. Any other template variable
@@ -456,16 +465,17 @@ class GenerativeSpinup:
                 )
         return template
 
-    def _check_grid(self, snap: xr.Dataset, schema: dict[str, Any]) -> None:
-        """Grid shape, spacing and bounds vs the artifact's ``grid`` block."""
-        grid = schema["grid"]
+    def _grid_error(
+        self, snap: xr.Dataset, schema: dict[str, Any], grid: dict[str, Any]
+    ) -> Optional[str]:
+        """Return why ``snap`` does not match ``grid``, or ``None``."""
         dims = schema["coordinate_order"]
         expected_shape = tuple(int(grid[f"n{d}"]) for d in dims)
         got_shape = tuple(int(snap.sizes[d]) for d in dims)
         if got_shape != expected_shape:
-            raise ValueError(
-                f"template grid {dict(zip(dims, got_shape))} does not match the "
-                f"generator's trained grid {dict(zip(dims, expected_shape))}."
+            return (
+                f"grid {dict(zip(dims, got_shape))} does not match trained grid "
+                f"{dict(zip(dims, expected_shape))}"
             )
         bounds = grid.get("bounds")
         for d in dims:
@@ -475,13 +485,12 @@ class GenerativeSpinup:
                 continue
             spacing = float(spacing)
             if not np.allclose(np.diff(coord), spacing, rtol=_SPACING_RTOL, atol=0.0):
-                raise ValueError(
-                    f"template '{d}' spacing {np.diff(coord).mean():.6g} does not "
-                    f"match the generator's trained d{d}={spacing:.6g}."
+                return (
+                    f"'{d}' spacing {np.diff(coord).mean():.6g} does not match "
+                    f"trained d{d}={spacing:.6g}"
                 )
             if bounds is None:
                 continue
-            # bounds are ordered (x, y, z) like the domain config.
             lo, hi = (float(b) for b in bounds["xyz".index(d)])
             tol = _BOUNDS_ATOL * max(1.0, abs(hi - lo))
             if (
@@ -490,15 +499,30 @@ class GenerativeSpinup:
                 or coord[-1] > hi + tol
                 or coord[-1] <= hi - spacing - tol
             ):
-                raise ValueError(
-                    f"template '{d}' coordinates span [{coord[0]:.6g}, "
-                    f"{coord[-1]:.6g}], which does not sit inside the generator's "
-                    f"trained bounds [{lo:.6g}, {hi:.6g}] at spacing {spacing:.6g}."
+                return (
+                    f"'{d}' coordinates [{coord[0]:.6g}, {coord[-1]:.6g}] do "
+                    f"not sit inside trained bounds [{lo:.6g}, {hi:.6g}] at "
+                    f"spacing {spacing:.6g}"
                 )
+        return None
+
+    def _check_grid(
+        self,
+        snap: xr.Dataset,
+        schema: dict[str, Any],
+        *,
+        grid: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Grid shape, spacing and bounds vs the artifact's ``grid`` block."""
+        error = self._grid_error(snap, schema, grid or schema["grid"])
+        if error is not None:
+            raise ValueError(
+                f"template {error}; it does not match the generator's trained grid."
+            )
 
     def _check_supported_geometry(
-        self, fluid: np.ndarray, schema: dict[str, Any]
-    ) -> None:
+        self, snap: xr.Dataset, fluid: np.ndarray, schema: dict[str, Any]
+    ) -> dict[str, Any]:
         """The template geometry must be one the generator was trained on.
 
         Unseen geometries need a held-out evaluation before they can be
@@ -511,6 +535,7 @@ class GenerativeSpinup:
         shape = tuple(int(s) for s in fluid.shape)
         fluid_cells = int(round(float(fluid.sum())))
         fingerprint = geometry_fingerprint(fluid)
+        mask_matches: list[dict[str, Any]] = []
         for entry in supported:
             if entry.get("mask_sha256") is None:
                 raise ValueError(
@@ -525,7 +550,27 @@ class GenerativeSpinup:
                 and int(entry["fluid_cells"]) == fluid_cells
                 and str(entry["mask_sha256"]) == fingerprint
             ):
-                return
+                mask_matches.append(entry)
+        # Per-geometry grid metadata was added after the original single-grid
+        # artifact format. If any matching entry carries it, require the
+        # template to match one such entry. Never fall back to the top-level
+        # grid, because that would conflate identical masks on physical grids.
+        gridded = [entry for entry in mask_matches if entry.get("grid") is not None]
+        if gridded:
+            failures = []
+            for entry in gridded:
+                grid = dict(entry["grid"])
+                error = self._grid_error(snap, schema, grid)
+                if error is None:
+                    return grid
+                failures.append(error)
+            raise ValueError(
+                f"template {self.template_path} carries a supported geometry "
+                "mask, but its physical grid does not match any grid trained "
+                f"with that mask: {failures}."
+            )
+        if mask_matches:
+            return dict(schema["grid"])
         raise ValueError(
             f"template {self.template_path} carries a geometry (shape={shape}, "
             f"fluid_cells={fluid_cells}, mask_sha256={fingerprint}) the generator "
@@ -567,6 +612,8 @@ class GenerativeSpinup:
 
     @property
     def grid_shape(self) -> tuple[int, ...]:
+        if self._geometry is not None:
+            return tuple(int(s) for s in self._geometry.shape[1:])
         schema = self._ensure_schema()
         return tuple(int(schema["grid"][f"n{d}"]) for d in schema["coordinate_order"])
 

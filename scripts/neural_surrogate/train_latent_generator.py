@@ -46,6 +46,8 @@ strictly after ``fit()``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -64,6 +66,7 @@ from omegaconf.errors import MissingMandatoryValue
 
 # Bump when the meaning of the cached latent statistics changes.
 _LATENT_STATS_VERSION = 1
+_RUN_SIGNATURE_VERSION = 1
 
 # On-disk spatial dim name -> canonical axis. The corpora write cell-centred
 # coordinates either plainly (pylbm / the surrogate's own output) or with the
@@ -226,7 +229,7 @@ def _grid_metadata(state_path: Path, state_var: str, order: Sequence[str]) -> di
     }
 
 
-def _verified_prehistory(train_ds: Any, root: Path) -> Optional[dict]:
+def _verified_prehistory(ds: Any, root: Path) -> Optional[dict]:
     """Provenance gate for ``dataset.constant_prehistory`` (plan 07 §1).
 
     Repeating the first recorded parameter row for the missing leading history
@@ -238,10 +241,10 @@ def _verified_prehistory(train_ds: Any, root: Path) -> Optional[dict]:
     the flag is off (anchors then start at ``t = Hp-1`` and no history is
     invented).
     """
-    if not train_ds.constant_prehistory:
+    if not ds.constant_prehistory:
         return None
-    hp = int(train_ds.param_history_steps)
-    required = (hp - 1) * float(train_ds.history_dt_seconds)
+    hp = int(ds.param_history_steps)
+    required = (hp - 1) * float(ds.history_dt_seconds)
     time_block = _training_data_provenance(root).get("time") or {}
     spinup = time_block.get("spinup_time")
     if spinup is None:
@@ -254,18 +257,29 @@ def _verified_prehistory(train_ds: Any, root: Path) -> Optional[dict]:
             "regenerate the data with its config."
         )
     spinup = float(spinup)
+    if not math.isfinite(spinup):
+        raise ValueError(
+            "dataset.constant_prehistory=true requires a finite "
+            f"time.spinup_time, got {spinup!r}"
+        )
     if spinup + 1e-9 < required:
         raise ValueError(
             f"dataset.constant_prehistory=true requires a constant-forcing "
             f"spin-up at least as long as the repeated plateau: "
             f"time.spinup_time={spinup:g} s < (Hp - 1) * history_dt_seconds = "
-            f"({hp} - 1) * {train_ds.history_dt_seconds:g} = {required:g} s. The "
+            f"({hp} - 1) * {ds.history_dt_seconds:g} = {required:g} s. The "
             "invented rows would reach back before the constant forcing began."
         )
     # State and parameter times are validated element-wise by the dataset, so
     # one number describes both; across trajectories they must agree too, or
     # 'the first saved time' is not a single, auditable instant.
-    firsts = sorted({round(float(t[0]), 9) for t in train_ds._times})
+    raw_firsts = [float(t[0]) for t in ds._times]
+    if not all(math.isfinite(value) for value in raw_firsts):
+        raise ValueError(
+            "dataset.constant_prehistory=true requires finite first saved times, "
+            f"got {raw_firsts}"
+        )
+    firsts = sorted({round(value, 9) for value in raw_firsts})
     if len(firsts) != 1:
         raise ValueError(
             f"dataset.constant_prehistory=true requires one common first saved "
@@ -277,6 +291,30 @@ def _verified_prehistory(train_ds: Any, root: Path) -> Optional[dict]:
         "required_seconds": required,
         "first_saved_time": firsts[0],
     }
+
+
+def _validate_split_contract(train_ds: Any, val_ds: Any) -> None:
+    """Require train and validation to describe the same physical history."""
+    if list(train_ds.param_names) != list(val_ds.param_names):
+        raise ValueError(
+            f"param order differs between splits: train {train_ds.param_names} "
+            f"vs val {val_ds.param_names}"
+        )
+    if int(train_ds.param_history_steps) != int(val_ds.param_history_steps):
+        raise ValueError(
+            "param_history_steps differs between train and validation: "
+            f"{train_ds.param_history_steps} vs {val_ds.param_history_steps}"
+        )
+    train_dt = float(train_ds.history_dt_seconds)
+    val_dt = float(val_ds.history_dt_seconds)
+    cadence_rtol = max(float(train_ds.cadence_rtol), float(val_ds.cadence_rtol))
+    if not math.isclose(train_dt, val_dt, rel_tol=cadence_rtol, abs_tol=1e-9):
+        raise ValueError(
+            "history cadence differs between train and validation: "
+            f"{train_dt:g} s vs {val_dt:g} s (rtol={cadence_rtol:g})"
+        )
+    if bool(train_ds.constant_prehistory) != bool(val_ds.constant_prehistory):
+        raise ValueError("constant_prehistory differs between train and validation")
 
 
 def _training_data_provenance(root: Path) -> dict:
@@ -493,6 +531,259 @@ def _install_latent_stats(
 # --------------------------------------------------------------------------- #
 
 
+def _effective_architecture_signature(cfg: DictConfig, model: Any) -> dict:
+    """Architecture semantics that must remain fixed across a resumed run."""
+    arch = dict(_plain(cfg.architecture))
+    for key in ("_target_", "pretrained_ae_dir", "ae_kwargs", "skip_pretrained_load"):
+        arch.pop(key, None)
+    # Resolve inferred values and normalize newly exposed boolean defaults so
+    # an older config without the key remains compatible with ``false``.
+    arch["hidden_size"] = int(model.hidden_size)
+    arch["mlp_ratio"] = int(model.mlp_ratio)
+    arch["normalize"] = bool(model.normalize)
+    arch["use_checkpoint"] = bool(arch.get("use_checkpoint", False))
+    return arch
+
+
+def _optimizer_signature(optimizer_cfg: Any) -> dict:
+    optimizer = dict(_plain(optimizer_cfg))
+    optimizer["class"] = optimizer.pop("_target_", None)
+    return optimizer
+
+
+def _lr_schedule_signature(trainer_cfg: Any) -> dict:
+    return {
+        key: _plain(trainer_cfg.get(key))
+        for key in ("lr_warmup_epochs", "lr_warmup_start", "lr_min")
+    }
+
+
+def _validation_loader_signature(cfg: Any) -> dict:
+    dataloader = cfg.dataloader
+    sampler = cfg.get("batch_sampler")
+    signature = {
+        "batch_size": _plain(dataloader.get("batch_size")),
+        "drop_last": bool(dataloader.get("drop_last", False)),
+        "batch_sampler": None,
+    }
+    if sampler is not None:
+        signature["batch_sampler"] = {
+            key: _plain(sampler.get(key))
+            for key in ("batch_size", "cell_budget", "drop_last")
+            if sampler.get(key) is not None
+        }
+    return signature
+
+
+def _run_signature(
+    cfg: DictConfig,
+    model: Any,
+    train_ds: Any,
+    val_ds: Any,
+    loss_cfg: Any,
+    physical: dict,
+) -> dict:
+    """Physical and numerical semantics for safe checkpoint continuation.
+
+    Optimizer horizon settings such as ``num_epochs`` are deliberately absent:
+    extending a run is supported. Validation RNG and loss are included because
+    changing either invalidates the persisted best-validation comparison.
+    """
+    loss = dict(_plain(loss_cfg))
+    loss["class"] = loss.pop("_target_", "torch.nn.MSELoss")
+
+    def _manifest_digest(ds: Any) -> str:
+        digest = hashlib.sha256()
+        files = sorted([*ds._state_files, *ds._param_files])
+        for path in files:
+            stat = path.stat()
+            row = f"{path.relative_to(ds.root)}\0{stat.st_size}\0{stat.st_mtime_ns}\n"
+            digest.update(row.encode())
+        return digest.hexdigest()
+
+    return {
+        "version": _RUN_SIGNATURE_VERSION,
+        "state_vars": list(train_ds.state_vars),
+        "param_vars": list(train_ds.param_names),
+        "param_history_steps": int(train_ds.param_history_steps),
+        "history_dt_seconds": float(train_ds.history_dt_seconds),
+        "constant_prehistory": bool(train_ds.constant_prehistory),
+        "time_stride": int(train_ds.time_stride),
+        "cadence_rtol": float(train_ds.cadence_rtol),
+        "dataset_root": str(Path(train_ds.root).resolve()),
+        "ae_fingerprint": model.ae_fingerprint,
+        "architecture": _effective_architecture_signature(cfg, model),
+        "ae_kwargs": _plain(model.ae_kwargs),
+        "param_mean": [float(v) for v in model.param_mean.cpu().tolist()],
+        "param_std": [float(v) for v in model.param_std.cpu().tolist()],
+        "loss": loss,
+        "val_seed": int(cfg.trainer.get("val_seed", 0)),
+        "validation_loader": _validation_loader_signature(cfg),
+        "optimizer": _optimizer_signature(cfg.optimizer),
+        "lr_schedule": _lr_schedule_signature(cfg.trainer),
+        "dataset_manifest": {
+            "train": _manifest_digest(train_ds),
+            "val": _manifest_digest(val_ds),
+        },
+        "physical_metadata": physical,
+    }
+
+
+def _signature_differences(old: Any, new: Any, prefix: str = "") -> list[str]:
+    """Compact, deterministic leaf differences for an actionable error."""
+    old = _plain(old)
+    new = _plain(new)
+    if isinstance(old, dict) and isinstance(new, dict):
+        out: list[str] = []
+        for key in sorted(set(old) | set(new)):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in old or key not in new:
+                out.append(
+                    f"{path}: {old.get(key, '<missing>')!r} -> {new.get(key, '<missing>')!r}"
+                )
+            else:
+                out.extend(_signature_differences(old[key], new[key], path))
+        return out
+    return [] if old == new else [f"{prefix}: {old!r} -> {new!r}"]
+
+
+def _validate_legacy_resume(saved: DictConfig, signature: dict) -> None:
+    """Reconstruct the auditable subset of a pre-signature artifact."""
+    generator = saved.get("generator") or {}
+    schema = generator.get("physical_schema") or {}
+    checks = {
+        "state_vars": list(schema.get("state_vars") or []),
+        "param_vars": list(schema.get("param_vars") or []),
+        "param_history_steps": schema.get("param_history_steps"),
+        "ae_fingerprint": generator.get("ae_fingerprint"),
+    }
+    for key, old in checks.items():
+        if old != signature[key]:
+            raise RuntimeError(
+                f"resume config is incompatible at {key}: saved {old!r}, "
+                f"requested {signature[key]!r}. Use a fresh model_name."
+            )
+    old_dt = schema.get("history_dt_seconds")
+    if old_dt is None or not math.isclose(
+        float(old_dt),
+        float(signature["history_dt_seconds"]),
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise RuntimeError(
+            "resume config is incompatible at history_dt_seconds: "
+            f"saved {old_dt!r}, requested {signature['history_dt_seconds']!r}. "
+            "Use a fresh model_name."
+        )
+    old_ds = saved.get("dataset") or {}
+    legacy_dataset_checks = {
+        "constant_prehistory": bool(old_ds.get("constant_prehistory", False)),
+        "time_stride": int(old_ds.get("time_stride", 1)),
+        "cadence_rtol": float(old_ds.get("cadence_rtol", 0.05)),
+        "dataset_root": str(Path(str(old_ds.get("root_dir"))).resolve()),
+    }
+    for key, old_value in legacy_dataset_checks.items():
+        if old_value != signature[key]:
+            raise RuntimeError(
+                f"resume config is incompatible at {key}: saved {old_value!r}, "
+                f"requested {signature[key]!r}. Use a fresh model_name."
+            )
+    old_arch = saved.get("architecture") or {}
+    for key, value in signature["architecture"].items():
+        old_value = old_arch.get(key, False if key == "use_checkpoint" else None)
+        if old_value != value:
+            raise RuntimeError(
+                f"resume config is incompatible at architecture.{key}: saved "
+                f"{old_value!r}, requested {value!r}. Use a fresh model_name."
+            )
+    if _plain(old_arch.get("ae_kwargs")) != signature["ae_kwargs"]:
+        raise RuntimeError(
+            "resume config is incompatible with the saved frozen-AE architecture. "
+            "Use a fresh model_name."
+        )
+    saved_val_seed = int((saved.get("trainer") or {}).get("val_seed", 0))
+    saved_loss = dict(_plain(saved.get("loss")) or {})
+    saved_loss["class"] = saved_loss.pop("_target_", "torch.nn.MSELoss")
+    if signature["val_seed"] != saved_val_seed or signature["loss"] != saved_loss:
+        raise RuntimeError(
+            "resume changes the validation seed or loss from the legacy artifact; "
+            "its saved best validation score is not comparable."
+        )
+    legacy_training = {
+        "optimizer": _optimizer_signature(saved.optimizer),
+        "lr_schedule": _lr_schedule_signature(saved.trainer),
+        "validation_loader": _validation_loader_signature(saved),
+    }
+    for key, old_value in legacy_training.items():
+        differences = _signature_differences(old_value, signature[key], key)
+        if differences:
+            raise RuntimeError(
+                "resume changes training semantics from the legacy artifact: "
+                f"{differences[0]}. Use a fresh model_name."
+            )
+
+
+def _preflight_resume(
+    cfg: DictConfig, out_dir: Path, model: Any, signature: dict
+) -> None:
+    """Validate saved semantics and checkpoint tensors before artifact writes."""
+    if not bool(cfg.trainer.get("resume", False)):
+        return
+    config_path = out_dir / "config.yaml"
+    checkpoint_path = out_dir / "checkpoint.pt"
+    if not checkpoint_path.exists():
+        return
+    if not config_path.exists():
+        raise RuntimeError(
+            f"resume=true and {checkpoint_path} exists but {config_path} is missing; "
+            "the checkpoint's physical conditioning contract cannot be audited."
+        )
+    saved = OmegaConf.load(config_path)
+    saved_signature = OmegaConf.select(saved, "generator.run_signature")
+    if saved_signature is None:
+        _validate_legacy_resume(saved, signature)
+    else:
+        differences = _signature_differences(saved_signature, signature)
+        if differences:
+            detail = "\n  ".join(differences[:12])
+            raise RuntimeError(
+                "resume run signature is incompatible with the saved artifact:\n  "
+                f"{detail}\nUse a fresh model_name or restore the original config."
+            )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    metadata_signature = (checkpoint.get("metadata") or {}).get(
+        "latent_generator_run_signature"
+    )
+    if metadata_signature is not None:
+        differences = _signature_differences(metadata_signature, signature)
+        if differences:
+            raise RuntimeError(
+                "checkpoint metadata does not match the requested latent-generator "
+                f"run signature: {differences[0]}"
+            )
+    checkpoint_model = checkpoint.get("model") or {}
+    if not bool(checkpoint_model.get("latent_stats_installed", torch.tensor(False))):
+        raise RuntimeError(
+            f"checkpoint {checkpoint_path} has latent_stats_installed=false; "
+            "the existing config was left untouched"
+        )
+    for key in ("param_mean", "param_std"):
+        saved_stat = checkpoint_model.get(key)
+        expected = torch.tensor(signature[key], dtype=torch.float32)
+        if saved_stat is None or not torch.equal(saved_stat.cpu().float(), expected):
+            raise RuntimeError(
+                f"checkpoint {key} differs from the current training corpus; "
+                "refusing a shape-compatible but semantically incompatible resume"
+            )
+    try:
+        model.load_state_dict(checkpoint["model"], strict=True)
+    except (KeyError, RuntimeError) as exc:
+        raise RuntimeError(
+            f"checkpoint {checkpoint_path} cannot load into the requested model; "
+            "the existing config was left untouched"
+        ) from exc
+
+
 def _stamp_export_config(
     cfg: DictConfig,
     model: Any,
@@ -502,6 +793,8 @@ def _stamp_export_config(
     physical: dict,
     provenance: dict,
     prehistory: Optional[dict],
+    val_prehistory: Optional[dict],
+    run_signature: dict,
 ) -> None:
     """Rewrite ``cfg`` into the self-contained artifact config (in place)."""
     cfg.architecture.skip_pretrained_load = True
@@ -522,14 +815,23 @@ def _stamp_export_config(
     )
     # Shape + fluid-cell count do not identify a geometry (relocating the
     # obstacles preserves both), so each entry also carries the mask's hash.
-    supported = [
-        {
+    supported = []
+    seen: set[str] = set()
+    for traj, state_file in enumerate(train_ds._state_files):
+        g = train_ds.geometry_for(traj)
+        entry_grid = _grid_metadata(
+            state_file, train_ds.state_vars[0], physical["coordinate_order"]
+        )
+        entry = {
             "shape": [int(s) for s in g.shape],
             "fluid_cells": int(g.sum().item()),
             "mask_sha256": geometry_fingerprint(g),
+            "grid": entry_grid,
         }
-        for g in train_ds._geometries
-    ]
+        identity = json.dumps(entry, sort_keys=True)
+        if identity not in seen:
+            seen.add(identity)
+            supported.append(entry)
     cfg.generator = {
         "physical_schema": {
             "state_vars": list(train_ds.state_vars),
@@ -548,6 +850,7 @@ def _stamp_export_config(
             "constant_forcing_notes": str(physical["constant_forcing_notes"]),
         },
         "ae_fingerprint": model.ae_fingerprint,
+        "run_signature": run_signature,
         "ae_dir": str(ae_dir),
         "sampling": {"num_steps": int(model.num_sampling_steps)},
         "data_provenance": {
@@ -559,6 +862,10 @@ def _stamp_export_config(
             # What the constant_prehistory claim was checked against (null when
             # the flag is off); see _verified_prehistory.
             "verified_prehistory": prehistory,
+            "verified_prehistory_by_split": {
+                "train": prehistory,
+                "val": val_prehistory,
+            },
             "cadence_rtol": float(train_ds.cadence_rtol),
             "training_data_config": _training_data_provenance(root),
         },
@@ -608,7 +915,15 @@ def run(cfg: DictConfig) -> Any:
     _resolve_ae_inherited_dataset_settings(cfg, ae_cfg)
 
     # -- data ----------------------------------------------------------------- #
-    dtype = getattr(torch, cfg.dataset.dtype)
+    dtype_name = str(cfg.dataset.dtype)
+    if dtype_name != "float32":
+        raise ValueError(
+            "dataset.dtype must be float32 for latent-generator training: the "
+            "frozen AE encoding and latent-statistics path intentionally run in "
+            "fp32. Use trainer.amp/amp_dtype for mixed-precision velocity-net "
+            f"training, not dataset.dtype={dtype_name!r}."
+        )
+    dtype = torch.float32
     train_ds = instantiate(cfg.dataset, split="train", dtype=dtype)
     val_ds = instantiate(cfg.dataset, split="val", dtype=dtype)
     if int(cfg.dataloader.get("num_workers", 0)) == 0:
@@ -624,11 +939,7 @@ def run(cfg: DictConfig) -> Any:
             )
     train_loader = build_loader(cfg, train_ds, train=True)
     val_loader = build_loader(cfg, val_ds, train=False)
-    if list(train_ds.param_names) != list(val_ds.param_names):
-        raise ValueError(
-            f"param order differs between splits: train {train_ds.param_names} "
-            f"vs val {val_ds.param_names}"
-        )
+    _validate_split_contract(train_ds, val_ds)
     print(
         f"train anchors={len(train_ds)}  val anchors={len(val_ds)}  "
         f"param_names={train_ds.param_names}  Hp={train_ds.param_history_steps}  "
@@ -636,6 +947,18 @@ def run(cfg: DictConfig) -> Any:
         f"geometries={len(train_ds._geometries)}"
     )
     prehistory = _verified_prehistory(train_ds, Path(train_ds.root))
+    val_prehistory = _verified_prehistory(val_ds, Path(val_ds.root))
+    if (
+        prehistory is not None
+        and val_prehistory is not None
+        and prehistory["first_saved_time"] != val_prehistory["first_saved_time"]
+    ):
+        raise ValueError(
+            "constant_prehistory requires train and validation to share the same "
+            "first saved time, got "
+            f"{prehistory['first_saved_time']} and "
+            f"{val_prehistory['first_saved_time']}"
+        )
     if prehistory is not None:
         print(f"constant_prehistory verified against the corpus: {prehistory}")
 
@@ -668,6 +991,14 @@ def run(cfg: DictConfig) -> Any:
         train_ds.param_names, float(train_ds.history_dt_seconds)
     )
 
+    loss_cfg = cfg.get("loss")
+    if loss_cfg is None:
+        # Backward compatibility for configs composed before ``loss`` became an
+        # exposed block; this was the script's original fixed objective.
+        loss_cfg = {"_target_": "torch.nn.MSELoss"}
+    loss_fn = instantiate(loss_cfg)
+    run_signature = _run_signature(cfg, model, train_ds, val_ds, loss_cfg, physical)
+
     _check_attention_budget(model, train_ds, train_loader, "train")
     _check_attention_budget(model, val_ds, val_loader, "val")
 
@@ -677,19 +1008,32 @@ def run(cfg: DictConfig) -> Any:
     trainable = [p for p in model.parameters() if p.requires_grad]
     trainer = instantiate(
         cfg.trainer,
+        _recursive_=False,
+        _convert_="all",
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         optimizer=instantiate(cfg.optimizer, params=trainable),
-        loss_fn=torch.nn.MSELoss(),
+        loss_fn=loss_fn,
         weights_path=out_dir / "weights.pt",
+        checkpoint_metadata={"latent_generator_run_signature": run_signature},
     )
 
     provenance = _install_latent_stats(cfg, model, trainer, train_ds, out_dir)
+    _preflight_resume(cfg, out_dir, model, run_signature)
 
     # -- export config first, so a killed run still leaves a loadable schema --- #
     _stamp_export_config(
-        cfg, model, train_ds, val_ds, ae_dir, physical, provenance, prehistory
+        cfg,
+        model,
+        train_ds,
+        val_ds,
+        ae_dir,
+        physical,
+        provenance,
+        prehistory,
+        val_prehistory,
+        run_signature,
     )
     OmegaConf.save(cfg, out_dir / "config.yaml")
 

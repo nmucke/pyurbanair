@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import time
 from pathlib import Path
 from typing import Callable
@@ -58,6 +59,7 @@ class BaseTraining:
         grad_unroll_steps: int = 2,
         checkpoint_every: int = 1,
         resume: bool = False,
+        checkpoint_metadata: dict | None = None,
     ) -> None:
         self.device = torch.device(device)
         # Global CUDA backend tuning (no-ops on CPU). cudnn.benchmark autotunes
@@ -236,6 +238,7 @@ class BaseTraining:
         # resume granularity, not the quality of the saved model.
         self.checkpoint_every = max(1, int(checkpoint_every))
         self.resume = resume
+        self.checkpoint_metadata = checkpoint_metadata
         # Per-batch auxiliary scalars a subclass may expose for logging (e.g.
         # the DD loss term breakdown). ``None`` until/unless a subclass sets it
         # inside ``_final_loss``; the generic full-grid trainer leaves it unset.
@@ -606,14 +609,13 @@ class BaseTraining:
     def _best_val_path(self) -> Path | None:
         """Sidecar recording the val loss the on-disk ``weights.pt`` holds.
 
-        Only written on the ``weights_transform`` path: there ``weights.pt`` is a
-        merged/plain export refreshed on *every* val improvement, while the full
+        ``weights.pt`` is refreshed on *every* val improvement, while the full
         checkpoint (carrying ``best_val`` / ``best_model_state``) is written only
         every ``checkpoint_every`` epochs -- so the checkpoint's ``best_val`` can
         lag the on-disk weights. This sidecar lets a resume (and the caller's
         final export) tell the true on-disk best from a staler checkpoint and
-        never overwrite newer weights with older ones. Kept out of the plain
-        (``weights_transform is None``) path so that default stays byte-identical.
+        never overwrite newer weights with older ones. This applies to both
+        plain training and transformed (e.g. merged LoRA) exports.
         """
         if self.weights_path is None:
             return None
@@ -632,9 +634,39 @@ class BaseTraining:
             return None
         try:
             with path.open() as f:
-                return float(json.load(f)["best_val"])
-        except (ValueError, KeyError, OSError):
+                value = float(json.load(f)["best_val"])
+                return value if math.isfinite(value) else None
+        except (ValueError, TypeError, KeyError, OSError):
             return None
+
+    def _recover_plain_disk_best(self, checkpoint_state: dict) -> float:
+        """Score a legacy plain export whose best-loss sidecar is missing.
+
+        Old plain checkpoints did not write ``best_val.json``. Their on-disk
+        weights may be newer than the checkpoint, so evaluating those weights
+        once is necessary before accepting another improvement. Restore the
+        resumable model and torch RNG afterward; optimizer state is untouched.
+        """
+        assert self.weights_path is not None
+        was_training = self.model.training
+        devices = [self.device] if self.device.type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            try:
+                self._eager_model.load_state_dict(
+                    torch.load(self.weights_path, map_location=self.device)
+                )
+                with torch.no_grad():
+                    score = float(self._validate())
+            finally:
+                self._eager_model.load_state_dict(checkpoint_state)
+                self.model.train(was_training)
+        if not math.isfinite(score):
+            raise RuntimeError(
+                f"cannot recover best validation loss for {self.weights_path}: "
+                f"validation returned {score}"
+            )
+        self._write_best_val(score)
+        return score
 
     def _metrics_path(self) -> Path | None:
         if self.weights_path is None:
@@ -677,6 +709,11 @@ class BaseTraining:
                 # overwritten with last-epoch weights by the caller. None for
                 # plain training (which reloads the best from weights.pt on disk).
                 "best_model_state": best_model_state,
+                **(
+                    {"metadata": self.checkpoint_metadata}
+                    if self.checkpoint_metadata is not None
+                    else {}
+                ),
             },
             path,
         )
@@ -708,10 +745,31 @@ class BaseTraining:
             self.weights_path.parent.mkdir(parents=True, exist_ok=True)
         if self.resume and ckpt_path is not None and ckpt_path.exists():
             ckpt = torch.load(ckpt_path, map_location=self.device)
+            if (
+                self.checkpoint_metadata is not None
+                and ckpt.get("metadata") is not None
+                and ckpt["metadata"] != self.checkpoint_metadata
+            ):
+                raise ValueError(
+                    f"checkpoint metadata in {ckpt_path} does not match this run; "
+                    "refusing to resume an incompatible training contract"
+                )
             self._eager_model.load_state_dict(ckpt["model"])
             self.optimizer.load_state_dict(ckpt["optimizer"])
             if self.scheduler is not None and ckpt.get("scheduler") is not None:
                 self.scheduler.load_state_dict(ckpt["scheduler"])
+                # Loading a scheduler also restores its old training horizon.
+                # When a run is extended, retain its current LR but anneal over
+                # the new remaining horizon instead of entering the rising
+                # half of the old cosine after its original final epoch.
+                cosine = self.scheduler
+                if isinstance(cosine, torch.optim.lr_scheduler.SequentialLR):
+                    cosine = cosine._schedulers[-1]
+                if isinstance(cosine, torch.optim.lr_scheduler.CosineAnnealingLR):
+                    horizon = max(
+                        self.num_epochs - max(int(self.lr_warmup_epochs or 0), 0), 1
+                    )
+                    cosine.T_max = max(cosine.T_max, horizon)
             self.scaler.load_state_dict(ckpt["scaler"])
             best_val = ckpt["best_val"]
             epochs_since_improvement = ckpt["epochs_since_improvement"]
@@ -725,7 +783,7 @@ class BaseTraining:
             best_state = ckpt.get("best_model_state")
             if best_state is not None:
                 best_state = {k: v.cpu() for k, v in best_state.items()}
-            # The merged weights.pt is refreshed on every improvement, but this
+            # weights.pt is refreshed on every improvement, but this
             # checkpoint's best_val/best_model_state only every checkpoint_every
             # epochs -- so the on-disk weights can be NEWER (a better val) than
             # this checkpoint. The best_val.json sidecar records the on-disk best;
@@ -733,8 +791,10 @@ class BaseTraining:
             # improvement can't save weights worse than what's on disk) and drop
             # the now-stale in-RAM snapshot (so end-of-fit won't restore -- and the
             # caller won't export -- older weights over the better on-disk ones).
-            if self.weights_transform is not None:
+            if self.weights_path is not None and self.weights_path.exists():
                 disk_best = self._read_best_val()
+                if disk_best is None and self.weights_transform is None:
+                    disk_best = self._recover_plain_disk_best(ckpt["model"])
                 if disk_best is not None and disk_best < best_val:
                     best_val = disk_best
                     best_state = None
@@ -805,12 +865,11 @@ class BaseTraining:
                             k: v.detach().cpu().clone()
                             for k, v in self._eager_model.state_dict().items()
                         }
-                        # Record the val loss these on-disk weights hold so a
-                        # resume (and the guarded final export) can distinguish
-                        # them from a staler checkpoint's best_val.
-                        self._write_best_val(best_val)
                     else:
                         torch.save(self._eager_model.state_dict(), self.weights_path)
+                    # Plain and transformed exports can both be newer than
+                    # the last periodic checkpoint after an interrupted run.
+                    self._write_best_val(best_val)
                     print(f"  saved new best weights to {self.weights_path}")
             else:
                 epochs_since_improvement += 1

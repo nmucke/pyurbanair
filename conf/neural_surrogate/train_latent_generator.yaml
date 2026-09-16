@@ -62,6 +62,8 @@ architecture:
   film_hidden: 128
   # Transformer feed-forward expansion factor (hidden_size * mlp_ratio).
   mlp_ratio: 4
+  # Recompute transformer blocks during backward to reduce activation memory.
+  use_checkpoint: false
   # Z-score params_hist with the buffered parameter statistics (state stats
   # always stay the frozen AE's, latent stats are always applied).
   normalize: true
@@ -91,7 +93,7 @@ dataset:
   # order, and the order the deploy side reads a member's current values in.
   # Include EVERY varying forcing parameter needed to distinguish target
   # states; omitted ones must be documented constants (constant_forcing_notes).
-  param_vars: 
+  param_vars:
     - inflow_angle
     - velocity_magnitude
   param_history_steps: ${architecture.param_history_steps}
@@ -175,6 +177,8 @@ trainer:
   amp: true
   amp_dtype: bfloat16
   compile_model: false
+  # null lets the model choose; true/false explicitly controls dynamic shapes.
+  compile_dynamic: null
   channels_last: false
   cudnn_benchmark: true
   tf32: true
@@ -189,6 +193,9 @@ trainer:
   # non-shuffling val loader, the examples and their order) are identical
   # across epochs and runs -- the val loss is a fixed yardstick, not a draw.
   val_seed: 0
+
+loss:
+  _target_: torch.nn.MSELoss
 
 # Only the trainable velocity-net parameters are handed to the optimizer (the
 # script filters on requires_grad; the trainer asserts it).

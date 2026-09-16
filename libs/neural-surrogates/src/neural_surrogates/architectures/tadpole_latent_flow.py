@@ -211,6 +211,9 @@ class TadpoleLatentGenerator(nn.Module):
         module docstring).
     n_layers, num_heads, mlp_ratio, film_hidden:
         Velocity-net transformer / FiLM-MLP sizing.
+    use_checkpoint:
+        Recompute velocity-transformer blocks during backward to reduce
+        activation memory.
     time_embed_dim:
         Width of the sinusoidal ``tau`` embedding (even).
     num_sampling_steps:
@@ -240,6 +243,7 @@ class TadpoleLatentGenerator(nn.Module):
         time_embed_dim: int = 64,
         film_hidden: int = 128,
         mlp_ratio: int = 4,
+        use_checkpoint: bool = False,
         num_sampling_steps: int = 50,
         latent_eps: float = 1e-6,
         max_latent_tokens: int | None = None,
@@ -341,6 +345,7 @@ class TadpoleLatentGenerator(nn.Module):
         self.n_layers = int(n_layers)
         self.num_heads = heads
         self.mlp_ratio = int(mlp_ratio)
+        self.use_checkpoint = bool(use_checkpoint)
         self.cond_dim = self.param_history_steps * self.n_params + self.time_embed_dim
         self.velocity_net = ParamConditionedSubnetwork(
             in_dim=d,
@@ -351,6 +356,7 @@ class TadpoleLatentGenerator(nn.Module):
             param_conditioning="film",
             mlp_ratio=int(mlp_ratio),
             film_hidden=int(film_hidden),
+            use_checkpoint=self.use_checkpoint,
             geom_cond_dim=self.geom_cond_dim,
         )
 

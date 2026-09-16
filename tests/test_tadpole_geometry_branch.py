@@ -21,6 +21,7 @@ vendored autoencoder's runtime deps, CPU only, ``CROP = 16`` and tiny shapes.
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 from collections.abc import Callable
 from pathlib import Path
@@ -428,6 +429,9 @@ def test_pretrain_end_to_end_branch_mode(tmp_path: Path, monkeypatch: Any) -> No
     cfg.dataset.sdf_clamp_cells = cfg.architecture.sdf_clamp_cells
     cfg.dataloader.batch_size = 2
     cfg.dataloader.num_workers = 0
+    if cfg.get("batch_sampler") is not None:
+        cfg.batch_sampler.batch_size = 2
+        cfg.batch_sampler.drop_last = False
     cfg.trainer.num_epochs = 1
     cfg.trainer.device = "cpu"
     cfg.trainer.amp = False
@@ -445,6 +449,10 @@ def test_pretrain_end_to_end_branch_mode(tmp_path: Path, monkeypatch: Any) -> No
     assert (out / "geometry_branch.pt").exists()
     for name in ("weights.pt", "encoder.pt", "decoder.pt", "config.yaml"):
         assert (out / name).exists()
+    with (out / "metrics.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert float(rows[0]["train_loss"]) > 0
 
     # the exported branch reloads into a freshly built one, and the encoder
     # checkpoint carries the projections that go with it

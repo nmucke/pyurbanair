@@ -1,4 +1,6 @@
 import sys
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 from data_assimilation.observation_operator import TemporalObservationOperator
@@ -46,6 +48,84 @@ def test_truth_and_assim_model_aliases_compose() -> None:
     assert cfg.truth_model.name == "pylbm"
     assert cfg.assim_model.name == "pyudales"
     assert cfg.assim_model.solver_name == "udales"
+
+
+def test_smoke_composer_stabilizes_single_udales_mount(
+    compose_test_cfg: Callable[..., Any],
+) -> None:
+    cfg = compose_test_cfg(["model=pyudales"])
+
+    assert cfg.model.forward_model.ncpu == 1
+    assert cfg.model.forward_model.inlet_turbulence.enabled is False
+
+
+def test_smoke_composer_stabilizes_dual_udales_mounts(
+    compose_test_cfg: Callable[..., Any],
+) -> None:
+    cfg = compose_test_cfg(
+        ["model@truth_model=pyudales", "model@assim_model=pyudales"],
+        config_name="run_esmda",
+    )
+
+    for model in (cfg.truth_model, cfg.assim_model):
+        assert model.forward_model.ncpu == 1
+        assert model.forward_model.inlet_turbulence.enabled is False
+
+
+def test_smoke_composer_leaves_non_udales_mount_unchanged(
+    compose_test_cfg: Callable[..., Any],
+) -> None:
+    cfg = compose_test_cfg(["model=pylbm"])
+    production_cfg = _compose(["model=pylbm"])
+
+    assert cfg.model.name == "pylbm"
+    assert "ncpu" not in cfg.model.forward_model
+    assert cfg.model.forward_model.inlet_turbulence == (
+        production_cfg.model.forward_model.inlet_turbulence
+    )
+
+
+def test_smoke_composer_preserves_explicit_udales_compute_and_inlet_overrides(
+    compose_test_cfg: Callable[..., Any],
+) -> None:
+    production_cfg = _compose(["model=pyudales"])
+    cfg = compose_test_cfg(
+        [
+            "model=pyudales",
+            "model.forward_model.ncpu=2",
+            "++model.forward_model.inlet_turbulence.intensity=0.15",
+        ]
+    )
+
+    assert cfg.model.forward_model.ncpu == 2
+    assert cfg.model.forward_model.inlet_turbulence.enabled == (
+        production_cfg.model.forward_model.inlet_turbulence.enabled
+    )
+    assert cfg.model.forward_model.inlet_turbulence.intensity == 0.15
+
+
+def test_smoke_composer_preserves_explicit_whole_inlet_block(
+    compose_test_cfg: Callable[..., Any],
+) -> None:
+    cfg = compose_test_cfg(
+        [
+            "model=pyudales",
+            "model.forward_model.inlet_turbulence={enabled:true,intensity:0.12}",
+        ]
+    )
+
+    assert cfg.model.forward_model.inlet_turbulence.enabled is True
+    assert cfg.model.forward_model.inlet_turbulence.intensity == 0.12
+
+
+def test_smoke_composer_preserves_explicit_inlet_opt_in(
+    compose_test_cfg: Callable[..., Any],
+) -> None:
+    cfg = compose_test_cfg(
+        ["model=pyudales", "model.forward_model.inlet_turbulence.enabled=true"]
+    )
+
+    assert cfg.model.forward_model.inlet_turbulence.enabled is True
 
 
 def test_entrypoint_composes_with_model_override() -> None:

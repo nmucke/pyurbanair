@@ -14,13 +14,14 @@ import csv
 import importlib.util
 import json
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any, Callable
 
 import numpy as np
 import pytest
 from hydra import compose, initialize_config_dir
 from neural_surrogates import generator_evaluation as ge
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 _WORKTREE = Path(__file__).resolve().parents[1]
 _SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "test_latent_generator.py"
@@ -305,12 +306,79 @@ def test_aggregate_report_applies_declared_tolerances():
 # --------------------------------------------------------------------------- #
 
 
-def _load_eval_run() -> Callable[[DictConfig], dict[str, Any]]:
+def _load_eval_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("test_latent_generator_ut", _SCRIPT)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.run  # type: ignore[no-any-return]
+    return mod
+
+
+def _load_eval_run() -> Callable[[DictConfig], dict[str, Any]]:
+    return _load_eval_module().run  # type: ignore[no-any-return]
+
+
+def test_acceptance_dataset_contract_rejects_cadence_and_param_order(
+    tmp_path: Path,
+) -> None:
+    validate = _load_eval_module()._validate_dataset_contract
+    cfg = OmegaConf.create(
+        {
+            "generator": {
+                "physical_schema": {
+                    "param_vars": ["angle", "speed"],
+                    "param_history_steps": 3,
+                    "history_dt_seconds": 5.0,
+                },
+                "data_provenance": {
+                    "cadence_rtol": 0.05,
+                    "constant_prehistory": False,
+                },
+            }
+        }
+    )
+    ds = SimpleNamespace(
+        param_names=("angle", "speed"),
+        param_history_steps=3,
+        history_dt_seconds=10.0,
+        constant_prehistory=False,
+    )
+    with pytest.raises(ValueError, match="history cadence"):
+        validate(ds, cfg, tmp_path)
+    ds.history_dt_seconds = 5.0
+    ds.param_names = ("speed", "angle")
+    with pytest.raises(ValueError, match="param_vars"):
+        validate(ds, cfg, tmp_path)
+
+
+def test_acceptance_constant_prehistory_requires_corpus_provenance(
+    tmp_path: Path,
+) -> None:
+    validate = _load_eval_module()._validate_dataset_contract
+    cfg = OmegaConf.create(
+        {
+            "generator": {
+                "physical_schema": {
+                    "param_vars": ["speed"],
+                    "param_history_steps": 3,
+                    "history_dt_seconds": 5.0,
+                },
+                "data_provenance": {
+                    "cadence_rtol": 0.05,
+                    "constant_prehistory": True,
+                },
+            }
+        }
+    )
+    ds = SimpleNamespace(
+        param_names=("speed",),
+        param_history_steps=3,
+        history_dt_seconds=5.0,
+        constant_prehistory=True,
+        _times=[np.array([0.0, 5.0])],
+    )
+    with pytest.raises(ValueError, match="spinup_time"):
+        validate(ds, cfg, tmp_path)
 
 
 def _compose_eval_cfg(model_dir: Path, out_dir: Path, *extra: str) -> DictConfig:

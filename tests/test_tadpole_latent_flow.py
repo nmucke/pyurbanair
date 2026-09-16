@@ -462,6 +462,53 @@ def test_forward_generator_reproducible_and_autocast_safe(tmp_path):
     assert torch.isfinite(v_pred.float()).all()
 
 
+def test_forward_uses_linear_interpolation_and_exact_velocity_target(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    ae_dir = _make_ae_export(tmp_path, "global", "fold")
+    m = _generator(ae_dir).eval()
+    _install_nontrivial_latent_stats(m)
+    state, geom, params_hist = _inputs(b=2)
+    cond = m.encode_latents(state, geom)
+    assert cond.z is not None
+
+    seed = 29
+    expected_rng = torch.Generator().manual_seed(seed)
+    z0 = torch.randn(
+        cond.z.shape,
+        generator=expected_rng,
+        device=cond.z.device,
+        dtype=cond.z.dtype,
+    )
+    tau = torch.rand(
+        cond.z.shape[0],
+        generator=expected_rng,
+        device=cond.z.device,
+        dtype=cond.z.dtype,
+    )
+    expected_z_tau = (1 - tau[:, None, None, None, None]) * z0 + tau[
+        :, None, None, None, None
+    ] * cond.z
+    seen = {}
+
+    def capture_velocity(z: Any, flow_time: Any, params: Any, encoding: Any) -> Any:
+        seen["z"] = z
+        seen["tau"] = flow_time
+        return torch.zeros_like(z)
+
+    monkeypatch.setattr(m, "velocity", capture_velocity)
+    _, target = m(
+        state,
+        params_hist,
+        geom,
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+    assert torch.equal(seen["tau"], tau)
+    assert torch.allclose(seen["z"], expected_z_tau)
+    assert torch.allclose(target, cond.z - z0)
+
+
 # --------------------------------------------------------------------------- #
 # 5. Latent statistics: constant channels.
 # --------------------------------------------------------------------------- #

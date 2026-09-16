@@ -88,15 +88,36 @@ def _load_generator(model_dir: Path, device: torch.device) -> tuple[Any, DictCon
     train_cfg = OmegaConf.load(model_dir / "config.yaml")
     assert isinstance(train_cfg, DictConfig)
     dtype = getattr(torch, train_cfg.dataset.dtype)
+    schema = train_cfg.generator.physical_schema
+    dataset_params = [str(v) for v in train_cfg.dataset.param_vars]
+    schema_params = [str(v) for v in schema.param_vars]
+    if dataset_params != schema_params:
+        raise ValueError(
+            f"artifact dataset.param_vars {dataset_params} do not match saved "
+            f"physical_schema.param_vars {schema_params}"
+        )
+    dataset_states = [str(v) for v in train_cfg.dataset.state_vars]
+    schema_states = [str(v) for v in schema.state_vars]
+    if dataset_states != schema_states:
+        raise ValueError(
+            f"artifact dataset.state_vars {dataset_states} do not match saved "
+            f"physical_schema.state_vars {schema_states}"
+        )
     model = instantiate(
         train_cfg.architecture,
-        n_state_channels=len(train_cfg.dataset.state_vars),
-        n_params=len(train_cfg.dataset.param_vars),
+        n_state_channels=len(schema_states),
+        n_params=len(schema_params),
     ).to(dtype=dtype)
     state = torch.load(model_dir / "weights.pt", map_location="cpu")
     model.load_state_dict(state, strict=True)
     if not bool(model.latent_stats_installed):
         raise RuntimeError(f"{model_dir / 'weights.pt'} has no latent statistics")
+    model.set_conditioning_schema(schema_params, float(schema.history_dt_seconds))
+    if int(model.param_history_steps) != int(schema.param_history_steps):
+        raise ValueError(
+            f"model param_history_steps={model.param_history_steps} does not "
+            f"match physical_schema={schema.param_history_steps}"
+        )
     model.to(device).eval()
     return model, train_cfg
 
@@ -132,6 +153,102 @@ def _load_states(
             axis=1,
         )
     return torch.from_numpy(arr).to(dtype)
+
+
+def _trajectory_spacing(dataset: Any, traj: int) -> tuple[float, float, float]:
+    """Uniform ``(dz, dy, dx)`` spacing of one trajectory's actual grid."""
+    aliases = {"z": ("z", "zt"), "y": ("y", "yt"), "x": ("x", "xt")}
+    with xr.open_dataset(dataset._state_files[traj]) as ds:
+        out = []
+        for axis in ("z", "y", "x"):
+            name = next(
+                (candidate for candidate in aliases[axis] if candidate in ds.coords),
+                None,
+            )
+            if name is None or ds.sizes[name] < 2:
+                raise ValueError(
+                    f"{dataset._state_files[traj].name}: cannot determine d{axis} "
+                    f"from coordinates {aliases[axis]}"
+                )
+            diff = np.diff(np.asarray(ds[name].values, dtype=np.float64))
+            step = float(np.median(diff))
+            if not step > 0 or not np.allclose(diff, step, rtol=1e-6, atol=1e-9):
+                raise ValueError(
+                    f"{dataset._state_files[traj].name}: {name} coordinates are "
+                    "not a positive uniform grid"
+                )
+            out.append(step)
+    return tuple(out)  # type: ignore[return-value]
+
+
+def _validate_dataset_contract(dataset: Any, train_cfg: DictConfig, root: Path) -> None:
+    """Validate physical conditioning semantics that tensor shapes cannot."""
+    schema = train_cfg.generator.physical_schema
+    expected_params = [str(v) for v in schema.param_vars]
+    if list(dataset.param_names) != expected_params:
+        raise ValueError(
+            f"acceptance dataset param_vars {list(dataset.param_names)} do not "
+            f"match artifact param_vars {expected_params}"
+        )
+    expected_hp = int(schema.param_history_steps)
+    if int(dataset.param_history_steps) != expected_hp:
+        raise ValueError(
+            "acceptance dataset param_history_steps "
+            f"{dataset.param_history_steps} does not match artifact {expected_hp}"
+        )
+    expected_dt = float(schema.history_dt_seconds)
+    rtol = float(train_cfg.generator.data_provenance.get("cadence_rtol", 0.05))
+    if not np.isclose(dataset.history_dt_seconds, expected_dt, rtol=rtol, atol=1e-9):
+        raise ValueError(
+            f"acceptance dataset history cadence {dataset.history_dt_seconds:g} s "
+            f"does not match artifact {expected_dt:g} s (rtol={rtol:g})"
+        )
+    expected_constant = bool(
+        train_cfg.generator.data_provenance.get("constant_prehistory", False)
+    )
+    if bool(dataset.constant_prehistory) != expected_constant:
+        raise ValueError(
+            "acceptance dataset constant_prehistory setting does not match the "
+            f"artifact ({dataset.constant_prehistory} vs {expected_constant})"
+        )
+    if expected_constant:
+        cfg_path = root / "config.yaml"
+        corpus_cfg = OmegaConf.load(cfg_path) if cfg_path.exists() else None
+        time_cfg = None if corpus_cfg is None else corpus_cfg.get("time")
+        spinup = None if time_cfg is None else time_cfg.get("spinup_time")
+        required = (expected_hp - 1) * float(dataset.history_dt_seconds)
+        if (
+            spinup is None
+            or not np.isfinite(float(spinup))
+            or float(spinup) + 1e-9 < required
+        ):
+            raise ValueError(
+                "acceptance dataset constant_prehistory=true is not supported "
+                f"by {cfg_path}: time.spinup_time={spinup!r}, need at least "
+                f"{required:g} s"
+            )
+        raw_firsts = [float(t[0]) for t in dataset._times]
+        if not np.all(np.isfinite(raw_firsts)):
+            raise ValueError(
+                "acceptance dataset constant_prehistory=true requires finite "
+                f"first saved times, got {raw_firsts}"
+            )
+        firsts = {round(value, 9) for value in raw_firsts}
+        if len(firsts) != 1:
+            raise ValueError(
+                "acceptance dataset constant_prehistory=true requires one "
+                f"common first saved time, got {sorted(firsts)}"
+            )
+        verified = train_cfg.generator.data_provenance.get("verified_prehistory")
+        if verified is not None and verified.get("first_saved_time") is not None:
+            trained_first = float(verified.first_saved_time)
+            heldout_first = next(iter(firsts))
+            if not np.isclose(heldout_first, trained_first, rtol=0.0, atol=1e-9):
+                raise ValueError(
+                    "acceptance dataset constant_prehistory first saved time "
+                    f"{heldout_first:g} does not match the verified training "
+                    f"value {trained_first:g}"
+                )
 
 
 # --------------------------------------------------------------------------- #
@@ -194,6 +311,8 @@ def _generate(
             _expand(features, b, device),
             generator=gen,
             num_steps=int(num_steps),
+            param_names=model.param_names,
+            history_dt_seconds=model.history_dt_seconds,
         )
         out.append(sample.float().cpu().numpy())
     return np.concatenate(out, axis=0)
@@ -235,6 +354,8 @@ def _benchmark_sampling(
         _expand(features, batch_size, device),
         generator=torch.Generator(device=device).manual_seed(0),
         num_steps=int(num_steps),
+        param_names=model.param_names,
+        history_dt_seconds=model.history_dt_seconds,
     )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -787,7 +908,6 @@ def run(cfg: DictConfig) -> dict[str, Any]:
     schema = train_cfg.generator.physical_schema
     components = [str(v) for v in schema.state_vars]
     param_vars = [str(v) for v in schema.param_vars]
-    spacing = (float(schema.grid.dz), float(schema.grid.dy), float(schema.grid.dx))
     primary_steps = int(train_cfg.generator.sampling.num_steps)
     hp = int(model.param_history_steps)
 
@@ -802,6 +922,7 @@ def run(cfg: DictConfig) -> dict[str, Any]:
     dataset = instantiate(
         train_cfg.dataset, root_dir=str(root), split=str(cfg.data.split), dtype=dtype
     )
+    _validate_dataset_contract(dataset, train_cfg, Path(root))
     selection = _select_snapshots(
         dataset, int(cfg.data.max_snapshots), int(cfg.data.seed)
     )
@@ -845,12 +966,8 @@ def run(cfg: DictConfig) -> dict[str, Any]:
     padding: dict[str, dict[str, Any]] = {}
     padding_applicable = False
     grids_seen: dict[str, int] = {}
+    grid_spacings: dict[str, tuple[float, float, float]] = {}
     rollout_inputs: dict[str, list[tuple[np.ndarray, torch.Tensor, np.ndarray]]] = {}
-
-    def _metrics(
-        fields: np.ndarray, fluid: np.ndarray, stencil: np.ndarray
-    ) -> dict[str, Any]:
-        return _group_metrics(fields, fluid, stencil, spacing, max_values, rng)
 
     for traj, ts in selection.items():
         geometry = dataset.geometry_for(traj)
@@ -858,7 +975,18 @@ def run(cfg: DictConfig) -> dict[str, Any]:
         fluid = geometry.numpy().astype(bool)
         stencil = ge.stencil_fluid_mask(fluid)
         grid = tuple(int(s) for s in geometry.shape)
-        grid_key = "x".join(str(s) for s in grid)
+        spacing = _trajectory_spacing(dataset, traj)
+        shape_key = "x".join(str(s) for s in grid)
+        # Preserve the familiar shape-only label where it is unambiguous. If
+        # the same tensor shape occurs on another physical grid, keep the
+        # groups separate so spectra/divergence are never merged across units.
+        if shape_key not in grid_spacings or np.allclose(
+            grid_spacings[shape_key], spacing, rtol=1e-6, atol=1e-9
+        ):
+            grid_key = shape_key
+        else:
+            grid_key = shape_key + "@" + ",".join(f"{v:g}" for v in spacing)
+        grid_spacings[grid_key] = spacing
         grids_seen[grid_key] = grids_seen.get(grid_key, 0) + 1
         padded_axes = tuple(p != g for p, g in zip(model._padded_shape(grid), grid))
         padding_applicable = padding_applicable or any(padded_axes)
@@ -868,6 +996,13 @@ def run(cfg: DictConfig) -> dict[str, Any]:
         print(
             f"trajectory {traj}: grid {grid_key}, {len(ts)} snapshots, padded axes (z,y,x)={padded_axes}"
         )
+
+        def _metrics(
+            fields: np.ndarray, fluid_mask: np.ndarray, stencil_mask: np.ndarray
+        ) -> dict[str, Any]:
+            return _group_metrics(
+                fields, fluid_mask, stencil_mask, spacing, max_values, rng
+            )
 
         real = _load_states(dataset, traj, ts, dtype)
         real_np = real.float().numpy()
@@ -1223,7 +1358,11 @@ def run(cfg: DictConfig) -> dict[str, Any]:
         "param_history_steps": hp,
         "param_vars": param_vars,
         "state_vars": components,
-        "grid_spacing_dz_dy_dx": list(spacing),
+        "grid_spacings_dz_dy_dx": {
+            key: list(value) for key, value in grid_spacings.items()
+        },
+        # Kept for consumers of legacy single-grid reports.
+        "grid_spacing_dz_dy_dx": list(next(iter(grid_spacings.values()))),
         "sources": scalars,
         "reference": reference,
         "conditioning": conditioning,

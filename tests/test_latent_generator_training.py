@@ -184,6 +184,7 @@ def test_train_end_to_end_exports_self_contained_generator(
         Path(saved.dataset.root_dir) / "state" / "train" / "sample_0000.nc"
     )["blanking"].values
     assert supported[0]["mask_sha256"] == geometry_fingerprint(1.0 - blank)
+    assert supported[0]["grid"]["nz"] == nz
     assert schema.boundary_conditions == "synthetic test corpus"
     assert schema.constant_forcing_notes == ""
     assert len(gen.ae_fingerprint) == 64
@@ -195,6 +196,12 @@ def test_train_end_to_end_exports_self_contained_generator(
     assert prov.verified_prehistory is None  # nothing to verify with the flag off
     assert prov.training_data_config.time.output_frequency == DT
     assert gen.latent_stats.max_batches == 2 and gen.latent_stats.seed == 0
+    signature = gen.run_signature
+    assert list(signature.param_vars) == list(PARAM_VARS)
+    assert signature.param_history_steps == HP
+    assert signature.history_dt_seconds == DT
+    assert signature.architecture.use_checkpoint is False
+    assert signature.loss["class"] == "torch.nn.MSELoss"
 
     # Self-contained reload: no AE dir, no data dir -- remove both first.
     import shutil
@@ -357,6 +364,161 @@ def test_resume_continues_with_latent_stats_and_cached_stats(tmp_path, monkeypat
         load_run()(cfg)
 
 
+def test_resume_rejects_reordered_params_before_overwriting_config(
+    tmp_path: Path,
+) -> None:
+    model_dir = train_tiny_generator(tmp_path, values={"trainer.num_epochs": 1})
+    original = (model_dir / "config.yaml").read_text()
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    cfg = compose_generator_cfg(
+        ae_dir,
+        data_dir,
+        tmp_path,
+        values={
+            "dataset.param_vars": list(reversed(PARAM_VARS)),
+            "trainer.resume": True,
+            "trainer.num_epochs": 2,
+        },
+    )
+    with pytest.raises(RuntimeError, match="param_(mean|vars)"):
+        load_run()(cfg)
+    assert (model_dir / "config.yaml").read_text() == original
+
+
+def test_resume_rejects_optimizer_and_schedule_changes_before_config_write(
+    tmp_path: Path,
+) -> None:
+    model_dir = train_tiny_generator(tmp_path, values={"trainer.num_epochs": 1})
+    original = (model_dir / "config.yaml").read_text()
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    for changed, match in (
+        ({"optimizer.lr": 2.0e-3}, "optimizer.lr"),
+        ({"trainer.lr_min": 2.0e-5}, "lr_schedule.lr_min"),
+    ):
+        cfg = compose_generator_cfg(
+            ae_dir,
+            data_dir,
+            tmp_path,
+            values={
+                "trainer.resume": True,
+                "trainer.num_epochs": 2,
+                **changed,
+            },
+        )
+        with pytest.raises(RuntimeError, match=match):
+            load_run()(cfg)
+        assert (model_dir / "config.yaml").read_text() == original
+
+
+def test_resume_rejects_in_place_validation_corpus_replacement(
+    tmp_path: Path,
+) -> None:
+    model_dir = train_tiny_generator(tmp_path, values={"trainer.num_epochs": 1})
+    original = (model_dir / "config.yaml").read_text()
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    path = data_dir / "param" / "val" / "sample_0000.nc"
+    with xr.open_dataset(path) as opened:
+        replacement = opened.load()
+    replacement[PARAM_VARS[0]].values[0] += 1.0
+    replacement.to_netcdf(path)
+    cfg = compose_generator_cfg(
+        ae_dir,
+        data_dir,
+        tmp_path,
+        values={"trainer.resume": True, "trainer.num_epochs": 2},
+    )
+    with pytest.raises(RuntimeError, match="dataset_manifest.val"):
+        load_run()(cfg)
+    assert (model_dir / "config.yaml").read_text() == original
+
+
+def test_legacy_artifact_without_signatures_resumes_same_contract(
+    tmp_path: Path,
+) -> None:
+    model_dir = train_tiny_generator(tmp_path, values={"trainer.num_epochs": 1})
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    saved.generator.pop("run_signature")
+    OmegaConf.save(saved, model_dir / "config.yaml")
+    checkpoint = torch.load(model_dir / "checkpoint.pt", map_location="cpu")
+    checkpoint.pop("metadata")
+    torch.save(checkpoint, model_dir / "checkpoint.pt")
+
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    unsigned_config = (model_dir / "config.yaml").read_text()
+    for changed, match in (
+        ({"optimizer.lr": 2.0e-3}, "optimizer.lr"),
+        ({"trainer.lr_min": 2.0e-5}, "lr_schedule.lr_min"),
+    ):
+        incompatible = compose_generator_cfg(
+            ae_dir,
+            data_dir,
+            tmp_path,
+            values={
+                "trainer.resume": True,
+                "trainer.num_epochs": 2,
+                **changed,
+            },
+        )
+        with pytest.raises(RuntimeError, match=match):
+            load_run()(incompatible)
+        assert (model_dir / "config.yaml").read_text() == unsigned_config
+
+    cfg = compose_generator_cfg(
+        ae_dir,
+        data_dir,
+        tmp_path,
+        values={"trainer.resume": True, "trainer.num_epochs": 2},
+    )
+    load_run()(cfg)
+    assert [row["epoch"] for row in _metrics_rows(model_dir)] == ["1", "2"]
+    refreshed = OmegaConf.load(model_dir / "config.yaml")
+    assert refreshed.generator.run_signature.param_vars == list(PARAM_VARS)
+
+
+def test_non_float32_dataset_dtype_is_rejected_early(tmp_path: Path) -> None:
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    cfg = compose_generator_cfg(
+        ae_dir, data_dir, tmp_path, values={"dataset.dtype": "float64"}
+    )
+    with pytest.raises(ValueError, match="dataset.dtype must be float32"):
+        load_run()(cfg)
+    assert not (tmp_path / "model_weights" / "latent_generator_test").exists()
+
+
+def test_train_val_cadence_mismatch_is_rejected(tmp_path: Path) -> None:
+    ae_dir, _ = fixture_inputs(tmp_path)
+    data_dir = tmp_path / "data_cadence"
+    write_history_dataset(data_dir, splits={"train": 2}, dt=DT)
+    write_history_dataset(data_dir, splits={"val": 1}, dt=2 * DT, seed=7)
+    cfg = compose_generator_cfg(ae_dir, data_dir, tmp_path)
+    with pytest.raises(ValueError, match="history cadence differs"):
+        load_run()(cfg)
+
+
+def test_constant_prehistory_is_verified_on_validation_split(tmp_path: Path) -> None:
+    ae_dir, _ = fixture_inputs(tmp_path)
+    data_dir = tmp_path / "data_val_prehistory"
+    write_history_dataset(data_dir, splits={"train": 1, "val": 2})
+    data_cfg = OmegaConf.load(data_dir / "config.yaml")
+    data_cfg.time.spinup_time = (HP - 1) * DT
+    OmegaConf.save(data_cfg, data_dir / "config.yaml")
+    # Give only the second validation trajectory a different first instant;
+    # both its state and parameter coordinates remain internally consistent.
+    for kind in ("state", "param"):
+        path = data_dir / kind / "val" / "sample_0001.nc"
+        ds = xr.load_dataset(path)
+        ds = ds.assign_coords(time=ds.time + 1.0)
+        ds.to_netcdf(path)
+    cfg = compose_generator_cfg(
+        ae_dir,
+        data_dir,
+        tmp_path,
+        values={"dataset.constant_prehistory": True},
+    )
+    with pytest.raises(ValueError, match="one common first saved time"):
+        load_run()(cfg)
+
+
 # --------------------------------------------------------------------------- #
 # (f) attention budget, (g) state_vars mismatch, required metadata.
 # --------------------------------------------------------------------------- #
@@ -409,7 +571,13 @@ def test_constant_prehistory_is_gated_on_corpus_provenance(tmp_path):
     with pytest.raises(ValueError, match="time.spinup_time"):
         run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
 
-    # (c) An adequate spin-up trains, and the verdict is recorded.
+    # (c) NaN cannot pass the duration comparison by accident.
+    data_cfg.time.spinup_time = float("nan")
+    OmegaConf.save(data_cfg, data_dir / "config.yaml")
+    with pytest.raises(ValueError, match="finite time.spinup_time"):
+        run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
+
+    # (d) An adequate spin-up trains, and the verdict is recorded.
     data_cfg.time.spinup_time = (HP - 1) * DT
     OmegaConf.save(data_cfg, data_dir / "config.yaml")
     run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
