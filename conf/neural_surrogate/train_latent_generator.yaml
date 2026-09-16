@@ -34,7 +34,7 @@ model_name: latent_generator_s
 # ...), its weights.pt is loaded strictly, and its `dataset.state_vars` must
 # equal `dataset.state_vars` below (checked by the script). The AE must have a
 # geometry path (encode_geometry: true OR a geometry_branch) to condition on.
-pretrained_ae_dir: tadpole_ae_s
+pretrained_ae_dir: model_weights/tadpole_ae_s_new
 
 architecture:
   _target_: neural_surrogates.TadpoleLatentGenerator
@@ -113,13 +113,13 @@ dataset:
   # guarantees the forcing was constant at those values before the first saved
   # time (e.g. a constant-forcing spin-up ending exactly at the first save).
   # The script VERIFIES that claim against the corpus' own config.yaml: it
-  # requires time.spinup_time >= (Hp - 1) * history_dt_seconds (the repeated
+  # requires training_data.spinup_time >= (Hp - 1) * history_dt_seconds (the repeated
   # plateau must fit inside the constant-forcing spin-up) and one common first
   # saved time, and records the verdict under generator.data_provenance.
   constant_prehistory: true
   # Every saved dt must lie within this relative tolerance of the split's
   # median cadence (pyudales_idealized saves at 0, 4.85, 9.92, 15.00, ... s).
-  cadence_rtol: 0.05
+  cadence_rtol: 0.1
   cache: false
   dtype: float32
 
@@ -212,7 +212,7 @@ optimizer:
 # DataLoader; the script refuses a null sampler on a multi-geometry split.
 batch_sampler:
   _target_: neural_surrogates.TrajectoryBatchSampler
-  batch_size: 4
+  batch_size: 16
   # Physical-cell budget per batch (bounds the frozen encoder's memory); the
   # latent-attention budget above is checked separately by the script.
   cell_budget: 393216
@@ -222,10 +222,10 @@ batch_sampler:
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 4
+  batch_size: 16
   shuffle: true
   drop_last: true
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
   persistent_workers: true
   # Ship the (shared) geometry mask + SDF features once per batch; params_hist

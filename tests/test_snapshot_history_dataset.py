@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import xarray as xr
+from omegaconf import OmegaConf
 
 torch = pytest.importorskip("torch")
 
@@ -27,6 +28,7 @@ from neural_surrogates import (
     snapshot_history_collate,
 )
 from neural_surrogates.datasets._params import load_param_table
+from neural_surrogates.datasets.snapshot_history import corpus_time_config
 from neural_surrogates.training.data_utils import get_normalization_stats
 from torch.utils.data import DataLoader
 
@@ -491,3 +493,24 @@ def test_load_param_table_errors_unchanged(tmp_path: Path) -> None:
         load_param_table(path, 4, ("inflow_angle",), torch.float32)
     with pytest.raises(ValueError, match="unsupported shape"):
         load_param_table(path, 5, ("matrix",), torch.float32)
+
+
+def test_corpus_time_config_prefers_training_data_block(tmp_path: Path) -> None:
+    """Generators build the forward model from ``training_data.*``; the saved
+    top-level ``time`` block is the unused Hydra default and must not leak in,
+    not even per key."""
+    assert corpus_time_config(tmp_path) == ({}, None)
+    default = {"simulation_time": 60.0, "output_frequency": 2.5, "spinup_time": 30.0}
+    OmegaConf.save(
+        {
+            "time": default,
+            "training_data": {"simulation_time": 1000.0, "output_frequency": 5.0},
+        },
+        tmp_path / "config.yaml",
+    )
+    block, source = corpus_time_config(tmp_path)
+    assert source == "training_data"
+    assert block == {"simulation_time": 1000.0, "output_frequency": 5.0}
+    # A corpus without a training_data horizon falls back to ``time``.
+    OmegaConf.save({"time": default, "training_data": {}}, tmp_path / "config.yaml")
+    assert corpus_time_config(tmp_path) == (default, "time")

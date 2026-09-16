@@ -58,6 +58,7 @@ import torch
 import xarray as xr
 from hydra.utils import instantiate
 from neural_surrogates.architectures._tadpole_crop import crop_size_config_value
+from neural_surrogates.datasets.snapshot_history import corpus_time_config
 from neural_surrogates.generative_spinup import MASK_CONVENTION, geometry_fingerprint
 from neural_surrogates.sdf import normalize_sdf_mode
 from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
@@ -245,13 +246,14 @@ def _verified_prehistory(ds: Any, root: Path) -> Optional[dict]:
         return None
     hp = int(ds.param_history_steps)
     required = (hp - 1) * float(ds.history_dt_seconds)
-    time_block = _training_data_provenance(root).get("time") or {}
+    time_block, source = corpus_time_config(root)
     spinup = time_block.get("spinup_time")
     if spinup is None:
         raise ValueError(
             f"dataset.constant_prehistory=true needs the corpus' own "
-            f"{root / 'config.yaml'} to record time.spinup_time: the repeated "
-            "leading history is only valid if the forcing really was constant "
+            f"{root / 'config.yaml'} to record training_data.spinup_time (or "
+            "time.spinup_time for a corpus without a training_data block): the "
+            "repeated leading history is only valid if the forcing really was constant "
             "at the first saved values before the first save, and nothing else "
             "in the corpus states that. Set constant_prehistory=false or "
             "regenerate the data with its config."
@@ -260,13 +262,13 @@ def _verified_prehistory(ds: Any, root: Path) -> Optional[dict]:
     if not math.isfinite(spinup):
         raise ValueError(
             "dataset.constant_prehistory=true requires a finite "
-            f"time.spinup_time, got {spinup!r}"
+            f"{source}.spinup_time, got {spinup!r}"
         )
     if spinup + 1e-9 < required:
         raise ValueError(
             f"dataset.constant_prehistory=true requires a constant-forcing "
             f"spin-up at least as long as the repeated plateau: "
-            f"time.spinup_time={spinup:g} s < (Hp - 1) * history_dt_seconds = "
+            f"{source}.spinup_time={spinup:g} s < (Hp - 1) * history_dt_seconds = "
             f"({hp} - 1) * {ds.history_dt_seconds:g} = {required:g} s. The "
             "invented rows would reach back before the constant forcing began."
         )
@@ -288,6 +290,7 @@ def _verified_prehistory(ds: Any, root: Path) -> Optional[dict]:
         )
     return {
         "spinup_time": spinup,
+        "spinup_time_source": source,
         "required_seconds": required,
         "first_saved_time": firsts[0],
     }
@@ -318,17 +321,22 @@ def _validate_split_contract(train_ds: Any, val_ds: Any) -> None:
 
 
 def _training_data_provenance(root: Path) -> dict:
-    """``domain`` / ``time`` blocks of the corpus' ``config.yaml`` (if any) --
-    recorded as provenance only (see :func:`_grid_metadata`)."""
+    """``domain`` block and generation horizon of the corpus' ``config.yaml``
+    (if any) -- recorded as provenance only (see :func:`_grid_metadata`).
+    ``time`` is the horizon the data were actually generated with, resolved by
+    :func:`corpus_time_config`; ``time_source`` names the block it came from."""
     path = root / "config.yaml"
     if not path.exists():
         return {}
     data_cfg: Any = OmegaConf.load(path)
     out: dict = {}
-    for key in ("domain", "time"):
-        block = data_cfg.get(key)
-        if block is not None:
-            out[key] = _plain(block)
+    domain = data_cfg.get("domain")
+    if domain is not None:
+        out["domain"] = _plain(domain)
+    time_block, source = corpus_time_config(root)
+    if source is not None:
+        out["time"] = time_block
+        out["time_source"] = source
     return out
 
 

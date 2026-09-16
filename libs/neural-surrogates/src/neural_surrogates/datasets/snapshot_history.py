@@ -58,6 +58,38 @@ import torch
 import xarray as xr
 from neural_surrogates.datasets._params import load_param_table
 from neural_surrogates.datasets.snapshot import SnapshotDataset, snapshot_collate
+from omegaconf import OmegaConf
+
+_CORPUS_TIME_KEYS = ("simulation_time", "output_frequency", "spinup_time")
+
+
+def corpus_time_config(root: str | Path) -> tuple[dict, str | None]:
+    """Generation horizon of a training corpus, from its own ``config.yaml``.
+
+    Returns ``(block, source)``: the ``simulation_time`` / ``output_frequency``
+    / ``spinup_time`` values the data were generated with and the top-level key
+    they came from, or ``({}, None)`` when the corpus records none.
+
+    The generators save their whole Hydra config, and build the forward model
+    from ``training_data.*`` -- the top-level ``time`` block is the unused Hydra
+    default there (e.g. ``pyudales_idealized``: ``time.spinup_time=30`` vs the
+    real ``training_data.spinup_time=200``). So ``training_data`` wins whenever
+    it carries any of these keys, with no per-key fallback to ``time`` (which
+    would silently re-read the default); ``time`` is used only by corpora that
+    have no ``training_data`` horizon at all.
+    """
+    path = Path(root) / "config.yaml"
+    if not path.exists():
+        return {}, None
+    data_cfg = OmegaConf.load(path)
+    for source in ("training_data", "time"):
+        block = data_cfg.get(source)
+        if not OmegaConf.is_dict(block):
+            continue
+        values = {key: block[key] for key in _CORPUS_TIME_KEYS if key in block}
+        if values:
+            return values, source
+    return {}, None
 
 
 def snapshot_history_collate(batch: list[dict]) -> dict:

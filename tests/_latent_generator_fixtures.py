@@ -219,7 +219,16 @@ def write_history_dataset(
                     "nz": nz,
                     "bounds": [[0.0, float(nx)], [0.0, float(ny)], [0.0, float(nz)]],
                 },
+                # The generators save their whole Hydra config: the top-level
+                # ``time`` block is the unused default (deliberately wrong
+                # here, incl. a spin-up that would satisfy any plateau), and
+                # the horizon the data were generated with is training_data's.
                 "time": {
+                    "simulation_time": 60.0,
+                    "output_frequency": 2.5 * float(dt),
+                    "spinup_time": 1.0e6,
+                },
+                "training_data": {
                     "simulation_time": float(t_len * dt),
                     "output_frequency": float(dt),
                     "spinup_time": 0.0,

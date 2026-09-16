@@ -55,6 +55,9 @@ import torch  # noqa: E402
 import xarray as xr  # noqa: E402
 from hydra.utils import instantiate  # noqa: E402
 from neural_surrogates import generator_evaluation as ge  # noqa: E402
+from neural_surrogates.datasets.snapshot_history import (  # noqa: E402
+    corpus_time_config,
+)
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
 
 # Fixed source -> colour assignment (never cycled): real is the black
@@ -213,9 +216,8 @@ def _validate_dataset_contract(dataset: Any, train_cfg: DictConfig, root: Path) 
         )
     if expected_constant:
         cfg_path = root / "config.yaml"
-        corpus_cfg = OmegaConf.load(cfg_path) if cfg_path.exists() else None
-        time_cfg = None if corpus_cfg is None else corpus_cfg.get("time")
-        spinup = None if time_cfg is None else time_cfg.get("spinup_time")
+        time_cfg, source = corpus_time_config(root)
+        spinup = time_cfg.get("spinup_time")
         required = (expected_hp - 1) * float(dataset.history_dt_seconds)
         if (
             spinup is None
@@ -224,7 +226,8 @@ def _validate_dataset_contract(dataset: Any, train_cfg: DictConfig, root: Path) 
         ):
             raise ValueError(
                 "acceptance dataset constant_prehistory=true is not supported "
-                f"by {cfg_path}: time.spinup_time={spinup!r}, need at least "
+                f"by {cfg_path}: {source or 'training_data'}.spinup_time="
+                f"{spinup!r}, need at least "
                 f"{required:g} s"
             )
         raw_firsts = [float(t[0]) for t in dataset._times]

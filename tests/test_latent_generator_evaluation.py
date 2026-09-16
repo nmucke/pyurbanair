@@ -379,6 +379,15 @@ def test_acceptance_constant_prehistory_requires_corpus_provenance(
     )
     with pytest.raises(ValueError, match="spinup_time"):
         validate(ds, cfg, tmp_path)
+    # The saved top-level ``time`` default cannot vouch for the plateau; the
+    # horizon the data were generated with (``training_data``) decides.
+    corpus = {"time": {"spinup_time": 1.0e6}, "training_data": {"spinup_time": 5.0}}
+    OmegaConf.save(corpus, tmp_path / "config.yaml")
+    with pytest.raises(ValueError, match="training_data.spinup_time=5.0"):
+        validate(ds, cfg, tmp_path)
+    corpus["training_data"]["spinup_time"] = 10.0
+    OmegaConf.save(corpus, tmp_path / "config.yaml")
+    validate(ds, cfg, tmp_path)
 
 
 def _compose_eval_cfg(model_dir: Path, out_dir: Path, *extra: str) -> DictConfig:

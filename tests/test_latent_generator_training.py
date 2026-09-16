@@ -195,6 +195,7 @@ def test_train_end_to_end_exports_self_contained_generator(
     assert prov.constant_prehistory is False
     assert prov.verified_prehistory is None  # nothing to verify with the flag off
     assert prov.training_data_config.time.output_frequency == DT
+    assert prov.training_data_config.time_source == "training_data"
     assert gen.latent_stats.max_batches == 2 and gen.latent_stats.seed == 0
     signature = gen.run_signature
     assert list(signature.param_vars) == list(PARAM_VARS)
@@ -500,7 +501,7 @@ def test_constant_prehistory_is_verified_on_validation_split(tmp_path: Path) -> 
     data_dir = tmp_path / "data_val_prehistory"
     write_history_dataset(data_dir, splits={"train": 1, "val": 2})
     data_cfg = OmegaConf.load(data_dir / "config.yaml")
-    data_cfg.time.spinup_time = (HP - 1) * DT
+    data_cfg.training_data.spinup_time = (HP - 1) * DT
     OmegaConf.save(data_cfg, data_dir / "config.yaml")
     # Give only the second validation trajectory a different first instant;
     # both its state and parameter coordinates remain internally consistent.
@@ -553,7 +554,7 @@ def test_attention_budget_is_checked_on_the_val_split_too(tmp_path):
 def test_constant_prehistory_is_gated_on_corpus_provenance(tmp_path):
     """The repeated leading history is a claim about the DATA, so it is checked
     against the corpus' own constant-forcing spin-up."""
-    ae_dir, data_dir = fixture_inputs(tmp_path)  # writes time.spinup_time: 0.0
+    ae_dir, data_dir = fixture_inputs(tmp_path)  # training_data.spinup_time: 0.0
     run = load_run()
     values: dict[str, Any] = {
         "dataset.constant_prehistory": True,
@@ -565,26 +566,28 @@ def test_constant_prehistory_is_gated_on_corpus_provenance(tmp_path):
         run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
 
     # (b) A corpus that records no spin-up at all cannot vouch for anything.
+    # The top-level ``time`` default must not stand in for it.
     data_cfg = OmegaConf.load(data_dir / "config.yaml")
-    data_cfg.time.pop("spinup_time")
+    data_cfg.training_data.pop("spinup_time")
     OmegaConf.save(data_cfg, data_dir / "config.yaml")
-    with pytest.raises(ValueError, match="time.spinup_time"):
+    with pytest.raises(ValueError, match="training_data.spinup_time"):
         run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
 
     # (c) NaN cannot pass the duration comparison by accident.
-    data_cfg.time.spinup_time = float("nan")
+    data_cfg.training_data.spinup_time = float("nan")
     OmegaConf.save(data_cfg, data_dir / "config.yaml")
-    with pytest.raises(ValueError, match="finite time.spinup_time"):
+    with pytest.raises(ValueError, match="finite training_data.spinup_time"):
         run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
 
     # (d) An adequate spin-up trains, and the verdict is recorded.
-    data_cfg.time.spinup_time = (HP - 1) * DT
+    data_cfg.training_data.spinup_time = (HP - 1) * DT
     OmegaConf.save(data_cfg, data_dir / "config.yaml")
     run(compose_generator_cfg(ae_dir, data_dir, tmp_path, values=values))
     model_dir = tmp_path / "model_weights" / "latent_generator_test"
     prov = OmegaConf.load(model_dir / "config.yaml").generator.data_provenance
     assert prov.constant_prehistory is True
     assert prov.verified_prehistory.spinup_time == (HP - 1) * DT
+    assert prov.verified_prehistory.spinup_time_source == "training_data"
     assert prov.verified_prehistory.required_seconds == (HP - 1) * DT
     assert prov.verified_prehistory.first_saved_time == 0.0
     # Anchors now start at t = 0 (Hp-1 more per trajectory).
