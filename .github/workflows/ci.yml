@@ -40,4 +40,10 @@ jobs:
         run: pixi run setup-dev
 
       - name: Run tests
+        # Hosted runners can expose UCX interfaces whose port-speed probing
+        # raises SIGFPE during MPI_Init with the solvers' FP traps enabled.
+        # Use portable transports for this single-host smoke suite.
+        env:
+          OMPI_MCA_pml: ob1
+          OMPI_MCA_btl: self,sm,tcp
         run: pixi run -e dev py.test

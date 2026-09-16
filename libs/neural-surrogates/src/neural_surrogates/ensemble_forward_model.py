@@ -14,6 +14,11 @@ ensemble splits the two:
 * **Rollout** is then a single *batched* network pass over all members
   (batch dimension = ensemble member), run in the parent process so CUDA is
   never forked into the spin-up workers.
+
+With ``spinup_source: generative`` there is no CFD spin-up at all: every
+member's cold-start field is sampled from the shared latent generator
+(:mod:`neural_surrogates.generative_spinup`) in bounded batches, in the parent
+process, from that member's *current* parameters.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from importlib import import_module
-from typing import Optional
+from typing import Optional, cast
 
 import xarray
 
@@ -160,6 +165,50 @@ class NeuralSurrogateEnsembleForwardModel(BaseEnsembleForwardModel):
             for i in range(self.ensemble_size)
         ]
 
+    def _generative_templates(
+        self,
+        params: Optional[xarray.Dataset],
+        sim_name: Optional[str],
+    ) -> list[xarray.Dataset]:
+        """Sample every member's cold-start field from the latent generator.
+
+        Conditioning is each member's CURRENT parameters (first knot of a
+        time-varying schedule) and the noise is seeded by the member's stable
+        ensemble index, so a repeated forecast with updated parameters gets a
+        freshly conditioned sample under common random numbers. The sampler
+        chunks the ensemble by its ``sample_batch_size``; the CFD spin-up
+        ensemble is never constructed here.
+        """
+        forward_model = cast(NeuralSurrogateForwardModel, self.forward_model)
+        generator = forward_model._generative_spinup
+        if generator is None:
+            raise RuntimeError(
+                "spinup_source='generative' but the surrogate carries no "
+                "GenerativeSpinup handle."
+            )
+        # A generative cold start has no CFD member that can fail, so there is
+        # nothing to resample (a generator failure raises instead).
+        self._last_failure_substitutions = {}
+        member_params = [
+            self.get_member_params(params, i) for i in range(self.ensemble_size)
+        ]
+        generated = generator.generate(member_params, list(range(self.ensemble_size)))
+        # Each generated snapshot then takes the WARM path (state given), so the
+        # single-member and batched cold starts share the same canonicalisation
+        # and history-window handling.
+        templates: list[xarray.Dataset] = []
+        for i, snapshot in enumerate(generated):
+            forward_model._validate_generated_snapshot(snapshot)
+            templates.append(
+                forward_model._get_template_and_initial_state(
+                    state=snapshot,
+                    params=member_params[i],
+                    sim_name=f"{sim_name}_{i}" if sim_name else None,
+                    member_index=i,
+                )
+            )
+        return templates
+
     def _warm_start_templates(
         self,
         state: xarray.Dataset | pathlib.Path,
@@ -203,11 +252,15 @@ class NeuralSurrogateEnsembleForwardModel(BaseEnsembleForwardModel):
         The ``training_data`` spin-up source has no cold start of its own — the
         caller (``scripts/esmda/run_esmda.py``) loads the training snapshots and passes
         them in as the warm-start ``state`` — so ``state is None`` is an error
-        there.
+        there. The ``generative`` source samples every member's cold-start
+        field from the latent generator instead (see
+        :meth:`_generative_templates`); the CFD spin-up ensemble is never built.
         """
         cold_start = state is None
         if not cold_start:
             templates = self._warm_start_templates(state, params, sim_name)
+        elif self.forward_model.spinup_source == "generative":
+            templates = self._generative_templates(params, sim_name)
         elif self.forward_model.spinup_source == "training_data":
             raise RuntimeError(
                 "spinup_source='training_data' has no cold start: the training "

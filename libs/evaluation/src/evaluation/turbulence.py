@@ -1008,6 +1008,140 @@ class MomentAccumulator:
 
 
 # ---------------------------------------------------------------------------
+# Time-resolved TKE (the per-frame counterpart of MomentAccumulator.tke)
+# ---------------------------------------------------------------------------
+#
+# MomentAccumulator reduces a whole pass to ONE TKE field, which is what the
+# mean-field metrics score. A rollout diagnostic wants the other view: one TKE
+# field per frame, so the error against a truth trajectory can be drawn as a
+# curve over time and animated per grid point. That needs a *local* Reynolds
+# average -- a sliding window -- rather than the pass-long one, and it needs
+# every frame in memory, so it is a function over a materialised trajectory
+# rather than a streaming accumulator.
+
+
+def _window_bounds(n_time: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+    """Half-open ``[lo, hi)`` frame bounds of the window centred on each frame.
+
+    The window keeps its full ``width`` at the ends by sliding inward rather
+    than truncating, so every frame's variance is estimated from the same number
+    of samples -- a truncated window would make the first and last frames of the
+    curve noisier for a reason that has nothing to do with the flow.
+    """
+    lo = np.clip(np.arange(n_time) - width // 2, 0, n_time - width)
+    return lo, lo + width
+
+
+def _window_sums(values: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+    """``values[lo[t]:hi[t]].sum(axis=0)`` for every ``t``, via one cumulative sum.
+
+    The cumulative sum is written straight into a zero-padded buffer rather than
+    concatenated onto one, which saves a full copy of a trajectory-sized array.
+    """
+    cumulative = np.zeros((values.shape[0] + 1, *values.shape[1:]))
+    np.cumsum(values, axis=0, out=cumulative[1:])
+    return np.asarray(cumulative[hi] - cumulative[lo])
+
+
+def rolling_tke(
+    *components: np.ndarray, window: int | None = None, ddof: int = 1
+) -> np.ndarray:
+    """Per-frame resolved TKE ``k(t) = 0.5*sum_i var_W(u_i)(t)``.
+
+    The fluctuation is taken about a sliding-window mean of ``window`` frames
+    centred on each frame, so ``k`` follows the flow instead of collapsing to
+    one number: ``window=None`` (the default) averages over the whole record and
+    reproduces :meth:`MomentAccumulator.tke` exactly, broadcast over time, while
+    a shorter window separates the turbulence from a mean flow that is itself
+    drifting -- which is the case whenever the forcing is time-varying.
+
+    **Resolved only**, like :meth:`MomentAccumulator.tke`: these are moments of
+    the fields the solver wrote, and the subgrid contribution is neither in them
+    nor negligible inside a canopy.
+
+    Args:
+        *components: One array per velocity component, **time first**, all of
+            shape ``(n_time, *cell_shape)``. Accumulation is in float64.
+        window: Frames in the sliding Reynolds average. ``None`` or a value at
+            or above ``n_time`` uses the whole record.
+        ddof: Denominator correction, ``1`` (the unbiased sample variance) to
+            match :meth:`MomentAccumulator.tke`.
+
+    Returns:
+        ``(n_time, *cell_shape)``; ``nan`` at cells whose window holds ``ddof``
+        or fewer finite frames (a solid cell, or any cell at ``window=1``).
+
+    Raises:
+        ValueError: If no components are given, if their shapes differ, if an
+            array has no time axis, or if ``window``/``ddof`` is out of range.
+    """
+    if not components:
+        raise ValueError("rolling_tke needs at least one component array")
+    fields = [np.asarray(component) for component in components]
+    shapes = {component.shape for component in fields}
+    if len(shapes) != 1:
+        raise ValueError(f"all components must share one shape, got {sorted(shapes)}")
+    if fields[0].ndim < 1:
+        raise ValueError(
+            "components need a leading time axis; pass a single frame as "
+            "field[None] rather than as a bare frame"
+        )
+    if ddof < 0:
+        raise ValueError(f"ddof must be non-negative, got {ddof}")
+    n_time = int(fields[0].shape[0])
+    width = n_time if window is None else int(window)
+    if width < 1:
+        raise ValueError(f"window must be at least one frame, got {window}")
+    width = min(width, n_time)
+
+    # Casewise validity, as in MomentAccumulator: a frame enters a cell's window
+    # only if every component is finite there, so the component variances that
+    # are summed below are taken over one and the same set of frames.
+    valid = np.isfinite(fields[0])
+    for component in fields[1:]:
+        valid &= np.isfinite(component)
+    invalid = ~valid
+    counts = valid.sum(axis=0)
+    safe_counts = np.where(counts > 0, counts, 1)
+
+    lo, hi = _window_bounds(n_time, width)
+    n = _window_sums(valid.astype(float), lo, hi)
+    safe_n = np.where(n > 0, n, 1.0)
+    denominator = n - ddof
+    usable = denominator > 0
+
+    # One component at a time, each freed before the next is promoted to
+    # float64: a rollout trajectory is gigabytes, and holding all C deviation
+    # fields at once costs more than the diagnostic is worth.
+    summed_comoment = np.zeros((n_time, *fields[0].shape[1:]))
+    for index, component in enumerate(fields):
+        # Shift by the component's own per-cell record mean before the running
+        # sums. The sums below are the naive ``q - s^2/n`` form -- the one
+        # MomentAccumulator's docstring rules out -- and subtracting a constant
+        # is what makes it safe here: it leaves the variance unchanged while
+        # removing the offset that drives the cancellation (urban flow carries
+        # ~0.2 m/s fluctuations on a ~5 m/s mean, a 600x ratio in the mean
+        # square). Masked entries are written to zero rather than multiplied by
+        # the mask, because ``0 * nan`` is ``nan``.
+        deviation = np.array(component, dtype=float)  # always a copy: mutated below
+        fields[index] = np.empty(0)  # release this function's reference early
+        deviation[invalid] = 0.0
+        deviation -= deviation.sum(axis=0) / safe_counts
+        deviation[invalid] = 0.0
+        total = _window_sums(deviation, lo, hi)
+        deviation *= deviation
+        square = _window_sums(deviation, lo, hi)
+        del deviation
+        summed_comoment += square - total * total / safe_n
+        del total, square
+    # Rounding can push a variance a few ulp below zero on a cell that barely
+    # fluctuates; a negative TKE would be read as a real signal in the figures.
+    summed_comoment = np.maximum(summed_comoment, 0.0)
+    scale = np.where(usable, 1.0 / np.where(usable, denominator, 1.0), np.nan)
+    return np.asarray(0.5 * summed_comoment * scale)
+
+
+# ---------------------------------------------------------------------------
 # Frequency spectra at the probes (phase 3, metrics doc section 4.3)
 #
 # The one structural check the suite keeps. An over-smoothed or

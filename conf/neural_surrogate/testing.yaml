@@ -3,7 +3,17 @@
 # model_dir: model_weights/domain_decomposition_conv
 # model_dir: model_weights/p3d_barcelona
 # model_dir: model_weights/unet_convnext_medium
-model_dir: model_weights/p3d_idealized
-sample_idx: 0
+# model_dir: model_weights/p3d_idealized
+model_dir: model_weights/dft_s
+sample_idx: 2
 device: cuda
 output_dir: ${model_dir}/rollout_${sample_idx}
+
+# Sliding Reynolds-average window, in SAVED FRAMES, behind the resolved-TKE
+# diagnostics (`tke_error.png`, the animation's TKE panel and the printed
+# domain/rollout scalars). `null` = a fifth of the rollout, floored at 8 frames:
+# short enough that the per-step error curve is a curve and the animation's TKE
+# panel moves, long enough that each variance is a measurement rather than its
+# own scatter. Set a window >= the rollout length for the pass-long Reynolds
+# average instead (one static k field, so the per-step panel goes flat).
+tke_window: null

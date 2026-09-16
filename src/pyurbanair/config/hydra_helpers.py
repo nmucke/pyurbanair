@@ -64,9 +64,12 @@ def prepare_neural_surrogate(
     preprocessing/compile entirely. This keeps a
     training-data surrogate (e.g. a pypalm-trained net assimilated with a
     pyudales spin-up template) from running an unused uDALES preprocessing pass.
+    The same holds for ``"generative"``: the cold start is sampled from the
+    latent generator and the CFD backend is not even built, so there is nothing
+    to prepare.
     """
     surrogate = _unwrap_forward_model(forward_model)
-    if getattr(surrogate, "spinup_source", None) == "training_data":
+    if getattr(surrogate, "spinup_source", None) in ("training_data", "generative"):
         return
     spinup = surrogate.spinup_forward_model
     if spinup_backend == "pyudales":

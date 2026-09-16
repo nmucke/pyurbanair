@@ -18,6 +18,7 @@ from einops import rearrange
 from ..architecture.p3d import _KLP3DEncoder, _P3DDecoder
 from ..architecture.p3d.kl import DiagonalGaussianDistribution
 from ..utils import load_weights
+from ..._tadpole_crop import CropSize, normalize_crop_size
 
 # GIFt is upstream Tadpole's fine-tuning library; it is used ONLY by the
 # integer-rank (GIFt-LoRA) ``*_ft_state`` path. pyurbanair drives fine-tuning
@@ -63,7 +64,7 @@ class TadpoleAutoencoder(Module):
                 encoder_ft_state: Union[Literal["frozen","FPFT"],int] = "FPFT",
                 decoder_ft_state: Union[Literal["frozen","FPFT"],int] = "FPFT",
                 latent_type: Literal["sample", "mode"] = "sample",
-                encoder_crop_size: int = 64,
+                encoder_crop_size: CropSize = 64,
                 max_internal_batchsize: Optional[int] = None,
                 geom_in_dims: Optional[Sequence[int]] = None,
                 ):
@@ -80,7 +81,7 @@ class TadpoleAutoencoder(Module):
             encoder_ft_state (Union[Literal["frozen","FPFT"],int]): Fine-tuning state for encoder. Can be a positive integer indicating the rank for LoRA fine-tuning, "frozen" to freeze the encoder weights, or "FPFT" to enable full-parameter fine-tuning. Default is "FPFT".
             decoder_ft_state (Union[Literal["frozen","FPFT"],int]): Fine-tuning state for decoder. Can be a positive integer indicating the rank for LoRA fine-tuning, "frozen" to freeze the decoder weights, or "FPFT" to enable full-parameter fine-tuning. Default is "FPFT".
             latent_type (Literal["sample", "mode"]): How to sample from the latent distribution, either "sample" or "mode". Default is "sample".
-            encoder_crop_size (int): Size to crop input for encoder. If None, no cropping will be applied and the entire input will be processed as a single crop. Default is 64.
+            encoder_crop_size: Scalar cubic tile size or anisotropic ``(z, y, x)`` tile shape. Default is 64.
             max_internal_batchsize (Optional[int]): Maximum batch size for internal processing. If None, all crops will be processed in a single batch. Default is None.
         """
         
@@ -131,7 +132,7 @@ class TadpoleAutoencoder(Module):
                 for param in self.decoder.parameters():
                     param.requires_grad = False
         self.latent_type = latent_type
-        self.encoder_crop_size = encoder_crop_size
+        self.encoder_crop_size = normalize_crop_size(encoder_crop_size)
         self.max_internal_batchsize = max_internal_batchsize
         
     def latent_sample(self, dist: DiagonalGaussianDistribution) -> torch.Tensor:
@@ -157,12 +158,13 @@ class TadpoleAutoencoder(Module):
         # x: (B, C, X, Y, Z); geom_feats: the 4 FOLDED geometry-branch features
         # (batch dim == the folded batch), or None for the unconditioned path.
         kl_elem = None
+        cd, ch, cw = self.encoder_crop_size
         b, c, u, v, w = (
             x.shape[0],
             x.shape[1],
-            max(x.shape[2] // self.encoder_crop_size,1),
-            max(x.shape[3] // self.encoder_crop_size,1),
-            max(x.shape[4] // self.encoder_crop_size,1),
+            max(x.shape[2] // cd, 1),
+            max(x.shape[3] // ch, 1),
+            max(x.shape[4] // cw, 1),
         )
         x = rearrange(
             x, "B C (U Xc) (V Yc) (W Zc) -> (B C U V W) 1 Xc Yc Zc", U=u, V=v, W=w

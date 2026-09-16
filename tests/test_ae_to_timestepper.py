@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -43,6 +44,9 @@ pytest.importorskip("einops")
 pytest.importorskip("peft")
 
 from neural_surrogates import TadpoleAE, TadpoleTimeStepper
+from neural_surrogates.architectures._tadpole.architecture.downstream import (
+    SequentialModel,
+)
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
@@ -100,6 +104,47 @@ def _inputs(b=1, grid=(16, 16, 16), n_params=2):
     params = torch.randn(b, n_params) if n_params else None
     geom = (torch.rand(b, *grid) > 0.2).float()
     return state, params, geom
+
+
+def _nonzero_sequential(**kwargs: Any) -> SequentialModel:
+    model = SequentialModel(
+        in_dim=4,
+        hidden_size=8,
+        num_heads=2,
+        n_layers=2,
+        attention_method="naive",
+        init_zero_proj=False,
+        **kwargs,
+    )
+    return model
+
+
+def test_sequential_checkpoint_matches_eager_forward_and_backward() -> None:
+    eager = _nonzero_sequential(use_checkpoint=False)
+    checkpointed = _nonzero_sequential(use_checkpoint=True)
+    checkpointed.load_state_dict(eager.state_dict())
+    x_eager = torch.randn(2, 4, 1, 2, 3, requires_grad=True)
+    x_checkpointed = x_eager.detach().clone().requires_grad_(True)
+
+    eager(x_eager).square().mean().backward()
+    checkpointed(x_checkpointed).square().mean().backward()
+
+    assert torch.allclose(eager(x_eager.detach()), checkpointed(x_eager.detach()))
+    assert torch.allclose(x_eager.grad, x_checkpointed.grad)
+    for p_eager, p_checkpointed in zip(eager.parameters(), checkpointed.parameters()):
+        assert torch.allclose(p_eager.grad, p_checkpointed.grad)
+
+
+def test_sequential_context_windows_preserve_grid_and_gradients() -> None:
+    model = _nonzero_sequential(in_context_patches=3)
+    x = torch.randn(2, 4, 1, 2, 4, requires_grad=True)
+    out = model(x)
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+    out.square().mean().backward()
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all()
+    assert torch.count_nonzero(x.grad) > 0
 
 
 def test_identity_at_init_parity():
@@ -276,6 +321,23 @@ def test_encoder_crop_size_must_be_multiple_of_16():
         _stepper(encoder_crop_size=8)
 
 
+def test_anisotropic_encoder_tiles_run_through_dft():
+    model = _stepper(encoder_crop_size=(16, 16, 32)).eval()
+    model.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
+    state, params, geom = _inputs(grid=(16, 16, 32))
+    encoder_inputs = []
+    hook = model.dft.encoder.register_forward_pre_hook(
+        lambda _, args: encoder_inputs.append(tuple(args[0].shape))
+    )
+    with torch.no_grad():
+        result = model(state, params, geom)
+    hook.remove()
+
+    # Three state channels plus one folded geometry channel, one tile each.
+    assert encoder_inputs == [(4, 1, 16, 16, 32)]
+    assert result.shape == state.shape
+
+
 def test_sdf_geom_features_precompute_matches_recompute():
     """M6 correctness: passing precomputed ``geom_features`` yields output
     byte-identical to letting the stepper recompute the SDF transform inside
@@ -447,6 +509,12 @@ def _compose_dft(pretrained_dir, data_dir, extra_overrides=None):
                 f"pretrained_model_dir={pretrained_dir}",
                 "model_name=tadpole_stepper_test",
                 f"dataset.root_dir={data_dir}",
+                # The fabricated AE fixtures use folded geometry. Keep these
+                # tests explicit when the real DFT config selects the branch.
+                "architecture.encode_geometry=true",
+                "architecture.geometry_branch=null",
+                "architecture.sdf_features=none",
+                "architecture.skip_mixing=null",
                 *(extra_overrides or []),
             ],
         )

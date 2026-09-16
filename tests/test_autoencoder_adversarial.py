@@ -630,6 +630,11 @@ def test_pretrain_end_to_end_with_discriminator(
     cfg.dataset.sdf_features = cfg.architecture.sdf_features
     cfg.dataloader.batch_size = 2
     cfg.dataloader.num_workers = 0
+    if cfg.get("batch_sampler") is not None:
+        # The trajectory sampler replaces dataloader.batch_size. Its production
+        # batch size would drop every four-snapshot trajectory in this fixture.
+        cfg.batch_sampler.batch_size = 2
+        cfg.batch_sampler.drop_last = False
     cfg.trainer.num_epochs = 1
     cfg.trainer.device = "cpu"
     cfg.trainer.amp = False
@@ -656,3 +661,4 @@ def test_pretrain_end_to_end_with_discriminator(
     assert {"discriminator", "disc_optimizer", "disc_scaler", "global_step"} <= set(
         ckpt
     )
+    assert ckpt["global_step"] > 0

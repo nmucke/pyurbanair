@@ -9,6 +9,7 @@ from ..architecture.p3d.skip_wrapper  import KLP3DEncoderSkip,P3DDecoderSkip
 from ..architecture.p3d.kl import DiagonalGaussianDistribution
 from ..architecture.downstream import SequentialModel
 from ..utils import load_weights
+from ..._tadpole_crop import CropSize, normalize_crop_size
 # GIFt is upstream Tadpole's fine-tuning library; it is used ONLY by the
 # integer-rank (GIFt-LoRA) ``*_ft_state`` path. pyurbanair drives fine-tuning
 # through HF PEFT instead and always constructs the DFT with ``*_ft_state`` in
@@ -63,7 +64,7 @@ class TadpoleDFT(Module):
                 encoder_ft_state: Union[Literal["frozen","FPFT"],int] = 32,
                 decoder_ft_state: Union[Literal["frozen","FPFT"],int] = 32,
                 latent_type: Literal["sample", "mode"] = "sample",
-                encoder_crop_size: Optional[int] = None,
+                encoder_crop_size: Optional[CropSize] = None,
                 max_internal_batchsize: Optional[int] = None,
                 geom_in_dims: Optional[Sequence[int]] = None,
                 ):
@@ -81,7 +82,7 @@ class TadpoleDFT(Module):
             encoder_ft_state (Union[Literal["frozen","FPFT"],int]): Fine-tuning state for encoder. Can be a positive integer indicating the rank for LoRA fine-tuning, "frozen" to freeze the encoder weights, or "FPFT" to enable full-parameter fine-tuning. Default is 32.
             decoder_ft_state (Union[Literal["frozen","FPFT"],int]): Fine-tuning state for decoder. Can be a positive integer indicating the rank for LoRA fine-tuning, "frozen" to freeze the decoder weights, or "FPFT" to enable full-parameter fine-tuning. Default is 32.
             latent_type (Literal["sample", "mode"]): How to sample from the latent distribution, either "sample" or "mode". Default is "sample".
-            encoder_crop_size (Optional[int]): Size to crop input for encoder. If None, no cropping will be applied and the entire input will be processed as a single crop. Default is None.
+            encoder_crop_size: Scalar cubic tile size or anisotropic ``(z, y, x)`` tile shape. If None, the full input is one tile. Default is None.
             max_internal_batchsize (Optional[int]): Maximum batch size for internal processing. If None, all crops will be processed in a single batch. Default is None.
             geom_in_dims (Optional[Sequence[int]]): pyurbanair addition -- the four
                 channel counts of a ``GeometryBranch``'s feature pyramid (strides
@@ -148,7 +149,11 @@ class TadpoleDFT(Module):
         # set other parameters
         assert latent_type in ["sample", "mode"], "latent_type must be one of 'sample' or 'mode'"
         self.latent_type = latent_type
-        self.encoder_crop_size = encoder_crop_size if encoder_crop_size is not None else 1e6
+        self.encoder_crop_size = (
+            normalize_crop_size(encoder_crop_size)
+            if encoder_crop_size is not None
+            else (1_000_000, 1_000_000, 1_000_000)
+        )
         self.max_internal_batchsize = max_internal_batchsize
 
     def latent_sample(self, dist: DiagonalGaussianDistribution) -> torch.Tensor:
@@ -179,9 +184,10 @@ class TadpoleDFT(Module):
         """
         # x: (B, C, X, Y, Z)
         c = x.shape[1]
-        u = x.shape[2] // self.encoder_crop_size
-        v = x.shape[3] // self.encoder_crop_size
-        w = x.shape[4] // self.encoder_crop_size
+        cd, ch, cw = self.encoder_crop_size
+        u = x.shape[2] // cd
+        v = x.shape[3] // ch
+        w = x.shape[4] // cw
         u = max(u, 1)
         v = max(v, 1)
         w = max(w, 1)

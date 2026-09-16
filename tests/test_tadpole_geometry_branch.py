@@ -21,6 +21,7 @@ vendored autoencoder's runtime deps, CPU only, ``CROP = 16`` and tiny shapes.
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 from collections.abc import Callable
 from pathlib import Path
@@ -153,6 +154,21 @@ def test_fold_shapes_across_levels() -> None:
     n_crops = 2 * C * (GRID[0] // CROP) * (GRID[1] // CROP) * (GRID[2] // CROP)
     for f, dim, stride in zip(folded, _branch(ae).out_dims, (1, 2, 4, 16)):
         assert f.shape == (n_crops, dim, *([max(CROP // stride, 1)] * 3))
+
+
+def test_fold_shapes_with_anisotropic_tiles() -> None:
+    tile = (16, 16, 32)
+    grid = (16, 32, 64)
+    ae = _branch_ae(encoder_crop_size=tile)
+    state = torch.randn(2, C, *grid)
+    geom = torch.ones(2, *grid)
+    folded = ae._fold_geom_feats(_feats(ae, geom, state), C)
+    n_tiles = 2 * C * 1 * 2 * 2
+    for feature, dim, stride in zip(
+        folded, _branch(ae).out_dims, GeometryBranch.strides
+    ):
+        expected_tile = tuple(size // stride for size in tile)
+        assert feature.shape == (n_tiles, dim, *expected_tile)
 
 
 # --------------------------------------------------------------------------- #
@@ -413,6 +429,9 @@ def test_pretrain_end_to_end_branch_mode(tmp_path: Path, monkeypatch: Any) -> No
     cfg.dataset.sdf_clamp_cells = cfg.architecture.sdf_clamp_cells
     cfg.dataloader.batch_size = 2
     cfg.dataloader.num_workers = 0
+    if cfg.get("batch_sampler") is not None:
+        cfg.batch_sampler.batch_size = 2
+        cfg.batch_sampler.drop_last = False
     cfg.trainer.num_epochs = 1
     cfg.trainer.device = "cpu"
     cfg.trainer.amp = False
@@ -430,6 +449,10 @@ def test_pretrain_end_to_end_branch_mode(tmp_path: Path, monkeypatch: Any) -> No
     assert (out / "geometry_branch.pt").exists()
     for name in ("weights.pt", "encoder.pt", "decoder.pt", "config.yaml"):
         assert (out / name).exists()
+    with (out / "metrics.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert float(rows[0]["train_loss"]) > 0
 
     # the exported branch reloads into a freshly built one, and the encoder
     # checkpoint carries the projections that go with it

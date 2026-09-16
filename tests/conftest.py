@@ -174,6 +174,7 @@ def _compose_test_cfg(
     )
     # The path overrides go before the caller's, so a test that wants its own
     # (already isolated) tmp_path for one of the roots still wins.
+    caller_overrides = list(overrides or [])
     with initialize(version_base=None, config_path="../conf"):
         cfg = compose(
             config_name=config_name,
@@ -181,10 +182,11 @@ def _compose_test_cfg(
                 *_SMOKE_OVERRIDES,
                 *esmda_overrides,
                 *_isolated_path_overrides(),
-                *(overrides or []),
+                *caller_overrides,
             ],
         )
     _fit_nudging_to_smoke_domain(cfg)
+    _fit_pyudales_to_smoke_domain(cfg, caller_overrides)
     return cfg
 
 
@@ -203,6 +205,46 @@ def _fit_nudging_to_smoke_domain(cfg: DictConfig) -> None:
         nudging = cfg.get(mount, {}).get("forward_model", {}).get("nudging_config")
         if nudging is not None and "nnudge_meters" in nudging:
             nudging.nnudge_meters = _SMOKE_NNUDGE_METERS
+
+
+def _override_key(override: str) -> str:
+    """Return an override's dotted key without Hydra's mutation prefix."""
+    return override.partition("=")[0].lstrip("+~")
+
+
+def _field_was_overridden(
+    overrides: Sequence[str], field: str, *, include_nested: bool = False
+) -> bool:
+    """Whether a caller explicitly controls a field (or one of its children)."""
+    for override in overrides:
+        key = _override_key(override)
+        if key == field or (include_nested and key.startswith(f"{field}.")):
+            return True
+    return False
+
+
+def _fit_pyudales_to_smoke_domain(
+    cfg: DictConfig, caller_overrides: Sequence[str]
+) -> None:
+    """Keep production uDALES compute and inlet settings out of smoke runs."""
+    for mount in ("model", "truth_model", "assim_model"):
+        model = cfg.get(mount)
+        if model is None or model.get("solver_name") != "udales":
+            continue
+        forward_model = model.get("forward_model")
+        if forward_model is None:
+            continue
+
+        ncpu_field = f"{mount}.forward_model.ncpu"
+        if not _field_was_overridden(caller_overrides, ncpu_field):
+            forward_model.ncpu = 1
+
+        inlet_field = f"{mount}.forward_model.inlet_turbulence"
+        inlet = forward_model.get("inlet_turbulence")
+        if inlet is not None and not _field_was_overridden(
+            caller_overrides, inlet_field, include_nested=True
+        ):
+            inlet.enabled = False
 
 
 @pytest.fixture(autouse=True)  # type: ignore[misc]

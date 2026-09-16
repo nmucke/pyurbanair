@@ -76,6 +76,7 @@ The heavy vendored stack (``diffusers`` / ``timm``) is imported lazily inside
 from __future__ import annotations
 
 import torch
+from neural_surrogates.architectures._tadpole_crop import CropSize, normalize_crop_size
 from neural_surrogates.architectures._tadpole_field_io import _TadpoleFieldIO
 from neural_surrogates.architectures._tadpole_spatial import (
     decode_spatial,
@@ -108,10 +109,10 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         ``"sample"`` (VAE-proper; sample the latent) or ``"mode"`` (use the
         latent mean -- the deterministic-AE ablation).
     encoder_crop_size:
-        Spatial crop size the field is tiled into internally. Must be a positive
-        multiple of 16 (the encoder's total downsampling; smaller values make the
-        upstream decoder over-upsample). Choose one that divides the grid to
-        avoid padding, or rely on the padding fallback.
+        Spatial tile size, either one integer for cubic tiles or a ``(z, y, x)``
+        sequence for anisotropic tiles. Every entry must be a positive multiple
+        of 16 (the encoder's total downsampling). Choose values that divide the
+        grid to avoid padding, or rely on the padding fallback.
     spatial_mode:
         ``local`` (default): independent tiles; ``global``: whole rectangular
         domain per channel; ``halo``: encode expanded tiles, assemble central
@@ -156,7 +157,7 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         n_params: int = 0,
         size: str = "S",
         latent_type: str = "sample",
-        encoder_crop_size: int = 64,
+        encoder_crop_size: CropSize = 64,
         max_internal_batchsize: int | None = None,
         pretrained: str | dict = "none",
         encode_geometry: bool = True,
@@ -187,19 +188,11 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
             raise ValueError(
                 f"latent_type must be 'sample' or 'mode', got {latent_type!r}"
             )
-        if encoder_crop_size < 16 or encoder_crop_size % 16 != 0:
-            # The encoder downsamples by 16 total; a smaller/indivisible crop
-            # makes the upstream decoder over-upsample (output != input shape).
-            raise ValueError(
-                "encoder_crop_size must be a positive multiple of 16, got "
-                f"{encoder_crop_size}"
-            )
-
         self.n_state_channels = int(n_state_channels)
         self.n_params = int(n_params)
         self.size = size
         self.latent_type = latent_type
-        self.encoder_crop_size = int(encoder_crop_size)
+        self.encoder_crop_size = normalize_crop_size(encoder_crop_size)
         validate_spatial_mode(spatial_mode, halo_size)
         self.spatial_mode = spatial_mode
         self.halo_size = halo_size

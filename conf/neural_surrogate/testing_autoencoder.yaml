@@ -9,7 +9,7 @@
 #     model_dir=model_weights/tadpole_ae_s
 
 # A model_dir written by pretrain_autoencoder.py (config.yaml + weights.pt).
-model_dir: model_weights/tadpole_ae_s
+model_dir: model_weights/tadpole_ae_s_new
 device: cuda
 # Where the plots / metrics land.
 output_dir: ${model_dir}/ae_eval

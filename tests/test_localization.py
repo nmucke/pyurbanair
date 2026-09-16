@@ -437,6 +437,9 @@ def test_parameter_esmda_runs_with_correlation_localization(
             "esmda.interval_seconds=3.0",
             "truth_model.forward_model.nudging_config.nnudge_meters=4.0",
             "assim_model.forward_model.nudging_config.nnudge_meters=4.0",
+            # Keep solver backtraces in pytest's captured output on failure.
+            "truth_model.forward_model.verbose=true",
+            "assim_model.forward_model.verbose=true",
         ],
         config_name="run_esmda",
     )

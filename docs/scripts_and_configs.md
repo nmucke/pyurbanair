@@ -36,11 +36,18 @@ and [`conf/neural_surrogate/testing.yaml`](../conf/neural_surrogate/testing.yaml
 instantaneous LES-field error as a qualitative diagnostic, rather than the sole
 cross-model score. In addition to snapshots and sensor series it writes
 time-windowed fluid-cell mean/spread maps, STL-derived upstream/canopy/wake
-profiles, PDFs/CDFs, sensor spectra/autocorrelations, and wake-recovery metrics.
+profiles, PDFs/CDFs, sensor spectra/autocorrelations, wake-recovery metrics, and
+a resolved-TKE error against the reference (`field_tke_error.png`, the
+`field_tke_mae_z<h>` summary columns, and a per-cell `|Δk|` column in
+`state_animation.mp4`) — a solver can sit close to the reference field while
+carrying the wrong amount of fluctuation, which the `|U|` RMSE cannot separate
+from a phase drift.
 `compare.analysis` controls the statistical window, compact full-height grid,
-wall-cell exclusion, distribution sampling, wake-recovery threshold, and the
-sensor-series smoothing window (`interval_seconds` / `aggregation_mode`, this
-script's own copy of the assimilation's aggregation knobs). Its
+wall-cell exclusion, distribution sampling, wake-recovery threshold, the
+TKE Reynolds-average window (`tke_window_seconds`, `null` = a fifth of the run
+floored at 8 frames), and
+the sensor-series smoothing window (`interval_seconds` / `aggregation_mode`,
+this script's own copy of the assimilation's aggregation knobs). Its
 regions are inferred from the selected STL and assume the dominant flow is in
 the +x direction.
 
@@ -218,9 +225,19 @@ same four top-level keys: `name`, `solver_name`, `forward_model._target_`,
   physics and parameter meaning as pyudales's periodic nudging. See
   [docs/pypalm.md §8](pypalm.md).
 - **neural_surrogate**: `model_dir` (checkpoint folder written by `train_neural_surrogate.py`),
-  `spinup_source: forward_model|training_data` (cold-start source),
-  `spinup_forward_model` (a nested uDALES config for the CFD cold start),
-  `default_params` (constant fallbacks for params the caller omits),
+  `spinup_source: forward_model|training_data|generative` (cold-start source),
+  `spinup_forward_model` (a nested uDALES config for the CFD cold start; left
+  un-built under `generative`), `generative_spinup` (`model_dir` — a
+  `train_latent_generator.py` artifact — / `template_path` — a NetCDF with the
+  canonical coords + an explicit `blanking` mask — / `seed` / `sample_batch_size`
+  / `num_sampling_steps` / `expected_units` — an optional `{variable: unit}` map
+  asserted against the artifact's own units — / `save_diagnostics`; `null`
+  defaults, validated only
+  when generative; `save_diagnostics` is consumed by `run_esmda.py`, which then
+  writes every generated snapshot under `<out_dir>/_generated_states/`; see
+  [neural_surrogates.md §40](neural_surrogates.md#40-deployment-spinup_source-generative)),
+  `default_params` (constant fallbacks for params the caller omits — also the
+  fallback the generator conditions on),
   `_recursive_: false` (surrogate builds its spin-up backend itself).
   Uses `solver_name: pylbm` (regular-grid observation mapping) regardless of the
   spin-up backend.
@@ -387,7 +404,7 @@ full-space. The shipped default remains `none`.
 
 ### 1.9 Config group: `neural_surrogate/`
 
-Five primary configs (not groups) drive the surrogate scripts:
+Eight primary configs (not groups) drive the surrogate scripts:
 
 | Config | Script | Purpose |
 |---|---|---|
@@ -395,7 +412,9 @@ Five primary configs (not groups) drive the surrogate scripts:
 | [`neural_surrogate/training.yaml`](../conf/neural_surrogate/training.yaml) | `train_neural_surrogate.py` | Full surrogate training config: `trainer:` (AMP, `torch.compile`, LR schedule, pushforward curriculum, grad clip, resume, checkpoint), `optimizer:`, `dataset:`, `dataloader:`, `init_weights_path`. Mode selected via `neural_surrogate/mode@_global_`. |
 | [`neural_surrogate/pretrain_autoencoder.yaml`](../conf/neural_surrogate/pretrain_autoencoder.yaml) | `pretrain_autoencoder.py` | Tadpole-style (V)AE pre-training (plan 02), no next-step objective. `architecture:` (`neural_surrogates.TadpoleAE`: `size`, `encoder_crop_size`, `latent_type`, `encode_geometry`, `sdf_features`, `pretrained`), `loss:` (`kl_weight`, `geometry_recon_weight`), `trainer:` (`neural_surrogates.AutoencoderTrainer`), `optimizer:`, `dataset:` (`neural_surrogates.SnapshotDataset`), `dataloader:` (`snapshot_collate`). No `mode` group. See [neural_surrogates.md §26–30](neural_surrogates.md#part-g--autoencoder-foundation-model-pre-training-tadpole). |
 | [`neural_surrogate/finetuning.yaml`](../conf/neural_surrogate/finetuning.yaml) | `finetune_neural_surrogate.py` | LoRA fine-tuning of a trained surrogate (plan 01). Reuses `training.yaml`'s `trainer`/`dataset`/`dataloader`/`optimizer` shape plus `pretrained_model_dir`, `model_name`, `recompute_normalization`, and a `lora:` block (`variant`, `rank`, `alpha`, `dropout`, `target_preset`, `target_modules`, `modules_to_save`). Architecture + state/param/SDF spec are read from the pretrained `model_dir` (not re-declared). `finetune_mode` selected via `neural_surrogate/finetune_mode@_global_`. See [neural_surrogates.md §21–25](neural_surrogates.md#part-f--parameter-efficient-fine-tuning-lora--peft). |
-| [`neural_surrogate/testing.yaml`](../conf/neural_surrogate/testing.yaml) | `test_neural_surrogate.py` | Minimal: `model_dir`, `sample_idx`, `device`, `output_dir`. |
+| [`neural_surrogate/train_latent_generator.yaml`](../conf/neural_surrogate/train_latent_generator.yaml) | `train_latent_generator.py` | Conditional latent flow matching for generative spin-up (plan 07): trains a `neural_surrogates.TadpoleLatentGenerator` (`architecture:` — `param_history_steps`, `hidden_size: null` → full latent width, `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `normalize`, `num_sampling_steps`, `latent_eps`, `max_latent_tokens`) in the latent space of a frozen AE export (`pretrained_ae_dir: ???`) with `neural_surrogates.LatentFlowMatchingTrainer` (`trainer:`, incl. `val_seed`) on a `neural_surrogates.SnapshotHistoryDataset` (`dataset:` — required ordered `param_vars`, `constant_prehistory` — verified against the corpus' own `time.spinup_time` — , `cadence_rtol`; `dataloader:` with `snapshot_history_collate`; `batch_sampler:` on by default). Also requires the `physical_metadata:` block (units, mask convention, coordinate order, BCs) recorded in the artifact's `generator.physical_schema`, plus `latent_stats:` (`max_batches`, `seed`). No `mode` group. See [neural_surrogates.md §35–42](neural_surrogates.md#part-i--generative-spin-up-latent-flow-matching-plan-07). |
+| [`neural_surrogate/testing_latent_generator.yaml`](../conf/neural_surrogate/testing_latent_generator.yaml) | `test_latent_generator.py` | Statistical acceptance gate for a latent generator (plan 07 §3): `model_dir`/`output_dir` (required), `data:` (`root_dir` null → the artifact's corpus, held-out `split`, `max_snapshots`, `seed`), `sampling:` (`num_steps_sweep`, `num_noise_seeds`, `batch_size` = the deployment shape the timing/memory benchmark uses), `conditioning:` (`constant_history`/`shuffled_history`/`omitted_history`), `rollout:` (off by default; needs a stepper export with the same `param_vars`), `divergence.stencil: central`, `distribution:`/`bootstrap:` (pooled-value reservoir, histogram bins, bootstrap resamples) and the declared `acceptance:` factors (`profile_rmse_factor`, `w1_factor`, `divergence_factor`, `diversity_min_ratio`). No `mode` group. See [neural_surrogates.md §39](neural_surrogates.md#39-evaluation-and-acceptance-gate). |
+| [`neural_surrogate/testing.yaml`](../conf/neural_surrogate/testing.yaml) | `test_neural_surrogate.py` | Minimal: `model_dir`, `sample_idx`, `device`, `output_dir`, `tke_window`. |
 | [`neural_surrogate/comparison.yaml`](../conf/neural_surrogate/comparison.yaml) | `compare_surrogate_models.py` | `models` (list of `{name, dir}`), `data` (`root_dir`, `split`, `sample_indices`, `max_steps`), `device`, `output_dir`, `animate`. |
 
 #### `neural_surrogate/architectures/`
@@ -437,6 +456,11 @@ architecture comes from the pretrained `model_dir`.
 | [`finetune_mode/dft.yaml`](../conf/neural_surrogate/finetune_mode/dft.yaml) | `neural_surrogates.Trainer` | `torch.nn.MSELoss` |
 
 Both entries sit **after** `_self_` so they override the inline `trainer._target_`.
+Both fine-tuning and latent-generator training expose `trainer.compile_dynamic`
+alongside `compile_model`; `null` keeps the trainer/model default. The latent
+generator also exposes `architecture.use_checkpoint` for its velocity transformer
+and a `loss` target (MSE by default). Its `dataset.dtype` must remain `float32`;
+mixed precision is controlled by the trainer's AMP settings.
 Unlike `lora_nextstep` (architecture read from the pretrained `model_dir`),
 `dft` (plan 03: autoencoder → time-stepper) declares the `TadpoleTimeStepper`
 architecture **inline** — its `pretrained_model_dir` is the **AE** dir, and the
@@ -444,9 +468,14 @@ script instantiates the stepper fresh with `pretrained_ae_dir` set to it. It als
 carries a `lora.target_preset: tadpole_encdec` and a `trainable_modules` list (the
 sub-network + γ skips + `latent_residual_scale` + optional `skip_mixing`,
 trained fully, not via LoRA).
-DFT additionally exposes `architecture.skip_mixing: null`; set it to
-`{width: 32, levels: [4, 8]}` to enable zero-initialized pointwise state mixing
-alongside the gated skips. Levels select spatial strides from `[1, 2, 4, 8]`.
+`architecture.subnetwork_cfg` exposes the DFT transformer's existing overrides,
+including `use_checkpoint`. Optional `in_context_patches` uses overlapping
+windows of flattened spatial tokens with full-grid output; the default `-1`
+retains global attention.
+DFT additionally exposes `architecture.skip_mixing`, currently configured as
+`{width: 32, levels: [4, 8]}` for zero-initialized pointwise state mixing
+alongside the gated skips; set it to `null` to disable it. Levels select spatial
+strides from `[1, 2, 4, 8]`.
 This is a DFT-only option; no matching AE setting or retraining is required.
 Both `pretrain_autoencoder.yaml` and `finetune_mode/dft.yaml` expose
 `architecture.spatial_mode: local | global | halo` (default `local`),
@@ -455,7 +484,15 @@ default 16). Global processing pads only to stride 16. Halo processing retains
 one full-domain latent time-stepper and crops overlapping decoder outputs to
 their central cores. These settings travel with the exported architecture and
 need not match between AE pretraining and DFT. See
-[neural_surrogates.md §31–34](neural_surrogates.md#part-g--autoencoder--time-stepper-tadpole-dft).
+[neural_surrogates.md §31–34](neural_surrogates.md#part-h--autoencoder--time-stepper-tadpole-dft).
+
+Latent-generator exports record grid metadata per supported geometry, so
+deployment can select any trained geometry/grid pair instead of only the first
+training grid. Training checks history cadence across train/validation and
+prehistory provenance in both splits; acceptance repeats those checks for the
+selected corpus. Resume validates a saved semantic signature before replacing
+`config.yaml`, and preserves newer best weights even when the periodic checkpoint
+is older. See [neural_surrogates.md §38–40](neural_surrogates.md#38-config--script--artifacts).
 
 ---
 
@@ -1552,7 +1589,9 @@ Brief summary:
 | [`neural_surrogate/generate_random_geometries_training_data.py`](../scripts/neural_surrogate/generate_random_geometries_training_data.py) | Yes — [`neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml) | Same dataset layout over randomly sampled pool geometries (`source=idealized\|realistic`): per-geometry grid from STL bounds at `geometry.resolution` (nx/ny padded to multiples of 16, fixed `z_size`), geometry-disjoint val/test, direct sequential single-model runs (one prepared forward model per geometry, no ensemble machinery). See `docs/neural_surrogates.md` §2b. |
 | [`neural_surrogate/train_neural_surrogate.py`](../scripts/neural_surrogate/train_neural_surrogate.py) | Yes — [`neural_surrogate/training.yaml`](../conf/neural_surrogate/training.yaml) | Train a surrogate; bakes normalization stats into the checkpoint. Writes `model_weights/<model_name>/`. |
 | [`neural_surrogate/finetune_neural_surrogate.py`](../scripts/neural_surrogate/finetune_neural_surrogate.py) | Yes — [`neural_surrogate/finetuning.yaml`](../conf/neural_surrogate/finetuning.yaml) | LoRA fine-tune a trained surrogate (plan 01): inject adapters, train only the adapter weights, export a merged `model_dir` (+ `adapter/`) that loads into `NeuralSurrogateForwardModel` unchanged. See `docs/neural_surrogates.md` §21–25. |
-| [`neural_surrogate/test_neural_surrogate.py`](../scripts/neural_surrogate/test_neural_surrogate.py) | Yes — [`neural_surrogate/testing.yaml`](../conf/neural_surrogate/testing.yaml) | Autoregressive rollout on the test split; writes trajectory tensors, rollout PNG, RMSE plot, animation. |
+| [`neural_surrogate/train_latent_generator.py`](../scripts/neural_surrogate/train_latent_generator.py) | Yes — [`neural_surrogate/train_latent_generator.yaml`](../conf/neural_surrogate/train_latent_generator.yaml) | Train a conditional latent flow-matching generator on a frozen `TadpoleAE` export (plan 07, generative spin-up): validates the AE / dataset / physical-metadata contract, checks the latent-attention budget before training, estimates + caches the latent statistics (`latent_stats.pt`), and writes a self-contained `model_weights/<model_name>/` (`config.yaml` with the `generator.physical_schema` block, full `weights.pt` incl. the frozen `ae.*`) that `spinup_source: generative` consumes. See `docs/neural_surrogates.md` §35–42. |
+| [`neural_surrogate/test_latent_generator.py`](../scripts/neural_surrogate/test_latent_generator.py) | Yes — [`neural_surrogate/testing_latent_generator.yaml`](../conf/neural_surrogate/testing_latent_generator.yaml) | Statistical acceptance gate a latent generator must pass before `spinup_source: generative` is used for assimilation (plan 07 §3): on a held-out split it compares real states, frozen-AE reconstructions, generated-with-true-history and the constant-history cold start under matched geometry — profiles, distributions + W1, spectra, Reynolds stresses, divergence on a stencil-valid fluid mask, diversity across noise seeds, conditioning probes, an Euler step sweep with wall time / peak memory, and padding bands. Writes `metrics.csv`, `summary.json` (tolerances + `acceptance: {passed, failures}`), figures and `report.md`, and prints PASS/FAIL. Metric functions: `neural_surrogates.generator_evaluation`. See `docs/neural_surrogates.md` §39. |
+| [`neural_surrogate/test_neural_surrogate.py`](../scripts/neural_surrogate/test_neural_surrogate.py) | Yes — [`neural_surrogate/testing.yaml`](../conf/neural_surrogate/testing.yaml) | Autoregressive rollout on the test split; writes trajectory tensors, rollout PNG, RMSE plot, resolved-TKE error plot, animation. |
 | [`neural_surrogate/compare_surrogate_models.py`](../scripts/neural_surrogate/compare_surrogate_models.py) | Yes — [`neural_surrogate/comparison.yaml`](../conf/neural_surrogate/comparison.yaml) | Roll out several trained models on the same trajectories; writes overlaid per-step RMSE, stacked truth/pred/`|err|` slice grids + animation, a summary-metrics bar chart, and `metrics.csv`. |
 | [`neural_surrogate/dataloading.py`](../scripts/neural_surrogate/dataloading.py) | No — argparse | `TransitionDataset` smoke test: builds a DataLoader, prints batch shapes, writes diagnostic plots (`states.png`, `params.png`, `geometry.png`). |
 | [`neural_surrogate/add_geometry_to_training_data.py`](../scripts/neural_surrogate/add_geometry_to_training_data.py) | No — argparse | Post-processes an existing dataset to add a geometry variable to each state file. |
@@ -1576,5 +1615,6 @@ Brief summary:
 | Run the full filter-smoothing (hybrid) pipeline | [`scripts/run_filter_smoothing_pipeline.sh`](../scripts/run_filter_smoothing_pipeline.sh) |
 | Train a surrogate | [`scripts/neural_surrogate/train_neural_surrogate.py`](../scripts/neural_surrogate/train_neural_surrogate.py) — see [`docs/neural_surrogates.md`](neural_surrogates.md) |
 | LoRA fine-tune a trained surrogate | [`scripts/neural_surrogate/finetune_neural_surrogate.py`](../scripts/neural_surrogate/finetune_neural_surrogate.py) — see [`docs/neural_surrogates.md` Part F](neural_surrogates.md#part-f--parameter-efficient-fine-tuning-lora--peft) |
+| Train a latent generator (generative spin-up) | [`scripts/neural_surrogate/train_latent_generator.py`](../scripts/neural_surrogate/train_latent_generator.py) — see [`docs/neural_surrogates.md` Part I](neural_surrogates.md#part-i--generative-spin-up-latent-flow-matching-plan-07); deploy with `assim_model.forward_model.spinup_source=generative` |
 | Understand config groups at a glance | [`conf/README.md`](../conf/README.md) |
 | Understand the data-assimilation abstractions | [`docs/codebase_guide.md §6`](codebase_guide.md) |

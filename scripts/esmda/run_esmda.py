@@ -393,6 +393,39 @@ _OBS_ORDERING = (
 )
 
 
+def _generative_spinup_block(cfg):
+    """The assimilation surrogate's ``generative_spinup`` block, or ``None``.
+
+    Non-``None`` exactly when ``assim_model.forward_model.spinup_source`` is
+    ``"generative"`` (the block itself may be empty; the surrogate validates
+    its contents at construction). Kept as a helper so the branch the window
+    loop takes is unit-testable without a full run.
+    """
+    fm_cfg = cfg.assim_model.forward_model
+    if fm_cfg.get("spinup_source", None) != "generative":
+        return None
+    return fm_cfg.get("generative_spinup", None) or {}
+
+
+def _check_generative_smoother(esmda, generative):
+    """Reject a state-bearing smoother combined with generative spin-up.
+
+    A joint (or state-only) smoother feeds its Kalman-analysed initial state
+    into the next forecast, while the generative cold start regenerates that
+    state from the current parameters -- two competing sources of the window-0
+    initial condition with no reconciliation policy (plan 07 §4). Fail before
+    any forecast rather than silently ignoring one of them.
+    """
+    if generative and isinstance(esmda, StateAndParameterESMDA):
+        raise ValueError(
+            f"spinup_source='generative' is not supported with the state-bearing "
+            f"smoother {type(esmda).__name__} (esmda/smoother=state, "
+            "state_and_parameter or state_and_dynamic): the analysed initial "
+            "state and the regenerated cold start would compete for window 0. "
+            "Use a parameter-only smoother (esmda/smoother=static|dynamic)."
+        )
+
+
 def _obs_index_coords(obs_op, n_d):
     """Per-observation ``sensor`` / ``state`` / ``interval`` labels, or ``{}``.
 
@@ -783,6 +816,30 @@ def run(cfg: DictConfig) -> None:
             f"'{split}' split of {root}"
         )
 
+    # --- Optional generative cold start ----------------------------------------------
+    # With spinup_source "generative" window 0 stays a COLD start (state_input
+    # None): the surrogate ensemble samples every member's initial field from
+    # the latent generator, conditioned on that member's current parameters, on
+    # EVERY forecast -- so each ESMDA iteration and the final posterior forecast
+    # re-generate from the updated parameters. Nothing is pre-generated to disk,
+    # the prior is not anchored, and the t=0 knot stays free (inferable): the
+    # opposite of the training_data warm start above.
+    generative_cfg = _generative_spinup_block(cfg)
+    generative_diagnostics = bool(
+        generative_cfg is not None and generative_cfg.get("save_diagnostics", False)
+    )
+    if generative_cfg is not None:
+        generator = getattr(assim_model, "_generative_spinup", None)
+        if generator is None:
+            raise ValueError(
+                "spinup_source='generative' requires the neural_surrogate "
+                "assimilation model (it carries the GenerativeSpinup handle)."
+            )
+        print(
+            f"Generative cold start: window 0 initial states are sampled per "
+            f"forecast -- {generator.describe()}"
+        )
+
     # --- Observation operator -----------------------------------------------------------
     truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
     assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
@@ -824,6 +881,7 @@ def run(cfg: DictConfig) -> None:
         **smoother_overrides,
     )
     include_state = isinstance(esmda, StateAndParameterESMDA)
+    _check_generative_smoother(esmda, generative_cfg is not None)
 
     # Cap on-disk peak storage: have the smoother delete each ESMDA step's
     # forecast as soon as its update is computed, keeping only the prior (step 0,
@@ -868,6 +926,14 @@ def run(cfg: DictConfig) -> None:
         # window. Only the time-varying smoother carries this flag.
         if hasattr(esmda, "pin_initial_time_point"):
             esmda.pin_initial_time_point = window > 0 or pin_initial_from_spinup
+
+        # Generative diagnostics: record every generated snapshot of this
+        # window (one ``call_<k>`` folder per cold forecast). Write-only -- these
+        # files are never read back as an initial state.
+        if generative_diagnostics:
+            assim_model._generative_spinup.diagnostics_dir = (
+                out_dir / "_generated_states" / f"window_{window}"
+            )
 
         # Get observations in window and add noise. Select the w-th contiguous
         # block of frames (half-open) rather than an inclusive time-slice: the

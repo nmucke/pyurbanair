@@ -195,60 +195,11 @@ class AutoencoderTrainer(BaseTraining):
     def _prepare_ae_batch(
         self, batch: dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Move a snapshot batch to the device and broadcast the (possibly
-        once-shipped) geometry / SDF features to the batch size.
-
-        :func:`~neural_surrogates.datasets.snapshot.snapshot_collate` ships a
-        shared geometry once as ``(1, *grid)``; that upload is cached on the
-        device (identity fast path + ``torch.equal`` content revalidation,
-        mirroring :meth:`BaseTraining._prepare_batch`) so a same-geometry stream
-        does not re-upload the mask + SDF features each step -- and expanded to
-        ``(B, *grid)`` (a view) so the model sees one geometry per member with
-        no broadcast ambiguity. Random-crop batches arrive per-sample as
-        ``(B, *grid)`` (leading dim != 1): they take the direct-upload branch and
-        are never cached, so a stale crop can never be served.
-        """
-        to_kwargs: dict = {"non_blocking": True}
-        if self.channels_last:
-            to_kwargs["memory_format"] = torch.channels_last_3d
-        state = batch["state"].to(self.device, **to_kwargs)
-        b = state.shape[0]
-        geom_batch = batch["geometry"]
-        feat_batch = batch.get("geom_features")
-
-        if geom_batch.shape[0] != 1:
-            # Per-sample geometry (random-crop batch): upload directly, no cache
-            # -- the crops differ across the batch and across steps.
-            geometry = geom_batch.to(self.device, non_blocking=True)
-            features = (
-                feat_batch.to(self.device, non_blocking=True)
-                if feat_batch is not None
-                else None
-            )
-            return state, geometry, features
-
-        # Shared geometry shipped once as (1, *grid): device-side cache keyed on
-        # the host tensor. Identity (``is``) hits for workerless loaders; the
-        # content compare keeps a same-geometry stream from re-uploading each
-        # step; a genuinely different geometry refreshes the cache.
-        geom_host = geom_batch[0]
-        cached = self._geometry_host
-        stale = cached is None or (
-            cached is not geom_host
-            and not (cached.shape == geom_host.shape and torch.equal(cached, geom_host))
-        )
-        if stale:
-            self._geometry_host = geom_host
-            self._geometry = geom_host.to(self.device)
-            self._geom_features = (
-                feat_batch[0].to(self.device) if feat_batch is not None else None
-            )
-        assert self._geometry is not None  # set on the first (always-stale) batch
-        geometry = self._geometry.expand(b, *self._geometry.shape)
-        features = None
-        if self._geom_features is not None:
-            features = self._geom_features.expand(b, *self._geom_features.shape)
-        return state, geometry, features
+        """``(state, geometry, features)`` for one snapshot batch -- delegates to
+        the shared :meth:`BaseTraining._prepare_snapshot_batch` (device upload,
+        cached shared-geometry broadcast, per-sample crop branch). Kept under
+        its historical name for the tests and subclasses that call it."""
+        return self._prepare_snapshot_batch(batch)
 
     def _validate(self) -> float:
         """Score validation with a *deterministic* latent.

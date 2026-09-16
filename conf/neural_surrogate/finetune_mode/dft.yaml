@@ -32,39 +32,47 @@ architecture:
   # local: independent tiles (existing behavior); global: whole rectangular field;
   # halo: overlapping encoder/decoder tiles with central-core outputs. The
   # latent time-stepper still runs once over the full latent grid in every mode.
-  spatial_mode: local
+  spatial_mode: global
   # Extra context on EACH side of a halo tile, in cells (multiple of 16).
   # Used only by spatial_mode=halo; encoder_crop_size then sets the core size.
   halo_size: 16
   # The AE export dir (encoder.pt / decoder.pt / weights.pt). Filled from
   # `pretrained_model_dir` by the script; re-stamped to null + skip_pretrained_load
   # in the SAVED config so ESMDA rebuilds the net from the merged weights alone.
-  pretrained_ae_dir: ???
+  pretrained_ae_dir: model_weights/tadpole_ae_s_new
   # "default" builds the param-conditioned latent transformer (zero-init); None
   # gives a pure frozen AE (no time-stepping increment).
   subnetwork: default
+  # Overrides for the latent transformer. Keep this mapping in the exported
+  # config so checkpointing and memory-local attention are reproducible.
+  subnetwork_cfg:
+    use_checkpoint: false
+    in_context_patches: -1
   # Optional state-only residual adapters alongside the gated DFT skips.
   # Enable with: architecture.skip_mixing='{width: 32, levels: [4, 8]}'
   # Levels are spatial strides: 1, 2, 4, 8; null preserves existing checkpoints.
-  skip_mixing: null
+  skip_mixing: # null
+    width: 32
+    levels: [4, 8]
   # film (adaLN scale/shift, default) | token (additive param embedding) | none.
   param_conditioning: film
   # Deterministic latent for rollouts (identity-at-init parity holds in "mode").
   latent_type: mode
   # Local tile / halo core size (multiple of 16, ignored in global mode).
   # It may differ from pretraining. Local/halo pad to a multiple of this size.
-  encoder_crop_size: 64
+  encoder_crop_size: 16
   # Geometry / SDF handling -- MUST mirror the AE (cross-checked). The stepper
   # feeds the same geometry block through the frozen encoder the AE was trained on.
-  encode_geometry: true
-  sdf_features: none
+  encode_geometry: false
+  sdf_features: both
   sdf_clamp_cells: 32
   # Geometry-branch conditioning (must mirror the AE -- cross-checked). null =
   # today's behaviour. A mapping (e.g. `{width: 32}`) loads the AE's frozen
-  # `geometry_branch.pt` and injects its features into the encoder/decoder
+  # `geometry_branch.pt` and injects its featuresd into the encoder/decoder
   # projections + the subnetwork's spatial FiLM; it requires
   # `encode_geometry: false` (the two are mutually exclusive).
-  geometry_branch: null
+  geometry_branch: # null
+    width: 32
   # Cap on folded crops processed at once (bound memory); null = all together.
   max_internal_batchsize: null
   normalize: true
