@@ -43,6 +43,11 @@ architecture:
   # "default" builds the param-conditioned latent transformer (zero-init); None
   # gives a pure frozen AE (no time-stepping increment).
   subnetwork: default
+  # Overrides for the latent transformer. Keep this mapping in the exported
+  # config so checkpointing and memory-local attention are reproducible.
+  subnetwork_cfg:
+    use_checkpoint: false
+    in_context_patches: -1
   # Optional state-only residual adapters alongside the gated DFT skips.
   # Enable with: architecture.skip_mixing='{width: 32, levels: [4, 8]}'
   # Levels are spatial strides: 1, 2, 4, 8; null preserves existing checkpoints.

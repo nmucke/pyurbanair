@@ -802,6 +802,17 @@ returned model is the best-val checkpoint (not the last epoch). The run
 script passes `weights_path=model_weights/<model_name>/weights.pt`, so
 nothing needs to be saved by the caller after `fit()`.
 
+Every best-weight save also writes `best_val.json`. On resume this score takes
+precedence over a worse score in an older periodic checkpoint, for both plain
+training and merged LoRA exports. Plain checkpoints predating the sidecar are
+handled by evaluating the saved best weights once, then restoring the resumable
+checkpoint model and torch RNG before continuing. Optional `checkpoint_metadata`
+lets a training script attach a semantic contract to the checkpoint; a supplied
+contract must match saved metadata before any model/optimizer state is loaded.
+Increasing `num_epochs` on resume extends the cosine horizon while preserving
+the checkpoint's current learning rate. It continues decreasing to `lr_min`;
+a run already at `lr_min` stays there instead of cycling back upward.
+
 **Early stopping.** When `trainer.patience` is set in the config
 (default `null`, disabled), training halts after `patience` consecutive
 epochs without val-loss improvement. Combine with a generous
@@ -1543,6 +1554,9 @@ keeps the trainer's on-disk best and warns). `merge_to_state_dict` returns
 **CPU** tensors, so the per-improvement deepcopy+merge retains no GPU memory and
 `weights.pt` is device-agnostic.
 
+The disk-best score guard also applies to plain training, including latent flow
+matching; it is not limited to `weights_transform` runs.
+
 ### 23. Config + script
 
 [conf/neural_surrogate/finetuning.yaml](../conf/neural_surrogate/finetuning.yaml)
@@ -2011,6 +2025,15 @@ encoder/decoder batch chunk limit. With mixing enabled, local mode also uses
 local mode retains its original crop-folded contract). No extra spatial halo is
 needed for these pointwise adapters.
 
+**Subnetwork controls.** `architecture.subnetwork_cfg` exposes overrides for
+the latent transformer (for example `use_checkpoint: true`, `n_layers`,
+`hidden_size`, `num_heads`, and `film_hidden`). Its defaults retain full-domain
+attention. `use_checkpoint` recomputes transformer activations during backward
+to reduce memory. Positive `in_context_patches` selects overlapping windows of
+flattened spatial tokens and averages their predictions back onto every token;
+this changes the attention context and should be evaluated separately from the
+default global model.
+
 **Geometry branch.** With `geometry_branch={...}` the stepper reuses the AE's
 branch instead of folding geometry: it builds `GeometryBranch(in_channels=1 +
 n_sdf, **geometry_branch)`, loads `<pretrained_ae_dir>/geometry_branch.pt` (a
@@ -2341,6 +2364,10 @@ caller's (bf16) autocast during training. A cast *after* a bf16 encoding would
 not recover fp32 latents, which is why autocast is disabled explicitly rather
 than left to the caller.
 
+The flow training entry point requires `dataset.dtype: float32` and rejects
+other dtypes before loading data. Use `trainer.amp` / `amp_dtype` for mixed
+precision of the velocity network; the data dtype never casts the frozen AE.
+
 **Self-contained artifact.** `ae_kwargs` (a plain, YAML-serialisable dict) and
 `ae_fingerprint` are recorded at build time, and the generator's own
 `state_dict` carries the frozen `ae.*` weights plus every buffer. Deployment
@@ -2369,6 +2396,8 @@ deliberately covers every state-latent channel at every latent position,
 padded ones included — latent attention and halo decoding propagate errors at
 padded positions into the retained domain, so leaving them untrained would not
 be harmless. Padding sensitivity is an evaluation item (§39).
+The `loss` config defaults to `torch.nn.MSELoss`; alternative experimental
+losses must return a scalar over the same latent tensors.
 
 **Deterministic validation.** The objective is stochastic (a fresh `z0` and
 `tau` per sample), so a validation loss drawn with the training RNG would ride
@@ -2424,11 +2453,12 @@ omitted ones must be documented constants) and the `physical_metadata` block
 
 | Block | Keys (defaults) |
 |---|---|
-| `architecture` | `_target_: neural_surrogates.TadpoleLatentGenerator`; `param_history_steps: 12` (`Hp`); `hidden_size: null` (→ `D`); `n_layers: 4`; `num_heads: 8`; `time_embed_dim: 64`; `film_hidden: 128`; `mlp_ratio: 4`; `normalize: true`; `num_sampling_steps: 50`; `latent_eps: 1.0e-6`; `max_latent_tokens: 4096` (`null` = unlimited). `n_state_channels` / `n_params` / `pretrained_ae_dir` are injected by the script. The export stamps the *resolved* `hidden_size`, `mlp_ratio` and `normalize` so the deploy rebuild never depends on the defaults of the day. |
-| `dataset` | `_target_: neural_surrogates.SnapshotHistoryDataset`; `state_vars: [u, v, w]` (must equal the AE export's `dataset.state_vars`); `param_vars: ???`; `param_history_steps: ${architecture.param_history_steps}` (the two can never disagree); `time_stride: 1`; `random_crop_size: null`; `sdf_features: null` / `sdf_clamp_cells: null` (inherited from the AE export — an explicit value must agree); `constant_prehistory: false`; `cadence_rtol: 0.05`; `cache`, `dtype`. |
+| `architecture` | `_target_: neural_surrogates.TadpoleLatentGenerator`; `param_history_steps: 12` (`Hp`); `hidden_size: null` (→ `D`); `n_layers: 4`; `num_heads: 8`; `time_embed_dim: 64`; `film_hidden: 128`; `mlp_ratio: 4`; `use_checkpoint: false` (velocity transformer activation checkpointing); `normalize: true`; `num_sampling_steps: 50`; `latent_eps: 1.0e-6`; `max_latent_tokens: 4096` (`null` = unlimited). `n_state_channels` / `n_params` / `pretrained_ae_dir` are injected by the script. The export stamps the *resolved* `hidden_size`, `mlp_ratio` and `normalize` so the deploy rebuild never depends on the defaults of the day. |
+| `dataset` | `_target_: neural_surrogates.SnapshotHistoryDataset`; `state_vars: [u, v, w]` (must equal the AE export's `dataset.state_vars`); `param_vars: [inflow_angle, velocity_magnitude]`; `param_history_steps: ${architecture.param_history_steps}` (the two can never disagree); `time_stride: 1`; `random_crop_size: null`; `sdf_features: null` / `sdf_clamp_cells: null` (inherited from the AE export — an explicit value must agree); `constant_prehistory: true` (the corpus must verify the plateau); `cadence_rtol: 0.05`; `cache`; `dtype: float32` (required). |
 | `physical_metadata` | `units` (one entry per state **and** parameter variable — a missing one refuses the run), `geometry_mask_convention` (must be *exactly* `neural_surrogates.generative_spinup.MASK_CONVENTION`, `"blanking: 1 = obstacle; model fluid mask = 1 - blanking"` — the one polarity the deploy side applies, so any other value is refused rather than exported), `coordinate_order: [z, y, x]` (anything else is rejected; the state files' own spatial dims must be in that order too, in either the canonical `z/y/x` or the backend `zt/yt/xt` spelling), `boundary_conditions: ???` (free text), `constant_forcing_notes: ""` (parameters held constant across the corpus, i.e. not in `param_vars`). Recorded verbatim in the artifact. |
 | `latent_stats` | `max_batches: 50` train batches drawn with a **seeded shuffle** (`seed: 0`) so a multi-geometry corpus contributes several trajectories rather than the first one in file order; `null` = the whole split. |
-| `trainer` | `_target_: neural_surrogates.LatentFlowMatchingTrainer`; the usual `BaseTraining` knobs (`amp: true` / `amp_dtype: bfloat16` wrap the velocity net only), `resume: true`, `val_seed: 0`. |
+| `trainer` | `_target_: neural_surrogates.LatentFlowMatchingTrainer`; the usual `BaseTraining` knobs (`amp: true` / `amp_dtype: bfloat16` wrap the velocity net only), `compile_dynamic: null`, `resume: true`, `val_seed: 0`. |
+| `loss` | `_target_: torch.nn.MSELoss`; configurable scalar latent-space objective. |
 | `optimizer` | `torch.optim.AdamW`, `lr: 1.0e-4`, `weight_decay: 1.0e-2` — handed only the `requires_grad` (velocity-net) parameters. |
 | `batch_sampler` | `TrajectoryBatchSampler` ships **on** (`batch_size: 4`, `cell_budget: 393216`, `shuffle`, `drop_last`, `seed`) because `pyudales_idealized` is multi-geometry; it replaces `dataloader.batch_size` / `shuffle` / `drop_last` (same contract as §29). Set `batch_sampler: null` for a single-geometry corpus; the script refuses a null sampler on a split that mixes grid shapes. |
 | `dataloader` | `torch.utils.data.DataLoader` with `collate_fn: neural_surrogates.snapshot_history_collate` (`_partial_: true`). |
@@ -2447,6 +2477,18 @@ the failure comes before an epoch is burned → build the trainer → install th
 latent statistics → stamp and save `config.yaml` **before** `fit()` (a killed
 run still leaves a loadable schema) → `fit()` → `_verify_export_reloads`
 (rebuild from `config.yaml` + `weights.pt` alone, strict, statistics installed).
+
+Train and validation must agree on ordered parameters, history length and
+physical cadence (within `cadence_rtol`); constant-prehistory provenance is
+verified for both splits. Resume checks run before replacing the artifact
+config: `generator.run_signature`, also stored in checkpoint metadata, binds
+the ordered conditioning schema, dataset/AE identity, normalization, architecture,
+optimizer/scheduler settings and validation objective. Dataset identity includes
+a digest of file paths, sizes and modification times for both splits, so replacing
+files in place invalidates the signature. Changing their meaning requires a fresh `model_name`;
+extending `trainer.num_epochs` is allowed. Legacy artifacts are checked against
+their saved config and checkpoint before continuing. An incompatible checkpoint
+leaves the existing config intact.
 
 **Latent-statistics cache.** The stats are written to `<model_dir>/latent_stats.pt`
 as `{provenance, mean, std}` with a provenance dict (`version`,
@@ -2467,7 +2509,7 @@ model_weights/<name>/
                     #   ae_kwargs inline, hidden_size resolved; dataset with param_vars/state_vars
                     #   resolved; plus the generator: block below
   weights.pt        # best-val FULL state dict: velocity net + frozen ae.* + every buffer
-  checkpoint.pt, metrics.csv
+  checkpoint.pt, metrics.csv, best_val.json
   latent_stats.pt   # {provenance, mean, std} cache (see above)
 ```
 
@@ -2488,11 +2530,12 @@ generator:
     # train-split unique geometries; mask_sha256 = sha256 of the uint8 fluid
     # mask in (z, y, x) order, so a relocation of the same obstacles (identical
     # shape AND fluid_cells) is not mistaken for a trained geometry
-    supported_geometries: [{shape: [nz, ny, nx], fluid_cells: <int>, mask_sha256: <sha256>}, ...]
+    supported_geometries: [{shape: [nz, ny, nx], fluid_cells: <int>, mask_sha256: <sha256>, grid: {...}}, ...]
     boundary_conditions: "<free text>"
     constant_forcing_notes: "<free text>"
   ae_fingerprint: <sha256 of the AE export's weights.pt>
   ae_dir: <provenance path of the AE export>
+  run_signature: {...}                  # validated before resuming a checkpoint
   sampling: {num_steps: 50}               # the validated Euler step count
   data_provenance: {root_dir, split, n_train, n_val, constant_prehistory,
                     verified_prehistory: {spinup_time, required_seconds, first_saved_time} | null,
@@ -2501,11 +2544,16 @@ generator:
   latent_stats: {max_batches, seed, n_channels}
 ```
 
-`grid` is read off the **first state file's** spatial coordinates (spacing =
-median coordinate step, `bounds` = cell edges) rather than the corpus
+Each supported geometry carries its own `grid`, read from the corresponding
+state file's spatial coordinates (spacing = median coordinate step, `bounds`
+= cell edges), rather than the corpus
 `config.yaml` `domain` block, which for a random-geometry corpus is the
-generation *template*, not the grid any trajectory ran on; `dims` and
-`first_center` are the on-disk provenance for those numbers. Deployment rebuilds
+generation *template*, not the grid any trajectory ran on. Identical masks at
+different spacings/bounds remain separate supported entries. The top-level
+`grid` retains the first grid for compatibility with older artifacts; deployment
+selects a matching geometry/grid entry instead of restricting every template to
+that first grid. Legacy entries without their own grid use the top-level grid.
+`dims` and `first_center` record the coordinate provenance. Deployment rebuilds
 with `instantiate(cfg.architecture, n_state_channels=len(state_vars),
 n_params=len(param_vars))` + a strict `load_state_dict(weights.pt)` — no AE dir,
 no data.
@@ -2542,6 +2590,9 @@ pixi run -e dev python scripts/neural_surrogate/test_latent_generator.py \
 `model_dir` (a `train_latent_generator.py` export) and `output_dir` are the two
 required keys; the generator is rebuilt from its `config.yaml` + strict
 `weights.pt` and refused if it carries no latent statistics.
+Acceptance reinstalls the saved conditioning schema and checks the selected
+dataset's parameter order, history length, cadence and prehistory provenance,
+including when `data.root_dir` points at another corpus.
 
 | Block | Keys (defaults) |
 |---|---|
@@ -2572,9 +2623,9 @@ Two further sources score the conditioning probes: `generated_shuffled_history`
 parameter vector, i.e. no conditioning), plus one `generated_steps<N>` source per
 swept Euler count.
 
-**Metrics** — fluid cells only, never zero-filled obstacles, with the schema's
-`dz/dy/dx` — per source and per grid shape, merged count-weighted across
-trajectories of the same shape: conditional mean and fluctuation-RMS vertical
+**Metrics** — fluid cells only, never zero-filled obstacles, with each trajectory's
+actual `dz/dy/dx` — per source and per grid shape/spacing, merged count-weighted
+across trajectories on the same grid: conditional mean and fluctuation-RMS vertical
 profiles; pooled per-component histograms on shared bins plus the 1-Wasserstein
 distance to `real`; 1-D energy spectra along `x` over fully fluid rows (and their
 log-spectral distance in dB); Reynolds stresses `<u_i' u_j'>` about the per-cell
@@ -2651,7 +2702,7 @@ instance read-only across members.
 
 | Concern | Behaviour |
 |---|---|
-| **Template requirements** | `template_path` is a NetCDF carrying the canonical coordinates and an explicit obstacle mask (`blanking`); its velocity values are **never** used, obstacles are never inferred from generated zeros, and a training snapshot may serve (for its metadata only). It is canonicalised through `_to_regular_grid`, reduced to its last frame, and validated against the artifact's `generator.physical_schema`: every `state_vars` variable and the mask present on `coordinate_order` dims; grid shape equal to `grid.n{z,y,x}`; cell spacing within `1e-4` relative of `grid.d{z,y,x}`; coordinates inside `grid.bounds`; a binary mask; and the geometry fingerprint — shape, fluid-cell count **and** `geometry_fingerprint(fluid)` (sha256 of the uint8 mask in `(z, y, x)`) — present in `supported_geometries`, so an unseen geometry is rejected rather than sampled blindly, including a relocation of the same obstacles, which matches on shape and cell count alone (initial scope is a validated supported geometry/grid; an artifact whose entries predate `mask_sha256` is refused and must be re-exported). Only the state variables and the mask are kept, so no stale template variable leaks into generated states; the fluid mask (`1 - blanking`) and, for an AE with SDF feature channels, its SDF features are computed once and cached. |
+| **Template requirements** | `template_path` is a NetCDF carrying the canonical coordinates and an explicit obstacle mask (`blanking`); its velocity values are **never** used, obstacles are never inferred from generated zeros, and a training snapshot may serve (for its metadata only). It is canonicalised through `_to_regular_grid`, reduced to its last frame, and validated against the artifact's `generator.physical_schema`: every `state_vars` variable and the mask present on `coordinate_order` dims; grid shape, spacing (within `1e-4` relative) and bounds matching the selected supported geometry's `grid` (legacy artifacts fall back to the top-level `grid`); a binary mask; and the geometry fingerprint — shape, fluid-cell count **and** `geometry_fingerprint(fluid)` (sha256 of the uint8 mask in `(z, y, x)`) — present in `supported_geometries`, so an unseen geometry is rejected rather than sampled blindly, including a relocation of the same obstacles, which matches on shape and cell count alone (initial scope is a validated supported geometry/grid; an artifact whose entries predate `mask_sha256` is refused and must be re-exported). Only the state variables and the mask are kept, so no stale template variable leaks into generated states; the fluid mask (`1 - blanking`) and, for an AE with SDF feature channels, its SDF features are computed once and cached. |
 | **Mask polarity and units** | The schema's `geometry_mask_convention` must equal `MASK_CONVENTION` (`"blanking: 1 = obstacle; model fluid mask = 1 - blanking"`) *exactly* — the same constant the training script refuses to deviate from — and must name the `geometry_var`, so an artifact can never carry a polarity opposite to the `1 - blanking` the deployment applies. The schema's `units` must cover **every** state and parameter variable (the error lists the missing names), and the optional `expected_units` constructor kwarg / config key states the deployment's own convention: every variable listed there must match the artifact's unit, so a generator trained on `deg` cannot be driven with `rad`. |
 | **Conditioning schema on the model** | After the strict `load_state_dict`, the loader calls `model.set_conditioning_schema(param_vars, history_dt_seconds)` from the artifact's `physical_schema`, and every `sample` call restates `param_names` / `history_dt_seconds` for the model to re-check (order-sensitive names, cadence within `1e-6` relative). `params_hist` is a bare `(B, Hp, P)` tensor, so nothing else would catch a reordered conditioning vector or a history saved at another cadence; supplying a claim to a model with **no** schema installed raises rather than passing silently. |
 | **Current-first-knot conditioning** | `current_param_vector(params, member)` reads each member's **current** value of every `param_vars` entry in the saved order: the first knot (`isel(time=0)`) of a time-varying schedule, the scalar of a static one, `default_params` for a variable the params omit — else it raises naming the member and the variable; non-finite values raise. The physical rollout itself still uses the full parameter schedule. |

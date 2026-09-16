@@ -537,6 +537,48 @@ def test_bounds_mismatch_raises(tmp_path, inject_stub) -> None:
         GenerativeSpinup(model_dir, template).generate([_params()], [0])
 
 
+def test_supported_non_first_physical_grid_is_selected(
+    tmp_path: pathlib.Path, inject_stub: Any
+) -> None:
+    """A mask may be trained on more than one physical grid; deployment must
+    match the grid stored beside that mask rather than the legacy first grid."""
+    model_dir = _write_artifact(tmp_path / "m")
+    cfg = OmegaConf.load(model_dir / "config.yaml")
+    second_bounds = [[10.0, 10.0 + 2 * NX], [0.0, NY], [0.0, NZ]]
+    second_grid = dict(cfg.generator.physical_schema.grid)
+    second_grid.update({"dx": 2.0, "bounds": second_bounds})
+    first = cfg.generator.physical_schema.supported_geometries[0]
+    first.grid = cfg.generator.physical_schema.grid
+    cfg.generator.physical_schema.supported_geometries.append(
+        {
+            "shape": list(first.shape),
+            "fluid_cells": int(first.fluid_cells),
+            "mask_sha256": str(first.mask_sha256),
+            "grid": second_grid,
+        }
+    )
+    OmegaConf.save(cfg, model_dir / "config.yaml")
+
+    template = _write_template(tmp_path / "second.nc", bounds=second_bounds)
+    out = GenerativeSpinup(model_dir, template).generate([_params()], [0])[0]
+    assert out["u"].shape == GRID
+
+
+def test_supported_mask_on_untrained_physical_grid_raises(
+    tmp_path: pathlib.Path, inject_stub: Any
+) -> None:
+    model_dir = _write_artifact(tmp_path / "m")
+    cfg = OmegaConf.load(model_dir / "config.yaml")
+    cfg.generator.physical_schema.supported_geometries[0].grid = (
+        cfg.generator.physical_schema.grid
+    )
+    OmegaConf.save(cfg, model_dir / "config.yaml")
+    untrained = [[0.0, 2 * NX], [0.0, NY], [0.0, NZ]]
+    template = _write_template(tmp_path / "untrained.nc", bounds=untrained)
+    with pytest.raises(ValueError, match="physical grid does not match"):
+        GenerativeSpinup(model_dir, template).generate([_params()], [0])
+
+
 def test_unsupported_geometry_raises(tmp_path, inject_stub) -> None:
     model_dir = _write_artifact(tmp_path / "m", fluid_cells=1)
     template = _write_template(tmp_path / "t.nc")

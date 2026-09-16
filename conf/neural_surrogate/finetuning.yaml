@@ -68,6 +68,8 @@ trainer:
   amp: true
   amp_dtype: bfloat16
   compile_model: false
+  # null lets the model choose; true/false explicitly controls dynamic shapes.
+  compile_dynamic: null
   channels_last: false
   cudnn_benchmark: true
   tf32: true

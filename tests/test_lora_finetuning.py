@@ -424,6 +424,7 @@ def test_finetune_end_to_end(tmp_path, monkeypatch):
         cfg = compose(
             config_name="neural_surrogate/finetuning",
             overrides=[
+                "neural_surrogate/finetune_mode@_global_=lora_nextstep",
                 f"pretrained_model_dir={pretrained_dir}",
                 "model_name=unet_ft_test",
                 f"dataset.root_dir={data_dir}",

@@ -253,6 +253,9 @@ def shrink_for_cpu(cfg: DictConfig) -> None:
         cfg.architecture[k] = v
     cfg.architecture.num_sampling_steps = 2
     cfg.architecture.param_history_steps = HP
+    # Synthetic fixtures have no pre-save forcing plateau; keep the production
+    # default independent from the test corpus' explicit provenance.
+    cfg.dataset.constant_prehistory = False
     cfg.batch_sampler = None
     cfg.dataloader.batch_size = 2
     cfg.dataloader.drop_last = False
