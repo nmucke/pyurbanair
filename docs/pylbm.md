@@ -211,7 +211,11 @@ handles the full build chain:
    falls back to gfortran otherwise, logging which it picked; `true` *requires*
    CUDA and raises without it (a GPU batch job should fail rather than silently
    drop to a ~100× slower CPU build); `false` forces gfortran. A bad string is
-   rejected in `ForwardModel.__init__` via `validate_cuda_setting`.
+   rejected in `ForwardModel.__init__` via `validate_cuda_setting`. The SDK is
+   installed with `pixi run -e cuda install-nvhpc`, which then runs
+   `prune-nvhpc` to delete the bundled CUDA toolkits nvfortran does not pick for
+   the host's GPU driver (~12 GB; a CUDA 12 driver keeps 12.9, R580+ keeps 13.1).
+   Set `NVHPC_PRUNE=0` for an install shared across hosts with different drivers.
 1. **Environment resolution** (`_resolve_build_environment`) — prefers the
    active Pixi environment if it has `include/netcdf.mod`; falls back to
    `delftblue`/`dev`/`default` envs in `.pixi/envs/` if not.

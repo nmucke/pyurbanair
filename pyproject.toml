@@ -268,7 +268,8 @@ scripts = ["activation_scripts/cuda_activation.sh"]
 env = { PYTHONNOUSERSITE = "1", XLA_PYTHON_CLIENT_PREALLOCATE = "false" }
 
 [tool.pixi.feature.cuda.tasks]
-install-nvhpc = { cmd = "bash activation_scripts/install_nvhpc.sh", description = "One-time download + install of the NVIDIA HPC SDK (nvfortran, ~16 GB) into the cuda env. Required before GPU pylbm/uDALES builds." }
+install-nvhpc = { cmd = "bash activation_scripts/install_nvhpc.sh", description = "One-time download + install of the NVIDIA HPC SDK (nvfortran, ~16 GB) into the cuda env. Required before GPU pylbm/uDALES builds. Keeps only the CUDA toolkit nvfortran picks for this host's driver (~20 GB installed; NVHPC_PRUNE=0 keeps all)." }
+prune-nvhpc = { cmd = "bash activation_scripts/prune_nvhpc.sh", description = "Remove the NVHPC SDK's unused bundled CUDA toolkits (~12 GB) from an existing install. NVHPC_PRUNE=0 / NVHPC_KEEP_CUDA=<ver> to override." }
 
 # CPU-only environments: silence JAX's CUDA-discovery clutter.
 #   PYTHONNOUSERSITE stops an incompatible jax_cuda12_plugin in the user's
