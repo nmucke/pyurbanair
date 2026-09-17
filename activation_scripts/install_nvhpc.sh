@@ -85,5 +85,12 @@ if [ -z "$(nvfortran_path)" ]; then
   exit 1
 fi
 
+# The installer copies out of the extracted tree, which is as large as the SDK
+# itself; only the (resumable) archive is worth keeping around.
+rm -rf "${EXTRACT_DIR}"
+
+# Drop the bundled CUDA toolkits nvfortran does not link against (~12 GB).
+NVHPC_INSTALL_BASE="${NVHPC_INSTALL_BASE}" bash "${SCRIPT_DIR}/prune_nvhpc.sh"
+
 echo "NVHPC installation complete: $(nvfortran_path)"
 echo "The cuda environment will now find nvfortran automatically on activation."
