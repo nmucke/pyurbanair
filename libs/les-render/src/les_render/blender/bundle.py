@@ -3,9 +3,11 @@
 Runs inside Blender's Python (numpy + stdlib only), so it must not import
 ``les_render``. The camera interpolation is a transliteration of
 ``les_render.cameras.sample_camera`` and must stay in sync with it: smoothstep
-easing of the key-segment parameter, a uniform Catmull-Rom spline (end keys
-duplicated) for ``location``/``target``, and a linear lerp of the lens
-properties on the same eased parameter; hard cuts between shots.
+easing *once per shot* (not once per key segment -- see that function's
+docstring), mapped back into key-frame space, then a uniform Catmull-Rom
+spline (end keys duplicated) for ``location``/``target``, and a linear lerp of
+the lens properties on the same key-segment fraction; hard cuts between
+shots.
 """
 
 from __future__ import annotations
@@ -113,7 +115,14 @@ def _catmull_rom(p0, p1, p2, p3, u: float) -> np.ndarray:
 
 
 def sample_camera(shots: list[dict[str, Any]], frame: int) -> dict[str, Any]:
-    """Camera state at video ``frame``: location, target, focal_length_mm, fstop, shot."""
+    """Camera state at video ``frame``: location, target, focal_length_mm, fstop, shot.
+
+    Eases *once per shot* -- ``u = smoothstep((frame - start) / (end -
+    start))`` mapped back into key-frame space as ``f' = start + u * (end -
+    start)`` -- rather than once per key segment, so interior keys don't
+    force the camera to a near-stop; see ``les_render.cameras.sample_camera``
+    for the full algorithm this mirrors.
+    """
     if not shots:
         raise ValueError("no shots to sample")
     frame = int(min(max(frame, shots[0]["start"]), shots[-1]["end"]))
@@ -135,14 +144,21 @@ def sample_camera(shots: list[dict[str, Any]], frame: int) -> dict[str, Any]:
         )
 
     kf = [k["frame"] for k in keys]
-    if len(keys) == 1 or frame <= kf[0]:
+    if len(keys) == 1:
         return hold(keys[0])
-    if frame >= kf[-1]:
+
+    start, end = shot["start"], shot["end"]
+    u_global = 0.0 if end <= start else (frame - start) / (end - start)
+    f_prime = start + _smoothstep(u_global) * (end - start)
+
+    if f_prime <= kf[0]:
+        return hold(keys[0])
+    if f_prime >= kf[-1]:
         return hold(keys[-1])
-    i = int(np.searchsorted(kf, frame, side="right") - 1)
+    i = int(np.searchsorted(kf, f_prime, side="right") - 1)
     i = min(max(i, 0), len(keys) - 2)
     t0, t1 = kf[i], kf[i + 1]
-    u = _smoothstep(0.0 if t1 == t0 else (frame - t0) / (t1 - t0))
+    u = 0.0 if t1 == t0 else (f_prime - t0) / (t1 - t0)
     im1, ip2 = max(i - 1, 0), min(i + 2, len(keys) - 1)
     loc = _catmull_rom(*(keys[j]["location"] for j in (im1, i, i + 1, ip2)), u)
     tgt = _catmull_rom(*(keys[j]["target"] for j in (im1, i, i + 1, ip2)), u)

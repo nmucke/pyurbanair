@@ -3,7 +3,9 @@
 ``run_blender(bundle_dir, render=True, ...)`` runs ``blender -b -P
 build_scene.py -- --bundle DIR ...`` in a subprocess, streams its log (and
 raises ``BlenderError`` with the log tail on failure), and returns the preview
-frames directory (``render=True``) or the alembic directory (otherwise).
+frames directory (``render=True``) or the alembic directory (otherwise); one
+run can render and export Alembic together. ``encode_preview`` turns the
+rendered frames (+ HUD) into ``preview/<case>.mp4``.
 
 Blender is found via ``$BLENDER`` or ``PATH``. The Blender side only needs its
 own bundled Python (bpy + numpy), never this package.
@@ -31,6 +33,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import threading
 import time
 from collections import deque
 from typing import Any, Optional, Sequence
@@ -221,6 +224,11 @@ def run_blender(
         bufsize=1,
     )
     assert proc.stdout is not None
+    # The read loop below blocks until Blender closes stdout, so the timeout
+    # has to kill the process from a timer rather than via proc.wait().
+    timer = threading.Timer(timeout, proc.kill) if timeout else None
+    if timer is not None:
+        timer.start()
     try:
         for line in proc.stdout:
             line = line.rstrip("\n")
@@ -232,10 +240,15 @@ def run_blender(
                     if line.startswith("[les]")
                     else log.debug("[blender] %s", line)
                 )
-        rc = proc.wait(timeout=timeout)
+        rc = proc.wait()
     except BaseException:
         proc.kill()
         raise
+    finally:
+        if timer is not None:
+            timer.cancel()
+    if timeout and time.perf_counter() - t0 >= timeout and rc != 0:
+        raise BlenderError(f"blender timed out after {timeout:.0f} s")
     if rc != 0 or any(line.startswith("Traceback") for line in tail):
         raise BlenderError(
             f"blender exited with {rc}; last output:\n" + "\n".join(tail)
@@ -246,54 +259,89 @@ def run_blender(
     return bundle_dir / "alembic"
 
 
-def render_preview(
+def preview_frames(frames: Optional[str | Sequence[int]], n_frames: int) -> list[int]:
+    """Video frames a ``--frames`` spec selects (same rules as the Blender side:
+    ``a:b`` and ``a:b:s`` are inclusive, ``f1,f2`` is a list, None is all)."""
+    if frames is None:
+        return list(range(n_frames))
+    if not isinstance(frames, str):
+        return [int(f) for f in frames]
+    if "," in frames or ":" not in frames:
+        return [int(f) for f in frames.split(",") if f.strip()]
+    parts = [int(p) if p else None for p in frames.split(":")]
+    a = parts[0] or 0
+    b = parts[1] if len(parts) > 1 and parts[1] is not None else n_frames - 1
+    step = parts[2] if len(parts) > 2 and parts[2] else 1
+    return list(range(max(a, 0), min(b, n_frames - 1) + 1, step))
+
+
+def encode_preview(
     bundle_dir: pathlib.Path | str,
+    frames: Optional[str | Sequence[int]] = None,
+    frames_dir: Optional[pathlib.Path | str] = None,
     mp4: Optional[pathlib.Path | str] = None,
     crf: int = 18,
-    **blender_opts: Any,
 ) -> pathlib.Path:
-    """Render the preview frames with Blender and encode ``preview/<case>.mp4``
-    (with the HUD overlay when the bundle has one)."""
+    """Encode rendered preview frames (+ HUD overlay) to ``preview/<case>.mp4``.
+
+    Only the frames ``frames`` selects are encoded (a contiguous range is
+    required), starting at the first of them, so stale files from an earlier,
+    longer render never leak in. The HUD is scaled to the frame size when the
+    preview was rendered at a different resolution, and skipped with a warning
+    when it was exported with ``frame_step > 1`` (ffmpeg pairs files 1:1).
+    """
     import json
+
+    from les_render.compose import compose_video
 
     bundle_dir = pathlib.Path(bundle_dir).resolve()
     manifest = json.loads((bundle_dir / "manifest.json").read_text())
-    frames_dir = run_blender(bundle_dir, render=True, **blender_opts)
+    frames_dir = (
+        pathlib.Path(frames_dir) if frames_dir else bundle_dir / "preview" / "frames"
+    )
+    wanted = preview_frames(frames, int(manifest["timeline"]["n_frames"]))
+    if not wanted:
+        raise ValueError(f"frame selection {frames!r} is empty")
+    first, count = wanted[0], len(wanted)
+    if wanted != list(range(first, first + count)):
+        raise ValueError(
+            f"video needs a contiguous frame range, got {frames!r}; "
+            "render with a:b or skip the video stage"
+        )
+    missing = [f for f in wanted if not (frames_dir / f"{f:04d}.png").is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"{len(missing)} preview frames missing in {frames_dir} "
+            f"(first: {missing[0]:04d}.png)"
+        )
     mp4 = (
         pathlib.Path(mp4)
         if mp4
         else bundle_dir / "preview" / f"{manifest['case']['name']}.mp4"
     )
     hud = manifest.get("hud")
-    hud_pattern = None
-    if hud and int(hud.get("frame_step", 1)) == 1:
-        hud_pattern = str(bundle_dir / hud["pattern"].replace("{frame:04d}", "%04d"))
-    frames = sorted(frames_dir.glob("[0-9][0-9][0-9][0-9].png"))
-    if not frames:
-        raise FileNotFoundError(f"no rendered frames in {frames_dir}")
-    first = int(frames[0].stem)
-    fps = float(manifest["timeline"]["fps"])
-    size = _png_size(frames[0])
-    hud_first = pathlib.Path(hud_pattern % first) if hud_pattern else None
-    same_size = hud_first is None or (
-        hud_first.is_file() and _png_size(hud_first) == size
-    )
-    if same_size:
-        try:
-            from les_render.compose import compose_video
-
-            return compose_video(
-                str(frames_dir / "%04d.png"),
-                mp4,
-                fps=fps,
-                hud_pattern=hud_pattern,
-                crf=crf,
-                start_number=first,
+    hud_pattern: Optional[str] = None
+    hud_size: Optional[tuple[int, int]] = None
+    if hud:
+        if int(hud.get("frame_step", 1)) != 1:
+            log.warning("HUD exported with frame_step > 1: encoding without it")
+        else:
+            hud_pattern = str(
+                bundle_dir / hud["pattern"].replace("{frame:04d}", "%04d")
             )
-        except ImportError:
-            pass
-    # preview at a different resolution than the HUD: scale the overlay
-    return _ffmpeg(frames_dir, mp4, fps, hud_pattern, crf, first, size)
+            size = _png_size(frames_dir / f"{first:04d}.png")
+            if _png_size(pathlib.Path(hud_pattern % first)) != size:
+                hud_size = size
+    return compose_video(
+        str(frames_dir / "%04d.png"),
+        mp4,
+        fps=float(manifest["timeline"]["fps"]),
+        hud_pattern=hud_pattern,
+        crf=crf,
+        start_number=first,
+        frame_count=count,
+        hud_size=hud_size,
+    )
 
 
 def _png_size(path: pathlib.Path) -> tuple[int, int]:
@@ -303,61 +351,3 @@ def _png_size(path: pathlib.Path) -> tuple[int, int]:
         head = fh.read(24)
     w, h = struct.unpack(">II", head[16:24])
     return int(w), int(h)
-
-
-def _ffmpeg(
-    frames_dir: pathlib.Path,
-    mp4: pathlib.Path,
-    fps: float,
-    hud_pattern: Optional[str],
-    crf: int,
-    first: int,
-    size: Optional[tuple[int, int]] = None,
-) -> pathlib.Path:
-    ff = shutil.which("ffmpeg")
-    if ff is None:
-        raise FileNotFoundError("ffmpeg not found on PATH")
-    mp4.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        ff,
-        "-y",
-        "-framerate",
-        str(fps),
-        "-start_number",
-        str(first),
-        "-i",
-        str(frames_dir / "%04d.png"),
-    ]
-    if hud_pattern:
-        cmd += [
-            "-framerate",
-            str(fps),
-            "-start_number",
-            str(first),
-            "-i",
-            hud_pattern,
-            "-filter_complex",
-            (
-                f"[1:v]scale={size[0]}:{size[1]}:flags=lanczos[h];"
-                if size
-                else "[1:v]null[h];"
-            )
-            + "[0:v][h]overlay=0:0:format=auto,format=yuv420p[v]",
-            "-map",
-            "[v]",
-        ]
-    else:
-        cmd += ["-pix_fmt", "yuv420p"]
-    cmd += [
-        "-c:v",
-        "libx264",
-        "-crf",
-        str(crf),
-        "-preset",
-        "slow",
-        "-movflags",
-        "+faststart",
-        str(mp4),
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
-    return mp4

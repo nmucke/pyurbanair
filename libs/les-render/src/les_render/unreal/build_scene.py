@@ -87,8 +87,11 @@ ABC_SCALE = (100.0, -100.0, 100.0)
 # Alembic importer turns out to decode sRGB itself (colours look too dark).
 VERTEX_COLOR_GAMMA = 2.2
 
-# Particles: "auto" tries Groom + Groom Cache, then alembic/<layer>_mesh.abc as
-# a Geometry Cache. "groom" | "geometry_cache" | "none" force one path.
+# Particles: "auto" and "groom" both import alembic/<layer>.abc as a Groom
+# asset + Groom Cache; "none" skips particle layers entirely. (There is no
+# Geometry Cache fallback: nothing in the bundle pipeline writes the
+# alembic/<layer>_mesh.abc a fallback would need. If groom import fails, the
+# particles stage logs the manual re-import steps instead.)
 PARTICLE_MODE = os.environ.get("LES_PARTICLE_MODE", "auto")
 
 # After spawning glTF geometry, compare its bounds with the manifest and fix
@@ -281,10 +284,13 @@ def sample_camera(shots, frame):
     """Camera state at video ``frame`` (sim frame).
 
     Pure-Python port of ``les_render.cameras.sample_camera`` (which the
-    Blender preview uses): shot lookup with hard cuts, smoothstep-eased
-    parameter, uniform Catmull-Rom through keys[i-1..i+2] (end keys
-    duplicated) for location and target, linear lerp for focal length and
-    f-stop, hold before the first / after the last key.
+    Blender preview uses): shot lookup with hard cuts; smoothstep eased
+    *once per shot* -- ``u = smoothstep((frame - start) / (end - start))``
+    mapped back into key-frame space as ``f' = start + u * (end - start)`` --
+    then a uniform Catmull-Rom through keys[i-1..i+2] (end keys duplicated,
+    located at ``f'``) for location and target, linear lerp for focal length
+    and f-stop on the same key-segment fraction, hold before the first /
+    after the last key.
     Returns ``{"location", "target", "focal_length_mm", "fstop", "shot"}``.
     """
     if not shots:
@@ -308,14 +314,21 @@ def sample_camera(shots, frame):
         )
 
     kf = [k["frame"] for k in keys]
-    if len(keys) == 1 or frame <= kf[0]:
+    if len(keys) == 1:
         return hold(keys[0])
-    if frame >= kf[-1]:
+
+    start, end = shot["start"], shot["end"]
+    u_global = 0.0 if end <= start else (frame - start) / (end - start)
+    f_prime = start + _smoothstep(u_global) * (end - start)
+
+    if f_prime <= kf[0]:
+        return hold(keys[0])
+    if f_prime >= kf[-1]:
         return hold(keys[-1])
-    i = max(j for j in range(len(kf)) if kf[j] <= frame)
+    i = max(j for j in range(len(kf)) if kf[j] <= f_prime)
     i = min(max(i, 0), len(keys) - 2)
     t0, t1 = kf[i], kf[i + 1]
-    u = _smoothstep(0.0 if t1 == t0 else (frame - t0) / (t1 - t0))
+    u = 0.0 if t1 == t0 else (f_prime - t0) / (t1 - t0)
     im1, ip2 = max(i - 1, 0), min(i + 2, len(keys) - 1)
     loc = _catmull_rom(*(keys[j]["location"] for j in (im1, i, i + 1, ip2)), u)
     tgt = _catmull_rom(*(keys[j]["target"] for j in (im1, i, i + 1, ip2)), u)
@@ -712,8 +725,6 @@ def build_plan(manifest, bundle, content_root=CONTENT_ROOT):
             item["source"] = str(bundle / layer["pattern"].format(frame=0))
         elif typ in ("particles", "isosurface"):
             item["source"] = str(bundle / "alembic" / f"{name}.abc")
-            mesh = bundle / "alembic" / f"{name}_mesh.abc"
-            item["mesh_source"] = str(mesh) if mesh.exists() else None
         elif typ == "slice":
             item["source"] = str((bundle / layer["pattern"].format(frame=0)).parent)
             item["plane"] = str(bundle / "unreal" / "meshes" / f"{name}_plane.glb")
@@ -1576,43 +1587,27 @@ def _import_geometry_cache(ctx, item, source, emissive_default):
 
 
 @_stage(
-    "particles (groom / geometry cache)",
+    "particles (groom)",
     "import alembic/<layer>.abc as Groom with 'Import Groom Cache' ticked (Rotation 90,0,0 Scale 100,-100,100), "
-    "place a Groom Actor at the origin and add a Groom Cache track; or import alembic/<layer>_mesh.abc as Geometry Cache",
+    "place a Groom Actor at the origin and add a Groom Cache track",
 )
 def stage_particles(ctx):
     for item in ctx["plan"]["layers"]:
         if item["type"] != "particles" or PARTICLE_MODE == "none":
             continue
-        if not item["exists"] and not item.get("mesh_source"):
+        if not item["exists"]:
             _warn(
                 f"particles {item['name']}: {item['source']} missing (run the bundle's alembic stage), skipped"
             )
             continue
-        done = False
-        if PARTICLE_MODE in ("auto", "groom") and item["exists"]:
-            try:
-                _import_groom(ctx, item)
-                done = True
-            except Exception as exc:  # noqa: BLE001
-                _warn(
-                    f"particles {item['name']}: groom import failed ({exc}); trying geometry-cache fallback"
-                )
-        if (
-            not done
-            and PARTICLE_MODE in ("auto", "geometry_cache")
-            and item.get("mesh_source")
-        ):
-            _import_geometry_cache(
-                ctx,
-                item,
-                item["mesh_source"],
-                float(item["layer"].get("emission_strength", 1.0)),
-            )
-            done = True
-        if not done:
+        try:
+            _import_groom(ctx, item)
+        except Exception as exc:  # noqa: BLE001
             _warn(
-                f"particles {item['name']}: not imported (no groom and no alembic/{item['name']}_mesh.abc)"
+                f"particles {item['name']}: groom import failed ({exc}); not imported. "
+                f"Manual fallback: import {item['source']} by hand as Groom with 'Import Groom "
+                "Cache' ticked (Rotation 90,0,0 Scale 100,-100,100), place a Groom Actor at the "
+                "origin and add a Groom Cache track."
             )
 
 

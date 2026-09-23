@@ -28,6 +28,7 @@ import importlib.util
 import json
 import math
 import pathlib
+import shutil
 from typing import Any, Optional
 
 import numpy as np
@@ -297,3 +298,83 @@ class TestRenderYamlOverride:
         out_dir = module.run(cfg)
         manifest = json.loads((out_dir / "manifest.json").read_text())
         assert manifest["render"]["look"] == "daylight"
+
+
+class TestCaseOverridePrecedence:
+    """Command line > render.yaml > preset defaults."""
+
+    def test_cli_beats_render_yaml(self, tmp_path: pathlib.Path) -> None:
+        mod = _load_render_les_module()
+        cfg = _compose_cfg(
+            tmp_path, tmp_path / "bundle", overrides=("time.duration=8",)
+        )
+        merged = mod.apply_case_overrides(
+            cfg,
+            {"time": {"duration": 20, "fps": 12}, "render": {"look": "daylight"}},
+            ["time.duration=8", "render_preset=cinematic", "+extra=1"],
+        )
+        assert merged.time.duration == 8  # command line wins
+        assert merged.time.fps == 12  # render.yaml beats the config default
+        assert merged.render.look == "daylight"
+
+    def test_render_yaml_cannot_switch_preset_by_name(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        mod = _load_render_les_module()
+        cfg = _compose_cfg(tmp_path, tmp_path / "bundle", overrides=())
+        with pytest.raises(ValueError, match="cannot switch presets"):
+            mod.apply_case_overrides(cfg, {"render_preset": "vortex"}, [])
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")  # type: ignore[misc, unused-ignore]
+def test_encode_preview_partial_range_ignores_stale_frames(
+    tmp_path: pathlib.Path,
+) -> None:
+    import json
+    import subprocess
+
+    from les_render.blender_runner import encode_preview
+    from PIL import Image
+
+    bundle = tmp_path / "bundle"
+    frames = bundle / "preview" / "frames"
+    hud = bundle / "hud"
+    frames.mkdir(parents=True)
+    hud.mkdir()
+    for f in range(10):  # 0-9 on disk: 0-1 and 5-9 are stale leftovers
+        Image.new("RGB", (64, 36), (f * 20, 0, 0)).save(frames / f"{f:04d}.png")
+        # HUD drawn at a different resolution than the preview -> scaled
+        Image.new("RGBA", (128, 72), (0, 0, 0, 0)).save(hud / f"hud.{f:04d}.png")
+    manifest = {
+        "case": {"name": "demo"},
+        "timeline": {"fps": 10, "n_frames": 10},
+        "hud": {"pattern": "hud/hud.{frame:04d}.png", "frame_step": 1},
+    }
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+
+    mp4 = encode_preview(bundle, frames="2:4")
+    n = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "csv=p=0",
+            str(mp4),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert int(n) == 3
+
+    with pytest.raises(ValueError, match="contiguous"):
+        encode_preview(bundle, frames="0:8:2")
+    (frames / "0003.png").unlink()
+    with pytest.raises(FileNotFoundError, match="missing"):
+        encode_preview(bundle, frames="2:4")

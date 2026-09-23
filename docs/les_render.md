@@ -47,6 +47,10 @@ pixi run -e viz python scripts/visualization/make_render_case.py \
 pixi run -e viz python scripts/visualization/render_les.py input=cases/va53
 ```
 
+Tests: `pixi run -e viz test-render` (the `libs/les-render/tests` suite; the
+Blender and ffmpeg tests skip when those binaries are absent; CI runs it in
+the `render-tests` job).
+
 The bundle goes to `output_dir`, else `results/les_render/<case>/<preset>/`.
 The Blender preview ends up in `<bundle>/preview/<case>.mp4`; the Unreal
 workflow is in `<bundle>/unreal/README.md` (generated from
@@ -81,14 +85,16 @@ together are ~1 MB per frame.
 
 ## Blender preview
 
-`les_render.blender_runner.run_blender(bundle, ...)` (the `blender` stage)
-runs `blender -b -P les_render/blender/build_scene.py -- --bundle DIR ...`;
+`les_render.blender_runner.run_blender(bundle, ...)` (the `blender` and
+`alembic` stages, in one Blender launch when both are on) runs `blender -b -P les_render/blender/build_scene.py -- --bundle DIR ...`;
 the scripts use only `bpy` + numpy, never `les_render`. Useful flags (also via
 `blender.*` in the Hydra config): `--engine eevee|cycles`, `--samples`,
 `--frames a:b`, `--look dark|daylight`, `--layers a,b`, `--export-alembic`,
 `--save-blend` (writes `preview/scene.blend` for interactive tweaking).
 Frames go to `<bundle>/preview/frames/%04d.png` with file `0000` = video
-frame 0. The camera is baked per frame from `cameras.sample_camera` with a
+frame 0; `encode_preview` (the `video` stage) encodes exactly the frames
+`blender.frames` selected (a contiguous `a:b` range), overlaying the HUD and
+scaling it if the preview resolution differs. The camera is baked per frame from `cameras.sample_camera` with a
 36 mm horizontal sensor (UE needs the matching 36 x 36*H/W mm filmback).
 
 * **EEVEE** (default): ~2.4 s/frame at 1280x720 on the 3090 plus a ~15-50 s
@@ -118,7 +124,7 @@ What the pipeline hands UE:
 | Bundle asset | UE asset / actor |
 |---|---|
 | `volumes/*/*.vdb` (OpenVDB 11, format 224, one float grid, cubic voxels) | animated Sparse Volume Texture -> Heterogeneous Volume + volume material |
-| `alembic/<particles>.abc` (Blender stage, `stages.alembic=true`) | Groom + Groom Cache (fallback: Geometry Cache) |
+| `alembic/<particles>.abc` (Blender stage, `stages.alembic=true`) | Groom + Groom Cache (on failure the build logs the manual re-import steps) |
 | `alembic/<isosurface>.abc` | Geometry Cache (vertex colours) |
 | `slices/*/*.png` | Img Media Source -> Media Texture on a plane (`unreal/meshes/*.glb`) |
 | `geometry/*.glb` | static meshes (clay / dark matte materials) |
@@ -141,7 +147,7 @@ Point the script at a folder (or directly at a state file):
 | state NetCDF (`u, v, w` on `(time, zt, yt, xt)`; optional `pres`, `blanking`) | yes | `state.nc`, else the only `*.nc` with `u, v, w` |
 | building geometry STL (metres, same frame as `xt/yt/zt`) | no | `*.stl` in the folder, else `attrs["geometry_stl"]` in the folder or `<dataset>/geometries/`, else boxes from `blanking` |
 | inflow parameters NetCDF (`inflow_angle`, `velocity_magnitude` vs `time`) | no | `params.nc`, else a `*.nc` with `inflow_angle`, else `<dataset>/param/<split>/<state name>` |
-| `render.yaml` | no | per-case overrides merged over the preset (e.g. hand-tuned shots) |
+| `render.yaml` | no | per-case overrides (e.g. hand-tuned shots, `render_preset: {look: daylight}`). Precedence: preset/config < `render.yaml` < command line. It can override preset keys but not switch presets by name. |
 
 `blanking` (1 = solid) is strongly recommended: raw solver output holds junk
 velocity inside buildings, and the mask is used to zero it, to keep particles
@@ -255,5 +261,8 @@ layer dict) `variable`, `range: [vmin, vmax]`, `colormap`,
 ```
 
 Camera keys are world-space (sim frame); renderers interpolate location and
-target smoothly (ease in/out) and aim the camera at `target`. Shots tile the
+target with Catmull-Rom through the keys and aim the camera at `target`. Easing
+is applied once per shot (slow in/out at the shot's first and last frame only),
+so the camera keeps its speed through interior keys
+(`les_render.cameras.sample_camera` is the reference implementation). Shots tile the
 timeline without gaps.

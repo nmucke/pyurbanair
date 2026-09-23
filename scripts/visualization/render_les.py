@@ -24,6 +24,7 @@ import pathlib
 import sys
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from les_render.case import discover_case
 from les_render.export import build_bundle
 from omegaconf import DictConfig, OmegaConf
@@ -43,15 +44,47 @@ def resolve_bundle_dir(cfg: DictConfig) -> pathlib.Path:
     return pathlib.Path(str(cfg.results_dir)) / case.name / str(cfg.render_preset.name)
 
 
+def apply_case_overrides(
+    cfg: DictConfig, overrides: dict, cli_overrides: list[str]
+) -> DictConfig:
+    """Merge a case folder's ``render.yaml`` over ``cfg``, then re-apply the
+    command-line overrides so the command line always wins.
+
+    Precedence (lowest -> highest): preset/config defaults, ``render.yaml``,
+    command line. ``render.yaml`` can override preset keys (``render_preset:
+    {look: daylight}``) but cannot switch presets by name.
+    """
+    if isinstance(overrides.get("render_preset"), str):
+        raise ValueError(
+            "render.yaml cannot switch presets by name "
+            f"(render_preset: {overrides['render_preset']!r}); pass "
+            "render_preset=<name> on the command line, or override preset keys "
+            "as a mapping"
+        )
+    merged = OmegaConf.merge(cfg, OmegaConf.create(overrides))
+    # Plain `key=value` overrides only: group choices (render_preset=vortex) are
+    # already reflected in cfg, and +/~ edits are not dotlist syntax.
+    dotlist = [
+        o
+        for o in cli_overrides
+        if "=" in o and o[0] not in "+~" and o.split("=", 1)[0] != "render_preset"
+    ]
+    if dotlist:
+        merged = OmegaConf.merge(merged, OmegaConf.from_dotlist(dotlist))
+    assert isinstance(merged, DictConfig)
+    return merged
+
+
 def run(cfg: DictConfig) -> pathlib.Path:
     case = discover_case(
         cfg.input, state=cfg.state, geometry=cfg.geometry, params=cfg.params
     )
     if case.overrides:
         log.info("merging per-case overrides from render.yaml")
-        merged = OmegaConf.merge(cfg, OmegaConf.create(case.overrides))
-        assert isinstance(merged, DictConfig)
-        cfg = merged
+        cli = (
+            list(HydraConfig.get().overrides.task) if HydraConfig.initialized() else []
+        )
+        cfg = apply_case_overrides(cfg, case.overrides, cli)
     out_dir = resolve_bundle_dir(cfg)
     container = OmegaConf.to_container(cfg, resolve=True)
     assert isinstance(container, dict)

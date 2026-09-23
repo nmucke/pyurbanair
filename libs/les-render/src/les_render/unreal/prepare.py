@@ -234,7 +234,7 @@ def _layer_table(manifest: dict[str, Any]) -> str:
     rows = ["| layer | type | Unreal asset / actor | source |", "|---|---|---|---|"]
     kinds = {
         "volume": "Sparse Volume Texture + Heterogeneous Volume (Frame track)",
-        "particles": "Groom + Groom Cache (fallback: Geometry Cache from `<layer>_mesh.abc`)",
+        "particles": "Groom + Groom Cache",
         "isosurface": "Geometry Cache (Geometry Cache track)",
         "slice": "Img Media Source + Media Texture on a plane (Media track)",
     }

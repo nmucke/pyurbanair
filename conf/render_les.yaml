@@ -4,7 +4,8 @@
 # Engine + a Blender preview mp4. Run in the `viz` pixi environment. The look
 # (which layers, colours, camera sequence, HUD) comes from `render_preset`;
 # everything else here is the case, the time window and the render stages.
-# A `render.yaml` inside the case folder is merged over this config.
+# A `render.yaml` inside the case folder is merged over this config; the
+# command line still wins over it.
 #
 # Examples::
 #   python scripts/visualization/render_les.py input=path/to/case_folder
@@ -48,7 +49,7 @@ stages:
 blender:
   engine: eevee          # eevee (fast) | cycles (final quality, GPU)
   samples: null          # render samples; null = engine default
-  frames: null           # "a:b" video-frame range; null = all
+  frames: null           # "a:b" video-frame range (inclusive); null = all
 
 workers: 4               # frame-parallel export workers (DRAM-bound past ~4-8)
 overwrite: false         # wipe existing layer folders before export

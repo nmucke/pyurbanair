@@ -46,7 +46,7 @@ index space; see [Placement knobs](#placement-knobs).
 | Editor Scripting Utilities | `EditorAssetLibrary`, used by older engines |
 | Sequencer Scripting | Level Sequence Python API |
 | Movie Render Queue (+ *Additional Render Passes*, optional) | rendering |
-| Alembic Importer (includes Geometry Cache) | isosurfaces, particle fallback |
+| Alembic Importer (includes Geometry Cache) | isosurfaces |
 | Groom **and** Alembic Groom Importer | particle streaklines and trails as hair strands |
 | Img Media (Media Framework) | slice PNG sequences |
 | glTF Importer / Interchange (on by default in 5.x) | `geometry/*.glb`, slice planes |
@@ -95,7 +95,7 @@ Options, passed after the script path or as environment variables:
 | `--skip a,b` | | | skip stages: `level,luts,geometry,look,volumes,particles,isosurfaces,slices,sequence,save,mrq` |
 | `--quit` | `LES_QUIT_WHEN_DONE=1` | off | quit the editor when done |
 | | `LES_VDB_PLACEMENT` | `auto` | `auto\|world\|index` |
-| | `LES_PARTICLE_MODE` | `auto` | `auto\|groom\|geometry_cache\|none` |
+| | `LES_PARTICLE_MODE` | `auto` | `auto\|groom\|none` |
 | | `LES_CAMERA_KEY_STEP` | `1` | key the camera every N frames |
 | | `LES_OUTPUT_FORMAT` | `png` | `png\|exr` |
 
@@ -275,8 +275,9 @@ marcher tuned by *Step Factor* and *Shadow Step Factor* on the actor and the
   scale 100/-100/100). A Groom Actor carries a Groom Cache track. If no Groom
   Cache appears (automated groom-cache import is unverified), re-import the
   `.abc` by hand, tick *Import Groom Cache*, and add a *Groom Cache* track on
-  the actor. If groom import fails entirely, `alembic/<layer>_mesh.abc` (if
-  the Blender stage wrote it) is imported as a **Geometry Cache** instead.
+  the actor. If groom import fails entirely, the stage logs those same manual
+  steps and skips the layer -- there is no Geometry Cache fallback (nothing in
+  the bundle pipeline writes a `<layer>_mesh.abc` for one to import).
 * **Isosurfaces**: `alembic/<layer>.abc` becomes a **Geometry Cache**
   (varying topology is fine) with a Geometry Cache track. Blender writes the
   colour as a per-corner C4f param `Cd` holding **sRGB-encoded** floats (PLY

@@ -68,6 +68,23 @@ class Grid:
         return Grid(*axes)
 
 
+XYZ_DIMS = ("xt", "yt", "zt")
+
+
+def xyz(da: xr.DataArray) -> np.ndarray:
+    """Values of a spatial field in ``(x, y, z)`` order, by dimension name."""
+    return np.asarray(da.transpose(*XYZ_DIMS).values)
+
+
+def solid_mask(ds: xr.Dataset) -> np.ndarray:
+    """``blanking`` (1 = solid) as a bool ``(x, y, z)`` array; a time dimension,
+    if present, is dropped (geometry is static)."""
+    blanking = ds["blanking"]
+    if "time" in blanking.dims:
+        blanking = blanking.isel(time=0)
+    return xyz(blanking).astype(bool)
+
+
 class FieldSeries:
     """Lazy, cached access to the (solid-masked) velocity snapshots of a case."""
 
@@ -87,7 +104,7 @@ class FieldSeries:
         )
         self.times = ds["time"].values.astype(np.float64)
         if "blanking" in ds:
-            self.solid = ds["blanking"].values.astype(bool).transpose(2, 1, 0)
+            self.solid = solid_mask(ds)
         else:
             self.solid = np.zeros(self.grid.shape, dtype=bool)
         self.has_pressure = "pres" in ds
@@ -98,14 +115,14 @@ class FieldSeries:
 
     def _load_velocity(self, k: int) -> np.ndarray:
         snap = self.ds[["u", "v", "w"]].isel(time=k).load()
-        vel = np.stack([snap[c].values.transpose(2, 1, 0) for c in ("u", "v", "w")])
+        vel = np.stack([xyz(snap[c]) for c in ("u", "v", "w")])
         vel = np.nan_to_num(vel.astype(np.float32))
         vel[:, self.solid] = 0.0
         vel.flags.writeable = False
         return vel
 
     def _load_pressure(self, k: int) -> np.ndarray:
-        p = self.ds["pres"].isel(time=k).values.transpose(2, 1, 0).astype(np.float32)
+        p = xyz(self.ds["pres"].isel(time=k)).astype(np.float32)
         p = np.nan_to_num(p)
         fluid = ~self.solid
         p = p - p[fluid].mean()  # gauge: only fluctuations are meaningful

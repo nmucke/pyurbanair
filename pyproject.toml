@@ -126,6 +126,10 @@ PYTHONNOUSERSITE = "1"
 [tool.pixi.feature.viz.pypi-dependencies]
 les-render = { path = "libs/les-render", editable = true }
 
+# The les-render suite lives outside `tests/` (the dev env has no openvdb).
+[tool.pixi.feature.viz.tasks]
+test-render = { cmd = "pytest libs/les-render/tests -q", description = "Run the les-render tests (Blender/ffmpeg tests skip when absent)" }
+
 # torch comes from PyPI, not conda-forge: conda pytorch >=2.6 hard-depends
 # on conda triton, whose nvcc toolchain caps gcc <13 and conflicts with the
 # gcc 15.2 the CFD features pin. The generic requirement lives in the

@@ -244,6 +244,69 @@ def test_no_shot_ever_inside_a_footprint(
             assert not cameras.point_in_building(loc, footprints), (s["name"], f, loc)
 
 
+def test_street_shot_beside_packed_row_avoids_buildings() -> None:
+    """Regression for the street-shot fallback: three buildings in a row with
+    no gap between them (no canyon) used to send the dolly straight down the
+    row's centreline, inside every footprint. The fallback must now fly
+    beside the row instead."""
+    footprints = [
+        {"min": [x, 40.0, 0.0], "max": [x + 20.0, 60.0, 15.0]}
+        for x in (40.0, 80.0, 120.0)
+    ]
+    geometry = {
+        "buildings_bounds": [[40.0, 40.0, 0.0], [140.0, 60.0, 15.0]],
+        "max_building_height": 15.0,
+        "footprints": footprints,
+    }
+    domain = {"lower": [0.0, 0.0, 0.0], "upper": [200.0, 100.0, 60.0]}
+    timeline = Timeline(fps=30.0, playback_speed=20.0, t_start=0.0, n_frames=300)
+    shots = cameras.make_shots(
+        geometry, domain, timeline, {"shots": [{"type": "street", "fraction": 1.0}]}
+    )
+    hits = [
+        f
+        for f in range(timeline.n_frames)
+        if cameras.point_in_building(cameras.sample_camera(shots, f)[0], footprints)
+    ]
+    assert not hits, hits
+
+
+def test_street_shot_fallback_raises_camera_when_it_cannot_clear(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When widening the cross clearance still can't clear every footprint
+    (an adjoining building the fallback isn't aware of via ``buildings_bounds``),
+    the fallback must raise the camera above the buildings and log a warning,
+    rather than silently leaving the camera inside a building."""
+    # `buildings_bounds` (used to place the fallback dolly) only spans the
+    # near building, but `footprints` (used for collision checks) also has a
+    # second, much wider building starting exactly where the fallback's
+    # "beside the row" placement would land -- wide enough that widening by a
+    # margin at a time for a few iterations still doesn't clear it.
+    footprints = [
+        {"min": [40.0, 40.0, 0.0], "max": [60.0, 60.0, 15.0]},
+        {"min": [40.0, 60.0, 0.0], "max": [60.0, 300.0, 15.0]},
+    ]
+    geometry = {
+        "buildings_bounds": [[40.0, 40.0, 0.0], [60.0, 60.0, 15.0]],
+        "max_building_height": 15.0,
+        "footprints": footprints,
+    }
+    domain = {"lower": [0.0, 0.0, 0.0], "upper": [200.0, 400.0, 60.0]}
+    timeline = Timeline(fps=30.0, playback_speed=20.0, t_start=0.0, n_frames=120)
+    with caplog.at_level("WARNING", logger="les_render.cameras"):
+        shots = cameras.make_shots(
+            geometry, domain, timeline, {"shots": [{"type": "street", "fraction": 1.0}]}
+        )
+    assert any("raising the camera" in r.message for r in caplog.records)
+    z_vals = [k["location"][2] for k in shots[0]["keys"]]
+    expected_z = 15.0 + cameras._margin(geometry, cameras._merge_spec(None))
+    assert z_vals == pytest.approx([expected_z] * len(z_vals))
+    for f in range(timeline.n_frames):
+        loc, _target, _focal = cameras.sample_camera(shots, f)
+        assert not cameras.point_in_building(loc, footprints), (f, loc)
+
+
 # -- cameras: sample_camera --------------------------------------------
 
 
@@ -273,6 +336,49 @@ def test_sample_camera_continuity(
                 max_jump = max(max_jump, float(np.linalg.norm(loc - prev_loc)))
             prev_loc = loc
         assert max_jump < 20.0, (s["name"], max_jump)
+
+
+def test_sample_camera_interior_keys_stay_at_speed(
+    shots: list[dict[str, Any]],
+) -> None:
+    """Regression: easing per key segment used to decelerate the camera to a
+    near-stop at every interior key. Easing should happen once per shot, so a
+    multi-key shot keeps cruising through interior keys (speed only drops
+    near the shot's own start/end)."""
+    checked_a_multi_key_shot = False
+    for s in shots:
+        keys = s["keys"]
+        if len(keys) < 3:
+            continue  # no interior keys to check
+        frames = list(range(s["start"], s["end"] + 1))
+        if len(frames) < 10:
+            continue
+        locs = np.array([cameras.sample_camera(shots, f)[0] for f in frames])
+        speeds = np.linalg.norm(np.diff(locs, axis=0), axis=1)
+        median_speed = float(np.median(speeds))
+        if median_speed <= 1e-9:
+            continue
+        checked_a_multi_key_shot = True
+
+        # Interior keys (excluding the shot's first/last) must not force a
+        # near-stop: speed around each one stays a healthy fraction of the
+        # shot's cruising speed.
+        for k in keys[1:-1]:
+            idx = k["frame"] - s["start"]
+            lo, hi = max(idx - 1, 0), min(idx, len(speeds) - 1)
+            speed_here = max(speeds[lo], speeds[hi])
+            assert speed_here > 0.3 * median_speed, (
+                s["name"],
+                k["frame"],
+                speed_here,
+                median_speed,
+            )
+
+        # The shot as a whole still eases in/out at its own start and end.
+        assert speeds[0] < 0.5 * median_speed, (s["name"], "start", speeds[0])
+        assert speeds[-1] < 0.5 * median_speed, (s["name"], "end", speeds[-1])
+
+    assert checked_a_multi_key_shot  # sanity: the default sequence has one
 
 
 def test_sample_camera_clamps_outside_range(shots: list[dict[str, Any]]) -> None:

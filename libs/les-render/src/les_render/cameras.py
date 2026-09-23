@@ -70,9 +70,12 @@ single camera.
 from __future__ import annotations
 
 import copy
+import logging
 from typing import Any, Optional, Sequence
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 Vec3 = tuple[float, float, float]
 
@@ -309,7 +312,6 @@ def _establishing_keys(
     domain: dict,
     frames: Sequence[int],
     spec: dict,
-    reverse: bool = False,
 ) -> list[dict]:
     lo, hi = _cluster_bbox(geometry)
     centre = 0.5 * (lo + hi)
@@ -341,10 +343,6 @@ def _establishing_keys(
         loc = np.array([centre[0] + offset_xy[0], centre[1] + offset_xy[1], z_cam])
         target = np.array([target_xy[0], target_xy[1], 0.35 * H])
         keys.append(_key(frames[idx], loc, target, focal, fstop))
-    if reverse:
-        keys = list(reversed(keys))
-        for k, f in zip(keys, frames):
-            k["frame"] = int(f)
     return keys
 
 
@@ -398,16 +396,18 @@ def _street_keys(
         else spec["fstop"]["street"]
     )
 
+    lo, hi = _cluster_bbox(geometry)
     if canyon is None:
-        # No canyon found (e.g. a single isolated building): fall back to a
-        # low pass along the cluster's flow-axis centreline, clamped clear of
-        # every footprint by construction (it runs past the cluster's edge).
-        lo, hi = _cluster_bbox(geometry)
-        centre = 0.5 * (lo + hi)
+        # No canyon found (e.g. a single isolated building, or buildings
+        # packed solid across the cross-flow axis so no gap qualifies): fly a
+        # low pass just outside the cluster's cross-flow bounding box --
+        # beside the array, at pedestrian height -- rather than along its
+        # centreline, which can run straight through a packed row of
+        # buildings.
         H = max(float(geometry.get("max_building_height", 10.0)), 1.0)
-        cross_pos = centre[1] if axis_i == 0 else centre[0]
         axis_lo, axis_hi = lo[axis_i] - 0.3 * margin, hi[axis_i] + 0.3 * margin
         z_cam = min(3.0, 0.4 * H)
+        cross_pos = float(hi[cross_i]) + margin
     else:
         cross_pos = canyon["cross"]
         axis_lo, axis_hi = canyon["axis_range"]
@@ -425,20 +425,25 @@ def _street_keys(
         0.12 * (axis_hi - axis_lo) * (1.0 if flow[axis_i] >= 0 or axis_i == 1 else -1.0)
     )
 
-    keys = []
-    for idx in range(len(frames)):
-        pos = np.zeros(3)
-        pos[axis_i] = axis_vals[idx]
-        pos[cross_i] = cross_pos
-        pos[2] = z_cam
-        tgt = pos.copy()
-        tgt[axis_i] = min(axis_vals[idx] + look_ahead, axis_hi)
-        tgt[2] = 0.5 * z_cam
-        keys.append(_key(frames[idx], pos, tgt, focal, fstop))
+    def _build(cross_pos: float, z_cam: float) -> list[dict]:
+        keys = []
+        for idx in range(len(frames)):
+            pos = np.zeros(3)
+            pos[axis_i] = axis_vals[idx]
+            pos[cross_i] = cross_pos
+            pos[2] = z_cam
+            tgt = pos.copy()
+            tgt[axis_i] = min(axis_vals[idx] + look_ahead, axis_hi)
+            tgt[2] = 0.5 * z_cam
+            keys.append(_key(frames[idx], pos, tgt, focal, fstop))
+        return keys
 
-    # Safety: verify the sampled path never clips a footprint; nudge the
-    # cross position outward (widen clearance) if it does.
-    for _ in range(4):
+    keys = _build(cross_pos, z_cam)
+
+    # Safety net: verify the path between consecutive keys never clips a
+    # footprint; widen the cross clearance (by a full margin each time, not a
+    # token nudge) if it does.
+    for _ in range(6):
         bad = any(
             segment_hits_building(
                 keys[i]["location"], keys[i + 1]["location"], footprints, margin=0.0
@@ -447,15 +452,27 @@ def _street_keys(
         )
         if not bad:
             break
-        cross_pos += (
-            np.sign(
-                cross_pos - np.mean([f["min"][cross_i] for f in footprints] or [0.0])
-            )
-            * 0.5
+        sign = np.sign(
+            cross_pos - np.mean([f["min"][cross_i] for f in footprints] or [0.0])
         )
-        for k in keys:
-            k["location"][cross_i] = float(cross_pos)
-            k["target"][cross_i] = float(cross_pos)
+        cross_pos += (sign or 1.0) * margin
+        keys = _build(cross_pos, z_cam)
+
+    # Widening can still fail to clear every footprint (e.g. a very deep
+    # cluster hemming in the domain); if so, don't fly through a building --
+    # raise the camera above the buildings instead, and say so loudly.
+    if any(
+        segment_hits_building(keys[i]["location"], keys[i + 1]["location"], footprints)
+        for i in range(len(keys) - 1)
+    ) or any(point_in_building(k["location"], footprints) for k in keys):
+        max_h = float(geometry.get("max_building_height", 10.0))
+        safe_z = max_h + margin
+        log.warning(
+            "street shot: could not clear every footprint by widening clearance; "
+            "raising the camera above the buildings (z=%.2f)",
+            safe_z,
+        )
+        keys = _build(cross_pos, safe_z)
     return keys
 
 
@@ -532,10 +549,9 @@ def _build_keys(
     domain: dict,
     frames: Sequence[int],
     spec: dict,
-    reverse: bool = False,
 ) -> list[dict]:
     if kind == "establishing":
-        return _establishing_keys(geometry, domain, frames, spec, reverse=reverse)
+        return _establishing_keys(geometry, domain, frames, spec)
     if kind not in _BUILDERS:
         raise ValueError(
             f"unknown shot kind {kind!r}; choose from establishing, plan, street, wake"
@@ -675,14 +691,23 @@ def sample_camera(shots: list[dict], frame: int) -> tuple[Vec3, Vec3, float]:
 
     1. Find the shot whose ``[start, end]`` contains ``frame`` (clamped to
        the sequence's overall range).
-    2. Locate the key segment ``[keys[i], keys[i+1]]`` bracketing ``frame``
-       (clamped to the first/last key outside the shot's key range).
-    3. Ease the local parameter with smoothstep (``u -> 3u^2 - 2u^3``), then
-       evaluate a uniform Catmull-Rom spline (tension 0.5) through
-       ``keys[i-1..i+2]`` (end keys duplicated) for ``location`` and
-       ``target`` independently, component-wise.
-    4. ``focal_length_mm`` and ``fstop`` are linearly interpolated on the
-       same eased parameter (no overshoot wanted for a lens property).
+    2. Ease *once per shot*, not once per key segment: ``u = smoothstep((frame
+       - start) / (end - start))`` (``u -> 3u^2 - 2u^3``), then map ``u`` back
+       into frame-space, ``f' = start + u * (end - start)``. Easing per
+       segment would decelerate to a near-stop at every interior key; easing
+       once over the whole shot keeps interior keys at speed and only eases
+       in/out at the shot's own start and end.
+    3. Locate the key segment ``[keys[i], keys[i+1]]`` bracketing ``f'``
+       (clamped to the first/last key outside the shot's key range), and the
+       local, already-eased fraction of ``f'`` across it.
+    4. Evaluate a uniform Catmull-Rom spline (tension 0.5) through
+       ``keys[i-1..i+2]`` (end keys duplicated) at that fraction for
+       ``location`` and ``target`` independently, component-wise.
+    5. ``focal_length_mm`` is linearly interpolated on the same fraction (no
+       overshoot wanted for a lens property). This function only returns
+       ``(location, target, focal_length_mm)``; renderers (``blender/bundle.py``,
+       ``unreal/build_scene.py``) interpolate ``fstop`` the same way from the
+       same fraction.
     """
     if not shots:
         raise ValueError("no shots to sample")
@@ -694,18 +719,21 @@ def sample_camera(shots: list[dict], frame: int) -> tuple[Vec3, Vec3, float]:
         return _vec3(k["location"]), _vec3(k["target"]), float(k["focal_length_mm"])
 
     kf = [k["frame"] for k in keys]
-    if frame <= kf[0]:
+    start, end = shot["start"], shot["end"]
+    u_global = 0.0 if end <= start else (frame - start) / (end - start)
+    f_prime = start + float(_smoothstep(u_global)) * (end - start)
+
+    if f_prime <= kf[0]:
         k = keys[0]
         return _vec3(k["location"]), _vec3(k["target"]), float(k["focal_length_mm"])
-    if frame >= kf[-1]:
+    if f_prime >= kf[-1]:
         k = keys[-1]
         return _vec3(k["location"]), _vec3(k["target"]), float(k["focal_length_mm"])
 
-    i = int(np.searchsorted(kf, frame, side="right") - 1)
+    i = int(np.searchsorted(kf, f_prime, side="right") - 1)
     i = min(max(i, 0), len(keys) - 2)
     t0, t1 = kf[i], kf[i + 1]
-    u = 0.0 if t1 == t0 else (frame - t0) / (t1 - t0)
-    u_eased = float(_smoothstep(u))
+    u = 0.0 if t1 == t0 else (f_prime - t0) / (t1 - t0)
 
     p_im1 = (
         np.array(keys[i - 1]["location"])
@@ -719,7 +747,7 @@ def sample_camera(shots: list[dict], frame: int) -> tuple[Vec3, Vec3, float]:
         if i + 2 < len(keys)
         else np.array(keys[i + 1]["location"])
     )
-    location = _catmull_rom(p_im1, p_i, p_ip1, p_ip2, u_eased)
+    location = _catmull_rom(p_im1, p_i, p_ip1, p_ip2, u)
 
     t_im1 = (
         np.array(keys[i - 1]["target"]) if i - 1 >= 0 else np.array(keys[i]["target"])
@@ -731,11 +759,9 @@ def sample_camera(shots: list[dict], frame: int) -> tuple[Vec3, Vec3, float]:
         if i + 2 < len(keys)
         else np.array(keys[i + 1]["target"])
     )
-    target = _catmull_rom(t_im1, t_i, t_ip1, t_ip2, u_eased)
+    target = _catmull_rom(t_im1, t_i, t_ip1, t_ip2, u)
 
-    focal = (1.0 - u_eased) * keys[i]["focal_length_mm"] + u_eased * keys[i + 1][
-        "focal_length_mm"
-    ]
+    focal = (1.0 - u) * keys[i]["focal_length_mm"] + u * keys[i + 1]["focal_length_mm"]
 
     return (_vec3(location), _vec3(target), float(focal))
 

@@ -159,7 +159,9 @@ def discover_case(
 
 def mesh_from_blanking(ds: xr.Dataset) -> trimesh.Trimesh:
     """Box mesh of the solid cells when no STL is available."""
-    solid = ds["blanking"].values.astype(bool).transpose(2, 1, 0)  # -> (x, y, z)
+    from les_render.fields import solid_mask
+
+    solid = solid_mask(ds)  # (x, y, z)
     dx = float(ds.xt[1] - ds.xt[0])
     dy = float(ds.yt[1] - ds.yt[0])
     dz = float(ds.zt[1] - ds.zt[0])

@@ -21,7 +21,11 @@ except ImportError:  # pragma: no cover - depends on the openvdb build in the en
     import openvdb as vdb
 
 from les_render.fields import FieldSeries
-from les_render.isosurfaces import default_isosurface_specs, export_isosurfaces
+from les_render.isosurfaces import (
+    _limit_faces,
+    default_isosurface_specs,
+    export_isosurfaces,
+)
 from les_render.slices import default_slice_specs, export_slices
 from les_render.timeline import Timeline, make_timeline
 from les_render.volumes import default_volume_specs, export_volumes
@@ -153,6 +157,40 @@ def test_volume_default_density_grid_omitted_by_default(
     path = tmp_path / "volumes" / "speed_glow" / "speed_glow.0000.vdb"
     with pytest.raises(Exception):
         vdb.read(str(path), "density")
+
+
+def test_volume_all_null_spec_uses_defaults(
+    fields: FieldSeries, timeline: Timeline, tmp_path: pathlib.Path
+) -> None:
+    """A preset/render.yaml key set to ``null`` (Hydra ``~``) must fall back
+    to the default, not reach a caster (``float(None)`` etc.) as a literal
+    None -- every documented volume spec key, all null at once."""
+    spec = {
+        "name": None,
+        "variable": None,
+        "transform": None,
+        "gamma": None,
+        "reference": None,
+        "vscale": None,
+        "upsample": None,
+        "density_range": None,
+        "density_floor_percentile": None,
+        "density_ceiling_percentile": None,
+        "colormap": None,
+        "color_range": None,
+        "emission_strength": None,
+        "density_scale": None,
+        "write_normalized_density": None,
+        "half": None,
+        "frame_step": None,
+        "workers": None,
+    }
+    layer = export_volumes(fields, timeline, spec, tmp_path)
+    assert layer["type"] == "volume"
+    assert layer["name"] == "speed_glow"
+    assert layer["n_files"] > 0
+    for f in range(layer["n_files"]):
+        assert (tmp_path / layer["pattern"].format(frame=f)).is_file()
 
 
 # -- isosurfaces -----------------------------------------------------------
@@ -295,6 +333,88 @@ def test_isosurface_known_field_sphere_and_ply_readable(
     assert verts["red"].dtype == np.uint8 or verts["red"].dtype.kind == "u"
 
 
+def test_isosurface_all_null_spec_uses_defaults(
+    fields: FieldSeries, timeline: Timeline, tmp_path: pathlib.Path
+) -> None:
+    """Every documented isosurface spec key set to ``null`` must fall back to
+    its default rather than reach a caster as a literal None."""
+    spec = {
+        "name": None,
+        "iso_variable": None,
+        "level": None,
+        "level_percentile": None,
+        "level_fraction": None,
+        "upsample": None,
+        "smooth_sigma": None,
+        "color_variable": None,
+        "colormap": None,
+        "color_range": None,
+        "max_faces": None,
+        "min_component_faces": None,
+        "frame_step": None,
+        "workers": None,
+    }
+    layer = export_isosurfaces(fields, timeline, spec, tmp_path)
+    assert layer["type"] == "isosurface"
+    assert layer["name"] == "q_criterion"
+    assert layer["n_files"] > 0
+    for f in range(layer["n_files"]):
+        assert (tmp_path / layer["pattern"].format(frame=f)).is_file()
+
+
+def _strip_mesh(n_quads: int, x_offset: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """A single connected component of ``2 * n_quads`` triangles: two rows of
+    ``n_quads + 1`` vertices at y=0/y=1, x=``x_offset``..``x_offset+n_quads``,
+    triangulated into a ladder strip (each pair of adjacent triangles shares
+    an edge, so ``trimesh.graph.connected_components`` reports it as one
+    component)."""
+    n = n_quads + 1
+    xs = np.arange(n, dtype=np.float64) + x_offset
+    row0 = np.stack([xs, np.zeros(n), np.zeros(n)], axis=1)
+    row1 = np.stack([xs, np.ones(n), np.zeros(n)], axis=1)
+    verts = np.concatenate([row0, row1])
+    faces = []
+    for i in range(n_quads):
+        faces.append([i, i + 1, n + i])
+        faces.append([i + 1, n + i + 1, n + i])
+    return verts, np.asarray(faces, dtype=np.int64)
+
+
+def _disjoint_components(*n_quads: int) -> tuple[np.ndarray, np.ndarray]:
+    """Concatenate several :func:`_strip_mesh` strips, spaced far enough
+    apart in x that they share no vertices/edges (so each stays its own
+    connected component)."""
+    verts_parts, face_parts = [], []
+    offset = 0.0
+    voffset = 0
+    for n in n_quads:
+        v, f = _strip_mesh(n, x_offset=offset)
+        face_parts.append(f + voffset)
+        verts_parts.append(v)
+        voffset += v.shape[0]
+        offset += n + 100.0  # far more than 1 unit apart -> no shared vertices
+    return np.concatenate(verts_parts), np.concatenate(face_parts)
+
+
+def test_limit_faces_never_exceeds_max_faces_across_components() -> None:
+    """Regression for the off-by-one that let the cap be exceeded: two
+    60-face components with max_faces=100 used to return 120 faces (both
+    kept, since the check ran *before* adding each component) instead of
+    honouring the cap."""
+    verts, faces = _disjoint_components(30, 30)  # 60 + 60 faces
+    _, kept_faces, _ = _limit_faces(verts, faces, min_component_faces=0, max_faces=100)
+    assert kept_faces.shape[0] <= 100
+    assert kept_faces.shape[0] == 60, "expected exactly the first component kept"
+
+
+def test_limit_faces_keeps_oversized_single_component_whole() -> None:
+    """The documented exception: a single component already over max_faces is
+    kept whole (this pass only drops whole components, never splits one)."""
+    verts, faces = _strip_mesh(75)  # 150 faces, one component
+    _, kept_faces, _ = _limit_faces(verts, faces, min_component_faces=0, max_faces=100)
+    assert kept_faces.shape[0] == faces.shape[0] == 150
+
+
 # -- slices ----------------------------------------------------------------
 
 
@@ -405,3 +525,39 @@ def test_slice_resolution_capped_and_lic_runs(
     img = np.asarray(Image.open(path).convert("RGBA"))
     assert img.shape[:2] == (layer["resolution"][1], layer["resolution"][0])
     assert img.dtype == np.uint8
+
+
+def test_slice_all_null_spec_uses_defaults(
+    fields: FieldSeries, timeline: Timeline, tmp_path: pathlib.Path
+) -> None:
+    """Every documented slice spec key set to ``null`` must fall back to its
+    default rather than reach a caster as a literal None."""
+    spec = {
+        "name": None,
+        "axis": None,
+        "position": None,
+        "variable": None,
+        "colormap": None,
+        "range": None,
+        "upsample": None,
+        "extent": None,
+        "px_per_metre": None,
+        "max_resolution": None,
+        "resolution": None,
+        "lic": None,
+        "lic_length": None,
+        "lic_kernel": None,
+        "lic_noise_seed": None,
+        "lic_strength": None,
+        "animate_noise": None,
+        "animate_speed": None,
+        "frame_step": None,
+        "workers": None,
+    }
+    layer = export_slices(fields, timeline, spec, tmp_path)
+    assert layer["type"] == "slice"
+    assert layer["name"] == "pedestrian_speed"
+    assert layer["axis"] == "z"
+    assert layer["n_files"] > 0
+    for f in range(layer["n_files"]):
+        assert (tmp_path / layer["pattern"].format(frame=f)).is_file()

@@ -44,8 +44,9 @@ engines that cannot do per-segment opacity.
 Physics
 -------
 * Velocity: trilinear in space on the solid-masked grid (optionally on a
-  ``upsample``-x tricubic refinement, :func:`fields.upsample_vector`), linear
-  in time between snapshots; the same model as :meth:`FieldSeries.sample_velocity`
+  ``upsample``-x tricubic refinement, :func:`fields.upsample_vector`), and in
+  time by :meth:`FieldSeries.time_weights` (Catmull-Rom over the four
+  surrounding snapshots by default); the same model as :meth:`FieldSeries.sample_velocity`
   but with a cache-friendly padded-array gather (:class:`VelocitySampler`).
 * Integration: explicit RK (``integrator``: ``"rk2"`` midpoint, default, or
   ``"rk4"``). RK2 is the default: the trilinear velocity is only C0 across
@@ -228,12 +229,13 @@ def default_particle_specs() -> dict[str, dict[str, Any]]:
 
 
 class VelocitySampler:
-    """Trilinear-in-space, linear-in-time velocity at many points, fast.
+    """Trilinear-in-space velocity at many points, fast; time blending follows
+    :meth:`FieldSeries.time_weights` (Catmull-Rom by default).
 
     Each snapshot is kept as a channels-last ``(nx+1, ny+1, nz+1, 3)`` float32
     array padded by one plane per axis (edge copy, or wrap-around on periodic
     axes), so the 8 interpolation corners of any point are at constant flat
-    offsets. For a sample time the two bracketing snapshots are blended once
+    offsets. For a sample time the weighted snapshots are blended once
     (a few MB, reused for a repeated time) and every point then needs 8 small
     ``np.take`` gathers from a cache-resident array. Numerically identical to
     :func:`fields.trilinear` / :meth:`FieldSeries.sample_velocity`.
@@ -321,7 +323,8 @@ class VelocitySampler:
         return self._blend
 
     def max_speed(self, t0: float, t1: float) -> float:
-        """Upper bound of |u| over sim times [t0, t1] (max over bracketing snapshots)."""
+        """Upper bound of |u| over sim times [t0, t1] (max over every snapshot the
+        time weights touch; Catmull-Rom overshoot is small next to the CFL margin)."""
         # Cubic time weights also draw on the neighbours of the bracket.
         k0 = max(self.fields.bracket(t0)[0] - 1, 0)
         k1 = min(self.fields.bracket(t1)[1] + 1, self.fields.times.size - 1)

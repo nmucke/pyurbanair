@@ -447,10 +447,8 @@ def test_build_plan(bundle: tuple[pathlib.Path, dict[str, Any]]) -> None:
         by["speed_glow"]["source"].endswith("volumes/speed_glow/speed_glow.0000.vdb")
         and by["speed_glow"]["exists"]
     )
-    assert (
-        by["streaklines"]["source"].endswith("alembic/streaklines.abc")
-        and by["streaklines"]["mesh_source"] is None
-    )
+    assert by["streaklines"]["source"].endswith("alembic/streaklines.abc")
+    assert "mesh_source" not in by["streaklines"]
     assert by["ground_speed"]["source"].endswith("slices/ground_speed")
 
 

@@ -37,8 +37,10 @@ LIC (in-plane flow texture)
 ----------------------------
 A fixed (seeded) white-noise texture at the output resolution is advected
 along the in-plane velocity direction, sampled with
-``fields.sample_velocity`` (trilinear in space, linear in time, so this
-works at plane positions between stored snapshots) and converted to a
+``fields.sample_velocity`` (trilinear in space, cubic in time by default --
+Catmull-Rom over the four surrounding snapshots, see
+``FieldSeries.time_weights`` -- so this works at plane positions between
+stored snapshots) and converted to a
 texel-space unit direction each step (texel pitch is uniform since
 ``resolution`` is derived from a single ``px_per_metre``). For every pixel,
 the streamline is integrated ``lic_length`` texels forward *and* backward,
@@ -101,8 +103,6 @@ used when ``animate_noise`` is on.
 
 from __future__ import annotations
 
-import concurrent.futures as cf
-import multiprocessing as mp
 import os
 import pathlib
 from typing import Any, Optional
@@ -112,6 +112,7 @@ import numpy as np
 from PIL import Image
 
 from . import colormaps
+from ._frames import file_frames, map_frames, opt
 from .fields import FieldSeries, robust_range, scalar_field, trilinear
 from .timeline import Timeline
 
@@ -119,17 +120,14 @@ _DIVERGING_VARS = {"u", "v", "w", "pressure"}
 _IN_PLANE_AXES = {"z": ("x", "y"), "y": ("x", "z"), "x": ("y", "z")}
 _N_AUTO_SAMPLES = 4
 
+# Per-process global, populated by _set_fields -- either directly (thread
+# pool / sequential, same process as the caller) or via _frames.map_frames's
+# pool initializer (forkserver worker process).
 _FIELDS: Optional[FieldSeries] = None
 
 
 def default_slice_specs() -> list[dict[str, Any]]:
     return [{"name": "pedestrian_speed"}]
-
-
-def _file_frames(timeline: Timeline, frame_step: int) -> list[tuple[int, int, float]]:
-    times = timeline.frame_times
-    video_frames = list(range(0, timeline.n_frames, frame_step))
-    return [(f, vf, float(times[vf])) for f, vf in enumerate(video_frames)]
 
 
 def _domain_extent(
@@ -294,14 +292,9 @@ def _compute_lic(
     return np.asarray(np.clip((lic - lo) / (hi - lo), 0.0, 1.0))
 
 
-def _init_pool(source: str, numba_threads: int) -> None:
+def _set_fields(f: Optional[FieldSeries]) -> None:
     global _FIELDS
-    from .fields import open_fields
-
-    # Each worker runs the parallel LIC kernel; split the cores between them.
-    numba.set_num_threads(max(1, min(numba_threads, numba.config.NUMBA_NUM_THREADS)))
-
-    _FIELDS = open_fields(source)
+    _FIELDS = f
 
 
 def _render_slice_file(job: dict[str, Any]) -> dict[str, Any]:
@@ -361,43 +354,44 @@ def export_slices(
     fields: FieldSeries, timeline: Timeline, spec: dict[str, Any], out_dir: pathlib.Path
 ) -> dict[str, Any]:
     spec = dict(spec)
-    name = str(spec.get("name", "pedestrian_speed"))
-    axis = str(spec.get("axis", "z"))
+    name = str(opt(spec, "name", "pedestrian_speed"))
+    axis = str(opt(spec, "axis", "z"))
     if axis not in _IN_PLANE_AXES:
         raise ValueError(f"axis must be one of {sorted(_IN_PLANE_AXES)}, got {axis!r}")
-    position = float(spec.get("position", 2.0))
-    variable = str(spec.get("variable", "speed"))
+    position = float(opt(spec, "position", 2.0))
+    variable = str(opt(spec, "variable", "speed"))
     diverging = variable in _DIVERGING_VARS
-    colormap = str(spec.get("colormap", "RdBu_r" if diverging else "inferno"))
-    upsample = int(spec.get("upsample", 2))
-    px_per_metre = float(spec.get("px_per_metre", 8.0))
-    max_resolution = int(spec.get("max_resolution", 2048))
-    frame_step = int(spec.get("frame_step", 1))
-    workers = int(spec.get("workers", 4))
+    colormap = str(opt(spec, "colormap", "RdBu_r" if diverging else "inferno"))
+    upsample = int(opt(spec, "upsample", 2))
+    px_per_metre = float(opt(spec, "px_per_metre", 8.0))
+    max_resolution = int(opt(spec, "max_resolution", 2048))
+    frame_step = int(opt(spec, "frame_step", 1))
+    workers = int(opt(spec, "workers", 4))
 
     lo_domain, hi_domain = _domain_extent(fields, axis)
-    extent = tuple(tuple(p) for p in spec.get("extent", (lo_domain, hi_domain)))
+    extent = tuple(tuple(p) for p in opt(spec, "extent", (lo_domain, hi_domain)))
     resolution = tuple(
-        spec.get("resolution") or _resolution(extent, px_per_metre, max_resolution)
+        opt(spec, "resolution", None)
+        or _resolution(extent, px_per_metre, max_resolution)
     )
 
     auto_lo, auto_hi = _auto_range(
         fields, variable, diverging, timeline, axis, position
     )
-    value_range = tuple(float(v) for v in spec.get("range", (auto_lo, auto_hi)))
+    value_range = tuple(float(v) for v in opt(spec, "range", (auto_lo, auto_hi)))
 
-    lic = bool(spec.get("lic", True))
-    lic_length = int(spec.get("lic_length", 25))
-    lic_kernel = str(spec.get("lic_kernel", "hann"))
-    lic_noise_seed = int(spec.get("lic_noise_seed", 0))
-    lic_strength = float(spec.get("lic_strength", 0.6))
-    animate_noise = bool(spec.get("animate_noise", False))
-    animate_speed = float(spec.get("animate_speed", 2.0))
+    lic = bool(opt(spec, "lic", True))
+    lic_length = int(opt(spec, "lic_length", 25))
+    lic_kernel = str(opt(spec, "lic_kernel", "hann"))
+    lic_noise_seed = int(opt(spec, "lic_noise_seed", 0))
+    lic_strength = float(opt(spec, "lic_strength", 0.6))
+    animate_noise = bool(opt(spec, "animate_noise", False))
+    animate_speed = float(opt(spec, "animate_speed", 2.0))
 
     layer_dir = pathlib.Path(out_dir) / "slices" / name
     layer_dir.mkdir(parents=True, exist_ok=True)
 
-    frames = _file_frames(timeline, frame_step)
+    frames = file_frames(timeline, frame_step)
     jobs = [
         dict(
             f=f,
@@ -423,28 +417,12 @@ def export_slices(
         for f, _vf, t in frames
     ]
 
-    source = None
-    encoding = getattr(fields.ds, "encoding", None)
-    if encoding:
-        source = encoding.get("source")
-
-    global _FIELDS
-    if workers <= 1 or len(jobs) <= 1:
-        _FIELDS = fields
-        results = [_render_slice_file(j) for j in jobs]
-    elif source:
-        ctx = mp.get_context("forkserver")
-        with cf.ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=ctx,
-            initializer=_init_pool,
-            initargs=(source, max(1, (os.cpu_count() or 4) // workers)),
-        ) as ex:
-            results = list(ex.map(_render_slice_file, jobs))
-    else:
-        _FIELDS = fields
-        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(_render_slice_file, jobs))
+    # Each forkserver worker runs the parallel LIC kernel; split the cores
+    # between them instead of each grabbing every core.
+    numba_threads = max(1, (os.cpu_count() or 4) // workers)
+    results = map_frames(
+        fields, jobs, _render_slice_file, workers, _set_fields, numba_threads
+    )
     del results
 
     layer: dict[str, Any] = {

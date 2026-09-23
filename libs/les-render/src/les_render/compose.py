@@ -50,9 +50,17 @@ def compose_video(
     start_number: int = 0,
     ffmpeg: Optional[str] = None,
     extra_input_args: Optional[Sequence[str]] = None,
+    frame_count: Optional[int] = None,
+    hud_size: Optional[tuple[int, int]] = None,
 ) -> pathlib.Path:
     """Encode a frame sequence (optionally with a transparent HUD overlay) to
     H.264 mp4.
+
+    ``start_number`` is the index of the first frame file (the HUD sequence is
+    read from the same index); ``frame_count`` stops after that many frames, so
+    stale files beyond a partial render are never encoded. ``hud_size`` scales
+    the HUD to ``(width, height)`` when it was drawn at a different resolution
+    than the frames.
 
     ``frames_pattern`` / ``hud_pattern`` are ffmpeg ``-i`` printf patterns
     (e.g. ``"render/frame.%04d.png"``); PNG or any format ffmpeg reads.
@@ -82,7 +90,19 @@ def compose_video(
         ]
         # HUD (straight-alpha RGBA) composited over the render; straight alpha
         # is what ffmpeg's overlay filter expects by default.
-        cmd += ["-filter_complex", "[0:v][1:v]overlay=format=auto[v]", "-map", "[v]"]
+        scale = (
+            f"[1:v]scale={hud_size[0]}:{hud_size[1]}:flags=lanczos[h];"
+            if hud_size
+            else "[1:v]null[h];"
+        )
+        cmd += [
+            "-filter_complex",
+            scale + "[0:v][h]overlay=format=auto[v]",
+            "-map",
+            "[v]",
+        ]
+    if frame_count is not None:
+        cmd += ["-frames:v", str(int(frame_count))]
 
     cmd += [
         "-c:v",

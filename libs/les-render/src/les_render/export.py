@@ -23,8 +23,9 @@ import logging
 import pathlib
 import shutil
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
+import xarray as xr
 from les_render.case import Case, discover_case
 from les_render.fields import FieldSeries
 from les_render.geometry import export_geometry
@@ -94,10 +95,16 @@ def export_stage(
     case: Case, cfg: dict[str, Any], out_dir: pathlib.Path
 ) -> dict[str, Any]:
     """Write geometry, layers and shots; return (and save) the manifest."""
+    with case.open_state() as ds:
+        return _export_stage(case, cfg, out_dir, ds)
+
+
+def _export_stage(
+    case: Case, cfg: dict[str, Any], out_dir: pathlib.Path, ds: xr.Dataset
+) -> dict[str, Any]:
     from les_render.cameras import make_shots
     from les_render.hud import inflow_block
 
-    ds = case.open_state()
     fields = FieldSeries(ds)
     timeline = build_timeline(fields, cfg.get("time", {}))
     grid = fields.grid
@@ -145,7 +152,11 @@ def export_stage(
         ground_margin=float(preset.get("ground_margin", 0.0)),
     )
     params = case.open_params()
-    manifest["inflow"] = inflow_block(params) if params is not None else None
+    if params is not None:
+        with params:
+            manifest["inflow"] = inflow_block(params)
+    else:
+        manifest["inflow"] = None
     log.info("geometry + inflow: %.1f s", time.perf_counter() - t0)
 
     manifest["layers"] = []
@@ -162,7 +173,6 @@ def export_stage(
     )
     manifest["hud"] = None
     write_manifest(manifest, out_dir)
-    ds.close()
     return manifest
 
 
@@ -219,37 +229,27 @@ def build_bundle(cfg: dict[str, Any], out_dir: pathlib.Path) -> dict[str, Any]:
         prepare_unreal(out_dir)
         log.info("unreal scripts + LUTs -> %s", out_dir / "unreal")
 
-    blender_cfg = cfg.get("blender", {})
-    if stages.get("alembic", False):
+    blender_cfg = _blender_opts(cfg.get("blender", {}))
+    if stages.get("alembic", False) or stages.get("blender", True):
         from les_render.blender_runner import run_blender
 
-        run_blender(
-            out_dir, export_alembic=True, render=False, **_blender_opts(blender_cfg)
-        )
-
-    frames_dir: Optional[pathlib.Path] = None
-    if stages.get("blender", True):
-        from les_render.blender_runner import run_blender
-
+        # One Blender launch does both: scene setup is the expensive part.
         t0 = time.perf_counter()
-        frames_dir = run_blender(out_dir, render=True, **_blender_opts(blender_cfg))
-        log.info("blender render: %.1f s", time.perf_counter() - t0)
+        run_blender(
+            out_dir,
+            render=stages.get("blender", True),
+            export_alembic=stages.get("alembic", False),
+            **blender_cfg,
+        )
+        log.info("blender: %.1f s", time.perf_counter() - t0)
 
     if stages.get("video", True):
-        from les_render.compose import compose_video
+        from les_render.blender_runner import encode_preview
 
-        frames_dir = frames_dir or out_dir / "preview" / "frames"
-        mp4 = out_dir / "preview" / f"{manifest['case']['name']}.mp4"
-        hud = manifest.get("hud")
-        compose_video(
-            str(frames_dir / "%04d.png"),
-            mp4,
-            fps=manifest["timeline"]["fps"],
-            hud_pattern=str(out_dir / "hud" / "hud.%04d.png") if hud else None,
-        )
+        mp4 = encode_preview(out_dir, frames=blender_cfg.get("frames"))
         log.info("video: %s", mp4)
     return manifest
 
 
 def _blender_opts(blender_cfg: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in blender_cfg.items() if v is not None}
+    return {k: v for k, v in (blender_cfg or {}).items() if v is not None}

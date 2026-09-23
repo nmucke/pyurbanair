@@ -92,8 +92,6 @@ against the same repo DRAM-bandwidth-bound-past-~4-8-workers caveat.
 
 from __future__ import annotations
 
-import concurrent.futures as cf
-import multiprocessing as mp
 import pathlib
 from typing import Any, Optional
 
@@ -103,22 +101,20 @@ from scipy import ndimage
 from skimage import measure
 
 from . import colormaps
+from ._frames import file_frames, map_frames, opt
 from .fields import FieldSeries, robust_range, scalar_field, trilinear, upsample_mask
 from .timeline import Timeline
 
 _N_AUTO_SAMPLES = 4
 
+# Per-process global, populated by _set_fields -- either directly (thread
+# pool / sequential, same process as the caller) or via _frames.map_frames's
+# pool initializer (forkserver worker process).
 _FIELDS: Optional[FieldSeries] = None
 
 
 def default_isosurface_specs() -> list[dict[str, Any]]:
     return [{"name": "q_criterion"}]
-
-
-def _file_frames(timeline: Timeline, frame_step: int) -> list[tuple[int, int, float]]:
-    times = timeline.frame_times
-    video_frames = list(range(0, timeline.n_frames, frame_step))
-    return [(f, vf, float(times[vf])) for f, vf in enumerate(video_frames)]
 
 
 def _smoothed(vals: np.ndarray, solid: np.ndarray, sigma: float) -> np.ndarray:
@@ -168,7 +164,11 @@ def _limit_faces(
     verts: np.ndarray, faces: np.ndarray, min_component_faces: int, max_faces: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Drop tiny connected components, then cap total faces by dropping the
-    smallest remaining components. Returns (verts_kept, faces_reindexed,
+    smallest remaining components, largest-first. The result never exceeds
+    ``max_faces`` -- except when a single component (necessarily the largest,
+    kept first) is alone already over the budget: this pass only drops whole
+    components, never splits one, so that component is kept whole rather than
+    silently discarded. Returns (verts_kept, faces_reindexed,
     original_vertex_indices_kept)."""
     if faces.shape[0] == 0:
         return verts[:0], faces[:0], np.zeros(0, dtype=np.int64)
@@ -183,7 +183,7 @@ def _limit_faces(
     kept: list[np.ndarray] = []
     total = 0
     for g in groups:
-        if total >= max_faces:
+        if kept and total + len(g) > max_faces:
             break
         kept.append(g)
         total += len(g)
@@ -253,11 +253,9 @@ def _write_ply(
         fh.write(farr.tobytes())
 
 
-def _init_pool(source: str) -> None:
+def _set_fields(f: Optional[FieldSeries]) -> None:
     global _FIELDS
-    from .fields import open_fields
-
-    _FIELDS = open_fields(source)
+    _FIELDS = f
 
 
 def _render_isosurface_file(job: dict[str, Any]) -> dict[str, Any]:
@@ -311,18 +309,18 @@ def export_isosurfaces(
     fields: FieldSeries, timeline: Timeline, spec: dict[str, Any], out_dir: pathlib.Path
 ) -> dict[str, Any]:
     spec = dict(spec)
-    name = str(spec.get("name", "q_criterion"))
-    iso_variable = str(spec.get("iso_variable", "q_criterion"))
-    color_variable = str(spec.get("color_variable", "speed"))
-    upsample = int(spec.get("upsample", 2))
-    smooth_sigma = float(spec.get("smooth_sigma", 0.7))
-    level_percentile = float(spec.get("level_percentile", 99.0))
-    level_fraction = float(spec.get("level_fraction", 0.15))
-    max_faces = int(spec.get("max_faces", 400_000))
-    min_component_faces = int(spec.get("min_component_faces", 50))
-    frame_step = int(spec.get("frame_step", 2))
-    workers = int(spec.get("workers", 4))
-    colormap = str(spec.get("colormap", "viridis"))
+    name = str(opt(spec, "name", "q_criterion"))
+    iso_variable = str(opt(spec, "iso_variable", "q_criterion"))
+    color_variable = str(opt(spec, "color_variable", "speed"))
+    upsample = int(opt(spec, "upsample", 2))
+    smooth_sigma = float(opt(spec, "smooth_sigma", 0.7))
+    level_percentile = float(opt(spec, "level_percentile", 99.0))
+    level_fraction = float(opt(spec, "level_fraction", 0.15))
+    max_faces = int(opt(spec, "max_faces", 400_000))
+    min_component_faces = int(opt(spec, "min_component_faces", 50))
+    frame_step = int(opt(spec, "frame_step", 2))
+    workers = int(opt(spec, "workers", 4))
+    colormap = str(opt(spec, "colormap", "viridis"))
 
     auto_level, auto_lo, auto_hi = _auto_level_and_color_range(
         fields,
@@ -334,13 +332,13 @@ def export_isosurfaces(
         level_percentile,
         level_fraction,
     )
-    level = float(spec.get("level", auto_level))
-    color_range = tuple(float(v) for v in spec.get("color_range", (auto_lo, auto_hi)))
+    level = float(opt(spec, "level", auto_level))
+    color_range = tuple(float(v) for v in opt(spec, "color_range", (auto_lo, auto_hi)))
 
     layer_dir = pathlib.Path(out_dir) / "isosurfaces" / name
     layer_dir.mkdir(parents=True, exist_ok=True)
 
-    frames = _file_frames(timeline, frame_step)
+    frames = file_frames(timeline, frame_step)
     jobs = [
         dict(
             f=f,
@@ -360,28 +358,7 @@ def export_isosurfaces(
         for f, _vf, t in frames
     ]
 
-    source = None
-    encoding = getattr(fields.ds, "encoding", None)
-    if encoding:
-        source = encoding.get("source")
-
-    global _FIELDS
-    if workers <= 1 or len(jobs) <= 1:
-        _FIELDS = fields
-        results = [_render_isosurface_file(j) for j in jobs]
-    elif source:
-        ctx = mp.get_context("forkserver")
-        with cf.ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=ctx,
-            initializer=_init_pool,
-            initargs=(source,),
-        ) as ex:
-            results = list(ex.map(_render_isosurface_file, jobs))
-    else:
-        _FIELDS = fields
-        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(_render_isosurface_file, jobs))
+    results = map_frames(fields, jobs, _render_isosurface_file, workers, _set_fields)
     del results
 
     layer: dict[str, Any] = {

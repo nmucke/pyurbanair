@@ -110,24 +110,14 @@ away from walls stay visible. Because this transform's output is already in
 
 Parallelism
 -----------
-Frames are independent, so they're farmed out over ``spec["workers"]``. When
-the input dataset was opened from a file on disk (the normal case --
-``fields.ds.encoding["source"]``), workers are OS processes started with the
-``forkserver`` multiprocessing context (never ``fork``: this process may
-already have loaded CUDA/JAX elsewhere in a longer pipeline, and fork after
-that deadlocks -- see repo memory). Each worker process re-opens the state
-file once via a pool initializer and reuses it for all frames it handles,
-so the (non-trivially-picklable, ``functools.lru_cache``-wrapped)
-``FieldSeries`` object itself never needs to cross a process boundary. If
-the dataset has no on-disk source (e.g. an in-memory ``xr.Dataset`` built by
-a test), the same worker function runs in a thread pool instead -- frames
-still overlap, just without process isolation.
+Frames are independent, so they're farmed out over ``spec["workers"]`` via
+``_frames.map_frames`` (shared with ``isosurfaces.py`` / ``slices.py`` -- see
+that module's docstring for the forkserver-process-pool / thread-pool /
+serial dispatch rules).
 """
 
 from __future__ import annotations
 
-import concurrent.futures as cf
-import multiprocessing as mp
 import pathlib
 import warnings
 from typing import Any, Optional
@@ -140,6 +130,7 @@ except ImportError:  # pragma: no cover - depends on the openvdb build in the en
     import openvdb as vdb
 
 from . import colormaps
+from ._frames import file_frames, map_frames, opt
 from .fields import FieldSeries, Grid, scalar_field, upsample_mask
 from .timeline import Timeline
 
@@ -158,21 +149,15 @@ _PRESETS: dict[str, dict[str, str]] = {
 
 _N_AUTO_SAMPLES = 4
 
-# Per-process globals, populated either directly (thread pool / sequential,
-# same process as the caller) or by _init_pool (forkserver worker process).
+# Per-process global, populated by _set_fields -- either directly (thread
+# pool / sequential, same process as the caller) or via _frames.map_frames's
+# pool initializer (forkserver worker process).
 _FIELDS: Optional[FieldSeries] = None
 
 
 def default_volume_specs() -> list[dict[str, Any]]:
     """The two built-in presets, with every other key left at its default."""
     return [{"name": "speed_glow"}, {"name": "vorticity"}]
-
-
-def _file_frames(timeline: Timeline, frame_step: int) -> list[tuple[int, int, float]]:
-    """(file_index, video_frame, sim_time) for every exported file."""
-    times = timeline.frame_times
-    video_frames = list(range(0, timeline.n_frames, frame_step))
-    return [(f, vf, float(times[vf])) for f, vf in enumerate(video_frames)]
 
 
 def _openvdb_transform(spacing: np.ndarray, origin: np.ndarray) -> "vdb.Transform":
@@ -253,11 +238,9 @@ def _auto_stats(
     return reference, vscale, max(lo, 0.0), hi
 
 
-def _init_pool(source: str) -> None:
+def _set_fields(f: Optional[FieldSeries]) -> None:
     global _FIELDS
-    from .fields import open_fields
-
-    _FIELDS = open_fields(source)
+    _FIELDS = f
 
 
 def _render_volume_file(job: dict[str, Any]) -> dict[str, Any]:
@@ -317,44 +300,44 @@ def export_volumes(
     fields: FieldSeries, timeline: Timeline, spec: dict[str, Any], out_dir: pathlib.Path
 ) -> dict[str, Any]:
     spec = dict(spec)
-    name = str(spec.get("name", "speed_glow"))
+    name = str(opt(spec, "name", "speed_glow"))
     preset = _PRESETS.get(name, {})
 
-    variable = spec.get("variable", preset.get("variable"))
+    variable = opt(spec, "variable", preset.get("variable"))
     if variable is None:
         raise ValueError(
             f"volume spec {name!r} is not a built-in preset ({sorted(_PRESETS)}); "
             "pass an explicit 'variable'."
         )
-    transform = str(spec.get("transform", preset.get("transform", "linear")))
-    gamma = float(spec.get("gamma", 0.45))
-    upsample = int(spec.get("upsample", 2))
-    frame_step = int(spec.get("frame_step", 4))
-    half = bool(spec.get("half", True))
-    write_density = bool(spec.get("write_normalized_density", False))
-    emission_strength = float(spec.get("emission_strength", 1.5))
-    density_scale = float(spec.get("density_scale", 1.0))
-    workers = int(spec.get("workers", 4))
-    colormap = str(spec.get("colormap", preset.get("colormap", "viridis")))
-    floor_pct = float(spec.get("density_floor_percentile", 70.0))
-    ceiling_pct = float(spec.get("density_ceiling_percentile", 99.5))
+    transform = str(opt(spec, "transform", preset.get("transform", "linear")))
+    gamma = float(opt(spec, "gamma", 0.45))
+    upsample = int(opt(spec, "upsample", 2))
+    frame_step = int(opt(spec, "frame_step", 4))
+    half = bool(opt(spec, "half", True))
+    write_density = bool(opt(spec, "write_normalized_density", False))
+    emission_strength = float(opt(spec, "emission_strength", 1.5))
+    density_scale = float(opt(spec, "density_scale", 1.0))
+    workers = int(opt(spec, "workers", 4))
+    colormap = str(opt(spec, "colormap", preset.get("colormap", "viridis")))
+    floor_pct = float(opt(spec, "density_floor_percentile", 70.0))
+    ceiling_pct = float(opt(spec, "density_ceiling_percentile", 99.5))
 
     reference, vscale, auto_lo, auto_hi = _auto_stats(
         fields, variable, transform, gamma, timeline, upsample, floor_pct, ceiling_pct
     )
-    reference = float(spec.get("reference", reference))
-    vscale = float(spec.get("vscale", vscale))
+    reference = float(opt(spec, "reference", reference))
+    vscale = float(opt(spec, "vscale", vscale))
     density_range = tuple(
-        float(v) for v in spec.get("density_range", (auto_lo, auto_hi))
+        float(v) for v in opt(spec, "density_range", (auto_lo, auto_hi))
     )
-    color_range = tuple(float(v) for v in spec.get("color_range", density_range))
+    color_range = tuple(float(v) for v in opt(spec, "color_range", density_range))
 
     refined_grid: Grid = fields.grid.refined(upsample) if upsample > 1 else fields.grid
 
     layer_dir = pathlib.Path(out_dir) / "volumes" / name
     layer_dir.mkdir(parents=True, exist_ok=True)
 
-    frames = _file_frames(timeline, frame_step)
+    frames = file_frames(timeline, frame_step)
     jobs = [
         dict(
             f=f,
@@ -374,28 +357,7 @@ def export_volumes(
         for f, _vf, t in frames
     ]
 
-    source = None
-    encoding = getattr(fields.ds, "encoding", None)
-    if encoding:
-        source = encoding.get("source")
-
-    global _FIELDS
-    if workers <= 1 or len(jobs) <= 1:
-        _FIELDS = fields
-        results = [_render_volume_file(j) for j in jobs]
-    elif source:
-        ctx = mp.get_context("forkserver")
-        with cf.ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=ctx,
-            initializer=_init_pool,
-            initargs=(source,),
-        ) as ex:
-            results = list(ex.map(_render_volume_file, jobs))
-    else:
-        _FIELDS = fields
-        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(_render_volume_file, jobs))
+    results = map_frames(fields, jobs, _render_volume_file, workers, _set_fields)
 
     layer: dict[str, Any] = {
         "name": name,
