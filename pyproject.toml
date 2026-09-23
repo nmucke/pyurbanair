@@ -105,6 +105,27 @@ data-assimilation = { path = "libs/data-assimilation", editable = true }
 [tool.pixi.feature.evaluation.pypi-dependencies]
 evaluation = { path = "libs/evaluation", editable = true }
 
+# Cinematic LES visualization (Unreal Engine export + Blender preview). Kept in
+# its own lightweight `viz` environment: openvdb (conda-forge only) drags in
+# boost/tbb, which we don't want perturbing the big dev solve.
+# openvdb 11 has no osx-arm64 build, so the feature is linux-64 only.
+[tool.pixi.feature.viz]
+platforms = ["linux-64"]
+
+[tool.pixi.feature.viz.dependencies]
+# 11.x on purpose: 12+ writes VDB file format 225, which Blender 4.2 and the
+# OpenVDB bundled with Unreal Engine 5 cannot read (they stop at 224).
+openvdb = ">=11,<12"
+scikit-image = ">=0.25,<0.27"
+numba = ">=0.61,<1"
+pytest = ">=8.3.5,<8.4"
+
+[tool.pixi.feature.viz.activation.env]
+PYTHONNOUSERSITE = "1"
+
+[tool.pixi.feature.viz.pypi-dependencies]
+les-render = { path = "libs/les-render", editable = true }
+
 # torch comes from PyPI, not conda-forge: conda pytorch >=2.6 hard-depends
 # on conda triton, whose nvcc toolchain caps gcc <13 and conflicts with the
 # gcc 15.2 the CFD features pin. The generic requirement lives in the
@@ -178,6 +199,17 @@ strict_equality = true
 [[tool.mypy.overrides]]
 module = "neural_surrogates.architectures._tadpole.*"
 ignore_errors = true
+
+# les_render's Blender scripts run inside Blender's own interpreter against the
+# untyped `bpy` API; the pure-numpy helpers they share are tested in pytest.
+[[tool.mypy.overrides]]
+module = "les_render.blender.*"
+ignore_errors = true
+
+# Untyped third-party modules used by les_render (viz env only).
+[[tool.mypy.overrides]]
+module = ["pyopenvdb", "openvdb", "numba", "skimage.*", "scipy.*", "yaml"]
+ignore_missing_imports = true
 
 
 
@@ -304,3 +336,4 @@ delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilat
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
 snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm", "cuda"] }
+viz = { features = ["viz", "py312"] }

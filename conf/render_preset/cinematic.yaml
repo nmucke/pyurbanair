@@ -1,0 +1,52 @@
+# Everything at once, dark "emissive flow over clay city" look: smoke-wire
+# streaklines from an inlet rake, comet-trail pathlines, a haze of speed
+# deviation (wakes and jets), Q-criterion vortex cores and a pedestrian-level
+# LIC wind map. The camera sequence (establishing -> plan -> street -> wake ->
+# establishing) shows a subset of layers per shot (cameras.DEFAULT_LAYERS).
+# Layer keys are the per-module spec keys; see each module's docstring in
+# libs/les-render/src/les_render/.
+name: cinematic
+look: dark
+ground_margin: 40.0
+
+layers:
+  streaklines:
+    type: particles
+    kind: streaklines
+    seeding: inlet_rake
+    line_duration: 45.0       # s of dye per line; a full transit ends in a turbulent hairball
+    colormap: inferno
+  trails:
+    type: particles
+    kind: trails
+    counts: 20000             # ~7.7 MB per video frame on disk
+    colormap: inferno
+  speed_glow:
+    type: volume
+    variable: speed
+    transform: abs_excess     # |speed - median fluid speed|: lights wakes and jets, not the free stream
+    density_floor_percentile: 85.0   # keep only the strongest deviations (else a haze slab over the roofs)
+    colormap: GnBu_r
+  vortices:
+    type: isosurface
+    iso_variable: q_criterion
+    level_fraction: 0.4       # x 99th-pct Q; lower gives fat blobs on a 4 m grid
+    color_variable: speed
+    colormap: inferno
+  ground_speed:
+    type: slice
+    axis: z
+    position: 2.0             # pedestrian level [m]
+    variable: speed
+    colormap: inferno
+    px_per_metre: 4.0
+
+cameras: {}                   # cameras.DEFAULT_SPEC: the 5-shot sequence
+
+hud:
+  title: null
+  captions:
+    establishing: Wind through an idealized city block array
+    plan: Pedestrian-level wind speed (z = 2 m)
+    street: Street canyon at pedestrian height
+    wake: Vortex cores (Q-criterion) in a building wake

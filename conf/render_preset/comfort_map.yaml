@@ -1,0 +1,36 @@
+# Pedestrian wind comfort: a daylight architectural-model look with the z = 2 m
+# wind-speed map (LIC texture shows direction) and light pathline trails near
+# the ground, seen mostly from above.
+name: comfort_map
+look: daylight
+ground_margin: 40.0
+
+layers:
+  ground_speed:
+    type: slice
+    axis: z
+    position: 2.0
+    variable: speed
+    colormap: viridis
+    px_per_metre: 6.0
+    lic_strength: 0.5
+  trails:
+    type: particles
+    kind: trails
+    counts: 15000
+    z_max: 12.0
+    colormap: viridis
+
+cameras:
+  shots:
+    - {type: plan, fraction: 0.5}
+    - {type: street, fraction: 0.3}
+    - {type: plan, fraction: 0.2}
+  layers:
+    plan: [ground_speed, trails]
+    street: [ground_speed, trails]
+
+hud:
+  captions:
+    plan: Wind speed at pedestrian height (z = 2 m)
+    street: Street canyon at pedestrian height

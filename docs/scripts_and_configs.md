@@ -1597,6 +1597,13 @@ Brief summary:
 | [`neural_surrogate/add_geometry_to_training_data.py`](../scripts/neural_surrogate/add_geometry_to_training_data.py) | No — argparse | Post-processes an existing dataset to add a geometry variable to each state file. |
 | [`neural_surrogate/finish_training_data_processing.py`](../scripts/neural_surrogate/finish_training_data_processing.py) | No — argparse | Finalizes a partially-generated dataset (e.g. after a cluster job restart). |
 
+### 2.9 Visualization scripts (`viz` env)
+
+| Script | Hydra? | Purpose |
+|---|---|---|
+| [`visualization/render_les.py`](../scripts/visualization/render_les.py) | Yes — [`render_les.yaml`](../conf/render_les.yaml) + group [`render_preset/`](../conf/render_preset/) | Case folder / state file -> render bundle (Unreal assets + scripts) -> Blender preview mp4. See [les_render.md](les_render.md). Runs under `pixi run -e viz`; resolves its own output dir (`output_dir`, else `results/les_render/<case>/<preset>`) because `resolve_output_dir` imports jax and the backends. |
+| [`visualization/make_render_case.py`](../scripts/visualization/make_render_case.py) | No — argparse | Symlinks (or copies) a training sample's state, STL and params into a self-contained case folder, optionally with a `render.yaml` template. |
+
 ---
 
 ## Quick lookup

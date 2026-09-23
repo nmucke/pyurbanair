@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
+# Leaf library: turns an LES state file into render-ready assets (OpenVDB
+# volumes, particle/pathline caches, building meshes, camera rigs) for Unreal
+# Engine, plus a headless Blender preview. No jax, no pyurbanair, no backend.
+# `openvdb` comes from conda-forge (see the `viz` pixi feature), not PyPI.
+dependencies = [
+    "numpy>=2.3.5,<3",
+    "scipy>=1.16.3,<2",
+    "xarray>=2025.12.0,<2026",
+    "netcdf4>=1.7.3,<2",
+    "trimesh>=4.10.1,<5",
+]
+name = "les-render"
+requires-python = ">= 3.12,<3.13"
+version = "0.1.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/les_render"]

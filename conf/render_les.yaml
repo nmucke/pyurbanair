@@ -1,0 +1,60 @@
+# Primary config (entry point) for scripts/visualization/render_les.py.
+#
+# Turns one LES case into a cinematic animation: a render bundle for Unreal
+# Engine + a Blender preview mp4. Run in the `viz` pixi environment. The look
+# (which layers, colours, camera sequence, HUD) comes from `render_preset`;
+# everything else here is the case, the time window and the render stages.
+# A `render.yaml` inside the case folder is merged over this config.
+#
+# Examples::
+#   python scripts/visualization/render_les.py input=path/to/case_folder
+#   python scripts/visualization/render_les.py input=.../sample_0000.nc render_preset=vortex
+#   python scripts/visualization/render_les.py input=... time.duration=8 render.width=960 render.height=540
+#   python scripts/visualization/render_les.py input=... stages.export=false   # re-render only
+defaults:
+  - render_preset: cinematic
+  - _self_
+
+# Case folder or state file. state/geometry/params override auto-discovery.
+input: ???
+state: null
+geometry: null
+params: null
+
+# Bundle location: output_dir, else <results_dir>/<case name>/<preset name>.
+output_dir: null
+results_dir: results/les_render
+
+time:
+  fps: 30
+  playback_speed: 20     # sim seconds per video second
+  t_start: null          # sim seconds; null = first snapshot
+  t_end: null            # sim seconds; null = last snapshot
+  duration: null         # video seconds; wins over t_end
+
+render:
+  width: 1920
+  height: 1080
+  look: null             # dark | daylight; null = the preset's look
+
+stages:
+  export: true           # geometry, layers, shots, manifest
+  hud: true              # overlay PNGs
+  unreal: true           # stage UE scripts + LUT textures in <bundle>/unreal
+  alembic: false         # Blender writes alembic/*.abc for UE (particles, isosurfaces)
+  blender: true          # headless Blender preview render
+  video: true            # ffmpeg: frames + HUD -> preview/<case>.mp4
+
+blender:
+  engine: eevee          # eevee (fast) | cycles (final quality, GPU)
+  samples: null          # render samples; null = engine default
+  frames: null           # "a:b" video-frame range; null = all
+
+workers: 4               # frame-parallel export workers (DRAM-bound past ~4-8)
+overwrite: false         # wipe existing layer folders before export
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${results_dir}/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}
