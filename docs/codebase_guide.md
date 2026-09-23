@@ -38,6 +38,7 @@ file-level detail, gotchas, and recipes this guide only summarizes:
 | Neural surrogates (UNetConvNeXt, UPT, P3D, domain-decomposition, training, rollout) | [docs/neural_surrogates.md](neural_surrogates.md) |
 | Hydra configs (`conf/`) and the executable scripts (`scripts/`) | [docs/scripts_and_configs.md](scripts_and_configs.md) |
 | Running on HPC clusters (Snellius / DelftBlue / local SLURM) | [docs/job_scripts.md](job_scripts.md) |
+| Cinematic LES animations (render bundles for Unreal Engine + Blender preview, `viz` env) | [docs/les_render.md](les_render.md) |
 | Dynamic multi-window ESMDA theory/config | [docs/temp/esmda_dynamic_multiwindow.md](temp/esmda_dynamic_multiwindow.md) |
 | Model-error compensation parameters (α, sgs/km) | [docs/temp/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md) |
 | Reduced SVD/KL state update theory | [docs/temp/reduced_state_da.md](temp/reduced_state_da.md) |
@@ -95,6 +96,11 @@ libs/data-assimilation/src/data_assimilation/
     base.py                        # BaseSmoothing — _forecast_step, _observation_step
     esmda.py                       # Parameter/StateAndParameter/TimeVaryingParameter/
                                    #   StateAndTimeVaryingParameter ESMDA
+
+libs/les-render/src/les_render/   # LES state file -> render bundle (OpenVDB, particle
+                                   #   caches, isosurfaces, LIC slices, shots, HUD) for
+                                   #   Unreal + Blender. Leaf lib, own `viz` pixi env.
+                                   #   See docs/les_render.md.
 
 libs/evaluation/src/evaluation/    # Metrics + figures for DA runs. Leaf lib: no jax, no
                                    #   pyurbanair, no backends (see its __init__).

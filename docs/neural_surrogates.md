@@ -151,6 +151,31 @@ these differences:
   itself be a multiple of 16. Geometries whose tallest building reaches
   `z_size` are dropped from the pool with a warning (pylbm SIGFPEs when
   buildings pierce the domain top).
+- **Adaptive spin-up.** `training_data.spinup_time` is a FLOOR, not the value
+  every sample gets. With `training_data.adaptive_spinup.enabled: true` each
+  geometry's spin-up is sized from its own streamwise fill time —
+  `fill_times * Lx_domain / (bulk speed * cos(inflow_angle))`, using the
+  sample's INITIAL parameters (the spin-up holds them on a constant plateau),
+  quantised up to a whole `output_frequency` and clamped to
+  `[spinup_time, adaptive_spinup.max_spinup_time]`. This matters on the uDALES
+  turbulent-inlet path, where the interior starts from rest with nudging off
+  and so fills by advection from the inlet face alone: a spin-up sized from
+  nudging-path experience leaves a visible streamwise velocity deficit in the
+  early frames (see [pyudales.md §6.1](pyudales.md)). Because the clamp floor
+  is `spinup_time`, the scalar written into the corpus `config.yaml` stays a
+  valid lower bound for `train_latent_generator`'s `constant_prehistory`
+  check. `enabled: false` gives every sample the flat `spinup_time` as before.
+  The value actually used is recorded per sample in the state file's
+  `spinup_time_s` attribute.
+- **Saved variables and on-disk encoding.** `training_data.save_vars` is a
+  whitelist of time-varying variables (null keeps everything the backend
+  returned); variables with no time dimension, such as the pyudales blanking
+  mask, are always kept. `training_data.state_encoding` is passed through to
+  `Dataset.to_netcdf(encoding=...)` (null writes uncompressed, as before);
+  `least_significant_digit` is applied to float variables only. Both default
+  to the previous behaviour when absent. These matter at pool scale: uDALES
+  returns `pres` alongside `u`/`v`/`w` and no surrogate config reads it, and
+  the fields compress far better after bit-rounding than with deflate alone.
 - **Direct sequential single-model runs — no ensemble machinery.** Resampled
   duplicates are grouped so each geometry's forward model is built and
   prepared once, then called once per simulation (`save_on_disk` mode writes
@@ -167,6 +192,31 @@ these differences:
   mesh frame, i.e. where the geometry sits inside the padded domain)
   and `geometries/` (copies of every STL used); each state file carries
   `geometry_stl` / `geometry_source` / `resolution_m` attrs.
+- **Sharded generation (`training_data.sharding`).** A generation too long
+  for one job splits into `stage: plan | simulate | finalize` and yields the
+  same corpus as the one-process `stage: all` (the default). `plan` draws
+  everything random once — the geometry/split assignment and every parameter
+  trajectory — and freezes it with the resolved `config.yaml` (sharding block
+  stripped) in the output dir; `sampled_params.nc` is written last and marks
+  the plan complete. `simulate` shards (`num_shards`, `shard_index`) re-read
+  that frozen config (only runtime keys — `paths`, `ncpu`, `temp_dir`,
+  `verbose`, ... — come from the shard's own command line), check that the
+  pool still reproduces `geometries.csv`, and run a disjoint set of whole
+  geometry groups, balanced greedily on cells × simulated seconds × mean
+  inflow speed. Spin-up is still sized over each group's full sample list.
+  Sample files are written atomically (hidden temp name + rename, param file
+  last), and samples already on disk are skipped, so resubmitting a shard that
+  hit the time limit resumes it; a failing geometry is logged and skipped and
+  the shard exits nonzero at the end. `finalize` refuses to run until every
+  sample exists (naming the shards to resubmit), then writes `params.nc` from
+  the first planned sample's time axis, the frame-count check and the figures
+  from the saved files. An explicit `training_data.output_dir` is required
+  for every stage but `all`. Rerunning `all` or `plan` against an existing
+  plan with the same config resumes it; a plan made under a different config
+  is refused rather than overwritten. DelftBlue wrapper:
+  [job_scripts/delftblue/submit_random_geometries_training_data.sh](../job_scripts/delftblue/submit_random_geometries_training_data.sh)
+  (plan → simulate array + resume rounds → finalize, chained with SLURM
+  dependencies).
 - **ncpu must divide every sampled `nx`** (pypalm/pyudales slab
   decomposition). All pool `nx` are multiples of 16, so `ncpu` ∈
   {1, 2, 4, 8, 16} always works; the script validates this before running

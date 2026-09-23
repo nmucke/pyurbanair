@@ -454,13 +454,36 @@ rescale — remains a future option behind the identical file interface.
 **Spin-up is longer than on the nudging path.** `prof.inp`/`lscale.inp` are
 written as zeros (start from rest) *and* `lnudge=.false.`, so the interior fills
 from the inlet face alone with no relaxation pulling it toward the target
-profile. A `spinup_time` sized from nudging-path experience will be too short.
-Measure it during calibration.
+profile. A `spinup_time` sized from nudging-path experience will be too short — it is a
+flow-through-time requirement, roughly 6 x `Lx / (bulk streamwise speed)`.
+Measured on a 764 m domain given 2 flow-throughs, the first saved frame still
+carried a 27% inlet->outlet velocity deficit. The random-geometry generator
+sizes it per geometry (`training_data.adaptive_spinup`, see
+[neural_surrogates.md](neural_surrogates.md)).
 
-**Calibration is still open.** The shipped `intensity` and length scales are
-starting points (≈ building height), not tuned values. Three things bias the
-realised turbulence below its nominal value, all of which calibration should
-account for before reaching for more amplitude:
+**`profile_config.z_ref` defaults to the domain top.** `build_profile_shape`
+falls back to `zsize` when `z_ref` is unset (`vertical_profile.py`
+`_power_law`), so `velocity_magnitude` means "the speed at the domain top" and
+silently changes meaning whenever `z_size` does — the same nominal 7.5 m/s is a
+16% slower canopy wind at `z_size` 128 than at 64. Pin `z_ref` explicitly on
+any dataset that will be compared with, or fine-tuned from, another generated
+at a different height.
+
+**`intensity` is bounded above by a dead safety net.** The generated field is
+Gaussian and unclipped, and uDALES' own inlet guard is commented out — the
+`max(0., …)` in `modboundary.f90:687-706` is dead on all six lines (u0/um,
+v0/vm, w0/wm). A negative driver sample is therefore written verbatim onto the
+west face *and* into the pinned pressure BC `bcpup`. Since `sigma_u =
+intensity * |U(z)|` with constant TI in z, the backflow rate is
+`Phi(-1/intensity)` everywhere: ~4e-11 at `intensity: 0.15`, but **3e-5 at
+0.25** — hundreds of backflow cells per window on a 200x32 inlet plane. Keep
+`intensity` at or below ~0.15 unless you first restore that guard.
+
+**Calibrated defaults.** `conf/model/pyudales.yaml` now ships values tuned for
+the `realistic` STL pool at 4 m spacing (`intensity: 0.15`,
+`length_scale_y/z: 24`, `length_scale_x: 48`, `time_step: 0.5`). Three things
+still bias the realised turbulence below its nominal value, all of which
+calibration should account for before reaching for more amplitude:
 
 - *Too-short correlation lengths* are the classic failure mode — the
   fluctuations decay before reaching the buildings, and the fix is longer

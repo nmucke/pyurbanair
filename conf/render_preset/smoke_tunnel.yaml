@@ -1,0 +1,28 @@
+# Wind-tunnel smoke visualization: dense streaklines released from an inlet
+# rake plus a near-ground line, nothing else. The most readable "what does the
+# air do" view for talks.
+name: smoke_tunnel
+look: dark
+ground_margin: 40.0
+
+layers:
+  streaklines:
+    type: particles
+    kind: streaklines
+    seeding: inlet_rake
+    counts: {rake_y: 36, rake_z: 10, ground_line: 72}
+    colormap: inferno
+
+cameras:
+  shots:
+    - {type: establishing, fraction: 0.35}
+    - {type: street, fraction: 0.35}
+    - {type: establishing, fraction: 0.30}
+  layers:
+    establishing: [streaklines]
+    street: [streaklines]
+
+hud:
+  captions:
+    establishing: Streaklines from an upstream smoke rake
+    street: Street canyon at pedestrian height

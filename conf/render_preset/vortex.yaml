@@ -1,0 +1,34 @@
+# Coherent structures: Q-criterion vortex cores coloured by speed, with a
+# sparse set of streaklines for context, orbiting the wake of the tallest
+# building.
+name: vortex
+look: dark
+ground_margin: 40.0
+
+layers:
+  vortices:
+    type: isosurface
+    iso_variable: q_criterion
+    level_fraction: 0.4       # x 99th-pct Q; lower gives fat blobs on a 4 m grid
+    color_variable: speed
+    colormap: inferno
+    frame_step: 1
+  streaklines:
+    type: particles
+    kind: streaklines
+    seeding: inlet_rake
+    counts: {rake_y: 12, rake_z: 5, ground_line: 0}
+    colormap: inferno
+
+cameras:
+  shots:
+    - {type: establishing, fraction: 0.3}
+    - {type: wake, fraction: 0.7}
+  layers:
+    establishing: [vortices, streaklines]
+    wake: [vortices, streaklines]
+
+hud:
+  captions:
+    establishing: Vortex cores (Q-criterion) across the array
+    wake: Vortex shedding behind the tallest building

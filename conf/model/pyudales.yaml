@@ -15,7 +15,7 @@ forward_model:
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
-  ncpu: 4
+  ncpu: 16
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow # periodic #
@@ -67,6 +67,14 @@ forward_model:
     profile_config:
       type: power_law
       alpha: 0.25
+      # Height (m) at which `velocity_magnitude` IS the speed: U(z) =
+      # velocity_magnitude * (z/z_ref)^alpha. Unset, this defaults to the
+      # domain top (vertical_profile._power_law), which silently redefines
+      # the parameter whenever z_size changes -- the same nominal 7.5 m/s is
+      # a 16% slower canopy wind at z_size 128 than at 64. Pinned to 64 m so
+      # the parameter means the same thing across datasets (the
+      # pyudales_idealized corpus was generated at z_size 64, i.e. z_ref 64).
+      z_ref: 64.0
   # Kill numerically-unstable runs early: when the adaptive timestep collapses
   # toward zero the run is terminated and reported as a failure, so the ensemble
   # resamples it from a successful donor instead of waiting for the slow crash.
@@ -95,15 +103,39 @@ forward_model:
   #
   # `enabled: false` (the default) is a strict no-op — namoptions stays
   # byte-identical and no driver files are written.
+  # Calibrated for the `realistic` STL pool at 4 m isotropic spacing, z_size
+  # 128 m, velocity_magnitude 5-10 m/s (conf/neural_surrogate/training_data.yaml).
+  # The pool's building heights are bimodal: z_max median 16 m, p75 48 m, p90 50 m.
   inlet_turbulence:
     enabled: true
-    intensity: 0.25        # u'_rms / |U_mean(z)|; v' and w' get 0.7x this
-    length_scale_y: 12.0  # m — spanwise integral length scale of the eddies
-    length_scale_z: 12.0  # m — vertical (defaults ~ building height; calibrate)
-    length_scale_x: 12.0  # m — streamwise; sets the AR(1) time scale via Taylor
+    # u'_rms / |U_mean(z)|, held CONSTANT in z (sigma = intensity * |U(z)|);
+    # v' and w' get 0.7x this. 0.15 is the upper end of a rough urban approach
+    # flow. Do NOT raise much past this: the field is Gaussian and unclipped,
+    # and uDALES' own inlet guard is dead code -- the `max(0.,u0driver)` in
+    # modboundary.f90:687-706 is commented out on every line -- so a negative
+    # sample is written verbatim onto the west face AND into the pinned
+    # pressure BC. P(u<0) = Phi(-1/intensity): ~4e-11 at 0.15, but 3e-5 at
+    # 0.25, which is hundreds of backflow cells per window on this grid.
+    intensity: 0.15
+    # Spanwise/vertical integral length scales. 4 m spacing -> these are 6
+    # cells; the digital filter uses a +/-2n-cell, 4n+1-tap kernel, so scales
+    # under ~6 m collapse to the n=1 floor silently. Too-SHORT scales are the
+    # documented failure mode (fluctuations decay before reaching the
+    # buildings); the fix is longer scales, not more `intensity`. 24 m sits
+    # above the pool's median building height and below the 0.3*zsize = 38.4 m
+    # plane-fraction warning, where plane-mean removal starts eating the rms.
+    length_scale_y: 24.0
+    length_scale_z: 24.0
+    # Streamwise; converted to the AR(1) time scale by Taylor's hypothesis,
+    # T = length_scale_x / mean(velocity_magnitude), a = exp(-pi*dt/(2T)).
+    # Kept at 2x the cross-stream scales as in a real boundary layer: a = 0.885
+    # at U = 7.5 m/s vs 0.61 for an isotropic 12 m. Costs only AR(1) burn-in.
+    length_scale_x: 48.0
     time_step: 0.5        # s — &DRIVER dtdriver. Injected turbulence is
                           #     band-limited to ~1/(2*dtdriver) because the
                           #     solver interpolates linearly between records.
+                          #     U*dtdriver = 3.75 m at U=7.5 ~= dx, well matched.
+                          #     Memory scales 1/dtdriver: see lchunkread below.
     driverjobnr: 998      # 3-digit driver-file suffix; must differ from expnr
     seed: null            # null -> derived from the member's experiment name
     # Large cases only: bound the resident driver arrays

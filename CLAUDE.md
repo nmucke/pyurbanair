@@ -21,6 +21,7 @@ the surrogate docs for a pure LBM change).
 | Neural surrogates (`libs/neural-surrogates`) | [docs/neural_surrogates.md](docs/neural_surrogates.md) |
 | Hydra configs (`conf/`) or scripts (`scripts/`) | [docs/scripts_and_configs.md](docs/scripts_and_configs.md) |
 | Running jobs on HPC (Snellius / DelftBlue / local) | [docs/job_scripts.md](docs/job_scripts.md) |
+| Cinematic LES animations: Unreal / Blender render bundles (`libs/les-render`, `scripts/visualization/`) | [docs/les_render.md](docs/les_render.md) |
 
 `docs/codebase_guide.md` is the entrypoint and has its own finer-grained
 documentation map plus the "adding a new X" recipes. When in doubt, start there.
