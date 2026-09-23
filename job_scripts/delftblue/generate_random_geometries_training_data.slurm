@@ -125,28 +125,44 @@ trap 'requeue_self "Time limit near (USR1)" && sleep 600' USR1
 # launch a uDALES linked against conda's OpenMPI) and OPAL_PREFIX (which points
 # conda's OpenMPI at nvhpc's install tree). Backgrounded + `wait` so the USR1
 # trap runs while it works.
+#
+# A stage that dies within QUICK_FAIL_S of starting is retried IN PLACE: /home
+# is BeeGFS and, under many concurrent imports, intermittently reports a file of
+# the (hardlinked) pixi env as missing. Requeueing for that would send the task
+# to the back of a low-priority queue.
+QUICK_FAIL_S=300
+QUICK_RETRIES=3
 set +e
-pixi run --as-is -e delftblue -- bash -c '
-    unset OPAL_PREFIX CC CXX F77 F90 FC
-    export PATH="${CONDA_PREFIX}/bin:${PATH}"
-    exec "$@"
-' bash python -u \
-    scripts/neural_surrogate/generate_random_geometries_training_data.py \
-    "training_data.output_dir=${OUTPUT_DIR}" \
-    "training_data.sharding.stage=${STAGE}" \
-    "training_data.sharding.num_shards=${NUM_SHARDS}" \
-    ${SHARD_FLAGS[@]+"${SHARD_FLAGS[@]}"} \
-    "hydra.run.dir=${OUTPUT_DIR}/hydra/${STAGE}_${SLURM_JOB_ID:-$$}" \
-    "paths.experiment_dir=${RUN_TEMP_DIR}" \
-    "model.forward_model.ncpu=${NCPU}" \
-    "$@" &
-PY_PID=$!
-# `wait` returns early whenever a trapped signal arrives; keep waiting until
-# the stage itself has exited.
-while :; do
-    wait "${PY_PID}"
-    STATUS=$?
-    kill -0 "${PY_PID}" 2>/dev/null || break
+for attempt in $(seq 0 "${QUICK_RETRIES}"); do
+    started=${SECONDS}
+    pixi run --as-is -e delftblue -- bash -c '
+        unset OPAL_PREFIX CC CXX F77 F90 FC
+        export PATH="${CONDA_PREFIX}/bin:${PATH}"
+        exec "$@"
+    ' bash python -u \
+        scripts/neural_surrogate/generate_random_geometries_training_data.py \
+        "training_data.output_dir=${OUTPUT_DIR}" \
+        "training_data.sharding.stage=${STAGE}" \
+        "training_data.sharding.num_shards=${NUM_SHARDS}" \
+        ${SHARD_FLAGS[@]+"${SHARD_FLAGS[@]}"} \
+        "hydra.run.dir=${OUTPUT_DIR}/hydra/${STAGE}_${SLURM_JOB_ID:-$$}" \
+        "paths.experiment_dir=${RUN_TEMP_DIR}" \
+        "model.forward_model.ncpu=${NCPU}" \
+        "$@" &
+    PY_PID=$!
+    # `wait` returns early whenever a trapped signal arrives; keep waiting
+    # until the stage itself has exited.
+    while :; do
+        wait "${PY_PID}"
+        STATUS=$?
+        kill -0 "${PY_PID}" 2>/dev/null || break
+    done
+    elapsed=$((SECONDS - started))
+    [ "${STATUS}" -ne 0 ] && [ "${elapsed}" -lt "${QUICK_FAIL_S}" ] \
+        && [ "${attempt}" -lt "${QUICK_RETRIES}" ] || break
+    echo "Stage ${STAGE} exited ${STATUS} after ${elapsed}s; retrying in place" \
+         "($((attempt + 1))/${QUICK_RETRIES}) -- $(date)"
+    sleep 30
 done
 set -e
 
