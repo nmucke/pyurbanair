@@ -79,6 +79,14 @@ openmpi = {version=">=4.1.0", channel="conda-forge"}
 libnetcdf = {version=">=4.9.3", channel="conda-forge"}
 coreutils = {version=">=9.0", channel="conda-forge"}
 
+# OpenMPI 5.0.x segfaults in MPI_Finalize on DelftBlue (mca_base_var_finalize ->
+# var_destructor in libopen-pal), killing uDALES with exit 139 after a clean
+# run; 4.1.x takes a different MCA cleanup path. After changing this, rebuild
+# libs/pyudales/u-dales/build/release: the auto-build only checks the binary
+# exists, not which MPI it links.
+[tool.pixi.feature.delftblue.dependencies]
+openmpi = {version=">=4.1.0,<5", channel="conda-forge"}
+
 [tool.pixi.feature.delftblue.activation]
 scripts = ["activation_scripts/delftblue_activation.sh"]
 

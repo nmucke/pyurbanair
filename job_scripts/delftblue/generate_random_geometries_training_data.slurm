@@ -2,7 +2,7 @@
 # ONE stage of a sharded random-geometry training-data generation on DelftBlue
 # (scripts/neural_surrogate/generate_random_geometries_training_data.py, pyudales).
 # Normally submitted by submit_random_geometries_training_data.sh, which chains
-# plan -> simulate array (+ resume rounds) -> finalize with SLURM dependencies.
+# plan -> simulate array -> finalize with SLURM dependencies.
 # By hand:
 #
 #     export OUTPUT_DIR=/projects/urbanair/training_data/pyudales_realistic NUM_SHARDS=64
@@ -14,26 +14,38 @@
 #   plan      draws every geometry assignment + parameter trajectory ONCE and
 #             freezes them, with the resolved config, in OUTPUT_DIR
 #   simulate  array task i runs shard i of NUM_SHARDS against that frozen plan;
-#             samples already on disk are skipped, so resubmitting a task that
-#             hit the time limit resumes it
+#             samples already on disk are skipped, so a rerun resumes the shard
 #   finalize  checks all samples are on disk, writes params.nc + figures
 #
+# Time limit: a simulate task REQUEUES ITSELF (same job id, so dependencies on
+# the array keep waiting) when SLURM signals USR1 shortly before the limit, and
+# also when the stage exits nonzero (a failed geometry is retried), at most
+# MAX_REQUEUES times. The in-flight simulation is lost; finished samples are
+# kept (atomic writes) and skipped on the restart.
+#
 # Environment:
-#   OUTPUT_DIR  (required) dataset root; must be the same for every stage
-#   NUM_SHARDS  (required) must be the same for every stage
-#   NCPU        uDALES MPI ranks per shard (default: cpus-per-task). Must divide
-#               every sampled nx; all pool nx are multiples of 16, so 1/2/4/8/16.
+#   OUTPUT_DIR    (required) dataset root; must be the same for every stage
+#   NUM_SHARDS    (required) must be the same for every stage
+#   NCPU          uDALES MPI ranks per shard (default: cpus-per-task). Must divide
+#                 every sampled nx; all pool nx are multiples of 16, so 1/2/4/8/16.
+#   MAX_REQUEUES  simulate restarts before giving up (default 3)
 # Extra Hydra overrides on the sbatch line are passed through. For simulate and
 # finalize only runtime keys take effect (scratch paths, ncpu, verbose): the
 # physics comes from the plan's frozen config.yaml, whatever conf/ says now.
 #
+# research-ceg-gse, not innovation: innovation allows this user 1 running and 10
+# submitted jobs, which cannot hold a shard array. 16 cores packs evenly on both
+# compute-p1 (48c) and compute-p2 (64c) nodes, so either partition may start it.
 #SBATCH --job-name=gen_rand_geom
-#SBATCH --partition=compute-p1
+#SBATCH --partition=compute-p1,compute-p2
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem-per-cpu=3G
-#SBATCH --time=24:00:00
-#SBATCH --account=innovation
+#SBATCH --time=12:00:00
+#SBATCH --account=research-ceg-gse
+#SBATCH --requeue
+#SBATCH --signal=B:USR1@300
+#SBATCH --open-mode=append
 #SBATCH --output=job_scripts/delftblue/out_files/slurm-%x-%A_%a.out
 #SBATCH --error=job_scripts/delftblue/out_files/slurm-%x-%A_%a.err
 
@@ -44,6 +56,7 @@ shift
 : "${OUTPUT_DIR:?set OUTPUT_DIR (the dataset root, shared by every stage)}"
 : "${NUM_SHARDS:?set NUM_SHARDS (shared by every stage)}"
 NCPU="${NCPU:-${SLURM_CPUS_PER_TASK:-1}}"
+MAX_REQUEUES="${MAX_REQUEUES:-3}"
 
 SHARD_FLAGS=()
 if [ "${STAGE}" = "simulate" ]; then
@@ -57,13 +70,13 @@ mkdir -p job_scripts/delftblue/out_files "${OUTPUT_DIR}"
 
 # Per-geometry solver scratch goes on /scratch (beegfs), private to this task
 # (SLURM_JOB_ID is unique per array task). Cleaned on success; left behind on
-# failure for inspection.
+# failure or requeue for inspection (a restart reuses the same path).
 RUN_TEMP_DIR="/scratch/${USER}/urbanair_temp/${SLURM_JOB_ID:-$$}"
 mkdir -p "${RUN_TEMP_DIR}"
-trap '[ "$?" = "0" ] && rm -rf "${RUN_TEMP_DIR}"' EXIT
 
 echo "DELFTBLUE random-geometry training data: stage=${STAGE}" \
-     "shard=${SHARD_INDEX:--}/${NUM_SHARDS} job ${SLURM_JOB_ID:-local} on $(hostname) -- $(date)"
+     "shard=${SHARD_INDEX:--}/${NUM_SHARDS} job ${SLURM_JOB_ID:-local}" \
+     "(restart ${SLURM_RESTART_COUNT:-0}) on $(hostname) -- $(date)"
 echo "Output: ${OUTPUT_DIR}  (temp: ${RUN_TEMP_DIR}, ncpu=${NCPU})"
 [ "$#" -gt 0 ] && echo "Extra hydra overrides: $*"
 
@@ -84,9 +97,40 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
+# Requeue this simulate task (true) or decline (false). SLURM then kills the
+# running job and puts it back in the queue under the same job id.
+requeue_self() {
+    local restarts="${SLURM_RESTART_COUNT:-0}"
+    [ "${STAGE}" = "simulate" ] && [ -n "${SLURM_JOB_ID:-}" ] || return 1
+    if [ "${restarts}" -ge "${MAX_REQUEUES}" ]; then
+        echo "$1; already restarted ${restarts}x (MAX_REQUEUES=${MAX_REQUEUES}), not requeueing"
+        return 1
+    fi
+    echo "$1; requeueing (restart $((restarts + 1))/${MAX_REQUEUES}) -- $(date)"
+    # Name the task as <array>_<index>: the FIRST task's SLURM_JOB_ID equals
+    # the array's master id, and requeueing that requeues every task.
+    local self="${SLURM_JOB_ID}"
+    if [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
+        self="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+    fi
+    scontrol requeue "${self}"
+}
+trap 'requeue_self "Time limit near (USR1)" && sleep 600' USR1
+
 # hydra.run.dir is absolute and per task: the default lives under .temp, which
 # the other DelftBlue submit files also avoid (see generate_training_data.slurm).
-pixi run -e delftblue -- python -u \
+# --as-is: never re-solve or install the env from a job -- 64 array tasks would
+# race on .pixi. The bash -c scrubs what the delftblue activation's `module
+# load nvhpc` adds: nvhpc's bin/ ahead of the env's (its HPC-X mpiexec would
+# launch a uDALES linked against conda's OpenMPI) and OPAL_PREFIX (which points
+# conda's OpenMPI at nvhpc's install tree). Backgrounded + `wait` so the USR1
+# trap runs while it works.
+set +e
+pixi run --as-is -e delftblue -- bash -c '
+    unset OPAL_PREFIX CC CXX F77 F90 FC
+    export PATH="${CONDA_PREFIX}/bin:${PATH}"
+    exec "$@"
+' bash python -u \
     scripts/neural_surrogate/generate_random_geometries_training_data.py \
     "training_data.output_dir=${OUTPUT_DIR}" \
     "training_data.sharding.stage=${STAGE}" \
@@ -95,6 +139,20 @@ pixi run -e delftblue -- python -u \
     "hydra.run.dir=${OUTPUT_DIR}/hydra/${STAGE}_${SLURM_JOB_ID:-$$}" \
     "paths.experiment_dir=${RUN_TEMP_DIR}" \
     "model.forward_model.ncpu=${NCPU}" \
-    "$@"
+    "$@" &
+PY_PID=$!
+# `wait` returns early whenever a trapped signal arrives; keep waiting until
+# the stage itself has exited.
+while :; do
+    wait "${PY_PID}"
+    STATUS=$?
+    kill -0 "${PY_PID}" 2>/dev/null || break
+done
+set -e
 
+if [ "${STATUS}" -ne 0 ]; then
+    requeue_self "Stage ${STAGE} exited ${STATUS}" && sleep 600
+    exit "${STATUS}"
+fi
+rm -rf "${RUN_TEMP_DIR}"
 echo "Done -- stage ${STAGE} (${OUTPUT_DIR})"

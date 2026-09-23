@@ -144,9 +144,12 @@ appended on the command line.
 - `submit_random_geometries_training_data.sh` (+ `generate_random_geometries_training_data.slurm`)
   — random-geometry training data (`generate_random_geometries_training_data.py`)
   that does not fit one job's time limit: submits plan → a `NUM_SHARDS`-task
-  simulate array (+ `RESUME_ROUNDS` resubmissions that pick up timed-out
-  shards) → finalize, chained with dependencies. Produces the same corpus as
-  one single-process run. `DRY_RUN=1` prints the sbatch commands.
+  simulate array → finalize, chained with dependencies. A simulate task that
+  nears its time limit (SLURM `USR1`) or fails requeues itself under the same
+  job id (up to `MAX_REQUEUES`) and resumes only its missing samples. Runs on
+  `research-ceg-gse` (`innovation` allows 1 running / 10 queued jobs per user)
+  over `compute-p1,compute-p2`. Produces the same corpus as one
+  single-process run. `DRY_RUN=1` prints the sbatch commands.
 - `run_esmda_test.slurm` — quick ESMDA smoke run of the committed
   `conf/run_esmda.yaml` against an on-disk truth (`TRUTH_DIR` env var);
   outputs under `test_outputs/`.

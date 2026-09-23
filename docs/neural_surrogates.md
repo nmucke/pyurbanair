@@ -215,8 +215,9 @@ these differences:
   plan with the same config resumes it; a plan made under a different config
   is refused rather than overwritten. DelftBlue wrapper:
   [job_scripts/delftblue/submit_random_geometries_training_data.sh](../job_scripts/delftblue/submit_random_geometries_training_data.sh)
-  (plan → simulate array + resume rounds → finalize, chained with SLURM
-  dependencies).
+  (plan → simulate array → finalize, chained with SLURM dependencies; a
+  simulate task requeues itself under the same job id when it nears the time
+  limit or fails, up to `MAX_REQUEUES` times).
 - **ncpu must divide every sampled `nx`** (pypalm/pyudales slab
   decomposition). All pool `nx` are multiples of 16, so `ncpu` ∈
   {1, 2, 4, 8, 16} always works; the script validates this before running
