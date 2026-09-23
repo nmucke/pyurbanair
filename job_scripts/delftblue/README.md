@@ -141,6 +141,12 @@ appended on the command line.
 - `generate_training_data.slurm` — neural-surrogate training data
   (`scripts/neural_surrogate/generate_training_data.py`, pyudales, full 64-core compute-p2
   node). Output under `/projects/urbanair/training_data/pyudales_<size>`.
+- `submit_random_geometries_training_data.sh` (+ `generate_random_geometries_training_data.slurm`)
+  — random-geometry training data (`generate_random_geometries_training_data.py`)
+  that does not fit one job's time limit: submits plan → a `NUM_SHARDS`-task
+  simulate array (+ `RESUME_ROUNDS` resubmissions that pick up timed-out
+  shards) → finalize, chained with dependencies. Produces the same corpus as
+  one single-process run. `DRY_RUN=1` prints the sbatch commands.
 - `run_esmda_test.slurm` — quick ESMDA smoke run of the committed
   `conf/run_esmda.yaml` against an on-disk truth (`TRUTH_DIR` env var);
   outputs under `test_outputs/`.

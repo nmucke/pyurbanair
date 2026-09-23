@@ -79,6 +79,23 @@ pushd $outdir
 ##   not move ranks off the CPUs the worker was pinned to.
 ## --oversubscribe: still allow more ranks than OpenMPI's slot count
 ##   (cgroups/affinity can confuse the slot computation under pinning).
+## Restrict UCX to shared memory + self.
+##
+## This host has a DOWN network interface that reports speed = -1
+## (/sys/class/net/enp6s0/speed). UCX divides by the port speed in
+## ucp_worker_iface_port_speed (core/ucp_worker.c:812) while enumerating
+## transports, so EVERY rank takes a SIGFPE during MPI init -- the run dies
+## with exit 136 before a single timestep, and the Fortran backtrace looks
+## like a solver crash even though no uDALES code has run yet.
+##
+## This script launches mpiexec with no hostfile, so it is single-node by
+## construction and shared memory is all the transport it needs (it is also
+## the fastest option for ranks on one box). Only set when the caller has not
+## chosen a transport list themselves.
+if [ -z "$UCX_TLS" ]; then
+    export UCX_TLS=sm,self
+fi
+
 mpiexec -n $NCPU --bind-to none --oversubscribe $DA_BUILD namoptions.$exp 2>&1 | tee -a run.$exp.log
 
 ## Merge output files across outputs.

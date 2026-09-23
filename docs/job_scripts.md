@@ -40,6 +40,7 @@ job_scripts/
 │   │   └── sweep_{domain,ensemble,esmda_steps,interval}_rollout_esmda_from_truth.sh
 │   ├── sweep_state_estimation_rollout_esmda_from_truth.sh
 │   ├── ground_truth.slurm, generate_training_data.slurm
+│   ├── submit_random_geometries_training_data.sh + generate_random_geometries_training_data.slurm
 │   ├── eval_sweep.slurm, run_esmda_test.slurm
 │   ├── visualize_run.slurm, trim_and_visualize.slurm
 │   ├── make_state_small.slurm, plot_state_slices.slurm
@@ -336,6 +337,7 @@ fails unless you run `pixi add ffmpeg` once on the login node or export
 |--------|-------------|
 | [`ground_truth.slurm`](../job_scripts/delftblue/ground_truth.slurm) | Time-varying ground truth; outputs under `/projects/urbanair/ground_truth/` |
 | [`generate_training_data.slurm`](../job_scripts/delftblue/generate_training_data.slurm) | Surrogate training data; full 64-core `compute-p2` node; outputs under `/projects/urbanair/training_data/pyudales_<size>` |
+| [`submit_random_geometries_training_data.sh`](../job_scripts/delftblue/submit_random_geometries_training_data.sh) + [`generate_random_geometries_training_data.slurm`](../job_scripts/delftblue/generate_random_geometries_training_data.slurm) | Random-geometry training data too long for one job: plan → `NUM_SHARDS`-task simulate array (`NCPU` uDALES ranks each) + `RESUME_ROUNDS` resubmissions → finalize, chained with dependencies; same corpus as one process (see [neural_surrogates.md](neural_surrogates.md) §2b) |
 | [`eval_sweep.slurm`](../job_scripts/delftblue/eval_sweep.slurm) | Post-process sweep → metrics + figures; runs on a compute node (stage 1 opens large states) |
 | [`run_esmda_test.slurm`](../job_scripts/delftblue/run_esmda_test.slurm) | Quick ESMDA smoke run against an on-disk truth (`TRUTH_DIR` env); outputs under `test_outputs/` |
 | [`visualize_run.slurm`](../job_scripts/delftblue/visualize_run.slurm) | Regenerate figure set for one run |
@@ -356,6 +358,7 @@ fails unless you run `pixi add ffmpeg` once on the login node or export
 | State-estimation methods sweep | `bash job_scripts/delftblue/sweep_state_estimation_rollout_esmda_from_truth.sh pyudales` |
 | Generate ground truth | `sbatch job_scripts/delftblue/ground_truth.slurm` |
 | Generate surrogate training data | `sbatch job_scripts/delftblue/generate_training_data.slurm` |
+| Random-geometry training data, sharded | `NUM_SHARDS=64 bash job_scripts/delftblue/submit_random_geometries_training_data.sh` |
 | PALM overhead capture (M0) | `sbatch job_scripts/delftblue/pypalm/m0_capture.slurm` |
 | PALM direct-run unit test (M1) | `sbatch job_scripts/delftblue/pypalm/m1_direct_run.slurm` |
 | PALM direct-run smoke (M2) | `sbatch job_scripts/delftblue/pypalm/m2_smoke.slurm` |
