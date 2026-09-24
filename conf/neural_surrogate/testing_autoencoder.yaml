@@ -6,10 +6,10 @@
 #   scripts/neural_surrogate/test_autoencoder.py
 #
 #   pixi run -e dev python scripts/neural_surrogate/test_autoencoder.py \
-#     model_dir=model_weights/tadpole_ae_s
+#     model_dir=model_weights/tadpole_ae_b_realistic
 
 # A model_dir written by pretrain_autoencoder.py (config.yaml + weights.pt).
-model_dir: model_weights/tadpole_ae_s_new
+model_dir: model_weights/tadpole_ae_b_realistic
 device: cuda
 # Where the plots / metrics land.
 output_dir: ${model_dir}/ae_eval
@@ -30,6 +30,7 @@ num_heights: 5
 # How many snapshots (sampled across trajectories/times) to aggregate the
 # quantitative metrics over. null = every snapshot in the split.
 num_metric_samples: 48
-# Per-trajectory forward batch size (snapshots reconstructed at once).
-batch_size: 8
+# Full-field reconstruction (larger than training crops); start with one
+# snapshot at a time for the B model. Override model_dir for Slurm outputs.
+batch_size: 1
 seed: 0

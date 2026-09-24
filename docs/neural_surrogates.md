@@ -1975,24 +1975,23 @@ sits next to them — `geometry_branch.pt`, a plain `torch.save` of the branch's
 `encoder.pt`/`decoder.pt`). It is written **only** in branch mode, so a standard
 run's artifact set is unchanged, and it is what `TadpoleTimeStepper` loads (§31).
 
-**Batching default.** The shipped default is `batch_sampler: null` — the plain
-shuffled `DataLoader`, which honours `dataloader.batch_size` / `shuffle` /
-`drop_last` as written and mixes snapshots freely across trajectories. This is
-the right default for the shipped single-geometry targets (e.g.
-`pylbm_barcelona`). The config also ships a commented-out `TrajectoryBatchSampler`
-block as a ready-to-enable example for a **multi-geometry** snapshot corpus (its
-per-trajectory grids cannot be stacked by plain shuffled batching — see §6,
-"Multi-geometry splits", for the same contract on `TransitionDataset`). Enabling
-it has three
-consequences to be aware of: (1) it **replaces** `dataloader.batch_size` /
-`shuffle` / `drop_last`, which become dead knobs (neutralised in
-`training/data_utils.py`) — set batch size via the sampler's own `batch_size`;
-(2) every batch is drawn from a single trajectory, so batches never mix
-geometries within a step (they still shuffle across trajectories each epoch); and
-(3) `cell_budget` caps the total cells per batch as `max(1, cell_budget // cells)`,
-so on grids ≥ ~2.1M cells the default `cell_budget: 4194304` silently drops the
-per-trajectory batch size to 1. Size `cell_budget` from a known-good
-single-geometry run (`batch_size * cells_per_sample`).
+**Current training defaults.** The pretraining config selects size B, the
+realistic DelftBlue corpus, geometry-branch conditioning with SDF and its
+gradient, and 64-cell random crops. `[16, 32, 32]` encoder tiles divide the
+resulting `32 x 64 x 64` crops without padding. The paired evaluation config
+uses the B model name and one full-field snapshot per forward pass.
+
+**Batching default.** `TrajectoryBatchSampler` groups each batch within one
+trajectory so different geometry/grid shapes never mix. It owns `batch_size`,
+`shuffle`, and `drop_last`; DataLoader fields with those names are ignored.
+The initial batch size is 1, with one loader worker and `drop_last: false`.
+`cell_budget: null` makes batch size the direct tuning knob: the sampler's
+optional cell budget counts **full trajectory grids**, not the random crops
+returned by `SnapshotDataset`, so it is not a crop-memory bound. Increase batch
+size/workers only after measuring GPU memory and matching the CPU allocation.
+The DelftBlue script leaves these training settings to the YAML; its `smoke`
+mode applies its own bounded overrides. Model and dataset SDF settings are
+linked by config interpolation to keep their conditioning contract consistent.
 
 The pre-train script also **warns** when encoder tiling wastes compute on
 padding. It derives each actual dataset crop shape (a scalar `random_crop_size`

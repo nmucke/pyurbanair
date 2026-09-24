@@ -44,10 +44,6 @@ OVERRIDES=(
     "model_name=${OUTPUT_DIR}"
     "hydra.run.dir=${OUTPUT_DIR}/hydra"
     trainer.device=cuda
-    trainer.checkpoint_every=1
-    dataloader.num_workers=1
-    batch_sampler.batch_size=1
-    batch_sampler.drop_last=false
 )
 if [ "${MODE}" = smoke ]; then
     # Normalization reads entire trajectories, irrespective of time_stride/crops.
@@ -75,6 +71,7 @@ PY
     DATA_ROOT="${SMOKE_ROOT}"
     OVERRIDES+=(
         trainer.num_epochs=1 trainer.lr_warmup_epochs=0 trainer.resume=false
+        trainer.checkpoint_every=1 batch_sampler.batch_size=1 batch_sampler.drop_last=false
         dataset.random_crop_size=16 architecture.encoder_crop_size=16
         dataloader.num_workers=0
     )

@@ -8,7 +8,7 @@
 #   scripts/neural_surrogate/pretrain_autoencoder.py
 #
 #   pixi run -e dev python scripts/neural_surrogate/pretrain_autoencoder.py \
-#     dataset.root_dir=training_data/pylbm_barcelona model_name=tadpole_ae_s
+#     model_name=tadpole_ae_b_realistic
 #
 # Unlike training.yaml this has no `mode` group: the AE is a single trainer +
 # architecture pairing, so everything is inline.
@@ -17,13 +17,13 @@ defaults:
   - _self_
 
 # Where the pre-trained model lands: model_weights/<model_name>/.
-model_name: tadpole_ae_s_new 
+model_name: tadpole_ae_b_realistic
 
 architecture:
   _target_: neural_surrogates.TadpoleAE
   # Upstream size S/B/L (8.8M / 38.1M / 152.1M params; latent compression
   # 16/8/4). n_state_channels is injected by the script from dataset.state_vars.
-  size: S
+  size: B
   # local: independent tiles (existing behavior); global: whole rectangular field;
   # halo: overlapping tiles, retaining their central cores. All modes encode
   # each state channel independently. Global pads only to the encoder stride 16.
@@ -35,8 +35,8 @@ architecture:
   # A scalar still selects cubic tiles. Every value MUST be a multiple of 16
   # (the encoder's total downsampling). Pick values that divide the trained grid
   # to avoid padding; the model zero-pads each axis independently otherwise.
-  # pyudales_idealized has only 16 cells in z, so use 16 vertically to avoid
-  # padding that axis while retaining wider 32-cell horizontal context.
+  # The realistic corpus has 32 cells in z: these tiles divide the
+  # 32 x 64 x 64 dataset crops without padding.
   encoder_crop_size: [16, 32, 32]
   # "sample" (VAE-proper) or "mode" (deterministic-AE ablation; pair with
   # loss.kl_weight: 0 for a plain AE).
@@ -52,7 +52,7 @@ architecture:
   sdf_features: both
   sdf_clamp_cells: 32
   # Geometry BRANCH: the alternative to folding geometry through the encoder.
-  # null (default) = today's behaviour, byte-identical. A block here builds a
+  # null disables conditioning. The enabled block below builds a
   # small conv net that turns [mask, SDF...] into features at strides
   # (1, 2, 4, 16); zero-init 1x1x1 projections inside the encoder/decoder add
   # them at the conv stem's stride 1/2/4 points, their mirror in the decoder's
@@ -172,7 +172,7 @@ trainer:
   mask_loss: true
   grad_clip_norm: 1.0
   resume: true
-  checkpoint_every: 5
+  checkpoint_every: 1
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -181,8 +181,7 @@ optimizer:
 
 dataset:
   _target_: neural_surrogates.SnapshotDataset
-  root_dir: training_data/pyudales_idealized
-  # root_dir: /export/scratch2/ntm/pyudales_medium
+  root_dir: /projects/urbanair/training_data/pyudales_realistic
   state_vars:
     - u
     - v
@@ -196,50 +195,31 @@ dataset:
   random_crop_size: 64
   cache: false
   dtype: float32
-  # Must match architecture.sdf_features / sdf_clamp_cells.
-  sdf_features: both
-  sdf_clamp_cells: 32
+  # Keep geometry features identical to the model's conditioning inputs.
+  sdf_features: ${architecture.sdf_features}
+  sdf_clamp_cells: ${architecture.sdf_clamp_cells}
 
-# Optional trajectory-bucketed batch sampler.
-#
-# The default (null) plain shuffled DataLoader only supports a SINGLE-GEOMETRY
-# (or uniform-grid) split: with `random_crop_size: null`, a shuffled batch that
-# mixes trajectories of different grid shapes hits `snapshot_collate`'s
-# default_collate fallback, which raises on mismatched tensor shapes. For a
-# MULTI-GEOMETRY snapshot corpus (root produced by
-# generate_random_geometries_training_data.py) set this block: it draws every
-# batch from a single trajectory (one grid/geometry), exactly as for
-# TransitionDataset (see training.yaml for the full argument contract). The
-# shipped `pylbm_barcelona` target is single-geometry, so it stays null: the
-# default below is the plain shuffled DataLoader (batch_sampler: null), which
-# honours dataloader.batch_size / shuffle / drop_last as written.
-#
-# To opt in for a multi-geometry corpus, comment out `batch_sampler: null` and
-# uncomment the TrajectoryBatchSampler block. NOTE (see docs Part G): once
-# enabled the sampler REPLACES dataloader.batch_size / shuffle / drop_last (they
-# become dead knobs, neutralised in training/data_utils.py), batches never mix
-# trajectories, and on grids >= ~2.1M cells cell_budget: 4194304 silently drops
-# the per-trajectory batch size to 1 (max(1, cell_budget // cells_per_sample)).
-# batch_sampler: null
+# Group batches by trajectory so different geometry/grid shapes never mix.
+# This sampler owns batch_size/shuffle/drop_last; the DataLoader fields below
+# are ignored while it is enabled. Set batch_sampler=null for plain batching.
 batch_sampler:
   _target_: neural_surrogates.TrajectoryBatchSampler
-  batch_size: 8
-  # Bounds cells/batch, which is what actually sets peak GPU memory here: a
-  # train step (AE + critic, bf16 autocast) costs ~30 GiB per 1e6 batch cells,
-  # so the 24 GiB card tops out around 6e5. At 393216 the small grids run the
-  # full batch 4 and the largest (16x112x224) drops to 1, for a ~12 GiB peak.
-  # This is the knob to raise on a bigger card / lower if you still OOM.
-  cell_budget: 393216
+  batch_size: 1
+  # The sampler budgets FULL trajectory grids, not random crops. Disable this
+  # cap for crop training so batch_size remains the actual tuning knob.
+  # Batch size 1 is a starting point for B; measure before increasing it.
+  cell_budget: null
   shuffle: true
-  drop_last: true
+  drop_last: false
   seed: 0
 
 dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 8
+  batch_size: 1
   shuffle: true
-  drop_last: true
-  num_workers: 16
+  drop_last: false
+  # One worker fits the two-CPU smoke allocation; increase with Slurm CPUs.
+  num_workers: 1
   pin_memory: true
   persistent_workers: true
   # Ship the (shared) geometry mask + SDF features once per batch; falls back to

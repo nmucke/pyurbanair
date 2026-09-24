@@ -13,7 +13,7 @@ It uses the installed `delftblue` Pixi environment (`--as-is`), one A100
 15-minute limit. CUDA and bf16 support are checked before training. The source
 defaults to `/projects/urbanair/training_data/pyudales_realistic`; two frames
 from the first train and validation trajectories are copied to a separate
-scratch dataset. It trains the S-size AE with its geometry branch on 16-cell
+scratch dataset. It trains the B-size AE with its geometry branch on 16-cell
 crops for one epoch, then resumes for a second epoch and checks the exports.
 Normalization sees only the small copy (time stride alone does not bound its
 I/O). Source files are untouched.
@@ -33,8 +33,7 @@ sbatch --partition=gpu-a100 --cpus-per-task=8 --mem-per-cpu=4G --time=04:00:00 \
     trainer.num_epochs=200 batch_sampler.batch_size=1 dataloader.num_workers=4
 ```
 
-The script provides resource-conscious batch/worker defaults; remaining model,
-loss and crop settings come from `conf/neural_surrogate/pretrain_autoencoder.yaml`.
+Training model, loss, batch, worker and crop settings come from `conf/neural_surrogate/pretrain_autoencoder.yaml`.
 Tune batch size through `batch_sampler.batch_size`, not `dataloader.batch_size`.
 Full training scans all trajectories for normalization on the first run and
 caches the statistics. Reuse `OUTPUT_DIR` with the same model/data settings to
