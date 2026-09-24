@@ -101,6 +101,7 @@ sweep_metrics/*
 # generated artifacts
 .temp
 slurm-*.out
+slurm-*.err
 state.nc
 params.nc
 

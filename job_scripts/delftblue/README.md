@@ -1,5 +1,54 @@
 # DelftBlue job scripts
 
+## Tadpole AE pre-training (GPU)
+
+From the repository root, submit the bounded real-data smoke test:
+
+```bash
+sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm smoke
+```
+
+It uses the installed `delftblue` Pixi environment (`--as-is`), one A100
+10 GB GPU slice on `gpu-a100-small`, two CPU cores, 8 GB host RAM and a
+15-minute limit. CUDA and bf16 support are checked before training. The source
+defaults to `/projects/urbanair/training_data/pyudales_realistic`; two frames
+from the first train and validation trajectories are copied to a separate
+scratch dataset. It trains the S-size AE with its geometry branch on 16-cell
+crops for one epoch, then resumes for a second epoch and checks the exports.
+Normalization sees only the small copy (time stride alone does not bound its
+I/O). Source files are untouched.
+
+Outputs go to `/scratch/$USER/tadpole_ae/smoke-<jobid>/`, including resolved
+config, metrics, checkpoint, best weights and encoder/decoder/geometry exports.
+Logs are `slurm-tadpole-ae-<jobid>.{out,err}` in the submit directory. Export
+`DATA_ROOT`, `OUTPUT_DIR`, or `PIXI_ENV` before submission to change those
+defaults. Scratch outputs are retained for inspection; archive useful weights
+to project storage.
+
+For a full run, select `train`, adjust resources and pass Hydra overrides:
+
+```bash
+sbatch --partition=gpu-a100 --cpus-per-task=8 --mem-per-cpu=4G --time=04:00:00 \
+    job_scripts/delftblue/pretrain_tadpole_ae.slurm train \
+    trainer.num_epochs=200 batch_sampler.batch_size=1 dataloader.num_workers=4
+```
+
+The script provides resource-conscious batch/worker defaults; remaining model,
+loss and crop settings come from `conf/neural_surrogate/pretrain_autoencoder.yaml`.
+Tune batch size through `batch_sampler.batch_size`, not `dataloader.batch_size`.
+Full training scans all trajectories for normalization on the first run and
+caches the statistics. Reuse `OUTPUT_DIR` with the same model/data settings to
+resume; `trainer.num_epochs` is the total target epoch count. Checkpoints and
+handoff exports are saved every epoch. The smoke resume stage fixes the total
+at two epochs. Full runs need their own measured GPU-memory sizing.
+
+The [DelftBlue GPU instructions](https://doc.dhpc.tudelft.nl/delftblue/Slurm-scheduler/#gpu-job)
+limit `gpu-a100-small` to one 10 GB GPU slice, two CPU cores and four hours.
+Use `gpu-a100` for larger jobs; the [research GPU walltime limit](https://doc.dhpc.tudelft.nl/delftblue/DHPC-Policies/)
+is 48 hours. Neither mode requests an exclusive node.
+
+## CFD and assimilation (CPU)
+
 Submit ESMDA runs on DelftBlue (CPU-only, `compute-p1`/`compute-p2` partitions)
 with the `submit.sh` wrapper. The `<size>` label maps to an ensemble size, from
 which the requested cores follow automatically; the run itself uses the
