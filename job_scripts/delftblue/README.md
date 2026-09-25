@@ -30,11 +30,12 @@ For a full run, select `train`, adjust resources and pass Hydra overrides:
 ```bash
 sbatch --partition=gpu-a100 --cpus-per-task=8 --mem-per-cpu=4G --time=04:00:00 \
     job_scripts/delftblue/pretrain_tadpole_ae.slurm train \
-    trainer.num_epochs=200 batch_sampler.batch_size=1 dataloader.num_workers=4
+    trainer.num_epochs=200 dataloader.num_workers=4
 ```
 
 Training model, loss, batch, worker and crop settings come from `conf/neural_surrogate/pretrain_autoencoder.yaml`.
 Tune batch size through `batch_sampler.batch_size`, not `dataloader.batch_size`.
+The default training batch size is 32 for a full 80 GB A100; smoke jobs use 1.
 Full training scans all trajectories for normalization on the first run and
 caches the statistics. Reuse `OUTPUT_DIR` with the same model/data settings to
 resume; `trainer.num_epochs` is the total target epoch count. Checkpoints and

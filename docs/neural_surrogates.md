@@ -1984,7 +1984,8 @@ uses the B model name and one full-field snapshot per forward pass.
 **Batching default.** `TrajectoryBatchSampler` groups each batch within one
 trajectory so different geometry/grid shapes never mix. It owns `batch_size`,
 `shuffle`, and `drop_last`; DataLoader fields with those names are ignored.
-The initial batch size is 1, with one loader worker and `drop_last: false`.
+The training batch size is 32 (validated on a full 80 GB A100), with one loader
+worker and `drop_last: false`. Smoke jobs override the batch size to 1.
 `cell_budget: null` makes batch size the direct tuning knob: the sampler's
 optional cell budget counts **full trajectory grids**, not the random crops
 returned by `SnapshotDataset`, so it is not a crop-memory bound. Increase batch

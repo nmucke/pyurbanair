@@ -204,10 +204,10 @@ dataset:
 # are ignored while it is enabled. Set batch_sampler=null for plain batching.
 batch_sampler:
   _target_: neural_surrogates.TrajectoryBatchSampler
-  batch_size: 1
+  batch_size: 32
   # The sampler budgets FULL trajectory grids, not random crops. Disable this
   # cap for crop training so batch_size remains the actual tuning knob.
-  # Batch size 1 is a starting point for B; measure before increasing it.
+  # Batch size 32 was validated for B on a full 80 GB A100.
   cell_budget: null
   shuffle: true
   drop_last: false
