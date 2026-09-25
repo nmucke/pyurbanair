@@ -12,9 +12,10 @@ sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm train
 This requests `gpu-a100`, one full A100 GPU, eight CPU cores, 32 GB host RAM,
 and 48 hours. CUDA and bf16 support are checked before training. The source
 defaults to `/projects/urbanair/training_data/pyudales_realistic`; training
-reads the full corpus. The full-GPU
-batch probe accepted the config's batch size 32 with about 50 GiB reserved GPU
-memory. Its eight-core, 32 GB allocation also completed successfully.
+reads the full corpus. The full-GPU batch probe completed 10 steps at batch size
+55 with about 77 GiB reserved GPU
+memory. The config uses batch size 48 for more headroom. Its eight-core, 32 GB
+allocation also completed successfully.
 
 Training outputs go to `/scratch/$USER/tadpole_ae/train/`, including resolved
 config, metrics, checkpoint, best weights and encoder/decoder/geometry exports.
@@ -40,7 +41,8 @@ source files untouched. Its output is `/scratch/$USER/tadpole_ae/smoke-<jobid>/`
 
 Training model, loss, batch, worker and crop settings come from `conf/neural_surrogate/pretrain_autoencoder.yaml`.
 Tune batch size through `batch_sampler.batch_size`, not `dataloader.batch_size`.
-The default training batch size is 32 for a full 80 GB A100; smoke jobs use 1.
+The default training batch size is 48 with four loader workers on the eight-CPU
+full A100 job; smoke jobs use batch size 1 and zero workers.
 Full training scans all trajectories for normalization on the first run and
 caches the statistics. Reuse `OUTPUT_DIR` with the same model/data settings to
 resume; `trainer.num_epochs` is the total target epoch count. Checkpoints and

@@ -204,10 +204,10 @@ dataset:
 # are ignored while it is enabled. Set batch_sampler=null for plain batching.
 batch_sampler:
   _target_: neural_surrogates.TrajectoryBatchSampler
-  batch_size: 32
+  batch_size: 48
   # The sampler budgets FULL trajectory grids, not random crops. Disable this
   # cap for crop training so batch_size remains the actual tuning knob.
-  # Batch size 32 was validated for B on a full 80 GB A100.
+  # A short B-size probe on a full A100 completed at 55; use 48 for headroom.
   cell_budget: null
   shuffle: true
   drop_last: false
@@ -218,8 +218,9 @@ dataloader:
   batch_size: 1
   shuffle: true
   drop_last: false
-  # One worker fits the two-CPU smoke allocation; increase with Slurm CPUs.
-  num_workers: 1
+  # Four workers feed the full-A100 job's eight-CPU allocation. Smoke overrides
+  # this to zero workers on its two-CPU slice.
+  num_workers: 4
   pin_memory: true
   persistent_workers: true
   # Ship the (shared) geometry mask + SDF features once per batch; falls back to
