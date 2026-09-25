@@ -347,11 +347,11 @@ fails unless you run `pixi add ffmpeg` once on the login node or export
 
 ### DelftBlue quick reference
 
-Tadpole AE training: `sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm smoke`
-runs a bounded two-frame real-data test on one `gpu-a100-small` GPU slice,
-including checkpoint resume. Use `train` with suitable `gpu-a100` resources for
-the full corpus. See the [GPU training instructions](../job_scripts/delftblue/README.md#tadpole-ae-pre-training-gpu)
-for paths, resource overrides and hyperparameter tuning.
+Tadpole AE training: `sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm train`
+uses one full `gpu-a100` A100 for 48 hours, eight CPUs and 32 GB host RAM.
+The `smoke` mode runs the bounded two-frame test on `gpu-a100-small` when
+submitted with the resource overrides in the
+[GPU training instructions](../job_scripts/delftblue/README.md#tadpole-ae-pre-training-gpu).
 
 | Task | Command |
 |------|---------|

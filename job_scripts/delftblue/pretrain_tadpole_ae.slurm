@@ -1,31 +1,36 @@
 #!/bin/bash
-# Submit from the repo root. Default: two tiny epochs, including checkpoint resume.
-#   sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm smoke
-# Full corpus (edit resources/hyperparameters first):
-#   sbatch --partition=gpu-a100 --cpus-per-task=8 --mem-per-cpu=4G --time=04:00:00 \
-#     job_scripts/delftblue/pretrain_tadpole_ae.slurm train trainer.num_epochs=200
+# Submit from the repo root. Default: full-corpus training on one 80 GB A100.
+#   sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm train
+# Smoke test on a 10 GB GPU slice (overrides the full-run resources below):
+#   sbatch --partition=gpu-a100-small --cpus-per-task=2 --time=00:15:00 \
+#     job_scripts/delftblue/pretrain_tadpole_ae.slurm smoke
 # Extra arguments are Hydra overrides and take precedence over the defaults.
 #SBATCH --job-name=tadpole_ae
-#SBATCH --partition=gpu-a100-small
+#SBATCH --partition=gpu-a100
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=4G
-#SBATCH --time=00:15:00
+#SBATCH --time=2-00:00:00
 #SBATCH --account=research-ceg-gse
 #SBATCH --output=slurm-tadpole-ae-%j.out
 #SBATCH --error=slurm-tadpole-ae-%j.err
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:?Submit this script with sbatch from the repo root}"
-MODE="${1:-smoke}"
+MODE="${1:-train}"
 if [ "$#" -gt 0 ]; then shift; fi
 case "${MODE}" in smoke|train) ;; *) echo "Usage: $0 [smoke|train] [Hydra overrides...]" >&2; exit 2 ;; esac
 
 # CONFIG — change these or export them before sbatch; tune the AE through Hydra.
 DATA_ROOT="${DATA_ROOT:-/projects/urbanair/training_data/pyudales_realistic}"
-OUTPUT_DIR="${OUTPUT_DIR:-/scratch/${USER}/tadpole_ae/${MODE}-${SLURM_JOB_ID}}"
+if [ "${MODE}" = train ]; then
+    # A stable path lets a later 48-hour job resume from checkpoint.pt.
+    OUTPUT_DIR="${OUTPUT_DIR:-/scratch/${USER}/tadpole_ae/train}"
+else
+    OUTPUT_DIR="${OUTPUT_DIR:-/scratch/${USER}/tadpole_ae/smoke-${SLURM_JOB_ID}}"
+fi
 PIXI_ENV="${PIXI_ENV:-delftblue}"
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR="$(realpath "${OUTPUT_DIR}")"

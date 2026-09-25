@@ -2,36 +2,41 @@
 
 ## Tadpole AE pre-training (GPU)
 
-From the repository root, submit the bounded real-data smoke test:
+From the repository root, submit full-corpus training on one 80 GB A100 for the
+maximum 48 hours allowed by the research GPU partition:
 
 ```bash
-sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm smoke
+sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm train
 ```
 
-It uses the installed `delftblue` Pixi environment (`--as-is`), one A100
-10 GB GPU slice on `gpu-a100-small`, two CPU cores, 8 GB host RAM and a
-15-minute limit. CUDA and bf16 support are checked before training. The source
-defaults to `/projects/urbanair/training_data/pyudales_realistic`; two frames
-from the first train and validation trajectories are copied to a separate
-scratch dataset. It trains the B-size AE with its geometry branch on 16-cell
-crops for one epoch, then resumes for a second epoch and checks the exports.
-Normalization sees only the small copy (time stride alone does not bound its
-I/O). Source files are untouched.
+This requests `gpu-a100`, one full A100 GPU, eight CPU cores, 32 GB host RAM,
+and 48 hours. CUDA and bf16 support are checked before training. The source
+defaults to `/projects/urbanair/training_data/pyudales_realistic`; training
+reads the full corpus. The full-GPU
+batch probe accepted the config's batch size 32 with about 50 GiB reserved GPU
+memory. Its eight-core, 32 GB allocation also completed successfully.
 
-Outputs go to `/scratch/$USER/tadpole_ae/smoke-<jobid>/`, including resolved
+Training outputs go to `/scratch/$USER/tadpole_ae/train/`, including resolved
 config, metrics, checkpoint, best weights and encoder/decoder/geometry exports.
 Logs are `slurm-tadpole-ae-<jobid>.{out,err}` in the submit directory. Export
 `DATA_ROOT`, `OUTPUT_DIR`, or `PIXI_ENV` before submission to change those
-defaults. Scratch outputs are retained for inspection; archive useful weights
-to project storage.
+defaults. The stable training directory enables a later submission to resume
+from the last completed epoch. Do not run two training jobs against the same
+output directory simultaneously. Scratch outputs are retained for inspection;
+archive useful weights to project storage.
 
-For a full run, select `train`, adjust resources and pass Hydra overrides:
+For the bounded real-data smoke test, override the Slurm resources:
 
 ```bash
-sbatch --partition=gpu-a100 --cpus-per-task=8 --mem-per-cpu=4G --time=04:00:00 \
-    job_scripts/delftblue/pretrain_tadpole_ae.slurm train \
-    trainer.num_epochs=200 dataloader.num_workers=4
+sbatch --partition=gpu-a100-small --cpus-per-task=2 --time=00:15:00 \
+    job_scripts/delftblue/pretrain_tadpole_ae.slurm smoke
 ```
+
+This uses one A100 10 GB GPU slice, two CPU cores, 8 GB host RAM and a
+15-minute limit. The smoke job trains the B-size AE with its geometry branch on
+16-cell crops for one epoch, resumes for a second epoch, and checks the exports.
+Normalization sees only a separate two-frame train/validation copy, leaving the
+source files untouched. Its output is `/scratch/$USER/tadpole_ae/smoke-<jobid>/`.
 
 Training model, loss, batch, worker and crop settings come from `conf/neural_surrogate/pretrain_autoencoder.yaml`.
 Tune batch size through `batch_sampler.batch_size`, not `dataloader.batch_size`.
@@ -40,12 +45,13 @@ Full training scans all trajectories for normalization on the first run and
 caches the statistics. Reuse `OUTPUT_DIR` with the same model/data settings to
 resume; `trainer.num_epochs` is the total target epoch count. Checkpoints and
 handoff exports are saved every epoch. The smoke resume stage fixes the total
-at two epochs. Full runs need their own measured GPU-memory sizing.
+at two epochs. Repeat the GPU-memory probe when changing model, crop or batch
+settings.
 
 The [DelftBlue GPU instructions](https://doc.dhpc.tudelft.nl/delftblue/Slurm-scheduler/#gpu-job)
-limit `gpu-a100-small` to one 10 GB GPU slice, two CPU cores and four hours.
-Use `gpu-a100` for larger jobs; the [research GPU walltime limit](https://doc.dhpc.tudelft.nl/delftblue/DHPC-Policies/)
-is 48 hours. Neither mode requests an exclusive node.
+limit `gpu-a100-small` to one 10 GB GPU slice, two CPU cores and four hours;
+the research GPU walltime limit on `gpu-a100` is 48 hours. Neither mode
+requests an exclusive node.
 
 ## CFD and assimilation (CPU)
 
