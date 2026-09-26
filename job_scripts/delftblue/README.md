@@ -50,6 +50,13 @@ handoff exports are saved every epoch. The smoke resume stage fixes the total
 at two epochs. Repeat the GPU-memory probe when changing model, crop or batch
 settings.
 
+The first four-worker full-corpus attempt (`580606`) hit the **32 GB host-RAM**
+limit after 123 batches, before finishing an epoch. Its shuffled loader had
+kept every visited NetCDF trajectory open; netCDF4 reserved 64 MiB per state
+variable per file. `SnapshotDataset` now closes the old file when switching
+trajectories, retaining only the current batch's file in each worker. This is
+separate from GPU activation memory and the `dataset.cache: false` setting.
+
 The [DelftBlue GPU instructions](https://doc.dhpc.tudelft.nl/delftblue/Slurm-scheduler/#gpu-job)
 limit `gpu-a100-small` to one 10 GB GPU slice, two CPU cores and four hours;
 the research GPU walltime limit on `gpu-a100` is 48 hours. Neither mode

@@ -249,6 +249,36 @@ def test_snapshot_dataset_items_and_collate(tmp_path):
     assert batch["geom_features"].shape == (1, 4, NZ, NY, NX)
 
 
+def test_snapshot_dataset_closes_previous_trajectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "data"
+    _write_dataset(root)
+    ds = SnapshotDataset(root, "train")
+    closed: list[xr.Dataset] = []
+    original_close = xr.Dataset.close
+
+    def record_close(dataset: xr.Dataset) -> None:
+        closed.append(dataset)
+        original_close(dataset)
+
+    monkeypatch.setattr(xr.Dataset, "close", record_close)
+    first_state = ds[0]["state"]
+    assert ds._state_cache is not None
+    first_file = ds._state_cache[0]
+    ds[1]  # same trajectory reuses the open file
+    assert ds._state_cache is not None
+    assert len(ds._state_cache) == 1
+    assert not closed
+
+    ds[T]  # next trajectory closes the previous file
+    assert ds._state_cache is not None
+    assert len(ds._state_cache) == 1
+    assert list(ds._state_cache) == [1]
+    assert sum(old is first_file for old in closed) == 1
+    torch.testing.assert_close(ds[0]["state"], first_state)
+
+
 def test_snapshot_dataset_time_stride(tmp_path):
     root = tmp_path / "data"
     _write_dataset(root)

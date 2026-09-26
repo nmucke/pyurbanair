@@ -229,6 +229,14 @@ class SnapshotDataset(Dataset):
             self._state_cache = {}
         ds = self._state_cache.get(traj)
         if ds is None:
+            # The sampler groups a batch by trajectory, but shuffles batches
+            # across trajectories. netCDF4 retains a chunk cache for each open
+            # variable (64 MiB for each of u/v/w in the realistic corpus), so
+            # keeping every visited file open exhausts worker RAM mid-epoch.
+            # One open file per worker preserves reuse within the current batch.
+            for old_ds in self._state_cache.values():
+                old_ds.close()
+            self._state_cache.clear()
             ds = xr.open_dataset(self._state_files[traj], cache=self.cache)
             self._state_cache[traj] = ds
         return ds

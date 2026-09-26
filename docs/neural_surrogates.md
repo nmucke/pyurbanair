@@ -1844,7 +1844,10 @@ snapshots to decorrelate them; `random_crop_size` returns a random spatial crop
 per item (the paper's intermediate pre-cropping — more crop diversity, smaller
 batches; default `null` = full field). `snapshot_collate` ships a shared
 geometry once as `(1, *grid)` (the full-field fast path) and falls back to
-stacking per-sample geometry when random-cropping.
+stacking per-sample geometry when random-cropping. Each loader worker keeps at
+most one trajectory's NetCDF file open, reusing it within a trajectory batch
+and closing it when the next batch switches trajectories. This bounds the
+netCDF4 per-variable chunk caches on shuffled multi-geometry runs.
 
 ### 28. `AutoencoderTrainer` — the (V)AE loss
 
