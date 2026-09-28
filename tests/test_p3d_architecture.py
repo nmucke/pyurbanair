@@ -15,11 +15,13 @@ skips cleanly when the (heavy) P3D deps are absent.
 from __future__ import annotations
 
 import pathlib
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pytest
 import xarray as xr
+
+from tests.config_loader import TEST_CONF_DIR
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("p3d_surrogate")
@@ -29,6 +31,7 @@ from hydra.utils import instantiate
 from neural_surrogates import P3D, NeuralSurrogateForwardModel, sdf_features
 from neural_surrogates.architectures import P3D as P3D_from_architectures
 from omegaconf import OmegaConf
+from torch import Tensor
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
@@ -42,26 +45,20 @@ PARAM_VARS = ("inflow_angle", "velocity_magnitude")
 # size (S) with a small window so the suite stays runnable on CPU.
 TINY = dict(size="S", window_size=2, partition_size=1)
 
-PRESET_DIR = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "conf"
-    / "neural_surrogate"
-    / "architectures"
-    / "p3d"
-)
+PRESET_DIR = TEST_CONF_DIR / "neural_surrogate" / "architectures" / "p3d"
 
 
 # -- helper builders --------------------------------------------------------
 
 
-def _tiny_p3d(**overrides) -> P3D:
+def _tiny_p3d(**overrides: Any) -> P3D:
     """Build a ``tiny``-sized P3D with the test channel/param counts."""
     kwargs = dict(n_state_channels=N_STATE, n_params=N_PARAMS, **TINY)
     kwargs.update(overrides)
     return P3D(**kwargs)
 
 
-def _inputs(batch: int = 2, *, seed: int = 0, obstacle: bool = True):
+def _inputs(batch: int = 2, *, seed: int = 0, obstacle: bool = True) -> Any:
     """Random ``(state, params, geometry)`` on the test grid.
 
     A central column of cells is marked obstacle when ``obstacle`` so the
@@ -178,7 +175,7 @@ def test_autoregressive_rollout_stays_finite() -> None:
 # -- 7. presets instantiate; tiny forwards ----------------------------------
 
 
-@pytest.mark.parametrize("preset", ["tiny", "small", "medium", "large", "xlarge"])
+@pytest.mark.parametrize("preset", ["tiny", "small", "medium", "large", "xlarge"])  # type: ignore[misc]
 def test_presets_instantiate(preset: str) -> None:
     cfg = OmegaConf.load(PRESET_DIR / f"{preset}.yaml")
     model = instantiate(cfg, n_state_channels=N_STATE, n_params=N_PARAMS)
@@ -317,7 +314,7 @@ def test_p3d_as_domain_decomposed_fine_and_coarse_net() -> None:
 # -- 8c. SDF geometry features (sdf_features) -------------------------------
 
 
-def _batched_sdf(geometry: torch.Tensor, clamp: float = 32.0) -> torch.Tensor:
+def _batched_sdf(geometry: Tensor, clamp: float = 32.0) -> Tensor:
     """(B, 4, *grid) features for a (B, *grid) mask, via the shared helper."""
     return torch.stack(
         [
@@ -380,7 +377,7 @@ def test_sdf_features_true_widens_stem_and_accepts_provided() -> None:
         _tiny_p3d().eval()(state, params, geometry, geom_features=feat)
 
 
-@pytest.mark.parametrize("mode, n_feat", [("sdf", 1), ("grad", 3), ("both", 4)])
+@pytest.mark.parametrize("mode, n_feat", [("sdf", 1), ("grad", 3), ("both", 4)])  # type: ignore[misc]
 def test_sdf_feature_mode_widens_stem_by_selected_channels(
     mode: str, n_feat: int
 ) -> None:
@@ -412,7 +409,7 @@ def test_sdf_bool_true_is_both_mode() -> None:
     assert model.n_geom_feature_channels == 4
 
 
-def test_sdf_self_compute_caches_once_and_matches_provided(monkeypatch) -> None:
+def test_sdf_self_compute_caches_once_and_matches_provided(monkeypatch: Any) -> None:
     """Inference self-compute: the EDT runs once for a stable geometry object
     (steps 2..T hit the cache), a new geometry tensor recomputes, and the
     self-computed output equals the explicitly-provided-features path."""
@@ -421,7 +418,7 @@ def test_sdf_self_compute_caches_once_and_matches_provided(monkeypatch) -> None:
     calls = {"n": 0}
     real = p3d_mod.compute_sdf_features
 
-    def counting(*args, **kwargs):
+    def counting(*args: Any, **kwargs: Any) -> Any:
         calls["n"] += 1
         return real(*args, **kwargs)
 
@@ -599,7 +596,9 @@ class _StubSpinup(BaseForwardModel):
     def disable_spinup(self) -> None:
         self.spinup_time = 0.0
 
-    def run_single(self, state=None, params=None, sim_name="state") -> xr.Dataset:
+    def run_single(
+        self, state: Any = None, params: Any = None, sim_name: Any = "state"
+    ) -> xr.Dataset:
         self.calls += 1
         coords = {
             "z": np.arange(NZ) + 0.5,
@@ -634,7 +633,7 @@ def _params() -> xr.Dataset:
     )
 
 
-def _make_p3d_model(**overrides) -> NeuralSurrogateForwardModel:
+def _make_p3d_model(**overrides: Any) -> NeuralSurrogateForwardModel:
     kwargs = dict(
         architecture=_tiny_p3d(),
         spinup_forward_model=_StubSpinup(),

@@ -75,32 +75,21 @@ ulimit -s unlimited
 
 ### Configuration
 
-All simulation and assimilation settings live in `conf/`, composed by
-[Hydra](https://hydra.cc/). Any field can be overridden from the command line
-(`domain.nx=80`, `esmda.num_steps=4`). There are three run entry points,
-one per script, and each is **self-contained** —
-[`run_forward_model.yaml`](conf/run_forward_model.yaml) for
-`scripts/run_forward_model.py`, [`run_esmda.yaml`](conf/run_esmda.yaml) for
-`scripts/esmda/run_esmda.py`, and
-[`run_filtering.yaml`](conf/run_filtering.yaml) for
-`scripts/filtering/run_filtering.py` (sequential EnKF). See
-[`conf/README.md`](conf/README.md) for the full overview.
+Simulation and assimilation settings live in `conf/`, composed by
+[Hydra](https://hydra.cc/). Named experiments collect the choices for a run;
+CLI values override them. For example:
 
-**Inlined base** (each entry point carries its own copy, rather than pulling
-shared files):
+```bash
+pixi run -e dev python scripts/preview_config.py run_esmda experiment=esmda/barcelona_dynamic
+pixi run -e dev python scripts/esmda/run_esmda.py experiment=esmda/barcelona_dynamic ensemble.ensemble_size=64
+```
 
-- **output `paths`** — output roots (everything mutable lands under `.temp/`).
-- **`time.seconds_per_knot`** — the spacing (in seconds) between time-varying
-  parameter knots; the parameter takes a new value every `seconds_per_knot` s,
-  with the last value linearly extrapolated onto the window end when the horizon
-  isn't an exact multiple. The per-window horizon — simulation duration, output
-  frequency, spinup time — lives in the `case`.
-- **`ensemble`** — ensemble size, parallel processes, CPUs/process, failure
-  policy.
-- **`esmda`** (run_esmda only) — assimilation steps/windows, observation error
-  std, seed, plus `localization` / `state_reduction` (default `none`; selected
-  via the `esmda/*` groups, see below).
-- the **`run:`** namespace and Hydra settings.
+Workflow entry points select reusable cases, backends, parameter samplers,
+execution budgets and algorithm components. Shared policy lives in `common/`;
+selected components own their defaults. See [`conf/README.md`](conf/README.md)
+for ownership, recipes and effective-config records. Tests use their own small
+configs under `tests/conf/`, independent of production tuning; see
+[`tests/README.md`](tests/README.md) for fast and integration test commands.
 
 **Groups** (one option per structurally-distinct variant):
 
@@ -208,7 +197,7 @@ mode is the cross product of three declarative axes plus a truth source:
   assimilation horizon partway into a disk truth (skips a spin-up and rebases
   that time to t=0). Disk truth is streamed, so multi-GB files never load fully.
 
-Shared ESMDA settings live in the inlined `esmda:` block of `conf/run_esmda.yaml`.
+Shared ESMDA settings live in `conf/esmda/default.yaml`.
 The dynamic multi-window setup
 (time-varying inflow over a rollout, with localization) is written up in
 [`docs/temp/esmda_dynamic_multiwindow.md`](docs/temp/esmda_dynamic_multiwindow.md).
@@ -532,9 +521,9 @@ pyurbanair/
 │                                          #   Tadpole AE + AE→DFT time-stepper (tadpole_ae/stepper, _tadpole/)
 │
 ├── conf/                                  # Hydra config (see Configuration)
-│   ├── run_forward_model.yaml             # Entry point — forward-model runs (self-contained)
-│   ├── run_esmda.yaml                     # Entry point — all ESMDA runs (self-contained)
-│   ├── run_filtering.yaml                 # Entry point — sequential EnKF runs (self-contained)
+│   ├── run_forward_model.yaml             # Entry point — forward-model runs (workflow composition)
+│   ├── run_esmda.yaml                     # Entry point — all ESMDA runs (workflow composition)
+│   ├── run_filtering.yaml                 # Entry point — sequential EnKF runs (workflow composition)
 │   ├── README.md                          # Config overview — the axes + recipes
 │   ├── case/                              # Experiment bundles: domain+grid+geometry+sensors+time (xie_and_castro, barcelona)
 │   ├── model/                             # Backend wiring (pylbm, pyudales, pypalm, neural_surrogate)

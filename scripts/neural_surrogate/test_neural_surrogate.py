@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import hydra
 import matplotlib.animation as animation
@@ -40,9 +41,11 @@ from evaluation.turbulence import rolling_tke
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
+from pyurbanair.config.run_record import write_run_record
+
 
 def _load_trajectory(
-    dataset, sample_idx: int, dtype: torch.dtype
+    dataset: Any, sample_idx: int, dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     state_path = dataset._state_files[sample_idx]
     with xr.open_dataset(state_path) as ds:
@@ -55,7 +58,7 @@ def _load_trajectory(
     return truth, params, geometry
 
 
-@torch.no_grad()
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
 def _rollout(
     model: torch.nn.Module,
     truth: torch.Tensor,
@@ -306,7 +309,7 @@ def _animate_rollout(
     quantities = "|u|" if slices_k is None else "|u| and resolved-TKE error"
     suptitle = fig.suptitle(f"{quantities} vertical slices  t=0/{T - 1}")
 
-    def update(frame: int):
+    def update(frame: int) -> list[Any]:
         artists = [suptitle]
         for image, frames in ims:
             image.set_array(frames[frame])
@@ -314,6 +317,7 @@ def _animate_rollout(
         suptitle.set_text(f"{quantities} vertical slices  t={frame}/{T - 1}")
         return artists
 
+    writer: animation.AbstractMovieWriter
     if animation.writers.is_available("ffmpeg"):
         writer = animation.FFMpegWriter(fps=fps)
         save_path = out_path
@@ -400,7 +404,7 @@ def run(cfg: DictConfig) -> None:
     )
 
     out_dir = Path(cfg.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(cfg, out_dir, "surrogate_testing")
     torch.save({"truth": truth, "pred": pred}, out_dir / "trajectory.pt")
     _plot_rollout(truth, pred, out_dir)
     _plot_params(params, test_ds.param_names, out_dir)
@@ -438,7 +442,7 @@ def run(cfg: DictConfig) -> None:
     print(f"overall RMSE={rmse:.6f}  outputs in {out_dir}  animation={anim_path.name}")
 
 
-@hydra.main(
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/testing",

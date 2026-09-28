@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -26,9 +27,12 @@ import xarray as xr
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from tests.config_loader import TEST_CONF_DIR
+
 torch = pytest.importorskip("torch")
 
 from neural_surrogates import Trainer  # noqa: E402
+from torch import nn  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
 NZ = NY = NX = 4
@@ -36,12 +40,12 @@ C = 3  # state channels (u, v, w)
 P = 2  # params per step
 
 _WORKTREE = Path(__file__).resolve().parents[1]
-_CONF = _WORKTREE / "conf"
+_CONF = TEST_CONF_DIR
 _SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "train_neural_surrogate.py"
 
 
 # --- unit-level fixtures ------------------------------------------------------ #
-class _EchoModel(torch.nn.Module):
+class _EchoModel(nn.Module):
     """Minimal stand-in for a history-aware architecture.
 
     Exposes the two attributes ``BaseTraining`` reads off the eager model
@@ -59,19 +63,19 @@ class _EchoModel(torch.nn.Module):
         self.scale = torch.nn.Parameter(torch.ones(1))
         self.seen_shapes: list[tuple[int, ...]] = []
 
-    def forward(self, state, params, geometry, extra=None):
+    def forward(self, state: Any, params: Any, geometry: Any, extra: Any = None) -> Any:
         self.seen_shapes.append(tuple(state.shape))
         return state[:, -self.n_state_channels :] * self.scale
 
 
-class _BareModel(torch.nn.Module):
+class _BareModel(nn.Module):
     """A pre-history architecture: neither attribute is defined."""
 
     def __init__(self) -> None:
         super().__init__()
         self.scale = torch.nn.Parameter(torch.ones(1))
 
-    def forward(self, state, params, geometry, extra=None):
+    def forward(self, state: Any, params: Any, geometry: Any, extra: Any = None) -> Any:
         return state * self.scale
 
 
@@ -79,7 +83,7 @@ def _dummy_loader() -> DataLoader:
     return DataLoader([0, 1], batch_size=1)
 
 
-def _make_trainer(model: torch.nn.Module) -> Trainer:
+def _make_trainer(model: nn.Module) -> Trainer:
     return Trainer(
         model=model,
         train_loader=_dummy_loader(),
@@ -175,16 +179,19 @@ def test_forward_is_unchanged_at_h1() -> None:
 
 
 # --- (c)/(d) end-to-end through the train script ------------------------------ #
-def _load_run():
+def _load_run() -> Any:
     spec = importlib.util.spec_from_file_location(
         "train_ns_history_under_test", _SCRIPT
     )
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.run
 
 
-def _write_dataset(root: Path, *, nz=8, ny=8, nx=8, t=8) -> None:
+def _write_dataset(
+    root: Path, *, nz: Any = 8, ny: Any = 8, nx: Any = 8, t: Any = 8
+) -> None:
     """Tiny pylbm-style dataset: u,v,w + blanking over (time,z,y,x), with
     matching per-time params. ``t`` is generous enough that a history window
     still leaves several (state_n, state_next) pairs per trajectory."""
@@ -196,7 +203,7 @@ def _write_dataset(root: Path, *, nz=8, ny=8, nx=8, t=8) -> None:
         for i in range(n):
             blank = np.zeros((nz, ny, nx), "f4")
             blank[0] = 1.0  # one solid ground row
-            state = {
+            state: dict[str, tuple[tuple[str, ...], Any]] = {
                 v: (
                     ("time", "z", "y", "x"),
                     rng.standard_normal((t, nz, ny, nx)).astype("f4"),
@@ -225,12 +232,12 @@ def _write_dataset(root: Path, *, nz=8, ny=8, nx=8, t=8) -> None:
             ).to_netcdf(root / "param" / split / f"sample_{i:04d}.nc")
 
 
-def _compose(overrides):
+def _compose(overrides: Any) -> Any:
     with initialize_config_dir(version_base=None, config_dir=str(_CONF)):
         return compose(config_name="neural_surrogate/training", overrides=overrides)
 
 
-def _smoke_cfg(data_dir: Path, model_name: str):
+def _smoke_cfg(data_dir: Path, model_name: str) -> Any:
     """A 1-epoch CPU-fast standard-mode run on a tiny ConvNeXt-UNet."""
     cfg = _compose(
         [
@@ -260,7 +267,7 @@ def _smoke_cfg(data_dir: Path, model_name: str):
     return cfg
 
 
-def test_train_script_end_to_end_with_history(tmp_path, monkeypatch) -> None:
+def test_train_script_end_to_end_with_history(tmp_path: Any, monkeypatch: Any) -> None:
     data_dir = tmp_path / "data"
     _write_dataset(data_dir)
 
@@ -280,7 +287,7 @@ def test_train_script_end_to_end_with_history(tmp_path, monkeypatch) -> None:
     assert saved.architecture.num_history_steps == 2
 
 
-def test_train_script_rejects_history_mismatch(tmp_path, monkeypatch) -> None:
+def test_train_script_rejects_history_mismatch(tmp_path: Any, monkeypatch: Any) -> None:
     data_dir = tmp_path / "data"
     _write_dataset(data_dir)
 
@@ -293,7 +300,9 @@ def test_train_script_rejects_history_mismatch(tmp_path, monkeypatch) -> None:
         _load_run()(cfg)
 
 
-def test_train_script_legacy_config_defaults_to_one_step(tmp_path, monkeypatch) -> None:
+def test_train_script_legacy_config_defaults_to_one_step(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
     """A config carrying the key on NEITHER node still trains, at H=1, and the
     saved config records the resolved default."""
     data_dir = tmp_path / "data"

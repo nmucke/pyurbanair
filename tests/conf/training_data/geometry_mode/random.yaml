@@ -1,0 +1,5 @@
+# @package _global_
+training_data:
+  geometry:
+    mode: random
+    output_name: ${training_data.geometry.source}

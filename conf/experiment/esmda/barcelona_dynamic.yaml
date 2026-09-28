@@ -1,0 +1,20 @@
+# @package _global_
+# Named, reviewable run recipe.
+defaults:
+  - override /case: barcelona
+  - override /execution: assimilation
+  - override /model@truth_model: pyudales
+  - override /model@assim_model: pylbm
+  - override /params@truth_params: dynamic_sine
+  - override /params@prior_params: dynamic
+  - override /esmda/smoother: dynamic
+  - override /esmda/localization: correlation
+
+experiment:
+  workflow: esmda
+run:
+  name: barcelona_dynamic
+ensemble:
+  ensemble_size: 32
+esmda:
+  num_assimilation_windows: 3

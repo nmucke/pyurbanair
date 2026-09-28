@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import hydra
@@ -22,8 +23,12 @@ from hydra.utils import instantiate
 from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
 from omegaconf import DictConfig, OmegaConf, open_dict
 
+from pyurbanair.config.run_record import validate_run_config, write_run_record
+
 
 def run(cfg: DictConfig) -> None:
+    validate_run_config(cfg, "surrogate_training")
+    launch_cfg = copy.deepcopy(cfg)
     dtype = getattr(torch, cfg.dataset.dtype)
 
     train_ds = instantiate(cfg.dataset, split="train", dtype=dtype)
@@ -130,7 +135,9 @@ def run(cfg: DictConfig) -> None:
         )
 
     out_dir = Path("model_weights") / cfg.model_name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(
+        launch_cfg, out_dir, "surrogate_training", save_legacy_config=False
+    )
     # Stamp the resolved history window under BOTH nodes before saving: the
     # forward model rebuilds the net from the `architecture` node alone, while
     # the eval / fine-tune scripts read the `dataset` node, and either may have
@@ -153,7 +160,7 @@ def run(cfg: DictConfig) -> None:
     print(f"config and best weights saved to {out_dir}")
 
 
-@hydra.main(
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/training",

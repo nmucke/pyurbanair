@@ -16,8 +16,10 @@ import numpy as np
 import pytest
 import trimesh
 import xarray as xr
-from hydra import compose, initialize
-from omegaconf import DictConfig
+from hydra import compose, initialize_config_dir
+from omegaconf import DictConfig, OmegaConf
+
+from tests.config_loader import TEST_CONF_DIR
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(
@@ -90,7 +92,7 @@ def fake_solver(monkeypatch: pytest.MonkeyPatch) -> set[str]:
 
 
 def _cfg(pool_dir: pathlib.Path, out: pathlib.Path, *extra: str) -> DictConfig:
-    with initialize(version_base=None, config_path="../conf"):
+    with initialize_config_dir(version_base=None, config_dir=str(TEST_CONF_DIR)):
         return compose(
             config_name="neural_surrogate/training_data",
             overrides=[
@@ -109,6 +111,7 @@ def _cfg(pool_dir: pathlib.Path, out: pathlib.Path, *extra: str) -> DictConfig:
                 "training_data.simulation_time=20.0",
                 "training_data.output_frequency=5.0",
                 "training_data.spinup_time=5.0",
+                "training_data.adaptive_spinup.enabled=true",
                 "training_data.adaptive_spinup.max_spinup_time=100.0",
                 "training_data.params_sampler.seconds_per_knot=10.0",
                 f"training_data.output_dir={out}",
@@ -158,6 +161,20 @@ def test_sharded_matches_single_process(
         sharded / "geometries.csv"
     ).read_text()
     assert "sharding" not in (sharded / "config.yaml").read_text()
+    record_dir = sharded / "_run_records" / "simulate_0"
+    effective = OmegaConf.load(record_dir / "config.resolved.yaml")
+    requested = OmegaConf.load(record_dir / "config.requested.yaml")
+    manifest = OmegaConf.load(record_dir / "run_manifest.yaml")
+    assert isinstance(effective, DictConfig)
+    assert isinstance(requested, DictConfig)
+    assert isinstance(manifest, DictConfig)
+    assert effective.training_data.sharding.stage == "simulate"
+    assert requested.training_data.sharding.shard_index == 0
+    assert pathlib.Path(manifest.paths.output_dir) == sharded.resolve()
+    assert pathlib.Path(manifest.paths.record_dir) == record_dir.resolve()
+    assert manifest.choices == {}
+    assert isinstance(manifest.requested_choices, DictConfig)
+    assert manifest.choice_provenance == "requested"
 
 
 def test_shards_partition_the_groups(

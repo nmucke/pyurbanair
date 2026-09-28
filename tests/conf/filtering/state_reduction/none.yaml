@@ -1,0 +1,3 @@
+# @package filtering
+# Independent frozen test configuration.
+state_reduction: null

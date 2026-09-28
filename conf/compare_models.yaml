@@ -1,28 +1,8 @@
-# Primary config (entry point) for scripts/compare_models.py.
-#
-# Runs several solver backends over each named parameter scenario. Within a
-# scenario, both solvers replay exactly the same parameter trajectory; across
-# scenarios the forcing changes. This makes the resulting four runs a controlled
-# comparison of each solver's response to parameter changes.
-#
-# Every backend is mounted under `models.<name>`; `compare.models` selects which
-# of them actually run. To add a backend to a run just extend that list (and, for
-# a backend not mounted below, add a `- model@models.<name>: <name>` default):
-#
-#   python scripts/compare_models.py 'compare.models=[pypalm,pyudales,pylbm]'
-#
-# The general knobs below mirror conf/run_forward_model.yaml, so a comparison run
-# is specified exactly like a single forward run, except params are selected by
-# named `parameter_scenarios` below:
-#
-#   python scripts/compare_models.py
-#   python scripts/compare_models.py run.rollout_steps=3
-#   python scripts/compare_models.py 'compare.parameter_scenarios=[draw_a]'
-#   python scripts/compare_models.py \
-#     params@parameter_scenarios.draw_a=dynamic_sine \
-#     params@parameter_scenarios.draw_b=dynamic_cosine
-#   python scripts/compare_models.py run.ensemble=true ensemble.ensemble_size=8
+# Compare selected backends across named parameter scenarios.
+# Each model and scenario is mounted independently for N-way comparison.
 defaults:
+  - common/runtime
+  - execution: comparison
   - case: xie_and_castro
   # Parameter configs are mounted by scenario name. Add another with
   # `+params@parameter_scenarios.my_case=dynamic_sine`, then select it in
@@ -36,6 +16,7 @@ defaults:
   # - model@models.pylbm: pylbm
   # - model@models.neural_surrogate: neural_surrogate
   - _self_
+  - experiment: null
 
 compare:
   # Which of the mounted backends to run, in plot order. The first entry is the
@@ -145,23 +126,6 @@ time:
 
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=8 ensemble.num_parallel_processes=4`. ---
-ensemble:
-  ensemble_size: 8
-  num_parallel_processes: 1
-  num_cpus_per_process: 15
-  failure:
-    policy: resample_from_successes
-    jitter_scale: 0.05
-    seed: 0
-
 run:
-  skip_viz: false
-  results_dir: null
   ensemble: false
   rollout_steps: 0
-
-hydra:
-  job:
-    chdir: false
-  run:
-    dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

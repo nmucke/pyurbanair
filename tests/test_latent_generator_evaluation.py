@@ -23,6 +23,8 @@ from hydra import compose, initialize_config_dir
 from neural_surrogates import generator_evaluation as ge
 from omegaconf import DictConfig, OmegaConf
 
+from tests.config_loader import TEST_CONF_DIR
+
 _WORKTREE = Path(__file__).resolve().parents[1]
 _SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "test_latent_generator.py"
 
@@ -36,7 +38,7 @@ def _grid_fields(n: int = 1, shape: tuple[int, int, int] = (8, 8, 8)) -> np.ndar
 # --------------------------------------------------------------------------- #
 
 
-def test_stencil_mask_excludes_boundary_and_obstacle_neighbours():
+def test_stencil_mask_excludes_boundary_and_obstacle_neighbours() -> None:
     fluid = np.ones((6, 6, 6), dtype=bool)
     fluid[3, 3, 3] = False  # one obstacle cell
     stencil = ge.stencil_fluid_mask(fluid)
@@ -57,7 +59,7 @@ def test_stencil_mask_excludes_boundary_and_obstacle_neighbours():
     assert stencil[2, 2, 2] and stencil[4, 4, 4] and stencil[1, 1, 1]
 
 
-def test_divergence_free_field_is_zero_and_linear_field_is_exact():
+def test_divergence_free_field_is_zero_and_linear_field_is_exact() -> None:
     nz, ny, nx = 10, 10, 10
     z, y, x = np.meshgrid(np.arange(nz), np.arange(ny), np.arange(nx), indexing="ij")
     fluid = np.ones((nz, ny, nx), dtype=bool)
@@ -84,7 +86,7 @@ def test_divergence_free_field_is_zero_and_linear_field_is_exact():
 # --------------------------------------------------------------------------- #
 
 
-def test_profiles_average_fluid_cells_per_level_only():
+def test_profiles_average_fluid_cells_per_level_only() -> None:
     fields = _grid_fields(2, (4, 3, 3))
     fields[0, 0] = 1.0
     fields[1, 0] = 3.0
@@ -104,7 +106,7 @@ def test_profiles_average_fluid_cells_per_level_only():
     assert np.isfinite(boot) and boot > 0
 
 
-def test_constant_field_has_zero_reynolds_stress_and_shear_field_known():
+def test_constant_field_has_zero_reynolds_stress_and_shear_field_known() -> None:
     fluid = np.ones((4, 4, 4), dtype=bool)
     const = (
         np.ones((3, 3, 4, 4, 4)) * np.array([1.0, 2.0, 3.0])[None, :, None, None, None]
@@ -129,7 +131,7 @@ def test_constant_field_has_zero_reynolds_stress_and_shear_field_known():
     assert np.isnan(single["stress"]).all()
 
 
-def test_diversity_and_pairwise_spread():
+def test_diversity_and_pairwise_spread() -> None:
     fluid = np.ones((4, 4, 4), dtype=bool)
     base = np.zeros((3, 4, 4, 4))
     # Two seeds per conditioning: identical for condition 0, offset by 1 for 1.
@@ -151,7 +153,7 @@ def test_diversity_and_pairwise_spread():
 # --------------------------------------------------------------------------- #
 
 
-def test_wasserstein_of_a_translation_is_the_shift():
+def test_wasserstein_of_a_translation_is_the_shift() -> None:
     rng = np.random.default_rng(0)
     a = rng.standard_normal(5000)
     assert ge.wasserstein_1(a, a) == 0.0
@@ -177,7 +179,7 @@ def test_wasserstein_of_a_translation_is_the_shift():
     assert ge.pool_values([v, v], max_values=10).shape == (3, 10)
 
 
-def test_spectra_pick_out_a_single_wavenumber_over_fluid_rows_only():
+def test_spectra_pick_out_a_single_wavenumber_over_fluid_rows_only() -> None:
     nz, ny, nx = 3, 4, 32
     dx = 0.5
     x = np.arange(nx) * dx
@@ -202,7 +204,7 @@ def test_spectra_pick_out_a_single_wavenumber_over_fluid_rows_only():
     assert none["rows"] == 0 and np.isnan(none["energy"]).all()
 
 
-def test_padding_sensitivity_is_none_without_padded_axes():
+def test_padding_sensitivity_is_none_without_padded_axes() -> None:
     fields = np.random.default_rng(1).standard_normal((2, 3, 20, 6, 6))
     fluid = np.ones((20, 6, 6), dtype=bool)
     assert (
@@ -231,7 +233,7 @@ def _group(fields: np.ndarray, fluid: np.ndarray) -> dict[str, Any]:
     }
 
 
-def test_merge_group_metrics_matches_pooled_computation():
+def test_merge_group_metrics_matches_pooled_computation() -> None:
     rng = np.random.default_rng(2)
     fluid = np.ones((6, 6, 8), dtype=bool)
     a = rng.standard_normal((3, 3, 6, 6, 8))
@@ -253,7 +255,7 @@ def test_merge_group_metrics_matches_pooled_computation():
     assert cmp["spectra_lsd_db"] == pytest.approx(0.0, abs=1e-9)
 
 
-def test_aggregate_report_applies_declared_tolerances():
+def test_aggregate_report_applies_declared_tolerances() -> None:
     tol = {
         "profile_rmse_factor": 2.0,
         "w1_factor": 2.0,
@@ -393,7 +395,7 @@ def test_acceptance_constant_prehistory_requires_corpus_provenance(
 def _compose_eval_cfg(model_dir: Path, out_dir: Path, *extra: str) -> DictConfig:
     """``testing_latent_generator.yaml`` at smoke shapes (2 snapshots, 2 seeds,
     a two-point step sweep) plus ``extra`` overrides."""
-    with initialize_config_dir(version_base=None, config_dir=str(_WORKTREE / "conf")):
+    with initialize_config_dir(version_base=None, config_dir=str(TEST_CONF_DIR)):
         return compose(
             config_name="neural_surrogate/testing_latent_generator",
             overrides=[
@@ -411,7 +413,7 @@ def _compose_eval_cfg(model_dir: Path, out_dir: Path, *extra: str) -> DictConfig
         )
 
 
-def test_acceptance_script_end_to_end(tmp_path):
+def test_acceptance_script_end_to_end(tmp_path: Any) -> None:
     pytest.importorskip("torch")
     pytest.importorskip("diffusers")
     pytest.importorskip("timm")
@@ -530,7 +532,7 @@ def test_acceptance_script_end_to_end(tmp_path):
     assert "## Verdict: **" in report and "Declared tolerances" in report
 
 
-def test_acceptance_script_reports_per_grid_and_padding_bands(tmp_path):
+def test_acceptance_script_reports_per_grid_and_padding_bands(tmp_path: Any) -> None:
     """A held-out corpus of TWO grid shapes, one of them not a multiple of the
     AE's crop size: the per-grid figures/rows and the padded-edge-vs-interior
     block are the two outputs the single-grid smoke above can never produce."""

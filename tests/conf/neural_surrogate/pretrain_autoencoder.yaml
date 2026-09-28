@@ -1,0 +1,85 @@
+# @package _global_
+# Fixed CPU test defaults; fixture/caller supplies temporary data paths.
+defaults:
+- _self_
+model_name: tadpole_ae_s_new
+architecture:
+  _target_: neural_surrogates.TadpoleAE
+  size: S
+  spatial_mode: local
+  halo_size: 16
+  encoder_crop_size:
+  - 16
+  - 32
+  - 32
+  latent_type: sample
+  encode_geometry: false
+  sdf_features: both
+  sdf_clamp_cells: 32
+  geometry_branch:
+    width: 32
+  pretrained: none
+  max_internal_batchsize: null
+  normalize: true
+discriminator: null
+loss:
+  kl_weight: 0.001
+  geometry_recon_weight: 0.1
+  adv_weight: 0.0001
+  adv_start_step: 1000
+  adv_ramp_steps: 1000
+  adaptive_adv_weight: true
+  disc_recon_threshold: null
+trainer:
+  _target_: neural_surrogates.AutoencoderTrainer
+  num_epochs: 1
+  device: cpu
+  patience: 20
+  amp: false
+  amp_dtype: bfloat16
+  compile_model: false
+  channels_last: false
+  cudnn_benchmark: true
+  tf32: true
+  lr_warmup_epochs: 5
+  lr_warmup_start: 1.0e-06
+  lr_min: 1.0e-06
+  mask_loss: true
+  grad_clip_norm: 1.0
+  resume: true
+  checkpoint_every: 5
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 0.0001
+  weight_decay: 1.0e-06
+dataset:
+  _target_: neural_surrogates.SnapshotDataset
+  root_dir: .temp/tests/training_data
+  state_vars:
+  - u
+  - v
+  - w
+  time_stride: 1
+  random_crop_size: 64
+  cache: false
+  dtype: float32
+  sdf_features: both
+  sdf_clamp_cells: 32
+batch_sampler:
+  _target_: neural_surrogates.TrajectoryBatchSampler
+  batch_size: 1
+  cell_budget: 393216
+  shuffle: true
+  drop_last: true
+  seed: 0
+dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: 1
+  shuffle: true
+  drop_last: true
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  collate_fn:
+    _target_: neural_surrogates.snapshot_collate
+    _partial_: true
