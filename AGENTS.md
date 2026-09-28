@@ -44,8 +44,8 @@ runs them in ensembles for parameter / state estimation.
   specific solver — polymorphism is through these base classes.
 - **`data-assimilation`** implements ESMDA in JAX.
 - All public I/O is `xarray.Dataset`; on-disk format is NetCDF.
-- Run-time config is a Hydra tree under `conf/` with two self-contained entry
-  points: `run_forward_model.yaml` and `run_esmda.yaml`.
+- Run-time config is a Hydra tree under `conf/` with workflow entry points,
+  reusable component groups, and named runs under `conf/experiment/`.
 
 ## Commands
 
@@ -55,13 +55,14 @@ all backends and dev tools.
 ```bash
 pixi run setup-dev              # one-time bootstrap (handles a known bin/test clobber)
 pixi shell -e dev               # activate the dev env
-pixi run -e dev py.test         # run the test suite (--exitfirst; smoke-shaped, fast)
+pixi run -e dev py.test         # fast suite (--exitfirst; no real CFD solves)
 pixi run -e dev pre-commit      # black + isort + mypy on staged files
 ```
 
-- Tests compose Hydra configs and call each script's `run(cfg)` directly; a
-  tiny "smoke shape" (small domain / short window / 2-member ensemble) keeps
-  them fast. See `tests/conftest.py` (`compose_test_cfg`, `_SMOKE_OVERRIDES`).
+- Tests compose independent configs from `tests/conf/` and call each script's
+  `run(cfg)` directly. `compose_test_cfg` isolates paths; tiny test settings
+  never inherit production tuning. Real CFD tests use the `integration` marker;
+  run `pixi run -e dev test-integration` or `test-all` explicitly.
 - Forward runs: `python scripts/run_forward_model.py model=pylbm ...`
 - Assimilation: `python scripts/esmda/run_esmda.py ...` (the single ESMDA entry point;
   mode = `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`).

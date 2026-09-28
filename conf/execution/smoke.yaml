@@ -1,0 +1,5 @@
+# @package ensemble
+# Complete smoke execution budget. Override individual values per run.
+ensemble_size: 2
+num_parallel_processes: 1
+num_cpus_per_process: 1

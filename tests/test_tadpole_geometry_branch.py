@@ -33,6 +33,8 @@ import xarray as xr
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from tests.config_loader import TEST_CONF_DIR
+
 torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 pytest.importorskip("timm")
@@ -49,7 +51,7 @@ if TYPE_CHECKING:
     from torch.nn import Module
 
 _WORKTREE = Path(__file__).resolve().parents[1]
-_CONF = _WORKTREE / "conf"
+_CONF = TEST_CONF_DIR
 _SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "pretrain_autoencoder.py"
 
 STATE_VARS = ("u", "v", "w")

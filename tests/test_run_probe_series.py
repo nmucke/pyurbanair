@@ -77,6 +77,7 @@ def _assert_probe_schema(
     assert np.isfinite(ds["u"].values).all()
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_probe_series_smoke(
     compose_test_cfg: Callable[..., DictConfig],
 ) -> None:

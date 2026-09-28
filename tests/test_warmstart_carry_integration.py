@@ -11,11 +11,14 @@ from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
+import pytest
 from hydra.utils import instantiate
 from numpy.typing import NDArray
 from omegaconf import DictConfig
 from pyudales.utils.warm_start_utils import _carry_dir, fetch_carry
 from scipy.io import FortranFile
+
+pytestmark = pytest.mark.integration
 
 from pyurbanair.config.hydra_helpers import clean_outputs
 

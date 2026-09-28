@@ -1,0 +1,23 @@
+# Independent frozen test configuration.
+_target_: pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel
+_convert_: all
+correlation_length: 200.0
+seed: 2
+external_parameters:
+  inflow_angle:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.0
+    std: 10.0
+  velocity_magnitude:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 7.5
+    std: 0.5
+    min: 0.1
+static_parameters:
+  vertical_inflow_exponent:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.25
+    std: 0.05
+    min: 0.05
+simulation_time: ${time.simulation_time}
+seconds_per_knot: ${time.seconds_per_knot}

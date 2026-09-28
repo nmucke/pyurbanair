@@ -148,6 +148,11 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_operator,
     filter_parameter_config,
 )
+from pyurbanair.config.run_record import (
+    append_constructor_override,
+    validate_run_config,
+    write_run_record,
+)
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -296,6 +301,7 @@ def _save_window_esmda_pred_obs(
 
 
 def run(cfg: DictConfig) -> None:
+    validate_run_config(cfg, "filter_smoothing")
     # --- Geometry (all validated BEFORE any solver is started) ----------------
     num_windows = int(cfg.filter_smoothing.num_assimilation_windows)
     if num_windows < 1:
@@ -396,7 +402,52 @@ def run(cfg: DictConfig) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     windows_dir = out_dir / "windows"
     windows_dir.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(config=cfg, f=out_dir / "config.yaml")
+    write_run_record(
+        cfg,
+        out_dir,
+        "filter_smoothing",
+        constructor_overrides=[
+            {
+                "role": "truth" if cfg.run.truth_dir is None else "external_truth",
+                "component": "forward_model",
+                "values": {
+                    "num_windows": num_windows,
+                    "window_seconds": sim_time,
+                    "truth_horizon_seconds": final_time,
+                },
+            },
+            {
+                "role": "esmda_assim",
+                "component": "forward_model",
+                "values": {
+                    "temp_dir": str(
+                        pathlib.Path(cfg.paths.experiment_dir)
+                        / "filter_smoothing_esmda"
+                    ),
+                    "simulation_time": sim_time,
+                },
+            },
+            {
+                "role": "filter_assim",
+                "component": "forward_model",
+                "values": {
+                    "temp_dir": str(
+                        pathlib.Path(cfg.paths.experiment_dir)
+                        / "filter_smoothing_filter"
+                    ),
+                    "simulation_time": cycle_seconds,
+                },
+            },
+        ],
+    )
+
+    if cfg.run.truth_dir is None and is_dynamic_truth:
+        append_constructor_override(
+            out_dir,
+            role="truth",
+            component="parameter_sampler",
+            values={"simulation_time": final_time},
+        )
 
     # --- Truth (simulated inline, or loaded from disk) ------------------------
     if cfg.run.truth_dir is None:
@@ -568,10 +619,27 @@ def run(cfg: DictConfig) -> None:
     # prior (this ensemble is window 0's), written with the posterior at the end.
     prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
+    append_constructor_override(
+        out_dir,
+        role="assim",
+        component="parameter_sampler",
+        values={
+            "sampled_shape": dict(prior_params.sizes),
+            "parameter_names": list(prior_params.data_vars),
+        },
+    )
 
     # --- Observation operators and the per-cycle observations ------------------
-    truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
-    assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
+    truth_obs_op = create_observation_operator(
+        cfg.obs,
+        cfg.truth_model.solver_name,
+        OmegaConf.select(cfg, "observation.operator"),
+    )
+    assim_obs_op = create_observation_operator(
+        cfg.obs,
+        cfg.assim_model.solver_name,
+        OmegaConf.select(cfg, "observation.operator"),
+    )
     # The predicted-observation twin of the truth-side stride, for BOTH halves
     # (run_filtering.py's wrapper): the filter's cycle forecast emits `every_n`
     # frames and the smoother's window forecast every frame of the window,
@@ -584,7 +652,7 @@ def run(cfg: DictConfig) -> None:
     # Interval aggregation for the SMOOTHER ONLY. ONE instance, shared between
     # the C_D sizing below and the smoother, so its interval-count consistency
     # check spans the truth and the forecasts (run_esmda.py's contract).
-    aggregate_obs = create_aggregate_observations(cfg.esmda)
+    aggregate_obs = create_aggregate_observations(cfg)
 
     obs_error_std = float(cfg.filter_smoothing.obs_error_std)
     # Every cycle's observation is built and perturbed HERE, over the whole
@@ -665,11 +733,17 @@ def run(cfg: DictConfig) -> None:
     # --- The two DA instances, and the hybrid around them ----------------------
     rng_key, esmda_key = jax.random.split(rng_key)
     smoother_overrides: dict[str, Any] = {}
-    if "num_time_points" in cfg.esmda.smoother:
+    if "TimeVaryingParameter" in str(cfg.esmda.smoother._target_):
         # The time-varying smoother flattens each knot into its own
         # augmented-state scalar, so `num_time_points` must equal the sampled
         # prior's knot count (run_esmda.py derives it the same way).
         smoother_overrides["num_time_points"] = int(prior_params.sizes["time"])
+        append_constructor_override(
+            out_dir,
+            role="assim",
+            component="esmda.smoother",
+            values={"num_time_points": smoother_overrides["num_time_points"]},
+        )
     smoother = instantiate(
         cfg.esmda.smoother,
         observation_operator=assim_obs_op,
@@ -1077,7 +1151,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved outputs in {out_dir}")
 
 
-@hydra.main(  # type: ignore[misc]
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None, config_path="../../conf", config_name="run_filter_smoothing"
 )
 def main(cfg: DictConfig) -> None:

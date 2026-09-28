@@ -605,7 +605,7 @@ def test_plot_data_mismatch_decay_labels_the_step_axis_as_it_is_told(
 
     def _spy(self: Figure, *args: object, **kwargs: object) -> object:
         figures.append(self)
-        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+        return original(self, *args, **kwargs)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(Figure, "savefig", _spy)
@@ -895,6 +895,7 @@ def _run_dir_listing(cfg: DictConfig) -> set[str]:
     }
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_esmda_persists_every_iteration_when_the_flag_is_on(
     compose_test_cfg: Callable[..., DictConfig],
 ) -> None:
@@ -930,6 +931,7 @@ def test_run_esmda_persists_every_iteration_when_the_flag_is_on(
     assert (windows_dir / "window_0_params_steps.nc").exists()
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_esmda_flag_off_reproduces_the_pre_phase2_artifact_set(
     compose_test_cfg: Callable[..., DictConfig],
 ) -> None:

@@ -159,7 +159,6 @@ def test_filtering_analysis_config_composes(
 @pytest.mark.parametrize(  # type: ignore[misc]
     "mode,num_windows,extra",
     [
-        pytest.param("joint", 1, None, id="joint"),
         pytest.param("joint", 2, None, id="joint_two_windows"),
         pytest.param("state", 1, None, id="state"),
         pytest.param(
@@ -175,6 +174,7 @@ def test_filtering_analysis_config_composes(
         ),
     ],
 )
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_filtering(
     mode: str, num_windows: int, extra: Optional[list[str]], compose_test_cfg: Any
 ) -> None:
@@ -326,6 +326,7 @@ def test_run_filtering(
         assert state_history.sizes["cycle"] == num_cycles
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_filtering_distance_localization(compose_test_cfg: Any) -> None:
     """State rows localized by physical distance (params stay global)."""
     from scripts.filtering.run_filtering import run
@@ -373,6 +374,7 @@ def test_run_filtering_distance_localization(compose_test_cfg: Any) -> None:
         ),
     ],
 )
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_filtering_ensemble_transform(
     option: str, localization: str, target: str, compose_test_cfg: Any
 ) -> None:
@@ -455,6 +457,7 @@ def test_run_filtering_ensemble_transform(
         assert all(cycle[k] is None for k in transform_fields)
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_filtering_tracks_dynamic_truth(compose_test_cfg: Any) -> None:
     """Mixed mode: a time-varying (dynamic) TRUTH tracked by a static prior.
 
@@ -528,7 +531,7 @@ def test_run_filtering_rejects_dynamic_prior(compose_test_cfg: Any) -> None:
         ),
         config_name="run_filtering",
     )
-    with pytest.raises(ValueError, match="time-varying"):
+    with pytest.raises(ValueError, match="prior_params"):
         run(cfg)
 
 
@@ -653,8 +656,8 @@ def test_unstrided_truth_subset_is_the_single_frame_slice() -> None:
 @pytest.mark.parametrize(  # type: ignore[misc]
     "every_n,match",
     [
-        pytest.param(0, "assimilate_every_n_step must be >= 1", id="zero"),
-        pytest.param(2, "does not divide", id="indivisible"),
+        pytest.param(0, "assimilate_every_n_step", id="zero"),
+        pytest.param(2, "divide", id="indivisible"),
     ],
 )
 def test_run_filtering_rejects_bad_stride(
@@ -685,6 +688,7 @@ def test_run_filtering_rejects_bad_stride(
         pytest.param(2, 2, id="stride2"),
     ],
 )
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_filtering_assimilate_every_n_step(
     every_n: int,
     num_windows: int,

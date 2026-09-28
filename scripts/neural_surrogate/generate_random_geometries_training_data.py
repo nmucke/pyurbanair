@@ -52,6 +52,7 @@ Usage:
 
 from __future__ import annotations
 
+import copy
 import csv
 import dataclasses
 import math
@@ -101,6 +102,7 @@ from pyurbanair.config.hydra_helpers import (
     resolve_output_dir,
     resolve_parameter_schema,
 )
+from pyurbanair.config.run_record import validate_run_config, write_run_record
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 
 _POOL_SOURCES = ("idealized", "realistic")
@@ -582,11 +584,11 @@ def _select_saved_vars(state: xr.Dataset, save_vars: list[str] | None) -> xr.Dat
         for name, da in state.data_vars.items()
         if "time" in da.dims and name not in keep
     ]
-    missing = keep - set(state.data_vars)
+    missing = keep - {str(name) for name in state.data_vars}
     if missing:
         raise KeyError(
             f"training_data.save_vars requests {sorted(missing)}, which the "
-            f"{'/'.join(sorted(state.data_vars))} state does not carry."
+            f"{'/'.join(sorted(str(name) for name in state.data_vars))} state does not carry."
         )
     return state.drop_vars(drop) if drop else state
 
@@ -603,6 +605,8 @@ def _netcdf_encoding(state: xr.Dataset, encoding_cfg: DictConfig | None) -> dict
     if encoding_cfg is None:
         return {}
     base = OmegaConf.to_container(encoding_cfg, resolve=True)
+    if not isinstance(base, dict):
+        raise TypeError("training_data.encoding must be a mapping")
     lsd = base.pop("least_significant_digit", None)
     encoding = {}
     for name, da in state.data_vars.items():
@@ -1032,6 +1036,8 @@ def _write_plan(
     td = cfg.training_data
     model_name = cfg.model.name
     sampler_cfg = OmegaConf.to_container(td.params_sampler, resolve=True)
+    if not isinstance(sampler_cfg, dict):
+        raise TypeError("training_data.params_sampler must be a mapping")
     seconds_per_knot = float(sampler_cfg.pop("seconds_per_knot"))
     sampler_cfg["ensemble_size"] = len(samples)
     params_sampler = hydra.utils.instantiate(sampler_cfg)
@@ -1349,6 +1355,8 @@ def _finalize(
 
 
 def run(cfg: DictConfig) -> None:
+    validate_run_config(cfg, "surrogate_random_data")
+    requested_cfg = copy.deepcopy(cfg)
     model_name = cfg.model.name
     if model_name not in _SUPPORTED_MODELS:
         raise ValueError(
@@ -1390,8 +1398,34 @@ def run(cfg: DictConfig) -> None:
     else:
         # Shards run the plan's frozen config, not whatever conf/ says now.
         cfg = _load_plan_config(cfg, output_dir)
+        source = str(cfg.training_data.geometry.source)
         samples = _plan_samples(cfg)
         _check_geometry_manifest(output_dir / "geometries.csv", samples)
+
+    record_dir = (
+        output_dir / "_run_records" / f"{sharding.stage}_{sharding.shard_index}"
+    )
+    write_run_record(
+        cfg,
+        record_dir,
+        "surrogate_random_data",
+        constructor_overrides=[
+            {
+                "role": "data_generation",
+                "component": "geometry_pool",
+                "values": {
+                    "pool": source,
+                    "stage": sharding.stage,
+                    "num_shards": sharding.num_shards,
+                    "shard_index": sharding.shard_index,
+                    "geometry_manifest": str(output_dir / "geometries.csv"),
+                },
+            }
+        ],
+        artifact_dir=output_dir,
+        record_choices_as_requested=sharding.stage in ("simulate", "finalize"),
+    )
+    OmegaConf.save(requested_cfg, record_dir / "config.requested.yaml", resolve=True)
 
     groups = _group_samples(samples)
     sampled = xr.load_dataset(output_dir / "sampled_params.nc")
@@ -1431,7 +1465,7 @@ def run(cfg: DictConfig) -> None:
         _finalize(cfg, samples, sampled, output_dir, missing_hint=_missing_hint)
 
 
-@hydra.main(  # type: ignore[misc]
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/training_data",

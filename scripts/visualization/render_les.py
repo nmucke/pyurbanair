@@ -19,6 +19,7 @@ Runs in the lightweight ``viz`` pixi environment (openvdb, usd-core)::
 
 from __future__ import annotations
 
+import copy
 import logging
 import pathlib
 import sys
@@ -28,6 +29,8 @@ from hydra.core.hydra_config import HydraConfig
 from les_render.case import discover_case
 from les_render.export import build_bundle
 from omegaconf import DictConfig, OmegaConf
+
+from pyurbanair.config.run_record import validate_run_config, write_run_record
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +44,11 @@ def resolve_bundle_dir(cfg: DictConfig) -> pathlib.Path:
     if cfg.output_dir:
         return pathlib.Path(str(cfg.output_dir))
     case = discover_case(cfg.input, state=cfg.state)
-    return pathlib.Path(str(cfg.results_dir)) / case.name / str(cfg.render_preset.name)
+    return (
+        pathlib.Path(str(cfg.results_dir))
+        / str(case.name)
+        / str(cfg.render_preset.name)
+    )
 
 
 def apply_case_overrides(
@@ -76,6 +83,8 @@ def apply_case_overrides(
 
 
 def run(cfg: DictConfig) -> pathlib.Path:
+    validate_run_config(cfg, "render")
+    launch_cfg = copy.deepcopy(cfg)
     case = discover_case(
         cfg.input, state=cfg.state, geometry=cfg.geometry, params=cfg.params
     )
@@ -86,6 +95,19 @@ def run(cfg: DictConfig) -> pathlib.Path:
         )
         cfg = apply_case_overrides(cfg, case.overrides, cli)
     out_dir = resolve_bundle_dir(cfg)
+    write_run_record(
+        launch_cfg,
+        out_dir,
+        "render",
+        constructor_overrides=[
+            {
+                "role": "render",
+                "component": "case",
+                "values": {"name": case.name, "overrides": case.overrides or {}},
+            }
+        ],
+        save_legacy_config=False,
+    )
     container = OmegaConf.to_container(cfg, resolve=True)
     assert isinstance(container, dict)
     build_bundle(container, out_dir)  # type: ignore[arg-type, unused-ignore]

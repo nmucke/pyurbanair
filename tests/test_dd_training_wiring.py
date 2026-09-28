@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -20,19 +21,24 @@ import xarray as xr
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from tests.config_loader import TEST_CONF_DIR
+
 _WORKTREE = Path(__file__).resolve().parents[1]
-_CONF = _WORKTREE / "conf"
+_CONF = TEST_CONF_DIR
 _SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "train_neural_surrogate.py"
 
 
-def _load_run():
+def _load_run() -> Any:
     spec = importlib.util.spec_from_file_location("train_ns_under_test", _SCRIPT)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.run
 
 
-def _write_dataset(root: Path, *, nz=8, ny=8, nx=8, t=4) -> None:
+def _write_dataset(
+    root: Path, *, nz: Any = 8, ny: Any = 8, nx: Any = 8, t: Any = 4
+) -> None:
     """Tiny pylbm-style dataset: u,v,w + blanking over (time,z,y,x), with
     matching per-time params. ny is divisible by the test interior_size (4)."""
     rng = np.random.default_rng(0)
@@ -43,7 +49,7 @@ def _write_dataset(root: Path, *, nz=8, ny=8, nx=8, t=4) -> None:
         for i in range(n):
             blank = np.zeros((nz, ny, nx), "f4")
             blank[0] = 1.0  # one solid ground row
-            state = {
+            state: dict[str, tuple[tuple[str, ...], Any]] = {
                 v: (
                     ("time", "z", "y", "x"),
                     rng.standard_normal((t, nz, ny, nx)).astype("f4"),
@@ -72,7 +78,7 @@ def _write_dataset(root: Path, *, nz=8, ny=8, nx=8, t=4) -> None:
             ).to_netcdf(root / "param" / split / f"sample_{i:04d}.nc")
 
 
-def _shrink_dd(cfg) -> None:
+def _shrink_dd(cfg: Any) -> None:
     """Shrink the DD architecture + dataloader so the run is CPU-fast."""
     cfg.dataset.pushforward_steps = 1
     cfg.dataloader.batch_size = 2
@@ -107,12 +113,12 @@ def _shrink_dd(cfg) -> None:
     cfg.init_weights_path = None
 
 
-def _compose(overrides):
+def _compose(overrides: Any) -> Any:
     with initialize_config_dir(version_base=None, config_dir=str(_CONF)):
         return compose(config_name="neural_surrogate/training", overrides=overrides)
 
 
-@pytest.mark.parametrize(
+@pytest.mark.parametrize(  # type: ignore[misc]
     "extra_overrides,model_name,expect_trainer,expect_loss",
     [
         # Each path selects its trainer + loss explicitly rather than relying on
@@ -135,8 +141,13 @@ def _compose(overrides):
     ],
 )
 def test_dd_training_paths(
-    tmp_path, monkeypatch, extra_overrides, model_name, expect_trainer, expect_loss
-):
+    tmp_path: Any,
+    monkeypatch: Any,
+    extra_overrides: Any,
+    model_name: Any,
+    expect_trainer: Any,
+    expect_loss: Any,
+) -> None:
     data_dir = tmp_path / "data"
     _write_dataset(data_dir)
 

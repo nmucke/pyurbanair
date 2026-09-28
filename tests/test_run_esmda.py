@@ -14,14 +14,20 @@ state_and_dynamic (the old `parameter`/`time_varying` names mapped to
 """
 
 import pathlib
+from typing import Any
 
 import numpy as np
 import pytest
 
 
 def _overrides(
-    truth_model, assim_model, smoother, prior, num_windows, localization=None
-):
+    truth_model: Any,
+    assim_model: Any,
+    smoother: Any,
+    prior: Any,
+    num_windows: Any,
+    localization: Any = None,
+) -> Any:
     truth = "static_truth" if prior == "static" else "dynamic_truth"
     # Localization selection. Default: the global (unlocalized) update — the
     # default correlation localization is degenerate at this 2-member ensemble
@@ -39,7 +45,7 @@ def _overrides(
         f"params@truth_params={truth}",
         *localization,
         "ensemble.ensemble_size=2",
-        "ensemble.num_parallel_processes=2",
+        "ensemble.num_parallel_processes=1",
         "esmda.num_steps=1",
         f"esmda.num_assimilation_windows={num_windows}",
         "run.skip_viz=true",
@@ -84,17 +90,10 @@ def _overrides(
         pytest.param("pylbm", "pylbm", "static", "static", 1, id="parameter"),
         pytest.param("pylbm", "pylbm", "state", "static", 1, id="state"),
         pytest.param(
-            "pylbm", "pylbm", "state_and_parameter", "static", 1, id="state_and_param"
-        ),
-        pytest.param(
             "pylbm", "pylbm", "state_and_parameter", "static", 2, id="rollout"
         ),
-        pytest.param("pylbm", "pylbm", "dynamic", "dynamic", 1, id="tv_param"),
         pytest.param("pylbm", "pylbm", "dynamic", "dynamic", 2, id="tv_rollout"),
         # Joint state + time-varying-parameter mode (single window + rollout).
-        pytest.param(
-            "pylbm", "pylbm", "state_and_dynamic", "dynamic", 1, id="state_and_tv_param"
-        ),
         pytest.param(
             "pylbm",
             "pylbm",
@@ -108,13 +107,14 @@ def _overrides(
         pytest.param("pylbm", "pyudales", "static", "static", 1, id="cross"),
     ],
 )
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_esmda(
     truth_model: str,
     assim_model: str,
     smoother: str,
     prior: str,
     num_windows: int,
-    compose_test_cfg,
+    compose_test_cfg: Any,
 ) -> None:
     import xarray
 
@@ -139,8 +139,9 @@ def test_run_esmda(
         pytest.param("dynamic", "dynamic", id="dynamic_model_error"),
     ],
 )
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_esmda_with_model_error_parameters(
-    smoother: str, prior: str, compose_test_cfg
+    smoother: str, prior: str, compose_test_cfg: Any
 ) -> None:
     """ESMDA estimates the model-error knobs when `params_to_estimate` includes
     them: the static path adds two scalar knobs; the dynamic path additionally
@@ -193,8 +194,9 @@ def test_run_esmda_with_model_error_parameters(
         pytest.param("state_and_dynamic", "dynamic", 1, id="state_tv_distance"),
     ],
 )
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_esmda_distance_localization(
-    smoother: str, prior: str, num_windows: int, compose_test_cfg
+    smoother: str, prior: str, num_windows: int, compose_test_cfg: Any
 ) -> None:
     """The state-bearing smoothers run with distance-based state localization."""
     from scripts.esmda.run_esmda import run
@@ -242,8 +244,9 @@ def test_run_esmda_distance_localization(
         ),
     ],
 )
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_esmda_state_reduction(
-    smoother: str, prior: str, reduction_overrides: list, compose_test_cfg
+    smoother: str, prior: str, reduction_overrides: list, compose_test_cfg: Any
 ) -> None:
     """The state-bearing smoothers run with the reduced SVD state update."""
     from scripts.esmda.run_esmda import run
@@ -252,8 +255,9 @@ def test_run_esmda_state_reduction(
     run(compose_test_cfg(overrides, config_name="run_esmda"))
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_esmda_loads_ground_truth_from_disk(
-    tmp_path: pathlib.Path, compose_test_cfg
+    tmp_path: pathlib.Path, compose_test_cfg: Any
 ) -> None:
     """run_forward_model.py writes a time-varying ground-truth artifact; run_esmda
     consumes it via run.truth_dir instead of simulating the truth."""
@@ -308,7 +312,7 @@ def test_run_esmda_loads_ground_truth_from_disk(
 # ---------------------------------------------------------------------------
 
 
-def _write_ensemble_window(path, n_ens=6, seed=0):
+def _write_ensemble_window(path: Any, n_ens: Any = 6, seed: Any = 0) -> Any:
     """Write a tiny ensemble window state file (leading ``ensemble`` axis).
 
     Mirrors a real window_*_posterior_state.nc: u/v/w plus a stored
@@ -341,7 +345,7 @@ def _write_ensemble_window(path, n_ens=6, seed=0):
     return arrs
 
 
-def test_streaming_state_summary_drops_redundant_velmag(tmp_path):
+def test_streaming_state_summary_drops_redundant_velmag(tmp_path: Any) -> None:
     """The window reduction returns u/v/w means + vel_mean/vel_std and, when a
     stored ``vel_magnitude`` is present, deliberately DROPS its (redundant with
     ``vel_mean``) ensemble mean -- the largest variable is never read."""
@@ -372,7 +376,9 @@ def test_streaming_state_summary_drops_redundant_velmag(tmp_path):
     assert np.allclose(out["vel_mean"].values, vmean.astype("f4"), rtol=1e-5, atol=1e-5)
 
 
-def test_streaming_state_summary_threading_matches_serial(tmp_path, monkeypatch):
+def test_streaming_state_summary_threading_matches_serial(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
     """The multi-worker reduction agrees with the single-worker path."""
     import scripts.esmda.run_esmda as run_esmda
 

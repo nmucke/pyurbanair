@@ -13,21 +13,22 @@ file stays sub-second on CPU. ``torch`` / ``kappamodules`` are imported via
 from __future__ import annotations
 
 import pathlib
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pytest
 import xarray as xr
+
+from tests.config_loader import TEST_CONF_DIR
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("kappamodules")
 trimesh = pytest.importorskip("trimesh")
 
 from hydra.utils import instantiate
-from omegaconf import OmegaConf
-
-from neural_surrogates import NeuralSurrogateForwardModel, UPT
+from neural_surrogates import UPT, NeuralSurrogateForwardModel
 from neural_surrogates.architectures import UPT as UPT_from_architectures
+from omegaconf import OmegaConf
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
@@ -51,26 +52,20 @@ TINY = dict(
     max_degree=8,
 )
 
-PRESET_DIR = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "conf"
-    / "neural_surrogate"
-    / "architectures"
-    / "upt"
-)
+PRESET_DIR = TEST_CONF_DIR / "neural_surrogate" / "architectures" / "upt"
 
 
 # -- helper builders --------------------------------------------------------
 
 
-def _tiny_upt(**overrides) -> UPT:
+def _tiny_upt(**overrides: Any) -> UPT:
     """Build a ``tiny``-sized UPT with the test channel/param counts."""
     kwargs = dict(n_state_channels=N_STATE, n_params=N_PARAMS, **TINY)
     kwargs.update(overrides)
     return UPT(**kwargs)
 
 
-def _inputs(batch: int = 2, *, seed: int = 0, obstacle: bool = True):
+def _inputs(batch: int = 2, *, seed: int = 0, obstacle: bool = True) -> Any:
     """Random ``(state, params, geometry)`` on the tiny grid.
 
     A central column of cells is marked obstacle when ``obstacle`` so the
@@ -188,7 +183,7 @@ def test_autoregressive_rollout_stays_finite() -> None:
 # -- 7. all five Hydra presets instantiate; tiny forwards -------------------
 
 
-@pytest.mark.parametrize("preset", ["tiny", "small", "medium", "large", "xlarge"])
+@pytest.mark.parametrize("preset", ["tiny", "small", "medium", "large", "xlarge"])  # type: ignore[misc]
 def test_presets_instantiate(preset: str) -> None:
     cfg = OmegaConf.load(PRESET_DIR / f"{preset}.yaml")
     model = instantiate(cfg, n_state_channels=N_STATE, n_params=N_PARAMS)
@@ -255,7 +250,9 @@ class _StubSpinup(BaseForwardModel):
     def disable_spinup(self) -> None:
         self.spinup_time = 0.0
 
-    def run_single(self, state=None, params=None, sim_name="state") -> xr.Dataset:
+    def run_single(
+        self, state: Any = None, params: Any = None, sim_name: Any = "state"
+    ) -> xr.Dataset:
         self.calls += 1
         coords = {
             "z": np.arange(NZ) + 0.5,
@@ -290,7 +287,7 @@ def _params() -> xr.Dataset:
     )
 
 
-def _make_upt_model(**overrides) -> NeuralSurrogateForwardModel:
+def _make_upt_model(**overrides: Any) -> NeuralSurrogateForwardModel:
     kwargs = dict(
         architecture=_tiny_upt(),
         spinup_forward_model=_StubSpinup(),

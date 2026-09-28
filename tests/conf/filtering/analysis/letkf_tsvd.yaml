@@ -1,0 +1,10 @@
+# @package filtering
+# Independent frozen test configuration.
+analysis:
+  _target_: data_assimilation.filtering.etkf.LETKFAnalysis
+  tsvd:
+    _target_: data_assimilation.filtering.etkf.ObservationTSVD
+    enabled: true
+    energy_fraction: 0.99
+    max_rank: null
+    numerical_tolerance: null

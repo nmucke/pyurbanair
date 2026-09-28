@@ -10,16 +10,20 @@ import numpy as np
 import pytest
 import xarray
 
+from tests.config_loader import TEST_CONF_DIR
+
 
 class _DummyEnsembleModel:
     """Minimal stand-in: the unit tests never run a forecast."""
 
-    def __init__(self, save_on_disk: bool = False, results_dir=None) -> None:
+    def __init__(self, save_on_disk: bool = False, results_dir: Any = None) -> None:
         self.save_on_disk = save_on_disk
         self.results_dir = results_dir
 
 
-def _make_state(key, n_e: int, nt: int = 1, nx: int = 4, ny: int = 3, nz: int = 2):
+def _make_state(
+    key: Any, n_e: int, nt: int = 1, nx: int = 4, ny: int = 3, nz: int = 2
+) -> Any:
     shape = (n_e, nt, nx, ny, nz)
     keys = jax.random.split(key, 3)
     data_vars = {
@@ -41,7 +45,7 @@ def _make_state(key, n_e: int, nt: int = 1, nx: int = 4, ny: int = 3, nz: int = 
     )
 
 
-def _make_params(key, n_e: int):
+def _make_params(key: Any, n_e: int) -> Any:
     k1, k2 = jax.random.split(key)
     return xarray.Dataset(
         {
@@ -55,7 +59,7 @@ def _make_params(key, n_e: int):
     )
 
 
-def _make_smoother(n_d: int, rng_seed: int = 0, **kwargs):
+def _make_smoother(n_d: int, rng_seed: int = 0, **kwargs: Any) -> Any:
     from data_assimilation.smoothing.esmda import StateAndParameterESMDA
 
     return StateAndParameterESMDA(
@@ -541,7 +545,7 @@ def test_state_reduction_incompatible_with_localization() -> None:
 
 
 def test_final_time_smoothing_requires_reduction_and_in_memory_mode(
-    tmp_path,
+    tmp_path: Any,
 ) -> None:
     from data_assimilation.reduction import OnlineStateReduction
 
@@ -763,7 +767,7 @@ def test_shipped_streaming_defaults_keep_rank_and_orthogonality_bounded() -> Non
     from omegaconf import OmegaConf
 
     shipped = OmegaConf.load(
-        "conf/filtering/state_reduction/svd_streaming.yaml"
+        TEST_CONF_DIR / "filtering/state_reduction/svd_streaming.yaml"
     ).state_reduction
     assert shipped.max_rank is not None, "the shipped default must bound the rank"
     reduction = StreamingStateReduction(

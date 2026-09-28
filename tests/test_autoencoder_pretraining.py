@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 import xarray as xr
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
+
+from tests.config_loader import TEST_CONF_DIR
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
@@ -35,16 +38,18 @@ from neural_surrogates import (
     TadpoleAE,
     snapshot_collate,
 )
+from torch import nn
 
 _WORKTREE = Path(__file__).resolve().parents[1]
-_CONF = _WORKTREE / "conf"
+_CONF = TEST_CONF_DIR
 _SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "pretrain_autoencoder.py"
 
 STATE_VARS = ("u", "v", "w")
 
 
-def _load_pretrain_run():
+def _load_pretrain_run() -> Any:
     spec = importlib.util.spec_from_file_location("pretrain_ae_under_test", _SCRIPT)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.run
@@ -57,7 +62,7 @@ def _load_pretrain_run():
 CROP = 16  # encoder_crop_size must be a multiple of 16 (encoder downsamples /16)
 
 
-def _ae(encode_geometry=True, sdf_features="none", **kw):
+def _ae(encode_geometry: Any = True, sdf_features: Any = "none", **kw: Any) -> Any:
     kw.setdefault("encoder_crop_size", CROP)
     return TadpoleAE(
         n_state_channels=3,
@@ -69,13 +74,13 @@ def _ae(encode_geometry=True, sdf_features="none", **kw):
     )
 
 
-def _inputs(b=1, grid=(16, 16, 16)):
+def _inputs(b: Any = 1, grid: Any = (16, 16, 16)) -> Any:
     state = torch.randn(b, 3, *grid)
     geom = (torch.rand(b, *grid) > 0.2).float()
     return state, geom
 
 
-def test_reconstruction_shape_and_kl_finite():
+def test_reconstruction_shape_and_kl_finite() -> None:
     ae = _ae().eval()
     ae.set_normalization([0, 0, 0], [1, 1, 1])
     state, geom = _inputs()
@@ -88,21 +93,21 @@ def test_reconstruction_shape_and_kl_finite():
     assert torch.allclose(recon * (1 - mask), torch.zeros_like(recon))
 
 
-def test_encoder_crop_size_must_be_multiple_of_16():
+def test_encoder_crop_size_must_be_multiple_of_16() -> None:
     with pytest.raises(ValueError, match="multiple of 16"):
         _ae(encoder_crop_size=8)
 
 
-@pytest.mark.parametrize(
+@pytest.mark.parametrize(  # type: ignore[misc]
     "crop",
     [(16, 32), (16, 32, 8), (16, 32, 32, 64), (16, 32.0, 32)],
 )
-def test_anisotropic_encoder_crop_size_is_validated(crop):
+def test_anisotropic_encoder_crop_size_is_validated(crop: Any) -> None:
     with pytest.raises(ValueError, match="encoder_crop_size"):
         _ae(encoder_crop_size=crop)
 
 
-def test_anisotropic_tiles_fold_across_the_full_batch():
+def test_anisotropic_tiles_fold_across_the_full_batch() -> None:
     """Each axis uses its own tile extent without padding the thin z axis."""
     ae = _ae(
         encode_geometry=False,
@@ -128,7 +133,7 @@ def test_anisotropic_tiles_fold_across_the_full_batch():
     assert recon.shape == state.shape
 
 
-def test_padding_round_trip_non_divisible_grid():
+def test_padding_round_trip_non_divisible_grid() -> None:
     """A grid not divisible by the crop size is padded internally and cropped
     back, so the reconstruction matches the (odd) input shape."""
     ae = _ae().eval()
@@ -140,7 +145,7 @@ def test_padding_round_trip_non_divisible_grid():
     assert recon.shape[2:] == grid
 
 
-def test_encode_geometry_channel_counts():
+def test_encode_geometry_channel_counts() -> None:
     """Working-space recon/target channel counts track encode_geometry + SDF."""
     state, geom = _inputs()
     for eg, sdf, extra in [(False, "none", 0), (True, "none", 1), (True, "both", 5)]:
@@ -152,7 +157,7 @@ def test_encode_geometry_channel_counts():
         assert target.shape[1] == 3 + extra
 
 
-def test_encode_decode_passthrough_runs():
+def test_encode_decode_passthrough_runs() -> None:
     ae = _ae().eval()
     ae.set_normalization([0, 0, 0], [1, 1, 1])
     state, geom = _inputs()
@@ -163,7 +168,7 @@ def test_encode_decode_passthrough_runs():
     assert torch.isfinite(decoded).all()
 
 
-def test_normalization_round_trip():
+def test_normalization_round_trip() -> None:
     """`_denormalize_state(_normalize_state(x))` recovers x on fluid cells,
     locking down the z-score math independently of the random autoencoder."""
     ae = _ae()
@@ -176,7 +181,7 @@ def test_normalization_round_trip():
     assert torch.allclose(x_rec[fluid], state[fluid], atol=1e-5)
 
 
-def test_weight_round_trip_output_parity():
+def test_weight_round_trip_output_parity() -> None:
     """weights.pt reload reproduces outputs bit-for-bit, incl. the installed
     normalization buffers. `latent_type="mode"` makes the forward deterministic
     so a broken buffer save/load would change the output."""
@@ -205,7 +210,7 @@ def test_weight_round_trip_output_parity():
 NZ, NY, NX, T = 16, 16, 16, 4
 
 
-def _write_dataset(root: Path, *, splits=None) -> None:
+def _write_dataset(root: Path, *, splits: Any = None) -> None:
     splits = splits or {"train": 2, "val": 1}
     rng = np.random.default_rng(0)
     for split, n in splits.items():
@@ -213,7 +218,7 @@ def _write_dataset(root: Path, *, splits=None) -> None:
         blank = np.zeros((NZ, NY, NX), "f4")
         blank[0] = 1.0  # bottom layer is obstacle (blanking=1)
         for i in range(n):
-            state = {
+            state: dict[str, tuple[tuple[str, ...], Any]] = {
                 v: (
                     ("time", "z", "y", "x"),
                     rng.standard_normal((T, NZ, NY, NX)).astype("f4"),
@@ -232,7 +237,7 @@ def _write_dataset(root: Path, *, splits=None) -> None:
             ).to_netcdf(root / "state" / split / f"sample_{i:04d}.nc")
 
 
-def test_snapshot_dataset_items_and_collate(tmp_path):
+def test_snapshot_dataset_items_and_collate(tmp_path: Any) -> None:
     root = tmp_path / "data"
     _write_dataset(root)
     ds = SnapshotDataset(root, "train", sdf_features="both", sdf_clamp_cells=8)
@@ -249,7 +254,7 @@ def test_snapshot_dataset_items_and_collate(tmp_path):
     assert batch["geom_features"].shape == (1, 4, NZ, NY, NX)
 
 
-def test_snapshot_dataset_time_stride(tmp_path):
+def test_snapshot_dataset_time_stride(tmp_path: Any) -> None:
     root = tmp_path / "data"
     _write_dataset(root)
     ds = SnapshotDataset(root, "train", time_stride=2)
@@ -257,7 +262,7 @@ def test_snapshot_dataset_time_stride(tmp_path):
     assert len(ds) == 2 * 2
 
 
-def test_snapshot_trajectory_batch_sampler(tmp_path):
+def test_snapshot_trajectory_batch_sampler(tmp_path: Any) -> None:
     """SnapshotDataset exposes `sample_index` + `grid_shape`, so the
     TrajectoryBatchSampler (multi-geometry batching) works over it."""
     from neural_surrogates import TrajectoryBatchSampler
@@ -274,7 +279,7 @@ def test_snapshot_trajectory_batch_sampler(tmp_path):
         assert len(trajs) == 1, f"batch mixes trajectories {trajs}"
 
 
-def test_snapshot_random_crop(tmp_path):
+def test_snapshot_random_crop(tmp_path: Any) -> None:
     root = tmp_path / "data"
     _write_dataset(root)
     ds = SnapshotDataset(root, "train", random_crop_size=8, sdf_features="sdf")
@@ -287,7 +292,7 @@ def test_snapshot_random_crop(tmp_path):
     assert batch["geometry"].shape == (2, 8, 8, 8)
 
 
-def test_snapshot_random_crop_equals_full_field_slice(tmp_path):
+def test_snapshot_random_crop_equals_full_field_slice(tmp_path: Any) -> None:
     """The lazy-read crop (M5) must equal the corresponding slice of the
     full-field item for the same crop origin -- i.e. reading only the crop
     changes I/O, not values."""
@@ -315,7 +320,7 @@ def test_snapshot_random_crop_equals_full_field_slice(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _StubAE(torch.nn.Module):
+class _StubAE(nn.Module):
     """Minimal stand-in exposing the attributes AutoencoderTrainer reads."""
 
     n_state_channels = 3
@@ -327,7 +332,7 @@ class _StubAE(torch.nn.Module):
         self.p = torch.nn.Parameter(torch.zeros(1))
 
 
-def _make_ae_trainer(model):
+def _make_ae_trainer(model: Any) -> Any:
     from torch.utils.data import DataLoader
 
     dummy = DataLoader([0, 1], batch_size=1)
@@ -342,7 +347,7 @@ def _make_ae_trainer(model):
     )
 
 
-def test_ae_trainer_geometry_cache_busts_on_change():
+def test_ae_trainer_geometry_cache_busts_on_change() -> None:
     """A shared geometry is uploaded once and reused across content-equal
     batches, but a genuinely different geometry refreshes the device cache; a
     per-sample (crop) batch bypasses the cache entirely."""
@@ -402,7 +407,7 @@ def test_ae_trainer_geometry_cache_busts_on_change():
 # --------------------------------------------------------------------------- #
 
 
-def _shrink_for_cpu(cfg) -> None:
+def _shrink_for_cpu(cfg: Any) -> None:
     cfg.architecture.encoder_crop_size = CROP
     cfg.dataloader.batch_size = 2
     cfg.dataloader.num_workers = 0
@@ -432,8 +437,10 @@ def _shrink_for_cpu(cfg) -> None:
     cfg.dataset.sdf_clamp_cells = cfg.architecture.sdf_clamp_cells
 
 
-@pytest.mark.parametrize("spatial_mode", ["local", "global", "halo"])
-def test_pretrain_end_to_end(tmp_path, monkeypatch, spatial_mode):
+@pytest.mark.parametrize("spatial_mode", ["local", "global", "halo"])  # type: ignore[misc]
+def test_pretrain_end_to_end(
+    tmp_path: Any, monkeypatch: Any, spatial_mode: Any
+) -> None:
     data_dir = tmp_path / "data"
     _write_dataset(data_dir)
 

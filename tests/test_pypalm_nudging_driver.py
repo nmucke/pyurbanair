@@ -8,14 +8,16 @@ docs/plans/palm_nudging_driver_plan.md §Phases 4.
 """
 
 import pathlib
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 import pytest
 import xarray
-from hydra import compose, initialize
+from hydra import compose, initialize_config_dir
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
+
+from tests.config_loader import TEST_CONF_DIR
 
 _SMOKE = [
     "domain.nx=20",
@@ -56,7 +58,7 @@ NZ = 4
 
 def _make_model(tmp_path: pathlib.Path, *extra_overrides: str) -> Any:
     """Compose + instantiate a pypalm smoke model staged under ``tmp_path``."""
-    with initialize(version_base=None, config_path="../conf"):
+    with initialize_config_dir(version_base=None, config_dir=str(TEST_CONF_DIR)):
         cfg = compose(
             config_name="run_forward_model",
             overrides=[*_SMOKE, f"paths.experiment_dir={tmp_path}", *extra_overrides],
@@ -85,7 +87,9 @@ def _time_varying_params(times: Any, angles: Any, speeds: Any = 5.0) -> xarray.D
 def _switch(fm: Any, key: str) -> Optional[str]:
     from pypalm.utils.p3d_utils import P3DFile
 
-    return P3DFile(fm.p3d_path).get_value("initialization_parameters", key)
+    return cast(
+        Optional[str], P3DFile(fm.p3d_path).get_value("initialization_parameters", key)
+    )
 
 
 def _nudging_switches_on(fm: Any) -> bool:
@@ -108,7 +112,9 @@ def _turbulent_inflow_active(fm: Any) -> bool:
     p3d = P3DFile(fm.p3d_path)
     if not p3d.has_section("turbulent_inflow_parameters"):
         return False
-    return p3d.get_value("turbulent_inflow_parameters", "switch_off_module") != ".true."
+    return bool(
+        p3d.get_value("turbulent_inflow_parameters", "switch_off_module") != ".true."
+    )
 
 
 def _nudge_block_count(fm: Any) -> int:

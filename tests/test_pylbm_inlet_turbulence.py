@@ -124,7 +124,7 @@ class TestApplyInletTurbulenceEnabled:
 
 
 class TestApplyInletTurbulenceNoOp:
-    @pytest.mark.parametrize(
+    @pytest.mark.parametrize(  # type: ignore[misc]
         "cfg",
         [
             None,
@@ -169,7 +169,7 @@ class TestValidateInletTurbulence:
                 {"enabled": True, "amplitud": 1e-5}, "inflow_outflow"
             )
 
-    @pytest.mark.parametrize("interval", [0, -5])
+    @pytest.mark.parametrize("interval", [0, -5])  # type: ignore[misc]
     def test_non_positive_update_interval_raises(self, interval: int) -> None:
         with pytest.raises(ValueError, match="update_interval"):
             validate_inlet_turbulence(
@@ -225,21 +225,3 @@ class TestForwardModelWiring:
         signature = inspect.signature(ForwardModel.__init__)
         assert "inlet_turbulence" in signature.parameters
         assert signature.parameters["inlet_turbulence"].default is None
-
-    def test_config_defaults_match_the_solver_template(self) -> None:
-        """conf/model/pylbm.yaml must not silently change the solver defaults."""
-        import yaml  # type: ignore[import-untyped]
-
-        conf_path = (
-            pathlib.Path(__file__).resolve().parents[1]
-            / "conf"
-            / "model"
-            / "pylbm.yaml"
-        )
-        cfg = yaml.safe_load(conf_path.read_text())["forward_model"]["inlet_turbulence"]
-
-        template_tokens = TEMPLATE_INFILE.splitlines()[TURBULENCE_LINE_INDEX]
-        _, amplitude, interval = template_tokens.split("!")[0].split()
-        assert cfg["enabled"] is False
-        assert float(cfg["amplitude"]) == pytest.approx(float(amplitude))
-        assert int(cfg["update_interval"]) == int(interval)

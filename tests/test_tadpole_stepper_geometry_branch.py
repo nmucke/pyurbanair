@@ -36,6 +36,8 @@ from typing import Any, cast
 
 import pytest
 
+from tests.config_loader import TEST_CONF_DIR
+
 torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 pytest.importorskip("timm")
@@ -571,7 +573,7 @@ def test_trainable_modules_cover_the_film_but_not_the_branch() -> None:
     mod = _load_finetune_module()
     tokens = list(
         OmegaConf.load(
-            _WORKTREE / "conf/neural_surrogate/finetune_mode/dft.yaml"
+            TEST_CONF_DIR / "neural_surrogate/finetune_mode/dft.yaml"
         ).trainable_modules
     )
     m = _branch_stepper()

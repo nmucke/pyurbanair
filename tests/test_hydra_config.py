@@ -1,24 +1,30 @@
+import builtins
+import io
+import os
 import sys
-from collections.abc import Callable
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from data_assimilation.observation_operator import TemporalObservationOperator
-from hydra import compose, initialize
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from pyurbanair.config.hydra_helpers import (
+    create_aggregate_observations,
     create_observation_operator,
     create_observation_points,
 )
+from tests.config_loader import TEST_CONF_DIR, compose_test_config
 
 
-def _compose(overrides: list[str] | None = None):
-    with initialize(version_base=None, config_path="../conf"):
-        return compose(config_name="run_forward_model", overrides=overrides or [])
+def _compose(
+    overrides: list[str] | None = None, config_name: str = "run_forward_model"
+) -> Any:
+    return compose_test_config(overrides, config_name=config_name)
 
 
-@pytest.mark.parametrize(
+@pytest.mark.parametrize(  # type: ignore[misc]
     "override,expected_name,expected_solver",
     [
         ("model=pylbm", "pylbm", "pylbm"),
@@ -27,160 +33,157 @@ def _compose(overrides: list[str] | None = None):
     ],
 )
 def test_single_model_configs_compose(
-    override: str,
-    expected_name: str,
-    expected_solver: str,
+    override: Any, expected_name: Any, expected_solver: Any
 ) -> None:
     cfg = _compose([override])
-
     assert cfg.model.name == expected_name
     assert cfg.model.solver_name == expected_solver
 
 
 def test_truth_and_assim_model_aliases_compose() -> None:
-    # The truth/assim double-mount lives in the run_esmda entry point.
-    with initialize(version_base=None, config_path="../conf"):
-        cfg = compose(
-            config_name="run_esmda",
-            overrides=["model@truth_model=pylbm", "model@assim_model=pyudales"],
-        )
-
+    cfg = _compose(
+        ["model@truth_model=pylbm", "model@assim_model=pyudales"],
+        config_name="run_esmda",
+    )
     assert cfg.truth_model.name == "pylbm"
     assert cfg.assim_model.name == "pyudales"
     assert cfg.assim_model.solver_name == "udales"
 
 
-def test_smoke_composer_stabilizes_single_udales_mount(
-    compose_test_cfg: Callable[..., Any],
-) -> None:
-    cfg = compose_test_cfg(["model=pyudales"])
-
-    assert cfg.model.forward_model.ncpu == 1
-    assert cfg.model.forward_model.inlet_turbulence.enabled is False
-
-
-def test_smoke_composer_stabilizes_dual_udales_mounts(
-    compose_test_cfg: Callable[..., Any],
-) -> None:
-    cfg = compose_test_cfg(
-        ["model@truth_model=pyudales", "model@assim_model=pyudales"],
-        config_name="run_esmda",
-    )
-
-    for model in (cfg.truth_model, cfg.assim_model):
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "config_name,mounts",
+    [
+        ("run_forward_model", ("model",)),
+        ("run_esmda", ("truth_model", "assim_model")),
+        ("run_filtering", ("truth_model", "assim_model")),
+        ("run_filter_smoothing", ("truth_model", "assim_model")),
+    ],
+)
+def test_fixed_udales_smoke_settings(config_name: Any, mounts: Any) -> None:
+    cfg = _compose(config_name=config_name)
+    for mount in mounts:
+        model = cfg[mount]
         assert model.forward_model.ncpu == 1
         assert model.forward_model.inlet_turbulence.enabled is False
+        assert model.forward_model.nudging_config.nnudge_meters == 4.0
 
 
-def test_smoke_composer_leaves_non_udales_mount_unchanged(
-    compose_test_cfg: Callable[..., Any],
-) -> None:
-    cfg = compose_test_cfg(["model=pylbm"])
-    production_cfg = _compose(["model=pylbm"])
-
-    assert cfg.model.name == "pylbm"
-    assert "ncpu" not in cfg.model.forward_model
-    assert cfg.model.forward_model.inlet_turbulence == (
-        production_cfg.model.forward_model.inlet_turbulence
-    )
-
-
-def test_smoke_composer_preserves_explicit_udales_compute_and_inlet_overrides(
-    compose_test_cfg: Callable[..., Any],
-) -> None:
-    production_cfg = _compose(["model=pyudales"])
-    cfg = compose_test_cfg(
+def test_caller_override_wins_over_test_baseline() -> None:
+    cfg = _compose(
         [
-            "model=pyudales",
             "model.forward_model.ncpu=2",
-            "++model.forward_model.inlet_turbulence.intensity=0.15",
+            "model.forward_model.inlet_turbulence.enabled=true",
         ]
     )
-
     assert cfg.model.forward_model.ncpu == 2
-    assert cfg.model.forward_model.inlet_turbulence.enabled == (
-        production_cfg.model.forward_model.inlet_turbulence.enabled
-    )
-    assert cfg.model.forward_model.inlet_turbulence.intensity == 0.15
-
-
-def test_smoke_composer_preserves_explicit_whole_inlet_block(
-    compose_test_cfg: Callable[..., Any],
-) -> None:
-    cfg = compose_test_cfg(
-        [
-            "model=pyudales",
-            "model.forward_model.inlet_turbulence={enabled:true,intensity:0.12}",
-        ]
-    )
-
-    assert cfg.model.forward_model.inlet_turbulence.enabled is True
-    assert cfg.model.forward_model.inlet_turbulence.intensity == 0.12
-
-
-def test_smoke_composer_preserves_explicit_inlet_opt_in(
-    compose_test_cfg: Callable[..., Any],
-) -> None:
-    cfg = compose_test_cfg(
-        ["model=pyudales", "model.forward_model.inlet_turbulence.enabled=true"]
-    )
-
     assert cfg.model.forward_model.inlet_turbulence.enabled is True
 
 
-def test_entrypoint_composes_with_model_override() -> None:
-    cfg = _compose(["model=pyudales"])
+def test_fixed_test_config_is_independent_of_production_run_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A conflicting cwd/conf tree cannot change the frozen smoke configuration.
+    shadow_conf = tmp_path / "conf"
+    shadow_conf.mkdir()
+    (shadow_conf / "run_forward_model.yaml").write_text(
+        "domain:\n  nx: 999\nensemble:\n  ensemble_size: 999\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert TEST_CONF_DIR != Path(__file__).resolve().parents[1] / "conf"
+    for path in TEST_CONF_DIR.rglob("*.yaml"):
+        assert "hydra.searchpath" not in path.read_text()
+    with initialize_config_dir(version_base=None, config_dir=str(TEST_CONF_DIR)):
+        composed = compose(config_name="run_forward_model", return_hydra_config=True)
+    main_sources = [
+        source.path
+        for source in composed.hydra.runtime.config_sources
+        if source.provider == "main"
+    ]
+    assert main_sources == [str(TEST_CONF_DIR)]
+    production_conf = Path(__file__).resolve().parents[1] / "conf"
+    original_open = builtins.open
+    original_io_open = io.open
 
-    assert cfg.model.name == "pyudales"
-    # Physics comes from the default case (xie_and_castro). Assert on the
-    # case's identity and the shape of its domain block, not on a grid count:
-    # nx/ny/nz are compute knobs that get retuned per experiment, and pinning
-    # one here only records whatever the case happened to say that week.
-    assert "xie_and_castro" in cfg.geometry.udales_case_dir
-    assert {"nx", "ny", "nz", "bounds"} <= set(cfg.domain)
-    assert cfg.obs.mode in {"points", "grid"}
+    def forbid_production_config_reads(opener: Any) -> Any:
+        def guarded(file: Any, *args: Any, **kwargs: Any) -> Any:
+            if isinstance(file, (str, os.PathLike)):
+                path = Path(file).resolve()
+                if path.is_relative_to(production_conf):
+                    raise AssertionError(
+                        f"test composition read production config: {path}"
+                    )
+            return opener(file, *args, **kwargs)
 
+        return guarded
 
-def test_default_compute_is_medium() -> None:
-    # The default compute values are baked straight into the entry point
-    # (conf/run_forward_model.yaml's ensemble/time blocks).
-    cfg = _compose([])
-
-    assert cfg.ensemble.ensemble_size == 64
-    assert cfg.ensemble.num_parallel_processes == 1
-    assert cfg.time.seconds_per_knot == 20.0
+    monkeypatch.setattr(builtins, "open", forbid_production_config_reads(original_open))
+    monkeypatch.setattr(io, "open", forbid_production_config_reads(original_io_open))
+    for name in (
+        "run_forward_model",
+        "run_esmda",
+        "run_filtering",
+        "run_filter_smoothing",
+    ):
+        cfg = _compose(config_name=name)
+        assert (cfg.domain.nx, cfg.domain.ny, cfg.domain.nz) == (20, 20, 4)
+        assert cfg.time.simulation_time == 3.0
+        assert cfg.time.output_frequency == 1.0
+        assert cfg.ensemble.ensemble_size == 2
+        assert cfg.ensemble.num_parallel_processes == 1
+    data = _compose(config_name="neural_surrogate/training_data")
+    assert data.training_data.simulation_time == 3.0
+    assert data.training_data.adaptive_spinup.enabled is False
+    assert data.training_data.num_train == 2
+    fixed_data = _compose(
+        ["training_data/geometry_mode=fixed", "case=barcelona"],
+        config_name="neural_surrogate/training_data",
+    )
+    assert fixed_data.training_data.geometry.output_name == "barcelona"
 
 
 def test_palm_target_does_not_import_for_non_palm_composition() -> None:
     for module_name in list(sys.modules):
         if module_name == "pypalm" or module_name.startswith("pypalm."):
             del sys.modules[module_name]
-
     _compose(["model=pylbm"])
-
     assert "pypalm" not in sys.modules
 
 
 def test_interpolations_resolve_under_aliased_packages() -> None:
-    # The smoother is supplied by the run_esmda primary config's
-    # ``esmda/smoother`` group, so compose it (rather than the base ``config``)
-    # to exercise the smoother interpolations.
-    with initialize(version_base=None, config_path="../conf"):
-        cfg = compose(
-            config_name="run_esmda",
-            overrides=[
-                "model@truth_model=pylbm",
-                "model@assim_model=pypalm",
-                "assim_model.compile=false",
-                "esmda.num_steps=4",
-            ],
-        )
-    resolved = OmegaConf.to_container(cfg, resolve=True)
-
+    cfg = _compose(
+        [
+            "model@truth_model=pylbm",
+            "model@assim_model=pypalm",
+            "assim_model.compile=false",
+            "esmda.num_steps=4",
+        ],
+        config_name="run_esmda",
+    )
+    resolved = cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True))
     assert resolved["assim_model"]["prepare"]["compile"] is False
     assert resolved["esmda"]["alpha"] == 4
     assert resolved["esmda"]["smoother"]["num_steps"] == 4
     assert resolved["esmda"]["smoother"]["alpha"] == 4
+
+
+def test_observation_components_use_test_group_targets() -> None:
+    cfg = _compose(config_name="run_esmda")
+    assert cfg.observation.operator._target_.endswith("TemporalObservationOperator")
+    op = create_observation_operator(
+        cfg.obs, cfg.truth_model.solver_name, cfg.observation.operator
+    )
+    aggregation = create_aggregate_observations(cfg)
+    assert isinstance(op, TemporalObservationOperator)
+    assert op.observation_operator.num_sensors == len(cfg.obs.x_points)
+    assert aggregation is not None
+    assert aggregation.interval_seconds == cfg.esmda.interval_seconds
+
+
+def test_legacy_observation_fallback_without_group() -> None:
+    cfg = _compose()
+    assert "observation" not in cfg
+    op = create_observation_operator(cfg.obs, cfg.model.solver_name)
+    assert isinstance(op, TemporalObservationOperator)
 
 
 def test_resolve_parameter_schema_includes_pressure_gradient_for_udales() -> None:

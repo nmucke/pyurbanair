@@ -4,38 +4,47 @@
 # training-data generation config (replaces the former conf/training_data/ group
 # + conf/generate_training_data.yaml; dataset shape taken from the old medium preset).
 #
-# The PHYSICAL setup is picked by `training_data.geometry.source`:
-#   barcelona | xie_and_castro — the single-geometry named cases; the case's
-#     domain/geometry/time replace the composed `case` selection, so the yaml
-#     knob alone switches geometry (generate_training_data.py).
-#   idealized | realistic — the UrbanTALES STL pools under
-#     examples/geometries/processed/<source>; geometries are randomly sampled
-#     per simulation and the grid is derived per geometry from the STL extent
-#     (generate_random_geometries_training_data.py).
-# Override on the CLI as usual, e.g.
-# `model=pylbm training_data.geometry.source=realistic training_data.num_train=256`.
+# Fixed generation uses case= with training_data/geometry_mode=fixed.
+# The separate random-geometry generator uses mode=random and
+# geometry.source=idealized|realistic to select an UrbanTALES STL pool.
 defaults:
-  - /run_forward_model
-  # Backend selection lives here so the whole data-generation setup is this
-  # one file; `model=pylbm` on the CLI still wins over this entry.
-  - override /model@model: pyudales
+  - /common/runtime
+  - /execution: forward
+  - /case: xie_and_castro
+  - /params: dynamic
+  - /model@model: pyudales
+  - /training_data/geometry_mode: random
   - _self_
 
+# Historical data-generation roots and the same scientific knot spacing.
+paths:
+  results_dir: results/${model.name}
+  experiment_dir: ${oc.env:PWD}/.temp_${model.name}
+  base_results_dir: .temp_${model.name}
+time:
+  seconds_per_knot: 20.0
+run:
+  ensemble: false
+  ground_truth_dir: null
+  rollout_steps: 0
+  ensemble_save_on_disk: false
+# Dataset generation treats a failed sample as an error.
+ensemble:
+  failure:
+    policy: raise
+
 training_data:
-  # Small single-geometry fine-tune set: every other knob below is kept
-  # identical to training_data/pyudales_idealized/config.yaml (the pre-training
-  # corpus), so only the geometry and the sample count differ.
+  # Dataset size for the selected geometry mode.
   num_train: 500
   num_val: 10
   num_test: 10
 
-  # output_dir: training_data/${model.name}_${training_data.geometry.source}/
-  output_dir: /export/scratch2/ntm/training_data/${model.name}_${training_data.geometry.source}/
+  # output_dir: training_data/${model.name}_${training_data.geometry.output_name}/
+  output_dir: /export/scratch2/ntm/training_data/${model.name}_${training_data.geometry.output_name}/
 
   # --- Geometry source --------------------------------------------------
   geometry:
-    # Single fixed geometry (generate_training_data.py): conf/case/
-    # xie_and_castro.yaml is merged over the composed config, so the domain
+    # Fixed geometry (generate_training_data.py) uses case=, so the domain
     # (nx/ny/nz + bounds) comes from the CASE, not from the resolution /
     # z_size / *_padding knobs below — those stay inert here, kept at the
     # pyudales_idealized values so this file still documents that dataset.
@@ -43,7 +52,6 @@ training_data:
     # shallower than the 4 m isotropic / z = 64 m pool grid; and uDALES sets
     # nprocx = ncpu, which must divide itot = 40 (so ncpu in
     # 1/2/4/5/8/10/20/40, NOT the 16 that conf/model/pyudales.yaml carries).
-    # source: xie_and_castro
     source: realistic
 
     # Pool + per-backend case-template locations, derived from `source`.
