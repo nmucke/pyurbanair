@@ -27,7 +27,7 @@ from __future__ import annotations
 import inspect
 import pathlib
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
@@ -354,7 +354,9 @@ def _generate(
         seed=20260729,
     )
     kwargs.update(overrides)
-    return build_driver_planes(**kwargs)
+    return cast(
+        tuple[np.ndarray, np.ndarray, np.ndarray], build_driver_planes(**kwargs)
+    )
 
 
 def test_plane_means_follow_the_requested_inflow_profile() -> None:
@@ -647,6 +649,7 @@ def test_disabled_path_writes_nothing(tmp_path: pathlib.Path) -> None:
     assert "iinletgen" not in NamoptionsFile(namoptions_path).get_section_keys("INLET")
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_e2e_disabled_run_leaves_no_inlet_turbulence_artefacts(
     tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
 ) -> None:
@@ -827,6 +830,7 @@ def _smoke_overrides(tmp_path: pathlib.Path) -> list[str]:
     ]
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_e2e_solver_reads_and_interpolates_the_driver_planes(
     tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
 ) -> None:
@@ -888,6 +892,7 @@ def test_e2e_solver_reads_and_interpolates_the_driver_planes(
         )
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_e2e_two_window_rollout_continues_the_turbulence(
     tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
 ) -> None:
@@ -1044,6 +1049,7 @@ def test_clock_is_copied_on_failure_substitution(tmp_path: pathlib.Path) -> None
     assert read_elapsed_time(failed) == 600.0
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_e2e_parallel_ensemble_keeps_each_member_continuous(
     tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
 ) -> None:

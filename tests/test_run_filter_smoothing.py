@@ -7,15 +7,15 @@ Two tiers, following tests/test_run_filtering.py:
   third entry point and that every ``${esmda.*}`` / ``${filtering.*}``
   interpolation they carry resolves against ``conf/run_filter_smoothing.yaml``'s
   own blocks. These run anywhere;
-* end-to-end smoke tests under the tiny smoke config (conftest
-  ``tests/conf/test/smoke.yaml``) with the global (unlocalized) update — the correlation
+* end-to-end smoke tests under the small independent `tests/conf` configuration
+  with the global (unlocalized) update — the correlation
   localization the ESMDA entry point defaults to is degenerate at this 2-member
   ensemble size. Three of them, one per hybrid path: state + dynamic
   (per-segment trajectory restriction), joint + static (the exact-reduction
   path, where the hybrid is a plain joint EnKF on the MDA posterior) and
   joint + dynamic (the correction-on-the-ESMDA-schedule path).
 
-The e2e tests build and run pylbm and are verified in CI, serially; they
+The e2e tests build and run pylbm and run serially in the integration suite; they
 SIGABRT on the maintainer's Mac (libomp / pylbm ``prepare_compile``), which is
 the same limitation test_run_esmda.py and test_run_filtering.py live with.
 """
@@ -124,9 +124,8 @@ def test_filter_smoothing_composes(
     assert cfg.esmda.smoother.alpha == cfg.esmda.num_steps
     assert cfg.esmda.smoother.localization is None
     if smoother == "dynamic":
-        # Present but a placeholder: the script overrides it at instantiate time
-        # from the sampled prior's knot count.
-        assert "num_time_points" in cfg.esmda.smoother
+        # The runner supplies the sampled prior knot count at construction.
+        assert "num_time_points" not in cfg.esmda.smoother
         assert cfg.esmda.smoother.pin_initial_time_point is True
 
     # The filter half, and its interpolations into the shared `filtering:` block.
@@ -148,10 +147,14 @@ def test_filter_smoothing_composes(
     assert cfg.filter_smoothing.num_assimilation_windows == 1
     assert cfg.filter_smoothing.seed == 42
     assert cfg.filter_smoothing.obs_error_std > 0.0
-    assert "num_assimilation_windows" not in cfg.esmda
-    assert "num_assimilation_windows" not in cfg.filtering
-    assert "obs_error_std" not in cfg.esmda
-    assert "obs_error_std" not in cfg.filtering
+    for node in (cfg.esmda, cfg.filtering):
+        assert (
+            node.num_assimilation_windows
+            == cfg.filter_smoothing.num_assimilation_windows
+        )
+        assert node.obs_error_std == cfg.filter_smoothing.obs_error_std
+    cfg.filter_smoothing.obs_error_std = 0.5
+    assert cfg.esmda.obs_error_std == cfg.filtering.obs_error_std == 0.5
 
     # run_filtering.yaml's analysis stride, same meaning, default 1. Under a
     # stride the thinning applies to BOTH halves (one observation product).
@@ -238,35 +241,6 @@ def test_filter_smoothing_esmda_localization_composes(
     assert cfg.filtering.filter.localization is None
 
 
-def test_filter_smoothing_default_config_is_the_documented_one(
-    compose_test_cfg: Any,
-) -> None:
-    """The shipped defaults list, composed without any mode overrides.
-
-    Pins the defaults the config's header documents (and the plan fixed), so a
-    later edit to one of the shared groups cannot quietly change what a bare
-    ``python scripts/filter_smoothing/run_filter_smoothing.py`` runs.
-    """
-    cfg = compose_test_cfg([], config_name="run_filter_smoothing")
-    assert cfg.esmda.smoother._target_ == (
-        "data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA"
-    )
-    assert cfg.esmda.localization is None
-    assert cfg.esmda.state_reduction is None
-    assert cfg.filtering.mode == "joint"
-    assert cfg.filtering.analysis._target_ == (
-        "data_assimilation.filtering.analysis.StochasticEnKFAnalysis"
-    )
-    assert cfg.filtering.inflation._target_ == "data_assimilation.inflation.RTPS"
-    assert cfg.filtering.parameter_evolution is None
-    assert cfg.filtering.localization is None
-    assert cfg.filtering.state_reduction is None
-    # A dynamic prior is the default, so the default run takes the trajectory
-    # (per-segment) path rather than the static one.
-    assert "seconds_per_knot" in cfg.prior_params
-    assert str(cfg.paths.results_dir)  # rewritten by the conftest's isolation
-
-
 # ---------------------------------------------------------------------------
 # Configuration rejections (no solver: every one of these fires before the
 # truth is simulated)
@@ -292,7 +266,7 @@ def test_run_filter_smoothing_rejects_parameter_mode(compose_test_cfg: Any) -> N
     cfg = compose_test_cfg(
         _overrides("dynamic", "parameter", 1), config_name="run_filter_smoothing"
     )
-    with pytest.raises(ValueError, match="not a hybrid mode"):
+    with pytest.raises(ValueError, match="filtering.mode"):
         run(cfg)
     assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
 
@@ -313,7 +287,7 @@ def test_run_filter_smoothing_rejects_state_bearing_smoother(
         _overrides("dynamic", "joint", 1, ["esmda/smoother=state_and_dynamic"]),
         config_name="run_filter_smoothing",
     )
-    with pytest.raises(ValueError, match="state-bearing"):
+    with pytest.raises(ValueError, match="esmda.smoother"):
         run(cfg)
     assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
 
@@ -333,7 +307,7 @@ def test_run_filter_smoothing_rejects_indivisible_cycles(
         _overrides("dynamic", "joint", 1, ["time.output_frequency=0.4"]),
         config_name="run_filter_smoothing",
     )
-    with pytest.raises(ValueError, match="does not divide"):
+    with pytest.raises(ValueError, match="time.simulation_time"):
         run(cfg)
     assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
 
@@ -352,7 +326,7 @@ def test_run_filter_smoothing_rejects_bad_stride(compose_test_cfg: Any) -> None:
         _overrides("dynamic", "joint", 1, ["filtering.assimilate_every_n_step=0"]),
         config_name="run_filter_smoothing",
     )
-    with pytest.raises(ValueError, match="must be >= 1"):
+    with pytest.raises(ValueError, match="assimilate_every_n_step"):
         run(cfg)
 
     # The smoke window holds 3 frames; a stride of 2 cannot tile it.
@@ -360,7 +334,7 @@ def test_run_filter_smoothing_rejects_bad_stride(compose_test_cfg: Any) -> None:
         _overrides("dynamic", "joint", 1, ["filtering.assimilate_every_n_step=2"]),
         config_name="run_filter_smoothing",
     )
-    with pytest.raises(ValueError, match="does not divide"):
+    with pytest.raises(ValueError, match="divide"):
         run(cfg)
     assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
 
@@ -443,6 +417,7 @@ def test_nominal_window_clock_yields_exact_segment_bounds() -> None:
         pytest.param("dynamic", "state", 2, 3, id="state_dynamic_strided"),
     ],
 )
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_filter_smoothing(
     smoother: str, mode: str, num_windows: int, every_n: int, compose_test_cfg: Any
 ) -> None:

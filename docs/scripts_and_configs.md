@@ -12,23 +12,21 @@ orientation, then return here for field-level detail.
 
 ### Overview
 
-The configuration tree has exactly **five primary run entry points**, each
-self-contained (they inline the shared base rather than pulling separate
-`paths.yaml`/`time.yaml`/`ensemble.yaml` files):
+The root YAML files compose reusable ingredients. Named files under `experiment/`
+collect run selections and overrides; CLI values win over those files. See
+[`conf/README.md`](../conf/README.md) for the ownership map and concrete examples.
 
-| Entry point | Script | What it adds |
-|---|---|---|
-| [`conf/run_forward_model.yaml`](../conf/run_forward_model.yaml) | `run_forward_model.py` | `case` + single `model@model` mount + single `params` mount |
-| [`conf/run_esmda.yaml`](../conf/run_esmda.yaml) | `run_esmda.py` | same base + `esmda:` scalars + double model mount (`@truth_model`/`@assim_model`) + double params mount (`@truth_params`/`@prior_params`) |
-| [`conf/run_filtering.yaml`](../conf/run_filtering.yaml) | `run_filtering.py` | same base + `filtering:` scalars + the `filtering/*` groups + the same double model/params mounts (static params only) |
-| [`conf/run_filter_smoothing.yaml`](../conf/run_filter_smoothing.yaml) | `run_filter_smoothing.py` | same base + a `filter_smoothing:` node for the shared knobs + BOTH the `esmda:` and `filtering:` nodes (each with its groups) — the hybrid drives one parameter-only smoother and one filter per window |
-| [`conf/compare_models.yaml`](../conf/compare_models.yaml) | `compare_models.py` | same base as `run_forward_model` + `compare:` scalars + an *N-way* model mount (`model@models.<name>`) and named parameter-scenario mounts (`params@parameter_scenarios.<name>`) |
+The forward, ESMDA, filtering, hybrid, comparison and probe workflows retain their
+existing config names and Python entry points. Surrogate training, evaluation,
+fine-tuning, data generation and rendering have their own entry points.
+Probe and data-generation configs compose ingredients directly, rather than
+inheriting another executable's whole config.
 
-A third entry point, [`conf/neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml),
-extends `run_forward_model` with dataset-shape fields for surrogate data
-generation. The surrogate train/test scripts use
-[`conf/neural_surrogate/training.yaml`](../conf/neural_surrogate/training.yaml)
-and [`conf/neural_surrogate/testing.yaml`](../conf/neural_surrogate/testing.yaml).
+Use `scripts/preview_config.py <config-name> [overrides...]` for a backend-free
+preview. Runners record resolved launch settings and runtime overrides separately
+from their legacy `config.yaml` artifact. Test runs use the independent
+[`tests/conf/`](../tests/conf/) tree and isolated output paths; see
+[`tests/README.md`](../tests/README.md).
 
 ### `compare_models` diagnostics
 
@@ -57,111 +55,34 @@ via `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows
 
 ### Test configuration
 
-Integration tests still compose the production entry point and its model, case,
-and algorithm groups. The `compose_test_cfg` fixture in
-[`tests/conftest.py`](../tests/conftest.py) adds the
-[`tests/conf/test/smoke.yaml`](../tests/conf/test/smoke.yaml) Hydra overlay.
-It sets a 20 × 20 × 4 domain, a 3 s window, and a two-member ensemble. The
-fixture also gives each composition separate temporary output directories,
-pins the ESMDA case to Xie and Castro, and adjusts uDALES settings for this
-small domain. Per-test Hydra overrides are applied last. Tests of the actual
-production defaults compose `conf/` directly instead.
+Integration tests compose independent configs from [`tests/conf/`](../tests/conf/).
+They use a 20 × 20 × 4 domain, a 3 s window, and a two-member ensemble.
+The `compose_test_cfg` fixture in [`tests/conftest.py`](../tests/conftest.py)
+gives each composition separate temporary output directories and applies
+per-test overrides last. Tests of production config contracts compose `conf/`
+directly without executing a run. See [`tests/README.md`](../tests/README.md).
 
 ---
 
-### 1.1 Inlined base blocks
+### 1.1 Shared policy and explicit ownership
 
-Both entry points inline these shared namespaces directly in their YAML body
-rather than pulling them from separate files. The table below summarises each.
+| Setting | Default owner |
+|---|---|
+| Failure policy, shared run flags, Hydra directory policy | `common/runtime.yaml` |
+| Ensemble size, workers, CPUs per worker | Selected `execution/` preset, mounted at `ensemble` |
+| Physical grid, geometry, sensor coordinates, window duration/cadence/spinup | `case/` |
+| Parameter knot spacing and workflow-specific output/rollout controls | Workflow entry point |
+| ESMDA/filter settings reused by the hybrid | `esmda/default.yaml`, `filtering/default.yaml` |
+| Algorithm component or null value | Its selected component group |
+| Operator/aggregation constructors | `observation/`, using runtime sensor/model inputs |
+| Run-specific deviations | `experiment/`, then CLI overrides |
 
-#### `paths:`
-
-| Field | Default (fwd / esmda) | Purpose |
-|---|---|---|
-| `results_dir` | `results/${model.name}` / `/export/scratch2/ntm/${truth_model.name}_to_${assim_model.name}` | Top-level output root; Hydra run dir is nested under it. |
-| `experiment_dir` | `${oc.env:PWD}/.temp_${model.name}` | Absolute scratch dir for CFD solvers (they `chdir` into subdirs here). Resolved from `$PWD` rather than Hydra's runtime cwd so bare `compose()` in tests works. |
-| `base_results_dir` | `.temp_${model.name}` | Fallback used by `resolve_output_dir()` when Hydra is not initialized (direct `run(cfg)` calls from tests). |
-
-#### `time:`
-
-| Field | Default | Purpose |
-|---|---|---|
-| `seconds_per_knot` | `30.0` (fwd) / `60.0` (esmda) | Spacing (seconds) between AR(2) parameter knots. The per-window horizon (`simulation_time`/`output_frequency`/`spinup_time`) lives in the `case` group, not here. |
-
-#### `ensemble:`
-
-| Field | Default | Purpose |
-|---|---|---|
-| `ensemble_size` | 64 (fwd) / 50 (esmda) | Number of ensemble members. |
-| `num_parallel_processes` | 1 | `ProcessPoolExecutor` worker count. |
-| `num_cpus_per_process` | 15 (fwd) / 1 (esmda) | CPU affinity per worker (passed to `cpu_pinning`). |
-| `failure.policy` | `resample_from_successes` | What to do when a member fails: `raise` or `resample_from_successes`. |
-| `failure.jitter_scale` | 0.05 | Relative std of Gaussian jitter applied to donor params when resampling. |
-| `failure.seed` | 0 | RNG seed for the resampling draw. |
-
-#### `esmda:` (run_esmda; run_filter_smoothing reuses the node)
-
-| Field | Default | Purpose |
-|---|---|---|
-| `num_steps` | 3 | Number of ESMDA (Kalman update) iterations per window. |
-| `alpha` | `${.num_steps}` | Inflation denominator; defaults to `num_steps` (standard ESMDA). |
-| `num_assimilation_windows` | 3 | Number of sequential assimilation windows (1 = single window). |
-| `seed` | 42 | JAX RNG seed. |
-| `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors). |
-| `interval_seconds` | 30.0 | Width of the observation-aggregation intervals (s): the time-resolved observations are binned into contiguous intervals of this length and reduced within each before the update sees them. `null` = full-resolution assimilation (every output frame). |
-| `aggregation_mode` | `mean` | Reduction applied within each interval: `mean` \| `median` \| `max` \| `min`. |
-| `localization` | `null` | Set by the `esmda/localization` group; `null` = global (unlocalized) update. |
-| `state_reduction` | `null` | Set by the `esmda/state_reduction` group; `null` = full-space update. |
-| `final_time_smoothing` | `false` | Post-loop Kalman update of the full trajectory (requires `state_reduction`). |
-
-#### `filtering:` (run_filtering; run_filter_smoothing reuses the node)
-
-| Field | Default | Purpose |
-|---|---|---|
-| `num_assimilation_windows` | 2 | Number of assimilation windows, the same unit as `esmda.num_assimilation_windows`: one window is `time.simulation_time` seconds, so the horizon is `num_assimilation_windows * time.simulation_time` and the two entry points are configured identically for like-for-like runs. Cycles are **derived**, not configured: one cycle is one observation interval (`time.output_frequency` s) ending in one full-weight analysis, so a window holds `time.simulation_time / time.output_frequency` of them. Windows are pure computational/IO chunking (one `run()` call and one set of per-window artifacts each) — state, parameters, the filter's PRNG stream and the per-cycle noise draws all carry across a boundary, so a horizon run as 1 window or as `W` is mathematically identical. |
-| `assimilate_every_n_step` | 1 | Analysis **stride**: assimilate only every `n`-th observation frame. `1` is the every-observation filter above; `n > 1` leaves the model's output cadence alone and thins only the analyses, so a cycle becomes `n * time.output_frequency` seconds and a window holds `time.simulation_time / time.output_frequency / n` cycles. The intermediate frames are still simulated and still written (the per-cycle `_ensemble_states/cycle_{k}/` segments hold all `n`); they simply never see a Kalman step, and the analysis is the segment's LAST frame. `n` must divide `time.simulation_time / time.output_frequency` or the run refuses to start. `run.save_forecast_history=true` writes those intermediate frames as ordinary window artifacts too (§2.1), without the on-disk ensemble mode. |
-| `seed` | 42 | JAX RNG seed. |
-| `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors), of ONE observation frame. |
-| `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
-| `analysis` | (group) | Set by `filtering/analysis` (default `stochastic`); `etkf*`/`letkf*` are the deterministic ensemble transforms and constrain `localization` (§1.8). |
-| `localization` | (group) | Set by `filtering/localization` (default `none`). |
-| `state_reduction` | (group) | Set by `filtering/state_reduction` (default `none`); current/streaming SVD requires `mode=state|joint` and global localization. |
-| `inflation` | (group) | Set by `filtering/inflation` (default `rtps`). |
-| `parameter_evolution` | (group) | Set by `filtering/evolution` (default `none`). |
-| `filter` | `EnsembleKalmanFilter` block | The composed filter `_target_`; normally left alone. |
-
-#### `filter_smoothing:` (run_filter_smoothing only)
-
-The hybrid's own node holds only what is a property of the EXPERIMENT rather
-than of either algorithm; everything algorithm-specific stays on the reused
-`esmda:` / `filtering:` nodes above (with `filtering.mode` restricted to
-`state | joint`). `filtering.assimilate_every_n_step` keeps its filtering
-meaning, with one hybrid-specific rule: the stride thins BOTH halves'
-observations — the smoother assimilates the same strided frames — so the run
-keeps one observation product (`esmda.interval_seconds` must stay coarse
-enough that no aggregation bin is emptied).
-
-| Field | Default | Purpose |
-|---|---|---|
-| `num_assimilation_windows` | 2 | Horizon in windows of `time.simulation_time` seconds, the same unit as both siblings'. Unlike a pure filtering run's, a window boundary here is NOT purely computational: the MDA restarts on the next window's prior (extrapolated for a dynamic trajectory) and the joint correction resets, so `W` is a real modelling choice. |
-| `seed` | 42 | JAX RNG seed feeding the truth noise, the smoother, and the filter. |
-| `obs_error_std` | 0.25 | Observation-error std of ONE frame; the filter's `C_D` is exactly that, the smoother's is the same value tiled over the window's aggregated vector. |
-
-#### `run:`
-
-| Field | Default | Purpose |
-|---|---|---|
-| `skip_viz` | `false` | Skip all figure/animation output. |
-| `results_dir` | `null` | Explicit override for the per-run output directory (null = use Hydra's auto dir). |
-| `ensemble` | `false` (fwd only) | Run an ensemble rather than a single member. |
-| `rollout_steps` | 0 (fwd only) | Number of extra windows to roll forward. |
-| `ensemble_save_on_disk` | `false` (fwd) / `true` (esmda) | Write per-member NetCDFs instead of in-memory ensemble Dataset. |
-| `truth_dir` | `null` | Path to a saved `state.nc`/`params.nc` truth artifact; `null` = simulate inline. |
-| `truth_start_time` | `null` | Drop truth frames before this time (seconds) and rebase. |
-| `save_prior_state` | `false` (esmda only) | Persist the per-window prior ensemble state (large; off by default). |
-| `save_forecast_history` | `false` (filtering only) | Also persist each window's FORECAST frames at the model's full output cadence (`windows/window_{w}_forecast_state.nc`), including the frames a `filtering.assimilate_every_n_step > 1` analysis skips. `n`× the analyzed states in size; off by default. |
-
----
+Do not repeat numeric defaults in this reference: inspect the selected files or
+resolved preview. Root configs retain explicit historical output paths for
+compatibility; `run.results_dir` remains the per-run override. The hybrid owns its
+shared window count, seed and observation error, projected into each algorithm.
+Filtering strides thin analyses without changing the solver output cadence;
+ESMDA aggregation remains distinct from that stride.
 
 ### 1.2 Config group: `case/`
 
@@ -209,7 +130,7 @@ Real Barcelona urban geometry (~900 × 870 × 85 m domain).
 Each file wires one CFD backend under a runtime package. Every file provides the
 same four top-level keys: `name`, `solver_name`, `forward_model._target_`,
 `ensemble_model._target_`, `prepare._target_`. The ensemble model also reads
-`${ensemble.failure}` directly from the inlined base.
+`${ensemble.failure}` from `common/runtime.yaml`.
 
 | File | Backend | `_target_` classes |
 |---|---|---|
@@ -453,7 +374,7 @@ selection wires them all.
 | [`mode/domain_decomposition.yaml`](../conf/neural_surrogate/mode/domain_decomposition.yaml) | `neural_surrogates.PatchTrainer` | `neural_surrogates.DomainDecompositionLoss` | `domain_decomposed/small` |
 
 The `mode` entry sits **after** `_self_` in `training.yaml`'s defaults list so it
-overrides the inline `trainer._target_`. The architecture family/size is still
+owns `trainer._target_`. The architecture family/size is still
 separately overridable on the CLI on top of the mode default.
 
 #### `neural_surrogate/finetune_mode/`
@@ -467,7 +388,7 @@ architecture comes from the pretrained `model_dir`.
 | [`finetune_mode/lora_nextstep.yaml`](../conf/neural_surrogate/finetune_mode/lora_nextstep.yaml) | `neural_surrogates.Trainer` | `torch.nn.MSELoss` |
 | [`finetune_mode/dft.yaml`](../conf/neural_surrogate/finetune_mode/dft.yaml) | `neural_surrogates.Trainer` | `torch.nn.MSELoss` |
 
-Both entries sit **after** `_self_` so they override the inline `trainer._target_`.
+The selected mode owns the trainer target; shared training settings do not redefine it.
 Both fine-tuning and latent-generator training expose `trainer.compile_dynamic`
 alongside `compile_model`; `null` keeps the trainer/model default. The latent
 generator also exposes `architecture.use_checkpoint` for its velocity transformer
@@ -1597,7 +1518,7 @@ Brief summary:
 
 | Script | Hydra? | Purpose |
 |---|---|---|
-| [`neural_surrogate/generate_training_data.py`](../scripts/neural_surrogate/generate_training_data.py) | Yes — [`neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml) | Build `train/val/test` dataset from a CFD ensemble on ONE fixed geometry (`training_data.geometry.source=barcelona\|xie_and_castro`). Configures the ensemble with `failure: raise`. |
+| [`neural_surrogate/generate_training_data.py`](../scripts/neural_surrogate/generate_training_data.py) | Yes — [`neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml) | Build `train/val/test` dataset from a CFD ensemble on ONE fixed geometry (`case=barcelona\|xie_and_castro training_data/geometry_mode=fixed`). Configures the ensemble with `failure: raise`. |
 | [`neural_surrogate/generate_random_geometries_training_data.py`](../scripts/neural_surrogate/generate_random_geometries_training_data.py) | Yes — [`neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml) | Same dataset layout over randomly sampled pool geometries (`source=idealized\|realistic`): per-geometry grid from STL bounds at `geometry.resolution` (nx/ny padded to multiples of 16, fixed `z_size`), geometry-disjoint val/test, direct sequential single-model runs (one prepared forward model per geometry, no ensemble machinery); `training_data.sharding` splits one generation into plan / simulate shards / finalize jobs with the same result. See `docs/neural_surrogates.md` §2b. |
 | [`neural_surrogate/train_neural_surrogate.py`](../scripts/neural_surrogate/train_neural_surrogate.py) | Yes — [`neural_surrogate/training.yaml`](../conf/neural_surrogate/training.yaml) | Train a surrogate; bakes normalization stats into the checkpoint. Writes `model_weights/<model_name>/`. |
 | [`neural_surrogate/finetune_neural_surrogate.py`](../scripts/neural_surrogate/finetune_neural_surrogate.py) | Yes — [`neural_surrogate/finetuning.yaml`](../conf/neural_surrogate/finetuning.yaml) | LoRA fine-tune a trained surrogate (plan 01): inject adapters, train only the adapter weights, export a merged `model_dir` (+ `adapter/`) that loads into `NeuralSurrogateForwardModel` unchanged. See `docs/neural_surrogates.md` §21–25. |
@@ -1623,7 +1544,7 @@ Brief summary:
 | You want to… | Go to |
 |---|---|
 | Add a new experiment (domain/sensors/geometry) | [`conf/case/`](../conf/case/) — one YAML per case |
-| Change run size (ensemble, ESMDA steps, windows) | CLI overrides on `ensemble.*`/`esmda.*`; or edit the inlined blocks in [`run_esmda.yaml`](../conf/run_esmda.yaml) |
+| Change run size (ensemble, ESMDA steps, windows) | CLI overrides on `ensemble.*`/`esmda.*`; or add a named file in [`experiment/`](../conf/experiment/) |
 | Switch CFD backend | `model@model=pylbm|pyudales|pypalm|neural_surrogate` (fwd) or `model@truth_model=...` + `model@assim_model=...` (esmda) |
 | Change DA mode | `esmda/smoother=static|state|state_and_parameter|dynamic|state_and_dynamic` |
 | Run a sequential filter (EnKF) instead of ESMDA | [`scripts/filtering/run_filtering.py`](../scripts/filtering/run_filtering.py) — `filtering.mode=state|parameter|joint` + `filtering/*` groups (§1.8) |

@@ -14,6 +14,7 @@ from data_assimilation.observation_operator import (
     TemporalObservationOperator,
 )
 from hydra.core.hydra_config import HydraConfig
+from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from pylbm.utils.warm_start_utils import clean_output_files as clean_lbm_output_files
 from pyudales.utils.clean_up_utils import clean_output_dir as clean_udales_output_dir
@@ -212,9 +213,37 @@ def create_validation_points(
 def create_observation_operator(
     obs_cfg: Any,
     solver_name: str,
+    operator_cfg: Any = None,
 ) -> ObservationOperator | TemporalObservationOperator:
     obs = _plain(obs_cfg)
     obs_x, obs_y, obs_z = create_observation_points(obs)
+    if operator_cfg is not None:
+        component = (
+            OmegaConf.to_container(operator_cfg, resolve=False)
+            if isinstance(operator_cfg, DictConfig)
+            else copy.deepcopy(operator_cfg)
+        )
+        if not isinstance(component, dict):
+            raise TypeError("observation.operator must be a mapping")
+        spatial = component.get("observation_operator")
+        args = {
+            "obs_x": obs_x.tolist(),
+            "obs_y": obs_y.tolist(),
+            "obs_z": obs_z.tolist(),
+            "obs_states": list(obs["states"]),
+            "solver_name": solver_name,
+        }
+        if spatial is not None:
+            if not isinstance(spatial, dict):
+                raise TypeError(
+                    "observation.operator.observation_operator must be a mapping"
+                )
+            for name, value in args.items():
+                spatial[name] = value
+        else:
+            for name, value in args.items():
+                component[name] = value
+        return instantiate(component)
     operator = ObservationOperator(
         obs_x=obs_x.tolist(),
         obs_y=obs_y.tolist(),
@@ -250,6 +279,11 @@ def create_aggregate_observations(cfg: Any) -> AggregateObservations | None:
     argument. An absent or null ``interval_seconds`` means the data
     assimilation assimilates the full time-resolved observation vector.
     """
+    if isinstance(cfg, DictConfig) and "observation" in cfg:
+        component = cfg.observation.get("aggregation")
+        if component is None or component.get("interval_seconds") is None:
+            return None
+        return instantiate(component)
     node = _plain(cfg)
     interval_seconds = node.get("interval_seconds")
     if interval_seconds is None:

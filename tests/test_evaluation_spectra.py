@@ -59,7 +59,7 @@ from collections.abc import Iterator, Sequence
 import numpy as np
 import pytest
 import xarray
-import yaml  # type: ignore[import-untyped]
+import yaml
 from evaluation.figures import plot_spectra
 from evaluation.turbulence import (
     _MIN_BAND_BINS,
@@ -75,6 +75,8 @@ from evaluation.turbulence import (
     welch_spectrum,
 )
 from matplotlib.figure import Figure
+
+from tests.config_loader import TEST_CONF_DIR
 
 # Long enough that the estimator's own scatter is small: 2048-sample segments,
 # 15 of them averaged at 50 % overlap.
@@ -773,7 +775,7 @@ def _draw(
     bundle: dict, output_path: pathlib.Path, **kwargs: object
 ) -> pathlib.Path | None:
     """S4 from a bundle, the way ``make_esmda_figures.py`` calls it."""
-    return plot_spectra(
+    result: pathlib.Path | None = plot_spectra(
         bundle["f"],
         bundle["truth"],
         bundle["posterior"],
@@ -783,8 +785,9 @@ def _draw(
         variance=bundle["variance"],
         f_cutoff=bundle["f_cutoff"],
         sensor_sets=bundle["sensor_sets"],
-        **kwargs,  # type: ignore[arg-type]
+        **kwargs,
     )
+    return result
 
 
 def test_plot_spectra_writes_a_png_and_returns_its_path(
@@ -1259,9 +1262,7 @@ def truth_as_posterior(truth: xarray.Dataset) -> xarray.Dataset:
 # The SHIPPED probe cadence (conf/run_probe_series.yaml)
 # ---------------------------------------------------------------------------
 
-_PROBE_CONFIG = (
-    pathlib.Path(__file__).resolve().parents[1] / "conf/run_probe_series.yaml"
-)
+_PROBE_CONFIG = TEST_CONF_DIR / "run_probe_series.yaml"
 
 # The window length figure S4 is specified against: `time.simulation_time` as it
 # is COMMITTED in conf/case/xie_and_castro.yaml and conf/case/barcelona.yaml.

@@ -14,6 +14,8 @@ from hydra.utils import instantiate
 
 from pyurbanair.config.hydra_helpers import clean_outputs
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(scope="module")  # type: ignore[misc]
 def pylbm_cfg(compose_module_cfg: Callable[..., Any]) -> Any:

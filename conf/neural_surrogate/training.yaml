@@ -1,13 +1,8 @@
 # @package _global_
-
-# defaults:
-# #   - /neural_surrogate/architectures/unet_convnext@architecture: medium
-#   - _self_
-
-# model_name: unet_convnext_medium_test
-
-
+# Surrogate training: dataset selection plus a compatible mode bundle for
+# architecture, trainer class, and loss.
 defaults:
+  - /neural_surrogate/dataset@dataset: transition
   - _self_
   # `mode` bundles everything that varies together -- the architecture default,
   # the trainer class, the loss and model_name -- so a single choice selects them
@@ -16,11 +11,11 @@ defaults:
   # DomainDecompositionLoss. Switch with `neural_surrogate/mode@_global_=standard`.
   # The architecture *size/family* is still swappable on the CLI on top of the
   # mode default, e.g. `neural_surrogate/architectures@architecture=p3d/large`.
-  # `mode` must sit AFTER `_self_` so it overrides the inline `trainer:` block's
-  # `_target_` below. The loss is defined entirely inside the mode file (there is
+  # The loss is defined entirely inside the mode file (there is
   # no `loss` group).
   # - /neural_surrogate/mode@_global_: domain_decomposition
   - /neural_surrogate/mode@_global_: standard
+  - /experiment: null
 
 # The uDALES runs are periodic in the spanwise (y) direction: spatial convs
 # wrap circularly along y instead of zero-padding. x stays non-periodic
@@ -44,12 +39,9 @@ init_weights_path: null
 # channels-last, the warmup+cosine LR schedule, the pushforward-rollout
 # curriculum, gradient clipping, early stopping and checkpoint/resume +
 # metrics.csv logging. The class is selected by the `mode` group (see above),
-# which overrides the `_target_` below; the domain_decomposition mode also needs
+# and the domain_decomposition mode also needs
 # a `domain_decomposed` architecture whose forward accepts return_intermediates.
 trainer:
-  # Overridden by the `mode` group (standard -> Trainer, domain_decomposition ->
-  # PatchTrainer). This value only applies if no mode is selected.
-  _target_: neural_surrogates.Trainer
   num_epochs: 200
   device: cuda
   patience: 15
@@ -114,55 +106,6 @@ optimizer:
   _target_: torch.optim.AdamW
   lr: 1.0e-4
   weight_decay: 1e-8
-
-dataset:
-  # The dd_patch (PatchTrainer) + dd loss path trains on FULL-FIELD transition
-  # batches: the DomainDecomposed model tiles the field into patches internally
-  # and exposes every patch's neighbours via return_intermediates=True, which is
-  # what the Eq (9) interface/divergence terms need. Use TransitionDataset here.
-  # PatchTransitionDataset is a separate one-step, delta-only per-patch path
-  # whose items (state_n_patch/delta_target/...) lack the full-field state_n the
-  # trainer reads -- selecting it here raises `KeyError: 'state_n'`.
-  _target_: neural_surrogates.TransitionDataset
-  # _target_: neural_surrogates.PatchTransitionDataset
-  # root_dir may be a single-geometry dataset (barcelona / xie_and_castro) or a
-  # multi-geometry one (geometry.source idealized/realistic, one grid+geometry
-  # per trajectory). The dataset handles both without extra arguments --
-  # geometry, SDF features and normalization stats are per-trajectory, and
-  # equal masks are deduped so single-geometry runs behave exactly as before.
-  # Multi-geometry roots additionally REQUIRE the batch_sampler block below.
-  # root_dir: training_data/pyudales_medium
-  root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_idealized
-  # root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_medium
-  # root_dir: /export/scratch1/ntm/pyurbanair/training_data/pypalm_barcelona
-  # root_dir: /export/scratch1/ntm/pyurbanair/training_data/pypalm_realistic
-  state_vars:
-    - u
-    - v
-    - w
-  param_vars: null
-  cache: false
-  dtype: float32
-  pushforward_steps: 7
-  # Backward history window H: how many CONSECUTIVE PAST frames (t-H+1 … t) each
-  # sample feeds the model, pre-flattened oldest-first into (H*C, *grid) -- the
-  # mirror image of `pushforward_steps`, which is the FORWARD rollout horizon.
-  # Must equal the architecture's `num_history_steps` (the train script
-  # cross-checks it and stamps the value into the saved config.yaml). 1 = the
-  # classic one-step input and is byte-identical to the pre-history behaviour.
-  # H > 1 costs the first H-1 anchors of every trajectory (a sample needs H past
-  # frames), so a trajectory needs at least pushforward_steps + H snapshots.
-  num_history_steps: 1
-  # SDF / ∇SDF geometry features (see neural_surrogates.sdf). Selects which extra
-  # channels the dataset ships alongside the `blanking` mask, computed once per
-  # geometry at init: `none` (off), `sdf` (clamped signed distance only, +1),
-  # `grad` (unit gradient only, +3), or `both` (SDF + ∇SDF, +4). Must match the
-  # architecture's `sdf_features` mode (the train script cross-checks this, and
-  # that the two `sdf_clamp_cells` agree). `none` keeps items byte-identical to
-  # the pre-feature dataset.
-  sdf_features: both  # none | sdf | grad | both
-  # Clamp radius L (in cells) for the normalised SDF channel: clip(sdf, -L, L)/L.
-  sdf_clamp_cells: 32
 
 # Optional trajectory-bucketed batch sampler.
 #

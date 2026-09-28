@@ -45,6 +45,8 @@ from hydra.utils import instantiate
 from neural_surrogates import TransitionDataset
 from omegaconf import DictConfig, OmegaConf
 
+from pyurbanair.config.run_record import write_run_record
+
 
 class LoadedModel:
     """A trained surrogate plus the dataset it is evaluated on."""
@@ -136,7 +138,7 @@ def _load_trajectory(
     return truth, params, geometry
 
 
-@torch.no_grad()
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
 def _rollout(
     model: torch.nn.Module,
     truth: torch.Tensor,
@@ -377,7 +379,7 @@ def run(cfg: DictConfig) -> None:
             )
 
     out_dir = Path(cfg.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(cfg, out_dir, "surrogate_comparison")
 
     # per_step[sample_idx][model_name] -> per-step RMSE curve
     per_step: dict[int, dict[str, np.ndarray]] = {}
@@ -515,7 +517,7 @@ def run(cfg: DictConfig) -> None:
         print(f"  {name}: rmse={s['rmse']:.5f}  rel_l2={s['rel_l2']:.4f}")
 
 
-@hydra.main(
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/comparison",

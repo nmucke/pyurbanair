@@ -1,0 +1,64 @@
+# Independent frozen test configuration.
+defaults:
+- case: xie_and_castro
+- _self_
+- filtering/analysis: stochastic
+- filtering/localization: none
+- filtering/state_reduction: none
+- filtering/inflation: rtps
+- filtering/evolution: none
+- model@truth_model: pyudales
+- model@assim_model: pyudales
+- params@truth_params: dynamic_sine
+- params@prior_params: static
+- observation/operator: temporal_points
+paths:
+  results_dir: .temp/filtering_${truth_model.name}_to_${assim_model.name}
+  experiment_dir: ${oc.env:PWD}/.temp
+  base_results_dir: .temp_lbm
+time:
+  seconds_per_knot: 1.5
+params_to_estimate:
+- inflow_angle
+- velocity_magnitude
+ensemble:
+  ensemble_size: 2
+  num_parallel_processes: 1
+  num_cpus_per_process: 1
+  failure:
+    policy: resample_from_successes
+    jitter_scale: 0.05
+    seed: 0
+filtering:
+  num_assimilation_windows: 1
+  assimilate_every_n_step: 1
+  seed: 42
+  obs_error_std: 0.1
+  mode: joint
+  analysis: stochastic
+  localization: null
+  state_reduction: null
+  inflation: null
+  parameter_evolution: random_walk
+  filter:
+    _target_: data_assimilation.filtering.EnsembleKalmanFilter
+    _convert_: all
+    mode: ${filtering.mode}
+    analysis: ${filtering.analysis}
+    localization: ${filtering.localization}
+    state_reduction: ${filtering.state_reduction}
+    inflation: ${filtering.inflation}
+    parameter_evolution: ${filtering.parameter_evolution}
+run:
+  skip_viz: true
+  results_dir: null
+  ensemble_save_on_disk: false
+  save_history: true
+  save_forecast_history: false
+  truth_dir: null
+  truth_start_time: null
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

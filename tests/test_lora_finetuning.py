@@ -18,12 +18,15 @@ from __future__ import annotations
 import copy
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 import xarray as xr
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
+
+from tests.config_loader import TEST_CONF_DIR
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("peft")
@@ -39,15 +42,16 @@ from neural_surrogates.finetuning import (
 from pyurbanair.base_forward_model import BaseForwardModel
 
 _WORKTREE = Path(__file__).resolve().parents[1]
-_CONF = _WORKTREE / "conf"
+_CONF = TEST_CONF_DIR
 _SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "finetune_neural_surrogate.py"
 
 STATE_VARS = ("u", "v", "w")
 PARAM_VARS = ("inflow_angle", "velocity_magnitude")
 
 
-def _load_finetune_run():
+def _load_finetune_run() -> Any:
     spec = importlib.util.spec_from_file_location("finetune_ns_under_test", _SCRIPT)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.run
@@ -58,7 +62,7 @@ def _load_finetune_run():
 # --------------------------------------------------------------------------- #
 
 
-def _p3d(n_params=2):
+def _p3d(n_params: Any = 2) -> Any:
     p3d = pytest.importorskip("neural_surrogates.architectures.p3d")
     pytest.importorskip("p3d_surrogate")
     return p3d.P3D(
@@ -71,14 +75,14 @@ def _p3d(n_params=2):
     )
 
 
-def _p3d_inputs(b=2, grid=(16, 16, 16)):
+def _p3d_inputs(b: Any = 2, grid: Any = (16, 16, 16)) -> Any:
     state = torch.randn(b, 3, *grid)
     params = torch.randn(b, 2)
     geom = (torch.rand(b, *grid) > 0.2).float()
     return state, params, geom
 
 
-def test_inject_is_identity_at_init():
+def test_inject_is_identity_at_init() -> None:
     """LoRA B=0 at init => the wrapped model's output equals the base's."""
     model = _p3d().eval()
     peft_model = inject_lora(
@@ -94,7 +98,7 @@ def test_inject_is_identity_at_init():
     assert torch.allclose(base, wrapped, atol=1e-6)
 
 
-def test_merge_round_trips_to_plain_state_dict():
+def test_merge_round_trips_to_plain_state_dict() -> None:
     """merge_to_state_dict yields a plain base state dict, identical at init."""
     model = _p3d().eval()
     base_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -113,7 +117,7 @@ def test_merge_round_trips_to_plain_state_dict():
         assert torch.allclose(merged[k], v, atol=1e-6), k
 
 
-def test_merge_parity_at_nonzero_lora_b():
+def test_merge_parity_at_nonzero_lora_b() -> None:
     """merge_to_state_dict reproduces the wrapped forward at *nonzero* LoRA B.
 
     The init round-trip (B=0) only proves the pass-through path; it never
@@ -160,7 +164,7 @@ def test_merge_parity_at_nonzero_lora_b():
     assert torch.allclose(wrapped, reloaded, atol=1e-5)
 
 
-def test_only_adapter_and_modules_to_save_train():
+def test_only_adapter_and_modules_to_save_train() -> None:
     """Only lora_* and the explicit modules_to_save head require grad."""
     model = _p3d().eval()
     peft_model = inject_lora(
@@ -183,7 +187,7 @@ def test_only_adapter_and_modules_to_save_train():
     assert frozen, "expected a frozen base qkv layer"
 
 
-def test_merge_preserves_trained_modules_to_save_head():
+def test_merge_preserves_trained_modules_to_save_head() -> None:
     """merge_and_unload must fold a trained modules_to_save head back in.
 
     PEFT wraps a modules_to_save target in a ModulesToSaveWrapper; the merge has
@@ -222,7 +226,7 @@ def test_merge_preserves_trained_modules_to_save_head():
 # --------------------------------------------------------------------------- #
 
 
-def test_all_preset_skips_grouped_and_1x1_convs():
+def test_all_preset_skips_grouped_and_1x1_convs() -> None:
     """all_adaptable_module_names drops depthwise + 1x1x1 convs (unmergeable)."""
     model = UNetConvNeXt(
         n_state_channels=3,
@@ -260,15 +264,15 @@ class _StubSpinup(BaseForwardModel):
     ``importorskip('trimesh')`` would raise a Skip mid-test here).
     """
 
-    def __init__(self, results_dir=None) -> None:
+    def __init__(self, results_dir: Any = None) -> None:
         super().__init__(results_dir=results_dir)
         self.spinup_time = 0.0
         self._rng = np.random.default_rng(0)
 
-    def _apply_inflow_settings(self, params) -> None:
+    def _apply_inflow_settings(self, params: Any) -> None:
         pass
 
-    def save_results(self, state, sim_name: str = "state") -> None:
+    def save_results(self, state: Any, sim_name: str = "state") -> None:
         self._save_results(state, sim_name)
 
     def _clean_output(self) -> None:
@@ -277,7 +281,9 @@ class _StubSpinup(BaseForwardModel):
     def disable_spinup(self) -> None:
         self.spinup_time = 0.0
 
-    def run_single(self, state=None, params=None, sim_name="state") -> xr.Dataset:
+    def run_single(
+        self, state: Any = None, params: Any = None, sim_name: Any = "state"
+    ) -> xr.Dataset:
         coords = {
             "z": np.arange(NZ) + 0.5,
             "y": np.arange(NY) + 0.5,
@@ -302,7 +308,9 @@ def _params() -> xr.Dataset:
     )
 
 
-def _write_dataset(root: Path, *, nz=NZ, ny=NY, nx=NX, t=4) -> None:
+def _write_dataset(
+    root: Path, *, nz: Any = NZ, ny: Any = NY, nx: Any = NX, t: Any = 4
+) -> None:
     rng = np.random.default_rng(0)
     for split, n in {"train": 2, "val": 1}.items():
         (root / "state" / split).mkdir(parents=True, exist_ok=True)
@@ -310,7 +318,7 @@ def _write_dataset(root: Path, *, nz=NZ, ny=NY, nx=NX, t=4) -> None:
         for i in range(n):
             blank = np.zeros((nz, ny, nx), "f4")
             blank[0] = 1.0
-            state = {
+            state: dict[str, tuple[tuple[str, ...], Any]] = {
                 v: (
                     ("time", "z", "y", "x"),
                     rng.standard_normal((t, nz, ny, nx)).astype("f4"),
@@ -398,7 +406,7 @@ def _make_pretrained_model_dir(root: Path, data_dir: Path) -> Path:
     return model_dir
 
 
-def _shrink_for_cpu(cfg) -> None:
+def _shrink_for_cpu(cfg: Any) -> None:
     cfg.dataset.pushforward_steps = 1
     cfg.dataloader.batch_size = 2
     cfg.dataloader.num_workers = 0
@@ -414,7 +422,7 @@ def _shrink_for_cpu(cfg) -> None:
     cfg.trainer.resume = False
 
 
-def test_finetune_end_to_end(tmp_path, monkeypatch):
+def test_finetune_end_to_end(tmp_path: Any, monkeypatch: Any) -> None:
     """compose finetuning.yaml -> run -> exported dir loads + rolls out."""
     data_dir = tmp_path / "data"
     _write_dataset(data_dir)

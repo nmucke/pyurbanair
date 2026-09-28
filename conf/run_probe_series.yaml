@@ -1,36 +1,38 @@
-# @package _global_
-#
-# Entry point for scripts/esmda/run_probe_series.py — the high-rate probe
-# re-runs (WP3.2a) that feed the Welch spectrum / LSD metric and figure S4.
-#
-# It extends `run_esmda.yaml` rather than redefining anything: the probe re-run
-# must be launched with the SAME case / model / params / obs overrides the ESMDA
-# run itself used (the script cross-checks the run dir's saved config.yaml and
-# refuses a mismatched grid), so composing the ESMDA entry point and adding only
-# the `probes:` knobs below is the whole difference.
-#
-# Example (re-probe the last window of an existing run at the default cadence)::
-#
-#   python scripts/esmda/run_probe_series.py \
-#     case=barcelona model@truth_model=pylbm model@assim_model=pylbm \
-#     probes.run_dir=/export/scratch2/ntm/pylbm_to_pylbm \
-#     probes.window_index=-1
+# Probe-series diagnostic: direct ESMDA ingredients with probe-specific scratch.
 defaults:
-  - /run_esmda
+  - common/runtime
+  - execution: assimilation
+  - case: xie_and_castro
+  - esmda: default
+  - esmda/localization: correlation
+  - esmda/state_reduction: none
+  - esmda/smoother: dynamic
+  - model@truth_model: pyudales
+  - model@assim_model: pyudales
+  - params@truth_params: dynamic_sine
+  - params@prior_params: dynamic
+  - observation/operator: temporal_points
+  - observation/aggregation: mean
   - _self_
+  - experiment: null
 
-# --- Scratch (NOT the assimilation run's) ---------------------------------------
-# `/run_esmda` points `experiment_dir` at the scratch its own solvers chdir into.
-# A probe re-run must never share it: it cleans output dirs and prunes restart
-# files in the dir it runs in, and its LBM build tree would be rebuilt underneath
-# a live job. So it gets its own root here, and the models are additionally
-# constructed under a probe-specific experiment name (`_PROBE_EXPERIMENT` in the
-# script) so even an explicit override onto the assimilation scratch cannot write
-# into `experiment/runcase/`. Sharing the compiled binary across the two is a
-# `PYLBM_BUILD_ROOT` / `PYLBM_LBM_PATH` question, not an `experiment_dir` one.
+# Keep the same physical and artifact contract as an ESMDA run.
 paths:
+  results_dir: .temp/${truth_model.name}_to_${assim_model.name}
   experiment_dir: ${oc.env:PWD}/.temp_probes
+  base_results_dir: .temp_lbm
+time:
+  seconds_per_knot: 60.0
+params_to_estimate: [inflow_angle, velocity_magnitude]
+run:
+  ensemble_save_on_disk: true
+  save_prior_state: false
+  truth_dir: null
+  truth_start_time: null
 
+
+# Probe reruns clean solver output and restart files. The dedicated scratch root
+# above keeps those operations separate from an assimilation run.
 probes:
   # The finished ESMDA run directory to re-probe (it holds the posterior params /
   # states and truth_access.yaml, and receives truth_probes.nc +

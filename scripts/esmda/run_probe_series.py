@@ -94,6 +94,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
+from pyurbanair.config.run_record import validate_run_config, write_run_record
 from pyurbanair.utils.cpu_pinning import (
     build_cpu_queue,
     cpu_pinning_disabled,
@@ -669,7 +670,9 @@ def _truth_window(truth_access: dict, window: int) -> xarray.Dataset:
         truth_access.get("start_idx", 0),
         truth_access.get("t_offset", 0.0),
     )
-    return truth.isel(time=slice(window * n_per_window, (window + 1) * n_per_window))
+    result = truth.isel(time=slice(window * n_per_window, (window + 1) * n_per_window))
+    assert isinstance(result, xarray.Dataset)
+    return result
 
 
 def _window_initial_state(
@@ -1083,6 +1086,7 @@ def _member_probes(
 
 
 def run(cfg: DictConfig) -> None:
+    validate_run_config(cfg, "probe")
     probes_cfg = cfg.get("probes", {}) or {}
     # The probe files live beside the artifacts they are compared against, i.e.
     # in the ESMDA run dir -- resolved exactly as run_esmda.py resolves its own
@@ -1194,6 +1198,25 @@ def run(cfg: DictConfig) -> None:
         )
 
     points, sensor_set_labels = _probe_points(build_sensor_sets(cfg))
+    write_run_record(
+        cfg,
+        run_dir / "probe_run",
+        "probe",
+        constructor_overrides=[
+            {
+                "role": "probe",
+                "component": "forward_model",
+                "window": window,
+                "values": {
+                    "output_frequency": output_frequency,
+                    "spinup_time": spinup_time,
+                    "num_sensors": len(points[0]),
+                    "num_members": n_members,
+                },
+            }
+        ],
+        artifact_dir=run_dir,
+    )
 
     # The member clones are made FIRST, and the ordering matters -- but it is not
     # what makes this safe, and on its own it was not enough. Both models are
@@ -1271,7 +1294,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved probe series for window {window} in {run_dir}")
 
 
-@hydra.main(  # type: ignore[misc]
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None, config_path="../../conf", config_name="run_probe_series"
 )
 def main(cfg: DictConfig) -> None:

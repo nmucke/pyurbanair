@@ -27,8 +27,10 @@ reproducible (no VAE sampling noise).
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
+from typing import Any, Sequence, cast
 
 import hydra
 import matplotlib
@@ -41,12 +43,16 @@ import xarray as xr  # noqa: E402
 from hydra.utils import instantiate  # noqa: E402
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
 
+from pyurbanair.config.run_record import write_run_record
+
 # --------------------------------------------------------------------------- #
 # Loading
 # --------------------------------------------------------------------------- #
 
 
-def _load_model(cfg: DictConfig, train_cfg: DictConfig, device: torch.device):
+def _load_model(
+    cfg: DictConfig, train_cfg: DictConfig, device: torch.device
+) -> tuple[Any, torch.dtype]:
     dtype = getattr(torch, train_cfg.dataset.dtype)
     model = (
         instantiate(
@@ -66,7 +72,9 @@ def _load_model(cfg: DictConfig, train_cfg: DictConfig, device: torch.device):
     return model, dtype
 
 
-def _load_snapshots(dataset, traj: int, t_indices, dtype: torch.dtype):
+def _load_snapshots(
+    dataset: Any, traj: int, t_indices: Sequence[int], dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Stack snapshots ``(len(t), C, *grid)`` of one trajectory + its geometry."""
     with xr.open_dataset(dataset._state_files[traj]) as ds:
         arr = np.stack(
@@ -79,8 +87,14 @@ def _load_snapshots(dataset, traj: int, t_indices, dtype: torch.dtype):
     return state, geometry, features
 
 
-@torch.no_grad()
-def _reconstruct(model, state, geometry, features, device):
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
+def _reconstruct(
+    model: Any,
+    state: torch.Tensor,
+    geometry: torch.Tensor,
+    features: torch.Tensor | None,
+    device: torch.device,
+) -> torch.Tensor:
     """Physical-units reconstruction ``(B, C, *grid)`` for a batch on one grid."""
     b = state.shape[0]
     geom = geometry.unsqueeze(0).expand(b, *geometry.shape).to(device)
@@ -88,7 +102,7 @@ def _reconstruct(model, state, geometry, features, device):
     if features is not None:
         feat = features.unsqueeze(0).expand(b, *features.shape).to(device)
     recon = model(state.to(device), geom, feat)
-    return recon.cpu()
+    return cast(torch.Tensor, recon.cpu())
 
 
 # --------------------------------------------------------------------------- #
@@ -114,7 +128,9 @@ class _Accum:
         self.err: list[np.ndarray] = []
         self.kl: list[float] = []
 
-    def add(self, truth, recon, fluid):
+    def add(
+        self, truth: torch.Tensor, recon: torch.Tensor, fluid: torch.Tensor
+    ) -> None:
         """truth/recon: (C, nz, ny, nx); fluid: (nz, ny, nx) bool."""
         t = truth.numpy()
         p = recon.numpy()
@@ -189,7 +205,14 @@ def _blank_obstacles(mag: np.ndarray, fluid: np.ndarray) -> np.ndarray:
     return out
 
 
-def _plot_reconstruction(truth, recon, fluid, z_levels, title, path) -> None:
+def _plot_reconstruction(
+    truth: torch.Tensor,
+    recon: torch.Tensor,
+    fluid: torch.Tensor,
+    z_levels: Sequence[int],
+    title: str,
+    path: Path,
+) -> None:
     """rows truth/recon/|err| of |u|; one column per z-height."""
     mag_t = np.linalg.norm(truth.numpy(), axis=0)  # (nz, ny, nx)
     mag_p = np.linalg.norm(recon.numpy(), axis=0)
@@ -226,7 +249,9 @@ def _plot_reconstruction(truth, recon, fluid, z_levels, title, path) -> None:
     plt.close(fig)
 
 
-def _plot_per_channel(summary, channel_names, path) -> None:
+def _plot_per_channel(
+    summary: dict[str, Any], channel_names: Sequence[str], path: Path
+) -> None:
     fig, ax = plt.subplots(figsize=(1.6 * len(channel_names) + 3, 4))
     x = np.arange(len(channel_names))
     w = 0.27
@@ -244,7 +269,7 @@ def _plot_per_channel(summary, channel_names, path) -> None:
     plt.close(fig)
 
 
-def _plot_height_profile(acc: _Accum, path) -> None:
+def _plot_height_profile(acc: _Accum, path: Path) -> None:
     rmse = np.sqrt(acc.h_sse / np.maximum(acc.h_cnt, 1))
     centres = (np.arange(acc.nb) + 0.5) / acc.nb
     valid = acc.h_cnt > 0
@@ -259,7 +284,7 @@ def _plot_height_profile(acc: _Accum, path) -> None:
     plt.close(fig)
 
 
-def _plot_error_hist(acc: _Accum, path) -> None:
+def _plot_error_hist(acc: _Accum, path: Path) -> None:
     err = np.concatenate(acc.err) if acc.err else np.zeros(1)
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.hist(err, bins=80, color="steelblue")
@@ -272,7 +297,7 @@ def _plot_error_hist(acc: _Accum, path) -> None:
     plt.close(fig)
 
 
-def _plot_pred_vs_true(acc: _Accum, path) -> None:
+def _plot_pred_vs_true(acc: _Accum, path: Path) -> None:
     t = np.concatenate(acc.mag_true) if acc.mag_true else np.zeros(1)
     p = np.concatenate(acc.mag_pred) if acc.mag_pred else np.zeros(1)
     lim = float(max(t.max(), p.max())) or 1.0
@@ -291,7 +316,9 @@ def _plot_pred_vs_true(acc: _Accum, path) -> None:
     plt.close(fig)
 
 
-def _plot_latent_stats(kl_per_sample, latent_active, path) -> None:
+def _plot_latent_stats(
+    kl_per_sample: Sequence[float], latent_active: float, path: Path
+) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     axes[0].hist(kl_per_sample, bins=30, color="darkorange")
     axes[0].set_xlabel("KL element (mean per snapshot)")
@@ -315,13 +342,15 @@ def _pick(n_available: int, n_want: int) -> list[int]:
     n = min(n_want, n_available)
     if n <= 0:
         return []
-    return np.linspace(0, n_available - 1, n, dtype=int).tolist()
+    return cast(list[int], np.linspace(0, n_available - 1, n, dtype=int).tolist())
 
 
 def run(cfg: DictConfig) -> None:
+    launch_cfg = copy.deepcopy(cfg)
     torch.manual_seed(int(cfg.seed))
     model_dir = Path(cfg.model_dir)
     train_cfg = OmegaConf.load(model_dir / "config.yaml")
+    assert isinstance(train_cfg, DictConfig)
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
     dataset = instantiate(
@@ -343,7 +372,9 @@ def run(cfg: DictConfig) -> None:
         print(f"training: {len(lines) - 1} epochs logged; last: {lines[-1]}")
 
     out_dir = Path(cfg.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(
+        launch_cfg, out_dir, "surrogate_autoencoder_testing", save_legacy_config=False
+    )
 
     # --- Reconstruction figures across trajectories / snapshots ---
     traj_ids = _pick(len(dataset._state_files), int(cfg.num_trajectories))
@@ -450,7 +481,7 @@ def run(cfg: DictConfig) -> None:
     print(f"plots + metrics.json written to {out_dir}")
 
 
-@hydra.main(
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/testing_autoencoder",

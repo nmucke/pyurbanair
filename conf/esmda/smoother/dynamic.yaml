@@ -11,4 +11,3 @@ num_steps: ${esmda.num_steps}
 alpha: ${esmda.alpha}
 pin_initial_time_point: true
 localization: ${esmda.localization}
-num_time_points: 1  # overridden by run_esmda.py from the sampled prior's time dim

@@ -37,6 +37,8 @@ import xarray as xr
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from tests.config_loader import TEST_CONF_DIR
+
 torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 pytest.importorskip("timm")
@@ -51,7 +53,7 @@ from neural_surrogates.architectures._tadpole.architecture.downstream import (
 from pyurbanair.base_forward_model import BaseForwardModel
 
 _WORKTREE = Path(__file__).resolve().parents[1]
-_CONF = _WORKTREE / "conf"
+_CONF = TEST_CONF_DIR
 _SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "finetune_neural_surrogate.py"
 
 STATE_VARS = ("u", "v", "w")
@@ -60,8 +62,9 @@ PARAM_VARS = ("inflow_angle", "velocity_magnitude")
 CROP = 16  # encoder_crop_size must be a multiple of 16 (encoder downsamples /16)
 
 
-def _load_finetune_run():
+def _load_finetune_run() -> Any:
     spec = importlib.util.spec_from_file_location("finetune_ns_under_test", _SCRIPT)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.run
@@ -74,13 +77,13 @@ def _load_finetune_run():
 
 def _stepper(
     *,
-    n_state_channels=3,
-    n_params=2,
-    encode_geometry=True,
-    sdf_features="none",
-    param_conditioning="film",
-    latent_type="mode",
-    **kw,
+    n_state_channels: Any = 3,
+    n_params: Any = 2,
+    encode_geometry: Any = True,
+    sdf_features: Any = "none",
+    param_conditioning: Any = "film",
+    latent_type: Any = "mode",
+    **kw: Any,
 ) -> TadpoleTimeStepper:
     """A fresh (random-init, no AE dir) stepper on CPU smoke shapes."""
     kw.setdefault("encoder_crop_size", CROP)
@@ -99,7 +102,7 @@ def _stepper(
     )
 
 
-def _inputs(b=1, grid=(16, 16, 16), n_params=2):
+def _inputs(b: Any = 1, grid: Any = (16, 16, 16), n_params: Any = 2) -> Any:
     state = torch.randn(b, 3, *grid)
     params = torch.randn(b, n_params) if n_params else None
     geom = (torch.rand(b, *grid) > 0.2).float()
@@ -147,7 +150,7 @@ def test_sequential_context_windows_preserve_grid_and_gradients() -> None:
     assert torch.count_nonzero(x.grad) > 0
 
 
-def test_identity_at_init_parity():
+def test_identity_at_init_parity() -> None:
     """THE DFT-wiring invariant: at init the zero-init subnetwork/gamma skips
     leave the DFT output *identical* to the plain-AE reconstruction, so
     ``stepper(state) == stepper._ae_reference_recon(state, geom)`` exactly.
@@ -168,7 +171,7 @@ def test_identity_at_init_parity():
     assert torch.allclose(out * (1 - mask), torch.zeros_like(out))
 
 
-def test_identity_at_init_parity_non_divisible_grid():
+def test_identity_at_init_parity_non_divisible_grid() -> None:
     """The parity invariant also holds on a grid not divisible by the crop size
     (internal zero-pad -> crop-back path)."""
     m = _stepper(latent_type="mode").eval()
@@ -181,7 +184,7 @@ def test_identity_at_init_parity_non_divisible_grid():
     assert torch.equal(out, ref)  # exact, bitwise
 
 
-def test_param_conditioning_none_matches_zero_params_module_tree():
+def test_param_conditioning_none_matches_zero_params_module_tree() -> None:
     """``param_conditioning="none"`` (with params) and ``n_params=0`` build the
     *same* module tree (no param machinery) -- the repo no-op rule -- and both
     forward cleanly."""
@@ -204,7 +207,7 @@ def test_param_conditioning_none_matches_zero_params_module_tree():
     assert torch.isfinite(out_zero).all()
 
 
-def test_encode_geometry_on_off_shapes():
+def test_encode_geometry_on_off_shapes() -> None:
     """encode_geometry toggles the folded geometry channels but the public
     forward always returns the physical state shape (obstacles zeroed)."""
     state, params, geom = _inputs()
@@ -218,7 +221,7 @@ def test_encode_geometry_on_off_shapes():
         assert torch.isfinite(out).all()
 
 
-def test_padding_round_trip_non_divisible_grid():
+def test_padding_round_trip_non_divisible_grid() -> None:
     """A grid not divisible by the crop size is padded internally and cropped
     back, so the prediction matches the (odd) input shape."""
     m = _stepper(latent_type="mode").eval()
@@ -230,7 +233,7 @@ def test_padding_round_trip_non_divisible_grid():
     assert out.shape[2:] == grid
 
 
-def test_weight_round_trip_output_parity():
+def test_weight_round_trip_output_parity() -> None:
     """weights.pt (state_dict) reload reproduces outputs, incl. the installed
     normalization buffers. ``latent_type="mode"`` makes the forward
     deterministic so a broken buffer save/load would change the output."""
@@ -252,7 +255,7 @@ def test_weight_round_trip_output_parity():
     assert torch.allclose(fresh.param_mean, torch.tensor([0.1, 0.2]))
 
 
-def test_skip_pretrained_load_builds_without_ae_dir():
+def test_skip_pretrained_load_builds_without_ae_dir() -> None:
     """``skip_pretrained_load=True`` (the ESMDA-deploy build) needs no AE dir --
     the merged weights.pt carries every weight -- and forwards finitely."""
     m = _stepper().eval()  # _stepper builds with skip_pretrained_load=True
@@ -263,7 +266,7 @@ def test_skip_pretrained_load_builds_without_ae_dir():
     assert out.shape == state.shape
 
 
-def test_forward_requires_params_when_conditioned():
+def test_forward_requires_params_when_conditioned() -> None:
     """A conditioned build called without params errors loudly rather than
     silently degrading to unconditioned (see the no-op-rule guard in forward)."""
     m = _stepper(n_params=2, param_conditioning="film").eval()
@@ -273,14 +276,14 @@ def test_forward_requires_params_when_conditioned():
         m(state, None, geom)
 
 
-def test_predict_residual_false_rejected():
+def test_predict_residual_false_rejected() -> None:
     """``predict_residual`` is a dead knob (the residual is intrinsic); False is
     rejected rather than silently ignored."""
     with pytest.raises(ValueError, match="predict_residual=True"):
         _stepper(predict_residual=False)
 
 
-def test_identity_at_init_parity_after_lora_injection():
+def test_identity_at_init_parity_after_lora_injection() -> None:
     """The case that actually ships: after standard-LoRA injection (B zero-init),
     the parity invariant STILL holds -- injection adds no delta at init."""
     inject_lora = pytest.importorskip("neural_surrogates.finetuning").inject_lora
@@ -301,7 +304,7 @@ def test_identity_at_init_parity_after_lora_injection():
     assert torch.equal(out, ref)  # exact, bitwise: injection adds no delta at init
 
 
-def test_max_internal_batchsize_chunked_path_parity():
+def test_max_internal_batchsize_chunked_path_parity() -> None:
     """The vendored DFT chunks the folded crops when max_internal_batchsize is
     set; toggling it on the SAME weights must not change the output (covers the
     otherwise-untested chunk / res-chunk decode path in dft.py)."""
@@ -316,12 +319,12 @@ def test_max_internal_batchsize_chunked_path_parity():
     assert torch.isfinite(chunked).all()
 
 
-def test_encoder_crop_size_must_be_multiple_of_16():
+def test_encoder_crop_size_must_be_multiple_of_16() -> None:
     with pytest.raises(ValueError, match="multiple of 16"):
         _stepper(encoder_crop_size=8)
 
 
-def test_anisotropic_encoder_tiles_run_through_dft():
+def test_anisotropic_encoder_tiles_run_through_dft() -> None:
     model = _stepper(encoder_crop_size=(16, 16, 32)).eval()
     model.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
     state, params, geom = _inputs(grid=(16, 16, 32))
@@ -338,7 +341,7 @@ def test_anisotropic_encoder_tiles_run_through_dft():
     assert result.shape == state.shape
 
 
-def test_sdf_geom_features_precompute_matches_recompute():
+def test_sdf_geom_features_precompute_matches_recompute() -> None:
     """M6 correctness: passing precomputed ``geom_features`` yields output
     byte-identical to letting the stepper recompute the SDF transform inside
     ``forward`` -- the substitution the ESMDA rollout cache relies on."""
@@ -352,7 +355,7 @@ def test_sdf_geom_features_precompute_matches_recompute():
     assert torch.equal(out_cached, out_recompute)
 
 
-def test_rollout_computes_sdf_features_once(tmp_path):
+def test_rollout_computes_sdf_features_once(tmp_path: Any) -> None:
     """M6 optimisation: an SDF-enabled stepper computes its (static) SDF
     features exactly once per rollout, not once per internal step; the rollout
     still produces a finite trajectory over multiple emitted frames."""
@@ -404,11 +407,11 @@ def test_rollout_computes_sdf_features_once(tmp_path):
     calls = {"n": 0}
     original = stepper._sdf_features
 
-    def _counting(geometry):
+    def _counting(geometry: Any) -> Any:
         calls["n"] += 1
         return original(geometry)
 
-    stepper._sdf_features = _counting  # type: ignore[method-assign]
+    stepper._sdf_features = _counting
 
     result = model(params=_params())
 
@@ -500,7 +503,9 @@ def _make_ae_model_dir(
 # --------------------------------------------------------------------------- #
 
 
-def _compose_dft(pretrained_dir, data_dir, extra_overrides=None):
+def _compose_dft(
+    pretrained_dir: Any, data_dir: Any, extra_overrides: Any = None
+) -> Any:
     with initialize_config_dir(version_base=None, config_dir=str(_CONF)):
         cfg = compose(
             config_name="neural_surrogate/finetuning",
@@ -522,7 +527,7 @@ def _compose_dft(pretrained_dir, data_dir, extra_overrides=None):
     return cfg
 
 
-def test_cross_check_size_mismatch_raises(tmp_path):
+def test_cross_check_size_mismatch_raises(tmp_path: Any) -> None:
     """AE config size != stepper size -> the DFT script fails loud (ValueError)."""
     data_dir = tmp_path / "data"
     _write_transition_dataset(data_dir)
@@ -535,7 +540,7 @@ def test_cross_check_size_mismatch_raises(tmp_path):
         _load_finetune_run()(cfg)
 
 
-def test_cross_check_encode_geometry_mismatch_raises(tmp_path):
+def test_cross_check_encode_geometry_mismatch_raises(tmp_path: Any) -> None:
     """AE config encode_geometry != stepper encode_geometry -> ValueError."""
     data_dir = tmp_path / "data"
     _write_transition_dataset(data_dir)
@@ -564,15 +569,15 @@ class _StubSpinup(BaseForwardModel):
     A trimmed copy of the plan-01 e2e stub kept local so this test does not
     import a module whose top-level ``importorskip`` would raise mid-test."""
 
-    def __init__(self, results_dir=None) -> None:
+    def __init__(self, results_dir: Any = None) -> None:
         super().__init__(results_dir=results_dir)
         self.spinup_time = 0.0
         self._rng = np.random.default_rng(0)
 
-    def _apply_inflow_settings(self, params) -> None:
+    def _apply_inflow_settings(self, params: Any) -> None:
         pass
 
-    def save_results(self, state, sim_name: str = "state") -> None:
+    def save_results(self, state: Any, sim_name: str = "state") -> None:
         self._save_results(state, sim_name)
 
     def _clean_output(self) -> None:
@@ -581,7 +586,9 @@ class _StubSpinup(BaseForwardModel):
     def disable_spinup(self) -> None:
         self.spinup_time = 0.0
 
-    def run_single(self, state=None, params=None, sim_name="state") -> xr.Dataset:
+    def run_single(
+        self, state: Any = None, params: Any = None, sim_name: Any = "state"
+    ) -> xr.Dataset:
         coords = {
             "z": np.arange(NZ) + 0.5,
             "y": np.arange(NY) + 0.5,
@@ -606,7 +613,9 @@ def _params() -> xr.Dataset:
     )
 
 
-def _write_transition_dataset(root: Path, *, nz=NZ, ny=NY, nx=NX, t=T) -> None:
+def _write_transition_dataset(
+    root: Path, *, nz: Any = NZ, ny: Any = NY, nx: Any = NX, t: Any = T
+) -> None:
     """TransitionDataset fixture (state + param nc files), plan-01 shape."""
     rng = np.random.default_rng(0)
     for split, n in {"train": 2, "val": 1}.items():
@@ -615,7 +624,7 @@ def _write_transition_dataset(root: Path, *, nz=NZ, ny=NY, nx=NX, t=T) -> None:
         for i in range(n):
             blank = np.zeros((nz, ny, nx), "f4")
             blank[0] = 1.0
-            state = {
+            state: dict[str, tuple[tuple[str, ...], Any]] = {
                 v: (
                     ("time", "z", "y", "x"),
                     rng.standard_normal((t, nz, ny, nx)).astype("f4"),
@@ -663,7 +672,7 @@ def _write_transition_dataset(root: Path, *, nz=NZ, ny=NY, nx=NX, t=T) -> None:
     )
 
 
-def _shrink_dft_for_cpu(cfg) -> None:
+def _shrink_dft_for_cpu(cfg: Any) -> None:
     """CPU smoke shapes for the DFT fine-tune (mirrors the plan-01/-02 shrinkers).
 
     dft.yaml owns the trainer/dataset block shape; these keys match
@@ -685,7 +694,7 @@ def _shrink_dft_for_cpu(cfg) -> None:
     cfg.trainer.resume = False
 
 
-@pytest.mark.parametrize(
+@pytest.mark.parametrize(  # type: ignore[misc]
     "spatial_mode,skip_mixing",
     [
         pytest.param("local", False, id="local"),
@@ -693,7 +702,9 @@ def _shrink_dft_for_cpu(cfg) -> None:
         pytest.param("halo", True, id="halo-with-skip-mixing"),
     ],
 )
-def test_dft_finetune_end_to_end(tmp_path, monkeypatch, spatial_mode, skip_mixing):
+def test_dft_finetune_end_to_end(
+    tmp_path: Any, monkeypatch: Any, spatial_mode: Any, skip_mixing: Any
+) -> None:
     """compose finetuning.yaml (finetune_mode=dft) -> run -> exported dir loads
     into NeuralSurrogateForwardModel + rolls out a finite trajectory."""
     data_dir = tmp_path / "data"

@@ -148,6 +148,11 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_operator,
     filter_parameter_config,
 )
+from pyurbanair.config.run_record import (
+    append_constructor_override,
+    validate_run_config,
+    write_run_record,
+)
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -469,6 +474,7 @@ def _collect_window_cycle_dirs(
 
 
 def run(cfg: DictConfig) -> None:
+    validate_run_config(cfg, "filtering")
     num_windows = int(cfg.filtering.num_assimilation_windows)
     if num_windows < 1:
         raise ValueError(
@@ -542,7 +548,35 @@ def run(cfg: DictConfig) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     windows_dir = out_dir / "windows"
     windows_dir.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(config=cfg, f=out_dir / "config.yaml")
+    write_run_record(
+        cfg,
+        out_dir,
+        "filtering",
+        constructor_overrides=[
+            {
+                "role": "truth" if cfg.run.truth_dir is None else "external_truth",
+                "component": "forward_model",
+                "values": {
+                    "num_windows": num_windows,
+                    "window_seconds": sim_time,
+                    "truth_horizon_seconds": final_time,
+                },
+            },
+            {
+                "role": "assim",
+                "component": "forward_model",
+                "values": {"simulation_time": cycle_seconds},
+            },
+        ],
+    )
+
+    if cfg.run.truth_dir is None and is_dynamic_truth:
+        append_constructor_override(
+            out_dir,
+            role="truth",
+            component="parameter_sampler",
+            values={"simulation_time": final_time},
+        )
 
     # --- Truth (simulated inline, or loaded from disk) ------------------------
     if cfg.run.truth_dir is None:
@@ -685,10 +719,27 @@ def run(cfg: DictConfig) -> None:
     # prior (this ensemble is window 0's), written with the posterior at the end.
     prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
+    append_constructor_override(
+        out_dir,
+        role="assim",
+        component="parameter_sampler",
+        values={
+            "sampled_shape": dict(prior_params.sizes),
+            "parameter_names": list(prior_params.data_vars),
+        },
+    )
 
     # --- Observation operators and per-cycle observations ----------------------
-    truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
-    assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
+    truth_obs_op = create_observation_operator(
+        cfg.obs,
+        cfg.truth_model.solver_name,
+        OmegaConf.select(cfg, "observation.operator"),
+    )
+    assim_obs_op = create_observation_operator(
+        cfg.obs,
+        cfg.assim_model.solver_name,
+        OmegaConf.select(cfg, "observation.operator"),
+    )
     # The predicted-observation twin of the truth-side stride: a cycle's segment
     # emits `every_n` frames, and the filter must only see the one its analysis
     # assimilates. Wrapped ONLY when the stride bites, so an unstrided run hands
@@ -1040,7 +1091,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved outputs in {out_dir}")
 
 
-@hydra.main(  # type: ignore[misc]
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None, config_path="../../conf", config_name="run_filtering"
 )
 def main(cfg: DictConfig) -> None:

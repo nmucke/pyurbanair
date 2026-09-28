@@ -1,0 +1,63 @@
+# @package _global_
+# Fixed CPU test defaults; fixture/caller supplies temporary data paths.
+defaults:
+- _self_
+- /neural_surrogate/mode@_global_: standard
+init_weights_path: null
+trainer:
+  _target_: neural_surrogates.Trainer
+  num_epochs: 1
+  device: cpu
+  patience: 15
+  amp: false
+  amp_dtype: bfloat16
+  compile_model: false
+  channels_last: false
+  cudnn_benchmark: true
+  tf32: true
+  pushforward_epochs_per_step: 10
+  pushforward_start_steps: 1
+  lr_warmup_epochs: 5
+  lr_warmup_start: 1.0e-06
+  lr_min: 1.0e-06
+  mask_loss: true
+  grad_clip_norm: 1.0
+  grad_unroll_steps: 2
+  resume: true
+  checkpoint_every: 5
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 0.0001
+  weight_decay: 1e-8
+dataset:
+  _target_: neural_surrogates.TransitionDataset
+  root_dir: .temp/tests/training_data
+  state_vars:
+  - u
+  - v
+  - w
+  param_vars: null
+  cache: false
+  dtype: float32
+  pushforward_steps: 1
+  num_history_steps: 1
+  sdf_features: both
+  sdf_clamp_cells: 32
+batch_sampler:
+  _target_: neural_surrogates.TrajectoryBatchSampler
+  batch_size: 1
+  cell_budget: 4194304
+  shuffle: true
+  drop_last: true
+  seed: 0
+dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: 1
+  shuffle: true
+  drop_last: true
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true

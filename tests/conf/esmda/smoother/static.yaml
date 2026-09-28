@@ -1,0 +1,5 @@
+# Independent frozen test configuration.
+_target_: data_assimilation.smoothing.esmda.ParameterESMDA
+num_steps: ${esmda.num_steps}
+alpha: ${esmda.alpha}
+localization: ${esmda.localization}

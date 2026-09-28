@@ -98,6 +98,7 @@ from omegaconf import DictConfig
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise)
 from pyurbanair.animation import _get_writer_and_output_path
 from pyurbanair.config.hydra_helpers import clean_outputs, resolve_output_dir
+from pyurbanair.config.run_record import validate_run_config, write_run_record
 from pyurbanair.utils.run_utils import add_velocity_magnitude
 from scripts._common import resolve_results_dir
 
@@ -243,7 +244,9 @@ def run_one_model(
             )
         else:
             out = forward_model(params=params, state=state)
-        return out if out is not None else forward_model.get_states()
+        result = out if out is not None else forward_model.get_states()
+        assert isinstance(result, xarray.Dataset)
+        return result
 
     t0 = time.time()
     windows = [step(params=_member_params(params_list[0], is_ensemble))]
@@ -300,7 +303,7 @@ def _clamped(da: xarray.DataArray, dim: str, target: np.ndarray) -> np.ndarray:
     clamp rather than punch NaN holes into the comparison.
     """
     coord = np.asarray(da.coords[dim].values, dtype=float)
-    return np.clip(target, coord.min(), coord.max())
+    return np.asarray(np.clip(target, coord.min(), coord.max()))
 
 
 def regrid_state(
@@ -379,7 +382,7 @@ def plot_parameters(
     and speed recovered from (u, v) at inlet probes. A model that responds
     sluggishly to the prescribed inflow shows up here as a lagged/damped curve.
     """
-    param_names = list(params.data_vars)
+    param_names = [str(name) for name in params.data_vars]
     n_rows = len(param_names)
     colors = _model_colors(list(fields))
 
@@ -453,7 +456,7 @@ def plot_scenario_parameters(
     """Plot the prescribed dynamic trajectories that define each scenario."""
     param_names = list(
         dict.fromkeys(
-            name
+            str(name)
             for params in params_by_scenario.values()
             for name, da in params.data_vars.items()
             if "time" in da.dims
@@ -497,7 +500,7 @@ def plot_parameter_scenario_response(
     """Prescribed and realised inflow for several scenarios of one solver."""
     param_names = list(
         dict.fromkeys(
-            name
+            str(name)
             for params in params_by_scenario.values()
             for name, da in params.data_vars.items()
             if "time" in da.dims
@@ -983,7 +986,9 @@ def rolling_aggregate(
     window += 1 - window % 2
 
     rolling = series.rolling(time=window, center=True, min_periods=1)
-    return getattr(rolling, aggregation_mode)()
+    result = getattr(rolling, aggregation_mode)()
+    assert isinstance(result, xarray.DataArray)
+    return result
 
 
 def plot_sensor_rolling(
@@ -1232,7 +1237,7 @@ def auto_regions(
 
 def _region_mask(region: Region, x: np.ndarray, y: np.ndarray) -> np.ndarray:
     xx, yy = np.meshgrid(x, y, indexing="xy")
-    return (
+    return np.asarray(
         (xx >= region.x_min)
         & (xx <= region.x_max)
         & (yy >= region.y_min)
@@ -1587,9 +1592,9 @@ def plot_vertical_profiles(
                     )
             axes[0].plot(mean_speed, heights, color=colors[name], label=name)
             axes[1].plot(direction, heights, color=colors[name], label=name)
-            for component, values in component_std.items():
+            for component, spread_values in component_std.items():
                 axes[2].plot(
-                    values,
+                    spread_values,
                     heights,
                     color=colors[name],
                     ls={"u": "-", "v": "--", "w": ":"}[component],
@@ -1614,7 +1619,9 @@ def _sample(values: np.ndarray, max_samples: int) -> np.ndarray:
     values = values[np.isfinite(values)]
     if values.size <= max_samples:
         return values
-    return values[np.linspace(0, values.size - 1, max_samples).round().astype(int)]
+    return np.asarray(
+        values[np.linspace(0, values.size - 1, max_samples).round().astype(int)]
+    )
 
 
 def plot_field_distributions(
@@ -2643,6 +2650,7 @@ def _compare_parameter_scenarios_within_model(
 
 
 def run(cfg: DictConfig) -> None:
+    validate_run_config(cfg, "comparison")
     """Run every selected solver against every selected parameter scenario."""
     model_keys = [str(k) for k in cfg.compare.models]
     unknown = [key for key in model_keys if key not in cfg.models]
@@ -2673,7 +2681,7 @@ def run(cfg: DictConfig) -> None:
         )
 
     root_out_dir = resolve_output_dir(cfg, "compare_models") / "comparison"
-    root_out_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(cfg, root_out_dir, "comparison")
     params_by_scenario: dict[str, xarray.Dataset] = {}
     states_by_scenario: dict[str, dict[str, xarray.Dataset]] = {}
     summary_rows: list[dict] = []
@@ -2733,7 +2741,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved all scenario comparisons in {root_out_dir}")
 
 
-@hydra.main(  # type: ignore[misc]
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None, config_path="../conf", config_name="compare_models"
 )
 def main(cfg: DictConfig) -> None:

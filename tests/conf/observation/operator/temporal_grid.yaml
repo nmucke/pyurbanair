@@ -1,0 +1,6 @@
+# Temporal grid observations. The runner injects the model role's solver_name.
+_target_: data_assimilation.observation_operator.TemporalObservationOperator
+observation_operator:
+  _target_: data_assimilation.observation_operator.ObservationOperator
+  _convert_: all
+  obs_states: ${obs.states}

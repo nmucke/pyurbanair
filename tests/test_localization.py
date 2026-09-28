@@ -406,6 +406,7 @@ def test_masked_row_cannot_disable_localization_for_shared_group() -> None:
     assert not np.allclose(global_result[0], augmented[0])
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_parameter_esmda_runs_with_correlation_localization(
     compose_test_cfg: Callable[..., Any],
 ) -> None:
