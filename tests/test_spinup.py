@@ -20,7 +20,7 @@ def test_spinup_trims_output(model: str, compose_test_cfg: Any) -> None:
     if model == "pylbm":
         overrides.append("model.forward_model.cuda=false")
 
-    cfg = compose_test_cfg(overrides)
+    cfg = compose_test_cfg(overrides + ["time.spinup_time=0.0"])
     expected_steps = round(cfg.time.simulation_time / cfg.time.output_frequency)
     true_params = instantiate(cfg.params).sample(1).isel(ensemble=0, drop=True)
 

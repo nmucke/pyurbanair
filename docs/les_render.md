@@ -48,8 +48,8 @@ pixi run -e viz python scripts/visualization/render_les.py input=cases/va53
 ```
 
 Tests: `pixi run -e viz test-render` (the `libs/les-render/tests` suite; the
-Blender and ffmpeg tests skip when those binaries are absent; CI runs it in
-the `render-tests` job).
+Blender and ffmpeg tests skip when those binaries are absent). Run this suite
+manually; it is not part of CI.
 
 The bundle goes to `output_dir`, else `results/les_render/<case>/<preset>/`.
 The Blender preview ends up in `<bundle>/preview/<case>.mp4`; the Unreal

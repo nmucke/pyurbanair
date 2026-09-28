@@ -41,6 +41,9 @@ buildings and do not appreciably reduce fixed solver startup overhead. Surrogate
 fixtures use CPU, small batches and short training; export fixtures remain
 compatible with the library's model artifact format. Tiny PyTorch tests use one
 CPU thread to avoid thread-pool overhead; the previous setting is restored.
+The Pixi test commands report the 20 slowest cases. CI also caps OpenMP and BLAS
+threads at one for these small workloads and selects Open MPI's `ob1` transport
+to avoid UCX interface probing on hosted runners.
 
 Unit tests of pure functions can continue to use inline arrays/dictionaries.
 They do not need Hydra simply because a test-config folder exists.

@@ -896,10 +896,10 @@ def _run_dir_listing(cfg: DictConfig) -> set[str]:
 
 
 @pytest.mark.integration  # type: ignore[misc]
-def test_run_esmda_persists_every_iteration_when_the_flag_is_on(
+def test_run_esmda_observation_diagnostics_are_opt_in(
     compose_test_cfg: Callable[..., DictConfig],
 ) -> None:
-    """``num_steps + 1`` iterations persisted, with the observations beside them.
+    """Diagnostics persist every iteration and add only the expected files.
 
     What is under test is the plumbing, not the assimilation, hence the cheapest
     mode. The ``esmda_step`` length is the assertion that matters: it is
@@ -930,18 +930,9 @@ def test_run_esmda_persists_every_iteration_when_the_flag_is_on(
 
     assert (windows_dir / "window_0_params_steps.nc").exists()
 
-
-@pytest.mark.integration  # type: ignore[misc]
-def test_run_esmda_flag_off_reproduces_the_pre_phase2_artifact_set(
-    compose_test_cfg: Callable[..., DictConfig],
-) -> None:
-    """The plan's acceptance criterion: a directory-listing comparison.
-
-    Not a name-pattern check — that would pass a change which quietly *dropped*
-    an existing artifact as well as one that added nothing. The flag-off listing
-    must equal the flag-on listing minus exactly the three new files.
-    """
-    on_listing = _run_dir_listing(_run_e2e(compose_test_cfg, True))
+    # Compare complete artifact sets so enabling diagnostics cannot silently
+    # remove an existing output or write extra files with the flag disabled.
+    on_listing = _run_dir_listing(cfg)
     off_listing = _run_dir_listing(_run_e2e(compose_test_cfg, False))
 
     added = {

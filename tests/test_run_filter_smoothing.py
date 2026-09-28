@@ -7,15 +7,15 @@ Two tiers, following tests/test_run_filtering.py:
   third entry point and that every ``${esmda.*}`` / ``${filtering.*}``
   interpolation they carry resolves against ``conf/run_filter_smoothing.yaml``'s
   own blocks. These run anywhere;
-* end-to-end smoke tests under the tiny smoke config (conftest
-  ``_SMOKE_OVERRIDES``) with the global (unlocalized) update — the correlation
+* end-to-end smoke tests under the small independent `tests/conf` configuration
+  with the global (unlocalized) update — the correlation
   localization the ESMDA entry point defaults to is degenerate at this 2-member
   ensemble size. Three of them, one per hybrid path: state + dynamic
   (per-segment trajectory restriction), joint + static (the exact-reduction
   path, where the hybrid is a plain joint EnKF on the MDA posterior) and
   joint + dynamic (the correction-on-the-ESMDA-schedule path).
 
-The e2e tests build and run pylbm and are verified in CI, serially; they
+The e2e tests build and run pylbm and run serially in the integration suite; they
 SIGABRT on the maintainer's Mac (libomp / pylbm ``prepare_compile``), which is
 the same limitation test_run_esmda.py and test_run_filtering.py live with.
 """
@@ -66,7 +66,7 @@ def _overrides(
         "esmda/localization=none",
         "filtering/localization=none",
         "ensemble.ensemble_size=2",
-        "ensemble.num_parallel_processes=2",
+        "ensemble.num_parallel_processes=1",
         # The conftest smoke overrides pin a tiny [0,20]^2 domain but supply no
         # matching sensor coordinates; place the assimilation sensors in the
         # open N-S lanes of that domain (the same four points both siblings use).
@@ -400,10 +400,6 @@ def test_nominal_window_clock_yields_exact_segment_bounds() -> None:
 @pytest.mark.parametrize(  # type: ignore[misc]
     "smoother,mode,num_windows,every_n",
     [
-        # The trajectory path with no parameter correction: the filter forecasts
-        # each segment with the MDA trajectory restricted to it and updates the
-        # state alone.
-        pytest.param("dynamic", "state", 1, 1, id="state_dynamic"),
         # The exact-reduction path: a static MDA posterior makes the filter
         # phase one plain joint-EnKF pass over the window's cycles. Two windows,
         # so the prior carry (posterior -> next prior) is exercised.

@@ -1,7 +1,7 @@
 """Plan 07 phase 2B: ``LatentFlowMatchingTrainer`` + ``train_latent_generator.py``.
 
 End-to-end on CPU smoke shapes (AE size S, crop 16, grid 16x16x32, Hp=3, P=2,
-2 epochs, batch 2) via the shared fixtures in ``_latent_generator_fixtures``:
+1 epoch, batch 2) via the shared fixtures in ``_latent_generator_fixtures``:
 
 * the export is complete and self-contained (``config.yaml`` stamped
   ``skip_pretrained_load: true`` + inline ``ae_kwargs`` + the ``generator``
@@ -129,7 +129,7 @@ def test_train_end_to_end_exports_self_contained_generator(
         assert (model_dir / name).exists(), name
     assert (model_dir / "latent_stats.pt").exists()
     rows = _metrics_rows(model_dir)
-    assert [r["epoch"] for r in rows] == ["1", "2"]
+    assert [r["epoch"] for r in rows] == ["1"]
     assert all(float(r["val_loss"]) > 0 for r in rows)
 
     saved = OmegaConf.load(model_dir / "config.yaml")

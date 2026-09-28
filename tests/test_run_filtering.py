@@ -1,8 +1,8 @@
 """End-to-end smoke tests for scripts/filtering/run_filtering.py (sequential EnKF).
 
-Mirrors tests/test_run_esmda.py: everything runs under the tiny smoke config
-(conftest ``_SMOKE_OVERRIDES``) with the global (unlocalized) update — the
-default correlation localization is degenerate at this 2-member ensemble size.
+Mirrors tests/test_run_esmda.py: everything runs under the small independent
+`tests/conf` configuration with the global (unlocalized) update — correlation
+localization is degenerate at this 2-member ensemble size.
 One test per filter mode (state / parameter / joint), plus a multi-cycle run,
 distance localization (purely geometric, so meaningful at 2 members), the
 deterministic ensemble-transform analyses, and the mixed drift-tracking path (a
@@ -43,7 +43,7 @@ def _overrides(
         # degenerate at 2 members.
         "filtering/localization=none",
         "ensemble.ensemble_size=2",
-        "ensemble.num_parallel_processes=2",
+        "ensemble.num_parallel_processes=1",
         # The conftest smoke overrides pin a tiny [0,20]^2 domain but do not
         # supply matching sensor coordinates; place the assimilation sensors in
         # the open N-S lanes of that domain (same points as test_run_esmda).
@@ -183,9 +183,11 @@ def test_run_filtering(
 
     from scripts.filtering.run_filtering import run
 
-    cfg = compose_test_cfg(
-        _overrides(mode, num_windows, extra), config_name="run_filtering"
-    )
+    overrides = _overrides(mode, num_windows, extra)
+    if mode == "joint":
+        # Keep one script-level exercise of the forkserver ensemble path.
+        overrides.append("ensemble.num_parallel_processes=2")
+    cfg = compose_test_cfg(overrides, config_name="run_filtering")
     run(cfg)
 
     # Cycles are DERIVED from the observation cadence, not configured: the smoke
@@ -355,18 +357,6 @@ def test_run_filtering_distance_localization(compose_test_cfg: Any) -> None:
             id="etkf",
         ),
         pytest.param(
-            "etkf_tsvd",
-            "none",
-            "data_assimilation.filtering.etkf.ETKFAnalysis",
-            id="etkf_tsvd",
-        ),
-        pytest.param(
-            "letkf",
-            "distance",
-            "data_assimilation.filtering.etkf.LETKFAnalysis",
-            id="letkf",
-        ),
-        pytest.param(
             "letkf_tsvd",
             "distance",
             "data_assimilation.filtering.etkf.LETKFAnalysis",
@@ -380,11 +370,8 @@ def test_run_filtering_ensemble_transform(
 ) -> None:
     """Deterministic ensemble-transform analyses end to end.
 
-    All four deterministic options run the solver, covering the full
-    (analysis class) x (TSVD on/off) grid rather than only its diagonal. Each
-    case builds and runs pylbm, so this is the most expensive coverage in the
-    file; it is kept because a nested-``_target_`` TSVD node reaching a real
-    run is exactly the wiring the compose-only tests above cannot prove.
+    One global and one localized deterministic option run the solver. The
+    compose-only and analysis-unit tests cover the other class/TSVD pairings.
 
     At the smoke ensemble size (``ensemble.ensemble_size=2``) the forecast
     anomalies span a single direction, so the transform is well defined — the

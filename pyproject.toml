@@ -244,9 +244,9 @@ mypy = {version="~=1.15.0", channel="conda-forge"}
 setup-dev = { cmd = "bash scripts/setup_dev_env.sh", description = "Bootstrap dev env (works around coreutils/tempest-remap bin/test conflict)" }
 
 [tool.pixi.feature.dev.tasks]
-"py.test" = { cmd = "python -m pytest tests --exitfirst", description = "Run fast tests without compiled CFD solves" }
-test-integration = { cmd = "python -m pytest tests -m integration --exitfirst", description = "Run the small real-solver integration suite" }
-test-all = { cmd = "python -m pytest tests -m '' --exitfirst", description = "Run all unit and solver integration tests" }
+"py.test" = { cmd = "python -m pytest tests --exitfirst --durations=20", description = "Run fast tests without compiled CFD solves" }
+test-integration = { cmd = "python -m pytest tests -m integration --exitfirst --durations=20", description = "Run the small real-solver integration suite" }
+test-all = { cmd = "python -m pytest tests -m '' --exitfirst --durations=20", description = "Run all unit and solver integration tests" }
 pre-commit = { cmd = "pre-commit run", description = "Run pre-commit hooks on specific files" }
 format = { cmd = "black src", description = "Format code" }
 type-check = { cmd = "mypy src", description = "Type check code" }

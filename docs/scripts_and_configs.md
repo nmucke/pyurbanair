@@ -53,6 +53,15 @@ The **mode** of a run is the cross product of its config groups — no separate
 mode file is required. `run_esmda.py` handles every former assimilation script
 via `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`.
 
+### Test configuration
+
+Integration tests compose independent configs from [`tests/conf/`](../tests/conf/).
+They use a 20 × 20 × 4 domain, a 3 s window, and a two-member ensemble.
+The `compose_test_cfg` fixture in [`tests/conftest.py`](../tests/conftest.py)
+gives each composition separate temporary output directories and applies
+per-test overrides last. Tests of production config contracts compose `conf/`
+directly without executing a run. See [`tests/README.md`](../tests/README.md).
+
 ---
 
 ### 1.1 Shared policy and explicit ownership

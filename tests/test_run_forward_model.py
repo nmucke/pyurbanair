@@ -1,4 +1,4 @@
-"""Smoke tests for scripts/run_forward_model.py.
+"""Pairwise smoke coverage of the forward runner's switches on both backends.
 
 Four representative runs cover both backends, static/dynamic parameters,
 single/ensemble execution, and state carry. Backend numerical contracts are
