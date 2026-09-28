@@ -188,6 +188,16 @@ def test_data_mismatch_summary_flags_underfit_and_overfit() -> None:
     assert healthy["overfit_final"] is False
 
 
+def test_data_mismatch_summary_caveat_tracks_representation_variance() -> None:
+    values = [np.full(12, 0.5)]
+    legacy = data_mismatch_summary(values, n_obs=12)
+    corrected = data_mismatch_summary(values, n_obs=12, has_representation_error=True)
+
+    assert legacy is not None and corrected is not None
+    assert legacy["caveat"] == "no_representativeness_error"
+    assert corrected["caveat"] == "representation_error_included_calibration_unverified"
+
+
 def test_data_mismatch_summary_flags_collapse_only_when_off_target() -> None:
     """A vanishing across-member IQR is the pathology only away from the target."""
     n_obs = 200

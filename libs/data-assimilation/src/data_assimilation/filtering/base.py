@@ -37,7 +37,7 @@ import pathlib
 import shutil
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional, Sequence, Union
+from typing import Any, Callable, Literal, Optional, Sequence, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -113,6 +113,7 @@ class CycleDiagnostics:
     # predicted-observation rows really are H applied to the analyzed state;
     # otherwise the name of the approximation they represent.
     obs_posterior_rmse_kind: str = "exact"
+    obs_analyzed_final_rmse: Optional[float] = None
     analysis_time: Optional[float] = None
     reduction_rank: Optional[int] = None
     reduction_available_rank: Optional[int] = None
@@ -471,7 +472,10 @@ class BaseFilter:
         params: Optional[xarray.Dataset] = None,
     ) -> Optional[xarray.Dataset]:
         """Run the ensemble over one cycle's segment (None in on-disk mode)."""
-        return self.forward_model.run_ensemble(state=state, params=params)
+        return cast(  # type: ignore[redundant-cast,unused-ignore]
+            Optional[xarray.Dataset],
+            self.forward_model.run_ensemble(state=state, params=params),
+        )
 
     def _record_pred_obs(self, pred_obs: jnp.ndarray) -> None:
         """Record one cycle's raw forecast observations ``(T*N_obs, N_e)``.
@@ -746,7 +750,48 @@ class BaseFilter:
     # The cycle loop
     # ------------------------------------------------------------------
 
+    collect_analyzed_observations: bool = False
+    analyzed_observation_operator: Any
+    _cycle_covariances: Any = None
+    _window_covariances: Any = None
+
+    def set_observation_covariance(self, C_D: Any) -> None:
+        """Replace the physical covariance of one frame after validation."""
+        covariance = jnp.asarray(C_D)
+        if covariance.ndim == 2:
+            if covariance.shape[0] != covariance.shape[1] or not bool(
+                jnp.all(covariance == jnp.diag(jnp.diag(covariance)))
+            ):
+                raise ValueError(
+                    "C_D must be diagonal; correlated errors are unsupported."
+                )
+            covariance = jnp.diag(covariance)
+        self.C_D_diag = validate_variances(covariance)
+
     def run(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+        observations: Optional[Union[jnp.ndarray, Sequence[Any]]] = None,
+        *,
+        return_history: bool = False,
+        observation_covariances: Any = None,
+    ) -> FilterResult:
+        """Filter with optional physical variances shaped like the raw batches.
+
+        Variances have shape (cycles, frames, obs), or (cycles, obs) for
+        single-frame cycles. All entries are validated before forecasting and
+        thinned with the observation stride. Constructor covariance is unchanged.
+        """
+        previous = getattr(self, "_window_covariances", None)
+        self._window_covariances = observation_covariances
+        try:
+            return self._run(state, params, observations, return_history=return_history)
+        finally:
+            self._window_covariances = previous
+            self._cycle_covariances = None
+
+    def _run(
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
@@ -806,6 +851,16 @@ class BaseFilter:
                 'array, or a one-element list of per-cycle ("time", "obs") '
                 "DataArrays."
             )
+        covariances = self._window_covariances
+        if covariances is not None:
+            covariances = jnp.asarray(covariances)
+            if covariances.ndim == 2:
+                covariances = covariances[:, None, :]
+            if covariances.shape != obs_batches.shape:
+                raise ValueError(
+                    "observation_covariances must match raw observation batches."
+                )
+            validate_variances(covariances.reshape(-1))
         if obs_batches.shape[2] != self.C_D_diag.shape[0]:
             raise ValueError(
                 f"Observation frames have N_obs={obs_batches.shape[2]} but C_D "
@@ -835,6 +890,8 @@ class BaseFilter:
                     "the stride."
                 )
             obs_batches = obs_batches[:, every_n - 1 :: every_n, :]
+            if covariances is not None:
+                covariances = covariances[:, every_n - 1 :: every_n, :]
         if self.mode in ("parameter", "joint"):
             if params is None:
                 raise ValueError(f"mode={self.mode!r} requires params.")
@@ -850,6 +907,7 @@ class BaseFilter:
             self.pred_obs_history = []
             self.pred_obs_post_history = []
             self.pred_obs_frames_history = []
+        self.analyzed_pred_obs_history: list[np.ndarray] = []
         diagnostics: list[CycleDiagnostics] = []
         params_history: list[xarray.Dataset] = (
             [params] if (return_history and params is not None) else []
@@ -865,6 +923,9 @@ class BaseFilter:
             unit="cycle",
         )
         for cycle in pbar:
+            self._cycle_covariances = (
+                None if covariances is None else covariances[cycle]
+            )
             self._set_cycle_results_dir(cycle)
 
             forecast = self._forecast_step(state=analysis_state, params=params)
@@ -912,6 +973,27 @@ class BaseFilter:
             analysis_state, params, cycle_diag = self._analysis_cycle(
                 cycle, final_state, params, pred_obs, obs_batches[cycle]
             )
+            if getattr(self, "collect_analyzed_observations", False):
+                assert analysis_state is not None
+                observed_state = analysis_state
+                if "time" not in observed_state.dims:
+                    observed_state = observed_state.expand_dims(
+                        time=np.atleast_1d(observed_state.coords.get("time", 0.0))
+                    )
+                operator = getattr(
+                    self, "analyzed_observation_operator", self.observation_operator
+                )
+                analyzed_obs = self._prepare_pred_obs(operator(observed_state))
+                actual = np.asarray(analyzed_obs[:, -1, :]).T
+                self.analyzed_pred_obs_history.append(actual)
+                cycle_diag.obs_analyzed_final_rmse = float(
+                    np.sqrt(
+                        np.mean(
+                            (np.asarray(obs_batches[cycle, -1]) - actual.mean(axis=1))
+                            ** 2
+                        )
+                    )
+                )
             diagnostics.append(cycle_diag)
 
             # Repair any diverged members in the warm start for the next
@@ -1243,7 +1325,11 @@ class BaseFilter:
                 rows,
                 rows[start : start + n_obs],
                 obs[frame],
-                self.C_D_diag,
+                (
+                    self.C_D_diag
+                    if getattr(self, "_cycle_covariances", None) is None
+                    else self._cycle_covariances[frame]
+                ),
                 frame_keys[frame],
                 **plumbing,
             )
@@ -1494,7 +1580,12 @@ class BaseFilter:
         innovation = obs - jnp.mean(pred_obs, axis=1)
         pred_obs_dev = pred_obs - jnp.mean(pred_obs, axis=1, keepdims=True)
         C_DD = jnp.dot(pred_obs_dev, pred_obs_dev.T) / (N_e - 1)
-        S = C_DD + jnp.diag(jnp.tile(self.C_D_diag, num_frames))
+        physical_variances = (
+            jnp.tile(self.C_D_diag, num_frames)
+            if getattr(self, "_cycle_covariances", None) is None
+            else self._cycle_covariances.reshape(-1)
+        )
+        S = C_DD + jnp.diag(physical_variances)
         chi2 = float(
             innovation
             @ jax.scipy.linalg.cho_solve(jax.scipy.linalg.cho_factor(S), innovation)

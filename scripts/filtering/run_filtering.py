@@ -144,7 +144,10 @@ from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
 from pyurbanair.config.hydra_helpers import (
+    add_observation_error_metadata,
+    add_prior_innovation_diagnostics,
     clean_outputs,
+    create_observation_error,
     create_observation_operator,
     filter_parameter_config,
 )
@@ -381,6 +384,8 @@ def _save_window_obs_diagnostics(
     pred_obs: Optional[np.ndarray],
     pred_obs_post: Optional[np.ndarray],
     obs_op: Any,
+    resolved_error: Any = None,
+    pred_obs_analyzed: Optional[np.ndarray] = None,
 ) -> None:
     """Write one window's observation-space arrays in the ESMDA schema.
 
@@ -409,6 +414,31 @@ def _save_window_obs_diagnostics(
     obs_ds["obs"].attrs["long_name"] = "assimilated observation (truth + noise)"
     obs_ds["obs_clean"].attrs["long_name"] = "noise-free truth projection"
     obs_ds["obs_error_std"].attrs["long_name"] = "sqrt(diag(C_D)), un-inflated"
+    if resolved_error is not None:
+        add_observation_error_metadata(obs_ds, resolved_error, _OBS_DIM)
+        obs_ds.attrs["analysis_covariance_multiplier"] = 1.0
+        if pred_obs is not None:
+            variance = np.concatenate([r.covariance_diag for r in resolved_error])
+            add_prior_innovation_diagnostics(
+                obs_ds,
+                obs,
+                pred_obs,
+                variance,
+                _OBS_DIM,
+                resolved_error[0].covariance_diag.size,
+            )
+            if pred_obs_analyzed is not None:
+                analyzed_innovation = np.asarray(obs, dtype=float).ravel() - np.asarray(
+                    pred_obs_analyzed, dtype=float
+                ).mean(axis=1)
+                obs_ds["obs_innovation_analyzed"] = (
+                    _OBS_DIM,
+                    analyzed_innovation,
+                )
+                obs_ds["obs_squared_residual_over_R_analyzed"] = (
+                    _OBS_DIM,
+                    analyzed_innovation**2 / variance,
+                )
     obs_ds.to_netcdf(windows_dir / f"window_{window}_obs.nc")
 
     if pred_obs is None or pred_obs_post is None:
@@ -422,6 +452,14 @@ def _save_window_obs_diagnostics(
             **coords,
         },
     )
+    if pred_obs_analyzed is not None:
+        pred_ds["pred_obs_analyzed"] = (
+            (_OBS_DIM, "ensemble"),
+            np.asarray(pred_obs_analyzed),
+        )
+        pred_ds["pred_obs_analyzed"].attrs[
+            "long_name"
+        ] = "H(actual analyzed state), final frame of each filter cycle"
     pred_ds.attrs["ordering"] = _OBS_ORDERING
     pred_ds.attrs["esmda_step"] = (
         "iteration index; 0 = prior forecast, -1 = posterior forecast. "
@@ -469,6 +507,9 @@ def _collect_window_cycle_dirs(
 
 
 def run(cfg: DictConfig) -> None:
+    observation_error = create_observation_error(
+        cfg, cfg.obs, ("filtering.obs_error_std",)
+    )
     num_windows = int(cfg.filtering.num_assimilation_windows)
     if num_windows < 1:
         raise ValueError(
@@ -706,6 +747,14 @@ def run(cfg: DictConfig) -> None:
     # horizon's worth costs nothing; the truth itself stays lazily on disk.
     observations: list[Any] = []
     observations_clean: list[Any] = []
+    resolved_errors = []
+    if observation_error is not None:
+        base_obs_op: Any = getattr(truth_obs_op, "observation_operator", truth_obs_op)
+        n_raw_obs = int(base_obs_op.num_sensors) * len(base_obs_op.obs_states)
+        rng_key, noise_key = jax.random.split(rng_key)
+        raw_normal_samples = np.asarray(
+            jax.random.normal(noise_key, (n_total, n_raw_obs))
+        )
     cycle_times: list[float] = []
     # Every OUTPUT frame's time, not just the analysis times: the axis the
     # optional full-resolution forecast artifact is written on (`cycle_times` is
@@ -727,9 +776,25 @@ def run(cfg: DictConfig) -> None:
             float(t) for t in np.asarray(cycle_block["time"].values).ravel()
         )
         cycle_obs_clean = truth_obs_op(cycle_truth)
-        rng_key, subkey = jax.random.split(rng_key)
-        cycle_obs = cycle_obs_clean + obs_error_std * np.asarray(
-            jax.random.normal(subkey, cycle_obs_clean.shape)
+        if observation_error is not None:
+            resolved_errors.append(
+                observation_error.resolve(cycle_obs_clean, truth_obs_op)
+            )
+        if observation_error is None:
+            rng_key, subkey = jax.random.split(rng_key)
+            raw_noise = np.asarray(jax.random.normal(subkey, cycle_obs_clean.shape))
+        else:
+            raw_noise = raw_normal_samples[(cycle + 1) * every_n - 1].reshape(
+                cycle_obs_clean.shape
+            )
+        cycle_obs = (
+            cycle_obs_clean
+            + (
+                resolved_errors[-1].raw_instrument_std
+                if observation_error is not None
+                else obs_error_std
+            )
+            * raw_noise
         )
         observations.append(cycle_obs)
         observations_clean.append(cycle_obs_clean)
@@ -747,7 +812,11 @@ def run(cfg: DictConfig) -> None:
         # obs.temporal_mode null: the bare spatial operator already returns the
         # flat observation vector of the cycle's single frame.
         n_d = int(np.asarray(first_obs).size)
-    C_D_diag = (obs_error_std**2) * jnp.ones(n_d)
+    C_D_diag = (
+        jnp.asarray(resolved_errors[0].covariance_diag)
+        if observation_error is not None
+        else (obs_error_std**2) * jnp.ones(n_d)
+    )
 
     # --- Filter ----------------------------------------------------------------
     rng_key, filter_key = jax.random.split(rng_key)
@@ -772,6 +841,9 @@ def run(cfg: DictConfig) -> None:
     # ride-along rows the analysis already computes) posterior forecast
     # observations; no extra forward solve.
     enkf.collect_pred_obs = True
+    if observation_error is not None:
+        enkf.collect_analyzed_observations = True
+        enkf.analyzed_observation_operator = assim_obs_op
     # The full-resolution forecast frames (every time.output_frequency step, not
     # just the analysis times). Opt-in: the artifact is `every_n` times the
     # window's analyzed states, and the filter holds a window's worth in memory.
@@ -820,6 +892,15 @@ def run(cfg: DictConfig) -> None:
             state=state_input,
             params=params,
             observations=observations[window_slice],
+            **(
+                {
+                    "observation_covariances": np.stack(
+                        [r.covariance_diag for r in resolved_errors[window_slice]]
+                    )
+                }
+                if observation_error is not None
+                else {}
+            ),
             return_history=True,
         )
 
@@ -859,10 +940,20 @@ def run(cfg: DictConfig) -> None:
             window,
             _flat_obs_vector(observations[window_slice]),
             _flat_obs_vector(observations_clean[window_slice]),
-            np.tile(np.sqrt(np.asarray(C_D_diag)), cycles_per_window),
+            (
+                np.concatenate([r.std for r in resolved_errors[window_slice]])
+                if observation_error is not None
+                else np.tile(np.sqrt(np.asarray(C_D_diag)), cycles_per_window)
+            ),
             _stack_cycle_pred_obs(enkf.pred_obs_history),
             _stack_cycle_pred_obs(enkf.pred_obs_post_history),
             truth_obs_op,
+            resolved_errors[window_slice] if observation_error is not None else None,
+            (
+                _stack_cycle_pred_obs(enkf.analyzed_pred_obs_history)
+                if observation_error is not None
+                else None
+            ),
         )
 
         if save_history:
@@ -961,7 +1052,14 @@ def run(cfg: DictConfig) -> None:
                 # frames (output_frequency each) and assimilates the last one.
                 "assimilate_every_n_step": int(every_n),
                 "final_time": float(final_time),
-                "observation_error_std": obs_error_std,
+                "observation_error_std": (
+                    obs_error_std if observation_error is None else None
+                ),
+                **(
+                    {"observation_error_model": resolved_errors[0].provenance}
+                    if observation_error is not None
+                    else {}
+                ),
                 # The gate the shared observation-space diagnostic reads before
                 # it opens windows/window_*_{obs,pred_obs}.nc.
                 "save_obs_diagnostics": True,
@@ -1040,9 +1138,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved outputs in {out_dir}")
 
 
-@hydra.main(  # type: ignore[misc]
-    version_base=None, config_path="../../conf", config_name="run_filtering"
-)
+@hydra.main(version_base=None, config_path="../../conf", config_name="run_filtering")  # type: ignore[misc,unused-ignore]
 def main(cfg: DictConfig) -> None:
     run(cfg)
 

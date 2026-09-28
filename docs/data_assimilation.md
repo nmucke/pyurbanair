@@ -159,11 +159,89 @@ default everywhere.
 
 Because aggregation is a DA choice rather than an operator argument, its two
 knobs live on the run config's algorithm node — `esmda.interval_seconds` /
-`esmda.aggregation_mode`, right next to
-`obs_error_std` — not in the case's `obs:` block, which carries only
+`esmda.aggregation_mode` — not in the case's `obs:` block, which carries only
 observation-operator arguments. `run_filtering.yaml` has no such keys, because
 the filter aggregates nothing. `create_aggregate_observations` (§11) reads
-them; a null `interval_seconds` means full-resolution assimilation.
+them; a null `interval_seconds` means full-resolution assimilation. The
+optional corrected likelihood is configured separately at the run-config root
+as `observation_error`.
+
+### Opt-in physical observation likelihood
+
+The three assimilation entry points also accept a root-level
+`observation_error` block. `null` is the default and preserves the legacy
+scalar `obs_error_std` path, including its conservative behavior of assigning
+one frame's variance to each aggregated mean. Corrected runs opt in explicitly:
+
+```yaml
+observation_error:
+  instrument_std: 0.25
+  representation_std: 0.0
+  representation_time_model: independent
+  aggregation: propagate_mean
+```
+
+The immutable `ObservationErrorSpec` in
+[`observation_error.py`](../libs/data-assimilation/src/data_assimilation/observation_error.py)
+resolves labelled diagonal variances for each window's actual times. Each
+standard deviation may be scalar or a mapping with a required `default` and
+optional `components`, zero-based `sensors`, and `height_bands` overrides.
+Height bands use `{min_z, max_z, std}` and half-open `[min_z, max_z)` bounds.
+The flattening order remains time-major, with component blocks and sensors
+inside each frame.
+
+Corrected mode currently supports only independent frame errors and mean
+aggregation. It propagates each raw diagonal covariance through the exact bin
+weights: independent variance `σ²` averaged over `m` equally weighted frames
+becomes `σ²/m` (with the actual weights used for partial or unequal bins).
+`median`, `min`, and `max` are rejected because they need a calibrated product
+likelihood. Correlated errors and persistent representation errors are also
+rejected; the `independent` representation-time model is an explicit
+approximation, not evidence about cross-frame residual correlation.
+
+Instrument noise generates the synthetic measurements. Representation
+uncertainty contributes to the likelihood only; it is not added to synthetic
+truth. `representation_std` is specified in the observed variable's units at
+raw-frame resolution. Under the currently supported independent model, its
+variance is propagated through mean aggregation just like independent
+instrument variance. Persistent forecast bias belongs in model-discrepancy
+handling, rather than being hidden in an enlarged observation covariance.
+
+`observation_error` specifies physical covariance. ESMDA `alpha` applies
+algorithmic tempering separately; it does not change synthetic noise or the
+reported physical covariance. A future hybrid `beta` must follow the same
+covariance-multiplier contract; beta scheduling is outside this release. In corrected mode, explicit CLI
+overrides of both the new block and legacy scalar error keys are rejected as
+ambiguous. Untouched legacy defaults have no effect when the new block is set.
+This implementation establishes the stated variance propagation contract;
+it does not establish held-out calibration quality.
+
+The smoother accepts either a diagonal matrix or a variance vector (the latter
+stays a vector internally). Use `set_observation_covariance(...)` between
+windows, or pass `observation_covariance=...` to one smoother call; the latter
+restores the constructor covariance afterward. The filter's optional
+`run(observation_covariances=...)` accepts physical variances shaped
+`(cycles, frames, obs)` or `(cycles, obs)` for single-frame cycles. It validates
+all entries before forecasts and applies the same frame stride as the data.
+The constant constructor covariance remains the default.
+
+Corrected artifacts retain instrument and representation contributions,
+physical times, bin memberships and averaging weights, and separate analysis
+multipliers. Prior diagnostics include signed innovations, NIS using forecast
+covariance plus physical `R`, bias, predictive coverage, and residual correlation
+summaries. `pred_obs_analyzed` is obtained by reapplying `H` to the actual
+analyzed state, including posterior inflation and trajectory smoothing where
+applicable. Filter projections cover each cycle's final state only; earlier
+ride-along predictions remain explicitly labelled proxies.
+
+
+Run [`scripts/examples/observation_likelihood.py`](../scripts/examples/observation_likelihood.py)
+with the dev environment for a scalar check through both
+`ObservationErrorSpec.resolve()` and the production `ETKFAnalysis`. For four
+independent frames with instrument std `0.5` and representation std `0.2`, it
+resolves physical variance `0.0725` and gives posterior mean/std `1.3986/0.2600`;
+the legacy full-frame variance gives `1.2000/0.4472`. These are analytical
+oracle results, not held-out calibration evidence.
 
 ---
 
@@ -1050,6 +1128,7 @@ A run uses the library as follows (very brief; see
 ```python
 # From src/pyurbanair/config/hydra_helpers.py
 obs_op  = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
+# Legacy path (observation_error: null); corrected mode resolves per window.
 C_D     = create_C_D(obs_op.num_obs, cfg.esmda.obs_error_std)
 
 # Hydra instantiates the smoother from the esmda/smoother group
@@ -1072,9 +1151,11 @@ optional `AggregateObservations` from the run config's algorithm node
 (`esmda.interval_seconds` / `esmda.aggregation_mode` — aggregation is a DA
 choice, not an operator argument; `run_filtering.py` has no such keys, its
 filter assimilating every frame serially), which the script passes to the DA
-class. `create_C_D`
-produces the diagonal `σ² I` error covariance, sized from the aggregated
-first-window observation vector. The script also constructs validation sensors
+class. With `observation_error: null`, `create_C_D` produces the legacy
+diagonal `σ² I` covariance, sized from the aggregated first-window observation
+vector. With an opt-in error spec, each window resolves its own labelled
+physical covariance from raw observations and exact aggregation bins. The
+script also constructs validation sensors
 (never assimilated; scored as held-out check) and handles inline vs. on-disk
 truth; see `codebase_guide.md §6` and the script's docstring.
 

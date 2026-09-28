@@ -7,7 +7,7 @@ block grouping, and the constructor validation added in the code review.
 
 import pathlib
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -348,7 +348,7 @@ def _make_time_varying_smoother(
     return smoother
 
 
-@pytest.mark.parametrize("pin", [False, True])  # type: ignore[misc]
+@pytest.mark.parametrize("pin", [False, True])  # type: ignore[misc, unused-ignore]
 def test_time_varying_flatten_unflatten_round_trip(pin: bool) -> None:
     num_time = 3
     params = _time_varying_params(num_time)
@@ -367,7 +367,7 @@ def test_time_varying_flatten_unflatten_round_trip(pin: bool) -> None:
     assert ("inflow_angle_0" in flat.data_vars) == (not pin)
 
 
-@pytest.mark.parametrize("pin", [False, True])  # type: ignore[misc]
+@pytest.mark.parametrize("pin", [False, True])  # type: ignore[misc, unused-ignore]
 def test_time_varying_group_ids_group_knots_not_unrelated_params(pin: bool) -> None:
     num_time = 3
     params = _time_varying_params(num_time)
@@ -381,7 +381,7 @@ def test_time_varying_group_ids_group_knots_not_unrelated_params(pin: bool) -> N
     names = list(flat.data_vars)
     by_group: dict[int, list[str]] = {}
     for gid, name in zip(group_ids, names):
-        by_group.setdefault(int(gid), []).append(name)
+        by_group.setdefault(int(gid), []).append(str(name))
 
     # All knots of one parameter share exactly one block; unrelated parameters
     # (including the static ``sensor_2``) never share a block.
@@ -675,3 +675,71 @@ def test_state_group_ids_share_collocated_grid() -> None:
     groups = np.asarray(obj._state_group_ids(state))
     n_cells = state["u"].size // state.sizes["ensemble"]
     np.testing.assert_array_equal(groups[:n_cells], groups[n_cells:])
+
+
+def test_window_covariance_replacement_updates_perturbations_and_gain() -> None:
+    def make(covariance: float) -> ParameterESMDA:
+        return ParameterESMDA(
+            _dummy_obs_op(),
+            cast(Any, _forward_model()),
+            C_D=jnp.diag(jnp.array([covariance])),
+            num_steps=1,
+            rng_key=jax.random.PRNGKey(14),
+        )
+
+    replaced = make(1.0)
+    replaced.set_observation_covariance(jnp.array([0.1]))
+    direct = make(0.1)
+    prior = jnp.array([[-1.0, 0.0, 1.0, 2.0]])
+    observed = jnp.array([2.0])
+    updated = replaced._compute_kalman_update(prior, prior, observed, 4)
+    expected = direct._compute_kalman_update(prior, prior, observed, 4)
+    legacy = make(1.0)._compute_kalman_update(prior, prior, observed, 4)
+    np.testing.assert_array_equal(updated, expected)
+    assert not np.allclose(updated, legacy)
+    before = replaced.C_D
+    with pytest.raises(ValueError, match="finite"):
+        replaced.set_observation_covariance(jnp.array([np.inf]))
+    np.testing.assert_array_equal(replaced.C_D, before)
+
+
+def test_window_covariance_shape_fails_before_forecast_and_is_restored() -> None:
+    smoother = ParameterESMDA(
+        _dummy_obs_op(), cast(Any, _forward_model()), C_D=jnp.eye(1)
+    )
+    with pytest.raises(ValueError, match="sizes differ"):
+        smoother(observations=np.ones(1), observation_covariance=np.ones(2))
+    np.testing.assert_array_equal(smoother.C_D, np.eye(1))
+
+
+def test_analyzed_observations_project_post_smoothing_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forecast = _obs_state(n_e=3)
+    model = SimpleNamespace(
+        save_on_disk=False,
+        run_ensemble=lambda **kwargs: forecast,
+        apply_failure_substitutions_to_params=lambda params: params,
+        apply_failure_substitutions_to_state=lambda state: state,
+    )
+    smoother = ParameterESMDA(
+        _temporal_obs_op(), cast(Any, model), C_D=jnp.ones(8), num_steps=1
+    )
+    monkeypatch.setattr(
+        smoother, "_one_step", lambda **kwargs: (None, kwargs["params"])
+    )
+    monkeypatch.setattr(
+        smoother, "_final_time_smoothing_step", lambda state, obs: state + 2
+    )
+    smoother.collect_obs_diagnostics = True
+    smoother.collect_analyzed_observations = True
+    params = xarray.Dataset({"a": ("ensemble", np.zeros(3))})
+    result = smoother(params=params, observations=np.zeros(8))
+    assert smoother.analyzed_pred_obs is not None
+    np.testing.assert_allclose(
+        smoother.analyzed_pred_obs,
+        np.asarray(smoother._observation_step(state=result[1])).T,
+    )
+    np.testing.assert_allclose(
+        smoother.analyzed_pred_obs, smoother.pred_obs_history[-1] + 2
+    )

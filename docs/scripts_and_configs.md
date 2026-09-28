@@ -99,6 +99,43 @@ rather than pulling them from separate files. The table below summarises each.
 | `failure.jitter_scale` | 0.05 | Relative std of Gaussian jitter applied to donor params when resampling. |
 | `failure.seed` | 0 | RNG seed for the resampling draw. |
 
+#### `observation_error:` (all assimilation entry points)
+
+The root-level block is shared by ESMDA, filtering and filter-smoothing. Its
+default `null` preserves the existing algorithm-specific `obs_error_std` key
+and legacy aggregation behavior. To use propagated physical covariance, set:
+
+```yaml
+observation_error:
+  instrument_std: 0.25
+  representation_std: 0.0
+  representation_time_model: independent
+  aggregation: propagate_mean
+```
+
+`instrument_std` and `representation_std` can each be scalars or mappings with
+a required `default` and optional `components`, zero-based `sensors`, and
+`height_bands` entries (`{min_z, max_z, std}`, with a half-open height range).
+Both values use the observed variable's units. Instrument noise generates the
+synthetic observations; representation uncertainty contributes only to the
+assimilation likelihood. The supported temporal model treats representation
+errors as independent between raw frames, and `propagate_mean` carries each
+diagonal variance through actual mean-bin weights. Only mean aggregation is
+supported in this mode. Persistent and correlated errors, and median/min/max
+aggregation, are rejected pending a suitable likelihood model.
+
+The block describes physical covariance. ESMDA `alpha` tempers it independently
+and never rescales measurement draws or physical covariance diagnostics. Future
+hybrid `beta` scheduling must follow the same contract. Do not explicitly override an old `obs_error_std` and
+the root block together: Hydra rejects that ambiguous combination. The
+algorithm-specific legacy keys remain in the config with their existing
+defaults; those untouched values are ignored when `observation_error` is set.
+For programmatic `run(cfg)` calls without Hydra override metadata, explicit
+override provenance is unavailable: the new block takes precedence and old
+scalar keys are ignored. Corrected mode requires `obs.temporal_mode=full`.
+See [data_assimilation.md](data_assimilation.md#opt-in-physical-observation-likelihood)
+for the covariance contract and its validation limits.
+
 #### `esmda:` (run_esmda; run_filter_smoothing reuses the node)
 
 | Field | Default | Purpose |
@@ -107,7 +144,7 @@ rather than pulling them from separate files. The table below summarises each.
 | `alpha` | `${.num_steps}` | Inflation denominator; defaults to `num_steps` (standard ESMDA). |
 | `num_assimilation_windows` | 3 | Number of sequential assimilation windows (1 = single window). |
 | `seed` | 42 | JAX RNG seed. |
-| `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors). |
+| `obs_error_std` | 0.25 | Legacy diagonal error std used only when root `observation_error: null`; retained for seeded-run compatibility. |
 | `interval_seconds` | 30.0 | Width of the observation-aggregation intervals (s): the time-resolved observations are binned into contiguous intervals of this length and reduced within each before the update sees them. `null` = full-resolution assimilation (every output frame). |
 | `aggregation_mode` | `mean` | Reduction applied within each interval: `mean` \| `median` \| `max` \| `min`. |
 | `localization` | `null` | Set by the `esmda/localization` group; `null` = global (unlocalized) update. |
@@ -121,7 +158,7 @@ rather than pulling them from separate files. The table below summarises each.
 | `num_assimilation_windows` | 2 | Number of assimilation windows, the same unit as `esmda.num_assimilation_windows`: one window is `time.simulation_time` seconds, so the horizon is `num_assimilation_windows * time.simulation_time` and the two entry points are configured identically for like-for-like runs. Cycles are **derived**, not configured: one cycle is one observation interval (`time.output_frequency` s) ending in one full-weight analysis, so a window holds `time.simulation_time / time.output_frequency` of them. Windows are pure computational/IO chunking (one `run()` call and one set of per-window artifacts each) — state, parameters, the filter's PRNG stream and the per-cycle noise draws all carry across a boundary, so a horizon run as 1 window or as `W` is mathematically identical. |
 | `assimilate_every_n_step` | 1 | Analysis **stride**: assimilate only every `n`-th observation frame. `1` is the every-observation filter above; `n > 1` leaves the model's output cadence alone and thins only the analyses, so a cycle becomes `n * time.output_frequency` seconds and a window holds `time.simulation_time / time.output_frequency / n` cycles. The intermediate frames are still simulated and still written (the per-cycle `_ensemble_states/cycle_{k}/` segments hold all `n`); they simply never see a Kalman step, and the analysis is the segment's LAST frame. `n` must divide `time.simulation_time / time.output_frequency` or the run refuses to start. `run.save_forecast_history=true` writes those intermediate frames as ordinary window artifacts too (§2.1), without the on-disk ensemble mode. |
 | `seed` | 42 | JAX RNG seed. |
-| `obs_error_std` | 0.25 | Diagonal observation-error standard deviation (same for all sensors), of ONE observation frame. |
+| `obs_error_std` | 0.25 | Legacy diagonal error std of ONE observation frame, used only when root `observation_error: null`. |
 | `mode` | `joint` | Which blocks the analysis updates: `state` \| `parameter` \| `joint`. The parameter-updating modes (`parameter`/`joint`) require spread maintenance (evolution or inflation). |
 | `analysis` | (group) | Set by `filtering/analysis` (default `stochastic`); `etkf*`/`letkf*` are the deterministic ensemble transforms and constrain `localization` (§1.8). |
 | `localization` | (group) | Set by `filtering/localization` (default `none`). |
@@ -145,7 +182,7 @@ enough that no aggregation bin is emptied).
 |---|---|---|
 | `num_assimilation_windows` | 2 | Horizon in windows of `time.simulation_time` seconds, the same unit as both siblings'. Unlike a pure filtering run's, a window boundary here is NOT purely computational: the MDA restarts on the next window's prior (extrapolated for a dynamic trajectory) and the joint correction resets, so `W` is a real modelling choice. |
 | `seed` | 42 | JAX RNG seed feeding the truth noise, the smoother, and the filter. |
-| `obs_error_std` | 0.25 | Observation-error std of ONE frame; the filter's `C_D` is exactly that, the smoother's is the same value tiled over the window's aggregated vector. |
+| `obs_error_std` | 0.25 | Legacy observation-error std of ONE frame, used only when root `observation_error: null`. |
 
 #### `run:`
 
@@ -653,7 +690,12 @@ Stage 1 of the three-script pipeline (see `run_esmda_pipeline.sh`). Saves:
   axis is named `obs_index`, not `obs`, because a variable whose name equals its
   dimension is silently promoted to an index coordinate on the netCDF
   round-trip — which would turn the `obs` data variable into a coordinate on
-  read. These feed `run_summary.yaml`'s `esmda_diagnostics` block and figure D3;
+  read. With corrected `observation_error`, the observation file also stores
+  separate instrument and representation variances, observation times, bin
+  counts, raw times, frame membership and aggregation weights. It records the
+  signed prior innovation and elementwise physical-covariance NIS; tempering
+  does not enter that denominator. These feed `run_summary.yaml`'s
+  `esmda_diagnostics` block and figure D3;
   set the flag false to reproduce the pre-phase-2 artifact set exactly. The
   post-processing decides on the **run's own flag**, read back from
   `run_info.yaml`'s `configuration`, not on whether the files are there: a
@@ -1163,12 +1205,11 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   `collapsed` fires only when a vanishing across-member IQR is paired with an
   off-target median (identical members *on* target are converged, not collapsed)
   and is `null` when fewer than 8 values back it, since the smoke shape's two
-  members have no meaningful IQR. **The flags are advisory**, and the block carries
-  `caveat: no_representativeness_error` saying why: the χ² target assumes `C_D`
-  covers representativeness error and here it is a single instrument-scale
-  `esmda.obs_error_std`, so a too-small `C_D` makes a healthy run look
-  under-fitted. Read the trend across iterations and the member spread — neither
-  moved by a constant mis-scaling of `C_D` — before the flags. Absent on any run
+  members have no meaningful IQR. **The flags are advisory**: legacy artifacts
+  carry `caveat: no_representativeness_error`; corrected artifacts report
+  whether a representation variance was included, while still marking its
+  calibration as unverified. Read the trend across iterations and member spread
+  alongside the flags. Absent on any run
   dir written before WP2.1 or with `esmda.save_obs_diagnostics=false` — that
   second case is decided by the flag recorded in the run's own `run_info.yaml`
   and not by whether the files exist, so a flag-off rerun into a results dir an
@@ -1224,7 +1265,9 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
   annotated from the file's own `t_start`/`t_end`.
 - `sensor_fans.png` — the sensor `|U|` series as nested posterior quantile fans,
   one column per sensor set, with the truth, the window boundaries and a
-  ± `esmda.obs_error_std` envelope around the truth. Its x-axis is physical time
+  legacy scalar observation-error envelope around the truth. Corrected
+  `observation_error` runs omit this envelope because this plot does not yet
+  show component/sensor-specific likelihood widths. Its x-axis is physical time
   on *every* run, so the window boundaries are marked whenever there is more than
   one window — unlike the parameter plots, whose x-axis is a window index on a
   static run. **Pre-WP2.1 caveat, stated in the figure:** the realized noisy

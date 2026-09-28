@@ -138,7 +138,7 @@ def _interpolate_knots(
     span = times[upper] - times[lower]
     weight = np.clip((targets - times[lower]) / span, 0.0, 1.0)
     weight = weight.reshape((targets.size,) + (1,) * (values.ndim - 1))
-    return values[lower] * (1.0 - weight) + values[upper] * weight
+    return np.asarray(values[lower] * (1.0 - weight) + values[upper] * weight)
 
 
 def params_for_segment(
@@ -414,6 +414,7 @@ class FilterSmoothing:
 
         # Accumulated across the filter phase's calls when the filter records
         # them; rebound per ``run`` (see the class docstring).
+        self.analyzed_pred_obs_history: list[np.ndarray] = []
         self.pred_obs_history: list[np.ndarray] = []
         self.pred_obs_post_history: list[np.ndarray] = []
         self.pred_obs_frames_history: list[Optional[xarray.DataArray]] = []
@@ -531,6 +532,9 @@ class FilterSmoothing:
         entry, so what it holds now is that call's cycles alone and extending
         keeps the hybrid's lists one-entry-per-global-cycle.
         """
+        self.analyzed_pred_obs_history.extend(
+            getattr(self.filter, "analyzed_pred_obs_history", [])
+        )
         if not self.filter.collect_pred_obs:
             return
         self.pred_obs_history.extend(self.filter.pred_obs_history)
@@ -601,6 +605,7 @@ class FilterSmoothing:
         )
 
         # --- Filter phase -----------------------------------------------
+        self.analyzed_pred_obs_history = []
         self.pred_obs_history = []
         self.pred_obs_post_history = []
         self.pred_obs_frames_history = []

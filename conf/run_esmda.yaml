@@ -107,6 +107,8 @@ ensemble:
 # GROUPS (esmda/localization=none|correlation|distance,
 # esmda/state_reduction=none|svd) that override `esmda.localization` /
 # `esmda.state_reduction` below. ---
+observation_error: null  # opt in with a mapping; null preserves seeded legacy runs
+
 esmda:
   num_steps: 4
   alpha: ${.num_steps}

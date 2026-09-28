@@ -113,6 +113,8 @@ ensemble:
 # analysis / localization / state reduction / inflation / evolution selected by
 # the groups above;
 # `filtering.mode` picks which augmented blocks the analysis updates. ---
+observation_error: null  # opt in with a mapping; null preserves seeded legacy runs
+
 filtering:
   # Assimilation windows, exactly as `esmda.num_assimilation_windows`: one
   # window spans `time.simulation_time` seconds, so the experiment horizon is

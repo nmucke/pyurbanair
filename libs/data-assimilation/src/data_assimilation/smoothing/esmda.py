@@ -10,7 +10,10 @@ import jax.numpy as jnp
 import numpy as np
 import xarray
 from data_assimilation.augmentation import ParamAugmentation, StateAugmentation
-from data_assimilation.filtering.analysis import stochastic_enkf_update
+from data_assimilation.filtering.analysis import (
+    stochastic_enkf_update,
+    validate_variances,
+)
 from data_assimilation.io import load_dataset as _load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import (
@@ -69,28 +72,33 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # it here so a full (non-diagonal) C_D fails loudly instead of silently
         # producing a wrong perturbation/inflation.
         C_D = jnp.asarray(C_D)
-        if C_D.ndim != 2 or C_D.shape[0] != C_D.shape[1]:
-            raise ValueError(
-                f"C_D must be a square (N_d, N_d) matrix, got shape {C_D.shape}."
-            )
-        off_diagonal = C_D - jnp.diag(jnp.diag(C_D))
-        if not bool(jnp.all(off_diagonal == 0.0)):
-            raise ValueError(
-                "C_D must be diagonal: the element-wise C_D_sqrt and the "
-                "diagonal used by the localized update assume a diagonal "
-                "observation-error covariance. Pass sigma**2 on the diagonal."
-            )
-        # Strictly positive variances keep ``C_DD + alpha * C_D`` positive
-        # definite (C_DD is only rank <= N_e - 1). A zero/negative variance -- a
-        # config typo or a "perfect" synthetic sensor -- makes the analysis
-        # system singular in the directions outside the ensemble span, and JAX's
-        # solve returns NaN without raising.
-        if not bool(jnp.all(jnp.diag(C_D) > 0.0)):
-            raise ValueError(
-                "C_D must have strictly positive diagonal variances; a zero or "
-                "negative observation-error variance makes the analysis system "
-                "singular (NaN-poisoning the ensemble). Check obs_error_std."
-            )
+        if C_D.ndim == 1:
+            C_D = validate_variances(C_D)
+        else:
+            if C_D.ndim != 2 or C_D.shape[0] != C_D.shape[1]:
+                raise ValueError(
+                    f"C_D must be a square (N_d, N_d) matrix, got shape {C_D.shape}."
+                )
+            off_diagonal = C_D - jnp.diag(jnp.diag(C_D))
+            if not bool(jnp.all(off_diagonal == 0.0)):
+                raise ValueError(
+                    "C_D must be diagonal: the element-wise C_D_sqrt and the "
+                    "diagonal used by the localized update assume a diagonal "
+                    "observation-error covariance. Pass sigma**2 on the diagonal."
+                )
+            # Strictly positive variances keep ``C_DD + alpha * C_D`` positive
+            # definite (C_DD is only rank <= N_e - 1). A zero/negative variance -- a
+            # config typo or a "perfect" synthetic sensor -- makes the analysis
+            # system singular in the directions outside the ensemble span, and JAX's
+            # solve returns NaN without raising.
+            if not bool(jnp.all(jnp.isfinite(C_D))) or not bool(
+                jnp.all(jnp.diag(C_D) > 0.0)
+            ):
+                raise ValueError(
+                    "C_D must have strictly positive diagonal variances; a zero or "
+                    "negative observation-error variance makes the analysis system "
+                    "singular (NaN-poisoning the ensemble). Check obs_error_std."
+                )
 
         # ES-MDA consistency: the tempering coefficients must satisfy
         # ``sum_k 1/alpha_k = 1`` for the multiple updates to equal one Bayesian
@@ -163,6 +171,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # evaluation happens, unless a caller asks for it.
         self.collect_obs_diagnostics = False
         self.pred_obs_history: list[np.ndarray] = []
+        # Optional H(actual returned trajectory) after final-time smoothing.
+        self.collect_analyzed_observations = False
+        self.analyzed_pred_obs: np.ndarray | None = None
 
         if self.forward_model.save_on_disk:
             self.base_results_dir = self.forward_model.results_dir
@@ -171,6 +182,34 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
                 os.makedirs(step_dir, exist_ok=True)
                 for state_file in step_dir.glob("state_*.nc"):
                     state_file.unlink(missing_ok=True)
+
+    def set_observation_covariance(self, C_D: Any) -> None:
+        """Replace physical covariance for the next window after validation."""
+        covariance = jnp.asarray(C_D)
+        if covariance.ndim == 2:
+            if covariance.shape[0] != covariance.shape[1] or not bool(
+                jnp.all(covariance == jnp.diag(jnp.diag(covariance)))
+            ):
+                raise ValueError(
+                    "C_D must be diagonal; correlated errors are unsupported."
+                )
+            covariance = jnp.diag(covariance)
+        diagonal = validate_variances(covariance)
+        self.C_D = diagonal
+        self.C_D_sqrt = jnp.sqrt(self.C_D)
+
+    def __call__(
+        self, *args: Any, observation_covariance: Any = None, **kwargs: Any
+    ) -> Any:
+        """Optionally use a physical covariance only for this window."""
+        if observation_covariance is None:
+            return super().__call__(*args, **kwargs)
+        previous, previous_sqrt = self.C_D, self.C_D_sqrt
+        self.set_observation_covariance(observation_covariance)
+        try:
+            return super().__call__(*args, **kwargs)
+        finally:
+            self.C_D, self.C_D_sqrt = previous, previous_sqrt
 
     def _set_step_results_dir(self, step: int) -> None:
         """Point the forward model's results directory at the given step."""
@@ -264,7 +303,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
             augmented=augmented,
             pred_obs=pred_obs,
             obs=obs,
-            C_D_diag=jnp.diag(self.C_D),
+            C_D_diag=(self.C_D if self.C_D.ndim == 1 else jnp.diag(self.C_D)),
             rng_key=subkey,
             alpha=alpha,
             localization=self.localization,
@@ -376,6 +415,8 @@ sensor_observation_coords` (shared with the filtering package); see its
         # through). The predicted observations take the same path inside
         # ``_observation_step``, so the two always live in the same space.
         obs = self._get_observations(observations)
+        if obs.ndim != 1 or obs.shape[0] != self.C_D.shape[0]:
+            raise ValueError("Observation vector and physical covariance sizes differ.")
 
         initial_state = state
 
@@ -383,6 +424,7 @@ sensor_observation_coords` (shared with the filtering package); see its
         # window gets that window's entries alone. Rebound rather than cleared:
         # the caller may still hold the previous window's list.
         self.pred_obs_history = []
+        self.analyzed_pred_obs = None
 
         params_history: list[xarray.Dataset] = [params] if return_params_history else []
         state_history: list[xarray.Dataset] = []
@@ -456,7 +498,15 @@ sensor_observation_coords` (shared with the filtering package); see its
             # params.
             state = self._final_time_smoothing_step(state, obs)
 
+            if self.collect_analyzed_observations:
+                self.analyzed_pred_obs = np.asarray(
+                    self._observation_step(
+                        state=state, results_dir=self._results_dir_or_none()
+                    )
+                ).T
+
             if return_state_history:
+                assert state is not None
                 state_history.append(state)
 
         # Build return values
@@ -478,6 +528,7 @@ sensor_observation_coords` (shared with the filtering package); see its
             )
             return result_params, result_state
 
+        assert state is not None
         return result_params, state
 
 

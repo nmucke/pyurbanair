@@ -1396,6 +1396,7 @@ def compute_metrics(run_dir: pathlib.Path) -> None:
             mismatch["per_step"],
             mismatch["num_observations"],
             per_window=mismatch["per_window"],
+            has_representation_error=mismatch["has_representation_error"],
         )
         if block is not None:
             summary["esmda_diagnostics"] = {"data_mismatch": block}

@@ -144,6 +144,8 @@ ensemble:
 # the filter. This is the node that replaces run_esmda.yaml's
 # `esmda.{num_assimilation_windows,seed,obs_error_std}` and
 # run_filtering.yaml's `filtering.{...}` twins. ---
+observation_error: null  # opt in with a mapping; null preserves seeded legacy runs
+
 filter_smoothing:
   # One window = `time.simulation_time` seconds, exactly as in both siblings.
   # Unlike a pure filter's, a window boundary here is NOT purely computational:
