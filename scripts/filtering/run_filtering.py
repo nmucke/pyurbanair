@@ -513,9 +513,7 @@ def _collect_window_cycle_dirs(
 
 def run(cfg: DictConfig) -> None:
     validate_run_config(cfg, "filtering")
-    observation_error = create_observation_error(
-        cfg, cfg.obs, ("filtering.obs_error_std",)
-    )
+    observation_error = create_observation_error(cfg)
     num_windows = int(cfg.filtering.num_assimilation_windows)
     if num_windows < 1:
         raise ValueError(
@@ -789,7 +787,6 @@ def run(cfg: DictConfig) -> None:
     if every_n > 1:
         filter_obs_op = _StridedObservationOperator(assim_obs_op, every_n)
 
-    obs_error_std = float(cfg.filtering.obs_error_std)
     # Every cycle's observation is built and perturbed HERE, over the whole
     # horizon and in global cycle order, before the window loop: the draw
     # sequence then depends only on the cycle index, never on how the horizon is
@@ -799,13 +796,10 @@ def run(cfg: DictConfig) -> None:
     observations: list[Any] = []
     observations_clean: list[Any] = []
     resolved_errors = []
-    if observation_error is not None:
-        base_obs_op: Any = getattr(truth_obs_op, "observation_operator", truth_obs_op)
-        n_raw_obs = int(base_obs_op.num_sensors) * len(base_obs_op.obs_states)
-        rng_key, noise_key = jax.random.split(rng_key)
-        raw_normal_samples = np.asarray(
-            jax.random.normal(noise_key, (n_total, n_raw_obs))
-        )
+    base_obs_op: Any = getattr(truth_obs_op, "observation_operator", truth_obs_op)
+    n_raw_obs = int(base_obs_op.num_sensors) * len(base_obs_op.obs_states)
+    rng_key, noise_key = jax.random.split(rng_key)
+    raw_normal_samples = np.asarray(jax.random.normal(noise_key, (n_total, n_raw_obs)))
     cycle_times: list[float] = []
     # Every OUTPUT frame's time, not just the analysis times: the axis the
     # optional full-resolution forecast artifact is written on (`cycle_times` is
@@ -827,25 +821,12 @@ def run(cfg: DictConfig) -> None:
             float(t) for t in np.asarray(cycle_block["time"].values).ravel()
         )
         cycle_obs_clean = truth_obs_op(cycle_truth)
-        if observation_error is not None:
-            resolved_errors.append(
-                observation_error.resolve(cycle_obs_clean, truth_obs_op)
-            )
-        if observation_error is None:
-            rng_key, subkey = jax.random.split(rng_key)
-            raw_noise = np.asarray(jax.random.normal(subkey, cycle_obs_clean.shape))
-        else:
-            raw_noise = raw_normal_samples[(cycle + 1) * every_n - 1].reshape(
-                cycle_obs_clean.shape
-            )
+        resolved_errors.append(observation_error.resolve(cycle_obs_clean, truth_obs_op))
+        raw_noise = raw_normal_samples[(cycle + 1) * every_n - 1].reshape(
+            cycle_obs_clean.shape
+        )
         cycle_obs = (
-            cycle_obs_clean
-            + (
-                resolved_errors[-1].raw_instrument_std
-                if observation_error is not None
-                else obs_error_std
-            )
-            * raw_noise
+            cycle_obs_clean + (resolved_errors[-1].raw_instrument_std) * raw_noise
         )
         observations.append(cycle_obs)
         observations_clean.append(cycle_obs_clean)
@@ -863,11 +844,7 @@ def run(cfg: DictConfig) -> None:
         # obs.temporal_mode null: the bare spatial operator already returns the
         # flat observation vector of the cycle's single frame.
         n_d = int(np.asarray(first_obs).size)
-    C_D_diag = (
-        jnp.asarray(resolved_errors[0].covariance_diag)
-        if observation_error is not None
-        else (obs_error_std**2) * jnp.ones(n_d)
-    )
+    C_D_diag = jnp.asarray(resolved_errors[0].covariance_diag)
 
     # --- Filter ----------------------------------------------------------------
     rng_key, filter_key = jax.random.split(rng_key)
@@ -892,9 +869,8 @@ def run(cfg: DictConfig) -> None:
     # ride-along rows the analysis already computes) posterior forecast
     # observations; no extra forward solve.
     enkf.collect_pred_obs = True
-    if observation_error is not None:
-        enkf.collect_analyzed_observations = True
-        enkf.analyzed_observation_operator = assim_obs_op
+    enkf.collect_analyzed_observations = True
+    enkf.analyzed_observation_operator = assim_obs_op
     # The full-resolution forecast frames (every time.output_frequency step, not
     # just the analysis times). Opt-in: the artifact is `every_n` times the
     # window's analyzed states, and the filter holds a window's worth in memory.
@@ -949,8 +925,6 @@ def run(cfg: DictConfig) -> None:
                         [r.covariance_diag for r in resolved_errors[window_slice]]
                     )
                 }
-                if observation_error is not None
-                else {}
             ),
             return_history=True,
         )
@@ -991,20 +965,12 @@ def run(cfg: DictConfig) -> None:
             window,
             _flat_obs_vector(observations[window_slice]),
             _flat_obs_vector(observations_clean[window_slice]),
-            (
-                np.concatenate([r.std for r in resolved_errors[window_slice]])
-                if observation_error is not None
-                else np.tile(np.sqrt(np.asarray(C_D_diag)), cycles_per_window)
-            ),
+            (np.concatenate([r.std for r in resolved_errors[window_slice]])),
             _stack_cycle_pred_obs(enkf.pred_obs_history),
             _stack_cycle_pred_obs(enkf.pred_obs_post_history),
             truth_obs_op,
-            resolved_errors[window_slice] if observation_error is not None else None,
-            (
-                _stack_cycle_pred_obs(enkf.analyzed_pred_obs_history)
-                if observation_error is not None
-                else None
-            ),
+            resolved_errors[window_slice],
+            (_stack_cycle_pred_obs(enkf.analyzed_pred_obs_history)),
         )
 
         if save_history:
@@ -1103,14 +1069,7 @@ def run(cfg: DictConfig) -> None:
                 # frames (output_frequency each) and assimilates the last one.
                 "assimilate_every_n_step": int(every_n),
                 "final_time": float(final_time),
-                "observation_error_std": (
-                    obs_error_std if observation_error is None else None
-                ),
-                **(
-                    {"observation_error_model": resolved_errors[0].provenance}
-                    if observation_error is not None
-                    else {}
-                ),
+                "observation_error_model": resolved_errors[0].provenance,
                 # The gate the shared observation-space diagnostic reads before
                 # it opens windows/window_*_{obs,pred_obs}.nc.
                 "save_obs_diagnostics": True,

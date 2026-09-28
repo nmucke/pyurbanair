@@ -146,15 +146,14 @@ def test_filter_smoothing_composes(
     # The shared knobs live on their own node, not duplicated onto either half.
     assert cfg.filter_smoothing.num_assimilation_windows == 1
     assert cfg.filter_smoothing.seed == 42
-    assert cfg.filter_smoothing.obs_error_std > 0.0
+    assert cfg.observation_error.instrument_std > 0.0
     for node in (cfg.esmda, cfg.filtering):
         assert (
             node.num_assimilation_windows
             == cfg.filter_smoothing.num_assimilation_windows
         )
-        assert node.obs_error_std == cfg.filter_smoothing.obs_error_std
-    cfg.filter_smoothing.obs_error_std = 0.5
-    assert cfg.esmda.obs_error_std == cfg.filtering.obs_error_std == 0.5
+        assert "obs_error_std" not in node
+    assert "obs_error_std" not in cfg.filter_smoothing
 
     # run_filtering.yaml's analysis stride, same meaning, default 1. Under a
     # stride the thinning applies to BOTH halves (one observation product).
@@ -511,7 +510,11 @@ def test_run_filter_smoothing(
         assert n_d == cycles_per_window * n_obs_frame
         assert obs["obs_error_std"].shape == (n_d,)
         assert np.allclose(
-            obs["obs_error_std"].values, float(cfg.filter_smoothing.obs_error_std)
+            obs["obs_error_std"].values,
+            np.hypot(
+                cfg.observation_error.instrument_std,
+                cfg.observation_error.representation_std,
+            ),
         )
         # obs_interval reads as the cycle index within the window.
         assert set(np.unique(obs["obs_interval"].values)) == set(

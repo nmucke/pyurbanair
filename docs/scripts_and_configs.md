@@ -80,22 +80,29 @@ directly without executing a run. See [`tests/README.md`](../tests/README.md).
 Do not repeat numeric defaults in this reference: inspect the selected files or
 resolved preview. Root configs retain explicit historical output paths for
 compatibility; `run.results_dir` remains the per-run override. The hybrid owns its
-shared window count, seed and observation error, projected into each algorithm.
+shared window count and seed, projected into each algorithm. Observation
+uncertainty is shared through `observation/error.yaml`.
 Filtering strides thin analyses without changing the solver output cadence;
 ESMDA aggregation remains distinct from that stride.
 #### `observation_error:` (all assimilation entry points)
 
-The root-level block is shared by ESMDA, filtering and filter-smoothing. Its
-default `null` preserves the existing algorithm-specific `obs_error_std` key
-and legacy aggregation behavior. To use propagated physical covariance, set:
+All three assimilation entry points include
+[`conf/observation/error.yaml`](../conf/observation/error.yaml) in their defaults.
+It mounts the following settings at the root `observation_error` key:
 
 ```yaml
-observation_error:
-  instrument_std: 0.25
-  representation_std: 0.0
-  representation_time_model: independent
-  aggregation: propagate_mean
+# conf/observation/error.yaml
+# @package observation_error
+instrument_std: 0.25
+representation_std: 0.0
+representation_time_model: independent
+aggregation: propagate_mean
 ```
+
+Edit that file for shared defaults. For one run, use
+`observation_error.instrument_std=0.3 observation_error.representation_std=0.1`
+on the CLI or set the root block in an experiment. There are no competing
+error defaults under `esmda/`, `filtering/`, or `filter_smoothing`.
 
 `instrument_std` and `representation_std` can each be scalars or mappings with
 a required `default` and optional `components`, zero-based `sensors`, and
@@ -110,16 +117,14 @@ aggregation, are rejected pending a suitable likelihood model.
 
 The block describes physical covariance. ESMDA `alpha` tempers it independently
 and never rescales measurement draws or physical covariance diagnostics. Future
-hybrid `beta` scheduling must follow the same contract. Do not explicitly override an old `obs_error_std` and
-the root block together: Hydra rejects that ambiguous combination. The
-algorithm-specific legacy keys remain in the config with their existing
-defaults; those untouched values are ignored when `observation_error` is set.
-For programmatic `run(cfg)` calls without Hydra override metadata, explicit
-override provenance is unavailable: the new block takes precedence and old
-scalar keys are ignored. Corrected mode requires a temporal `observation/operator` component
-(`temporal_points` or `temporal_grid`); legacy configs can use
-`obs.temporal_mode=full`.
-See [data_assimilation.md](data_assimilation.md#opt-in-physical-observation-likelihood)
+hybrid `beta` scheduling must follow the same contract. The old algorithm-level
+`obs_error_std` keys and `observation_error: null` are rejected. Migrate an old
+scalar to `observation_error.instrument_std`; raw noise retains that scale, but
+mean likelihood variance now decreases with the number of independent frames.
+The saved `obs_error_std` artifact field remains the physical marginal standard
+deviation, so historical results stay readable. A temporal `observation/operator`
+component (`temporal_points` or `temporal_grid`) is required.
+See [data_assimilation.md](data_assimilation.md#physical-observation-likelihood)
 for the covariance contract and its validation limits.
 
 

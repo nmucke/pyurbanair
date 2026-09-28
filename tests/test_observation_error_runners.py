@@ -1,14 +1,11 @@
 """Small runner-facing checks for the opt-in observation likelihood."""
 
 import pathlib
-from types import SimpleNamespace
-from typing import Any
 
 import numpy as np
 import pytest
 import xarray as xr
 from data_assimilation.observation_error import ResolvedObservationError
-from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 
 from pyurbanair.config.hydra_helpers import create_observation_error
@@ -33,7 +30,6 @@ def _resolved() -> ResolvedObservationError:
             }
         ),
         OmegaConf.create({"temporal_mode": "full"}),
-        ("esmda.obs_error_std",),
     )
     assert spec is not None
     raw = xr.DataArray(
@@ -51,35 +47,22 @@ def test_helper_rejects_unknown_error_key() -> None:
         {"observation_error": {"instrument_std": 0.2, "correlation": 0.5}}
     )
     with pytest.raises(ValueError, match="Unknown observation_error keys"):
-        create_observation_error(cfg, OmegaConf.create({"temporal_mode": "full"}), ())
+        create_observation_error(cfg, OmegaConf.create({"temporal_mode": "full"}))
 
 
-def test_null_preserves_legacy_and_explicit_override_conflicts(
-    monkeypatch: Any,
-) -> None:
+def test_removed_configuration_is_rejected() -> None:
     obs = OmegaConf.create({"temporal_mode": "full"})
-    assert (
-        create_observation_error(
-            OmegaConf.create({"observation_error": None}),
-            obs,
-            ("esmda.obs_error_std",),
+    with pytest.raises(ValueError, match="must be a mapping"):
+        create_observation_error(OmegaConf.create({"observation_error": None}), obs)
+    for name in ("esmda", "filtering", "filter_smoothing"):
+        cfg = OmegaConf.create(
+            {
+                "observation_error": {"instrument_std": 0.2},
+                name: {"obs_error_std": 0.4},
+            }
         )
-        is None
-    )
-    monkeypatch.setattr(HydraConfig, "initialized", lambda: True)
-    monkeypatch.setattr(
-        HydraConfig,
-        "get",
-        lambda: SimpleNamespace(
-            overrides=SimpleNamespace(task=["esmda.obs_error_std=0.4"])
-        ),
-    )
-    with pytest.raises(ValueError, match="legacy observation-error override"):
-        create_observation_error(
-            OmegaConf.create({"observation_error": {"instrument_std": 0.2}}),
-            obs,
-            ("esmda.obs_error_std",),
-        )
+        with pytest.raises(ValueError, match="has been removed"):
+            create_observation_error(cfg, obs)
 
 
 def test_esmda_artifact_uses_propagated_physical_variance(
@@ -121,7 +104,6 @@ def test_filter_artifact_distinguishes_analyzed_state(tmp_path: pathlib.Path) ->
     spec = create_observation_error(
         OmegaConf.create({"observation_error": {"instrument_std": 0.2}}),
         OmegaConf.create({"temporal_mode": "full"}),
-        ("filtering.obs_error_std",),
     )
     assert spec is not None
     raw = xr.DataArray(
@@ -171,7 +153,9 @@ def test_corrected_likelihood_composes_with_observation_components(
                 "observation_error={instrument_std:0.25,representation_std:0.1}"
             ],
         )
-    spec = create_observation_error(cfg, cfg.obs, ())
+    for name in ("esmda", "filtering", "filter_smoothing"):
+        assert "obs_error_std" not in (cfg.get(name) or {})
+    spec = create_observation_error(cfg, cfg.obs)
     assert spec is not None
     operator = create_observation_operator(
         cfg.obs, cfg.truth_model.solver_name, cfg.observation.operator
@@ -191,4 +175,32 @@ def test_corrected_likelihood_composes_with_observation_components(
         "_target_": "data_assimilation.observation_operator.ObservationOperator"
     }
     with pytest.raises(ValueError, match="temporal observation/operator"):
-        create_observation_error(cfg, cfg.obs, ())
+        create_observation_error(cfg, cfg.obs)
+
+
+def test_shared_error_has_distinct_filter_and_smoother_products() -> None:
+    from hydra import compose, initialize_config_dir
+
+    from pyurbanair.config.hydra_helpers import create_aggregate_observations
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "conf"
+    with initialize_config_dir(version_base=None, config_dir=str(root)):
+        smoother_cfg = compose(config_name="run_esmda")
+        filter_cfg = compose(config_name="run_filtering")
+    assert smoother_cfg.observation_error == filter_cfg.observation_error
+    assert create_aggregate_observations(filter_cfg) is None
+    raw = xr.DataArray(
+        np.zeros((4, 1)), dims=("time", "obs"), coords={"time": [0.0, 1.0, 2.0, 3.0]}
+    )
+    spec = create_observation_error(smoother_cfg)
+    smoother_error = spec.resolve(
+        raw, _ToyOperator(), create_aggregate_observations(smoother_cfg)
+    )
+    filter_error = spec.resolve(
+        raw, _ToyOperator(), create_aggregate_observations(filter_cfg)
+    )
+    np.testing.assert_array_equal(
+        smoother_error.raw_instrument_std, filter_error.raw_instrument_std
+    )
+    np.testing.assert_allclose(filter_error.variance, 0.25**2)
+    np.testing.assert_allclose(smoother_error.variance, 0.25**2 / 4)

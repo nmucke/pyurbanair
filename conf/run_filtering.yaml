@@ -1,6 +1,7 @@
 # Sequential filtering workflow. Shared filter settings and selected analysis
 # components are composed below; an optional experiment records a named run.
 defaults:
+  - observation/error
   - common/runtime
   - execution: assimilation
   - case: xie_and_castro
@@ -57,7 +58,6 @@ params_to_estimate:
 # analysis / localization / state reduction / inflation / evolution selected by
 # the groups above;
 # `filtering.mode` picks which augmented blocks the analysis updates. ---
-observation_error: null  # opt in with a mapping; null preserves seeded legacy runs
 
 run:
   # Read by the shared ESMDA metric/figure stages when they are pointed at a

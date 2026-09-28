@@ -299,20 +299,22 @@ def create_C_D(num_obs: int, obs_error_std: float) -> jnp.ndarray:
     return jnp.diag((obs_error_std**2) * jnp.ones(num_obs))
 
 
-def create_observation_error(
-    cfg: Any, obs_cfg: Any, legacy_error_keys: tuple[str, ...]
-) -> ObservationErrorSpec | None:
-    """Resolve the opt-in observation likelihood, retaining null as legacy.
-
-    The old scalar keys remain in the composed configuration for reproducible
-    legacy runs. In corrected mode their untouched defaults have no effect,
-    while an explicit Hydra override of either contract is ambiguous and fails.
-    """
+def create_observation_error(cfg: Any, obs_cfg: Any = None) -> ObservationErrorSpec:
+    """Load the single observation-error contract from observation/error.yaml."""
+    for name in ("esmda", "filtering", "filter_smoothing"):
+        if "obs_error_std" in (cfg.get(name) or {}):
+            raise ValueError(
+                f"{name}.obs_error_std has been removed; set "
+                "observation_error.instrument_std in conf/observation/error.yaml "
+                "or in a run override. Mean variances now propagate through aggregation."
+            )
     error = _plain(cfg.get("observation_error"))
-    if error is None:
-        return None
     if not isinstance(error, dict):
-        raise ValueError("observation_error must be a mapping or null")
+        raise ValueError(
+            "observation_error must be a mapping; include observation/error in defaults"
+        )
+    if obs_cfg is None:
+        obs_cfg = cfg.get("obs", {})
     allowed = {
         "instrument_std",
         "representation_std",
@@ -324,18 +326,6 @@ def create_observation_error(
         raise ValueError(f"Unknown observation_error keys: {sorted(unknown)}")
     if "instrument_std" not in error:
         raise ValueError("observation_error.instrument_std is required")
-    if HydraConfig.initialized():
-        overrides = HydraConfig.get().overrides.task
-        overridden_old = [
-            key
-            for key in legacy_error_keys
-            if any(override.lstrip("+").startswith(f"{key}=") for override in overrides)
-        ]
-        if overridden_old:
-            raise ValueError(
-                "Explicit legacy observation-error override conflicts with "
-                "observation_error: " + ", ".join(overridden_old)
-            )
     operator_config = OmegaConf.select(cfg, "observation.operator")
     temporal = (
         operator_config.get("_target_")

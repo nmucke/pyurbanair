@@ -935,7 +935,11 @@ def test_run_esmda_observation_diagnostics_are_opt_in(
         # The noise is what separates the two: obs = obs_clean + sqrt(C_D)·z.
         assert not np.allclose(obs_ds["obs"].values, obs_ds["obs_clean"].values)
         assert obs_ds["obs_error_std"].values == pytest.approx(
-            float(cfg.esmda.obs_error_std)
+            np.hypot(
+                cfg.observation_error.instrument_std,
+                cfg.observation_error.representation_std,
+            )
+            / np.sqrt(obs_ds["obs_bin_count"].values)
         )
 
     assert (windows_dir / "window_0_params_steps.nc").exists()

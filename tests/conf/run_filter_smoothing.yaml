@@ -1,5 +1,6 @@
 # Independent frozen test configuration.
 defaults:
+- observation/error
 - case: xie_and_castro
 - _self_
 - esmda/localization: none
@@ -36,11 +37,9 @@ ensemble:
 filter_smoothing:
   num_assimilation_windows: 1
   seed: 42
-  obs_error_std: 0.25
 esmda:
   num_assimilation_windows: ${filter_smoothing.num_assimilation_windows}
   seed: ${filter_smoothing.seed}
-  obs_error_std: ${filter_smoothing.obs_error_std}
   num_steps: 1
   alpha: ${.num_steps}
   interval_seconds: 3.0
@@ -52,7 +51,6 @@ esmda:
 filtering:
   num_assimilation_windows: ${filter_smoothing.num_assimilation_windows}
   seed: ${filter_smoothing.seed}
-  obs_error_std: ${filter_smoothing.obs_error_std}
   mode: joint
   assimilate_every_n_step: 1
   analysis: stochastic
@@ -81,5 +79,3 @@ hydra:
     chdir: false
   run:
     dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
-
-observation_error: null

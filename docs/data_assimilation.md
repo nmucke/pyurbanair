@@ -163,23 +163,20 @@ knobs live on the run config's algorithm node — `esmda.interval_seconds` /
 observation-operator arguments. `run_filtering.yaml` has no such keys, because
 the filter aggregates nothing. `create_aggregate_observations` (§11) reads
 them; a null `interval_seconds` means full-resolution assimilation. The
-optional corrected likelihood is configured separately at the run-config root
-as `observation_error`.
+likelihood is configured in `conf/observation/error.yaml`, mounted at the
+run-config root as `observation_error`.
 
-### Opt-in physical observation likelihood
+### Physical observation likelihood
 
-The three assimilation entry points also accept a root-level
-`observation_error` block. `null` is the default and preserves the legacy
-scalar `obs_error_std` path, including its conservative behavior of assigning
-one frame's variance to each aggregated mean. Corrected runs opt in explicitly:
-
-```yaml
-observation_error:
-  instrument_std: 0.25
-  representation_std: 0.0
-  representation_time_model: independent
-  aggregation: propagate_mean
-```
+The three assimilation entry points share
+[`conf/observation/error.yaml`](../conf/observation/error.yaml). It defines the
+root-level `observation_error` block; experiment and CLI overrides use that
+same name. Its default instrument std is `0.25`, representation std is `0.0`,
+representation time model is `independent`, and aggregation is `propagate_mean`.
+The old algorithm-level `obs_error_std` settings and null error model have been
+removed. Migrating an old scalar to `observation_error.instrument_std` preserves
+its raw measurement-noise scale, but the corrected variance of a temporal mean
+is smaller than the historical full-frame variance.
 
 The immutable `ObservationErrorSpec` in
 [`observation_error.py`](../libs/data-assimilation/src/data_assimilation/observation_error.py)
@@ -210,9 +207,7 @@ handling, rather than being hidden in an enlarged observation covariance.
 `observation_error` specifies physical covariance. ESMDA `alpha` applies
 algorithmic tempering separately; it does not change synthetic noise or the
 reported physical covariance. A future hybrid `beta` must follow the same
-covariance-multiplier contract; beta scheduling is outside this release. In corrected mode, explicit CLI
-overrides of both the new block and legacy scalar error keys are rejected as
-ambiguous. Untouched legacy defaults have no effect when the new block is set.
+covariance-multiplier contract; beta scheduling is outside this release.
 This implementation establishes the stated variance propagation contract;
 it does not establish held-out calibration quality.
 
@@ -1126,22 +1121,25 @@ A run uses the library as follows (very brief; see
 [conf/run_esmda.yaml](../conf/run_esmda.yaml) for the full picture):
 
 ```python
-# From src/pyurbanair/config/hydra_helpers.py
-obs_op  = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
-# Legacy path (observation_error: null); corrected mode resolves per window.
-C_D     = create_C_D(obs_op.num_obs, cfg.esmda.obs_error_std)
+obs_op = create_observation_operator(
+    cfg.obs, cfg.assim_model.solver_name, cfg.observation.operator
+)
+aggregate = create_aggregate_observations(cfg)
+error = create_observation_error(cfg)
+# Resolve each window before ensemble forecasts, using its actual raw times.
+resolved = error.resolve(raw_truth_observations, obs_op, aggregate)
+noisy_observations = raw_truth_observations + resolved.raw_instrument_std * raw_normal_draws
+esmda = instantiate(
+    cfg.esmda.smoother, observation_operator=obs_op,
+    aggregate_observations=aggregate, forward_model=ensemble_model,
+    C_D=resolved.covariance_diag, rng_key=rng_key,
+)
+posterior_params, posterior_state = esmda(
+    state=prior_state, params=prior_params, observations=noisy_observations,
+    observation_covariance=resolved.covariance_diag,
+)
+prior_state = posterior_state
 
-# Hydra instantiates the smoother from the esmda/smoother group
-esmda = instantiate(cfg.esmda.smoother, observation_operator=obs_op,
-                    forward_model=ensemble_model, C_D=C_D, rng_key=rng_key)
-
-# run_esmda.py's window loop (num_assimilation_windows ≥ 1)
-for window in range(cfg.esmda.num_assimilation_windows):
-    truth_obs = slice_and_noise(truth_state, cfg.esmda.obs_error_std)
-    posterior_params, posterior_state = esmda(
-        state=prior_state, params=prior_params, observations=truth_obs
-    )
-    prior_state = posterior_state  # warm-start next window
 ```
 
 `create_observation_operator` builds a `TemporalObservationOperator`
@@ -1151,11 +1149,9 @@ optional `AggregateObservations` from the run config's algorithm node
 (`esmda.interval_seconds` / `esmda.aggregation_mode` — aggregation is a DA
 choice, not an operator argument; `run_filtering.py` has no such keys, its
 filter assimilating every frame serially), which the script passes to the DA
-class. With `observation_error: null`, `create_C_D` produces the legacy
-diagonal `σ² I` covariance, sized from the aggregated first-window observation
-vector. With an opt-in error spec, each window resolves its own labelled
-physical covariance from raw observations and exact aggregation bins. The
-script also constructs validation sensors
+class. Each window resolves its labelled physical covariance from raw
+observations and exact aggregation bins. The script also constructs validation
+sensors
 (never assimilated; scored as held-out check) and handles inline vs. on-disk
 truth; see `codebase_guide.md §6` and the script's docstring.
 

@@ -2,6 +2,7 @@
 # Shared algorithm settings live in esmda/default.yaml; selected components
 # and an optional named experiment complete the configuration.
 defaults:
+  - observation/error
   - common/runtime
   - execution: assimilation
   - case: xie_and_castro
@@ -66,7 +67,6 @@ params_to_estimate:
 # GROUPS (esmda/localization=none|correlation|distance,
 # esmda/state_reduction=none|svd) that override `esmda.localization` /
 # `esmda.state_reduction` below. ---
-observation_error: null  # opt in with a mapping; null preserves seeded legacy runs
 
 run:
   # When true, ensemble forecasts are written to disk (one NetCDF per member,

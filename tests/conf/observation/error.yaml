@@ -1,0 +1,6 @@
+# @package observation_error
+# Independent test defaults; do not inherit production tuning.
+instrument_std: 0.25
+representation_std: 0.0
+representation_time_model: independent
+aggregation: propagate_mean
