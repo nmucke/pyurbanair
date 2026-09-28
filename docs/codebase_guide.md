@@ -73,8 +73,8 @@ src/pyurbanair/                    # Top-level package: base classes + glue
 
 conf/                              # Hydra config (see §5 Configuration system)
   README.md                        # Config overview (axes + recipes)
-  run_forward_model.yaml           # Entry point for run_forward_model.py (self-contained base inlined)
-  run_esmda.yaml                   # Entry point for run_esmda.py (inlined base + esmda: + smoother/double-mount)
+  run_forward_model.yaml           # Entry point for run_forward_model.py (workflow composition)
+  run_esmda.yaml                   # Entry point for run_esmda.py (algorithm groups + truth/assim mounts)
   case/                            # Experiment bundle: domain+grid+obs+geometry+time, one self-
                                    #   contained file per case (xie_and_castro, barcelona). `case=...`.
   params/                          # Parameter samplers: static, dynamic, static_truth,
@@ -169,7 +169,7 @@ examples/
 
 tests/                             # pytest suite. tests/conftest.py provides
                                    # `compose_test_cfg` / `compose_module_cfg` fixtures
-                                   # that apply the test smoke config + per-test overrides.
+                                   # that compose tests/conf + isolated paths + caller overrides.
 .temp/                             # Default scratch dir. Everything mutable lands here.
 ```
 
@@ -206,7 +206,7 @@ All three solvers conform to the same three-class shape, declared in
   reconfigurable later via `configure_failure_policy` (used by
   `generate_training_data.py` to force `"raise"`):
   - `"raise"` — first failure aborts the whole ensemble.
-  - `"resample_from_successes"` (the default in the inlined `ensemble:` block) — failed
+  - `"resample_from_successes"` (the default in `common/runtime.yaml`) — failed
     members are cloned from a random successful donor; the *params* ensemble can
     be re-cloned (with Gaussian jitter) by calling
     `apply_failure_substitutions_to_params(params)`.
@@ -256,211 +256,56 @@ For time-varying parameters, vars have a `time` dim. For ensembles, an
 
 ## 5. Configuration system
 
-Run-time configuration is a [Hydra](https://hydra.cc/) tree rooted at
-[`conf/`](../conf/). There are **two run entry points**, one per script, and
-each is **self-contained**:
-[`conf/run_forward_model.yaml`](../conf/run_forward_model.yaml) (forward-model
-runs) and [`conf/run_esmda.yaml`](../conf/run_esmda.yaml) (all ESMDA runs); a
-third, [`conf/neural_surrogate/training_data.yaml`](../conf/neural_surrogate/training_data.yaml),
-drives surrogate data generation (bases off `run_forward_model`).
+Hydra composes the workflow entry points in [`conf/`](../conf/). Start with
+[`conf/README.md`](../conf/README.md) for named experiments and field ownership.
 
-Rather than pull shared `# @package`-mounted files, each entry point **inlines**
-the base directly in its body — there is no `config.yaml`/`paths.yaml`/
-`time.yaml`/`ensemble.yaml`/`esmda.yaml` anymore:
+- `common/runtime.yaml` owns shared failure policy, run flags and Hydra output
+  policy. `execution/` owns member/worker/CPU budgets, mounted at `ensemble`.
+- `case/` bundles domain, grid, geometry, sensors and physical time settings.
+  Workflow files own `time.seconds_per_knot`.
+- `model/` and `params/` contain constructor targets. Forward runs mount once;
+  assimilation mounts truth/assimilation models and truth/prior samplers separately.
+- `esmda/default.yaml` and `filtering/default.yaml` own shared algorithm settings.
+  Their component groups own selectable targets or null values without competing
+  root placeholders. The hybrid composes both algorithms.
+- `experiment/<workflow>/<name>.yaml` records selections and intentional overrides.
+  Ingredients compose first, then the workflow body, experiment, and CLI values.
+  `experiment.workflow` is validated against the runner.
+- `observation/` configures operator and aggregation targets. A narrow adapter
+  supplies coordinates and solver names from the runtime model role. Dataset
+  inspection, covariance sizing and per-window state carry remain Python logic.
 
-| Inlined block | Runtime key | Notable fields |
-|---|---|---|
-| `paths:` | `paths` | `results_dir` (fwd `.temp/${model.name}`; esmda `.temp/${truth_model.name}_to_${assim_model.name}`), `experiment_dir` |
-| `time:` | `time` | `seconds_per_knot` (spacing between time-varying parameter knots; per-window horizon `simulation_time`/`output_frequency`/`spinup_time` comes from the `case`) |
-| `ensemble:` | `ensemble` | `ensemble_size`, `num_parallel_processes`, `failure.{policy, jitter_scale, seed}` |
-| `esmda:` (run_esmda only) | `esmda` | `num_steps`, `alpha`, `num_assimilation_windows`, `obs_error_std`, `seed`. `localization`/`state_reduction` are set by the **`esmda/localization`** / **`esmda/state_reduction`** groups (default `none`); inlined *before* those groups in the defaults so they override it. |
-| `run:` | `run` | generic script knobs (`skip_viz`, `results_dir`, `ensemble`, `rollout_steps`, `truth_dir`, …) |
-
-Everything that varies per variant is a **group**:
-
-| Group | Selects | Notable |
-|---|---|---|
-| `case/` | experiment bundle (`xie_and_castro`, `barcelona`) | one self-contained file per experiment: `domain` (bounds + grid) + `obs` (sensors incl. validation) + `geometry` (STL) + per-window `time`. `case=xie_and_castro` is the default. The single place to define/add an experiment. |
-| `model/` | forward + ensemble backend | mounted under a package: `model@model=pylbm` (forward), or twice for assimilation (see below) |
-| `params/` | parameter sampler | `static`, `dynamic`, `static_truth`, `dynamic_truth` — see below. Mounts at runtime key `params` (forward) or `truth_params`/`prior_params` (esmda). |
-| `esmda/smoother/` | ESMDA variant | `static` (`ParameterESMDA`), `state` (`StateESMDA`), `dynamic` (`TimeVaryingParameterESMDA`), `state_and_parameter` (`StateAndParameterESMDA`), `state_and_dynamic` (`StateAndTimeVaryingParameterESMDA`). The one genuinely mode-specific `_target_`. |
-| `training_data/` | surrogate data-generation overlay | each size pulls `training_data/_base.yaml` (sampler skeleton + horizon) and overrides only what scales |
-
-**Parameter samplers** are a group mounted *by package*, not a flat file. Each
-option is a single sampler `_target_`:
-- `static` / `dynamic` — the assimilation **prior** (Normal priors / AR(2)
-  external prior).
-- `static_truth` / `dynamic_truth` — the **truth** generator (Constants / a
-  distinct AR(2) seed). Keeping truth and prior as separate configs avoids the
-  inverse crime.
-
-`run_forward_model.yaml` mounts one sampler at key `params`
-(`params=static|dynamic`). `run_esmda.yaml` mounts the group **twice** —
-`params@truth_params` and `params@prior_params` — exactly mirroring the model
-double-mount.
-
-**ESMDA smoother** is selected via the `esmda/smoother` group (default
-`dynamic`). It is the one genuinely mode-specific piece; the shared
-`num_steps`/`alpha`/`localization` come from the inlined `esmda:` block of
-`run_esmda.yaml` via `${esmda.*}` interpolation. The single [`run_esmda.py`](../scripts/esmda/run_esmda.py)
-script handles every former esmda script — mode is the cross product of
-`esmda/smoother`, `params@prior_params`, and `esmda.num_assimilation_windows`
-(1 = single window, N = rollout). Tests compose `config_name="run_esmda"` and
-pick the smoother via the group override (see [tests/conftest.py](../tests/conftest.py)).
-
-The available files are `static|state|state_and_parameter|dynamic|state_and_dynamic`;
-the CLI selector must match these filenames (for example
-`esmda/smoother=state`).
-
-**Localization** is selected via the `esmda/localization` config **group**
-(`conf/esmda/localization/{none,correlation,distance}.yaml`), each setting
-`esmda.localization` which every smoother receives via
-`localization: ${esmda.localization}`. The default is **`none` (the global,
-unlocalized update)**. `correlation` = adaptive correlation-based (Vossepoel et
-al. 2025); `distance` = physical-distance-based. Pick one with
-`esmda/localization=distance` and tweak its fields
-(`esmda.localization.localization_radius=40`), or force the global update with
-`esmda.localization=null`. In the state-bearing smoothers
-(`state`, `state_and_parameter`, `state_and_dynamic`) state rows are localized.
-Correlation localization also applies to joint parameter rows; distance
-localization keeps parameter rows on the global update. Each strategy's
-`block_grouping` flag toggles per-row vs. the paper's "grid block" joint
-analysis (see §6).
-
-The **compute budget** (`ensemble.ensemble_size`,
-`ensemble.num_parallel_processes`, `esmda.num_steps`/`num_assimilation_windows`,
-`time.seconds_per_knot`) is baked into the two entry points at medium-sized
-defaults — there is no separate scale/size group. Change it with plain CLI
-overrides; the pytest suite shrinks it to a tiny smoke shape via
-[`tests/conf/test/smoke.yaml`](../tests/conf/test/smoke.yaml).
-
-Forward-model runs mount the model once at `cfg.model.*`. Assimilation runs use
-Hydra's package-override syntax to mount the same `model/` and `params/` groups
-**twice**, once as the truth and once as the assim/prior:
+Use the isolated preview to inspect a run without importing a backend:
 
 ```bash
-python scripts/esmda/run_esmda.py \
-  model@truth_model=pylbm model@assim_model=pyudales \
-  params@truth_params=static_truth params@prior_params=static \
-  esmda/smoother=static
+pixi run -e dev python scripts/preview_config.py run_esmda \
+  experiment=esmda/barcelona_dynamic
 ```
 
-Inside the YAMLs, sibling-relative interpolation (`${.foo}`, `${..foo}`)
-is used wherever the surrounding group might be re-mounted under
-another package; absolute interpolation (`${time.simulation_time}`) is
-reserved for cross-group lookups.
+Runners retain `run(cfg)` plus a thin `@hydra.main` wrapper. They validate before
+side effects and instantiate selected components explicitly. Dynamic smoother
+knot counts are supplied from sampled data, not misleading editable YAML values.
+Run records distinguish the original config, resolved launch settings and runtime
+constructor arguments; surrogate exported model config schemas remain unchanged.
 
-### Instantiation vs. helpers
-
-Backend object construction is **declarative** — every forward model,
-ensemble model, ESMDA smoother, parameter sampler, and time-varying prior is
-built by `hydra.utils.instantiate(cfg.<group>, ...)` against the `_target_`
-block in YAML. Both samplers and the smoother are full `_target_` configs (the
-old `create_true_params` / `create_parameter_ensemble` / `configure_failure_policy`
-/ `build_truth_ts_model` helpers are gone). The scripts call only a small set of
-remaining procedural helpers from
-[src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py):
-
-```python
-# Assim model + ensemble (run_esmda.py)
-assim_model     = instantiate(cfg.assim_model.forward_model, results_dir=...)
-instantiate(cfg.assim_model.prepare, forward_model=assim_model)   # compile / preprocess
-clean_outputs(model_name=cfg.assim_model.name, forward_model=assim_model)
-ensemble_model  = instantiate(cfg.assim_model.ensemble_model, forward_model=assim_model)
-
-# Truth + prior samplers, each its own _target_ block (mounted twice)
-truth_sampler   = instantiate(cfg.truth_params)        # static_truth | dynamic_truth
-true_params     = truth_sampler.sample(1)
-prior_sampler   = instantiate(cfg.prior_params)        # static | dynamic
-prior_params    = prior_sampler.sample(cfg.ensemble.ensemble_size)
-
-# Observation operator + error covariance (helpers)
-obs_op          = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
-C_D             = create_C_D(num_obs, cfg.esmda.obs_error_std)
-
-esmda           = instantiate(cfg.esmda.smoother, ..., rng_key=rng_key)
-```
-
-The failure policy is now configured directly in the ensemble model's
-`_target_` block (`conf/model/<name>.yaml` → `ensemble_model`), reading
-`${ensemble.failure.*}`; there is no separate `configure_failure_policy` call.
-
-`pypalm` stays **lazy** because its `_target_` blocks only appear inside
-[conf/model/pypalm.yaml](../conf/model/pypalm.yaml); composing a config
-with `model=pylbm` never imports `pypalm`. This is asserted by a
-regression test in [tests/test_hydra_config.py](../tests/test_hydra_config.py).
-
-### Script structure
-
-Every script in [`scripts/`](../scripts/) follows the same shape:
-
-```python
-def run(cfg: DictConfig) -> None:
-    ...
-
-@hydra.main(version_base=None, config_path="../conf", config_name="run_forward_model")
-def main(cfg: DictConfig) -> None:
-    run(cfg)
-```
-
-`run(cfg)` is the **testable entry point** — tests compose a
-`DictConfig` and call `run(cfg)` directly without going through Hydra's
-CLI. `main` is just the CLI wrapper.
+Fixed-site data generation uses `case=... training_data/geometry_mode=fixed`.
+It no longer loads another case after Hydra composition. Random geometry generation
+uses its separate runner and records geometry-specific derived settings.
 
 ### Tests
 
-[tests/conftest.py](../tests/conftest.py) exposes two fixtures, both
-returning the same composer callable. Pick by fixture scope, not by
-behavior:
+Tests compose **only** [`tests/conf/`](../tests/conf/), never the editable
+production entry points. Those configs freeze physical and numerical settings:
+20×20×4 cells, a 3 s window, two members and one worker for CFD smoke runs.
+`compose_test_cfg` and `compose_module_cfg` preserve the same caller interface;
+the fixtures inject unique temporary output and scratch paths, followed by the
+caller's overrides. Direct composition uses `tests.config_loader`.
 
-- **`compose_test_cfg`** (function-scoped): use this in every ordinary
-  test that calls `run(cfg)` once. Each `compose(...)` call opens and
-  closes a `GlobalHydra`, so the function-scoped lifecycle is fine.
-- **`compose_module_cfg`** (module-scoped): use only when a
-  module-scoped fixture depends on a composed config (e.g. `pylbm_cfg`
-  → `pylbm_model` in the sign / velocity-grid tests, where compiling
-  pylbm once per module is the whole point). A function-scoped
-  composer can't be invoked from a module-scoped fixture without
-  pytest erroring on the scope mismatch.
-
-Every fixture applies the smoke shape
-([tests/conf/test/smoke.yaml](../tests/conf/test/smoke.yaml): the smallest domain /
-shortest window / 2-member ensemble) and isolates each run's output paths in
-pytest's temporary root. uDALES mounts default to one MPI rank and no synthetic inlet turbulence;
-explicit caller overrides retain control of those settings. Inlet tests opt in
-with length scales appropriate to their grid. Override anything per-test:
-
-```python
-def test_something(compose_test_cfg) -> None:
-    # ESMDA tests pass run_esmda as config_name and pick the smoother via the
-    # esmda/smoother group override (there is no `esmda=<variant>` selector).
-    cfg = compose_test_cfg(
-        [
-            "model@truth_model=pylbm", "model@assim_model=pyudales",
-            "esmda/smoother=static",
-            "params@truth_params=static_truth", "params@prior_params=static",
-            "esmda.num_steps=1",
-        ],
-        config_name="run_esmda",
-    )
-    run(cfg)
-```
-
-The forward-runner smoke tests use pairwise switch combinations on each backend,
-and assimilation scripts test each mode without repeating single-window cases
-already exercised by multi-window runs. Most ensembles run sequentially; dedicated
-cases still cover forkserver execution. Neural training smoke tests use one epoch
-for artifact/wiring checks, with focused tests for gradients and resume behavior.
-`pixi run -e dev py.test` reports the 20 slowest tests. CI limits OpenMP/BLAS to
-one thread for these small arrays to avoid thread overhead.
-
-The [CI workflow](../.github/workflows/ci.yml) selects Open MPI's `ob1` PML
-with `self,sm,tcp` BTLs for its Open MPI 5 test environment.
-UCX's network-port probing can raise `SIGFPE` during MPI startup on hosted
-runners when the Fortran solvers enable floating-point traps. These CI-only
-settings avoid that startup path while keeping solver traps enabled; local
-and HPC transport selection is unchanged. See the
-[Open MPI transport documentation](https://docs.open-mpi.org/en/main/tuning-apps/networking/tcp.html).
+The default test command runs fast tests; real CFD calls are explicitly marked
+`integration`. See [`tests/README.md`](../tests/README.md) for the commands,
+coverage policy and configuration maintenance rules. Config contract tests may
+inspect production configs without executing them; numerical tests never depend
+on production tuning. The tests require `forkserver` for parallel ensembles.
 
 ## 6. Data assimilation flow
 
@@ -939,18 +784,16 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 - `.temp/` is the default scratch directory. Every backend writes its
   per-experiment dir and per-member dirs underneath. The default
   `paths.results_dir` is `.temp/${model.name}` and `experiment_dir` is
-  `.temp` (see the inlined `paths:` block); `run_esmda.yaml`
+  `.temp` (see workflow `paths:` settings); `run_esmda.yaml`
   overrides `results_dir` to `.temp/${truth_model.name}_to_${assim_model.name}`.
-- Tests apply the smoke shape
-  ([tests/conf/test/smoke.yaml](../tests/conf/test/smoke.yaml): tiny domain / 3 s
-  window / 2-member ensemble) via the conftest fixtures — `pixi run py.test` in
-  the dev env.
+- Tests own their small runs in `tests/conf/`; production edits do not retune them.
+  Run `pixi run -e dev py.test`, `test-integration`, or `test-all` as appropriate.
 - Pre-commit hooks (`black`, `isort`, `mypy`) installed via
   `pixi run pre-commit`. They are **not enforced** server-side; commits
   can bypass.
 - **Ensemble scaling on this hardware** is DRAM-bandwidth-bound past
   ~4 workers (see [docs/ensemble_scaling.md](temp/ensemble_scaling.md) and
-  the comments in the inlined `ensemble:` block).
+  the selected `execution/` preset).
   Don't blindly raise `num_parallel_processes` past 8 — re-benchmark
   first.
 - `pyurbanair` deliberately uses `forkserver` not `fork` for parallel

@@ -1,0 +1,11 @@
+# @package _global_
+# Named, reviewable run recipe.
+defaults:
+  - override /neural_surrogate/mode@_global_: standard
+  - override /neural_surrogate/dataset@dataset: transition
+
+experiment:
+  workflow: surrogate_training
+model_name: p3d_barcelona
+dataset:
+  root_dir: training_data/pyudales_barcelona

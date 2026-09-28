@@ -1,0 +1,48 @@
+# Reusable transition dataset settings for surrogate training.
+# The dd_patch (PatchTrainer) + dd loss path trains on FULL-FIELD transition
+# batches: the DomainDecomposed model tiles the field into patches internally
+# and exposes every patch's neighbours via return_intermediates=True, which is
+# what the Eq (9) interface/divergence terms need. Use TransitionDataset here.
+# PatchTransitionDataset is a separate one-step, delta-only per-patch path
+# whose items (state_n_patch/delta_target/...) lack the full-field state_n the
+# trainer reads -- selecting it here raises `KeyError: 'state_n'`.
+_target_: neural_surrogates.TransitionDataset
+# _target_: neural_surrogates.PatchTransitionDataset
+# root_dir may be a single-geometry dataset (barcelona / xie_and_castro) or a
+# multi-geometry one (geometry.source idealized/realistic, one grid+geometry
+# per trajectory). The dataset handles both without extra arguments --
+# geometry, SDF features and normalization stats are per-trajectory, and
+# equal masks are deduped so single-geometry runs behave exactly as before.
+# Multi-geometry roots additionally REQUIRE the batch_sampler block below.
+# root_dir: training_data/pyudales_medium
+root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_idealized
+# root_dir: /export/scratch1/ntm/pyurbanair/training_data/pyudales_medium
+# root_dir: /export/scratch1/ntm/pyurbanair/training_data/pypalm_barcelona
+# root_dir: /export/scratch1/ntm/pyurbanair/training_data/pypalm_realistic
+state_vars:
+  - u
+  - v
+  - w
+param_vars: null
+cache: false
+dtype: float32
+pushforward_steps: 7
+# Backward history window H: how many CONSECUTIVE PAST frames (t-H+1 … t) each
+# sample feeds the model, pre-flattened oldest-first into (H*C, *grid) -- the
+# mirror image of `pushforward_steps`, which is the FORWARD rollout horizon.
+# Must equal the architecture's `num_history_steps` (the train script
+# cross-checks it and stamps the value into the saved config.yaml). 1 = the
+# classic one-step input and is byte-identical to the pre-history behaviour.
+# H > 1 costs the first H-1 anchors of every trajectory (a sample needs H past
+# frames), so a trajectory needs at least pushforward_steps + H snapshots.
+num_history_steps: 1
+# SDF / ∇SDF geometry features (see neural_surrogates.sdf). Selects which extra
+# channels the dataset ships alongside the `blanking` mask, computed once per
+# geometry at init: `none` (off), `sdf` (clamped signed distance only, +1),
+# `grad` (unit gradient only, +3), or `both` (SDF + ∇SDF, +4). Must match the
+# architecture's `sdf_features` mode (the train script cross-checks this, and
+# that the two `sdf_clamp_cells` agree). `none` keeps items byte-identical to
+# the pre-feature dataset.
+sdf_features: both  # none | sdf | grad | both
+# Clamp radius L (in cells) for the normalised SDF channel: clip(sdf, -L, L)/L.
+sdf_clamp_cells: 32

@@ -1,0 +1,4 @@
+# Window aggregation; legacy esmda fields remain editable projections.
+_target_: data_assimilation.observation_operator.AggregateObservations
+interval_seconds: ${esmda.interval_seconds}
+mode: ${esmda.aggregation_mode}

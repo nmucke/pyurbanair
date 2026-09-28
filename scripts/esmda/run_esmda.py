@@ -117,6 +117,11 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_operator,
     filter_parameter_config,
 )
+from pyurbanair.config.run_record import (
+    append_constructor_override,
+    validate_run_config,
+    write_run_record,
+)
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -638,11 +643,12 @@ def _save_assembled_outputs(out_dir, windows_dir, num_windows, sim_time, is_dyna
 
 
 def run(cfg: DictConfig) -> None:
+    validate_run_config(cfg, "esmda")
     observation_error = create_observation_error(cfg, cfg.obs, ("esmda.obs_error_std",))
     if (
         observation_error is not None
-        and cfg.esmda.interval_seconds is not None
-        and cfg.esmda.aggregation_mode != "mean"
+        and (configured_aggregation := create_aggregate_observations(cfg)) is not None
+        and configured_aggregation.mode != "mean"
     ):
         raise ValueError("Corrected observation_error supports only mean aggregation")
     num_windows = int(cfg.esmda.num_assimilation_windows)
@@ -676,7 +682,30 @@ def run(cfg: DictConfig) -> None:
 
     # Persist the raw composed Hydra config used to launch this run (interpolations
     # intact), so the run is fully reproducible from the output folder alone.
-    OmegaConf.save(config=cfg, f=out_dir / "config.yaml")
+    write_run_record(
+        cfg,
+        out_dir,
+        "esmda",
+        constructor_overrides=[
+            {
+                "role": "truth" if cfg.run.truth_dir is None else "external_truth",
+                "component": "forward_model",
+                "values": {
+                    "num_windows": num_windows,
+                    "window_seconds": sim_time,
+                    "truth_horizon_seconds": final_time,
+                },
+            }
+        ],
+    )
+
+    if cfg.run.truth_dir is None and is_dynamic:
+        append_constructor_override(
+            out_dir,
+            role="truth",
+            component="parameter_sampler",
+            values={"simulation_time": final_time},
+        )
 
     # --- True parameter sampler and state -----------------------------------------------------------
     # ``true_state_path`` points at the truth on disk; ``n_total`` is the number
@@ -811,6 +840,15 @@ def run(cfg: DictConfig) -> None:
     # --- Prior parameter sampler -----------------------------------------------------------
     prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
+    append_constructor_override(
+        out_dir,
+        role="assim",
+        component="parameter_sampler",
+        values={
+            "sampled_shape": dict(prior_params.sizes),
+            "parameter_names": list(prior_params.data_vars),
+        },
+    )
 
     # --- Optional training-data warm start --------------------------------------------
     # When the neural surrogate is the assimilation model and its
@@ -884,12 +922,20 @@ def run(cfg: DictConfig) -> None:
         )
 
     # --- Observation operator -----------------------------------------------------------
-    truth_obs_op = create_observation_operator(cfg.obs, cfg.truth_model.solver_name)
-    assim_obs_op = create_observation_operator(cfg.obs, cfg.assim_model.solver_name)
+    truth_obs_op = create_observation_operator(
+        cfg.obs,
+        cfg.truth_model.solver_name,
+        OmegaConf.select(cfg, "observation.operator"),
+    )
+    assim_obs_op = create_observation_operator(
+        cfg.obs,
+        cfg.assim_model.solver_name,
+        OmegaConf.select(cfg, "observation.operator"),
+    )
     # Interval aggregation (or None for full-resolution assimilation). ONE
     # instance, shared between the C_D sizing below and the smoother, so its
     # interval-count consistency check spans the truth and the forecasts.
-    aggregate_obs = create_aggregate_observations(cfg.esmda)
+    aggregate_obs = create_aggregate_observations(cfg)
     if observation_error is not None and aggregate_obs is not None:
         aggregate_obs.allow_interval_count_change = True
     resolved_errors = []
@@ -934,8 +980,14 @@ def run(cfg: DictConfig) -> None:
     # here rather than from a config constant.
     rng_key, esmda_key = jax.random.split(rng_key)
     smoother_overrides: dict = {}
-    if "num_time_points" in cfg.esmda.smoother:
+    if "TimeVaryingParameter" in str(cfg.esmda.smoother._target_):
         smoother_overrides["num_time_points"] = int(prior_params.sizes["time"])
+        append_constructor_override(
+            out_dir,
+            role="assim",
+            component="esmda.smoother",
+            values={"num_time_points": smoother_overrides["num_time_points"]},
+        )
     esmda = instantiate(
         cfg.esmda.smoother,
         observation_operator=assim_obs_op,

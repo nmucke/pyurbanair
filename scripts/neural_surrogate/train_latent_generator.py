@@ -46,6 +46,7 @@ strictly after ``fit()``.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -64,6 +65,8 @@ from neural_surrogates.sdf import normalize_sdf_mode
 from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import MissingMandatoryValue
+
+from pyurbanair.config.run_record import write_run_record
 
 # Bump when the meaning of the cached latent statistics changes.
 _LATENT_STATS_VERSION = 1
@@ -747,6 +750,8 @@ def _preflight_resume(
             "the checkpoint's physical conditioning contract cannot be audited."
         )
     saved = OmegaConf.load(config_path)
+    if not isinstance(saved, DictConfig):
+        raise TypeError(f"Expected mapping in {config_path}")
     saved_signature = OmegaConf.select(saved, "generator.run_signature")
     if saved_signature is None:
         _validate_legacy_resume(saved, signature)
@@ -905,6 +910,7 @@ def _verify_export_reloads(out_dir: Path, n_state: int, n_params: int) -> None:
 
 def run(cfg: DictConfig) -> Any:
     """Train and export; returns the trainer (tests inspect it)."""
+    launch_cfg = copy.deepcopy(cfg)
     OmegaConf.set_struct(cfg, False)
 
     # -- required inputs, checked before any data is touched ----------------- #
@@ -1012,7 +1018,9 @@ def run(cfg: DictConfig) -> Any:
 
     # -- trainer (before the stats pass: it shares the batch preparation) ----- #
     out_dir = Path(cfg.paths.output_dir) / cfg.model_name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(
+        launch_cfg, out_dir, "surrogate_latent_training", save_legacy_config=False
+    )
     trainable = [p for p in model.parameters() if p.requires_grad]
     trainer = instantiate(
         cfg.trainer,
@@ -1052,7 +1060,7 @@ def run(cfg: DictConfig) -> Any:
     return trainer
 
 
-@hydra.main(
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/train_latent_generator",

@@ -28,6 +28,7 @@ never disagree, and hands it plus its own optimizer to the trainer.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,8 @@ import torch
 from hydra.utils import instantiate
 from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
 from omegaconf import DictConfig, OmegaConf
+
+from pyurbanair.config.run_record import write_run_record
 
 
 def _export_handoff_weights(model: Any, out_dir: Path) -> None:
@@ -61,6 +64,7 @@ def _export_handoff_weights(model: Any, out_dir: Path) -> None:
 
 
 def run(cfg: DictConfig) -> None:
+    launch_cfg = copy.deepcopy(cfg)
     dtype = getattr(torch, cfg.dataset.dtype)
 
     train_ds = instantiate(cfg.dataset, split="train", dtype=dtype)
@@ -220,7 +224,9 @@ def run(cfg: DictConfig) -> None:
     )
 
     out_dir = Path("model_weights") / cfg.model_name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(
+        launch_cfg, out_dir, "surrogate_autoencoder_training", save_legacy_config=False
+    )
     OmegaConf.save(cfg, out_dir / "config.yaml")
 
     trainer = instantiate(
@@ -264,7 +270,7 @@ def run(cfg: DictConfig) -> None:
     print(f"config, best weights and encoder/decoder saved to {out_dir}")
 
 
-@hydra.main(
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/pretrain_autoencoder",

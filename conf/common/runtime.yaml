@@ -1,0 +1,16 @@
+# @package _global_
+# Shared output and failure policy for solver workflows.
+ensemble:
+  failure:
+    policy: resample_from_successes
+    jitter_scale: 0.05
+    seed: 0
+run:
+  name: null
+  skip_viz: false
+  results_dir: null
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

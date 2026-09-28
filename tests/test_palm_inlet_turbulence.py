@@ -9,14 +9,16 @@ The PALM-side mapping (and why it is NOT ``turbulent_inflow``) is documented in
 """
 
 import pathlib
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 import pytest
 import xarray
-from hydra import compose, initialize
+from hydra import compose, initialize_config_dir
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
+
+from tests.config_loader import TEST_CONF_DIR
 
 _SMOKE = [
     "domain.nx=20",
@@ -49,7 +51,7 @@ _OFF = ["model.forward_model.inlet_turbulence.enabled=false", _SEED_ON]
 
 def _make_model(tmp_path: pathlib.Path, *extra_overrides: str) -> Any:
     """Compose + instantiate a pypalm smoke model staged under ``tmp_path``."""
-    with initialize(version_base=None, config_path="../conf"):
+    with initialize_config_dir(version_base=None, config_dir=str(TEST_CONF_DIR)):
         cfg = compose(
             config_name="run_forward_model",
             overrides=[*_SMOKE, f"paths.experiment_dir={tmp_path}", *extra_overrides],
@@ -78,7 +80,7 @@ def _time_varying_params(times: Any, angles: Any, speeds: Any = 5.0) -> xarray.D
 def _get(fm: Any, section: str, key: str) -> Optional[str]:
     from pypalm.utils.p3d_utils import P3DFile
 
-    return P3DFile(fm.p3d_path).get_value(section, key)
+    return cast(Optional[str], P3DFile(fm.p3d_path).get_value(section, key))
 
 
 def _rt(fm: Any, key: str) -> Optional[str]:
@@ -107,7 +109,9 @@ def _turbulent_inflow_active(fm: Any) -> bool:
     p3d = P3DFile(fm.p3d_path)
     if not p3d.has_section("turbulent_inflow_parameters"):
         return False
-    return p3d.get_value("turbulent_inflow_parameters", "switch_off_module") != ".true."
+    return bool(
+        p3d.get_value("turbulent_inflow_parameters", "switch_off_module") != ".true."
+    )
 
 
 # The keys the knob owns; used to assert the disabled path is a strict no-op.
@@ -347,7 +351,7 @@ def test_non_positive_dt_disturb_raises(tmp_path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _apply(tmp_path: pathlib.Path, block, warm_start: bool = False) -> dict:
+def _apply(tmp_path: pathlib.Path, block: Any, warm_start: bool = False) -> dict:
     """Stage a template, mimic the cold-start init write, apply the knob."""
     import shutil
 
@@ -385,7 +389,7 @@ def _in_run_fires(v: dict) -> bool:
     return dt is not None and float(dt) < 1.0e6
 
 
-@pytest.mark.parametrize(
+@pytest.mark.parametrize(  # type: ignore[misc]
     "seed,enabled,want_kick,want_in_run",
     [
         (True, False, True, False),  # historical default: seed only

@@ -147,3 +147,48 @@ def test_filter_artifact_distinguishes_analyzed_state(tmp_path: pathlib.Path) ->
         assert ds.attrs["physical_nis_prior_per_observation"] > 0.0
     with xr.open_dataset(tmp_path / "window_0_pred_obs.nc") as ds:
         assert ds.pred_obs_analyzed.dims == ("obs_index", "ensemble")
+
+
+@pytest.mark.parametrize(  # type: ignore[misc,unused-ignore]
+    "config_name", ["run_esmda", "run_filtering", "run_filter_smoothing"]
+)
+@pytest.mark.parametrize("config_root", ["conf", "tests/conf"])  # type: ignore[misc,unused-ignore]
+def test_corrected_likelihood_composes_with_observation_components(
+    config_name: str, config_root: str
+) -> None:
+    from hydra import compose, initialize_config_dir
+
+    from pyurbanair.config.hydra_helpers import (
+        create_aggregate_observations,
+        create_observation_operator,
+    )
+
+    root = pathlib.Path(__file__).resolve().parents[1] / config_root
+    with initialize_config_dir(version_base=None, config_dir=str(root)):
+        cfg = compose(
+            config_name=config_name,
+            overrides=[
+                "observation_error={instrument_std:0.25,representation_std:0.1}"
+            ],
+        )
+    spec = create_observation_error(cfg, cfg.obs, ())
+    assert spec is not None
+    operator = create_observation_operator(
+        cfg.obs, cfg.truth_model.solver_name, cfg.observation.operator
+    )
+    aggregate = create_aggregate_observations(cfg)
+    raw = xr.DataArray(
+        np.zeros((2, operator.observation_operator.num_obs)),
+        dims=("time", "obs"),
+        coords={"time": [0.0, 1.0]},
+    )
+    resolved = spec.resolve(raw, operator, aggregate)
+    expected = 0.25**2 + 0.1**2
+    if aggregate is not None:
+        expected /= 2
+    np.testing.assert_allclose(resolved.variance, expected)
+    cfg.observation.operator = {
+        "_target_": "data_assimilation.observation_operator.ObservationOperator"
+    }
+    with pytest.raises(ValueError, match="temporal observation/operator"):
+        create_observation_error(cfg, cfg.obs, ())

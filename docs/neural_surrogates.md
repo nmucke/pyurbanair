@@ -77,34 +77,32 @@ passed through unchanged.
 A single config drives data generation:
 [conf/neural_surrogate/training_data.yaml](../conf/neural_surrogate/training_data.yaml)
 (`config_name="neural_surrogate/training_data"`), shared by both generation
-scripts. **The geometry is picked by `training_data.geometry.source`**:
-
-- `barcelona` / `xie_and_castro` — single fixed geometry
-  (`generate_training_data.py`). The script merges the named case file
-  (`conf/case/<source>.yaml`) over the composed config, so this one knob
-  switches domain/geometry/obs/time; the merged case wins over `case=` and
-  over CLI overrides of the keys it sets.
-- `idealized` / `realistic` — the UrbanTALES STL pools under
-  `examples/geometries/processed/<source>`
-  (`generate_random_geometries_training_data.py`, §2b). Each simulation gets
-  a randomly drawn geometry with a per-geometry grid.
+scripts. Fixed geometry is selected by `case=` during Hydra composition:
 
 ```bash
 python scripts/neural_surrogate/generate_training_data.py \
-    training_data.geometry.source=xie_and_castro
+    training_data/geometry_mode=fixed case=xie_and_castro
 python scripts/neural_surrogate/generate_training_data.py \
-    model=pylbm training_data.geometry.source=barcelona
+    training_data/geometry_mode=fixed model=pylbm case=barcelona
 ```
+
+The selected case owns domain, geometry, sensors and physical window settings;
+CLI overrides retain precedence. There is no script-side case merge. The old
+`geometry.source=barcelona|xie_and_castro` selector is rejected with migration
+instructions. Random geometry uses `training_data/geometry_mode=random` and
+`training_data.geometry.source=idealized|realistic` with the separate
+`generate_random_geometries_training_data.py` runner (§2b). Fixed output names
+come from `case_name`; random output names come from the pool source.
 
 It declares (under `training_data:`):
 
 | Field | Purpose |
 |---|---|
 | `num_train`, `num_val`, `num_test` | per-split sample counts |
-| `geometry.source` | geometry selection, see above |
+| `geometry.source` | random pool selection; fixed geometry uses `case=` |
 | `geometry.stl_dir` / `geometry.udales_case_dir` / `geometry.palm_case_dir` | pool + backend case-template dirs, derived from `source` (pool sources only) |
 | `geometry.resolution` / `geometry.z_size` | pool grid spacing + fixed vertical extent (§2b) |
-| `output_dir` | resolves to `training_data/${model.name}_${training_data.geometry.source}/` |
+| `output_dir` | resolves to the configured root plus `${model.name}_${training_data.geometry.output_name}/` |
 | `simulation_time` / `output_frequency` / `spinup_time` | generation horizon — set directly in this file (not inherited from the case) |
 | `seed` | RNG seed driving every random draw |
 | `num_parallel_processes` | ensemble parallelism for `generate_training_data.py` — see §5. The random-geometry script runs strictly sequentially and ignores it. |

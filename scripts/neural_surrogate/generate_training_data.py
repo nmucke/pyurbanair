@@ -5,20 +5,15 @@ Samples inflow parameters from the configured `params_sampler` (Hydra
 ensemble call, partitions the resulting per-member NetCDFs into split
 directories, and writes one figure + one animation per split.
 
-The geometry is a single fixed case selected by
-`training_data.geometry.source` (barcelona | xie_and_castro): the named case
-file is merged over the composed config, so the yaml knob alone switches
-geometry. Note the merged case wins over `case=` and over CLI overrides of
-the keys it sets (domain/geometry/obs/time). The random-sampling pool sources
-(idealized | realistic) belong to
-generate_random_geometries_training_data.py instead.
+The fixed geometry and grid come from the composed ``case=`` selection.
+Random geometry pools use generate_random_geometries_training_data.py.
 
 Usage:
 
     python scripts/neural_surrogate/generate_training_data.py \
-        training_data.geometry.source=xie_and_castro
+        case=xie_and_castro training_data/geometry_mode=fixed
     python scripts/neural_surrogate/generate_training_data.py \
-        model=pyudales training_data.geometry.source=barcelona
+        model=pyudales case=barcelona training_data/geometry_mode=fixed
 """
 
 from __future__ import annotations
@@ -47,57 +42,9 @@ from pyurbanair.config.hydra_helpers import (
     resolve_output_dir,
     resolve_parameter_schema,
 )
+from pyurbanair.config.run_record import validate_run_config, write_run_record
 from pyurbanair.dynamic_parameters import build_knot_times
 from pyurbanair.utils.run_utils import add_velocity_magnitude, extract_2d_slice
-
-_CASE_SOURCES = ("barcelona", "xie_and_castro")
-_POOL_SOURCES = ("idealized", "realistic")
-
-
-def _apply_geometry_source(cfg: DictConfig) -> DictConfig:
-    """Merge the case named by `training_data.geometry.source` over the config.
-
-    The composed `case` group already provides domain/geometry/obs/time; when
-    the config names a single-geometry case, merge that case file on top so
-    the yaml knob alone selects the geometry (its keys win over whatever
-    `case=` selected, including CLI overrides of those keys). Pool sources
-    are rejected here — they need per-geometry grids and belong to
-    generate_random_geometries_training_data.py.
-    """
-    source = OmegaConf.select(cfg, "training_data.geometry.source")
-    if source is None:
-        return cfg
-    if source in _POOL_SOURCES:
-        raise ValueError(
-            f"training_data.geometry.source={source!r} samples random "
-            "geometries; use scripts/neural_surrogate/"
-            "generate_random_geometries_training_data.py for it, or set the "
-            f"source to one of {_CASE_SOURCES}."
-        )
-    if source not in _CASE_SOURCES:
-        raise ValueError(
-            f"Unknown training_data.geometry.source={source!r}; expected one "
-            f"of {_CASE_SOURCES + _POOL_SOURCES}."
-        )
-    case_path = (
-        pathlib.Path(__file__).resolve().parents[2] / "conf" / "case" / f"{source}.yaml"
-    )
-    case_cfg = OmegaConf.load(case_path)
-    # Case files carry new-to-this-composition keys (e.g. barcelona's
-    # geometry.udales_precomputed_geom_dir), so merge with struct off.
-    OmegaConf.set_struct(cfg, False)
-    # Replace the case-owned namespaces wholesale instead of deep-merging:
-    # keys the composed case set but the target case does not (barcelona's
-    # geometry.udales_precomputed_geom_dir, xie's obs.validation_*_points)
-    # must not leak through. `time` stays a deep merge — case files set only
-    # a subset of it (seconds_per_knot lives in the run_forward_model base).
-    for node in ("domain", "geometry", "obs"):
-        if node in case_cfg:
-            cfg[node] = None
-    merged = OmegaConf.merge(cfg, case_cfg)
-    OmegaConf.set_struct(merged, True)
-    print(f"Geometry source '{source}': merged {case_path} over the composed config")
-    return merged
 
 
 def _sample_params(
@@ -123,6 +70,8 @@ def _sample_params(
         build_knot_times(0.0, float(simulation_time), seconds_per_knot)
     )
     sampled = params_sampler.sample_prior(time_coords, rng_key)
+    if not isinstance(sampled, xr.Dataset):
+        raise TypeError("training_data.params_sampler must produce an xarray.Dataset")
     return sampled.assign_coords(time=time_coords)
 
 
@@ -390,7 +339,7 @@ def _partition_states_into_splits(
 
 
 def run(cfg: DictConfig) -> None:
-    cfg = _apply_geometry_source(cfg)
+    validate_run_config(cfg, "surrogate_data")
     model_name = cfg.model.name
     td = cfg.training_data
 
@@ -420,6 +369,25 @@ def run(cfg: DictConfig) -> None:
     raw_states_dir.mkdir()
     print(f"Writing training data to {output_dir}")
 
+    write_run_record(
+        cfg,
+        output_dir,
+        "surrogate_data",
+        constructor_overrides=[
+            {
+                "role": "data_generation",
+                "component": "ensemble_model",
+                "values": {
+                    "ensemble_size": n_total,
+                    "num_parallel_processes": num_parallel_processes,
+                    "failure_policy": str(cfg.ensemble.failure.policy),
+                    "simulation_time": float(td.simulation_time),
+                    "output_frequency": float(td.output_frequency),
+                },
+            }
+        ],
+        save_legacy_config=False,
+    )
     OmegaConf.save(cfg, output_dir / "config.yaml", resolve=True)
 
     # --- Sample parameters ------------------------------------------------
@@ -427,6 +395,8 @@ def run(cfg: DictConfig) -> None:
     # lives under params_sampler in the config but is not a sampler constructor
     # arg, so pop it before instantiating.
     sampler_cfg = OmegaConf.to_container(td.params_sampler, resolve=True)
+    if not isinstance(sampler_cfg, dict):
+        raise TypeError("training_data.params_sampler must be a mapping")
     seconds_per_knot = float(sampler_cfg.pop("seconds_per_knot"))
     sampler_cfg["ensemble_size"] = n_total
     params_sampler = hydra.utils.instantiate(sampler_cfg)
@@ -492,9 +462,7 @@ def run(cfg: DictConfig) -> None:
         num_parallel_processes=num_parallel_processes,
         results_dir=raw_states_dir,
     )
-    # Parallel + on-disk does not support resample, so leave the default
-    # "raise" policy: any member failure aborts the whole generation run.
-    ensemble_model.configure_failure_policy(policy="raise")
+    # The configured failure policy is part of the recorded launch settings.
 
     print(
         f"Running ensemble: {n_total} members ({num_train}/{num_val}/{num_test} "
@@ -563,7 +531,7 @@ def run(cfg: DictConfig) -> None:
     print(f"Done. Training data root: {output_dir}")
 
 
-@hydra.main(  # type: ignore[misc]
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/training_data",

@@ -1,6 +1,6 @@
 """Tests for the high-rate probe re-runs (scripts/esmda/run_probe_series.py, WP3.2a).
 
-The integration test runs the ESMDA smoke shape (``tests/conf/test/smoke.yaml``)
+The integration test runs the small ESMDA configuration in `tests/conf`
 and then re-probes its single window, checking the output schema *and* that the
 high-rate snapshots the re-run produced were deleted again -- the whole point of
 the script is that the full fields are transient.
@@ -77,6 +77,7 @@ def _assert_probe_schema(
     assert np.isfinite(ds["u"].values).all()
 
 
+@pytest.mark.integration  # type: ignore[misc]
 def test_run_probe_series_smoke(
     compose_test_cfg: Callable[..., DictConfig],
 ) -> None:

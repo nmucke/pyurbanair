@@ -9,6 +9,8 @@
 # parameters, paths) stay shared at the conf root and are not part of a case.
 # `size/` and `preset/` overlays deep-merge over the domain/obs below.
 
+case_name: xie_and_castro
+
 domain:
   # Grid + physical bounds — the canonical domain for scripts/esmda/run_esmda.py.
   # Rescale a whole run with the `size/` overlays (`size=tiny` … `size=xlarge`),

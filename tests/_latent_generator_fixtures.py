@@ -38,8 +38,10 @@ import xarray as xr
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
+from tests.config_loader import TEST_CONF_DIR
+
 _WORKTREE = Path(__file__).resolve().parents[1]
-CONF_DIR = _WORKTREE / "conf"
+CONF_DIR = TEST_CONF_DIR
 SCRIPT = _WORKTREE / "scripts" / "neural_surrogate" / "train_latent_generator.py"
 
 STATE_VARS: tuple[str, ...] = ("u", "v", "w")

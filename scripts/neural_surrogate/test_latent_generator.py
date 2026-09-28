@@ -38,6 +38,7 @@ distribution -- run this before enabling generative spin-up in ESMDA.
 
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import resource
@@ -55,10 +56,10 @@ import torch  # noqa: E402
 import xarray as xr  # noqa: E402
 from hydra.utils import instantiate  # noqa: E402
 from neural_surrogates import generator_evaluation as ge  # noqa: E402
-from neural_surrogates.datasets.snapshot_history import (  # noqa: E402
-    corpus_time_config,
-)
+from neural_surrogates.datasets.snapshot_history import corpus_time_config  # noqa: E402
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
+
+from pyurbanair.config.run_record import write_run_record
 
 # Fixed source -> colour assignment (never cycled): real is the black
 # reference, the rest follow the categorical order of the evaluation palette.
@@ -267,7 +268,7 @@ def _expand(
     return t.unsqueeze(0).expand(b, *t.shape).to(device)
 
 
-@torch.no_grad()
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
 def _ae_reconstruct(
     model: Any,
     state: torch.Tensor,
@@ -290,7 +291,7 @@ def _ae_reconstruct(
     return np.concatenate(out, axis=0)
 
 
-@torch.no_grad()
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
 def _generate(
     model: Any,
     params_hist: torch.Tensor,
@@ -333,7 +334,7 @@ def _peak_memory_mb(device: torch.device) -> float:
     return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / 1024.0
 
 
-@torch.no_grad()
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
 def _benchmark_sampling(
     model: Any,
     params_hist_row: torch.Tensor,
@@ -425,7 +426,7 @@ class _SourceStore:
         chunks = [
             g["values"] for groups in self.groups[source].values() for g in groups
         ]
-        return ge.pool_values(chunks, max_values, rng)
+        return np.asarray(ge.pool_values(chunks, max_values, rng))
 
     def n(self, source: str) -> int:
         return sum(g["n"] for groups in self.groups[source].values() for g in groups)
@@ -475,7 +476,7 @@ def _load_stepper(
     return model, history
 
 
-@torch.no_grad()
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
 def _rollout_transients(
     stepper: Any,
     history: int,
@@ -987,10 +988,13 @@ def _write_report(summary: dict[str, Any], path: Path) -> None:
 
 def run(cfg: DictConfig) -> dict[str, Any]:
     """Evaluate the artifact; returns the summary dict (tests inspect it)."""
+    launch_cfg = copy.deepcopy(cfg)
     OmegaConf.set_struct(cfg, False)
     model_dir = Path(cfg.model_dir)
     out_dir = Path(cfg.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(
+        launch_cfg, out_dir, "surrogate_latent_testing", save_legacy_config=False
+    )
     if str(cfg.divergence.get("stencil", "central")) != "central":
         raise ValueError("divergence.stencil: only 'central' is implemented")
     want = torch.device(str(cfg.device))
@@ -1583,7 +1587,7 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"not JSON serialisable: {type(obj).__name__}")
 
 
-@hydra.main(
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/testing_latent_generator",

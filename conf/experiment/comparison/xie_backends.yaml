@@ -1,0 +1,14 @@
+# @package _global_
+# Named, reviewable run recipe.
+defaults:
+  - override /case: xie_and_castro
+  - override /execution: comparison
+  - override /model@models.pyudales: pyudales
+  - override /model@models.pypalm: pypalm
+  - override /params@parameter_scenarios.draw_a: dynamic_sine
+  - override /params@parameter_scenarios.draw_b: dynamic_cosine
+
+experiment:
+  workflow: comparison
+run:
+  name: xie_backends

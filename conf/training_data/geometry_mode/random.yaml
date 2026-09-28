@@ -1,0 +1,6 @@
+# @package _global_
+# Random UrbanTALES geometry pool; source selects the pool and output suffix.
+training_data:
+  geometry:
+    mode: random
+    output_name: ${training_data.geometry.source}

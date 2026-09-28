@@ -71,14 +71,10 @@ def test_no_application_stack_behind_the_library(module: str) -> None:
         f"{module} pulled in {sorted(loaded & set(FORBIDDEN))}; "
         "libs/evaluation must stay a leaf (master plan invariant 5)"
     )
-
-
-@pytest.mark.parametrize("module", NUMERIC_MODULES)  # type: ignore[misc]
-def test_numeric_modules_do_not_import_matplotlib(module: str) -> None:
-    loaded = _import_and_report((module,))
-    assert (
-        "matplotlib" not in loaded
-    ), f"{module} imported matplotlib; it belongs to evaluation.style/figures only"
+    if module in NUMERIC_MODULES:
+        assert (
+            "matplotlib" not in loaded
+        ), f"{module} imported matplotlib; it belongs to evaluation.style/figures only"
 
 
 # WP0.2 could not import these from pyurbanair.utils (leaf rule) and could not
@@ -112,6 +108,8 @@ def test_inlined_velocity_helpers_match_their_originals(
     copy = ast.parse(inspect.getsource(getattr(figures, copy_name))).body[0]
     original_fn = getattr(importlib.import_module(original_module), original_name)
     original = ast.parse(inspect.getsource(original_fn)).body[0]
+    assert isinstance(copy, (ast.FunctionDef, ast.AsyncFunctionDef))
+    assert isinstance(original, (ast.FunctionDef, ast.AsyncFunctionDef))
 
     # Compare bodies only: the copy is renamed (leading underscore) and may
     # carry a different docstring, but the arithmetic must not diverge.

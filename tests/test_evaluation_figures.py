@@ -46,9 +46,9 @@ coverage of the writer lives in ``test_evaluation_mean_fields.py``.
 
 Figure internals are read back through a ``Figure.savefig`` spy
 (``captured_figures``) rather than through a helper the implementation would
-have to expose: it needs no change to the five frozen signatures, and a
-``plt.close``d figure keeps its artists, so the bars, reference lines and
-colour norms are all still readable after the function returns.
+have to expose. Artist tests capture the completed figure without encoding a
+PNG; export tests use the real renderer. A ``plt.close``d figure keeps its
+artists, so bars, lines and colour norms remain readable.
 
 Specification: ``docs/plans/esmda_evaluation/phase1_metrics_and_figures.md``
 (WP1.5); conventions: ``docs/plans/esmda_turbulence_evaluation.md`` §7.
@@ -106,13 +106,26 @@ def _close_figures() -> Iterator[None]:
 
 @pytest.fixture  # type: ignore[misc]
 def captured_figures(monkeypatch: pytest.MonkeyPatch) -> list[Figure]:
-    """Every ``Figure`` a plot function saves, in save order.
+    """Capture saved figures for artist assertions without rendering pixels.
 
     ``style.save_png`` closes the figure it wrote, but closing only drops it
     from pyplot's registry -- the axes, patches and lines survive, so this is
     enough to read a figure's content back without the implementation growing
     an accessor for the tests' benefit.
     """
+    saved: list[Figure] = []
+
+    def _spy(self: Figure, *args: object, **kwargs: object) -> object:
+        saved.append(self)
+        return None
+
+    monkeypatch.setattr(Figure, "savefig", _spy)
+    return saved
+
+
+@pytest.fixture  # type: ignore[misc]
+def rendered_figures(monkeypatch: pytest.MonkeyPatch) -> list[Figure]:
+    """Capture figures while retaining the real PNG export contract."""
     saved: list[Figure] = []
     original = Figure.savefig
 
@@ -996,7 +1009,7 @@ def test_parameter_marginals_render_without_a_prior(tmp_path: pathlib.Path) -> N
 
 
 def test_parameter_marginals_render_without_a_truth(
-    tmp_path: pathlib.Path, captured_figures: list[Figure]
+    tmp_path: pathlib.Path, rendered_figures: list[Figure]
 ) -> None:
     # A run against measured data has no true parameters. The marginals are
     # still worth drawing -- prior vs posterior contraction does not need a
@@ -1007,7 +1020,7 @@ def test_parameter_marginals_render_without_a_truth(
     out = tmp_path / "p1.png"
 
     _assert_png(plot_parameter_marginals(posterior, None, out, prior_params=prior), out)
-    annotations = _z_annotations(captured_figures[-1])
+    annotations = _z_annotations(rendered_figures[-1])
     assert annotations and all("no truth" in a for a in annotations), annotations
 
 
@@ -1259,7 +1272,7 @@ def test_station_profiles_exclude_the_extrapolated_top_level(
 def test_station_profiles_keep_the_validation_columns_when_truncating(
     tmp_path: pathlib.Path,
     caplog: pytest.LogCaptureFixture,
-    captured_figures: list[Figure],
+    rendered_figures: list[Figure],
 ) -> None:
     # More columns than fit: the held-out sensors are the ones a reader came
     # for, so they are kept first -- and the drop is logged, never silent.
@@ -1277,7 +1290,7 @@ def test_station_profiles_keep_the_validation_columns_when_truncating(
         result = plot_station_profiles(fields, out, max_stations=3)
 
     _assert_png(result, out)
-    titles = _station_panel_titles(captured_figures[-1])
+    titles = _station_panel_titles(rendered_figures[-1])
     assert len(titles) == 3, f"expected 3 station columns, got {titles}"
     assert all(
         t.lower().startswith("validation") for t in titles
@@ -1539,7 +1552,7 @@ def test_mean_slices_keep_the_difference_out_of_the_shared_norm(
 def test_mean_slices_never_render_a_column_with_no_finite_cell(
     tmp_path: pathlib.Path,
     caplog: pytest.LogCaptureFixture,
-    captured_figures: list[Figure],
+    rendered_figures: list[Figure],
 ) -> None:
     # One diverged member is enough to leave a whole accumulated mean field
     # non-finite, and the union-of-columns finiteness check does not fire on
@@ -1562,7 +1575,7 @@ def test_mean_slices_never_render_a_column_with_no_finite_cell(
         result = plot_mean_slices(fields, out)
 
     _assert_png(result, out)
-    fig = captured_figures[-1]
+    fig = rendered_figures[-1]
     titles, text = _axes_titles(fig), _axes_text(fig)
     assert "truth" in titles and "posterior" in titles, (
         "the finite columns stopped rendering: one dead column must not cost "
@@ -1578,7 +1591,7 @@ def test_mean_slices_never_render_a_column_with_no_finite_cell(
 def test_mean_slices_keep_a_dead_subject_column_in_the_grid_and_say_why(
     tmp_path: pathlib.Path,
     caplog: pytest.LogCaptureFixture,
-    captured_figures: list[Figure],
+    rendered_figures: list[Figure],
 ) -> None:
     # The diverged-member case, on the column the figure is ABOUT. Dropping it
     # leaves "Truth | Prior mean" under the suptitle "Time-mean u on horizontal
@@ -1599,7 +1612,7 @@ def test_mean_slices_keep_a_dead_subject_column_in_the_grid_and_say_why(
         result = plot_mean_slices(fields, out)
 
     _assert_png(result, out)
-    fig = captured_figures[-1]
+    fig = rendered_figures[-1]
     assert "posterior mean" in _axes_titles(fig), (
         "the posterior column vanished from the grid: the figure reads as a "
         "complete truth-vs-prior comparison"
@@ -2087,7 +2100,7 @@ def test_sensor_fans_y_limits_include_the_observation_envelope(
 def test_sensor_fans_skip_a_truth_whose_cadence_does_not_match(
     tmp_path: pathlib.Path,
     caplog: pytest.LogCaptureFixture,
-    captured_figures: list[Figure],
+    rendered_figures: list[Figure],
 ) -> None:
     # A truth of a different length is a truth on a different axis, and the only
     # honest options are to be told what that axis is or to leave it out.
@@ -2104,7 +2117,7 @@ def test_sensor_fans_skip_a_truth_whose_cadence_does_not_match(
 
     _assert_png(result, out)
     assert not _labelled_lines(
-        captured_figures[-1], "Truth"
+        rendered_figures[-1], "Truth"
     ), "a truth on a mismatched cadence was drawn on an invented axis"
     assert caplog.records, "the truth was dropped without a word about it"
 
@@ -2112,7 +2125,7 @@ def test_sensor_fans_skip_a_truth_whose_cadence_does_not_match(
 def test_sensor_fans_drop_a_non_finite_member_and_still_draw_the_fan(
     tmp_path: pathlib.Path,
     caplog: pytest.LogCaptureFixture,
-    captured_figures: list[Figure],
+    rendered_figures: list[Figure],
 ) -> None:
     # ``np.quantile`` propagates NaN, so with an ``.any()``-shaped guard a single
     # diverged member empties the bands and makes the median all-NaN: the panel
@@ -2131,7 +2144,7 @@ def test_sensor_fans_drop_a_non_finite_member_and_still_draw_the_fan(
         result = plot_sensor_fans(truth, ensemble, out)
 
     _assert_png(result, out)
-    fig = captured_figures[-1]
+    fig = rendered_figures[-1]
     medians = _labelled_lines(fig, "Posterior median")
     assert medians, "the fan was not drawn at all"
     for line in medians:
@@ -2813,8 +2826,26 @@ def _captured_kwargs(
 
         return _stub
 
-    for name in names + ("animate_rollout_state",):
+    # The complete-run and old-run tests above exercise real exports. Wiring
+    # tests only need the arguments passed to the selected functions, so avoid
+    # redrawing every unrelated figure on each parameterized case.
+    figure_calls = (
+        "plot_rollout_time_evolution",
+        "plot_parameter_error",
+        "plot_final_state_with_obs",
+        "plot_sensor_timeseries",
+        "plot_parameter_marginals",
+        "plot_station_profiles",
+        "plot_mean_slices",
+        "plot_sensor_fans",
+        "plot_spectra",
+        "plot_data_mismatch_decay",
+        "plot_rank_histogram",
+        "animate_rollout_state",
+    )
+    for name in figure_calls:
         monkeypatch.setattr(wiring, name, _record(name))
+    assert set(names) <= set(figure_calls)
     return recorded
 
 

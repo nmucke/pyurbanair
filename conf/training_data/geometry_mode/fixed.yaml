@@ -1,0 +1,6 @@
+# @package _global_
+# Fixed geometry is selected solely by case=.
+training_data:
+  geometry:
+    mode: fixed
+    output_name: ${case_name}

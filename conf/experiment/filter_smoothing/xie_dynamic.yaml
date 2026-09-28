@@ -1,0 +1,16 @@
+# @package _global_
+# Named, reviewable run recipe.
+defaults:
+  - override /case: xie_and_castro
+  - override /execution: assimilation
+  - override /model@truth_model: pyudales
+  - override /model@assim_model: pyudales
+  - override /params@truth_params: dynamic_sine
+  - override /params@prior_params: dynamic
+  - override /esmda/smoother: dynamic
+  - override /filtering/analysis: stochastic
+
+experiment:
+  workflow: filter_smoothing
+run:
+  name: xie_dynamic

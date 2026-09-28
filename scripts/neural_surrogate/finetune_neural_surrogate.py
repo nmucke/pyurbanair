@@ -21,6 +21,7 @@ weights are frozen and only LoRA trains, and the trainer persists an always-vali
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -38,12 +39,17 @@ from neural_surrogates.finetuning import (
 from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
 from omegaconf import DictConfig, OmegaConf
 
+from pyurbanair.config.run_record import write_run_record
 
-def _as_list(value) -> list | None:
+
+def _as_list(value: Any) -> list[Any] | None:
     """OmegaConf list / None -> plain python list / None."""
     if value is None:
         return None
-    return list(OmegaConf.to_container(value) if OmegaConf.is_config(value) else value)
+    plain = OmegaConf.to_container(value) if OmegaConf.is_config(value) else value
+    if not isinstance(plain, (list, tuple)):
+        raise TypeError("Expected a sequence in the fine-tuning configuration")
+    return list(plain)
 
 
 def _read_on_disk_best_val(path: Path) -> float | None:
@@ -61,7 +67,7 @@ def _read_on_disk_best_val(path: Path) -> float | None:
         return None
 
 
-def _check_ae_stepper_match(ae_arch: DictConfig, model) -> None:
+def _check_ae_stepper_match(ae_arch: DictConfig, model: Any) -> None:
     """Fail loud if the pre-trained AE and the stepper node disagree.
 
     The stepper loads the AE's ``encoder.pt`` / ``decoder.pt`` and inherits its
@@ -139,7 +145,7 @@ def _check_ae_stepper_match(ae_arch: DictConfig, model) -> None:
         )
 
 
-def _unfreeze_trainable_modules(peft_model, tokens: list[str]) -> int:
+def _unfreeze_trainable_modules(peft_model: torch.nn.Module, tokens: list[str]) -> int:
     """Unfreeze the DFT's fully-trained NEW modules by (base-relative) name.
 
     ``tokens`` are dotted paths / segments relative to the base architecture
@@ -162,6 +168,7 @@ def _unfreeze_trainable_modules(peft_model, tokens: list[str]) -> int:
 
 
 def run(cfg: DictConfig) -> None:
+    launch_cfg = copy.deepcopy(cfg)
     OmegaConf.set_struct(cfg, False)
 
     if cfg.get("pretrained_model_dir") in (None, "???"):
@@ -405,7 +412,9 @@ def run(cfg: DictConfig) -> None:
     # the original dir), the fine-tune `dataset` (root/state_vars/param_vars),
     # and a `pretrained:` provenance block.
     out_dir = Path("model_weights") / cfg.model_name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    write_run_record(
+        launch_cfg, out_dir, "surrogate_finetuning", save_legacy_config=False
+    )
     if is_dft:
         # Stamp the stepper node so ESMDA rebuilds the net from the merged
         # weights.pt alone -- no dependency on the AE dir still existing. The
@@ -488,7 +497,7 @@ def run(cfg: DictConfig) -> None:
         )
 
 
-@hydra.main(
+@hydra.main(  # type: ignore[misc, unused-ignore]
     version_base=None,
     config_path="../../conf",
     config_name="neural_surrogate/finetuning",
