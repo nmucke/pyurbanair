@@ -10,66 +10,11 @@ from omegaconf import DictConfig
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-# Test smoke shape: the smallest, fastest run the solvers accept — a tiny
-# [0,20]^2 x [0,10] domain, a 3 s window and a 2-member ensemble. Applied to
-# every composed test config so the suite exercises the code paths without
-# producing a meaningful flow (formerly the deleted `+scale=test` overlay).
-#
-# DO NOT shrink this further expecting the suite to get faster — that was
-# measured and it does not. At this size the e2e suite is dominated by FIXED
-# per-test overhead (process spawn, imports, JAX/solver setup, the per-model
-# compile check, NetCDF round-trips), not by the flow solve, which is already
-# only a few thousand cell-updates. A/B on three representative tests with a
-# warm build tree: halving nx/ny to 10 and cutting spinup_time to 1.0 moved the
-# uDALES case 16.6s -> 16.3s (noise) and the whole 3-test subset 131s -> 115s,
-# while the FULL suite came out SLOWER (672s -> 772s) — i.e. inside this
-# machine's run-to-run spread. The coarser grid also costs real coverage: at
-# dx=2 m the Xie & Castro blocks in this corner of the array (5–10 m across, x
-# edges at 5/15, y edges every 5 m) are down to ~2 cells, close to voxelizing
-# away entirely and leaving an empty channel. Not worth it.
-#
-# Each knob is at a floor for a reason:
-#
-# * ``bounds`` are fixed by the TESTS, not the physics — test_run_esmda and
-#   test_run_filtering place sensors at x=18, so a narrower domain would put
-#   the observations outside the grid.
-# * ``nx``/``ny`` must stay EVEN (PALM's poisfft rejects an odd number of grid
-#   points along a cyclic direction, PAC0071/PAC0072).
-# * ``simulation_time`` is pinned to 3.0 by the e2e tests' own
-#   ``<algorithm>.interval_seconds=3.0`` (esmda/filtering); one
-#   interval is the minimum the aggregator can score.
-# * ``output_frequency`` 1.0 -> 4 frames per window. Time interpolation and the
-#   temporal observation operator need more than a single frame.
-# * ``ensemble_size`` 2 — the ESMDA update needs >=2 members.
-# * ``spinup_time`` is only prepended to the FIRST window (see
-#   base_rollout_forward_model.disable_spinup); it keeps the spin-up-and-trim
-#   path alive.
-_SMOKE_OVERRIDES = [
-    "domain.nx=20",
-    "domain.ny=20",
-    "domain.nz=4",
-    "domain.bounds=[[0.0,20.0],[0.0,20.0],[0.0,10.0]]",
-    "time.simulation_time=3.0",
-    "time.output_frequency=1.0",
-    "time.spinup_time=3.0",
-    "time.seconds_per_knot=1.5",
-    "ensemble.ensemble_size=2",
-    "ensemble.num_parallel_processes=1",
-    # The case's held-out sensors sit at the real geometry's coordinates, all of
-    # which fall OUTSIDE the 20x20x10 smoke box, so the validation sensor set was
-    # present but scored nothing inside the domain. Pin one held-out sensor into
-    # the smoke box — (16, 18) is a fluid street-level cell just downstream of the
-    # single block the smoke domain crops (x=[5,15], y=[5,15], roof at the domain
-    # top) — so the validation branches (sensor_statistics.validation, the S5
-    # validation columns, the D1 held-out histograms) run under CI.
-    # ``++`` because these keys exist only in the xie_and_castro case: barcelona
-    # defines no held-out sensors, and a plain assignment would make any
-    # ``compose_test_cfg(["case=barcelona"])` die with a Hydra "no match in
-    # config" error instead of composing.
-    "++obs.validation_x_points=[16.0]",
-    "++obs.validation_y_points=[18.0]",
-    "++obs.validation_z_points=[2.0]",
-]
+# The common smoke shape lives in tests/conf/test/smoke.yaml. Keep the notes
+# here: shrinking its 20x20x4 grid or 3 s window did not improve full-suite
+# runtime in prior benchmarks, and would remove geometry/sensor coverage.
+# nx/ny must stay even for PALM; two members are needed for ESMDA updates.
+_TEST_CONFIG_DIR = (pathlib.Path(__file__).parent / "conf").resolve()
 
 
 # run_esmda.yaml is the one entry point that gets retuned for whatever
@@ -179,7 +124,8 @@ def _compose_test_cfg(
         cfg = compose(
             config_name=config_name,
             overrides=[
-                *_SMOKE_OVERRIDES,
+                f"hydra.searchpath=[{_TEST_CONFIG_DIR.as_uri()}]",
+                "+test=smoke",
                 *esmda_overrides,
                 *_isolated_path_overrides(),
                 *caller_overrides,

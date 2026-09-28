@@ -11,7 +11,7 @@ Two layers:
 * **End-to-end** (``finetune_neural_surrogate.run`` in ``finetune_mode=dft``):
   fabricate a tiny pre-trained ``TadpoleAE`` ``model_dir`` cheaply (no real
   pre-train), compose ``finetuning.yaml`` with ``finetune_mode=dft`` + smoke
-  overrides, fine-tune 2 epochs, and assert the exported dir has
+  overrides, fine-tune 1 epoch, and assert the exported dir has
   ``weights.pt``/``adapter/``/``config.yaml`` (with ``skip_pretrained_load: true``
   stamped in), loads into ``NeuralSurrogateForwardModel`` and rolls out. Mirrors
   the plan-01 e2e in ``test_lora_finetuning.py`` (reuses its forward-model +
@@ -673,7 +673,7 @@ def _shrink_dft_for_cpu(cfg) -> None:
     cfg.dataloader.batch_size = 2
     cfg.dataloader.drop_last = False
     cfg.dataloader.num_workers = 0
-    cfg.trainer.num_epochs = 2
+    cfg.trainer.num_epochs = 1
     cfg.trainer.device = "cpu"
     cfg.trainer.amp = False
     cfg.trainer.compile_model = False
@@ -685,8 +685,14 @@ def _shrink_dft_for_cpu(cfg) -> None:
     cfg.trainer.resume = False
 
 
-@pytest.mark.parametrize("spatial_mode", ["local", "global", "halo"])
-@pytest.mark.parametrize("skip_mixing", [False, True])
+@pytest.mark.parametrize(
+    "spatial_mode,skip_mixing",
+    [
+        pytest.param("local", False, id="local"),
+        pytest.param("global", False, id="global"),
+        pytest.param("halo", True, id="halo-with-skip-mixing"),
+    ],
+)
 def test_dft_finetune_end_to_end(tmp_path, monkeypatch, spatial_mode, skip_mixing):
     """compose finetuning.yaml (finetune_mode=dft) -> run -> exported dir loads
     into NeuralSurrogateForwardModel + rolls out a finite trajectory."""

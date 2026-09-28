@@ -46,6 +46,11 @@ jobs:
         env:
           OMPI_MCA_pml: ob1
           OMPI_MCA_btl: self,sm,tcp
+          # Tiny test tensors cost more to dispatch across threads than to
+          # compute. These limits also apply in forkserver ensemble workers.
+          OMP_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
         run: pixi run -e dev py.test
 
   render-tests:

@@ -424,7 +424,7 @@ def test_parameter_esmda_runs_with_correlation_localization(
             "esmda/localization=correlation",
             "esmda.localization.truncation_correlation=0.2",
             "ensemble.ensemble_size=4",
-            "ensemble.num_parallel_processes=2",
+            "ensemble.num_parallel_processes=1",
             "esmda.num_steps=1",
             "esmda.num_assimilation_windows=1",
             "run.skip_viz=true",

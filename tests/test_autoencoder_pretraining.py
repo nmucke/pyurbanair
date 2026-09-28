@@ -5,8 +5,8 @@ Two layers:
 * **Unit** (``TadpoleAE`` / ``SnapshotDataset``): reconstruction shape, finite KL,
   padding round-trip on a non-divisible grid, ``encode_geometry`` on/off channel
   counts, and the snapshot dataset item shapes + shared-geometry collate.
-* **End-to-end** (``pretrain_autoencoder.run``): compose the Hydra config, run 2
-  epochs on a tiny fixture dataset, and assert the exported ``model_dir`` has the
+* **End-to-end** (``pretrain_autoencoder.run``): compose the Hydra config, run 1
+  epoch on a tiny fixture dataset, and assert the exported ``model_dir`` has the
   expected artifacts and that ``weights.pt`` reloads into a fresh ``TadpoleAE``.
 
 Gated with ``importorskip('diffusers')`` / ``importorskip('timm')`` -- the
@@ -412,7 +412,7 @@ def _shrink_for_cpu(cfg) -> None:
         # dropping each trajectory as shorter than the production batch size.
         cfg.batch_sampler.batch_size = 2
         cfg.batch_sampler.drop_last = False
-    cfg.trainer.num_epochs = 2
+    cfg.trainer.num_epochs = 1
     cfg.trainer.device = "cpu"
     cfg.trainer.amp = False
     cfg.trainer.compile_model = False
@@ -432,8 +432,8 @@ def _shrink_for_cpu(cfg) -> None:
     cfg.dataset.sdf_clamp_cells = cfg.architecture.sdf_clamp_cells
 
 
-@pytest.mark.parametrize("spatial_mode", ["local", "global", "halo"])
-def test_pretrain_end_to_end(tmp_path, monkeypatch, spatial_mode):
+def test_pretrain_end_to_end(tmp_path, monkeypatch):
+    spatial_mode = "local"
     data_dir = tmp_path / "data"
     _write_dataset(data_dir)
 

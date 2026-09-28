@@ -59,6 +59,18 @@ def test_smoke_composer_stabilizes_single_udales_mount(
     assert cfg.model.forward_model.inlet_turbulence.enabled is False
 
 
+def test_smoke_config_keeps_caller_overrides(
+    compose_test_cfg: Callable[..., Any],
+) -> None:
+    cfg = compose_test_cfg(["domain.nx=24", "case=barcelona"])
+
+    assert cfg.domain.nx == 24
+    assert cfg.domain.ny == 20
+    assert cfg.time.simulation_time == 3.0
+    assert cfg.ensemble.ensemble_size == 2
+    assert cfg.obs.validation_x_points == [16.0]
+
+
 def test_smoke_composer_stabilizes_dual_udales_mounts(
     compose_test_cfg: Callable[..., Any],
 ) -> None:

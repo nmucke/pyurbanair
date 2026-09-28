@@ -61,7 +61,7 @@ pixi run -e dev pre-commit      # black + isort + mypy on staged files
 
 - Tests compose Hydra configs and call each script's `run(cfg)` directly; a
   tiny "smoke shape" (small domain / short window / 2-member ensemble) keeps
-  them fast. See `tests/conftest.py` (`compose_test_cfg`, `_SMOKE_OVERRIDES`).
+  them fast. See `tests/conftest.py` (`compose_test_cfg`) and `tests/conf/test/smoke.yaml`.
 - Forward runs: `python scripts/run_forward_model.py model=pylbm ...`
 - Assimilation: `python scripts/esmda/run_esmda.py ...` (the single ESMDA entry point;
   mode = `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`).

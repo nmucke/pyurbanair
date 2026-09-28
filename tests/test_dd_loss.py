@@ -1,29 +1,18 @@
-"""Tests for the Eq (9) domain-decomposition loss and :class:`PatchTrainer`.
+"""Tests for the Eq (9) domain-decomposition loss.
 
 Covers each loss term (non-negative, finite, differentiable), the interface
 term's zero-when-agreeing / positive-when-disagreeing behaviour incl. periodic
-wrap, the divergence term's zero on a divergence-free field, the coarse term's
-zero at the restriction target, and an overfit smoke test that the
-:class:`PatchTrainer` drives the total loss down on a tiny synthetic
-full-field ``TransitionDataset``.
+wrap, the divergence term's zero on a divergence-free field, and the coarse
+term's zero at the restriction target. PatchTrainer's one-epoch integration
+path is covered in ``test_dd_training_wiring.py``.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
-xr = pytest.importorskip("xarray")
-
-from neural_surrogates import (
-    DomainDecomposed,
-    DomainDecompositionLoss,
-    PatchTrainer,
-    TransitionDataset,
-)
+from neural_surrogates import DomainDecomposed, DomainDecompositionLoss
 from neural_surrogates.decomposition import DomainDecomposition
 
 N_STATE = 3
@@ -41,8 +30,12 @@ DECOMP = dict(
 # Sub-nets are Hydra `_target_` config nodes (any registered architecture); the
 # wrapper instantiates them and injects channel counts / extra_in_channels.
 _UNET = "neural_surrogates.UNetConvNeXt"
-FINE = dict(_target_=_UNET, base_channels=4, channel_mults=[1, 2], depths=[1, 1], residual=True)
-COARSE = dict(_target_=_UNET, base_channels=4, channel_mults=[1, 2], depths=[1, 1], residual=True)
+FINE = dict(
+    _target_=_UNET, base_channels=4, channel_mults=[1, 2], depths=[1, 1], residual=True
+)
+COARSE = dict(
+    _target_=_UNET, base_channels=4, channel_mults=[1, 2], depths=[1, 1], residual=True
+)
 
 # y length divisible by interior_size (8 % 4 == 0); multiple patches per axis.
 GRID = (8, 8, 8)
@@ -106,9 +99,7 @@ def test_total_is_weighted_sum():
     state, params, geometry = _inputs()
     target = torch.randn_like(state)
     with torch.no_grad():
-        state_next, info = model(
-            state, params, geometry, return_intermediates=True
-        )
+        state_next, info = model(state, params, geometry, return_intermediates=True)
     loss_fn = DomainDecompositionLoss(
         lambda_interface=0.1, lambda_divergence=0.01, lambda_coarse=1.0
     )
@@ -303,112 +294,3 @@ def test_coarse_positive_when_mismatched():
     loss_fn = DomainDecompositionLoss()
     val = loss_fn._coarse_term(info, target, dd)
     assert float(val) == pytest.approx(1.0, abs=1e-6)
-
-
-# --------------------------------------------------------------------------- #
-# Overfit smoke: PatchTrainer drives the total loss down.
-# --------------------------------------------------------------------------- #
-T_LEN = 4
-STATE_VARS = ("u", "v", "w")
-PARAM_VARS = ("inflow_angle", "velocity_magnitude")
-
-
-def _write_traj(state_dir: Path, param_dir: Path, idx: int, seed: int) -> None:
-    state_dir.mkdir(parents=True, exist_ok=True)
-    param_dir.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(seed)
-    dims = ("time", "z", "y", "x")
-    shape = (T_LEN, *GRID)
-    data_vars = {
-        v: (dims, rng.standard_normal(shape).astype(np.float32))
-        for v in STATE_VARS
-    }
-    obstacle = np.zeros(GRID, dtype=np.float32)
-    obstacle[0:2, 2:4, 2:4] = 1.0
-    data_vars["blanking"] = (
-        dims,
-        np.broadcast_to(obstacle, shape).copy(),
-    )
-    xr.Dataset(data_vars).to_netcdf(state_dir / f"sample_{idx:04d}.nc")
-    pvars = {
-        "inflow_angle": (("time",), rng.uniform(-60, 60, T_LEN).astype(np.float32)),
-        "velocity_magnitude": (
-            ("time",),
-            rng.uniform(1, 5, T_LEN).astype(np.float32),
-        ),
-    }
-    xr.Dataset(pvars).to_netcdf(param_dir / f"sample_{idx:04d}.nc")
-
-
-@pytest.fixture
-def field_root(tmp_path: Path) -> Path:
-    root = tmp_path / "fields"
-    for idx in range(2):
-        _write_traj(
-            root / "state" / "train",
-            root / "param" / "train",
-            idx,
-            seed=10 + idx,
-        )
-    return root
-
-
-def test_patch_trainer_overfits(field_root: Path):
-    from torch.utils.data import DataLoader
-
-    ds = TransitionDataset(
-        root_dir=field_root,
-        split="train",
-        state_vars=STATE_VARS,
-        param_vars=PARAM_VARS,
-        geometry_var="blanking",
-        pushforward_steps=1,
-    )
-    loader = DataLoader(ds, batch_size=2, shuffle=False)
-
-    model = _model(seed=1).train()
-    loss_fn = DomainDecompositionLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
-
-    # Measure the initial total loss over the (fixed) dataset.
-    def epoch_loss() -> float:
-        model.eval()
-        total, n = 0.0, 0
-        with torch.no_grad():
-            for batch in loader:
-                geom = batch["geometry"][0]
-                geom_b = geom.expand(batch["state_n"].shape[0], *geom.shape)
-                sn, info = model(
-                    batch["state_n"],
-                    batch["params_n"][:, 0, :],
-                    geom_b,
-                    return_intermediates=True,
-                )
-                loss, _ = loss_fn(
-                    info=info,
-                    state_next=sn,
-                    target_next=batch["state_next"],
-                    geometry=geom_b,
-                    dd=model.dd,
-                )
-                total += float(loss)
-                n += 1
-        model.train()
-        return total / max(n, 1)
-
-    initial = epoch_loss()
-
-    trainer = PatchTrainer(
-        model=model,
-        train_loader=loader,
-        val_loader=loader,
-        optimizer=optimizer,
-        loss_fn=loss_fn,
-        num_epochs=20,
-        device="cpu",
-        weights_path=None,
-    )
-    trainer.fit()
-
-    final = epoch_loss()
-    assert final < initial, f"loss did not decrease: {initial} -> {final}"

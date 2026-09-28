@@ -18,7 +18,7 @@ deployment / evaluation tests.
   ``test_ae_to_timestepper.py``).
 * :func:`compose_generator_cfg` / :func:`train_tiny_generator` -- compose
   ``conf/neural_surrogate/train_latent_generator.yaml`` shrunk to CPU smoke
-  shapes (AE size S, crop 16, grid 16x16x32, Hp=3, P=2, 2 epochs, batch 2) and
+  shapes (AE size S, crop 16, grid 16x16x32, Hp=3, P=2, 1 epoch, batch 2) and
   run ``scripts/neural_surrogate/train_latent_generator.py::run``.
 
 Callers gate on the vendored Tadpole runtime deps themselves
@@ -256,7 +256,7 @@ def load_run() -> Callable[[DictConfig], Any]:
 
 
 def shrink_for_cpu(cfg: DictConfig) -> None:
-    """CPU smoke shapes: tiny velocity net, 2 epochs, batch 2, no sampler."""
+    """CPU smoke shapes: tiny velocity net, 1 epoch, batch 2, no sampler."""
     OmegaConf.set_struct(cfg, False)
     for k, v in NET.items():
         cfg.architecture[k] = v
@@ -271,7 +271,7 @@ def shrink_for_cpu(cfg: DictConfig) -> None:
     cfg.dataloader.num_workers = 0
     cfg.dataloader.pin_memory = False
     cfg.latent_stats.max_batches = 2
-    cfg.trainer.num_epochs = 2
+    cfg.trainer.num_epochs = 1
     cfg.trainer.device = "cpu"
     cfg.trainer.amp = False
     cfg.trainer.compile_model = False

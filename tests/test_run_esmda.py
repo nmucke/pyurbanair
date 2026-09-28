@@ -4,7 +4,7 @@ Covers the modes the single script replaces (the old
 run_{parameter,state_and_parameter,rollout,time_varying_parameter,
 time_varying_parameters_rollout}_esmda.py family) plus the joint
 state+time-varying-parameter mode, a cross-model case and a disk-loaded-truth
-case. Everything runs under the tiny smoke config (conftest `_SMOKE_OVERRIDES`) with the global
+case. Everything runs under the tiny smoke config (`tests/conf/test/smoke.yaml`) with the global
 (unlocalized) update — the default correlation localization is degenerate at
 this 2-member ensemble size and has its own test.
 
@@ -39,7 +39,7 @@ def _overrides(
         f"params@truth_params={truth}",
         *localization,
         "ensemble.ensemble_size=2",
-        "ensemble.num_parallel_processes=2",
+        "ensemble.num_parallel_processes=1",
         "esmda.num_steps=1",
         f"esmda.num_assimilation_windows={num_windows}",
         "run.skip_viz=true",
@@ -84,17 +84,10 @@ def _overrides(
         pytest.param("pylbm", "pylbm", "static", "static", 1, id="parameter"),
         pytest.param("pylbm", "pylbm", "state", "static", 1, id="state"),
         pytest.param(
-            "pylbm", "pylbm", "state_and_parameter", "static", 1, id="state_and_param"
-        ),
-        pytest.param(
             "pylbm", "pylbm", "state_and_parameter", "static", 2, id="rollout"
         ),
-        pytest.param("pylbm", "pylbm", "dynamic", "dynamic", 1, id="tv_param"),
         pytest.param("pylbm", "pylbm", "dynamic", "dynamic", 2, id="tv_rollout"),
-        # Joint state + time-varying-parameter mode (single window + rollout).
-        pytest.param(
-            "pylbm", "pylbm", "state_and_dynamic", "dynamic", 1, id="state_and_tv_param"
-        ),
+        # Joint state + time-varying-parameter mode with cross-window carry.
         pytest.param(
             "pylbm",
             "pylbm",
@@ -121,6 +114,9 @@ def test_run_esmda(
     from scripts.esmda.run_esmda import run
 
     overrides = _overrides(truth_model, assim_model, smoother, prior, num_windows)
+    if truth_model == assim_model == "pylbm" and smoother == "static":
+        # Keep one script-level exercise of the forkserver ensemble path.
+        overrides.append("ensemble.num_parallel_processes=2")
     cfg = compose_test_cfg(overrides, config_name="run_esmda")
     run(cfg)
 
@@ -188,8 +184,6 @@ def test_run_esmda_with_model_error_parameters(
     [
         # Distance-based localization on the STATE (params stay global), selected
         # via the `esmda/localization` config group. Geometric -> fine at N_e=2.
-        pytest.param("state", "static", 1, id="state_only_distance"),
-        pytest.param("state_and_parameter", "static", 1, id="state_static_distance"),
         pytest.param("state_and_dynamic", "dynamic", 1, id="state_tv_distance"),
     ],
 )

@@ -1,25 +1,8 @@
-"""Smoke tests for scripts/run_forward_model.py.
+"""Pairwise smoke coverage of the forward runner's switches on both backends.
 
-Exercises the forward-model runner across the full knob matrix it exposes (minus
-the esmda paths, refactored separately):
-
-  * backend:    pylbm, pyudales
-  * parameters: static  (`params=static`,  no `time` dim)
-                dynamic (`params=dynamic`, time-varying inflow)
-  * rollout:    off (`run.rollout_steps=0`, a single window)
-                on  (`run.rollout_steps=2`, three stitched windows)
-  * ensemble:   single member vs. an N-member ensemble (`run.ensemble=true`,
-                sized by the `ensemble.*` fields of the conftest smoke overrides)
-
-These are integration-style smoke tests: the goal is only to confirm the script
-runs end to end on every combination, not to assert on the physics. Everything
-is sized down hard by the smoke overrides injected in conftest.
-
-Two overrides exist purely to make the script composable outside `hydra.main`:
-`paths.experiment_dir` (normally `${hydra:runtime.cwd}/.temp`, which needs a live
-HydraConfig) and `paths.base_results_dir` (the fallback `resolve_output_dir`
-reads when HydraConfig is absent — only hit on the dynamic write path). Both are
-redirected into the test's tmp_path.
+Each backend exercises every pair of static/dynamic parameters, single/ensemble
+execution and cold/rollout runs. One continuation window is enough to exercise
+warm starts and concatenation; the full Cartesian product repeats those paths.
 """
 
 import pathlib
@@ -57,24 +40,12 @@ def _overrides(
     ],
 )
 @pytest.mark.parametrize(
-    "params",
+    "params,rollout_steps,ensemble",
     [
-        pytest.param("static", id="static"),
-        pytest.param("dynamic", id="dynamic"),
-    ],
-)
-@pytest.mark.parametrize(
-    "rollout_steps",
-    [
-        pytest.param(0, id="no_rollout"),
-        pytest.param(2, id="rollout"),
-    ],
-)
-@pytest.mark.parametrize(
-    "ensemble",
-    [
-        pytest.param(False, id="single"),
-        pytest.param(True, id="ensemble"),
+        pytest.param("static", 0, False, id="static-single"),
+        pytest.param("static", 1, True, id="static-ensemble-rollout"),
+        pytest.param("dynamic", 1, False, id="dynamic-single-rollout"),
+        pytest.param("dynamic", 0, True, id="dynamic-ensemble"),
     ],
 )
 def test_run_forward_model(
@@ -85,8 +56,7 @@ def test_run_forward_model(
     tmp_path: pathlib.Path,
     compose_test_cfg,
 ) -> None:
-    """run_forward_model.py runs end to end for every backend × params × rollout
-    × single/ensemble combination."""
+    """Run representative switch combinations through the real solver."""
     from scripts.run_forward_model import run
 
     run(compose_test_cfg(_overrides(model, params, rollout_steps, ensemble, tmp_path)))

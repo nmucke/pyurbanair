@@ -55,6 +55,18 @@ The **mode** of a run is the cross product of its config groups — no separate
 mode file is required. `run_esmda.py` handles every former assimilation script
 via `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`.
 
+### Test configuration
+
+Integration tests still compose the production entry point and its model, case,
+and algorithm groups. The `compose_test_cfg` fixture in
+[`tests/conftest.py`](../tests/conftest.py) adds the
+[`tests/conf/test/smoke.yaml`](../tests/conf/test/smoke.yaml) Hydra overlay.
+It sets a 20 × 20 × 4 domain, a 3 s window, and a two-member ensemble. The
+fixture also gives each composition separate temporary output directories,
+pins the ESMDA case to Xie and Castro, and adjusts uDALES settings for this
+small domain. Per-test Hydra overrides are applied last. Tests of the actual
+production defaults compose `conf/` directly instead.
+
 ---
 
 ### 1.1 Inlined base blocks

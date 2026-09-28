@@ -169,7 +169,7 @@ examples/
 
 tests/                             # pytest suite. tests/conftest.py provides
                                    # `compose_test_cfg` / `compose_module_cfg` fixtures
-                                   # that apply the smoke shape (_SMOKE_OVERRIDES) + per-test overrides.
+                                   # that apply the test smoke config + per-test overrides.
 .temp/                             # Default scratch dir. Everything mutable lands here.
 ```
 
@@ -332,7 +332,7 @@ The **compute budget** (`ensemble.ensemble_size`,
 `time.seconds_per_knot`) is baked into the two entry points at medium-sized
 defaults — there is no separate scale/size group. Change it with plain CLI
 overrides; the pytest suite shrinks it to a tiny smoke shape via
-`_SMOKE_OVERRIDES` in `tests/conftest.py`.
+[`tests/conf/test/smoke.yaml`](../tests/conf/test/smoke.yaml).
 
 Forward-model runs mount the model once at `cfg.model.*`. Assimilation runs use
 Hydra's package-override syntax to mount the same `model/` and `params/` groups
@@ -423,10 +423,10 @@ behavior:
   composer can't be invoked from a module-scoped fixture without
   pytest erroring on the scope mismatch.
 
-Every fixture applies the smoke shape (`_SMOKE_OVERRIDES` in
-[tests/conftest.py](../tests/conftest.py): the smallest domain / shortest window /
-2-member ensemble) and isolates each run's output paths in pytest's temporary
-root. uDALES mounts default to one MPI rank and no synthetic inlet turbulence;
+Every fixture applies the smoke shape
+([tests/conf/test/smoke.yaml](../tests/conf/test/smoke.yaml): the smallest domain /
+shortest window / 2-member ensemble) and isolates each run's output paths in
+pytest's temporary root. uDALES mounts default to one MPI rank and no synthetic inlet turbulence;
 explicit caller overrides retain control of those settings. Inlet tests opt in
 with length scales appropriate to their grid. Override anything per-test:
 
@@ -445,6 +445,14 @@ def test_something(compose_test_cfg) -> None:
     )
     run(cfg)
 ```
+
+The forward-runner smoke tests use pairwise switch combinations on each backend,
+and assimilation scripts test each mode without repeating single-window cases
+already exercised by multi-window runs. Most ensembles run sequentially; dedicated
+cases still cover forkserver execution. Neural training smoke tests use one epoch
+for artifact/wiring checks, with focused tests for gradients and resume behavior.
+`pixi run -e dev py.test` reports the 20 slowest tests. CI limits OpenMP/BLAS to
+one thread for these small arrays to avoid thread overhead.
 
 The [CI workflow](../.github/workflows/ci.yml) selects Open MPI's `ob1` PML
 with `self,sm,tcp` BTLs for its Open MPI 5 test environment.
@@ -933,9 +941,10 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   `paths.results_dir` is `.temp/${model.name}` and `experiment_dir` is
   `.temp` (see the inlined `paths:` block); `run_esmda.yaml`
   overrides `results_dir` to `.temp/${truth_model.name}_to_${assim_model.name}`.
-- Tests apply the smoke shape (`_SMOKE_OVERRIDES` in
-  [tests/conftest.py](../tests/conftest.py): tiny domain / 3 s window / 2-member
-  ensemble) via the conftest fixtures — `pixi run py.test` in the dev env.
+- Tests apply the smoke shape
+  ([tests/conf/test/smoke.yaml](../tests/conf/test/smoke.yaml): tiny domain / 3 s
+  window / 2-member ensemble) via the conftest fixtures — `pixi run py.test` in
+  the dev env.
 - Pre-commit hooks (`black`, `isort`, `mypy`) installed via
   `pixi run pre-commit`. They are **not enforced** server-side; commits
   can bypass.
