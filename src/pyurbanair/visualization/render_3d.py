@@ -55,7 +55,7 @@ def render_3d(
 ) -> dict[str, Any]:
     import pyvista as pv
 
-    from .render import encode_movie
+    from .render import _slice, encode_movie
 
     frame_dir = output / "media" / "flow-3d"
     frame_dir.mkdir()
@@ -74,6 +74,8 @@ def render_3d(
             "scale": 1.0,
         }
     first = reader.frame(times[0])
+    if any(first.sizes[axis] < 2 for axis in "xyz"):
+        raise ValueError("3D rendering needs at least two points on each axis")
     if geometry is not None:
         bounds = geometry.bounds
         if any(
@@ -88,6 +90,21 @@ def render_3d(
             raise ValueError(
                 "Geometry rendering requires an explicit blanking mask to prevent streamlines crossing solids"
             )
+        # An STL can cover a much larger city than this saved simulation. Show
+        # only its intersection with the cell-face domain, in physical metres.
+        display_bounds = []
+        for axis in "xyz":
+            coordinates = first[axis].values
+            display_bounds.extend(
+                [
+                    float(coordinates[0] - (coordinates[1] - coordinates[0]) / 2),
+                    float(coordinates[-1] + (coordinates[-1] - coordinates[-2]) / 2),
+                ]
+            )
+        geometry = geometry.clip_box(display_bounds, invert=False)
+        assert geometry_metadata is not None
+        geometry_metadata["display_bounds"] = display_bounds
+        geometry_metadata["clipping"] = "saved field cell-face domain; no rescaling"
     seeds = np.asarray(opts.seeds, dtype=float)
     if not len(seeds):
         # Deterministic inlet seeds; invalid ones are explicitly removed below.
@@ -123,16 +140,27 @@ def render_3d(
         spec = opts.slices[0]
         axis = spec["axis"]
         origin = [float(ds[value].mean()) for value in "xyz"]
-        origin["xyz".index(axis)] = (
-            float(spec["position"])
-            if spec.get("position") is not None
-            else origin["xyz".index(axis)]
-        )
+        _, slice_metadata = _slice(ds, spec)
+        origin["xyz".index(axis)] = slice_metadata["actual"]
         plane = field.slice(normal=axis, origin=origin)
+        axis_index = "xyz".index(axis)
+        if not plane.n_points and origin[axis_index] in (
+            field.bounds[2 * axis_index],
+            field.bounds[2 * axis_index + 1],
+        ):
+            # VTK's cutting plane can omit a coincident outer face. Extract
+            # those exact faces instead of moving the requested physical plane.
+            surface = field.extract_surface()
+            centres = surface.cell_centers().points[:, axis_index]
+            tolerance = max(1.0, abs(origin[axis_index])) * 1e-12
+            plane = surface.extract_cells(
+                np.flatnonzero(abs(centres - origin[axis_index]) <= tolerance)
+            )
+        slice_metadata["rendered_points"] = plane.n_points
         plotter = pv.Plotter(off_screen=True, window_size=(opts.width, opts.height))
         try:
             plotter.set_background("#071c29")
-            if geometry is not None:
+            if geometry is not None and geometry.n_points:
                 plotter.add_mesh(geometry, color="#adc6cd")
             if plane.n_points:
                 plotter.add_mesh(
@@ -185,11 +213,19 @@ def render_3d(
         "units": "m/s",
         "color_limits": limits,
         "camera": opts.camera,
+        "slice": slice_metadata,
         "geometry": geometry_metadata,
         "seeds": seeds.tolist(),
         "vertical_exaggeration": 1,
         "frames": mapping,
-        "duration": len(times) / opts.fps if movie else 0,
+        "snapshots": [
+            {
+                "simulation_time": time,
+                "path": str((frame_dir / f"{index:05d}.png").relative_to(output)),
+            }
+            for index, time in enumerate(times)
+        ],
+        "duration": len(times) / opts.fps,
     }
 
 

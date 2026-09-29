@@ -185,6 +185,12 @@ Render options include `member` or `reduction` (`mean_velocity`/`mean_speed`),
 `variable` (`u`, `v`, `w`, `speed`, `horizontal_speed`), `slices`, `probes`, time
 selection, color limits, FPS, dimensions, and bounded frame counts. `render_3d`
 adds the optional offscreen renderer with explicit geometry, seeds and camera.
+The default 2D dashboard displays two horizontal maps and a vertical `w` section
+at once, alongside matching A–C virtual-probe traces at both heights. Per-slice
+`variable` and physical `position` or domain `fraction` are configurable. Explicit
+probe coordinates replace automatic samples; `probes: []` omits them. The viewer's
+2D/3D buttons and shared timeline keep every visible panel at matching physical
+time, including PNG-sequence playback when a movie is unavailable.
 Inspect `conf/visualization/` presets for examples and use
 [the visualization reference](forward_visualization.md) for scientific details.
 

@@ -167,6 +167,8 @@ class BundleAssetServer:
             allowed.add(view["poster"])
             if view.get("media"):
                 allowed.add(view["media"])
+            for snapshot in view.get("snapshots", []):
+                allowed.add(snapshot["path"])
         if (root / "previews" / "probes.png").exists():
             allowed.add("previews/probes.png")
         for relative in allowed:

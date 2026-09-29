@@ -25,9 +25,13 @@ class RenderOptions:
     reduction: str | None = None
     variable: str = "horizontal_speed"
     slices: list[dict[str, Any]] = field(
-        default_factory=lambda: [{"axis": "z", "position": None}]
+        default_factory=lambda: [
+            {"axis": "z", "fraction": 0.0},
+            {"axis": "z", "fraction": 0.65},
+            {"axis": "y", "fraction": 0.5, "variable": "w"},
+        ]
     )
-    probes: list[dict[str, Any]] = field(default_factory=list)
+    probes: list[dict[str, Any]] | None = None
     time_start: float | None = None
     time_end: float | None = None
     stride: int = 1
@@ -79,15 +83,37 @@ def validate_options(
             raise ValueError(f"{name} must be an integer between {lower} and {upper}")
     if opts.width % 2 or opts.height % 2:
         raise ValueError("Image dimensions must be even for browser MP4 compatibility")
-    if not 1 <= len(opts.slices) <= 6 or len(opts.probes) > 32 or len(opts.seeds) > 128:
+    if (
+        not 1 <= len(opts.slices) <= 6
+        or len(opts.probes or []) > 32
+        or len(opts.seeds) > 128
+    ):
         raise ValueError("Limits: 1–6 slices, 32 probes and 128 streamline seeds")
     for item in opts.slices:
-        if set(item) - {"axis", "position"} or item.get("axis") not in ("x", "y", "z"):
+        if set(item) - {"axis", "position", "fraction", "variable"} or item.get(
+            "axis"
+        ) not in ("x", "y", "z"):
             raise ValueError("Each slice has an axis (x/y/z) and physical position")
+        if item.get("variable", opts.variable) not in (
+            "u",
+            "v",
+            "w",
+            "speed",
+            "horizontal_speed",
+        ):
+            raise ValueError("Unsupported slice variable")
+        if "fraction" in item and (
+            not np.isfinite(item["fraction"])
+            or not 0 <= item["fraction"] <= 1
+            or item.get("position") is not None
+        ):
+            raise ValueError(
+                "Slice fraction must be between 0 and 1, without a position"
+            )
         if item.get("position") is not None and not np.isfinite(item["position"]):
             raise ValueError("Slice position must be finite")
     ids = set()
-    for index, probe in enumerate(opts.probes):
+    for index, probe in enumerate(opts.probes or []):
         if set(probe) - {"id", "x", "y", "z"} or any(
             axis not in probe or not np.isfinite(probe[axis]) for axis in "xyz"
         ):
@@ -138,7 +164,11 @@ def _slice(ds: xr.Dataset, spec: dict[str, Any]) -> tuple[xr.Dataset, dict[str, 
     requested = spec.get("position")
     coord = ds[axis].values
     if requested is None:
-        requested = float(coord[len(coord) // 2])
+        requested = (
+            float(coord.min() + spec["fraction"] * (coord.max() - coord.min()))
+            if "fraction" in spec
+            else float(coord[len(coord) // 2])
+        )
     if requested < coord.min() or requested > coord.max():
         raise ValueError(
             f"Slice {axis}={requested} lies outside the cell-centre domain"
@@ -150,6 +180,35 @@ def _slice(ds: xr.Dataset, spec: dict[str, Any]) -> tuple[xr.Dataset, dict[str, 
         "actual": float(coord[position]),
         "sampling": "nearest cell centre",
     }
+
+
+def _default_probes(
+    ds: xr.Dataset, slices: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Compare the same three horizontal cells at every displayed map height.
+
+    These are deterministic virtual samples, not observations or relocated fluid
+    points. A selected solid cell deliberately remains a gap in its trace.
+    """
+    heights = sorted(
+        {_slice(ds, spec)[1]["actual"] for spec in slices if spec["axis"] == "z"}
+    )
+    positions = []
+    for fraction in (0.2, 0.5, 0.8):
+        requested = float(ds.x.min() + fraction * (ds.x.max() - ds.x.min()))
+        x = float(ds.x.sel(x=requested, method="nearest"))
+        side = next(
+            (spec for spec in slices if spec["axis"] == "y"),
+            {"axis": "y", "fraction": 0.5},
+        )
+        y = _slice(ds, side)[1]["actual"]
+        if (x, y) not in positions:
+            positions.append((x, y))
+    return [
+        {"id": f"{chr(65 + index)} · z={z:g} m", "x": x, "y": y, "z": z}
+        for z in heights
+        for index, (x, y) in enumerate(positions)
+    ]
 
 
 def _probe(
@@ -257,21 +316,42 @@ def render(
     output.mkdir(parents=True)
     (output / "previews").mkdir()
     (output / "media").mkdir()
-    (output / "render_config.resolved.yaml").write_text(yaml.safe_dump(asdict(opts)))
+    automatic_probes = opts.probes is None
+    probe_specs = (
+        _default_probes(reader.frame(times[0]), opts.slices)
+        if automatic_probes
+        else opts.probes or []
+    )
+    effective_options = {
+        **asdict(opts),
+        "probes": probe_specs,
+        "automatic_probes": automatic_probes,
+    }
+    (output / "render_config.resolved.yaml").write_text(
+        yaml.safe_dump(effective_options)
+    )
     warnings = set()
     if opts.movie and shutil.which("ffmpeg") is None:
         warnings.add("ffmpeg unavailable; PNG previews and probes remain available")
     probes: list[dict[str, Any]] = [
         {
             "id": str(spec.get("id", f"probe-{i + 1}")),
+            "label": (
+                str(spec["id"]).split(" · ")[0]
+                if automatic_probes
+                else str(spec.get("id", f"probe-{i + 1}"))
+            ),
             "requested": {axis: spec[axis] for axis in "xyz"},
             "sampling": "nearest cell centre; solid/missing samples are null",
-            "color": ["#73dbd4", "#ffbe73", "#a9a6ff", "#f17c9b"][i % 4],
+            "color": ["#73dbd4", "#ffbe73", "#a9a6ff", "#f17c9b"][
+                (ord(str(spec["id"])[0]) - 65 if automatic_probes else i) % 4
+            ],
             "values": [],
         }
-        for i, spec in enumerate(opts.probes)
+        for i, spec in enumerate(probe_specs)
     ]
-    extrema = [float("inf"), float("-inf")]
+    variables = {spec.get("variable", opts.variable) for spec in opts.slices}
+    extrema = {variable: [float("inf"), float("-inf")] for variable in variables}
     speed_extrema = [float("inf"), float("-inf")]
     reference_coords: dict[str, np.ndarray] = {}
     slice_metadata: list[dict[str, Any]] = []
@@ -297,7 +377,7 @@ def render(
                 }
                 for axis in "xyz"
             }
-        for probe, spec in zip(probes, opts.probes):
+        for probe, spec in zip(probes, probe_specs):
             value, actual = _probe(ds, spec, opts.variable)
             probe["actual"] = actual
             probe["values"].append(value)
@@ -313,23 +393,26 @@ def render(
         for spec in opts.slices:
             plane, metadata = _slice(ds, spec)
             slice_metadata.append(metadata)
-            values = plane[opts.variable].values
+            variable = spec.get("variable", opts.variable)
+            values = plane[variable].values
             valid = values[np.isfinite(values)]
             if valid.size:
-                extrema[0] = min(extrema[0], float(valid.min()))
-                extrema[1] = max(extrema[1], float(valid.max()))
-    if opts.color_limits:
-        limits = opts.color_limits
-    elif np.isfinite(extrema).all():
-        limits = extrema
-        if opts.variable in ("u", "v", "w"):
+                extrema[variable][0] = min(extrema[variable][0], float(valid.min()))
+                extrema[variable][1] = max(extrema[variable][1], float(valid.max()))
+    field_limits = {}
+    for variable, values in extrema.items():
+        limits = values
+        if opts.color_limits and variable == opts.variable:
+            limits = opts.color_limits
+        elif not np.isfinite(limits).all():
+            limits = [-1.0, 1.0] if variable in ("u", "v", "w") else [0.0, 1.0]
+            warnings.add(f"Selected {variable} slices have no finite fluid data")
+        elif variable in ("u", "v", "w"):
             magnitude = max(abs(limits[0]), abs(limits[1]), 1e-9)
             limits = [-magnitude, magnitude]
         elif limits[0] == limits[1]:
             limits = [limits[0], limits[1] + max(abs(limits[1]) * 0.01, 1e-9)]
-    else:
-        limits = [0.0, 1.0]
-        warnings.add("Selected slices have no finite fluid data")
+        field_limits[variable] = limits
     probe_data = {
         "version": 1,
         "field": opts.variable,
@@ -349,25 +432,40 @@ def render(
         frame_dir = output / "media" / view_id
         frame_dir.mkdir()
         mapping = []
+        snapshots = []
         frame_number = 0
         axis = metadata["axis"]
+        view_height = (
+            opts.height
+            if axis == "z"
+            else min(opts.height, max(128, 2 * round(opts.width / 6.4)))
+        )
+        text_scale = max(1.0, opts.width / (640 if axis == "z" else 960))
+        variable = opts.slices[view_index].get("variable", opts.variable)
+        limits = field_limits[variable]
+        cmap = "RdBu_r" if variable in ("u", "v", "w") else opts.cmap
         plot_axes = [value for value in "xyz" if value != axis]
         for time, repeat in zip(times, repeats):
             ds = reader.frame(time)
             plane, _ = _slice(ds, opts.slices[view_index])
             fig = Figure(
-                figsize=(opts.width / 100, opts.height / 100),
+                figsize=(opts.width / 100, view_height / 100),
                 dpi=100,
                 layout="constrained",
+                facecolor="#091e2b",
             )
             FigureCanvasAgg(fig)
             ax = fig.subplots()
-            plotted_values = plane[opts.variable].transpose(plot_axes[1], plot_axes[0])
+            ax.set_facecolor("#142936")
+            ax.tick_params(colors="#adc6cd", labelsize=10 * text_scale)
+            for spine in ax.spines.values():
+                spine.set_color("#31505d")
+            plotted_values = plane[variable].transpose(plot_axes[1], plot_axes[0])
             artist = ax.pcolormesh(
                 plane[plot_axes[0]],
                 plane[plot_axes[1]],
                 plotted_values,
-                cmap=opts.cmap,
+                cmap=cmap,
                 vmin=limits[0],
                 vmax=limits[1],
                 shading="nearest",
@@ -392,19 +490,53 @@ def render(
                         edgecolors="black",
                     )
                     ax.annotate(
-                        probe["id"],
+                        probe["label"],
                         (probe["actual"][plot_axes[0]], probe["actual"][plot_axes[1]]),
+                        xytext=(6, 6),
+                        textcoords="offset points",
+                        color="#ffffff",
+                        fontsize=12 * text_scale,
+                        fontweight="bold",
+                        bbox={
+                            "facecolor": "#071c29",
+                            "alpha": 0.8,
+                            "edgecolor": "none",
+                            "pad": 2,
+                        },
                     )
+            if axis == "z":
+                for section in slice_metadata:
+                    if section["axis"] in ("x", "y"):
+                        draw_line = ax.axvline if section["axis"] == "x" else ax.axhline
+                        draw_line(
+                            section["actual"],
+                            color="#00c9df",
+                            linewidth=1.2,
+                            linestyle="--",
+                        )
             ax.set(
                 xlabel=f"{plot_axes[0]} [m]",
                 ylabel=f"{plot_axes[1]} [m]",
-                title=f"{opts.variable} · {axis}={metadata['actual']:g} m · t={time:g} s",
+                title=f"{variable} · {axis}={metadata['actual']:g} m · t={time:g} s",
             )
             ax.set_aspect("equal")
-            fig.colorbar(artist, ax=ax, label=f"{opts.variable} [m/s]")
+            ax.xaxis.label.set_color("#adc6cd")
+            ax.yaxis.label.set_color("#adc6cd")
+            ax.title.set_color("#eef4ee")
+            ax.xaxis.label.set_fontsize(11 * text_scale)
+            ax.yaxis.label.set_fontsize(11 * text_scale)
+            ax.title.set_fontsize(12 * text_scale)
+            colorbar = fig.colorbar(artist, ax=ax, label=f"{variable} [m/s]")
+            colorbar.ax.tick_params(colors="#adc6cd", labelsize=10 * text_scale)
+            colorbar.ax.yaxis.label.set_color("#adc6cd")
+            colorbar.ax.yaxis.label.set_fontsize(11 * text_scale)
+            colorbar.outline.set_edgecolor("#31505d")
             frame_path = frame_dir / f"{frame_number:05d}.png"
             fig.savefig(frame_path)
             fig.clear()
+            snapshots.append(
+                {"simulation_time": time, "path": str(frame_path.relative_to(output))}
+            )
             for _ in range(repeat):
                 target = frame_dir / f"{frame_number:05d}.png"
                 if target != frame_path:
@@ -427,19 +559,21 @@ def render(
         views.append(
             {
                 "id": view_id,
-                "label": f"2D {axis}={metadata['actual']:g} m",
+                "label": f"{'Horizontal slice' if axis == 'z' else 'Side section'} · {axis}={metadata['actual']:g} m",
                 "kind": "2d",
                 "poster": poster,
                 "media": movie,
                 "mime_type": "video/mp4" if movie else "image/png",
                 "width": opts.width,
-                "height": opts.height,
-                "field": opts.variable,
+                "height": view_height,
+                "field": variable,
+                "cmap": cmap,
                 "units": "m/s",
                 "color_limits": limits,
                 "slice": metadata,
                 "frames": mapping,
-                "duration": frame_number / opts.fps if movie else 0,
+                "snapshots": snapshots,
+                "duration": frame_number / opts.fps,
             }
         )
     if opts.render_3d:
@@ -489,11 +623,11 @@ def render(
             )
     backend = reader.index.get("backend", "unknown")
     provenance = {
-        "renderer_version": 1,
-        "viewer_version": 1,
+        "renderer_version": 2,
+        "viewer_version": 2,
         "source_root": str(reader.root),
         "sources": reader.sources,
-        "options": asdict(opts),
+        "options": effective_options,
     }
     template_hashes = {}
     for name in ("index.html", "viewer.css", "viewer.js", "probe_charts.js"):

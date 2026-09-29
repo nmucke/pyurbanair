@@ -3,22 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Urban wind · Forward simulation</title>
+<title>The shape of urban wind · Forward simulation</title>
 <link rel="stylesheet" href="viewer.css">
 <script src="probe_charts.js" defer></script>
 <script src="viewer.js" defer></script>
 </head>
 <body>
 <main>
-<header><div><p class="eyebrow">URBAN AIRFLOW</p><h1 id="title">The shape of urban wind</h1></div><a href="provenance.json">Run provenance</a></header>
-<div class="controls"><label>View <select id="view" aria-label="Simulation view" disabled></select></label><p id="selection"></p><a id="download" download hidden>Download image</a></div>
+<header><div><p class="eyebrow">URBAN AIRFLOW · FORWARD SIMULATION</p><h1>The shape of urban wind</h1><p id="title" class="run-title">Loading run…</p></div><a href="provenance.json">Run provenance ↗</a></header>
+<div class="controls">
+<div class="view-buttons" role="group" aria-label="Visualization mode"><button id="mode-2d" data-view="slices" type="button" aria-pressed="true" disabled>2D slices</button><button id="mode-3d" data-view="3d" type="button" aria-pressed="false" disabled>3D flow</button></div>
+<p id="mode-help"></p><label>Playback <select id="rate"><option value="0.5">Slow · ½×</option><option value="1" selected>Normal · 1×</option><option value="1.5">Fast · 1½×</option><option value="2">Fast · 2×</option></select></label>
+</div>
 <p id="status" role="status">Loading visualization…</p>
-<section class="cinema" aria-label="Simulation playback"><div class="film-stage"><div class="visual"><video id="video" controls preload="metadata" hidden></video><img id="poster" alt="Simulation field preview" hidden></div><aside id="probes" aria-label="Virtual probe charts"></aside></div>
-<div id="playback" class="film-controls" hidden><button id="play" type="button">Play</button><button id="restart" type="button">Restart</button><input id="seek" type="range" min="0" max="0" step="0.01" value="0" aria-label="Seek video"><span id="clock">0:00 / 0:00</span><label>Speed <select id="rate"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><button id="fullscreen" type="button">Fullscreen</button></div>
+<section class="cinema slices-active" aria-label="Synchronized simulation playback">
+<div class="film-stage">
+<div class="field-stage"><div id="views-2d" class="view-grid slices-grid" aria-label="Simultaneous two-dimensional slices"></div><div id="views-3d" class="view-grid flow-grid" aria-label="Three-dimensional flow views" hidden></div></div>
+<aside id="sensor-panels" aria-label="Virtual probe time series"><div class="sensor-intro"><strong>Virtual samples in the flow</strong><span id="probe-description">Saved simulation values, not field observations</span></div><div id="probes"></div></aside>
+</div>
+<div id="playback" class="film-controls" data-playing="false"><button id="play" type="button" aria-pressed="false" disabled>Play</button><button id="restart" type="button" disabled>Restart</button><input id="seek" type="range" min="0" max="0" step="any" value="0" aria-label="Shared simulation time" data-unit="simulation-seconds" disabled><span id="clock">0:00 / 0:00</span><button id="fullscreen" type="button">Full screen</button></div>
 </section>
-<div class="detail"><div><strong id="physical">Simulation time</strong><p id="caption"></p></div><div><a href="probes.csv" download>Download probe CSV</a><p>Virtual probes sample saved simulation values. Missing or solid samples remain gaps.</p></div></div>
+<div class="detail"><div><strong id="physical" data-time="0">Simulation time</strong><p id="caption"></p><small id="selection"></small></div><div><p id="domain"></p><a href="probes.csv" download>Download probe CSV</a><p class="small">Each panel labels its displayed saved sample. Missing and solid probe values remain gaps.</p></div></div>
 <p id="processing" class="caption"></p><ul id="warnings" class="caption"></ul>
-<noscript>JavaScript is required for synchronized playback. Download the manifest and media from this bundle using a local static server.</noscript>
+<noscript>JavaScript is required for synchronized playback. Serve this bundle with a local HTTP server to load its manifest and media.</noscript>
 </main>
 </body>
 </html>

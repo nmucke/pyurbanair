@@ -4,8 +4,14 @@ reduction: null
 variable: horizontal_speed
 slices:
   - axis: z
-    position: null
-probes: []
+    fraction: 0.0
+  - axis: z
+    fraction: 0.65
+  - axis: y
+    fraction: 0.5
+    variable: w
+# null selects A–C at identical horizontal cells on each map; [] disables probes.
+probes: null
 time_start: null
 time_end: null
 stride: 1

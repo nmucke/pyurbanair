@@ -13,8 +13,7 @@ manifest = render(
     {
         "member": 0,  # omit for a single simulation
         "variable": "horizontal_speed",
-        "slices": [{"axis": "z", "position": 3.0}],
-        "probes": [{"id": "upstream", "x": 10, "y": 20, "z": 3}],
+        # Default: two horizontal maps, a vertical section, and matched probes.
         "stride": 2,
     },
 )
@@ -74,11 +73,36 @@ Discoverable presets live in `conf/visualization/quicklook.yaml` and
 supported settings; arbitrary callbacks, Python expressions and encoder command
 arguments are not accepted.
 
-The default creates horizontal-speed PNG slices, probe JSON/CSV and plots,
-optional H.264 MP4, and a complete HTML/CSS/JavaScript viewer. Slices can be
-normal to x, y or z. Colors are fixed across a clip; automatic limits use all
-finite selected slice samples, with symmetric limits for signed components.
-Explicit limits clip displayed colors only, not stored probe values.
+The default recreates the supplied viewer's multi-panel arrangement: two
+horizontal-speed maps at the lowest cell centre and 65% of the cell-centre
+height range, a central y-normal vertical-velocity (`w`) section underneath,
+and probe traces grouped by height alongside. All three planes appear together.
+Cyan lines locate the section on the maps; A–C markers match the chart colors.
+The same horizontal sample locations are used at each map height. Automatic
+locations are deterministic grid samples, not observed sensors, and solid samples
+remain gaps. Set `probes: []` to omit charts or supply explicit XYZ probes.
+
+Each slice accepts `axis`, a physical `position` or a `fraction` of the axis's
+cell-centre range, and an optional `variable`. Explicit slices replace the
+default layout, so a single requested slice remains supported. For example:
+
+```yaml
+slices:
+  - {axis: z, position: 2, variable: horizontal_speed}
+  - {axis: z, position: 26, variable: horizontal_speed}
+  - {axis: y, fraction: 0.5, variable: w}
+```
+
+Choose positions inside the saved domain; labels report actual nearest-cell
+coordinates. Colors are fixed across a clip and shared by slices of the same
+field. Signed velocity components use symmetric diverging colors; the side
+section shows rising air in red and sinking air in blue. `color_limits` applies
+to `variable`, while other slice fields retain their own scales. Limits clip
+displayed colors only, not stored probe values. Products include PNG snapshots,
+probe JSON/CSV and plots, optional H.264 MP4, and the HTML/CSS/JavaScript viewer.
+Vertical-section images use a shorter, wide canvas within the requested image
+dimensions so the dashboard does not shrink a portrait-sized image into its
+wide lower panel. Axes retain equal physical scale without vertical stretching.
 
 The bounds are 300 rendered frames, six slices, 32 probes, 1920×1080 pixels,
 60 FPS, 10,000 probe sample times and eight million selected cells per frame
@@ -98,13 +122,20 @@ still. Physical-time cursors use this mapping; view changes preserve physical
 time to the closest preceding available sample. Playback rate does not change
 the mapping.
 
-Without ffmpeg, PNG previews, probes and the viewer still work. Encoding failures
+Without ffmpeg, the viewer plays the saved PNG sequence with the same timeline.
+Every view records `snapshots` containing actual sample times and bundle paths;
+`duration` describes presentation pacing even when there is no MP4. Older bundles
+without snapshots retain an explicitly labeled still-image fallback. Encoding failures
 also preserve those products and become manifest warnings. The encoder uses
 fixed H.264/yuv420p/faststart arguments and a five-minute timeout.
 
-The viewer uses only local assets. It supports available view selection,
-play/pause, restart, seek, playback speed, fullscreen, correctly labeled
-downloads, responsive probe charts, and still-image fallback for failed movies.
+The viewer uses only local assets. Its **2D slices / 3D flow** buttons switch
+between the simultaneous slice dashboard and available 3D renders, preserving
+physical time. The 3D button is disabled with an explanation when no 3D product
+was requested or available. One play/pause, restart, seek and speed controller
+synchronizes every visible panel and the probe cursor through each view's own
+time mapping. Panels show their actual held sample times. Downloads are offered
+per panel, with responsive charts and fullscreen support.
 Metadata is inserted as text, never HTML. Native controls remain until the
 custom controller initializes. Serve an exported bundle using a local static
 server; direct `file://` JSON fetches are not supported.
@@ -130,6 +161,9 @@ bounds are rejected; overlapping bounds alone cannot establish precise alignment
 so users must supply the matching geometry. With STL geometry an explicit state
 mask is required to prevent lines crossing buildings. The regular 2D products
 remain available if the optional 3D render raises a recoverable error.
+Displayed STL surfaces are clipped to the saved field's cell-face bounds; a
+larger source city cannot force the camera to frame an area without flow data.
+The original geometry hash and displayed bounds are retained in provenance.
 
 Physical cell centres become rectilinear VTK sampling points, with x fastest
 in flattened data. Nonuniform axes are supported. Every interpolation cell

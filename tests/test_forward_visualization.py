@@ -46,6 +46,40 @@ def save_run(tmp_path: Path, ds: xr.Dataset | None = None) -> Path:
     return run
 
 
+def test_default_dashboard_has_maps_section_and_matching_height_probes(
+    tmp_path: Path,
+) -> None:
+    ds = regular((0, 2.5))
+    ds["w"] = ds.w * 0 + ds.z - 3
+    ds["blanking"] = xr.zeros_like(ds.u)
+    ds.blanking.loc[dict(x=4, y=8, z=1)] = 1
+    root = save_run(tmp_path, ds)
+    bundle = tmp_path / "bundle"
+    manifest = render(root, bundle, {"movie": False, "width": 320, "height": 240})
+    low, high, side = manifest["views"]
+    assert [view["slice"]["axis"] for view in manifest["views"]] == ["z", "z", "y"]
+    assert low["slice"]["actual"] != high["slice"]["actual"]
+    assert low["field"] == high["field"] == "horizontal_speed"
+    assert low["color_limits"] == high["color_limits"]
+    assert side["field"] == "w" and side["cmap"] == "RdBu_r"
+    assert side["color_limits"] == [-3, 3]
+    probes = json.loads((bundle / "probes.json").read_text())["probes"]
+    assert len(probes) == 6
+    for a, b in zip(probes[:3], probes[3:]):
+        assert a["label"] == b["label"]
+        assert a["color"] == b["color"]
+        assert a["actual"]["x"] == b["actual"]["x"]
+        assert a["actual"]["y"] == b["actual"]["y"] == side["slice"]["actual"]
+    assert probes[0]["values"] == [None, None]  # Never move a solid sample into fluid.
+    assert probes[3]["values"] == [5, 5]
+    with BundleAssetServer() as server:
+        url = server.register(bundle)
+        for view in manifest["views"]:
+            assert [frame["simulation_time"] for frame in view["snapshots"]] == [0, 2.5]
+            with urlopen(url + view["snapshots"][1]["path"]) as response:
+                assert response.read().startswith(b"\x89PNG")
+
+
 def test_regular_magnitudes_masks_and_axis_orientation() -> None:
     ds = regular((0,)).isel(time=0, drop=True).sortby("x", ascending=False)
     ds["blanking"] = xr.zeros_like(ds.u)
