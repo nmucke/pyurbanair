@@ -607,7 +607,7 @@ A wrapper for Geir Evensen's Lattice Boltzmann simulator. On first import, it au
 
 #### pyudales
 
-A wrapper for the uDALES v2.2.0 simulator. On first import, it automatically downloads the repository from GitHub and compiles the code based on the experiment specifications. Preprocessing can be done with Matlab or with the pure-Python preprocessor in `python_udgeom/`. A timestep watchdog (`utils/run_monitor.py`) detects numerical instability (`dt` collapse) and kills a diverging run early so the ensemble can resample it instead of waiting out a slow crash.
+A wrapper for the uDALES v2.2.0 simulator. Normal model preparation automatically exports pinned pristine sources and builds a verified cached executable; importing the package has no download or build side effects. The opt-in Vreman model-discrepancy extension is prepared and selected automatically (see [the backend guide](docs/pyudales.md#41-opt-in-strainrotation-discrepancy-fixed-forward-runs)). Preprocessing can be done with Matlab or with the pure-Python preprocessor in `python_udgeom/`. A timestep watchdog (`utils/run_monitor.py`) detects numerical instability (`dt` collapse) and kills a diverging run early so the ensemble can resample it instead of waiting out a slow crash.
 
 #### pypalm
 

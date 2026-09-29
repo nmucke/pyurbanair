@@ -13328,7 +13328,7 @@ packages:
 - pypi: ./libs/pyudales
   name: pyudales
   version: 0.1.0
-  sha256: 1d9c23f7a45ee28a5ea15bdd7babad2dfe61555f2f726ff6b8febdf6870e4a3e
+  sha256: bfa582e32c0030b190201cefb2c7a64f52f2c09990c68b93a139e02a18480e13
   requires_dist:
   - numpy>=2.3.5,<3
   - xarray>=2025.12.0,<2026

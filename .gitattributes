@@ -1,2 +1,5 @@
 # SCM syntax highlighting & preventing 3-way merges
 pixi.lock merge=binary linguist-language=YAML linguist-generated=true
+
+# Unified diff context markers intentionally contain a trailing space.
+libs/pyudales/src/pyudales/solver_extensions/discrepancy/*.patch whitespace=-blank-at-eol

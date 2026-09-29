@@ -121,7 +121,12 @@ def resolve_parameter_schema(model_name: str) -> tuple[str, ...]:
         "sgs_constant",
     )
     if model_name == "pyudales":
-        return base + ("pressure_gradient_magnitude",)
+        return base + (
+            "pressure_gradient_magnitude",
+            "sgs_bias_b0",
+            "sgs_bias_b1",
+            "sgs_bias_b2",
+        )
     return base
 
 

@@ -1711,3 +1711,14 @@ environment. Configuration remains the `conf/` tree; `conf/visualization/` adds
 postprocessing presets. See [mcp.md](mcp.md) for configuration coverage, job
 lifecycle, setup and limits, and [forward_visualization.md](forward_visualization.md)
 for the saved-state viewer. These services do not use the retiring LES renderer.
+
+### Fixed uDALES model discrepancy
+
+`conf/model/pyudales.yaml` now exposes an opt-in
+`forward_model.model_discrepancy` block. Set its explicit height band,
+regularization and log cap, and supply static `sgs_bias_b0/b1/b2` parameter
+fields. The standard forward runner prepares the pinned native extension
+and records its provenance automatically; no manual patch or binary path is
+needed. Defaults remain disabled. See [pyudales §4.1](pyudales.md#41-opt-in-strainrotation-discrepancy-fixed-forward-runs)
+for the contract. Discrepancy on an assimilation model is rejected in this first
+increment pending deterministic replay and inference integration.

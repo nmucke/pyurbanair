@@ -67,6 +67,7 @@ def create_new_forward_model(
         case_dir=forward_model.dirs.case_dir,
         experiment_name=experiment_name,
         results_dir=forward_model.dirs.results_dir,
+        solver_executable=forward_model.dirs.solver_executable,
     )
 
     # Rename files that reference the old experiment name

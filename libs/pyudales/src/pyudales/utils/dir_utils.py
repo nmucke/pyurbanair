@@ -3,8 +3,8 @@
 import os
 import pathlib
 from dataclasses import dataclass
-
 from typing import Optional
+
 
 def get_project_root(start_path: pathlib.Path | None = None) -> pathlib.Path:
     """
@@ -65,12 +65,17 @@ class DirectoryPaths:
     udales_root_path: pathlib.Path
     cwd: pathlib.Path
     temp_dir: pathlib.Path  # Base temp directory (e.g., {cwd}/.temp)
-    experiment_base_dir: pathlib.Path  # Base directory for experiments (e.g., {temp_dir}/experiment)
-    experiment_dir: pathlib.Path  # Specific experiment directory (e.g., {experiment_base_dir}/{experiment_name})
+    experiment_base_dir: (
+        pathlib.Path
+    )  # Base directory for experiments (e.g., {temp_dir}/experiment)
+    experiment_dir: (
+        pathlib.Path
+    )  # Specific experiment directory (e.g., {experiment_base_dir}/{experiment_name})
     output_dir: pathlib.Path
     case_dir: pathlib.Path  # Original case directory provided by user
     experiment_name: str
     results_dir: Optional[pathlib.Path] = None
+    solver_executable: Optional[pathlib.Path] = None
 
 
 def get_udales_directory_paths(

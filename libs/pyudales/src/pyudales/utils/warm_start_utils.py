@@ -7,6 +7,7 @@ import pathlib
 import pdb
 import re
 import shutil
+import tempfile
 
 import numpy as np
 from xarray import Dataset
@@ -15,6 +16,130 @@ from .dir_utils import DirectoryPaths
 from .namoptions_utils import NamoptionsFile
 
 logger = logging.getLogger(__name__)
+
+
+def stage_discrepancy_warmstart(
+    state: Dataset, dirs: DirectoryPaths, template_file: pathlib.Path
+) -> pathlib.Path:
+    """Stage every native rank's restart with one analyzed flow and clock.
+
+    The pinned cd2 build uses one horizontal halo and one upper vertical halo.
+    Hidden records are copied as bytes, preserving each rank's own SGS and
+    thermodynamic fields. Unsupported decomposition/layouts fail before launch.
+    """
+    from scipy.io import FortranEOFError, FortranFile
+
+    namoptions = NamoptionsFile(
+        dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
+    )
+    scalar_restart = (
+        int(namoptions.get_value("SCALARS", "nsv") or 0) > 0
+        and namoptions.get_value_as_bool("SCALARS", "lreadscal") is True
+    )
+    if (
+        scalar_restart
+        or namoptions.get_value_as_bool("RUN", "lreadmean") is True
+        or namoptions.get_value_as_bool("INLET", "lreadminl") is True
+    ):
+        raise ValueError(
+            "Discrepancy warm starts do not yet support auxiliary scalar, mean, "
+            "or inlet restart files; disable their restart-read switches"
+        )
+    nx, ny, nz = (
+        int(namoptions.get_value("DOMAIN", name) or 0)
+        for name in ("itot", "jtot", "ktot")
+    )
+    nprocx = int(namoptions.get_value("RUN", "nprocx") or 1)
+    nprocy = int(namoptions.get_value("RUN", "nprocy") or 1)
+    if min(nx, ny, nz, nprocx) <= 0 or nprocy != 1 or nx % nprocx:
+        raise ValueError(
+            "Discrepancy warm starts require an evenly divided x-only decomposition"
+        )
+    local_nx = nx // nprocx
+    shape = (local_nx + 2, ny + 2, nz + 1)
+    match = re.fullmatch(r"initd(\d+)_(\d+)_(\d+)\.(.+)", template_file.name)
+    if match is None or match.group(4) != dirs.experiment_name:
+        raise ValueError(
+            f"Invalid discrepancy restart template name: {template_file.name}"
+        )
+    timestamp = match.group(1)
+    templates = [
+        template_file.parent / f"initd{timestamp}_{rank:03d}_000.{dirs.experiment_name}"
+        for rank in range(nprocx)
+    ]
+    if not all(path.is_file() for path in templates):
+        raise ValueError(
+            "Discrepancy warm start requires the complete per-rank restart set"
+        )
+    if "time" in state.dims:
+        state = state.isel(time=-1)
+    fields = {}
+    dimensions = {
+        "u": ("zt", "yt", "xm"),
+        "v": ("zt", "ym", "xt"),
+        "w": ("zm", "yt", "xt"),
+        "pres": ("zt", "yt", "xt"),
+    }
+    for name, dims in dimensions.items():
+        if name not in state:
+            if name == "pres":
+                continue
+            raise ValueError(f"Discrepancy warm start requires velocity field {name}")
+        field = np.asarray(state[name].transpose(*dims).values, dtype=np.float64)
+        if field.shape != (nz, ny, nx) or not np.all(np.isfinite(field)):
+            raise ValueError(
+                f"Discrepancy warm start requires finite global {name} with shape {(nz, ny, nx)}"
+            )
+        fields[name] = field.transpose(2, 1, 0)
+    dt = float(namoptions.get_value("RUN", "dtmax") or 1.0)
+    if not np.isfinite(dt) or dt <= 0:
+        raise ValueError("Discrepancy warm start dtmax must be positive and finite")
+    periodic_x = int(namoptions.get_value("BC", "BCxm") or 1) == 1
+    periodic_y = int(namoptions.get_value("BC", "BCym") or 1) == 1
+    yindices = np.arange(-1, ny + 1)
+    yindices = yindices % ny if periodic_y else np.clip(yindices, 0, ny - 1)
+    zindices = np.minimum(np.arange(nz + 1), nz - 1)
+    output = dirs.output_dir / dirs.experiment_name
+    output.mkdir(parents=True, exist_ok=True)
+    # Validate and stage all ranks before replacing any launch input.
+    with tempfile.TemporaryDirectory(
+        prefix=".discrepancy_restart_", dir=output
+    ) as temporary:
+        for rank, template in enumerate(templates):
+            records = []
+            with FortranFile(template, "r") as handle:
+                while True:
+                    try:
+                        records.append(handle.read_record(np.uint8))
+                    except FortranEOFError:
+                        break
+            expected_cells = int(np.prod(shape))
+            if len(records) != 13 or len(records[2]) not in (
+                4 * expected_cells,
+                8 * expected_cells,
+            ):
+                raise ValueError(f"Unsupported native cd2 restart layout in {template}")
+            dtype = np.dtype(f"f{len(records[2]) // expected_cells}")
+            if (
+                any(len(records[index]) != len(records[2]) for index in range(2, 12))
+                or len(records[12]) != 2 * dtype.itemsize
+            ):
+                raise ValueError(f"Inconsistent native restart records in {template}")
+            xindices = np.arange(rank * local_nx - 1, (rank + 1) * local_nx + 1)
+            xindices = xindices % nx if periodic_x else np.clip(xindices, 0, nx - 1)
+            for index, name in enumerate(dimensions, start=2):
+                if name in fields:
+                    values = fields[name][np.ix_(xindices, yindices, zindices)]
+                    records[index] = (
+                        values.astype(dtype).flatten(order="F").view(np.uint8)
+                    )
+            records[12] = np.array([0.0, dt], dtype=dtype).view(np.uint8)
+            with FortranFile(pathlib.Path(temporary) / template.name, "w") as handle:
+                for record in records:
+                    handle.write_record(record)
+        for template in templates:
+            (pathlib.Path(temporary) / template.name).replace(output / template.name)
+    return output / templates[0].name
 
 
 def _infer_warmstart_grid_shape(

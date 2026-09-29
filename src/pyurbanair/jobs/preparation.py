@@ -49,6 +49,7 @@ _RECORDED_ENV = (
     "PYPALM_MPIRUN_EXTRA_ARGS",
     "PYPALM_USE_DIRECT_RUN",
     "PYLBM_GPU_ARCH",
+    "PYUDALES_CACHE_DIR",
     "NETCDF_FORTRAN_ROOT",
     "PYURBANAIR_DISABLE_CPU_PINNING",
 )
@@ -955,8 +956,12 @@ class PreparationService:
                 bin_dir / "gfortran",
             ],
             "pyudales": [
-                self.repo_root / "libs/pyudales/u-dales/build/release/u-dales",
+                self.repo_root / "libs/pyudales/u-dales/.git",
                 bin_dir / "mpirun",
+                bin_dir / "mpif90",
+                bin_dir / "cmake",
+                bin_dir / "nc-config",
+                bin_dir / "nf-config",
             ],
             "pypalm": [
                 Path(

@@ -76,6 +76,17 @@ def _concat_windows(
         _window_dataset(ds, window, cfg) for window, ds in enumerate(window_list)
     ]
     combined = xarray.concat(rebased, dim="time", join="override")
+    metadata = [
+        ds.attrs.get("model_discrepancy_by_member", ds.attrs.get("model_discrepancy"))
+        for ds in window_list
+    ]
+    if any(value is not None for value in metadata):
+        combined.attrs.pop("model_discrepancy", None)
+        combined.attrs.pop("model_discrepancy_by_member", None)
+        combined.attrs["model_discrepancy_by_window"] = json.dumps(
+            [json.loads(value) if value is not None else None for value in metadata],
+            sort_keys=True,
+        )
     combined.attrs.pop("window", None)
     combined.attrs.pop("window_start", None)
     return combined

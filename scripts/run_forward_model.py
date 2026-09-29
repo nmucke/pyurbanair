@@ -17,7 +17,7 @@ if __package__ is None or __package__ == "":
 import hydra
 from omegaconf import DictConfig
 
-from pyurbanair.workflows.forward import get_stepper, run  # noqa: F401
+from pyurbanair.workflows.forward import _concat_windows, get_stepper, run  # noqa: F401
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="run_forward_model")  # type: ignore[misc, unused-ignore]

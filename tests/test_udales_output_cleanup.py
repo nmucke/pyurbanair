@@ -43,6 +43,9 @@ def test_run_single_cleans_output_before_staging_warmstart(
 
     model = ForwardModel.__new__(ForwardModel)
     model.dirs = dirs
+    model.model_discrepancy = {"enabled": False}
+    model._discrepancy_defaults = {}
+    monkeypatch.setattr(model, "prepare_solver", lambda **kwargs: None)
     model._elapsed_time = 0.0
     model.spinup_time = 2.0
     model._simulation_time = 3.0

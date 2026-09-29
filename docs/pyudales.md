@@ -12,22 +12,25 @@ boundary-layer LES solver on a staggered C-grid.
 
 ## 1. Obtaining the Fortran source
 
-[`__init__.py`](../libs/pyudales/src/pyudales/__init__.py) runs at first import. It
-reads `.gitmodules` to locate the `libs/pyudales/u-dales` submodule entry, then:
+Importing pyudales does not download, checkout or compile solver code. Normal
+`prepare_udales` / `run_preprocessing` prepares the solver and preprocessing tools;
+direct forecasts and ensemble construction also ensure the solver is prepared
+before any workers start.
 
-1. Attempts `git submodule update --init --recursive libs/pyudales/u-dales`.
-2. Falls back to a direct `git clone` of the URL extracted from `.gitmodules`.
-3. Checks out the tag/branch recorded in `.gitmodules` (currently v2.2.0).
+[`utils/solver_build.py`](../libs/pyudales/src/pyudales/utils/solver_build.py)
+exports pristine commit `b84916ac60cecd1da54dd09df76c15e30dcaabe9` from the
+submodule's Git objects (or a cached direct clone), leaving local edits untouched.
+Stock and discrepancy variants live in separate, locked, atomically published
+cache entries. The default cache is `.cache/pyudales`; `PYUDALES_CACHE_DIR` can
+select another writable location. Package resources may be read-only. Cache keys
+include source/extension hashes, build scripts, toolchain, dependencies, flags and
+platform. Reuse requires a matching capability manifest and executable hash.
+Failed or partial builds are rebuilt; `CMakeCache.txt` alone is insufficient.
 
-After the source is present the `__init__` runs `build_udales_macos.sh release`
-(builds the Fortran binary into `u-dales/build/release/`) and
-`build_preprocessing_macos.sh` (builds the IBM preprocessing tools including
-`u-dales/tools/View3D/`). These are skipped when the corresponding
-`CMakeCache.txt` already exists.
-
-The top-level script path is in `LOCAL_EXECUTE_SCRIPT`
-(`libs/pyudales/shell_scripts/local_execute.sh`), kept outside the submodule so
-local modifications survive submodule re-initialisation.
+The selected executable travels in `DirectoryPaths.solver_executable` and
+`config.sh`'s `DA_BUILD`; its source tree supplies the corresponding preprocessing
+tools. No manual patch, solver fork, or executable-path override is required.
+The launch script remains a pyudales resource outside the upstream source.
 
 **Known build constraint.** The uDALES build implements only the `cd2` (second-
 order centred differencing) momentum advection scheme. Setting `iadv_mom=1` in
@@ -236,6 +239,77 @@ into namoptions `&INPS` and the `prof.inp`/`lscale.inp` files via
 `apply_inflow_settings`. The `uini` key is not written (that is a pylbm-specific
 convention); uDALES uses `u0`/`v0` as the reference velocity scalars independent
 of the initial condition.
+
+---
+
+### 4.1 Opt-in strain/rotation discrepancy (fixed forward runs)
+
+`model.forward_model.model_discrepancy` enables a native Vreman viscosity
+correction. This first implementation supports fixed coefficients in single and
+ensemble forward runs. Assimilation-model enablement is rejected until the
+window checkpoint/replay and parameter-inference work is implemented. There are
+no time-varying coefficient schedules or process noise.
+
+All feature settings must be chosen explicitly; the following numbers illustrate
+the interface and are **not calibrated defaults**:
+
+```yaml
+model_discrepancy:
+  enabled: true
+  kind: sgs_strain_rotation
+  coefficient_model: persistent
+  canopy_height: 10.0
+  height_band_over_H: [0.5, 1.5]
+  gradient_regularization: 1.0e-6
+  log_multiplier_cap: 1.0986122886681098
+  prior_std: null
+```
+
+Height is measured in metres from the native solver's vertical datum (`zf`);
+`canopy_height` is a fixed representative building height. The regularization is
+in s⁻¹ and the logarithmic cap is dimensionless. `prior_std` is reserved for the
+later inference stage; supplying it does not sample a prior.
+
+Supply static scalar Dataset fields `sgs_bias_b0`, `sgs_bias_b1`, `sgs_bias_b2`
+through `params` (or `Constant` entries in the parameter sampler). For example:
+
+```python
+params = xarray.Dataset({"sgs_bias_b0": 0.1, "sgs_bias_b1": -0.2, "sgs_bias_b2": 0.05})
+state = forward_model(params=params)
+```
+
+Coefficients are routed separately from inlet controls. Each call resolves
+against constructor coefficients (zero by default), then applies that call's
+provided fields; previous call values never become defaults. All three are
+written after preprocessing. Time-array and nonfinite coefficients are rejected.
+Disabling a reused case strips extension-only namelist keys before selecting the
+stock executable; untouched disabled inputs are a no-op.
+
+The correction is `exp(L*tanh((b0+b1*phi+b2*q)/L))`, where `phi` is the compact
+sine-squared height band and `q` compares squared rotation and strain norms.
+The native patch reuses Vreman gradients every closure evaluation, preserves
+scalar diffusivity by applying the multiplier after `ekh` is calculated, and
+adds molecular viscosity afterward. The existing momentum stress divergence and
+boundary filling remain in place. Enabled zero-gradient cells have zero SGS
+viscosity; the disabled branch retains upstream arithmetic. Before the first
+step, the enabled extension refreshes viscosity from the staged state with
+velocity halos/boundaries populated. Enabled warm starts stage the full rank
+restart set, inject each rank's velocity/pressure slab, synchronize clocks and
+preserve that rank's hidden records byte-for-byte. This staging supports the
+pinned `cd2` layout and an evenly divided x-only decomposition. Auxiliary restart
+reads (`lreadmean`, `lreadminl`, or `nsv>0` with `lreadscal`) are rejected until
+those additional files are carried too. Unsupported layouts or incomplete rank
+sets fail before launch. Native startup also rejects inconsistent
+rank clocks before entering thermodynamic collectives.
+
+The returned/saved state carries JSON in its `model_discrepancy` attribute:
+feature settings, coefficients, executable/build provenance and native multiplier
+extrema/saturation diagnostics. The native diagnostic text file is collected
+before output cleanup. Ensemble metadata is aggregated as
+`model_discrepancy_by_member`; forward rollouts retain each window under
+`model_discrepancy_by_window`. Native physics, multi-rank equivalence, wall/energy
+budgets, restart replay, and coefficient-recovery experiments remain separate
+acceptance gates; compiling the extension does not demonstrate transfer skill.
 
 ---
 

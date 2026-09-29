@@ -11,7 +11,7 @@ from pyurbanair.jobs.preparation import PreparationService, _artifact_architectu
 from tests.test_forward_preparation import checkout
 
 
-def test_surrogate_checks_selected_cfd_spinup_binary(
+def test_surrogate_checks_selected_cfd_spinup_prerequisites(
     checkout: Path, tmp_path: Path
 ) -> None:
     worker_bin = checkout / ".pixi/envs/dev/bin"
@@ -58,10 +58,25 @@ def test_surrogate_checks_selected_cfd_spinup_binary(
     )
     assert not plan["validation"]["prerequisites_present"]
     assert any(
-        issue["field"] == "backend.pyudales"
-        and "build/release/u-dales" in issue["message"]
+        issue["field"] == "backend.pyudales" and "mpif90" in issue["message"]
         for issue in plan["validation"]["issues"]
     )
+
+
+def test_udales_readiness_uses_managed_build_prerequisites(
+    checkout: Path, tmp_path: Path
+) -> None:
+    worker_bin = checkout / ".pixi/envs/dev/bin"
+    worker_bin.mkdir(parents=True)
+    for name in ("python", "mpirun", "mpif90", "cmake", "nc-config", "nf-config"):
+        (worker_bin / name).write_text("test tool identity")
+    source = checkout / "libs/pyudales/u-dales"
+    source.mkdir(parents=True)
+    (source / ".git").write_text("gitdir: test source repository")
+    service = PreparationService(checkout, tmp_path / "store")
+    assert service.capabilities()["backends"]["pyudales"]["prerequisites_present"]
+    (worker_bin / "mpif90").unlink()
+    assert not service.capabilities()["backends"]["pyudales"]["prerequisites_present"]
 
 
 @pytest.mark.parametrize("kind", ["surrogate", "generator"])  # type: ignore[misc]

@@ -20,6 +20,17 @@ def _get(cfg: DictConfig, key: str, default: Any = None) -> Any:
 
 def validate_run_config(cfg: DictConfig, workflow: str) -> None:
     """Reject incompatible choices before creating a run directory or solver."""
+    for role in ("model", "truth_model", "assim_model"):
+        if _get(cfg, f"{role}.forward_model.model_discrepancy.enabled", False):
+            if _get(cfg, f"{role}.name") != "pyudales":
+                raise ValueError(
+                    "model_discrepancy currently requires pyudales/Vreman."
+                )
+            if role == "assim_model":
+                raise ValueError(
+                    "Discrepancy assimilation is not implemented yet; first validate "
+                    "fixed-coefficient forward runs and deterministic window replay."
+                )
     if workflow == "render":
         if OmegaConf.is_missing(cfg, "input"):
             raise ValueError("input is required for render_les")

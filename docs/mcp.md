@@ -21,6 +21,10 @@ Prepare the selected backend using its maintained reference:
 compile, fetch source, or prove that a solver runs. A trained surrogate export
 and its referenced metadata are supplied separately. No LLM API key is needed.
 
+uDALES readiness checks require its initialized source submodule and the worker
+build tools. Workers prepare the selected stock or discrepancy solver in the
+managed uDALES cache; the legacy `build/release/u-dales` binary is not required.
+
 CPU workers use `dev`; GPU workers use the installed `cuda` environment. The MCP
 server runs in the separate `mcp` environment. Install optional 3D support with
 `pixi install --locked -e rendering`. Its PyVista/VTK and ffmpeg dependencies
