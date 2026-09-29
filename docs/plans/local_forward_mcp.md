@@ -11,6 +11,10 @@ Use stdio for desktop and terminal clients; keep web connectivity optional.
 Expose the full forward configuration, including backend input settings, rather
 than maintaining a second, reduced configuration interface. First fix the
 forward runner's incomplete result persistence and surrogate initialization.
+Add post-run visualization: adapt the supplied HTML into a viewer driven by run
+metadata, generate 2D movies and synchronized virtual-probe charts, and offer
+3D movies through a new optional PyVista/VTK renderer. Return images
+agents can inspect as well as a local browser viewer for the user.
 
 Status: proposed implementation plan, researched on 2026-09-29. No server is
 implemented by this document. Three research agents examined backend execution,
@@ -23,8 +27,9 @@ The first release covers single simulations, ensembles, static or dynamic
 parameters, and multi-window forward rollouts across all four backends. It
 assumes a local clone with the selected backend installed and runnable. Include
 configuration discovery, validation, launch, monitoring, cancellation and result
-inspection. Assimilation, surrogate training, cluster submission and distributed
-execution remain later workflows.
+inspection, plus rendering of completed simulation artifacts. Assimilation,
+surrogate training, cluster submission and distributed execution remain later
+workflows.
 
 Give `libs/mcp_server` its own `pyproject.toml`, distribution name
 `pyurbanair-mcp` and Python package `pyurbanair_mcp`. Declare the official Python
@@ -69,7 +74,11 @@ The package boundary follows the existing editable libraries under `libs/`.
 must never depend on the MCP library or SDK. Keep tool registration, protocol
 schemas and transport handling in `libs/mcp_server`. Configuration composition,
 scientific validation, workflow execution, job supervision and artifact handling
-remain reusable core services that scripts and tests can call directly.
+remain reusable core services that scripts and tests can call directly. The
+viewer template, lightweight rendering and data adaptation also live in the core;
+MCP exposes adapters to those services. The new rendering code must be independent
+of `render_les.py`, `les-render` and their configs/environment; that pipeline is
+scheduled for removal and is not a foundation for this work.
 
 This is a packaging boundary, not a standalone simulation installation. The
 server still needs the local checkout, its `conf/` tree and the selected backend's
@@ -88,6 +97,11 @@ flowchart TD
     G --> H[LBM / uDALES / PALM / surrogate]
     F --> I[Run directory: inputs, logs, NetCDF, provenance]
     B -->|bounded reads| I
+    D --> J[Render worker]
+    I --> J
+    J --> K[Viewer bundle: HTML, media, probes, manifest]
+    B -->|image content and resource links| K
+    K --> L[Local browser via read-only loopback asset server]
 ```
 
 Keep three concerns separate: MCP request handling, configuration preparation,
@@ -99,8 +113,10 @@ clients from each believing they have the machine's only active job.
 Autostart the supervisor under a startup lock, communicate over a user-private
 Unix socket, and store jobs in SQLite on a local filesystem. The supervisor can
 exit when idle. The launcher reconnects to an existing instance when present.
-No HTTP service or network listener is necessary for this architecture. Keep
-the transport adapter thin enough to add loopback Streamable HTTP later.
+MCP and job control need no HTTP listener. Viewing generated bundles adds an
+on-demand, read-only HTTP asset server bound to loopback; this does not change
+the stdio MCP transport. Keep the transport adapter thin enough to add
+Streamable HTTP later if needed.
 
 Reuse these existing seams:
 
@@ -127,16 +143,18 @@ expose documentation and saved configuration for clients that support them.
 
 | Proposed tool | Input and result |
 | --- | --- |
-| `get_capabilities` | Backends, supported modes, environment identity, prerequisite status and actionable missing dependencies. Read-only inspection; no build. |
+| `get_capabilities` | Backends, supported modes, rendering presets, environment identity, prerequisite status and actionable missing dependencies. Read-only inspection; no build. |
 | `list_config_options` | Group/search/page; available models, cases, samplers, execution presets and forward experiments. |
 | `inspect_config` | Selections/overrides and optional subtree; source YAML, effective values, field documentation, ownership and related options. |
 | `prepare_forward_run` | Ordered Hydra overrides, native input overrides, optional initial-state specification and local execution limits; returns `plan_id`, digest, resolved settings, validation and expected artifacts. |
 | `launch_forward_run` | `plan_id` and idempotency key; returns `run_id` and queued/running state promptly. |
 | `list_runs` | Filter/page; persistent recent and active runs, including runs started in another client session. |
-| `get_run_status` | `run_id`; phase, timestamps, heartbeat, backend, member/window information when available, outcome and errors. |
-| `get_run_logs` | `run_id`, cursor and byte limit; bounded log content and next cursor. |
-| `cancel_run` | `run_id`; idempotent cancellation request and resulting state. |
+| `get_run_status` | Simulation `run_id` or general `job_id`; phase, timestamps, heartbeat, backend/renderer, member/window information when available, outcome and errors. |
+| `get_run_logs` | `run_id` or `job_id`, cursor and byte limit; bounded log content and next cursor. |
+| `cancel_run` | `run_id` or `job_id`; idempotent cancellation request and resulting state. |
 | `inspect_run_results` | `run_id`, optional artifact ID and bounded selection; artifact inventory, NetCDF metadata, small slices or previews. |
+| `render_simulation` | Completed `run_id`, member/reduction, time interval, views, fields, slice/probe locations and render overrides; validates and queues a render job, returning `job_id` and `visualization_id`. |
+| `get_visualization` | `visualization_id`, optional frame/time selection; status, provenance, bounded PNG image content, media links and a local viewer URL. |
 
 Validation failures return field paths, explanations and suggested fixes.
 Execution failures distinguish preparation, compilation, simulation and
@@ -324,7 +342,54 @@ escalate TERM to KILL after a grace period, confirm descendants have exited,
 and preserve logs/partial artifacts. Test cancellation during preparation as
 well as during solver execution. Release resource slots only after teardown.
 
-**9. Proposed files and implementation order**
+**9. Visualization after simulation**
+
+Use the supplied HTML as the visual starting point: retain the dark layout,
+2D/3D view selector, playback controls, downloads and synchronized probe charts.
+It currently plays existing MP4 files; it is not a renderer of simulation fields.
+The chart JavaScript and media were not included, and the paste contains a
+broken JavaScript expression. The detailed
+[viewer adaptation plan](local_forward_visualization.md) records those changes
+and links to the preserved source.
+
+Rendering is a separate job reading the saved state, parameters and geometry.
+Changing heights, probes, camera or color limits must not rerun the solver.
+Use the same queue, logging, cancellation and resource accounting as simulation
+jobs, with `kind=visualization` and `parent_run_id`. A render failure leaves the
+successful simulation and its numerical artifacts intact. Permit an explicit
+post-run render request to enqueue this job automatically after success.
+
+Provide two rendering levels:
+
+- **Standard:** snapshots, 2D slice movies, probe plots/data and the HTML viewer.
+  Use existing Matplotlib/xarray infrastructure, adding ffmpeg for MP4. PNG and
+  probe outputs remain available without a video encoder. This is the initial
+  path for all four backends.
+- **3D:** implement a focused PyVista/VTK offscreen renderer for matching STL
+  geometry, a speed-colored slice and instantaneous streamlines, producing PNG
+  frames and MP4. Add its dependencies through a new optional rendering feature
+  and verify offscreen rendering on the local machine. Keep its interface small:
+  camera, seed placement, field/color scale and bounded quality settings. This
+  matches the supplied viewer's movie interface without depending on the old
+  rendering pipeline. See the detailed adaptation plan for sources and limits.
+
+Normalize staggered velocity components onto common physical coordinates before
+computing speed or extracting probes. Preserve masks, actual slice coordinates,
+units, member/reduction choice and the mapping from video time to simulation
+time. Do not infer buildings from zero speed. Document any spatial or temporal
+interpolation, and distinguish horizontal speed from full velocity magnitude.
+The adapter must support indexed member/window artifacts as well as consolidated
+NetCDF files.
+
+Generate a versioned viewer manifest from real run metadata instead of the
+HTML's fixed case names, 2/26 m heights, 20-second timeline and hard-coded files.
+Each bundle contains the HTML/CSS/JS, manifest, probe JSON, posters, previews and
+available movies. Return actual PNG image content through MCP so the agent can
+inspect a result; an HTML/MP4 path alone does not give it visual access. The
+browser provides the rich playback interface. Inline MCP Apps embedding is a
+later, capability-dependent adapter over the same viewer, not a prerequisite.
+
+**10. Proposed files and implementation order**
 
 The library layout is:
 
@@ -350,10 +415,15 @@ to MCP responses. No core service should return SDK-specific objects.
 | `src/pyurbanair/config/composition.py` | Pure config discovery/composition, source provenance and inspection. |
 | `src/pyurbanair/workflows/forward.py` | Shared forward execution, initialization and artifact contract. |
 | `src/pyurbanair/jobs/` | Preparation snapshots, native adapters, paths, registry, supervisor and worker. |
+| `src/pyurbanair/visualization/` | Backend-neutral data adaptation, 2D rendering, probes, viewer manifest/bundle generation and loopback asset serving. |
+| `src/pyurbanair/visualization/web/` | Packaged HTML/CSS/JS adapted from the supplied viewer; usable without MCP. |
+| `src/pyurbanair/visualization/render_3d.py` | New optional PyVista/VTK renderer, independent of the retiring LES rendering pipeline. |
+| `conf/visualization/` | New discoverable 2D/3D/viewer defaults and named presets. |
 | `scripts/start_mcp` | Thin environment-aware launcher for `pyurbanair_mcp`, passing the absolute repository root; no protocol stdout chatter. |
 | Root `pyproject.toml` / `pixi.lock` | Dedicated `mcp` feature installing `pyurbanair-mcp` from `libs/mcp_server` in editable mode; MCP-enabled local environments and launcher task. |
 | `tests/test_mcp_*.py` | MCP adapter, packaging and protocol tests, collected by the existing repository test command when the MCP feature is installed. |
 | Core configuration, job and forward tests | Shared service behavior and backend integration, runnable without the MCP SDK. |
+| Visualization and browser tests | Data correctness, movie/probe synchronization, asset serving, offline bundle assets and optional renderer integration. |
 | `docs/mcp.md` | Setup, clients, tool usage, lifecycle, configuration coverage and troubleshooting. |
 
 1. **Establish the workflow contract.** Extract the shared runner with behavior
@@ -368,7 +438,10 @@ to MCP responses. No core service should return SDK-specific objects.
    `pyurbanair_mcp` package. Add the SDK dependency there, wire the dedicated Pixi
    feature and entry point, and implement schemas, bounded reads and the launcher.
    Keep protocol handlers as wrappers around the already-tested core services.
-5. **Verify every backend and client.** Run small integration simulations, then
+5. **Add post-run visualization.** Implement normalization, 2D/probe rendering,
+   the manifest-driven viewer and bounded image returns. Add the new optional
+   PyVista/VTK renderer; test the supplied layout with generated fixtures.
+6. **Verify every backend and client.** Run small integration simulations, then
    desktop/terminal smoke tests. Document supported versions and missing local
    prerequisites. Update maintained configuration/codebase docs where contracts
    changed, and deliver setup examples.
@@ -377,7 +450,7 @@ Each milestone should be a focused PR with appropriate tests and
 `pixi run -e dev pre-commit` before committing. The substantial work is reliable
 workflow execution and result handling; tool registration is a thin final layer.
 
-**10. Setup experience and acceptance**
+**11. Setup experience and acceptance**
 
 Document the initial sequence: clone and bootstrap with `pixi run setup-dev`,
 prepare the desired backends/checkpoints, install an environment with the `mcp`
@@ -388,6 +461,10 @@ backends, but not the MCP library. Use absolute launcher paths
 because apps may not inherit the terminal's activated environment or CWD.
 Installation/build chatter must go to stderr and occur outside MCP startup
 where possible. The numerical server does not itself need an LLM API key.
+Report visualization readiness separately: basic images/probes, MP4 encoding
+and optional 3D. Only 3D render workers need the new PyVista/VTK feature and a
+working offscreen graphics context; MCP startup and 2D rendering must not import
+VTK. Do not reuse the old `viz` environment or require Blender/OpenVDB.
 
 Illustrative registration commands for the proposed launcher, not commands
 available in the repository today:
@@ -441,9 +518,17 @@ Acceptance gates:
 - A representative end-to-end request such as "run a small PALM ensemble, change
   the inflow and output interval, and show its results" works using only MCP
   tools. Repeat with LBM, uDALES and a supplied trained surrogate.
+- From completed outputs of each backend, generate 2D media and a viewer; return
+  a PNG the agent can inspect. Change slice heights and probes without launching
+  another solver. Verify actual coordinates, field definitions, ensemble labels
+  and synchronization across video, physical-time cursor and probe samples.
+- Browser tests cover seek/restart, view switching, variable clip durations,
+  missing media, single-frame runs, narrow screens and downloads. Missing ffmpeg
+  or 3D prerequisites must leave the basic viewer/previews usable. Test optional
+  3D on a provisioned machine and cancellation without orphan render processes.
 
 Later workflows should reuse the job/config/artifact services through a small
 workflow adapter with discover, validate, execute and summarize operations.
-Register only `forward` initially. Assimilation and training can then add their
-own configuration and artifact contracts without redesigning the MCP transport
-or job lifecycle.
+Register `forward` and its postprocessing render jobs initially. Assimilation
+and training can then add their own configuration and artifact contracts without
+redesigning the MCP transport or job lifecycle.
