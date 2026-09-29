@@ -43,6 +43,20 @@ class BaseForwardModel:
         """
         self._set_save_mode(results_dir)
 
+    @property
+    def forecast_window_replay_enabled(self) -> bool:
+        """Whether this backend checkpoints hidden state for repeated forecasts."""
+        return False
+
+    def begin_forecast_window(self) -> None:
+        """Capture immutable window-start solver state on supporting backends."""
+
+    def restore_forecast_window(self) -> None:
+        """Restore hidden state before injecting the current analyzed inputs."""
+
+    def end_forecast_window(self, commit: bool) -> None:
+        """Keep the accepted endpoint, or restore the pre-window solver state."""
+
     def get_states(self, sim_name: str = "state") -> xarray.Dataset:
         """Get the states from the results directory."""
         with xarray.open_dataset(

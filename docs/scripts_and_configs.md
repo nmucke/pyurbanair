@@ -1676,5 +1676,6 @@ regularization and log cap, and supply static `sgs_bias_b0/b1/b2` parameter
 fields. The standard forward runner prepares the pinned native extension
 and records its provenance automatically; no manual patch or binary path is
 needed. Defaults remain disabled. See [pyudales §4.1](pyudales.md#41-opt-in-strainrotation-discrepancy-fixed-forward-runs)
-for the contract. Discrepancy on an assimilation model is rejected in this first
-increment pending deterministic replay and inference integration.
+for the contract. The backend now implements window checkpoints for deterministic
+replay, but discrepancy on an assimilation model remains rejected by the runners
+pending coefficient prior/inference integration and recovery validation.

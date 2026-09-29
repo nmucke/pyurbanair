@@ -170,6 +170,39 @@ def discrepancy_metadata(
     }
 
 
+def validate_discrepancy_sgs_constant(
+    namoptions: NamoptionsFile, *, value: Any = None
+) -> float:
+    """Require a dissipative native Vreman base when discrepancy is enabled.
+
+    Callers opt in explicitly. An override is checked before namelist rounding;
+    otherwise the template is read with uDALES' native default of 0.07.
+    """
+    if value is None:
+        section = next(
+            (name for name in namoptions.sections if name.lower() == "namsubgrid"),
+            "NAMSUBGRID",
+        )
+        keys = {name.lower(): name for name in namoptions.get_section_keys(section)}
+        value = namoptions.get_value(section, keys.get("c_vreman", "c_vreman"))
+        if value is None:
+            value = 0.07
+    if isinstance(value, str):
+        # Fortran namelists accept double-precision exponents and comments.
+        value = (
+            value.split("!", 1)[0]
+            .strip()
+            .rstrip(",")
+            .replace("D", "e")
+            .replace("d", "e")
+        )
+    name = "Enabled model_discrepancy requires finite nonnegative c_vreman"
+    result = _finite_float(value, name)
+    if result < 0:
+        raise ValueError(name)
+    return result
+
+
 def write_model_discrepancy(
     namoptions_path: pathlib.Path,
     config: Mapping[str, Any] | None,
@@ -211,6 +244,7 @@ def write_model_discrepancy(
         or logical("loneeqn", False)
     ):
         raise ValueError("Enabled model_discrepancy requires the active Vreman closure")
+    validate_discrepancy_sgs_constant(namoptions)
     coefficients = extract_discrepancy_coefficients(params)
     za, zb = settings["height_band_over_H"]
     native: dict[str, str | float] = {

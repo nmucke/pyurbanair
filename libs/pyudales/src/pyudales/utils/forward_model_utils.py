@@ -86,6 +86,27 @@ def create_new_forward_model(
     reset_elapsed_time(new_forward_model.dirs)
     new_forward_model._elapsed_time = 0.0
 
+    # A member must own its template as well as its carry. The deepcopy's
+    # old path otherwise points back into the shared template model directory.
+    if new_forward_model.forecast_window_replay_enabled:
+        new_forward_model._warmstart_template_dir = (
+            new_experiment_dir / "warmstart_template"
+        )
+        change_file_extensions(
+            new_forward_model._warmstart_template_dir,
+            old_experiment_name,
+            experiment_name,
+        )
+    if (
+        new_forward_model.forecast_window_replay_enabled
+        and forward_model.warmstart_template_file is not None
+    ):
+        old_template = forward_model.warmstart_template_file
+        new_forward_model.warmstart_template_file = (
+            new_forward_model._warmstart_template_dir
+            / old_template.with_suffix(f".{experiment_name}").name
+        )
+
     # Update config.sh file to reflect new directories
     create_config_sh(
         dirs=new_forward_model.dirs,

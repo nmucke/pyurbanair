@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import pathlib
@@ -6,7 +7,11 @@ from typing import Any, Optional, cast
 import xarray
 from pyudales.forward_model import ForwardModel
 from pyudales.utils.forward_model_utils import create_new_forward_model
-from pyudales.utils.inlet_turbulence_utils import copy_elapsed_time, read_elapsed_time
+from pyudales.utils.inlet_turbulence_utils import (
+    copy_elapsed_time,
+    derive_seed,
+    read_elapsed_time,
+)
 from pyudales.utils.warm_start_utils import copy_carry
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
@@ -79,6 +84,76 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             experiment_name,
         )
 
+    @property
+    def forecast_window_replay_enabled(self) -> bool:
+        return any(
+            model.forecast_window_replay_enabled
+            for model in self.ensemble_forward_models
+        )
+
+    def begin_forecast_window(self) -> None:
+        if not self.forecast_window_replay_enabled:
+            return
+        if getattr(self, "_forecast_window_ensemble_state", None) is not None:
+            raise RuntimeError("A discrepancy forecast window is already active")
+        begun = []
+        try:
+            for model in self.ensemble_forward_models:
+                model.begin_forecast_window()
+                begun.append(model)
+        except BaseException:
+            for model in begun:
+                model.end_forecast_window(commit=False)
+            raise
+        rng = getattr(self, "_failure_rng", None)
+        self._forecast_window_ensemble_state: dict[str, Any] | None = {
+            "rng": copy.deepcopy(rng.bit_generator.state) if rng is not None else None,
+            "substitutions": dict(getattr(self, "_last_failure_substitutions", {})),
+        }
+
+    def restore_forecast_window(self) -> None:
+        for model in self.ensemble_forward_models:
+            model.restore_forecast_window()
+
+    def end_forecast_window(self, commit: bool) -> None:
+        if not self.forecast_window_replay_enabled:
+            return
+        # Prepare every member before releasing a single rollback checkpoint.
+        for base_model in self.ensemble_forward_models:
+            cast(ForwardModel, base_model)._prepare_end_forecast_window(commit)
+        transaction = getattr(self, "_forecast_window_ensemble_state", None)
+        if not commit and transaction is not None:
+            if transaction["rng"] is not None:
+                self._failure_rng.bit_generator.state = transaction["rng"]
+            self._last_failure_substitutions = transaction["substitutions"]
+        self._forecast_window_ensemble_state = None
+        for base_model in self.ensemble_forward_models:
+            cast(ForwardModel, base_model)._release_forecast_window()
+
+    def get_member_state(
+        self,
+        state: Optional[xarray.Dataset | pathlib.Path],
+        member_index: int,
+        sim_name: str = "state",
+    ) -> Optional[xarray.Dataset]:
+        # During replay, None explicitly requests the pinned cold start. Old
+        # saved forecast outputs must not silently become initial conditions.
+        model = self.ensemble_forward_models[member_index]
+        if state is None and getattr(model, "_forecast_window_start", None) is not None:
+            return None
+        return super().get_member_state(state, member_index, sim_name)
+
+    def apply_failure_substitutions_to_params(
+        self, params: xarray.Dataset
+    ) -> xarray.Dataset:
+        if not self.forecast_window_replay_enabled:
+            return cast(
+                xarray.Dataset, super().apply_failure_substitutions_to_params(params)
+            )
+        # The accepted donor trajectory used exactly these coefficients. Jitter
+        # would mislabel that trajectory and its hidden native checkpoint.
+        return cast(xarray.Dataset, self.apply_failure_substitutions_to_state(params))
+
     def run_ensemble(
         self,
         state: Optional[xarray.Dataset | pathlib.Path] = None,
@@ -113,6 +188,21 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         for failed, donor in self._last_failure_substitutions.items():
             donor_model = cast(ForwardModel, self.ensemble_forward_models[donor])
             failed_model = cast(ForwardModel, self.ensemble_forward_models[failed])
+            checkpoint = getattr(donor_model, "_forecast_window_start", None)
+            if checkpoint is not None:
+                failed_model._forecast_window_start = checkpoint
+                failed_model.params = copy.deepcopy(donor_model.params)
+                failed_model._discrepancy_defaults = copy.deepcopy(
+                    donor_model._discrepancy_defaults
+                )
+                # Preserve the donor forcing realization after committing too.
+                failed_model.inlet_turbulence = copy.deepcopy(
+                    donor_model.inlet_turbulence
+                )
+                if failed_model.inlet_turbulence.get("seed") is None:
+                    failed_model.inlet_turbulence["seed"] = derive_seed(
+                        checkpoint.experiment_name
+                    )
             copy_carry(donor_model.dirs, failed_model.dirs)
             if not copy_elapsed_time(donor_model.dirs, failed_model.dirs):
                 logger.info(

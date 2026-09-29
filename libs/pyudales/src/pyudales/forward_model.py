@@ -18,6 +18,7 @@ from .utils.config_utils import create_config_sh
 from .utils.dir_utils import get_project_root, get_udales_directory_paths
 from .utils.discrepancy_utils import (
     extract_discrepancy_coefficients,
+    validate_discrepancy_sgs_constant,
     validate_model_discrepancy,
     write_model_discrepancy,
 )
@@ -59,6 +60,7 @@ from .utils.warm_start_utils import (
     store_carry,
     update_warmstart_file_from_xarray,
 )
+from .utils.window_checkpoint import WindowCheckpoint, validate_carry
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -719,7 +721,7 @@ class ForwardModel(BaseForwardModel):
         return simulation_time if warm_start else simulation_time + self.spinup_time
 
     def _apply_inflow_settings(
-        self, params: xarray.Dataset, warm_start: bool = False
+        self, params: Optional[xarray.Dataset], warm_start: bool = False
     ) -> None:
         """Apply the inflow settings to the forward model."""
         if params is not None:
@@ -877,6 +879,8 @@ class ForwardModel(BaseForwardModel):
             )
             return
 
+        if getattr(self, "model_discrepancy", {}).get("enabled", False):
+            validate_discrepancy_sgs_constant(namoptions, value=sgs)
         namoptions.set_value("NAMSUBGRID", key, f"{float(sgs):.4f}")
         namoptions.write()
         logger.info(
@@ -1081,7 +1085,76 @@ class ForwardModel(BaseForwardModel):
 
         logger.info("Preprocessing completed.")
 
+    @property
+    def forecast_window_replay_enabled(self) -> bool:
+        return bool(self.model_discrepancy.get("enabled", False))
+
+    def begin_forecast_window(self) -> None:
+        """Pin native hidden state and mutable inputs for an assimilation window."""
+        if not self.forecast_window_replay_enabled:
+            return
+        if getattr(self, "_forecast_window_original", None) is not None:
+            raise RuntimeError("A discrepancy forecast window is already active")
+        checkpoint = WindowCheckpoint.capture(self)
+        self._forecast_window_original: WindowCheckpoint | None = checkpoint
+        self._forecast_window_start: WindowCheckpoint | None = checkpoint
+
+    def restore_forecast_window(self) -> None:
+        checkpoint = getattr(self, "_forecast_window_start", None)
+        if checkpoint is not None:
+            checkpoint.restore(self)
+            clean_output_dir(self.dirs)
+
+    def _prepare_end_forecast_window(self, commit: bool) -> None:
+        original = getattr(self, "_forecast_window_original", None)
+        if original is None:
+            return
+        if commit:
+            validate_carry(self, required=True)
+            self._elapsed_time = read_elapsed_time(self.dirs, self._elapsed_time)
+        else:
+            original.restore(self)
+            clean_output_dir(self.dirs)
+
+    def _release_forecast_window(self) -> None:
+        original = getattr(self, "_forecast_window_original", None)
+        if original is None:
+            return
+        self._forecast_window_original = None
+        self._forecast_window_start = None
+        if original is not None:
+            try:
+                original.remove()
+            except OSError:
+                # The endpoint is already accepted (or rollback complete).
+                # Scratch cleanup must never turn a successful transaction into
+                # an unrollbackable half-commit across ensemble members.
+                logger.warning(
+                    "Could not remove window checkpoint %s",
+                    original.root,
+                    exc_info=True,
+                )
+
+    def end_forecast_window(self, commit: bool) -> None:
+        self._prepare_end_forecast_window(commit)
+        self._release_forecast_window()
+
     def run_single(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+        sim_name: Optional[str] = "state",
+    ) -> xarray.Dataset:
+        # Also restore inside workers: retries must never inherit a prior
+        # attempt's endpoint, even when the caller already restored the parent.
+        self.restore_forecast_window()
+        try:
+            return self._run_single(state=state, params=params, sim_name=sim_name)
+        except BaseException:
+            self.restore_forecast_window()
+            raise
+
+    def _run_single(
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
@@ -1171,7 +1244,12 @@ class ForwardModel(BaseForwardModel):
             # the two stay in step (without that the substituted member would be
             # permanently offset from the state it is carrying).
             self._elapsed_time += window_runtime
-            if is_inlet_turbulence_enabled(self.inlet_turbulence):
+            if self.forecast_window_replay_enabled:
+                validate_carry(self, required=True)
+            if (
+                is_inlet_turbulence_enabled(self.inlet_turbulence)
+                or self.forecast_window_replay_enabled
+            ):
                 # Guarded: with the knob off nothing reads the clock, and the
                 # disabled path must not drop a file into the experiment dir
                 # (CLAUDE.md strict no-op rule).

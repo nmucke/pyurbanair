@@ -374,6 +374,24 @@ the posterior forecast (written to `step_{num_steps}/`). An optional
 `_final_time_smoothing_step` follows (no-op in the base; overridden by the
 state-bearing variants when `final_time_smoothing=True`).
 
+**Hidden-state replay (opt-in backend protocol).** An ensemble advertising
+`forecast_window_replay_enabled` captures its member checkpoints at window
+entry, restores them before every forecast, and commits only after the posterior
+forecast and postprocessing succeed. An exception or `final_forecast=False`
+rolls the backend back to its pre-window inputs. Analyzed initial conditions
+and the current parameter vector are injected after restoration. This prevents
+intermediate endpoints from becoming hidden inputs to subsequent MDA iterations.
+Backends without this capability retain their existing behavior and RNG streams.
+With replay enabled, final-forecast donor substitutions also update the returned
+parameter ensemble and its final history entry to match the accepted forecast.
+
+The first implementation is uDALES with enabled discrepancy; see
+[pyudales §4.2](pyudales.md#42-window-checkpoints-for-repeated-forecasts) for
+checkpoint contents and limitations. The runner's discrepancy assimilation guard
+remains in place until coefficient priors, inference and recovery tests are
+integrated. This protocol alone does not enable filtering or hybrid discrepancy
+inference, nor does it checkpoint the smoother's RNG for job recovery.
+
 **`_observation_coords`** (used by distance localization). Tiles the
 sensor xyz coordinates so that observation index `j` maps to sensor
 `j % num_sensors`, matching the flattened observation vector layout.

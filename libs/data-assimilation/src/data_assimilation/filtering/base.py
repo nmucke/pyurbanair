@@ -522,6 +522,7 @@ class BaseFilter:
         self.pred_obs_frames_history: list[Optional[xarray.DataArray]] = []
 
         if self.forward_model.save_on_disk:
+            assert self.forward_model.results_dir is not None
             self.base_results_dir = self.forward_model.results_dir
 
     # ------------------------------------------------------------------

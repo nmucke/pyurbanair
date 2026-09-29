@@ -213,6 +213,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         self.analyzed_pred_obs: np.ndarray | None = None
 
         if self.forward_model.save_on_disk:
+            assert self.forward_model.results_dir is not None
             self.base_results_dir = self.forward_model.results_dir
             for i in range(num_steps + 1):
                 step_dir = self.base_results_dir / f"step_{i}"
@@ -511,6 +512,50 @@ sensor_observation_coords` (shared with the filtering package); see its
         return_state_history: bool = False,
         final_forecast: bool = True,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
+        """Run one window, committing only a successful posterior forecast.
+
+        A supporting backend restores its hidden solver state before every
+        forecast. Analysis-only calls and exceptions leave its pre-window state
+        intact, so intermediate endpoints cannot leak into a later forecast.
+        """
+        replay = getattr(self.forward_model, "forecast_window_replay_enabled", False)
+        if replay:
+            self.forward_model.begin_forecast_window()
+        try:
+            result = self._analysis_window(
+                params=params,
+                observations=observations,
+                state=state,
+                return_params_history=return_params_history,
+                return_state_history=return_state_history,
+                final_forecast=final_forecast,
+            )
+            if replay:
+                self.forward_model.end_forecast_window(commit=final_forecast)
+        except BaseException:
+            if replay:
+                self.forward_model.end_forecast_window(commit=False)
+            raise
+        return result
+
+    def _forecast_step(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+    ) -> xarray.Dataset:
+        if getattr(self.forward_model, "forecast_window_replay_enabled", False):
+            self.forward_model.restore_forecast_window()
+        return super()._forecast_step(state=state, params=params)
+
+    def _analysis_window(
+        self,
+        params: xarray.Dataset,
+        observations: Observations,
+        state: Optional[xarray.Dataset] = None,
+        return_params_history: bool = False,
+        return_state_history: bool = False,
+        final_forecast: bool = True,
+    ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the ESMDA analysis loop.
 
         ``observations`` is the window's time-resolved observation DataArray
@@ -621,6 +666,12 @@ sensor_observation_coords` (shared with the filtering package); see its
             # params.
             self._set_step_results_dir(self.num_steps)
             state = self._forecast_step(state=initial_state, params=params)
+            if getattr(self.forward_model, "forecast_window_replay_enabled", False):
+                params = self.forward_model.apply_failure_substitutions_to_params(
+                    params
+                )
+                if return_params_history:
+                    params_history[-1] = params
 
             # Close the observation-space history with the POSTERIOR forecast:
             # the in-loop appends only cover the num_steps prior/intermediate

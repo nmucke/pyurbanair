@@ -14,6 +14,7 @@ from pyudales.utils.discrepancy_utils import (
     extract_discrepancy_coefficients,
     height_feature,
     strain_rotation_feature,
+    validate_discrepancy_sgs_constant,
     validate_model_discrepancy,
     viscosity_multiplier,
     write_model_discrepancy,
@@ -165,6 +166,49 @@ def test_native_closure_defaults_are_vreman(tmp_path: pathlib.Path) -> None:
     path = tmp_path / "namoptions.999"
     path.write_text("&NAMSUBGRID\n/\n")
     assert write_model_discrepancy(path, ENABLED) is not None
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "value", ["-0.07", "-1e-10", "NaN", "Infinity", "-Infinity", ".true.", "bad"]
+)
+def test_enabled_rejects_invalid_native_sgs_constant(
+    tmp_path: pathlib.Path, value: str
+) -> None:
+    path = tmp_path / "namoptions.999"
+    original = f"&namsubgrid\nC_VREMAN = {value}\n/\n"
+    path.write_text(original)
+    with pytest.raises(ValueError, match="finite nonnegative c_vreman"):
+        write_model_discrepancy(path, ENABLED)
+    assert path.read_text() == original
+    assert write_model_discrepancy(path, None) is None
+    assert path.read_text() == original
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "value, expected", [("0", 0.0), ("-0.0", 0.0), ("7.D-2, ! native", 0.07)]
+)
+def test_enabled_accepts_nonnegative_native_sgs_constant(
+    tmp_path: pathlib.Path, value: str, expected: float
+) -> None:
+    path = tmp_path / "namoptions.999"
+    path.write_text(f"&namsubgrid\nC_VREMAN = {value}\n/\n")
+    assert validate_discrepancy_sgs_constant(NamoptionsFile(path)) == expected
+    assert write_model_discrepancy(path, ENABLED) is not None
+    assert NamoptionsFile(path).get_value("namsubgrid", "C_VREMAN") == value
+
+
+def test_native_sgs_override_is_validated_before_rounding(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "namoptions.999"
+    path.write_text("&NAMSUBGRID\n/\n")
+    namoptions = NamoptionsFile(path)
+    assert validate_discrepancy_sgs_constant(namoptions) == 0.07
+    assert validate_discrepancy_sgs_constant(namoptions, value=0.2) == 0.2
+    for value in (-1e-10, float("nan"), float("inf"), True):
+        with pytest.raises(ValueError, match="finite nonnegative c_vreman"):
+            validate_discrepancy_sgs_constant(namoptions, value=value)
+    assert path.read_text() == "&NAMSUBGRID\n/\n"
 
 
 def test_namelist_removal_can_be_undone(tmp_path: pathlib.Path) -> None:
