@@ -108,15 +108,6 @@ def test_probe_preview_requires_completed_run(tmp_path: pathlib.Path) -> None:
         validate_run_config(cfg, "probe")
 
 
-def test_render_preview_requires_existing_input(tmp_path: pathlib.Path) -> None:
-    cfg = _compose("render_les")
-    with pytest.raises(ValueError, match="input is required"):
-        validate_run_config(cfg, "render")
-    cfg = _compose("render_les", f"input={tmp_path / 'missing.nc'}")
-    with pytest.raises(ValueError, match="input does not exist"):
-        validate_run_config(cfg, "render")
-
-
 def test_grid_operator_and_explicit_none_aggregation() -> None:
     from pyurbanair.config.hydra_helpers import (
         create_aggregate_observations,

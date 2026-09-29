@@ -31,11 +31,6 @@ def validate_run_config(cfg: DictConfig, workflow: str) -> None:
                     "Discrepancy assimilation is not implemented yet; coefficient "
                     "prior/inference integration and recovery validation are still required."
                 )
-    if workflow == "render":
-        if OmegaConf.is_missing(cfg, "input"):
-            raise ValueError("input is required for render_les")
-        if not pathlib.Path(str(cfg.input)).exists():
-            raise ValueError(f"input does not exist: {cfg.input}")
     expected = _get(cfg, "experiment.workflow")
     if expected is not None and expected != workflow:
         raise ValueError(

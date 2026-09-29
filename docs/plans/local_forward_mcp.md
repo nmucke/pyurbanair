@@ -76,9 +76,7 @@ schemas and transport handling in `libs/mcp_server`. Configuration composition,
 scientific validation, workflow execution, job supervision and artifact handling
 remain reusable core services that scripts and tests can call directly. The
 viewer template, lightweight rendering and data adaptation also live in the core;
-MCP exposes adapters to those services. The new rendering code must be independent
-of `render_les.py`, `les-render` and their configs/environment; that pipeline is
-scheduled for removal and is not a foundation for this work.
+MCP exposes adapters to those services.
 
 This is a packaging boundary, not a standalone simulation installation. The
 server still needs the local checkout, its `conf/` tree and the selected backend's
@@ -417,7 +415,7 @@ to MCP responses. No core service should return SDK-specific objects.
 | `src/pyurbanair/jobs/` | Preparation snapshots, native adapters, paths, registry, supervisor and worker. |
 | `src/pyurbanair/visualization/` | Backend-neutral data adaptation, 2D rendering, probes, viewer manifest/bundle generation and loopback asset serving. |
 | `src/pyurbanair/visualization/web/` | Packaged HTML/CSS/JS adapted from the supplied viewer; usable without MCP. |
-| `src/pyurbanair/visualization/render_3d.py` | New optional PyVista/VTK renderer, independent of the retiring LES rendering pipeline. |
+| `src/pyurbanair/visualization/render_3d.py` | New optional PyVista/VTK renderer. |
 | `conf/visualization/` | New discoverable 2D/3D/viewer defaults and named presets. |
 | `scripts/start_mcp` | Thin environment-aware launcher for `pyurbanair_mcp`, passing the absolute repository root; no protocol stdout chatter. |
 | Root `pyproject.toml` / `pixi.lock` | Dedicated `mcp` feature installing `pyurbanair-mcp` from `libs/mcp_server` in editable mode; MCP-enabled local environments and launcher task. |
@@ -464,7 +462,7 @@ where possible. The numerical server does not itself need an LLM API key.
 Report visualization readiness separately: basic images/probes, MP4 encoding
 and optional 3D. Only 3D render workers need the new PyVista/VTK feature and a
 working offscreen graphics context; MCP startup and 2D rendering must not import
-VTK. Do not reuse the old `viz` environment or require Blender/OpenVDB.
+VTK.
 
 Illustrative registration commands for the proposed launcher, not commands
 available in the repository today:

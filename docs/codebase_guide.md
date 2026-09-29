@@ -40,7 +40,6 @@ file-level detail, gotchas, and recipes this guide only summarizes:
 | Local MCP forward jobs, preparation and client setup | [docs/mcp.md](mcp.md) |
 | Saved forward visualization and browser bundles | [docs/forward_visualization.md](forward_visualization.md) |
 | Running on HPC clusters (Snellius / DelftBlue / local SLURM) | [docs/job_scripts.md](job_scripts.md) |
-| Cinematic LES animations (render bundles for Unreal Engine + Blender preview, `viz` env) | [docs/les_render.md](les_render.md) |
 | Dynamic multi-window ESMDA theory/config | [docs/temp/esmda_dynamic_multiwindow.md](temp/esmda_dynamic_multiwindow.md) |
 | Model-error compensation parameters (α, sgs/km) | [docs/temp/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md) |
 | Reduced SVD/KL state update theory | [docs/temp/reduced_state_da.md](temp/reduced_state_da.md) |
@@ -103,11 +102,6 @@ libs/data-assimilation/src/data_assimilation/
                                    #   StateAndTimeVaryingParameter ESMDA
 
 libs/mcp_server/src/pyurbanair_mcp/ # Optional MCP SDK v2 adapter; see docs/mcp.md
-
-libs/les-render/src/les_render/   # LES state file -> render bundle (OpenVDB, particle
-                                   #   caches, isosurfaces, LIC slices, shots, HUD) for
-                                   #   Unreal + Blender. Leaf lib, own `viz` pixi env.
-                                   #   See docs/les_render.md.
 
 libs/evaluation/src/evaluation/    # Metrics + figures for DA runs. Leaf lib: no jax, no
                                    #   pyurbanair, no backends (see its __init__).

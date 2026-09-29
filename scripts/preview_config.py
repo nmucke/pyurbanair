@@ -34,7 +34,6 @@ WORKFLOWS = {
     "neural_surrogate/testing_autoencoder": "surrogate_autoencoder_testing",
     "neural_surrogate/train_latent_generator": "surrogate_latent_training",
     "neural_surrogate/testing_latent_generator": "surrogate_latent_testing",
-    "render_les": "render",
 }
 
 _INPUT_PATHS = {
