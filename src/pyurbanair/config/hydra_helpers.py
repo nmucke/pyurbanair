@@ -340,8 +340,8 @@ def create_observation_error(cfg: Any, obs_cfg: Any = None) -> ObservationErrorS
         )
     if error.get("representation_time_model", "independent") != "independent":
         raise ValueError("Only independent representation_time_model is supported")
-    if error.get("aggregation", "propagate_mean") != "propagate_mean":
-        raise ValueError("Only aggregation='propagate_mean' is supported")
+    if error.get("aggregation", "propagate_mean") not in ("propagate_mean", "none"):
+        raise ValueError("aggregation must be 'propagate_mean' or 'none'")
     return ObservationErrorSpec(
         instrument_std=error["instrument_std"],
         representation_std=error.get("representation_std", 0.0),

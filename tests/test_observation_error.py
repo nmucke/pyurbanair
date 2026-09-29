@@ -186,3 +186,47 @@ def test_smoother_observation_path_handles_changed_window_bin_counts() -> None:
     np.testing.assert_allclose(second_product.reshape(3, 4)[:, 0], [0.0, 1.5, 3.0])
     np.testing.assert_allclose(first_error.variance[:, 0], [2.0, 2.0])
     np.testing.assert_allclose(second_error.variance[:, 0], [4.0, 2.0, 4.0])
+
+
+def test_none_preserves_configured_errors_across_unequal_mean_bins() -> None:
+    raw = _observations([0.0, 1.0, 2.0, 4.0, 5.0, 8.0])
+    raw.values[:] = np.arange(6)[:, None]
+    aggregate = AggregateObservations(4.0)
+    settings: dict[str, Any] = dict(
+        instrument_std={"default": 2.0, "components": {"v": 3.0}},
+        representation_std={"default": 1.0, "sensors": {1: 2.0}},
+    )
+    unchanged = ObservationErrorSpec(**settings, aggregation="none").resolve(
+        raw, _operator(), aggregate
+    )
+    propagated = ObservationErrorSpec(**settings).resolve(raw, _operator(), aggregate)
+    np.testing.assert_allclose(unchanged.instrument_variance, [[4, 4, 9, 9]] * 3)
+    np.testing.assert_allclose(unchanged.representation_variance, [[1, 4, 1, 4]] * 3)
+    np.testing.assert_allclose(unchanged.variance, [[5, 8, 10, 13]] * 3)
+    np.testing.assert_allclose(
+        propagated.variance, unchanged.variance / np.array([3, 2, 1])[:, None]
+    )
+    np.testing.assert_array_equal(
+        unchanged.raw_instrument_std, propagated.raw_instrument_std
+    )
+    assert unchanged.frame_ids == propagated.frame_ids
+    assert unchanged.weights == propagated.weights
+    assert unchanged.provenance.endswith(":none")
+    smoother = ParameterESMDA.__new__(ParameterESMDA)
+    smoother.aggregate_observations = aggregate
+    np.testing.assert_allclose(
+        np.asarray(smoother._get_observations(raw)).reshape(3, 4)[:, 0], [1, 3.5, 5]
+    )
+    for mode in ("none", "propagate_mean"):
+        frame = ObservationErrorSpec(**settings, aggregation=mode).resolve(
+            raw, _operator()
+        )
+        np.testing.assert_allclose(frame.variance, [[5, 8, 10, 13]] * 6)
+
+
+@pytest.mark.parametrize("mode", [None, "invalid"])  # type: ignore[misc, unused-ignore]
+def test_invalid_error_aggregation_rejected(mode: Any) -> None:
+    with pytest.raises(ValueError, match="aggregation must be"):
+        ObservationErrorSpec(1.0, aggregation=mode).resolve(
+            _observations([0.0]), _operator()
+        )

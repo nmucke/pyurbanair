@@ -111,7 +111,13 @@ Both values use the observed variable's units. Instrument noise generates the
 synthetic observations; representation uncertainty contributes only to the
 assimilation likelihood. The supported temporal model treats representation
 errors as independent between raw frames, and `propagate_mean` carries each
-diagonal variance through actual mean-bin weights. Only mean aggregation is
+diagonal variance through actual mean-bin weights. Set `aggregation: none` in
+`observation/error.yaml` (or `observation_error.aggregation=none` on the CLI) to
+retain the configured instrument and representation std for each averaged
+observation, independent of bin size. Raw noise generation and observation
+averaging are unchanged; this specifies uncertainty directly for the averaged
+product. YAML `null` is rejected. With unaggregated frames the two policies agree.
+Only mean aggregation is
 supported in this mode. Persistent and correlated errors, and median/min/max
 aggregation, are rejected pending a suitable likelihood model.
 
