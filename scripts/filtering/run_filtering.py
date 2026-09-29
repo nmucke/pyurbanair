@@ -139,6 +139,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray
+from data_assimilation.filtering import validate_beta
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
@@ -516,9 +517,38 @@ def _collect_window_cycle_dirs(
     shutil.rmtree(staging, ignore_errors=True)
 
 
+def _validate_filter_beta(cfg: DictConfig, observation_error: Any) -> float:
+    """Validate ``filtering.beta`` PRE-FLIGHT, before the truth is simulated.
+
+    The constructor validates it too, but only after the truth rollout: a typo
+    (``beta=0.5``, ``.nan``) or a beta whose ``beta * R`` overflows the analysis
+    dtype must not cost a CFD run first. ``filtering.filter.beta`` is what
+    reaches the constructor, so it must be present and agree.
+    """
+    beta = validate_beta(cfg.filtering.get("beta", 1.0))
+    filter_beta = cfg.filtering.filter.get("beta", None)
+    if filter_beta is None or validate_beta(filter_beta) != beta:
+        raise ValueError(
+            f"filtering.filter.beta={filter_beta!r} must interpolate "
+            f"filtering.beta={beta!r}; drop the filtering.filter.beta override."
+        )
+    # The same check the constructor makes on the resolved variances, against
+    # their upper bound: formed exactly as there (Python beta times a JAX
+    # variance vector), so beta is cast to the analysis dtype FIRST — a beta
+    # that is itself unrepresentable there (1e39 in float32) must fail too.
+    tempered = beta * jnp.asarray([observation_error.variance_upper_bound()])
+    if not bool(jnp.all(jnp.isfinite(tempered))):
+        raise ValueError(
+            f"filtering.beta={beta!r} overflows the {tempered.dtype} "
+            "observation-error variances (beta * R is not finite)."
+        )
+    return beta
+
+
 def run(cfg: DictConfig) -> None:
     validate_run_config(cfg, "filtering")
     observation_error = create_observation_error(cfg)
+    _validate_filter_beta(cfg, observation_error)
     num_windows = int(cfg.filtering.num_assimilation_windows)
     if num_windows < 1:
         raise ValueError(

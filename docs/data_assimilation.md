@@ -676,8 +676,10 @@ repeated `run()` calls cannot compound it. The covariance is scaled exactly
 once: the stochastic kernel draws perturbations with std `sqrt(beta) sigma`
 from it, and ETKF/LETKF whiten by it (`R_eff = E_inf**2 * beta * R` under
 localization) — beta is never also passed as the kernel's `alpha`. In joint
-mode it tempers state and parameter rows alike. The innovation chi2 and the
-scripts' `obs_error_std` artifacts stay **physical**; the same holds for a
+mode it tempers state and parameter rows alike. `beta` is read-only after construction
+(the tempered covariance is derived from it once; build a new filter to change
+it). The innovation chi2 and the scripts' `obs_error_std` artifacts stay
+**physical**; the same holds for a
 covariance replaced with `set_observation_covariance` or passed per window as
 `run(..., observation_covariances=...)` — both are tempered once, before the
 first forecast. Beta is distinct from

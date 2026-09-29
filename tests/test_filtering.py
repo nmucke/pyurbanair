@@ -2804,3 +2804,48 @@ def test_tempered_window_covariance_overflow_is_rejected_before_forecast(
             observations=jnp.ones((2, 1)),
             observation_covariances=jnp.array([[1e-9], [fmax / 1e20]]),
         )
+
+
+def test_beta_is_read_only_after_construction() -> None:
+    """Reassigning beta would leave the cached effective covariance stale."""
+    filt = _toy_state_filter(beta=2.0)
+    with pytest.raises(AttributeError, match="fixed at construction"):
+        filt.beta = 4.0
+    assert filt.beta == 2.0
+    np.testing.assert_array_equal(filt.effective_C_D_diag, 2.0 * filt.C_D_diag)
+
+
+def test_default_beta_hands_the_kernel_the_constructors_covariance() -> None:
+    """Pinned against the INPUT, not another run through the new code path.
+
+    At the default beta every analysis must receive exactly the covariance the
+    caller passed — same values, same dtype — which is what the pre-beta filter
+    handed the kernel, so the kernel's output is the legacy output.
+    """
+    physical = jnp.array([0.2, 0.35])
+    seen: list[jnp.ndarray] = []
+    inner = StochasticEnKFAnalysis()
+
+    class _Recording(AnalysisScheme):
+        localization_policy = inner.localization_policy
+
+        def __call__(  # type: ignore[override]
+            self,
+            augmented: jnp.ndarray,
+            pred_obs: jnp.ndarray,
+            obs: jnp.ndarray,
+            C_D_diag: jnp.ndarray,
+            rng_key: jax.Array,
+            **kwargs: Any,
+        ) -> jnp.ndarray:
+            seen.append(C_D_diag)
+            return inner(augmented, pred_obs, obs, C_D_diag, rng_key, **kwargs)
+
+    state, params, observations = _beta_problem()
+    _beta_filter(analysis=_Recording(), C_D=physical).run(
+        state=state, params=params, observations=observations
+    )
+    assert seen, "the analysis never ran"
+    for received in seen:
+        assert received.dtype == physical.dtype
+        np.testing.assert_array_equal(np.asarray(received), np.asarray(physical))

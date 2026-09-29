@@ -420,6 +420,9 @@ def test_default_tempering_composes_to_the_legacy_policy(
         (["filtering.filter.beta=2.0"], "conflicts with filter_smoothing.beta"),
         # The smoother weight is derived, never configured.
         (["+esmda.smoother.likelihood_weight=0.5"], "DERIVED"),
+        # A MISSING forwarded key is not agreement: the filter would be built
+        # at its default beta while the policy says otherwise.
+        (["filter_smoothing.beta=2.0", "~filtering.filter.beta"], "missing"),
     ],
 )
 def test_run_filter_smoothing_rejects_bad_tempering_before_the_truth(
@@ -820,9 +823,7 @@ def test_variance_upper_bound_covers_every_override() -> None:
     """The pre-flight bound is the largest configured std of each part, squared."""
     from data_assimilation.observation_error import ObservationErrorSpec
 
-    from scripts.filter_smoothing.run_filter_smoothing import _variance_upper_bound
-
-    assert _variance_upper_bound(ObservationErrorSpec(0.25)) == pytest.approx(0.0625)
+    assert ObservationErrorSpec(0.25).variance_upper_bound() == pytest.approx(0.0625)
     spec = ObservationErrorSpec(
         instrument_std={
             "default": 0.1,
@@ -832,7 +833,7 @@ def test_variance_upper_bound_covers_every_override() -> None:
         },
         representation_std={"default": 0.05, "components": {"v": 0.3}},
     )
-    assert _variance_upper_bound(spec) == pytest.approx(0.4**2 + 0.3**2)
+    assert spec.variance_upper_bound() == pytest.approx(0.4**2 + 0.3**2)
 
 
 def test_shared_budget_rejects_a_correlated_error_model(compose_test_cfg: Any) -> None:
@@ -861,3 +862,28 @@ def test_shared_budget_rejects_a_correlated_error_model(compose_test_cfg: Any) -
     persistent = ObservationErrorSpec(0.25, representation_time_model="persistent")
     with pytest.raises(ValueError, match="representation_time_model"):
         _resolve_tempering(cfg, 1, persistent)
+
+
+def test_observation_product_records_the_aggregator_that_ran(
+    compose_test_cfg: Any,
+) -> None:
+    """The record reads the aggregator itself, not the legacy esmda.* keys."""
+    from data_assimilation.observation_operator import AggregateObservations
+
+    from pyurbanair.config.hydra_helpers import create_observation_operator
+    from scripts.filter_smoothing.run_filter_smoothing import _observation_product
+
+    cfg = compose_test_cfg(
+        _overrides("static", "joint", 1), config_name="run_filter_smoothing"
+    )
+    op = create_observation_operator(
+        cfg.obs, cfg.assim_model.solver_name, cfg.observation.operator
+    )
+    assert float(cfg.esmda.interval_seconds) == 3.0
+    record = _observation_product(
+        cfg, op, 12, 1, AggregateObservations(interval_seconds=10.0, mode="median")
+    )
+    assert record["smoother_aggregation"] == {
+        "interval_seconds": 10.0,
+        "mode": "median",
+    }

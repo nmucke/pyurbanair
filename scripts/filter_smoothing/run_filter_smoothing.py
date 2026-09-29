@@ -148,7 +148,6 @@ import numbers
 import pathlib
 import sys
 import time
-from collections.abc import Mapping
 from typing import Any, Optional, Sequence
 
 import hydra
@@ -245,32 +244,6 @@ _ESMDA_PRED_OBS_SEMANTICS = (
 # ---------------------------------------------------------------------------
 
 
-def _variance_upper_bound(observation_error: ObservationErrorSpec) -> float:
-    """An upper bound on every physical variance the spec can resolve to.
-
-    The per-observation variances are only known once the truth is observed
-    (height bands and sensor overrides need the operator), but the pre-flight
-    overflow check needs a number NOW. Each resolved variance is
-    ``instrument_std**2 + representation_std**2`` for one of the spec's
-    configured stds, and mean propagation only shrinks it (the squared bin
-    weights sum to <= 1), so the largest configured std of each part bounds it.
-    """
-
-    def largest(setting: Any) -> float:
-        if not isinstance(setting, Mapping):
-            return float(setting)
-        values = [float(setting["default"])]
-        values += [float(band["std"]) for band in setting.get("height_bands", ())]
-        values += [float(v) for v in setting.get("components", {}).values()]
-        values += [float(v) for v in setting.get("sensors", {}).values()]
-        return max(values)
-
-    return (
-        largest(observation_error.instrument_std) ** 2
-        + largest(observation_error.representation_std) ** 2
-    )
-
-
 def _resolve_tempering(
     cfg: DictConfig, every_n: int, observation_error: ObservationErrorSpec
 ) -> TemperingPolicy:
@@ -288,7 +261,7 @@ def _resolve_tempering(
     must be temporally independent (a correlated product would need a joint
     likelihood in both phases). The numerics are checked in the analysis dtype
     against an upper bound of the physical variances
-    (:func:`_variance_upper_bound`) and the base alpha; the constructors re-check
+    (``ObservationErrorSpec.variance_upper_bound``) and the base alpha; the constructors re-check
     the resolved ones.
     """
     node = cfg.filter_smoothing
@@ -302,16 +275,25 @@ def _resolve_tempering(
             beta,
             allocation,
             base_alpha=base_alpha,
-            variances=[_variance_upper_bound(observation_error)],
+            variances=[observation_error.variance_upper_bound()],
         )
     except ValueError as err:
         raise ValueError(
             "filter_smoothing.beta / filter_smoothing.likelihood_allocation: " f"{err}"
         ) from err
 
+    # ``filtering.filter.beta`` is what reaches the constructor, so a MISSING
+    # key is not agreement: the filter would be built at its default beta = 1
+    # and the mismatch would only surface after the truth was simulated.
+    if cfg.filtering.filter.get("beta", None) is None:
+        raise ValueError(
+            "filtering.filter.beta is missing; it must interpolate "
+            "filter_smoothing.beta (via filtering.beta) so the filter is built "
+            "with the hybrid's beta."
+        )
     for key, value in (
         ("filtering.beta", cfg.filtering.get("beta", policy.beta)),
-        ("filtering.filter.beta", cfg.filtering.filter.get("beta", policy.beta)),
+        ("filtering.filter.beta", cfg.filtering.filter.beta),
     ):
         if (
             isinstance(value, bool)
@@ -410,8 +392,10 @@ def _observation_product(
             None
             if aggregate_obs is None
             else {
-                "interval_seconds": float(cfg.esmda.interval_seconds),
-                "mode": str(cfg.esmda.aggregation_mode),
+                # Read off the aggregator that actually ran, not the legacy
+                # esmda.* keys: it is built from observation.aggregation.
+                "interval_seconds": float(aggregate_obs.interval_seconds),
+                "mode": str(aggregate_obs.mode),
             }
         ),
         "sensor_coordinates_sha256": hashlib.sha256(payload.encode()).hexdigest(),
@@ -994,12 +978,15 @@ def run(cfg: DictConfig) -> None:
     # policy (1.0 under filter_only: the legacy full-weight schedule, bitwise),
     # never configured; FilterSmoothing re-checks that it matches.
     smoother_overrides["likelihood_weight"] = tempering.smoother_weight
-    append_constructor_override(
-        out_dir,
-        role="assim",
-        component="esmda.smoother",
-        values={"likelihood_weight": tempering.smoother_weight},
-    )
+    # Recorded only when it differs from the constructor default, so a default
+    # (filter_only) run's manifest is unchanged by this feature.
+    if tempering.smoother_weight != 1.0:
+        append_constructor_override(
+            out_dir,
+            role="assim",
+            component="esmda.smoother",
+            values={"likelihood_weight": tempering.smoother_weight},
+        )
     smoother = instantiate(
         cfg.esmda.smoother,
         observation_operator=assim_obs_op,

@@ -345,7 +345,10 @@ for bit). It is a likelihood-tempering multiplier of the observation-error
 covariance, not spread inflation and not localization's `tapering_beta`;
 `observation_error`, the `obs_error_std` artifacts and the innovation chi2 stay
 physical, and `run_info.yaml` records the value that ran as
-`configuration.beta` (the window artifacts as `analysis_covariance_multiplier`). In `run_filter_smoothing.yaml` it is interpolated from
+`configuration.beta` (the window artifacts as `analysis_covariance_multiplier`).
+`run_filtering.py` validates it pre-flight — range, agreement with
+`filtering.filter.beta`, and overflow of `beta * R` against
+`ObservationErrorSpec.variance_upper_bound()` — before the truth is simulated. In `run_filter_smoothing.yaml` it is interpolated from
 `filter_smoothing.beta` (see §2.1).
 
 The analysis options carry a declared `localization_policy` that

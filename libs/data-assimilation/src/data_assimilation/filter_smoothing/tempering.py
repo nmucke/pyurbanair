@@ -47,6 +47,9 @@ from typing import Any, Literal, Optional, get_args
 
 import jax
 import numpy as np
+
+# Beta is validated by the FILTER's own rule, so the policy and the collaborator
+# it configures can never disagree about what a valid beta is.
 from data_assimilation.filtering import validate_beta
 from numpy.typing import ArrayLike, DTypeLike
 
@@ -54,20 +57,6 @@ LikelihoodAllocation = Literal["filter_only", "shared_budget"]
 
 #: Every accepted ``likelihood_allocation`` value, in documentation order.
 LIKELIHOOD_ALLOCATIONS: tuple[str, ...] = get_args(LikelihoodAllocation)
-
-
-def _validate_beta(beta: Any) -> float:
-    """``beta`` as a finite Python float ``>= 1``; the checks BOTH policies share.
-
-    Delegates to the filter's own :func:`~data_assimilation.filtering.\
-validate_beta`, so the policy and the collaborator it configures can never
-    disagree about what a valid beta is (``bool`` — an ``int`` subclass, so a
-    YAML ``beta: true`` — strings, NaN, infinities and values below 1 are all
-    rejected; an infinite beta would pass an infinite covariance through the
-    filter's solvers, and skipping the filter phase is not a supported
-    endpoint).
-    """
-    return validate_beta(beta)
 
 
 def _smoother_weight(beta: float, allocation: str) -> float:
@@ -109,7 +98,7 @@ class TemperingPolicy:
     smoother_weight: float
 
     def __post_init__(self) -> None:
-        beta = _validate_beta(self.beta)
+        beta = validate_beta(self.beta)
         allocation = _validate_allocation(self.likelihood_allocation)
         if allocation == "shared_budget" and not beta > 1.0:
             raise ValueError(
@@ -318,7 +307,7 @@ def resolve_tempering_policy(
     aggregation, identical raw frames/operator/covariance in both phases) need
     the collaborators and the data, so :class:`FilterSmoothing` checks them.
     """
-    value = _validate_beta(beta)
+    value = validate_beta(beta)
     allocation = _validate_allocation(likelihood_allocation)
     policy = TemperingPolicy(
         beta=value,

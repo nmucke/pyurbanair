@@ -69,8 +69,8 @@ uses ``beta R``) and the smoother's ``likelihood_weight`` (every MDA update uses
 with them — it only VALIDATES that they match its policy, at construction and
 again at every ``run()``, and never mutates them. Under
 ``likelihood_allocation="shared_budget"`` (``w + 1/beta = 1``) it additionally
-proves, before the ESMDA phase, that both phases really see the same raw
-observation product (see :meth:`FilterSmoothing._check_shared_product`); the
+checks, before the ESMDA phase, that both phases see the same raw observation
+product (see :meth:`FilterSmoothing._check_shared_product`); the
 default ``filter_only`` policy at ``beta = 1`` is the legacy hybrid, bit for
 bit.
 """
@@ -579,7 +579,12 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
         """The two phases see identical observations and covariances.
 
         Run at the top of :meth:`run`, BEFORE the ESMDA phase (hence before any
-        forecast). Validates identities and timestamps, not merely lengths:
+        forecast). Checks timestamps and covariances, not merely lengths. In
+        the run script the load-bearing guarantees are the shared operator
+        instance (:meth:`_check_shared_collaborators`), the timestamp checks
+        and the ``C_D`` tiling: its batches carry no ``obs`` coordinate and both
+        phases are handed the same ``batches``, so the coordinate and value
+        checks below guard direct library use rather than the Hydra path.
 
         * every batch carries the same non-time coordinates as batch 0 (the
           ESMDA phase concatenates with ``join="override"``, which would

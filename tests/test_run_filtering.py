@@ -212,7 +212,11 @@ def test_filtering_beta_reaches_the_instantiated_filter(
 
 
 def test_invalid_filtering_beta_fails_at_instantiation(compose_test_cfg: Any) -> None:
-    """An out-of-range beta fails when the filter is built — before any forecast."""
+    """An out-of-range beta also fails in the constructor itself (library use).
+
+    The script rejects it earlier still, before the truth is simulated: see
+    ``test_run_filtering_rejects_bad_beta_before_the_truth``.
+    """
     import jax.numpy as jnp
     import numpy as np
     from hydra.utils import instantiate
@@ -942,3 +946,26 @@ def test_run_filtering_assimilate_every_n_step(
     assert configuration["cycles_per_window"] == cycles_per_window
     assert configuration["num_cycles"] == num_cycles
     assert configuration["seconds_per_cycle"] == every_n * dt_obs
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "extra,match",
+    [
+        (["filtering.beta=0.5"], "beta"),
+        (["filtering.beta=.nan"], "beta"),
+        # Finite, but beta * R overflows the float32 analysis covariance.
+        (["filtering.beta=1e39"], "overflows"),
+        (["filtering.filter.beta=2.0"], "filtering.filter.beta"),
+        (["~filtering.filter.beta"], "filtering.filter.beta"),
+    ],
+)
+def test_run_filtering_rejects_bad_beta_before_the_truth(
+    extra: list[str], match: str, compose_test_cfg: Any
+) -> None:
+    """Invalid tempering fails PRE-FLIGHT: no truth rollout is paid for it."""
+    from scripts.filtering.run_filtering import run
+
+    cfg = compose_test_cfg(_overrides("joint", 1, extra), config_name="run_filtering")
+    with pytest.raises(ValueError, match=match):
+        run(cfg)
+    assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()

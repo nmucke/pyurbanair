@@ -164,6 +164,29 @@ class ObservationErrorSpec:
         object.__setattr__(self, "instrument_std", _freeze(self.instrument_std))
         object.__setattr__(self, "representation_std", _freeze(self.representation_std))
 
+    def variance_upper_bound(self) -> float:
+        """An upper bound on every physical variance this spec can resolve to.
+
+        Resolved variances need the operator (height bands and sensor
+        overrides), but a pre-flight check -- e.g. that a tempered ``beta * R``
+        cannot overflow -- needs a number before any solver runs. Each resolved
+        variance is ``instrument_std**2 + representation_std**2`` for one of the
+        configured stds, and ``propagate_mean`` only shrinks it (the squared bin
+        weights sum to <= 1), so the largest configured std of each part bounds
+        it.
+        """
+
+        def largest(setting: float | Mapping[str, Any]) -> float:
+            if not isinstance(setting, Mapping):
+                return float(setting)
+            values = [float(setting["default"])]
+            values += [float(band["std"]) for band in setting.get("height_bands", ())]
+            values += [float(v) for v in setting.get("components", {}).values()]
+            values += [float(v) for v in setting.get("sensors", {}).values()]
+            return max(values)
+
+        return largest(self.instrument_std) ** 2 + largest(self.representation_std) ** 2
+
     def resolve(
         self,
         observations: xr.DataArray,

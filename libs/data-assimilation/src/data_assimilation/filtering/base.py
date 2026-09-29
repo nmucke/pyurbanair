@@ -391,7 +391,7 @@ class BaseFilter:
         # it, so beta must NOT also reach the kernel as ``alpha``. Because R is
         # scaled rather than rows, the whole augmented update — state and
         # parameter rows alike in joint mode — is tempered uniformly.
-        self.beta: float = validate_beta(beta)
+        self._beta: float = validate_beta(beta)
         self.effective_C_D_diag: jnp.ndarray = self._temper(self.C_D_diag)
 
         if (
@@ -819,6 +819,24 @@ class BaseFilter:
     # analyses consume, while the physical one feeds the chi2 diagnostic.
     _cycle_effective_covariances: Any = None
     _window_covariances: Any = None
+
+    @property
+    def beta(self) -> float:
+        """The likelihood-tempering multiplier, fixed at construction.
+
+        Read-only because :attr:`effective_C_D_diag` is derived from it once:
+        reassigning beta afterwards would leave every analysis on the OLD
+        tempered covariance while run records (and the hybrid's policy check)
+        reported the new value. Build a new filter to change it.
+        """
+        return self._beta
+
+    @beta.setter
+    def beta(self, value: Any) -> None:
+        raise AttributeError(
+            "beta is fixed at construction (effective_C_D_diag is derived from "
+            "it once); build a new filter to change it."
+        )
 
     def _temper(self, variances: jnp.ndarray) -> jnp.ndarray:
         """``beta * variances``: the covariance every analysis actually uses.
