@@ -19,13 +19,14 @@ class _ToyOperator:
     obs_z = (2.0,)
 
 
-def _resolved() -> ResolvedObservationError:
+def _resolved(aggregation: str = "propagate_mean") -> ResolvedObservationError:
     spec = create_observation_error(
         OmegaConf.create(
             {
                 "observation_error": {
                     "instrument_std": 0.2,
                     "representation_std": 0.1,
+                    "aggregation": aggregation,
                 }
             }
         ),
@@ -178,15 +179,24 @@ def test_corrected_likelihood_composes_with_observation_components(
         create_observation_error(cfg, cfg.obs)
 
 
-def test_shared_error_has_distinct_filter_and_smoother_products() -> None:
+@pytest.mark.parametrize("policy", ["propagate_mean", "none"])  # type: ignore[misc, unused-ignore]
+def test_shared_error_has_distinct_filter_and_smoother_products(policy: str) -> None:
     from hydra import compose, initialize_config_dir
 
     from pyurbanair.config.hydra_helpers import create_aggregate_observations
 
     root = pathlib.Path(__file__).resolve().parents[1] / "conf"
     with initialize_config_dir(version_base=None, config_dir=str(root)):
-        smoother_cfg = compose(config_name="run_esmda")
-        filter_cfg = compose(config_name="run_filtering")
+        overrides = [
+            "observation_error.instrument_std=0.25",
+            "observation_error.representation_std=0.0",
+            f"observation_error.aggregation={policy}",
+        ]
+        smoother_cfg = compose(
+            config_name="run_esmda",
+            overrides=overrides + ["esmda.interval_seconds=4.0"],
+        )
+        filter_cfg = compose(config_name="run_filtering", overrides=overrides)
     assert smoother_cfg.observation_error == filter_cfg.observation_error
     assert create_aggregate_observations(filter_cfg) is None
     raw = xr.DataArray(
@@ -203,4 +213,33 @@ def test_shared_error_has_distinct_filter_and_smoother_products() -> None:
         smoother_error.raw_instrument_std, filter_error.raw_instrument_std
     )
     np.testing.assert_allclose(filter_error.variance, 0.25**2)
-    np.testing.assert_allclose(smoother_error.variance, 0.25**2 / 4)
+    np.testing.assert_allclose(
+        smoother_error.variance, 0.25**2 / (4 if policy == "propagate_mean" else 1)
+    )
+
+
+def test_none_error_policy_reaches_esmda_artifact(tmp_path: pathlib.Path) -> None:
+    resolved = _resolved("none")
+    np.testing.assert_allclose(resolved.covariance_diag, [0.05])
+    np.testing.assert_allclose(resolved.raw_instrument_std, 0.2)
+    pred = np.array([[0.8, 1.0]])
+    params = xr.Dataset({"a": (("esmda_step", "ensemble"), [[0.0, 0.0], [1.0, 1.0]])})
+    _save_obs_diagnostics(
+        tmp_path,
+        0,
+        np.array([1.1]),
+        np.array([1.0]),
+        resolved.std,
+        [pred, pred],
+        params,
+        _ToyOperator(),
+        resolved,
+        2.0,
+        np.array([[1.0, 1.1]]),
+    )
+    with xr.open_dataset(tmp_path / "window_0_obs.nc") as ds:
+        np.testing.assert_allclose(ds.obs_error_std, np.sqrt(0.05))
+        np.testing.assert_allclose(ds.obs_instrument_variance, [0.04])
+        np.testing.assert_allclose(ds.obs_representation_variance, [0.01])
+        assert ds.obs_bin_count.item() == 2
+        assert ds.attrs["observation_error_model"].endswith(":none")

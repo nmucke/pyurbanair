@@ -187,8 +187,8 @@ Height bands use `{min_z, max_z, std}` and half-open `[min_z, max_z)` bounds.
 The flattening order remains time-major, with component blocks and sensors
 inside each frame.
 
-Corrected mode currently supports only independent frame errors and mean
-aggregation. It propagates each raw diagonal covariance through the exact bin
+The `aggregation: propagate_mean` error policy supports independent frame errors
+and mean aggregation. It propagates each raw diagonal covariance through the exact bin
 weights: independent variance `σ²` averaged over `m` equally weighted frames
 becomes `σ²/m` (with the actual weights used for partial or unequal bins).
 `median`, `min`, and `max` are rejected because they need a calibrated product
@@ -196,10 +196,19 @@ likelihood. Correlated errors and persistent representation errors are also
 rejected; the `independent` representation-time model is an explicit
 approximation, not evidence about cross-frame residual correlation.
 
+Set `observation_error.aggregation=none` to keep both configured standard
+deviations unchanged for each averaged observation: the likelihood variance is
+`instrument_std² + representation_std²`, regardless of the bin's frame count.
+This assigns uncertainty directly to the averaged product; it is not covariance
+propagation of independent raw noise. Observation means, bin metadata, and raw
+synthetic noise draws are unchanged. With no observation averaging, both error
+policies give the same covariance. Use the string `none`, not YAML `null`.
+Temporal averaging itself remains controlled by `observation/aggregation`.
+
 Instrument noise generates the synthetic measurements. Representation
 uncertainty contributes to the likelihood only; it is not added to synthetic
 truth. `representation_std` is specified in the observed variable's units at
-raw-frame resolution. Under the currently supported independent model, its
+raw-frame resolution. Under `aggregation: propagate_mean`, its
 variance is propagated through mean aggregation just like independent
 instrument variance. Persistent forecast bias belongs in model-discrepancy
 handling, rather than being hidden in an enlarged observation covariance.

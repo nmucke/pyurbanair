@@ -369,7 +369,7 @@ def test_run_filtering(
     # window obs_error_std arrays above stay physical whatever beta is).
     assert configuration["beta"] == float(cfg.filtering.beta)
     assert configuration["observation_error_model"] == (
-        "observation_error.v1:diagonal:independent"
+        "observation_error.v1:diagonal:independent:propagate_mean"
     )
     diagnostics = read_yaml(out_dir / "cycle_diagnostics.yaml")
     # One row per cycle over the WHOLE horizon, numbered globally: the window

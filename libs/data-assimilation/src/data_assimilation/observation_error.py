@@ -2,7 +2,8 @@
 
 Instrument noise is sampled on raw frames. Representation uncertainty affects
 the likelihood only. The independent time model permits exact propagation of
-both diagonal contributions through a mean aggregation.
+both diagonal contributions through a mean aggregation. The explicit ``none``
+policy instead assigns the configured variance to each observation product.
 """
 
 from dataclasses import dataclass
@@ -171,9 +172,9 @@ class ObservationErrorSpec:
         overrides), but a pre-flight check -- e.g. that a tempered ``beta * R``
         cannot overflow -- needs a number before any solver runs. Each resolved
         variance is ``instrument_std**2 + representation_std**2`` for one of the
-        configured stds, and ``propagate_mean`` only shrinks it (the squared bin
-        weights sum to <= 1), so the largest configured std of each part bounds
-        it.
+        configured stds: ``aggregation="none"`` assigns exactly that to every
+        product, and ``propagate_mean`` only shrinks it (the squared bin weights
+        sum to <= 1), so the largest configured std of each part bounds it.
         """
 
         def largest(setting: float | Mapping[str, Any]) -> float:
@@ -199,8 +200,8 @@ class ObservationErrorSpec:
                 "Only independent representation_time_model is supported; "
                 "persistent errors need a calibrated temporal covariance."
             )
-        if self.aggregation != "propagate_mean":
-            raise ValueError("Only aggregation='propagate_mean' is supported.")
+        if self.aggregation not in ("propagate_mean", "none"):
+            raise ValueError("aggregation must be 'propagate_mean' or 'none'.")
         if observations.dims != ("time", "obs"):
             raise ValueError("Observation error requires raw dims ('time', 'obs').")
         if "time" not in observations.coords:
@@ -264,26 +265,36 @@ class ObservationErrorSpec:
             bins = aggregate_observations.bins(
                 observations, allow_interval_count_change=True
             )
-        instrument_variance = np.stack(
-            [
-                np.sum(
-                    raw_instrument_variance[list(b.frame_ids)]
-                    * np.square(b.weights)[:, None],
-                    axis=0,
-                )
-                for b in bins
-            ]
-        )
-        representation_variance = np.stack(
-            [
-                np.sum(
-                    raw_representation_variance[list(b.frame_ids)]
-                    * np.square(b.weights)[:, None],
-                    axis=0,
-                )
-                for b in bins
-            ]
-        )
+        if self.aggregation == "none":
+            # The configured error applies to each product, irrespective of
+            # its frame count. Raw synthetic measurement noise is unchanged.
+            instrument_variance = np.broadcast_to(
+                instrument**2, (len(bins), len(instrument))
+            )
+            representation_variance = np.broadcast_to(
+                representation**2, instrument_variance.shape
+            )
+        else:
+            instrument_variance = np.stack(
+                [
+                    np.sum(
+                        raw_instrument_variance[list(b.frame_ids)]
+                        * np.square(b.weights)[:, None],
+                        axis=0,
+                    )
+                    for b in bins
+                ]
+            )
+            representation_variance = np.stack(
+                [
+                    np.sum(
+                        raw_representation_variance[list(b.frame_ids)]
+                        * np.square(b.weights)[:, None],
+                        axis=0,
+                    )
+                    for b in bins
+                ]
+            )
         variance = instrument_variance + representation_variance
         if not np.all(np.isfinite(variance)) or np.any(variance <= 0):
             raise ValueError("Total observation variances must be finite and positive.")
@@ -300,4 +311,5 @@ class ObservationErrorSpec:
             sensor_indices=sensors,
             frame_ids=tuple(b.frame_ids for b in bins),
             weights=tuple(b.weights for b in bins),
+            provenance=f"observation_error.v1:diagonal:independent:{self.aggregation}",
         )

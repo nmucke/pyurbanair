@@ -78,8 +78,18 @@ def main() -> None:
     corrected = gaussian_update(
         prior_mean, prior_variance, observation, physical_variance
     )
-    legacy = gaussian_update(
-        prior_mean, prior_variance, observation, raw_instrument_std**2
+    retained = ObservationErrorSpec(
+        instrument_std=raw_instrument_std,
+        representation_std=raw_representation_std,
+        aggregation="none",
+    ).resolve(
+        observations,
+        operator,
+        AggregateObservations(interval_seconds=num_independent_frames),
+    )
+    retained_variance = float(retained.variance[0, 0])
+    unscaled = gaussian_update(
+        prior_mean, prior_variance, observation, retained_variance
     )
 
     alpha = 3.0
@@ -102,12 +112,12 @@ def main() -> None:
             jax.random.PRNGKey(0),
         )
     )[0]
-    etkf_legacy = np.asarray(
+    etkf_unscaled = np.asarray(
         analysis(
             prior_ensemble,
             pred_obs,
             jnp.asarray([observation]),
-            jnp.asarray([raw_instrument_std**2]),
+            jnp.asarray([retained_variance]),
             jax.random.PRNGKey(0),
         )
     )[0]
@@ -115,23 +125,24 @@ def main() -> None:
         float(np.mean(etkf_corrected)),
         float(np.var(etkf_corrected, ddof=1)),
     )
-    etkf_legacy_stats = (
-        float(np.mean(etkf_legacy)),
-        float(np.var(etkf_legacy, ddof=1)),
+    etkf_unscaled_stats = (
+        float(np.mean(etkf_unscaled)),
+        float(np.var(etkf_unscaled, ddof=1)),
     )
     assert np.allclose(etkf_corrected_stats, corrected, atol=2e-6)
-    assert np.allclose(etkf_legacy_stats, legacy, atol=2e-6)
+    assert np.allclose(etkf_unscaled_stats, unscaled, atol=2e-6)
 
     print(f"mean observation: {observation:.3f}")
     print(f"instrument variance after averaging: {instrument_variance:.4f}")
     print(f"representation variance in likelihood: {representation_variance:.4f}")
     print(f"physical likelihood variance: {physical_variance:.4f}")
+    print(f"aggregation=none likelihood variance: {retained_variance:.4f}")
     print(
         "corrected posterior: " f"mean={corrected[0]:.4f}, std={sqrt(corrected[1]):.4f}"
     )
     print(
-        "legacy full-frame variance posterior: "
-        f"mean={legacy[0]:.4f}, std={sqrt(legacy[1]):.4f}"
+        "aggregation=none posterior: "
+        f"mean={unscaled[0]:.4f}, std={sqrt(unscaled[1]):.4f}"
     )
     print(
         f"one alpha={alpha:g} tempered step: "
@@ -143,9 +154,9 @@ def main() -> None:
         f"std={sqrt(etkf_corrected_stats[1]):.4f}"
     )
     print(
-        "production ETKF legacy: "
-        f"mean={etkf_legacy_stats[0]:.4f}, "
-        f"std={sqrt(etkf_legacy_stats[1]):.4f}"
+        "production ETKF unscaled: "
+        f"mean={etkf_unscaled_stats[0]:.4f}, "
+        f"std={sqrt(etkf_unscaled_stats[1]):.4f}"
     )
     print("physical likelihood variance remains 0.0725 under tempering")
 

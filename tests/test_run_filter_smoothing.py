@@ -767,7 +767,7 @@ def test_run_filter_smoothing(
     assert tempering["nominal_combined_exponent"] == (1.0 if shared else 2.0)
     assert "observation_error_std" not in configuration
     assert configuration["observation_error_model"] == (
-        "observation_error.v1:diagonal:independent"
+        "observation_error.v1:diagonal:independent:propagate_mean"
     )
     product = configuration["observation_product"]
     assert product["num_observations_per_frame"] == n_obs_frame
