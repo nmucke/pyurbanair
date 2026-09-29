@@ -9,7 +9,10 @@ Three groups, all on toy in-memory forward models — no CFD solver:
   exactly the posterior forward pass and change nothing else;
 * the estimator itself — constructor validation, the exact reduction of the
   static-parameter path to a plain filter run, and the per-segment trajectory
-  slicing of the dynamic path.
+  slicing of the dynamic path;
+* beta tempering: the policy/collaborator contract, the shared-budget product
+  checks (all before any forecast), and single application of the effective
+  coefficients on both paths over repeated windows.
 """
 
 import pathlib
@@ -22,13 +25,16 @@ import pytest
 import xarray
 from data_assimilation.filter_smoothing import (
     FilterSmoothing,
+    TemperingPolicy,
     knot_times,
     params_for_segment,
+    resolve_tempering_policy,
     segment_bounds,
     trajectory_values_at,
 )
 from data_assimilation.filtering import EnsembleKalmanFilter
 from data_assimilation.inflation import RTPS
+from data_assimilation.observation_operator import AggregateObservations
 from data_assimilation.smoothing.esmda import (
     ParameterESMDA,
     StateAndTimeVaryingParameterESMDA,
@@ -808,14 +814,11 @@ class _IdentityParameterESMDA(ParameterESMDA):
     """
 
     def __call__(
-        self,
-        state: Optional[xarray.Dataset] = None,
-        params: Optional[xarray.Dataset] = None,
-        observations: Optional[Any] = None,
-        return_params_history: bool = False,
-        return_state_history: bool = False,
-        final_forecast: bool = True,
+        self, *args: Any, observation_covariance: Any = None, **kwargs: Any
     ) -> xarray.Dataset:
+        # The hybrid calls the smoother with keywords only; mirroring the base
+        # signature keeps the double valid whatever keywords it adds.
+        params = kwargs.get("params")
         assert params is not None
         return params
 
@@ -991,3 +994,386 @@ def test_dynamic_path_applies_the_filters_own_pruning_semantics(
     )
 
     assert sorted(p.name for p in root.iterdir()) == ["cycle_0", "cycle_2"]
+
+
+# ---------------------------------------------------------------------------
+# (j) Beta tempering: the policy, the collaborators, the shared product
+# ---------------------------------------------------------------------------
+
+
+def _tempered_hybrid(
+    policy: TemperingPolicy,
+    mode: str = "joint",
+    *,
+    dynamic: bool = False,
+    num_steps: int = 2,
+    shared_op: bool = True,
+    smoother_variance: float = _OBS_VARIANCE,
+    num_cycles: int = _NUM_CYCLES,
+) -> tuple[FilterSmoothing, Any, EnsembleKalmanFilter, _ToyEnsembleModel]:
+    """A hybrid whose collaborators are BUILT with the policy's weights."""
+    op = _obs_op()
+    window_frames = num_cycles * _CYCLE_FRAMES
+    common: dict[str, Any] = dict(
+        observation_operator=op,
+        forward_model=_ToyEnsembleModel(num_frames=window_frames),
+        C_D=jnp.diag(jnp.full(window_frames * _N_SENSORS, smoother_variance)),
+        num_steps=num_steps,
+        rng_key=jax.random.PRNGKey(0),
+        likelihood_weight=policy.smoother_weight,
+    )
+    smoother: Any = (
+        TimeVaryingParameterESMDA(num_time_points=2, **common)
+        if dynamic
+        else ParameterESMDA(**common)
+    )
+    filter_model = _ToyEnsembleModel(num_frames=_CYCLE_FRAMES)
+    enkf = EnsembleKalmanFilter(
+        observation_operator=op if shared_op else _obs_op(),
+        forward_model=filter_model,
+        C_D=jnp.full(_N_SENSORS, _OBS_VARIANCE),
+        mode=mode,  # type: ignore[arg-type]
+        inflation=RTPS(alpha=0.5) if mode == "joint" else None,
+        rng_key=jax.random.PRNGKey(7),
+        beta=policy.beta,
+    )
+    hybrid = FilterSmoothing(smoother=smoother, filter=enkf, tempering=policy)
+    return hybrid, smoother, enkf, filter_model
+
+
+def _prior(dynamic: bool) -> xarray.Dataset:
+    return _trajectory_prior(np.array([0.0, 10.0])) if dynamic else _static_prior()
+
+
+def test_default_tempering_is_filter_only_at_the_filters_beta() -> None:
+    hybrid = FilterSmoothing(
+        smoother=_static_smoother(_ToyEnsembleModel(num_frames=_WINDOW_FRAMES)),
+        filter=_filter(_ToyEnsembleModel(num_frames=_CYCLE_FRAMES), "joint"),
+    )
+    assert hybrid.tempering == resolve_tempering_policy()
+    assert hybrid.tempering.is_legacy
+
+    # A beta-tempered filter with a full-weight smoother IS filter-only.
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_obs_op(),
+        forward_model=_ToyEnsembleModel(num_frames=_CYCLE_FRAMES),
+        C_D=jnp.full(_N_SENSORS, _OBS_VARIANCE),
+        mode="state",
+        beta=3.0,
+    )
+    hybrid = FilterSmoothing(
+        smoother=_static_smoother(_ToyEnsembleModel(num_frames=_WINDOW_FRAMES)),
+        filter=enkf,
+    )
+    assert hybrid.tempering == resolve_tempering_policy(3.0, "filter_only")
+
+
+@pytest.mark.parametrize("dynamic", [False, True])  # type: ignore[misc]
+def test_explicit_default_policy_is_bitwise_the_legacy_hybrid(dynamic: bool) -> None:
+    """``filter_only`` at beta 1, spelled out, changes nothing — same RNG stream."""
+    batches = _observation_batches()
+
+    def legacy() -> Any:
+        smoother = (
+            _dynamic_smoother(_ToyEnsembleModel(num_frames=_WINDOW_FRAMES), 2)
+            if dynamic
+            else _static_smoother(_ToyEnsembleModel(num_frames=_WINDOW_FRAMES))
+        )
+        hybrid = FilterSmoothing(
+            smoother=smoother,
+            filter=_filter(_ToyEnsembleModel(num_frames=_CYCLE_FRAMES), "joint"),
+        )
+        return hybrid.run(
+            state=_initial_state(), params=_prior(dynamic), observations=batches
+        )
+
+    hybrid, *_ = _tempered_hybrid(resolve_tempering_policy(), dynamic=dynamic)
+    tempered = hybrid.run(
+        state=_initial_state(), params=_prior(dynamic), observations=batches
+    )
+    reference = legacy()
+
+    for name in ("esmda_params", "params"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(tempered, name)["a"].values),
+            np.asarray(getattr(reference, name)["a"].values),
+        )
+    assert tempered.state is not None and reference.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(tempered.state["u"].values), np.asarray(reference.state["u"].values)
+    )
+    assert [d.innovation_chi2 for d in tempered.diagnostics] == [
+        d.innovation_chi2 for d in reference.diagnostics
+    ]
+
+
+def test_tempering_mismatch_with_the_collaborators_is_rejected() -> None:
+    shared = resolve_tempering_policy(2.0, "shared_budget")
+    _, smoother, enkf, _ = _tempered_hybrid(shared)
+
+    # Default policy (filter_only at the filter's beta) vs a tempered smoother.
+    with pytest.raises(ValueError, match="likelihood_weight"):
+        FilterSmoothing(smoother=smoother, filter=enkf)
+    # Policy beta differs from the filter's.
+    with pytest.raises(ValueError, match="beta"):
+        FilterSmoothing(
+            smoother=smoother,
+            filter=enkf,
+            tempering=resolve_tempering_policy(4.0, "shared_budget"),
+        )
+    # Legacy collaborators under a shared policy.
+    with pytest.raises(ValueError, match="beta"):
+        FilterSmoothing(
+            smoother=_static_smoother(_ToyEnsembleModel(num_frames=_WINDOW_FRAMES)),
+            filter=_filter(_ToyEnsembleModel(num_frames=_CYCLE_FRAMES), "joint"),
+            tempering=shared,
+        )
+    with pytest.raises(ValueError, match="TemperingPolicy"):
+        FilterSmoothing(
+            smoother=smoother, filter=enkf, tempering=(2.0, "shared_budget")  # type: ignore[arg-type]
+        )
+    # Nothing was patched on the way: the collaborators keep their own weights.
+    assert enkf.beta == 2.0 and smoother.likelihood_weight == 0.5
+
+
+def test_weight_changed_after_construction_is_caught_before_any_forecast() -> None:
+    hybrid, smoother, _, filter_model = _tempered_hybrid(
+        resolve_tempering_policy(2.0, "shared_budget")
+    )
+    smoother.likelihood_weight = 1.0
+    with pytest.raises(ValueError, match="likelihood_weight"):
+        hybrid.run(
+            state=_initial_state(),
+            params=_static_prior(),
+            observations=_observation_batches(),
+        )
+    assert smoother.forward_model.calls == 0 and filter_model.calls == 0
+
+
+def test_shared_budget_rejects_smoother_aggregation() -> None:
+    op = _obs_op()
+    policy = resolve_tempering_policy(2.0, "shared_budget")
+    smoother = ParameterESMDA(
+        observation_operator=op,
+        forward_model=_ToyEnsembleModel(num_frames=_WINDOW_FRAMES),
+        C_D=jnp.diag(jnp.full(_N_SENSORS, _OBS_VARIANCE)),
+        num_steps=2,
+        aggregate_observations=AggregateObservations(interval_seconds=10.0),
+        likelihood_weight=policy.smoother_weight,
+    )
+    enkf = EnsembleKalmanFilter(
+        observation_operator=op,
+        forward_model=_ToyEnsembleModel(num_frames=_CYCLE_FRAMES),
+        C_D=jnp.full(_N_SENSORS, _OBS_VARIANCE),
+        mode="state",
+        beta=policy.beta,
+    )
+    with pytest.raises(ValueError, match="aggregate_observations"):
+        FilterSmoothing(smoother=smoother, filter=enkf, tempering=policy)
+    # The same pair is fine under filter_only (the heuristic legacy product).
+    smoother.likelihood_weight = 1.0
+    FilterSmoothing(
+        smoother=smoother,
+        filter=enkf,
+        tempering=resolve_tempering_policy(2.0, "filter_only"),
+    )
+
+
+def test_shared_budget_rejects_a_filter_stride_before_any_forecast() -> None:
+    hybrid, smoother, enkf, filter_model = _tempered_hybrid(
+        resolve_tempering_policy(2.0, "shared_budget")
+    )
+    enkf.assimilate_every_n_step = 2
+    with pytest.raises(ValueError, match="assimilate_every_n_step"):
+        hybrid.run(
+            state=_initial_state(),
+            params=_static_prior(),
+            observations=_observation_batches(),
+        )
+    assert smoother.forward_model.calls == 0 and filter_model.calls == 0
+
+
+def test_shared_budget_requires_one_operator_instance() -> None:
+    with pytest.raises(ValueError, match="ONE observation operator"):
+        _tempered_hybrid(
+            resolve_tempering_policy(2.0, "shared_budget"), shared_op=False
+        )
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "case,match",
+    [
+        ("variance", "C_D"),
+        ("length", "C_D"),
+        ("relabelled", "labels its observations"),
+        ("repeated_frame", "same observation consumed twice"),
+    ],
+)
+def test_shared_budget_rejects_a_different_product_before_any_forecast(
+    case: str, match: str
+) -> None:
+    """Identities, timestamps and covariances — not just lengths."""
+    policy = resolve_tempering_policy(2.0, "shared_budget")
+    batches = _observation_batches()
+    kwargs: dict[str, Any] = {}
+    if case == "variance":
+        kwargs["smoother_variance"] = 2.0 * _OBS_VARIANCE
+    elif case == "length":
+        # Sized for three cycles, handed two: the lengths disagree.
+        kwargs["num_cycles"] = 3
+    elif case == "relabelled":
+        batches[1] = batches[1].assign_coords(obs=np.arange(_N_SENSORS) + 10)
+    else:
+        # Batch 1 starts ON batch 0's last frame (5.0 s): ends still increase,
+        # so segment_bounds alone would accept it.
+        batches[1] = batches[1].assign_coords(time=[5.0, 10.0])
+    hybrid, smoother, _, filter_model = _tempered_hybrid(policy, **kwargs)
+
+    with pytest.raises(ValueError, match=match):
+        hybrid.run(state=_initial_state(), params=_static_prior(), observations=batches)
+    assert smoother.forward_model.calls == 0 and filter_model.calls == 0
+
+
+def test_shared_budget_static_path_is_the_tempered_collaborators_composed() -> None:
+    """The hybrid adds nothing: ESMDA(w) then filter(beta).run, bit for bit."""
+    policy = resolve_tempering_policy(4.0, "shared_budget")
+    batches = _observation_batches()
+    hybrid, *_ = _tempered_hybrid(policy)
+    result = hybrid.run(
+        state=_initial_state(), params=_static_prior(), observations=batches
+    )
+
+    _, smoother, enkf, _ = _tempered_hybrid(policy)
+    theta = smoother(
+        state=_initial_state(),
+        params=_static_prior(),
+        observations=_window_observations(batches),
+        final_forecast=False,
+    )
+    reference = enkf.run(state=_initial_state(), params=theta, observations=batches)
+
+    np.testing.assert_array_equal(
+        np.asarray(result.esmda_params["a"].values), np.asarray(theta["a"].values)
+    )
+    assert result.state is not None and reference.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(result.state["u"].values), np.asarray(reference.state["u"].values)
+    )
+
+
+class _SpyAnalysis:
+    """Records the covariance and observation every filter analysis receives."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.C_D: list[np.ndarray] = []
+        self.obs: list[np.ndarray] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def __call__(
+        self, augmented: Any, pred_obs: Any, obs: Any, C_D_diag: Any, *a: Any, **k: Any
+    ) -> Any:
+        self.C_D.append(np.asarray(C_D_diag))
+        self.obs.append(np.asarray(obs))
+        return self.inner(augmented, pred_obs, obs, C_D_diag, *a, **k)
+
+
+@pytest.mark.parametrize("dynamic", [False, True])  # type: ignore[misc]
+@pytest.mark.parametrize("mode", ["state", "joint"])  # type: ignore[misc]
+def test_shared_budget_scales_each_analysis_once_over_repeated_windows(
+    dynamic: bool, mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both paths, two windows: every ESMDA update uses ``alpha / w`` with the
+    PHYSICAL C_D, every filter analysis ``beta * C_D`` — never compounded — and
+    each raw frame reaches the filter exactly once per window."""
+    import data_assimilation.smoothing.esmda as esmda_module
+
+    beta, num_steps = 4.0, 2
+    policy = resolve_tempering_policy(beta, "shared_budget")
+    hybrid, smoother, enkf, _ = _tempered_hybrid(
+        policy, mode, dynamic=dynamic, num_steps=num_steps
+    )
+    spy = _SpyAnalysis(enkf.analysis)
+    enkf.analysis = spy  # type: ignore[assignment]
+    esmda_calls: list[tuple[float, np.ndarray]] = []
+    original = esmda_module.stochastic_enkf_update
+
+    def esmda_spy(*args: Any, **kwargs: Any) -> Any:
+        esmda_calls.append((kwargs["alpha"], np.asarray(kwargs["C_D_diag"])))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(esmda_module, "stochastic_enkf_update", esmda_spy)
+
+    physical = np.full(_N_SENSORS, _OBS_VARIANCE, dtype=np.float32)
+    state: Any = _initial_state()
+    params = _prior(dynamic)
+    windows = [_observation_batches(seed=3), _observation_batches(seed=11)]
+    for batches in windows:
+        result = hybrid.run(state=state, params=params, observations=batches)
+        state, params = result.state, result.esmda_params
+
+    # ESMDA: num_steps updates per window, base alpha / w, physical C_D.
+    assert len(esmda_calls) == num_steps * len(windows)
+    for alpha, C_D in esmda_calls:
+        assert alpha == num_steps / policy.smoother_weight
+        np.testing.assert_array_equal(C_D, np.tile(physical, _WINDOW_FRAMES))
+    # Filter: one analysis per raw frame, beta * C_D every time.
+    frames = [
+        np.asarray(b.transpose("time", "obs").values)[t]
+        for batches in windows
+        for b in batches
+        for t in range(_CYCLE_FRAMES)
+    ]
+    assert len(spy.C_D) == len(frames)
+    for C_D in spy.C_D:
+        np.testing.assert_array_equal(C_D, beta * physical)
+    for seen, frame in zip(spy.obs, frames):
+        np.testing.assert_array_equal(seen, frame.astype(seen.dtype))
+    # The collaborators are untouched: physical in, effective derived once.
+    np.testing.assert_array_equal(np.asarray(enkf.C_D_diag), physical)
+    np.testing.assert_array_equal(np.asarray(enkf.effective_C_D_diag), beta * physical)
+    assert smoother.alpha == num_steps
+    assert smoother.effective_alpha == num_steps / policy.smoother_weight
+
+
+def test_shared_budget_accepts_window_covariances_installed_as_vectors() -> None:
+    """The run script installs 1-D per-window covariances on both collaborators.
+
+    The hybrid reads the smoother's C_D whichever layout it holds: installing
+    the SAME physical values as vectors changes nothing, bit for bit, while a
+    mismatched vector is still caught before any forecast.
+    """
+    policy = resolve_tempering_policy(2.0, "shared_budget")
+    batches = _observation_batches()
+    window_frames = _NUM_CYCLES * _CYCLE_FRAMES
+
+    reference, *_ = _tempered_hybrid(policy)
+    expected = reference.run(
+        state=_initial_state(), params=_static_prior(), observations=batches
+    )
+
+    hybrid, smoother, enkf, _ = _tempered_hybrid(policy)
+    smoother.set_observation_covariance(
+        jnp.full(window_frames * _N_SENSORS, _OBS_VARIANCE)
+    )
+    enkf.set_observation_covariance(jnp.full(_N_SENSORS, _OBS_VARIANCE))
+    assert smoother.C_D.ndim == 1
+    result = hybrid.run(
+        state=_initial_state(), params=_static_prior(), observations=batches
+    )
+    assert result.state is not None and expected.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(result.state["u"].values), np.asarray(expected.state["u"].values)
+    )
+
+    mismatched, smoother, _, filter_model = _tempered_hybrid(policy)
+    smoother.set_observation_covariance(
+        jnp.full(window_frames * _N_SENSORS, 2.0 * _OBS_VARIANCE)
+    )
+    with pytest.raises(ValueError, match="C_D"):
+        mismatched.run(
+            state=_initial_state(), params=_static_prior(), observations=batches
+        )
+    assert smoother.forward_model.calls == 0 and filter_model.calls == 0

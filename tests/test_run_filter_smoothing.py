@@ -338,6 +338,133 @@ def test_run_filter_smoothing_rejects_bad_stride(compose_test_cfg: Any) -> None:
     assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
 
 
+# ---------------------------------------------------------------------------
+# Beta tempering: config wiring and pre-flight rejections (no solver)
+# ---------------------------------------------------------------------------
+
+
+def test_default_tempering_composes_to_the_legacy_policy(
+    compose_test_cfg: Any,
+) -> None:
+    """beta 1 / filter_only by default, forwarded into the filter target."""
+    from data_assimilation import resolve_tempering_policy
+
+    from pyurbanair.config.hydra_helpers import create_observation_error
+    from scripts.filter_smoothing.run_filter_smoothing import _resolve_tempering
+
+    cfg = compose_test_cfg(
+        _overrides("dynamic", "joint", 1), config_name="run_filter_smoothing"
+    )
+    assert cfg.filter_smoothing.beta == 1.0
+    assert cfg.filter_smoothing.likelihood_allocation == "filter_only"
+    assert cfg.filtering.beta == cfg.filtering.filter.beta == 1.0
+    policy = _resolve_tempering(cfg, 1, create_observation_error(cfg))
+    assert policy == resolve_tempering_policy()
+    assert policy.is_legacy and policy.smoother_weight == 1.0
+
+    # filter_smoothing.beta is the single source: it reaches the filter target.
+    cfg = compose_test_cfg(
+        _overrides(
+            "static",
+            "joint",
+            1,
+            [
+                "filter_smoothing.beta=4.0",
+                "filter_smoothing.likelihood_allocation=shared_budget",
+                "esmda.interval_seconds=null",
+            ],
+        ),
+        config_name="run_filter_smoothing",
+    )
+    assert cfg.filtering.beta == cfg.filtering.filter.beta == 4.0
+    policy = _resolve_tempering(cfg, 1, create_observation_error(cfg))
+    assert policy.smoother_weight == 0.75 and policy.filter_weight == 0.25
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "extra,match",
+    [
+        # The default aggregation (esmda.interval_seconds=3.0) is a different
+        # observation product from the filter's raw frames.
+        (
+            [
+                "filter_smoothing.beta=2.0",
+                "filter_smoothing.likelihood_allocation=shared_budget",
+            ],
+            "interval_seconds",
+        ),
+        # Zero parameter budget.
+        (
+            [
+                "filter_smoothing.likelihood_allocation=shared_budget",
+                "esmda.interval_seconds=null",
+            ],
+            "beta > 1",
+        ),
+        # Conservative stride guard (3 divides the 3-frame smoke window).
+        (
+            [
+                "filter_smoothing.beta=2.0",
+                "filter_smoothing.likelihood_allocation=shared_budget",
+                "esmda.interval_seconds=null",
+                "filtering.assimilate_every_n_step=3",
+            ],
+            "assimilate_every_n_step",
+        ),
+        (["filter_smoothing.beta=0.5"], "beta"),
+        (["filter_smoothing.beta=.nan"], "beta"),
+        (["filter_smoothing.likelihood_allocation=shared"], "likelihood_allocation"),
+        # A conflicting CLI override of the forwarded key ...
+        (["filtering.beta=2.0"], "conflicts with filter_smoothing.beta"),
+        # ... or of the filter target's own key.
+        (["filtering.filter.beta=2.0"], "conflicts with filter_smoothing.beta"),
+        # The smoother weight is derived, never configured.
+        (["+esmda.smoother.likelihood_weight=0.5"], "DERIVED"),
+        # A MISSING forwarded key is not agreement: the filter would be built
+        # at its default beta while the policy says otherwise.
+        (["filter_smoothing.beta=2.0", "~filtering.filter.beta"], "missing"),
+    ],
+)
+def test_run_filter_smoothing_rejects_bad_tempering_before_the_truth(
+    extra: list[str], match: str, compose_test_cfg: Any
+) -> None:
+    from scripts.filter_smoothing.run_filter_smoothing import run
+
+    cfg = compose_test_cfg(
+        _overrides("static", "joint", 1, extra), config_name="run_filter_smoothing"
+    )
+    with pytest.raises(ValueError, match=match):
+        run(cfg)
+    assert not (pathlib.Path(cfg.paths.results_dir) / "true_state.nc").exists()
+
+
+def test_observation_product_identity(compose_test_cfg: Any) -> None:
+    """The product record names the operator chain and hashes the sensors."""
+    from pyurbanair.config.hydra_helpers import create_observation_operator
+    from scripts.filter_smoothing.run_filter_smoothing import _observation_product
+
+    cfg = compose_test_cfg(
+        _overrides("static", "joint", 1), config_name="run_filter_smoothing"
+    )
+    op = create_observation_operator(
+        cfg.obs, cfg.assim_model.solver_name, cfg.observation.operator
+    )
+    record = _observation_product(cfg, op, 12, 1, None)
+    assert record["operator"] == [
+        "TemporalObservationOperator",
+        "ObservationOperator",
+    ]
+    assert record["num_sensors"] == 4
+    assert record["num_observations_per_frame"] == 12
+    assert record["smoother_aggregation"] is None
+    assert len(record["sensor_coordinates_sha256"]) == 64
+    # Same sensors -> same hash; a moved sensor -> a different one.
+    assert _observation_product(cfg, op, 12, 1, None) == record
+    cfg.obs.x_points = [2.5, 2.5, 18.0, 17.0]
+    moved = _observation_product(cfg, op, 12, 1, None)
+    assert moved["sensor_coordinates_sha256"] != record["sensor_coordinates_sha256"]
+
+
 def test_nominal_window_clock_yields_exact_segment_bounds() -> None:
     """The PRODUCTION observation geometry composes with ``segment_bounds``.
 
@@ -397,28 +524,37 @@ def test_nominal_window_clock_yields_exact_segment_bounds() -> None:
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
-    "smoother,mode,num_windows,every_n",
+    "smoother,mode,num_windows,every_n,shared",
     [
         # The exact-reduction path: a static MDA posterior makes the filter
         # phase one plain joint-EnKF pass over the window's cycles. Two windows,
         # so the prior carry (posterior -> next prior) is exercised.
-        pytest.param("static", "joint", 2, 1, id="joint_static"),
+        pytest.param("static", "joint", 2, 1, False, id="joint_static"),
         # The correction-on-the-ESMDA-schedule path: a trajectory posterior plus
         # a joint parameter update, per segment. Two windows, so the dynamic
         # carry (extrapolate -> next prior) and the per-window reset of the
         # correction are both exercised.
-        pytest.param("dynamic", "joint", 2, 1, id="joint_dynamic"),
+        pytest.param("dynamic", "joint", 2, 1, False, id="joint_dynamic"),
         # The analysis stride: one cycle spans the smoke window's three frames
         # and assimilates only the last — BOTH halves see that one strided
         # frame per window (one observation product), the trajectory is
         # restricted to the full-window segment, and the strided observation
         # operator wraps both DA instances.
-        pytest.param("dynamic", "state", 2, 3, id="state_dynamic_strided"),
+        pytest.param("dynamic", "state", 2, 3, False, id="state_dynamic_strided"),
+        # Shared likelihood budget (beta 2: half to each phase) on the RAW
+        # product, over two windows of the dynamic path: the hybrid's run-time
+        # product checks pass on real observations, every window.
+        pytest.param("dynamic", "joint", 2, 1, True, id="joint_dynamic_shared"),
     ],
 )
 @pytest.mark.integration  # type: ignore[misc]
 def test_run_filter_smoothing(
-    smoother: str, mode: str, num_windows: int, every_n: int, compose_test_cfg: Any
+    smoother: str,
+    mode: str,
+    num_windows: int,
+    every_n: int,
+    shared: bool,
+    compose_test_cfg: Any,
 ) -> None:
     import numpy as np
     import xarray
@@ -426,13 +562,15 @@ def test_run_filter_smoothing(
     from scripts.esmda._esmda_common import read_yaml
     from scripts.filter_smoothing.run_filter_smoothing import run
 
+    extra = [f"filtering.assimilate_every_n_step={every_n}"]
+    if shared:
+        extra += [
+            "filter_smoothing.beta=2.0",
+            "filter_smoothing.likelihood_allocation=shared_budget",
+            "esmda.interval_seconds=null",
+        ]
     cfg = compose_test_cfg(
-        _overrides(
-            smoother,
-            mode,
-            num_windows,
-            [f"filtering.assimilate_every_n_step={every_n}"],
-        ),
+        _overrides(smoother, mode, num_windows, extra),
         config_name="run_filter_smoothing",
     )
     run(cfg)
@@ -447,7 +585,18 @@ def test_run_filter_smoothing(
     num_cycles = num_windows * cycles_per_window
     n_sensors = len(cfg.obs.x_points)
     n_obs_frame = len(cfg.obs.states) * n_sensors
+    # esmda.interval_seconds == the whole smoke window aggregates the window's
+    # frames into ONE interval; the shared budget assimilates them raw.
+    n_obs_smoother = cycles_per_window * n_obs_frame if shared else n_obs_frame
     num_steps = int(cfg.esmda.num_steps)
+    beta = 2.0 if shared else 1.0
+    weight = 0.5 if shared else 1.0
+    physical_std = float(
+        np.hypot(
+            cfg.observation_error.instrument_std,
+            cfg.observation_error.representation_std,
+        )
+    )
     is_dynamic = smoother == "dynamic"
 
     out_dir = pathlib.Path(cfg.paths.results_dir)
@@ -469,6 +618,7 @@ def test_run_filter_smoothing(
     # The analyzed frames are each cycle's LAST truth frame (the analysis
     # time); unstrided that is every frame.
     analysis_times = truth_times[every_n - 1 :: every_n]
+    window_obs_values: list[Any] = []
     for w in range(num_windows):
         # The window state is the FILTER's analyzed series — one frame per
         # cycle, on the window's own truth frame times — occupying the slots an
@@ -530,13 +680,36 @@ def test_run_filter_smoothing(
         # not window_{w}_pred_obs.nc.
         esmda_pred = xarray.open_dataset(windows_dir / f"window_{w}_esmda_pred_obs.nc")
         assert esmda_pred.sizes["esmda_step"] == num_steps
-        # esmda.interval_seconds == the whole smoke window, so the window's
-        # frames aggregate into a single interval.
-        assert esmda_pred.sizes["obs_index"] == n_obs_frame
-        assert esmda_pred["pred_obs"].shape == (num_steps, n_obs_frame, 2)
+        assert esmda_pred.sizes["obs_index"] == n_obs_smoother
+        assert esmda_pred["pred_obs"].shape == (num_steps, n_obs_smoother, 2)
         for var in ("obs", "obs_clean", "obs_error_std"):
-            assert esmda_pred[var].shape == (n_obs_frame,)
+            assert esmda_pred[var].shape == (n_obs_smoother,)
         assert "final_forecast=False" in esmda_pred.attrs["esmda_step"]
+        # obs_error_std stays PHYSICAL in both halves' artifacts, whatever
+        # the tempering: the raw per-frame std on the shared (unaggregated)
+        # product, and only ever SHRUNK by mean propagation otherwise. The
+        # tempering is recorded beside it as the multiplier the analyses
+        # applied to the physical C_D: alpha_base / w for the smoother, beta
+        # for the filter.
+        if shared:
+            assert np.allclose(esmda_pred["obs_error_std"].values, physical_std)
+        else:
+            assert np.all(esmda_pred["obs_error_std"].values <= physical_std + 1e-12)
+        assert esmda_pred.attrs["analysis_covariance_multiplier"] == pytest.approx(
+            num_steps / weight
+        )
+        assert obs.attrs["analysis_covariance_multiplier"] == beta
+        if shared:
+            # One observation product: the smoother's raw window vector IS the
+            # filter's per-cycle frames, value for value.
+            np.testing.assert_array_equal(esmda_pred["obs"].values, obs["obs"].values)
+        window_obs_values.append(np.asarray(obs["obs"].values))
+
+    # Window boundaries consume no observation twice: the windows' raw
+    # observation vectors are disjoint blocks of one horizon-long draw.
+    all_obs = np.concatenate(window_obs_values)
+    assert all_obs.size == num_cycles * n_obs_frame
+    assert np.unique(all_obs).size == all_obs.size
 
     # Assembled, ESMDA schema — the shared metric/figure stages' inputs.
     posterior_params = xarray.open_dataset(out_dir / "posterior_params.nc")
@@ -578,7 +751,29 @@ def test_run_filter_smoothing(
     assert configuration["save_obs_diagnostics"] is True
     assert configuration["save_prior_state"] is False
     assert configuration["num_observations_per_frame"] == n_obs_frame
-    assert configuration["num_observations_per_window_aggregated"] == n_obs_frame
+    assert configuration["num_observations_per_window_aggregated"] == n_obs_smoother
+    # Beta tempering, as the collaborators actually ran it.
+    tempering = configuration["tempering"]
+    assert tempering["beta"] == tempering["filter_beta"] == beta
+    assert tempering["likelihood_allocation"] == (
+        "shared_budget" if shared else "filter_only"
+    )
+    assert tempering["filter_weight"] == 1.0 / beta
+    assert tempering["smoother_weight"] == tempering["smoother_likelihood_weight"]
+    assert tempering["smoother_weight"] == weight
+    assert tempering["base_alpha"] == float(num_steps)
+    assert tempering["effective_alpha"] == tempering["smoother_effective_alpha"]
+    assert tempering["effective_alpha"] == num_steps / weight
+    assert tempering["nominal_combined_exponent"] == (1.0 if shared else 2.0)
+    assert "observation_error_std" not in configuration
+    assert configuration["observation_error_model"] == (
+        "observation_error.v1:diagonal:independent:propagate_mean"
+    )
+    product = configuration["observation_product"]
+    assert product["num_observations_per_frame"] == n_obs_frame
+    assert product["assimilate_every_n_step"] == every_n
+    assert (product["smoother_aggregation"] is None) is shared
+    assert len(product["sensor_coordinates_sha256"]) == 64
     assert configuration["analysis"]["_target_"] == (
         "data_assimilation.filtering.analysis.StochasticEnKFAnalysis"
     )
@@ -622,3 +817,73 @@ def test_run_filter_smoothing(
 
     posterior_state = xarray.open_dataset(out_dir / "posterior_state.nc")
     assert posterior_state.sizes["ensemble"] == 2
+
+
+def test_variance_upper_bound_covers_every_override() -> None:
+    """The pre-flight bound is the largest configured std of each part, squared."""
+    from data_assimilation.observation_error import ObservationErrorSpec
+
+    assert ObservationErrorSpec(0.25).variance_upper_bound() == pytest.approx(0.0625)
+    spec = ObservationErrorSpec(
+        instrument_std={
+            "default": 0.1,
+            "height_bands": [{"min_z": 0.0, "max_z": 10.0, "std": 0.4}],
+            "components": {"u": 0.2},
+            "sensors": {"3": 0.3},
+        },
+        representation_std={"default": 0.05, "components": {"v": 0.3}},
+    )
+    assert spec.variance_upper_bound() == pytest.approx(0.4**2 + 0.3**2)
+
+
+def test_shared_budget_rejects_a_correlated_error_model(compose_test_cfg: Any) -> None:
+    """Defence in depth: create_observation_error only admits `independent`
+    today, but a shared budget must never be split over a temporally
+    correlated product, whatever the global contract later allows."""
+    from data_assimilation.observation_error import ObservationErrorSpec
+
+    from scripts.filter_smoothing.run_filter_smoothing import _resolve_tempering
+
+    cfg = compose_test_cfg(
+        _overrides(
+            "static",
+            "joint",
+            1,
+            [
+                "filter_smoothing.beta=2.0",
+                "filter_smoothing.likelihood_allocation=shared_budget",
+                "esmda.interval_seconds=null",
+            ],
+        ),
+        config_name="run_filter_smoothing",
+    )
+    independent = ObservationErrorSpec(0.25)
+    assert _resolve_tempering(cfg, 1, independent).smoother_weight == 0.5
+    persistent = ObservationErrorSpec(0.25, representation_time_model="persistent")
+    with pytest.raises(ValueError, match="representation_time_model"):
+        _resolve_tempering(cfg, 1, persistent)
+
+
+def test_observation_product_records_the_aggregator_that_ran(
+    compose_test_cfg: Any,
+) -> None:
+    """The record reads the aggregator itself, not the legacy esmda.* keys."""
+    from data_assimilation.observation_operator import AggregateObservations
+
+    from pyurbanair.config.hydra_helpers import create_observation_operator
+    from scripts.filter_smoothing.run_filter_smoothing import _observation_product
+
+    cfg = compose_test_cfg(
+        _overrides("static", "joint", 1), config_name="run_filter_smoothing"
+    )
+    op = create_observation_operator(
+        cfg.obs, cfg.assim_model.solver_name, cfg.observation.operator
+    )
+    assert float(cfg.esmda.interval_seconds) == 3.0
+    record = _observation_product(
+        cfg, op, 12, 1, AggregateObservations(interval_seconds=10.0, mode="median")
+    )
+    assert record["smoother_aggregation"] == {
+        "interval_seconds": 10.0,
+        "mode": "median",
+    }

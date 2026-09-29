@@ -2,7 +2,8 @@
 
 Covers the parts of ``smoothing/esmda.py`` reachable without a forward model:
 the global Kalman update, the time-varying flatten/unflatten round-trip and its
-block grouping, and the constructor validation added in the code review.
+block grouping, the constructor validation added in the code review, and the
+shared-budget ``likelihood_weight`` (docs/plans/hybrid_beta_tempering.md).
 """
 
 import pathlib
@@ -14,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import xarray
+from data_assimilation.filtering.analysis import stochastic_enkf_update
 from data_assimilation.localization.correlation import CorrelationLocalization
 from data_assimilation.localization.distance import DistanceLocalization
 from data_assimilation.observation_operator import (
@@ -22,9 +24,11 @@ from data_assimilation.observation_operator import (
     TemporalObservationOperator,
     flatten_observations,
 )
+from data_assimilation.reduction import OnlineStateReduction
 from data_assimilation.smoothing.esmda import (
     ParameterESMDA,
     StateAndParameterESMDA,
+    StateAndTimeVaryingParameterESMDA,
     StateESMDA,
     TimeVaryingParameterESMDA,
 )
@@ -677,6 +681,279 @@ def test_state_group_ids_share_collocated_grid() -> None:
     np.testing.assert_array_equal(groups[:n_cells], groups[n_cells:])
 
 
+# ---------------------------------------------------------------------------
+# Likelihood weight (shared-budget hybrid tempering)
+# ---------------------------------------------------------------------------
+
+
+def _weighted_smoother(cls: Any = ParameterESMDA, **kwargs: Any) -> Any:
+    """A constructed smoother of any variant; ``num_time_points`` as needed."""
+    if issubclass(cls, TimeVaryingParameterESMDA):
+        kwargs.setdefault("num_time_points", 2)
+    kwargs.setdefault("C_D", jnp.diag(jnp.ones(1)))
+    return cls(
+        observation_operator=_dummy_obs_op(),
+        forward_model=_forward_model(),
+        **kwargs,
+    )
+
+
+_ALL_VARIANTS = [
+    ParameterESMDA,
+    TimeVaryingParameterESMDA,
+    StateAndParameterESMDA,
+    StateESMDA,
+    StateAndTimeVaryingParameterESMDA,
+]
+
+
+@pytest.mark.parametrize("cls", _ALL_VARIANTS)  # type: ignore[misc]
+def test_every_variant_threads_the_likelihood_weight(cls: Any) -> None:
+    """Explicit signatures, ``**kwargs`` chains and the MRO diamond all forward it."""
+    default = _weighted_smoother(cls, num_steps=4)
+    assert default.likelihood_weight == 1.0
+    assert default.effective_alpha == 4.0
+
+    weighted = _weighted_smoother(cls, num_steps=4, likelihood_weight=0.5)
+    assert weighted.likelihood_weight == 0.5
+    # ``alpha`` stays the BASE coefficient; the effective one is derived.
+    assert weighted.alpha == 4
+    assert weighted.effective_alpha == 8.0
+    # The physical covariance is never rescaled.
+    np.testing.assert_array_equal(np.asarray(weighted.C_D), np.eye(1))
+    np.testing.assert_array_equal(np.asarray(weighted.C_D_sqrt), np.eye(1))
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "weight",
+    [float("nan"), float("inf"), -float("inf"), 0.0, -0.5, 1.5, True, False, "0.5"],
+)
+@pytest.mark.parametrize("cls", _ALL_VARIANTS)  # type: ignore[misc]
+def test_constructor_rejects_invalid_likelihood_weight(cls: Any, weight: Any) -> None:
+    with pytest.raises(ValueError, match="likelihood_weight"):
+        _weighted_smoother(cls, likelihood_weight=weight)
+
+
+def test_constructor_accepts_numpy_real_likelihood_weight() -> None:
+    esmda = _weighted_smoother(likelihood_weight=np.float32(0.25))
+    assert isinstance(esmda.likelihood_weight, float)
+    assert esmda.likelihood_weight == 0.25
+
+
+def test_constructor_rejects_effective_alpha_overflow_in_compute_dtype() -> None:
+    """A finite config whose ``alpha_eff`` or ``alpha_eff * C_D`` overflows fails."""
+    dtype = jnp.asarray(1.0).dtype  # float32 unless x64 is enabled
+    fmax = float(np.finfo(dtype).max)
+
+    # alpha_eff itself overflows the dtype (and, for tiny w, Python floats too).
+    with pytest.raises(ValueError, match="effective"):
+        _weighted_smoother(num_steps=4, likelihood_weight=4.0 / fmax / 10.0)
+    with pytest.raises(ValueError, match="effective"):
+        _weighted_smoother(num_steps=4, likelihood_weight=5e-324)
+
+    # alpha_eff is representable but its product with C_D is not.
+    variance = float(np.sqrt(fmax))
+    with pytest.raises(ValueError, match="effective"):
+        _weighted_smoother(
+            C_D=jnp.diag(jnp.array([variance], dtype=dtype)),
+            num_steps=4,
+            likelihood_weight=4.0 / (10.0 * variance),
+        )
+    # The same variance at unit weight is fine.
+    _weighted_smoother(C_D=jnp.diag(jnp.array([variance], dtype=dtype)), num_steps=4)
+
+
+@pytest.mark.parametrize("weight", [1.0, 0.5])  # type: ignore[misc]
+def test_base_schedule_check_fires_independently_of_weight(weight: float) -> None:
+    """``sum 1/alpha_base = 1`` is validated as before; the weight cannot mask it.
+
+    ``num_steps=4, alpha=8`` would be the EFFECTIVE schedule of ``w=0.5`` -- it
+    must still be rejected as a base schedule.
+    """
+    with pytest.raises(ValueError, match="Inconsistent ES-MDA schedule"):
+        _weighted_smoother(num_steps=4, alpha=8.0, likelihood_weight=weight)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "cls", [StateAndParameterESMDA, StateESMDA, StateAndTimeVaryingParameterESMDA]
+)
+def test_final_time_smoothing_rejects_non_unit_weight(cls: Any) -> None:
+    with pytest.raises(ValueError, match="final_time_smoothing"):
+        _weighted_smoother(
+            cls,
+            likelihood_weight=0.5,
+            state_reduction=OnlineStateReduction(),
+            final_time_smoothing=True,
+        )
+    # The legacy unit-weight pairing still constructs (default and explicit).
+    unit_weight_kwargs: tuple[dict[str, Any], ...] = ({}, {"likelihood_weight": 1.0})
+    for kwargs in unit_weight_kwargs:
+        esmda = _weighted_smoother(
+            cls,
+            state_reduction=OnlineStateReduction(),
+            final_time_smoothing=True,
+            **kwargs,
+        )
+        assert esmda.final_time_smoothing
+
+
+def _linear_problem(
+    n_aug: int = 3, n_d: int = 2, n_e: int = 50
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    k1, k2, k3 = jax.random.split(jax.random.PRNGKey(11), 3)
+    augmented = jax.random.normal(k1, (n_aug, n_e))
+    pred_obs = jax.random.normal(k2, (n_d, n_aug)) @ augmented
+    obs = jax.random.normal(k3, (n_d,))
+    return augmented, pred_obs, obs
+
+
+def test_unit_weight_is_bitwise_the_legacy_update() -> None:
+    """Default vs explicit ``w=1``: identical updates AND identical RNG stream."""
+    augmented, pred_obs, obs = _linear_problem()
+    C_D = jnp.diag(jnp.array([0.3, 0.7]))
+    key = jax.random.PRNGKey(123)
+    default = _weighted_smoother(C_D=C_D, num_steps=4, rng_key=key)
+    explicit = _weighted_smoother(
+        C_D=C_D, num_steps=4, rng_key=key, likelihood_weight=1.0
+    )
+
+    # The legacy path: one split per update, the kernel called with the base
+    # alpha unchanged.
+    legacy_key = key
+    for _ in range(3):
+        legacy_key, subkey = jax.random.split(legacy_key)
+        expected = stochastic_enkf_update(
+            augmented=augmented,
+            pred_obs=pred_obs,
+            obs=obs,
+            C_D_diag=jnp.diag(C_D),
+            rng_key=subkey,
+            alpha=4,
+        )
+        a = default._compute_kalman_update(augmented, pred_obs, obs, 50)
+        b = explicit._compute_kalman_update(augmented, pred_obs, obs, 50)
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(expected))
+        np.testing.assert_array_equal(np.asarray(b), np.asarray(expected))
+        np.testing.assert_array_equal(
+            np.asarray(default.rng_key), np.asarray(legacy_key)
+        )
+        np.testing.assert_array_equal(
+            np.asarray(explicit.rng_key), np.asarray(legacy_key)
+        )
+
+
+def test_weighted_update_uses_the_effective_alpha() -> None:
+    """``w=0.5`` equals the unit-weight kernel with alpha doubled, same key."""
+    augmented, pred_obs, obs = _linear_problem()
+    C_D = jnp.diag(jnp.array([0.3, 0.7]))
+    key = jax.random.PRNGKey(7)
+    _, subkey = jax.random.split(key)
+
+    def kernel(alpha: float) -> np.ndarray:
+        return np.asarray(
+            stochastic_enkf_update(
+                augmented=augmented,
+                pred_obs=pred_obs,
+                obs=obs,
+                C_D_diag=jnp.diag(C_D),
+                rng_key=subkey,
+                alpha=alpha,
+            )
+        )
+
+    weighted = _weighted_smoother(
+        C_D=C_D, num_steps=4, rng_key=key, likelihood_weight=0.5
+    )
+    result = np.asarray(weighted._compute_kalman_update(augmented, pred_obs, obs, 50))
+    np.testing.assert_array_equal(result, kernel(8.0))
+    # Genuinely different from the un-weighted update.
+    assert not np.allclose(result, kernel(4.0))
+    # Physical covariance untouched by the update.
+    np.testing.assert_array_equal(np.asarray(weighted.C_D), np.asarray(C_D))
+
+    # An explicit alpha is a BASE-schedule value: it is divided by w too.
+    override = _weighted_smoother(
+        C_D=C_D, num_steps=4, rng_key=key, likelihood_weight=0.5
+    )
+    result = np.asarray(
+        override._compute_kalman_update(augmented, pred_obs, obs, 50, alpha=2.0)
+    )
+    np.testing.assert_array_equal(result, kernel(4.0))
+
+
+def _run_linear_mda(
+    weight: float, num_steps: int, seed: int, n_e: int
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    """Full MDA schedule on a linear-Gaussian parameter problem.
+
+    ``y = G theta + e``, prior ``N(m, P)``, ``e ~ N(0, R)``. The linear forward
+    model is applied in place of a CFD forecast, so each step's ``pred_obs`` is
+    exactly ``G @ ensemble``.
+    """
+    problem = {
+        "m": np.array([1.0, -2.0]),
+        "P": np.array([[1.0, 0.3], [0.3, 0.5]]),
+        "G": np.array([[1.0, 0.0], [0.5, 1.0]]),
+        "R": np.diag([0.2, 0.3]),
+        "y": np.array([2.0, 0.5]),
+    }
+    k_prior, k_smoother = jax.random.split(jax.random.PRNGKey(seed))
+    chol = np.linalg.cholesky(problem["P"])
+    ensemble = jnp.asarray(problem["m"])[:, None] + jnp.asarray(chol) @ (
+        jax.random.normal(k_prior, (2, n_e))
+    )
+    G = jnp.asarray(problem["G"])
+    smoother = _weighted_smoother(
+        C_D=jnp.asarray(problem["R"]),
+        num_steps=num_steps,
+        rng_key=k_smoother,
+        likelihood_weight=weight,
+    )
+    obs = jnp.asarray(problem["y"])
+    for _ in range(num_steps):
+        ensemble = smoother._compute_kalman_update(ensemble, G @ ensemble, obs, n_e)
+    ens = np.asarray(ensemble, dtype=np.float64)
+    return ens.mean(axis=1), np.cov(ens), problem
+
+
+def _tempered_posterior(
+    problem: dict[str, np.ndarray], weight: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Analytic posterior of prior x likelihood**weight."""
+    P_inv = np.linalg.inv(problem["P"])
+    GtRinv = problem["G"].T @ np.linalg.inv(problem["R"])
+    cov = np.linalg.inv(P_inv + weight * GtRinv @ problem["G"])
+    mean = cov @ (P_inv @ problem["m"] + weight * GtRinv @ problem["y"])
+    return mean, cov
+
+
+@pytest.mark.parametrize("weight", [1.0, 0.5, 0.25])  # type: ignore[misc]
+def test_weighted_mda_conditions_on_the_tempered_likelihood(weight: float) -> None:
+    """Linear-Gaussian oracle: a full weighted schedule targets ``prior * L**w``.
+
+    Posterior precision ``P^-1 + w G^T R^-1 G``. Stochastic ES-MDA is exact
+    only in the infinite-ensemble limit, so moments are averaged over a few
+    seeds of a large ensemble and compared with statistical tolerances; the
+    comparison against the un-tempered posterior checks the test is
+    discriminative, not an exactness claim.
+    """
+    num_steps, n_e, seeds = 4, 20000, range(3)
+    runs = [_run_linear_mda(weight, num_steps, s, n_e) for s in seeds]
+    problem = runs[0][2]
+    mean = np.mean([r[0] for r in runs], axis=0)
+    cov = np.mean([r[1] for r in runs], axis=0)
+
+    target_mean, target_cov = _tempered_posterior(problem, weight)
+    np.testing.assert_allclose(mean, target_mean, atol=0.02)
+    np.testing.assert_allclose(cov, target_cov, rtol=0.06, atol=0.004)
+
+    if weight < 1.0:
+        full_mean, full_cov = _tempered_posterior(problem, 1.0)
+        # Tempering visibly widens the posterior relative to the full update.
+        assert np.all(np.diag(cov) > 1.3 * np.diag(full_cov))
+        assert not np.allclose(mean, full_mean, atol=0.05)
+
+
 def test_window_covariance_replacement_updates_perturbations_and_gain() -> None:
     def make(covariance: float) -> ParameterESMDA:
         return ParameterESMDA(
@@ -742,4 +1019,60 @@ def test_analyzed_observations_project_post_smoothing_state(
     )
     np.testing.assert_allclose(
         smoother.analyzed_pred_obs, smoother.pred_obs_history[-1] + 2
+    )
+
+
+# ---------------------------------------------------------------------------
+# Likelihood weight x per-window physical observation covariances
+# ---------------------------------------------------------------------------
+
+
+def test_replaced_window_covariance_keeps_the_likelihood_weight() -> None:
+    """A 1-D replacement covariance is PHYSICAL: the update still uses alpha/w."""
+    augmented, pred_obs, obs = _linear_problem()
+    variances = jnp.array([0.3, 0.7])
+    key = jax.random.PRNGKey(7)
+    _, subkey = jax.random.split(key)
+    smoother = _weighted_smoother(
+        C_D=jnp.diag(jnp.ones(2)), num_steps=4, rng_key=key, likelihood_weight=0.5
+    )
+    smoother.set_observation_covariance(variances)
+    np.testing.assert_array_equal(np.asarray(smoother.C_D), np.asarray(variances))
+    result = np.asarray(smoother._compute_kalman_update(augmented, pred_obs, obs, 50))
+    expected = stochastic_enkf_update(
+        augmented=augmented,
+        pred_obs=pred_obs,
+        obs=obs,
+        C_D_diag=variances,
+        rng_key=subkey,
+        alpha=8.0,
+    )
+    np.testing.assert_array_equal(result, np.asarray(expected))
+    assert smoother.effective_alpha == 8.0
+
+
+def test_window_covariance_call_keeps_the_weight_and_restores() -> None:
+    """``__call__(observation_covariance=...)`` swaps only the PHYSICAL C_D."""
+    smoother = _weighted_smoother(C_D=jnp.eye(1), num_steps=4, likelihood_weight=0.25)
+    with pytest.raises(ValueError, match="sizes differ"):
+        smoother(observations=np.ones(1), observation_covariance=np.ones(2))
+    np.testing.assert_array_equal(np.asarray(smoother.C_D), np.eye(1))
+    assert smoother.likelihood_weight == 0.25
+    assert smoother.effective_alpha == 16.0
+
+
+def test_covariance_replacement_rechecks_the_effective_covariance() -> None:
+    """``alpha_eff * C_D`` overflowing on a NEW covariance fails; C_D unchanged."""
+    dtype = jnp.asarray(1.0).dtype
+    variance = float(np.sqrt(np.finfo(dtype).max))
+    smoother = _weighted_smoother(
+        num_steps=4, likelihood_weight=4.0 / (10.0 * variance)
+    )
+    before = smoother.C_D
+    with pytest.raises(ValueError, match="effective"):
+        smoother.set_observation_covariance(jnp.array([variance], dtype=dtype))
+    assert smoother.C_D is before
+    # At unit weight the same replacement is fine.
+    _weighted_smoother(num_steps=4).set_observation_covariance(
+        jnp.array([variance], dtype=dtype)
     )

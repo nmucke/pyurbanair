@@ -139,6 +139,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray
+from data_assimilation.filtering import validate_beta
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
@@ -391,6 +392,7 @@ def _save_window_obs_diagnostics(
     obs_op: Any,
     resolved_error: Any = None,
     pred_obs_analyzed: Optional[np.ndarray] = None,
+    analysis_covariance_multiplier: float = 1.0,
 ) -> None:
     """Write one window's observation-space arrays in the ESMDA schema.
 
@@ -421,7 +423,11 @@ def _save_window_obs_diagnostics(
     obs_ds["obs_error_std"].attrs["long_name"] = "sqrt(diag(C_D)), un-inflated"
     if resolved_error is not None:
         add_observation_error_metadata(obs_ds, resolved_error, _OBS_DIM)
-        obs_ds.attrs["analysis_covariance_multiplier"] = 1.0
+        # What the analyses multiplied the physical C_D by: the filter's beta
+        # (1.0 untempered). obs_error_std stays the physical marginal.
+        obs_ds.attrs["analysis_covariance_multiplier"] = float(
+            analysis_covariance_multiplier
+        )
         if pred_obs is not None:
             variance = np.concatenate([r.covariance_diag for r in resolved_error])
             add_prior_innovation_diagnostics(
@@ -511,9 +517,38 @@ def _collect_window_cycle_dirs(
     shutil.rmtree(staging, ignore_errors=True)
 
 
+def _validate_filter_beta(cfg: DictConfig, observation_error: Any) -> float:
+    """Validate ``filtering.beta`` PRE-FLIGHT, before the truth is simulated.
+
+    The constructor validates it too, but only after the truth rollout: a typo
+    (``beta=0.5``, ``.nan``) or a beta whose ``beta * R`` overflows the analysis
+    dtype must not cost a CFD run first. ``filtering.filter.beta`` is what
+    reaches the constructor, so it must be present and agree.
+    """
+    beta = validate_beta(cfg.filtering.get("beta", 1.0))
+    filter_beta = cfg.filtering.filter.get("beta", None)
+    if filter_beta is None or validate_beta(filter_beta) != beta:
+        raise ValueError(
+            f"filtering.filter.beta={filter_beta!r} must interpolate "
+            f"filtering.beta={beta!r}; drop the filtering.filter.beta override."
+        )
+    # The same check the constructor makes on the resolved variances, against
+    # their upper bound: formed exactly as there (Python beta times a JAX
+    # variance vector), so beta is cast to the analysis dtype FIRST — a beta
+    # that is itself unrepresentable there (1e39 in float32) must fail too.
+    tempered = beta * jnp.asarray([observation_error.variance_upper_bound()])
+    if not bool(jnp.all(jnp.isfinite(tempered))):
+        raise ValueError(
+            f"filtering.beta={beta!r} overflows the {tempered.dtype} "
+            "observation-error variances (beta * R is not finite)."
+        )
+    return beta
+
+
 def run(cfg: DictConfig) -> None:
     validate_run_config(cfg, "filtering")
     observation_error = create_observation_error(cfg)
+    _validate_filter_beta(cfg, observation_error)
     num_windows = int(cfg.filtering.num_assimilation_windows)
     if num_windows < 1:
         raise ValueError(
@@ -971,6 +1006,7 @@ def run(cfg: DictConfig) -> None:
             truth_obs_op,
             resolved_errors[window_slice],
             (_stack_cycle_pred_obs(enkf.analyzed_pred_obs_history)),
+            analysis_covariance_multiplier=enkf.beta,
         )
 
         if save_history:
@@ -1070,6 +1106,11 @@ def run(cfg: DictConfig) -> None:
                 "assimilate_every_n_step": int(every_n),
                 "final_time": float(final_time),
                 "observation_error_model": resolved_errors[0].provenance,
+                # The analysis tempering: every analysis used `beta * C_D`. The
+                # observation-error model above (and the obs_error_std arrays in
+                # the window artifacts) stay the PHYSICAL error; read from the
+                # constructed filter, i.e. the value that actually ran.
+                "beta": float(enkf.beta),
                 # The gate the shared observation-space diagnostic reads before
                 # it opens windows/window_*_{obs,pred_obs}.nc.
                 "save_obs_diagnostics": True,

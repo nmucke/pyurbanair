@@ -19,11 +19,13 @@ import xarray
 from data_assimilation.filtering import (
     EnsembleKalmanFilter,
     ETKFAnalysis,
+    FilterResult,
     IdentityEvolution,
     LETKFAnalysis,
     ObservationTSVD,
     RandomWalkEvolution,
 )
+from data_assimilation.filtering.analysis import AnalysisScheme, StochasticEnKFAnalysis
 from data_assimilation.inflation import RTPP, RTPS, MultiplicativeInflation
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.localization.correlation import CorrelationLocalization
@@ -2207,6 +2209,403 @@ def test_transform_diagnostics_come_from_the_posterior_producing_call() -> None:
     assert diag.transform_retained_energy == pytest.approx(1.0)
 
 
+# ---------------------------------------------------------------------------
+# Beta tempering: R_filter = beta * R (docs/plans/hybrid_beta_tempering.md)
+# ---------------------------------------------------------------------------
+
+
+def _beta_filter(beta: Optional[float] = None, **overrides: Any) -> Any:
+    """A small joint filter, built with or WITHOUT an explicit ``beta``.
+
+    ``beta=None`` omits the argument entirely, so the legacy-equivalence test
+    below compares against the constructor exactly as every pre-beta caller
+    invoked it rather than against another explicit value.
+    """
+    kwargs: dict[str, Any] = dict(
+        observation_operator=_TemporalToyObsOp(np.array([[1.0, 0.5], [0.0, 1.0]])),
+        forward_model=_ToyLinearModel(
+            np.array([[0.9, 0.2], [-0.1, 0.8]]), param_effect=0.5
+        ),
+        C_D=jnp.array([0.2, 0.35]),
+        mode="joint",
+        inflation=RTPS(alpha=0.5),
+        parameter_evolution=RandomWalkEvolution(std=0.05),
+        rng_key=jax.random.PRNGKey(71),
+    )
+    kwargs.update(overrides)
+    if beta is not None:
+        kwargs["beta"] = beta
+    return EnsembleKalmanFilter(**kwargs)
+
+
+def _beta_problem(
+    n_e: int = 16, num_cycles: int = 3
+) -> tuple[xarray.Dataset, xarray.Dataset, list[xarray.DataArray]]:
+    """Joint-mode inputs with TWO frames per cycle, so the serial sweep runs."""
+    state = _initial_state(jax.random.PRNGKey(72), n_e, np.zeros(2), np.eye(2))
+    params = _params_dataset(
+        np.asarray(0.3 + 0.2 * jax.random.normal(jax.random.PRNGKey(73), (n_e,)))
+    )
+    values = np.asarray(
+        0.5 + 0.3 * jax.random.normal(jax.random.PRNGKey(74), (num_cycles, 2, 2))
+    )
+    observations = [
+        _labelled_truth_obs(values[k], np.array([0.0, 1.0])) for k in range(num_cycles)
+    ]
+    return state, params, observations
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "beta",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        0.5,
+        0.0,
+        -2.0,
+        True,
+        False,
+        np.bool_(True),
+        "2.0",
+        None,
+        jnp.asarray(2.0),
+    ],
+    ids=[
+        "nan",
+        "inf",
+        "-inf",
+        "below-one",
+        "zero",
+        "negative",
+        "True",
+        "False",
+        "np-bool",
+        "string",
+        "None",
+        "jax-array",
+    ],
+)
+def test_invalid_beta_is_rejected_at_construction(beta: Any) -> None:
+    """beta must be a real, finite number >= 1 — and never a bool.
+
+    ``None`` is rejected rather than defaulted: the Hydra config always spells
+    the value, so a ``null`` there is a config error, not "use the default".
+    """
+    with pytest.raises(ValueError, match="beta"):
+        EnsembleKalmanFilter(mode="state", beta=beta, **_dummy_filter_kwargs())
+
+
+def test_beta_that_overflows_the_covariance_dtype_is_rejected() -> None:
+    """A FINITE beta can still overflow float32 variances to inf.
+
+    ``1e39`` is a perfectly finite Python float but ``1e39 * 0.1`` is not
+    representable in float32; the effective covariance is validated in the dtype
+    the analyses will actually use, so this fails at construction rather than as
+    a NaN ensemble in cycle 0.
+    """
+    kwargs = _dummy_filter_kwargs()
+    kwargs["C_D"] = jnp.array([0.1], dtype=jnp.float32)
+    with pytest.raises(ValueError, match="overflows"):
+        EnsembleKalmanFilter(mode="state", beta=1e39, **kwargs)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "beta", [1, 2, np.float32(3.0), np.float64(2.5), np.int64(4)]
+)
+def test_valid_beta_is_stored_as_a_python_float(beta: Any) -> None:
+    enkf = EnsembleKalmanFilter(mode="state", beta=beta, **_dummy_filter_kwargs())
+    assert type(enkf.beta) is float
+    assert enkf.beta == float(beta)
+    # C_D_diag stays PHYSICAL; only the effective vector is tempered.
+    np.testing.assert_array_equal(np.asarray(enkf.C_D_diag), [np.float32(0.1)])
+    np.testing.assert_array_equal(
+        np.asarray(enkf.effective_C_D_diag),
+        np.asarray(float(beta) * jnp.array([0.1])),
+    )
+
+
+def test_default_beta_is_the_legacy_filter_bit_for_bit() -> None:
+    """No ``beta`` argument, and ``beta=1.0``, give the SAME run, bitwise.
+
+    Joint mode, prior/posterior inflation, parameter evolution and a two-frame
+    serial sweep, over several cycles: every path through the cycle loop that
+    touches the covariance or the PRNG stream. The RNG key left on the
+    instance is compared too, so an extra split for beta (which would shift
+    every later draw) cannot hide behind equal posteriors.
+    """
+    state, params, observations = _beta_problem()
+    legacy = _beta_filter()
+    explicit = _beta_filter(beta=1.0)
+    assert legacy.beta == 1.0
+    np.testing.assert_array_equal(
+        np.asarray(legacy.effective_C_D_diag), np.asarray(legacy.C_D_diag)
+    )
+
+    legacy_result = legacy.run(state=state, params=params, observations=observations)
+    explicit_result = explicit.run(
+        state=state, params=params, observations=observations
+    )
+
+    assert legacy_result.state is not None and explicit_result.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(explicit_result.state["u"]), np.asarray(legacy_result.state["u"])
+    )
+    assert legacy_result.params is not None and explicit_result.params is not None
+    np.testing.assert_array_equal(
+        np.asarray(explicit_result.params["a"]), np.asarray(legacy_result.params["a"])
+    )
+    np.testing.assert_array_equal(
+        np.asarray(jax.random.key_data(explicit.rng_key)),
+        np.asarray(jax.random.key_data(legacy.rng_key)),
+    )
+    for ours, reference in zip(explicit_result.diagnostics, legacy_result.diagnostics):
+        # Everything but the wall-clock timing is identical.
+        ours.analysis_time = reference.analysis_time = None
+        assert ours == reference
+
+
+def _pre_scaled_pair(beta: float, **overrides: Any) -> tuple[Any, Any, jnp.ndarray]:
+    """``(beta, C_D)`` and ``(1, beta * C_D)`` twins of the same filter.
+
+    Scaling the covariance exactly once means the tempered filter IS the
+    untempered filter handed ``beta * C_D``: same kernel inputs, same keys, so
+    the two runs must agree bit for bit. A second scaling anywhere (``alpha``
+    in the stochastic kernel, a re-multiplication per window) or a site that
+    still reads the physical ``C_D`` would break the equality.
+    """
+    C_D = overrides.pop("C_D", jnp.array([0.2, 0.35]))
+    tempered = _beta_filter(beta=beta, C_D=C_D, **overrides)
+    pre_scaled = _beta_filter(beta=1.0, C_D=beta * C_D, **overrides)
+    return tempered, pre_scaled, C_D
+
+
+def _assert_same_run(tempered: Any, pre_scaled: Any, **run_kwargs: Any) -> tuple:
+    ours = tempered.run(**run_kwargs)
+    reference = pre_scaled.run(**run_kwargs)
+    assert ours.state is not None and reference.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(ours.state["u"]), np.asarray(reference.state["u"])
+    )
+    if reference.params is not None:
+        assert ours.params is not None
+        np.testing.assert_array_equal(
+            np.asarray(ours.params["a"]), np.asarray(reference.params["a"])
+        )
+    return ours, reference
+
+
+@pytest.mark.parametrize("beta", [2.0, 4.0, 8.0])  # type: ignore[misc]
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "localization",
+    [None, _AllOnesLocalization(), CorrelationLocalization(max_inflation=4.0)],
+    ids=["global", "all-ones", "correlation"],
+)
+def test_stochastic_beta_equals_pre_scaling_the_covariance(
+    beta: float, localization: Optional[BaseLocalization]
+) -> None:
+    """Joint mode, multi-frame sweep, global and localized stochastic updates.
+
+    Both blocks of the joint update are tempered alike (the parameter rows are
+    compared too), which is automatic because R is scaled rather than rows.
+    """
+    tempered, pre_scaled, _ = _pre_scaled_pair(beta, localization=localization)
+    state, params, observations = _beta_problem()
+    ours, reference = _assert_same_run(
+        tempered, pre_scaled, state=state, params=params, observations=observations
+    )
+    # ...while the physical-covariance diagnostic is NOT the pre-scaled one:
+    # the tempered run's chi2 is still measured against the physical C_D.
+    assert ours.diagnostics[0].innovation_chi2 != pytest.approx(
+        reference.diagnostics[0].innovation_chi2
+    )
+    # And beta genuinely changed the analysis (the comparison is not vacuous).
+    untempered = _beta_filter(localization=localization).run(
+        state=state, params=params, observations=observations
+    )
+    assert untempered.state is not None and ours.state is not None
+    assert not np.allclose(
+        np.asarray(untempered.state["u"]), np.asarray(ours.state["u"])
+    )
+    # The first cycle's forecast is identical, so its NIS is too: the chi2 is
+    # physical whatever beta is.
+    assert ours.diagnostics[0].innovation_chi2 == (
+        untempered.diagnostics[0].innovation_chi2
+    )
+
+
+class _RecordingAnalysis(AnalysisScheme):
+    """The stochastic analysis, recording the covariance of every call."""
+
+    def __init__(self) -> None:
+        self.inner = StochasticEnKFAnalysis()
+        self.covariances: list[np.ndarray] = []
+
+    def __call__(  # type: ignore[override]
+        self,
+        augmented: jnp.ndarray,
+        pred_obs: jnp.ndarray,
+        obs: jnp.ndarray,
+        C_D_diag: jnp.ndarray,
+        rng_key: jax.Array,
+        **kwargs: Any,
+    ) -> jnp.ndarray:
+        self.covariances.append(np.asarray(C_D_diag))
+        return self.inner(augmented, pred_obs, obs, C_D_diag, rng_key, **kwargs)
+
+
+def test_the_sweep_and_the_reduction_replay_see_the_effective_covariance() -> None:
+    """Every analysis call of a cycle — each frame of the serial sweep AND the
+    reduction's discarded-increment replay — is handed ``beta * C_D``.
+
+    Two frames per cycle and a truncated state reduction, so each cycle makes
+    four calls (two sweep frames, two replay frames). Across two ``run()``
+    calls — the window pattern — none of them sees the physical covariance or a
+    compounded one, and the instance's vectors are exactly as constructed.
+    """
+    beta = 3.0
+    C_D = jnp.array([0.2, 0.35])
+    analysis = _RecordingAnalysis()
+    enkf = _beta_filter(
+        beta=beta,
+        C_D=C_D,
+        analysis=analysis,
+        mode="state",
+        parameter_evolution=None,
+        state_reduction=OnlineStateReduction(max_rank=1, whiten=False),
+    )
+    state, _, observations = _beta_problem(num_cycles=4)
+    constructed = np.asarray(enkf.effective_C_D_diag).copy()
+    first = enkf.run(state=state, observations=observations[:2])
+    enkf.run(state=first.state, observations=observations[2:])
+
+    expected = np.asarray(beta * C_D)
+    assert len(analysis.covariances) == 4 * 2 * 2  # cycles x (sweep+replay) x frames
+    for covariance in analysis.covariances:
+        np.testing.assert_array_equal(covariance, expected)
+    np.testing.assert_array_equal(np.asarray(enkf.effective_C_D_diag), constructed)
+    np.testing.assert_array_equal(np.asarray(enkf.C_D_diag), np.asarray(C_D))
+
+
+def test_reduction_replay_is_tempered_like_the_sweep() -> None:
+    """The discarded-increment fraction of a tempered run is the pre-scaled one.
+
+    Were the replay to read the PHYSICAL ``C_D`` while the sweep used the
+    effective one, its weight matrix would describe a different analysis than
+    the posterior it is supposed to decompose — and the fraction would differ
+    from the pre-scaled twin's (it does differ from the untempered run's, which
+    is what shows the diagnostic is sensitive to the covariance at all).
+    """
+    beta = 4.0
+    reduction_kwargs: dict[str, Any] = dict(
+        mode="state", parameter_evolution=None, inflation=None
+    )
+    tempered, pre_scaled, _ = _pre_scaled_pair(
+        beta,
+        state_reduction=OnlineStateReduction(max_rank=1, whiten=False),
+        **reduction_kwargs,
+    )
+    state, _, observations = _beta_problem(num_cycles=2)
+    ours, reference = _assert_same_run(
+        tempered, pre_scaled, state=state, observations=observations
+    )
+    untempered = _beta_filter(
+        state_reduction=OnlineStateReduction(max_rank=1, whiten=False),
+        **reduction_kwargs,
+    ).run(state=state, observations=observations)
+    for tempered_diag, reference_diag, untempered_diag in zip(
+        ours.diagnostics, reference.diagnostics, untempered.diagnostics
+    ):
+        fraction = tempered_diag.reduction_discarded_increment_fraction
+        assert fraction is not None and fraction > 1e-3
+        assert fraction == reference_diag.reduction_discarded_increment_fraction
+        assert fraction != pytest.approx(
+            untempered_diag.reduction_discarded_increment_fraction
+        )
+
+
+def test_windowing_a_tempered_filter_is_still_inert() -> None:
+    """Repeated ``run()`` calls never re-multiply the covariance.
+
+    The same horizon as one call or as two windows on ONE instance must be
+    bit-identical (the pre-beta windowing contract), which it could not be if
+    any call scaled ``C_D`` again.
+    """
+    state, params, observations = _beta_problem(num_cycles=4)
+    whole = _beta_filter(beta=4.0).run(
+        state=state, params=params, observations=observations
+    )
+    windowed = _beta_filter(beta=4.0)
+    first = windowed.run(state=state, params=params, observations=observations[:2])
+    second = windowed.run(
+        state=first.state, params=first.params, observations=observations[2:]
+    )
+    assert whole.state is not None and second.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(second.state["u"]), np.asarray(whole.state["u"])
+    )
+    assert whole.params is not None and second.params is not None
+    np.testing.assert_array_equal(
+        np.asarray(second.params["a"]), np.asarray(whole.params["a"])
+    )
+    np.testing.assert_array_equal(
+        np.asarray(windowed.effective_C_D_diag), np.asarray(4.0 * windowed.C_D_diag)
+    )
+
+
+@pytest.mark.parametrize("beta", [1.0, 2.0, 4.0, 8.0])  # type: ignore[misc]
+def test_stochastic_beta_targets_the_kalman_analysis_with_beta_R(beta: float) -> None:
+    """Fixed linear prior: posterior moments match the Kalman update with beta R.
+
+    One analysis of a large ensemble (identity forecast, linear ``H``); the
+    reference is built from the prior ensemble's own SAMPLE moments, so what
+    remains is the perturbed-observation sampling error alone — hence a
+    statistical tolerance here and an exact one for the ETKF
+    (test_filtering_etkf.py). The tolerance is well inside the gap to the
+    wrong targets: ``R`` (beta ignored) and ``beta**2 R`` (beta applied twice,
+    e.g. once through ``C_D`` and again as the kernel's ``alpha``).
+    """
+    n_e = 20000
+    H = np.array([[1.0, 0.5], [0.0, 1.0]])
+    C_D = np.array([0.3, 0.5])
+    state = _initial_state(
+        jax.random.PRNGKey(75),
+        n_e,
+        np.array([0.4, -0.2]),
+        np.array([[1.0, 0.3], [0.3, 0.8]]),
+    )
+    y = np.array([1.1, 0.2])
+    result = EnsembleKalmanFilter(
+        observation_operator=_ToyObsOp(H),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=jnp.asarray(C_D),
+        mode="state",
+        beta=beta,
+        rng_key=jax.random.PRNGKey(76),
+    ).run(state=state, observations=jnp.asarray(y)[None, :])
+
+    prior = np.asarray(state["u"].values, dtype=np.float64)  # (N_e, nx)
+    m_f, P_f = prior.mean(axis=0), np.cov(prior.T)
+
+    def _kalman(R_scale: float) -> tuple[np.ndarray, np.ndarray]:
+        S = H @ P_f @ H.T + R_scale * np.diag(C_D)
+        K = P_f @ H.T @ np.linalg.inv(S)
+        return m_f + K @ (y - H @ m_f), (np.eye(2) - K @ H) @ P_f
+
+    assert result.state is not None
+    posterior = np.asarray(result.state["u"].values, dtype=np.float64)
+    m_a, P_a = _kalman(beta)
+    # The perturbations are CENTRED, so the analysis mean is the sample Kalman
+    # mean up to float32 round-off; only the covariance carries sampling error
+    # (~5e-3 at this size, against a >= 0.05 gap to either wrong target).
+    np.testing.assert_allclose(posterior.mean(axis=0), m_a, atol=1e-4)
+    np.testing.assert_allclose(np.cov(posterior.T), P_a, atol=0.015)
+    if beta > 1.0:
+        for wrong in (1.0, beta**2):
+            _, P_wrong = _kalman(wrong)
+            assert np.abs(P_wrong - P_a).max() > 0.05
+
+
 def test_per_cycle_covariances_match_chained_calls_and_preserve_default() -> None:
     state = _initial_state(jax.random.PRNGKey(11), 20, np.zeros(1), np.eye(1))
 
@@ -2304,3 +2703,149 @@ def test_varying_frame_covariances_follow_analysis_stride() -> None:
     np.testing.assert_array_equal(result.state.u, reference.state.u)
     for actual, expected in zip(result.diagnostics, reference.diagnostics):
         assert actual.innovation_chi2 == expected.innovation_chi2
+
+
+# ---------------------------------------------------------------------------
+# Beta tempering x per-window physical observation covariances
+# ---------------------------------------------------------------------------
+
+
+def _toy_state_filter(
+    beta: float = 1.0, analysis: Optional[AnalysisScheme] = None, **overrides: Any
+) -> EnsembleKalmanFilter:
+    kwargs: dict[str, Any] = dict(
+        observation_operator=_ToyObsOp(np.eye(1)),
+        forward_model=cast(Any, _ToyLinearModel(np.eye(1))),
+        C_D=jnp.array([0.5]),
+        analysis=ETKFAnalysis() if analysis is None else analysis,
+        rng_key=jax.random.PRNGKey(8),
+        mode="state",
+        beta=beta,
+    )
+    kwargs.update(overrides)
+    return EnsembleKalmanFilter(**kwargs)
+
+
+@pytest.mark.parametrize("scheme", ["etkf", "stochastic"])  # type: ignore[misc]
+def test_beta_tempers_per_cycle_observation_covariances(scheme: str) -> None:
+    """``run(observation_covariances=R_k)`` at beta analyses with ``beta R_k``.
+
+    Bitwise the beta-1 filter handed the pre-scaled covariances, while the chi2
+    diagnostic keeps reading the PHYSICAL ones.
+    """
+    state = _initial_state(jax.random.PRNGKey(11), 20, np.zeros(1), np.eye(1))
+    observations = jnp.array([[1.0], [2.0]])
+    physical = jnp.array([[0.1], [2.0]])
+    beta = 4.0
+
+    def run(filter_beta: float, covariances: jnp.ndarray) -> FilterResult:
+        analysis = ETKFAnalysis() if scheme == "etkf" else StochasticEnKFAnalysis()
+        return _toy_state_filter(beta=filter_beta, analysis=analysis).run(
+            state=state, observations=observations, observation_covariances=covariances
+        )
+
+    tempered = run(beta, physical)
+    prescaled = run(1.0, beta * physical)
+    untempered = run(1.0, physical)
+    assert tempered.state is not None and prescaled.state is not None
+    assert untempered.state is not None
+    np.testing.assert_array_equal(tempered.state.u, prescaled.state.u)
+    assert not np.allclose(tempered.state.u, untempered.state.u)
+    # Cycle 0 forecasts the same ensemble in both runs, so the chi2 against the
+    # physical covariance must agree exactly; the pre-scaled run's does not.
+    assert tempered.diagnostics[0].innovation_chi2 == pytest.approx(
+        untempered.diagnostics[0].innovation_chi2, rel=0, abs=0
+    )
+    assert tempered.diagnostics[0].innovation_chi2 != pytest.approx(
+        prescaled.diagnostics[0].innovation_chi2
+    )
+
+
+def test_set_observation_covariance_retempers_from_the_new_physical_one() -> None:
+    """A replacement is PHYSICAL: effective = beta * new, never compounded."""
+    filt = _toy_state_filter(beta=3.0)
+    new = jnp.array([0.2])
+    for _ in range(2):  # repeated windows installing the same covariance
+        filt.set_observation_covariance(new)
+        np.testing.assert_array_equal(filt.C_D_diag, new)
+        np.testing.assert_array_equal(filt.effective_C_D_diag, 3.0 * new)
+    # A diagonal matrix is accepted and reduced, like the constructor's.
+    filt.set_observation_covariance(jnp.diag(jnp.array([0.4])))
+    np.testing.assert_array_equal(filt.effective_C_D_diag, 3.0 * jnp.array([0.4]))
+
+
+def test_rejected_covariance_replacement_leaves_the_filter_unchanged() -> None:
+    """``beta * C_D`` overflowing the dtype fails before anything is assigned."""
+    fmax = float(np.finfo(np.asarray(jnp.ones(1)).dtype).max)
+    filt = _toy_state_filter(beta=1e30, C_D=jnp.array([1e-9]))
+    physical, effective = filt.C_D_diag, filt.effective_C_D_diag
+    with pytest.raises(ValueError, match="overflows"):
+        filt.set_observation_covariance(jnp.array([fmax / 1e20]))
+    assert filt.C_D_diag is physical
+    assert filt.effective_C_D_diag is effective
+
+
+def test_tempered_window_covariance_overflow_is_rejected_before_forecast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-window covariances are tempered (and checked) before cycle 0."""
+    model = _ToyLinearModel(np.eye(1))
+
+    def forbidden(**kwargs: Any) -> xarray.Dataset:
+        pytest.fail("forecast happened before the tempered covariance check")
+
+    monkeypatch.setattr(model, "run_ensemble", forbidden)
+    fmax = float(np.finfo(np.asarray(jnp.ones(1)).dtype).max)
+    filt = _toy_state_filter(
+        beta=1e30, forward_model=cast(Any, model), C_D=jnp.array([1e-9])
+    )
+    with pytest.raises(ValueError, match="overflows"):
+        filt.run(
+            observations=jnp.ones((2, 1)),
+            observation_covariances=jnp.array([[1e-9], [fmax / 1e20]]),
+        )
+
+
+def test_beta_is_read_only_after_construction() -> None:
+    """Reassigning beta would leave the cached effective covariance stale."""
+    filt = _toy_state_filter(beta=2.0)
+    with pytest.raises(AttributeError, match="fixed at construction"):
+        filt.beta = 4.0
+    assert filt.beta == 2.0
+    np.testing.assert_array_equal(filt.effective_C_D_diag, 2.0 * filt.C_D_diag)
+
+
+def test_default_beta_hands_the_kernel_the_constructors_covariance() -> None:
+    """Pinned against the INPUT, not another run through the new code path.
+
+    At the default beta every analysis must receive exactly the covariance the
+    caller passed — same values, same dtype — which is what the pre-beta filter
+    handed the kernel, so the kernel's output is the legacy output.
+    """
+    physical = jnp.array([0.2, 0.35])
+    seen: list[jnp.ndarray] = []
+    inner = StochasticEnKFAnalysis()
+
+    class _Recording(AnalysisScheme):
+        localization_policy = inner.localization_policy
+
+        def __call__(  # type: ignore[override]
+            self,
+            augmented: jnp.ndarray,
+            pred_obs: jnp.ndarray,
+            obs: jnp.ndarray,
+            C_D_diag: jnp.ndarray,
+            rng_key: jax.Array,
+            **kwargs: Any,
+        ) -> jnp.ndarray:
+            seen.append(C_D_diag)
+            return inner(augmented, pred_obs, obs, C_D_diag, rng_key, **kwargs)
+
+    state, params, observations = _beta_problem()
+    _beta_filter(analysis=_Recording(), C_D=physical).run(
+        state=state, params=params, observations=observations
+    )
+    assert seen, "the analysis never ran"
+    for received in seen:
+        assert received.dtype == physical.dtype
+        np.testing.assert_array_equal(np.asarray(received), np.asarray(physical))

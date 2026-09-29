@@ -9,7 +9,10 @@ state — and both packages call it:
 * ``smoothing/esmda.py`` passes its tempered ``alpha`` (and its own key
   splitting), so the smoother behavior is unchanged by the extraction;
 * ``filtering/base.py`` calls it through :class:`StochasticEnKFAnalysis` with
-  the filter's full-weight ``alpha = 1``.
+  the filter's full-weight ``alpha = 1``. A filter tempered by ``beta`` hands
+  the scheme ``beta * C_D`` as ``C_D_diag`` instead, and still ``alpha = 1``:
+  the covariance is scaled exactly once (perturbation std ``sqrt(beta)``
+  sigma), never again through ``alpha``.
 
 New update flavors for the filter (ETKF, particle-style updates, ...) are new
 :class:`AnalysisScheme` implementations — the cycle loop in ``BaseFilter``

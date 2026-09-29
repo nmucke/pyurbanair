@@ -1076,3 +1076,137 @@ def test_rtpp_blends_each_member_against_its_own_prior(
     # Non-vacuous: the same statement is false for a scrambled pairing, which
     # is exactly what a rotated square root would produce.
     assert np.min(_alignment(posterior_anomalies[::-1])) < 0.5
+
+
+# ---------------------------------------------------------------------------
+# Beta tempering through the filter: the ETKF whitens by beta * C_D
+# ---------------------------------------------------------------------------
+
+
+def _beta_etkf_run(
+    beta: float,
+    C_D: jnp.ndarray,
+    tsvd: Optional[ObservationTSVD] = None,
+    mode: str = "state",
+) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray]:
+    """One ETKF analysis of a fixed linear prior through ``EnsembleKalmanFilter``.
+
+    Identity forecast, so the analysed ensemble is the prior itself and the
+    Kalman reference can be built from its sample moments.
+    """
+    n_e = 24
+    H = np.array([[1.0, 0.2, -0.1, 0.0], [0.0, 0.3, 0.5, 1.0]])
+    state = _initial_state(
+        jax.random.PRNGKey(41),
+        n_e,
+        np.array([0.5, -0.3, 0.2, 1.0]),
+        np.array(
+            [
+                [0.6, 0.1, 0.0, 0.05],
+                [0.1, 0.5, 0.1, 0.0],
+                [0.0, 0.1, 0.7, 0.1],
+                [0.05, 0.0, 0.1, 0.4],
+            ]
+        ),
+    )
+    params = _params_dataset(
+        np.asarray(0.3 + 0.2 * jax.random.normal(jax.random.PRNGKey(42), (n_e,)))
+    )
+    y = np.array([1.2, 0.4])
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_ToyObsOp(H),
+        forward_model=_ToyLinearModel(np.eye(4), param_effect=0.4),
+        C_D=C_D,
+        analysis=ETKFAnalysis(tsvd=tsvd),
+        mode=mode,  # type: ignore[arg-type]
+        parameter_evolution=(None if mode == "state" else RandomWalkEvolution(std=0.0)),
+        rng_key=jax.random.PRNGKey(43),
+        beta=beta,
+    )
+    result = enkf.run(
+        state=state,
+        params=params if mode == "joint" else None,
+        observations=jnp.asarray(y)[None, :],
+    )
+    prior = np.asarray(state["u"].values, dtype=np.float64)
+    return result, prior, H, y
+
+
+@pytest.mark.parametrize("beta", [1.0, 2.0, 4.0, 8.0])  # type: ignore[misc]
+def test_etkf_beta_is_the_exact_kalman_update_with_beta_R(beta: float) -> None:
+    """ETKF posterior mean AND covariance equal the Kalman update with ``beta R``.
+
+    Same exact-from-sampled-moments oracle as
+    :func:`test_matches_exact_kalman_update_from_sampled_moments`, but through
+    the filter, so it pins that the ``beta`` handed to the constructor reaches
+    the transform's whitening as ``beta * C_D`` — once. The stochastic twin
+    (``test_filtering.py``) targets the same moments to a sampling tolerance.
+    """
+    C_D = np.array([0.15, 0.25])
+    result, prior, H, y = _beta_etkf_run(beta, jnp.asarray(C_D))
+    m_f, P_f = prior.mean(axis=0), np.cov(prior.T)
+
+    def _kalman(R_scale: float) -> tuple[np.ndarray, np.ndarray]:
+        S = H @ P_f @ H.T + R_scale * np.diag(C_D)
+        K = P_f @ H.T @ np.linalg.inv(S)
+        return m_f + K @ (y - H @ m_f), (np.eye(4) - K @ H) @ P_f
+
+    m_a, P_a = _kalman(beta)
+    assert result.state is not None
+    analyzed = np.asarray(result.state["u"].values, dtype=np.float64)
+    np.testing.assert_allclose(analyzed.mean(axis=0), m_a, rtol=RTOL, atol=ATOL)
+    np.testing.assert_allclose(np.cov(analyzed.T), P_a, rtol=RTOL, atol=ATOL)
+    if beta > 1.0:
+        # Non-vacuous: the untempered and the doubly-tempered targets are far
+        # outside the tolerance.
+        for wrong in (1.0, beta**2):
+            wrong_mean, wrong_cov = _kalman(wrong)
+            assert np.abs(wrong_mean - m_a).max() > 1e-3
+            assert np.abs(wrong_cov - P_a).max() > 1e-3
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "tsvd",
+    [None, ObservationTSVD(enabled=True, max_rank=1)],
+    ids=["etkf", "etkf_tsvd"],
+)
+@pytest.mark.parametrize("mode", ["state", "joint"])  # type: ignore[misc]
+def test_etkf_beta_equals_pre_scaling_the_covariance(
+    tsvd: Optional[ObservationTSVD], mode: str
+) -> None:
+    """A tempered ETKF IS the untempered one handed ``beta * C_D``, bitwise.
+
+    With the TSVD on, the whitened spectrum it truncates is the EFFECTIVE one,
+    so the recorded rank/energy diagnostics must agree as well. In joint mode
+    the parameter rows are compared too: beta tempers the whole update.
+    """
+    beta = 4.0
+    C_D = jnp.array([0.15, 0.25])
+    tempered, _, _, _ = _beta_etkf_run(beta, C_D, tsvd=tsvd, mode=mode)
+    pre_scaled, _, _, _ = _beta_etkf_run(1.0, beta * C_D, tsvd=tsvd, mode=mode)
+    untempered, _, _, _ = _beta_etkf_run(1.0, C_D, tsvd=tsvd, mode=mode)
+
+    np.testing.assert_array_equal(
+        np.asarray(tempered.state["u"]), np.asarray(pre_scaled.state["u"])
+    )
+    assert not np.allclose(
+        np.asarray(tempered.state["u"]), np.asarray(untempered.state["u"])
+    )
+    if mode == "joint":
+        np.testing.assert_array_equal(
+            np.asarray(tempered.params["a"]), np.asarray(pre_scaled.params["a"])
+        )
+        assert not np.allclose(
+            np.asarray(tempered.params["a"]), np.asarray(untempered.params["a"])
+        )
+    ours, reference = tempered.diagnostics[0], pre_scaled.diagnostics[0]
+    assert ours.transform_retained_rank == reference.transform_retained_rank
+    assert ours.transform_retained_energy == reference.transform_retained_energy
+    assert (
+        ours.transform_discarded_spectrum_max
+        == reference.transform_discarded_spectrum_max
+    )
+    # The NIS stays physical: identical to the untempered run's (same forecast),
+    # not to the pre-scaled run's.
+    assert ours.innovation_chi2 == untempered.diagnostics[0].innovation_chi2
+    assert ours.innovation_chi2 != pytest.approx(reference.innovation_chi2)

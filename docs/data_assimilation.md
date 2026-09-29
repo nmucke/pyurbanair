@@ -298,8 +298,25 @@ covariance matrix, shape `(N_d, N_d)`), `C_D_sqrt`, `num_steps`, `alpha`,
 `rng_key`, and an optional `localization`.
 
 **Alpha tempering.** The default `alpha = num_steps` satisfies
-`sum_i (1/alpha_i) = 1` for the equal-weight schedule. Any scalar override
-is also valid.
+`sum_i (1/alpha_i) = 1` for the equal-weight schedule, and that is the only
+scalar schedule accepted: the constructor rejects `num_steps / alpha != 1`
+(beyond a `1e-6` slack) because any other value silently conditions on
+`L^(num_steps/alpha)` — a different inference problem. `self.alpha` is always
+this **base** coefficient.
+
+**Likelihood weight.** `likelihood_weight=w` (default `1.0`, every variant)
+makes the whole MDA loop condition on `L^w` instead of `L`: every update runs
+with `effective_alpha = alpha / w` (a read-only property), so
+`sum_i 1/effective_alpha_i = w`. It exists for the filter-smoothing hybrid's
+`shared_budget` policy (§9), which derives it — it is not a user knob and not
+in `conf/esmda/`. Validated finite `0 < w <= 1`, and the effective covariance
+`effective_alpha * C_D` is checked finite in the compute dtype. The base
+`sum 1/alpha = 1` check is unchanged; explicit `alpha` arguments (including
+`_compute_kalman_update(alpha=...)`) are always base values and are divided by
+`w` exactly once, inside the update. `C_D`/`C_D_sqrt` stay physical.
+`final_time_smoothing=True` with `w != 1` is rejected (its extra full-weight
+update has no allocation). At `w = 1` the path — values and RNG stream — is
+bitwise the legacy one.
 
 **On-disk mode.** When `forward_model.save_on_disk` is True the constructor
 creates `step_0/` through `step_{num_steps}/` under `base_results_dir` and
@@ -591,7 +608,9 @@ consumed exactly once — there is no MDA schedule.
 The observation operator is applied to the whole segment, so a cycle carries
 `T` time-resolved observation **frames** (one per output frame), and the filter
 assimilates them **serially**: one full-weight (`alpha = 1`) analysis per
-frame, in time order — an asynchronous/serial EnKF. Nothing is aggregated
+frame, in time order — an asynchronous/serial EnKF. (Full weight means no MDA
+schedule; the optional beta tempering below scales each analysis's covariance
+instead.) Nothing is aggregated
 (unlike the smoothers, the filter takes no `aggregate_observations`).
 
 What that means concretely, per cycle:
@@ -653,6 +672,28 @@ Correlation localization applies to both blocks, while physical-distance
 localization applies to state rows and keeps parameter rows global. Localization
 strategies are reused from `localization/` unchanged; distance-based strategies
 need state rows.
+
+**Beta tempering.** `beta` (default `1.0`, config `filtering.beta`) multiplies
+the observation-error covariance of **every** analysis: `R_filter = beta R`, so
+`K = C_xy (C_yy + beta R)^(-1)` and the likelihood is `L^(1/beta)`. It must be
+a finite real `>= 1` (`filtering.validate_beta`; booleans, NaN and infinity
+are rejected — a "filter off" limit is not passed through a solver).
+`C_D_diag` stays the physical per-frame variance; `effective_C_D_diag = beta *
+C_D_diag` is computed once at construction and is the only covariance handed to
+the analysis (every frame of a sweep, and the reduction-diagnostic replay), so
+repeated `run()` calls cannot compound it. The covariance is scaled exactly
+once: the stochastic kernel draws perturbations with std `sqrt(beta) sigma`
+from it, and ETKF/LETKF whiten by it (`R_eff = E_inf**2 * beta * R` under
+localization) — beta is never also passed as the kernel's `alpha`. In joint
+mode it tempers state and parameter rows alike. `beta` is read-only after construction
+(the tempered covariance is derived from it once; build a new filter to change
+it). The innovation chi2 and the scripts' `obs_error_std` artifacts stay
+**physical**; the same holds for a
+covariance replaced with `set_observation_covariance` or passed per window as
+`run(..., observation_covariances=...)` — both are tempered once, before the
+first forecast. Beta is distinct from
+ensemble-spread inflation and from localization's `tapering_beta`; `beta = 1`
+is bitwise the untempered filter.
 
 ### Analysis schemes
 
@@ -986,7 +1027,8 @@ window:
    `aggregate_observations`, exactly as in a plain ESMDA run.
 
 ```python
-hybrid = FilterSmoothing(smoother=<ParameterESMDA>, filter=<EnsembleKalmanFilter>)
+hybrid = FilterSmoothing(smoother=<ParameterESMDA>, filter=<EnsembleKalmanFilter>,
+                         tempering=None)  # None = filter_only at filter.beta
 result = hybrid.run(state=..., params=prior, observations=[...], return_history=True)
 ```
 
@@ -994,7 +1036,8 @@ result = hybrid.run(state=..., params=prior, observations=[...], return_history=
 time coordinates on the window clock (seconds); it concatenates them on `time`
 for the smoother and hands them to the filter raw. Each collaborator keeps its
 own `C_D` from construction (smoother: window-aggregated diagonal; filter:
-one frame's variances).
+one frame's variances), and its own tempering weight (see
+[Beta tempering](#beta-tempering-splitting-each-observation-between-the-phases)).
 
 How the filter is driven depends on the ESMDA posterior:
 
@@ -1052,13 +1095,82 @@ works as in a pure filtering run (a cycle spans `n` observation intervals and
 assimilates only the last frame), with one hybrid-specific rule: the thinning
 applies to BOTH phases — the smoother assimilates the same strided frames,
 and both DA instances share the strided observation-operator wrapper — so the
-run keeps exactly one observation product.
+run keeps exactly one observation product. `filter_smoothing.beta` /
+`filter_smoothing.likelihood_allocation` configure the tempering policy above;
+the script resolves it before the truth is simulated (see
+[scripts_and_configs.md](scripts_and_configs.md)).
 
 > Historical note: an earlier, different filter-smoothing algorithm (an outer
 > ESMDA whose *forecast operator* was an inner EnKF pass, updating the whole
 > knot trajectory against stacked per-cycle observations) was removed in
 > `0e3291c`; see `docs/plans/filter_smoothing_windowed_esmda.md` for its
 > design record. This section describes its replacement.
+
+### Beta tempering: splitting each observation between the phases
+
+Every raw observation is assimilated **twice** — by the MDA loop and by the
+filter — so the hybrid carries a `TemperingPolicy`
+([filter_smoothing/tempering.py](../libs/data-assimilation/src/data_assimilation/filter_smoothing/tempering.py))
+that says how strongly each phase may use it. Resolve it once with
+`resolve_tempering_policy(beta, likelihood_allocation)`, build the filter with
+`beta=policy.beta` and the smoother with
+`likelihood_weight=policy.smoother_weight`, and pass it to
+`FilterSmoothing(smoother, filter, tempering=policy)`:
+
+| `likelihood_allocation` | smoother weight `w` | filter | nominal exponent per reused observation |
+|---|---|---|---|
+| `filter_only` (default) | `1` (full normalized schedule) | `beta R` | `1 + 1/beta` |
+| `shared_budget` (opt-in) | `(beta - 1)/beta` | `beta R` | `w + 1/beta = 1` |
+
+`filter_only` at `beta = 1` is the legacy hybrid bit for bit (and what
+`tempering=None` resolves to, at the filter's own beta). It is conservative
+damping, **not** likelihood accounting: no finite beta removes the double use.
+`shared_budget` splits the unit budget — four steps at beta 2 keep base alpha 4
+but run effective alpha 8 against a `2R` filter (half each); beta 4 gives three
+quarters to ESMDA. It requires `beta > 1` (beta 1 would give the parameter
+stage a zero budget), and `w` is computed as `(beta - 1)/beta`, not `1 -
+1/beta`, to avoid cancellation near 1. The resolver rejects NaN/inf/`< 1`/bool
+beta in both policies and checks `beta R`, `effective_alpha` and
+`effective_alpha R` for overflow (and `w` for underflow) in the analysis dtype.
+
+The hybrid **validates, never mutates**: at construction and at the top of
+every `run()` it requires `filter.beta == policy.beta` and
+`smoother.likelihood_weight == policy.smoother_weight`. Under `shared_budget`
+it also requires the same observation product in both phases — no smoother
+aggregation, `filter.assimilate_every_n_step == 1` (deliberately conservative:
+the run script's stride thins both phases identically, so this could later be
+relaxed behind the identity checks), one shared observation-operator instance —
+and, before the ESMDA phase's first forecast, that the batches carry identical
+non-time coordinates, that frame times strictly increase across the whole
+window (no boundary frame reused), that the smoother's flattened window vector
+equals the filter's frames value for value and in order, and that the
+smoother's physical `C_D` diagonal is the filter's `C_D_diag` tiled over those
+frames. Both collaborators take diagonal `C_D` only, and the run script
+rejects `shared_budget` unless `observation_error.representation_time_model` is
+`independent` (pre-flight): a temporally correlated error model would need the
+same joint likelihood in both phases. Both the static and the dynamic filter
+paths use the same filter instance, hence the same policy. Consecutive windows
+do not re-scale anything: the per-window physical covariances the run script
+installs with `set_observation_covariance` are tempered by the collaborators
+themselves — the filter re-derives `beta R` from the NEW physical covariance,
+the smoother re-checks `alpha_eff R` — so each window's covariance is scaled
+exactly once.
+
+**What the policy does not claim.** The allocation is nominal. For the scalar
+`x = theta` example with a joint filter, `shared_budget` recovers the
+once-conditioned posterior `V^-1 = P^-1 + R^-1` and `filter_only` gives
+`V^-1 = P^-1 + (1 + 1/beta) R^-1`
+(`tests/test_hybrid_tempering.py`). But with `mode="state"` the state variance
+is right while theta keeps ESMDA's partial posterior, so the joint
+state–parameter covariance is wrong; and with forecast uncertainty the
+parameter-only ESMDA cannot update (e.g. its pinned initial condition), the
+hybrid's joint covariance departs from the joint posterior for every beta tried
+— parameter-only ESMDA followed by a state filter is not a factorization of the
+joint posterior, and nonlinear reforecasting, localization and inflation
+prevent an exactness claim in any case. Treat `shared_budget` as a hybrid
+approximation to be validated (held-out coverage, proper scores, physical
+NIS), not as exact Bayesian accounting; a conditional-dual / joint-smoother
+redesign is separate work.
 
 ---
 
@@ -1089,7 +1201,9 @@ alpha: ${esmda.alpha}
 localization: ${esmda.localization}
 ```
 so the `esmda:` block in `run_esmda.yaml` is the single place to change
-`num_steps` or `alpha`.
+`num_steps` or `alpha` (which must stay equal to `num_steps` — see §5). The
+ESMDA `likelihood_weight` is deliberately absent from these files: only the
+filter-smoothing script passes it, derived from its tempering policy.
 
 ### `esmda/localization` group
 
