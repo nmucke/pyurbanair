@@ -6,7 +6,7 @@ defaults:
   - override /execution: assimilation
   - override /model@truth_model: pyudales
   - override /model@assim_model: pyudales
-  - override /params@truth_params: sgs_bias_truth
+  - override /params@truth_params: static_truth
   - override /params@prior_params: static
 
 run:
@@ -51,6 +51,35 @@ observation_error:
   representation_std: 0.0
 
 params_to_estimate: [sgs_bias_b0, sgs_bias_b1, sgs_bias_b2]
+
+truth_params:
+  parameters:
+    inflow_angle:
+      value: 0.0
+    sgs_bias_b0:
+      value: 0.10
+    sgs_bias_b1:
+      value: -0.12
+    sgs_bias_b2:
+      value: 0.08
+
+prior_params:
+  parameters:
+    sgs_bias_b0:
+      mean: 0.0
+      std: 0.15
+      min: null
+      max: null
+    sgs_bias_b1:
+      mean: 0.0
+      std: 0.15
+      min: null
+      max: null
+    sgs_bias_b2:
+      mean: 0.0
+      std: 0.15
+      min: null
+      max: null
 
 # Keep truth and assimilation model configuration identical so recovery
 # measures only the injected discrepancy coefficients.

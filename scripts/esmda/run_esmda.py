@@ -109,10 +109,7 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
-from pyurbanair.config.discrepancy import (
-    SGS_BIAS_PARAMETER_METADATA,
-    SGS_BIAS_PARAMETER_NAMES,
-)
+from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_METADATA
 from pyurbanair.config.hydra_helpers import (
     add_observation_error_metadata,
     add_prior_innovation_diagnostics,
@@ -856,9 +853,13 @@ def run(cfg: DictConfig) -> None:
     # --- Prior parameter sampler -----------------------------------------------------------
     prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
-    if discrepancy_enabled:
-        for name, metadata in SGS_BIAS_PARAMETER_METADATA.items():
-            prior_params[name].attrs.update(metadata)
+    parameter_metadata = {
+        name: metadata
+        for name, metadata in SGS_BIAS_PARAMETER_METADATA.items()
+        if discrepancy_enabled and name in prior_params
+    }
+    for name, metadata in parameter_metadata.items():
+        prior_params[name].attrs.update(metadata)
     append_constructor_override(
         out_dir,
         role="assim",
@@ -871,7 +872,7 @@ def run(cfg: DictConfig) -> None:
                     "discrepancy_prior": OmegaConf.to_container(
                         prior_params_cfg, resolve=True
                     ),
-                    "parameter_metadata": SGS_BIAS_PARAMETER_METADATA,
+                    "parameter_metadata": parameter_metadata,
                 }
                 if discrepancy_enabled
                 else {}
@@ -992,7 +993,7 @@ def run(cfg: DictConfig) -> None:
     rng_key, esmda_key = jax.random.split(rng_key)
     smoother_overrides: dict = {}
     if discrepancy_enabled:
-        smoother_overrides["global_parameter_names"] = SGS_BIAS_PARAMETER_NAMES
+        smoother_overrides["global_parameter_names"] = tuple(parameter_metadata)
     if "TimeVaryingParameter" in str(cfg.esmda.smoother._target_):
         smoother_overrides["num_time_points"] = int(prior_params.sizes["time"])
         append_constructor_override(

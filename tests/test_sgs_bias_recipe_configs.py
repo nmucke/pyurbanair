@@ -82,6 +82,27 @@ def test_small_sgs_recipes_share_the_same_physical_case_and_model() -> None:
         )
 
     assert base.truth_params._target_ == "pyurbanair.static_parameters.ParameterSampler"
+    assert base.truth_params.parameters.inflow_angle.value == 0.0
+    for name, value in zip(COEFFICIENTS, [0.10, -0.12, 0.08]):
+        assert base.truth_params.parameters[name].value == value
+        assert base.prior_params.parameters[name].std == 0.15
+        assert base.prior_params.parameters[name].min is None
+        assert base.prior_params.parameters[name].max is None
+
+
+def test_regular_parameter_configs_contain_static_sgs_coefficients() -> None:
+    for name in [
+        "static",
+        "static_truth",
+        "dynamic",
+        "dynamic_truth",
+        "dynamic_sine",
+        "dynamic_cosine",
+    ]:
+        cfg = OmegaConf.load(CONF_DIR / "params" / f"{name}.yaml")
+        block = cfg.parameters if name.startswith("static") else cfg.static_parameters
+        assert set(COEFFICIENTS).issubset(block)
+    assert not (CONF_DIR / "params/sgs_bias_truth.yaml").exists()
 
 
 def test_each_small_sgs_workflow_has_distinct_paths_and_algorithm_settings() -> None:

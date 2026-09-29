@@ -149,21 +149,65 @@ def test_invalid_prior_scales_rejected(scales: Any) -> None:
         validate_sgs_discrepancy_inference(cfg, "esmda")
 
 
-def test_existing_coefficient_distribution_and_dynamic_prior_rejected() -> None:
+def test_explicit_coefficient_prior_takes_precedence() -> None:
     prior = _prior()
-    prior.parameters.sgs_bias_b1 = {
-        "_target_": "pyurbanair.static_parameters.Constant",
-        "value": 0.0,
+    explicit = {
+        "_target_": "pyurbanair.static_parameters.Normal",
+        "mean": 0.2,
+        "std": 0.4,
+        "min": -1.0,
     }
-    with pytest.raises(ValueError, match="already defines.*sgs_bias_b1"):
-        augment_sgs_discrepancy_prior(prior, _discrepancy())
+    prior.parameters.sgs_bias_b1 = explicit
+    result = augment_sgs_discrepancy_prior(prior, _discrepancy())
+    assert result.parameters.sgs_bias_b1 == explicit
+    assert result.parameters.sgs_bias_b0.std == 0.1
+    assert result.parameters.sgs_bias_b2.std == 0.3
+    before = instantiate(prior).sample(32)
+    after = instantiate(result).sample(32)
+    for name in before:
+        np.testing.assert_array_equal(before[name], after[name])
+
+
+def test_explicit_priors_need_no_prior_std() -> None:
+    cfg = _run_cfg()
+    cfg.assim_model.forward_model.model_discrepancy.prior_std = None
+    cfg.params_to_estimate = None
+    for name in SGS_BIAS_PARAMETER_NAMES:
+        cfg.prior_params.parameters[name] = {
+            "_target_": "pyurbanair.static_parameters.Normal",
+            "mean": 0.0,
+            "std": 0.2,
+            "min": -1.0,
+        }
+    for workflow in ["esmda", "filtering", "filter_smoothing"]:
+        if workflow == "filter_smoothing":
+            cfg.filtering.mode = "state"
+        validate_sgs_discrepancy_inference(cfg, workflow)
+    assert (
+        augment_sgs_discrepancy_prior(
+            cfg.prior_params, cfg.assim_model.forward_model.model_discrepancy
+        )
+        is cfg.prior_params
+    )
+
+
+def test_unselected_coefficients_are_not_added() -> None:
+    prior = _prior()
+    selected = ["inflow_angle", "sgs_bias_b2"]
+    result = augment_sgs_discrepancy_prior(prior, _discrepancy(), selected)
+    assert "sgs_bias_b0" not in result.parameters
+    assert "sgs_bias_b1" not in result.parameters
+    assert result.parameters.sgs_bias_b2.std == 0.3
+    discrepancy = _discrepancy()
+    discrepancy.prior_std = None
+    assert augment_sgs_discrepancy_prior(prior, discrepancy, ["inflow_angle"]) is prior
+
+
+def test_dynamic_prior_still_requires_separate_integration() -> None:
+    prior = _prior()
     prior._target_ = "pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel"
     with pytest.raises(ValueError, match="static ParameterSampler"):
         augment_sgs_discrepancy_prior(prior, _discrepancy())
-    cfg = _run_cfg()
-    cfg.prior_params.parameters.sgs_bias_b1 = {"_target_": "prior", "value": 0.0}
-    with pytest.raises(ValueError, match="already defines.*sgs_bias_b1"):
-        validate_sgs_discrepancy_inference(cfg, "esmda")
 
 
 def test_supported_scope_allows_multiple_windows_and_prior_only_coefficients() -> None:
@@ -190,9 +234,9 @@ def test_supported_scope_allows_multiple_windows_and_prior_only_coefficients() -
             "data_assimilation.smoothing.esmda.StateESMDA",
             "parameter-only",
         ),
-        ("params_to_estimate", ["sgs_bias_b0", "sgs_bias_b1"], "exactly"),
-        ("params_to_estimate", [*SGS_BIAS_PARAMETER_NAMES, "sgs_constant"], "exactly"),
-        ("params_to_estimate", None, "exactly"),
+        ("params_to_estimate", ["sgs_bias_b0", "sgs_bias_b0"], "unique"),
+        ("params_to_estimate", ["unknown_parameter"], "no configured prior"),
+        ("params_to_estimate", "sgs_bias_b0", "unique"),
     ],
 )
 def test_unsupported_inference_scope_rejected(

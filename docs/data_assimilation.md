@@ -387,14 +387,17 @@ parameter ensemble and its final history entry to match the accepted forecast.
 
 The first implementation is uDALES with enabled discrepancy; see
 [pyudales §4.2](pyudales.md#42-window-checkpoints-for-repeated-forecasts) for
-checkpoint contents and limitations. Coefficient-only inference is supported by
+checkpoint contents and limitations. Joint parameter inference is supported by
 the runners as described below. Replay does not checkpoint the smoother's RNG
 for job recovery.
 
 **Persistent SGS coefficient inference.** The opt-in uDALES discrepancy runner
-path selects exactly `sgs_bias_b0`, `sgs_bias_b1`, and `sgs_bias_b2`. It augments
-the static prior from the three configured `model_discrepancy.prior_std` scales;
-forcing and native SGS settings remain constructor values. The truth sampler is
+path supports `sgs_bias_b0`, `sgs_bias_b1`, and `sgs_bias_b2` alongside other
+selected scalar parameters. Explicit priors in `prior_params.parameters` are
+used unchanged; `model_discrepancy.prior_std` supplies defaults only for selected
+coefficients missing from that mapping. `params_to_estimate=null` selects all
+configured parameters plus the three coefficients. Explicit lists may select
+any subset; unselected coefficients retain their model defaults. The truth sampler is
 independent and retains its prescribed forcing, even when it has no coefficient
 fields. Parameter accuracy metrics use only fields actually present in truth.
 The static posterior carries to the next ESMDA window without process noise.

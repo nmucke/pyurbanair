@@ -149,11 +149,10 @@ def validate_sgs_discrepancy_settings(discrepancy_cfg: Any) -> None:
 
 
 def validate_sgs_discrepancy_inference(cfg: DictConfig, workflow: str) -> None:
-    """Check the first supported inference scope before a runner has side effects.
+    """Check inference compatibility before a runner has side effects.
 
     Fixed-coefficient forward runs and truth models are outside this check.
-    The initial inverse problem estimates all three global coefficients and
-    holds forcing and the native SGS constant at their configured values.
+    Coefficients may be inferred alongside the other configured parameters.
     """
     discrepancy = OmegaConf.select(cfg, "assim_model.forward_model.model_discrepancy")
     if not _enabled(discrepancy):
@@ -173,7 +172,6 @@ def validate_sgs_discrepancy_inference(cfg: DictConfig, workflow: str) -> None:
     parameters = OmegaConf.select(cfg, "prior_params.parameters")
     if not isinstance(parameters, DictConfig):
         raise ValueError("Static prior sampler must define a parameters mapping.")
-    _check_coefficient_collisions(parameters)
     if (
         workflow in {"esmda", "filter_smoothing"}
         and OmegaConf.select(cfg, "esmda.smoother._target_") != _STATIC_SMOOTHER
@@ -220,51 +218,55 @@ def validate_sgs_discrepancy_inference(cfg: DictConfig, workflow: str) -> None:
                 "SGS discrepancy filtering requires identity parameter evolution "
                 "(filtering/evolution=none or IdentityEvolution)."
             )
-    selected = OmegaConf.select(cfg, "params_to_estimate")
-    if (
-        not isinstance(selected, (list, tuple, ListConfig))
-        or len(selected) != len(SGS_BIAS_PARAMETER_NAMES)
-        or not all(isinstance(name, str) for name in selected)
-        or set(selected) != set(SGS_BIAS_PARAMETER_NAMES)
-    ):
-        raise ValueError(
-            "SGS discrepancy inference must estimate exactly sgs_bias_b0/b1/b2; "
-            "hold physical forcing and sgs_constant fixed."
-        )
-    _prior_scales(discrepancy)
+    augment_sgs_discrepancy_prior(
+        cfg.prior_params, discrepancy, OmegaConf.select(cfg, "params_to_estimate")
+    )
 
 
 def augment_sgs_discrepancy_prior(
-    prior_params_cfg: DictConfig, discrepancy_cfg: Any
+    prior_params_cfg: DictConfig, discrepancy_cfg: Any, selected: Any = None
 ) -> DictConfig:
-    """Append three independent zero-mean Normal priors to a static sampler.
+    """Supply missing priors for selected SGS coefficients in a static sampler.
 
     Call after the normal parameter filter and only for the assimilation prior.
-    Existing entries stay in their original order, which preserves their JAX
-    random-key sequence. Missing/disabled discrepancy returns the input object.
+    Explicit distributions take precedence over ``prior_std``. Existing entries
+    stay in their original order, preserving their JAX random-key sequence.
+    ``selected=None`` includes all configured parameters and all coefficients.
+    Missing/disabled discrepancy returns the input object.
     """
     if not _enabled(discrepancy_cfg):
         return prior_params_cfg
     if prior_params_cfg.get("_target_") != _STATIC_SAMPLER:
         raise ValueError("SGS discrepancy prior requires a static ParameterSampler.")
-    scales = _prior_scales(discrepancy_cfg)
     parameters = prior_params_cfg.get("parameters")
     if not isinstance(parameters, DictConfig):
         raise ValueError("Static prior sampler must define a parameters mapping.")
-    _check_coefficient_collisions(parameters)
+    if selected is None:
+        names = set(parameters) | set(SGS_BIAS_PARAMETER_NAMES)
+    else:
+        if (
+            not isinstance(selected, (list, tuple, ListConfig))
+            or not all(isinstance(name, str) and name for name in selected)
+            or len(set(selected)) != len(selected)
+        ):
+            raise ValueError(
+                "params_to_estimate must be null or a list of unique parameter names."
+            )
+        names = set(selected)
+        missing_priors = names - set(parameters) - set(SGS_BIAS_PARAMETER_NAMES)
+        if missing_priors:
+            raise ValueError(
+                f"Selected parameters have no configured prior: {sorted(missing_priors)}"
+            )
+    missing = names.intersection(SGS_BIAS_PARAMETER_NAMES) - set(parameters)
+    if not missing:
+        return prior_params_cfg
+    scales = _prior_scales(discrepancy_cfg)
     result = copy.deepcopy(prior_params_cfg)
     original_struct = OmegaConf.is_struct(result)
     OmegaConf.set_struct(result, False)
     for name, scale in zip(SGS_BIAS_PARAMETER_NAMES, scales):
-        result.parameters[name] = {"_target_": _NORMAL, "mean": 0.0, "std": scale}
+        if name in missing:
+            result.parameters[name] = {"_target_": _NORMAL, "mean": 0.0, "std": scale}
     OmegaConf.set_struct(result, original_struct)
     return result
-
-
-def _check_coefficient_collisions(parameters: DictConfig) -> None:
-    collisions = set(SGS_BIAS_PARAMETER_NAMES).intersection(parameters)
-    if collisions:
-        raise ValueError(
-            "SGS discrepancy prior already defines coefficient distributions: "
-            + ", ".join(sorted(collisions))
-        )

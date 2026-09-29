@@ -144,10 +144,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
-from pyurbanair.config.discrepancy import (
-    SGS_BIAS_PARAMETER_METADATA,
-    SGS_BIAS_PARAMETER_NAMES,
-)
+from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_METADATA
 from pyurbanair.config.hydra_helpers import (
     add_observation_error_metadata,
     add_prior_innovation_diagnostics,
@@ -529,7 +526,7 @@ def _validate_filter_beta(cfg: DictConfig, observation_error: Any) -> float:
     dtype must not cost a CFD run first. ``filtering.filter.beta`` is what
     reaches the constructor, so it must be present and agree.
     """
-    beta = validate_beta(cfg.filtering.get("beta", 1.0))
+    beta: float = validate_beta(cfg.filtering.get("beta", 1.0))
     filter_beta = cfg.filtering.filter.get("beta", None)
     if filter_beta is None or validate_beta(filter_beta) != beta:
         raise ValueError(
@@ -801,9 +798,13 @@ def run(cfg: DictConfig) -> None:
     # prior (this ensemble is window 0's), written with the posterior at the end.
     prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
-    if discrepancy_enabled:
-        for name, metadata in SGS_BIAS_PARAMETER_METADATA.items():
-            prior_params[name].attrs.update(metadata)
+    parameter_metadata = {
+        name: metadata
+        for name, metadata in SGS_BIAS_PARAMETER_METADATA.items()
+        if discrepancy_enabled and name in prior_params
+    }
+    for name, metadata in parameter_metadata.items():
+        prior_params[name].attrs.update(metadata)
     append_constructor_override(
         out_dir,
         role="assim",
@@ -816,7 +817,7 @@ def run(cfg: DictConfig) -> None:
                     "discrepancy_prior": OmegaConf.to_container(
                         prior_params_cfg, resolve=True
                     ),
-                    "parameter_metadata": SGS_BIAS_PARAMETER_METADATA,
+                    "parameter_metadata": parameter_metadata,
                 }
                 if discrepancy_enabled
                 else {}
@@ -906,7 +907,7 @@ def run(cfg: DictConfig) -> None:
     rng_key, filter_key = jax.random.split(rng_key)
     filter_overrides: dict[str, Any] = {}
     if discrepancy_enabled:
-        filter_overrides["global_parameter_names"] = SGS_BIAS_PARAMETER_NAMES
+        filter_overrides["global_parameter_names"] = tuple(parameter_metadata)
     if cfg.filtering.mode == "state":
         # The default config selects a random-walk evolution for the parameter-
         # updating modes. A plain `filtering.mode=state` override must remain a

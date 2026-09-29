@@ -28,6 +28,17 @@ static_parameters:
   # conf/model/*.yaml, because the three solvers' SGS constants are different
   # physical quantities (uDALES/pylbm dimensionless; PALM m^2/s). Re-add it here
   # ONLY to have ESMDA estimate it, and only for a single-backend run.
+
+  # Persistent, dimensionless uDALES model-discrepancy coefficients.
+  sgs_bias_b0:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
+  sgs_bias_b1:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
+  sgs_bias_b2:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
 # See conf/params/dynamic.yaml — knots are spaced `seconds_per_knot` seconds.
 simulation_time: ${time.simulation_time}
 seconds_per_knot: ${time.seconds_per_knot}

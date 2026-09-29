@@ -1678,13 +1678,38 @@ and records its provenance automatically; no manual patch or binary path is
 needed. Defaults remain disabled. See [pyudales §4.1](pyudales.md#41-opt-in-strainrotation-discrepancy)
 for the contract and window checkpoint behavior.
 
-For inference, select exactly `params_to_estimate=[sgs_bias_b0,sgs_bias_b1,sgs_bias_b2]`
-and a static prior sampler. Set three positive `prior_std` values on the
-assimilation model's discrepancy block. The runner adds independent zero-mean
-Gaussian priors and declares those coefficients global for localization; leave
-their distributions out of `prior_params.parameters`. Truth parameters are
-independent and need not contain coefficients. Keep physical forcing and
-`sgs_constant` fixed in the model configuration.
+SGS coefficients live in the regular `conf/params/` files: Normal priors in
+`static.yaml` and `dynamic.yaml`, and Constant values in the truth/prescribed
+forcing files. Dynamic samplers store the coefficients under `static_parameters`
+so they have no time dimension; discrepancy inference runners currently use a
+static prior sampler.
+
+Select the parameters to estimate with the usual list, for example:
+
+```yaml
+params_to_estimate:
+  - inflow_angle
+  - velocity_magnitude
+  - vertical_inflow_exponent
+  - sgs_constant
+  - pressure_gradient_magnitude
+  - sgs_bias_b0
+  - sgs_bias_b1
+  - sgs_bias_b2
+```
+
+`params_to_estimate: null` selects all configured parameters plus the three SGS
+coefficients. Explicit prior distributions (including their bounds) are used
+unchanged. A parameter declared as `Constant` has no prior spread and remains
+fixed; choose a nonzero-spread prior to estimate it. Jointly estimating
+`sgs_constant` and `sgs_bias_b0` is allowed, but their similar effect on SGS
+viscosity can make them difficult to identify separately.
+
+For custom sampler configs missing a selected SGS coefficient, the optional
+three-element `model_discrepancy.prior_std` supplies zero-centred Gaussian
+fallbacks. It can remain null when the selected coefficients have explicit
+priors. Unselected coefficients are not added. Truth parameter schemas remain
+independent and need not contain coefficients.
 
 Three small same-model recipes share the same cropped Xie–Castro geometry,
 fixed forcing, and injected truth coefficients `[0.10, -0.12, 0.08]`:

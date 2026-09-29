@@ -1,4 +1,4 @@
-"""Coefficient-only inference wiring, including native multi-window smoke tests."""
+"""SGS and mixed parameter inference, including native multi-window smoke tests."""
 
 import json
 from pathlib import Path
@@ -70,6 +70,31 @@ def test_truth_parameters_remain_independent_of_inferred_coefficients(
     assert prior.sizes == {"ensemble": 8}
 
 
+@pytest.mark.parametrize("workflow", ["esmda", "filtering", "filter_smoothing"])  # type: ignore[misc]
+@pytest.mark.parametrize("selection", ["all", "explicit", "subset"])  # type: ignore[misc]
+def test_mixed_parameter_selection(
+    workflow: str, selection: str, compose_test_cfg: Any
+) -> None:
+    overrides = ["params@prior_params=static", "params@truth_params=static_truth"]
+    if workflow != "filtering":
+        overrides.append("esmda/smoother=static")
+    cfg = compose_test_cfg(overrides, config_name=f"run_{workflow}")
+    _configure(cfg, workflow)
+    names = [*cfg.prior_params.parameters, *SGS_BIAS_PARAMETER_NAMES]
+    if selection == "all":
+        cfg.params_to_estimate = None
+    elif selection == "explicit":
+        cfg.params_to_estimate = names
+    else:
+        names = ["inflow_angle", "velocity_magnitude", "sgs_bias_b1"]
+        cfg.params_to_estimate = names
+    validate_run_config(cfg, workflow)
+    _, prior_cfg = inference_parameter_configs(cfg)
+    prior = instantiate(prior_cfg).sample(12)
+    assert set(prior.data_vars) == set(names)
+    assert all(prior[name].dims == ("ensemble",) for name in names)
+
+
 def test_disk_ensemble_retains_each_members_discrepancy(tmp_path: Path) -> None:
     from scripts.esmda.run_esmda import _stream_concat_members
 
@@ -93,8 +118,9 @@ def test_disk_ensemble_retains_each_members_discrepancy(tmp_path: Path) -> None:
 @pytest.mark.integration  # type: ignore[misc]
 @pytest.mark.parametrize("workflow", ["esmda", "filtering", "filter_smoothing"])  # type: ignore[misc]
 @pytest.mark.parametrize("disk", [False, True], ids=["memory", "disk"])  # type: ignore[misc]
+@pytest.mark.parametrize("mixed", [False, True], ids=["coefficients", "all_parameters"])  # type: ignore[misc]
 def test_native_discrepancy_workflows(
-    workflow: str, disk: bool, compose_test_cfg: Any
+    workflow: str, disk: bool, mixed: bool, compose_test_cfg: Any
 ) -> None:
     """Run all inference paths across a warm boundary, using frozen test configs.
 
@@ -120,6 +146,39 @@ def test_native_discrepancy_workflows(
         ]
     cfg = compose_test_cfg(overrides, config_name=f"run_{workflow}")
     _configure(cfg, workflow)
+    estimated = list(SGS_BIAS_PARAMETER_NAMES)
+    if mixed:
+        estimated = [*cfg.prior_params.parameters, *estimated]
+        cfg.params_to_estimate = estimated
+        for name, mean, std in [
+            ("inflow_angle", 10.0, 0.1),
+            ("velocity_magnitude", 5.0, 0.01),
+            ("vertical_inflow_exponent", 0.25, 0.001),
+            ("sgs_constant", 0.24, 0.001),
+            ("pressure_gradient_magnitude", 0.0041912, 0.00001),
+        ]:
+            OmegaConf.update(
+                cfg,
+                f"prior_params.parameters.{name}",
+                {
+                    "_target_": "pyurbanair.static_parameters.Normal",
+                    "mean": mean,
+                    "std": std,
+                },
+                merge=False,
+            )
+        cfg.assim_model.forward_model.model_discrepancy.prior_std = None
+        for name in SGS_BIAS_PARAMETER_NAMES:
+            OmegaConf.update(
+                cfg,
+                f"prior_params.parameters.{name}",
+                {
+                    "_target_": "pyurbanair.static_parameters.Normal",
+                    "mean": 0.0,
+                    "std": 0.15,
+                },
+                force_add=True,
+            )
     for name, value in zip(SGS_BIAS_PARAMETER_NAMES, [0.1, -0.12, 0.08]):
         OmegaConf.update(
             cfg,
@@ -135,8 +194,8 @@ def test_native_discrepancy_workflows(
     out = Path(cfg.paths.results_dir)
     prior = xr.load_dataset(out / "prior_params.nc")
     posterior = xr.load_dataset(out / "posterior_params.nc")
-    assert set(posterior.data_vars) == set(SGS_BIAS_PARAMETER_NAMES)
-    assert all(np.isfinite(posterior[name]).all() for name in SGS_BIAS_PARAMETER_NAMES)
+    assert set(posterior.data_vars) == set(estimated)
+    assert all(np.isfinite(posterior[name]).all() for name in estimated)
     assert any(
         not np.array_equal(prior[name], posterior[name])
         for name in SGS_BIAS_PARAMETER_NAMES

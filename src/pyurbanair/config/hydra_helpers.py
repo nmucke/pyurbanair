@@ -184,7 +184,7 @@ def inference_parameter_configs(cfg: DictConfig) -> tuple[DictConfig, DictConfig
         else filter_parameter_config(cfg.truth_params, selected)
     )
     prior = augment_sgs_discrepancy_prior(
-        filter_parameter_config(cfg.prior_params, selected), discrepancy
+        filter_parameter_config(cfg.prior_params, selected), discrepancy, selected
     )
     return truth, prior
 

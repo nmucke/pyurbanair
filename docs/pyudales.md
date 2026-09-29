@@ -247,10 +247,11 @@ of the initial condition.
 `model.forward_model.model_discrepancy` enables a native Vreman viscosity
 correction. Fixed coefficients are supported in single and ensemble forward
 runs. The backend also provides the window checkpoint/replay protocol below.
-The runners also support coefficient-only static ESMDA, parameter/joint
-filtering, and static ESMDA followed by state-only filtering. Physical forcing
-and the native SGS constant remain fixed. There are no within-forecast
-coefficient schedules or coefficient process noise.
+The runners also support static ESMDA, parameter/joint filtering, and static
+ESMDA followed by state-only filtering. SGS coefficients can be estimated
+alongside the other scalar parameters, including forcing and the native SGS
+constant. There are no within-forecast coefficient schedules or coefficient
+process noise.
 
 All feature settings must be chosen explicitly; the following numbers illustrate
 the interface and are **not calibrated defaults**:
@@ -269,11 +270,13 @@ model_discrepancy:
 
 Height is measured in metres from the native solver's vertical datum (`zf`);
 `canopy_height` is a fixed representative building height. The regularization is
-in s⁻¹ and the logarithmic cap is dimensionless. For inference, `prior_std` supplies three positive, finite standard deviations
-for independent zero-centred Gaussian coefficient priors. The inference runner
-adds these distributions to the selected static prior sampler; do not also
-define them in `prior_params.parameters`. In a forward-only run this field
-does not sample anything.
+in s⁻¹ and the logarithmic cap is dimensionless. Coefficient priors live in
+`conf/params/static.yaml` alongside the other parameter priors; truth values
+live in the regular truth configs. Explicit distributions take precedence.
+`prior_std` is an optional fallback: its three positive finite scales supply
+zero-centred Gaussian priors for selected coefficients missing from a custom
+sampler. Leave it null when all selected coefficients have explicit priors.
+In a forward-only run this field does not sample anything.
 
 Supply static scalar Dataset fields `sgs_bias_b0`, `sgs_bias_b1`, `sgs_bias_b2`
 through `params` (or `Constant` entries in the parameter sampler). For example:
