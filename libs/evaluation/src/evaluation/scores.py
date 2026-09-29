@@ -1518,6 +1518,7 @@ def data_mismatch_summary(
     per_step: Sequence[np.ndarray] | None,
     n_obs: int,
     per_window: Sequence[np.ndarray] | None = None,
+    has_representation_error: bool = False,
 ) -> dict | None:
     """Reduce per-iteration ``O_N`` values to the ``data_mismatch`` block.
 
@@ -1536,13 +1537,12 @@ def data_mismatch_summary(
         The block described in ``phase2_obs_persistence.md``, or ``None`` when
         no iteration has a finite value (an empty or fully failed history).
 
-    The three flags are **advisory**, and the block carries that in its own
-    ``caveat`` field: the χ² target assumes ``C_D`` covers representativeness
-    error as well as instrument error, and here it does not
-    (``esmda.obs_error_std`` is a single instrument-scale number). A ``C_D``
-    that is too small makes an otherwise healthy run look under-fitted. Read the
-    *trend* across iterations and the across-member spread — neither of which a
-    constant mis-scaling of ``C_D`` moves — before reading the flags.
+    The three flags are **advisory**. Legacy artifacts carry the
+    ``no_representativeness_error`` caveat because their scalar error model
+    contains instrument noise only. Corrected artifacts can include a
+    representation-error contribution; that changes the caveat, but does not
+    establish held-out calibration. Read the *trend* across iterations and the
+    across-member spread before reading the flags.
     """
     steps = [
         np.asarray(v, dtype=float).ravel()
@@ -1597,5 +1597,9 @@ def data_mismatch_summary(
         "underfit_final": underfit,
         "overfit_final": overfit,
         "collapsed": collapsed,
-        "caveat": "no_representativeness_error",
+        "caveat": (
+            "representation_error_included_calibration_unverified"
+            if has_representation_error
+            else "no_representativeness_error"
+        ),
     }

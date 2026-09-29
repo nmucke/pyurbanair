@@ -1,5 +1,6 @@
 # Independent frozen test configuration.
 defaults:
+- observation/error
 - case: xie_and_castro
 - _self_
 - filtering/analysis: stochastic
@@ -33,7 +34,6 @@ filtering:
   num_assimilation_windows: 1
   assimilate_every_n_step: 1
   seed: 42
-  obs_error_std: 0.1
   mode: joint
   analysis: stochastic
   localization: null

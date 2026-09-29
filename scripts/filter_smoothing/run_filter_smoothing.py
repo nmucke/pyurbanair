@@ -127,6 +127,7 @@ Examples::
 """
 
 import dataclasses
+import json
 import pathlib
 import sys
 import time
@@ -143,8 +144,11 @@ from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
 from pyurbanair.config.hydra_helpers import (
+    add_observation_error_metadata,
+    add_prior_innovation_diagnostics,
     clean_outputs,
     create_aggregate_observations,
+    create_observation_error,
     create_observation_operator,
     filter_parameter_config,
 )
@@ -251,6 +255,9 @@ def _save_window_esmda_pred_obs(
     obs_clean: np.ndarray,
     obs_error_std: np.ndarray,
     obs_op: Any,
+    resolved_error: Any = None,
+    physical_frame_times: Sequence[float] | None = None,
+    analysis_covariance_multiplier: float | None = None,
 ) -> None:
     """Write the MDA iterations' observation-space arrays for one window.
 
@@ -292,6 +299,23 @@ def _save_window_esmda_pred_obs(
     ds["obs"].attrs["long_name"] = "assimilated observation (truth + noise)"
     ds["obs_clean"].attrs["long_name"] = "noise-free truth projection"
     ds["obs_error_std"].attrs["long_name"] = "sqrt(diag(C_D)), un-inflated"
+    if resolved_error is not None:
+        add_observation_error_metadata(ds, resolved_error, _OBS_DIM)
+        assert analysis_covariance_multiplier is not None
+        ds.attrs["analysis_covariance_multiplier"] = float(
+            analysis_covariance_multiplier
+        )
+        if physical_frame_times is not None:
+            ds.attrs["source_physical_frame_times_json"] = json.dumps(
+                list(physical_frame_times)
+            )
+        add_prior_innovation_diagnostics(
+            ds,
+            obs,
+            stacked[0],
+            resolved_error.covariance_diag,
+            _OBS_DIM,
+        )
     ds.to_netcdf(windows_dir / f"window_{window}_esmda_pred_obs.nc")
 
 
@@ -302,6 +326,11 @@ def _save_window_esmda_pred_obs(
 
 def run(cfg: DictConfig) -> None:
     validate_run_config(cfg, "filter_smoothing")
+    observation_error = create_observation_error(cfg)
+    if (
+        configured_aggregation := create_aggregate_observations(cfg)
+    ) is not None and configured_aggregation.mode != "mean":
+        raise ValueError("Corrected observation_error supports only mean aggregation")
     # --- Geometry (all validated BEFORE any solver is started) ----------------
     num_windows = int(cfg.filter_smoothing.num_assimilation_windows)
     if num_windows < 1:
@@ -640,6 +669,7 @@ def run(cfg: DictConfig) -> None:
         cfg.assim_model.solver_name,
         OmegaConf.select(cfg, "observation.operator"),
     )
+    analyzed_obs_op = assim_obs_op
     # The predicted-observation twin of the truth-side stride, for BOTH halves
     # (run_filtering.py's wrapper): the filter's cycle forecast emits `every_n`
     # frames and the smoother's window forecast every frame of the window,
@@ -654,13 +684,19 @@ def run(cfg: DictConfig) -> None:
     # check spans the truth and the forecasts (run_esmda.py's contract).
     aggregate_obs = create_aggregate_observations(cfg)
 
-    obs_error_std = float(cfg.filter_smoothing.obs_error_std)
+    if aggregate_obs is not None:
+        aggregate_obs.allow_interval_count_change = True
     # Every cycle's observation is built and perturbed HERE, over the whole
     # horizon and in global cycle order, before the window loop — the same
     # windowing-inert draw sequence run_filtering.py uses. The arrays are
     # KB-scale (sensors x states per cycle); the truth stays lazily on disk.
     observations: list[Any] = []
     observations_clean: list[Any] = []
+    frame_errors = []
+    base_obs_op: Any = getattr(truth_obs_op, "observation_operator", truth_obs_op)
+    n_raw_obs = int(base_obs_op.num_sensors) * len(base_obs_op.obs_states)
+    rng_key, noise_key = jax.random.split(rng_key)
+    raw_normal_samples = np.asarray(jax.random.normal(noise_key, (n_total, n_raw_obs)))
     cycle_times: list[float] = []  # PHYSICAL (global) frame times, for the artifacts
     truth_view = open_truth(true_state_path, n_total, x_offset, start_idx, t_offset)
     for cycle in range(num_cycles):
@@ -688,10 +724,11 @@ def run(cfg: DictConfig) -> None:
                 "case config (a bare spatial operator returns an unlabelled "
                 "flat vector)."
             )
-        rng_key, subkey = jax.random.split(rng_key)
-        cycle_obs = cycle_obs_clean + obs_error_std * np.asarray(
-            jax.random.normal(subkey, cycle_obs_clean.shape)
+        frame_errors.append(observation_error.resolve(cycle_obs_clean, truth_obs_op))
+        raw_noise = raw_normal_samples[(cycle + 1) * every_n - 1].reshape(
+            cycle_obs_clean.shape
         )
+        cycle_obs = cycle_obs_clean + (frame_errors[-1].raw_instrument_std) * raw_noise
         # Onto the nominal window clock (see the module docstring): batch l of
         # a window ends at (l + 1) * cycle_seconds, so every window's batches
         # run over (0, sim_time] and the forecast segments tile [0, sim_time]
@@ -714,7 +751,7 @@ def run(cfg: DictConfig) -> None:
     # observed states), which is what one analysis consumes; the library
     # validates it per frame.
     n_d_frame = int(observations[0].sizes["obs"])
-    C_D_diag = (obs_error_std**2) * jnp.ones(n_d_frame)
+    C_D_diag = jnp.asarray(frame_errors[0].covariance_diag)
     # The SMOOTHER's is the covariance of a whole window's AGGREGATED and
     # flattened observation vector — sized off window 0, whose length every
     # window shares. Aggregating here also primes the shared aggregator's
@@ -728,7 +765,19 @@ def run(cfg: DictConfig) -> None:
     )
     smoother_obs_flat = _flatten_obs(first_window_obs, aggregate_obs)
     n_d_window = int(np.shape(smoother_obs_flat)[0])
-    C_D = jnp.diag((obs_error_std**2) * jnp.ones(n_d_window))
+    window_errors = [
+        observation_error.resolve(
+            xarray.concat(
+                observations_clean[w * cycles_per_window : (w + 1) * cycles_per_window],
+                dim="time",
+                join="override",
+            ),
+            truth_obs_op,
+            aggregate_obs,
+        )
+        for w in range(num_windows)
+    ]
+    C_D = jnp.asarray(window_errors[0].covariance_diag)
 
     # --- The two DA instances, and the hybrid around them ----------------------
     rng_key, esmda_key = jax.random.split(rng_key)
@@ -785,6 +834,8 @@ def run(cfg: DictConfig) -> None:
     # data-mismatch diagnostic reads, so they are always produced; the hybrid
     # accumulates these lists across the window's per-segment filter calls.
     enkf.collect_pred_obs = True
+    enkf.collect_analyzed_observations = True
+    enkf.analyzed_observation_operator = analyzed_obs_op
 
     hybrid = FilterSmoothing(smoother=smoother, filter=enkf)
 
@@ -838,6 +889,8 @@ def run(cfg: DictConfig) -> None:
         else:
             _save_window_params(prior_params, prior_path, window * sim_time)
 
+        smoother.set_observation_covariance(window_errors[window].covariance_diag)
+        enkf.set_observation_covariance(frame_errors[first_cycle].covariance_diag)
         result = hybrid.run(
             state=state_input,
             params=prior_params,
@@ -893,10 +946,12 @@ def run(cfg: DictConfig) -> None:
             window,
             _flat_obs_vector(observations[window_slice]),
             _flat_obs_vector(observations_clean[window_slice]),
-            np.tile(np.sqrt(np.asarray(C_D_diag)), cycles_per_window),
+            (np.concatenate([r.std for r in frame_errors[window_slice]])),
             _stack_cycle_pred_obs(hybrid.pred_obs_history),
             _stack_cycle_pred_obs(hybrid.pred_obs_post_history),
             truth_obs_op,
+            frame_errors[window_slice],
+            (_stack_cycle_pred_obs(hybrid.analyzed_pred_obs_history)),
         )
         # The smoother half, on its aggregated axis and under its own name.
         window_obs = xarray.concat(
@@ -911,8 +966,11 @@ def run(cfg: DictConfig) -> None:
             smoother.pred_obs_history,
             _flatten_obs(window_obs, aggregate_obs),
             _flatten_obs(window_obs_clean, aggregate_obs),
-            np.sqrt(np.diag(np.asarray(C_D))),
+            (window_errors[window].std),
             truth_obs_op,
+            window_errors[window],
+            (cycle_times[window_slice]),
+            float(cfg.esmda.alpha),
         )
 
         if save_history:
@@ -1057,7 +1115,7 @@ def run(cfg: DictConfig) -> None:
                 # reads like a filtering one to the shared stages.
                 "assimilate_every_n_step": int(every_n),
                 "final_time": float(final_time),
-                "observation_error_std": obs_error_std,
+                "observation_error_model": window_errors[0].provenance,
                 "num_esmda_steps": int(cfg.esmda.num_steps),
                 # The smoother's observation vector is aggregated, the filter's
                 # is not; both lengths are recorded because the two per-window

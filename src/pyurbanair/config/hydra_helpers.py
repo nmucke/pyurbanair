@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import pathlib
 from typing import Any
 
@@ -8,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray
+from data_assimilation.observation_error import ObservationErrorSpec
 from data_assimilation.observation_operator import (
     AggregateObservations,
     ObservationOperator,
@@ -295,6 +297,167 @@ def create_aggregate_observations(cfg: Any) -> AggregateObservations | None:
 
 def create_C_D(num_obs: int, obs_error_std: float) -> jnp.ndarray:
     return jnp.diag((obs_error_std**2) * jnp.ones(num_obs))
+
+
+def create_observation_error(cfg: Any, obs_cfg: Any = None) -> ObservationErrorSpec:
+    """Load the single observation-error contract from observation/error.yaml."""
+    for name in ("esmda", "filtering", "filter_smoothing"):
+        if "obs_error_std" in (cfg.get(name) or {}):
+            raise ValueError(
+                f"{name}.obs_error_std has been removed; set "
+                "observation_error.instrument_std in conf/observation/error.yaml "
+                "or in a run override. Mean variances now propagate through aggregation."
+            )
+    error = _plain(cfg.get("observation_error"))
+    if not isinstance(error, dict):
+        raise ValueError(
+            "observation_error must be a mapping; include observation/error in defaults"
+        )
+    if obs_cfg is None:
+        obs_cfg = cfg.get("obs", {})
+    allowed = {
+        "instrument_std",
+        "representation_std",
+        "representation_time_model",
+        "aggregation",
+    }
+    unknown = set(error) - allowed
+    if unknown:
+        raise ValueError(f"Unknown observation_error keys: {sorted(unknown)}")
+    if "instrument_std" not in error:
+        raise ValueError("observation_error.instrument_std is required")
+    operator_config = OmegaConf.select(cfg, "observation.operator")
+    temporal = (
+        operator_config.get("_target_")
+        == "data_assimilation.observation_operator.TemporalObservationOperator"
+        if operator_config is not None
+        else obs_cfg.get("temporal_mode") == "full"
+    )
+    if not temporal:
+        raise ValueError(
+            "Corrected observation_error requires a temporal observation/operator "
+            "to retain physical frame labels."
+        )
+    if error.get("representation_time_model", "independent") != "independent":
+        raise ValueError("Only independent representation_time_model is supported")
+    if error.get("aggregation", "propagate_mean") not in ("propagate_mean", "none"):
+        raise ValueError("aggregation must be 'propagate_mean' or 'none'")
+    return ObservationErrorSpec(
+        instrument_std=error["instrument_std"],
+        representation_std=error.get("representation_std", 0.0),
+        representation_time_model=error.get("representation_time_model", "independent"),
+        aggregation=error.get("aggregation", "propagate_mean"),
+    )
+
+
+def add_observation_error_metadata(
+    dataset: xarray.Dataset, resolved: Any, dimension: str = "observation"
+) -> None:
+    """Record physical error components and the exact raw-frame bin weights."""
+    products = resolved if isinstance(resolved, list) else [resolved]
+    dataset["obs_instrument_variance"] = (
+        dimension,
+        np.concatenate([p.instrument_variance.reshape(-1) for p in products]),
+    )
+    dataset["obs_representation_variance"] = (
+        dimension,
+        np.concatenate([p.representation_variance.reshape(-1) for p in products]),
+    )
+    dataset["obs_time"] = (
+        dimension,
+        np.concatenate([np.repeat(p.times, p.variance.shape[1]) for p in products]),
+    )
+    dataset["obs_bin_count"] = (
+        dimension,
+        np.concatenate(
+            [
+                np.repeat([len(ids) for ids in p.frame_ids], p.variance.shape[1])
+                for p in products
+            ]
+        ),
+    )
+    dataset.attrs["observation_error_model"] = products[0].provenance
+    dataset.attrs["raw_frame_times_json"] = json.dumps(
+        [p.raw_times.tolist() for p in products]
+    )
+    dataset.attrs["aggregation_frame_ids_json"] = json.dumps(
+        [p.frame_ids for p in products]
+    )
+    dataset.attrs["aggregation_weights_json"] = json.dumps(
+        [p.weights for p in products]
+    )
+
+
+def add_prior_innovation_diagnostics(
+    dataset: xarray.Dataset,
+    observations: Any,
+    predicted_observations: Any,
+    physical_variance: Any,
+    dimension: str = "obs_index",
+    block_size: int | None = None,
+) -> None:
+    """Record signed innovations and NIS using physical R plus prior spread."""
+    pred = np.asarray(predicted_observations, dtype=float)
+    obs = np.asarray(observations, dtype=float).ravel()
+    variance = np.asarray(physical_variance, dtype=float).ravel()
+    innovation = obs - pred.mean(axis=1)
+    if block_size is None:
+        block_size = obs.size
+    if obs.size % block_size:
+        raise ValueError("Observation count is not divisible by NIS block size")
+    nis = 0.0
+    for start in range(0, obs.size, block_size):
+        stop = start + block_size
+        pred_block = pred[start:stop]
+        forecast_covariance = (
+            np.cov(pred_block, rowvar=True) if pred.shape[1] > 1 else 0.0
+        )
+        innovation_covariance = np.atleast_2d(forecast_covariance) + np.diag(
+            variance[start:stop]
+        )
+        residual = innovation[start:stop]
+        nis += float(residual @ np.linalg.solve(innovation_covariance, residual))
+    dataset["obs_innovation_prior"] = (dimension, innovation)
+    dataset["obs_squared_residual_over_R_prior"] = (
+        dimension,
+        innovation**2 / variance,
+    )
+    dataset.attrs["physical_nis_prior"] = nis
+    dataset.attrs["physical_nis_prior_per_observation"] = nis / obs.size
+    dataset.attrs["innovation_bias_prior"] = float(np.mean(innovation))
+    predictive_std = np.sqrt(
+        np.var(pred, axis=1, ddof=1 if pred.shape[1] > 1 else 0) + variance
+    )
+    standardized = np.abs(innovation) / predictive_std
+    dataset.attrs["predictive_coverage_1sigma_prior"] = float(
+        np.mean(standardized <= 1)
+    )
+    dataset.attrs["predictive_coverage_2sigma_prior"] = float(
+        np.mean(standardized <= 2)
+    )
+    if "obs_sensor" in dataset.coords and "obs_state" in dataset.coords:
+        sensors = np.asarray(dataset.coords["obs_sensor"].values)
+        states = np.asarray(dataset.coords["obs_state"].values)
+        channels = [(s, c) for c in np.unique(states) for s in np.unique(sensors)]
+        series = [innovation[(sensors == s) & (states == c)] for s, c in channels]
+        autocorr = []
+        for values in series:
+            if values.size > 2 and np.std(values[:-1]) > 0 and np.std(values[1:]) > 0:
+                autocorr.append(float(np.corrcoef(values[:-1], values[1:])[0, 1]))
+        dataset.attrs["innovation_lag1_autocorrelation_prior"] = (
+            float(np.mean(autocorr)) if autocorr else np.nan
+        )
+        paired = [
+            (a, b)
+            for i, a in enumerate(series)
+            for b in series[i + 1 :]
+            if a.size == b.size and a.size > 1 and np.std(a) > 0 and np.std(b) > 0
+        ]
+        dataset.attrs["innovation_cross_channel_correlation_prior"] = (
+            float(np.mean([np.corrcoef(a, b)[0, 1] for a, b in paired]))
+            if paired
+            else np.nan
+        )
 
 
 def make_time_coords(simulation_time: float, num_time_points: int) -> jnp.ndarray:

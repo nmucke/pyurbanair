@@ -233,7 +233,11 @@ def test_run_filtering(
         # obs_error_std is TILED to the window's full length, not the frame's.
         assert obs["obs_error_std"].shape == (n_d,)
         assert np.allclose(
-            obs["obs_error_std"].values, float(cfg.filtering.obs_error_std)
+            obs["obs_error_std"].values,
+            np.hypot(
+                cfg.observation_error.instrument_std,
+                cfg.observation_error.representation_std,
+            ),
         )
         # obs_interval reads as the cycle index within the window.
         assert set(np.unique(obs["obs_interval"].values)) == set(

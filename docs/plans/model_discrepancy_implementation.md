@@ -1,4 +1,4 @@
-# Plan 4 — Explicit dynamical model discrepancy
+# Plan 4 — Strain/rotation-dependent SGS model discrepancy
 
 Status: proposed implementation; no algorithm or solver changes made.
 Implements recommendation 4 in [the review](../data_assimilation_recommendations.md).
@@ -7,179 +7,286 @@ and [hybrid beta](hybrid_beta_tempering.md).
 
 ## Outcome and first deliverable
 
-Estimate a small, physically interpretable momentum correction separately from
-physical forcing and SGS parameters. Start with **uDALES assimilation**, using
-same-model truth with known injected discrepancy; transfer to PALM truth after
-that works. Add a PALM assimilation implementation later through the same
-physical contract. Unsupported backends must reject enabled discrepancy.
+Estimate **three dimensionless coefficients** that correct uDALES's native
+Vreman SGS eddy viscosity using local strain/rotation and height. This replaces
+the earlier additive-acceleration proposal. Begin with same-model truth with a
+known injected correction, then assess transfer to PALM-generated truth.
+Keep physical forcing and the native global SGS constant fixed initially.
 
-The first source model is:
+The first implementation uses only `b0`, `b1`, and `b2`. Coefficients are constant
+during each solver forecast, while flow-dependent features are recomputed at
+every native SGS evaluation. There is **no `b3*s` term**, strain-strength feature,
+reference timescale, OU process, or within-forecast coefficient schedule in this
+deliverable. These are later extensions, not dormant initial configuration.
+
+**Deployment requirement:** a fresh clone must support the normal documented
+Pixi setup and launch workflow without manual Fortran edits, patch commands,
+solver-fork checkouts or executable-path changes. The full local correction
+requires a native extension; pyudales must ship, prepare and select it
+automatically. Existing scalar `cs`/`c_vreman` inputs cannot express it faithfully.
+This assumes the documented platform/toolchain prerequisites.
+
+## A. Mathematical and parameter contract
+
+For resolved velocity `u`, define the native cell-centred gradient and invariants:
 
 ```text
-du/dt = F_u(x, θ) + Σ φ_j(z) b_u,j(t)
-dv/dt = F_v(x, θ) + Σ φ_j(z) b_v,j(t)
+G_ij = ∂u_i/∂x_j
+S = (G + Gᵀ)/2,       Ω = (G − Gᵀ)/2
+q = (Ω:Ω − S:S) / (Ω:Ω + S:S + ε_g²)
 ```
 
-Use one or two smooth vertical basis functions per horizontal component;
-start with no vertical forcing. Basis functions are dimensionless, evaluated
-on the native staggered grid, with recorded normalization and physical-height
-support. Coefficients have units **m s⁻²**. Evaluate the source during solver
-integration, not as a velocity adjustment after a complete forecast window.
+`A:A = Σ_ij A_ij²`. Choose a fixed, positive `ε_g` in s⁻¹, record it in run
+metadata, and test sensitivity to its scale. Then `−1 < q < 1`: strain dominates
+for negative values, rotation for positive values, and simple shear gives zero.
+Zero gradient gives zero. Use nonnegative squared norms and finite validation.
 
-Begin with persistent coefficients. Add an OU process for time-varying error in
-a later milestone, then permit persistent mean plus OU fluctuations only if
-sensor sensitivities distinguish them. Do not simultaneously fit an unrestricted
-bias field, forcing trajectory, closure constants and process hyperparameters.
+Use one dimensionless height feature:
 
-## A. Define the shared contract and deterministic uDALES source
+```text
+φ(z) = sin²[π(z − z_a)/(z_b − z_a)]   for z_a < z < z_b
+       0                            otherwise
+```
 
-Add `discrepancy.py` under `libs/data-assimilation/src/data_assimilation/` for
-basis metadata, coefficient priors and evolution. Solver-independent schedule
-validation/serialization belongs in `src/pyurbanair/` or backend utilities so
-CFD backends do not acquire a dependency on the DA library. Store coefficients
-in the parameter Dataset under explicit names such as `model_bias_u_0`.
+The band targets rooftop exchange. The urban canopy is the building-occupied
+layer, and `H` is an explicitly chosen representative building height. Configure
+`z_a/H` and `z_b/H`, validate `z_b > z_a`, and evaluate at native viscosity
+locations (`zf(k)` in uDALES). Record heights relative to the case's vertical
+datum; do not infer `H` from the evolving flow.
 
-Proposed opt-in configuration:
+The corrected SGS viscosity is
+
+```text
+g(x,t) = b0 + b1 φ(z) + b2 q(x,t)
+ν_t^b(x,t) = ν_t^0(x,t) exp[L tanh(g(x,t)/L)],   L > 0
+```
+
+`ν_t^0` denotes the native SGS viscosity evaluated from the **current member's
+current velocity field**, including native buoyancy adjustment where enabled.
+It is not an initial-time field and excludes molecular viscosity. Both
+viscosities have units m²/s; `b0`, `b1`, `b2`, `g`, and `L` are dimensionless.
+The coefficients control global level, rooftop-band level, and strain/rotation
+dependence, respectively.
+
+The exponential keeps the multiplier positive; `tanh` smoothly bounds it between
+`exp(−L)` and `exp(L)`. Near zero, the multiplier is approximately `1 + g`.
+For illustration, `L = log(3)` permits factors from 1/3 to 3; this is not a
+prescribed default. Select and freeze `L` using calibration/stability experiments.
+Monitor saturation because it reduces parameter sensitivity. Zero coefficients
+recover the native closure; zero native SGS viscosity remains zero.
+
+The continuum momentum correction implied by this change is
+
+```text
+d_i = ∂_j[2(ν_t^b − ν_t^0) S_ij]
+τ_ij^dev = −2ν_t^b S_ij
+Π = −τ^dev:S = 2ν_t^b S:S ≥ 0
+```
+
+Apply the viscosity inside the existing stress-flux calculation for **all three
+momentum components**. Multiplying an already computed diffusion tendency would
+omit spatial derivatives of the multiplier. Leave molecular viscosity, scalar
+diffusivity, pressure treatment and wall/immersed-boundary algorithms unchanged.
+Scalar transport can still change indirectly as the velocity evolves.
+The total SGS model is dissipative in the continuum; the correction relative to
+baseline may reduce dissipation. It cannot model SGS backscatter or independently
+rotate the stress. Discrete energy behavior and boundary stress fluxes still
+require tests; do not assume zero domain-integrated momentum change at walls.
+
+Proposed opt-in configuration (feature settings are required when enabled;
+prior scales are required only for estimation):
 
 ```yaml
 model_discrepancy:
   enabled: false
-  basis: vertical_smooth
-  modes_per_component: 1
-  components: [u, v]
-  coefficient_model: persistent  # later: ou
-  prior_std: null               # required calibration, m/s²
-  tau_seconds: null             # required only for OU
+  kind: sgs_strain_rotation
+  coefficient_model: persistent
+  canopy_height: null             # H, m
+  height_band_over_H: null         # [z_a/H, z_b/H]
+  gradient_regularization: null    # ε_g, s^-1
+  log_multiplier_cap: null         # L, dimensionless
+  prior_std: null                  # three dimensionless standard deviations
 ```
 
-Basis support, normalization and coefficient limits must be explicit in the
-resolved configuration. No universal amplitude or timescale is prescribed.
-Missing/disabled configuration must preserve existing results and RNG streams.
+Use explicit Dataset names `sgs_bias_b0`, `sgs_bias_b1`, `sgs_bias_b2` and a
+zero-centred Gaussian prior with positive, calibrated scales. Start with a
+diagonal prior covariance. Fix `c_vreman`: estimating it alongside `b0` creates
+strong confounding. Fixed feature settings belong to configuration, not the
+estimated parameter vector. Missing/disabled configuration preserves inputs,
+RNG streams and numerical behavior. Enabled unsupported closures/backends must
+fail clearly before CFD; first support Vreman only.
 
-Implementation steps:
+## B. Implement the native hook and Python wiring
 
-1. Add a dedicated schedule extractor/writer beside uDALES's
-   `utils/nudging_utils.py`. Existing `utils/params_utils.py` filters parameters
-   through `INFLOW_PARAM_NAMES` and detects time variation only for inflow
-   angle/speed. Handle discrepancy independently so its variables are neither
-   dropped nor mistaken for inlet controls.
-2. Add a Fortran module that reads a versioned member-local schedule once,
-   interpolates coefficient values at the integration clock and adds
-   acceleration to the horizontal momentum tendencies. The proposed call site
-   is after `nudge` and before immersed-boundary enforcement in
-   `libs/pyudales/u-dales/src/program.f90`. Verify RK-stage timing, staggering,
-   MPI ownership and boundary handling against native forcing routines.
-3. Do not multiply tendencies by the timestep; the integrator does that.
-   Preserve immersed-boundary and pressure corrections. Check the realized
-   momentum budget, since wall/flux corrections can modify the applied effect.
-4. Add finite/range validation, explicit enable flags and stale-file cleanup.
-   Disabled runs must never consume a previous member's source file. Do not
-   repurpose `pressure_gradient_magnitude` or change nudging targets to hide
-   this source: those have different physical meanings and existing conventions.
-5. Deliver the external Fortran change in a maintained solver revision/patch and
-   pin its provenance and build inputs in the Python repository. A local edit to
-   downloaded solver code is not a reproducible implementation.
+The review inspected pristine uDALES commit
+`b84916ac60cecd1da54dd09df76c15e30dcaabe9` (v2.2.0). Verify this revision in the
+extension manifest. Relevant integration points are `src/modsubgrid.f90`
+(`initsubgrid`, `closure`, `diffu/v/w`), `src/modboundary.f90` (`closurebc`),
+`src/program.f90`, and `src/tstep.f90`.
 
-## B. Make repeated forecasts reproducible
+1. Add an explicit enable flag, three coefficients and fixed feature settings
+   to the strict `NAMSUBGRID` namelist, with matching MPI broadcasts and finite/
+   range checks, including positive `H` and a cap whose exponentials are safe in
+   the solver's real precision. Ship definitions and helper routines as project-owned source
+   resources. No new arithmetic runs on the disabled path.
+2. Reuse Vreman's nine cell-centred derivatives. Its `a_ij = ∂u_j/∂x_i` is the
+   transpose of `G`, but produces identical squared strain/rotation norms.
+   Compute the multiplier in that loop and retain it in optional scratch
+   storage, or justify a second gradient pass. Allocate only when enabled;
+   recompute from each member's flow at every closure call, including RK stages.
+3. Apply the multiplier to interior turbulent `ekm` **after native buoyancy
+   correction and `ekh = ekm*prandtli`, before `ekm += numol`**. This exact order
+   preserves the scalar closure and molecular viscosity. Then retain native
+   `closurebc` halo exchange/boundary filling and the existing stress divergence.
+   Do not multiply ghost-cell boundary values independently or add a second
+   source in `program.f90`. Check wall budgets rather than asserting that wall
+   stresses themselves remain unchanged.
+4. Test the native zero-gradient limit explicitly. Vreman currently evaluates
+   `bb/aa` without a zero-denominator guard; regularizing `q` does not fix it.
+   If reproduced, add a documented, tested zero-gradient limit for the enabled
+   extension, with zero turbulent viscosity there. Keep any broader upstream
+   robustness fix separate from the default-preserving implementation.
+5. Add a dedicated pyudales discrepancy extractor/validator and namelist writer.
+   The current `INFLOW_PARAM_NAMES` whitelist would otherwise drop these
+   parameters. Carry discrepancy separately from inlet controls through merge,
+   member creation and per-call application, and extend parameter-schema/prior
+   resolution. Write all three coefficients per enabled call, including zeros,
+   after preprocessing so old values cannot leak into a subsequent member/run.
+   Disabling a previously enabled case must remove extension-only namelist keys
+   before selecting the stock executable; an untouched default case is a no-op.
+   Reject time-array coefficients initially instead of silently averaging them.
+6. Keep backend serialization independent of `data-assimilation`. DA code owns
+   inference/prior handling; pyudales owns native configuration. Support fixed
+   coefficients in a forward run before adding estimation. Record coefficients,
+   feature settings, multiplier extrema and saturation diagnostics in artifacts.
 
-Before ESMDA iteration, capture each member's window-start native restart,
-hidden SGS fields, clocks and any stochastic-source state. Restore that
-checkpoint before every replay, then inject that iteration's exposed initial
-state if it is being estimated. Commit the accepted endpoint once. uDALES's
-latest-run carry cannot automatically serve as every iteration's initial state.
+### Automatic source preparation and build
 
-A hybrid needs equivalent initial checkpoint copies for its separate smoother
-and filter model stacks. Include coefficient paths, process RNG and checkpoint
-identity in failure substitution: a cloned member must be consistent across
-state, parameters and hidden fields. Preserve `forkserver` execution.
+1. **Ship the extension.** Store the minimal checked patch, optional Fortran
+   module and manifest under `pyudales/solver_extensions/discrepancy/`, included
+   as package resources. The manifest identifies the exact upstream commit and
+   resource hashes. No user-managed fork or edited submodule is required.
+2. **Prepare an isolated source copy.** A helper such as `utils/solver_build.py`
+   materializes the pinned pristine source in a writable, gitignored cache.
+   Verify input hashes, apply the patch, and verify outputs. Leave the upstream
+   checkout and developer changes untouched; do not copy uncommitted edits into
+   the reproducible build. Unsupported revisions/conflicts fail before launch.
+3. **Verify builds.** Key reuse by upstream/extension hashes, compiler, MPI,
+   dependencies, flags and platform. Require a successful executable and matching
+   capability manifest, not merely `CMakeCache.txt`. Check configure/build exit
+   codes, including commands piped through `tee`. Lock concurrent preparation,
+   publish completed builds atomically, and recover from corrupt/partial caches.
+4. **Select automatically.** Refactor eager import-time building into normal
+   preparation before ensemble workers start. Pass the chosen executable through
+   `DirectoryPaths`, member copying and `DA_BUILD`; remove the fixed-path
+   assumption in `utils/config_utils.py`. Build scripts accept source/build
+   paths; preprocessing tool paths stay explicit. Enabled discrepancy must never
+   silently launch a stock executable. Disabled runs retain stock behavior.
+5. **Prove fresh-clone operation.** Submodule and direct-clone fallback resolve
+   the same pinned commit. No later tag checkout may override it. Test normal
+   Pixi setup/launch on supported Linux and macOS environments, empty caches,
+   read-only package resources and simultaneous stock-truth/extended-assimilation
+   variants. Record build provenance; subsequent launches reuse the matching
+   build without recompiling for each coefficient sample.
 
-First verify identical-input replays and compare continuous versus segmented
-no-analysis runs. Quantify restart transients before attributing improvements
-to discrepancy estimation.
+## C. Restart safety and deterministic replay
 
-## C. Integrate filtering, then ESMDA
+Native restart files already store `ekm`; no new prognostic field or restart
+format is needed for this algebraic correction. However, `tstep_update` runs
+before `subgrid` and uses stored `ekm`/`ekh` to choose the timestep. A changed
+coefficient or analyzed velocity can make that first estimate stale.
 
-**Filtering.** Add discrepancy rows to the joint augmented vector, preserving
-member identity. Support a parameter-update mask so physical forcing can be
-held fixed while discrepancy is estimated. Otherwise current joint mode updates
-every included parameter. Keep physical-parameter and discrepancy evolution
-separate, with a composable evolution policy.
+Before the first enabled forecast step, refresh viscosity from the final staged
+state and coefficients, with valid velocity halos/boundaries, without advancing
+time or applying momentum tendencies. Verify that calling/refactoring the
+closure for this purpose has no unwanted side effects. If a safe refresh is
+infeasible, implement and justify a conservative first-step bound; the bounded
+multiplier alone is not sufficient when the velocity field also changes.
+Test cold starts, warm starts, large allowed coefficient changes, and diffusion
+stability throughout the forecast. Existing adaptive timestep logic remains
+responsible for subsequent steps.
 
-For OU coefficients, use the exact transition:
+Before each ESMDA window, capture member-specific native restart, hidden fields
+and clocks. Restore the same window-start checkpoint before every replay, then
+inject any analyzed initial state and the current coefficients and refresh
+viscosity. Accept the endpoint once. Latest-run carry must not become the next
+ESMDA iteration's initial condition. Preserve member identity, checkpoint and
+coefficients during failure-donor substitution; preserve `forkserver` execution.
+Check identical-input replays and continuous versus segmented no-analysis runs.
 
-```text
-rho = exp(-Δt/tau)
-b_next = mean + rho (b_analysis - mean)
-         + stationary_std sqrt(1 - rho²) ξ
-```
+## D. Integrate ESMDA, filtering and the hybrid
 
-Pass actual elapsed time into `ParameterEvolution.evolve`; the current API has
-no duration. Preserve existing random-walk semantics via a compatibility
-adapter. Analyze the coefficient used during the current segment, then evolve
-for the next; save analyzed and next-forecast coefficients separately. Initial
-filter support holds coefficients constant within a segment, so test timestep
-refinement relative to `tau`. OU transition statistics are exact, but this
-piecewise-constant forcing approximation is not an exact continuous OU path.
+**ESMDA:** augment the existing parameter vector with the three coefficients,
+constant over the entire assimilation window. Replay each proposed vector
+deterministically. No coefficient process noise or trajectory knots are needed.
+Support prior-only nuisance parameters even when cross-model truth has no
+corresponding fields; do not require truth/prior parameter schemas to match.
+Give these global coefficients explicit localization metadata rather than an
+arbitrary grid-cell location. Hold forcing and the native SGS constant fixed in
+the first recovery experiment, then assess sensitivity before joint estimation.
 
-**ESMDA.** Sample a correlated discrepancy trajectory once per member/window
-and augment its coefficients or knots using `TimeVaryingParameterESMDA` and
-`ParamAugmentation`. Replay each proposed trajectory deterministically; never
-redraw hidden process noise at every MDA iteration. Persist prior paths and RNG
-provenance. Update prior/schema resolution so discrepancy can be estimated even
-when the supplied truth has no corresponding parameter; do not force these
-nuisance variables into `params_to_estimate`'s shared truth/prior contract.
+**Filtering:** add three parameter rows to parameter/joint augmentation and use
+identity evolution initially. Each forecast segment holds coefficients fixed;
+analysis may update them for the next segment. This is distinct from ESMDA's
+one vector per full window. Support a parameter-update mask to hold forcing
+fixed, and record forecast-used versus analyzed coefficients separately.
 
-Start with coarse knots and an OU-correlated prior. Inspect posterior roughness
-and forcing/discrepancy sensitivity overlap. If needed, add an explicit
-transition penalty or non-centred innovation controls; correlated prior samples
-alone do not guarantee an exact posterior OU law after nonlinear ensemble
-updates. Discrepancy modes should have explicit parameter/localization metadata,
-not inherit one arbitrary grid-cell location.
-
-## D. Connect the hybrid and transfer to another solver
-
-First support an ESMDA-estimated discrepancy schedule followed by state-only
-filtering. Extend `params_for_segment` schedule/rebasing tests to discrepancy
-variables and carry the full native checkpoint between phases correctly.
-Apply the beta plan's policy to the same error covariance; discrepancy process
-uncertainty and likelihood tempering are independent controls.
-
-Defer joint hybrid discrepancy updates until their meaning is explicit. Model
-an evolving residual around the ESMDA baseline schedule, rather than applying
-OU decay to baseline plus correction. Specify how the residual carries across
-windows; current hybrid joint corrections reset. Do not both propagate a
-residual and add it again when constructing the next prior. Retaining variation
-within a segment needs a schedule adapter beyond the current midpoint-value
-joint approximation.
-
-After uDALES passes the gates below, implement an equivalent acceleration hook
-for PALM. Transfer the basis definition and inference procedure; fitted bias
-coefficients can depend on solver, resolution and closure. Keep each backend's
-native closure as a baseline and use backend-specific SGS priors.
+**Hybrid:** first estimate the three coefficients with ESMDA and use that same
+vector through the window's state-only filtering phase. Ensure segment slicing
+preserves static coefficients and both phases replay the intended checkpoint.
+Apply the [beta plan](hybrid_beta_tempering.md) independently: discrepancy changes
+the forecast model and does not solve repeated observation use. Defer joint
+hybrid coefficient updates until their carry/reset semantics are specified.
 
 ## Tests, experiments and delivery gates
 
 | Milestone | Acceptance |
 |---|---|
-| Native source | Disabled baseline equivalence; correct acceleration sign/units; integrated momentum check |
-| Schedule/restart | Correct clocks at segment/window boundaries; deterministic replay; consistent MPI decomposition results within numerical tolerance |
-| OU evolution | Correct mean, stationary variance and lag covariance at unequal durations; distinct analysis/forecast artifacts |
-| Known-error assimilation | Recover a low-dimensional injected source without compensating through incorrect forcing |
-| Transfer | Improve held-out and assimilation-off forecasts without degrading calibration or energy/momentum budgets |
+| Mathematical kernel | Zero, pure-strain, solid-rotation and simple-shear gradients; correct units and height support; bounded finite multiplier; zero coefficients give unity |
+| Native closure | Disabled baseline equivalence; enabled zero-coefficient comparison on finite native cases; molecular and scalar closure preserved at the same input state; spatial multiplier enters stress divergence correctly |
+| Solver robustness | Zero-gradient Vreman handling; single-/multi-rank agreement within tolerance; periodic and upper-forced cases; wall/energy budgets and diffusive stability |
+| Fresh clone/build | Normal setup/launch succeeds without manual edits; pristine source remains unchanged; repeat reuse, invalidation, concurrent preparation and interrupted-build recovery |
+| Restart/replay | Coefficient/state changes refresh first-step stability inputs; deterministic window replay; continuous/segmented comparison; synchronized failure donors |
+| Known-error assimilation | Recover identifiable injected coefficients and improve withheld predictions with physical forcing fixed |
+| Transfer | Frozen tuning improves held-out and assimilation-off forecasts against another solver, without unacceptable loss of calibration or physical budget fidelity |
 
-Add focused discrepancy unit tests and backend source/restart integration tests;
-extend `test_model_error_parameters.py`, filtering, ESMDA, hybrid and runner
-tests. Include failure-donor synchronization and disk/memory parity. Update
-`docs/data_assimilation.md`, `docs/pyudales.md`, `docs/scripts_and_configs.md`
-and relevant configs; update PALM documentation when that implementation lands.
+Use fast tests for feature algebra, parameter routing, package resources, patch
+verification, cache invalidation and executable selection with subprocess
+doubles. Mark fresh-clone compilation, MPI, native stress and restart runs as
+`integration`. Extend existing model-parameter, ESMDA, filtering, hybrid and
+runner tests, including disk/memory parity. When implemented, update maintained
+`docs/pyudales.md`, `docs/data_assimilation.md`, `docs/scripts_and_configs.md` and
+relevant configs; this plan alone does not change current runtime contracts.
 
-Compare no discrepancy, existing parameter compensation, inflation-only,
-persistent discrepancy and OU discrepancy, with fixed observation-error settings.
-Use forcing-only, discrepancy-only and combined synthetic perturbations before
-cross-model truth. Assess sensitivity rank and posterior parameter correlations;
-reduce basis size if forcing and discrepancy cannot be distinguished. Tune on
-calibration runs and freeze hyperparameters for held-out solver/forcing tests.
+Compare the native closure, an estimated global SGS constant, inflation-only,
+and the three-coefficient correction at matched ensemble/forward-run budgets
+and fixed observation-error settings. Use same-model injected discrepancy first,
+then forcing-only and combined perturbations, followed by cross-model truth.
+Inspect prior-scaled, observation-whitened sensitivity singular values and
+posterior correlations; reduce fitted coefficients if observations cannot
+distinguish them. Evaluate held-out sensors, free forecasts, mean flow, Reynolds
+stresses, dissipation and ensemble coverage. Freeze priors, feature settings and
+`L` before held-out forcing/solver tests; training-observation fit alone is not
+evidence of transferable improvement.
 
-Deliver A–C first; D follows after demonstrated benefit. The established
-[IEnKF-Q formulation](https://arxiv.org/abs/1711.06110) is a useful later
-model-error-aware benchmark, not a prerequisite for this initial implementation.
+## Later extensions
+
+Only after the three-coefficient Vreman implementation passes these gates:
+
+- Add Smagorinsky support with consistent full-gradient stencils; its current
+  strain calculation alone does not supply rotation.
+- Add `b3*s`, with `s = T_ref² S:S / (1 + T_ref² S:S)` and a fixed, documented
+  `T_ref`, if it contributes identifiable predictive information. Add its prior,
+  configuration and tests at that time; none are required initially.
+- Introduce time-varying coefficients/OU priors only with explicit elapsed-time,
+  replay, schedule and hybrid residual semantics. Do not emulate continuous
+  variation through undocumented extra restarts.
+- Implement an equivalent SGS correction in another assimilation backend using
+  the same automatic delivery principle. PALM-generated truth does not require
+  modifying PALM. Transfer feature definitions and inference methodology, not an
+  assumption that fitted coefficients are universal across closures or grids.
+
+Delivery order: automatic build plus fixed-coefficient Vreman forward runs;
+restart/physics verification; three-parameter ESMDA and filtering; state-only
+hybrid integration; controlled transfer experiments. Scientific benefit remains
+to be demonstrated even though the source review found a feasible solver hook.

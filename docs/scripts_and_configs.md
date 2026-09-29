@@ -80,9 +80,59 @@ directly without executing a run. See [`tests/README.md`](../tests/README.md).
 Do not repeat numeric defaults in this reference: inspect the selected files or
 resolved preview. Root configs retain explicit historical output paths for
 compatibility; `run.results_dir` remains the per-run override. The hybrid owns its
-shared window count, seed and observation error, projected into each algorithm.
+shared window count and seed, projected into each algorithm. Observation
+uncertainty is shared through `observation/error.yaml`.
 Filtering strides thin analyses without changing the solver output cadence;
 ESMDA aggregation remains distinct from that stride.
+#### `observation_error:` (all assimilation entry points)
+
+All three assimilation entry points include
+[`conf/observation/error.yaml`](../conf/observation/error.yaml) in their defaults.
+It mounts the following settings at the root `observation_error` key:
+
+```yaml
+# conf/observation/error.yaml
+# @package observation_error
+instrument_std: 0.25
+representation_std: 0.0
+representation_time_model: independent
+aggregation: propagate_mean
+```
+
+Edit that file for shared defaults. For one run, use
+`observation_error.instrument_std=0.3 observation_error.representation_std=0.1`
+on the CLI or set the root block in an experiment. There are no competing
+error defaults under `esmda/`, `filtering/`, or `filter_smoothing`.
+
+`instrument_std` and `representation_std` can each be scalars or mappings with
+a required `default` and optional `components`, zero-based `sensors`, and
+`height_bands` entries (`{min_z, max_z, std}`, with a half-open height range).
+Both values use the observed variable's units. Instrument noise generates the
+synthetic observations; representation uncertainty contributes only to the
+assimilation likelihood. The supported temporal model treats representation
+errors as independent between raw frames, and `propagate_mean` carries each
+diagonal variance through actual mean-bin weights. Set `aggregation: none` in
+`observation/error.yaml` (or `observation_error.aggregation=none` on the CLI) to
+retain the configured instrument and representation std for each averaged
+observation, independent of bin size. Raw noise generation and observation
+averaging are unchanged; this specifies uncertainty directly for the averaged
+product. YAML `null` is rejected. With unaggregated frames the two policies agree.
+Only mean aggregation is
+supported in this mode. Persistent and correlated errors, and median/min/max
+aggregation, are rejected pending a suitable likelihood model.
+
+The block describes physical covariance. ESMDA `alpha` tempers it independently
+and never rescales measurement draws or physical covariance diagnostics. Future
+hybrid `beta` scheduling must follow the same contract. The old algorithm-level
+`obs_error_std` keys and `observation_error: null` are rejected. Migrate an old
+scalar to `observation_error.instrument_std`; raw noise retains that scale, but
+mean likelihood variance now decreases with the number of independent frames.
+The saved `obs_error_std` artifact field remains the physical marginal standard
+deviation, so historical results stay readable. A temporal `observation/operator`
+component (`temporal_points` or `temporal_grid`) is required.
+See [data_assimilation.md](data_assimilation.md#physical-observation-likelihood)
+for the covariance contract and its validation limits.
+
 
 ### 1.2 Config group: `case/`
 
@@ -574,7 +624,12 @@ Stage 1 of the three-script pipeline (see `run_esmda_pipeline.sh`). Saves:
   axis is named `obs_index`, not `obs`, because a variable whose name equals its
   dimension is silently promoted to an index coordinate on the netCDF
   round-trip — which would turn the `obs` data variable into a coordinate on
-  read. These feed `run_summary.yaml`'s `esmda_diagnostics` block and figure D3;
+  read. With corrected `observation_error`, the observation file also stores
+  separate instrument and representation variances, observation times, bin
+  counts, raw times, frame membership and aggregation weights. It records the
+  signed prior innovation and elementwise physical-covariance NIS; tempering
+  does not enter that denominator. These feed `run_summary.yaml`'s
+  `esmda_diagnostics` block and figure D3;
   set the flag false to reproduce the pre-phase-2 artifact set exactly. The
   post-processing decides on the **run's own flag**, read back from
   `run_info.yaml`'s `configuration`, not on whether the files are there: a
@@ -1084,12 +1139,11 @@ Stage 2 of the pipeline. Reads the artifacts saved by `run_esmda.py` and writes
   `collapsed` fires only when a vanishing across-member IQR is paired with an
   off-target median (identical members *on* target are converged, not collapsed)
   and is `null` when fewer than 8 values back it, since the smoke shape's two
-  members have no meaningful IQR. **The flags are advisory**, and the block carries
-  `caveat: no_representativeness_error` saying why: the χ² target assumes `C_D`
-  covers representativeness error and here it is a single instrument-scale
-  `esmda.obs_error_std`, so a too-small `C_D` makes a healthy run look
-  under-fitted. Read the trend across iterations and the member spread — neither
-  moved by a constant mis-scaling of `C_D` — before the flags. Absent on any run
+  members have no meaningful IQR. **The flags are advisory**: legacy artifacts
+  carry `caveat: no_representativeness_error`; corrected artifacts report
+  whether a representation variance was included, while still marking its
+  calibration as unverified. Read the trend across iterations and member spread
+  alongside the flags. Absent on any run
   dir written before WP2.1 or with `esmda.save_obs_diagnostics=false` — that
   second case is decided by the flag recorded in the run's own `run_info.yaml`
   and not by whether the files exist, so a flag-off rerun into a results dir an
@@ -1145,7 +1199,9 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
   annotated from the file's own `t_start`/`t_end`.
 - `sensor_fans.png` — the sensor `|U|` series as nested posterior quantile fans,
   one column per sensor set, with the truth, the window boundaries and a
-  ± `esmda.obs_error_std` envelope around the truth. Its x-axis is physical time
+  legacy scalar observation-error envelope around the truth. Corrected
+  `observation_error` runs omit this envelope because this plot does not yet
+  show component/sensor-specific likelihood widths. Its x-axis is physical time
   on *every* run, so the window boundaries are marked whenever there is more than
   one window — unlike the parameter plots, whose x-axis is a window index on a
   static run. **Pre-WP2.1 caveat, stated in the figure:** the realized noisy

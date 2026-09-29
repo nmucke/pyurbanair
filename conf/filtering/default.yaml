@@ -30,7 +30,6 @@ num_assimilation_windows: 3
 # window; the run refuses to start otherwise.
 assimilate_every_n_step: 1
 seed: 42
-obs_error_std: 0.1
 # state | parameter | joint. The parameter-updating modes (parameter and
 # joint) REQUIRE spread maintenance (filtering/evolution=random_walk or a
 # filtering/inflation option) — the filter refuses silently-collapsing

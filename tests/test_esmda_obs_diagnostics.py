@@ -188,6 +188,16 @@ def test_data_mismatch_summary_flags_underfit_and_overfit() -> None:
     assert healthy["overfit_final"] is False
 
 
+def test_data_mismatch_summary_caveat_tracks_representation_variance() -> None:
+    values = [np.full(12, 0.5)]
+    legacy = data_mismatch_summary(values, n_obs=12)
+    corrected = data_mismatch_summary(values, n_obs=12, has_representation_error=True)
+
+    assert legacy is not None and corrected is not None
+    assert legacy["caveat"] == "no_representativeness_error"
+    assert corrected["caveat"] == "representation_error_included_calibration_unverified"
+
+
 def test_data_mismatch_summary_flags_collapse_only_when_off_target() -> None:
     """A vanishing across-member IQR is the pathology only away from the target."""
     n_obs = 200
@@ -925,7 +935,11 @@ def test_run_esmda_observation_diagnostics_are_opt_in(
         # The noise is what separates the two: obs = obs_clean + sqrt(C_D)·z.
         assert not np.allclose(obs_ds["obs"].values, obs_ds["obs_clean"].values)
         assert obs_ds["obs_error_std"].values == pytest.approx(
-            float(cfg.esmda.obs_error_std)
+            np.hypot(
+                cfg.observation_error.instrument_std,
+                cfg.observation_error.representation_std,
+            )
+            / np.sqrt(obs_ds["obs_bin_count"].values)
         )
 
     assert (windows_dir / "window_0_params_steps.nc").exists()
