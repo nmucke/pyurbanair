@@ -109,8 +109,11 @@ from tqdm import tqdm
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
 from pyurbanair.config.hydra_helpers import (
+    add_observation_error_metadata,
+    add_prior_innovation_diagnostics,
     clean_outputs,
     create_aggregate_observations,
+    create_observation_error,
     create_observation_operator,
     filter_parameter_config,
 )
@@ -495,6 +498,9 @@ def _save_obs_diagnostics(
     pred_obs_history,
     result_params,
     obs_op,
+    resolved_error=None,
+    analysis_covariance_multiplier=None,
+    pred_obs_analyzed=None,
 ):
     """Write one window's observation-space arrays (WP2.1).
 
@@ -528,6 +534,28 @@ def _save_obs_diagnostics(
     obs_ds["obs"].attrs["long_name"] = "assimilated observation (truth + noise)"
     obs_ds["obs_clean"].attrs["long_name"] = "noise-free truth projection"
     obs_ds["obs_error_std"].attrs["long_name"] = "sqrt(diag(C_D)), un-inflated"
+    if resolved_error is not None:
+        add_observation_error_metadata(obs_ds, resolved_error, _OBS_DIM)
+        obs_ds.attrs["analysis_covariance_multiplier"] = float(
+            analysis_covariance_multiplier
+        )
+        if pred_obs_history:
+            add_prior_innovation_diagnostics(
+                obs_ds,
+                obs,
+                pred_obs_history[0],
+                resolved_error.covariance_diag,
+                _OBS_DIM,
+            )
+        if pred_obs_analyzed is not None:
+            analyzed_innovation = np.asarray(obs, dtype=float).ravel() - np.asarray(
+                pred_obs_analyzed, dtype=float
+            ).mean(axis=1)
+            obs_ds["obs_innovation_analyzed"] = (_OBS_DIM, analyzed_innovation)
+            obs_ds["obs_squared_residual_over_R_analyzed"] = (
+                _OBS_DIM,
+                analyzed_innovation**2 / resolved_error.covariance_diag,
+            )
     obs_ds.to_netcdf(windows_dir / f"window_{window}_obs.nc")
 
     if pred_obs_history:
@@ -540,6 +568,14 @@ def _save_obs_diagnostics(
                 **coords,
             },
         )
+        if pred_obs_analyzed is not None:
+            pred_ds["pred_obs_analyzed"] = (
+                (_OBS_DIM, "ensemble"),
+                np.asarray(pred_obs_analyzed, dtype=float),
+            )
+            pred_ds["pred_obs_analyzed"].attrs[
+                "long_name"
+            ] = "H(actual analyzed state) after final-time smoothing"
         pred_ds.attrs["ordering"] = _OBS_ORDERING
         pred_ds.attrs["esmda_step"] = (
             "iteration index; 0 = prior forecast, -1 = posterior forecast. With "
@@ -608,6 +644,11 @@ def _save_assembled_outputs(out_dir, windows_dir, num_windows, sim_time, is_dyna
 
 def run(cfg: DictConfig) -> None:
     validate_run_config(cfg, "esmda")
+    observation_error = create_observation_error(cfg)
+    if (
+        configured_aggregation := create_aggregate_observations(cfg)
+    ) is not None and configured_aggregation.mode != "mean":
+        raise ValueError("Corrected observation_error supports only mean aggregation")
     num_windows = int(cfg.esmda.num_assimilation_windows)
     sim_time = float(cfg.time.simulation_time)
     ensemble_size = int(cfg.ensemble.ensemble_size)
@@ -893,20 +934,24 @@ def run(cfg: DictConfig) -> None:
     # instance, shared between the C_D sizing below and the smoother, so its
     # interval-count consistency check spans the truth and the forecasts.
     aggregate_obs = create_aggregate_observations(cfg)
+    if aggregate_obs is not None:
+        aggregate_obs.allow_interval_count_change = True
+    resolved_errors = []
+    clean_observations = []
+    truth_view = open_truth(true_state_path, n_total, x_offset, start_idx, t_offset)
+    for window in range(num_windows):
+        truth_window = truth_view.isel(
+            time=slice(window * n_per_window, (window + 1) * n_per_window)
+        )
+        clean = truth_obs_op(truth_window)
+        resolved_errors.append(
+            observation_error.resolve(clean, truth_obs_op, aggregate_obs)
+        )
+        clean_observations.append(clean)
+    truth_view.close()
 
-    # --- Observation error covariance ---------
-    # Truth frames sit on a uniform grid over [0, sim_time*num_windows); each
-    # window owns exactly `n_per_window` of them. Size C_D from the first such
-    # block -- aggregated and flattened exactly as the assimilation will see it
-    # -- so it matches every window's observation vector (and the per-window
-    # count the assimilation model emits). Opened lazily and sliced, so only the
-    # first window's frames are read.
-    truth_first_window = open_truth(
-        true_state_path, n_total, x_offset, start_idx, t_offset
-    ).isel(time=slice(0, n_per_window))
-    obs = _flatten_obs(truth_obs_op(truth_first_window), aggregate_obs)
-    truth_first_window.close()
-    C_D = jnp.diag((cfg.esmda.obs_error_std**2) * jnp.ones(obs.shape[0]))
+    # Initialize from the first resolved window; replace covariance per window.
+    C_D = jnp.asarray(resolved_errors[0].covariance_diag)
 
     # --- Smoother -----------------------------------------------------------
     # The time-varying smoothers flatten each knot into its own augmented-state
@@ -950,6 +995,8 @@ def run(cfg: DictConfig) -> None:
     # ``.get`` so a config predating the key still composes.
     save_obs_diagnostics = bool(cfg.esmda.get("save_obs_diagnostics", False))
     esmda.collect_obs_diagnostics = save_obs_diagnostics
+    if save_obs_diagnostics:
+        esmda.collect_analyzed_observations = True
 
     # --- Run ESMDA -----------------------------------------------------------
     # Time the assimilation. ``window_seconds`` is each window's full wall-clock
@@ -992,20 +1039,15 @@ def run(cfg: DictConfig) -> None:
         # frame at the next window's start (t=(window+1)*sim_time) must NOT be
         # double-counted, or interior windows would be one frame longer than the
         # assimilation model emits and the observation vector would misalign.
-        window_true_state = open_truth(
-            true_state_path, n_total, x_offset, start_idx, t_offset
-        ).isel(time=slice(window * n_per_window, (window + 1) * n_per_window))
-        window_obs_clean = truth_obs_op(window_true_state)
-        window_true_state.close()
-        # Perturb every RAW frame with obs_error_std and hand the smoother the
-        # time-resolved observations (coords intact -- the aggregator bins on
-        # the time coordinate). Under interval-mean aggregation the aggregated
-        # noise is then milder than C_D says, which is deliberate (the
-        # assimilation stays mildly conservative); with no aggregation the two
-        # agree exactly.
+        window_obs_clean = clean_observations[window]
+        C_D = jnp.asarray(resolved_errors[window].covariance_diag)
+        esmda.set_observation_covariance(C_D)
+        # Sample instrument noise on raw frames. The likelihood independently
+        # propagates both instrument and representation variance through the bins.
         rng_key, subkey = jax.random.split(rng_key)
-        window_obs = window_obs_clean + float(cfg.esmda.obs_error_std) * np.asarray(
-            jax.random.normal(subkey, window_obs_clean.shape)
+        raw_noise = np.asarray(jax.random.normal(subkey, window_obs_clean.shape))
+        window_obs = (
+            window_obs_clean + resolved_errors[window].raw_instrument_std * raw_noise
         )
 
         # Sample posterior. ``return_state_history=True`` makes the smoother also
@@ -1052,10 +1094,13 @@ def run(cfg: DictConfig) -> None:
                 window,
                 _flatten_obs(window_obs, aggregate_obs),
                 _flatten_obs(window_obs_clean, aggregate_obs),
-                np.sqrt(np.diag(np.asarray(C_D))),
+                (resolved_errors[window].std),
                 esmda.pred_obs_history,
                 result_params,
                 truth_obs_op,
+                resolved_errors[window],
+                float(cfg.esmda.alpha),
+                esmda.analyzed_pred_obs,
             )
 
         posterior_params = result_params.isel(esmda_step=-1)
@@ -1157,7 +1202,7 @@ def run(cfg: DictConfig) -> None:
             "ensemble_size": int(ensemble_size),
             "simulation_time_per_window": float(sim_time),
             "final_time": float(final_time),
-            "observation_error_std": float(cfg.esmda.obs_error_std),
+            "observation_error_model": resolved_errors[0].provenance,
             "num_esmda_steps": int(cfg.esmda.num_steps),
             "save_obs_diagnostics": bool(save_obs_diagnostics),
             "seed": int(cfg.esmda.seed),

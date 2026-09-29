@@ -309,8 +309,14 @@ def test_run_filtering(
         assert n_d % cycles_per_window == 0
         # obs_error_std is TILED to the window's full length, not the frame's.
         assert obs["obs_error_std"].shape == (n_d,)
+        # ...and stays physical: the tempering is the recorded multiplier.
+        assert obs.attrs["analysis_covariance_multiplier"] == float(cfg.filtering.beta)
         assert np.allclose(
-            obs["obs_error_std"].values, float(cfg.filtering.obs_error_std)
+            obs["obs_error_std"].values,
+            np.hypot(
+                cfg.observation_error.instrument_std,
+                cfg.observation_error.representation_std,
+            ),
         )
         # obs_interval reads as the cycle index within the window.
         assert set(np.unique(obs["obs_interval"].values)) == set(
@@ -355,10 +361,12 @@ def test_run_filtering(
     assert configuration["num_cycles"] == num_cycles
     assert configuration["save_obs_diagnostics"] is True
     assert configuration["save_prior_state"] is False
-    # The tempering that ran, beside the PHYSICAL error it tempers (the window
-    # obs_error_std arrays above stay physical whatever beta is).
+    # The tempering that ran, beside the PHYSICAL error model it tempers (the
+    # window obs_error_std arrays above stay physical whatever beta is).
     assert configuration["beta"] == float(cfg.filtering.beta)
-    assert configuration["observation_error_std"] == float(cfg.filtering.obs_error_std)
+    assert configuration["observation_error_model"] == (
+        "observation_error.v1:diagonal:independent"
+    )
     diagnostics = read_yaml(out_dir / "cycle_diagnostics.yaml")
     # One row per cycle over the WHOLE horizon, numbered globally: the window
     # boundary is invisible to the filtering stages.

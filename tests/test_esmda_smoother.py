@@ -8,7 +8,7 @@ shared-budget ``likelihood_weight`` (docs/plans/hybrid_beta_tempering.md).
 
 import pathlib
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -352,7 +352,7 @@ def _make_time_varying_smoother(
     return smoother
 
 
-@pytest.mark.parametrize("pin", [False, True])  # type: ignore[misc]
+@pytest.mark.parametrize("pin", [False, True])  # type: ignore[misc, unused-ignore]
 def test_time_varying_flatten_unflatten_round_trip(pin: bool) -> None:
     num_time = 3
     params = _time_varying_params(num_time)
@@ -371,7 +371,7 @@ def test_time_varying_flatten_unflatten_round_trip(pin: bool) -> None:
     assert ("inflow_angle_0" in flat.data_vars) == (not pin)
 
 
-@pytest.mark.parametrize("pin", [False, True])  # type: ignore[misc]
+@pytest.mark.parametrize("pin", [False, True])  # type: ignore[misc, unused-ignore]
 def test_time_varying_group_ids_group_knots_not_unrelated_params(pin: bool) -> None:
     num_time = 3
     params = _time_varying_params(num_time)
@@ -385,7 +385,7 @@ def test_time_varying_group_ids_group_knots_not_unrelated_params(pin: bool) -> N
     names = list(flat.data_vars)
     by_group: dict[int, list[str]] = {}
     for gid, name in zip(group_ids, names):
-        by_group.setdefault(int(gid), []).append(name)
+        by_group.setdefault(int(gid), []).append(str(name))
 
     # All knots of one parameter share exactly one block; unrelated parameters
     # (including the static ``sensor_2``) never share a block.
@@ -952,3 +952,127 @@ def test_weighted_mda_conditions_on_the_tempered_likelihood(weight: float) -> No
         # Tempering visibly widens the posterior relative to the full update.
         assert np.all(np.diag(cov) > 1.3 * np.diag(full_cov))
         assert not np.allclose(mean, full_mean, atol=0.05)
+
+
+def test_window_covariance_replacement_updates_perturbations_and_gain() -> None:
+    def make(covariance: float) -> ParameterESMDA:
+        return ParameterESMDA(
+            _dummy_obs_op(),
+            cast(Any, _forward_model()),
+            C_D=jnp.diag(jnp.array([covariance])),
+            num_steps=1,
+            rng_key=jax.random.PRNGKey(14),
+        )
+
+    replaced = make(1.0)
+    replaced.set_observation_covariance(jnp.array([0.1]))
+    direct = make(0.1)
+    prior = jnp.array([[-1.0, 0.0, 1.0, 2.0]])
+    observed = jnp.array([2.0])
+    updated = replaced._compute_kalman_update(prior, prior, observed, 4)
+    expected = direct._compute_kalman_update(prior, prior, observed, 4)
+    legacy = make(1.0)._compute_kalman_update(prior, prior, observed, 4)
+    np.testing.assert_array_equal(updated, expected)
+    assert not np.allclose(updated, legacy)
+    before = replaced.C_D
+    with pytest.raises(ValueError, match="finite"):
+        replaced.set_observation_covariance(jnp.array([np.inf]))
+    np.testing.assert_array_equal(replaced.C_D, before)
+
+
+def test_window_covariance_shape_fails_before_forecast_and_is_restored() -> None:
+    smoother = ParameterESMDA(
+        _dummy_obs_op(), cast(Any, _forward_model()), C_D=jnp.eye(1)
+    )
+    with pytest.raises(ValueError, match="sizes differ"):
+        smoother(observations=np.ones(1), observation_covariance=np.ones(2))
+    np.testing.assert_array_equal(smoother.C_D, np.eye(1))
+
+
+def test_analyzed_observations_project_post_smoothing_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forecast = _obs_state(n_e=3)
+    model = SimpleNamespace(
+        save_on_disk=False,
+        run_ensemble=lambda **kwargs: forecast,
+        apply_failure_substitutions_to_params=lambda params: params,
+        apply_failure_substitutions_to_state=lambda state: state,
+    )
+    smoother = ParameterESMDA(
+        _temporal_obs_op(), cast(Any, model), C_D=jnp.ones(8), num_steps=1
+    )
+    monkeypatch.setattr(
+        smoother, "_one_step", lambda **kwargs: (None, kwargs["params"])
+    )
+    monkeypatch.setattr(
+        smoother, "_final_time_smoothing_step", lambda state, obs: state + 2
+    )
+    smoother.collect_obs_diagnostics = True
+    smoother.collect_analyzed_observations = True
+    params = xarray.Dataset({"a": ("ensemble", np.zeros(3))})
+    result = smoother(params=params, observations=np.zeros(8))
+    assert smoother.analyzed_pred_obs is not None
+    np.testing.assert_allclose(
+        smoother.analyzed_pred_obs,
+        np.asarray(smoother._observation_step(state=result[1])).T,
+    )
+    np.testing.assert_allclose(
+        smoother.analyzed_pred_obs, smoother.pred_obs_history[-1] + 2
+    )
+
+
+# ---------------------------------------------------------------------------
+# Likelihood weight x per-window physical observation covariances
+# ---------------------------------------------------------------------------
+
+
+def test_replaced_window_covariance_keeps_the_likelihood_weight() -> None:
+    """A 1-D replacement covariance is PHYSICAL: the update still uses alpha/w."""
+    augmented, pred_obs, obs = _linear_problem()
+    variances = jnp.array([0.3, 0.7])
+    key = jax.random.PRNGKey(7)
+    _, subkey = jax.random.split(key)
+    smoother = _weighted_smoother(
+        C_D=jnp.diag(jnp.ones(2)), num_steps=4, rng_key=key, likelihood_weight=0.5
+    )
+    smoother.set_observation_covariance(variances)
+    np.testing.assert_array_equal(np.asarray(smoother.C_D), np.asarray(variances))
+    result = np.asarray(smoother._compute_kalman_update(augmented, pred_obs, obs, 50))
+    expected = stochastic_enkf_update(
+        augmented=augmented,
+        pred_obs=pred_obs,
+        obs=obs,
+        C_D_diag=variances,
+        rng_key=subkey,
+        alpha=8.0,
+    )
+    np.testing.assert_array_equal(result, np.asarray(expected))
+    assert smoother.effective_alpha == 8.0
+
+
+def test_window_covariance_call_keeps_the_weight_and_restores() -> None:
+    """``__call__(observation_covariance=...)`` swaps only the PHYSICAL C_D."""
+    smoother = _weighted_smoother(C_D=jnp.eye(1), num_steps=4, likelihood_weight=0.25)
+    with pytest.raises(ValueError, match="sizes differ"):
+        smoother(observations=np.ones(1), observation_covariance=np.ones(2))
+    np.testing.assert_array_equal(np.asarray(smoother.C_D), np.eye(1))
+    assert smoother.likelihood_weight == 0.25
+    assert smoother.effective_alpha == 16.0
+
+
+def test_covariance_replacement_rechecks_the_effective_covariance() -> None:
+    """``alpha_eff * C_D`` overflowing on a NEW covariance fails; C_D unchanged."""
+    dtype = jnp.asarray(1.0).dtype
+    variance = float(np.sqrt(np.finfo(dtype).max))
+    smoother = _weighted_smoother(
+        num_steps=4, likelihood_weight=4.0 / (10.0 * variance)
+    )
+    before = smoother.C_D
+    with pytest.raises(ValueError, match="effective"):
+        smoother.set_observation_covariance(jnp.array([variance], dtype=dtype))
+    assert smoother.C_D is before
+    # At unit weight the same replacement is fine.
+    _weighted_smoother(num_steps=4).set_observation_covariance(
+        jnp.array([variance], dtype=dtype)
+    )

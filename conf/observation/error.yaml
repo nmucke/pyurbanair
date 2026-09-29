@@ -1,0 +1,6 @@
+# @package observation_error
+# Physical observation uncertainty, shared by all assimilation runners.
+instrument_std: 0.25
+representation_std: 0.0
+representation_time_model: independent
+aggregation: propagate_mean

@@ -100,6 +100,18 @@ logger = logging.getLogger(__name__)
 _TIME_RTOL = 1e-6
 
 
+def _variance_vector(C_D: Any) -> jnp.ndarray:
+    """The physical variances of a smoother ``C_D``, as a 1-D vector.
+
+    The smoother holds either the constructor's diagonal ``(N_d, N_d)`` matrix
+    or, once a window's covariance was set with
+    ``set_observation_covariance``, the 1-D variance vector itself — and
+    ``jnp.diag`` of the latter would BUILD a matrix rather than read one.
+    """
+    C_D = jnp.asarray(C_D)
+    return C_D if C_D.ndim == 1 else jnp.diag(C_D)
+
+
 def _time_tol(scale: float) -> float:
     """Absolute slack for a time comparison at the given scale."""
     return _TIME_RTOL * max(abs(float(scale)), 1.0)
@@ -156,7 +168,7 @@ def _interpolate_knots(
     span = times[upper] - times[lower]
     weight = np.clip((targets - times[lower]) / span, 0.0, 1.0)
     weight = weight.reshape((targets.size,) + (1,) * (values.ndim - 1))
-    return values[lower] * (1.0 - weight) + values[upper] * weight
+    return np.asarray(values[lower] * (1.0 - weight) + values[upper] * weight)
 
 
 def params_for_segment(
@@ -463,6 +475,7 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
 
         # Accumulated across the filter phase's calls when the filter records
         # them; rebound per ``run`` (see the class docstring).
+        self.analyzed_pred_obs_history: list[np.ndarray] = []
         self.pred_obs_history: list[np.ndarray] = []
         self.pred_obs_post_history: list[np.ndarray] = []
         self.pred_obs_frames_history: list[Optional[xarray.DataArray]] = []
@@ -504,14 +517,14 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
         # The collaborators validated their own effective covariances at
         # construction; re-running the policy's check in the filter's actual
         # dtype keeps the two contracts from drifting apart.
-        # Only the extremes matter, so the smoother's dense (N_d, N_d) C_D is
-        # reduced on device rather than copied to the host.
+        # Only the extremes matter, so the smoother's C_D (dense (N_d, N_d) or
+        # a 1-D window vector) is reduced on device rather than copied.
         C_D_diag = np.asarray(self.filter.C_D_diag)
         policy.check_numerics(
             base_alpha=float(self.smoother.alpha),
             variances=[
                 float(np.max(C_D_diag)),
-                float(jnp.max(jnp.diag(self.smoother.C_D))),
+                float(jnp.max(_variance_vector(self.smoother.C_D))),
             ],
             dtype=C_D_diag.dtype,
         )
@@ -639,7 +652,7 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
                 f"({smoother_vector.shape} vs {filter_vector.shape})."
             )
 
-        smoother_var = np.asarray(jnp.diag(self.smoother.C_D))
+        smoother_var = np.asarray(_variance_vector(self.smoother.C_D))
         filter_var = np.tile(np.asarray(self.filter.C_D_diag), num_frames)
         if smoother_var.shape != filter_var.shape or not np.allclose(
             smoother_var, filter_var, rtol=1e-6, atol=0.0
@@ -765,6 +778,9 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
         entry, so what it holds now is that call's cycles alone and extending
         keeps the hybrid's lists one-entry-per-global-cycle.
         """
+        self.analyzed_pred_obs_history.extend(
+            getattr(self.filter, "analyzed_pred_obs_history", [])
+        )
         if not self.filter.collect_pred_obs:
             return
         self.pred_obs_history.extend(self.filter.pred_obs_history)
@@ -841,6 +857,7 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
         )
 
         # --- Filter phase -----------------------------------------------
+        self.analyzed_pred_obs_history = []
         self.pred_obs_history = []
         self.pred_obs_post_history = []
         self.pred_obs_frames_history = []

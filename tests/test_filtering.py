@@ -9,7 +9,7 @@ schemes. Everything runs on toy in-memory forward models — no CFD solver.
 
 import pathlib
 import types
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +19,7 @@ import xarray
 from data_assimilation.filtering import (
     EnsembleKalmanFilter,
     ETKFAnalysis,
+    FilterResult,
     IdentityEvolution,
     LETKFAnalysis,
     ObservationTSVD,
@@ -118,12 +119,13 @@ class _OnDiskToyLinearModel(_ToyLinearModel):
     def set_results_dir(self, results_dir: pathlib.Path) -> None:
         self.results_dir = results_dir
 
-    def run_ensemble(
+    def run_ensemble(  # type: ignore[override, unused-ignore]
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
     ) -> None:
         forecast = super().run_ensemble(state=state, params=params)
+        assert forecast is not None
         results_dir = self.results_dir
         assert results_dir is not None
         for member in range(forecast.sizes["ensemble"]):
@@ -509,7 +511,7 @@ def _dummy_filter_kwargs() -> dict:
     }
 
 
-@pytest.mark.parametrize("mode", ["parameter", "joint"])  # type: ignore[misc]
+@pytest.mark.parametrize("mode", ["parameter", "joint"])  # type: ignore[misc, unused-ignore]
 def test_parameter_updating_modes_without_spread_maintenance_raise(
     mode: str,
 ) -> None:
@@ -883,7 +885,8 @@ def test_windowing_the_cycle_chain_is_mathematically_inert() -> None:
 
     windowed = _filter()
     windowed.collect_pred_obs = True
-    carried_state, carried_params = state, params
+    carried_state: Optional[xarray.Dataset] = state
+    carried_params: Optional[xarray.Dataset] = params
     window_results = []
     windowed_pred_obs: list[np.ndarray] = []
     windowed_pred_obs_post: list[np.ndarray] = []
@@ -924,10 +927,12 @@ def test_windowing_the_cycle_chain_is_mathematically_inert() -> None:
     # The observation-space histories the per-window artifacts stack are the
     # same rows in the same order, merely split at the window boundary.
     assert len(windowed_pred_obs) == num_cycles
-    for chunked, reference in zip(windowed_pred_obs, single.pred_obs_history):
-        np.testing.assert_array_equal(chunked, reference)
-    for chunked, reference in zip(windowed_pred_obs_post, single.pred_obs_post_history):
-        np.testing.assert_array_equal(chunked, reference)
+    for chunked_obs, reference_obs in zip(windowed_pred_obs, single.pred_obs_history):
+        np.testing.assert_array_equal(chunked_obs, reference_obs)
+    for chunked_obs, reference_obs in zip(
+        windowed_pred_obs_post, single.pred_obs_post_history
+    ):
+        np.testing.assert_array_equal(chunked_obs, reference_obs)
 
 
 def test_C_D_is_checked_against_the_per_frame_observation_vector() -> None:
@@ -1088,8 +1093,10 @@ def test_a_stride_matches_the_wrapped_operator_mechanism() -> None:
         assert analysed.obs_prior_rmse == reference.obs_prior_rmse
         assert analysed.obs_posterior_rmse == reference.obs_posterior_rmse
         assert analysed.innovation_chi2 == reference.innovation_chi2
-    for analysed, reference in zip(knob.pred_obs_history, wrapper.pred_obs_history):
-        np.testing.assert_array_equal(analysed, reference)
+    for analysed_obs, reference_obs in zip(
+        knob.pred_obs_history, wrapper.pred_obs_history
+    ):
+        np.testing.assert_array_equal(analysed_obs, reference_obs)
 
     # Negative control: the OTHER subset of the same frames is a different
     # filter, so the equality above is not "any stride matches any stride".
@@ -1384,7 +1391,7 @@ def test_forecast_frames_agree_on_the_in_memory_and_on_disk_paths(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", ["state", "joint"])  # type: ignore[misc]
+@pytest.mark.parametrize("mode", ["state", "joint"])  # type: ignore[misc, unused-ignore]
 @pytest.mark.parametrize(
     "inflation",
     [
@@ -1394,7 +1401,7 @@ def test_forecast_frames_agree_on_the_in_memory_and_on_disk_paths(
         RTPP(alpha=0.4),
     ],
     ids=["none", "multiplicative", "rtps", "rtpp"],
-)  # type: ignore[misc]
+)  # type: ignore[misc, unused-ignore]
 def test_full_rank_current_reduction_matches_physical_update(
     mode: str, inflation: Optional[Any]
 ) -> None:
@@ -1486,7 +1493,7 @@ def test_full_rank_current_reduction_matches_physical_update(
         lambda: StreamingStateReduction(energy_fraction=0.5, max_rank=1),
     ],
     ids=["current", "streaming"],
-)  # type: ignore[misc]
+)  # type: ignore[misc, unused-ignore]
 def test_reduced_zero_gain_preserves_every_physical_member(
     make_reduction: Any,
 ) -> None:
@@ -1543,7 +1550,7 @@ def test_truncated_reduction_preserves_state_contract_and_is_finite() -> None:
     assert diag.reduction_discarded_increment_fraction > 1e-3
 
 
-@pytest.mark.parametrize("mode", ["state", "joint"])  # type: ignore[misc]
+@pytest.mark.parametrize("mode", ["state", "joint"])  # type: ignore[misc, unused-ignore]
 def test_streaming_reduction_matches_full_update_across_cycles(mode: str) -> None:
     """A full-rank streaming basis keeps spanning the current ensemble.
 
@@ -2597,3 +2604,203 @@ def test_stochastic_beta_targets_the_kalman_analysis_with_beta_R(beta: float) ->
         for wrong in (1.0, beta**2):
             _, P_wrong = _kalman(wrong)
             assert np.abs(P_wrong - P_a).max() > 0.05
+
+
+def test_per_cycle_covariances_match_chained_calls_and_preserve_default() -> None:
+    state = _initial_state(jax.random.PRNGKey(11), 20, np.zeros(1), np.eye(1))
+
+    def make_filter() -> EnsembleKalmanFilter:
+        return EnsembleKalmanFilter(
+            observation_operator=_ToyObsOp(np.eye(1)),
+            forward_model=cast(Any, _ToyLinearModel(np.eye(1))),
+            C_D=jnp.array([0.5]),
+            analysis=ETKFAnalysis(),
+            rng_key=jax.random.PRNGKey(8),
+            mode="state",
+        )
+
+    observations = jnp.array([[1.0], [2.0]])
+    varying = make_filter()
+    result = varying.run(
+        state=state,
+        observations=observations,
+        observation_covariances=jnp.array([[0.1], [2.0]]),
+    )
+    chained = make_filter()
+    carry = state
+    for y, variance in zip(observations, [0.1, 2.0]):
+        chained.set_observation_covariance(jnp.array([variance]))
+        chained_result = chained.run(state=carry, observations=y[None, :])
+        assert chained_result.state is not None
+        carry = chained_result.state
+    assert result.state is not None
+    np.testing.assert_allclose(result.state.u, carry.u, atol=1e-6)
+    np.testing.assert_array_equal(varying.C_D_diag, [0.5])
+    assert result.diagnostics[-1].innovation_chi2 == pytest.approx(
+        chained_result.diagnostics[-1].innovation_chi2
+    )
+
+
+def test_covariance_is_validated_before_forecast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _ToyLinearModel(np.eye(1))
+
+    def forbidden(**kwargs: Any) -> xarray.Dataset:
+        pytest.fail("forecast happened before covariance validation")
+
+    monkeypatch.setattr(model, "run_ensemble", forbidden)
+    filt = EnsembleKalmanFilter(
+        observation_operator=_ToyObsOp(np.eye(1)),
+        forward_model=cast(Any, model),
+        C_D=jnp.ones(1),
+        mode="state",
+    )
+    with pytest.raises(ValueError, match="finite"):
+        filt.run(
+            observations=jnp.ones((2, 1)),
+            observation_covariances=jnp.array([[1.0], [np.inf]]),
+        )
+
+
+def test_actual_analyzed_observations_include_posterior_inflation() -> None:
+    state = _initial_state(jax.random.PRNGKey(11), 20, np.zeros(1), np.eye(1))
+    filt = EnsembleKalmanFilter(
+        observation_operator=_ToyObsOp(np.eye(1)),
+        forward_model=cast(Any, _ToyLinearModel(np.eye(1))),
+        C_D=jnp.array([0.1]),
+        analysis=ETKFAnalysis(),
+        inflation=RTPP(alpha=0.8),
+        mode="state",
+    )
+    filt.collect_pred_obs = True
+    filt.collect_analyzed_observations = True
+    result = filt.run(state=state, observations=jnp.array([[1.0]]))
+    actual = filt.analyzed_pred_obs_history[0]
+    assert result.state is not None
+    np.testing.assert_allclose(actual, np.asarray(result.state.u).T)
+    assert not np.allclose(actual, filt.pred_obs_post_history[0])
+    assert result.diagnostics[0].obs_analyzed_final_rmse is not None
+
+
+def test_varying_frame_covariances_follow_analysis_stride() -> None:
+    state = _initial_state(jax.random.PRNGKey(71), 12, np.zeros(2), np.eye(2))
+    values = np.arange(8, dtype=float).reshape(2, 4, 1) / 10
+    variances = np.array([0.1, 0.2, 0.4, 0.8, 0.3, 0.6, 0.9, 1.2]).reshape(2, 4, 1)
+    full = _stride_filter(4, 2)
+    subset = _stride_filter(4, 2, wrapped=True)
+    result = full.run(
+        state=state,
+        observations=_stride_batches(values),
+        observation_covariances=variances,
+    )
+    reference = subset.run(
+        state=state,
+        observations=_stride_batches(values[:, 1::2]),
+        observation_covariances=variances[:, 1::2],
+    )
+    assert result.state is not None and reference.state is not None
+    np.testing.assert_array_equal(result.state.u, reference.state.u)
+    for actual, expected in zip(result.diagnostics, reference.diagnostics):
+        assert actual.innovation_chi2 == expected.innovation_chi2
+
+
+# ---------------------------------------------------------------------------
+# Beta tempering x per-window physical observation covariances
+# ---------------------------------------------------------------------------
+
+
+def _toy_state_filter(
+    beta: float = 1.0, analysis: Optional[AnalysisScheme] = None, **overrides: Any
+) -> EnsembleKalmanFilter:
+    kwargs: dict[str, Any] = dict(
+        observation_operator=_ToyObsOp(np.eye(1)),
+        forward_model=cast(Any, _ToyLinearModel(np.eye(1))),
+        C_D=jnp.array([0.5]),
+        analysis=ETKFAnalysis() if analysis is None else analysis,
+        rng_key=jax.random.PRNGKey(8),
+        mode="state",
+        beta=beta,
+    )
+    kwargs.update(overrides)
+    return EnsembleKalmanFilter(**kwargs)
+
+
+@pytest.mark.parametrize("scheme", ["etkf", "stochastic"])  # type: ignore[misc]
+def test_beta_tempers_per_cycle_observation_covariances(scheme: str) -> None:
+    """``run(observation_covariances=R_k)`` at beta analyses with ``beta R_k``.
+
+    Bitwise the beta-1 filter handed the pre-scaled covariances, while the chi2
+    diagnostic keeps reading the PHYSICAL ones.
+    """
+    state = _initial_state(jax.random.PRNGKey(11), 20, np.zeros(1), np.eye(1))
+    observations = jnp.array([[1.0], [2.0]])
+    physical = jnp.array([[0.1], [2.0]])
+    beta = 4.0
+
+    def run(filter_beta: float, covariances: jnp.ndarray) -> FilterResult:
+        analysis = ETKFAnalysis() if scheme == "etkf" else StochasticEnKFAnalysis()
+        return _toy_state_filter(beta=filter_beta, analysis=analysis).run(
+            state=state, observations=observations, observation_covariances=covariances
+        )
+
+    tempered = run(beta, physical)
+    prescaled = run(1.0, beta * physical)
+    untempered = run(1.0, physical)
+    assert tempered.state is not None and prescaled.state is not None
+    assert untempered.state is not None
+    np.testing.assert_array_equal(tempered.state.u, prescaled.state.u)
+    assert not np.allclose(tempered.state.u, untempered.state.u)
+    # Cycle 0 forecasts the same ensemble in both runs, so the chi2 against the
+    # physical covariance must agree exactly; the pre-scaled run's does not.
+    assert tempered.diagnostics[0].innovation_chi2 == pytest.approx(
+        untempered.diagnostics[0].innovation_chi2, rel=0, abs=0
+    )
+    assert tempered.diagnostics[0].innovation_chi2 != pytest.approx(
+        prescaled.diagnostics[0].innovation_chi2
+    )
+
+
+def test_set_observation_covariance_retempers_from_the_new_physical_one() -> None:
+    """A replacement is PHYSICAL: effective = beta * new, never compounded."""
+    filt = _toy_state_filter(beta=3.0)
+    new = jnp.array([0.2])
+    for _ in range(2):  # repeated windows installing the same covariance
+        filt.set_observation_covariance(new)
+        np.testing.assert_array_equal(filt.C_D_diag, new)
+        np.testing.assert_array_equal(filt.effective_C_D_diag, 3.0 * new)
+    # A diagonal matrix is accepted and reduced, like the constructor's.
+    filt.set_observation_covariance(jnp.diag(jnp.array([0.4])))
+    np.testing.assert_array_equal(filt.effective_C_D_diag, 3.0 * jnp.array([0.4]))
+
+
+def test_rejected_covariance_replacement_leaves_the_filter_unchanged() -> None:
+    """``beta * C_D`` overflowing the dtype fails before anything is assigned."""
+    fmax = float(np.finfo(np.asarray(jnp.ones(1)).dtype).max)
+    filt = _toy_state_filter(beta=1e30, C_D=jnp.array([1e-9]))
+    physical, effective = filt.C_D_diag, filt.effective_C_D_diag
+    with pytest.raises(ValueError, match="overflows"):
+        filt.set_observation_covariance(jnp.array([fmax / 1e20]))
+    assert filt.C_D_diag is physical
+    assert filt.effective_C_D_diag is effective
+
+
+def test_tempered_window_covariance_overflow_is_rejected_before_forecast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-window covariances are tempered (and checked) before cycle 0."""
+    model = _ToyLinearModel(np.eye(1))
+
+    def forbidden(**kwargs: Any) -> xarray.Dataset:
+        pytest.fail("forecast happened before the tempered covariance check")
+
+    monkeypatch.setattr(model, "run_ensemble", forbidden)
+    fmax = float(np.finfo(np.asarray(jnp.ones(1)).dtype).max)
+    filt = _toy_state_filter(
+        beta=1e30, forward_model=cast(Any, model), C_D=jnp.array([1e-9])
+    )
+    with pytest.raises(ValueError, match="overflows"):
+        filt.run(
+            observations=jnp.ones((2, 1)),
+            observation_covariances=jnp.array([[1e-9], [fmax / 1e20]]),
+        )

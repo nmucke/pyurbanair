@@ -453,7 +453,13 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # (no envelope) rather than inventing a width. The realized noisy
     # observations are not persisted, so the band S5 draws is the clean truth
     # +/- sigma_o and the figure says so itself.
-    obs_error_std = OmegaConf.select(cfg, "filtering.obs_error_std", default=None)
+    if OmegaConf.select(cfg, "observation_error", default=None) is None:
+        obs_error_std = OmegaConf.select(cfg, "filtering.obs_error_std", default=None)
+    else:
+        # Corrected likelihoods may have sensor/component-specific raw-frame
+        # errors, while this plot currently accepts one scalar width. Omit the
+        # envelope instead of drawing the obsolete legacy scalar as physical.
+        obs_error_std = None
     # What the fan draws, which is the other thing the state source decides: the
     # analysis source's series ARE the analyzed states, but the forecast source's
     # are every frame of each cycle's forecast segment -- the PRIOR side of each

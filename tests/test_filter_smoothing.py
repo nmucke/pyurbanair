@@ -814,14 +814,11 @@ class _IdentityParameterESMDA(ParameterESMDA):
     """
 
     def __call__(
-        self,
-        state: Optional[xarray.Dataset] = None,
-        params: Optional[xarray.Dataset] = None,
-        observations: Optional[Any] = None,
-        return_params_history: bool = False,
-        return_state_history: bool = False,
-        final_forecast: bool = True,
+        self, *args: Any, observation_covariance: Any = None, **kwargs: Any
     ) -> xarray.Dataset:
+        # The hybrid calls the smoother with keywords only; mirroring the base
+        # signature keeps the double valid whatever keywords it adds.
+        params = kwargs.get("params")
         assert params is not None
         return params
 
@@ -1339,3 +1336,44 @@ def test_shared_budget_scales_each_analysis_once_over_repeated_windows(
     np.testing.assert_array_equal(np.asarray(enkf.effective_C_D_diag), beta * physical)
     assert smoother.alpha == num_steps
     assert smoother.effective_alpha == num_steps / policy.smoother_weight
+
+
+def test_shared_budget_accepts_window_covariances_installed_as_vectors() -> None:
+    """The run script installs 1-D per-window covariances on both collaborators.
+
+    The hybrid reads the smoother's C_D whichever layout it holds: installing
+    the SAME physical values as vectors changes nothing, bit for bit, while a
+    mismatched vector is still caught before any forecast.
+    """
+    policy = resolve_tempering_policy(2.0, "shared_budget")
+    batches = _observation_batches()
+    window_frames = _NUM_CYCLES * _CYCLE_FRAMES
+
+    reference, *_ = _tempered_hybrid(policy)
+    expected = reference.run(
+        state=_initial_state(), params=_static_prior(), observations=batches
+    )
+
+    hybrid, smoother, enkf, _ = _tempered_hybrid(policy)
+    smoother.set_observation_covariance(
+        jnp.full(window_frames * _N_SENSORS, _OBS_VARIANCE)
+    )
+    enkf.set_observation_covariance(jnp.full(_N_SENSORS, _OBS_VARIANCE))
+    assert smoother.C_D.ndim == 1
+    result = hybrid.run(
+        state=_initial_state(), params=_static_prior(), observations=batches
+    )
+    assert result.state is not None and expected.state is not None
+    np.testing.assert_array_equal(
+        np.asarray(result.state["u"].values), np.asarray(expected.state["u"].values)
+    )
+
+    mismatched, smoother, _, filter_model = _tempered_hybrid(policy)
+    smoother.set_observation_covariance(
+        jnp.full(window_frames * _N_SENSORS, 2.0 * _OBS_VARIANCE)
+    )
+    with pytest.raises(ValueError, match="C_D"):
+        mismatched.run(
+            state=_initial_state(), params=_static_prior(), observations=batches
+        )
+    assert smoother.forward_model.calls == 0 and filter_model.calls == 0

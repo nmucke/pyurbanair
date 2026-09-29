@@ -3,7 +3,6 @@ num_steps: 4
 alpha: ${.num_steps}
 num_assimilation_windows: 2
 seed: 42
-obs_error_std: 0.25
 # Observation aggregation: the time-resolved observations are binned into
 # contiguous `interval_seconds`-wide intervals and reduced within each by
 # `aggregation_mode` (mean|median|max|min) before the update sees them. null

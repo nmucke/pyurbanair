@@ -52,9 +52,9 @@ def validate_variances(C_D_diag: jnp.ndarray) -> jnp.ndarray:
             "Pass the diagonal of the observation-error covariance (sigma**2 "
             "per observation)."
         )
-    if not bool(jnp.all(C_D_diag > 0.0)):
+    if not bool(jnp.all(jnp.isfinite(C_D_diag))) or not bool(jnp.all(C_D_diag > 0.0)):
         raise ValueError(
-            "Observation-error variances must be strictly positive; a zero or "
+            "Observation-error variances must be finite and strictly positive; a zero or "
             "negative variance makes the analysis system singular "
             "(NaN-poisoning the ensemble). Check obs_error_std."
         )

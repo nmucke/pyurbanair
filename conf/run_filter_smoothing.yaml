@@ -1,6 +1,7 @@
 # Hybrid ESMDA parameter smoothing and sequential state filtering.
 # The filter_smoothing node owns their shared horizon, seed and error scale.
 defaults:
+  - observation/error
   - common/runtime
   - execution: assimilation
   - case: xie_and_castro
@@ -59,14 +60,7 @@ params_to_estimate:
 
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
-# --- Knobs SHARED by the two halves. The horizon, the PRNG seed and the
-# observation-error std are properties of the experiment, not of either
-# algorithm, and both halves are built from them: the smoother's (N_d, N_d)
-# window covariance and the filter's per-frame 1-D one are both sized from
-# `obs_error_std`, and the single seed feeds the truth noise, the smoother and
-# the filter. This is the node that replaces run_esmda.yaml's
-# `esmda.{num_assimilation_windows,seed,obs_error_std}` and
-# run_filtering.yaml's `filtering.{...}` twins. ---
+# Shared horizon and seed. Observation uncertainty comes from observation/error.
 filter_smoothing:
   # One window = `time.simulation_time` seconds, exactly as in both siblings.
   # Unlike a pure filter's, a window boundary here is NOT purely computational:
@@ -75,16 +69,13 @@ filter_smoothing:
   # reset, so W is a real modelling choice.
   num_assimilation_windows: 2
   seed: 42
-  # Diagonal observation-error standard deviation of ONE observation frame. The
-  # filter's C_D is exactly that; the smoother's is the same value tiled over
-  # the window's AGGREGATED observation vector.
-  obs_error_std: 0.25
   # Beta tempering: how strongly each phase may use an observation that BOTH
   # assimilate. Every filter analysis uses `beta * R` (L^(1/beta)); finite,
   # >= 1. The single source for the filter's beta (forwarded to
   # `filtering.beta` below; a conflicting `filtering.beta=` override is
-  # rejected). R itself — obs_error_std, the obs_error_std artifacts and the
-  # innovation chi2 — stays physical. See docs/data_assimilation.md §9.
+  # rejected). R itself — the physical `observation_error` variances, the
+  # obs_error_std artifacts and the innovation chi2 — stays physical. See
+  # docs/data_assimilation.md §9.
   beta: 1.0
   # filter_only | shared_budget.
   #   filter_only   — ESMDA keeps its full normalized schedule; only the filter
@@ -101,19 +92,17 @@ filter_smoothing:
 
 # --- The smoother half. `esmda.smoother` is the one mode-specific block
 # (selected by the `esmda/smoother` group); everything else here is shared
-# wiring the group files interpolate. The window/seed/obs-error knobs live on
+# wiring the group files interpolate. The window/seed knobs live on
 # `filter_smoothing:` above rather than being duplicated here. ---
 esmda:
-  # Hybrid owns its horizon, seed, and observation error in filter_smoothing.
+  # Hybrid owns its horizon and seed in filter_smoothing.
   num_assimilation_windows: ${filter_smoothing.num_assimilation_windows}
   seed: ${filter_smoothing.seed}
-  obs_error_std: ${filter_smoothing.obs_error_std}
   save_obs_diagnostics: true
 
 filtering:
   num_assimilation_windows: ${filter_smoothing.num_assimilation_windows}
   seed: ${filter_smoothing.seed}
-  obs_error_std: ${filter_smoothing.obs_error_std}
   beta: ${filter_smoothing.beta}
   mode: joint
   assimilate_every_n_step: 1

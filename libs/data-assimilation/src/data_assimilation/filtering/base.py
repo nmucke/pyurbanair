@@ -44,7 +44,7 @@ import pathlib
 import shutil
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional, Sequence, Union
+from typing import Any, Callable, Literal, Optional, Sequence, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -149,6 +149,7 @@ class CycleDiagnostics:
     # predicted-observation rows really are H applied to the analyzed state;
     # otherwise the name of the approximation they represent.
     obs_posterior_rmse_kind: str = "exact"
+    obs_analyzed_final_rmse: Optional[float] = None
     analysis_time: Optional[float] = None
     reduction_rank: Optional[int] = None
     reduction_available_rank: Optional[int] = None
@@ -391,19 +392,7 @@ class BaseFilter:
         # scaled rather than rows, the whole augmented update — state and
         # parameter rows alike in joint mode — is tempered uniformly.
         self.beta: float = validate_beta(beta)
-        # ``1.0 * x`` is exact in every float dtype, so the default reproduces
-        # the untempered filter bit for bit (same values, same RNG stream — no
-        # key is split for beta). Validated in its ACTUAL dtype: a finite beta
-        # can still overflow a float32 variance to inf, which must fail here
-        # rather than as a NaN ensemble in cycle 0.
-        effective = self.beta * self.C_D_diag
-        if not bool(jnp.all(jnp.isfinite(effective))):
-            raise ValueError(
-                f"beta={self.beta!r} overflows the {effective.dtype} "
-                "observation-error variances (beta * C_D is not finite). Use a "
-                "smaller beta."
-            )
-        self.effective_C_D_diag: jnp.ndarray = validate_variances(effective)
+        self.effective_C_D_diag: jnp.ndarray = self._temper(self.C_D_diag)
 
         if (
             localization is not None
@@ -545,7 +534,10 @@ class BaseFilter:
         params: Optional[xarray.Dataset] = None,
     ) -> Optional[xarray.Dataset]:
         """Run the ensemble over one cycle's segment (None in on-disk mode)."""
-        return self.forward_model.run_ensemble(state=state, params=params)
+        return cast(  # type: ignore[redundant-cast,unused-ignore]
+            Optional[xarray.Dataset],
+            self.forward_model.run_ensemble(state=state, params=params),
+        )
 
     def _record_pred_obs(self, pred_obs: jnp.ndarray) -> None:
         """Record one cycle's raw forecast observations ``(T*N_obs, N_e)``.
@@ -820,7 +812,85 @@ class BaseFilter:
     # The cycle loop
     # ------------------------------------------------------------------
 
+    collect_analyzed_observations: bool = False
+    analyzed_observation_operator: Any
+    _cycle_covariances: Any = None
+    # The beta-tempered twin of ``_cycle_covariances``: what the cycle's
+    # analyses consume, while the physical one feeds the chi2 diagnostic.
+    _cycle_effective_covariances: Any = None
+    _window_covariances: Any = None
+
+    def _temper(self, variances: jnp.ndarray) -> jnp.ndarray:
+        """``beta * variances``: the covariance every analysis actually uses.
+
+        The ONE place beta touches a covariance — the constructor's, a
+        replacement from :meth:`set_observation_covariance`, and a window's
+        per-frame ``observation_covariances`` all come through here, so each is
+        scaled exactly once and never compounds across windows. ``1.0 * x`` is
+        exact in every float dtype, so the default reproduces the untempered
+        filter bit for bit (same values, same RNG stream — no key is split for
+        beta). Validated in its ACTUAL dtype: a finite beta can still overflow
+        a float32 variance to inf, which must fail here rather than as a NaN
+        ensemble in cycle 0.
+        """
+        effective = self.beta * jnp.asarray(variances)
+        if not bool(jnp.all(jnp.isfinite(effective))):
+            raise ValueError(
+                f"beta={self.beta!r} overflows the {effective.dtype} "
+                "observation-error variances (beta * C_D is not finite). Use a "
+                "smaller beta."
+            )
+        return validate_variances(effective.reshape(-1)).reshape(effective.shape)
+
+    def set_observation_covariance(self, C_D: Any) -> None:
+        """Replace the physical covariance of one frame after validation.
+
+        The tempered :attr:`effective_C_D_diag` is re-derived from the NEW
+        physical covariance (never from the old effective one), and both are
+        validated before either is assigned, so a rejected replacement leaves
+        the filter unchanged.
+        """
+        covariance = jnp.asarray(C_D)
+        if covariance.ndim == 2:
+            if covariance.shape[0] != covariance.shape[1] or not bool(
+                jnp.all(covariance == jnp.diag(jnp.diag(covariance)))
+            ):
+                raise ValueError(
+                    "C_D must be diagonal; correlated errors are unsupported."
+                )
+            covariance = jnp.diag(covariance)
+        physical = validate_variances(covariance)
+        effective = self._temper(physical)
+        self.C_D_diag = physical
+        self.effective_C_D_diag = effective
+
     def run(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+        observations: Optional[Union[jnp.ndarray, Sequence[Any]]] = None,
+        *,
+        return_history: bool = False,
+        observation_covariances: Any = None,
+    ) -> FilterResult:
+        """Filter with optional physical variances shaped like the raw batches.
+
+        Variances have shape (cycles, frames, obs), or (cycles, obs) for
+        single-frame cycles. All entries are validated before forecasting and
+        thinned with the observation stride. Constructor covariance is unchanged.
+        They are PHYSICAL: the analyses use ``beta`` times them (tempered once,
+        here, before the first forecast); the chi2 diagnostic uses them as is.
+        """
+        previous = getattr(self, "_window_covariances", None)
+        self._window_covariances = observation_covariances
+        try:
+            return self._run(state, params, observations, return_history=return_history)
+        finally:
+            self._window_covariances = previous
+            self._cycle_covariances = None
+            self._cycle_effective_covariances = None
+
+    def _run(
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
@@ -880,6 +950,19 @@ class BaseFilter:
                 'array, or a one-element list of per-cycle ("time", "obs") '
                 "DataArrays."
             )
+        covariances = self._window_covariances
+        if covariances is not None:
+            covariances = jnp.asarray(covariances)
+            if covariances.ndim == 2:
+                covariances = covariances[:, None, :]
+            if covariances.shape != obs_batches.shape:
+                raise ValueError(
+                    "observation_covariances must match raw observation batches."
+                )
+            validate_variances(covariances.reshape(-1))
+        effective_covariances = (
+            None if covariances is None else self._temper(covariances)
+        )
         if obs_batches.shape[2] != self.C_D_diag.shape[0]:
             raise ValueError(
                 f"Observation frames have N_obs={obs_batches.shape[2]} but C_D "
@@ -909,6 +992,12 @@ class BaseFilter:
                     "the stride."
                 )
             obs_batches = obs_batches[:, every_n - 1 :: every_n, :]
+            if covariances is not None:
+                covariances = covariances[:, every_n - 1 :: every_n, :]
+            if effective_covariances is not None:
+                effective_covariances = effective_covariances[
+                    :, every_n - 1 :: every_n, :
+                ]
         if self.mode in ("parameter", "joint"):
             if params is None:
                 raise ValueError(f"mode={self.mode!r} requires params.")
@@ -924,6 +1013,7 @@ class BaseFilter:
             self.pred_obs_history = []
             self.pred_obs_post_history = []
             self.pred_obs_frames_history = []
+        self.analyzed_pred_obs_history: list[np.ndarray] = []
         diagnostics: list[CycleDiagnostics] = []
         params_history: list[xarray.Dataset] = (
             [params] if (return_history and params is not None) else []
@@ -939,6 +1029,12 @@ class BaseFilter:
             unit="cycle",
         )
         for cycle in pbar:
+            self._cycle_covariances = (
+                None if covariances is None else covariances[cycle]
+            )
+            self._cycle_effective_covariances = (
+                None if effective_covariances is None else effective_covariances[cycle]
+            )
             self._set_cycle_results_dir(cycle)
 
             forecast = self._forecast_step(state=analysis_state, params=params)
@@ -986,6 +1082,35 @@ class BaseFilter:
             analysis_state, params, cycle_diag = self._analysis_cycle(
                 cycle, final_state, params, pred_obs, obs_batches[cycle]
             )
+            if getattr(self, "collect_analyzed_observations", False):
+                assert analysis_state is not None
+                observed_state = analysis_state
+                if "time" not in observed_state.dims:
+                    # An adaptive-step backend (uDALES) ends each member's
+                    # segment at a slightly different time, so after the
+                    # ensemble concat ``time`` is a per-member coordinate, which
+                    # expand_dims refuses. The operator only needs a label for
+                    # this one analysed frame: collapse it to the members' mean.
+                    time_label = np.atleast_1d(
+                        np.mean(np.asarray(observed_state.coords.get("time", 0.0)))
+                    )
+                    observed_state = observed_state.drop_vars(
+                        "time", errors="ignore"
+                    ).expand_dims(time=time_label)
+                operator = getattr(
+                    self, "analyzed_observation_operator", self.observation_operator
+                )
+                analyzed_obs = self._prepare_pred_obs(operator(observed_state))
+                actual = np.asarray(analyzed_obs[:, -1, :]).T
+                self.analyzed_pred_obs_history.append(actual)
+                cycle_diag.obs_analyzed_final_rmse = float(
+                    np.sqrt(
+                        np.mean(
+                            (np.asarray(obs_batches[cycle, -1]) - actual.mean(axis=1))
+                            ** 2
+                        )
+                    )
+                )
             diagnostics.append(cycle_diag)
 
             # Repair any diverged members in the warm start for the next
@@ -1311,23 +1436,29 @@ class BaseFilter:
         covariance — for its difference to measure the truncation and nothing
         else.
 
-        Every analysis is handed :attr:`effective_C_D_diag` — ``beta * C_D`` —
-        and nothing else: each frame's analysis is full weight in the sense of
+        Every analysis is handed ``beta * C_D`` — :attr:`effective_C_D_diag`, or
+        the cycle's tempered per-frame ``observation_covariances`` — and
+        nothing else: each frame's analysis is full weight in the sense of
         taking no MDA ``alpha``, but tempered by ``beta`` through its
         covariance.
         """
         num_frames, n_obs = int(obs.shape[0]), int(obs.shape[1])
         for frame in range(num_frames):
             start = obs_offset + frame * n_obs
-            # The EFFECTIVE (beta-tempered) covariance, and this is its only
-            # consumer: the sweep and the reduction-diagnostic replay both come
-            # through here, so they cannot disagree about R. Identical to the
-            # physical ``C_D_diag`` at the default beta = 1.
+            # The EFFECTIVE (beta-tempered) covariance — the window's per-frame
+            # one when run() was given observation_covariances — and this is
+            # its only consumer: the sweep and the reduction-diagnostic replay
+            # both come through here, so they cannot disagree about R.
+            # Identical to the physical covariance at the default beta = 1.
             rows = self.analysis(
                 rows,
                 rows[start : start + n_obs],
                 obs[frame],
-                self.effective_C_D_diag,
+                (
+                    self.effective_C_D_diag
+                    if self._cycle_effective_covariances is None
+                    else self._cycle_effective_covariances[frame]
+                ),
                 frame_keys[frame],
                 **plumbing,
             )
@@ -1583,7 +1714,12 @@ class BaseFilter:
         innovation = obs - jnp.mean(pred_obs, axis=1)
         pred_obs_dev = pred_obs - jnp.mean(pred_obs, axis=1, keepdims=True)
         C_DD = jnp.dot(pred_obs_dev, pred_obs_dev.T) / (N_e - 1)
-        S = C_DD + jnp.diag(jnp.tile(self.C_D_diag, num_frames))
+        physical_variances = (
+            jnp.tile(self.C_D_diag, num_frames)
+            if getattr(self, "_cycle_covariances", None) is None
+            else self._cycle_covariances.reshape(-1)
+        )
+        S = C_DD + jnp.diag(physical_variances)
         chi2 = float(
             innovation
             @ jax.scipy.linalg.cho_solve(jax.scipy.linalg.cho_factor(S), innovation)

@@ -1,5 +1,6 @@
 """Observation operator for the data assimilation."""
 
+from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
@@ -125,7 +126,7 @@ class ObservationOperator:
                 # (obs_ids_x[i], obs_ids_y[i], obs_ids_z[i]) for all i.
                 # Result shape: (time, sensor) where sensor dimension has size num_sensors.
                 sensor_obs = state[state_var].isel(
-                    **{
+                    {
                         dims["z"]: xarray.DataArray(self.obs_ids_z, dims="sensor"),
                         dims["y"]: xarray.DataArray(self.obs_ids_y, dims="sensor"),
                         dims["x"]: xarray.DataArray(self.obs_ids_x, dims="sensor"),
@@ -255,6 +256,19 @@ class TemporalObservationOperator:
             return self._observation_single(state)
 
 
+@dataclass(frozen=True)
+class ObservationBin:
+    """One absolute time bin, with frame indices and linear mean weights."""
+
+    start_time: float
+    frame_ids: tuple[int, ...]
+    weights: tuple[float, ...]
+
+    @property
+    def count(self) -> int:
+        return len(self.frame_ids)
+
+
 class AggregateObservations:
     """Aggregate time-resolved observations into fixed-length time intervals.
 
@@ -265,7 +279,12 @@ class AggregateObservations:
     state.
     """
 
-    def __init__(self, interval_seconds: float, mode: str = "mean"):
+    def __init__(
+        self,
+        interval_seconds: float,
+        mode: str = "mean",
+        allow_interval_count_change: bool = False,
+    ):
         """
         Initialize the observation aggregator.
 
@@ -297,9 +316,85 @@ class AggregateObservations:
 
         self.interval_seconds = float(interval_seconds)
         self.mode = mode
+        self.allow_interval_count_change = allow_interval_count_change
         self._num_intervals: int | None = None
 
-    def __call__(self, observations: xarray.DataArray) -> xarray.DataArray:
+    def bins(
+        self,
+        observations: xarray.DataArray,
+        *,
+        allow_interval_count_change: bool | None = None,
+    ) -> tuple[ObservationBin, ...]:
+        """Return the exact bins used by aggregation for this window.
+
+        ``allow_interval_count_change`` is for a resolved per-window covariance.
+        The legacy callable retains its first-window length check.
+        """
+        if allow_interval_count_change is None:
+            allow_interval_count_change = self.allow_interval_count_change
+        if allow_interval_count_change and not np.all(np.isfinite(observations.values)):
+            raise ValueError(
+                "Corrected mean aggregation requires finite observations; "
+                "skipping NaNs would change the averaging weights."
+            )
+        if "time" not in observations.dims:
+            raise ValueError(
+                "AggregateObservations requires observations with a 'time' dimension."
+            )
+        if "time" not in observations.coords:
+            raise ValueError(
+                "AggregateObservations requires a 'time' coordinate (in seconds) "
+                "on the observations."
+            )
+        time_values = np.asarray(observations["time"].values, dtype=float)
+        if time_values.size == 0:
+            raise ValueError("Observations have no time steps to aggregate.")
+        if not np.all(np.isfinite(time_values)) or np.any(np.diff(time_values) <= 0):
+            raise ValueError(
+                "Observation times must be finite and strictly increasing."
+            )
+
+        bin_indices = np.floor(
+            (time_values - time_values[0]) / self.interval_seconds
+        ).astype(int)
+        num_intervals = int(bin_indices[-1]) + 1
+        if self._num_intervals is None:
+            self._num_intervals = num_intervals
+        elif num_intervals != self._num_intervals and not allow_interval_count_change:
+            raise ValueError(
+                f"Interval count changed between calls: first call produced "
+                f"{self._num_intervals} intervals, this one produced "
+                f"{num_intervals}. The observation vector length must stay "
+                "constant across windows (C_D is sized from the first "
+                "window); check the output cadence and window length."
+            )
+
+        bins = []
+        for b in range(num_intervals):
+            frame_ids = tuple(int(i) for i in np.nonzero(bin_indices == b)[0])
+            if not frame_ids:
+                raise ValueError(
+                    f"Absolute interval {b} (of {num_intervals}, "
+                    f"interval_seconds={self.interval_seconds}) has no frames. "
+                    "Output cadence is irregular or a frame is missing, so "
+                    "absolute-interval alignment cannot be guaranteed; check "
+                    "the model output cadence and window length."
+                )
+            bins.append(
+                ObservationBin(
+                    start_time=float(time_values[0] + b * self.interval_seconds),
+                    frame_ids=frame_ids,
+                    weights=tuple(1.0 / len(frame_ids) for _ in frame_ids),
+                )
+            )
+        return tuple(bins)
+
+    def __call__(
+        self,
+        observations: xarray.DataArray,
+        *,
+        allow_interval_count_change: bool | None = None,
+    ) -> xarray.DataArray:
         """Aggregate observations over absolute ``interval_seconds`` bins.
 
         Args:
@@ -311,78 +406,20 @@ class AggregateObservations:
             interval with coordinate ``t0 + k * interval_seconds`` (the
             interval's start time).
         """
-        if "time" not in observations.dims:
-            raise ValueError(
-                "AggregateObservations requires observations with a 'time' "
-                "dimension."
-            )
-        if "time" not in observations.coords:
-            raise ValueError(
-                "AggregateObservations requires a 'time' coordinate (in "
-                "seconds) on the observations."
-            )
-        time_values = np.asarray(observations["time"].values, dtype=float)
-        if time_values.size == 0:
-            raise ValueError("Observations have no time steps to aggregate.")
-
-        # Bin each frame by its time coordinate (seconds): frame t belongs to
-        # interval floor((t - t0) / interval_seconds). Frames are emitted at a
-        # uniform cadence, so each populated bin holds the frames whose time
-        # falls in [t0 + k*dt, t0 + (k+1)*dt).
-        bin_indices = np.floor(
-            (time_values - time_values[0]) / self.interval_seconds
-        ).astype(int)
-
-        # Bin against the ABSOLUTE interval range spanned by the window, not
-        # just the populated bins. Iterating only over np.unique(bin_indices)
-        # would make element k of the returned vector "the k-th populated
-        # interval" rather than "absolute interval k" -- if the model output
-        # ever skips an interval (irregular cadence, a short window, a missing
-        # frame), predicted and real observations would silently misalign and
-        # shift the whole innovation vector.
-        num_intervals = (
-            int(np.floor((time_values[-1] - time_values[0]) / self.interval_seconds))
-            + 1
+        bins = self.bins(
+            observations, allow_interval_count_change=allow_interval_count_change
         )
-        if self._num_intervals is None:
-            self._num_intervals = num_intervals
-        elif num_intervals != self._num_intervals:
-            # The observation vector length (and hence C_D, sized from the first
-            # window) is fixed by the first call's interval count. A later
-            # window with a different number of absolute intervals -- a short
-            # final window, a changed output cadence -- would silently return a
-            # mismatched-length vector.
-            raise ValueError(
-                f"Interval count changed between calls: first call produced "
-                f"{self._num_intervals} intervals, this one produced "
-                f"{num_intervals}. The observation vector length must stay "
-                "constant across windows (C_D is sized from the first "
-                "window); check the output cadence and window length."
-            )
-
         agg_fn = self.mode_mapping[self.mode]
         obs_per_interval = []
-        for b in range(num_intervals):
-            frame_ids = np.nonzero(bin_indices == b)[0]
-            if frame_ids.size == 0:
-                # A silent gap here would misalign every subsequent element of
-                # the observation vector against absolute interval index, rather
-                # than raising loudly.
-                raise ValueError(
-                    f"Absolute interval {b} (of {num_intervals}, "
-                    f"interval_seconds={self.interval_seconds}) has no frames. "
-                    "Output cadence is irregular or a frame is missing, so "
-                    "absolute-interval alignment cannot be guaranteed; check "
-                    "the model output cadence and window length."
-                )
-            obs_per_interval.append(agg_fn(observations.isel(time=frame_ids)))
+        for bin_ in bins:
+            obs_per_interval.append(
+                agg_fn(observations.isel(time=list(bin_.frame_ids)))
+            )
 
         aggregated = xarray.concat(obs_per_interval, dim="time")
         # Label each interval by its start time so the output stays a valid
         # input to another aggregation / to persistence.
-        aggregated = aggregated.assign_coords(
-            time=time_values[0] + np.arange(num_intervals) * self.interval_seconds
-        )
+        aggregated = aggregated.assign_coords(time=[bin_.start_time for bin_ in bins])
         return cast(xarray.DataArray, aggregated.transpose(*observations.dims))
 
 

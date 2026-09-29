@@ -671,6 +671,7 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
     per_window: list[np.ndarray] = []
     window_indices: list[int] = []
     n_obs = 0
+    has_representation_error = False
     for window, obs_path, pred_path in sorted(pairs):
         try:
             with (
@@ -679,6 +680,16 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
             ):
                 obs = obs_ds["obs"].values
                 sigma = obs_ds["obs_error_std"].values
+                if "obs_representation_variance" in obs_ds:
+                    representation_variance = np.asarray(
+                        obs_ds["obs_representation_variance"].values, dtype=float
+                    )
+                    has_representation_error |= bool(
+                        np.any(
+                            np.isfinite(representation_variance)
+                            & (representation_variance > 0)
+                        )
+                    )
                 pred = pred_ds["pred_obs"].values  # (esmda_step, obs, ensemble)
                 # N_d sets the target band, so windows scored against different
                 # observation counts cannot share one. The first window kept
@@ -732,6 +743,7 @@ def obs_diagnostics_bundle(run_dir: pathlib.Path) -> dict | None:
         "window_indices": window_indices,
         "num_observations": n_obs,
         "num_windows": len(per_window),
+        "has_representation_error": has_representation_error,
     }
 
 

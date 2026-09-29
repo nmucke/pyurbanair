@@ -146,15 +146,14 @@ def test_filter_smoothing_composes(
     # The shared knobs live on their own node, not duplicated onto either half.
     assert cfg.filter_smoothing.num_assimilation_windows == 1
     assert cfg.filter_smoothing.seed == 42
-    assert cfg.filter_smoothing.obs_error_std > 0.0
+    assert cfg.observation_error.instrument_std > 0.0
     for node in (cfg.esmda, cfg.filtering):
         assert (
             node.num_assimilation_windows
             == cfg.filter_smoothing.num_assimilation_windows
         )
-        assert node.obs_error_std == cfg.filter_smoothing.obs_error_std
-    cfg.filter_smoothing.obs_error_std = 0.5
-    assert cfg.esmda.obs_error_std == cfg.filtering.obs_error_std == 0.5
+        assert "obs_error_std" not in node
+    assert "obs_error_std" not in cfg.filter_smoothing
 
     # run_filtering.yaml's analysis stride, same meaning, default 1. Under a
     # stride the thinning applies to BOTH halves (one observation product).
@@ -350,6 +349,7 @@ def test_default_tempering_composes_to_the_legacy_policy(
     """beta 1 / filter_only by default, forwarded into the filter target."""
     from data_assimilation import resolve_tempering_policy
 
+    from pyurbanair.config.hydra_helpers import create_observation_error
     from scripts.filter_smoothing.run_filter_smoothing import _resolve_tempering
 
     cfg = compose_test_cfg(
@@ -358,7 +358,7 @@ def test_default_tempering_composes_to_the_legacy_policy(
     assert cfg.filter_smoothing.beta == 1.0
     assert cfg.filter_smoothing.likelihood_allocation == "filter_only"
     assert cfg.filtering.beta == cfg.filtering.filter.beta == 1.0
-    policy = _resolve_tempering(cfg, every_n=1)
+    policy = _resolve_tempering(cfg, 1, create_observation_error(cfg))
     assert policy == resolve_tempering_policy()
     assert policy.is_legacy and policy.smoother_weight == 1.0
 
@@ -377,7 +377,7 @@ def test_default_tempering_composes_to_the_legacy_policy(
         config_name="run_filter_smoothing",
     )
     assert cfg.filtering.beta == cfg.filtering.filter.beta == 4.0
-    policy = _resolve_tempering(cfg, every_n=1)
+    policy = _resolve_tempering(cfg, 1, create_observation_error(cfg))
     assert policy.smoother_weight == 0.75 and policy.filter_weight == 0.25
 
 
@@ -586,6 +586,14 @@ def test_run_filter_smoothing(
     # frames into ONE interval; the shared budget assimilates them raw.
     n_obs_smoother = cycles_per_window * n_obs_frame if shared else n_obs_frame
     num_steps = int(cfg.esmda.num_steps)
+    beta = 2.0 if shared else 1.0
+    weight = 0.5 if shared else 1.0
+    physical_std = float(
+        np.hypot(
+            cfg.observation_error.instrument_std,
+            cfg.observation_error.representation_std,
+        )
+    )
     is_dynamic = smoother == "dynamic"
 
     out_dir = pathlib.Path(cfg.paths.results_dir)
@@ -649,7 +657,11 @@ def test_run_filter_smoothing(
         assert n_d == cycles_per_window * n_obs_frame
         assert obs["obs_error_std"].shape == (n_d,)
         assert np.allclose(
-            obs["obs_error_std"].values, float(cfg.filter_smoothing.obs_error_std)
+            obs["obs_error_std"].values,
+            np.hypot(
+                cfg.observation_error.instrument_std,
+                cfg.observation_error.representation_std,
+            ),
         )
         # obs_interval reads as the cycle index within the window.
         assert set(np.unique(obs["obs_interval"].values)) == set(
@@ -671,11 +683,19 @@ def test_run_filter_smoothing(
             assert esmda_pred[var].shape == (n_obs_smoother,)
         assert "final_forecast=False" in esmda_pred.attrs["esmda_step"]
         # obs_error_std stays PHYSICAL in both halves' artifacts, whatever
-        # the tempering.
-        assert np.allclose(
-            esmda_pred["obs_error_std"].values,
-            float(cfg.filter_smoothing.obs_error_std),
+        # the tempering: the raw per-frame std on the shared (unaggregated)
+        # product, and only ever SHRUNK by mean propagation otherwise. The
+        # tempering is recorded beside it as the multiplier the analyses
+        # applied to the physical C_D: alpha_base / w for the smoother, beta
+        # for the filter.
+        if shared:
+            assert np.allclose(esmda_pred["obs_error_std"].values, physical_std)
+        else:
+            assert np.all(esmda_pred["obs_error_std"].values <= physical_std + 1e-12)
+        assert esmda_pred.attrs["analysis_covariance_multiplier"] == pytest.approx(
+            num_steps / weight
         )
+        assert obs.attrs["analysis_covariance_multiplier"] == beta
         if shared:
             # One observation product: the smoother's raw window vector IS the
             # filter's per-cycle frames, value for value.
@@ -731,8 +751,6 @@ def test_run_filter_smoothing(
     assert configuration["num_observations_per_window_aggregated"] == n_obs_smoother
     # Beta tempering, as the collaborators actually ran it.
     tempering = configuration["tempering"]
-    beta = 2.0 if shared else 1.0
-    weight = 0.5 if shared else 1.0
     assert tempering["beta"] == tempering["filter_beta"] == beta
     assert tempering["likelihood_allocation"] == (
         "shared_budget" if shared else "filter_only"
@@ -744,10 +762,10 @@ def test_run_filter_smoothing(
     assert tempering["effective_alpha"] == tempering["smoother_effective_alpha"]
     assert tempering["effective_alpha"] == num_steps / weight
     assert tempering["nominal_combined_exponent"] == (1.0 if shared else 2.0)
-    assert configuration["observation_error_std"] == float(
-        cfg.filter_smoothing.obs_error_std
+    assert "observation_error_std" not in configuration
+    assert configuration["observation_error_model"] == (
+        "observation_error.v1:diagonal:independent"
     )
-    assert configuration["observation_error_model"] == ("legacy_scalar_iid_diagonal/v1")
     product = configuration["observation_product"]
     assert product["num_observations_per_frame"] == n_obs_frame
     assert product["assimilate_every_n_step"] == every_n
@@ -796,3 +814,50 @@ def test_run_filter_smoothing(
 
     posterior_state = xarray.open_dataset(out_dir / "posterior_state.nc")
     assert posterior_state.sizes["ensemble"] == 2
+
+
+def test_variance_upper_bound_covers_every_override() -> None:
+    """The pre-flight bound is the largest configured std of each part, squared."""
+    from data_assimilation.observation_error import ObservationErrorSpec
+
+    from scripts.filter_smoothing.run_filter_smoothing import _variance_upper_bound
+
+    assert _variance_upper_bound(ObservationErrorSpec(0.25)) == pytest.approx(0.0625)
+    spec = ObservationErrorSpec(
+        instrument_std={
+            "default": 0.1,
+            "height_bands": [{"min_z": 0.0, "max_z": 10.0, "std": 0.4}],
+            "components": {"u": 0.2},
+            "sensors": {"3": 0.3},
+        },
+        representation_std={"default": 0.05, "components": {"v": 0.3}},
+    )
+    assert _variance_upper_bound(spec) == pytest.approx(0.4**2 + 0.3**2)
+
+
+def test_shared_budget_rejects_a_correlated_error_model(compose_test_cfg: Any) -> None:
+    """Defence in depth: create_observation_error only admits `independent`
+    today, but a shared budget must never be split over a temporally
+    correlated product, whatever the global contract later allows."""
+    from data_assimilation.observation_error import ObservationErrorSpec
+
+    from scripts.filter_smoothing.run_filter_smoothing import _resolve_tempering
+
+    cfg = compose_test_cfg(
+        _overrides(
+            "static",
+            "joint",
+            1,
+            [
+                "filter_smoothing.beta=2.0",
+                "filter_smoothing.likelihood_allocation=shared_budget",
+                "esmda.interval_seconds=null",
+            ],
+        ),
+        config_name="run_filter_smoothing",
+    )
+    independent = ObservationErrorSpec(0.25)
+    assert _resolve_tempering(cfg, 1, independent).smoother_weight == 0.5
+    persistent = ObservationErrorSpec(0.25, representation_time_model="persistent")
+    with pytest.raises(ValueError, match="representation_time_model"):
+        _resolve_tempering(cfg, 1, persistent)

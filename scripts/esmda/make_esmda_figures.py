@@ -447,17 +447,23 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # has only the first -- so nothing changes for them, and a filtering run
     # gets the envelope rather than a bare fan.
     # ``make_filtering_figures.py`` already reads its own key this way.
-    obs_error_std = next(
-        (
-            value
-            for key in (
-                "esmda.obs_error_std",
-                "filtering.obs_error_std",
-            )
-            if (value := OmegaConf.select(cfg, key, default=None)) is not None
-        ),
-        None,
-    )
+    if OmegaConf.select(cfg, "observation_error", default=None) is None:
+        obs_error_std = next(
+            (
+                value
+                for key in (
+                    "esmda.obs_error_std",
+                    "filtering.obs_error_std",
+                )
+                if (value := OmegaConf.select(cfg, key, default=None)) is not None
+            ),
+            None,
+        )
+    else:
+        # Corrected likelihoods may have sensor/component-specific raw-frame
+        # errors, while this plot currently accepts one scalar width. Omit the
+        # envelope instead of drawing the obsolete legacy scalar as if physical.
+        obs_error_std = None
     fans = run_dir / "sensor_fans.png"
     _note_skipped(
         fans,

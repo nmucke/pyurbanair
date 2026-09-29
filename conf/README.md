@@ -27,6 +27,7 @@ without chaining it to another recipe.
 | Members and workers | `execution/` | Select a preset or override `ensemble.*`. |
 | Failure policy, common run flags, Hydra directory | `common/runtime.yaml` | Override only for a specific run. |
 | ESMDA/filtering scalars and components | `esmda/`, `filtering/` | Select a component group or override its field. |
+| Observation uncertainty | `observation/error.yaml` | Edit shared defaults or override `observation_error.*`. |
 | Observation construction | `observation/` | Select operator and aggregation groups. |
 | Surrogate data and training | `neural_surrogate/` | Training modes bundle architecture, trainer and loss. |
 
@@ -69,3 +70,10 @@ For random-geometry shards, the resolved config comes from the frozen plan;
 `config.requested.yaml` records the shard's launch request separately. Its
 manifest labels requested group choices explicitly because the plan does not
 preserve the original Hydra defaults list.
+
+Observation uncertainty has one owner: `observation/error.yaml`, included by all
+three assimilation workflows and mounted at `observation_error`. Instrument
+noise is added to synthetic measurements; representation uncertainty only
+widens the likelihood. The algorithm-level `obs_error_std` configuration keys
+have been removed. The similarly named field in saved observation artifacts
+still records physical marginal standard deviations.

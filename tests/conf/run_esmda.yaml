@@ -1,5 +1,6 @@
 # Independent frozen test configuration.
 defaults:
+- observation/error
 - case: xie_and_castro
 - _self_
 - esmda/localization: none
@@ -33,7 +34,6 @@ esmda:
   alpha: ${.num_steps}
   num_assimilation_windows: 1
   seed: 42
-  obs_error_std: 0.25
   interval_seconds: 3.0
   aggregation_mode: mean
   localization: null

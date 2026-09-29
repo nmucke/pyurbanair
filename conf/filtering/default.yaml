@@ -30,13 +30,13 @@ num_assimilation_windows: 3
 # window; the run refuses to start otherwise.
 assimilate_every_n_step: 1
 seed: 42
-obs_error_std: 0.1
-# Likelihood tempering: every analysis uses `beta * R` (R = obs_error_std**2
-# per observation) instead of R, i.e. L^(1/beta), so beta > 1 weakens each
+# Likelihood tempering: every analysis uses `beta * R` (R = the physical
+# observation-error variances from `observation_error`, conf/observation/
+# error.yaml) instead of R, i.e. L^(1/beta), so beta > 1 weakens each
 # analysis. Must be a finite number >= 1; 1.0 = the untempered filter, bit for
 # bit. A multiplier of R — NOT ensemble-spread inflation (filtering/inflation)
-# and NOT localization's `tapering_beta`. `obs_error_std` and the recorded
-# innovation chi2 stay physical. The ESMDA x filter hybrid
+# and NOT localization's `tapering_beta`. The recorded observation-error
+# artifacts and the innovation chi2 stay physical. The ESMDA x filter hybrid
 # (run_filter_smoothing.py) forwards `filter_smoothing.beta` into this key.
 beta: 1.0
 # state | parameter | joint. The parameter-updating modes (parameter and
