@@ -1,0 +1,9 @@
+# @package visualization
+# Explicit optional VTK render; always retains 2D previews if 3D is unavailable.
+defaults:
+  - quicklook
+  - _self_
+render_3d: true
+variable: speed
+max_frames: 30
+max_steps: 500

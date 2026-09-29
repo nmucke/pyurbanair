@@ -1065,7 +1065,7 @@ class ForwardModel(BaseForwardModel):
                 set_trestart(self.dirs)
                 carry_file = fetch_carry(self.dirs)
                 if carry_file is not None:
-                    template_file = carry_file
+                    template_file: pathlib.Path | None = carry_file
                 else:
                     self._ensure_warmstart_template()
                     template_file = self.warmstart_template_file

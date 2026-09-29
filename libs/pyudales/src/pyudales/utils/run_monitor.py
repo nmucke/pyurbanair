@@ -23,7 +23,7 @@ import subprocess
 import time
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Optional
+from typing import IO, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -140,11 +140,11 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
 
 def run_with_dt_watchdog(
     command: list[str],
-    env: dict,
+    env: dict[str, str],
     log_path: Path,
     check: InstabilityCheck,
-    stdout=None,
-    stderr=None,
+    stdout: int | IO[Any] | None = None,
+    stderr: int | IO[Any] | None = None,
 ) -> None:
     """Run ``command`` like ``subprocess.run(check=True)`` plus a dt watchdog.
 

@@ -1,0 +1,25 @@
+# @package visualization
+member: null
+reduction: null
+variable: horizontal_speed
+slices:
+  - axis: z
+    position: null
+probes: []
+time_start: null
+time_end: null
+stride: 1
+max_frames: 60
+max_cells: 8000000
+fps: 12
+width: 960
+height: 640
+cmap: viridis
+color_limits: null
+movie: true
+render_3d: false
+geometry: null
+camera: null
+seeds: []
+max_steps: 500
+simulation_seconds_per_video_second: null

@@ -1328,7 +1328,7 @@ def fetch_carry(dirs: DirectoryPaths) -> pathlib.Path | None:
     output_experiment_dir = dirs.output_dir / dirs.experiment_name
     output_experiment_dir.mkdir(parents=True, exist_ok=True)
 
-    restored_000 = None
+    restored_000: pathlib.Path | None = None
     for name in meta.get("files", []):
         src = carry_dir / name
         if not src.exists():
@@ -1403,7 +1403,5 @@ def copy_carry(src_dirs: DirectoryPaths, dst_dirs: DirectoryPaths) -> bool:
         "files": sorted(new_files),
     }
     (dst_carry / CARRY_META_NAME).write_text(json.dumps(new_meta, indent=2))
-    logger.info(
-        "Copied warmstart carry from member %s to %s", src_exp, dst_exp
-    )
+    logger.info("Copied warmstart carry from member %s to %s", src_exp, dst_exp)
     return True
