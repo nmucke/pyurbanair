@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -250,7 +250,9 @@ def create_observation_operator(
         else:
             for name, value in args.items():
                 component[name] = value
-        return instantiate(component)
+        return cast(
+            ObservationOperator | TemporalObservationOperator, instantiate(component)
+        )
     operator = ObservationOperator(
         obs_x=obs_x.tolist(),
         obs_y=obs_y.tolist(),
@@ -290,7 +292,7 @@ def create_aggregate_observations(cfg: Any) -> AggregateObservations | None:
         component = cfg.observation.get("aggregation")
         if component is None or component.get("interval_seconds") is None:
             return None
-        return instantiate(component)
+        return cast(AggregateObservations, instantiate(component))
     node = _plain(cfg)
     interval_seconds = node.get("interval_seconds")
     if interval_seconds is None:

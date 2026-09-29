@@ -72,6 +72,20 @@ class BaseEnsembleForwardModel:
     - Optionally override sequential methods for custom behavior
     """
 
+    @property
+    def forecast_window_replay_enabled(self) -> bool:
+        """Opt-in backend support for deterministic replay of hidden state."""
+        return False
+
+    def begin_forecast_window(self) -> None:
+        """Capture member-specific window-start checkpoints when supported."""
+
+    def restore_forecast_window(self) -> None:
+        """Restore each member's checkpoint before the next window replay."""
+
+    def end_forecast_window(self, commit: bool) -> None:
+        """Accept one posterior endpoint, or roll back the whole window."""
+
     def __init__(
         self,
         forward_model: BaseForwardModel,

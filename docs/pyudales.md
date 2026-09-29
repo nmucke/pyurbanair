@@ -245,9 +245,10 @@ of the initial condition.
 ### 4.1 Opt-in strain/rotation discrepancy (fixed forward runs)
 
 `model.forward_model.model_discrepancy` enables a native Vreman viscosity
-correction. This first implementation supports fixed coefficients in single and
-ensemble forward runs. Assimilation-model enablement is rejected until the
-window checkpoint/replay and parameter-inference work is implemented. There are
+correction. Fixed coefficients are supported in single and ensemble forward
+runs. The backend also provides the window checkpoint/replay protocol below.
+Assimilation-model enablement in the runners remains rejected pending
+parameter-inference integration and its acceptance experiments. There are
 no time-varying coefficient schedules or process noise.
 
 All feature settings must be chosen explicitly; the following numbers illustrate
@@ -284,6 +285,9 @@ provided fields; previous call values never become defaults. All three are
 written after preprocessing. Time-array and nonfinite coefficients are rejected.
 Disabling a reused case strips extension-only namelist keys before selecting the
 stock executable; untouched disabled inputs are a no-op.
+When enabled, the native `c_vreman` value must be finite and nonnegative, including
+any per-call `sgs_constant` override. A positive multiplier cannot repair a
+negative native eddy viscosity.
 
 The correction is `exp(L*tanh((b0+b1*phi+b2*q)/L))`, where `phi` is the compact
 sine-squared height band and `q` compares squared rotation and strain norms.
@@ -307,9 +311,58 @@ feature settings, coefficients, executable/build provenance and native multiplie
 extrema/saturation diagnostics. The native diagnostic text file is collected
 before output cleanup. Ensemble metadata is aggregated as
 `model_discrepancy_by_member`; forward rollouts retain each window under
-`model_discrepancy_by_window`. Native physics, multi-rank equivalence, wall/energy
-budgets, restart replay, and coefficient-recovery experiments remain separate
-acceptance gates; compiling the extension does not demonstrate transfer skill.
+`model_discrepancy_by_window`. General native physics, multi-rank equivalence,
+wall/energy budgets, continuous-versus-segmented forecasts, and coefficient
+recovery remain separate acceptance gates; compiling the extension does not
+demonstrate transfer skill.
+
+### 4.2 Window checkpoints for repeated forecasts
+
+Discrepancy-enabled forward and ensemble models implement
+`begin_forecast_window()`, `restore_forecast_window()`, and
+`end_forecast_window(commit=...)`. Begin captures each member's full native
+carry, runtime input files, template, mutable parameter defaults, and physical
+clock in a separate temporary directory. Restore verifies the snapshot hashes
+and stages its contents before replacing the live inputs. Checkpoints include
+every MPI rank; incomplete or corrupt carry fails instead of silently falling
+back to a cold start. Snapshot storage is additional to forecast output storage
+and is released when the window closes.
+
+Each replay starts from these inputs, then injects the current velocity/pressure
+state and coefficients. The native startup viscosity refresh still runs before
+timestep selection. A successful `commit=True` retains the final forecast's
+carry and clock once; `commit=False` restores the original inputs and clock.
+The ESMDA loop uses this lifecycle automatically on supporting backends, rolling
+back on errors or `final_forecast=False`. Ordinary sequential forward calls
+outside this lifecycle continue carrying their previous endpoint.
+
+Failure substitution copies the donor's window-start identity as well as its
+endpoint carry and clock, including the synthetic-inlet seed. Discrepancy
+parameter substitution clones the donor exactly: failure jitter would associate
+the accepted forecast with coefficients it never used. The failed member's
+original snapshot remains available for whole-window rollback. The disabled
+backend path does not capture checkpoints or change failure jitter.
+
+A cold checkpoint has no native carry. Repeated cold calls restart from the
+same inputs; a later analyzed warm start without a native carry constructs its
+template from that attempt's inputs. This is not an archived post-spinup hidden
+state. Joint cold-to-warm assimilation and cross-model initial states still need
+dedicated validation before runner enablement.
+
+The small native regression case verifies exact repeated cold and warm forecasts
+on one and two MPI ranks, including replay after an intervening state/coefficient
+change. With zero coefficients the diagnostic multiplier is exactly one, but
+the enabled startup refresh can change the first adaptive timestep, so stock
+comparison uses a numerical tolerance. The rank regression compares the
+extension-minus-stock effect separately at each rank count; it does not assert
+that independently initialized stock runs are decomposition-independent.
+
+These checkpoints support replay within a live Python run, not resuming an
+interrupted assimilation job. They do not checkpoint the assimilation RNG or
+restore forecast output artifacts. Nonzero scalar top-flux cases and discrete
+energy/wall budgets remain unverified: startup boundary gradients can depend on
+the diffusivity that the enabled refresh subsequently changes. A neutral-case
+velocity regression cannot establish that boundary budget.
 
 ---
 

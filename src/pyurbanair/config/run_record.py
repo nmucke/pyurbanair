@@ -28,8 +28,8 @@ def validate_run_config(cfg: DictConfig, workflow: str) -> None:
                 )
             if role == "assim_model":
                 raise ValueError(
-                    "Discrepancy assimilation is not implemented yet; first validate "
-                    "fixed-coefficient forward runs and deterministic window replay."
+                    "Discrepancy assimilation is not implemented yet; coefficient "
+                    "prior/inference integration and recovery validation are still required."
                 )
     if workflow == "render":
         if OmegaConf.is_missing(cfg, "input"):
