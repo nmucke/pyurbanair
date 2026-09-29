@@ -60,6 +60,19 @@ cycle-local coordinates change nothing on the filter side.
 C_D stays per-instance: the smoother's is the window-aggregated ``(N_d, N_d)``
 diagonal, the filter's a per-frame 1-D variance vector. The hybrid never builds
 either — the run script does.
+
+**Beta tempering.** Every raw observation is used by BOTH phases, so the hybrid
+carries a :class:`~data_assimilation.filter_smoothing.tempering.TemperingPolicy`
+that says how strongly each may use it: the filter's ``beta`` (every analysis
+uses ``beta R``) and the smoother's ``likelihood_weight`` (every MDA update uses
+``alpha_base / w``). The hybrid never sets either — the collaborators are built
+with them — it only VALIDATES that they match its policy, at construction and
+again at every ``run()``, and never mutates them. Under
+``likelihood_allocation="shared_budget"`` (``w + 1/beta = 1``) it additionally
+proves, before the ESMDA phase, that both phases really see the same raw
+observation product (see :meth:`FilterSmoothing._check_shared_product`); the
+default ``filter_only`` policy at ``beta = 1`` is the legacy hybrid, bit for
+bit.
 """
 
 import logging
@@ -68,8 +81,13 @@ import shutil
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
+import jax.numpy as jnp
 import numpy as np
 import xarray
+from data_assimilation.filter_smoothing.tempering import (
+    TemperingPolicy,
+    resolve_tempering_policy,
+)
 from data_assimilation.filtering.base import BaseFilter, CycleDiagnostics
 from data_assimilation.smoothing.esmda import ParameterESMDA, StateAndParameterESMDA
 
@@ -371,6 +389,16 @@ class FilterSmoothing:
             ``mode="parameter"`` is rejected — with no state block the filter
             phase would produce no posterior state at all, which is the one
             thing the hybrid asks it for.
+        tempering: The likelihood-allocation policy
+            (:func:`~data_assimilation.filter_smoothing.tempering.\
+resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
+            own ``beta`` — so a filter built with ``beta=1`` and a full-weight
+            smoother is exactly the legacy hybrid. Either way the
+            collaborators must ALREADY carry the policy's weights
+            (``filter.beta == policy.beta``, ``smoother.likelihood_weight ==
+            policy.smoother_weight``); a mismatch raises instead of being
+            patched, so direct library use is held to the same contract as
+            the Hydra entry point.
 
     The filter's ``collect_pred_obs`` flag drives the same three histories
     here: each ``filter.run`` REBINDS its own lists (so a caller keeps the
@@ -378,7 +406,12 @@ class FilterSmoothing:
     calls into same-named attributes, rebound once per :meth:`run` call.
     """
 
-    def __init__(self, smoother: ParameterESMDA, filter: BaseFilter) -> None:
+    def __init__(
+        self,
+        smoother: ParameterESMDA,
+        filter: BaseFilter,
+        tempering: Optional[TemperingPolicy] = None,
+    ) -> None:
         # ``StateAndTimeVaryingParameterESMDA`` inherits from
         # ``TimeVaryingParameterESMDA``, hence from ``ParameterESMDA``, so the
         # isinstance test below accepts it: the state-bearing branch has to be
@@ -406,17 +439,218 @@ class FilterSmoothing:
                 "filtering.mode=state or =joint."
             )
 
+        if tempering is None:
+            # Filter-only at whatever beta the filter was built with: the
+            # smoother must then be full-weight, which _check_tempering asserts
+            # (a tempered smoother needs an explicit shared_budget policy).
+            tempering = resolve_tempering_policy(
+                getattr(filter, "beta", 1.0), "filter_only"
+            )
+        elif not isinstance(tempering, TemperingPolicy):
+            raise ValueError(
+                "tempering must be a TemperingPolicy (see "
+                "resolve_tempering_policy) or None, got "
+                f"{type(tempering).__name__}."
+            )
+
         self.smoother = smoother
         # Shadowing the builtin is confined to this constructor's argument name,
         # which is the user-facing spec ("the filter"); nothing in this module
         # calls ``filter()``.
         self.filter = filter
+        self.tempering = tempering
+        self._check_tempering()
 
         # Accumulated across the filter phase's calls when the filter records
         # them; rebound per ``run`` (see the class docstring).
         self.pred_obs_history: list[np.ndarray] = []
         self.pred_obs_post_history: list[np.ndarray] = []
         self.pred_obs_frames_history: list[Optional[xarray.DataArray]] = []
+
+    # ------------------------------------------------------------------
+    # Tempering
+    # ------------------------------------------------------------------
+
+    def _check_tempering(self) -> None:
+        """The collaborators carry the policy's weights; shared products agree.
+
+        Called at construction AND at the top of every :meth:`run`: the
+        collaborators are public, mutable objects, and the checks are cheap, so
+        a weight or stride changed after construction is caught before it can
+        cost a forecast. Nothing is ever written to the collaborators — each
+        applies its own weight exactly once, from construction
+        (``BaseFilter.effective_C_D_diag``, ``_BaseESMDA.effective_alpha``), so
+        repeated windows cannot re-multiply a covariance either.
+        """
+        policy = self.tempering
+        filter_beta = getattr(self.filter, "beta", 1.0)
+        if filter_beta != policy.beta:
+            raise ValueError(
+                f"The filter was built with beta={filter_beta!r} but the "
+                f"hybrid's tempering policy has beta={policy.beta!r} "
+                f"({policy.likelihood_allocation}). Build the filter with "
+                "beta=policy.beta; the hybrid never rewrites it."
+            )
+        smoother_weight = getattr(self.smoother, "likelihood_weight", 1.0)
+        if smoother_weight != policy.smoother_weight:
+            raise ValueError(
+                "The smoother was built with likelihood_weight="
+                f"{smoother_weight!r} but the tempering policy "
+                f"({policy.likelihood_allocation}, beta={policy.beta!r}) "
+                f"assigns it {policy.smoother_weight!r}. Build the smoother "
+                "with likelihood_weight=policy.smoother_weight (a tempered "
+                "smoother needs an explicit shared_budget policy)."
+            )
+        # The collaborators validated their own effective covariances at
+        # construction; re-running the policy's check in the filter's actual
+        # dtype keeps the two contracts from drifting apart.
+        # Only the extremes matter, so the smoother's dense (N_d, N_d) C_D is
+        # reduced on device rather than copied to the host.
+        C_D_diag = np.asarray(self.filter.C_D_diag)
+        policy.check_numerics(
+            base_alpha=float(self.smoother.alpha),
+            variances=[
+                float(np.max(C_D_diag)),
+                float(jnp.max(jnp.diag(self.smoother.C_D))),
+            ],
+            dtype=C_D_diag.dtype,
+        )
+        if policy.likelihood_allocation == "shared_budget":
+            self._check_shared_collaborators()
+
+    def _check_shared_collaborators(self) -> None:
+        """Structural preconditions of the shared likelihood budget.
+
+        ``w + 1/beta = 1`` is accounting PER REUSED OBSERVATION, so it only
+        means something if the two phases condition on the same raw
+        observations, through the same operator, with the same physical
+        covariance. The data-dependent half of that proof needs the batches and
+        lives in :meth:`_check_shared_product`; this is the half the
+        collaborators alone decide.
+
+        Correlated (temporal) observation errors are not checked for because
+        they cannot occur yet: both collaborators accept diagonal ``C_D`` only
+        (the smoother rejects off-diagonal entries, the filter takes a 1-D
+        variance vector). A correlated error model must be rejected here until
+        both phases implement the same joint likelihood.
+        """
+        aggregator = getattr(self.smoother, "aggregate_observations", None)
+        if aggregator is not None:
+            raise ValueError(
+                "likelihood_allocation='shared_budget' requires the smoother to "
+                "assimilate the RAW frames (aggregate_observations=None; "
+                "esmda.interval_seconds=null in the run script), but it "
+                f"aggregates them ({type(aggregator).__name__}). An aggregated "
+                "product is a different likelihood from the filter's raw "
+                "frames, so the shared budget would not be shared."
+            )
+        every_n = int(getattr(self.filter, "assimilate_every_n_step", 1))
+        if every_n != 1:
+            # Conservative: with n > 1 the filter analyses only every n-th
+            # frame of a batch, while the smoother assimilates every frame it
+            # is handed.
+            raise ValueError(
+                "likelihood_allocation='shared_budget' requires the filter to "
+                f"analyse every frame (assimilate_every_n_step=1, got {every_n}),"
+                " so both phases assimilate the same observation product."
+            )
+        if self.smoother.observation_operator is not self.filter.observation_operator:
+            raise ValueError(
+                "likelihood_allocation='shared_budget' requires the smoother "
+                "and the filter to share ONE observation operator instance: "
+                "the budget is split per observation, so both phases must "
+                "predict the same observations."
+            )
+
+    def _check_shared_product(self, batches: list[xarray.DataArray]) -> None:
+        """The two phases see identical observations and covariances.
+
+        Run at the top of :meth:`run`, BEFORE the ESMDA phase (hence before any
+        forecast). Validates identities and timestamps, not merely lengths:
+
+        * every batch carries the same non-time coordinates as batch 0 (the
+          ESMDA phase concatenates with ``join="override"``, which would
+          otherwise silently relabel a batch with a different ``obs`` axis);
+        * the frame times are strictly increasing across the whole window
+          (:func:`segment_bounds` plus the batch starts) — a repeated
+          timestamp would be the same frame consumed twice;
+        * the smoother's flattened window vector is, value for value and in
+          order, the concatenation of the frames the filter will assimilate;
+        * the smoother's physical ``C_D`` diagonal is the filter's per-frame
+          ``C_D_diag`` tiled over those frames.
+        """
+        reference = batches[0]
+        ref_coords = {
+            str(name): np.asarray(coord.values)
+            for name, coord in reference.coords.items()
+            if "time" not in coord.dims
+        }
+        for k, batch in enumerate(batches):
+            if batch.sizes.get("obs") != reference.sizes.get("obs"):
+                raise ValueError(
+                    f"observations[{k}] has {batch.sizes.get('obs')} "
+                    f"observations per frame, observations[0] "
+                    f"{reference.sizes.get('obs')}; shared_budget needs one "
+                    "observation product for the whole window."
+                )
+            coords = {
+                str(name): np.asarray(coord.values)
+                for name, coord in batch.coords.items()
+                if "time" not in coord.dims
+            }
+            if coords.keys() != ref_coords.keys() or not all(
+                np.array_equal(coords[name], ref_coords[name]) for name in coords
+            ):
+                raise ValueError(
+                    f"observations[{k}] labels its observations differently "
+                    "from observations[0] (non-time coordinates differ). "
+                    "shared_budget requires the smoother's window vector and "
+                    "the filter's frames to be the same observations."
+                )
+        segment_bounds(batches)
+        # segment_bounds orders the batch ENDS only; a batch may still start
+        # at or before the previous one's end, i.e. repeat a boundary frame.
+        frame_times = np.concatenate(
+            [np.asarray(batch.coords["time"].values, dtype=float) for batch in batches]
+        )
+        if frame_times.size > 1 and not np.all(np.diff(frame_times) > 0.0):
+            raise ValueError(
+                "shared_budget: the window's frame times are not strictly "
+                f"increasing across batches ({frame_times.tolist()}); a "
+                "repeated timestamp is the same observation consumed twice, "
+                "which the per-observation budget does not allow."
+            )
+
+        # The frames exactly as each phase will read them: through the
+        # collaborators' own conversion paths, so dtype and order are theirs.
+        filter_frames = [
+            np.asarray(self.filter._cycle_observations(batch)) for batch in batches
+        ]
+        num_frames = sum(int(f.shape[0]) for f in filter_frames)
+        window_obs = xarray.concat(batches, dim="time", join="override")
+        smoother_vector = np.asarray(self.smoother._get_observations(window_obs))
+        filter_vector = np.concatenate([f.reshape(-1) for f in filter_frames])
+        if smoother_vector.shape != filter_vector.shape or not np.array_equal(
+            smoother_vector, filter_vector
+        ):
+            raise ValueError(
+                "shared_budget: the smoother's flattened window observations "
+                "are not the filter's per-cycle frames in the same order "
+                f"({smoother_vector.shape} vs {filter_vector.shape})."
+            )
+
+        smoother_var = np.asarray(jnp.diag(self.smoother.C_D))
+        filter_var = np.tile(np.asarray(self.filter.C_D_diag), num_frames)
+        if smoother_var.shape != filter_var.shape or not np.allclose(
+            smoother_var, filter_var, rtol=1e-6, atol=0.0
+        ):
+            raise ValueError(
+                "shared_budget: the smoother's physical C_D diagonal "
+                f"(length {smoother_var.size}) is not the filter's per-frame "
+                f"C_D_diag tiled over the window's {num_frames} frame(s) "
+                f"(length {filter_var.size}). Both phases must condition on "
+                "the same physical observation-error covariance."
+            )
 
     # ------------------------------------------------------------------
     # Observations
@@ -572,6 +806,12 @@ class FilterSmoothing:
             A :class:`FilterSmoothingResult`.
         """
         batches = self._validate_observations(observations)
+        # Pre-flight, before the ESMDA phase's first forecast: the weights
+        # still match the policy and, under a shared budget, both phases are
+        # about to condition on the same raw observations.
+        self._check_tempering()
+        if self.tempering.likelihood_allocation == "shared_budget":
+            self._check_shared_product(batches)
 
         # --- ESMDA phase ------------------------------------------------
         # ``join="override"``: the batches share the ``obs`` axis by

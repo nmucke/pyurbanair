@@ -23,6 +23,11 @@ aggregation (``AggregateObservations``) is a smoother-side choice, kept by the
 ESMDA smoothers. Here every frame the operator produced is assimilated, so H
 and y agree frame by frame by construction.
 
+Every analysis may be likelihood-TEMPERED by the filter's ``beta >= 1``: it
+then uses ``beta * C_D`` instead of ``C_D`` (the ESMDA x filter hybrid's knob;
+see :class:`BaseFilter`). ``beta = 1`` is the default and the untempered filter,
+bit for bit; ``C_D_diag`` and the chi2 diagnostic stay physical either way.
+
 Two additive facilities are inert by default: an ``assimilate_every_n_step``
 that thins the ANALYSES within a cycle without thinning what the operator
 produces or what is recorded, and a ``collect_forecast_frames`` that keeps
@@ -32,6 +37,8 @@ the attributes).
 """
 
 import logging
+import math
+import numbers
 import os
 import pathlib
 import shutil
@@ -64,6 +71,35 @@ from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 logger = logging.getLogger(__name__)
 
 FilterMode = Literal["state", "parameter", "joint"]
+
+
+def validate_beta(beta: Any) -> float:
+    """Validate the filter's likelihood-tempering multiplier; return a float.
+
+    ``beta`` multiplies the observation-error covariance of every analysis
+    (``R_filter = beta * R``), so it must be a real, finite number ``>= 1``:
+    below one it would SHARPEN the likelihood beyond the data's own errors, and
+    ``inf`` — the "filter off" limit — must not be passed through a solver (see
+    ``docs/plans/hybrid_beta_tempering.md``). Booleans are rejected explicitly:
+    ``True`` is an ``int`` in Python and would otherwise pass as ``beta = 1``,
+    which is exactly the silent config slip (``beta: yes``) this guards against.
+    """
+    # Flags first, then one test: chaining the isinstance narrowings makes the
+    # pre-commit mypy (NumPy untyped there) call the error branch unreachable.
+    is_bool = isinstance(beta, bool) or type(beta) is np.bool_
+    is_real = isinstance(beta, numbers.Real)
+    if is_bool or not is_real:
+        raise ValueError(
+            f"beta must be a real number >= 1 (a multiplier of C_D), got "
+            f"{beta!r} of type {type(beta).__name__}."
+        )
+    value = float(beta)
+    if not math.isfinite(value) or value < 1.0:
+        raise ValueError(
+            f"beta must be a finite number >= 1 (a multiplier of C_D; 1 = the "
+            f"untempered filter), got {beta!r}."
+        )
+    return value
 
 
 @dataclass
@@ -225,6 +261,14 @@ class BaseFilter:
             for the physical state block. Supported only by unlocalized
             ``"state"`` and ``"joint"`` analyses.
         rng_key: PRNG key; defaults to a fresh ``PRNGKey(42)`` per instance.
+        beta: Likelihood tempering of every analysis: each one uses the
+            EFFECTIVE covariance ``beta * C_D`` (``L^(1/beta)``), so ``beta > 1``
+            weakens the filter's pull toward the data. A real finite number
+            ``>= 1``; ``1.0`` (the default) is the untempered filter, bit for
+            bit. It is neither ensemble-spread inflation nor localization's
+            ``tapering_beta``, and it leaves :attr:`C_D_diag` physical (see
+            :attr:`effective_C_D_diag`). The ESMDA x filter hybrid sets it from
+            its likelihood-allocation policy.
 
     On-disk mode mirrors the smoother: each cycle's forecast is written to
     ``cycle_{k}/`` under the forward model's results dir. Setting
@@ -298,6 +342,7 @@ class BaseFilter:
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
+        beta: float = 1.0,
     ) -> None:
         if mode not in ("state", "parameter", "joint"):
             raise ValueError(
@@ -330,6 +375,35 @@ class BaseFilter:
                 )
             C_D = jnp.diag(C_D)
         self.C_D_diag = validate_variances(C_D)
+
+        # Beta tempering: R_filter = beta * R. Scaled HERE, once per filter
+        # instance, and never again: every analysis of every cycle of every
+        # run() call reads the same precomputed vector, so repeated windows
+        # (consecutive run() calls on one instance, as run_filtering.py and the
+        # hybrid make) can never compound it. ``C_D_diag`` itself stays the
+        # PHYSICAL per-frame covariance — it is what the innovation chi2 (NIS)
+        # is measured against and what the scripts write as obs_error_std.
+        #
+        # The covariance is scaled exactly ONCE, and only here: the stochastic
+        # kernel draws its perturbations from the covariance it is handed
+        # (std ``sqrt(beta) * sigma``) and the ensemble transforms whiten by
+        # it, so beta must NOT also reach the kernel as ``alpha``. Because R is
+        # scaled rather than rows, the whole augmented update — state and
+        # parameter rows alike in joint mode — is tempered uniformly.
+        self.beta: float = validate_beta(beta)
+        # ``1.0 * x`` is exact in every float dtype, so the default reproduces
+        # the untempered filter bit for bit (same values, same RNG stream — no
+        # key is split for beta). Validated in its ACTUAL dtype: a finite beta
+        # can still overflow a float32 variance to inf, which must fail here
+        # rather than as a NaN ensemble in cycle 0.
+        effective = self.beta * self.C_D_diag
+        if not bool(jnp.all(jnp.isfinite(effective))):
+            raise ValueError(
+                f"beta={self.beta!r} overflows the {effective.dtype} "
+                "observation-error variances (beta * C_D is not finite). Use a "
+                "smaller beta."
+            )
+        self.effective_C_D_diag: jnp.ndarray = validate_variances(effective)
 
         if (
             localization is not None
@@ -1233,17 +1307,27 @@ class BaseFilter:
 
         The same helper serves the reduction's discarded-increment diagnostic
         (see :meth:`_record_reduction_diagnostics`), which must reproduce this
-        sweep exactly — same frames, same order, same keys — for its difference
-        to measure the truncation and nothing else.
+        sweep exactly — same frames, same order, same keys, same (effective)
+        covariance — for its difference to measure the truncation and nothing
+        else.
+
+        Every analysis is handed :attr:`effective_C_D_diag` — ``beta * C_D`` —
+        and nothing else: each frame's analysis is full weight in the sense of
+        taking no MDA ``alpha``, but tempered by ``beta`` through its
+        covariance.
         """
         num_frames, n_obs = int(obs.shape[0]), int(obs.shape[1])
         for frame in range(num_frames):
             start = obs_offset + frame * n_obs
+            # The EFFECTIVE (beta-tempered) covariance, and this is its only
+            # consumer: the sweep and the reduction-diagnostic replay both come
+            # through here, so they cannot disagree about R. Identical to the
+            # physical ``C_D_diag`` at the default beta = 1.
             rows = self.analysis(
                 rows,
                 rows[start : start + n_obs],
                 obs[frame],
-                self.C_D_diag,
+                self.effective_C_D_diag,
                 frame_keys[frame],
                 **plumbing,
             )
@@ -1472,6 +1556,11 @@ class BaseFilter:
         ``C_D`` is per frame, so the stacked system's error covariance is
         ``tile(C_D_diag, T)``, the block-diagonal repetition of it.
 
+        The chi2 is measured against the PHYSICAL ``C_D_diag``, never the
+        beta-tempered analysis covariance: it asks whether the forecast spread
+        is consistent with the actual observation errors, which beta does not
+        change (beta only decides how hard the analysis pulls).
+
         ``pred_obs`` must be the raw forecast (pre-inflation) so the chi2
         spread term reflects what the model produced, not what the inflation
         chose; the block spreads intentionally use the (possibly inflated)
@@ -1545,6 +1634,7 @@ class EnsembleKalmanFilter(BaseFilter):
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
+        beta: float = 1.0,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -1557,4 +1647,5 @@ class EnsembleKalmanFilter(BaseFilter):
             parameter_evolution=parameter_evolution,
             state_reduction=state_reduction,
             rng_key=rng_key,
+            beta=beta,
         )

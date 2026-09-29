@@ -34,6 +34,7 @@ filtering:
   assimilate_every_n_step: 1
   seed: 42
   obs_error_std: 0.1
+  beta: 1.0
   mode: joint
   analysis: stochastic
   localization: null
@@ -49,6 +50,7 @@ filtering:
     state_reduction: ${filtering.state_reduction}
     inflation: ${filtering.inflation}
     parameter_evolution: ${filtering.parameter_evolution}
+    beta: ${filtering.beta}
 run:
   skip_viz: true
   results_dir: null

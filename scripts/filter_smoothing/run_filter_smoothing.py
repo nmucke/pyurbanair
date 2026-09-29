@@ -34,6 +34,8 @@ Declarative axes (see conf/run_filter_smoothing.yaml):
         the filter's machinery, reused unchanged from run_filtering.yaml.
   * ``filter_smoothing.num_assimilation_windows=W``
         the horizon, in windows.
+  * ``filter_smoothing.beta=B filter_smoothing.likelihood_allocation=...``
+        beta tempering (``filter_only`` | ``shared_budget``); see below.
 
 and the truth source, mirroring both siblings:
 
@@ -109,6 +111,19 @@ run_filtering.py does, so neither pipeline needs a hybrid-specific reader:
     (the MDA iterations' predicted observations — ``num_steps`` entries with NO
     posterior entry, see ``_ESMDA_PRED_OBS_SEMANTICS``).
 
+BETA TEMPERING. Every raw observation is assimilated by BOTH halves, so
+``filter_smoothing.{beta, likelihood_allocation}`` decide how strongly each may
+use it (``data_assimilation.filter_smoothing.tempering``). The policy is
+resolved ONCE, in the pre-flight block — an invalid beta, a conflicting
+``filtering.beta`` override or a shared-budget run on an aggregated/strided
+product fails before the truth is simulated — and then drives both
+constructors: the filter's ``beta`` (forwarded by the config) and the
+smoother's derived ``likelihood_weight``. ``filter_only`` at ``beta = 1`` (the
+default) is the legacy hybrid, bit for bit. ``run_info.yaml`` records the
+policy, both phase weights, base/effective alphas, the nominal combined
+exponent, the observation-error model and an observation-product identity;
+``obs_error_std`` artifacts and the innovation chi2 stay PHYSICAL.
+
 There is no ``window_{w}_prior_state.nc``: as in a pure filtering run there is
 no window-long prior rollout to save (the MDA's own iterate forecasts are
 pruned), and ``run_info.yaml``'s ``configuration.save_prior_state: false``
@@ -127,17 +142,20 @@ Examples::
 """
 
 import dataclasses
+import hashlib
+import json
+import numbers
 import pathlib
 import sys
 import time
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 import hydra
 import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray
-from data_assimilation import FilterSmoothing
+from data_assimilation import FilterSmoothing, TemperingPolicy, resolve_tempering_policy
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
@@ -146,6 +164,7 @@ from pyurbanair.config.hydra_helpers import (
     clean_outputs,
     create_aggregate_observations,
     create_observation_operator,
+    create_observation_points,
     filter_parameter_config,
 )
 from pyurbanair.config.run_record import (
@@ -216,9 +235,154 @@ _ESMDA_PRED_OBS_SEMANTICS = (
     "variables are carried alongside rather than being read from that file."
 )
 
+# The observation-error model both halves are built from, recorded with every
+# run so a later error-model change (docs/plans/observation_likelihood_
+# implementation.md) cannot be confused with this one: ONE scalar
+# `filter_smoothing.obs_error_std`, independent across sensors, components and
+# frames (a diagonal C_D; neither half accepts anything else), and — on the
+# smoother's aggregated product — the same per-entry variance, NOT reduced by
+# the bin count. Correlated (temporal) errors do not exist yet; the hybrid
+# rejects any non-diagonal product under a shared likelihood budget.
+_OBSERVATION_ERROR_MODEL = "legacy_scalar_iid_diagonal/v1"
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
+
+def _resolve_tempering(cfg: DictConfig, every_n: int) -> TemperingPolicy:
+    """Resolve the beta-tempering policy — PRE-FLIGHT, before any solver runs.
+
+    ``filter_smoothing.beta`` is the single source: ``filtering.beta`` (and the
+    filter target's own ``beta``) interpolate it, so a differing value there is
+    a conflicting override and is rejected rather than silently winning. The
+    smoother's weight is derived, never configured, so an explicit
+    ``esmda.smoother.likelihood_weight`` is rejected the same way. Under
+    ``shared_budget`` the two halves must assimilate the same raw product: the
+    smoother's aggregation must be off, and the analysis stride is pinned to 1
+    (conservatively — the stride thins both halves identically here, but the
+    library-level contract is stated per analysed frame). The numerics are
+    checked in the analysis dtype against the physical variance and the base
+    alpha, exactly as the constructors will.
+    """
+    node = cfg.filter_smoothing
+    beta = node.get("beta", 1.0)
+    allocation = node.get("likelihood_allocation", "filter_only")
+    num_steps = int(cfg.esmda.num_steps)
+    alpha = cfg.esmda.get("alpha", None)
+    base_alpha = float(num_steps if alpha is None else alpha)
+    obs_error_std = float(cfg.filter_smoothing.obs_error_std)
+    try:
+        policy = resolve_tempering_policy(
+            beta,
+            allocation,
+            base_alpha=base_alpha,
+            variances=[obs_error_std**2],
+        )
+    except ValueError as err:
+        raise ValueError(
+            "filter_smoothing.beta / filter_smoothing.likelihood_allocation: " f"{err}"
+        ) from err
+
+    for key, value in (
+        ("filtering.beta", cfg.filtering.get("beta", policy.beta)),
+        ("filtering.filter.beta", cfg.filtering.filter.get("beta", policy.beta)),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, numbers.Real)
+            or float(value) != policy.beta
+        ):
+            raise ValueError(
+                f"{key}={value!r} conflicts with filter_smoothing.beta="
+                f"{policy.beta!r}. The hybrid's beta is set ONLY on "
+                "filter_smoothing.beta (filtering.beta interpolates it); drop "
+                f"the {key} override."
+            )
+    configured_weight = cfg.esmda.smoother.get("likelihood_weight", None)
+    if configured_weight is not None:
+        raise ValueError(
+            f"esmda.smoother.likelihood_weight={configured_weight!r} is set, but "
+            "the smoother's weight is DERIVED from filter_smoothing.beta and "
+            "filter_smoothing.likelihood_allocation "
+            f"(here {policy.smoother_weight!r}); drop the override."
+        )
+
+    if policy.likelihood_allocation == "shared_budget":
+        if create_aggregate_observations(cfg) is not None:
+            raise ValueError(
+                "filter_smoothing.likelihood_allocation=shared_budget requires "
+                "the smoother to assimilate the RAW frames the filter does, but "
+                f"esmda.interval_seconds={cfg.esmda.get('interval_seconds')!r} "
+                "aggregates them. Set esmda.interval_seconds=null (or "
+                "observation/aggregation=none): the shared budget is accounted "
+                "per raw observation, so an aggregated product would not share it."
+            )
+        if every_n != 1:
+            raise ValueError(
+                "filter_smoothing.likelihood_allocation=shared_budget requires "
+                f"filtering.assimilate_every_n_step=1 (got {every_n}). "
+                "Conservative for now: the shared budget is validated per "
+                "analysed raw frame."
+            )
+    return policy
+
+
+def _observation_product(
+    cfg: DictConfig,
+    obs_op: Any,
+    n_d_frame: int,
+    every_n: int,
+    aggregate_obs: Optional[Any],
+) -> dict[str, Any]:
+    """An identity record of the observation product the halves assimilated.
+
+    Enough to tell whether two runs (e.g. a filter-only and a shared-budget
+    member of a beta sweep) conditioned on the same observations: the
+    operator chain, the observed components, the per-frame length, the stride,
+    the smoother's aggregation, and a SHA-256 of the sensor coordinates (the
+    resolved points, so ``obs.mode=grid`` hashes the same as the equivalent
+    explicit points).
+    """
+    obs_x, obs_y, obs_z = create_observation_points(cfg.obs)
+    states = [str(s) for s in cfg.obs.states]
+    payload = json.dumps(
+        {
+            "x": np.asarray(obs_x, dtype=float).tolist(),
+            "y": np.asarray(obs_y, dtype=float).tolist(),
+            "z": np.asarray(obs_z, dtype=float).tolist(),
+            "states": states,
+        },
+        sort_keys=True,
+    )
+    # The wrapper chain, outermost first: the stride wrapper (when the stride
+    # bites) around the temporal wrapper around the spatial operator.
+    chain = [type(obs_op).__name__]
+    inner = obs_op
+    while len(chain) < 8:
+        wrapped = getattr(inner, "_operator", None)
+        if wrapped is None:
+            wrapped = getattr(inner, "observation_operator", None)
+        if wrapped is None:
+            break
+        chain.append(type(wrapped).__name__)
+        inner = wrapped
+    return {
+        "operator": chain,
+        "observed_states": states,
+        "num_sensors": int(np.asarray(obs_x).size),
+        "num_observations_per_frame": int(n_d_frame),
+        "assimilate_every_n_step": int(every_n),
+        "smoother_aggregation": (
+            None
+            if aggregate_obs is None
+            else {
+                "interval_seconds": float(cfg.esmda.interval_seconds),
+                "mode": str(cfg.esmda.aggregation_mode),
+            }
+        ),
+        "sensor_coordinates_sha256": hashlib.sha256(payload.encode()).hexdigest(),
+    }
 
 
 def _nominal_window_clock(
@@ -374,6 +538,10 @@ def run(cfg: DictConfig) -> None:
             "esmda/smoother=dynamic (parameter-only), or "
             "scripts/esmda/run_esmda.py for a state-bearing smoother."
         )
+
+    # Beta tempering, resolved ONCE here — before the run directory, the truth
+    # and every forecast — and handed to both constructors and the hybrid.
+    tempering = _resolve_tempering(cfg, every_n)
 
     # A time-varying PRIOR is what makes the ESMDA posterior a knot TRAJECTORY,
     # which in turn is what makes the filter phase run one pass per forecast
@@ -744,6 +912,16 @@ def run(cfg: DictConfig) -> None:
             component="esmda.smoother",
             values={"num_time_points": smoother_overrides["num_time_points"]},
         )
+    # The smoother's share of the likelihood is DERIVED from the tempering
+    # policy (1.0 under filter_only: the legacy full-weight schedule, bitwise),
+    # never configured; FilterSmoothing re-checks that it matches.
+    smoother_overrides["likelihood_weight"] = tempering.smoother_weight
+    append_constructor_override(
+        out_dir,
+        role="assim",
+        component="esmda.smoother",
+        values={"likelihood_weight": tempering.smoother_weight},
+    )
     smoother = instantiate(
         cfg.esmda.smoother,
         observation_operator=assim_obs_op,
@@ -786,7 +964,11 @@ def run(cfg: DictConfig) -> None:
     # accumulates these lists across the window's per-segment filter calls.
     enkf.collect_pred_obs = True
 
-    hybrid = FilterSmoothing(smoother=smoother, filter=enkf)
+    # The filter got its beta from the config (filtering.beta interpolates
+    # filter_smoothing.beta, checked in the pre-flight); the hybrid validates
+    # both collaborators against the one policy and, under a shared budget,
+    # the observation product itself at the top of every window.
+    hybrid = FilterSmoothing(smoother=smoother, filter=enkf, tempering=tempering)
 
     save_history = bool(cfg.run.get("save_history", True))
 
@@ -1057,8 +1239,26 @@ def run(cfg: DictConfig) -> None:
                 # reads like a filtering one to the shared stages.
                 "assimilate_every_n_step": int(every_n),
                 "final_time": float(final_time),
+                # PHYSICAL: what the synthetic noise was drawn with and what
+                # the obs_error_std artifacts and the innovation chi2 use. The
+                # analyses' EFFECTIVE covariances are in `tempering`.
                 "observation_error_std": obs_error_std,
+                "observation_error_model": _OBSERVATION_ERROR_MODEL,
                 "num_esmda_steps": int(cfg.esmda.num_steps),
+                # Beta tempering, read back from the constructed collaborators
+                # (the values that actually ran), not from the config.
+                "tempering": {
+                    **tempering.metadata(
+                        base_alpha=float(smoother.alpha),
+                        num_steps=int(smoother.num_steps),
+                    ),
+                    "filter_beta": float(enkf.beta),
+                    "smoother_likelihood_weight": float(smoother.likelihood_weight),
+                    "smoother_effective_alpha": float(smoother.effective_alpha),
+                },
+                "observation_product": _observation_product(
+                    cfg, assim_obs_op, n_d_frame, every_n, aggregate_obs
+                ),
                 # The smoother's observation vector is aggregated, the filter's
                 # is not; both lengths are recorded because the two per-window
                 # observation-space files live on those two different axes.

@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import xarray
 from data_assimilation.filtering import EnsembleKalmanFilter
 from data_assimilation.filtering.etkf import (
     _CHUNK_ELEMENT_BUDGET,
@@ -39,7 +40,14 @@ from data_assimilation.localization.correlation import CorrelationLocalization
 from data_assimilation.localization.distance import DistanceLocalization
 from data_assimilation.reduction import OnlineStateReduction
 
-from tests.test_filtering import _AllOnesLocalization, _dummy_filter_kwargs
+from tests.test_filtering import (
+    _AllOnesLocalization,
+    _beta_filter,
+    _beta_problem,
+    _CoordinateToyObsOp,
+    _dummy_filter_kwargs,
+    _ToyLinearModel,
+)
 from tests.test_filtering_etkf import ATOL, RTOL, _observation_problem
 
 # "Unchanged" for rows the analysis provably skips is an exact claim here (the
@@ -1431,3 +1439,105 @@ def test_global_and_local_rank_policies_agree_on_a_random_sweep(
         f"energy_fraction={energy_fraction}: that is a forked criterion, not "
         "round-off at the numerical floor"
     )
+
+
+# ---------------------------------------------------------------------------
+# Beta tempering through the filter: every local block whitens by beta * C_D
+# ---------------------------------------------------------------------------
+
+
+def _letkf_beta_run(
+    beta: float, C_D: jnp.ndarray, localization_name: str, tsvd: Any
+) -> Any:
+    """One LETKF filter run, joint (correlation) or state (distance) mode.
+
+    The distance setup is the two-row, far-apart-coordinates layout of
+    ``test_filtering.py``'s joint distance test, so row 1 is genuinely
+    localized away from the single sensor; the correlation setup is the
+    two-frame joint problem of that file's beta tests.
+    """
+    if localization_name == "correlation":
+        state, params, observations = _beta_problem()
+        enkf = _beta_filter(
+            beta=beta,
+            C_D=C_D,
+            analysis=LETKFAnalysis(tsvd=tsvd),
+            localization=CorrelationLocalization(max_inflation=4.0),
+        )
+        return enkf.run(state=state, params=params, observations=observations)
+
+    n_e = 40
+    signal = jax.random.normal(jax.random.PRNGKey(51), (n_e,))
+    noise = jax.random.normal(jax.random.PRNGKey(52), (n_e,))
+    state = xarray.Dataset(
+        {"u": (("ensemble", "x"), jnp.stack([signal, 0.5 * signal + noise], axis=1))},
+        coords={"ensemble": np.arange(n_e), "x": [0.0, 1.5]},
+    )
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_CoordinateToyObsOp(np.array([[1.0, 0.0]])),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=C_D,
+        analysis=LETKFAnalysis(tsvd=tsvd),
+        mode="state",
+        localization=DistanceLocalization(
+            localization_radius=2.0, max_inflation=4.0, block_grouping=False
+        ),
+        rng_key=jax.random.PRNGKey(53),
+        beta=beta,
+    )
+    return enkf.run(state=state, observations=jnp.array([[1.5]]))
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "tsvd",
+    [None, ObservationTSVD(enabled=True, max_rank=1)],
+    ids=["letkf", "letkf_tsvd"],
+)
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "localization_name", ["correlation", "distance"]
+)
+def test_letkf_beta_equals_pre_scaling_the_covariance(
+    localization_name: str, tsvd: Optional[ObservationTSVD]
+) -> None:
+    """A tempered LETKF IS the untempered one handed ``beta * C_D``.
+
+    Per block, ``R_eff = E_inf**2 * R`` with ``R`` the covariance the filter
+    handed over, so the effective covariance must reach every local whitening
+    (and, with the TSVD, every local truncation) — while the local observation
+    SELECTION, a function of the ensemble and coordinates only, is unchanged.
+    """
+    beta = 4.0
+    C_D = (
+        jnp.array([0.2, 0.35])
+        if localization_name == "correlation"
+        else jnp.array([0.2])
+    )
+    tempered = _letkf_beta_run(beta, C_D, localization_name, tsvd)
+    pre_scaled = _letkf_beta_run(1.0, beta * C_D, localization_name, tsvd)
+    untempered = _letkf_beta_run(1.0, C_D, localization_name, tsvd)
+
+    np.testing.assert_array_equal(
+        np.asarray(tempered.state["u"]), np.asarray(pre_scaled.state["u"])
+    )
+    assert not np.allclose(
+        np.asarray(tempered.state["u"]), np.asarray(untempered.state["u"])
+    )
+    if tempered.params is not None:
+        np.testing.assert_array_equal(
+            np.asarray(tempered.params["a"]), np.asarray(pre_scaled.params["a"])
+        )
+    ours, reference = tempered.diagnostics[-1], pre_scaled.diagnostics[-1]
+    for field in (
+        "local_num_blocks",
+        "local_num_active_blocks",
+        "local_active_obs_min",
+        "local_active_obs_max",
+        "local_retained_rank_min",
+        "local_retained_rank_max",
+        "local_retained_energy_min",
+        "local_discarded_spectrum_max",
+    ):
+        assert getattr(ours, field) == getattr(reference, field), field
+    # Beta tempers the weights, never which observations a block sees.
+    assert ours.local_num_blocks == untempered.diagnostics[-1].local_num_blocks
+    assert ours.local_active_obs_max == untempered.diagnostics[-1].local_active_obs_max

@@ -291,6 +291,16 @@ The sequential-filter counterparts of the `esmda/*` groups. Each file uses
 See [data_assimilation.md](data_assimilation.md) for the filtering library
 itself (`BaseFilter` / `EnsembleKalmanFilter`, cycle semantics, diagnostics).
 
+Outside the groups, `conf/filtering/default.yaml` carries `filtering.beta`
+(default `1.0`, forwarded as `filtering.filter.beta`): every analysis uses
+`beta * R` instead of `R` (finite, `>= 1`; `1.0` is the untempered filter bit
+for bit). It is a likelihood-tempering multiplier of the observation-error
+covariance, not spread inflation and not localization's `tapering_beta`;
+`obs_error_std`, the `obs_error_std` artifacts and the innovation chi2 stay
+physical, and `run_info.yaml` records the value that ran as
+`configuration.beta`. In `run_filter_smoothing.yaml` it is interpolated from
+`filter_smoothing.beta` (see §2.1).
+
 The analysis options carry a declared `localization_policy` that
 `BaseFilter.__init__` enforces, so an unusable pair fails before the first
 forecast rather than running a global update under a localized name:
@@ -719,6 +729,37 @@ clock (each window's batches run over `(0, simulation_time]`, which is the
 axis the trajectory prior lives on and the segment bounds are derived from),
 and sizes the two observation covariances separately (per-frame for the
 filter, aggregated-window for the smoother).
+
+**Beta tempering** ([data_assimilation.md §9](data_assimilation.md#beta-tempering-splitting-each-observation-between-the-phases)).
+Two keys on the `filter_smoothing:` node:
+
+- `filter_smoothing.beta` (default `1.0`) — the single source of the filter's
+  `beta`: `filtering.beta` interpolates it, and a differing `filtering.beta=`
+  or `filtering.filter.beta=` override is rejected.
+- `filter_smoothing.likelihood_allocation` (default `filter_only`) —
+  `filter_only` keeps ESMDA's full normalized schedule (nominal combined
+  exponent `1 + 1/beta`; the default pair is the legacy hybrid, bit for bit);
+  `shared_budget` passes the smoother the DERIVED
+  `likelihood_weight = (beta - 1)/beta` so `sum 1/alpha_eff + 1/beta = 1`. An
+  explicit `esmda.smoother.likelihood_weight` is rejected.
+
+The policy is resolved in the pre-flight block, so an invalid beta, an unknown
+allocation, a conflicting override or a `shared_budget` run with `beta = 1`,
+with smoother aggregation (set `esmda.interval_seconds=null`) or with
+`filtering.assimilate_every_n_step != 1` (a deliberately conservative guard)
+fails before the truth is simulated; the hybrid then re-validates the
+collaborators and — for `shared_budget` — the observation product itself at
+the top of every window, before any forecast. `run_info.yaml`'s
+`configuration` gains `tempering` (`beta`, `likelihood_allocation`,
+`filter_weight`, `smoother_weight`, `nominal_combined_exponent`,
+`base_alpha`/`effective_alpha` and their per-step lists,
+`smoother_likelihood_share`, plus `filter_beta` / `smoother_likelihood_weight` /
+`smoother_effective_alpha` read back from the constructed collaborators),
+`observation_error_model` (`legacy_scalar_iid_diagonal/v1`) and
+`observation_product` (operator chain, observed states, sensor count,
+per-frame length, stride, smoother aggregation, and a SHA-256 of the sensor
+coordinates). `observation_error_std`, every `obs_error_std` artifact and the
+innovation chi2 in `cycle_diagnostics.yaml` stay physical.
 
 Saves both siblings' schemas, like `run_filtering.py`: the ESMDA per-window
 schema (`windows/window_{w}_{prior,posterior}_params.nc` — the posterior IS

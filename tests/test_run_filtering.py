@@ -156,15 +156,92 @@ def test_filtering_analysis_config_composes(
         assert analysis.tsvd.enabled is True
 
 
+def _compose_production_run_filtering(overrides: list[str]) -> Any:
+    """Compose the PRODUCTION ``conf/run_filtering.yaml`` (no solver is run).
+
+    The frozen ``tests/conf`` copy mirrors it by hand, so the wiring test below
+    checks both: a key added to one and forgotten in the other fails here.
+    """
+    from hydra import compose, initialize_config_dir
+
+    conf_dir = pathlib.Path(__file__).resolve().parents[1] / "conf"
+    with initialize_config_dir(version_base=None, config_dir=str(conf_dir)):
+        return compose(config_name="run_filtering", overrides=overrides)
+
+
+@pytest.mark.parametrize("source", ["tests", "production"])  # type: ignore[misc]
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "overrides,expected",
+    [([], 1.0), (["filtering.beta=2.5"], 2.5)],
+    ids=["default", "override"],
+)
+def test_filtering_beta_reaches_the_instantiated_filter(
+    overrides: list[str], expected: float, source: str, compose_test_cfg: Any
+) -> None:
+    """``filtering.beta`` is interpolated into the filter's ``_target_`` block.
+
+    Instantiated exactly as ``run_filtering.py`` does (the script-only
+    collaborators supplied as toy objects), so this pins the config -> constructor
+    wiring without running a solver. The default must be the untempered 1.0.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+    from hydra.utils import instantiate
+
+    from tests.test_filtering import _ToyLinearModel, _ToyObsOp
+
+    if source == "tests":
+        cfg = compose_test_cfg(
+            _overrides("joint", 1, overrides), config_name="run_filtering"
+        )
+    else:
+        cfg = _compose_production_run_filtering(overrides)
+    assert cfg.filtering.beta == expected
+    C_D = jnp.array([0.01, 0.02])
+    enkf = instantiate(
+        cfg.filtering.filter,
+        observation_operator=_ToyObsOp(np.eye(2)),
+        forward_model=_ToyLinearModel(np.eye(2)),
+        C_D=C_D,
+    )
+    assert type(enkf.beta) is float and enkf.beta == expected
+    np.testing.assert_array_equal(np.asarray(enkf.C_D_diag), np.asarray(C_D))
+    np.testing.assert_array_equal(
+        np.asarray(enkf.effective_C_D_diag), np.asarray(expected * C_D)
+    )
+
+
+def test_invalid_filtering_beta_fails_at_instantiation(compose_test_cfg: Any) -> None:
+    """An out-of-range beta fails when the filter is built — before any forecast."""
+    import jax.numpy as jnp
+    import numpy as np
+    from hydra.utils import instantiate
+
+    from tests.test_filtering import _ToyLinearModel, _ToyObsOp
+
+    cfg = compose_test_cfg(
+        _overrides("joint", 1, ["filtering.beta=0.5"]), config_name="run_filtering"
+    )
+    with pytest.raises(Exception, match="beta"):
+        instantiate(
+            cfg.filtering.filter,
+            observation_operator=_ToyObsOp(np.eye(2)),
+            forward_model=_ToyLinearModel(np.eye(2)),
+            C_D=jnp.array([0.01, 0.02]),
+        )
+
+
 @pytest.mark.parametrize(  # type: ignore[misc]
     "mode,num_windows,extra",
     [
         pytest.param("joint", 2, None, id="joint_two_windows"),
         pytest.param("state", 1, None, id="state"),
+        # Also the one solver run with a TEMPERED filter (beta != 1), on the
+        # path where the analysis runs twice per cycle (the reduction replay).
         pytest.param(
             "state",
             1,
-            ["filtering/state_reduction=svd_current"],
+            ["filtering/state_reduction=svd_current", "filtering.beta=2.0"],
             id="state_svd_current",
         ),
         # Parameter mode needs spread maintenance; the random-walk evolution
@@ -278,6 +355,10 @@ def test_run_filtering(
     assert configuration["num_cycles"] == num_cycles
     assert configuration["save_obs_diagnostics"] is True
     assert configuration["save_prior_state"] is False
+    # The tempering that ran, beside the PHYSICAL error it tempers (the window
+    # obs_error_std arrays above stay physical whatever beta is).
+    assert configuration["beta"] == float(cfg.filtering.beta)
+    assert configuration["observation_error_std"] == float(cfg.filtering.obs_error_std)
     diagnostics = read_yaml(out_dir / "cycle_diagnostics.yaml")
     # One row per cycle over the WHOLE horizon, numbered globally: the window
     # boundary is invisible to the filtering stages.

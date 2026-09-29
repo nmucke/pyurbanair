@@ -1,4 +1,6 @@
 import logging
+import math
+import numbers
 import os
 import pathlib
 import shutil
@@ -38,6 +40,12 @@ class _BaseESMDA(BaseSmoothing):
 smoothing.base.BaseSmoothing`) is applied to the real observations and to
     every ``H(x)``, so ``C_D`` must be sized for the *aggregated* observation
     vector.
+
+    ``likelihood_weight`` (default ``1.0``, the legacy smoother) is the share
+    ``w`` of the observation likelihood the MDA schedule consumes: every update
+    runs with ``effective_alpha = alpha / w`` while ``alpha`` stays the
+    normalized base coefficient and ``C_D`` stays physical. It is derived by
+    the filter-smoothing hybrid's shared-budget policy, not a user knob.
     """
 
     #: Whether this smoother can supply physical row coordinates to a
@@ -46,6 +54,12 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
     #: ``False`` so an incompatible pairing is rejected at construction rather
     #: than deep inside the first Kalman update.
     _supplies_row_coordinates: bool = False
+
+    #: Share of the observation likelihood this smoother's MDA schedule
+    #: consumes (see ``__init__``). Class-level default so instances built
+    #: without ``__init__`` (array-level unit tests use ``__new__``) resolve the
+    #: legacy full-weight value.
+    likelihood_weight: float = 1.0
 
     def __init__(
         self,
@@ -57,6 +71,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         rng_key: Optional[jax.Array] = None,
         localization: Optional[BaseLocalization] = None,
         aggregate_observations: Optional[AggregateObservations] = None,
+        likelihood_weight: float = 1.0,
     ) -> None:
         super().__init__(
             observation_operator,
@@ -101,14 +116,30 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # ``alpha = num_steps`` is always consistent). The final-time trajectory
         # smoothing passes alpha=1 through ``_compute_kalman_update`` directly,
         # not via ``self.alpha``, so it is unaffected by this check.
-        effective_alpha = num_steps if alpha is None else alpha
-        if abs(num_steps / effective_alpha - 1.0) > 1e-6:
+        #
+        # This validates the BASE schedule only and is deliberately independent
+        # of ``likelihood_weight``: a tempered smoother still runs a normalized
+        # base schedule, and the weight rescales it afterwards (below).
+        base_alpha = num_steps if alpha is None else alpha
+        if abs(num_steps / base_alpha - 1.0) > 1e-6:
             raise ValueError(
                 f"Inconsistent ES-MDA schedule: num_steps={num_steps} and "
-                f"alpha={effective_alpha} give sum_k 1/alpha_k = "
-                f"{num_steps / effective_alpha:.4g} != 1. Set alpha=num_steps "
+                f"alpha={base_alpha} give sum_k 1/alpha_k = "
+                f"{num_steps / base_alpha:.4g} != 1. Set alpha=num_steps "
                 "(the default) or leave alpha unset."
             )
+
+        # Likelihood weight ``w`` (shared-budget hybrid tempering, see
+        # docs/plans/hybrid_beta_tempering.md): the MDA schedule conditions on
+        # ``L^w`` instead of ``L`` by running every update with the effective
+        # coefficient ``alpha_base / w``, so ``sum_k 1/alpha_eff_k = w`` and the
+        # remaining ``1 - w`` of the budget is left to another phase (the
+        # hybrid's filter). ``w = 1`` is the legacy full-likelihood smoother.
+        # The weight is derived by the hybrid's policy resolver, not a user
+        # knob. Validated before anything is stored so a bad value leaves no
+        # half-built smoother (and no on-disk step directories) behind.
+        likelihood_weight = self._validate_likelihood_weight(likelihood_weight)
+        self._validate_effective_covariance(C_D, base_alpha, likelihood_weight)
 
         # Reject a coordinate-based localization on a smoother that cannot supply
         # row coordinates (parameter-only variants). Deferring this to the first
@@ -126,7 +157,13 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
                 "state_and_dynamic)."
             )
 
-        self.alpha = num_steps if alpha is None else alpha
+        # ``self.alpha`` keeps meaning the BASE coefficient (every existing
+        # reader expects the normalized schedule); the coefficient the update
+        # actually uses is ``effective_alpha``. ``C_D``/``C_D_sqrt`` stay the
+        # PHYSICAL observation-error covariance -- the weight is applied only
+        # inside the update, exactly once.
+        self.alpha = base_alpha
+        self.likelihood_weight = likelihood_weight
         self.C_D = C_D
         self.C_D_sqrt = jnp.sqrt(self.C_D)
         # Default the PRNG key here (not in the signature): a default argument
@@ -171,6 +208,97 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
                 os.makedirs(step_dir, exist_ok=True)
                 for state_file in step_dir.glob("state_*.nc"):
                     state_file.unlink(missing_ok=True)
+
+    @staticmethod
+    def _validate_likelihood_weight(likelihood_weight: Any) -> float:
+        """Return ``likelihood_weight`` as a float, rejecting invalid values.
+
+        Must be a real, finite number with ``0 < w <= 1``. ``bool`` is rejected
+        explicitly (it is a ``numbers.Real`` subclass, and ``True`` silently
+        meaning ``w = 1`` would hide a wiring bug). ``w = 0`` would assign the
+        smoother no likelihood at all -- an infinite covariance the solver must
+        never see -- and ``w > 1`` would condition on the data more than once.
+        """
+        # Two flags rather than one ``or``: mypy narrows ``bool`` out of
+        # ``numbers.Real`` and would flag the second operand as unreachable.
+        is_bool = (
+            isinstance(likelihood_weight, bool) or type(likelihood_weight) is np.bool_
+        )
+        is_real = isinstance(likelihood_weight, numbers.Real)
+        if is_bool or not is_real:
+            raise ValueError(
+                "likelihood_weight must be a real number in (0, 1], got "
+                f"{likelihood_weight!r} ({type(likelihood_weight).__name__})."
+            )
+        weight = float(likelihood_weight)
+        if not math.isfinite(weight) or not 0.0 < weight <= 1.0:
+            raise ValueError(
+                f"likelihood_weight must be finite with 0 < w <= 1, got {weight}. "
+                "It is the smoother's share of the observation likelihood "
+                "(1.0 = the legacy full-likelihood ES-MDA)."
+            )
+        return weight
+
+    @staticmethod
+    def _validate_effective_covariance(
+        C_D: jnp.ndarray, base_alpha: float, likelihood_weight: float
+    ) -> None:
+        """Reject an effective ``alpha_base / w`` that breaks in the compute dtype.
+
+        A finite configuration can still overflow: a tiny weight makes
+        ``alpha_base / w`` (or ``alpha_eff * C_D``) exceed the float32 range
+        JAX computes in by default, and the Kalman solve would then see an
+        infinite covariance (or its reciprocal weight round to zero). The
+        product is formed exactly as :func:`stochastic_enkf_update` forms it
+        (Python scalar times the variance vector), so it is checked in the
+        dtype the update actually runs in. The legacy ``w = 1`` path only
+        re-checks the base schedule, which the ``C_D`` validation already
+        keeps finite.
+        """
+        try:
+            effective_alpha = base_alpha / likelihood_weight
+        except OverflowError:
+            effective_alpha = math.inf
+        C_D_diag = jnp.diag(C_D)
+        # An overflowing cast is exactly what is being detected; keep numpy's
+        # RuntimeWarning out of the logs (the ValueError below reports it).
+        with np.errstate(over="ignore"):
+            scaled = effective_alpha * C_D_diag
+            alpha_in_dtype = jnp.asarray(effective_alpha, dtype=scaled.dtype)
+        if not (
+            math.isfinite(effective_alpha)
+            and bool(jnp.isfinite(alpha_in_dtype))
+            and bool(alpha_in_dtype > 0)
+            and bool(1.0 / alpha_in_dtype > 0)
+            and bool(jnp.all(jnp.isfinite(scaled)))
+            and bool(jnp.all(scaled > 0))
+        ):
+            raise ValueError(
+                f"likelihood_weight={likelihood_weight} gives an effective "
+                f"ES-MDA coefficient alpha_base / w = {base_alpha} / "
+                f"{likelihood_weight} whose effective covariance alpha_eff * C_D "
+                f"is not finite and positive in {scaled.dtype}. Use a larger "
+                "likelihood weight (or smaller observation-error variances)."
+            )
+
+    @property
+    def effective_alpha(self) -> float:
+        """The coefficient the update actually uses: ``alpha / likelihood_weight``.
+
+        Derived (not stored) so it always reflects the current base ``alpha``
+        -- array-level tests set ``alpha`` on bare instances directly.
+        """
+        return float(self.alpha) / self.likelihood_weight
+
+    def _apply_likelihood_weight(self, base_alpha: float) -> float:
+        """Map a BASE-schedule coefficient to the one passed to the update.
+
+        Returns ``base_alpha`` itself (same object, no arithmetic) at unit
+        weight, so the legacy path is bitwise unchanged.
+        """
+        if self.likelihood_weight == 1.0:
+            return base_alpha
+        return base_alpha / self.likelihood_weight
 
     def _set_step_results_dir(self, step: int) -> None:
         """Point the forward model's results directory at the given step."""
@@ -249,7 +377,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
                 global path and by coordinate-free strategies.
             alpha: Optional override of the ESMDA inflation coefficient for
                 this single update (used by the un-tempered final trajectory
-                smoothing step). ``None`` -> ``self.alpha``.
+                smoothing step). ``None`` -> ``self.alpha``. Always a
+                BASE-schedule value: like ``self.alpha`` it is divided by
+                ``likelihood_weight`` here, never treated as already scaled.
 
         Returns:
             Updated augmented array of the same shape.
@@ -258,7 +388,14 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # tempered alpha; the single shared implementation lives in
         # ``filtering/analysis.py`` (1-D variance-vector C_D contract). ``N_e``
         # is kept in the signature for callers but derived from the arrays.
-        alpha = self.alpha if alpha is None else alpha
+        #
+        # The likelihood weight enters ONLY here, as ``alpha_base / w`` handed
+        # to the kernel as its ``alpha``: the kernel draws the perturbations
+        # from ``alpha * C_D`` and solves with ``C_DD + alpha * C_D``, so the
+        # effective covariance is applied exactly once. ``self.C_D`` stays
+        # physical. At ``w = 1`` the base value passes through untouched and
+        # no extra key is split, so the seeded RNG stream is the legacy one.
+        alpha = self._apply_likelihood_weight(self.alpha if alpha is None else alpha)
         self.rng_key, subkey = jax.random.split(self.rng_key)
         return stochastic_enkf_update(
             augmented=augmented,
@@ -594,6 +731,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         pin_initial_time_point: bool = False,
         localization: Optional[BaseLocalization] = None,
         aggregate_observations: Optional[AggregateObservations] = None,
+        likelihood_weight: float = 1.0,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -604,6 +742,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
             rng_key=rng_key,
             localization=localization,
             aggregate_observations=aggregate_observations,
+            likelihood_weight=likelihood_weight,
         )
         self.num_time_points = num_time_points
         # When True, ``t=0`` of every time-varying parameter is excluded
@@ -725,6 +864,19 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
                 "the analysis returns no state there, so the smoothed "
                 "trajectory would be discarded. Use an in-memory forward "
                 "model (results_dir=None)."
+            )
+        # The final-time smoothing is an EXTRA full-weight update on top of the
+        # MDA schedule (see ``_final_time_smoothing_step``). Under a shared
+        # likelihood budget (``likelihood_weight < 1``) the rest of the budget
+        # belongs to another phase, so this update has no allocation at all;
+        # reject the pairing rather than silently over-conditioning. The legacy
+        # unit-weight path (and its double-conditioning warning) is unchanged.
+        if final_time_smoothing and self.likelihood_weight != 1.0:
+            raise ValueError(
+                "final_time_smoothing is incompatible with likelihood_weight="
+                f"{self.likelihood_weight} (!= 1): its extra un-tempered update "
+                "has no allocation under a shared likelihood budget. Disable "
+                "final_time_smoothing or use the full-weight smoother."
             )
         self.state_reduction = state_reduction
         self.final_time_smoothing = final_time_smoothing
@@ -1135,7 +1287,8 @@ class StateAndTimeVaryingParameterESMDA(
     :class:`TimeVaryingParameterESMDA`, so the effective signature is
     ``(observation_operator, forward_model, C_D, num_time_points,
     num_steps=3, alpha=None, rng_key=..., pin_initial_time_point=False,
-    localization=None, state_reduction=None, final_time_smoothing=False)``.
+    localization=None, aggregate_observations=None, likelihood_weight=1.0,
+    state_reduction=None, final_time_smoothing=False)``.
     """
 
     def _one_step(

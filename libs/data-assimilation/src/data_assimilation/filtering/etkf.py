@@ -232,8 +232,11 @@ def whiten_observations(
     Args:
         pred_obs: Predicted observations, shape ``(N_d, N_e)``.
         obs: Observations, shape ``(N_d,)``.
-        C_D_diag: Physical observation-error variances, shape ``(N_d,)``,
-            strictly positive.
+        C_D_diag: The analysis's observation-error variances, shape
+            ``(N_d,)``, strictly positive: the physical ``C_D`` of a
+            ``beta = 1`` filter, ``beta * C_D`` of a tempered one (the filter
+            scales it before the call, so ``R`` here already means the
+            effective covariance and ``R_eff = E_inf**2 * beta * C_D``).
         error_inflation: Optional per-observation error inflation ``E_inf``,
             shape ``(N_d,)``, as returned by
             :meth:`~data_assimilation.localization.base.BaseLocalization.\

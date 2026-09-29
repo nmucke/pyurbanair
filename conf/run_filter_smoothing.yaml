@@ -79,6 +79,25 @@ filter_smoothing:
   # filter's C_D is exactly that; the smoother's is the same value tiled over
   # the window's AGGREGATED observation vector.
   obs_error_std: 0.25
+  # Beta tempering: how strongly each phase may use an observation that BOTH
+  # assimilate. Every filter analysis uses `beta * R` (L^(1/beta)); finite,
+  # >= 1. The single source for the filter's beta (forwarded to
+  # `filtering.beta` below; a conflicting `filtering.beta=` override is
+  # rejected). R itself — obs_error_std, the obs_error_std artifacts and the
+  # innovation chi2 — stays physical. See docs/data_assimilation.md §9.
+  beta: 1.0
+  # filter_only | shared_budget.
+  #   filter_only   — ESMDA keeps its full normalized schedule; only the filter
+  #                   is tempered. Nominal combined exponent 1 + 1/beta, so this
+  #                   is heuristic damping, not likelihood accounting. beta 1.0
+  #                   is the legacy hybrid, bit for bit.
+  #   shared_budget — opt-in research mode: ESMDA runs alpha / w with the
+  #                   DERIVED weight w = (beta - 1)/beta, so the two phases
+  #                   split each observation's unit budget. Needs beta > 1, the
+  #                   raw product in both phases (`esmda.interval_seconds=null`)
+  #                   and filtering.assimilate_every_n_step=1; rejected before
+  #                   the truth is simulated otherwise.
+  likelihood_allocation: filter_only
 
 # --- The smoother half. `esmda.smoother` is the one mode-specific block
 # (selected by the `esmda/smoother` group); everything else here is shared
@@ -95,6 +114,7 @@ filtering:
   num_assimilation_windows: ${filter_smoothing.num_assimilation_windows}
   seed: ${filter_smoothing.seed}
   obs_error_std: ${filter_smoothing.obs_error_std}
+  beta: ${filter_smoothing.beta}
   mode: joint
   assimilate_every_n_step: 1
 

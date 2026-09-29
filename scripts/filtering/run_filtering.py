@@ -1013,6 +1013,11 @@ def run(cfg: DictConfig) -> None:
                 "assimilate_every_n_step": int(every_n),
                 "final_time": float(final_time),
                 "observation_error_std": obs_error_std,
+                # The analysis tempering: every analysis used `beta * C_D`.
+                # `observation_error_std` above (and the obs_error_std arrays in
+                # the window artifacts) stay the PHYSICAL error; read from the
+                # constructed filter, i.e. the value that actually ran.
+                "beta": float(enkf.beta),
                 # The gate the shared observation-space diagnostic reads before
                 # it opens windows/window_*_{obs,pred_obs}.nc.
                 "save_obs_diagnostics": True,
