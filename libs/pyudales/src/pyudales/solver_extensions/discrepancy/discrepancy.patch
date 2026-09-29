@@ -1,0 +1,215 @@
+--- a/src/modsubgrid.f90
++++ b/src/modsubgrid.f90
+@@ -36,9 +36,14 @@
+ module modsubgrid
+   use mpi
+   use modsubgriddata
++  use modsgsdiscrepancy
++  use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
+   implicit none
+   save
+-  public :: subgrid, initsubgrid, exitsubgrid, subgridnamelist
++  public :: subgrid, initsubgrid, exitsubgrid, subgridnamelist, discrepancy_report, discrepancy_check_clocks
++  real, allocatable :: discrepancy_factor(:,:,:)
++  real :: discrepancy_min = huge(1.), discrepancy_max = 0.
++  real :: discrepancy_saturated = 0., discrepancy_samples = 0.
+ 
+ contains
+   subroutine initsubgrid
+@@ -63,6 +68,7 @@
+     allocate(sbbuo(ib-ih:ie+ih,jb-jh:je+jh,kb:ke+kh))
+     allocate(csz(ib-ih:ie+ih,kb:ke+kh))
+     allocate(damp(ib:ie,jb:je,kb:ke))
++    if (lsgs_discrepancy) allocate(discrepancy_factor(ib:ie,jb:je,kb:ke))
+ 
+ 
+     damp = 1.
+@@ -91,7 +97,9 @@
+     integer :: ierr
+ 
+     namelist/NAMSUBGRID/ &
+-         ldelta,lmason, cf,cn,Rigc,Prandtl,lsmagorinsky,lvreman,loneeqn,c_vreman,cs,nmason,lbuoycorr
++         ldelta,lmason, cf,cn,Rigc,Prandtl,lsmagorinsky,lvreman,loneeqn,c_vreman,cs,nmason,lbuoycorr, &
++         lsgs_discrepancy,sgs_bias_b0,sgs_bias_b1,sgs_bias_b2,sgs_discrepancy_height, &
++         sgs_discrepancy_za_over_h,sgs_discrepancy_zb_over_h,sgs_discrepancy_epsilon,sgs_discrepancy_cap
+ 
+     if(myid==0)then
+        open(ifnamopt,file=fname_options,status='old',iostat=ierr)
+@@ -118,6 +126,21 @@
+     call MPI_BCAST(cn         ,1,MY_REAL   ,0,comm3d,mpierr)
+     call MPI_BCAST(Rigc       ,1,MY_REAL   ,0,comm3d,mpierr)
+     call MPI_BCAST(Prandtl    ,1,MY_REAL   ,0,comm3d,mpierr)
++    call MPI_BCAST(lsgs_discrepancy,1,MPI_LOGICAL,0,comm3d,mpierr)
++    call MPI_BCAST(sgs_bias_b0,1,MY_REAL,0,comm3d,mpierr)
++    call MPI_BCAST(sgs_bias_b1,1,MY_REAL,0,comm3d,mpierr)
++    call MPI_BCAST(sgs_bias_b2,1,MY_REAL,0,comm3d,mpierr)
++    call MPI_BCAST(sgs_discrepancy_height,1,MY_REAL,0,comm3d,mpierr)
++    call MPI_BCAST(sgs_discrepancy_za_over_h,1,MY_REAL,0,comm3d,mpierr)
++    call MPI_BCAST(sgs_discrepancy_zb_over_h,1,MY_REAL,0,comm3d,mpierr)
++    call MPI_BCAST(sgs_discrepancy_epsilon,1,MY_REAL,0,comm3d,mpierr)
++    call MPI_BCAST(sgs_discrepancy_cap,1,MY_REAL,0,comm3d,mpierr)
++    if (lsgs_discrepancy) then
++      if (.not. discrepancy_valid() .or. .not. lvreman .or. lsmagorinsky .or. loneeqn) then
++        if (myid == 0) write(0,*) 'ERROR: invalid Vreman SGS discrepancy configuration'
++        call MPI_ABORT(comm3d,1,mpierr)
++      end if
++    end if
+     prandtli = 1./Prandtl
+ 
+     if ((lsmagorinsky) .or. (lvreman) .or. (loneeqn)) then
+@@ -160,7 +183,64 @@
+   subroutine exitsubgrid
+     implicit none
+     deallocate(ekm,ekh,zlt,sbdiss,sbbuo,sbshr,csz)
++    if (allocated(discrepancy_factor)) deallocate(discrepancy_factor)
+   end subroutine exitsubgrid
++
++  subroutine discrepancy_check_clocks
++    use modglobal, only : timee, dt
++    use modmpi, only : myid, comm3d, mpierr, my_real
++    implicit none
++    real :: clocks(2), clocks_min(2), clocks_max(2)
++    integer :: invalid_local, invalid_global
++    if (.not. lsgs_discrepancy) return
++    clocks = [timee,dt]
++    invalid_local = 0
++    if (.not. all(ieee_is_finite(clocks))) invalid_local = 1
++    call MPI_ALLREDUCE(invalid_local,invalid_global,1,MPI_INTEGER,MPI_MAX,comm3d,mpierr)
++    if (invalid_global /= 0) then
++      if (myid == 0) write(0,*) 'ERROR: nonfinite SGS discrepancy startup clock'
++      call MPI_ABORT(comm3d,1,mpierr)
++    end if
++    call MPI_ALLREDUCE(clocks,clocks_min,2,MY_REAL,MPI_MIN,comm3d,mpierr)
++    call MPI_ALLREDUCE(clocks,clocks_max,2,MY_REAL,MPI_MAX,comm3d,mpierr)
++    if (any(clocks_min /= clocks_max)) then
++      if (myid == 0) write(0,*) 'ERROR: inconsistent SGS discrepancy startup timee/dt across ranks'
++      call MPI_ABORT(comm3d,1,mpierr)
++    end if
++  end subroutine discrepancy_check_clocks
++
++  subroutine discrepancy_report
++    use modglobal, only : cexpnr
++    use modmpi, only : myid, comm3d, mpierr, my_real
++    implicit none
++    real :: global_min, global_max, global_saturated, global_samples
++    integer :: unit, ierr
++    if (.not. lsgs_discrepancy) return
++    call MPI_REDUCE(discrepancy_min,global_min,1,MY_REAL,MPI_MIN,0,comm3d,mpierr)
++    call MPI_REDUCE(discrepancy_max,global_max,1,MY_REAL,MPI_MAX,0,comm3d,mpierr)
++    call MPI_REDUCE(discrepancy_saturated,global_saturated,1,MY_REAL,MPI_SUM,0,comm3d,mpierr)
++    call MPI_REDUCE(discrepancy_samples,global_samples,1,MY_REAL,MPI_SUM,0,comm3d,mpierr)
++    if (myid /= 0) return
++    open(newunit=unit,file='sgs_discrepancy.'//cexpnr//'.txt',status='replace',iostat=ierr)
++    if (ierr /= 0) then
++      write(0,*) 'ERROR: cannot write SGS discrepancy diagnostics'
++      call MPI_ABORT(comm3d,1,mpierr)
++    end if
++    write(unit,'(a,es24.16)') 'multiplier_min=',global_min
++    write(unit,'(a,es24.16)') 'multiplier_max=',global_max
++    write(unit,'(a,es24.16)') 'saturation_fraction=',global_saturated/max(1.,global_samples)
++    write(unit,'(a,es24.16)') 'evaluated_cells=',global_samples
++    write(unit,'(a,es24.16)') 'saturation_threshold=',0.95
++    write(unit,'(a,es24.16)') 'sgs_bias_b0=',sgs_bias_b0
++    write(unit,'(a,es24.16)') 'sgs_bias_b1=',sgs_bias_b1
++    write(unit,'(a,es24.16)') 'sgs_bias_b2=',sgs_bias_b2
++    write(unit,'(a,es24.16)') 'canopy_height=',sgs_discrepancy_height
++    write(unit,'(a,es24.16)') 'height_a_over_h=',sgs_discrepancy_za_over_h
++    write(unit,'(a,es24.16)') 'height_b_over_h=',sgs_discrepancy_zb_over_h
++    write(unit,'(a,es24.16)') 'gradient_regularization=',sgs_discrepancy_epsilon
++    write(unit,'(a,es24.16)') 'log_multiplier_cap=',sgs_discrepancy_cap
++    close(unit)
++  end subroutine discrepancy_report
+ 
+   subroutine closure
+ 
+@@ -207,6 +287,7 @@
+     implicit none
+ 
+     real, dimension(ib:ie) :: shearbot
++    real :: discrepancy_a(3,3), saturated
+     real    :: strain2,mlen,uhor,distplus,utaubot,a11,a12,a13, &
+          a21,a22,a23,a31,a32,a33,aa,b11,b12,b13,b21,b22, &
+          b23,b33,bb,const,const2,du0dz,dv0dz,Rig
+@@ -324,7 +405,26 @@
+              b23 = dx2*a12*a13 + dy2*a22*a23 + dzf2(k)*a32*a33
+              bb = b11*b22 - b12*b12 + b11*b33 - b13*b13 + b22*b33 - b23*b23
+ 
+-             ekm(i,j,k) = c_vreman*sqrt( max( (bb/aa), 0.0 ) )   ! Eddy viscosity
++             if (lsgs_discrepancy) then
++               ! Enabled-only continuous zero-gradient limit; stock arithmetic is untouched.
++               if (aa == 0.) then
++                 ekm(i,j,k) = 0.
++               else
++                 ekm(i,j,k) = c_vreman*sqrt(max(bb/aa,0.))
++               end if
++               discrepancy_a = reshape([a11,a21,a31,a12,a22,a32,a13,a23,a33],[3,3])
++               if (.not. all(ieee_is_finite(discrepancy_a))) then
++                 write(0,*) 'ERROR: nonfinite SGS discrepancy gradient on rank ',myid
++                 call MPI_ABORT(comm3d,1,mpierr)
++               end if
++               call discrepancy_multiplier(discrepancy_a,zf(k),discrepancy_factor(i,j,k),saturated)
++               discrepancy_min = min(discrepancy_min,discrepancy_factor(i,j,k))
++               discrepancy_max = max(discrepancy_max,discrepancy_factor(i,j,k))
++               discrepancy_saturated = discrepancy_saturated + saturated
++               discrepancy_samples = discrepancy_samples + 1.
++             else
++               ekm(i,j,k) = c_vreman*sqrt( max( (bb/aa), 0.0 ) )   ! Eddy viscosity
++             end if
+            end do
+          end do
+        end do
+@@ -359,6 +459,11 @@
+        ekh(:,:,:) = ekm(:,:,:)*prandtli              ! Eddy diffusivity from eddy viscosity, Kh = Km/Pr
+        ! ekh(:,:,:) = max(ekh(:,:,:),ekmin)
+ 
++       if (lsgs_discrepancy) then
++         ! Correct only interior turbulent momentum viscosity, after buoyancy and
++         ! scalar diffusivity, before molecular viscosity and native closurebc.
++         ekm(ib:ie,jb:je,kb:ke) = ekm(ib:ie,jb:je,kb:ke)*discrepancy_factor
++       end if
+        ekm(:,:,:) = ekm(:,:,:) + numol               ! add molecular viscosity
+        ekh(:,:,:) = ekh(:,:,:) + numol*prandtlmoli   ! add molecular diffusivity
+ 
+--- a/src/program.f90
++++ b/src/program.f90
+@@ -31,7 +31,8 @@
+   use modsave,           only : writerestartfiles
+   use modboundary,       only : initboundary,boundary,grwdamp,halos
+   use modthermodynamics, only : initthermodynamics,thermodynamics
+-  use modsubgrid,        only : initsubgrid,subgrid
++  use modsubgrid,        only : initsubgrid,subgrid,closure,discrepancy_report,discrepancy_check_clocks
++  use modsgsdiscrepancy, only : lsgs_discrepancy
+   use modforces,         only : calcfluidvolumes,forces,coriolis,lstend,fixuinf1,fixuinf2,fixthetainf,nudge,masscorr,shiftedPBCs,periodicEBcorr
+   use modpois,           only : initpois,poisson
+   use modibm,            only : initibm,createmasks,ibmwallfun,ibmnorm,bottom
+@@ -89,6 +90,7 @@
+   call calcfluidvolumes
+ 
+   call readinitfiles
++  if (lsgs_discrepancy) call discrepancy_check_clocks
+ 
+   call createscals
+ 
+@@ -107,7 +109,14 @@
+ 
+   call initfielddump
+ 
++  ! Populate MPI/periodic halos before the existing startup boundary treatment.
++  if (lsgs_discrepancy) call halos
+   call boundary
++  if (lsgs_discrepancy) then
++    ! Algebraic refresh from staged velocity/temperature, without tendencies or time advance.
++    call thermodynamics
++    call closure
++  end if
+ 
+   call createtrees
+ 
+@@ -219,6 +228,7 @@
+ !--------------------------------------------------------
+ !    4    FINALIZE ADD ONS AND THE MAIN PROGRAM
+ !-------------------------------------------------------
++  call discrepancy_report
+   call exitfielddump
+   call exitstatsdump     !tg3315
+   call exit_heatpump

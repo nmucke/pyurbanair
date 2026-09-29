@@ -1,6 +1,7 @@
+import json
 import logging
 import pathlib
-from typing import Optional
+from typing import Any, Optional, cast
 
 import xarray
 from pyudales.forward_model import ForwardModel
@@ -9,9 +10,21 @@ from pyudales.utils.inlet_turbulence_utils import copy_elapsed_time, read_elapse
 from pyudales.utils.warm_start_utils import copy_carry
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
+from pyurbanair.base_forward_model import BaseForwardModel
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _attach_member_discrepancy(
+    result: xarray.Dataset, metadata: list[dict[str, Any] | None]
+) -> None:
+    """Keep member-specific provenance through xarray's attribute override."""
+    if any(value is not None for value in metadata):
+        result.attrs.pop("model_discrepancy", None)
+        result.attrs["model_discrepancy_by_member"] = json.dumps(
+            metadata, sort_keys=True
+        )
 
 
 class EnsembleForwardModel(BaseEnsembleForwardModel):
@@ -42,8 +55,9 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             failure: Failure-handling policy mapping (see
                 ``BaseEnsembleForwardModel``).
         """
+        forward_model.prepare_solver()
         super().__init__(
-            forward_model=forward_model,  # type: ignore[arg-type]
+            forward_model=forward_model,
             ensemble_size=ensemble_size,
             results_dir=results_dir,
             num_parallel_processes=num_parallel_processes,
@@ -52,15 +66,15 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             failure=failure,
         )
 
-    def _create_new_forward_model(  # type: ignore[override]
+    def _create_new_forward_model(
         self,
-        forward_model: ForwardModel,
+        forward_model: BaseForwardModel,
         experiment_base_dir: pathlib.Path,
         experiment_name: str,
     ) -> ForwardModel:
         """Create a new forward model for the ensemble."""
         return create_new_forward_model(
-            forward_model,
+            cast(ForwardModel, forward_model),
             experiment_base_dir,
             experiment_name,
         )
@@ -93,10 +107,12 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
         ones — is what keeps the parent's in-memory copies in step with what the
         forkserver workers wrote, since those mutations never came back.
         """
-        result = super().run_ensemble(state=state, params=params, sim_name=sim_name)
+        result: xarray.Dataset | None = super().run_ensemble(
+            state=state, params=params, sim_name=sim_name
+        )
         for failed, donor in self._last_failure_substitutions.items():
-            donor_model = self.ensemble_forward_models[donor]
-            failed_model = self.ensemble_forward_models[failed]
+            donor_model = cast(ForwardModel, self.ensemble_forward_models[donor])
+            failed_model = cast(ForwardModel, self.ensemble_forward_models[failed])
             copy_carry(donor_model.dirs, failed_model.dirs)
             if not copy_elapsed_time(donor_model.dirs, failed_model.dirs):
                 logger.info(
@@ -106,6 +122,38 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
                     donor_model.dirs.experiment_name,
                     failed_model.dirs.experiment_name,
                 )
-        for model in self.ensemble_forward_models:
+        for base_model in self.ensemble_forward_models:
+            model = cast(ForwardModel, base_model)
             model._elapsed_time = read_elapsed_time(model.dirs, model._elapsed_time)
+        if result is not None:
+            metadata: list[dict[str, Any] | None] = []
+            for index in range(self.ensemble_size):
+                donor = self._last_failure_substitutions.get(index, index)
+                member = cast(ForwardModel, self.ensemble_forward_models[donor])
+                if member.model_discrepancy.get("enabled", False):
+                    metadata.append(
+                        json.loads(
+                            (
+                                member.dirs.experiment_dir / "model_discrepancy.json"
+                            ).read_text()
+                        )
+                    )
+                else:
+                    metadata.append(None)
+            _attach_member_discrepancy(result, metadata)
+        return result
+
+    def get_states(self) -> xarray.Dataset:
+        """Load each saved member's provenance before concatenating its state."""
+        states = []
+        metadata: list[dict[str, Any] | None] = []
+        for index, model in enumerate(self.ensemble_forward_models):
+            state = model.get_states(sim_name=f"state_{index}")
+            states.append(state)
+            raw = state.attrs.get("model_discrepancy")
+            metadata.append(json.loads(raw) if raw is not None else None)
+        result = cast(
+            xarray.Dataset, xarray.concat(states, dim="ensemble", join="override")
+        )
+        _attach_member_discrepancy(result, metadata)
         return result

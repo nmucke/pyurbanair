@@ -44,6 +44,17 @@ forward_model:
   # see the closure-fix commit) -- it sits near the stability floor, not at a
   # physical central estimate.
   sgs_constant: 0.24
+  # Opt-in native Vreman correction. Calibrate all feature settings explicitly.
+  # Coefficients are static Dataset fields sgs_bias_b0/b1/b2 (default zero).
+  model_discrepancy:
+    enabled: false
+    kind: sgs_strain_rotation
+    coefficient_model: persistent
+    canopy_height: null
+    height_band_over_H: null
+    gradient_regularization: null
+    log_multiplier_cap: null
+    prior_std: null
   nudging_config:
     tnudge: 15.0
     # nnudge: number of bottom grid levels NOT nudged (raw level count).

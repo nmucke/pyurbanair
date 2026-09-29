@@ -24,6 +24,7 @@ Examples::
     python scripts/run_forward_model.py model=pylbm run.time_varying=true
 """
 
+import json
 import pathlib
 import sys
 import time
@@ -103,7 +104,19 @@ def _concat_windows(
     for w, ds in enumerate(window_list):
         t = np.asarray(ds["time"].values, dtype=float)
         rebased.append(ds.assign_coords(time=(t - t[0]) + w * sim))
-    return xarray.concat(rebased, dim="time", join="override")
+    result = xarray.concat(rebased, dim="time", join="override")
+    metadata = [
+        ds.attrs.get("model_discrepancy_by_member", ds.attrs.get("model_discrepancy"))
+        for ds in window_list
+    ]
+    if any(value is not None for value in metadata):
+        result.attrs.pop("model_discrepancy", None)
+        result.attrs.pop("model_discrepancy_by_member", None)
+        result.attrs["model_discrepancy_by_window"] = json.dumps(
+            [json.loads(value) if value is not None else None for value in metadata],
+            sort_keys=True,
+        )
+    return result
 
 
 def run(cfg: DictConfig) -> None:

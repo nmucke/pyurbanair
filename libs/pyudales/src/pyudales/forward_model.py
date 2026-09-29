@@ -12,10 +12,15 @@ import xarray
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
-from . import LOCAL_EXECUTE_SCRIPT, UDALES_PATH
+from . import LOCAL_EXECUTE_SCRIPT, UDALES_PATH, _script_dir
 from .utils.clean_up_utils import clean_output_dir, clean_temp_dir
 from .utils.config_utils import create_config_sh
 from .utils.dir_utils import get_project_root, get_udales_directory_paths
+from .utils.discrepancy_utils import (
+    extract_discrepancy_coefficients,
+    validate_model_discrepancy,
+    write_model_discrepancy,
+)
 from .utils.file_utils import copy_files
 from .utils.inlet_turbulence_utils import (
     INLET_TURBULENCE_KEYS,
@@ -41,6 +46,7 @@ from .utils.save_frequency_utils import (
     apply_output_frequency,
     apply_save_only_last_timestep,
 )
+from .utils.solver_build import prepare_solver, solver_source_dir, validate_solver
 from .utils.warm_start_utils import (
     clean_output_except_warmstart_files,
     clear_carry,
@@ -49,6 +55,7 @@ from .utils.warm_start_utils import (
     remove_old_warmstart_files,
     set_trestart,
     set_warm_start,
+    stage_discrepancy_warmstart,
     store_carry,
     update_warmstart_file_from_xarray,
 )
@@ -299,6 +306,7 @@ class ForwardModel(BaseForwardModel):
         precomputed_geom_dir: Optional[str] = None,
         instability_check: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
+        model_discrepancy: Optional[dict] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -359,6 +367,9 @@ class ForwardModel(BaseForwardModel):
                 (default 20), ``poll_interval_s`` (default 2.0). When the
                 timestep collapses the run is killed early and reported as a
                 failure, so the ensemble resamples it from a successful donor.
+            model_discrepancy: Opt-in native Vreman strain/rotation correction.
+                Requires explicit height band, gradient regularization and cap.
+                Static sgs_bias_b0/b1/b2 Dataset fields default to zero.
             inlet_turbulence: Optional dict enabling the turbulent inlet,
                 sharing the ``{"enabled": bool, ...}`` schema used by the other
                 backends. ``None``/``{}``/``{"enabled": False}`` (the default) is
@@ -372,6 +383,13 @@ class ForwardModel(BaseForwardModel):
                 ``driverjobnr``, ``seed``, ``lchunkread``, ``chunkread_size`` —
                 see :mod:`.utils.inlet_turbulence_utils`.
         """
+        self.model_discrepancy = validate_model_discrepancy(model_discrepancy)
+        self._discrepancy_defaults = extract_discrepancy_coefficients(
+            params if self.model_discrepancy["enabled"] else None
+        )
+        self._discrepancy_metadata: dict | None = None
+        self._prepared_variant: bool | None = None
+        self._prepared_tools = False
         super().__init__(results_dir=results_dir)
 
         # Verbose flag for controlling output
@@ -385,7 +403,7 @@ class ForwardModel(BaseForwardModel):
         self.dirs = get_udales_directory_paths(
             case_dir=case_dir,
             experiment_name=experiment_name,
-            udales_root_path=UDALES_PATH,  # type: ignore[arg-type]
+            udales_root_path=UDALES_PATH,
             temp_dir=temp_dir,
             experiment_base_dir=experiment_base_dir,
             output_dir=output_dir,
@@ -473,6 +491,8 @@ class ForwardModel(BaseForwardModel):
         validate_closure(closure)
         self.closure = closure
         self._apply_closure()
+        # Validate the effective template closure before preparation or launch.
+        self._apply_discrepancy_settings(params)
 
         # Per-backend default for the SGS constant, overridden by a `sgs_constant`
         # in the params Dataset when one is supplied. None leaves the case
@@ -952,9 +972,66 @@ class ForwardModel(BaseForwardModel):
                 "to run preprocessing from the STL."
             )
 
+    def _apply_discrepancy_settings(self, params: xarray.Dataset | None) -> None:
+        # Always resolve against construction-time defaults, never the last call.
+        values = dict(self._discrepancy_defaults)
+        if self.model_discrepancy.get("enabled", False) and params is not None:
+            supplied = extract_discrepancy_coefficients(params)
+            values.update(
+                {name: value for name, value in supplied.items() if name in params}
+            )
+        self._discrepancy_metadata = write_model_discrepancy(
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}",
+            self.model_discrepancy,
+            xarray.Dataset(values),
+        )
+
+    def prepare_solver(self, *, prepare_tools: bool = False) -> None:
+        """Prepare one verified solver variant before dispatching member workers."""
+        enabled = bool(self.model_discrepancy.get("enabled", False))
+        if (
+            self._prepared_variant == enabled
+            and (not prepare_tools or self._prepared_tools)
+            and self.dirs.solver_executable is not None
+            and validate_solver(self.dirs.solver_executable, enabled)
+        ):
+            return
+        executable = prepare_solver(
+            discrepancy_enabled=enabled,
+            source_dir=UDALES_PATH,
+            prepare_tools=prepare_tools,
+        )
+        self.dirs.solver_executable = executable
+        self.dirs.udales_root_path = solver_source_dir(executable)
+        self._prepared_variant = enabled
+        self._prepared_tools = prepare_tools
+        create_config_sh(self.dirs, self.matlab_bin, self.ncpu)
+
+    def _record_discrepancy(self, result: xarray.Dataset) -> None:
+        if self._discrepancy_metadata is None:
+            return
+        metadata = dict(self._discrepancy_metadata)
+        diagnostics = (
+            self.dirs.output_dir
+            / self.dirs.experiment_name
+            / f"sgs_discrepancy.{self.dirs.experiment_name}.txt"
+        )
+        if diagnostics.exists():
+            metadata["native_diagnostics"] = diagnostics.read_text()
+        if self.dirs.solver_executable is not None:
+            metadata["solver_executable"] = str(self.dirs.solver_executable)
+            provenance = self.dirs.solver_executable.parent.parent / "capability.json"
+            if provenance.exists():
+                metadata["build_provenance"] = json.loads(provenance.read_text())
+        payload = json.dumps(metadata, sort_keys=True)
+        result.attrs["model_discrepancy"] = payload
+        (self.dirs.experiment_dir / "model_discrepancy.json").write_text(payload)
+
     def run_preprocessing(self, python_or_matlab: str = "python") -> None:
         """Run preprocessing."""
 
+        self._apply_discrepancy_settings(None)
+        self.prepare_solver(prepare_tools=True)
         logger.info("Running preprocessing...")
 
         clean_temp_dir(self.dirs)
@@ -962,11 +1039,7 @@ class ForwardModel(BaseForwardModel):
 
         if python_or_matlab == "python":
             # Use Python-based preprocessing script
-            script_path = (
-                pathlib.Path(__file__).parent.parent.parent
-                / "shell_scripts"
-                / "write_inputs.sh"
-            )
+            script_path = _script_dir / "write_inputs.sh"
 
             command = [
                 "bash",
@@ -1039,6 +1112,8 @@ class ForwardModel(BaseForwardModel):
         # This must happen here, before fetch_carry/_prepare_warmstart stage a
         # restart in the execution directory. Moving it into _run_executable
         # would delete that staged restart and break warm starts.
+        self._apply_discrepancy_settings(params)
+        self.prepare_solver()
         clean_output_dir(self.dirs)
 
         warm_start = state is not None
@@ -1058,12 +1133,14 @@ class ForwardModel(BaseForwardModel):
                 set_trestart(self.dirs)
                 self._run_executable()
                 result = self._load_and_postprocess_state()
+                self._record_discrepancy(result)
                 store_carry(self.dirs)
             else:
                 self.spinup_time = 0.0
                 self._rewrite_runtime(self._simulation_time)
                 set_trestart(self.dirs)
                 carry_file = fetch_carry(self.dirs)
+                template_file: pathlib.Path | None
                 if carry_file is not None:
                     template_file = carry_file
                 else:
@@ -1072,6 +1149,7 @@ class ForwardModel(BaseForwardModel):
                 self._prepare_warmstart(state, template_file=template_file)
                 self._run_executable()
                 result = self._load_and_postprocess_state()
+                self._record_discrepancy(result)
                 # Capture the carry (newest restart by mtime) before the
                 # timestamp-based cleanup, which would otherwise keep the
                 # restored carry over the freshly written one when the cold
@@ -1308,15 +1386,18 @@ class ForwardModel(BaseForwardModel):
             state_for_warmstart = state_for_warmstart.isel(time=-1)
         if "time" in state_for_warmstart.coords:
             state_for_warmstart = state_for_warmstart.drop_vars("time")
-        update_warmstart_file_from_xarray(
-            state_for_warmstart,
-            self.dirs,
-            warmstart_file=template_file,
-        )
-        dest = self.dirs.output_dir / self.dirs.experiment_name / template_file.name
-        if template_file.resolve() != dest.resolve():
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(template_file, dest)
+        if self.model_discrepancy.get("enabled", False):
+            stage_discrepancy_warmstart(state_for_warmstart, self.dirs, template_file)
+        else:
+            update_warmstart_file_from_xarray(
+                state_for_warmstart,
+                self.dirs,
+                warmstart_file=template_file,
+            )
+            dest = self.dirs.output_dir / self.dirs.experiment_name / template_file.name
+            if template_file.resolve() != dest.resolve():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(template_file, dest)
         set_warm_start(self.dirs)
 
     def clear_warmstart_carry(self) -> None:
@@ -1360,6 +1441,14 @@ class ForwardModel(BaseForwardModel):
         template_path.unlink(missing_ok=True)
         src = self.dirs.output_dir / self.dirs.experiment_name / filename
         shutil.copy(src, template_path)
+        if self.model_discrepancy.get("enabled", False):
+            # Keep every rank's hidden fields for state-only warm starts too.
+            prefix = filename.split("_", 1)[0]
+            for rank_file in src.parent.glob(f"{prefix}_*_*.*"):
+                if rank_file.name != filename:
+                    shutil.copy(
+                        rank_file, self._warmstart_template_dir / rank_file.name
+                    )
         self.warmstart_template_file = template_path
 
     def disable_spinup(self) -> None:

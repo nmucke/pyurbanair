@@ -120,7 +120,7 @@ libs/pylbm/src/pylbm/              # LBM wrapper. __init__ git-clones the LBM Fo
   stl_to_lbm.py                    # STL → LBM voxel geometry
   utils/                           # infile.in editing, compile, warm-start, params, ...
 
-libs/pyudales/src/pyudales/        # uDALES wrapper. Similar shape to pylbm.
+libs/pyudales/src/pyudales/        # uDALES wrapper; explicit cached solver preparation.
   forward_model.py, ensemble_forward_model.py
   python_udgeom/                   # Python preprocessing alternative to Matlab
   utils/                           # namoptions, nudging, ncpu, warm-start, etc.
@@ -718,7 +718,9 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   written to that solver's input format. Read the value with
   `get_param_value(params, name)` and **no-op when it is absent** so single-model
   / default runs stay byte-identical.
-- **uDALES gotcha:** `pyudales/utils/params_utils.py` keeps a whitelist
+- **uDALES gotcha:** Discrepancy coefficients use their own extractor/writer
+  (`utils/discrepancy_utils.py`); do not add them to the inlet whitelist.
+  For inlet parameters, `pyudales/utils/params_utils.py` keeps a whitelist
   (`INFLOW_PARAM_NAMES`) of variables that survive `extract_inflow_params` /
   `merge_params`. A new variable not in it is *silently dropped* before reaching
   the solver — add it there. pylbm and pypalm read `params` directly.

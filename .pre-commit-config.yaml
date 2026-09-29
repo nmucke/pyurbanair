@@ -9,6 +9,9 @@ repos:
     rev: v4.5.0
     hooks:
       - id: trailing-whitespace
+        # Unified diff context lines contain intentional leading/trailing spaces;
+        # changing them also invalidates the checked solver resource hashes.
+        exclude: 'solver_extensions/discrepancy/discrepancy\.patch$'
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
