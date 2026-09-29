@@ -2,6 +2,8 @@
 
 import json
 import shutil
+import subprocess
+from importlib import import_module
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +73,69 @@ def test_vtk_order_mask_and_offscreen(tmp_path: Path) -> None:
         .read_bytes()
         .startswith(b"\x89PNG")
     )
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("error", "reason"),
+    [
+        (subprocess.CalledProcessError(1, ["ffmpeg"]), "exit status 1"),
+        (subprocess.TimeoutExpired(["ffmpeg"], 300), "timed out after 300 seconds"),
+    ],
+    ids=["encoder-exit", "encoder-timeout"],
+)
+def test_failed_3d_movie_keeps_completed_viewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: subprocess.SubprocessError,
+    reason: str,
+) -> None:
+    pytest.importorskip("pyvista")
+    # Exercise real 3D frames and the full bundle publication path. Only the
+    # external encoder is replaced, after it has written a partial destination.
+    render_module = import_module("pyurbanair.visualization.render")
+
+    def failed_encoder(frames: Path, destination: Path, fps: int) -> bool:
+        if destination.name == "flow-3d.mp4":
+            assert (frames / "00000.png").is_file()
+            destination.write_bytes(b"partial MP4")
+            raise error
+        return False
+
+    monkeypatch.setattr(render_module, "encode_movie", failed_encoder)
+    root = save_run(tmp_path, regular((0, 2.5)))
+    bundle = tmp_path / "bundle"
+    manifest = render(
+        root,
+        bundle,
+        {
+            "render_3d": True,
+            "movie": True,
+            "fps": 2,
+            "width": 320,
+            "height": 240,
+            "slices": [{"axis": "z", "fraction": 0}],
+            "probes": [{"id": "P", "x": 2, "y": 4, "z": 3}],
+            "seeds": [[2, 4, 3]],
+        },
+    )
+    assert manifest == json.loads((bundle / "viewer_manifest.json").read_text())
+    assert manifest["status"] == "complete"
+    assert [view["kind"] for view in manifest["views"]] == ["2d", "3d"]
+    assert manifest["views"][1]["media"] is None
+    assert manifest["views"][1]["mime_type"] == "image/png"
+    assert any(
+        "3D movie encoding failed" in warning and reason in warning
+        for warning in manifest["warnings"]
+    )
+    assert not (bundle / "media" / "flow-3d.mp4").exists()
+    for view in manifest["views"]:
+        assert len(view["snapshots"]) == 2
+        for snapshot in view["snapshots"]:
+            assert (bundle / snapshot["path"]).read_bytes().startswith(b"\x89PNG")
+    assert json.loads((bundle / "probes.json").read_text())["probes"][0]["values"] == [
+        5,
+        5,
+    ]
 
 
 def test_browser_panels_seek_modes_missing_media_and_narrow_layout(

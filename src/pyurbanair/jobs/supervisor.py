@@ -21,11 +21,25 @@ from collections.abc import Callable
 from typing import Any
 
 from pyurbanair.jobs.paths import ensure_private_directory
+from pyurbanair.jobs.preparation import PreparationService, _relevant_environment
 from pyurbanair.jobs.processes import TOKEN_ENV, identity, matching, owned, signal_owned
 from pyurbanair.jobs.registry import ACTIVE, Registry, atomic_json
 from pyurbanair.jobs.rendering_environment import select_render_environment
 
 MAX_MESSAGE = 4 * 1024 * 1024
+
+
+def _forward_worker_environment(
+    inherited: dict[str, str], plan: dict[str, Any]
+) -> dict[str, str]:
+    environment = dict(inherited)
+    recorded = plan["provenance"]["environment"]
+    for key in _relevant_environment(plan["backend"]):
+        if key != "CONDA_PREFIX":
+            environment.pop(key, None)
+            if key in recorded:
+                environment[key] = recorded[key]
+    return environment
 
 
 def socket_path(root: pathlib.Path) -> pathlib.Path:
@@ -133,6 +147,14 @@ class Supervisor:
         try:
             command = self.command_factory(job)
             env = dict(os.environ)
+            if job["payload"]["kind"] == "forward" and "store_root" in job["payload"]:
+                payload = job["payload"]
+                plan = PreparationService(self.repo_root, payload["store_root"]).load(
+                    payload["plan_id"]
+                )
+                if plan["digest"] != payload["plan_digest"]:
+                    raise ValueError("Prepared plan digest changed after enqueueing")
+                env = _forward_worker_environment(env, plan)
             # Prevent an activated MCP environment from contaminating worker imports.
             for key in ("PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX", "JAX_PLATFORMS"):
                 env.pop(key, None)

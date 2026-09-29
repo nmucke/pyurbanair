@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -52,6 +53,7 @@ def render_3d(
     times: list[float],
     opts: RenderOptions,
     limits: list[float],
+    warnings: set[str],
 ) -> dict[str, Any]:
     import pyvista as pv
 
@@ -194,12 +196,19 @@ def render_3d(
     poster = "previews/flow-3d.png"
     shutil.copyfile(frame_dir / "00000.png", output / poster)
     movie = None
-    if (
-        opts.movie
-        and len(times) > 1
-        and encode_movie(frame_dir, output / "media" / "flow-3d.mp4", opts.fps)
-    ):
-        movie = "media/flow-3d.mp4"
+    movie_path = output / "media" / "flow-3d.mp4"
+    if opts.movie and len(times) > 1:
+        try:
+            if encode_movie(frame_dir, movie_path, opts.fps):
+                movie = "media/flow-3d.mp4"
+        except (subprocess.SubprocessError, OSError) as exc:
+            warnings.add(
+                f"3D movie encoding failed; PNG sequence remains available: {exc}"
+            )
+            try:
+                movie_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                warnings.add(f"Could not remove incomplete 3D movie: {cleanup_error}")
     return {
         "id": "flow-3d",
         "label": "3D instantaneous streamlines",

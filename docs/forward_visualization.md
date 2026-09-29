@@ -160,7 +160,11 @@ metre coordinates, unit scale and no vertical exaggeration. Nonoverlapping STL
 bounds are rejected; overlapping bounds alone cannot establish precise alignment,
 so users must supply the matching geometry. With STL geometry an explicit state
 mask is required to prevent lines crossing buildings. The regular 2D products
-remain available if the optional 3D render raises a recoverable error.
+remain available if the optional 3D render raises a recoverable error. If 3D
+frames were completed before encoding fails or times out, the viewer retains
+their PNG sequence and records the movie failure in its warnings. A partial 3D
+MP4 is removed where possible and never listed in the manifest; cleanup failure
+is also recorded as a warning.
 Displayed STL surfaces are clipped to the saved field's cell-face bounds; a
 larger source city cannot force the camera to frame an area without flow data.
 The original geometry hash and displayed bounds are retained in provenance.

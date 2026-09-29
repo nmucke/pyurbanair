@@ -592,8 +592,23 @@ def render(
                     speed_limits[0],
                     speed_limits[1] + max(abs(speed_limits[1]) * 0.01, 1e-9),
                 ]
-            views.append(render_3d(reader, output, times, opts, speed_limits))
-        except (ImportError, RuntimeError, ValueError, OSError) as exc:
+            views.append(render_3d(reader, output, times, opts, speed_limits, warnings))
+        except (
+            ImportError,
+            RuntimeError,
+            ValueError,
+            OSError,
+            subprocess.SubprocessError,
+        ) as exc:
+            shutil.rmtree(output / "media" / "flow-3d", ignore_errors=True)
+            for path in (
+                output / "media" / "flow-3d.mp4",
+                output / "previews" / "flow-3d.png",
+            ):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             warnings.add(f"Optional 3D rendering unavailable: {exc}")
     if probes:
         fig = Figure(

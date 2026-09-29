@@ -12,7 +12,7 @@ import json
 import math
 import os
 import re
-import shutil
+import stat
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -53,12 +53,98 @@ _RECORDED_ENV = (
     "NETCDF_FORTRAN_ROOT",
     "PYURBANAIR_DISABLE_CPU_PINNING",
 )
+_UDALES_BUILD_ENV = (
+    "FC",
+    "CC",
+    "CXX",
+    "FFLAGS",
+    "FCFLAGS",
+    "CFLAGS",
+    "LDFLAGS",
+    "CMAKE_PREFIX_PATH",
+    "CMAKE_GENERATOR",
+    "CMAKE_TOOLCHAIN_FILE",
+    "NETCDF_DIR",
+    "NETCDF_FORTRAN_DIR",
+    "FFTW_DOUBLE_LIB",
+    "FFTW_FLOAT_LIB",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "CPATH",
+    "LIBRARY_PATH",
+    "UDALES_BUILD_JOBS",
+    "NVHPC_INSTALL_BASE",
+)
+
+
+def _relevant_environment(backend: str) -> tuple[str, ...]:
+    if backend in {"pyudales", "neural_surrogate"}:
+        return (*_RECORDED_ENV, *_UDALES_BUILD_ENV, "PATH", "CONDA_PREFIX")
+    return _RECORDED_ENV
+
+
+def _environment_snapshot(backend: str) -> dict[str, str]:
+    return {
+        name: os.environ[name]
+        for name in _relevant_environment(backend)
+        if name in os.environ
+    }
+
+
+def _cuda_activation_library(
+    repo_root: Path, selected_environment: str, recorded: dict[str, str]
+) -> str | None:
+    """Mirror the pinned CUDA activation script's optional NVHPC lib prefix."""
+    if selected_environment != "cuda":
+        return None
+    base = Path(
+        recorded.get("NVHPC_INSTALL_BASE", str(repo_root / ".pixi/envs/cuda/.nvhpc"))
+    ).expanduser()
+    if not base.is_absolute():
+        base = repo_root / base
+    compilers = sorted(base.glob("Linux_x86_64/*/compilers/bin/nvfortran"))
+    available = [path for path in compilers if os.access(path, os.X_OK)]
+    if not available:
+        return None
+    library = available[-1].parent.parent / "lib"
+    return str(library) if library.is_dir() else None
+
+
+def verify_worker_toolchain_environment(
+    plan: dict[str, Any], environment: dict[str, str]
+) -> None:
+    if plan["backend"] not in {"pyudales", "neural_surrogate"}:
+        return
+    recorded = plan["provenance"]["environment"]
+    activation_library = plan["provenance"].get("cuda_activation_library")
+    expected = {key: recorded[key] for key in _UDALES_BUILD_ENV if key in recorded}
+    if activation_library:
+        recorded_library = recorded.get("LD_LIBRARY_PATH")
+        expected["LD_LIBRARY_PATH"] = activation_library + (
+            f":{recorded_library}" if recorded_library else ""
+        )
+    changed = [
+        key
+        for key in _UDALES_BUILD_ENV
+        if (key in environment) != (key in expected)
+        or (key in expected and environment.get(key) != expected[key])
+    ]
+    if changed:
+        raise ValueError(
+            "uDALES build environment changed after Pixi activation: "
+            + ", ".join(changed)
+            + "; prepare again"
+        )
+
+
 _DEFAULT_LIMITS = {
     "max_members": 256,
     "max_windows": 32,
     "max_workers": 8,
     "max_cpu_threads": 128,
     "max_output_bytes": 16 * 1024**3,
+    "max_case_input_bytes": 2 * 1024**3,
+    "max_case_input_entries": 10_000,
 }
 
 
@@ -119,6 +205,171 @@ def fingerprint(path: str | Path) -> dict[str, Any]:
     }
 
 
+def _check_case_source(source: Path, store_root: Path) -> None:
+    # Resolve aliases before walking: the default store may live below the checkout.
+    if source.is_relative_to(store_root) or store_root.is_relative_to(source):
+        raise ValueError(f"case_dir overlaps managed job storage: {source}")
+    if not source.is_dir():
+        raise ValueError(f"case_dir must be a directory: {source}")
+
+
+def _case_entries(
+    source: Path, repo_root: Path, store_root: Path, limits: dict[str, int]
+) -> list[tuple[Path, bool, int, Path]]:
+    """Collect bounded entries and resolve safe regular-file links before copying."""
+    entries: list[tuple[Path, bool, int, Path]] = []
+    pending = [(source, 0)]
+    size = 0
+    while pending:
+        directory, depth = pending.pop()
+        with os.scandir(directory) as scan:
+            for child in scan:
+                relative = Path(child.path).relative_to(source)
+                metadata = child.stat(follow_symlinks=False)
+                if stat.S_ISLNK(metadata.st_mode):
+                    target = Path(child.path).resolve(strict=True)
+                    if not (
+                        target.is_relative_to(source)
+                        or target.is_relative_to(repo_root)
+                    ) or target.is_relative_to(store_root):
+                        raise ValueError(
+                            f"case_dir contains an unsafe symlink: {relative}"
+                        )
+                    metadata = target.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise ValueError(f"case_dir contains a symlink: {relative}")
+                else:
+                    target = Path(child.path)
+                is_directory = stat.S_ISDIR(metadata.st_mode)
+                if not (is_directory or stat.S_ISREG(metadata.st_mode)):
+                    raise ValueError(
+                        f"case_dir contains a non-regular entry: {relative}"
+                    )
+                entries.append((relative, is_directory, metadata.st_size, target))
+                if len(entries) > limits["max_case_input_entries"]:
+                    raise ValueError("case_dir exceeds max_case_input_entries")
+                if is_directory:
+                    if depth >= 32:
+                        raise ValueError("case_dir exceeds maximum directory depth 32")
+                    pending.append((Path(child.path), depth + 1))
+                else:
+                    size += metadata.st_size
+                    if size > limits["max_case_input_bytes"]:
+                        raise ValueError("case_dir exceeds max_case_input_bytes")
+    return entries
+
+
+def _open_case_file(path: Path, relative: Path) -> int:
+    """Open a scanned file without following a replaced directory component."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fd = os.open(path.anchor, directory_flags)
+    try:
+        for component in path.parts[1:-1]:
+            child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        # A swapped FIFO must not block the open before the regular-file check.
+        return os.open(
+            path.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
+        )
+    except OSError as error:
+        raise ValueError(
+            f"case_dir entry changed or contains a symlink: {relative}"
+        ) from error
+    finally:
+        os.close(directory_fd)
+
+
+def _case_fingerprint(
+    path: str | Path, repo_root: Path, store_root: Path, limits: dict[str, int]
+) -> dict[str, Any]:
+    source = Path(path).resolve(strict=True)
+    _check_case_source(source, store_root)
+    files: dict[str, str] = {}
+    size = 0
+    for relative, is_directory, expected_size, input_path in _case_entries(
+        source, repo_root, store_root, limits
+    ):
+        if is_directory:
+            continue
+        digest = hashlib.sha256()
+        descriptor = _open_case_file(input_path, relative)
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError(f"case_dir entry changed: {relative}")
+            file_size = 0
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                file_size += len(block)
+                size += len(block)
+                if size > limits["max_case_input_bytes"]:
+                    raise ValueError("case_dir exceeds max_case_input_bytes")
+                digest.update(block)
+            if file_size != expected_size:
+                raise ValueError(f"case_dir entry changed: {relative}")
+        files[str(relative)] = digest.hexdigest()
+    return {
+        "path": str(source),
+        "kind": "directory",
+        "sha256": hashlib.sha256(_canonical(files)).hexdigest(),
+        "bytes": size,
+        "case_input": True,
+    }
+
+
+def _stage_case_directory(
+    source: Path,
+    destination: Path,
+    repo_root: Path,
+    store_root: Path,
+    limits: dict[str, int],
+) -> dict[str, Any]:
+    """Copy a bounded case tree without following directory or file symlinks."""
+    _check_case_source(source, store_root)
+    if destination.is_relative_to(source) or source.is_relative_to(destination):
+        raise ValueError(f"case_dir overlaps staged input destination: {source}")
+    entries = _case_entries(source, repo_root, store_root, limits)
+
+    destination.mkdir(parents=True)
+    files: dict[str, str] = {}
+    copied = 0
+    for relative, is_directory, expected_size, input_path in entries:
+        target = destination / relative
+        if is_directory:
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        descriptor = _open_case_file(input_path, relative)
+        with (
+            os.fdopen(descriptor, "rb") as input_stream,
+            target.open("xb") as output_stream,
+        ):
+            metadata = os.fstat(input_stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(f"case_dir entry changed during staging: {relative}")
+            os.fchmod(output_stream.fileno(), stat.S_IMODE(metadata.st_mode))
+            file_size = 0
+            for block in iter(lambda: input_stream.read(1024 * 1024), b""):
+                file_size += len(block)
+                copied += len(block)
+                if copied > limits["max_case_input_bytes"]:
+                    raise ValueError("case_dir exceeds max_case_input_bytes")
+                digest.update(block)
+                output_stream.write(block)
+            if file_size != expected_size:
+                raise ValueError(f"case_dir entry changed during staging: {relative}")
+        files[str(relative)] = digest.hexdigest()
+    return {
+        "path": str(source),
+        "kind": "directory",
+        "sha256": hashlib.sha256(_canonical(files)).hexdigest(),
+        "bytes": copied,
+        "case_input": True,
+    }
+
+
 def _git(root: Path, *arguments: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(root), *arguments],
@@ -144,6 +395,21 @@ def code_identity(repo_root: str | Path, backend: str) -> dict[str, Any]:
         for source in sorted(directory.rglob("*")):
             if source.is_file() and source.suffix in {".py", ".yaml", ".toml", ".txt"}:
                 files[str(source.relative_to(root))] = _hash_file(source)
+    if "pyudales" in names:
+        for relative, suffixes in (
+            ("libs/pyudales/shell_scripts", {".sh"}),
+            ("libs/pyudales/src/pyudales/shell_scripts", {".sh"}),
+            (
+                "libs/pyudales/src/pyudales/solver_extensions/discrepancy",
+                {".json", ".patch", ".f90"},
+            ),
+        ):
+            for source in sorted((root / relative).glob("*")):
+                if source.is_file() and source.suffix in suffixes:
+                    files[str(source.relative_to(root))] = _hash_file(source)
+        activation = root / "activation_scripts/cuda_activation.sh"
+        if activation.is_file():
+            files[str(activation.relative_to(root))] = _hash_file(activation)
     for filename in (
         "pyproject.toml",
         "pixi.lock",
@@ -536,11 +802,16 @@ class PreparationService:
                         )
                     )
                     continue
-                identities.append(fingerprint(source))
                 if key == "case_dir":
                     staged = plan_dir / "inputs" / prefix.replace(".", "_") / "case"
-                    shutil.copytree(source, staged, symlinks=False)
+                    identities.append(
+                        _stage_case_directory(
+                            source, staged, self.repo_root, self.store_root, limits
+                        )
+                    )
                     model[key] = str(staged)
+                else:
+                    identities.append(fingerprint(source))
         if initial_state is None:
             initial_state = config.get("run", {}).get("initial_state")
         if initial_state is not None:
@@ -572,6 +843,7 @@ class PreparationService:
         self._selected_readiness(config, environment, issues, identities)
         prerequisites = self.capabilities(environment)
         backend = config["model"]["name"]
+        recorded_environment = _environment_snapshot(backend)
         selected_backends = {backend}
         for _, active_model in _active_models(config):
             active_backend = str(active_model.get("_target_", "")).split(".")[0]
@@ -639,11 +911,10 @@ class PreparationService:
                 "overrides": composition["overrides"],
                 "code": code_identity(self.repo_root, backend),
                 "inputs": identities,
-                "environment": {
-                    name: os.environ[name]
-                    for name in _RECORDED_ENV
-                    if name in os.environ
-                },
+                "environment": recorded_environment,
+                "cuda_activation_library": _cuda_activation_library(
+                    self.repo_root, environment, recorded_environment
+                ),
             },
             "expected_artifacts": [
                 "run_manifest.yaml",
@@ -931,7 +1202,16 @@ class PreparationService:
             )
         for identity in plan["provenance"]["inputs"]:
             try:
-                current = fingerprint(identity["path"])
+                current = (
+                    _case_fingerprint(
+                        identity["path"],
+                        self.repo_root,
+                        self.store_root,
+                        plan["limits"],
+                    )
+                    if identity.get("case_input")
+                    else fingerprint(identity["path"])
+                )
             except OSError as error:
                 raise ValueError(
                     f"prepared input disappeared: {identity['path']}"
@@ -940,9 +1220,7 @@ class PreparationService:
                 raise ValueError(
                     f"prepared input changed: {identity['path']}; prepare again"
                 )
-        current_env = {
-            name: os.environ[name] for name in _RECORDED_ENV if name in os.environ
-        }
+        current_env = _environment_snapshot(plan["backend"])
         if check_environment and current_env != plan["provenance"]["environment"]:
             raise ValueError("relevant execution environment changed; prepare again")
         return plan

@@ -61,12 +61,16 @@ def execute(job: dict[str, Any]) -> None:
             from omegaconf import OmegaConf
 
             from pyurbanair.jobs.paths import bind_job_paths
-            from pyurbanair.jobs.preparation import PreparationService
+            from pyurbanair.jobs.preparation import (
+                PreparationService,
+                verify_worker_toolchain_environment,
+            )
 
             service = PreparationService(job["repo_root"], payload["store_root"])
             plan = service.verify(payload["plan_id"], check_environment=False)
             if plan["digest"] != payload["plan_digest"]:
                 raise ValueError("Prepared plan digest changed after enqueueing")
+            verify_worker_toolchain_environment(plan, dict(os.environ))
             config, environment = bind_job_paths(plan["config"], root)
             for directory in environment.values():
                 pathlib.Path(directory).mkdir(parents=True, exist_ok=True)
