@@ -11,6 +11,7 @@ dependencies = [
   "matplotlib>=3.10.8,<4",
   "jax>=0.7.0,<0.8.0",
   "tqdm>=4.67.1,<5",
+  "psutil>=6,<8",
   "vape4d>=0.2.0,<0.3.0",
   "hydra-core>=1.3,<2", "manifold3d>=3.5.2,<4",
 ]
@@ -338,6 +339,18 @@ torch = { version = "==2.12.0+cpu", index = "https://download.pytorch.org/whl/cp
 torchvision = { version = "==0.27.0+cpu", index = "https://download.pytorch.org/whl/cpu" }
 
 
+# Optional local agent interface; workers do not require the MCP SDK.
+[tool.pixi.feature.mcp.pypi-dependencies]
+pyurbanair-mcp = { path = "libs/mcp_server", editable = true }
+
+[tool.pixi.feature.mcp.tasks]
+start-mcp = { cmd = "python -m pyurbanair_mcp --repo-root .", description = "Serve local forward tools over stdio" }
+
+[tool.pixi.feature.visualization-3d.dependencies]
+pyvista = ">=0.44,<0.47"
+vtk = ">=9.3,<9.6"
+ffmpeg = ">=7,<9"
+
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
 dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm", "benchmark_geometry", "cpu"] }
@@ -347,3 +360,5 @@ delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilat
 snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm", "cuda"] }
 viz = { features = ["viz", "py312"] }
+mcp = { features = ["mcp", "dev", "py312", "cpu"] }
+rendering = { features = ["visualization-3d", "dev", "py312", "cpu"] }

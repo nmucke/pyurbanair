@@ -155,6 +155,14 @@ python scripts/run_forward_model.py model=pylbm run.ensemble=true run.rollout_st
 python scripts/run_forward_model.py model=pylbm params=dynamic run.rollout_steps=3
 ```
 
+### Local agent interface and saved-result viewer
+
+Install the optional MCP environment with `pixi install --locked -e mcp`, then
+register the absolute path to `scripts/start_mcp` in your local client. Agents
+can inspect configurations, prepare and launch persistent forward jobs, retrieve
+results, and render saved fields without rerunning the solver. See
+[local MCP setup](docs/mcp.md) and [forward visualization](docs/forward_visualization.md).
+
 ### Ground-truth artifacts
 
 A truth simulation can be saved once and reused across many assimilation runs.

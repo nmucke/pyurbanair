@@ -113,3 +113,31 @@ def test_run_single_cleans_output_before_staging_warmstart(
     assert result["u"].item() == 1.0
     assert staged_restart.exists()
     assert not stale_fielddump.exists()
+
+
+def test_config_exports_preserve_paths_without_shell_evaluation(
+    tmp_path: pathlib.Path,
+) -> None:
+    import subprocess
+
+    from pyudales.utils.config_utils import create_config_sh
+
+    dirs = _make_dirs(tmp_path / "case space;$(touch UNEXPECTED)", "000")
+    matlab = tmp_path / "matlab;$(touch UNEXPECTED)" / "bin"
+    create_config_sh(dirs, matlab, 2)
+    output = subprocess.check_output(
+        [
+            "bash",
+            "-c",
+            'source "$1"; printf "%s\\0" "$DA_EXPDIR" "$MATLAB_BIN" "$DA_WORKDIR"',
+            "check",
+            str(dirs.experiment_dir / "config.sh"),
+        ],
+        cwd=tmp_path,
+    )
+    assert output.decode().split("\0")[:-1] == [
+        str(dirs.experiment_base_dir),
+        str(matlab),
+        str(dirs.output_dir),
+    ]
+    assert not (tmp_path / "UNEXPECTED").exists()

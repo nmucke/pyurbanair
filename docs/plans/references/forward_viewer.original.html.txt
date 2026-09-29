@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The shape of urban wind · LES films</title>
+<style>
+:root{color-scheme:dark;--bg:#071c29;--ink:#eef4ee;--muted:#adc6cd;--teal:#73dbd4;--line:#31505d}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}
+main{max-width:1920px;margin:auto;padding:35px 4vw 50px}
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:25px;margin-bottom:24px}
+.eyebrow{color:var(--teal);font-size:13px;font-weight:bold;letter-spacing:2.4px;margin:0 0 9px}
+h1{font:clamp(30px,3.2vw,57px)/1.1 Georgia,serif;margin:0}
+a{color:var(--teal)}
+button,select{font:inherit;color:inherit;border:1px solid var(--line);background:#102f3b;border-radius:5px;padding:11px 16px;cursor:pointer}
+button.active{background:var(--teal);color:#0a2530;border-color:var(--teal)}
+button:focus-visible,select:focus-visible,a:focus-visible{outline:3px solid #ffbe73;outline-offset:4px}
+.controls{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:18px}
+.controls label{display:flex;align-items:center;gap:12px;font-size:16px}
+.view-buttons{display:flex;gap:8px;margin-right:auto}
+.cinema{background:#061620;border:1px solid var(--line)}
+video{display:block;width:100%;max-height:calc(100vh - 290px);object-fit:contain;min-height:260px}
+.detail{display:grid;grid-template-columns:1.3fr 1fr;gap:40px;padding:24px 0;border-bottom:1px solid var(--line);font-size:18px;line-height:1.55}
+.detail p{margin:0 0 8px}
+.detail strong{color:var(--teal)}
+.caption{color:var(--muted);font-size:15px;line-height:1.6;max-width:1100px;margin-top:25px}
+.download{white-space:nowrap}
+small{font-size:14px;color:var(--muted)}
+@media(max-width:850px){
+  main{padding:22px 18px}
+  header{align-items:flex-start;flex-direction:column}
+  .detail{grid-template-columns:1fr;gap:10px}
+  video{max-height:70vh}
+  .controls{gap:10px}
+}
+.film-controls{display:flex;align-items:center;gap:15px;padding:12px 17px;border-top:1px solid var(--line);font-size:14px}
+.film-controls button{padding:6px 13px}
+.film-controls input{flex:1;accent-color:var(--teal);min-width:80px}
+.film-controls span{font-variant-numeric:tabular-nums;min-width:85px}
+.cinema:fullscreen{display:flex;flex-direction:column;justify-content:center}
+.cinema:fullscreen video{max-height:calc(100vh - 66px)}
+html.embedded main{max-width:none;padding:0}
+html.embedded header,html.embedded .detail,html.embedded .caption{display:none}
+html.embedded .controls{padding:12px 15px;margin:0;font-size:18px;gap:20px}
+html.embedded .controls label{font-size:18px}
+html.embedded video{height:563px;max-height:none;min-height:0}
+html.embedded .film-controls{padding:10px 15px;font-size:17px}
+html.embedded .cinema:fullscreen video{height:auto;max-height:calc(100vh - 66px)}
+.film-stage{min-width:0}
+.cinema.slices-active .film-stage{display:grid;grid-template-columns:minmax(0,1fr) clamp(380px,31%,520px);align-items:stretch}
+.cinema.slices-active video{height:650px;max-height:none;min-width:0}
+#sensor-panels{min-width:0;height:650px;padding:13px 15px 8px;border-left:1px solid var(--line);display:flex;flex-direction:column;gap:9px;background:#0a202c}
+#sensor-panels[hidden]{display:none}
+.sensor-intro{flex:0 0 auto}
+.sensor-intro strong{display:block;color:var(--ink);font-size:18px;line-height:1.15}
+.sensor-intro span{display:block;color:var(--muted);font-size:12px;line-height:1.25;margin-top:4px}
+.sensor-chart{flex:1 1 0;min-height:0;background:#102b38;border:1px solid var(--line);border-radius:7px;padding:7px 7px 4px;display:flex;flex-direction:column}
+.sensor-chart h3{margin:0 0 3px 5px;font-size:16px;line-height:1.1;color:var(--ink)}
+.sensor-chart canvas{display:block;width:100%;flex:1 1 0;min-height:0}
+.sensor-legend{flex:0 0 auto;display:flex;justify-content:space-around;gap:4px;font-size:12px;color:var(--muted)}
+.sensor-legend span{white-space:nowrap}
+.sensor-chip{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;margin-right:4px;color:#10202a;font-size:11px;font-weight:bold}
+.sensor-time{font-variant-numeric:tabular-nums;color:#ffd788}
+.cinema.slices-active:fullscreen .film-stage{height:calc(100vh - 66px)}
+.cinema.slices-active:fullscreen video,.cinema.slices-active:fullscreen #sensor-panels{height:100%;max-height:none}
+html.embedded .cinema.slices-active video,html.embedded .cinema.slices-active #sensor-panels{height:563px;max-height:none}
+html.embedded .cinema.slices-active:fullscreen video,html.embedded .cinema.slices-active:fullscreen #sensor-panels{height:100%}
+@media(max-width:1050px){
+  .cinema.slices-active .film-stage{grid-template-columns:1fr}
+  .cinema.slices-active video{height:auto;max-height:65vh}
+  .cinema.slices-active #sensor-panels{height:500px;border-left:0;border-top:1px solid var(--line)}
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <p class="eyebrow">DATA ASSIMILATION FOR THE GEOSCIENCES</p>
+      <h1>The shape of urban wind</h1>
+    </div>
+    <a href="../lecture.html#4">Back to the LES slide</a>
+  </header>
+
+
+  <div class="controls">
+    <label>Geometry
+      <select id="case">
+        <option value="train">US-Was-U1_d90</option>
+        <option value="val">UA-KY-V7_d45</option>
+        <option value="test" selected>CH-BAS-V1_d00</option>
+      </select>
+    </label>
+    <div class="view-buttons">
+      <button class="active" data-view="3d">3D flow</button>
+      <button data-view="slices">2D slices</button>
+    </div>
+    <label>Playback
+      <select id="rate">
+        <option value="0.5">Slow (½ speed)</option>
+        <option value="1" selected>Normal</option>
+        <option value="1.5">Fast (1½ speed)</option>
+      </select>
+    </label>
+    <a class="download" id="download" download>Download MP4</a>
+  </div>
+
+
+  <div class="cinema">
+    <div class="film-stage">
+      <video id="film" controls muted playsinline loop preload="metadata"
+        poster="poster3d_test.jpg" src="flow3d_test.mp4"></video>
+      <aside id="sensor-panels" aria-label="Virtual LES-sampled sensor time series" hidden>
+        <div class="sensor-intro">
+          <strong>Three virtual samples in the flow</strong>
+          <span>Direct grid-cell LES values, not field observations · horizontal speed · fixed 0–16 m/s</span>
+        </div>
+        <div class="sensor-chart">
+          <h3>Near street level · z = 2 m <span class="sensor-time" id="sensor-time"></span></h3>
+          <canvas id="sensor-chart-2" role="img" aria-label="Horizontal wind speed at three virtual LES sample points, two metres above ground"></canvas>
+        </div>
+        <div class="sensor-chart">
+          <h3>Above many roofs · z = 26 m</h3>
+          <canvas id="sensor-chart-26" role="img" aria-label="Horizontal wind speed at the same three virtual LES sample points, twenty-six metres above ground"></canvas>
+        </div>
+        <div class="sensor-legend" id="sensor-legend"></div>
+      </aside>
+    </div>
+    <div class="film-controls">
+      <button id="play">Play</button>
+      <button id="restart">Restart</button>
+      <input id="scrub" type="range" min="0" max="20" step="0.01" value="0" aria-label="Film playback position">
+      <span id="clock">0:00 / 0:20</span>
+      <button id="full">Full screen</button>
+    </div>
+  </div>
+
+
+  <div class="detail">
+    <div><p id="reading"></p><small id="technique"></small></div>
+    <div><p id="geometry"></p><small>4 m grid · approximately 10 simulated minutes · 20-second films</small></div>
+  </div>
+
+
+  <p class="caption">These are forward simulations from the supplied uDALES data, not assimilation results. The three cases also have different incoming winds. They illustrate different flows, not the effect of changing geometry alone. Colors use fixed scales across cases. In the 2D views, dark outlined areas mark solid buildings, cyan lines locate the vertical section, and A–C mark virtual LES samples at exactly the same horizontal cells in both maps. The right-hand traces show horizontal speed sampled from those grid cells; they are not measured observations. In 3D, buildings use the matching STL geometry with no vertical exaggeration.</p>
+  <p class="caption">Source: <code>pyudales_realistic/state/{train,val,test}/sample_0000.nc</code>. Simulation time starts after the recorded spin-up. <a href="[README.md](http://readme.md/)">Rendering notes and reproducibility</a>.</p>
+</main>
+
+
+<script src="sensor_data.js"></script>
+<script src="sensor_charts.js"></script>
+<script>
+if(new URLSearchParams(location.search).has('embedded')||document.documentElement.dataset.embedded)
+  document.documentElement.classList.add('embedded');
+
+
+const q=s=>document.querySelector(s),
+  cases={
+    train:{id:'US-Was-U1_d90',domain:'512 × 512 m',height:16},
+    val:{id:'UA-KY-V7_d45',domain:'896 × 576 m',height:50},
+    test:{id:'CH-BAS-V1_d00',domain:'896 × 768 m',height:90}
+  };
+let mode='3d';
+
+
+function update(){
+  const c=q('#case').value,d=cases[c],v=q('#film'),playing=!v.paused,t=v.currentTime||0;
+  const path=(mode==='3d'?'flow3d_':'slices_')+c+'.mp4';
+  v.pause();
+  v.poster=(mode==='3d'?'poster3d_':'poster_')+c+'.jpg';
+  v.src=path;
+  v.onloadedmetadata=()=>{
+    v.currentTime=Math.min(t,v.duration-.01);
+    v.playbackRate=+q('#rate').value;
+    if(playing)v.play().catch(()=>{});
+    window.LESCharts?.draw()
+  };
+  q('#download').href=path;
+  document.querySelectorAll('[data-view]').forEach(b=>{
+    const on=b.dataset.view===mode;
+    b.classList.toggle('active',on);
+    b.setAttribute('aria-pressed',on)
+  });
+  q('.cinema').classList.toggle('slices-active',mode==='slices');
+  q('#sensor-panels').hidden=mode!=='slices';
+  window.LESCharts?.setCase(c);
+  q('#geometry').innerHTML=`<strong>${[d.id](http://d.id/)}</strong><br>${d.domain} domain · buildings up to ${d.height} m`;
+  q('#reading').innerHTML=mode==='3d'
+    ?'<strong>Follow the flow around and above buildings.</strong><br>Streamlines reveal the shape of the instantaneous 3D flow. The near-ground slice shows speed at z = 2 m.'
+    :'<strong>Look for wakes, shelter and vertical exchange.</strong><br>Compare horizontal speed at 2 m and 26 m. Below, warm colors show rising air and cool colors show sinking air. A–C are virtual LES samples, not observations.';
+  q('#technique').textContent=mode==='3d'
+    ?'Instantaneous streamlines show flow shape, not tracked particle paths. 120 saved velocity fields; approximately 30× real time. Speed includes u, v and w.'
+    :'240 frames from linear interpolation between saved velocity components. Approximately 30× real time. Horizontal speed uses u and v; section colors show w. Sensor traces use the 120 actual saved fields.';
+}
+
+
+q('#case').onchange=update;
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{mode=b.dataset.view;update()});
+q('#rate').onchange=()=>q('#film').playbackRate=+q('#rate').value;
+update();
+
+
+const film=q('#film');
+film.controls=false;
+q('#play').onclick=()=>film.paused?film.play():film.pause();
+q('#restart').onclick=()=>{film.currentTime=0;window.LESCharts?.draw()};
+q('#scrub').oninput=e=>{film.currentTime=+e.target.value;window.LESCharts?.draw()};
+film.onplay=()=>q('#play').textContent='Pause';
+film.onpause=()=>q('#play').textContent='Play';
+film.ontimeupdate=()=>{
+  q('#scrub').value=film.currentTime;
+  q('#clock').textContent='0:'+String(Math.floor(film.currentTime)).padStart(2,'0')+' / 0:20';
+  window.LESCharts?.draw()
+};
+q('#full').onclick=()=>document.fullscreenElement
+  ?document.exitFullscreen()
+  :q('.cinema').requestFullscreen();
+
+
+addEventListener('message',e=>{
+  if(e.source===parent&&e.data?.type==='lecture:leave')film.pause()
+});
+addEventListener('keydown',e=>{
+  if(parent!==window&&!['INPUT','SELECT'].includes(e.target.tagName)&&['ArrowLeft','ArrowRight','PageUp','PageDown'].includes(e.key)){
+    e.preventDefault();
+    parent.postMessage({type:'lecture:navigate',direction:['ArrowRight','PageDown'].includes(e.key)?1:-1},'*')
+  }
+});
+</script>
+</body>
+</html>

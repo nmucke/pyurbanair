@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Use an absolute launcher path in clients; stdout belongs exclusively to MCP.
+set -euo pipefail
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+pixi_bin="${PYURBANAIR_PIXI:-pixi}"
+if ! command -v "$pixi_bin" >/dev/null 2>&1; then
+    if [[ -x "$HOME/.pixi/bin/pixi" ]]; then
+        pixi_bin="$HOME/.pixi/bin/pixi"
+    else
+        echo 'pixi is unavailable; set PYURBANAIR_PIXI to its absolute path.' >&2
+        exit 1
+    fi
+fi
+export PYURBANAIR_PIXI="$(command -v "$pixi_bin")"
+if [[ ! -x "$repo_root/.pixi/envs/mcp/bin/python" ]]; then
+    echo 'Install the MCP environment first: pixi install -e mcp' >&2
+    exit 1
+fi
+exec "$pixi_bin" run --locked --manifest-path "$repo_root/pyproject.toml" -e mcp python -m pyurbanair_mcp --repo-root "$repo_root" "$@"
