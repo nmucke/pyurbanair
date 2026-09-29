@@ -161,6 +161,10 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
+from pyurbanair.config.discrepancy import (
+    SGS_BIAS_PARAMETER_METADATA,
+    SGS_BIAS_PARAMETER_NAMES,
+)
 from pyurbanair.config.hydra_helpers import (
     add_observation_error_metadata,
     add_prior_innovation_diagnostics,
@@ -169,7 +173,7 @@ from pyurbanair.config.hydra_helpers import (
     create_observation_error,
     create_observation_operator,
     create_observation_points,
-    filter_parameter_config,
+    inference_parameter_configs,
 )
 from pyurbanair.config.run_record import (
     append_constructor_override,
@@ -599,8 +603,12 @@ def run(cfg: DictConfig) -> None:
     # that subset, applied to prior AND truth.
     selected = cfg.get("params_to_estimate", None)
     selected = list(selected) if selected is not None else None
-    truth_params_cfg = filter_parameter_config(cfg.truth_params, selected)
-    prior_params_cfg = filter_parameter_config(cfg.prior_params, selected)
+    truth_params_cfg, prior_params_cfg = inference_parameter_configs(cfg)
+    discrepancy_enabled = bool(
+        OmegaConf.select(
+            cfg, "assim_model.forward_model.model_discrepancy.enabled", default=False
+        )
+    )
     if selected is not None:
         print(f"Estimating parameters: {selected}")
 
@@ -829,6 +837,9 @@ def run(cfg: DictConfig) -> None:
     # prior (this ensemble is window 0's), written with the posterior at the end.
     prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
+    if discrepancy_enabled:
+        for name, metadata in SGS_BIAS_PARAMETER_METADATA.items():
+            prior_params[name].attrs.update(metadata)
     append_constructor_override(
         out_dir,
         role="assim",
@@ -836,6 +847,16 @@ def run(cfg: DictConfig) -> None:
         values={
             "sampled_shape": dict(prior_params.sizes),
             "parameter_names": list(prior_params.data_vars),
+            **(
+                {
+                    "discrepancy_prior": OmegaConf.to_container(
+                        prior_params_cfg, resolve=True
+                    ),
+                    "parameter_metadata": SGS_BIAS_PARAMETER_METADATA,
+                }
+                if discrepancy_enabled
+                else {}
+            ),
         },
     )
 
@@ -845,7 +866,7 @@ def run(cfg: DictConfig) -> None:
         cfg.truth_model.solver_name,
         OmegaConf.select(cfg, "observation.operator"),
     )
-    assim_obs_op = create_observation_operator(
+    assim_obs_op: Any = create_observation_operator(
         cfg.obs,
         cfg.assim_model.solver_name,
         OmegaConf.select(cfg, "observation.operator"),
@@ -963,6 +984,8 @@ def run(cfg: DictConfig) -> None:
     # --- The two DA instances, and the hybrid around them ----------------------
     rng_key, esmda_key = jax.random.split(rng_key)
     smoother_overrides: dict[str, Any] = {}
+    if discrepancy_enabled:
+        smoother_overrides["global_parameter_names"] = SGS_BIAS_PARAMETER_NAMES
     if "TimeVaryingParameter" in str(cfg.esmda.smoother._target_):
         # The time-varying smoother flattens each knot into its own
         # augmented-state scalar, so `num_time_points` must equal the sampled
@@ -1010,6 +1033,8 @@ def run(cfg: DictConfig) -> None:
 
     rng_key, filter_key = jax.random.split(rng_key)
     filter_overrides: dict[str, Any] = {}
+    if discrepancy_enabled:
+        filter_overrides["global_parameter_names"] = SGS_BIAS_PARAMETER_NAMES
     if filter_mode == "state":
         # The config ships an evolution/inflation pair for the parameter-
         # updating mode; in state mode the parameters are fixed by the smoother,
@@ -1236,12 +1261,9 @@ def run(cfg: DictConfig) -> None:
             out_dir / "params_history.nc"
         )
     if applied_params_pieces:
-        # Joint mode on a DYNAMIC trajectory only: the parameters each forecast
-        # segment was actually run with, `e_k + c_k` — the ESMDA schedule
-        # evaluated at the segment midpoint plus the filter's carried
-        # correction. Distinct from params_history (the ANALYZED values) and
-        # the only artifact from which the correction itself is recoverable
-        # per cycle.
+        # Forecast-used values: a dynamic joint schedule plus its correction,
+        # or the frozen global coefficients in the static state-only phase.
+        # These differ from params_history, which records analyzed values.
         xarray.concat(applied_params_pieces, dim="cycle", join="override").to_netcdf(
             out_dir / "applied_params_history.nc"
         )

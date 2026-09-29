@@ -21,6 +21,8 @@ from omegaconf import DictConfig, OmegaConf
 from pylbm.utils.warm_start_utils import clean_output_files as clean_lbm_output_files
 from pyudales.utils.clean_up_utils import clean_output_dir as clean_udales_output_dir
 
+from pyurbanair.config.discrepancy import augment_sgs_discrepancy_prior
+
 
 def _plain(value: Any) -> Any:
     if isinstance(value, DictConfig):
@@ -164,6 +166,27 @@ def filter_parameter_config(params_cfg: DictConfig, selected: Any) -> DictConfig
                 if name not in keep:
                     del cfg[block][name]
     return cfg
+
+
+def inference_parameter_configs(cfg: DictConfig) -> tuple[DictConfig, DictConfig]:
+    """Resolve independent truth and prior samplers for an inference runner.
+
+    Discrepancy coefficients are prior-only nuisance parameters when the truth
+    has no counterparts. Keep the truth's prescribed forcing in that case;
+    selecting inferred coefficients must not change how truth is generated.
+    """
+    selected = cfg.get("params_to_estimate")
+    discrepancy = OmegaConf.select(cfg, "assim_model.forward_model.model_discrepancy")
+    enabled = discrepancy is not None and discrepancy.get("enabled", False)
+    truth = (
+        cfg.truth_params
+        if enabled
+        else filter_parameter_config(cfg.truth_params, selected)
+    )
+    prior = augment_sgs_discrepancy_prior(
+        filter_parameter_config(cfg.prior_params, selected), discrepancy
+    )
+    return truth, prior
 
 
 def create_initial_state_ensemble(

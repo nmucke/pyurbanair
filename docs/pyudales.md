@@ -242,14 +242,15 @@ of the initial condition.
 
 ---
 
-### 4.1 Opt-in strain/rotation discrepancy (fixed forward runs)
+### 4.1 Opt-in strain/rotation discrepancy
 
 `model.forward_model.model_discrepancy` enables a native Vreman viscosity
 correction. Fixed coefficients are supported in single and ensemble forward
 runs. The backend also provides the window checkpoint/replay protocol below.
-Assimilation-model enablement in the runners remains rejected pending
-parameter-inference integration and its acceptance experiments. There are
-no time-varying coefficient schedules or process noise.
+The runners also support coefficient-only static ESMDA, parameter/joint
+filtering, and static ESMDA followed by state-only filtering. Physical forcing
+and the native SGS constant remain fixed. There are no within-forecast
+coefficient schedules or coefficient process noise.
 
 All feature settings must be chosen explicitly; the following numbers illustrate
 the interface and are **not calibrated defaults**:
@@ -268,8 +269,11 @@ model_discrepancy:
 
 Height is measured in metres from the native solver's vertical datum (`zf`);
 `canopy_height` is a fixed representative building height. The regularization is
-in s⁻¹ and the logarithmic cap is dimensionless. `prior_std` is reserved for the
-later inference stage; supplying it does not sample a prior.
+in s⁻¹ and the logarithmic cap is dimensionless. For inference, `prior_std` supplies three positive, finite standard deviations
+for independent zero-centred Gaussian coefficient priors. The inference runner
+adds these distributions to the selected static prior sampler; do not also
+define them in `prior_params.parameters`. In a forward-only run this field
+does not sample anything.
 
 Supply static scalar Dataset fields `sgs_bias_b0`, `sgs_bias_b1`, `sgs_bias_b2`
 through `params` (or `Constant` entries in the parameter sampler). For example:
@@ -346,8 +350,18 @@ backend path does not capture checkpoints or change failure jitter.
 A cold checkpoint has no native carry. Repeated cold calls restart from the
 same inputs; a later analyzed warm start without a native carry constructs its
 template from that attempt's inputs. This is not an archived post-spinup hidden
-state. Joint cold-to-warm assimilation and cross-model initial states still need
-dedicated validation before runner enablement.
+state. Joint initial-state ESMDA and cross-model initial-state injection remain outside
+the supported discrepancy runner modes. Sequential joint filtering instead
+updates each forecast endpoint before the next warm segment.
+
+For the hybrid, the filter and smoother retain separate experiment directories.
+Before each window, the smoother imports the filter's validated native carry,
+physical clock, and inlet realization, while preserving its own window runtime.
+The smoother's analysis-only call rolls back its intermediate endpoints; the
+state-only filter then advances with the estimated coefficient vector. Hybrid
+SGS runs require `ensemble.failure.policy=raise`: donor remapping across these
+separate stacks is not supported yet. Ordinary ESMDA/filter donor handling is
+unchanged.
 
 The small native regression case verifies exact repeated cold and warm forecasts
 on one and two MPI ranks, including replay after an intervening state/coefficient

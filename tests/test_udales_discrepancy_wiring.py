@@ -111,7 +111,7 @@ def test_rejects_incompatible_closure_before_build(tmp_path: Path) -> None:
     "role,name,error",
     [
         ("model", "pylbm", "requires pyudales"),
-        ("assim_model", "pyudales", "assimilation is not implemented"),
+        ("assim_model", "pyudales", "inference currently supports"),
     ],
 )
 def test_unsupported_discrepancy_workflows_fail_early(

@@ -89,7 +89,11 @@ from data_assimilation.filter_smoothing.tempering import (
     resolve_tempering_policy,
 )
 from data_assimilation.filtering.base import BaseFilter, CycleDiagnostics
-from data_assimilation.smoothing.esmda import ParameterESMDA, StateAndParameterESMDA
+from data_assimilation.smoothing.esmda import (
+    ParameterESMDA,
+    StateAndParameterESMDA,
+    TimeVaryingParameterESMDA,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -363,13 +367,11 @@ CycleDiagnostics` per filter cycle, renumbered 0..L-1 over the window (the
       prior: both hybrid paths drop it so the two histories index the same
       cycles as ``diagnostics``. ``params_history`` is ``None`` in
       ``mode="state"``.
-    * ``applied_params_history``: joint mode with a dynamic trajectory only —
-      the parameters each segment was actually forecast with, i.e.
-      ``e_k + c_k`` before that cycle's analysis. It is what separates the
-      ESMDA schedule from what the filter ran; ``None`` on the static path,
-      where every cycle is forecast with ``esmda_params`` itself, and in state
-      mode, where the applied parameters are per-segment trajectories of
-      differing knot counts and do not stack.
+    * ``applied_params_history``: the static filter's recorded per-cycle
+      forecast parameters when requested, or in dynamic joint mode the
+      parameters each segment actually used (``e_k + c_k``). Dynamic state
+      mode has per-segment trajectories of differing knot counts, so these
+      do not stack.
     """
 
     esmda_params: xarray.Dataset
@@ -834,6 +836,32 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
         if self.tempering.likelihood_allocation == "shared_budget":
             self._check_shared_product(batches)
 
+        smoother_model = self.smoother.forward_model
+        if getattr(smoother_model, "forecast_window_replay_enabled", False):
+            if (
+                isinstance(self.smoother, TimeVaryingParameterESMDA)
+                or params is None
+                or "time" in params.dims
+            ):
+                raise ValueError(
+                    "SGS discrepancy hybrid requires static parameter-only ESMDA."
+                )
+            if self.filter.mode != "state":
+                raise ValueError(
+                    "SGS discrepancy hybrid requires a state-only filter so "
+                    "coefficients remain fixed through the filter phase."
+                )
+            filter_model = self.filter.forward_model
+            if (
+                getattr(smoother_model, "_failure_policy", None) != "raise"
+                or getattr(filter_model, "_failure_policy", None) != "raise"
+            ):
+                raise ValueError(
+                    "SGS discrepancy hybrid requires failure.policy=raise "
+                    "in both ensemble stacks."
+                )
+            smoother_model.synchronize_forecast_state_from(filter_model)
+
         # --- ESMDA phase ------------------------------------------------
         # ``join="override"``: the batches share the ``obs`` axis by
         # construction (one observation operator), and the default outer join
@@ -916,7 +944,7 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
             diagnostics=result.diagnostics,
             esmda_params_history=esmda_params_history,
             params_history=params_history,
-            applied_params_history=None,
+            applied_params_history=getattr(result, "applied_params_history", None),
             state_history=result.state_history if return_history else None,
         )
 

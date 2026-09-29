@@ -387,10 +387,24 @@ parameter ensemble and its final history entry to match the accepted forecast.
 
 The first implementation is uDALES with enabled discrepancy; see
 [pyudales §4.2](pyudales.md#42-window-checkpoints-for-repeated-forecasts) for
-checkpoint contents and limitations. The runner's discrepancy assimilation guard
-remains in place until coefficient priors, inference and recovery tests are
-integrated. This protocol alone does not enable filtering or hybrid discrepancy
-inference, nor does it checkpoint the smoother's RNG for job recovery.
+checkpoint contents and limitations. Coefficient-only inference is supported by
+the runners as described below. Replay does not checkpoint the smoother's RNG
+for job recovery.
+
+**Persistent SGS coefficient inference.** The opt-in uDALES discrepancy runner
+path selects exactly `sgs_bias_b0`, `sgs_bias_b1`, and `sgs_bias_b2`. It augments
+the static prior from the three configured `model_discrepancy.prior_std` scales;
+forcing and native SGS settings remain constructor values. The truth sampler is
+independent and retains its prescribed forcing, even when it has no coefficient
+fields. Parameter accuracy metrics use only fields actually present in truth.
+The static posterior carries to the next ESMDA window without process noise.
+
+`global_parameter_names` is generic localization metadata on the smoothers and
+filters. Declared static parameter rows use the global update, including when
+state rows use correlation or distance localization. The default empty tuple
+preserves existing localization and RNG behavior. Parameter-only ESMDA accepts
+distance localization when every parameter is explicitly global; the filter's
+existing parameter-only distance restriction still applies.
 
 **`_observation_coords`** (used by distance localization). Tiles the
 sensor xyz coordinates so that observation index `j` maps to sensor
@@ -690,6 +704,15 @@ Correlation localization applies to both blocks, while physical-distance
 localization applies to state rows and keeps parameter rows global. Localization
 strategies are reused from `localization/` unchanged; distance-based strategies
 need state rows.
+
+For enabled SGS inference, parameter/joint filters use identity coefficient
+evolution (no process noise); retain an inflation scheme for spread maintenance.
+Coefficients are constant during a forecast segment and updated for the next
+segment. With `return_history=True` and declared global parameters,
+`FilterResult.applied_params_history` records the coefficients actually used by
+each accepted forecast, after donor substitution. `params_history` separately
+records the initial ensemble and analyzed values. The runners persist the former
+as `applied_params_history.nc` when `run.save_history=true`.
 
 **Beta tempering.** `beta` (default `1.0`, config `filtering.beta`) multiplies
 the observation-error covariance of **every** analysis: `R_filter = beta R`, so
@@ -1123,6 +1146,15 @@ the script resolves it before the truth is simulated (see
 > knot trajectory against stacked per-cycle observations) was removed in
 > `0e3291c`; see `docs/plans/filter_smoothing_windowed_esmda.md` for its
 > design record. This section describes its replacement.
+
+For SGS discrepancy the hybrid currently uses static parameter ESMDA and a
+state-only filter: each member keeps its ESMDA coefficient vector throughout
+that window's filter phase. The uDALES stacks synchronize native carry and clocks
+at window entry; see [pyudales §4.2](pyudales.md#42-window-checkpoints-for-repeated-forecasts).
+Failure donor substitution across phases is rejected (`failure.policy=raise`
+is required). Joint hybrid coefficient updates remain deferred. Static hybrid
+runs with declared global parameters also save the forecast-used coefficient
+history. The likelihood allocation below remains independent of discrepancy.
 
 ### Beta tempering: splitting each observation between the phases
 

@@ -5,6 +5,7 @@ import os
 import pathlib
 import shutil
 from abc import abstractmethod
+from collections.abc import Sequence
 from typing import Any, Optional
 
 import jax
@@ -64,6 +65,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
     #: legacy full-weight value.
     likelihood_weight: float = 1.0
 
+    #: Static parameters explicitly exempt from every localization strategy.
+    global_parameter_names: tuple[str, ...] = ()
+
     def __init__(
         self,
         observation_operator: ObservationOperator,
@@ -75,6 +79,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         localization: Optional[BaseLocalization] = None,
         aggregate_observations: Optional[AggregateObservations] = None,
         likelihood_weight: float = 1.0,
+        global_parameter_names: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator,
@@ -149,6 +154,15 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         likelihood_weight = self._validate_likelihood_weight(likelihood_weight)
         self._validate_effective_covariance(C_D, base_alpha, likelihood_weight)
 
+        if isinstance(global_parameter_names, str):
+            raise ValueError("global_parameter_names must be a sequence of names.")
+        names = tuple(global_parameter_names or ())
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("global_parameter_names must contain nonempty strings.")
+        if len(set(names)) != len(names):
+            raise ValueError("global_parameter_names must not contain duplicates.")
+        self.global_parameter_names = names
+
         # Reject a coordinate-based localization on a smoother that cannot supply
         # row coordinates (parameter-only variants). Deferring this to the first
         # Kalman update produces an opaque error deep in the analysis loop.
@@ -156,6 +170,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
             localization is not None
             and localization.requires_coordinates
             and not self._supplies_row_coordinates
+            and not self.global_parameter_names
         ):
             raise ValueError(
                 f"{type(localization).__name__} requires physical row "
@@ -445,6 +460,11 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # physical. At ``w = 1`` the base value passes through untouched and
         # no extra key is split, so the seeded RNG stream is the legacy one.
         alpha = self._apply_likelihood_weight(self.alpha if alpha is None else alpha)
+        localization = self.localization
+        if localize_mask is not None and not bool(jnp.any(localize_mask)):
+            # An explicitly global vector needs no spatial coordinates (and
+            # consumes exactly the same perturbation draw as a global update).
+            localization = None
         self.rng_key, subkey = jax.random.split(self.rng_key)
         return stochastic_enkf_update(
             augmented=augmented,
@@ -453,12 +473,57 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
             C_D_diag=(self.C_D if self.C_D.ndim == 1 else jnp.diag(self.C_D)),
             rng_key=subkey,
             alpha=alpha,
-            localization=self.localization,
+            localization=localization,
             group_ids=group_ids,
             localize_mask=localize_mask,
             row_coords=row_coords,
             obs_coords=obs_coords,
         )
+
+    def _validate_global_parameters(self, params: xarray.Dataset) -> None:
+        """Check explicit static/global metadata before any solver forecast."""
+        if not self.global_parameter_names:
+            return
+        missing = [name for name in self.global_parameter_names if name not in params]
+        if missing:
+            raise ValueError(
+                f"Global parameter names absent from params: {sorted(missing)}"
+            )
+        for name in self.global_parameter_names:
+            if params[name].dims != ("ensemble",):
+                raise ValueError(
+                    f"Global parameter {name!r} must be static with dims ('ensemble',)."
+                )
+        if (
+            self.localization is not None
+            and self.localization.requires_coordinates
+            and not self._supplies_row_coordinates
+            and set(params.data_vars) != set(self.global_parameter_names)
+        ):
+            raise ValueError(
+                "Distance-based localization on a parameter-only smoother requires "
+                "every parameter to be explicitly declared in global_parameter_names; "
+                "other parameter rows have no physical coordinates."
+            )
+
+    def _parameter_localize_mask(self, params: xarray.Dataset) -> Optional[jnp.ndarray]:
+        """Exclude explicitly global parameter rows, leaving legacy defaults intact."""
+        self._validate_global_parameters(params)
+        if not self.global_parameter_names:
+            return None
+        return jnp.asarray(
+            [name not in self.global_parameter_names for name in params.data_vars]
+        )
+
+    def _preserve_parameter_attrs(
+        self, updated: xarray.Dataset, template: xarray.Dataset
+    ) -> xarray.Dataset:
+        if not self.global_parameter_names:
+            return updated
+        updated.attrs = dict(template.attrs)
+        for name in updated.data_vars:
+            updated[name].attrs = dict(template[name].attrs)
+        return updated
 
     def _observation_coords(self, n_d: int) -> jnp.ndarray:
         """Physical (x, y, z) coordinate of each of the ``n_d`` observations.
@@ -518,6 +583,7 @@ sensor_observation_coords` (shared with the filtering package); see its
         forecast. Analysis-only calls and exceptions leave its pre-window state
         intact, so intermediate endpoints cannot leak into a later forecast.
         """
+        self._validate_global_parameters(params)
         replay = getattr(self.forward_model, "forecast_window_replay_enabled", False)
         if replay:
             self.forward_model.begin_forecast_window()
@@ -730,7 +796,16 @@ sensor_observation_coords` (shared with the filtering package); see its
 
 
 class ParameterESMDA(_BaseESMDA):
-    """Parameter-only ESMDA smoothing."""
+    """Parameter-only ESMDA smoothing.
+
+    ``global_parameter_names`` declares static ``(ensemble,)`` parameters that
+    always use all observations, including under correlation localization. No
+    spatial location is assigned to these rows. A parameter-only smoother can
+    use distance localization only when every parameter is explicitly global.
+    Names are validated against each input Dataset before forecasting; the
+    declaration persists across updates and windows. The default empty tuple
+    preserves the existing localization behavior.
+    """
 
     def update_params_from_pred_obs(
         self,
@@ -788,7 +863,12 @@ class ParameterESMDA(_BaseESMDA):
         else:
             group_ids = None
         params_updated = self._compute_kalman_update(
-            params_array, pred_obs, obs, N_e, group_ids=group_ids
+            params_array,
+            pred_obs,
+            obs,
+            N_e,
+            group_ids=group_ids,
+            localize_mask=self._parameter_localize_mask(params),
         )
 
         updated_data_vars = {
@@ -796,7 +876,9 @@ class ParameterESMDA(_BaseESMDA):
             for i, name in enumerate(param_names)
         }
 
-        return xarray.Dataset(data_vars=updated_data_vars, coords=params.coords)
+        return self._preserve_parameter_attrs(
+            xarray.Dataset(data_vars=updated_data_vars, coords=params.coords), params
+        )
 
     def _one_step(
         self,
@@ -843,6 +925,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         localization: Optional[BaseLocalization] = None,
         aggregate_observations: Optional[AggregateObservations] = None,
         likelihood_weight: float = 1.0,
+        global_parameter_names: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -854,6 +937,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
             localization=localization,
             aggregate_observations=aggregate_observations,
             likelihood_weight=likelihood_weight,
+            global_parameter_names=global_parameter_names,
         )
         self.num_time_points = num_time_points
         # When True, ``t=0`` of every time-varying parameter is excluded
@@ -886,6 +970,7 @@ ParamAugmentation` for the flattening semantics.
 
     def _flatten_time_varying_params(self, params: xarray.Dataset) -> xarray.Dataset:
         """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars."""
+        self._validate_global_parameters(params)
         return self._param_augmentation.flatten(params)
 
     def _unflatten_params(
@@ -894,7 +979,10 @@ ParamAugmentation` for the flattening semantics.
         original_params: xarray.Dataset,
     ) -> xarray.Dataset:
         """Reverse :meth:`_flatten_time_varying_params`."""
-        return self._param_augmentation.unflatten(flat_params, original_params)
+        return self._preserve_parameter_attrs(
+            self._param_augmentation.unflatten(flat_params, original_params),
+            original_params,
+        )
 
     def update_params_from_pred_obs(
         self,
@@ -1134,6 +1222,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         is ``None`` on this path (enforced at construction).
         """
         param_names = list(flat_params.data_vars.keys())
+        param_localize_mask = self._parameter_localize_mask(flat_params)
         # ``_unflatten_state`` reads only dims/sizes/coords/dtype from its
         # template, so ``states_array`` itself serves -- no need to allocate a
         # full ensemble-sized copy of empties (a real device allocation).
@@ -1165,7 +1254,9 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
                 },
                 coords={"ensemble": flat_params.coords["ensemble"]},
             )
-            return updated_states, updated_flat
+            return updated_states, self._preserve_parameter_attrs(
+                updated_flat, flat_params
+            )
 
         N_s = states_flat.shape[0]
         augmented = jnp.concatenate([states_flat, params_array], axis=0)
@@ -1182,7 +1273,11 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
             localize_mask = jnp.concatenate(
                 [
                     jnp.ones(N_s, dtype=bool),
-                    jnp.full((len(param_names),), localize_params, dtype=bool),
+                    (
+                        jnp.full((len(param_names),), localize_params, dtype=bool)
+                        if param_localize_mask is None
+                        else param_localize_mask & localize_params
+                    ),
                 ]
             )
             # Block grouping: co-locate state rows by their physical grid and
@@ -1221,7 +1316,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
             },
             coords={"ensemble": flat_params.coords["ensemble"]},
         )
-        return updated_states, updated_flat
+        return updated_states, self._preserve_parameter_attrs(updated_flat, flat_params)
 
     def _one_step(
         self,
@@ -1254,6 +1349,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         return updated_states, xarray.Dataset(
             data_vars={name: updated_flat[name] for name in updated_flat.data_vars},
             coords=params.coords,
+            attrs=updated_flat.attrs,
         )
 
     def _final_time_smoothing_step(

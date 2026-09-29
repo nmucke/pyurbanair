@@ -1668,14 +1668,63 @@ Brief summary:
 | Understand the data-assimilation abstractions | [`docs/codebase_guide.md §6`](codebase_guide.md) |
 
 
-### Fixed uDALES model discrepancy
+### uDALES model discrepancy
 
 `conf/model/pyudales.yaml` now exposes an opt-in
 `forward_model.model_discrepancy` block. Set its explicit height band,
 regularization and log cap, and supply static `sgs_bias_b0/b1/b2` parameter
 fields. The standard forward runner prepares the pinned native extension
 and records its provenance automatically; no manual patch or binary path is
-needed. Defaults remain disabled. See [pyudales §4.1](pyudales.md#41-opt-in-strainrotation-discrepancy-fixed-forward-runs)
-for the contract. The backend now implements window checkpoints for deterministic
-replay, but discrepancy on an assimilation model remains rejected by the runners
-pending coefficient prior/inference integration and recovery validation.
+needed. Defaults remain disabled. See [pyudales §4.1](pyudales.md#41-opt-in-strainrotation-discrepancy)
+for the contract and window checkpoint behavior.
+
+For inference, select exactly `params_to_estimate=[sgs_bias_b0,sgs_bias_b1,sgs_bias_b2]`
+and a static prior sampler. Set three positive `prior_std` values on the
+assimilation model's discrepancy block. The runner adds independent zero-mean
+Gaussian priors and declares those coefficients global for localization; leave
+their distributions out of `prior_params.parameters`. Truth parameters are
+independent and need not contain coefficients. Keep physical forcing and
+`sgs_constant` fixed in the model configuration.
+
+Three small same-model recipes share the same cropped Xie–Castro geometry,
+fixed forcing, and injected truth coefficients `[0.10, -0.12, 0.08]`:
+
+```bash
+pixi run -e dev python scripts/esmda/run_esmda.py experiment=esmda/sgs_bias_small
+pixi run -e dev python scripts/filtering/run_filtering.py experiment=filtering/sgs_bias_small
+pixi run -e dev python scripts/filter_smoothing/run_filter_smoothing.py experiment=filter_smoothing/sgs_bias_small
+```
+
+These use 32×24×16 cells, 12 members, two workers, a 10 s spinup, and one
+20 s window with outputs every 2 s. ESMDA uses three updates; filtering uses
+ten parameter-only cycles with identity evolution and RTPS inflation. The hybrid
+uses static ESMDA followed by ten state-only filter cycles, with `shared_budget`
+likelihood allocation and `beta=2`. Hybrid discrepancy currently requires
+`ensemble.failure.policy=raise`; joint hybrid coefficient updates are deferred.
+All settings are demonstration choices, not calibrated defaults or transfer
+validation. Outputs go under `results/pyudales/sgs_bias_small*`, with solver
+scratch under `.temp/sgs_bias_small*`.
+
+The usual ESMDA metrics and figure scripts recognize all three coefficients.
+Coefficient accuracy is omitted when the truth has no corresponding field;
+such a run is judged using its prediction diagnostics. Filtering and hybrid
+history output includes `applied_params_history.nc` so forecast-used coefficients
+can be distinguished from analyzed coefficients.
+
+In the initial macOS native run with the shipped seeds, the final analyzed
+ensemble means were:
+
+| Workflow | `b0` | `b1` | `b2` |
+|---|---:|---:|---:|
+| Injected truth | 0.100 | -0.120 | 0.080 |
+| ESMDA | 0.090 | -0.103 | 0.063 |
+| Filtering | 0.378 | -0.306 | 0.267 |
+| Hybrid ESMDA phase | 0.106 | -0.138 | 0.080 |
+
+ESMDA's held-out component velocity RMSE decreased from 0.0075 to 0.0031 m/s.
+The hybrid retained its estimated member-wise coefficients unchanged throughout
+all ten filter cycles. The short filtering example validates execution and
+parameter timing but **does not demonstrate coefficient recovery**. These are
+single-seed, same-model results; they do not establish calibration, long-horizon
+stability, or transfer skill. In particular, continuous-versus-segmented native
+forecast equivalence remains a separate physics check.

@@ -89,6 +89,7 @@ Examples::
 # tests/test_run_probe_series.py). Waived wholesale rather than annotated
 # piecemeal; drop this when the file is typed, and fix those divisions then.
 
+import json
 import pathlib
 import shutil
 import sys
@@ -108,6 +109,10 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
+from pyurbanair.config.discrepancy import (
+    SGS_BIAS_PARAMETER_METADATA,
+    SGS_BIAS_PARAMETER_NAMES,
+)
 from pyurbanair.config.hydra_helpers import (
     add_observation_error_metadata,
     add_prior_innovation_diagnostics,
@@ -115,7 +120,7 @@ from pyurbanair.config.hydra_helpers import (
     create_aggregate_observations,
     create_observation_error,
     create_observation_operator,
-    filter_parameter_config,
+    inference_parameter_configs,
 )
 from pyurbanair.config.run_record import (
     append_constructor_override,
@@ -223,6 +228,15 @@ def _stream_concat_members(member_files, out_path):
                 with netCDF4.Dataset(f) as src:
                     for name in data_vars:
                         out.variables[name][m, ...] = src.variables[name][...]
+            if "model_discrepancy" in out.ncattrs():
+                metadata = []
+                for f in member_files:
+                    with netCDF4.Dataset(f) as src:
+                        metadata.append(json.loads(src.getncattr("model_discrepancy")))
+                out.delncattr("model_discrepancy")
+                out.setncattr(
+                    "model_discrepancy_by_member", json.dumps(metadata, sort_keys=True)
+                )
 
 
 def _last_frame_ensemble(member_files):
@@ -664,8 +678,12 @@ def run(cfg: DictConfig) -> None:
     # did not exist on either side (docs/esmda_model_error_parameters.md §4).
     selected = cfg.get("params_to_estimate", None)
     selected = list(selected) if selected is not None else None
-    truth_params_cfg = filter_parameter_config(cfg.truth_params, selected)
-    prior_params_cfg = filter_parameter_config(cfg.prior_params, selected)
+    truth_params_cfg, prior_params_cfg = inference_parameter_configs(cfg)
+    discrepancy_enabled = bool(
+        OmegaConf.select(
+            cfg, "assim_model.forward_model.model_discrepancy.enabled", default=False
+        )
+    )
     if selected is not None:
         print(f"Estimating parameters: {selected}")
 
@@ -838,6 +856,9 @@ def run(cfg: DictConfig) -> None:
     # --- Prior parameter sampler -----------------------------------------------------------
     prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
+    if discrepancy_enabled:
+        for name, metadata in SGS_BIAS_PARAMETER_METADATA.items():
+            prior_params[name].attrs.update(metadata)
     append_constructor_override(
         out_dir,
         role="assim",
@@ -845,6 +866,16 @@ def run(cfg: DictConfig) -> None:
         values={
             "sampled_shape": dict(prior_params.sizes),
             "parameter_names": list(prior_params.data_vars),
+            **(
+                {
+                    "discrepancy_prior": OmegaConf.to_container(
+                        prior_params_cfg, resolve=True
+                    ),
+                    "parameter_metadata": SGS_BIAS_PARAMETER_METADATA,
+                }
+                if discrepancy_enabled
+                else {}
+            ),
         },
     )
 
@@ -960,6 +991,8 @@ def run(cfg: DictConfig) -> None:
     # here rather than from a config constant.
     rng_key, esmda_key = jax.random.split(rng_key)
     smoother_overrides: dict = {}
+    if discrepancy_enabled:
+        smoother_overrides["global_parameter_names"] = SGS_BIAS_PARAMETER_NAMES
     if "TimeVaryingParameter" in str(cfg.esmda.smoother._target_):
         smoother_overrides["num_time_points"] = int(prior_params.sizes["time"])
         append_constructor_override(

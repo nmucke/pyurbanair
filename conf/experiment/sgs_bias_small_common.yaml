@@ -1,0 +1,103 @@
+# @package _global_
+# Shared physical case, models, samplers, and ensemble budget for the small SGS
+# discrepancy study. Workflow recipes add only their algorithm and output roots.
+defaults:
+  - override /case: xie_and_castro
+  - override /execution: assimilation
+  - override /model@truth_model: pyudales
+  - override /model@assim_model: pyudales
+  - override /params@truth_params: sgs_bias_truth
+  - override /params@prior_params: static
+
+run:
+  skip_viz: true
+  truth_dir: null
+
+ensemble:
+  failure:
+    policy: raise
+    jitter_scale: 0.0
+    seed: 0
+  ensemble_size: 12
+  num_parallel_processes: 2
+  num_cpus_per_process: 1
+
+domain:
+  nx: 32
+  ny: 24
+  nz: 16
+  bounds:
+    - [-16.0, 48.0]
+    - [0.0, 48.0]
+    - [0.0, 32.0]
+
+obs:
+  x_points: [20.0, 20.0, 20.0, 40.0, 40.0, 40.0]
+  y_points: [10.0, 20.0, 30.0, 10.0, 20.0, 30.0]
+  z_points: [6.0, 12.0, 20.0, 6.0, 12.0, 20.0]
+  validation_x_points: [20.0, 40.0]
+  validation_y_points: [40.0, 40.0]
+  validation_z_points: [10.0, 18.0]
+  states: [u, v, w]
+  temporal_mode: full
+
+time:
+  simulation_time: 20.0
+  output_frequency: 2.0
+  spinup_time: 10.0
+
+observation_error:
+  instrument_std: 0.02
+  representation_std: 0.0
+
+params_to_estimate: [sgs_bias_b0, sgs_bias_b1, sgs_bias_b2]
+
+# Keep truth and assimilation model configuration identical so recovery
+# measures only the injected discrepancy coefficients.
+truth_model:
+  forward_model:
+    temp_dir: ${paths.experiment_dir}/truth
+    boundary_condition: inflow_outflow
+    closure: vreman
+    sgs_constant: 0.24
+    model_discrepancy:
+      enabled: true
+      kind: sgs_strain_rotation
+      coefficient_model: persistent
+      canopy_height: 10.0
+      height_band_over_H: [0.5, 2.0]
+      gradient_regularization: 0.01
+      log_multiplier_cap: 0.4054651081081644
+      prior_std: [0.15, 0.15, 0.15]
+    nudging_config:
+      tnudge: 15.0
+      nnudge_meters: 16.0
+      interior_nudging: true
+      profile_config:
+        type: power_law
+        alpha: 0.25
+        z_ref: 32.0
+    inlet_turbulence:
+      enabled: false
+    ncpu: 1
+    params:
+      _target_: xarray.Dataset
+      data_vars:
+        inflow_angle: 0.0
+        velocity_magnitude: 5.0
+
+assim_model:
+  forward_model:
+    temp_dir: ${paths.experiment_dir}/assim
+    boundary_condition: ${truth_model.forward_model.boundary_condition}
+    closure: ${truth_model.forward_model.closure}
+    sgs_constant: ${truth_model.forward_model.sgs_constant}
+    model_discrepancy: ${truth_model.forward_model.model_discrepancy}
+    nudging_config: ${truth_model.forward_model.nudging_config}
+    inlet_turbulence: ${truth_model.forward_model.inlet_turbulence}
+    ncpu: ${truth_model.forward_model.ncpu}
+    params:
+      _target_: xarray.Dataset
+      data_vars:
+        inflow_angle: 0.0
+        velocity_magnitude: 5.0

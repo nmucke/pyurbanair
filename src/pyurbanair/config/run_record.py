@@ -13,6 +13,11 @@ from typing import Any
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
+from pyurbanair.config.discrepancy import (
+    validate_sgs_discrepancy_inference,
+    validate_sgs_discrepancy_settings,
+)
+
 
 def _get(cfg: DictConfig, key: str, default: Any = None) -> Any:
     return OmegaConf.select(cfg, key, default=default)
@@ -26,11 +31,10 @@ def validate_run_config(cfg: DictConfig, workflow: str) -> None:
                 raise ValueError(
                     "model_discrepancy currently requires pyudales/Vreman."
                 )
-            if role == "assim_model":
-                raise ValueError(
-                    "Discrepancy assimilation is not implemented yet; coefficient "
-                    "prior/inference integration and recovery validation are still required."
-                )
+            validate_sgs_discrepancy_settings(
+                _get(cfg, f"{role}.forward_model.model_discrepancy")
+            )
+    validate_sgs_discrepancy_inference(cfg, workflow)
     if workflow == "render":
         if OmegaConf.is_missing(cfg, "input"):
             raise ValueError("input is required for render_les")
