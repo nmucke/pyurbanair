@@ -58,8 +58,8 @@ def compute_nudging_profiles(
     u_arr, v_arr = angle_to_velocity(inflow_angle, velocity_magnitude)
 
     shape = profile_shape if profile_shape is not None else np.ones(ktot)
-    u_profiles = u_arr[:, np.newaxis] * shape[np.newaxis, :]
-    v_profiles = v_arr[:, np.newaxis] * shape[np.newaxis, :]
+    u_profiles = np.asarray(u_arr)[:, np.newaxis] * shape[np.newaxis, :]
+    v_profiles = np.asarray(v_arr)[:, np.newaxis] * shape[np.newaxis, :]
     thl_profiles = np.full((n_times, ktot), thl0)
     qt_profiles = np.full((n_times, ktot), qt0)
 

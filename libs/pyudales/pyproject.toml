@@ -29,6 +29,9 @@ backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.
 [tool.hatch.build.targets.wheel]
 packages = ["src/pyudales"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"shell_scripts" = "pyudales/shell_scripts"
+
 [tool.pixi.dependencies]
 python = {version=">=3.12, <3.13", channel="conda-forge"}
 cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
