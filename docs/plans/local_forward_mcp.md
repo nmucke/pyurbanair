@@ -1,8 +1,10 @@
 # Local MCP server for forward simulations
 
-**Overview.** Add a local Python MCP server that lets agents discover settings,
-prepare a fully resolved run, launch it in the repository's Pixi environment,
-and inspect or cancel it by run ID. Reuse the existing Hydra configuration and
+**Overview.** Add a local Python MCP server in `libs/mcp_server` that lets agents
+discover settings, prepare a fully resolved run, launch it in the repository's
+Pixi environment, and inspect or cancel it by run ID. Keep shared configuration,
+workflow and job services in `pyurbanair`, with the MCP library providing the
+agent-facing interface. Reuse the existing Hydra configuration and
 forward workflow for uDALES, PALM, LBM and neural surrogates. Run simulations in
 separate processes with private working directories and persistent results.
 Use stdio for desktop and terminal clients; keep web connectivity optional.
@@ -24,8 +26,12 @@ configuration discovery, validation, launch, monitoring, cancellation and result
 inspection. Assimilation, surrogate training, cluster submission and distributed
 execution remain later workflows.
 
-Use the official Python MCP SDK as an optional dependency, with a tested version
-in the Pixi lockfile. Its current stable documentation describes v2; select that
+Give `libs/mcp_server` its own `pyproject.toml`, distribution name
+`pyurbanair-mcp` and Python package `pyurbanair_mcp`. Declare the official Python
+MCP SDK as a dependency of this library; installing the library remains optional
+for simulation users. Add it through a dedicated Pixi `mcp` feature, with a
+tested SDK version in the Pixi lockfile. Its current stable documentation
+describes v2; select that
 supported API when implementing rather than copying old FastMCP examples.
 [Official Python SDK](https://py.sdk.modelcontextprotocol.io/).
 
@@ -57,6 +63,19 @@ Native Windows support is not an initial requirement. GPU execution uses the
 existing Linux `cuda` environment when installed; CPU work uses `dev`.
 
 **2. Architecture and reuse**
+
+The package boundary follows the existing editable libraries under `libs/`.
+`pyurbanair_mcp` depends on `pyurbanair`; the core package and solver libraries
+must never depend on the MCP library or SDK. Keep tool registration, protocol
+schemas and transport handling in `libs/mcp_server`. Configuration composition,
+scientific validation, workflow execution, job supervision and artifact handling
+remain reusable core services that scripts and tests can call directly.
+
+This is a packaging boundary, not a standalone simulation installation. The
+server still needs the local checkout, its `conf/` tree and the selected backend's
+configured environment. It must receive an explicit repository root rather than
+infer it from the installed library's directory. The MCP adapter calls core
+services; workers select and load the backend at execution time.
 
 ```mermaid
 flowchart TD
@@ -307,17 +326,34 @@ well as during solver execution. Release resource slots only after teardown.
 
 **9. Proposed files and implementation order**
 
-Names below are proposed; avoid making the package import depend on MCP.
+The library layout is:
+
+```text
+libs/mcp_server/
+  pyproject.toml                 # pyurbanair-mcp; depends on pyurbanair and mcp
+  src/pyurbanair_mcp/
+    __init__.py
+    __main__.py                 # python -m pyurbanair_mcp
+    server.py                   # MCP registration and transport
+    tools.py                    # Adapters around core services
+    schemas.py                  # MCP request/response schemas
+```
+
+Register a `pyurbanair-mcp` console entry point in the library's manifest.
+Keep domain/job data structures in the core package; the adapter translates them
+to MCP responses. No core service should return SDK-specific objects.
 
 | Location | Responsibility |
 | --- | --- |
-| `src/pyurbanair/mcp/server.py` and `__main__.py` | SDK registration, typed tool results and stdio entry point. |
+| `libs/mcp_server/pyproject.toml` | Separate editable distribution, MCP SDK dependency and console entry point. |
+| `libs/mcp_server/src/pyurbanair_mcp/` | SDK registration, tool adapters, protocol schemas and stdio entry point. |
 | `src/pyurbanair/config/composition.py` | Pure config discovery/composition, source provenance and inspection. |
 | `src/pyurbanair/workflows/forward.py` | Shared forward execution, initialization and artifact contract. |
 | `src/pyurbanair/jobs/` | Preparation snapshots, native adapters, paths, registry, supervisor and worker. |
-| `scripts/start_mcp` | Absolute-path, environment-aware launcher; no protocol stdout chatter. |
-| `pyproject.toml` / `pixi.lock` | Optional MCP dependency and launcher task in appropriate local environments. |
-| `tests/test_mcp_*.py` / forward tests | Protocol, configuration, lifecycle, artifacts and backend integration. |
+| `scripts/start_mcp` | Thin environment-aware launcher for `pyurbanair_mcp`, passing the absolute repository root; no protocol stdout chatter. |
+| Root `pyproject.toml` / `pixi.lock` | Dedicated `mcp` feature installing `pyurbanair-mcp` from `libs/mcp_server` in editable mode; MCP-enabled local environments and launcher task. |
+| `tests/test_mcp_*.py` | MCP adapter, packaging and protocol tests, collected by the existing repository test command when the MCP feature is installed. |
+| Core configuration, job and forward tests | Shared service behavior and backend integration, runnable without the MCP SDK. |
 | `docs/mcp.md` | Setup, clients, tool usage, lifecycle, configuration coverage and troubleshooting. |
 
 1. **Establish the workflow contract.** Extract the shared runner with behavior
@@ -328,8 +364,10 @@ Names below are proposed; avoid making the package import depend on MCP.
    Exercise all four models without loading their runtimes.
 3. **Build local execution.** Implement supervisor/registry, isolated workers,
    single-job admission, idempotency, logs, reconnect and complete cancellation.
-4. **Expose MCP tools.** Add the SDK, schemas, bounded reads and launcher. Keep
-   protocol handlers as wrappers around the already-tested services.
+4. **Expose MCP tools.** Create `libs/mcp_server` with its own manifest and
+   `pyurbanair_mcp` package. Add the SDK dependency there, wire the dedicated Pixi
+   feature and entry point, and implement schemas, bounded reads and the launcher.
+   Keep protocol handlers as wrappers around the already-tested core services.
 5. **Verify every backend and client.** Run small integration simulations, then
    desktop/terminal smoke tests. Document supported versions and missing local
    prerequisites. Update maintained configuration/codebase docs where contracts
@@ -342,8 +380,11 @@ workflow execution and result handling; tool registration is a thin final layer.
 **10. Setup experience and acceptance**
 
 Document the initial sequence: clone and bootstrap with `pixi run setup-dev`,
-prepare the desired backends/checkpoints, select `dev` or `cuda`, run the local
-readiness command, then register the launcher. Use absolute launcher paths
+prepare the desired backends/checkpoints, install an environment with the `mcp`
+feature, select `dev` or `cuda` for simulation workers, run the local readiness
+command, then register the launcher. The MCP environment installs both local
+packages in editable mode; worker environments need the core and selected
+backends, but not the MCP library. Use absolute launcher paths
 because apps may not inherit the terminal's activated environment or CWD.
 Installation/build chatter must go to stderr and occur outside MCP startup
 where possible. The numerical server does not itself need an LLM API key.
@@ -377,6 +418,9 @@ and [OpenAI](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 
 Acceptance gates:
 
+- Packaging tests verify the editable library and console/module entry points.
+  Core configuration, job services and CLI workflows remain usable without the
+  MCP SDK installed; MCP tests run in an environment containing the `mcp` feature.
 - Fast tests cover all four config paths, nested/list/add/delete overrides,
   native-setting precedence, invalid targets, missing inputs, snapshot changes
   and path isolation. Discovery neither imports backends nor creates solver files.
