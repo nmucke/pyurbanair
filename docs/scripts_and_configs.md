@@ -30,6 +30,19 @@ generation. The surrogate train/test scripts use
 [`conf/neural_surrogate/training.yaml`](../conf/neural_surrogate/training.yaml)
 and [`conf/neural_surrogate/testing.yaml`](../conf/neural_surrogate/testing.yaml).
 
+AE pre-training uses `conf/neural_surrogate/pretrain_autoencoder.yaml` and
+`scripts/neural_surrogate/pretrain_autoencoder.py`. Its optional `prechunk`
+block prepares a complete lossless NetCDF dataset before constructing either
+loader: enable with `prechunk.enabled=true` and set `prechunk.output_root` to a
+separate directory. `prechunk.prepare_only=true` performs only preparation,
+without model construction or CUDA. Layout controls are `time_chunk`,
+`spatial_chunks` (z/y/x), `compression_level` and `max_buffer_mb`. Disabled or
+absent preserves the existing path. Enabled requires `dataset.time_stride=1`
+and `drop_last=false` in the active batching config to include every frame.
+The saved `dataset.root_dir` retains the original source; instantiated datasets
+read the prepared root. See [neural_surrogates.md §28](neural_surrogates.md#28-autoencodertrainer--the-vae-loss)
+and the [DelftBlue workflow](../job_scripts/delftblue/README.md#optional-pre-chunked-training-data).
+
 ### `compare_models` diagnostics
 
 [`scripts/compare_models.py`](../scripts/compare_models.py) deliberately treats

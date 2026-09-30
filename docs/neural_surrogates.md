@@ -1851,6 +1851,44 @@ netCDF4 per-variable chunk caches on shuffled multi-geometry runs.
 
 ### 28. `AutoencoderTrainer` — the (V)AE loss
 
+**Optional pre-chunking for AE pre-training.**
+`scripts/neural_surrogate/pretrain_autoencoder.py` accepts a `prechunk` block:
+`enabled` (default false), `output_root` (required separate destination),
+`time_chunk` (1), `spatial_chunks` ([16,64,64], z/y/x),
+`compression_level` (1; 0 disables zlib), `max_buffer_mb` (64), and
+`prepare_only` (false). An absent/disabled block retains the original path.
+When enabled, [datasets/rechunk.py](../libs/neural-surrogates/src/neural_surrogates/datasets/rechunk.py)
+streams and validates **all** `state/<split>/sample_*.nc` files to the destination
+before either dataset/loader is constructed. Train/val are required; other
+present state splits are also retained. The source root stays in the saved
+config; instantiated datasets use `prechunk.output_root`.
+
+This rewrites physical NetCDF storage, not the training sample index: every
+frame, cell, variable, coordinate and attribute is retained, including final
+partial storage chunks. Random crops remain dynamic. The enabled path refuses
+`dataset.time_stride != 1` and `drop_last=true` in the active batching config,
+ensuring all frames and partial batches are used. Encoded packed values are
+copied without unpack/repack or lossy quantization. Groups and user-defined
+NetCDF types are rejected explicitly. This cache is for AE state data; it does
+not copy unrelated parameter or model files.
+
+Per-file atomic publication and a manifest with source/output metadata
+fingerprints make interrupted preparation reusable. A complete-cache barrier
+precedes training; changed sources/options or altered completed files fail
+closed instead of mixing datasets. A destination lock prevents simultaneous
+writers. Chunk reads/copy buffers are bounded, though NetCDF caches and Python
+overhead are additional. Source normalization caches are not reused blindly:
+normalization is recomputed/cached under the prepared root with its own file
+signature. Keep the source root available on resumed runs.
+
+`prechunk.prepare_only=true` exits after preparation, without creating a model
+or requiring CUDA. DelftBlue's `prepare_tadpole_data.slurm` provides a CPU job;
+`PRECHUNK_DATA=true` enables the preparation/check stage of
+`pretrain_tadpole_ae.slurm`. See the
+[job instructions](../job_scripts/delftblue/README.md#optional-pre-chunked-training-data)
+for the CPU-preparation → GPU-training dependency command. Defaults are a
+starting layout; benchmark a representative subset before a full rewrite.
+
 [training/autoencoder.py](../libs/neural-surrogates/src/neural_surrogates/training/autoencoder.py)
 reuses all of `BaseTraining`'s machinery (device/AMP, warmup+cosine LR, grad
 clip, early stopping, checkpoint/resume, `metrics.csv`, best-weights) but has

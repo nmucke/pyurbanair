@@ -19,6 +19,20 @@ defaults:
 # Where the pre-trained model lands: model_weights/<model_name>/.
 model_name: tadpole_ae_b_realistic
 
+# Optional lossless NetCDF rewrite, completed BEFORE either loader is created.
+# Every source frame and field is retained; this is storage chunking, not fixed
+# crop extraction. Choose a separate directory (e.g. on /scratch), never source.
+# Disabled/absent leaves the existing loading path unchanged.
+prechunk:
+  enabled: false
+  output_root: null
+  time_chunk: 1
+  # Storage chunk shape in (z, y, x), clipped to each variable's dimensions.
+  spatial_chunks: [16, 64, 64]
+  compression_level: 1  # Lossless zlib, 0 disables compression.
+  max_buffer_mb: 64  # Copy/readback block budget, not total process memory.
+  prepare_only: false  # Prepare on a CPU allocation, then exit without training.
+
 architecture:
   _target_: neural_surrogates.TadpoleAE
   # Upstream size S/B/L (8.8M / 38.1M / 152.1M params; latent compression

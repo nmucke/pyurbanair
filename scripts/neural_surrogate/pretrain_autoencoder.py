@@ -60,11 +60,53 @@ def _export_handoff_weights(model: Any, out_dir: Path) -> None:
         torch.save(model.geometry_branch.state_dict(), out_dir / "geometry_branch.pt")
 
 
+def _prepare_dataset_root(cfg: DictConfig) -> Path | None:
+    """Prepare every source snapshot before building either training loader."""
+    options = cfg.get("prechunk")
+    if options is None:
+        return None
+    if not options.get("enabled", False):
+        if options.get("prepare_only", False):
+            raise ValueError("prechunk.prepare_only requires prechunk.enabled=true")
+        return None
+    if not options.get("output_root"):
+        raise ValueError("prechunk.output_root must name a separate dataset directory")
+    # Pre-chunking changes storage only: never silently skip source frames or
+    # the final, smaller batch of a trajectory in the prepared-data path.
+    if int(cfg.dataset.get("time_stride", 1)) != 1:
+        raise ValueError(
+            "Pre-chunking requires dataset.time_stride=1 to use all frames"
+        )
+    sampler_cfg = cfg.get("batch_sampler")
+    batching = cfg.dataloader if sampler_cfg is None else sampler_cfg
+    if batching.get("drop_last", False):
+        raise ValueError("Pre-chunking requires drop_last=false to use all samples")
+
+    from neural_surrogates.datasets.rechunk import prepare_rechunked_dataset
+
+    prepared = prepare_rechunked_dataset(
+        cfg.dataset.root_dir,
+        options.output_root,
+        time_chunk=options.get("time_chunk", 1),
+        spatial_chunks=options.get("spatial_chunks", [16, 64, 64]),
+        compression_level=options.get("compression_level", 1),
+        max_buffer_mb=options.get("max_buffer_mb", 64),
+    )
+    print(f"Prepared dataset ready: {prepared}", flush=True)
+    return prepared
+
+
 def run(cfg: DictConfig) -> None:
+    prepared = _prepare_dataset_root(cfg)
+    if prepared is not None and cfg.prechunk.get("prepare_only", False):
+        return
     dtype = getattr(torch, cfg.dataset.dtype)
 
-    train_ds = instantiate(cfg.dataset, split="train", dtype=dtype)
-    val_ds = instantiate(cfg.dataset, split="val", dtype=dtype)
+    # Keep the original source root in the saved config for provenance and
+    # repeatable cache checks. Only the instantiated datasets read the copy.
+    dataset_overrides = {} if prepared is None else {"root_dir": str(prepared)}
+    train_ds = instantiate(cfg.dataset, split="train", dtype=dtype, **dataset_overrides)
+    val_ds = instantiate(cfg.dataset, split="val", dtype=dtype, **dataset_overrides)
     # persistent_workers needs worker processes; force it off for workerless runs
     # (CPU smoke tests / debugging) so the DataLoader accepts the config.
     if int(cfg.dataloader.get("num_workers", 0)) == 0:

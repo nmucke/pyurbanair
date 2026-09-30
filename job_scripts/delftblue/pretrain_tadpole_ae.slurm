@@ -5,6 +5,7 @@
 #   sbatch --partition=gpu-a100-small --cpus-per-task=2 --time=00:15:00 \
 #     job_scripts/delftblue/pretrain_tadpole_ae.slurm smoke
 # Extra arguments are Hydra overrides and take precedence over the defaults.
+# Optional prepared scratch data: PRECHUNK_DATA=true (see README for CPU prep).
 #SBATCH --job-name=tadpole_ae
 #SBATCH --partition=gpu-a100
 #SBATCH --nodes=1
@@ -82,6 +83,16 @@ PY
     )
 fi
 OVERRIDES+=("dataset.root_dir=${DATA_ROOT}")
+if [ "${PRECHUNK_DATA:-false}" = true ]; then
+    # The Python entry point completes/revalidates every file before it builds
+    # either loader. A smoke run must not reuse the full-corpus cache directory.
+    if [ "${MODE}" = smoke ]; then
+        PRECHUNK_ROOT="${PRECHUNK_ROOT:-${OUTPUT_DIR}/rechunked_data}"
+    else
+        PRECHUNK_ROOT="${PRECHUNK_ROOT:-/scratch/${USER}/training_data/$(basename "${DATA_ROOT}")_rechunked}"
+    fi
+    OVERRIDES+=(prechunk.enabled=true "prechunk.output_root=${PRECHUNK_ROOT}")
+fi
 srun "${PYTHON[@]}" scripts/neural_surrogate/pretrain_autoencoder.py "${OVERRIDES[@]}" "$@"
 if [ "${MODE}" = smoke ]; then
     # Exercise loading optimizer/model state, a second epoch, and handoff exports.

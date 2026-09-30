@@ -50,6 +50,61 @@ handoff exports are saved every epoch. The smoke resume stage fixes the total
 at two epochs. Repeat the GPU-memory probe when changing model, crop or batch
 settings.
 
+### Optional pre-chunked training data
+
+Pre-chunking is **off by default**. Set `PRECHUNK_DATA=true` on the training
+job (or `prechunk.enabled=true prechunk.output_root=/scratch/...` as Hydra
+overrides) to prepare a lossless NetCDF copy before constructing either loader.
+The default destination is
+`/scratch/$USER/training_data/pyudales_realistic_rechunked/`; override it with
+`PRECHUNK_ROOT`. Checkpoint output is controlled separately by `OUTPUT_DIR`.
+
+Preparation copies **every** `state/<split>/sample_*.nc`, including held-out
+splits if present, all frames and all variables. Files keep their original
+names, coordinates and values. Only storage chunking/compression changes; the
+existing loader reads the prepared files and keeps sampling random crops.
+This path requires `dataset.time_stride=1` and the active batch sampler's
+`drop_last=false`, so the last partial batch and every training snapshot remain
+included. Chunk boundaries never become sample boundaries.
+
+For a large corpus, prepare it on a CPU allocation so conversion does not consume
+GPU time. These commands prepare first and start training only on success:
+
+```bash
+prep_job=$(sbatch --parsable job_scripts/delftblue/prepare_tadpole_data.slurm)
+PRECHUNK_DATA=true \
+OUTPUT_DIR=/projects/urbanair/model_weights/tadpole_ae_b_realistic \
+sbatch --dependency=afterok:"$prep_job" --cpus-per-task=32 \
+    job_scripts/delftblue/pretrain_tadpole_ae.slurm train \
+    dataloader.num_workers=28
+```
+
+Alternatively, `PRECHUNK_DATA=true sbatch ...pretrain_tadpole_ae.slurm train`
+does the full preparation inside the GPU allocation before training. Both
+paths validate/reuse an existing prepared copy. A manifest tracks source files,
+chunk settings, verified outputs and frame counts; interrupted conversions
+resume file by file, and training never starts with an incomplete copy.
+Changed source data, settings or completed outputs require a new destination.
+Keep the source dataset available for these provenance checks. Concurrent
+preparations in the same destination are refused.
+
+The `prechunk` config defaults to `time_chunk=1`,
+`spatial_chunks=[16,64,64]` in z/y/x order, `compression_level=1` (lossless zlib;
+zero disables compression), and `max_buffer_mb=64` for streaming copy/readback
+blocks. These are starting settings, not a benchmarked optimum. Pass identical
+layout overrides to both preparation and training jobs. Conversion preserves
+encoded values and verifies readback before publishing each file. It processes
+one file at a time; total memory also includes NetCDF caches and Python imports.
+Normalization is recomputed once against the prepared files and cached there.
+
+The portable CPU preparation command is:
+
+```bash
+pixi run -e dev python scripts/neural_surrogate/pretrain_autoencoder.py \
+    prechunk.enabled=true prechunk.prepare_only=true \
+    prechunk.output_root=/path/to/separate/rechunked_data
+```
+
 The first four-worker full-corpus attempt (`580606`) hit the **32 GB host-RAM**
 limit after 123 batches, before finishing an epoch. Its shuffled loader had
 kept every visited NetCDF trajectory open; netCDF4 reserved 64 MiB per state
