@@ -27,8 +27,7 @@ managed uDALES cache; the legacy `build/release/u-dales` binary is not required.
 
 CPU workers use `dev`; GPU workers use the installed `cuda` environment. The MCP
 server runs in the separate `mcp` environment. Install optional 3D support with
-`pixi install --locked -e rendering`. Its PyVista/VTK and ffmpeg dependencies
-are independent of the older `viz` environment and `les-render` library.
+`pixi install --locked -e rendering`. It includes PyVista/VTK and ffmpeg.
 The root lockfile pins the tested MCP SDK v2 and renderer packages.
 
 Register an **absolute** launcher path:

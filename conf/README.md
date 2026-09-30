@@ -47,7 +47,7 @@ own data-generation inputs: `training_data/geometry_mode=fixed case=barcelona` s
 The default `geometry_mode=random` and `training_data.geometry.source=idealized|realistic`
 select a random geometry pool for the separate random-geometry generator.
 Training, fine-tuning, testing, autoencoder and latent-generator configs stay
-independent. `render_les.yaml` likewise owns its independent rendering setup.
+independent.
 
 ESMDA's `esmda.interval_seconds` and `esmda.aggregation_mode` remain the
 editable aggregation values for existing artifact readers; the selected

@@ -5,9 +5,7 @@ replace its fixed cases and filenames with a generated manifest. Add a new
 postprocessing service that reads completed simulation artifacts and produces
 2D slices, virtual-probe series, and optional 3D flow movies. Agents receive
 rendered PNGs they can inspect; users get a local browser viewer with synchronized
-playback and downloads. This service is independent of `render_les.py`,
-`libs/les-render`, their presets and the old `viz` environment, which are excluded
-from this design at the user's request.
+playback and downloads.
 
 This supplements the [local MCP plan](local_forward_mcp.md). It is a design,
 not an implemented viewer. The supplied source is preserved in
@@ -272,5 +270,3 @@ Do not make this a requirement for the local browser workflow.
 Run browser tests against the new template, not the intentionally preserved
 broken source. Keep dependency-heavy offscreen/video tests separately marked;
 core normalization, manifest and probe tests run without PyVista or ffmpeg.
-No code or configuration from the retiring LES renderer is required by these
-acceptance gates.
