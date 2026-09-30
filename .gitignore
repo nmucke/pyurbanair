@@ -2,8 +2,7 @@
 .pixi/*
 !.pixi/config.toml
 
-# lock files
-pixi.lock
+# Environment lockfiles (the root Pixi lock is versioned).
 pyproject.lock
 
 # python cache

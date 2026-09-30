@@ -1638,15 +1638,6 @@ Brief summary:
 | [`neural_surrogate/add_geometry_to_training_data.py`](../scripts/neural_surrogate/add_geometry_to_training_data.py) | No — argparse | Post-processes an existing dataset to add a geometry variable to each state file. |
 | [`neural_surrogate/finish_training_data_processing.py`](../scripts/neural_surrogate/finish_training_data_processing.py) | No — argparse | Finalizes a partially-generated dataset (e.g. after a cluster job restart). |
 
-### 2.9 Visualization scripts (`viz` env)
-
-| Script | Hydra? | Purpose |
-|---|---|---|
-| [`visualization/render_les.py`](../scripts/visualization/render_les.py) | Yes — [`render_les.yaml`](../conf/render_les.yaml) + group [`render_preset/`](../conf/render_preset/) | Case folder / state file -> render bundle (Unreal assets + scripts) -> Blender preview mp4. See [les_render.md](les_render.md). Runs under `pixi run -e viz`; resolves its own output dir (`output_dir`, else `results/les_render/<case>/<preset>`) because `resolve_output_dir` imports jax and the backends. |
-| [`visualization/make_render_case.py`](../scripts/visualization/make_render_case.py) | No — argparse | Symlinks (or copies) a training sample's state, STL and params into a self-contained case folder, optionally with a `render.yaml` template. |
-
----
-
 ## Quick lookup
 
 | You want to… | Go to |
@@ -1667,6 +1658,50 @@ Brief summary:
 | Understand config groups at a glance | [`conf/README.md`](../conf/README.md) |
 | Understand the data-assimilation abstractions | [`docs/codebase_guide.md §6`](codebase_guide.md) |
 
+
+### Local forward jobs and complete artifacts
+
+`run_forward_model.run(cfg)` delegates to
+`pyurbanair.workflows.forward.run`. Ordinary CLI output behavior is preserved;
+local MCP workers explicitly choose `complete_artifacts=True`, supply composition
+provenance and bind a private output directory. Complete mode records intent
+before backend construction and writes every state/parameter member/window to
+`artifact_index.json`, plus consolidated outputs after success. Failed jobs
+retain a partial index. Numerical artifacts are independent of plotting.
+
+`run.initial_state` accepts a NetCDF path or a mapping with `path`, optional
+`member`, and `time_index` selecting the history endpoint. Surrogate histories
+are checked against trained variables, coordinates and cadence.
+For a one-member ensemble, a single initial field gains an `ensemble` axis.
+History-conditioned surrogate rollouts carry the last required real frames
+across windows, including the supplied initial history. The carry buffer counts
+toward the memory limit. Insufficient history or incompatible cadence stops the
+rollout before the next window instead of repeating an old frame to fill it.
+`run.rollout_steps` remains the number of additional windows.
+
+Rollout timestamps retain each backend's window-local sample offsets: forecast
+frames at `[1, 2, 3]` seconds become `[4, 5, 6]` in the second three-second
+window. Indexed datasets declare `time_reference: global`; explicitly global
+inputs are not shifted again. Boundary-including windows can share an endpoint.
+Complete consolidated files keep one sample at each timestamp, while the viewer
+deduplicates shared indexed endpoints only when their fields agree. Ordinary CLI
+rollout output can retain the repeated boundary timestamp. This corrects the old
+runner's shift of forecast-only windows back to zero.
+
+Consolidated static `params.nc` stays static when every window used the same
+parameters. When failure substitutions change them, it gains a `window`
+dimension and a `window_start` coordinate in seconds; the artifact index records
+`consolidated_params_layout` as `static`, `window`, or `time`. Indexed per-window
+parameters remain the authoritative record of the fields' actual inputs.
+
+`run.ensemble_save_on_disk=true` now raises an actionable error because this
+runner has no streaming implementation.
+
+The optional `scripts/start_mcp` launcher uses the dedicated `mcp` Pixi
+environment. Configuration remains the `conf/` tree; `conf/visualization/` adds
+postprocessing presets. See [mcp.md](mcp.md) for configuration coverage, job
+lifecycle, setup and limits, and [forward_visualization.md](forward_visualization.md)
+for the saved-state viewer.
 
 ### uDALES model discrepancy
 

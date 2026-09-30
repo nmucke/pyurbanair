@@ -37,8 +37,9 @@ file-level detail, gotchas, and recipes this guide only summarizes:
 | ESMDA / observation operator / localization / state reduction | [docs/data_assimilation.md](data_assimilation.md) |
 | Neural surrogates (UNetConvNeXt, UPT, P3D, domain-decomposition, training, rollout) | [docs/neural_surrogates.md](neural_surrogates.md) |
 | Hydra configs (`conf/`) and the executable scripts (`scripts/`) | [docs/scripts_and_configs.md](scripts_and_configs.md) |
+| Local MCP forward jobs, preparation and client setup | [docs/mcp.md](mcp.md) |
+| Saved forward visualization and browser bundles | [docs/forward_visualization.md](forward_visualization.md) |
 | Running on HPC clusters (Snellius / DelftBlue / local SLURM) | [docs/job_scripts.md](job_scripts.md) |
-| Cinematic LES animations (render bundles for Unreal Engine + Blender preview, `viz` env) | [docs/les_render.md](les_render.md) |
 | Dynamic multi-window ESMDA theory/config | [docs/temp/esmda_dynamic_multiwindow.md](temp/esmda_dynamic_multiwindow.md) |
 | Model-error compensation parameters (α, sgs/km) | [docs/temp/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md) |
 | Reduced SVD/KL state update theory | [docs/temp/reduced_state_da.md](temp/reduced_state_da.md) |
@@ -70,6 +71,9 @@ src/pyurbanair/                    # Top-level package: base classes + glue
     cpu_pinning.py                 # Worker → CPU pinning for parallel ensembles
     run_utils.py, state_utils.py, animation_utils.py
   animation.py
+  workflows/forward.py            # Shared CLI/local-worker forward execution + indexed artifacts
+  jobs/                           # Immutable plans, private paths, SQLite queue, supervisor/workers
+  visualization/                  # Saved-state normalization, rendering and local browser viewer
 
 conf/                              # Hydra config (see §5 Configuration system)
   README.md                        # Config overview (axes + recipes)
@@ -97,10 +101,7 @@ libs/data-assimilation/src/data_assimilation/
     esmda.py                       # Parameter/StateAndParameter/TimeVaryingParameter/
                                    #   StateAndTimeVaryingParameter ESMDA
 
-libs/les-render/src/les_render/   # LES state file -> render bundle (OpenVDB, particle
-                                   #   caches, isosurfaces, LIC slices, shots, HUD) for
-                                   #   Unreal + Blender. Leaf lib, own `viz` pixi env.
-                                   #   See docs/les_render.md.
+libs/mcp_server/src/pyurbanair_mcp/ # Optional MCP SDK v2 adapter; see docs/mcp.md
 
 libs/evaluation/src/evaluation/    # Metrics + figures for DA runs. Leaf lib: no jax, no
                                    #   pyurbanair, no backends (see its __init__).

@@ -400,6 +400,9 @@ reimplementation of the Matlab `write_inputs.m` workflow.
 | [`seb.py`](../libs/pyudales/src/pyudales/python_udgeom/seb.py) | Surface energy balance input generation |
 | [`write_inputs.py`](../libs/pyudales/src/pyudales/python_udgeom/write_inputs.py) | Orchestrator — calls ibm/seb, handles `precomputed_geom_dir` bypass |
 
+The generated `config.sh` shell-quotes paths, preserving spaces and treating
+shell metacharacters as literal path characters.
+
 The Python preprocessor is invoked via `shell_scripts/write_inputs.sh`, which sets
 `DA_EXPDIR` and `DA_TOOLSDIR` environment variables and runs the Python script
 against the experiment directory. It uses `trimesh` for STL loading.

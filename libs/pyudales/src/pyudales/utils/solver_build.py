@@ -230,6 +230,8 @@ def _environment_identity() -> dict[str, Any]:
         "CFLAGS",
         "LDFLAGS",
         "CMAKE_PREFIX_PATH",
+        "CMAKE_GENERATOR",
+        "CMAKE_TOOLCHAIN_FILE",
         "NETCDF_DIR",
         "NETCDF_FORTRAN_DIR",
         "FFTW_DOUBLE_LIB",
@@ -240,6 +242,8 @@ def _environment_identity() -> dict[str, Any]:
         "DYLD_LIBRARY_PATH",
         "CPATH",
         "LIBRARY_PATH",
+        "UDALES_BUILD_JOBS",
+        "NVHPC_INSTALL_BASE",
     )
     result: dict[str, Any] = {
         "platform": platform.platform(),
