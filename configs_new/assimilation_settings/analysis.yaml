@@ -1,0 +1,40 @@
+# @package analysis
+# Filter analysis schemes. Pick one with `filtering.analysis=${analysis.<name>}`.
+
+# Perturbed-observation EnKF. Works with any localization.
+stochastic:
+  _target_: data_assimilation.filtering.analysis.StochasticEnKFAnalysis
+
+# Global deterministic square-root transform. REQUIRES localization=none.
+etkf:
+  _target_: data_assimilation.filtering.etkf.ETKFAnalysis
+  tsvd: null
+
+# etkf with observation-space spectral truncation. REQUIRES localization=none.
+etkf_tsvd:
+  _target_: data_assimilation.filtering.etkf.ETKFAnalysis
+  tsvd:
+    _target_: data_assimilation.filtering.etkf.ObservationTSVD
+    enabled: true
+    # Keep the smallest prefix whose discarded tail holds <= (1 - energy_fraction).
+    energy_fraction: 0.99
+    # Optional hard rank cap (requires enabled: true).
+    max_rank: null
+    # Relative singular-value floor; null -> dtype/shape-aware default.
+    numerical_tolerance: null
+
+# Local ETKF, per state block. REQUIRES localization=distance|correlation and
+# no state reduction.
+letkf:
+  _target_: data_assimilation.filtering.etkf.LETKFAnalysis
+  tsvd: null
+
+# letkf with per-block observation-space truncation.
+letkf_tsvd:
+  _target_: data_assimilation.filtering.etkf.LETKFAnalysis
+  tsvd:
+    _target_: data_assimilation.filtering.etkf.ObservationTSVD
+    enabled: true
+    energy_fraction: 0.99
+    max_rank: null
+    numerical_tolerance: null

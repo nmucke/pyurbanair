@@ -1,0 +1,17 @@
+# Forward simulation: case, sampler, backend, ensemble budget and run controls.
+defaults:
+  - common
+  - case: xie_and_castro
+  - params: dynamic
+  - model: pyudales
+  - _self_
+
+paths:
+  results_dir: ${paths.results_root}/${model.name}
+
+forward:
+  ensemble: false
+  rollout_steps: 0
+  # Optional NetCDF path or {path, member, time_index}. Member uses the coordinate
+  # label; time_index selects the last available history frame by position.
+  initial_state: null

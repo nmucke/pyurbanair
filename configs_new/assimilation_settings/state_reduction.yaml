@@ -1,0 +1,42 @@
+# @package state_reduction
+# State reductions. Pick one with
+# `smoothing.state_reduction=${state_reduction.<name>}` (or `filtering.state_reduction`).
+# All of them need localization none.
+
+# Full-space state update.
+none: null
+
+# SMOOTHING ONLY. Online SVD basis rebuilt from the forecast ensemble every
+# ESMDA iteration (docs/reduced_state_da.md).
+svd:
+  _target_: data_assimilation.reduction.OnlineStateReduction
+  # Keep the smallest rank reaching this fraction of the energy.
+  energy_fraction: 0.99
+  max_rank: null
+  # initial_condition (time=0 anomalies) | window_snapshots (every frame).
+  basis_source: initial_condition
+  # Use every n-th frame for window_snapshots.
+  snapshot_stride: 1
+
+# FILTERING ONLY. Current-cycle POD of the end-of-cycle forecast anomalies.
+svd_current:
+  _target_: data_assimilation.reduction.OnlineStateReduction
+  # Filtering uses orthonormal (non-whitened) coefficients.
+  whiten: false
+  energy_fraction: 0.99
+  max_rank: null
+  # Optional {variable: scale} used before fitting; null -> Euclidean.
+  variable_scales: null
+
+# FILTERING ONLY. Incremental POD across cycles.
+svd_streaming:
+  _target_: data_assimilation.reduction.StreamingStateReduction
+  # Old covariance is multiplied by this each update (half-life ~6.6 cycles at 0.9).
+  forgetting_factor: 0.9
+  energy_fraction: 0.99
+  # Required for a bounded run: the rank otherwise grows every cycle.
+  max_rank: 50
+  update_every_n_cycles: 1
+  variable_scales: null
+  # Warn when successive bases rotate more than this (radians); null -> never.
+  subspace_warning_threshold: null

@@ -1,0 +1,32 @@
+# @package localization
+# Localization strategies, shared by smoothing and filtering. Pick one with
+# `smoothing.localization=${localization.<name>}` (or `filtering.localization`).
+
+# Global (unlocalized) update.
+none: null
+
+# Adaptive correlation-based localization (Vossepoel et al. 2025). Needs no
+# coordinates; applies to every estimated row.
+correlation:
+  _target_: data_assimilation.localization.correlation.CorrelationLocalization
+  # Truncation threshold rho_t. null -> 3/sqrt(N_e). Paper: 0.3-0.4 works best.
+  truncation_correlation: 0.35
+  # Fraction of the truncation distance left un-tapered.
+  tapering_beta: 0.5
+  # Max error-variance inflation at the truncation distance. Paper: 8.
+  max_inflation: 8.0
+  # Co-located state rows (u/v/w at one cell) share one selection.
+  block_grouping: true
+
+# Physical-distance localization. Needs a state-bearing method and point
+# observations; applies to state rows only.
+distance:
+  _target_: data_assimilation.localization.distance.DistanceLocalization
+  # Truncation radius in metres. Tune to the flow's correlation scale.
+  localization_radius: 10.0
+  tapering_beta: 0.5
+  # Paper: 4.
+  max_inflation: 4.0
+  block_grouping: true
+  # Use only the horizontal (x, y) distance.
+  horizontal_only: false

@@ -1,0 +1,40 @@
+# Static TRUTH parameters — a single fixed realization, drawn as Constants so
+# `.sample(1)` returns the exact true values. Mounted as `params@truth_params`
+# by run_esmda.yaml; the assimilation prior is the separate `params@prior_params`
+# (conf/params/static.yaml, with Normal priors), so truth and prior never share
+# a generative process (anti-inverse-crime).
+_target_: pyurbanair.static_parameters.ParameterSampler
+_convert_: all
+seed: 0
+parameters:
+  inflow_angle:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 10.0
+  velocity_magnitude:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 5.0
+  # Truth-model values for the model-error knobs. The truth solver may differ
+  # from the assimilation solver, so these are the TRUTH model's coefficients and
+  # need not match conf/params/static.yaml's prior means (that mismatch is exactly
+  # the model error the assim knobs absorb — docs/esmda_model_error_parameters.md).
+  vertical_inflow_exponent:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.25
+  # sgs_constant is NOT set here on purpose: it now defaults per-backend in
+  # conf/model/*.yaml, because the three solvers' SGS constants are different
+  # physical quantities (uDALES/pylbm dimensionless; PALM m^2/s). Re-add it here
+  # to prescribe the truth value, and only for a single-backend run.
+  pressure_gradient_magnitude:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0041912
+
+  # Persistent, dimensionless uDALES model-discrepancy coefficients.
+  sgs_bias_b0:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
+  sgs_bias_b1:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
+  sgs_bias_b2:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
