@@ -508,6 +508,14 @@ params_sampler = instantiate(cfg.params)          # or cfg.truth_params / cfg.pr
 params = params_sampler.sample(ensemble_size)
 ```
 
+Truth and prediction samplers keep every configured parameter. The runners'
+`params_to_estimate` selects only the prior fields eligible for DA updates:
+`null` selects all, and `[]` selects none. Unselected fields are still applied
+to the model and saved with the full parameter ensemble. Use a `Constant` to
+prescribe a value, or remove its sampler entry to use the model default.
+Unselected random priors keep their sampled member values; unselected dynamic
+trajectories continue through normal extrapolation between windows.
+
 - **Static** ([src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/)) —
   `ParameterSampler` holds a `name -> Distribution` mapping. Each parameter is
   a `Normal` / `Uniform` random prior or a fixed `Constant` (each its own
@@ -708,8 +716,8 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   `external_parameters:`) in `dynamic.yaml` / `dynamic_truth.yaml`. The AR(2)
   sampler draws it once (window 0), emits it with no `time` dim, and the
   time-varying smoother passes time-less vars through its flatten/unflatten
-  unchanged — so it is updated jointly with no smoother change and refined (not
-  re-randomized) across windows. See
+  unchanged — so it can be updated jointly when selected for estimation and is
+  carried (not re-randomized) across windows. See
   [docs/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md) §6.
 - If the parameter is backend-specific (like `pressure_gradient_magnitude`),
   extend `resolve_parameter_schema` in
@@ -729,9 +737,11 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   `write_uvel_time_file`).
 - To let a run **choose which parameters ESMDA estimates**, set
   `params_to_estimate` in [conf/run_esmda.yaml](../conf/run_esmda.yaml) (a list,
-  or `null` for all). It filters the prior *and* truth sampler configs via
-  `filter_parameter_config`; dropped parameters fall back to the forward model's
-  defaults on both sides.
+  `null` for all prior parameters, or `[]` for none). All configured prior and
+  truth parameters reach their corresponding forward models. Unselected prior
+  fields retain their sampled realization without DA updates; dynamic fields
+  still extrapolate normally. Omit a parameter from its sampler config to use
+  the corresponding model's default instead.
 
 ### Add a new ESMDA variant
 - Subclass `_BaseESMDA` in

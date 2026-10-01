@@ -63,6 +63,11 @@ from data_assimilation.inflation import InflationScheme
 from data_assimilation.io import get_sorted_state_files, load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import sensor_observation_coords
+from data_assimilation.parameter_selection import (
+    merge_parameters,
+    select_parameters,
+    validate_parameter_names,
+)
 from data_assimilation.reduction import OnlineStateReduction
 from tqdm import tqdm
 
@@ -201,7 +206,10 @@ class FilterResult:
     for any continuation) and ``params`` the final analyzed/evolved
     parameters. Histories are ``cycle``-concatenated Datasets, present only
     when ``return_history=True`` (``params_history`` additionally holds the
-    prior as its first entry).
+    prior as its first entry). With explicit ``global_parameter_names``,
+    ``applied_params_history`` records one accepted forecast parameter vector
+    per cycle, after failure-donor substitution and before analysis. It is
+    absent on the default path and when history collection is disabled.
 
     ``forecast_history`` is the odd one out and deliberately so: it is
     ``time``-concatenated (every output frame of every cycle's segment, not one
@@ -216,6 +224,8 @@ class FilterResult:
     params_history: Optional[xarray.Dataset] = None
     state_history: Optional[xarray.Dataset] = None
     forecast_history: Optional[xarray.Dataset] = None
+    # Accepted forecast coefficients, after donor substitution, before analysis.
+    applied_params_history: Optional[xarray.Dataset] = None
 
 
 class BaseFilter:
@@ -254,6 +264,9 @@ class BaseFilter:
             anomalies (prior hook also applied to the predicted-observation
             anomalies, keeping the gain consistent with the inflated
             ensemble).
+        parameter_names_to_estimate: Parameter fields included in the analysis,
+            inflation and evolution. None selects all supplied fields; an empty
+            sequence selects none. Every forecast still receives all fields.
         parameter_evolution: Parameter forecast model applied after each
             analysis; required (or ``inflation``) for the parameter-updating
             modes (``"parameter"``/``"joint"``), whose parameter block
@@ -331,6 +344,11 @@ class BaseFilter:
     #: mode it re-reads each cycle's member files in full.
     collect_forecast_frames: bool = False
 
+    #: Static parameter rows that use all observations under any localization.
+    #: These names persist across cycles; they do not assign a grid location.
+    global_parameter_names: tuple[str, ...] = ()
+    parameter_names_to_estimate: Optional[tuple[str, ...]] = None
+
     def __init__(
         self,
         observation_operator: Callable[[xarray.Dataset], Any],
@@ -344,6 +362,8 @@ class BaseFilter:
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
         beta: float = 1.0,
+        global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         if mode not in ("state", "parameter", "joint"):
             raise ValueError(
@@ -353,6 +373,17 @@ class BaseFilter:
         self.forward_model = forward_model
         self.analysis = analysis
         self.mode: FilterMode = mode
+        if isinstance(global_parameter_names, str):
+            raise ValueError("global_parameter_names must be a sequence of names.")
+        names = tuple(global_parameter_names or ())
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("global_parameter_names must contain nonempty strings.")
+        if len(set(names)) != len(names):
+            raise ValueError("global_parameter_names must not contain duplicates.")
+        self.global_parameter_names = names
+        self.parameter_names_to_estimate = validate_parameter_names(
+            parameter_names_to_estimate
+        )
 
         # One FRAME's error covariance, not one cycle's: the serial sweep hands
         # the analysis one frame's (num_sensors x num_states) vector at a time,
@@ -479,6 +510,7 @@ class BaseFilter:
             mode in ("parameter", "joint")
             and parameter_evolution is None
             and inflation is None
+            and self.parameter_names_to_estimate != ()
         ):
             raise ValueError(
                 f"mode={mode!r} needs spread maintenance: without "
@@ -1020,7 +1052,18 @@ class BaseFilter:
         if self.mode in ("parameter", "joint"):
             if params is None:
                 raise ValueError(f"mode={self.mode!r} requires params.")
-            self._check_static_params(params)
+            self._check_static_params(
+                select_parameters(params, self.parameter_names_to_estimate)
+            )
+        if params is not None:
+            select_parameters(params, self.parameter_names_to_estimate)
+        elif self.parameter_names_to_estimate:
+            raise ValueError(
+                "parameter_names_to_estimate requires a parameter Dataset."
+            )
+
+        if self.global_parameter_names:
+            self._validate_global_parameters(params)
 
         num_cycles = int(obs_batches.shape[0])
         n_obs_frame = int(obs_batches.shape[2])
@@ -1037,6 +1080,7 @@ class BaseFilter:
         params_history: list[xarray.Dataset] = (
             [params] if (return_history and params is not None) else []
         )
+        applied_params_history: list[xarray.Dataset] = []
         state_history: list[xarray.Dataset] = []
         # One entry per cycle, each the whole segment (see
         # ``collect_forecast_frames``); empty and never appended to otherwise.
@@ -1061,6 +1105,8 @@ class BaseFilter:
                 params = self.forward_model.apply_failure_substitutions_to_params(
                     params
                 )
+            if return_history and self.global_parameter_names and params is not None:
+                applied_params_history.append(params.copy(deep=True))
             results_dir = (
                 self.forward_model.results_dir
                 if self.forward_model.save_on_disk
@@ -1157,6 +1203,11 @@ class BaseFilter:
                 if params_history
                 else None
             ),
+            applied_params_history=(
+                xarray.concat(applied_params_history, dim="cycle", join="override")
+                if applied_params_history
+                else None
+            ),
             state_history=(
                 xarray.concat(state_history, dim="cycle", join="override")
                 if state_history
@@ -1172,6 +1223,22 @@ class BaseFilter:
                 else None
             ),
         )
+
+    def _validate_global_parameters(self, params: Optional[xarray.Dataset]) -> None:
+        if not self.global_parameter_names:
+            return
+        if params is None:
+            raise ValueError("global_parameter_names requires a parameter Dataset.")
+        missing = [name for name in self.global_parameter_names if name not in params]
+        if missing:
+            raise ValueError(
+                f"Global parameter names absent from params: {sorted(missing)}"
+            )
+        for name in self.global_parameter_names:
+            if params[name].dims != ("ensemble",):
+                raise ValueError(
+                    f"Global parameter {name!r} must be static with dims ('ensemble',)."
+                )
 
     def _check_static_params(self, params: xarray.Dataset) -> None:
         """Phase 1 supports scalar (ensemble,) parameters only."""
@@ -1249,7 +1316,8 @@ class BaseFilter:
             blocks.append(states_forecast)
         if self.mode in ("parameter", "joint"):
             assert params is not None  # validated in run()
-            flat_params = self._param_augmentation.flatten(params)
+            selected = select_parameters(params, self.parameter_names_to_estimate)
+            flat_params = self._param_augmentation.flatten(selected)
             params_array = ParamAugmentation.to_array(flat_params)
             n_param = params_array.shape[0]
             blocks.append(params_array)
@@ -1310,7 +1378,7 @@ class BaseFilter:
         # frame) but with all T*N_obs appended rows, whose mask/coords entries
         # are the same for every frame — the sensors do not move in time.
         group_ids, localize_mask, row_coords, obs_coords = self._localization_plumbing(
-            final_state, n_state, n_param, N_obs, N_d
+            final_state, n_state, n_param, N_obs, N_d, params=params
         )
 
         # One split per cycle, as before. With a single frame the subkey is used
@@ -1405,13 +1473,21 @@ class BaseFilter:
         if self.mode in ("parameter", "joint"):
             assert params is not None and flat_params is not None
             updated_flat = ParamAugmentation.from_array(updated[n_state:], flat_params)
-            params = xarray.Dataset(
+            if self.global_parameter_names:
+                updated_flat.attrs = dict(params.attrs)
+                for name in updated_flat.data_vars:
+                    updated_flat[name].attrs = dict(params[name].attrs)
+            updated_params = xarray.Dataset(
                 data_vars={name: updated_flat[name] for name in updated_flat.data_vars},
-                coords=params.coords,
+                coords=flat_params.coords,
+                attrs=updated_flat.attrs,
             )
-            if self.parameter_evolution is not None:
+            if self.parameter_evolution is not None and n_param:
                 self.rng_key, evolve_key = jax.random.split(self.rng_key)
-                params = self.parameter_evolution.evolve(params, evolve_key)
+                updated_params = self.parameter_evolution.evolve(
+                    updated_params, evolve_key
+                )
+            params = merge_parameters(params, updated_params)
 
         cycle_diag.analysis_time = time.perf_counter() - analysis_started
         if self.state_reduction is not None:
@@ -1622,6 +1698,7 @@ class BaseFilter:
         n_param: int,
         n_obs: int,
         n_appended: int,
+        params: Optional[xarray.Dataset] = None,
     ) -> tuple[
         Optional[jnp.ndarray],
         Optional[jnp.ndarray],
@@ -1643,6 +1720,7 @@ class BaseFilter:
         number of ride-along rows the row-wise descriptors must cover. They are
         equal on the ``T = 1`` path.
         """
+        self._validate_global_parameters(params)
         if self.localization is None:
             return None, None, None, None
 
@@ -1650,9 +1728,20 @@ class BaseFilter:
         if n_state:
             mask_blocks.append(jnp.ones(n_state, dtype=bool))
         if n_param:
-            mask_blocks.append(
-                jnp.full((n_param,), self.localization.localizes_parameters, dtype=bool)
+            param_mask = jnp.full(
+                (n_param,), self.localization.localizes_parameters, dtype=bool
             )
+            if self.global_parameter_names:
+                assert params is not None
+                param_mask = param_mask & jnp.asarray(
+                    [
+                        name not in self.global_parameter_names
+                        for name in select_parameters(
+                            params, self.parameter_names_to_estimate
+                        ).data_vars
+                    ]
+                )
+            mask_blocks.append(param_mask)
         mask_blocks.append(jnp.zeros(n_appended, dtype=bool))
         localize_mask = jnp.concatenate(mask_blocks)
 
@@ -1790,6 +1879,8 @@ class EnsembleKalmanFilter(BaseFilter):
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
         beta: float = 1.0,
+        global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -1803,4 +1894,6 @@ class EnsembleKalmanFilter(BaseFilter):
             state_reduction=state_reduction,
             rng_key=rng_key,
             beta=beta,
+            global_parameter_names=global_parameter_names,
+            parameter_names_to_estimate=parameter_names_to_estimate,
         )

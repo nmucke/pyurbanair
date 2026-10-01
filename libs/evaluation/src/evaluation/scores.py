@@ -359,6 +359,9 @@ _PLOTTED_PARAMS = (
     "velocity_magnitude",
     "vertical_inflow_exponent",
     "sgs_constant",
+    "sgs_bias_b0",
+    "sgs_bias_b1",
+    "sgs_bias_b2",
 )
 
 

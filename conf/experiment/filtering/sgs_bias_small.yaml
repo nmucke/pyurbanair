@@ -1,0 +1,25 @@
+# @package _global_
+# Parameter-only EnKF recovery using ten 2-second cycles over the small case.
+defaults:
+  - /experiment/sgs_bias_small_common@_global_
+  - override /filtering/analysis: stochastic
+  - override /filtering/localization: none
+  - override /filtering/inflation: rtps
+
+experiment:
+  workflow: filtering
+
+run:
+  name: sgs_bias_small_filtering
+  ensemble_save_on_disk: false
+  save_history: true
+
+filtering:
+  mode: parameter
+  num_assimilation_windows: 1
+  seed: 42
+  assimilate_every_n_step: 1
+
+paths:
+  results_dir: results/pyudales/sgs_bias_small_filtering/${now:%Y-%m-%d_%H-%M-%S}
+  experiment_dir: ${oc.env:PWD}/.temp/sgs_bias_small_filtering/${now:%Y-%m-%d_%H-%M-%S}

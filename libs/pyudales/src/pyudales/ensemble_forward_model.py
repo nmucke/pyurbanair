@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import math
 import pathlib
 from typing import Any, Optional, cast
 
@@ -10,9 +11,13 @@ from pyudales.utils.forward_model_utils import create_new_forward_model
 from pyudales.utils.inlet_turbulence_utils import (
     copy_elapsed_time,
     derive_seed,
+    elapsed_time_path,
     read_elapsed_time,
+    write_elapsed_time,
 )
-from pyudales.utils.warm_start_utils import copy_carry
+from pyudales.utils.namoptions_utils import NamoptionsFile
+from pyudales.utils.warm_start_utils import CARRY_DIRNAME, clear_carry, copy_carry
+from pyudales.utils.window_checkpoint import validate_carry
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 from pyurbanair.base_forward_model import BaseForwardModel
@@ -30,6 +35,53 @@ def _attach_member_discrepancy(
         result.attrs["model_discrepancy_by_member"] = json.dumps(
             metadata, sort_keys=True
         )
+
+
+def _native_layout(model: ForwardModel) -> tuple[int, int, int, int, int]:
+    nam = NamoptionsFile(
+        model.dirs.experiment_dir / f"namoptions.{model.dirs.experiment_name}"
+    )
+    try:
+        layout = tuple(
+            int(nam.get_value(section, key) or default)
+            for section, key, default in (
+                ("DOMAIN", "itot", 0),
+                ("DOMAIN", "jtot", 0),
+                ("DOMAIN", "ktot", 0),
+                ("RUN", "nprocx", 1),
+                ("RUN", "nprocy", 1),
+            )
+        )
+    except ValueError as exc:
+        raise ValueError("SGS hybrid handoff found invalid native grid/ranks.") from exc
+    if min(layout) <= 0:
+        raise ValueError("SGS hybrid handoff found invalid native grid/ranks.")
+    return layout  # type: ignore[return-value]
+
+
+def _handoff_clock(model: ForwardModel, has_carry: bool) -> float:
+    path = elapsed_time_path(model.dirs)
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text())
+            if payload["experiment_name"] != model.dirs.experiment_name:
+                raise ValueError("member identity mismatch")
+            clock = float(payload["elapsed_time"])
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "SGS hybrid handoff found an invalid physical clock."
+            ) from exc
+    else:
+        clock = float(model._elapsed_time)
+        if has_carry or clock != 0:
+            raise ValueError("SGS hybrid handoff requires a persisted physical clock.")
+    if not math.isfinite(clock) or clock < 0:
+        raise ValueError("SGS hybrid handoff found an invalid physical clock.")
+    if not has_carry and clock > 0:
+        raise ValueError(
+            "SGS hybrid handoff is missing native carry for an advanced clock."
+        )
+    return clock
 
 
 class EnsembleForwardModel(BaseEnsembleForwardModel):
@@ -90,6 +142,83 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             model.forecast_window_replay_enabled
             for model in self.ensemble_forward_models
         )
+
+    def synchronize_forecast_state_from(self, source: BaseEnsembleForwardModel) -> None:
+        """Give this smoother stack the filter stack's accepted native state.
+
+        The stacks have different solver horizons, so only member carry, clock
+        and inlet realization cross this boundary. In particular, destination
+        namoptions, paths and runtime remain owned by this stack.
+        """
+        if not self.forecast_window_replay_enabled:
+            return
+        if not isinstance(source, EnsembleForwardModel):
+            raise ValueError("SGS hybrid handoff requires a uDALES source ensemble.")
+        if source is self or not source.forecast_window_replay_enabled:
+            raise ValueError("SGS hybrid handoff requires a distinct enabled source.")
+        if self._failure_policy != "raise" or source._failure_policy != "raise":
+            raise ValueError(
+                "SGS hybrid handoff requires failure.policy=raise in both stacks."
+            )
+        if (
+            getattr(self, "_forecast_window_ensemble_state", None) is not None
+            or getattr(source, "_forecast_window_ensemble_state", None) is not None
+        ):
+            raise RuntimeError("Cannot hand off during an active forecast window.")
+        if self.ensemble_size != source.ensemble_size or len(
+            self.ensemble_forward_models
+        ) != len(source.ensemble_forward_models):
+            raise ValueError("SGS hybrid handoff requires matching ensemble sizes.")
+
+        handoffs: list[tuple[ForwardModel, ForwardModel, bool, float, dict]] = []
+        for index in range(self.ensemble_size):
+            destination = cast(ForwardModel, self.ensemble_forward_models[index])
+            origin = cast(ForwardModel, source.ensemble_forward_models[index])
+            if (
+                not origin.forecast_window_replay_enabled
+                or not destination.forecast_window_replay_enabled
+            ):
+                raise ValueError("SGS hybrid handoff requires every member enabled.")
+            if (
+                getattr(origin, "_forecast_window_original", None) is not None
+                or getattr(destination, "_forecast_window_original", None) is not None
+            ):
+                raise RuntimeError("Cannot hand off during an active forecast window.")
+            if origin.dirs.experiment_name != destination.dirs.experiment_name:
+                raise ValueError(
+                    "SGS hybrid handoff requires aligned member identities."
+                )
+            if origin.dirs.experiment_dir == destination.dirs.experiment_dir:
+                raise ValueError("SGS hybrid stacks must use separate experiment dirs.")
+            if origin.model_discrepancy != destination.model_discrepancy:
+                raise ValueError(
+                    "SGS hybrid handoff requires matching discrepancy settings."
+                )
+            if _native_layout(origin) != _native_layout(destination):
+                raise ValueError(
+                    "SGS hybrid handoff requires matching grid and MPI ranks."
+                )
+
+            has_carry = (origin.dirs.experiment_dir / CARRY_DIRNAME).exists()
+            validate_carry(origin, required=has_carry)
+            clock = _handoff_clock(origin, has_carry)
+            inlet = copy.deepcopy(origin.inlet_turbulence)
+            if inlet.get("seed") is None:
+                inlet["seed"] = derive_seed(origin.dirs.experiment_name)
+            handoffs.append((origin, destination, has_carry, clock, inlet))
+
+        # All members have passed structural and native-file validation before
+        # any destination is changed. The source remains authoritative.
+        for origin, destination, has_carry, clock, inlet in handoffs:
+            if has_carry:
+                if not copy_carry(origin.dirs, destination.dirs):
+                    raise ValueError("SGS hybrid handoff could not copy native carry.")
+                validate_carry(destination, required=True)
+            else:
+                clear_carry(destination.dirs)
+            write_elapsed_time(destination.dirs, clock)
+            destination._elapsed_time = clock
+            destination.inlet_turbulence = inlet
 
     def begin_forecast_window(self) -> None:
         if not self.forecast_window_replay_enabled:

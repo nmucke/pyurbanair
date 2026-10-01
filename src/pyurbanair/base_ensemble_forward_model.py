@@ -86,6 +86,15 @@ class BaseEnsembleForwardModel:
     def end_forecast_window(self, commit: bool) -> None:
         """Accept one posterior endpoint, or roll back the whole window."""
 
+    def synchronize_forecast_state_from(
+        self, source: "BaseEnsembleForwardModel"
+    ) -> None:
+        """Adopt a sibling stack's accepted hidden forecast state if needed.
+
+        Ordinary forward models have no hidden state to transfer. Backends
+        with native restart files override this hook for hybrid assimilation.
+        """
+
     def __init__(
         self,
         forward_model: BaseForwardModel,

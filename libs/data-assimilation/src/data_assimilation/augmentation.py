@@ -155,6 +155,8 @@ class ParamAugmentation:
     @staticmethod
     def to_array(flat_params: xarray.Dataset) -> jnp.ndarray:
         """Stack the flat scalar variables into a ``(N_p, N_e)`` array."""
+        if not flat_params.data_vars:
+            return jnp.empty((0, flat_params.sizes["ensemble"]))
         return jnp.array([flat_params[name].values for name in flat_params.data_vars])
 
     @staticmethod

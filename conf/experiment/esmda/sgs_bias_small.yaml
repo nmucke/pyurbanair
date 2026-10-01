@@ -1,0 +1,26 @@
+# @package _global_
+# Same-model static ESMDA recovery of the three persistent SGS coefficients.
+defaults:
+  - /experiment/sgs_bias_small_common@_global_
+  - override /esmda/smoother: static
+  - override /esmda/localization: none
+
+experiment:
+  workflow: esmda
+
+run:
+  name: sgs_bias_small
+  ensemble_save_on_disk: true
+  save_prior_state: true
+
+esmda:
+  num_steps: 3
+  alpha: ${.num_steps}
+  num_assimilation_windows: 1
+  seed: 42
+  interval_seconds: null
+  save_obs_diagnostics: true
+
+paths:
+  results_dir: results/pyudales/sgs_bias_small/${now:%Y-%m-%d_%H-%M-%S}
+  experiment_dir: ${oc.env:PWD}/.temp/sgs_bias_small/${now:%Y-%m-%d_%H-%M-%S}

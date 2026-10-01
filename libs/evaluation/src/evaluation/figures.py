@@ -112,6 +112,9 @@ _PARAM_LABELS = {
     "velocity_magnitude": "Velocity magnitude",
     "vertical_inflow_exponent": "Vertical inflow exponent (α)",
     "sgs_constant": "SGS constant",
+    "sgs_bias_b0": "SGS discrepancy coefficient b0",
+    "sgs_bias_b1": "SGS discrepancy coefficient b1",
+    "sgs_bias_b2": "SGS discrepancy coefficient b2",
 }
 
 

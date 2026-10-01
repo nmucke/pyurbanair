@@ -41,8 +41,9 @@ seed: 42
 beta: 1.0
 # state | parameter | joint. The parameter-updating modes (parameter and
 # joint) REQUIRE spread maintenance (filtering/evolution=random_walk or a
-# filtering/inflation option) — the filter refuses silently-collapsing
-# configurations at construction.
+# filtering/inflation option) when any parameters are selected for estimation.
+# An explicit empty selection needs neither; otherwise the filter refuses
+# silently-collapsing configurations at construction.
 mode: joint
 # Defaults; normally set by the filtering/* groups above.
 filter:

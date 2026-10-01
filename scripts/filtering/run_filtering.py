@@ -144,13 +144,14 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (suppress JAX CPU-fallback noise; must precede `import jax`)
+from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_METADATA
 from pyurbanair.config.hydra_helpers import (
     add_observation_error_metadata,
     add_prior_innovation_diagnostics,
     clean_outputs,
     create_observation_error,
     create_observation_operator,
-    filter_parameter_config,
+    inference_parameter_configs,
 )
 from pyurbanair.config.run_record import (
     append_constructor_override,
@@ -525,7 +526,7 @@ def _validate_filter_beta(cfg: DictConfig, observation_error: Any) -> float:
     dtype must not cost a CFD run first. ``filtering.filter.beta`` is what
     reaches the constructor, so it must be present and agree.
     """
-    beta = validate_beta(cfg.filtering.get("beta", 1.0))
+    beta: float = validate_beta(cfg.filtering.get("beta", 1.0))
     filter_beta = cfg.filtering.filter.get("beta", None)
     if filter_beta is None or validate_beta(filter_beta) != beta:
         raise ValueError(
@@ -609,11 +610,15 @@ def run(cfg: DictConfig) -> None:
 
     # Select which parameters the filter estimates (same contract as
     # run_esmda.py `params_to_estimate`): null -> every parameter the sampler
-    # configs define; a list -> that subset, applied to prior AND truth.
+    # configs define; a list -> that subset. Both samplers remain complete.
     selected = cfg.get("params_to_estimate", None)
     selected = list(selected) if selected is not None else None
-    truth_params_cfg = filter_parameter_config(cfg.truth_params, selected)
-    prior_params_cfg = filter_parameter_config(cfg.prior_params, selected)
+    truth_params_cfg, prior_params_cfg = inference_parameter_configs(cfg)
+    discrepancy_enabled = bool(
+        OmegaConf.select(
+            cfg, "assim_model.forward_model.model_discrepancy.enabled", default=False
+        )
+    )
     if selected is not None:
         print(f"Estimating parameters: {selected}")
 
@@ -793,6 +798,13 @@ def run(cfg: DictConfig) -> None:
     # prior (this ensemble is window 0's), written with the posterior at the end.
     prior_sampler = instantiate(prior_params_cfg)
     prior_params = prior_sampler.sample(ensemble_size)
+    parameter_metadata = {
+        name: metadata
+        for name, metadata in SGS_BIAS_PARAMETER_METADATA.items()
+        if discrepancy_enabled and name in prior_params
+    }
+    for name, metadata in parameter_metadata.items():
+        prior_params[name].attrs.update(metadata)
     append_constructor_override(
         out_dir,
         role="assim",
@@ -800,6 +812,16 @@ def run(cfg: DictConfig) -> None:
         values={
             "sampled_shape": dict(prior_params.sizes),
             "parameter_names": list(prior_params.data_vars),
+            **(
+                {
+                    "discrepancy_prior": OmegaConf.to_container(
+                        prior_params_cfg, resolve=True
+                    ),
+                    "parameter_metadata": parameter_metadata,
+                }
+                if discrepancy_enabled
+                else {}
+            ),
         },
     )
 
@@ -884,6 +906,8 @@ def run(cfg: DictConfig) -> None:
     # --- Filter ----------------------------------------------------------------
     rng_key, filter_key = jax.random.split(rng_key)
     filter_overrides: dict[str, Any] = {}
+    if discrepancy_enabled:
+        filter_overrides["global_parameter_names"] = tuple(parameter_metadata)
     if cfg.filtering.mode == "state":
         # The default config selects a random-walk evolution for the parameter-
         # updating modes. A plain `filtering.mode=state` override must remain a
@@ -896,6 +920,7 @@ def run(cfg: DictConfig) -> None:
         forward_model=ensemble_model,
         C_D=C_D_diag,
         rng_key=filter_key,
+        parameter_names_to_estimate=selected,
         **filter_overrides,
     )
     # The per-window observation-space arrays (window_{w}_{obs,pred_obs}.nc) are
@@ -922,6 +947,7 @@ def run(cfg: DictConfig) -> None:
     params: Any = prior_params
     diagnostic_rows: list[dict] = []
     params_history_pieces: list[xarray.Dataset] = []
+    applied_params_pieces: list[xarray.Dataset] = []
     state_history_pieces: list[xarray.Dataset] = []
     window_seconds: list[float] = []
     filter_start = time.perf_counter()
@@ -1011,6 +1037,8 @@ def run(cfg: DictConfig) -> None:
 
         if save_history:
             state_history_pieces.append(result.state_history)
+            if result.applied_params_history is not None:
+                applied_params_pieces.append(result.applied_params_history)
             if result.params_history is not None:
                 # Each call prepends the params it was handed, so every window
                 # after the first repeats the previous window's last entry. Drop
@@ -1041,6 +1069,10 @@ def run(cfg: DictConfig) -> None:
     if params_history_pieces:
         xarray.concat(params_history_pieces, dim="cycle", join="override").to_netcdf(
             out_dir / "params_history.nc"
+        )
+    if applied_params_pieces:
+        xarray.concat(applied_params_pieces, dim="cycle", join="override").to_netcdf(
+            out_dir / "applied_params_history.nc"
         )
     if state_history_pieces:
         xarray.concat(state_history_pieces, dim="cycle", join="override").to_netcdf(

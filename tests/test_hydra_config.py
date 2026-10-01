@@ -209,7 +209,7 @@ def test_resolve_parameter_schema_includes_model_error_knobs() -> None:
 
 
 def test_filter_parameter_config_restricts_static_sampler() -> None:
-    """`params_to_estimate` prunes the static sampler's `parameters` block."""
+    """Explicit sampler pruning remains available outside DA selection."""
     from omegaconf import OmegaConf
 
     from pyurbanair.config.hydra_helpers import filter_parameter_config
@@ -260,6 +260,57 @@ def test_filter_parameter_config_restricts_dynamic_sampler() -> None:
     pruned = filter_parameter_config(full, ["inflow_angle", "sgs_constant"])
     assert set(pruned["external_parameters"]) == {"inflow_angle"}
     assert set(pruned["static_parameters"]) == {"sgs_constant"}
+
+
+@pytest.mark.parametrize("kind", ["static", "dynamic"])  # type: ignore[misc]
+@pytest.mark.parametrize("selected", [None, [], ["inflow_angle"]])  # type: ignore[misc]
+def test_inference_parameter_selection_preserves_full_samplers(
+    kind: str, selected: Any
+) -> None:
+    import xarray
+    from hydra.utils import instantiate
+
+    from pyurbanair.config.hydra_helpers import inference_parameter_configs
+
+    cfg = _compose(
+        [f"params@prior_params={kind}", f"params@truth_params={kind}_truth"],
+        config_name="run_esmda",
+    )
+    cfg.params_to_estimate = selected
+    original = OmegaConf.to_container(cfg, resolve=True)
+
+    truth_cfg, prior_cfg = inference_parameter_configs(cfg)
+    assert OmegaConf.to_container(cfg, resolve=True) == original
+    xarray.testing.assert_identical(
+        instantiate(truth_cfg).sample(1), instantiate(cfg.truth_params).sample(1)
+    )
+    xarray.testing.assert_identical(
+        instantiate(prior_cfg).sample(4), instantiate(cfg.prior_params).sample(4)
+    )
+    # The unselected shear parameter must still be applied to both models.
+    assert "vertical_inflow_exponent" in instantiate(truth_cfg).sample(1)
+    assert "vertical_inflow_exponent" in instantiate(prior_cfg).sample(4)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "selected,error",
+    [
+        (["unknown_parameter"], "no configured prior"),
+        (["inflow_angle", "inflow_angle"], "unique"),
+        ("inflow_angle", "unique"),
+        ([""], "unique"),
+        ([1], "unique"),
+    ],
+)
+def test_inference_parameter_selection_rejects_invalid_names(
+    selected: Any, error: str
+) -> None:
+    from pyurbanair.config.hydra_helpers import inference_parameter_configs
+
+    cfg = _compose(config_name="run_esmda")
+    cfg.params_to_estimate = selected
+    with pytest.raises(ValueError, match=error):
+        inference_parameter_configs(cfg)
 
 
 def test_observation_helpers_use_explicit_mode() -> None:

@@ -96,11 +96,17 @@ PARAM_LABELS = {
     "inflow_angle": r"Inflow angle $\alpha$ [deg]",
     "velocity_magnitude": r"Velocity magnitude $|U|$ [m/s]",
     "pressure_gradient_magnitude": r"Pressure gradient [Pa/m]",
+    "sgs_bias_b0": r"SGS discrepancy coefficient $b_0$ [1]",
+    "sgs_bias_b1": r"SGS discrepancy coefficient $b_1$ [1]",
+    "sgs_bias_b2": r"SGS discrepancy coefficient $b_2$ [1]",
 }
 PARAM_UNITS = {
     "inflow_angle": "deg",
     "velocity_magnitude": "m/s",
     "pressure_gradient_magnitude": "Pa/m",
+    "sgs_bias_b0": "1",
+    "sgs_bias_b1": "1",
+    "sgs_bias_b2": "1",
 }
 
 
