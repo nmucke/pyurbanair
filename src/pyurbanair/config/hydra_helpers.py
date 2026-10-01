@@ -21,7 +21,10 @@ from omegaconf import DictConfig, OmegaConf
 from pylbm.utils.warm_start_utils import clean_output_files as clean_lbm_output_files
 from pyudales.utils.clean_up_utils import clean_output_dir as clean_udales_output_dir
 
-from pyurbanair.config.discrepancy import augment_sgs_discrepancy_prior
+from pyurbanair.config.discrepancy import (
+    augment_sgs_discrepancy_prior,
+    validate_parameter_selection,
+)
 
 
 def _plain(value: Any) -> Any:
@@ -142,16 +145,9 @@ _PARAM_CONFIG_BLOCKS = ("parameters", "external_parameters", "static_parameters"
 def filter_parameter_config(params_cfg: DictConfig, selected: Any) -> DictConfig:
     """Restrict a params sampler config to the parameters in ``selected``.
 
-    Lets a run choose *which* parameters ESMDA estimates from
-    ``conf/run_esmda.yaml`` (``params_to_estimate``) without editing the sampler
-    configs. ``selected`` is an iterable of parameter names, or ``None`` to keep
-    every parameter the config defines. Parameters dropped here are absent from
-    the sampled prior/truth Dataset, so the forward models fall back to their
-    construction-time/template defaults for them (see
-    docs/esmda_model_error_parameters.md §4 default-absent behaviour).
-
-    The same filter is applied to both the prior and truth samplers so excluding
-    a parameter reproduces the run as if that knob did not exist on either side.
+    This generic helper removes applied parameters from a sampler. Inference
+    runners instead retain the complete samplers and pass their estimation
+    selection to the assimilation algorithm separately.
     """
     if selected is None:
         return params_cfg
@@ -171,22 +167,15 @@ def filter_parameter_config(params_cfg: DictConfig, selected: Any) -> DictConfig
 def inference_parameter_configs(cfg: DictConfig) -> tuple[DictConfig, DictConfig]:
     """Resolve independent truth and prior samplers for an inference runner.
 
-    Discrepancy coefficients are prior-only nuisance parameters when the truth
-    has no counterparts. Keep the truth's prescribed forcing in that case;
-    selecting inferred coefficients must not change how truth is generated.
+    Every configured parameter is applied to its model, including parameters
+    excluded from the analysis. Only missing selected discrepancy priors are
+    added to the prediction sampler; truth stays independent.
     """
     selected = cfg.get("params_to_estimate")
     discrepancy = OmegaConf.select(cfg, "assim_model.forward_model.model_discrepancy")
-    enabled = discrepancy is not None and discrepancy.get("enabled", False)
-    truth = (
-        cfg.truth_params
-        if enabled
-        else filter_parameter_config(cfg.truth_params, selected)
-    )
-    prior = augment_sgs_discrepancy_prior(
-        filter_parameter_config(cfg.prior_params, selected), discrepancy, selected
-    )
-    return truth, prior
+    prior = augment_sgs_discrepancy_prior(cfg.prior_params, discrepancy, selected)
+    validate_parameter_selection(prior, selected)
+    return cfg.truth_params, prior
 
 
 def create_initial_state_ensemble(

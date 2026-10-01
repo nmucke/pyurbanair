@@ -39,20 +39,21 @@ time:
   seconds_per_knot: 60.0
 
 # --- Which parameters ESMDA estimates -------------------------------------------
-# Select which of the parameters defined in the params sampler configs
-# (params@prior_params / params@truth_params) are included in the assimilation.
+# Select which of the parameters in params@prior_params receive DA updates.
 #   * list  -> estimate only the named parameters (the default below).
-#   * null  -> estimate EVERY parameter the sampler configs define.
-# Parameters left out are absent from the sampled prior/truth Datasets, so the
-# forward models fall back to their construction-time/template defaults for them.
-# The filter is applied to BOTH the prior and the truth samplers, so excluding a
-# parameter reproduces the run as if that knob did not exist.
+#   * null  -> estimate EVERY parameter the prior sampler defines.
+#   * []    -> estimate no parameters.
+# All configured prior and truth parameters are sampled and passed to their
+# respective forward models. Unselected prior parameters retain their sampled
+# values without DA updates; dynamic trajectories still extrapolate normally.
+# To use a model default, omit that parameter from its sampler config. To use a
+# prescribed value, define a Constant distribution, even when it is unselected.
 #
 # The model-error compensation knobs vertical_inflow_exponent / sgs_constant
-# (docs/esmda_model_error_parameters.md) are OFF by default: the default truth and
-# assimilation models are the same solver (no model error to absorb), and a
-# case-inappropriate sgs_constant can destabilize the solver (§8). Enable them for
-# a CROSS-model study, after setting case-appropriate ranges in the params
+# (docs/temp/esmda_model_error_parameters.md) are not estimated by default.
+# Their configured values still apply; choose case-appropriate ranges because a
+# case-inappropriate sgs_constant can destabilize the solver (§8). Estimate them
+# for a CROSS-model study after setting appropriate ranges in the params
 # configs, e.g.:
 #   params_to_estimate=[inflow_angle,velocity_magnitude,sgs_constant,vertical_inflow_exponent]
 params_to_estimate:

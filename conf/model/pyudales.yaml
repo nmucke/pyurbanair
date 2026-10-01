@@ -54,7 +54,7 @@ forward_model:
     height_band_over_H: null
     gradient_regularization: null
     log_multiplier_cap: null
-    prior_std: null
+    prior_std: null  # no fallback; use explicit coefficient priors
   nudging_config:
     tnudge: 15.0
     # nnudge: number of bottom grid levels NOT nudged (raw level count).

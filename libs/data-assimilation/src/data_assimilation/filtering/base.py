@@ -63,6 +63,11 @@ from data_assimilation.inflation import InflationScheme
 from data_assimilation.io import get_sorted_state_files, load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import sensor_observation_coords
+from data_assimilation.parameter_selection import (
+    merge_parameters,
+    select_parameters,
+    validate_parameter_names,
+)
 from data_assimilation.reduction import OnlineStateReduction
 from tqdm import tqdm
 
@@ -259,6 +264,9 @@ class BaseFilter:
             anomalies (prior hook also applied to the predicted-observation
             anomalies, keeping the gain consistent with the inflated
             ensemble).
+        parameter_names_to_estimate: Parameter fields included in the analysis,
+            inflation and evolution. None selects all supplied fields; an empty
+            sequence selects none. Every forecast still receives all fields.
         parameter_evolution: Parameter forecast model applied after each
             analysis; required (or ``inflation``) for the parameter-updating
             modes (``"parameter"``/``"joint"``), whose parameter block
@@ -339,6 +347,7 @@ class BaseFilter:
     #: Static parameter rows that use all observations under any localization.
     #: These names persist across cycles; they do not assign a grid location.
     global_parameter_names: tuple[str, ...] = ()
+    parameter_names_to_estimate: Optional[tuple[str, ...]] = None
 
     def __init__(
         self,
@@ -354,6 +363,7 @@ class BaseFilter:
         state_reduction: Optional[OnlineStateReduction] = None,
         beta: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         if mode not in ("state", "parameter", "joint"):
             raise ValueError(
@@ -371,6 +381,9 @@ class BaseFilter:
         if len(set(names)) != len(names):
             raise ValueError("global_parameter_names must not contain duplicates.")
         self.global_parameter_names = names
+        self.parameter_names_to_estimate = validate_parameter_names(
+            parameter_names_to_estimate
+        )
 
         # One FRAME's error covariance, not one cycle's: the serial sweep hands
         # the analysis one frame's (num_sensors x num_states) vector at a time,
@@ -497,6 +510,7 @@ class BaseFilter:
             mode in ("parameter", "joint")
             and parameter_evolution is None
             and inflation is None
+            and self.parameter_names_to_estimate != ()
         ):
             raise ValueError(
                 f"mode={mode!r} needs spread maintenance: without "
@@ -1038,7 +1052,15 @@ class BaseFilter:
         if self.mode in ("parameter", "joint"):
             if params is None:
                 raise ValueError(f"mode={self.mode!r} requires params.")
-            self._check_static_params(params)
+            self._check_static_params(
+                select_parameters(params, self.parameter_names_to_estimate)
+            )
+        if params is not None:
+            select_parameters(params, self.parameter_names_to_estimate)
+        elif self.parameter_names_to_estimate:
+            raise ValueError(
+                "parameter_names_to_estimate requires a parameter Dataset."
+            )
 
         if self.global_parameter_names:
             self._validate_global_parameters(params)
@@ -1294,7 +1316,8 @@ class BaseFilter:
             blocks.append(states_forecast)
         if self.mode in ("parameter", "joint"):
             assert params is not None  # validated in run()
-            flat_params = self._param_augmentation.flatten(params)
+            selected = select_parameters(params, self.parameter_names_to_estimate)
+            flat_params = self._param_augmentation.flatten(selected)
             params_array = ParamAugmentation.to_array(flat_params)
             n_param = params_array.shape[0]
             blocks.append(params_array)
@@ -1454,14 +1477,17 @@ class BaseFilter:
                 updated_flat.attrs = dict(params.attrs)
                 for name in updated_flat.data_vars:
                     updated_flat[name].attrs = dict(params[name].attrs)
-            params = xarray.Dataset(
+            updated_params = xarray.Dataset(
                 data_vars={name: updated_flat[name] for name in updated_flat.data_vars},
-                coords=params.coords,
+                coords=flat_params.coords,
                 attrs=updated_flat.attrs,
             )
-            if self.parameter_evolution is not None:
+            if self.parameter_evolution is not None and n_param:
                 self.rng_key, evolve_key = jax.random.split(self.rng_key)
-                params = self.parameter_evolution.evolve(params, evolve_key)
+                updated_params = self.parameter_evolution.evolve(
+                    updated_params, evolve_key
+                )
+            params = merge_parameters(params, updated_params)
 
         cycle_diag.analysis_time = time.perf_counter() - analysis_started
         if self.state_reduction is not None:
@@ -1710,7 +1736,9 @@ class BaseFilter:
                 param_mask = param_mask & jnp.asarray(
                     [
                         name not in self.global_parameter_names
-                        for name in params.data_vars
+                        for name in select_parameters(
+                            params, self.parameter_names_to_estimate
+                        ).data_vars
                     ]
                 )
             mask_blocks.append(param_mask)
@@ -1852,6 +1880,7 @@ class EnsembleKalmanFilter(BaseFilter):
         state_reduction: Optional[OnlineStateReduction] = None,
         beta: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -1866,4 +1895,5 @@ class EnsembleKalmanFilter(BaseFilter):
             rng_key=rng_key,
             beta=beta,
             global_parameter_names=global_parameter_names,
+            parameter_names_to_estimate=parameter_names_to_estimate,
         )

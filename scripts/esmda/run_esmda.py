@@ -669,10 +669,8 @@ def run(cfg: DictConfig) -> None:
     rng_key = jax.random.PRNGKey(cfg.esmda.seed)
 
     # Select which parameters ESMDA estimates (conf/run_esmda.yaml
-    # `params_to_estimate`): null -> every parameter the sampler configs define;
-    # a list -> that subset. The same filter is applied to the prior and the
-    # truth samplers, so excluding a parameter reproduces the run as if the knob
-    # did not exist on either side (docs/esmda_model_error_parameters.md §4).
+    # `params_to_estimate`): null -> every configured prior parameter; a list
+    # -> that subset. Both models still apply all their configured parameters.
     selected = cfg.get("params_to_estimate", None)
     selected = list(selected) if selected is not None else None
     truth_params_cfg, prior_params_cfg = inference_parameter_configs(cfg)
@@ -1009,6 +1007,7 @@ def run(cfg: DictConfig) -> None:
         C_D=C_D,
         rng_key=esmda_key,
         aggregate_observations=aggregate_obs,
+        parameter_names_to_estimate=selected,
         **smoother_overrides,
     )
     include_state = isinstance(esmda, StateAndParameterESMDA)

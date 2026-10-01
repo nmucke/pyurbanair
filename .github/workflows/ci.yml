@@ -23,16 +23,13 @@ jobs:
         with:
           run-install: false
 
-      # Keyed on pyproject.toml, NOT pixi.lock: the lock file is gitignored, so
-      # it does not exist in a fresh checkout and hashFiles() returned an empty
-      # string -- leaving one immortal `pixi-Linux-` entry that no dependency
-      # change ever invalidated. Restoring a months-old env on top of a fresh
-      # (unpinned, and so drifting) solve is what broke the bin/test workaround.
+      # The root lockfile is versioned so CI and local MCP workers share the
+      # same solved dependencies; editable library manifests also invalidate cache.
       - name: Cache pixi environment
         uses: actions/cache@v4
         with:
           path: .pixi/envs
-          key: pixi-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          key: pixi-${{ runner.os }}-${{ hashFiles('pixi.lock', 'pyproject.toml', 'libs/**/pyproject.toml') }}
 
       # setup-dev, not `pixi install -e dev`: the first install hits the known
       # coreutils/tempest-remap bin/test clobber that the task works around.
@@ -52,3 +49,9 @@ jobs:
           OPENBLAS_NUM_THREADS: "1"
           MKL_NUM_THREADS: "1"
         run: pixi run -e dev py.test
+
+      - name: Install optional MCP environment
+        run: pixi install --locked -e mcp
+
+      - name: Verify MCP protocol and entry points
+        run: pixi run --locked -e mcp python -m pytest tests/test_mcp_protocol.py

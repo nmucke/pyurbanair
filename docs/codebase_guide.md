@@ -37,8 +37,9 @@ file-level detail, gotchas, and recipes this guide only summarizes:
 | ESMDA / observation operator / localization / state reduction | [docs/data_assimilation.md](data_assimilation.md) |
 | Neural surrogates (UNetConvNeXt, UPT, P3D, domain-decomposition, training, rollout) | [docs/neural_surrogates.md](neural_surrogates.md) |
 | Hydra configs (`conf/`) and the executable scripts (`scripts/`) | [docs/scripts_and_configs.md](scripts_and_configs.md) |
+| Local MCP forward jobs, preparation and client setup | [docs/mcp.md](mcp.md) |
+| Saved forward visualization and browser bundles | [docs/forward_visualization.md](forward_visualization.md) |
 | Running on HPC clusters (Snellius / DelftBlue / local SLURM) | [docs/job_scripts.md](job_scripts.md) |
-| Cinematic LES animations (render bundles for Unreal Engine + Blender preview, `viz` env) | [docs/les_render.md](les_render.md) |
 | Dynamic multi-window ESMDA theory/config | [docs/temp/esmda_dynamic_multiwindow.md](temp/esmda_dynamic_multiwindow.md) |
 | Model-error compensation parameters (α, sgs/km) | [docs/temp/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md) |
 | Reduced SVD/KL state update theory | [docs/temp/reduced_state_da.md](temp/reduced_state_da.md) |
@@ -70,6 +71,9 @@ src/pyurbanair/                    # Top-level package: base classes + glue
     cpu_pinning.py                 # Worker → CPU pinning for parallel ensembles
     run_utils.py, state_utils.py, animation_utils.py
   animation.py
+  workflows/forward.py            # Shared CLI/local-worker forward execution + indexed artifacts
+  jobs/                           # Immutable plans, private paths, SQLite queue, supervisor/workers
+  visualization/                  # Saved-state normalization, rendering and local browser viewer
 
 conf/                              # Hydra config (see §5 Configuration system)
   README.md                        # Config overview (axes + recipes)
@@ -97,10 +101,7 @@ libs/data-assimilation/src/data_assimilation/
     esmda.py                       # Parameter/StateAndParameter/TimeVaryingParameter/
                                    #   StateAndTimeVaryingParameter ESMDA
 
-libs/les-render/src/les_render/   # LES state file -> render bundle (OpenVDB, particle
-                                   #   caches, isosurfaces, LIC slices, shots, HUD) for
-                                   #   Unreal + Blender. Leaf lib, own `viz` pixi env.
-                                   #   See docs/les_render.md.
+libs/mcp_server/src/pyurbanair_mcp/ # Optional MCP SDK v2 adapter; see docs/mcp.md
 
 libs/evaluation/src/evaluation/    # Metrics + figures for DA runs. Leaf lib: no jax, no
                                    #   pyurbanair, no backends (see its __init__).
@@ -507,6 +508,14 @@ params_sampler = instantiate(cfg.params)          # or cfg.truth_params / cfg.pr
 params = params_sampler.sample(ensemble_size)
 ```
 
+Truth and prediction samplers keep every configured parameter. The runners'
+`params_to_estimate` selects only the prior fields eligible for DA updates:
+`null` selects all, and `[]` selects none. Unselected fields are still applied
+to the model and saved with the full parameter ensemble. Use a `Constant` to
+prescribe a value, or remove its sampler entry to use the model default.
+Unselected random priors keep their sampled member values; unselected dynamic
+trajectories continue through normal extrapolation between windows.
+
 - **Static** ([src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/)) —
   `ParameterSampler` holds a `name -> Distribution` mapping. Each parameter is
   a `Normal` / `Uniform` random prior or a fixed `Constant` (each its own
@@ -707,8 +716,8 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   `external_parameters:`) in `dynamic.yaml` / `dynamic_truth.yaml`. The AR(2)
   sampler draws it once (window 0), emits it with no `time` dim, and the
   time-varying smoother passes time-less vars through its flatten/unflatten
-  unchanged — so it is updated jointly with no smoother change and refined (not
-  re-randomized) across windows. See
+  unchanged — so it can be updated jointly when selected for estimation and is
+  carried (not re-randomized) across windows. See
   [docs/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md) §6.
 - If the parameter is backend-specific (like `pressure_gradient_magnitude`),
   extend `resolve_parameter_schema` in
@@ -728,9 +737,11 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   `write_uvel_time_file`).
 - To let a run **choose which parameters ESMDA estimates**, set
   `params_to_estimate` in [conf/run_esmda.yaml](../conf/run_esmda.yaml) (a list,
-  or `null` for all). It filters the prior *and* truth sampler configs via
-  `filter_parameter_config`; dropped parameters fall back to the forward model's
-  defaults on both sides.
+  `null` for all prior parameters, or `[]` for none). All configured prior and
+  truth parameters reach their corresponding forward models. Unselected prior
+  fields retain their sampled realization without DA updates; dynamic fields
+  still extrapolate normally. Omit a parameter from its sampler config to use
+  the corresponding model's default instead.
 
 ### Add a new ESMDA variant
 - Subclass `_BaseESMDA` in

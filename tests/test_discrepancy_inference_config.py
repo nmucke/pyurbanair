@@ -1,4 +1,4 @@
-"""Static SGS discrepancy inference configuration, without a CFD solve."""
+"""SGS discrepancy inference configuration, without a CFD solve."""
 
 from __future__ import annotations
 
@@ -35,6 +35,32 @@ def _prior() -> DictConfig:
                     "_target_": "pyurbanair.static_parameters.Constant",
                     "value": 5.0,
                 },
+            },
+        }
+    )
+
+
+def _dynamic_prior() -> DictConfig:
+    return OmegaConf.create(
+        {
+            "_target_": "pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel",
+            "_convert_": "all",
+            "seed": 123,
+            "simulation_time": 10.0,
+            "seconds_per_knot": 5.0,
+            "correlation_length": 100.0,
+            "external_parameters": {
+                "inflow_angle": {
+                    "_target_": "pyurbanair.static_parameters.Normal",
+                    "mean": 0.0,
+                    "std": 1.0,
+                }
+            },
+            "static_parameters": {
+                "velocity_magnitude": {
+                    "_target_": "pyurbanair.static_parameters.Constant",
+                    "value": 5.0,
+                }
             },
         }
     )
@@ -203,11 +229,129 @@ def test_unselected_coefficients_are_not_added() -> None:
     assert augment_sgs_discrepancy_prior(prior, discrepancy, ["inflow_angle"]) is prior
 
 
-def test_dynamic_prior_still_requires_separate_integration() -> None:
-    prior = _prior()
-    prior._target_ = "pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel"
-    with pytest.raises(ValueError, match="static ParameterSampler"):
+@pytest.mark.parametrize("dynamic", [False, True])  # type: ignore[misc]
+def test_configured_unestimated_coefficients_are_applied_to_independent_models(
+    dynamic: bool,
+) -> None:
+    from pyurbanair.config.hydra_helpers import inference_parameter_configs
+
+    cfg = _run_cfg()
+    cfg.params_to_estimate = ["inflow_angle"]
+    cfg.assim_model.forward_model.model_discrepancy.prior_std = None
+    cfg.prior_params = _dynamic_prior() if dynamic else _prior()
+    cfg.truth_params = copy.deepcopy(cfg.prior_params)
+    block = "static_parameters" if dynamic else "parameters"
+    for name in SGS_BIAS_PARAMETER_NAMES:
+        cfg.prior_params[block][name] = {
+            "_target_": "pyurbanair.static_parameters.Constant",
+            "value": -20.0,
+        }
+        cfg.truth_params[block][name] = {
+            "_target_": "pyurbanair.static_parameters.Constant",
+            "value": 0.0,
+        }
+    original = copy.deepcopy(cfg)
+    truth_cfg, prior_cfg = inference_parameter_configs(cfg)
+    assert cfg == original
+    truth = instantiate(truth_cfg).sample(1)
+    prior = instantiate(prior_cfg).sample(4)
+    assert set(truth.data_vars) == set(prior.data_vars)
+    assert "velocity_magnitude" in prior
+    for name in SGS_BIAS_PARAMETER_NAMES:
+        np.testing.assert_array_equal(prior[name], [-20.0] * 4)
+        np.testing.assert_array_equal(truth[name], [0.0])
+        assert prior[name].dims == ("ensemble",)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "workflow", ["esmda", "filtering", "filter_smoothing"]
+)
+def test_prescribed_coefficients_do_not_require_coefficient_inference(
+    workflow: str,
+) -> None:
+    cfg = _run_cfg()
+    cfg.params_to_estimate = ["inflow_angle"]
+    cfg.assim_model.forward_model.model_discrepancy.prior_std = None
+    cfg.filtering.mode = "state"
+    for name in SGS_BIAS_PARAMETER_NAMES:
+        cfg.prior_params.parameters[name] = {
+            "_target_": "pyurbanair.static_parameters.Constant",
+            "value": -20.0,
+        }
+    validate_sgs_discrepancy_inference(cfg, workflow)
+
+
+def test_dynamic_prior_adds_static_coefficients_without_changing_inflow() -> None:
+    prior = _dynamic_prior()
+    augmented = augment_sgs_discrepancy_prior(
+        prior, _discrepancy(), ["inflow_angle", *SGS_BIAS_PARAMETER_NAMES]
+    )
+    assert list(augmented.static_parameters) == [
+        "velocity_magnitude",
+        *SGS_BIAS_PARAMETER_NAMES,
+    ]
+    assert list(prior.static_parameters) == ["velocity_magnitude"]
+    before = instantiate(prior).sample(32)
+    after = instantiate(augmented).sample(32)
+    np.testing.assert_array_equal(before.inflow_angle, after.inflow_angle)
+    assert after.inflow_angle.dims == ("time", "ensemble")
+    for name in SGS_BIAS_PARAMETER_NAMES:
+        assert after[name].dims == ("ensemble",)
+
+
+def test_dynamic_fallback_creates_static_block_when_missing() -> None:
+    prior = _dynamic_prior()
+    del prior.static_parameters
+    augmented = augment_sgs_discrepancy_prior(
+        prior, _discrepancy(), ["inflow_angle", "sgs_bias_b0"]
+    )
+    assert list(augmented.static_parameters) == ["sgs_bias_b0"]
+    assert instantiate(augmented).sample(4).sgs_bias_b0.dims == ("ensemble",)
+
+
+def test_dynamic_explicit_coefficient_prior_needs_no_fallback_scales() -> None:
+    prior = _dynamic_prior()
+    prior.static_parameters.sgs_bias_b0 = {
+        "_target_": "pyurbanair.static_parameters.Normal",
+        "mean": 0.1,
+        "std": 0.2,
+    }
+    discrepancy = _discrepancy()
+    discrepancy.prior_std = None
+    assert augment_sgs_discrepancy_prior(prior, discrepancy, ["sgs_bias_b0"]) is prior
+
+
+@pytest.mark.parametrize("workflow", ["esmda", "filter_smoothing"])  # type: ignore[misc]
+def test_dynamic_sgs_inference_uses_matching_parameter_smoother(workflow: str) -> None:
+    cfg = _run_cfg()
+    cfg.prior_params = _dynamic_prior()
+    cfg.esmda.smoother._target_ = (
+        "data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA"
+    )
+    if workflow == "filter_smoothing":
+        cfg.filtering.mode = "state"
+    validate_sgs_discrepancy_inference(cfg, workflow)
+    cfg.esmda.smoother._target_ = "data_assimilation.smoothing.esmda.ParameterESMDA"
+    with pytest.raises(ValueError, match="matching the prior"):
+        validate_sgs_discrepancy_inference(cfg, workflow)
+
+
+def test_dynamic_sgs_coefficients_cannot_be_trajectories() -> None:
+    prior = _dynamic_prior()
+    prior.external_parameters.sgs_bias_b0 = {
+        "_target_": "pyurbanair.static_parameters.Normal",
+        "mean": 0.0,
+        "std": 0.1,
+    }
+    with pytest.raises(ValueError, match="must be static"):
         augment_sgs_discrepancy_prior(prior, _discrepancy())
+
+
+def test_filtering_keeps_static_sampler_requirement() -> None:
+    cfg = _run_cfg()
+    cfg.prior_params = _dynamic_prior()
+    with pytest.raises(ValueError, match="static prior sampler"):
+        validate_sgs_discrepancy_inference(cfg, "filtering")
 
 
 def test_supported_scope_allows_multiple_windows_and_prior_only_coefficients() -> None:
@@ -228,7 +372,7 @@ def test_supported_scope_allows_multiple_windows_and_prior_only_coefficients() -
             "dynamic",
             "persistent",
         ),
-        ("prior_params._target_", "other", "static prior sampler"),
+        ("prior_params._target_", "other", "static ParameterSampler"),
         (
             "esmda.smoother._target_",
             "data_assimilation.smoothing.esmda.StateESMDA",
@@ -261,12 +405,30 @@ def test_filtering_scope_accepts_parameter_updates_with_identity_evolution(
     validate_sgs_discrepancy_inference(cfg, "filtering")
 
 
-def test_filtering_rejects_state_only_or_coefficient_random_walk() -> None:
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "selected", [None, list(SGS_BIAS_PARAMETER_NAMES)]
+)
+@pytest.mark.parametrize("random_walk", [False, True])  # type: ignore[misc]
+def test_state_only_filtering_does_not_infer_selected_coefficients(
+    selected: Any, random_walk: bool
+) -> None:
     cfg = _run_cfg()
     cfg.filtering.mode = "state"
-    with pytest.raises(ValueError, match="parameter or joint"):
-        validate_sgs_discrepancy_inference(cfg, "filtering")
-    cfg.filtering.mode = "joint"
+    cfg.params_to_estimate = selected
+    if random_walk:
+        cfg.filtering.parameter_evolution = {
+            "_target_": (
+                "data_assimilation.filtering.parameter_evolution.RandomWalkEvolution"
+            ),
+            "std": 0.1,
+        }
+    validate_sgs_discrepancy_inference(cfg, "filtering")
+
+
+@pytest.mark.parametrize("mode", ["parameter", "joint"])  # type: ignore[misc]
+def test_filtering_rejects_coefficient_random_walk(mode: str) -> None:
+    cfg = _run_cfg()
+    cfg.filtering.mode = mode
     cfg.filtering.parameter_evolution = {
         "_target_": "data_assimilation.filtering.parameter_evolution.RandomWalkEvolution",
         "std": 0.1,

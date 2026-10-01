@@ -597,7 +597,7 @@ def run(cfg: DictConfig) -> None:
 
     # Select which parameters are estimated (the same contract as both
     # siblings): null -> every parameter the sampler configs define; a list ->
-    # that subset, applied to prior AND truth.
+    # that subset. All configured parameters still reach each forward model.
     selected = cfg.get("params_to_estimate", None)
     selected = list(selected) if selected is not None else None
     truth_params_cfg, prior_params_cfg = inference_parameter_configs(cfg)
@@ -1018,6 +1018,7 @@ def run(cfg: DictConfig) -> None:
         C_D=C_D,
         rng_key=esmda_key,
         aggregate_observations=aggregate_obs,
+        parameter_names_to_estimate=selected,
         **smoother_overrides,
     )
     # Cap on-disk peak storage: drop each MDA step's forecast as soon as its
@@ -1048,6 +1049,7 @@ def run(cfg: DictConfig) -> None:
         forward_model=filter_ensemble_model,
         C_D=C_D_diag,
         rng_key=filter_key,
+        parameter_names_to_estimate=selected,
         **filter_overrides,
     )
     # The per-window observation-space arrays are what the shared normalized

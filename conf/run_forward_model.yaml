@@ -33,7 +33,9 @@ run:
   ensemble: false
   ground_truth_dir: null
   rollout_steps: 0
-  # When true, ensemble forecasts are written to disk (one NetCDF per member)
-  # instead of one in-memory ensemble Dataset — keeps the full field off host
-  # RAM for the high-resolution / large-ensemble sweeps. Sequential backends only.
+  # Optional NetCDF path or {path, member, time_index}. Member uses the coordinate
+  # label; time_index selects the last available history frame by position.
+  initial_state: null
+  # Currently rejected by the shared forward workflow. Complete artifact mode
+  # persists every member/window but still retains rollout history in memory.
   ensemble_save_on_disk: false

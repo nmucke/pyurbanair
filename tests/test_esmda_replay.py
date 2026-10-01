@@ -1,7 +1,7 @@
 """ESMDA must replay hidden solver state, while accepting analyzed inputs."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -27,7 +27,7 @@ class HiddenStateEnsemble(BaseEnsembleForwardModel):
         self.inputs: list[np.ndarray] = []
         self.finishes: list[bool] = []
         self.fail_at: int | None = None
-        self._last_failure_substitutions = {}
+        self._last_failure_substitutions: dict[int, int] = {}
         self._failure_jitter_scale = 0.0
 
     def _create_new_forward_model(self, *args: Any, **kwargs: Any) -> BaseForwardModel:
@@ -91,13 +91,17 @@ def observe(state: xr.Dataset) -> np.ndarray:
     return np.asarray(state.u.isel(time=[-1]))
 
 
-def make_smoother(model: HiddenStateEnsemble) -> ParameterESMDA:
+def make_smoother(
+    model: HiddenStateEnsemble,
+    parameter_names_to_estimate: tuple[str, ...] | None = None,
+) -> ParameterESMDA:
     smoother = ParameterESMDA(
-        observation_operator=observe,  # type: ignore[arg-type]
+        observation_operator=cast(Any, observe),
         forward_model=model,
         C_D=jnp.array([1.0]),
         num_steps=2,
         rng_key=jax.random.PRNGKey(7),
+        parameter_names_to_estimate=parameter_names_to_estimate,
     )
     smoother.collect_obs_diagnostics = True
     return smoother
@@ -191,6 +195,46 @@ def test_disk_and_memory_replays_have_identical_updates(tmp_path: Path) -> None:
     xr.testing.assert_identical(mem_params, disk_params)
     np.testing.assert_array_equal(memory.pred_obs_history, disk.pred_obs_history)
     np.testing.assert_array_equal(memory.rng_key, disk.rng_key)
+
+
+@pytest.mark.parametrize("selection", [("a",), ()])  # type: ignore[misc]
+def test_disk_replay_applies_unestimated_parameters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: tuple[str, ...]
+) -> None:
+    params = prior()
+    params["sgs_bias_b0"] = ("ensemble", [-20.123456789, -19.123456789, -18.123456789])
+    params.sgs_bias_b0.attrs["units"] = "dimensionless"
+    smoothers = []
+    results = []
+    for directory in (None, tmp_path / "results"):
+        model = HiddenStateEnsemble(directory)
+        forecast = model.run_ensemble
+        applied: list[xr.Dataset] = []
+
+        def capture(
+            *, _forecast: Any = forecast, _applied: Any = applied, **kwargs: Any
+        ) -> Any:
+            _applied.append(kwargs["params"].copy(deep=True))
+            return _forecast(**kwargs)
+
+        monkeypatch.setattr(model, "run_ensemble", capture)
+        smoother = make_smoother(model, parameter_names_to_estimate=selection)
+        result = smoother(params=params, observations=np.array([4.0]))
+        posterior = result if model.save_on_disk else result[0]
+        for forecast_params in applied:
+            xr.testing.assert_identical(forecast_params.sgs_bias_b0, params.sgs_bias_b0)
+        xr.testing.assert_identical(posterior.sgs_bias_b0, params.sgs_bias_b0)
+        if not selection:
+            xr.testing.assert_identical(posterior, params)
+        else:
+            assert not np.array_equal(posterior.a, params.a)
+        smoothers.append(smoother)
+        results.append(posterior)
+    xr.testing.assert_identical(results[0], results[1])
+    np.testing.assert_array_equal(
+        smoothers[0].pred_obs_history, smoothers[1].pred_obs_history
+    )
+    np.testing.assert_array_equal(smoothers[0].rng_key, smoothers[1].rng_key)
 
 
 def test_commit_validation_failure_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:

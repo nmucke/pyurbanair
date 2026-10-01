@@ -53,7 +53,6 @@ conf/
   run_filter_smoothing.yaml
   compare_models.yaml
   run_probe_series.yaml
-  render_les.yaml
 
   common/
     runtime.yaml                    # shared output policy, Hydra, failure policy
@@ -136,7 +135,6 @@ conf/
     finetune_mode/
     architectures/
 
-  render_preset/                    # keep the independent rendering workflow
 ```
 
 Root workflow files should be short enough to scan: a defaults list followed by

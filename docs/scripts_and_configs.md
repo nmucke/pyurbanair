@@ -245,7 +245,7 @@ static sampler (`ParameterSampler`) or a time-varying sampler
 |---|---|---|
 | [`params/static.yaml`](../conf/params/static.yaml) | `pyurbanair.static_parameters.ParameterSampler` | Assimilation **prior**: Normal priors for `inflow_angle`, `velocity_magnitude`, `vertical_inflow_exponent`, `sgs_constant`; `pressure_gradient_magnitude` as a `Constant`. |
 | [`params/static_truth.yaml`](../conf/params/static_truth.yaml) | `pyurbanair.static_parameters.ParameterSampler` | **Truth** generator: all `Constant` distributions (exact fixed values). Avoids inverse crime. |
-| [`params/dynamic.yaml`](../conf/params/dynamic.yaml) | `pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel` | Time-varying **prior**: AR(2) relaxation for `inflow_angle` + `velocity_magnitude` (both get a `time` dim), plus static `vertical_inflow_exponent`/`sgs_constant` entries estimated jointly. |
+| [`params/dynamic.yaml`](../conf/params/dynamic.yaml) | `pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel` | Time-varying **prior**: AR(2) relaxation for `inflow_angle` + `velocity_magnitude` (both get a `time` dim), plus static entries without a `time` dim. |
 | [`params/dynamic_truth.yaml`](../conf/params/dynamic_truth.yaml) | `AR2RelaxationModel` | Time-varying **truth**: same AR(2) structure but different seed to avoid inverse crime. |
 | [`params/dynamic_sine.yaml`](../conf/params/dynamic_sine.yaml) | `pyurbanair.dynamic_parameters.harmonic.HarmonicParameterModel` | Deterministic sine forcing for controlled forward comparisons. |
 | [`params/dynamic_cosine.yaml`](../conf/params/dynamic_cosine.yaml) | `HarmonicParameterModel` | A second deterministic cosine forcing scenario. |
@@ -255,9 +255,9 @@ static sampler (`ParameterSampler`) or a time-varying sampler
 - `seconds_per_knot: ${time.seconds_per_knot}` — knot spacing interpolated from
   the shared `time` block.
 - `external_parameters` — time-varying params with `_target_` Normal distributions.
-- `static_parameters` — model-error knobs (`vertical_inflow_exponent`, `sgs_constant`)
-  that ride in the same Dataset but carry no `time` dim; drawn once (window 0)
-  and refined across windows.
+- `static_parameters` — parameters such as `vertical_inflow_exponent` and
+  `sgs_bias_b0/b1/b2` that ride in the same Dataset but carry no `time` dim;
+  drawn once (window 0), carried across windows, and updated only if selected.
 
 **Deterministic profiles.** `dynamic_sine` and `dynamic_cosine` use
 `HarmonicParameterModel`. Each entry in `profiles` has `waveform` (`sine` or
@@ -270,6 +270,19 @@ a controlled solver comparison rather than stochastic parameter inference.
 `params@truth_params=static_truth|dynamic_truth` and
 `params@prior_params=static|dynamic`. The truth and prior never share a generative
 process (the anti-inverse-crime design).
+
+**Applied parameters and estimated parameters.** ESMDA, filtering, and the hybrid
+sample every entry in their corresponding truth and prior configs and pass the
+full Dataset to each forward model. `params_to_estimate` controls DA updates
+only: a list selects those prior fields, `null` selects all prior fields, and
+`[]` selects none. Names must be unique and have configured priors (or an enabled
+SGS fallback as described below). Truth values do not depend on this selection.
+Unselected random parameters retain their sampled member values and spread;
+filtering parameter evolution and inflation apply only to selected fields.
+Dynamic trajectories continue through normal extrapolation between windows.
+To prescribe a value, use `Constant`; to use a model default, omit the entry
+from its sampler.
+Saved prior/posterior parameter artifacts contain all applied fields.
 
 ---
 
@@ -1638,15 +1651,6 @@ Brief summary:
 | [`neural_surrogate/add_geometry_to_training_data.py`](../scripts/neural_surrogate/add_geometry_to_training_data.py) | No — argparse | Post-processes an existing dataset to add a geometry variable to each state file. |
 | [`neural_surrogate/finish_training_data_processing.py`](../scripts/neural_surrogate/finish_training_data_processing.py) | No — argparse | Finalizes a partially-generated dataset (e.g. after a cluster job restart). |
 
-### 2.9 Visualization scripts (`viz` env)
-
-| Script | Hydra? | Purpose |
-|---|---|---|
-| [`visualization/render_les.py`](../scripts/visualization/render_les.py) | Yes — [`render_les.yaml`](../conf/render_les.yaml) + group [`render_preset/`](../conf/render_preset/) | Case folder / state file -> render bundle (Unreal assets + scripts) -> Blender preview mp4. See [les_render.md](les_render.md). Runs under `pixi run -e viz`; resolves its own output dir (`output_dir`, else `results/les_render/<case>/<preset>`) because `resolve_output_dir` imports jax and the backends. |
-| [`visualization/make_render_case.py`](../scripts/visualization/make_render_case.py) | No — argparse | Symlinks (or copies) a training sample's state, STL and params into a self-contained case folder, optionally with a `render.yaml` template. |
-
----
-
 ## Quick lookup
 
 | You want to… | Go to |
@@ -1668,6 +1672,50 @@ Brief summary:
 | Understand the data-assimilation abstractions | [`docs/codebase_guide.md §6`](codebase_guide.md) |
 
 
+### Local forward jobs and complete artifacts
+
+`run_forward_model.run(cfg)` delegates to
+`pyurbanair.workflows.forward.run`. Ordinary CLI output behavior is preserved;
+local MCP workers explicitly choose `complete_artifacts=True`, supply composition
+provenance and bind a private output directory. Complete mode records intent
+before backend construction and writes every state/parameter member/window to
+`artifact_index.json`, plus consolidated outputs after success. Failed jobs
+retain a partial index. Numerical artifacts are independent of plotting.
+
+`run.initial_state` accepts a NetCDF path or a mapping with `path`, optional
+`member`, and `time_index` selecting the history endpoint. Surrogate histories
+are checked against trained variables, coordinates and cadence.
+For a one-member ensemble, a single initial field gains an `ensemble` axis.
+History-conditioned surrogate rollouts carry the last required real frames
+across windows, including the supplied initial history. The carry buffer counts
+toward the memory limit. Insufficient history or incompatible cadence stops the
+rollout before the next window instead of repeating an old frame to fill it.
+`run.rollout_steps` remains the number of additional windows.
+
+Rollout timestamps retain each backend's window-local sample offsets: forecast
+frames at `[1, 2, 3]` seconds become `[4, 5, 6]` in the second three-second
+window. Indexed datasets declare `time_reference: global`; explicitly global
+inputs are not shifted again. Boundary-including windows can share an endpoint.
+Complete consolidated files keep one sample at each timestamp, while the viewer
+deduplicates shared indexed endpoints only when their fields agree. Ordinary CLI
+rollout output can retain the repeated boundary timestamp. This corrects the old
+runner's shift of forecast-only windows back to zero.
+
+Consolidated static `params.nc` stays static when every window used the same
+parameters. When failure substitutions change them, it gains a `window`
+dimension and a `window_start` coordinate in seconds; the artifact index records
+`consolidated_params_layout` as `static`, `window`, or `time`. Indexed per-window
+parameters remain the authoritative record of the fields' actual inputs.
+
+`run.ensemble_save_on_disk=true` now raises an actionable error because this
+runner has no streaming implementation.
+
+The optional `scripts/start_mcp` launcher uses the dedicated `mcp` Pixi
+environment. Configuration remains the `conf/` tree; `conf/visualization/` adds
+postprocessing presets. See [mcp.md](mcp.md) for configuration coverage, job
+lifecycle, setup and limits, and [forward_visualization.md](forward_visualization.md)
+for the saved-state viewer.
+
 ### uDALES model discrepancy
 
 `conf/model/pyudales.yaml` now exposes an opt-in
@@ -1678,11 +1726,13 @@ and records its provenance automatically; no manual patch or binary path is
 needed. Defaults remain disabled. See [pyudales §4.1](pyudales.md#41-opt-in-strainrotation-discrepancy)
 for the contract and window checkpoint behavior.
 
-SGS coefficients live in the regular `conf/params/` files: Normal priors in
-`static.yaml` and `dynamic.yaml`, and Constant values in the truth/prescribed
-forcing files. Dynamic samplers store the coefficients under `static_parameters`
-so they have no time dimension; discrepancy inference runners currently use a
-static prior sampler.
+SGS coefficients live in the regular `conf/params/` files: random priors or
+Constant prescribed values in `static.yaml` and `dynamic.yaml`, and independent
+values in the truth/prescribed forcing files. ESMDA and the hybrid accept the
+dynamic AR(2) prior with the coefficients under `static_parameters`, so they
+have no time dimension while
+inflow parameters can vary in time. Use the matching dynamic parameter-only
+ESMDA smoother. Filtering still requires a static prior sampler.
 
 Select the parameters to estimate with the usual list, for example:
 
@@ -1698,8 +1748,9 @@ params_to_estimate:
   - sgs_bias_b2
 ```
 
-`params_to_estimate: null` selects all configured parameters plus the three SGS
-coefficients. Explicit prior distributions (including their bounds) are used
+`params_to_estimate: null` selects all configured prior parameters plus the three
+SGS coefficients when discrepancy inference is enabled. `[]` selects none.
+Explicit prior distributions (including their bounds) are used
 unchanged. A parameter declared as `Constant` has no prior spread and remains
 fixed; choose a nonzero-spread prior to estimate it. Jointly estimating
 `sgs_constant` and `sgs_bias_b0` is allowed, but their similar effect on SGS
@@ -1708,8 +1759,24 @@ viscosity can make them difficult to identify separately.
 For custom sampler configs missing a selected SGS coefficient, the optional
 three-element `model_discrepancy.prior_std` supplies zero-centred Gaussian
 fallbacks. It can remain null when the selected coefficients have explicit
-priors. Unselected coefficients are not added. Truth parameter schemas remain
+priors. Missing unselected coefficients are not added; explicitly configured
+unselected coefficients are sampled and applied. Truth parameter schemas remain
 independent and need not contain coefficients.
+
+For a prescribed bias test, leave
+`params_to_estimate: [inflow_angle, velocity_magnitude]` and put the following in
+the dynamic prediction config (repeat for `sgs_bias_b1` and `sgs_bias_b2`):
+
+```yaml
+static_parameters:
+  sgs_bias_b0:
+    _target_: pyurbanair.static_parameters.Constant
+    value: -20.0
+```
+
+With prediction-model discrepancy enabled, all three `-20` values reach the
+solver and remain fixed through DA. Truth uses the values in its own config,
+regardless of which prediction parameters are selected for estimation.
 
 Three small same-model recipes share the same cropped Xie–Castro geometry,
 fixed forcing, and injected truth coefficients `[0.10, -0.12, 0.08]`:
