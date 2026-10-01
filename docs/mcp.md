@@ -128,11 +128,11 @@ code, or input. It consumes the saved resolved configuration. Job-owned paths
 are applied last and recorded in `launch.json`; source templates remain intact.
 For uDALES, source fingerprints include the managed builder's shell scripts and
 discrepancy extension resources, including its manifest, patch and Fortran code.
-Plans also record compiler and linker overrides. The supervisor restores those
-saved settings and the client's search path, clearing stale overrides before
-starting a worker. Pixi then activates the selected worker environment. The
-worker checks build settings against the plan, including the expected NVHPC
-library-path addition for CUDA activation. Changes to the preparing client's
+Plans also record compiler, linker, and macOS SDK/deployment overrides. The
+supervisor restores those saved settings and the client's search path, clearing
+stale overrides before starting a worker. Pixi then activates the selected
+worker environment. The worker checks build settings against the plan, including
+the expected NVHPC library-path addition for CUDA activation. Changes to the preparing client's
 `PATH` or `CONDA_PREFIX` also require a new plan.
 Large input hashing can take time. Do not edit the checkout between preparing
 and launching a run; prepare a new plan after changes.

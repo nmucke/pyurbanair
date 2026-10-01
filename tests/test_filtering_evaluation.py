@@ -1186,6 +1186,9 @@ def test_make_figures_draws_the_whole_set_on_a_complete_run_dir(
         "parameter_marginals.png",
         "station_profiles.png",
         "mean_slices.png",
+        "tke_slices.png",
+        "tke_time_evolution.png",
+        "tke_error.png",
         "sensor_fans.png",
         "rank_histogram.png",
     ):
@@ -1220,6 +1223,9 @@ def test_every_figure_is_written_on_an_opaque_background(
         "parameter_marginals.png",
         "station_profiles.png",
         "mean_slices.png",
+        "tke_slices.png",
+        "tke_time_evolution.png",
+        "tke_error.png",
         "sensor_fans.png",
         "rank_histogram.png",
     ):
@@ -1242,7 +1248,12 @@ def test_make_figures_skips_what_a_run_dir_without_the_metric_stage_cannot_suppo
     make_figures(run_dir)
 
     printed = capsys.readouterr().out
-    for name in ("station_profiles.png", "mean_slices.png", "rank_histogram.png"):
+    for name in (
+        "station_profiles.png",
+        "mean_slices.png",
+        "tke_slices.png",
+        "rank_histogram.png",
+    ):
         assert not (run_dir / name).exists(), f"{name} was drawn from nothing"
         assert name in printed, f"{name} was skipped silently"
     assert (
@@ -1268,7 +1279,12 @@ def test_make_figures_skips_the_parameter_marginals_in_state_mode(
     printed = capsys.readouterr().out
     assert not (run_dir / "parameter_marginals.png").exists()
     assert "filtering.mode=state" in printed
-    for name in ("sensor_fans.png", "station_profiles.png", "mean_slices.png"):
+    for name in (
+        "sensor_fans.png",
+        "station_profiles.png",
+        "mean_slices.png",
+        "tke_slices.png",
+    ):
         assert (run_dir / name).is_file(), f"{name} was lost with the parameters"
 
 

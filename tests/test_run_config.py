@@ -108,6 +108,19 @@ def test_probe_preview_requires_completed_run(tmp_path: pathlib.Path) -> None:
         validate_run_config(cfg, "probe")
 
 
+def test_probe_preview_skips_inherited_inference_validation(
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "truth_access.yaml").write_text("")
+    cfg = _compose(
+        "run_probe_series",
+        f"probes.run_dir={tmp_path}",
+        "assim_model.forward_model.model_discrepancy.enabled=true",
+        "esmda/smoother=state",
+    )
+    validate_run_config(cfg, "probe")
+
+
 def test_grid_operator_and_explicit_none_aggregation() -> None:
     from pyurbanair.config.hydra_helpers import (
         create_aggregate_observations,

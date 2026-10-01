@@ -22,6 +22,9 @@ Writes, into the run directory:
                                       columns (needs ``eval_fields.nc``).
   * ``mean_slices.png``            -- time-mean field slices, truth vs prior vs
                                       posterior vs difference (same file).
+  * ``tke_slices.png``             -- resolved-TKE slices on the same grid.
+  * ``tke_time_evolution.png``     -- assimilation/validation truth and ensemble TKE.
+  * ``tke_error.png``              -- assimilation/validation member/mean TKE errors.
   * ``sensor_fans.png``            -- sensor quantile fans with the observations.
   * ``rank_histogram.png``         -- rank histogram of the cycle statistics
                                       (needs ``run_summary.yaml``).
@@ -75,10 +78,17 @@ from evaluation.figures import (
     plot_sensor_fans,
     plot_sensor_timeseries,
     plot_station_profiles,
+    plot_tke_error_evolution,
+    plot_tke_slices,
+    plot_tke_time_evolution,
 )
 from evaluation.scores import compute_sensor_metrics
 from evaluation.sensors import sensor_magnitude
-from evaluation.turbulence import select_z_plane, streaming_state_rmse
+from evaluation.turbulence import (
+    select_z_plane,
+    sensor_tke_evolution,
+    streaming_state_rmse,
+)
 
 from pyurbanair.config.hydra_helpers import create_observation_points
 from pyurbanair.utils.animation_utils import animate_rollout_state
@@ -262,6 +272,35 @@ def make_figures(run_dir: pathlib.Path) -> None:
     # them, which is why the fan series below are collected inside the same loop
     # rather than re-extracted (master-plan invariant 2).
     ensemble_series = cycle_sensor_series(run_dir, ta, source, sensor_sets)
+    tke_series = {}
+    for name in sensor_sets:
+        time_seconds = None
+        if source.kind == "analysis":
+            time_seconds = (
+                np.arange(ensemble_series[name].sizes["time"], dtype=float) + 1.0
+            ) * dt_cycle
+        tke = sensor_tke_evolution(
+            truth_series[name],
+            ensemble_series[name],
+            window_seconds=float(ta["sim_time"]) / 8.0,
+            time_seconds=time_seconds,
+        )
+        if tke is None:
+            print(f"Skipping TKE evolution and error at {name}: fewer than two frames")
+            continue
+        tke_series[name] = tke
+    evolution = run_dir / "tke_time_evolution.png"
+    error = run_dir / "tke_error.png"
+    _note_skipped(
+        evolution,
+        plot_tke_time_evolution(
+            tke_series, evolution, sampling_note=source.description
+        ),
+    )
+    _note_skipped(
+        error,
+        plot_tke_error_evolution(tke_series, error, sampling_note=source.description),
+    )
 
     fan_truth: dict[str, np.ndarray] = {}
     fan_ensemble: dict[str, np.ndarray] = {}
@@ -440,10 +479,21 @@ def make_figures(run_dir: pathlib.Path) -> None:
                     sampling_is_sparse=sampling_is_sparse,
                 ),
             )
+            tke_slices = run_dir / "tke_slices.png"
+            _note_skipped(
+                tke_slices,
+                plot_tke_slices(
+                    fields,
+                    tke_slices,
+                    sampling_note=sampling_note,
+                    sampling_is_sparse=sampling_is_sparse,
+                ),
+            )
     else:
         print(
             f"No eval_fields.nc in {run_dir}; skipping station_profiles.png and "
-            "mean_slices.png (re-run scripts/filtering/compute_filtering_metrics.py "
+            "mean_slices.png and tke_slices.png (re-run "
+            "scripts/filtering/compute_filtering_metrics.py "
             "on this run dir to write it)"
         )
 

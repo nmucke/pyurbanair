@@ -36,7 +36,6 @@ def validate_run_config(cfg: DictConfig, workflow: str) -> None:
             validate_sgs_discrepancy_settings(
                 _get(cfg, f"{role}.forward_model.model_discrepancy")
             )
-    validate_sgs_discrepancy_inference(cfg, workflow)
     expected = _get(cfg, "experiment.workflow")
     if expected is not None and expected != workflow:
         raise ValueError(
@@ -115,6 +114,10 @@ def validate_run_config(cfg: DictConfig, workflow: str) -> None:
                     "time.simulation_time must be tiled exactly by "
                     "time.output_frequency times filtering.assimilate_every_n_step."
                 )
+    # Probes read saved runs; inherited assimilation settings are not a new
+    # inference request.
+    if workflow != "probe":
+        validate_sgs_discrepancy_inference(cfg, workflow)
     if workflow in {"esmda", "filtering", "filter_smoothing"}:
         selected = _get(cfg, "params_to_estimate")
         prior = augment_sgs_discrepancy_prior(

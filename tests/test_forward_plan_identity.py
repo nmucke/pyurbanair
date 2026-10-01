@@ -117,7 +117,7 @@ def test_supervisor_replays_saved_overrides_and_clears_stale_values() -> None:
 
 @pytest.mark.parametrize(  # type: ignore[misc]
     "key",
-    ["FC", "FFLAGS", "CMAKE_TOOLCHAIN_FILE", "LD_LIBRARY_PATH"],
+    ["FC", "FFLAGS", "CMAKE_TOOLCHAIN_FILE", "SDKROOT", "LD_LIBRARY_PATH"],
 )
 def test_worker_rejects_build_values_added_by_activation(key: str) -> None:
     plan = {"backend": "pyudales", "provenance": {"environment": {}}}

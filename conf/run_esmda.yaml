@@ -59,6 +59,9 @@ time:
 params_to_estimate:
   - inflow_angle
   - velocity_magnitude
+  # - sgs_bias_b0
+  # - sgs_bias_b1
+  # - sgs_bias_b2
 
 # --- Ensemble execution. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---

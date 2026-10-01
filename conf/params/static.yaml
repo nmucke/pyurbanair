@@ -32,20 +32,26 @@ parameters:
     mean: 0.22
     std: 0.03
     min: 0.18
+
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.0041912
 
-  # Persistent, dimensionless uDALES model-discrepancy coefficients.
+
   sgs_bias_b0:
     _target_: pyurbanair.static_parameters.Normal
     mean: 0.0
-    std: 0.15
+    std: 0.2
+    min: -1.0
+
   sgs_bias_b1:
     _target_: pyurbanair.static_parameters.Normal
     mean: 0.0
-    std: 0.15
+    std: 0.2
+    min: -1.0
+
   sgs_bias_b2:
     _target_: pyurbanair.static_parameters.Normal
     mean: 0.0
-    std: 0.15
+    std: 0.2
+    min: -1.0
