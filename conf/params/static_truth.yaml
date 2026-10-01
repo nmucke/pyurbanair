@@ -23,7 +23,7 @@ parameters:
   # sgs_constant is NOT set here on purpose: it now defaults per-backend in
   # conf/model/*.yaml, because the three solvers' SGS constants are different
   # physical quantities (uDALES/pylbm dimensionless; PALM m^2/s). Re-add it here
-  # ONLY to have ESMDA estimate it, and only for a single-backend run.
+  # to prescribe the truth value, and only for a single-backend run.
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.0041912

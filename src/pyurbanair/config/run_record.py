@@ -14,6 +14,8 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from pyurbanair.config.discrepancy import (
+    augment_sgs_discrepancy_prior,
+    validate_parameter_selection,
     validate_sgs_discrepancy_inference,
     validate_sgs_discrepancy_settings,
 )
@@ -113,6 +115,14 @@ def validate_run_config(cfg: DictConfig, workflow: str) -> None:
                     "time.simulation_time must be tiled exactly by "
                     "time.output_frequency times filtering.assimilate_every_n_step."
                 )
+    if workflow in {"esmda", "filtering", "filter_smoothing"}:
+        selected = _get(cfg, "params_to_estimate")
+        prior = augment_sgs_discrepancy_prior(
+            cfg.prior_params,
+            _get(cfg, "assim_model.forward_model.model_discrepancy"),
+            selected,
+        )
+        validate_parameter_selection(prior, selected)
     truth_dir = _get(cfg, "run.truth_dir")
     if truth_dir is not None:
         source = pathlib.Path(str(truth_dir))

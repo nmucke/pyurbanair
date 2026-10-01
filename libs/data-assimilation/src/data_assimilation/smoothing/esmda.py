@@ -24,6 +24,11 @@ from data_assimilation.observation_operator import (
     ObservationOperator,
     sensor_observation_coords,
 )
+from data_assimilation.parameter_selection import (
+    merge_parameters,
+    select_parameters,
+    validate_parameter_names,
+)
 from data_assimilation.reduction import OnlineStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing, Observations
 
@@ -67,6 +72,8 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
 
     #: Static parameters explicitly exempt from every localization strategy.
     global_parameter_names: tuple[str, ...] = ()
+    #: None estimates every supplied field; () keeps all forecast fields fixed.
+    parameter_names_to_estimate: Optional[tuple[str, ...]] = None
 
     def __init__(
         self,
@@ -80,6 +87,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         aggregate_observations: Optional[AggregateObservations] = None,
         likelihood_weight: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator,
@@ -162,6 +170,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         if len(set(names)) != len(names):
             raise ValueError("global_parameter_names must not contain duplicates.")
         self.global_parameter_names = names
+        self.parameter_names_to_estimate = validate_parameter_names(
+            parameter_names_to_estimate
+        )
 
         # Reject a coordinate-based localization on a smoother that cannot supply
         # row coordinates (parameter-only variants). Deferring this to the first
@@ -171,6 +182,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
             and localization.requires_coordinates
             and not self._supplies_row_coordinates
             and not self.global_parameter_names
+            and self.parameter_names_to_estimate != ()
         ):
             raise ValueError(
                 f"{type(localization).__name__} requires physical row "
@@ -482,8 +494,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
 
     def _validate_global_parameters(self, params: xarray.Dataset) -> None:
         """Check explicit static/global metadata before any solver forecast."""
-        if not self.global_parameter_names:
-            return
+        selected = select_parameters(params, self.parameter_names_to_estimate)
         missing = [name for name in self.global_parameter_names if name not in params]
         if missing:
             raise ValueError(
@@ -498,7 +509,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
             self.localization is not None
             and self.localization.requires_coordinates
             and not self._supplies_row_coordinates
-            and set(params.data_vars) != set(self.global_parameter_names)
+            and not set(selected.data_vars).issubset(self.global_parameter_names)
         ):
             raise ValueError(
                 "Distance-based localization on a parameter-only smoother requires "
@@ -508,7 +519,6 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
 
     def _parameter_localize_mask(self, params: xarray.Dataset) -> Optional[jnp.ndarray]:
         """Exclude explicitly global parameter rows, leaving legacy defaults intact."""
-        self._validate_global_parameters(params)
         if not self.global_parameter_names:
             return None
         return jnp.asarray(
@@ -838,6 +848,24 @@ class ParameterESMDA(_BaseESMDA):
         Returns:
             The updated parameter Dataset, on ``params``' own coordinates.
         """
+        self._validate_global_parameters(params)
+        selected = select_parameters(params, self.parameter_names_to_estimate)
+        if group_ids is not None and len(selected.data_vars) != len(params.data_vars):
+            indices = [i for i, name in enumerate(params.data_vars) if name in selected]
+            group_ids = group_ids[jnp.asarray(indices, dtype=int)]
+        updated = self._update_flat_params_from_pred_obs(
+            selected, pred_obs, obs, group_ids=group_ids
+        )
+        return merge_parameters(params, updated)
+
+    def _update_flat_params_from_pred_obs(
+        self,
+        params: xarray.Dataset,
+        pred_obs: jnp.ndarray,
+        obs: jnp.ndarray,
+        *,
+        group_ids: Optional[jnp.ndarray] = None,
+    ) -> xarray.Dataset:
         obs = jnp.asarray(obs)
         pred_obs = jnp.asarray(pred_obs)
         param_names = list(params.data_vars.keys())
@@ -851,6 +879,8 @@ class ParameterESMDA(_BaseESMDA):
                 "results step directory."
             )
 
+        if not param_names:
+            return params
         params_array = jnp.array([params[name].values for name in param_names])
 
         # Block grouping (paper sec. 3b): co-locate the augmented rows that
@@ -926,6 +956,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         aggregate_observations: Optional[AggregateObservations] = None,
         likelihood_weight: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -938,6 +969,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
             aggregate_observations=aggregate_observations,
             likelihood_weight=likelihood_weight,
             global_parameter_names=global_parameter_names,
+            parameter_names_to_estimate=parameter_names_to_estimate,
         )
         self.num_time_points = num_time_points
         # When True, ``t=0`` of every time-varying parameter is excluded
@@ -970,7 +1002,6 @@ ParamAugmentation` for the flattening semantics.
 
     def _flatten_time_varying_params(self, params: xarray.Dataset) -> xarray.Dataset:
         """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars."""
-        self._validate_global_parameters(params)
         return self._param_augmentation.flatten(params)
 
     def _unflatten_params(
@@ -1001,18 +1032,31 @@ ParamAugmentation` for the flattening semantics.
         :meth:`~data_assimilation.augmentation.ParamAugmentation.flatten`'s
         order.
         """
+        self._validate_global_parameters(params)
+        original_params = params
+        params = select_parameters(params, self.parameter_names_to_estimate)
         self._check_num_time_points(params)
         flat_params = self._flatten_time_varying_params(params)
+        if group_ids is not None and len(params.data_vars) != len(
+            original_params.data_vars
+        ):
+            full_flat = self._param_augmentation.flatten(original_params)
+            indices = [
+                i for i, name in enumerate(full_flat.data_vars) if name in flat_params
+            ]
+            group_ids = group_ids[jnp.asarray(indices, dtype=int)]
         # Group ids built from the true name->knot mapping (grouping this
         # parameter's time knots), so the block update never has to re-parse the
         # flattened names. A caller that already built them (with the same
         # mapping) passes them in instead.
         if group_ids is None:
             group_ids = self._time_varying_group_ids(params)
-        updated_flat = super().update_params_from_pred_obs(
+        updated_flat = self._update_flat_params_from_pred_obs(
             flat_params, pred_obs, obs, group_ids=group_ids
         )
-        return self._unflatten_params(updated_flat, params)
+        return merge_parameters(
+            original_params, self._unflatten_params(updated_flat, params)
+        )
 
 
 class StateAndParameterESMDA(_BaseESMDA):
@@ -1230,7 +1274,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
 
         states_flat = self._flatten_state(states_array)
 
-        params_array = jnp.array([flat_params[name].values for name in param_names])
+        params_array = ParamAugmentation.to_array(flat_params)
 
         # Reduced path: Kalman-update SVD/KL coefficients instead of the raw
         # state rows, then decode the increment onto each member's full state
@@ -1337,20 +1381,18 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         states_array = self._get_states(state=state, results_dir=results_dir)
         N_e = params.sizes["ensemble"]
 
+        self._validate_global_parameters(params)
+        selected = select_parameters(params, self.parameter_names_to_estimate)
         # Static params are already scalar (ensemble,) vars: no flatten needed.
         updated_states, updated_flat = self._augmented_state_update(
             states_array,
-            params,
+            selected,
             pred_obs,
             obs,
             N_e,
             snapshots_flat=self._basis_snapshots(state, results_dir),
         )
-        return updated_states, xarray.Dataset(
-            data_vars={name: updated_flat[name] for name in updated_flat.data_vars},
-            coords=params.coords,
-            attrs=updated_flat.attrs,
-        )
+        return updated_states, merge_parameters(params, updated_flat)
 
     def _final_time_smoothing_step(
         self,
@@ -1518,6 +1560,9 @@ class StateAndTimeVaryingParameterESMDA(
         # scalars (respecting pin_initial_time_point). The shared localized
         # update handles the augmented [state | params] vector.
         states_array = self._get_states(state=state, results_dir=results_dir)
+        self._validate_global_parameters(params)
+        original_params = params
+        params = select_parameters(params, self.parameter_names_to_estimate)
         flat_params = self._flatten_time_varying_params(params)
         N_e = flat_params.sizes["ensemble"]
 
@@ -1531,4 +1576,4 @@ class StateAndTimeVaryingParameterESMDA(
             param_group_ids=self._time_varying_group_ids(params),
         )
         updated_params = self._unflatten_params(updated_flat, params)
-        return updated_states, updated_params
+        return updated_states, merge_parameters(original_params, updated_params)

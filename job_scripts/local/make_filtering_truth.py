@@ -4,7 +4,7 @@
 params sampler is time-varying (``is_dynamic_params = "time" in params.coords``),
 so it cannot produce a STATIC truth. This script fills that gap: it mirrors the
 inline-truth branch of ``scripts/filtering/run_filtering.py`` exactly -- same
-config tree, same sampler filtering, same ``simulation_time=final_time`` -- and
+config tree, same complete truth sampler, same ``simulation_time=final_time`` -- and
 writes the result as a ``state.nc``/``params.nc`` pair that every run of the
 campaign then shares via ``run.truth_dir``.
 
@@ -38,7 +38,7 @@ import xarray
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from pyurbanair.config.hydra_helpers import clean_outputs, filter_parameter_config
+from pyurbanair.config.hydra_helpers import clean_outputs
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -73,11 +73,9 @@ def run(cfg: DictConfig) -> None:
     out_dir = pathlib.Path(out_dir_cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Mirror run_filtering.py: the same `params_to_estimate` contract applies to
-    # the truth sampler, and a dynamic truth is sampled over the FULL horizon.
-    selected = cfg.get("params_to_estimate", None)
-    selected = list(selected) if selected is not None else None
-    truth_params_cfg = filter_parameter_config(cfg.truth_params, selected)
+    # Mirror run_filtering.py: truth applies all its configured parameters,
+    # and a dynamic truth is sampled over the FULL horizon.
+    truth_params_cfg = cfg.truth_params
     is_dynamic_truth = "seconds_per_knot" in list(cfg.truth_params.keys())
 
     print(f"Truth horizon: {final_time:g}s ({num_cycles} cycles x {sim_time:g}s)")
@@ -136,7 +134,9 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved truth -> {state_path} ({n_frames} frames, {elapsed:.1f}s)")
 
 
-@hydra.main(version_base=None, config_path="../../conf", config_name="run_filtering")
+@hydra.main(  # type: ignore[misc]
+    version_base=None, config_path="../../conf", config_name="run_filtering"
+)
 def main(cfg: DictConfig) -> None:
     run(cfg)
 

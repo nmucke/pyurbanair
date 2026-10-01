@@ -29,6 +29,17 @@ layer, and the localization machinery.
 All public entry points accept and return `xarray.Dataset`; internal arrays
 are `jax.numpy` (JAX-CPU throughout; no JAX GPU use within this library).
 
+Parameter-bearing smoothers and filters accept `parameter_names_to_estimate`
+(`None` for all parameter fields, an explicit list for that subset, or `[]`
+for none). Their forecasts and returned parameter artifacts retain the full
+Dataset. Only selected fields enter parameter analysis, localization, inflation,
+and filtering parameter evolution (such as random walks). Unselected fields
+retain their supplied values, including ensemble spread; runners continue
+dynamic trajectories through the sampler's normal extrapolation. State-only
+modes keep every supplied parameter fixed. The Hydra runners map the root
+`params_to_estimate` setting to this library argument and sample every field in
+the independent truth/prior configs.
+
 Source tree:
 
 ```
@@ -393,14 +404,19 @@ for job recovery.
 
 **Persistent SGS coefficient inference.** The opt-in uDALES discrepancy runner
 path supports `sgs_bias_b0`, `sgs_bias_b1`, and `sgs_bias_b2` alongside other
-selected scalar parameters. Explicit priors in `prior_params.parameters` are
-used unchanged; `model_discrepancy.prior_std` supplies defaults only for selected
-coefficients missing from that mapping. `params_to_estimate=null` selects all
+selected parameters. Explicit priors in `prior_params.parameters` (static
+sampler) or `prior_params.static_parameters` (dynamic AR(2) sampler) are used
+unchanged; `model_discrepancy.prior_std` supplies defaults only for selected
+coefficients missing from that static mapping. `params_to_estimate=null` selects all
 configured parameters plus the three coefficients. Explicit lists may select
-any subset; unselected coefficients retain their model defaults. The truth sampler is
+any subset; configured unselected coefficients retain their sampled values and
+are still applied. Coefficients absent from the config and not selected for a
+fallback retain the model defaults. The truth sampler is
 independent and retains its prescribed forcing, even when it has no coefficient
 fields. Parameter accuracy metrics use only fields actually present in truth.
-The static posterior carries to the next ESMDA window without process noise.
+Static coefficients carry their analyzed values to the next ESMDA window
+without process noise, including when dynamic inflow trajectories are
+extrapolated between windows.
 
 `global_parameter_names` is generic localization metadata on the smoothers and
 filters. Declared static parameter rows use the global update, including when
@@ -703,6 +719,7 @@ Mode semantics: `"state"` updates the flattened end-of-segment state only
 params only (applied from the next cycle onward) and **requires spread
 maintenance** (`parameter_evolution` or `inflation` — the constructor refuses
 silently-collapsing configurations); `"joint"` updates `[state | params]`.
+An explicit empty parameter selection needs no parameter spread maintenance.
 Correlation localization applies to both blocks, while physical-distance
 localization applies to state rows and keeps parameter rows global. Localization
 strategies are reused from `localization/` unchanged; distance-based strategies
@@ -999,7 +1016,7 @@ The same label covers the analysis schemes, and the LETKF needs no new value:
   `RandomWalkEvolution(std | {name: std})`. Without one, an un-inflated
   parameter ensemble collapses after a few cycles and stops learning — so the
   parameter-updating modes (`parameter`/`joint`) refuse to construct without
-  an evolution or an inflation.
+  an evolution or an inflation, unless the parameter selection is explicitly empty.
 
 ### Run script
 
@@ -1150,12 +1167,13 @@ the script resolves it before the truth is simulated (see
 > `0e3291c`; see `docs/plans/filter_smoothing_windowed_esmda.md` for its
 > design record. This section describes its replacement.
 
-For SGS discrepancy the hybrid currently uses static parameter ESMDA and a
-state-only filter: each member keeps its ESMDA coefficient vector throughout
-that window's filter phase. The uDALES stacks synchronize native carry and clocks
+For SGS discrepancy the hybrid uses parameter-only ESMDA (static or dynamic)
+and a state-only filter: each member keeps its ESMDA coefficient vector throughout
+that window's filter phase while any dynamic forcing is restricted to each
+forecast segment. The uDALES stacks synchronize native carry and clocks
 at window entry; see [pyudales §4.2](pyudales.md#42-window-checkpoints-for-repeated-forecasts).
 Failure donor substitution across phases is rejected (`failure.policy=raise`
-is required). Joint hybrid coefficient updates remain deferred. Static hybrid
+is required). Joint hybrid coefficient updates remain deferred. Hybrid
 runs with declared global parameters also save the forecast-used coefficient
 history. The likelihood allocation below remains independent of discrepancy.
 

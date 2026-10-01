@@ -27,7 +27,7 @@ static_parameters:
   # sgs_constant is NOT set here on purpose: it now defaults per-backend in
   # conf/model/*.yaml, because the three solvers' SGS constants are different
   # physical quantities (uDALES/pylbm dimensionless; PALM m^2/s). Re-add it here
-  # ONLY to have ESMDA estimate it, and only for a single-backend run.
+  # to prescribe the truth value, and only for a single-backend run.
 
   # Persistent, dimensionless uDALES model-discrepancy coefficients.
   sgs_bias_b0:

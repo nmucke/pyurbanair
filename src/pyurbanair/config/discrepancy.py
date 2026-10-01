@@ -1,4 +1,4 @@
-"""Configuration-only support for static SGS discrepancy inference.
+"""Configuration-only support for persistent SGS discrepancy inference.
 
 The coefficient prior belongs to the assimilation sampler. Truth parameters
 are deliberately independent: an existing truth artifact need not contain the
@@ -22,7 +22,9 @@ SGS_BIAS_PARAMETER_METADATA = {
 }
 
 _STATIC_SAMPLER = "pyurbanair.static_parameters.ParameterSampler"
+_DYNAMIC_SAMPLER = "pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel"
 _STATIC_SMOOTHER = "data_assimilation.smoothing.esmda.ParameterESMDA"
+_DYNAMIC_SMOOTHER = "data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA"
 _IDENTITY_EVOLUTION = (
     "data_assimilation.filtering.parameter_evolution.IdentityEvolution"
 )
@@ -167,24 +169,42 @@ def validate_sgs_discrepancy_inference(cfg: DictConfig, workflow: str) -> None:
         raise ValueError("SGS discrepancy inference requires the pyudales backend.")
     if OmegaConf.select(cfg, "assim_model.forward_model.closure") != "vreman":
         raise ValueError("SGS discrepancy inference requires the Vreman closure.")
-    if OmegaConf.select(cfg, "prior_params._target_") != _STATIC_SAMPLER:
-        raise ValueError("SGS discrepancy inference requires a static prior sampler.")
-    parameters = OmegaConf.select(cfg, "prior_params.parameters")
-    if not isinstance(parameters, DictConfig):
-        raise ValueError("Static prior sampler must define a parameters mapping.")
-    if (
-        workflow in {"esmda", "filter_smoothing"}
-        and OmegaConf.select(cfg, "esmda.smoother._target_") != _STATIC_SMOOTHER
-    ):
+    sampler_target = OmegaConf.select(cfg, "prior_params._target_")
+    if workflow == "filtering" and sampler_target != _STATIC_SAMPLER:
+        raise ValueError("SGS discrepancy filtering requires a static prior sampler.")
+    if sampler_target not in {_STATIC_SAMPLER, _DYNAMIC_SAMPLER}:
         raise ValueError(
-            "SGS discrepancy inference requires the static parameter-only ESMDA smoother."
+            "SGS discrepancy inference requires a static ParameterSampler or "
+            "a dynamic AR2RelaxationModel prior."
         )
-    if workflow == "filtering" and OmegaConf.select(cfg, "filtering.mode") not in {
-        "parameter",
-        "joint",
-    }:
+    parameter_block = (
+        "parameters" if sampler_target == _STATIC_SAMPLER else "static_parameters"
+    )
+    parameters = OmegaConf.select(cfg, f"prior_params.{parameter_block}")
+    if parameters is None and sampler_target == _DYNAMIC_SAMPLER:
+        parameters = OmegaConf.create({})
+    if not isinstance(parameters, DictConfig):
+        raise ValueError(f"SGS discrepancy prior must define {parameter_block}.")
+    if sampler_target == _DYNAMIC_SAMPLER and set(
+        OmegaConf.select(cfg, "prior_params.external_parameters", default={})
+    ).intersection(SGS_BIAS_PARAMETER_NAMES):
+        raise ValueError("SGS discrepancy coefficients must be static parameters.")
+    prior = augment_sgs_discrepancy_prior(
+        cfg.prior_params, discrepancy, OmegaConf.select(cfg, "params_to_estimate")
+    )
+    selected = OmegaConf.select(cfg, "params_to_estimate")
+    validate_parameter_selection(prior, selected)
+    estimates_coefficients = (
+        selected is None or bool(set(selected).intersection(SGS_BIAS_PARAMETER_NAMES))
+    ) and not (
+        workflow == "filtering" and OmegaConf.select(cfg, "filtering.mode") == "state"
+    )
+    if workflow in {"esmda", "filter_smoothing"} and OmegaConf.select(
+        cfg, "esmda.smoother._target_"
+    ) != (_STATIC_SMOOTHER if sampler_target == _STATIC_SAMPLER else _DYNAMIC_SMOOTHER):
         raise ValueError(
-            "SGS discrepancy filtering requires filtering.mode=parameter or joint."
+            "SGS discrepancy inference requires the parameter-only ESMDA "
+            "smoother matching the prior sampler."
         )
     if (
         workflow == "filtering"
@@ -211,38 +231,77 @@ def validate_sgs_discrepancy_inference(cfg: DictConfig, workflow: str) -> None:
             "SGS discrepancy hybrid requires ensemble.failure.policy=raise "
             "until cross-phase donor handoff is supported."
         )
-    if workflow == "filtering":
+    if workflow == "filtering" and estimates_coefficients:
         evolution = OmegaConf.select(cfg, "filtering.parameter_evolution")
         if evolution is not None and evolution.get("_target_") != _IDENTITY_EVOLUTION:
             raise ValueError(
                 "SGS discrepancy filtering requires identity parameter evolution "
                 "(filtering/evolution=none or IdentityEvolution)."
             )
-    augment_sgs_discrepancy_prior(
-        cfg.prior_params, discrepancy, OmegaConf.select(cfg, "params_to_estimate")
-    )
+
+
+def validate_parameter_selection(prior_params_cfg: DictConfig, selected: Any) -> None:
+    """Reject malformed or unknown estimation names without sampling a prior."""
+    if selected is None:
+        return
+    if (
+        not isinstance(selected, (list, tuple, ListConfig))
+        or not all(isinstance(name, str) and name for name in selected)
+        or len(set(selected)) != len(selected)
+    ):
+        raise ValueError(
+            "params_to_estimate must be null or a list of unique parameter names."
+        )
+    available = {
+        name
+        for block in ("parameters", "external_parameters", "static_parameters")
+        for name in (prior_params_cfg.get(block) or {})
+    }
+    missing = set(selected) - available
+    if missing:
+        raise ValueError(
+            f"Selected parameters have no configured prior: {sorted(missing)}"
+        )
 
 
 def augment_sgs_discrepancy_prior(
     prior_params_cfg: DictConfig, discrepancy_cfg: Any, selected: Any = None
 ) -> DictConfig:
-    """Supply missing priors for selected SGS coefficients in a static sampler.
+    """Supply missing static SGS priors in a static or dynamic sampler.
 
-    Call after the normal parameter filter and only for the assimilation prior.
+    Call on the complete assimilation prior, independently of estimation selection.
     Explicit distributions take precedence over ``prior_std``. Existing entries
-    stay in their original order, preserving their JAX random-key sequence.
+    stay in their original order; a dynamic sampler's separate inflow RNG stream
+    is unchanged by adding static coefficients.
     ``selected=None`` includes all configured parameters and all coefficients.
     Missing/disabled discrepancy returns the input object.
     """
     if not _enabled(discrepancy_cfg):
         return prior_params_cfg
-    if prior_params_cfg.get("_target_") != _STATIC_SAMPLER:
-        raise ValueError("SGS discrepancy prior requires a static ParameterSampler.")
-    parameters = prior_params_cfg.get("parameters")
+    sampler_target = prior_params_cfg.get("_target_")
+    if sampler_target not in {_STATIC_SAMPLER, _DYNAMIC_SAMPLER}:
+        raise ValueError(
+            "SGS discrepancy prior requires a static ParameterSampler or "
+            "a dynamic AR2RelaxationModel."
+        )
+    parameter_block = (
+        "parameters" if sampler_target == _STATIC_SAMPLER else "static_parameters"
+    )
+    parameters = prior_params_cfg.get(parameter_block)
+    if parameters is None and sampler_target == _DYNAMIC_SAMPLER:
+        parameters = OmegaConf.create({})
     if not isinstance(parameters, DictConfig):
-        raise ValueError("Static prior sampler must define a parameters mapping.")
+        raise ValueError(f"SGS discrepancy prior must define {parameter_block}.")
+    external = prior_params_cfg.get("external_parameters", {})
+    if sampler_target == _DYNAMIC_SAMPLER and set(external).intersection(
+        SGS_BIAS_PARAMETER_NAMES
+    ):
+        raise ValueError("SGS discrepancy coefficients must be static parameters.")
+    available = set(parameters) | (
+        set(external) if sampler_target == _DYNAMIC_SAMPLER else set()
+    )
     if selected is None:
-        names = set(parameters) | set(SGS_BIAS_PARAMETER_NAMES)
+        names = available | set(SGS_BIAS_PARAMETER_NAMES)
     else:
         if (
             not isinstance(selected, (list, tuple, ListConfig))
@@ -253,7 +312,7 @@ def augment_sgs_discrepancy_prior(
                 "params_to_estimate must be null or a list of unique parameter names."
             )
         names = set(selected)
-        missing_priors = names - set(parameters) - set(SGS_BIAS_PARAMETER_NAMES)
+        missing_priors = names - available - set(SGS_BIAS_PARAMETER_NAMES)
         if missing_priors:
             raise ValueError(
                 f"Selected parameters have no configured prior: {sorted(missing_priors)}"
@@ -265,8 +324,14 @@ def augment_sgs_discrepancy_prior(
     result = copy.deepcopy(prior_params_cfg)
     original_struct = OmegaConf.is_struct(result)
     OmegaConf.set_struct(result, False)
+    if result.get(parameter_block) is None:
+        result[parameter_block] = {}
     for name, scale in zip(SGS_BIAS_PARAMETER_NAMES, scales):
         if name in missing:
-            result.parameters[name] = {"_target_": _NORMAL, "mean": 0.0, "std": scale}
+            result[parameter_block][name] = {
+                "_target_": _NORMAL,
+                "mean": 0.0,
+                "std": scale,
+            }
     OmegaConf.set_struct(result, original_struct)
     return result

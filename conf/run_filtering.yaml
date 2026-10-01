@@ -42,8 +42,9 @@ time:
   seconds_per_knot: 30.0
 
 # --- Which parameters the filter estimates (same contract as run_esmda.yaml
-# `params_to_estimate`: a list -> that subset of the sampler configs' params,
-# applied to BOTH prior and truth; null -> every parameter they define). ---
+# `params_to_estimate`: a list -> update only those prior parameters;
+# null -> update every prior parameter; [] -> update none). All truth and prior
+# parameters are sampled and applied, including parameters excluded from DA. ---
 # The mixed default's dynamic truth (conf/params/dynamic_truth.yaml) only varies
 # inflow_angle and velocity_magnitude, so estimate those (a parameter absent from
 # the truth would be tracked against no reference). Add others when the truth

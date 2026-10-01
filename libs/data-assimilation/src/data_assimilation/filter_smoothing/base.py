@@ -89,6 +89,7 @@ from data_assimilation.filter_smoothing.tempering import (
     resolve_tempering_policy,
 )
 from data_assimilation.filtering.base import BaseFilter, CycleDiagnostics
+from data_assimilation.parameter_selection import merge_parameters, select_parameters
 from data_assimilation.smoothing.esmda import (
     ParameterESMDA,
     StateAndParameterESMDA,
@@ -829,6 +830,9 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
             A :class:`FilterSmoothingResult`.
         """
         batches = self._validate_observations(observations)
+        if params is not None:
+            select_parameters(params, self.smoother.parameter_names_to_estimate)
+            select_parameters(params, self.filter.parameter_names_to_estimate)
         # Pre-flight, before the ESMDA phase's first forecast: the weights
         # still match the policy and, under a shared budget, both phases are
         # about to condition on the same raw observations.
@@ -838,14 +842,9 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
 
         smoother_model = self.smoother.forward_model
         if getattr(smoother_model, "forecast_window_replay_enabled", False):
-            if (
-                isinstance(self.smoother, TimeVaryingParameterESMDA)
-                or params is None
-                or "time" in params.dims
-            ):
-                raise ValueError(
-                    "SGS discrepancy hybrid requires static parameter-only ESMDA."
-                )
+            if params is None:
+                raise ValueError("SGS discrepancy hybrid requires a parameter prior.")
+            self.smoother._validate_global_parameters(params)
             if self.filter.mode != "state":
                 raise ValueError(
                     "SGS discrepancy hybrid requires a state-only filter so "
@@ -998,7 +997,11 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
                     # correction is what the filter has learned on top of it.
                     schedule = trajectory_values_at(theta, midpoint)
                     seg_params = (
-                        schedule if correction is None else schedule + correction
+                        schedule
+                        if correction is None
+                        else merge_parameters(
+                            schedule, schedule[list(correction.data_vars)] + correction
+                        )
                     )
                 else:
                     seg_params = params_for_segment(theta, t_start, t_end)
@@ -1016,7 +1019,10 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
 
                 if joint:
                     assert result.params is not None and schedule is not None
-                    correction = result.params - schedule
+                    selected = select_parameters(
+                        result.params, self.filter.parameter_names_to_estimate
+                    )
+                    correction = selected - schedule[list(selected.data_vars)]
                     final_params = result.params
 
                 carry_state = result.state

@@ -16,7 +16,7 @@ Three groups, all on toy in-memory forward models — no CFD solver:
 """
 
 import pathlib
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import jax
 import jax.numpy as jnp
@@ -590,7 +590,7 @@ def test_constructor_rejects_a_parameter_only_filter() -> None:
     model = _ToyEnsembleModel(num_frames=_WINDOW_FRAMES)
     parameter_filter = EnsembleKalmanFilter(
         observation_operator=_obs_op(),
-        forward_model=model,
+        forward_model=cast(Any, model),
         C_D=jnp.full(_N_SENSORS, _OBS_VARIANCE),
         mode="parameter",
         inflation=RTPS(alpha=0.5),
@@ -774,6 +774,49 @@ def test_dynamic_state_mode_forecasts_each_segment_with_its_own_slice() -> None:
     assert result.params is None
 
 
+def test_replay_hybrid_accepts_dynamic_forcing_with_static_global_coefficient() -> None:
+    class ReplayToyModel(_ToyEnsembleModel):
+        forecast_window_replay_enabled = True
+        _failure_policy = "raise"
+
+        def __init__(self, num_frames: int) -> None:
+            super().__init__(num_frames)
+            self.syncs = 0
+
+        def synchronize_forecast_state_from(self, other: Any) -> None:
+            self.syncs += 1
+
+        def begin_forecast_window(self) -> None:
+            pass
+
+        def restore_forecast_window(self) -> None:
+            pass
+
+        def end_forecast_window(self, commit: bool) -> None:
+            pass
+
+    smoother_model = ReplayToyModel(num_frames=_WINDOW_FRAMES)
+    filter_model = ReplayToyModel(num_frames=_CYCLE_FRAMES)
+    smoother = _dynamic_smoother(smoother_model, num_knots=2)
+    smoother.global_parameter_names = ("b",)
+    hybrid = FilterSmoothing(smoother=smoother, filter=_filter(filter_model, "state"))
+    prior = _trajectory_prior(np.array([0.0, 10.0]))
+    prior["b"] = ("ensemble", np.linspace(-0.2, 0.2, _N_E))
+
+    result = hybrid.run(
+        state=_initial_state(), params=prior, observations=_observation_batches()
+    )
+
+    assert smoother_model.syncs == 1
+    assert result.esmda_params["a"].dims == ("time", "ensemble")
+    assert result.esmda_params["b"].dims == ("ensemble",)
+    assert len(filter_model.params_seen) == _NUM_CYCLES
+    for seen in filter_model.params_seen:
+        assert seen is not None
+        assert seen["b"].dims == ("ensemble",)
+        np.testing.assert_array_equal(seen["b"], result.esmda_params["b"])
+
+
 def test_dynamic_state_mode_chains_the_warm_start_across_segments() -> None:
     """Segment k+1 starts from segment k's ANALYSED state, as one filter run would."""
     filter_model = _ToyEnsembleModel(num_frames=_CYCLE_FRAMES)
@@ -849,7 +892,7 @@ def test_dynamic_constant_trajectory_is_bitwise_one_multi_cycle_filter_run() -> 
     hybrid = FilterSmoothing(
         smoother=_IdentityParameterESMDA(
             observation_operator=_obs_op(),
-            forward_model=_ToyEnsembleModel(num_frames=_WINDOW_FRAMES),
+            forward_model=cast(Any, _ToyEnsembleModel(num_frames=_WINDOW_FRAMES)),
             C_D=jnp.diag(jnp.full(_WINDOW_FRAMES * _N_SENSORS, _OBS_VARIANCE)),
             num_steps=2,
             rng_key=jax.random.PRNGKey(0),
@@ -1030,7 +1073,7 @@ def _tempered_hybrid(
     filter_model = _ToyEnsembleModel(num_frames=_CYCLE_FRAMES)
     enkf = EnsembleKalmanFilter(
         observation_operator=op if shared_op else _obs_op(),
-        forward_model=filter_model,
+        forward_model=cast(Any, filter_model),
         C_D=jnp.full(_N_SENSORS, _OBS_VARIANCE),
         mode=mode,  # type: ignore[arg-type]
         inflation=RTPS(alpha=0.5) if mode == "joint" else None,
@@ -1056,7 +1099,7 @@ def test_default_tempering_is_filter_only_at_the_filters_beta() -> None:
     # A beta-tempered filter with a full-weight smoother IS filter-only.
     enkf = EnsembleKalmanFilter(
         observation_operator=_obs_op(),
-        forward_model=_ToyEnsembleModel(num_frames=_CYCLE_FRAMES),
+        forward_model=cast(Any, _ToyEnsembleModel(num_frames=_CYCLE_FRAMES)),
         C_D=jnp.full(_N_SENSORS, _OBS_VARIANCE),
         mode="state",
         beta=3.0,
@@ -1155,7 +1198,7 @@ def test_shared_budget_rejects_smoother_aggregation() -> None:
     policy = resolve_tempering_policy(2.0, "shared_budget")
     smoother = ParameterESMDA(
         observation_operator=op,
-        forward_model=_ToyEnsembleModel(num_frames=_WINDOW_FRAMES),
+        forward_model=cast(Any, _ToyEnsembleModel(num_frames=_WINDOW_FRAMES)),
         C_D=jnp.diag(jnp.full(_N_SENSORS, _OBS_VARIANCE)),
         num_steps=2,
         aggregate_observations=AggregateObservations(interval_seconds=10.0),
@@ -1163,7 +1206,7 @@ def test_shared_budget_rejects_smoother_aggregation() -> None:
     )
     enkf = EnsembleKalmanFilter(
         observation_operator=op,
-        forward_model=_ToyEnsembleModel(num_frames=_CYCLE_FRAMES),
+        forward_model=cast(Any, _ToyEnsembleModel(num_frames=_CYCLE_FRAMES)),
         C_D=jnp.full(_N_SENSORS, _OBS_VARIANCE),
         mode="state",
         beta=policy.beta,

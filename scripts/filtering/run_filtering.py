@@ -610,7 +610,7 @@ def run(cfg: DictConfig) -> None:
 
     # Select which parameters the filter estimates (same contract as
     # run_esmda.py `params_to_estimate`): null -> every parameter the sampler
-    # configs define; a list -> that subset, applied to prior AND truth.
+    # configs define; a list -> that subset. Both samplers remain complete.
     selected = cfg.get("params_to_estimate", None)
     selected = list(selected) if selected is not None else None
     truth_params_cfg, prior_params_cfg = inference_parameter_configs(cfg)
@@ -920,6 +920,7 @@ def run(cfg: DictConfig) -> None:
         forward_model=ensemble_model,
         C_D=C_D_diag,
         rng_key=filter_key,
+        parameter_names_to_estimate=selected,
         **filter_overrides,
     )
     # The per-window observation-space arrays (window_{w}_{obs,pred_obs}.nc) are

@@ -13,8 +13,9 @@ parameters:
     min: 0.1
   # Model-error compensation knobs (docs/esmda_model_error_parameters.md). Tight
   # priors: each extra free parameter risks an underdetermined inverse / ensemble
-  # collapse with few sensors. Exclude them from a run via run_esmda.yaml
-  # `params_to_estimate`.
+  # collapse with few sensors. run_esmda.yaml `params_to_estimate` selects DA
+  # updates only; all entries here are sampled and applied to predictions.
+  # Use Constant for prescribed values, or omit an entry to use model defaults.
   # Power-law shear exponent α: u(z) = u_ref (z/z_ref)^α.
   vertical_inflow_exponent:
     _target_: pyurbanair.static_parameters.Normal
