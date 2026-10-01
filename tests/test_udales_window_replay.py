@@ -4,7 +4,7 @@ import json
 import pickle
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -180,7 +180,7 @@ def test_disabled_window_is_byte_identical_noop(tmp_path: Path) -> None:
 
 
 def test_replay_failure_params_are_exact_donor_clones(tmp_path: Path) -> None:
-    ensemble = object.__new__(EnsembleForwardModel)  # type: ignore[type-abstract]
+    ensemble = cast(Any, EnsembleForwardModel).__new__(EnsembleForwardModel)
     ensemble.ensemble_forward_models = [_model(tmp_path)]
     ensemble._last_failure_substitutions = {1: 0}
     ensemble._failure_jitter_scale = 100.0
@@ -251,7 +251,7 @@ def test_ensemble_failure_propagates_start_identity_and_endpoint(
     for index, member in enumerate(members):
         _carry(member, float(index + 1))
     baseline = [_bytes(member) for member in members]
-    ensemble = object.__new__(EnsembleForwardModel)  # type: ignore[type-abstract]
+    ensemble = cast(Any, EnsembleForwardModel).__new__(EnsembleForwardModel)
     ensemble.ensemble_forward_models = list(members)
     ensemble.ensemble_size = 2
     ensemble.begin_forecast_window()
@@ -285,7 +285,7 @@ def test_ensemble_failure_propagates_start_identity_and_endpoint(
 
 def test_commit_validates_all_members_before_releasing_rollback(tmp_path: Path) -> None:
     members = [_model(tmp_path / str(index), f"{index:03d}") for index in range(2)]
-    ensemble = object.__new__(EnsembleForwardModel)  # type: ignore[type-abstract]
+    ensemble = cast(Any, EnsembleForwardModel).__new__(EnsembleForwardModel)
     ensemble.ensemble_forward_models = list(members)
     ensemble.begin_forecast_window()
     _carry(members[0], 10.0)
@@ -304,7 +304,7 @@ def test_checkpoint_cleanup_failure_keeps_committed_ensemble(
     from pyudales.utils.window_checkpoint import WindowCheckpoint
 
     members = [_model(tmp_path / str(index), f"{index:03d}") for index in range(2)]
-    ensemble = object.__new__(EnsembleForwardModel)  # type: ignore[type-abstract]
+    ensemble = cast(Any, EnsembleForwardModel).__new__(EnsembleForwardModel)
     ensemble.ensemble_forward_models = list(members)
     ensemble.begin_forecast_window()
     checkpoints = [member._forecast_window_original for member in members]
@@ -331,7 +331,7 @@ def test_reused_disk_results_do_not_turn_cold_replay_into_warm_start(
     results = tmp_path / "results"
     results.mkdir()
     xr.Dataset({"u": 999.0}).to_netcdf(results / "state_0.nc")
-    ensemble = object.__new__(EnsembleForwardModel)  # type: ignore[type-abstract]
+    ensemble = cast(Any, EnsembleForwardModel).__new__(EnsembleForwardModel)
     ensemble.ensemble_forward_models = [member]
     ensemble.ensemble_size = 1
     ensemble.results_dir = results

@@ -19,15 +19,15 @@ from pyudales.utils.warm_start_utils import CARRY_DIRNAME
 from pyudales.utils.window_checkpoint import validate_carry
 from scipy.io import FortranFile
 
-from pyurbanair.base_ensemble_forward_model import BaseForwardModel, FailurePolicy
+from pyurbanair.base_ensemble_forward_model import FailurePolicy
 from tests.test_udales_window_replay import _carry, _model
 
 
 def _ensemble(
     members: list[ForwardModel], policy: FailurePolicy = "raise"
 ) -> EnsembleForwardModel:
-    ensemble = object.__new__(EnsembleForwardModel)  # type: ignore[type-abstract]
-    ensemble.ensemble_forward_models = cast(list[BaseForwardModel], members)
+    ensemble = cast(Any, EnsembleForwardModel).__new__(EnsembleForwardModel)
+    ensemble.ensemble_forward_models = list(members)
     ensemble.ensemble_size = len(members)
     ensemble._failure_policy = policy
     return ensemble
@@ -212,6 +212,10 @@ def test_hybrid_calls_handoff_before_smoother_and_rejects_joint_filter(
 
     class Smoother:
         forward_model = smoother_model
+        parameter_names_to_estimate = None
+
+        def _validate_global_parameters(self, params: xr.Dataset) -> None:
+            assert params["sgs_bias_b0"].dims == ("ensemble",)
 
         def __call__(self, **kwargs: Any) -> xr.Dataset:
             events.append("smoother")
@@ -219,7 +223,9 @@ def test_hybrid_calls_handoff_before_smoother_and_rejects_joint_filter(
 
     hybrid = cast(Any, object.__new__(FilterSmoothing))
     hybrid.smoother = Smoother()
-    hybrid.filter = SimpleNamespace(mode="state", forward_model=filter_model)
+    hybrid.filter = SimpleNamespace(
+        mode="state", forward_model=filter_model, parameter_names_to_estimate=()
+    )
     hybrid.tempering = SimpleNamespace(likelihood_allocation="filter_only")
     monkeypatch.setattr(hybrid, "_validate_observations", lambda value: value)
     monkeypatch.setattr(hybrid, "_check_tempering", lambda: None)
