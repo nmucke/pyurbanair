@@ -593,6 +593,19 @@ sensor_observation_coords` (shared with the filtering package); see its
         forecast. Analysis-only calls and exceptions leave its pre-window state
         intact, so intermediate endpoints cannot leak into a later forecast.
         """
+        if not final_forecast and return_state_history:
+            raise ValueError(
+                "return_state_history requires the final forecast: with "
+                "final_forecast=False there is no posterior state to close "
+                "the history with."
+            )
+        if return_state_history and self.forward_model.save_on_disk:
+            raise ValueError(
+                "return_state_history is not supported in on-disk save mode: "
+                "the per-step states live in the step_{i}/ directories "
+                "(see get_state). Use an in-memory forward model "
+                "(results_dir=None) to collect the state history."
+            )
         self._validate_global_parameters(params)
         replay = getattr(self.forward_model, "forecast_window_replay_enabled", False)
         if replay:
@@ -664,20 +677,6 @@ sensor_observation_coords` (shared with the filtering package); see its
         filter-smoothing hybrid, which produces the posterior state with a
         sequential filter instead.
         """
-        if not final_forecast and return_state_history:
-            raise ValueError(
-                "return_state_history requires the final forecast: with "
-                "final_forecast=False there is no posterior state to close "
-                "the history with."
-            )
-        if return_state_history and self.forward_model.save_on_disk:
-            raise ValueError(
-                "return_state_history is not supported in on-disk save mode: "
-                "the per-step states live in the step_{i}/ directories "
-                "(see get_state). Use an in-memory forward model "
-                "(results_dir=None) to collect the state history."
-            )
-
         # Aggregate + flatten the real observations once (a plain array passes
         # through). The predicted observations take the same path inside
         # ``_observation_step``, so the two always live in the same space.
