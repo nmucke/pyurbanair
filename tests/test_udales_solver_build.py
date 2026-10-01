@@ -16,7 +16,9 @@ from pyudales.utils import solver_build as build
 @pytest.fixture  # type: ignore[misc]
 def fake_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[list[str]]:
     calls: list[list[str]] = []
-    monkeypatch.setattr(build, "_environment_identity", lambda: {"compiler": "test"})
+    monkeypatch.setattr(
+        build, "_environment_identity", lambda env: {"compiler": "test"}
+    )
     monkeypatch.setattr(build, "_source_repository", lambda *_: tmp_path)
 
     def export(_repository: Path, destination: Path) -> None:
@@ -72,9 +74,86 @@ def test_environment_invalidates_cache(
     tmp_path: Path, fake_build: list[list[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first = build.prepare_solver(cache_dir=tmp_path)
-    monkeypatch.setattr(build, "_environment_identity", lambda: {"compiler": "changed"})
+    monkeypatch.setattr(
+        build, "_environment_identity", lambda env: {"compiler": "changed"}
+    )
     assert build.prepare_solver(cache_dir=tmp_path) != first
     assert len(fake_build) == 2
+
+
+def test_macos_conda_build_uses_system_linker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "env"
+    compiler = prefix / "bin/mpif90"
+    compiler.parent.mkdir(parents=True)
+    compiler.touch()
+    monkeypatch.setattr(build.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(build.shutil, "which", lambda *args, **kwargs: str(compiler))
+    monkeypatch.setenv("CONDA_PREFIX", str(prefix))
+    monkeypatch.setenv("LDFLAGS", "-Wl,-dead_strip")
+
+    assert build._build_environment()["LDFLAGS"] == ("-Wl,-dead_strip -B/usr/bin/")
+    monkeypatch.setenv("LDFLAGS", "-B/custom/linker -Wl,-dead_strip")
+    assert build._build_environment()["LDFLAGS"] == ("-B/custom/linker -Wl,-dead_strip")
+
+
+def test_macos_pixi_build_without_conda_prefix_uses_system_linker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiler = tmp_path / ".pixi/envs/dev/bin/mpif90"
+    compiler.parent.mkdir(parents=True)
+    compiler.touch()
+    monkeypatch.setattr(build.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(build.shutil, "which", lambda *args, **kwargs: str(compiler))
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.delenv("LDFLAGS", raising=False)
+
+    assert build._build_environment()["LDFLAGS"] == "-B/usr/bin/"
+
+
+def test_linux_build_does_not_change_linker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(build.platform, "system", lambda: "Linux")
+    monkeypatch.setenv("LDFLAGS", "-Wl,--as-needed")
+    assert build._build_environment()["LDFLAGS"] == "-Wl,--as-needed"
+
+
+def test_both_native_builds_receive_the_linker_environment(
+    tmp_path: Path, fake_build: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = build._run
+    environments: list[dict[str, str]] = []
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        environments.append(kwargs["env"])
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(build, "_build_environment", lambda: {"LDFLAGS": "-B/usr/bin/"})
+    monkeypatch.setattr(build, "_run", run)
+    build.prepare_solver(cache_dir=tmp_path, prepare_tools=True)
+    assert len(fake_build) == 2
+    assert environments == [{"LDFLAGS": "-B/usr/bin/"}] * 2
+
+
+def test_macos_sdk_contents_enter_the_build_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk = tmp_path / "MacOSX.sdk"
+    libsystem = sdk / "usr/lib/libSystem.tbd"
+    libsystem.parent.mkdir(parents=True)
+    libsystem.write_bytes(b"first")
+    monkeypatch.setattr(build.platform, "system", lambda: "Darwin")
+    env = {"SDKROOT": str(sdk), "PATH": ""}
+    first = build._environment_identity(env)
+    libsystem.write_bytes(b"second")
+    second = build._environment_identity(env)
+    assert first["macos_sdk"]["path"] == str(sdk)
+    assert (
+        first["macos_sdk"]["libsystem_sha256"]
+        != second["macos_sdk"]["libsystem_sha256"]
+    )
 
 
 def test_concurrent_builds_publish_once(

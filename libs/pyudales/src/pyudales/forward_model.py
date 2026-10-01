@@ -1075,9 +1075,24 @@ class ForwardModel(BaseForwardModel):
             env["PATH"] = f"{matlab_bin_dir}:{env.get('PATH', '')}"
             _augment_runtime_library_paths(env)
 
-        subprocess.run(
-            command, check=True, env=env, stdout=self.stdout, stderr=self.stderr
-        )
+        try:
+            subprocess.run(
+                command, check=True, env=env, stdout=self.stdout, stderr=self.stderr
+            )
+        except subprocess.CalledProcessError as exc:
+            if python_or_matlab != "python":
+                raise
+            log_path = self.dirs.experiment_dir / (
+                f"write_inputs.{self.dirs.experiment_name}.log"
+            )
+            details = (
+                "\n".join(log_path.read_text().splitlines()[-60:])
+                if log_path.is_file()
+                else ""
+            )
+            raise RuntimeError(
+                f"uDALES preprocessing failed; see {log_path}\n{details}"
+            ) from exc
 
         # Wait for MATLAB preprocessing to complete if using MATLAB
         if python_or_matlab == "matlab":

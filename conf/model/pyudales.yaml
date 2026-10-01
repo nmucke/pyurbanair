@@ -15,7 +15,7 @@ forward_model:
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab
-  ncpu: 16
+  ncpu: 1
   save_only_last_timestep: false
   verbose: false
   boundary_condition: inflow_outflow # periodic #
@@ -47,14 +47,14 @@ forward_model:
   # Opt-in native Vreman correction. Calibrate all feature settings explicitly.
   # Coefficients are static Dataset fields sgs_bias_b0/b1/b2 (default zero).
   model_discrepancy:
-    enabled: false
+    enabled: true
     kind: sgs_strain_rotation
     coefficient_model: persistent
-    canopy_height: null
-    height_band_over_H: null
-    gradient_regularization: null
-    log_multiplier_cap: null
-    prior_std: null  # no fallback; use explicit coefficient priors
+    canopy_height: 10.0
+    height_band_over_H: [0.5, 2.0]
+    gradient_regularization: 0.01
+    log_multiplier_cap: 0.4054651081  # log(1.5)
+    prior_std: null                  # no fallback; use explicit coefficient priors
   nudging_config:
     tnudge: 15.0
     # nnudge: number of bottom grid levels NOT nudged (raw level count).
@@ -128,20 +128,19 @@ forward_model:
     # pressure BC. P(u<0) = Phi(-1/intensity): ~4e-11 at 0.15, but 3e-5 at
     # 0.25, which is hundreds of backflow cells per window on this grid.
     intensity: 0.15
-    # Spanwise/vertical integral length scales. 4 m spacing -> these are 6
+    # Spanwise/vertical integral length scales. 4 m spacing -> these are 3
     # cells; the digital filter uses a +/-2n-cell, 4n+1-tap kernel, so scales
     # under ~6 m collapse to the n=1 floor silently. Too-SHORT scales are the
     # documented failure mode (fluctuations decay before reaching the
-    # buildings); the fix is longer scales, not more `intensity`. 24 m sits
-    # above the pool's median building height and below the 0.3*zsize = 38.4 m
-    # plane-fraction warning, where plane-mean removal starts eating the rms.
-    length_scale_y: 24.0
-    length_scale_z: 24.0
+    # buildings); the fix is longer scales, not more `intensity`. These 12 m
+    # test scales should be revisited when changing the domain or grid.
+    length_scale_y: 12.0
+    length_scale_z: 12.0
     # Streamwise; converted to the AR(1) time scale by Taylor's hypothesis,
     # T = length_scale_x / mean(velocity_magnitude), a = exp(-pi*dt/(2T)).
-    # Kept at 2x the cross-stream scales as in a real boundary layer: a = 0.885
+    # Kept at 2x the cross-stream scales as in a real boundary layer: a = 0.782
     # at U = 7.5 m/s vs 0.61 for an isotropic 12 m. Costs only AR(1) burn-in.
-    length_scale_x: 48.0
+    length_scale_x: 24.0
     time_step: 0.5        # s — &DRIVER dtdriver. Injected turbulence is
                           #     band-limited to ~1/(2*dtdriver) because the
                           #     solver interpolates linearly between records.

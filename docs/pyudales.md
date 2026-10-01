@@ -26,6 +26,11 @@ select another writable location. Package resources may be read-only. Cache keys
 include source/extension hashes, build scripts, toolchain, dependencies, flags and
 platform. Reuse requires a matching capability manifest and executable hash.
 Failed or partial builds are rebuilt; `CMakeCache.txt` alone is insufficient.
+On macOS with a Pixi/Conda Fortran compiler, preparation selects Apple's
+`/usr/bin/ld` for both native builds and the IBM geometry compiler. This keeps
+linking compatible with the active macOS SDK's `libSystem.tbd`. An explicit
+caller-supplied `-B` flag takes precedence. The active SDK and effective linker
+flags enter the build cache key.
 
 The selected executable travels in `DirectoryPaths.solver_executable` and
 `config.sh`'s `DA_BUILD`; its source tree supplies the corresponding preprocessing
@@ -242,7 +247,7 @@ of the initial condition.
 
 ---
 
-### 4.1 Opt-in strain/rotation discrepancy
+### 4.1 Strain/rotation discrepancy
 
 `model.forward_model.model_discrepancy` enables a native Vreman viscosity
 correction. Fixed coefficients are supported in single and ensemble forward
@@ -254,7 +259,13 @@ coefficients have no time dimension and carry their analyzed values between
 windows. There are no within-forecast coefficient schedules or coefficient
 process noise.
 
-All feature settings must be chosen explicitly; the following numbers illustrate
+The backend requires explicit feature settings. The shipped model config currently
+enables the SGS bias test with a 10 m canopy height, a height band of `[0.5, 2.0]`,
+regularization of 0.01 s⁻¹, and a log cap of `log(1.5)`. The dynamic prediction
+prior prescribes coefficients of `-20`; these are test settings, not calibration.
+Set `model_discrepancy.enabled=false` to use the stock solver.
+
+The following numbers illustrate
 the interface and are **not calibrated defaults**:
 
 ```yaml

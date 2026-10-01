@@ -20,6 +20,9 @@ Writes, into the run directory:
                                       columns (needs ``eval_fields.nc``).
   * ``mean_slices.png``            -- time-mean field slices, truth vs prior vs
                                       posterior vs difference (same file).
+  * ``tke_slices.png``             -- resolved-TKE slices on the same grid.
+  * ``tke_time_evolution.png``     -- assimilation/validation truth and ensemble TKE.
+  * ``tke_error.png``              -- assimilation/validation member/mean TKE errors.
   * ``sensor_fans.png``            -- sensor quantile fans with the observations.
   * ``probe_spectra.png``          -- premultiplied energy spectra at the probes
                                       (needs the high-rate probe records).
@@ -87,10 +90,17 @@ from evaluation.figures import (
     plot_sensor_timeseries,
     plot_spectra,
     plot_station_profiles,
+    plot_tke_error_evolution,
+    plot_tke_slices,
+    plot_tke_time_evolution,
 )
 from evaluation.scores import compute_sensor_metrics
 from evaluation.sensors import sensor_magnitude
-from evaluation.turbulence import select_z_plane, streaming_state_rmse
+from evaluation.turbulence import (
+    select_z_plane,
+    sensor_tke_evolution,
+    streaming_state_rmse,
+)
 
 from pyurbanair.config.hydra_helpers import create_observation_points
 from pyurbanair.utils.animation_utils import animate_rollout_state
@@ -329,6 +339,27 @@ def make_figures(run_dir: pathlib.Path) -> None:
         ta["assim_solver_name"],
         sim_time,
     )
+    tke_series = {}
+    for name in sensor_sets:
+        tke = sensor_tke_evolution(
+            truth_series[name],
+            ensemble_series[name],
+            window_seconds=sim_time / 8.0,
+        )
+        if tke is None:
+            print(f"Skipping TKE evolution and error at {name}: fewer than two frames")
+            continue
+        tke_series[name] = tke
+    evolution = run_dir / "tke_time_evolution.png"
+    error = run_dir / "tke_error.png"
+    _note_skipped(
+        evolution,
+        plot_tke_time_evolution(tke_series, evolution),
+    )
+    _note_skipped(
+        error,
+        plot_tke_error_evolution(tke_series, error),
+    )
     # The |U| series the S5 fans draw, collected here rather than re-extracted:
     # this is the only pass over the window state files the figure stage makes
     # (master-plan invariant 2).
@@ -428,10 +459,13 @@ def make_figures(run_dir: pathlib.Path) -> None:
             )
             slices = run_dir / "mean_slices.png"
             _note_skipped(slices, plot_mean_slices(fields, slices))
+            tke_slices = run_dir / "tke_slices.png"
+            _note_skipped(tke_slices, plot_tke_slices(fields, tke_slices))
     else:
         print(
             f"No eval_fields.nc in {run_dir}; skipping station_profiles.png and "
-            "mean_slices.png (re-run scripts/esmda/compute_esmda_metrics.py on "
+            "mean_slices.png and tke_slices.png (re-run "
+            "scripts/esmda/compute_esmda_metrics.py on "
             "this run dir to write it)"
         )
 

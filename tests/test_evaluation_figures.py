@@ -77,6 +77,7 @@ from evaluation.figures import (
     plot_rank_histogram,
     plot_sensor_fans,
     plot_station_profiles,
+    plot_tke_slices,
 )
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
@@ -1364,6 +1365,53 @@ def test_station_profiles_survive_the_smoke_shape(tmp_path: pathlib.Path) -> Non
 # ---------------------------------------------------------------------------
 # F1 -- plot_mean_slices
 # ---------------------------------------------------------------------------
+
+
+def test_tke_slices_compare_truth_prior_and_posterior_on_one_scale(
+    tmp_path: pathlib.Path, rendered_figures: list[Figure]
+) -> None:
+    fluid = np.ones((1, 4, 5), dtype=np.int8)
+    fluid[:, :2, :2] = 0
+    fields = _eval_fields(n_zlev=1, fluid=fluid)
+    for source, value in (("truth", 1.0), ("prior", 2.0), ("posterior", 1.5)):
+        tke = np.full(fluid.shape, value, dtype=np.float32)
+        tke[fluid == 0] = 1.0e6
+        fields[f"{source}_slab_tke"] = (("zlev", "y", "x"), tke)
+
+    out = tmp_path / "tke_slices.png"
+    _assert_png(plot_tke_slices(fields, out), out)
+
+    fig = rendered_figures[-1]
+    difference = _image_of(fig, "posterior - truth")
+    assert difference[fluid[0] != 0] == pytest.approx(0.5)
+    assert np.isnan(difference[fluid[0] == 0]).all()
+    clims = _clims(fig)
+    assert clims.count((1.0, 2.0)) >= 3
+    assert all(max(abs(low), abs(high)) < 100 for low, high in clims)
+
+
+def test_tke_slices_mark_sparse_filtering_moments(
+    tmp_path: pathlib.Path, captured_figures: list[Figure]
+) -> None:
+    fields = _eval_fields(n_zlev=1)
+    plot_tke_slices(
+        fields,
+        tmp_path / "tke_slices.png",
+        sampling_note="one analyzed frame per cycle",
+        sampling_is_sparse=True,
+    )
+    text = " ".join(item.get_text() for item in captured_figures[-1].texts)
+    assert "analysis increments may add energy" in text
+    assert "No SGS contribution" in text
+    assert "one analyzed frame per cycle" in text
+
+
+def test_tke_slices_skip_without_tke_fields(tmp_path: pathlib.Path) -> None:
+    fields = _eval_fields(n_zlev=1).drop_vars(
+        ["posterior_slab_tke", "truth_slab_tke", "prior_slab_tke"]
+    )
+    out = tmp_path / "tke_slices.png"
+    _assert_no_op(plot_tke_slices(fields, out), out)
 
 
 def test_mean_slices_write_a_png_and_return_its_path(tmp_path: pathlib.Path) -> None:
@@ -2762,6 +2810,9 @@ def test_make_figures_draws_the_whole_set_on_a_complete_run_dir(
         "parameter_marginals.png",
         "station_profiles.png",
         "mean_slices.png",
+        "tke_slices.png",
+        "tke_time_evolution.png",
+        "tke_error.png",
         "sensor_fans.png",
         "rank_histogram.png",
     ):
@@ -2786,7 +2837,12 @@ def test_make_figures_skips_what_an_old_run_dir_cannot_support(
     make_figures(run_dir)
 
     printed = capsys.readouterr().out
-    for name in ("station_profiles.png", "mean_slices.png", "rank_histogram.png"):
+    for name in (
+        "station_profiles.png",
+        "mean_slices.png",
+        "tke_slices.png",
+        "rank_histogram.png",
+    ):
         assert not (run_dir / name).exists(), f"{name} was drawn from nothing"
         assert name in printed, f"{name} was skipped silently"
     assert "compute_esmda_metrics.py" in printed, "the skip does not say how to fix it"
@@ -2837,6 +2893,9 @@ def _captured_kwargs(
         "plot_parameter_marginals",
         "plot_station_profiles",
         "plot_mean_slices",
+        "plot_tke_slices",
+        "plot_tke_time_evolution",
+        "plot_tke_error_evolution",
         "plot_sensor_fans",
         "plot_spectra",
         "plot_data_mismatch_decay",

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from typing import NamedTuple
 
 import numpy as np
 import xarray
@@ -1139,6 +1140,93 @@ def rolling_tke(
     summed_comoment = np.maximum(summed_comoment, 0.0)
     scale = np.where(usable, 1.0 / np.where(usable, denominator, 1.0), np.nan)
     return np.asarray(0.5 * summed_comoment * scale)
+
+
+class SensorTKEEvolution(NamedTuple):
+    time: np.ndarray
+    truth: np.ndarray
+    members: np.ndarray
+    mean: np.ndarray
+    member_error: np.ndarray
+    mean_error: np.ndarray
+    window_frames: int
+    window_span_seconds: float
+
+
+def sensor_tke_evolution(
+    truth: xarray.DataArray,
+    predicted: xarray.DataArray,
+    *,
+    window_seconds: float,
+    time_seconds: np.ndarray | None = None,
+) -> SensorTKEEvolution | None:
+    """Rolling resolved TKE at sensors, keeping each predicted member separate.
+
+    Compute each sensor's temporal velocity variance before averaging over
+    sensors. The predicted mean is the mean of member TKE, not the TKE of the
+    mean velocity. Truth is interpolated onto the prediction's sample times;
+    ``time_seconds`` only relabels those samples for analysis-cycle artifacts.
+    """
+    if not np.isfinite(window_seconds) or window_seconds <= 0:
+        raise ValueError("window_seconds must be positive and finite")
+    if not {"component", "time", "sensor"} <= set(truth.dims):
+        raise ValueError("truth needs component, time and sensor dimensions")
+    if not {"component", "ensemble", "time", "sensor"} <= set(predicted.dims):
+        raise ValueError(
+            "predicted needs component, ensemble, time and sensor dimensions"
+        )
+    n_time = int(predicted.sizes["time"])
+    if n_time < 2 or int(predicted.sizes["ensemble"]) == 0:
+        logger.info("sensor_tke_evolution: fewer than two frames or no members")
+        return None
+    sample_time = np.asarray(predicted["time"].values, dtype=float)
+    times = (
+        sample_time if time_seconds is None else np.asarray(time_seconds, dtype=float)
+    )
+    if (
+        times.shape != (n_time,)
+        or not np.isfinite(times).all()
+        or np.any(np.diff(times) <= 0)
+    ):
+        raise ValueError("TKE sample times must be finite and strictly increasing")
+    dt = float(np.median(np.diff(times)))
+    width = min(n_time, max(2, int(round(window_seconds / dt)) + 1))
+    components = ["u", "v", "w"]
+    aligned_truth = truth.interp(time=predicted["time"])
+    true_velocity = np.asarray(
+        aligned_truth.sel(component=components)
+        .transpose("component", "time", "sensor")
+        .values,
+        dtype=float,
+    )
+    member_velocity = np.asarray(
+        predicted.sel(component=components)
+        .transpose("component", "time", "ensemble", "sensor")
+        .values,
+        dtype=float,
+    )
+    true_tke = rolling_tke(*(true_velocity[c] for c in range(3)), window=width)
+    member_tke = rolling_tke(*(member_velocity[c] for c in range(3)), window=width)
+
+    def finite_mean(values: np.ndarray, axis: int) -> np.ndarray:
+        finite = np.isfinite(values)
+        count = finite.sum(axis=axis)
+        total = np.where(finite, values, 0.0).sum(axis=axis)
+        return np.where(count > 0, total / np.maximum(count, 1), np.nan)
+
+    truth_curve = finite_mean(true_tke, axis=-1)
+    member_curves = finite_mean(member_tke, axis=-1).T
+    mean_curve = finite_mean(member_curves, axis=0)
+    return SensorTKEEvolution(
+        time=times,
+        truth=truth_curve,
+        members=member_curves,
+        mean=mean_curve,
+        member_error=member_curves - truth_curve[None, :],
+        mean_error=mean_curve - truth_curve,
+        window_frames=width,
+        window_span_seconds=(width - 1) * dt,
+    )
 
 
 # ---------------------------------------------------------------------------

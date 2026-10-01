@@ -21,7 +21,7 @@ import tarfile
 import tempfile
 from importlib import resources
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 UPSTREAM_COMMIT = "b84916ac60cecd1da54dd09df76c15e30dcaabe9"
 UPSTREAM_URL = "https://github.com/uDALES/u-dales.git"
@@ -220,7 +220,39 @@ def _export_source(repository: Path, destination: Path) -> None:
     downloader.write_text(text)
 
 
-def _environment_identity() -> dict[str, Any]:
+def _build_environment(compiler_command: str | None = None) -> dict[str, str]:
+    """Use Apple's linker with a Conda Fortran compiler and the active SDK.
+
+    Conda's ld64 can lag a new macOS SDK's .tbd syntax. The compiler still
+    compiles normally; ``-B/usr/bin/`` makes its link driver select Apple's ld.
+    Respect an explicit linker search prefix supplied by the caller.
+    """
+    env = os.environ.copy()
+    if platform.system() != "Darwin" or not os.access("/usr/bin/ld", os.X_OK):
+        return env
+    compiler_tokens = shlex.split(compiler_command or env.get("FC", "mpif90"))
+    compiler = (
+        shutil.which(compiler_tokens[0], path=env.get("PATH"))
+        if compiler_tokens
+        else None
+    )
+    if compiler is None:
+        return env
+    compiler_path = Path(compiler)
+    prefix = env.get("CONDA_PREFIX")
+    in_conda = prefix is not None and compiler_path.resolve().is_relative_to(
+        Path(prefix).resolve()
+    )
+    in_pixi = ".pixi" in compiler_path.parts and "envs" in compiler_path.parts
+    if not (in_conda or in_pixi):
+        return env
+    flags = shlex.split(env.get("LDFLAGS", ""))
+    if not any(flag.startswith("-B") for flag in flags):
+        env["LDFLAGS"] = f"{env.get('LDFLAGS', '').strip()} -B/usr/bin/".strip()
+    return env
+
+
+def _environment_identity(env: Mapping[str, str]) -> dict[str, Any]:
     keys = (
         "FC",
         "CC",
@@ -232,6 +264,10 @@ def _environment_identity() -> dict[str, Any]:
         "CMAKE_PREFIX_PATH",
         "CMAKE_GENERATOR",
         "CMAKE_TOOLCHAIN_FILE",
+        "CMAKE_OSX_SYSROOT",
+        "SDKROOT",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "DEVELOPER_DIR",
         "NETCDF_DIR",
         "NETCDF_FORTRAN_DIR",
         "FFTW_DOUBLE_LIB",
@@ -248,10 +284,10 @@ def _environment_identity() -> dict[str, Any]:
     result: dict[str, Any] = {
         "platform": platform.platform(),
         "machine": platform.machine(),
-        "environment": {key: os.environ.get(key, "") for key in keys},
+        "environment": {key: env.get(key, "") for key in keys},
     }
     commands = {
-        "compiler": shlex.split(os.environ.get("FC", "mpif90")) + ["--version"],
+        "compiler": shlex.split(env.get("FC", "mpif90")) + ["--version"],
         "mpi": ["mpirun", "--version"],
         "cmake": ["cmake", "--version"],
         "netcdf": ["nc-config", "--all"],
@@ -259,9 +295,11 @@ def _environment_identity() -> dict[str, Any]:
         "fftw": ["pkg-config", "--modversion", "fftw3", "fftw3f"],
     }
     for name, command in commands.items():
-        executable = shutil.which(command[0])
+        executable = shutil.which(command[0], path=env.get("PATH"))
         if executable:
-            completed = subprocess.run(command, capture_output=True, check=False)
+            completed = subprocess.run(
+                command, capture_output=True, check=False, env=dict(env)
+            )
             result[name] = {
                 "path": str(Path(executable).resolve()),
                 "sha256": _sha(Path(executable).read_bytes()),
@@ -273,7 +311,27 @@ def _environment_identity() -> dict[str, Any]:
         else:
             result[name] = None
     # Pixi/Conda dependency build IDs cover in-place library upgrades too.
-    prefix = os.environ.get("CONDA_PREFIX")
+    if platform.system() == "Darwin":
+        sdk = env.get("CMAKE_OSX_SYSROOT") or env.get("SDKROOT")
+        if not sdk and shutil.which("xcrun", path=env.get("PATH")):
+            completed = subprocess.run(
+                ["xcrun", "--sdk", "macosx", "--show-sdk-path"],
+                capture_output=True,
+                check=False,
+                env=dict(env),
+            )
+            if completed.returncode == 0:
+                sdk = completed.stdout.decode(errors="replace").strip()
+        if sdk:
+            sdk_path = Path(sdk).resolve()
+            libsystem = sdk_path / "usr/lib/libSystem.tbd"
+            result["macos_sdk"] = {
+                "path": str(sdk_path),
+                "libsystem_sha256": (
+                    _sha(libsystem.read_bytes()) if libsystem.is_file() else None
+                ),
+            }
+    prefix = env.get("CONDA_PREFIX")
     if prefix:
         result["packages"] = {
             p.name: _sha(p.read_bytes())
@@ -355,6 +413,7 @@ def prepare_solver(
     manifest, blobs = _extension() if discrepancy_enabled else ({}, {})
     scripts = _scripts()
     script_names = ["build_udales_macos.sh", "build_preprocessing_macos.sh"]
+    build_env = _build_environment()
     identity = {
         "upstream_commit": UPSTREAM_COMMIT,
         "findfftw_commit": FINDFFTW_COMMIT,
@@ -362,7 +421,7 @@ def prepare_solver(
         "extension": manifest,
         "build_type": build_type,
         "prepare_tools": prepare_tools,
-        "environment": _environment_identity(),
+        "environment": _environment_identity(build_env),
         "builder": _sha(Path(__file__).read_bytes()),
         "scripts": {name: _sha((scripts / name).read_bytes()) for name in script_names},
     }
@@ -392,11 +451,15 @@ def prepare_solver(
                     build_type,
                     str(source),
                     str(build),
-                ]
+                ],
+                env=build_env,
             )
             tool_hashes = {}
             if prepare_tools:
-                _run(["bash", str(scripts / script_names[1]), str(source)])
+                _run(
+                    ["bash", str(scripts / script_names[1]), str(source)],
+                    env=build_env,
+                )
                 tool = source / "tools" / "View3D" / "build" / "src" / "view3d"
                 if not tool.is_file() or not os.access(tool, os.X_OK):
                     raise RuntimeError(

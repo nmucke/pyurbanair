@@ -869,6 +869,9 @@ is read by no shared stage. The view's parameter figures
 against the truth — `parameter_error.png`, `parameter_marginals.png`) are
 copied to the run root, since the MDA posterior is the hybrid's parameter
 estimate and mode=state writes no root-level parameter figure of its own.
+`tke_slices.png` is written at the root for per-cycle moments and in
+`esmda_view/` for per-window moments; the two summaries remain separate.
+The sensor TKE evolution and error figures follow the same root/view split.
 
 ---
 
@@ -1262,6 +1265,19 @@ Stage 3 of the pipeline. Reads artifacts and writes into the run directory:
   diverging one for the difference, solid cells masked out. Always the
   accumulated time-mean, never an instantaneous frame; the averaging window is
   annotated from the file's own `t_start`/`t_end`.
+- `tke_slices.png` — resolved TKE on the same horizontal levels: truth, prior
+  ensemble mean when saved, posterior ensemble mean, and posterior minus truth.
+  The TKE panels share a colour scale; the signed difference uses a symmetric
+  scale. Solid cells are masked and SGS energy is excluded.
+- `tke_time_evolution.png` — two aligned panels: assimilation sensors on top,
+  validation sensors below. Each overlays bold black truth, a blue predicted
+  ensemble mean, and faint blue member curves. TKE is computed from a rolling
+  temporal variance of u/v/w at each sensor, then averaged over sensors; the
+  window spans one eighth of an assimilation window (at least two frames) and
+  is labelled on the figure. A missing sensor set is labelled as unavailable.
+- `tke_error.png` — the same sensor-set layout, with signed predicted-minus-truth
+  TKE for every member and the ensemble mean in blue, against a bold black
+  zero-error truth reference.
 - `sensor_fans.png` — the sensor `|U|` series as nested posterior quantile fans,
   one column per sensor set, with the truth, the window boundaries and a
   legacy scalar observation-error envelope around the truth. Corrected
@@ -1423,6 +1439,15 @@ Stage 3. Reads artifacts and writes into the run directory:
   columns (needs `eval_fields.nc`).
 - `mean_slices.png` (F1) — time-mean field slices, truth vs posterior vs
   difference (needs `eval_fields.nc`).
+- `tke_slices.png` — resolved-TKE slices, truth vs posterior vs difference, with
+  a prior column when available (needs `eval_fields.nc`). With the default
+  analyzed-frame source, its caption warns that analysis increments contribute
+  to the across-cycle variance; forecast-state storage gives within-cycle TKE.
+- `tke_time_evolution.png` and `tke_error.png` — the same rolling
+  sensor TKE and error plots as ESMDA. Under the default analyzed-frame source,
+  each sample is an end-of-cycle analysis and the rolling variance may include
+  analysis increments; the figure caption records that source. Saved forecast
+  segments give a within-cycle resolved-TKE history instead.
 - `sensor_fans.png` (S5) — sensor quantile fans with the observation-error
   envelope, assimilated and held-out columns side by side.
 - `rank_histogram.png` (D1) — rank histogram of the per-cycle statistics (needs
@@ -1718,13 +1743,22 @@ for the saved-state viewer.
 
 ### uDALES model discrepancy
 
-`conf/model/pyudales.yaml` now exposes an opt-in
+`conf/model/pyudales.yaml` exposes an optional
 `forward_model.model_discrepancy` block. Set its explicit height band,
 regularization and log cap, and supply static `sgs_bias_b0/b1/b2` parameter
 fields. The standard forward runner prepares the pinned native extension
 and records its provenance automatically; no manual patch or binary path is
-needed. Defaults remain disabled. See [pyudales §4.1](pyudales.md#41-opt-in-strainrotation-discrepancy)
+needed. The current config enables it for the SGS bias experiment. See [pyudales §4.1](pyudales.md#41-strainrotation-discrepancy)
 for the contract and window checkpoint behavior.
+
+The current Xie–Castro test configuration uses a cropped 60 × 80 × 32 m domain,
+160 s windows, 2 s output spacing, and an eight-member ensemble. ESMDA uses one
+update per window and 20 s observation averages. The dynamic prediction config
+prescribes all three SGS bias coefficients as `Constant(-20)` while estimating
+only inflow angle and velocity magnitude; the static filtering prior uses
+bounded Gaussian coefficient priors and selects the coefficients for estimation.
+The viscosity multiplier is capped at a factor of 1.5. These settings exercise
+the discrepancy setup and are not calibrated inference defaults.
 
 SGS coefficients live in the regular `conf/params/` files: random priors or
 Constant prescribed values in `static.yaml` and `dynamic.yaml`, and independent
