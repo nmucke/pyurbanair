@@ -1,0 +1,61 @@
+# @package _global_
+# Train the flow-matching generator of initial fields in the autoencoder's latent space.
+# Shared training defaults: training.yaml. The `trainer`, `optimizer`,
+# `batch_sampler`, `dataloader` and `dataset` blocks below override them key by key.
+defaults:
+  - training
+  - _self_
+
+# Which model scripts_new/surrogate/train.py builds.
+task: latent_generator
+name: latent_generator_s
+autoencoder_dir: ${paths.weights_dir}/tadpole_ae_s
+architecture:
+  _target_: neural_surrogates.TadpoleLatentGenerator
+  param_history_steps: 12
+  hidden_size: null
+  n_layers: 4
+  num_heads: 8
+  time_embed_dim: 64
+  film_hidden: 128
+  mlp_ratio: 4
+  use_checkpoint: false
+  normalize: true
+  num_sampling_steps: 50
+  latent_eps: 1.0e-6
+  max_latent_tokens: 4096
+# Batches used to estimate the latent normalization statistics.
+latent_stats:
+  max_batches: 50
+  seed: 0
+# Stored with the weights so a consumer knows what the model was trained on.
+physical_metadata:
+  units: {u: m/s, v: m/s, w: m/s, inflow_angle: deg, velocity_magnitude: m/s}
+  coordinate_order: [z, y, x]
+  geometry_mask_convention: "blanking: 1 = obstacle; model fluid mask = 1 - blanking"
+  notes: ""
+trainer:
+  _target_: neural_surrogates.LatentFlowMatchingTrainer
+  compile_dynamic: null
+  val_seed: 0
+optimizer:
+  weight_decay: 1.0e-2
+batch_sampler:
+  batch_size: 16
+  cell_budget: 393216
+dataloader:
+  num_workers: 8
+  collate_fn:
+    _target_: neural_surrogates.snapshot_history_collate
+    _partial_: true
+dataset:
+  _target_: neural_surrogates.SnapshotHistoryDataset
+  param_vars: [inflow_angle, velocity_magnitude]
+  param_history_steps: ${architecture.param_history_steps}
+  time_stride: 1
+  random_crop_size: null
+  sdf_features: null
+  sdf_clamp_cells: null
+  # Repeat the first parameters back in time when the history is too short.
+  constant_prehistory: true
+  cadence_rtol: 0.1

@@ -1,0 +1,165 @@
+# @package architectures
+# Neural-surrogate architectures for the next-step stepper. Pick one with
+# `architecture=${architectures.<name>}` in train_stepper (quote it on the CLI).
+# Names are <family>_<size>.
+
+# --- P3D -----------------------------------------------------------------------
+p3d_tiny:
+  _target_: neural_surrogates.P3D
+  size: S
+  window_size: 2
+  partition_size: 1
+p3d_small:
+  _target_: neural_surrogates.P3D
+  size: S
+  window_size: 4
+  partition_size: 1
+p3d_medium:
+  _target_: neural_surrogates.P3D
+  size: S
+  window_size: 4
+  partition_size: 1
+  sdf_features: both  # none | sdf | grad | both
+  sdf_clamp_cells: 32
+p3d_large:
+  _target_: neural_surrogates.P3D
+  size: B
+  partition_size: 1
+p3d_xlarge:
+  _target_: neural_surrogates.P3D
+  size: L
+  partition_size: 1
+
+# --- ConvNeXt U-Net --------------------------------------------------------------
+unet_convnext_tiny:
+  _target_: neural_surrogates.UNetConvNeXt
+  base_channels: 8
+  channel_mults: [1, 2]
+  depths: [1, 1]
+  kernel_size: 3
+  expansion: 2
+  separable_dwconv: true
+  normalize: true
+  residual: true
+  conditioning: film
+  param_embed_dim: 64
+  norm_groups: 8
+unet_convnext_small:
+  _target_: neural_surrogates.UNetConvNeXt
+  base_channels: 16
+  channel_mults: [1, 2, 4]
+  depths: [1, 1, 1]
+  kernel_size: 5
+  expansion: 4
+  separable_dwconv: true
+  normalize: true
+  residual: true
+  conditioning: film
+  param_embed_dim: 64
+  norm_groups: 8
+unet_convnext_medium:
+  _target_: neural_surrogates.UNetConvNeXt
+  base_channels: 32
+  channel_mults: [1, 2, 4, 8]
+  depths: [3, 3, 3, 3]
+  kernel_size: 7
+  expansion: 2
+  separable_dwconv: true
+  normalize: true
+  residual: true
+  conditioning: film
+  param_embed_dim: 64
+  norm_groups: 8
+unet_convnext_large:
+  _target_: neural_surrogates.UNetConvNeXt
+  base_channels: 32
+  channel_mults: [1, 2, 4, 8]
+  depths: [2, 2, 2, 2]
+  kernel_size: 7
+  expansion: 4
+  separable_dwconv: true
+  normalize: true
+  residual: true
+  conditioning: film
+  param_embed_dim: 64
+  norm_groups: 8
+unet_convnext_xlarge:
+  _target_: neural_surrogates.UNetConvNeXt
+  base_channels: 48
+  channel_mults: [1, 2, 4, 8]
+  depths: [3, 3, 3, 3]
+  kernel_size: 7
+  expansion: 4
+  separable_dwconv: true
+  normalize: true
+  residual: true
+  conditioning: film
+  param_embed_dim: 64
+  norm_groups: 8
+
+# --- UPT -------------------------------------------------------------------------
+upt_tiny:
+  _target_: neural_surrogates.UPT
+  dim: 32
+  num_latent_tokens: 16
+  num_supernodes: 16
+  gnn_dim: 16
+  enc_depth: 1
+  approx_depth: 1
+  dec_depth: 1
+  num_heads: 2
+  radius: 2.5
+  max_degree: 8
+  attention_type: dot_product
+upt_small:
+  _target_: neural_surrogates.UPT
+  dim: 128
+  num_latent_tokens: 64
+  num_supernodes: 128
+  gnn_dim: 128
+  enc_depth: 2
+  approx_depth: 4
+  dec_depth: 2
+  num_heads: 4
+  radius: 4.0
+  max_degree: 24
+  attention_type: dot_product
+upt_medium:
+  _target_: neural_surrogates.UPT
+  dim: 192
+  num_latent_tokens: 128
+  num_supernodes: 256
+  gnn_dim: 192
+  enc_depth: 4
+  approx_depth: 4
+  dec_depth: 4
+  num_heads: 3
+  radius: 5.0
+  max_degree: 32
+  attention_type: dot_product
+upt_large:
+  _target_: neural_surrogates.UPT
+  dim: 384
+  num_latent_tokens: 256
+  num_supernodes: 512
+  gnn_dim: 256
+  enc_depth: 4
+  approx_depth: 6
+  dec_depth: 4
+  num_heads: 6
+  radius: 5.0
+  max_degree: 32
+  attention_type: dot_product
+upt_xlarge:
+  _target_: neural_surrogates.UPT
+  dim: 768
+  num_latent_tokens: 512
+  num_supernodes: 1024
+  gnn_dim: 384
+  enc_depth: 4
+  approx_depth: 8
+  dec_depth: 4
+  num_heads: 12
+  radius: 6.0
+  max_degree: 32
+  attention_type: dot_product

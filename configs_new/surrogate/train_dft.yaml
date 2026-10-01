@@ -1,0 +1,75 @@
+# @package _global_
+# Fine-tune a pretrained autoencoder into a next-step surrogate.
+# Shared training defaults: training.yaml. The `trainer`, `optimizer`,
+# `batch_sampler`, `dataloader` and `dataset` blocks below override them key by key.
+defaults:
+  - training
+  - _self_
+
+# Which model scripts_new/surrogate/train.py builds.
+task: dft
+name: dft_s
+pretrained_dir: ${paths.weights_dir}/tadpole_ae_s
+architecture:
+  _target_: neural_surrogates.TadpoleTimeStepper
+  size: S
+  spatial_mode: global
+  halo_size: 16
+  pretrained_ae_dir: ${pretrained_dir}
+  subnetwork: default
+  subnetwork_cfg:
+    use_checkpoint: false
+    in_context_patches: -1
+  skip_mixing:
+    width: 32
+    levels: [4, 8]
+  param_conditioning: film
+  latent_type: mode
+  encoder_crop_size: 16
+  encode_geometry: false
+  sdf_features: ${dataset.sdf_features}
+  sdf_clamp_cells: ${dataset.sdf_clamp_cells}
+  geometry_branch:
+    width: 32
+  max_internal_batchsize: null
+  normalize: true
+trainable_modules:
+  - subnetwork
+  - latent_residual_scale
+  - skip_mixing
+  - dft.decoder.conv_decoder.scales
+  - dft.decoder.transformer_decoder.scales
+lora:
+  variant: all
+  rank: 32
+  alpha: 64
+  dropout: 0.0
+  target_preset: tadpole_encdec
+  target_modules: null
+  modules_to_save: []
+recompute_normalization: false
+trainer:
+  _target_: neural_surrogates.Trainer
+  num_epochs: 50
+  patience: 10
+  compile_dynamic: null
+  lr_warmup_epochs: 3
+  pushforward_epochs_per_step: 5
+  pushforward_start_steps: 1
+  grad_unroll_steps: 2
+optimizer:
+  lr: 5.0e-4
+  weight_decay: 0.0
+batch_sampler:
+  batch_size: 2
+  cell_budget: 393216
+dataloader:
+  num_workers: 16
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
+dataset:
+  _target_: neural_surrogates.TransitionDataset
+  param_vars: null
+  num_history_steps: null
+  pushforward_steps: 5

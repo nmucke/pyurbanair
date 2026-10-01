@@ -1,0 +1,32 @@
+# @package _global_
+# Train the next-step surrogate (the forecast model).
+# Shared training defaults: training.yaml. The `trainer`, `optimizer`,
+# `batch_sampler`, `dataloader` and `dataset` blocks below override them key by key.
+defaults:
+  - training
+  - _self_
+
+# Which model scripts_new/surrogate/train.py builds.
+task: stepper
+name: p3d_idealized
+architecture: ${architectures.p3d_medium}
+# Warm start from these weights (null -> random init).
+init_weights: null
+trainer:
+  _target_: neural_surrogates.Trainer
+  patience: 15
+  # Push-forward training: roll out more steps as training goes on.
+  pushforward_epochs_per_step: 10
+  pushforward_start_steps: 1
+  grad_unroll_steps: 2
+optimizer:
+  weight_decay: 1.0e-8
+dataloader:
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
+dataset:
+  _target_: neural_surrogates.TransitionDataset
+  param_vars: null
+  num_history_steps: 1
+  pushforward_steps: 7

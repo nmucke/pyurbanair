@@ -18,6 +18,9 @@ paths:
     snellius: /scratch-shared/${oc.env:USER}/urbanair_temp/${oc.env:SLURM_JOB_ID,local}
     delftblue: /scratch/${oc.env:USER}/urbanair_temp/${oc.env:SLURM_JOB_ID,local}
   experiment_dir: ${paths.scratch.${paths.machine}}
+  # Neural surrogates: trained weights and generated training data.
+  weights_dir: model_weights
+  training_data_dir: training_data
   # Fallback output root used by resolve_output_dir() when Hydra isn't
   # initialized (direct run(cfg) calls from tests).
   base_results_dir: .temp

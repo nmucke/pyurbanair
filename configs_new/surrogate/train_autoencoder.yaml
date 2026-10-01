@@ -1,0 +1,51 @@
+# @package _global_
+# Train the field autoencoder (pretraining for the latent models).
+# Shared training defaults: training.yaml. The `trainer`, `optimizer`,
+# `batch_sampler`, `dataloader` and `dataset` blocks below override them key by key.
+defaults:
+  - training
+  - _self_
+
+# Which model scripts_new/surrogate/train.py builds.
+task: autoencoder
+name: tadpole_ae_s
+architecture:
+  _target_: neural_surrogates.TadpoleAE
+  size: S
+  spatial_mode: local
+  halo_size: 16
+  encoder_crop_size: [16, 32, 32]
+  latent_type: sample
+  encode_geometry: false
+  sdf_features: ${dataset.sdf_features}
+  sdf_clamp_cells: ${dataset.sdf_clamp_cells}
+  geometry_branch:
+    width: 32
+  pretrained: none
+  max_internal_batchsize: null
+  normalize: true
+discriminator: null
+# Weights of the KL, geometry-reconstruction and optional adversarial terms
+# (the field reconstruction itself uses the shared `loss`).
+loss_weights:
+  kl_weight: 1.0e-3
+  geometry_recon_weight: 0.1
+  adv_weight: 1.0e-4
+  adv_start_step: 1000
+  adv_ramp_steps: 1000
+  adaptive_adv_weight: true
+  disc_recon_threshold: null
+trainer:
+  _target_: neural_surrogates.AutoencoderTrainer
+batch_sampler:
+  batch_size: 8
+  cell_budget: 393216
+dataloader:
+  num_workers: 16
+  collate_fn:
+    _target_: neural_surrogates.snapshot_collate
+    _partial_: true
+dataset:
+  _target_: neural_surrogates.SnapshotDataset
+  time_stride: 1
+  random_crop_size: 64

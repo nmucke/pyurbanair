@@ -1,0 +1,16 @@
+# Parameter sampler for generating surrogate training data: every trajectory
+# draws its own mean inflow angle and speed (uniform over the ranges below) and
+# an AR(2) time series around them, so the data covers the operating range.
+# Knots are `time.seconds_per_knot` apart; the size is set by the script.
+_target_: pyurbanair.training_data.UniformExternalAR2Sampler
+_convert_: all
+ensemble_size: 1
+external:
+  inflow_angle:
+    mean: {min: -45.0, max: 45.0}
+    std: 15.0
+  velocity_magnitude:
+    mean: {min: 5.0, max: 10.0}
+    std: 0.5
+time_series:
+  correlation_length: 300.0

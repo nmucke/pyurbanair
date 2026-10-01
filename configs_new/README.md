@@ -1,8 +1,8 @@
 # configs_new/
 
 Preview of the flattened config tree described in
-[docs/config_setup_spec.md](../docs/config_setup_spec.md). The scripts still
-read `conf/`; nothing here is wired up yet.
+[docs/config_setup_spec.md](../docs/config_setup_spec.md). The scripts in
+`scripts_new/` read it; the old ones in `scripts/` still read `conf/`.
 
 ```
 forward.yaml        # entry point: forward runs
@@ -14,6 +14,15 @@ assimilation_settings/   # one file per component, all options inside
 
 All three DA scripts load `assimilation.yaml`; each reads the blocks it needs
 (`smoothing`, `filtering`, and for the hybrid also `hybrid`).
+
+`workflows/` chains a run with its post-processing; the overrides go to the
+run script, and the post-processing reads the run dir it wrote:
+
+```bash
+bash workflows/forward_workflow.sh model=pylbm                  # run_forward + visualize_forward
+bash workflows/assimilation_workflow.sh smoother <overrides>    # or filtering / hybrid; run_<method>
+                                                                #   + compute_metrics + visualize_assimilation
+```
 
 ## Common overrides
 
@@ -59,3 +68,48 @@ smoother = instantiate(cfg.smoothing.smoother, num_time_points=...)
 enkf = instantiate(cfg.filtering, observation_operator=..., forward_model=..., C_D=...)
 operator = instantiate(cfg.observation.operator, ...)
 ```
+
+## Neural surrogates
+
+All surrogate configs live in `surrogate/`; run them with
+`config_name="surrogate/<name>"`.
+
+```
+surrogate/generate_data.yaml           # generate training data (like forward.yaml + `data`)
+surrogate/train_stepper.yaml           # train the next-step surrogate
+surrogate/train_autoencoder.yaml       # train the field autoencoder
+surrogate/train_latent_generator.yaml  # train the latent initial-field generator
+surrogate/train_dft.yaml               # fine-tune a pretrained autoencoder into a stepper (DFT)
+surrogate/finetune_stepper.yaml        # fine-tune a pretrained stepper (full or LoRA)
+surrogate/eval.yaml                    # all evaluation: blocks stepper (one or several
+                                       #   models), autoencoder, latent_generator
+surrogate/training.yaml                # training defaults every training config shares
+surrogate/architectures.yaml           # every stepper architecture, <family>_<size>
+params/surrogate_training_data.yaml    # sampler for the training data
+```
+
+Each training config loads `training.yaml` (shared `trainer`, `optimizer`,
+`batch_sampler`, `dataloader`, `dataset`) and overrides only what differs, so
+the composed config is already complete. Examples:
+
+```bash
+'architecture=${architectures.unet_convnext_small}'                 # train_stepper
+data.geometry.mode=fixed 'data.geometry.name=${case_name}'          # generate_data
+```
+
+The scripts are in `scripts_new/surrogate/`:
+
+```bash
+python scripts_new/surrogate/generate_data.py
+python scripts_new/surrogate/train.py --config-name surrogate/train_<task>   # or finetune_stepper
+python scripts_new/surrogate/evaluate_stepper.py            # all read surrogate/eval.yaml
+python scripts_new/surrogate/evaluate_autoencoder.py
+python scripts_new/surrogate/evaluate_latent_generator.py
+```
+
+`train.py` builds the model and datasets for the config's `task` from
+`tasks.py`; the evaluation scripts share `eval_common.py`.
+
+Hydra treats `surrogate/` as a config group, so every file there starts with
+`# @package _global_` (keys stay at the top level, not under `surrogate.`) and
+lists root configs with a leading slash (`- /common`, `- /model: pyudales`).

@@ -10,8 +10,8 @@ Status: the new tree exists in `configs_new/` next to `conf/`. It composes for
 every workflow; the scripts are not wired to it yet. Concrete values are not
 final and will be set once the structure is done.
 
-Out of scope: `neural_surrogate/`, `training_data/`, `visualization/`,
-`compare_models.yaml`, `run_probe_series.yaml`, named experiments.
+Out of scope: `visualization/`, `compare_models.yaml`, `run_probe_series.yaml`,
+named experiments. The neural-surrogate configs are covered in the last section.
 
 ## Layout
 
@@ -127,3 +127,31 @@ configs_new/
 - Every workflow composes and fully resolves, with and without component
   overrides (checked for `configs_new/`).
 - `pixi run -e dev py.test` passes once the scripts are switched over.
+
+## Neural surrogates
+
+| Old | New |
+|---|---|
+| `neural_surrogate/training_data.yaml` + `training_data/geometry_mode/*` | `surrogate/generate_data.yaml` (`data.geometry.mode: random\|fixed`); its trajectory times override `time.*`; its sampler is `params/surrogate_training_data.yaml` |
+| `neural_surrogate/training.yaml` + `mode/*` + `dataset/transition.yaml` | `surrogate/train_stepper.yaml` |
+| `neural_surrogate/pretrain_autoencoder.yaml` | `surrogate/train_autoencoder.yaml` |
+| `neural_surrogate/train_latent_generator.yaml` | `surrogate/train_latent_generator.yaml` |
+| `neural_surrogate/finetuning.yaml` + `finetune_mode/*` | `surrogate/train_dft.yaml` |
+| — (new) | `surrogate/finetune_stepper.yaml`: fine-tune a pretrained stepper (`method: full\|lora`) |
+| `neural_surrogate/testing*.yaml`, `comparison.yaml` | `surrogate/eval.yaml`, blocks `stepper` (`models`: one or several, so it also compares), `autoencoder`, `latent_generator` |
+| `neural_surrogate/architectures/<family>/<size>.yaml` (22 files) | `surrogate/architectures.yaml`, entries `<family>_<size>` (domain-decomposed ones discontinued) |
+| losses in `mode/*` | `loss` (MSE) in `surrogate/training.yaml`; the autoencoder's term weights are `loss_weights` |
+| per-file `trainer`, `optimizer`, `batch_sampler` + `dataloader` | shared `trainer`, `optimizer`, `batch_sampler` (the only `batch_size`), `dataloader`, `dataset` in `surrogate/training.yaml`; each `surrogate/train_*.yaml` overrides what differs and sets its `collate_fn` |
+| hard-coded weight/data paths | `paths.weights_dir`, `paths.training_data_dir` in `common.yaml` |
+
+Scripts, in `scripts_new/surrogate/` (the old ones in `scripts/neural_surrogate/`
+still read `conf/neural_surrogate/`):
+
+| Old | New |
+|---|---|
+| `generate_training_data.py`, `generate_random_geometries_training_data.py` | `generate_data.py` |
+| `train_neural_surrogate.py`, `pretrain_autoencoder.py`, `train_latent_generator.py`, `finetune_neural_surrogate.py` | `train.py` (`--config-name surrogate/<config>`); per-task setup in `tasks.py` |
+| `test_neural_surrogate.py`, `compare_surrogate_models.py` | `evaluate_stepper.py` |
+| `test_autoencoder.py` | `evaluate_autoencoder.py` |
+| `test_latent_generator.py` | `evaluate_latent_generator.py` |
+| — | `eval_common.py`: helpers shared by the evaluation scripts |
