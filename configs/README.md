@@ -30,7 +30,7 @@ bash workflows/assimilation_workflow.sh smoother <overrides>    # or filtering /
 ```bash
 # Hydra groups
 case=barcelona  model=pylbm                          # forward
-paths.machine=snellius                                # or delftblue / local
+paths.machine=snellius                                # or delftblue / local (job scripts set it)
 model@assim_model=pylbm  params@prior_params=static   # DA
 
 # DA components: point a slot at an option (quote it so the shell keeps ${...})
@@ -58,7 +58,7 @@ observation.aggregation.interval_seconds=30
 | `forward.*` | `ensemble`, `ground_truth_dir`, `rollout_steps`, `initial_state`, `save_windows` |
 | `smoother.*`, `analysis.*`, `localization.*`, `state_reduction.*`, `inflation.*` | every option of each component (from `assimilation_settings/`) |
 | `time.*` | from the case, including `seconds_per_knot` |
-| `paths.*` | `results_root`, `experiment_dir` from `common.yaml` (scratch chosen by `paths.machine`); `results_dir` from the workflow |
+| `paths.*` | `results_root`, `experiment_dir` from `common.yaml` (scratch chosen by `paths.machine`; `machine` and `results_root` default to `$PYURBANAIR_MACHINE` / `$PYURBANAIR_RESULTS_ROOT`, set by the job scripts); `results_dir` from the workflow |
 | `ensemble.*` | one budget for every workflow (`common.yaml`), incl. `failure` |
 
 ## What the scripts must do

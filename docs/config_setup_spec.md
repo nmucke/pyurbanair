@@ -75,7 +75,7 @@ configs/
 | `run_esmda.yaml`, `run_filtering.yaml`, `run_filter_smoothing.yaml` | `assimilation.yaml` |
 | `common/runtime.yaml` | `common.yaml` (without `run.results_dir`, only used by `compare_models.py`, and `hydra.job.chdir`, already Hydra's default) |
 | `execution/*` | one `ensemble:` block in `common.yaml` |
-| `paths:` in each `run_*.yaml` | `paths` in `common.yaml` + `paths.results_dir` in the entry point; job scripts pass `paths.machine=snellius` / `delftblue` |
+| `paths:` in each `run_*.yaml` | `paths` in `common.yaml` + `paths.results_dir` in the entry point; job scripts set `paths.machine` / `paths.results_root` through `PYURBANAIR_MACHINE` / `PYURBANAIR_RESULTS_ROOT` |
 | `time.seconds_per_knot` | `time.seconds_per_knot` in the case file |
 | `model@model=X` (forward) | `model=X` |
 | `params_to_estimate` | `assimilation.params_to_estimate` |
@@ -113,8 +113,8 @@ appends its workflow name to `paths.results_dir`), with post-processing in
 and `instantiate(cfg.observation.error)` (the `ObservationErrorSpec` field is
 `propagation`). The old scripts (`run_forward_model.py`, `esmda/run_esmda.py`,
 `filtering/run_filtering.py`, `filter_smoothing/run_filter_smoothing.py`,
-`preview_config.py`, the sweep/metrics helpers) are in `archive/scripts/`.
-`job_scripts/` still largely targets the archived setup.
+`preview_config.py`, the sweep/metrics helpers) are in `archive/scripts/`,
+the old job scripts in `archive/job_scripts/`.
 
 ## Acceptance
 

@@ -91,7 +91,7 @@ archive/     the previous configs, scripts and tests (not maintained)
 | Neural surrogates | [docs/neural_surrogates.md](docs/neural_surrogates.md) |
 | Backends | [pylbm](docs/pylbm.md), [pyudales](docs/pyudales.md), [pypalm](docs/pypalm.md) |
 | Tests | [tests/README.md](tests/README.md) |
-| HPC jobs | [docs/job_scripts.md](docs/job_scripts.md) (not yet ported to the current scripts) |
+| HPC jobs | [docs/job_scripts.md](docs/job_scripts.md) |
 | Agent interface (MCP) | [docs/mcp.md](docs/mcp.md) (`pixi run -e mcp register-claude` adds it to Claude Code) |
 
 ## Development

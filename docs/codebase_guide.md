@@ -40,7 +40,7 @@ file-level detail, gotchas, and recipes this guide only summarizes:
 | Tests (`tests/`: per-package folders, script tests, overlays) | [tests/README.md](../tests/README.md) |
 | Local MCP forward jobs, preparation and client setup | [docs/mcp.md](mcp.md) |
 | Saved forward visualization and browser bundles (`libs/visualization`) | [docs/visualization.md](visualization.md) |
-| Running on HPC clusters (Snellius / DelftBlue / local SLURM) | [docs/job_scripts.md](job_scripts.md) |
+| Running on HPC clusters (Snellius / DelftBlue) | [docs/job_scripts.md](job_scripts.md) |
 | Dynamic multi-window ESMDA theory/config | [docs/temp/esmda_dynamic_multiwindow.md](temp/esmda_dynamic_multiwindow.md) |
 | Model-error compensation parameters (α, sgs/km) | [docs/temp/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md) |
 | Reduced SVD/KL state update theory | [docs/temp/reduced_state_da.md](temp/reduced_state_da.md) |
